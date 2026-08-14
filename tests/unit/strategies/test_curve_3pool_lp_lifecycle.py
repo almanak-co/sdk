@@ -14,6 +14,7 @@ from unittest.mock import MagicMock
 import pytest
 
 LP_TOKEN_ADDRESS = "0x6c3F90f043a72FA612cbac8115EE7e52BDe6E490"
+POOL_ADDRESS = "0xbEbc44782C7dB0a1A60Cb6fe97d0b483032FF1C7"
 
 
 @pytest.fixture
@@ -28,6 +29,8 @@ def strategy():
     strat._deployment_id = "test-curve-3pool-lp-lifecycle"
     strat.deposit_amount = Decimal("100")
     strat.force_action = "open"
+    strat.pool_address = POOL_ADDRESS
+    strat.lp_token_address = LP_TOKEN_ADDRESS
     strat._phase = "IDLE"
     strat._lp_position_id = None
     return strat
@@ -81,7 +84,7 @@ class TestOpenPhase:
     def test_open_pool_is_3pool(self, strategy):
         market = _mock_market()
         intent = strategy.decide(market)
-        assert intent.pool == "3pool"
+        assert intent.pool == POOL_ADDRESS
 
     def test_open_amounts_match_config(self, strategy):
         market = _mock_market()
@@ -139,7 +142,7 @@ class TestClosePhase:
         strategy.force_action = ""
         market = _mock_market()
         intent = strategy.decide(market)
-        assert intent.pool == "3pool"
+        assert intent.pool == POOL_ADDRESS
 
     def test_close_intent_position_id_is_lp_token_address(self, strategy):
         """For Curve, position_id is the LP token address (compiler queries on-chain balance)."""
@@ -288,10 +291,12 @@ class TestStatePersistence:
         assert state["lp_position_id"] == LP_TOKEN_ADDRESS
 
     def test_load_persistent_state(self, strategy):
-        strategy.load_persistent_state({
-            "phase": "OPEN",
-            "lp_position_id": LP_TOKEN_ADDRESS,
-        })
+        strategy.load_persistent_state(
+            {
+                "phase": "OPEN",
+                "lp_position_id": LP_TOKEN_ADDRESS,
+            }
+        )
         assert strategy._phase == "OPEN"
         assert strategy._lp_position_id == LP_TOKEN_ADDRESS
 
@@ -340,7 +345,7 @@ class TestTeardown:
         assert len(summary.positions) == 1
         pos = summary.positions[0]
         assert pos.protocol == "curve"
-        assert pos.details["pool"] == "3pool"
+        assert pos.details["pool"] == POOL_ADDRESS
 
     def test_generate_teardown_intents_when_open(self, strategy):
         from almanak.framework.teardown import TeardownMode
@@ -351,7 +356,7 @@ class TestTeardown:
         assert len(intents) == 1
         assert intents[0].intent_type.value == "LP_CLOSE"
         assert intents[0].position_id == LP_TOKEN_ADDRESS
-        assert intents[0].pool == "3pool"
+        assert intents[0].pool == POOL_ADDRESS
 
     def test_generate_teardown_intents_empty_when_closed(self, strategy):
         from almanak.framework.teardown import TeardownMode
@@ -373,7 +378,7 @@ class TestStatus:
         assert status["strategy"] == "curve_3pool_lp_lifecycle"
         assert status["chain"] == "ethereum"
         assert status["phase"] == "IDLE"
-        assert status["pool"] == "3pool"
+        assert status["pool"] == POOL_ADDRESS
 
     def test_status_reflects_phase(self, strategy):
         strategy._phase = "OPEN"

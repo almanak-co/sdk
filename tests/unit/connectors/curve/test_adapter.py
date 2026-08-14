@@ -14,12 +14,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.connectors.curve.adapter import (
+from tests.support.curve_adapter import (
     ADD_LIQUIDITY_3_SELECTOR,
     CURVE_ADDRESSES,
     CURVE_GAS_ESTIMATE_BUFFER,
     CURVE_GAS_ESTIMATES,
-    CURVE_POOLS,
+    CURVE_TEST_POOLS,
     EXCHANGE_SELECTOR,
     EXCHANGE_UNDERLYING_SELECTOR,
     REMOVE_LIQUIDITY_3_SELECTOR,
@@ -178,7 +178,7 @@ class TestPoolInfo:
 
     def test_get_pool_info_by_address(self, adapter: CurveAdapter) -> None:
         """Test getting pool info by address."""
-        pool_address = CURVE_POOLS["ethereum"]["3pool"]["address"]
+        pool_address = CURVE_TEST_POOLS["ethereum"]["3pool"]["address"]
         pool_info = adapter.get_pool_info(pool_address)
 
         assert pool_info is not None
@@ -255,7 +255,7 @@ class TestSwap:
 
     def test_swap_success(self, adapter: CurveAdapter) -> None:
         """Test successful swap transaction building."""
-        pool_address = CURVE_POOLS["ethereum"]["3pool"]["address"]
+        pool_address = CURVE_TEST_POOLS["ethereum"]["3pool"]["address"]
         result = adapter.swap(
             pool_address=pool_address,
             token_in="USDC",
@@ -271,7 +271,7 @@ class TestSwap:
     def test_swap_with_approve(self, adapter: CurveAdapter) -> None:
         """Test swap includes approve transaction."""
         adapter.clear_allowance_cache()  # Ensure no cached allowance
-        pool_address = CURVE_POOLS["ethereum"]["3pool"]["address"]
+        pool_address = CURVE_TEST_POOLS["ethereum"]["3pool"]["address"]
         result = adapter.swap(
             pool_address=pool_address,
             token_in="USDC",
@@ -287,8 +287,8 @@ class TestSwap:
 
     def test_swap_skips_approve_when_cached(self, adapter: CurveAdapter) -> None:
         """Test swap skips approve when allowance is cached."""
-        pool_address = CURVE_POOLS["ethereum"]["3pool"]["address"]
-        token_address = CURVE_POOLS["ethereum"]["3pool"]["coin_addresses"][1]  # USDC
+        pool_address = CURVE_TEST_POOLS["ethereum"]["3pool"]["address"]
+        token_address = CURVE_TEST_POOLS["ethereum"]["3pool"]["coin_addresses"][1]  # USDC
 
         # Pre-set allowance
         adapter.set_allowance(token_address, pool_address, 10**18)
@@ -318,7 +318,7 @@ class TestSwap:
 
     def test_swap_unknown_token(self, adapter: CurveAdapter) -> None:
         """Test swap with unknown token returns error."""
-        pool_address = CURVE_POOLS["ethereum"]["3pool"]["address"]
+        pool_address = CURVE_TEST_POOLS["ethereum"]["3pool"]["address"]
         result = adapter.swap(
             pool_address=pool_address,
             token_in="WETH",  # Not in 3pool
@@ -332,10 +332,10 @@ class TestSwap:
     def test_swap_calldata_format(self, adapter: CurveAdapter) -> None:
         """Test swap calldata has correct format."""
         adapter.clear_allowance_cache()
-        pool_address = CURVE_POOLS["ethereum"]["3pool"]["address"]
+        pool_address = CURVE_TEST_POOLS["ethereum"]["3pool"]["address"]
 
         # Set allowance to skip approve tx
-        token_address = CURVE_POOLS["ethereum"]["3pool"]["coin_addresses"][1]  # USDC
+        token_address = CURVE_TEST_POOLS["ethereum"]["3pool"]["coin_addresses"][1]  # USDC
         adapter.set_allowance(token_address, pool_address, 10**18)
 
         result = adapter.swap(
@@ -352,7 +352,7 @@ class TestSwap:
 
     def test_swap_gas_estimate(self, adapter: CurveAdapter) -> None:
         """Test swap gas estimate is reasonable."""
-        pool_address = CURVE_POOLS["ethereum"]["3pool"]["address"]
+        pool_address = CURVE_TEST_POOLS["ethereum"]["3pool"]["address"]
         result = adapter.swap(
             pool_address=pool_address,
             token_in="USDC",
@@ -376,7 +376,7 @@ class TestAddLiquidity:
 
     def test_add_liquidity_success(self, adapter: CurveAdapter) -> None:
         """Test successful add_liquidity transaction building."""
-        pool_address = CURVE_POOLS["ethereum"]["3pool"]["address"]
+        pool_address = CURVE_TEST_POOLS["ethereum"]["3pool"]["address"]
         result = adapter.add_liquidity(
             pool_address=pool_address,
             amounts=[Decimal("1000"), Decimal("1000"), Decimal("1000")],
@@ -388,7 +388,7 @@ class TestAddLiquidity:
 
     def test_add_liquidity_wrong_amount_count(self, adapter: CurveAdapter) -> None:
         """Test add_liquidity with wrong number of amounts."""
-        pool_address = CURVE_POOLS["ethereum"]["3pool"]["address"]
+        pool_address = CURVE_TEST_POOLS["ethereum"]["3pool"]["address"]
         result = adapter.add_liquidity(
             pool_address=pool_address,
             amounts=[Decimal("1000"), Decimal("1000")],  # Wrong count
@@ -399,7 +399,7 @@ class TestAddLiquidity:
 
     def test_add_liquidity_calldata_format(self, adapter: CurveAdapter) -> None:
         """Test add_liquidity calldata has correct format."""
-        pool_address = CURVE_POOLS["ethereum"]["3pool"]["address"]
+        pool_address = CURVE_TEST_POOLS["ethereum"]["3pool"]["address"]
         result = adapter.add_liquidity(
             pool_address=pool_address,
             amounts=[Decimal("1000"), Decimal("1000"), Decimal("1000")],
@@ -426,7 +426,7 @@ class TestRemoveLiquidity:
         protection). Rather than warn-and-proceed (sandwich-extractable), the adapter
         must return a failure result so the caller can handle it explicitly.
         """
-        pool_address = CURVE_POOLS["ethereum"]["3pool"]["address"]
+        pool_address = CURVE_TEST_POOLS["ethereum"]["3pool"]["address"]
         result = adapter.remove_liquidity(
             pool_address=pool_address,
             lp_amount=Decimal("1000"),
@@ -452,7 +452,7 @@ class TestRemoveLiquidity:
             rpc_url="http://localhost:8545",
         )
         adapter = CurveAdapter(config)
-        pool_address = CURVE_POOLS["ethereum"]["3pool"]["address"]
+        pool_address = CURVE_TEST_POOLS["ethereum"]["3pool"]["address"]
 
         def _hex(v: int) -> str:
             return "0x" + hex(v)[2:].zfill(64)
@@ -493,7 +493,7 @@ class TestRemoveLiquidity:
             rpc_url="http://localhost:8545",
         )
         adapter = CurveAdapter(config)
-        pool_address = CURVE_POOLS["ethereum"]["3pool"]["address"]
+        pool_address = CURVE_TEST_POOLS["ethereum"]["3pool"]["address"]
 
         def _hex(v: int) -> str:
             return "0x" + hex(v)[2:].zfill(64)
@@ -534,7 +534,7 @@ class TestRemoveLiquidity:
     def test_remove_liquidity_one_coin(self) -> None:
         """Test remove_liquidity_one_coin transaction building."""
         adapter = self._rpc_adapter()
-        pool_address = CURVE_POOLS["ethereum"]["3pool"]["address"]
+        pool_address = CURVE_TEST_POOLS["ethereum"]["3pool"]["address"]
         # min-out is now sourced from on-chain calc_withdraw_one_coin (VIB-5437);
         # mock a sane positive quote (USDC has 6 decimals).
         with patch("almanak.connectors.curve.adapter.eth_call_uint256", return_value=1000 * 10**6):
@@ -551,7 +551,7 @@ class TestRemoveLiquidity:
 
     def test_remove_liquidity_one_coin_invalid_index(self, adapter: CurveAdapter) -> None:
         """Test remove_liquidity_one_coin with invalid index."""
-        pool_address = CURVE_POOLS["ethereum"]["3pool"]["address"]
+        pool_address = CURVE_TEST_POOLS["ethereum"]["3pool"]["address"]
         result = adapter.remove_liquidity_one_coin(
             pool_address=pool_address,
             lp_amount=Decimal("1000"),
@@ -564,7 +564,7 @@ class TestRemoveLiquidity:
     def test_remove_liquidity_one_calldata_format(self) -> None:
         """Test remove_liquidity_one_coin calldata has correct format."""
         adapter = self._rpc_adapter()
-        pool_address = CURVE_POOLS["ethereum"]["3pool"]["address"]
+        pool_address = CURVE_TEST_POOLS["ethereum"]["3pool"]["address"]
         with patch("almanak.connectors.curve.adapter.eth_call_uint256", return_value=1000 * 10**18):
             result = adapter.remove_liquidity_one_coin(
                 pool_address=pool_address,
@@ -610,7 +610,7 @@ class TestEstimateSwapOutput:
 
     def test_stableswap_different_decimals(self, adapter: CurveAdapter) -> None:
         """StableSwap adjusts for decimal difference (USDC 6 -> DAI 18)."""
-        pool_address = CURVE_POOLS["ethereum"]["3pool"]["address"]
+        pool_address = CURVE_TEST_POOLS["ethereum"]["3pool"]["address"]
         pool = adapter.get_pool_info(pool_address)
         assert pool is not None
         # USDC (index 1, 6 decimals) -> DAI (index 0, 18 decimals)
@@ -627,7 +627,7 @@ class TestEstimateSwapOutput:
         as min_amount_out for WETH (18 decimals), providing zero protection.
         With price_ratio, it should return ~0.04 WETH in 18 decimals.
         """
-        pool_address = CURVE_POOLS["ethereum"]["tricrypto2"]["address"]
+        pool_address = CURVE_TEST_POOLS["ethereum"]["tricrypto2"]["address"]
         pool = adapter.get_pool_info(pool_address)
         assert pool is not None
         # USDT (index 0, 6 decimals) -> WETH (index 2, 18 decimals)
@@ -653,7 +653,7 @@ class TestEstimateSwapOutput:
         """
         import pytest
 
-        pool_address = CURVE_POOLS["ethereum"]["tricrypto2"]["address"]
+        pool_address = CURVE_TEST_POOLS["ethereum"]["tricrypto2"]["address"]
         pool = adapter.get_pool_info(pool_address)
         assert pool is not None
         amount_in = 100_000000  # 100 USDT in 6 decimals
@@ -662,7 +662,7 @@ class TestEstimateSwapOutput:
 
     def test_cryptoswap_weth_to_usdt_with_price_ratio(self, adapter: CurveAdapter) -> None:
         """CryptoSwap reverse direction: WETH->USDT with price_ratio."""
-        pool_address = CURVE_POOLS["ethereum"]["tricrypto2"]["address"]
+        pool_address = CURVE_TEST_POOLS["ethereum"]["tricrypto2"]["address"]
         pool = adapter.get_pool_info(pool_address)
         assert pool is not None
         # WETH (index 2, 18 decimals) -> USDT (index 0, 6 decimals)
@@ -678,7 +678,7 @@ class TestEstimateSwapOutput:
 
     def test_swap_with_price_ratio_produces_protected_min(self, adapter: CurveAdapter) -> None:
         """End-to-end: swap() with price_ratio gives meaningful min_amount_out."""
-        pool_address = CURVE_POOLS["ethereum"]["tricrypto2"]["address"]
+        pool_address = CURVE_TEST_POOLS["ethereum"]["tricrypto2"]["address"]
         price_ratio = Decimal("1") / Decimal("2500")
 
         result = adapter.swap(
@@ -778,10 +778,10 @@ class TestDataClasses:
 def _make_3pool_info() -> PoolInfo:
     """Build a PoolInfo for Ethereum 3pool for testing."""
     return PoolInfo(
-        address=CURVE_POOLS["ethereum"]["3pool"]["address"],
-        lp_token=CURVE_POOLS["ethereum"]["3pool"]["lp_token"],
-        coins=CURVE_POOLS["ethereum"]["3pool"]["coins"],
-        coin_addresses=CURVE_POOLS["ethereum"]["3pool"]["coin_addresses"],
+        address=CURVE_TEST_POOLS["ethereum"]["3pool"]["address"],
+        lp_token=CURVE_TEST_POOLS["ethereum"]["3pool"]["lp_token"],
+        coins=CURVE_TEST_POOLS["ethereum"]["3pool"]["coins"],
+        coin_addresses=CURVE_TEST_POOLS["ethereum"]["3pool"]["coin_addresses"],
         pool_type=PoolType.STABLESWAP,
         n_coins=3,
         name="3pool",
@@ -932,7 +932,7 @@ class TestEstimateRemoveLiquiditySlippage:
             default_slippage_bps=50,  # 0.5%
         )
         adapter = CurveAdapter(config)
-        pool_address = CURVE_POOLS["ethereum"]["3pool"]["address"]
+        pool_address = CURVE_TEST_POOLS["ethereum"]["3pool"]["address"]
 
         rpc_responses = [
             _make_mock_rpc_response(_hex_uint256(total_supply)),
@@ -1341,7 +1341,7 @@ class TestSwapUnderlying:
         assert _word(swap_tx.data, 1) == 3
 
     def test_swap_underlying_non_metapool_error(self, adapter: CurveAdapter) -> None:
-        pool_address = CURVE_POOLS["ethereum"]["3pool"]["address"]
+        pool_address = CURVE_TEST_POOLS["ethereum"]["3pool"]["address"]
         result = adapter.swap_underlying(
             pool_address=pool_address, token_in="DAI", token_out="USDC", amount_in=Decimal("10")
         )
@@ -1402,7 +1402,7 @@ class TestAddLiquidityUnderlying:
         assert "combined coin space has 4" in (result.error or "")
 
     def test_add_liquidity_underlying_non_metapool(self, adapter: CurveAdapter) -> None:
-        pool_address = CURVE_POOLS["ethereum"]["3pool"]["address"]
+        pool_address = CURVE_TEST_POOLS["ethereum"]["3pool"]["address"]
         result = adapter.add_liquidity_underlying(
             pool_address=pool_address, underlying_amounts=[Decimal("1"), Decimal("1")]
         )
@@ -1431,7 +1431,7 @@ class TestRemoveLiquidityUnderlying:
         assert "not configured" in (result.error or "")
 
     def test_remove_liquidity_underlying_non_metapool(self, adapter: CurveAdapter) -> None:
-        pool_address = CURVE_POOLS["ethereum"]["3pool"]["address"]
+        pool_address = CURVE_TEST_POOLS["ethereum"]["3pool"]["address"]
         result = adapter.remove_liquidity_underlying(pool_address=pool_address, lp_amount=Decimal("1000"))
         assert result.success is False
         assert "is not a metapool" in (result.error or "")

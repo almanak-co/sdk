@@ -12,7 +12,7 @@ This is the receipt-parser deliverable for VIB-5434: it proves the parser alread
 decodes am3pool's events (the VIB-4307 "missing signatures" xfail reason was
 STALE — every am3pool topic0 was already in ``EVENT_TOPICS``).
 
-VIB-5551 REMOVED am3pool from ``CURVE_POOLS["polygon"]`` (the frozen Aave V2
+VIB-5551 REMOVED am3pool from ``CURVE_TEST_POOLS["polygon"]`` (the frozen Aave V2
 backing made every deposit revert; the registered representative is now the
 frxUSD/USDT NG pool — see ``test_frxusd_usdt_real_logs.py``). am3pool is
 therefore an UNCURATED pool: raw event decode still works (topics are
@@ -33,7 +33,7 @@ from unittest.mock import patch
 from almanak.connectors.curve.receipt_parser import CurveEventType, CurveReceiptParser
 
 # Real am3pool pool contract (the AddLiquidity/RemoveLiquidity emitter). No longer
-# in CURVE_POOLS — removed under VIB-5551 (frozen Aave V2 backing); decode of a
+# in CURVE_TEST_POOLS — removed under VIB-5551 (frozen Aave V2 backing); decode of a
 # legacy position's receipts must keep working registry-free.
 AM3POOL = "0x445fe580ef8d70ff569ab36e80c647af338db351"
 AM3CRV_LP = "0xe7a24ef0c5e95ffb0f6684b813a78f2a3ad7d171"
@@ -140,7 +140,7 @@ class TestAm3poolRealLogDecode:
         assert open_data.pool_address == AM3POOL
         assert open_data.amount0 == 100_000_000_000_000_000_000
         assert open_data.amount1 == 0
-        # VIB-5551 removed am3pool from CURVE_POOLS (frozen Aave V2 backing), so
+        # VIB-5551 removed am3pool from CURVE_TEST_POOLS (frozen Aave V2 backing), so
         # coin-symbol resolution now correctly MISSES the registry: an uncurated
         # pool yields None, never fabricated symbols (Empty ≠ Zero). The
         # registry-backed resolution surface is locked by

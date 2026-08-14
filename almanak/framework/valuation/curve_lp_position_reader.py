@@ -24,7 +24,7 @@ at ``peg=1`` (Empty ≠ Zero — a wrong mark is worse than no mark).
 ``get_virtual_price()`` are read live through the gateway's generic ``eth_call``
 (via the framework :class:`LPPositionReader`); this module opens no sockets and
 holds no RPC URL. Pool metadata (address / coins) is resolved from a READ-ONLY
-lookup of the Curve connector's static ``CURVE_POOLS`` registry — a pure data
+lookup of Curve's live MetaRegistry — a gateway-bound
 read, no connector logic, no egress — reached via a LAZY
 ``importlib.import_module`` so the framework→concrete-connector static-import
 ratchet stays clean.
@@ -167,19 +167,15 @@ class CurveLpPosition:
 def _resolve_curve_pool_meta(
     chain: str, *, pool: str, lp_token: str, gateway_client: object | None = None
 ) -> dict[str, Any] | None:
-    """Resolve a Curve pool's metadata — static registry first, then MetaRegistry.
+    """Resolve exact Curve pool metadata through the live MetaRegistry.
 
-    READ-ONLY lookup of the connector's ``CURVE_POOLS`` (static pool DATA only —
-    no connector logic, no egress) to map a pool name / LP-token / pool address to
-    its `{address, lp_token, coins}`. Matches by pool NAME first, then by LP-token
-    / pool ADDRESS, so a discovered position (which may carry only an address) and
-    a strategy-reported one (which may carry only a name) both resolve.
-
-    On a static miss (VIB-5628) an ADDRESS-shaped ``pool`` / ``lp_token`` falls
-    back to the connector's gateway-backed ``resolve_pool_metadata``, which reads
-    the pool's shape live from Curve's on-chain MetaRegistry. Returns ``None``
-    (fail closed) when the pool is neither in the static registry nor a resolvable
-    on-chain Curve pool.
+    Pool nicknames are intentionally unsupported: valuation needs an on-chain
+    identity and must not translate an SDK-global alias into a money-bearing
+    address. A discovered or strategy-reported position normally supplies its
+    exact pool address. When ``pool`` is not address-form, an exact ``lp_token``
+    address is also accepted as a fallback and validated through MetaRegistry.
+    Returns ``None`` fail closed when no gateway is available or neither exact
+    value resolves to a Curve pool.
 
     Resolved via a LAZY ``importlib.import_module`` (not a static ``import``) so
     the framework→concrete-connector static-import ratchet stays clean — the same
@@ -187,37 +183,6 @@ def _resolve_curve_pool_meta(
     without a top-level connector import. Recorded as the dated CONNECTOR_IMPORT
     exception in the coupling baseline (VIB-5420).
     """
-    try:
-        adapter = importlib.import_module("almanak.connectors.curve.adapter")
-        curve_pools: dict[str, dict[str, dict[str, Any]]] = adapter.CURVE_POOLS
-    except Exception:  # noqa: BLE001 — connector data optional; fail closed
-        logger.debug("Curve pool registry resolution failed", exc_info=True)
-        return None
-
-    chain_pools = curve_pools.get(chain, {})
-
-    # 1) by pool name (e.g. "3pool")
-    if pool and chain_pools:
-        meta = chain_pools.get(pool)
-        if meta is not None:
-            return meta
-
-    # 2) by LP-token or pool address — try BOTH candidate addresses sequentially
-    # (a stale `lp_token` detail must not mask a resolvable `pool` address, and
-    # vice-versa).
-    for addr in (lp_token, pool):
-        if not addr:
-            continue
-        needle = addr.lower()
-        if not needle.startswith("0x"):
-            continue
-        for meta in chain_pools.values():
-            if str(meta.get("lp_token", "")).lower() == needle or str(meta.get("address", "")).lower() == needle:
-                return meta
-
-    # 3) VIB-5628 dynamic fallback: an uncurated pool resolved live from the
-    # on-chain MetaRegistry via the connector's gateway-backed resolver. Needs a
-    # gateway client (the reader's) and an ADDRESS to query on.
     return _resolve_curve_pool_meta_dynamic(chain, pool=pool, lp_token=lp_token, gateway_client=gateway_client)
 
 
@@ -226,7 +191,7 @@ def _resolve_curve_pool_meta_dynamic(
 ) -> dict[str, Any] | None:
     """MetaRegistry fallback seed dict for an uncurated Curve pool (VIB-5628).
 
-    Returns a ``meta`` dict in the SAME shape as a static ``CURVE_POOLS`` entry
+    Returns a canonical ``meta`` dict
     (``address`` / ``lp_token`` / ``coins`` / ``coin_addresses`` / ``coin_decimals``
     / ``is_metapool`` / ``base_pool`` / ``base_pool_coin_addresses``) so the
     reader's family classifier and downstream marks consume it unchanged. Fails

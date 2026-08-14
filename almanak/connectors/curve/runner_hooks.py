@@ -28,7 +28,7 @@ class CurveRunnerHookConnector(
 
         Binds the Curve dynamic-pool resolver to the runner's gateway client so
         the receipt parser can label an uncurated pool's LP legs on a static
-        ``CURVE_POOLS`` miss. Returns ``None`` (no live path) when no gateway
+        exact pool metadata. Returns ``None`` (no live path) when no gateway
         client is configured, so the parser degrades to the legacy static-only
         path — Empty != Zero, never fabricates a leg.
         """

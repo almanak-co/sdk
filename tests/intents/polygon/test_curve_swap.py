@@ -14,7 +14,7 @@ VIB-5551: this pool replaces the aave-type am3pool
 representative. am3pool's deposit flow routed the underlying into the FROZEN
 Aave V2 Polygon LendingPool (VL_RESERVE_FROZEN), so every add_liquidity /
 exchange_underlying reverted on current forks — it is removed from
-CURVE_POOLS entirely. Coin order / liquidity verified on-chain 2026-07-24
+CURVE_TEST_POOLS entirely. Coin order / liquidity verified on-chain 2026-07-24
 (~45.2K USDT + ~47.3K frxUSD); real-fork proof:
 tests/reports/vib-5551-polygon-frxusd-usdt-realfork.md.
 
@@ -33,7 +33,6 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.connectors.curve.adapter import CURVE_POOLS
 from almanak.connectors.curve.receipt_parser import CurveEventType, CurveReceiptParser
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents.compiler import CompilationStatus, IntentCompiler, IntentCompilerConfig
@@ -43,6 +42,7 @@ from tests.intents.conftest import (
     SWAP_MAX_SLIPPAGE,
     get_token_balance,
 )
+from tests.support.curve_adapter import CURVE_TEST_POOLS
 
 logger = logging.getLogger(__name__)
 
@@ -70,18 +70,18 @@ TEST_WALLET = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
 
 
 class TestCurvePolygonPoolConfig:
-    """Verify frxusd_usdt is correctly configured in CURVE_POOLS."""
+    """Verify frxusd_usdt is correctly configured in CURVE_TEST_POOLS."""
 
     @pytest.mark.intent(IntentType.SWAP)
     def test_polygon_in_curve_pools(self):
-        """'polygon' chain must have a CURVE_POOLS entry."""
-        assert "polygon" in CURVE_POOLS
+        """'polygon' chain must have a CURVE_TEST_POOLS entry."""
+        assert "polygon" in CURVE_TEST_POOLS
 
     @pytest.mark.intent(IntentType.SWAP)
     def test_frxusd_usdt_present(self):
-        """frxusd_usdt must be in CURVE_POOLS['polygon']."""
-        assert POOL_KEY in CURVE_POOLS.get("polygon", {}), (
-            f"'{POOL_KEY}' not found in CURVE_POOLS['polygon']. Found: {list(CURVE_POOLS.get('polygon', {}).keys())}"
+        """frxusd_usdt must be in CURVE_TEST_POOLS['polygon']."""
+        assert POOL_KEY in CURVE_TEST_POOLS.get("polygon", {}), (
+            f"'{POOL_KEY}' not found in CURVE_TEST_POOLS['polygon']. Found: {list(CURVE_TEST_POOLS.get('polygon', {}).keys())}"
         )
 
     @pytest.mark.intent(IntentType.SWAP)
@@ -91,7 +91,7 @@ class TestCurvePolygonPoolConfig:
         Its deposit flow reverts at the frozen Aave V2 Polygon LendingPool, so
         re-adding it would route swaps/LP into a non-executable pool.
         """
-        for name, data in CURVE_POOLS["polygon"].items():
+        for name, data in CURVE_TEST_POOLS["polygon"].items():
             assert data["address"].lower() != "0x445fe580ef8d70ff569ab36e80c647af338db351", (
                 f"am3pool (frozen Aave V2 backing) must stay out of the registry; found as '{name}'"
             )
@@ -102,20 +102,20 @@ class TestCurvePolygonPoolConfig:
     @pytest.mark.intent(IntentType.SWAP)
     def test_pool_address_correct(self):
         """Pool address must match the deployed StableSwap NG contract."""
-        pool = CURVE_POOLS["polygon"][POOL_KEY]
+        pool = CURVE_TEST_POOLS["polygon"][POOL_KEY]
         assert pool["address"].lower() == EXPECTED_POOL_ADDRESS.lower()
 
     @pytest.mark.intent(IntentType.SWAP)
     def test_pool_is_ng(self):
         """frxusd_usdt is StableSwap NG: is_ng=True and LP token == pool address."""
-        pool = CURVE_POOLS["polygon"][POOL_KEY]
+        pool = CURVE_TEST_POOLS["polygon"][POOL_KEY]
         assert pool.get("is_ng") is True, f"frxusd_usdt must have is_ng=True; got {pool.get('is_ng')}"
         assert pool["lp_token"].lower() == pool["address"].lower(), "StableSwap NG: LP token IS the pool address"
 
     @pytest.mark.intent(IntentType.SWAP)
     def test_pool_has_2_coins_in_onchain_order(self):
         """frxusd_usdt is a 2-coin pool: coins(0)=USDT, coins(1)=frxUSD."""
-        pool = CURVE_POOLS["polygon"][POOL_KEY]
+        pool = CURVE_TEST_POOLS["polygon"][POOL_KEY]
         assert pool["n_coins"] == 2
         assert len(pool["coin_addresses"]) == 2
         assert pool["coin_addresses"][0].lower() == USDT_ADDRESS.lower(), "coins(0) must be USDT"
@@ -250,9 +250,7 @@ class TestCurvePolygonSwapExecution:
         frxusd_before = get_token_balance(web3, FRXUSD_ADDRESS, funded_wallet)
         logger.info("USDT before: %.2f", usdt_before / 10**6)
         logger.info("frxUSD before: %.2f", frxusd_before / 10**18)
-        assert usdt_before >= int(swap_amount * 10**6), (
-            "Test wallet lacks USDT — polygon funded_wallet seeding failed"
-        )
+        assert usdt_before >= int(swap_amount * 10**6), "Test wallet lacks USDT — polygon funded_wallet seeding failed"
 
         # --- Layer 1: Compile ---
         compiler = IntentCompiler(
@@ -280,8 +278,7 @@ class TestCurvePolygonSwapExecution:
         # --- Layer 2: Execute ---
         execution_result = await orchestrator.execute(compile_result.action_bundle)
         assert execution_result.success, (
-            f"Curve swap execution failed: {execution_result.error}\n"
-            "Check frxusd_usdt coin indices and is_ng setting."
+            f"Curve swap execution failed: {execution_result.error}\nCheck frxusd_usdt coin indices and is_ng setting."
         )
 
         logger.info("Execution success")

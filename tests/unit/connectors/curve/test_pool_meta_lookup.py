@@ -1,6 +1,6 @@
 """Receipt-parser dynamic pool-meta transport for UNCURATED Curve pools (VIB-5628).
 
-The Curve receipt parser holds no gateway client; on a static ``CURVE_POOLS``
+The Curve receipt parser holds no gateway client; on a static ``CURVE_TEST_POOLS``
 miss it consults a runner-injected ``pool_meta_lookup`` sync callable to label an
 uncurated pool's LP legs (coin addresses / symbols / pool_type). These tests
 prove:
@@ -24,7 +24,7 @@ from almanak.connectors.curve.receipt_parser import (
     _pool_type,
 )
 
-# Uncurated tricryptoUSDC pool (NOT in CURVE_POOLS) — the VIB-5628 real-fork pool.
+# Uncurated tricryptoUSDC pool (NOT in CURVE_TEST_POOLS) — the VIB-5628 real-fork pool.
 UNCURATED_POOL = "0x7f86bf177dd4f3494b841a37e810a34dd56c829b"
 LP_TOKEN = "0x7f86bf177dd4f3494b841a37e810a34dd56c829b"  # tricrypto LP == pool
 WALLET = "0xaabbccddee1122334455667788990011aabbccdd"

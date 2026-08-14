@@ -41,7 +41,7 @@ typed row + idempotent re-drain, the directional null-contract, a canonical
 (VIB-5429): the 2-token per-leg fields stay honestly ``None`` on a bare-label
 event (a proportional N-coin close has no token0/token1 direction — Empty ≠ Zero,
 not a fabricated zero), while the USD aggregates (cost_basis / realized_pnl) are
-MEASURED for a recognized USD-stable pool via the CURVE_POOLS coin resolver and
+MEASURED for a recognized USD-stable pool via the CURVE_TEST_POOLS coin resolver and
 stay ``None`` (fail-closed) for a non-stable pool. The event carries its true coin
 identity in ``coin_symbols`` (not the empty 2-token labels).
 """
@@ -62,7 +62,7 @@ from tests.intents.conftest import assert_accounting_persisted
 _ADDRESS_RE = re.compile(r"^0x[0-9a-f]{40}$")
 
 # VIB-5429 — the Curve LP money surface splits into two families on a bare-label
-# (no token0/token1) event, because the close-leg coin resolver (CURVE_POOLS
+# (no token0/token1) event, because the close-leg coin resolver (CURVE_TEST_POOLS
 # registry) now measures the USD *aggregates* from the pool's coins even when the
 # 2-token labels are empty, while the 2-token *per-leg* breakdown genuinely does
 # not apply to a proportional N-coin pool:

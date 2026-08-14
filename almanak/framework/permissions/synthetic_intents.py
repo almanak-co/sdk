@@ -11,9 +11,9 @@ from __future__ import annotations
 import functools
 import logging
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from decimal import Decimal
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 from ..data.tokens.defaults import DEFAULT_TOKENS
 from ..intents.compiler import (
@@ -390,6 +390,21 @@ def _get_token_pair(chain: str) -> tuple[str, str]:
     return pair
 
 
+def _override_has_intent_membership(protocol: str, intent_type: IntentType) -> bool:
+    """Return whether a pair-independent override may own ``intent_type``.
+
+    Connector overrides bypass framework router/manager tables, but they must
+    not bypass the connector's declared intent membership.  This matters when
+    the framework cannot resolve its default token pair: that path invokes the
+    override directly because there is no safe fallback context to dispatch.
+    """
+    if intent_type is IntentType.SWAP:
+        return protocol in _swap_protocols()
+    if intent_type in {IntentType.LP_OPEN, IntentType.LP_CLOSE}:
+        return protocol in _lp_protocols()
+    return True
+
+
 def _resolve_lp_pair(hints: PermissionHints, chain: str) -> tuple[str, str]:
     """Return the (tokenA, tokenB) pair to seed synthetic LP discovery on
     ``chain`` given the protocol's already-resolved ``hints``.
@@ -419,6 +434,10 @@ def build_synthetic_intents(
     protocol: str,
     intent_type: IntentType | str,
     chain: str,
+    *,
+    strategy_config: Mapping[str, Any] | None = None,
+    rpc_url: str | None = None,
+    gateway_client: Any = None,
 ) -> list[AnyIntent]:
     """Build synthetic intents for a (protocol, intent_type) combination.
 
@@ -429,6 +448,10 @@ def build_synthetic_intents(
         protocol: Protocol name (e.g., "uniswap_v3", "aave_v3")
         intent_type: Intent type string (e.g., "SWAP", "SUPPLY")
         chain: Target chain name
+        strategy_config: Deployment config used only by connector-owned
+            discovery overrides that bind exact, dynamic targets.
+        rpc_url: Optional read transport for binding resolution/compilation.
+        gateway_client: Preferred gateway read transport for binding resolution.
 
     Returns:
         List of synthetic intents. Empty if the combination is not supported.
@@ -438,38 +461,64 @@ def build_synthetic_intents(
         logger.debug("Unknown intent type: %s", intent_type)
         return []
 
+    protocol_lower = protocol.lower()
     if it in {IntentType.VAULT_DEPOSIT, IntentType.VAULT_REDEEM}:
         token_pair = ("", "")
     else:
         resolved_pair = _get_token_pair_or_none(chain)
         if resolved_pair is None:
-            return []
+            # Connector-owned discovery may authenticate every token and
+            # target from deployment configuration. Give that override the
+            # first chance to build a fail-closed vector before treating the
+            # framework's missing default token pair as unsupported, but only
+            # while the connector still declares membership for the requested
+            # SWAP/LP intent. Empty token refs are never passed to a fallback
+            # builder.
+            if not _override_has_intent_membership(protocol_lower, it):
+                return []
+            override = get_discovery_vectors_override(protocol_lower)
+            if override is None:
+                return []
+            override_ctx = DiscoveryContext(
+                usdc="",
+                weth="",
+                strategy_config=strategy_config or {},
+                rpc_url=rpc_url,
+                gateway_client=gateway_client,
+            )
+            result = override(protocol_lower, it, chain, override_ctx)
+            return result if result is not None else []
         token_pair = resolved_pair
 
-    protocol_lower = protocol.lower()
-    return _dispatch_synthetic_intents(it, protocol_lower, chain, *token_pair)
+    ctx = DiscoveryContext(
+        usdc=token_pair[0],
+        weth=token_pair[1],
+        strategy_config=strategy_config or {},
+        rpc_url=rpc_url,
+        gateway_client=gateway_client,
+    )
+    return _dispatch_synthetic_intents(it, protocol_lower, chain, ctx)
 
 
 def _dispatch_synthetic_intents(
     intent_type: IntentType,
     protocol: str,
     chain: str,
-    usdc: str,
-    weth: str,
+    ctx: DiscoveryContext,
 ) -> list[AnyIntent]:
     builders: dict[IntentType, Callable[[], list[AnyIntent]]] = {
-        IntentType.SWAP: lambda: _build_swap_intents(protocol, chain, usdc, weth),
-        IntentType.LP_OPEN: lambda: _build_lp_open_intents(protocol, chain),
-        IntentType.LP_CLOSE: lambda: _build_lp_close_intents(protocol, chain),
-        IntentType.LP_COLLECT_FEES: lambda: _build_lp_collect_fees_intents(protocol, chain),
-        IntentType.SUPPLY: lambda: _build_supply_intents(protocol, chain, usdc, weth),
-        IntentType.WITHDRAW: lambda: _build_withdraw_intents(protocol, chain, usdc, weth),
-        IntentType.BORROW: lambda: _build_borrow_intents(protocol, chain, usdc, weth),
-        IntentType.REPAY: lambda: _build_repay_intents(protocol, chain, usdc, weth),
-        IntentType.PERP_OPEN: lambda: _build_perp_open_intents(protocol, chain, usdc),
-        IntentType.PERP_CLOSE: lambda: _build_perp_close_intents(protocol, chain, usdc),
+        IntentType.SWAP: lambda: _build_swap_intents(protocol, chain, ctx),
+        IntentType.LP_OPEN: lambda: _build_lp_open_intents(protocol, chain, ctx),
+        IntentType.LP_CLOSE: lambda: _build_lp_close_intents(protocol, chain, ctx),
+        IntentType.LP_COLLECT_FEES: lambda: _build_lp_collect_fees_intents(protocol, chain, ctx),
+        IntentType.SUPPLY: lambda: _build_supply_intents(protocol, chain, ctx.usdc, ctx.weth),
+        IntentType.WITHDRAW: lambda: _build_withdraw_intents(protocol, chain, ctx.usdc, ctx.weth),
+        IntentType.BORROW: lambda: _build_borrow_intents(protocol, chain, ctx.usdc, ctx.weth),
+        IntentType.REPAY: lambda: _build_repay_intents(protocol, chain, ctx.usdc, ctx.weth),
+        IntentType.PERP_OPEN: lambda: _build_perp_open_intents(protocol, chain, ctx.usdc),
+        IntentType.PERP_CLOSE: lambda: _build_perp_close_intents(protocol, chain, ctx.usdc),
         IntentType.PERP_CANCEL_ORDER: lambda: _build_perp_cancel_intents(protocol, chain),
-        IntentType.FLASH_LOAN: lambda: _build_flash_loan_intents(protocol, chain, usdc),
+        IntentType.FLASH_LOAN: lambda: _build_flash_loan_intents(protocol, chain, ctx.usdc),
         IntentType.VAULT_DEPOSIT: lambda: _build_vault_deposit_intents(protocol, chain),
         IntentType.VAULT_REDEEM: lambda: _build_vault_redeem_intents(protocol, chain),
     }
@@ -480,12 +529,11 @@ def _dispatch_synthetic_intents(
     return builder()
 
 
-def _build_swap_intents(protocol: str, chain: str, usdc: str, weth: str) -> list[AnyIntent]:
+def _build_swap_intents(protocol: str, chain: str, ctx: DiscoveryContext) -> list[AnyIntent]:
     if protocol not in _swap_protocols():
         return []
     override = get_discovery_vectors_override(protocol)
     if override is not None:
-        ctx = DiscoveryContext(usdc=usdc, weth=weth)
         result = override(protocol, IntentType.SWAP, chain, ctx)
         if result is not None:
             return result
@@ -510,7 +558,7 @@ def _build_swap_intents(protocol: str, chain: str, usdc: str, weth: str) -> list
     # Some protocols need connector-declared token pairs.
     # Use hints override when available.
     hints = get_permission_hints(protocol)
-    from_token, to_token = usdc, weth
+    from_token, to_token = ctx.usdc, ctx.weth
     if hints.synthetic_swap_pair:
         pair = hints.synthetic_swap_pair.get(chain)
         if pair:
@@ -544,7 +592,7 @@ def _build_swap_intents(protocol: str, chain: str, usdc: str, weth: str) -> list
         intents.append(
             SwapIntent(
                 from_token=native_symbol,
-                to_token=usdc,
+                to_token=ctx.usdc,
                 amount=Decimal("0.01"),
                 protocol=protocol,
                 chain=chain,
@@ -561,7 +609,7 @@ def _build_swap_intents(protocol: str, chain: str, usdc: str, weth: str) -> list
 _SYNTHETIC_LP_PRICE_BAND = PriceBand(lower=Decimal("1500"), upper=Decimal("4000"))
 
 
-def _build_lp_open_intents(protocol: str, chain: str) -> list[AnyIntent]:
+def _build_lp_open_intents(protocol: str, chain: str, ctx: DiscoveryContext) -> list[AnyIntent]:
     if protocol not in _lp_protocols():
         return []
     # Override hook runs BEFORE the LP_POSITION_MANAGERS gate so a connector
@@ -573,10 +621,8 @@ def _build_lp_open_intents(protocol: str, chain: str) -> list[AnyIntent]:
     # LP_POSITION_MANAGERS and relies on the override hook firing first.
     # ``ctx.usdc`` / ``ctx.weth`` carry the chain-default token pair so the
     # callee doesn't have to re-import ``_get_token_pair``.
-    usdc, weth = _get_token_pair(chain)
     override = get_discovery_vectors_override(protocol)
     if override is not None:
-        ctx = DiscoveryContext(usdc=usdc, weth=weth)
         result = override(protocol, IntentType.LP_OPEN, chain, ctx)
         if result is not None:
             return result
@@ -619,15 +665,13 @@ def _build_lp_open_intents(protocol: str, chain: str) -> list[AnyIntent]:
     ]
 
 
-def _build_lp_close_intents(protocol: str, chain: str) -> list[AnyIntent]:
+def _build_lp_close_intents(protocol: str, chain: str, ctx: DiscoveryContext) -> list[AnyIntent]:
     if protocol not in _lp_protocols():
         return []
     # Override hook runs BEFORE the LP_POSITION_MANAGERS gate — see
     # ``_build_lp_open_intents`` for the canonical placement rationale.
-    usdc, weth = _get_token_pair(chain)
     override = get_discovery_vectors_override(protocol)
     if override is not None:
-        ctx = DiscoveryContext(usdc=usdc, weth=weth)
         result = override(protocol, IntentType.LP_CLOSE, chain, ctx)
         if result is not None:
             return result
@@ -646,7 +690,7 @@ def _build_lp_close_intents(protocol: str, chain: str) -> list[AnyIntent]:
     ]
 
 
-def _build_lp_collect_fees_intents(protocol: str, chain: str) -> list[AnyIntent]:
+def _build_lp_collect_fees_intents(protocol: str, chain: str, ctx: DiscoveryContext) -> list[AnyIntent]:
     hints = get_permission_hints(protocol)
     if not hints.supports_standalone_fee_collection:
         return []
@@ -656,8 +700,6 @@ def _build_lp_collect_fees_intents(protocol: str, chain: str) -> list[AnyIntent]
     # ``_build_swap_intents`` / ``_build_supply_intents``.
     override = get_discovery_vectors_override(protocol)
     if override is not None:
-        usdc, weth = _get_token_pair(chain)
-        ctx = DiscoveryContext(usdc=usdc, weth=weth)
         result = override(protocol, IntentType.LP_COLLECT_FEES, chain, ctx)
         if result is not None:
             return result

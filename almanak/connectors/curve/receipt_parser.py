@@ -351,11 +351,11 @@ def _canonical_pool_address(event: CurveEvent) -> str:
 
 # VIB-5628 — runner-injected sync ``(pool_address, chain) -> CurvePoolMetadata
 # | None`` bridge. The parser holds no gateway client of its own, so the three
-# static-registry lookups below take this optional callable and consult it on a
-# static MISS to label an UNCURATED pool's legs. ``CurvePoolMetadata`` is
+# metadata lookups below take this optional callable to label an exact pool's
+# legs. ``CurvePoolMetadata`` is
 # duck-typed (``.coin_addresses`` / ``.coin_symbols`` / ``.pool_type``) to keep
 # this leaf import-cycle-free; ``None`` (no bridge / miss / failure) degrades to
-# the legacy static-only behaviour unchanged (Empty ≠ Zero).
+# an empty result without fabricating identity (Empty ≠ Zero).
 PoolMetaLookup = Callable[[str, str], Any]
 
 
@@ -386,9 +386,8 @@ def _pool_coin_addresses(
 ) -> list[str]:
     """Return the pool-coin-ordered ERC-20 addresses for a Curve pool, or ``[]``.
 
-    Looks the pool up by its on-chain address in the static ``CURVE_POOLS``
-    registry (the same metadata the compiler funds from) and returns its
-    ``coin_addresses`` in pool-coin index order — the SAME order the
+    Resolves the pool through the runner-injected MetaRegistry lookup and
+    returns its ``coin_addresses`` in pool-coin index order — the SAME order the
     AddLiquidity event emits ``token_amounts``. This lets the money-leg
     declaration map ``token_amounts[i]`` to the coin that index actually funds,
     instead of the legacy positional ``amount0``/``amount1`` guess that blindly
@@ -396,26 +395,11 @@ def _pool_coin_addresses(
     single-sided deposit of coin index 1+ left coin 0 carrying a fabricated zero
     leg, and a deposit of coin index 2+ was dropped entirely).
 
-    The static registry is the FIRST choice (a cache). On a static MISS, if a
-    ``pool_meta_lookup`` bridge is wired (VIB-5628), consult it so an UNCURATED
-    pool's legs are still labelled. Returns ``[]`` (→ caller declares no legs,
-    legacy fallback unchanged) when the pool is unknown to both — never
+    Returns ``[]`` when no lookup is wired or the pool is not resolvable — never
     fabricates an address (Empty ≠ Zero).
     """
     if not pool_address:
         return []
-    try:
-        from almanak.connectors.curve.adapter import CURVE_POOLS
-
-        chain_pools = CURVE_POOLS.get(chain, {})
-        target = pool_address.lower()
-        for data in chain_pools.values():
-            if str(data.get("address", "")).lower() == target:
-                coin_addresses = data.get("coin_addresses") or []
-                return [str(a) for a in coin_addresses]
-    except Exception as exc:  # noqa: BLE001 — accounting path: degrade to legacy, never raise
-        logger.debug("Curve money-legs: pool-coin lookup failed for %s on %s: %s", pool_address, chain, exc)
-    # Static miss → dynamic MetaRegistry resolve (VIB-5628); ``None`` ⇒ ``[]``.
     meta = _lookup_pool_meta(pool_meta_lookup, pool_address, chain)
     if meta is not None and meta.coin_addresses:
         return [str(a) for a in meta.coin_addresses]
@@ -429,8 +413,8 @@ def _pool_coin_symbols(
 ) -> list[str]:
     """Return the pool-coin-ordered token SYMBOLS for a Curve pool, or ``[]``.
 
-    Sibling of :func:`_pool_coin_addresses` reading the static ``CURVE_POOLS``
-    ``coins`` list (e.g. ``["DAI", "USDC", "USDT"]`` for 3pool) in pool-coin
+    Sibling of :func:`_pool_coin_addresses` reading the live ``coin_symbols``
+    list in pool-coin
     index order — the SAME order the AddLiquidity / RemoveLiquidity events emit
     their ``token_amounts`` / ``fees`` arrays. VIB-5429: the LP accounting
     handler needs these symbols to map each decoded fee/amount leg to a coin it
@@ -438,24 +422,11 @@ def _pool_coin_symbols(
     no ``token_in`` / ``token_out`` and the fungible position_key has no token
     descriptor, so without this lookup the close legs collapse to NULLs.
 
-    Static registry FIRST (cache); on a MISS, consult the ``pool_meta_lookup``
-    bridge (VIB-5628) so an UNCURATED pool's close legs are still labelled.
-    Returns ``[]`` (→ caller degrades, never fabricates) when the pool is
-    unknown to both (Empty ≠ Zero).
+    Returns ``[]`` (→ caller degrades, never fabricates) when the lookup is
+    unavailable or the pool cannot be resolved (Empty ≠ Zero).
     """
     if not pool_address:
         return []
-    try:
-        from almanak.connectors.curve.adapter import CURVE_POOLS
-
-        target = pool_address.lower()
-        for data in CURVE_POOLS.get(chain, {}).values():
-            if str(data.get("address", "")).lower() == target:
-                coins = data.get("coins") or []
-                return [str(c) for c in coins]
-    except Exception as exc:  # noqa: BLE001 — accounting path: degrade to legacy, never raise
-        logger.debug("Curve coin-symbol lookup failed for %s on %s: %s", pool_address, chain, exc)
-    # Static miss → dynamic MetaRegistry resolve (VIB-5628); ``None`` ⇒ ``[]``.
     meta = _lookup_pool_meta(pool_meta_lookup, pool_address, chain)
     if meta is not None and meta.coin_symbols:
         return [str(c) for c in meta.coin_symbols]
@@ -467,27 +438,17 @@ def _pool_type(
     chain: str,
     pool_meta_lookup: PoolMetaLookup | None = None,
 ) -> str:
-    """Return the static ``CURVE_POOLS`` ``pool_type`` for a pool, or ``""``.
+    """Return the live-resolved ``pool_type`` for a pool, or ``""``.
 
     Used to disambiguate the two incompatible 3-word ``RemoveLiquidityOne``
     layouts that share topic0 (CryptoSwap carries a ``coin_index``; StableSwap-NG
-    does not — VIB-5433). Static registry FIRST (cache); on a MISS, consult the
-    ``pool_meta_lookup`` bridge (VIB-5628). Returns ``""`` (→ caller defers to
+    does not — VIB-5433). Consults the ``pool_meta_lookup`` bridge (VIB-5628).
+    Returns ``""`` (→ caller defers to
     the Transfer-based proceeds resolver) when the pool is unknown to both;
     never raises.
     """
     if not pool_address:
         return ""
-    try:
-        from almanak.connectors.curve.adapter import CURVE_POOLS
-
-        target = pool_address.lower()
-        for data in CURVE_POOLS.get(chain, {}).values():
-            if str(data.get("address", "")).lower() == target:
-                return str(data.get("pool_type", "")).lower()
-    except Exception as exc:  # noqa: BLE001 — accounting path: degrade, never raise
-        logger.debug("Curve pool-type lookup failed for %s on %s: %s", pool_address, chain, exc)
-    # Static miss → dynamic MetaRegistry resolve (VIB-5628); ``None`` ⇒ ``""``.
     meta = _lookup_pool_meta(pool_meta_lookup, pool_address, chain)
     if meta is not None and meta.pool_type:
         return str(meta.pool_type).lower()
@@ -579,11 +540,10 @@ class CurveReceiptParser:
                 (built from the runner's ``GatewayClient`` by
                 ``make_sync_curve_pool_meta_lookup``). Threaded by the enricher
                 only to connectors that declare it in ``receipt_parser_kwargs``.
-                Consulted by the leg-labelling helpers on a static
-                ``CURVE_POOLS`` MISS so an UNCURATED pool's coin addresses /
-                symbols / pool_type are still resolved. ``None`` (default —
-                paper / dry-run / unit-test, or no gateway) degrades to the
-                legacy static-only behaviour (Empty ≠ Zero, never fabricates).
+                Consulted by the leg-labelling helpers so an exact pool's coin
+                addresses / symbols / pool_type are resolved live. ``None``
+                (paper / dry-run / unit-test, or no gateway) degrades closed
+                (Empty ≠ Zero, never fabricates).
             **kwargs: Additional arguments (ignored for compatibility)
         """
         self.chain = chain.lower()
@@ -1945,7 +1905,7 @@ class CurveReceiptParser:
 
                 resolver = get_token_resolver()
                 # skip_gateway/log_errors: accounting write hot path — resolve the
-                # symbol AND decimals from the static registry without risking a
+                # symbol AND decimals from the token resolver's local cache without risking a
                 # gateway round-trip stall (mirrors ledger ``_lp_amount_to_human``).
                 info = resolver.resolve(coin_address, self.chain, log_errors=False, skip_gateway=True)
                 token_identity = getattr(info, "symbol", "") or token_identity
@@ -2012,7 +1972,7 @@ class CurveReceiptParser:
 
                 token_amounts = event.data.get("token_amounts") or []
 
-                # A stale / truncated ``CURVE_POOLS.coin_addresses`` (fewer coins
+                # A stale / truncated metadata response (fewer coins
                 # than the pool actually has) would let the loop below ignore a
                 # FUNDED ``token_amounts`` slot beyond its length and still declare
                 # a partial ``PrimitiveMoneyLegs``. Because declared legs BYPASS the

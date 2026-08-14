@@ -679,11 +679,10 @@ class ResultEnricher:
                 hooks bound to its ``GatewayClient``.
             pool_meta_lookup: VIB-5628. Sync ``(pool_address, chain) ->
                 CurvePoolMetadata | None`` callable injected into the Curve
-                receipt parser so the leg-labelling helpers can resolve an
-                UNCURATED pool's coin addresses / symbols / pool_type from the
-                on-chain MetaRegistry on a static ``CURVE_POOLS`` miss. ``None``
-                (default) skips the wiring — uncurated-pool legs then degrade to
-                ``[]`` / ``""`` (the legacy static-only path; Empty != Zero,
+                receipt parser so the leg-labelling helpers can resolve exact
+                pool coin addresses / symbols / pool_type from the on-chain
+                MetaRegistry. ``None`` (default) skips the wiring — pool legs
+                then degrade to ``[]`` / ``""`` (Empty != Zero,
                 never fabricates). The strategy runner builds this from the
                 Curve gateway bridge bound to its ``GatewayClient``.
         """

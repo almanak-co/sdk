@@ -4,8 +4,8 @@ Scripted-RPC tests: every on-chain byte the reader consumes is encoded here
 exactly as a Curve pool returns it (32-byte ABI words), covering both index
 ABI families (modern ``uint256`` vs legacy Vyper ``int128``), both ``get_dy``
 families (StableSwap ``int128`` vs CryptoSwap ``uint256``), the native-asset
-placeholder coin, fee-scale conversion, fail-closed paths, curated-pair
-resolution, and the LWAP multi-count guard for tier-insensitive resolution.
+placeholder coin, fee-scale conversion, direct exact-address reads, and
+fail-closed pair resolution without an SDK pool catalog.
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ def _address_bytes(address: str) -> bytes:
     return b"\x00" * 12 + bytes.fromhex(address.removeprefix("0x"))
 
 
-# Mainnet 3pool fixtures (curated in CURVE_POOLS["ethereum"]["3pool"]).
+# Mainnet 3pool fixtures, local to this scripted-RPC test module.
 POOL_3POOL = "0xbEbc44782C7dB0a1A60Cb6fe97d0b483032FF1C7"
 DAI = "0x6B175474E89094C44Da98b954EedeAC495271d0F"
 USDC = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
@@ -262,15 +262,15 @@ def test_get_pool_metadata_is_curve_shaped() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Pool resolution (curated pairs, tier-insensitive, total)
+# Pool resolution (no static catalog: pair-only reads fail closed)
 # ---------------------------------------------------------------------------
 
 
-def test_resolve_pool_address_ignores_fee_tier_and_order() -> None:
+def test_resolve_pool_address_requires_an_exact_pool() -> None:
     reader = _curve_reader(ScriptedCurvePool())
     for fee_tier in (100, 500, 3000, 10000, 0):
-        assert reader.resolve_pool_address(DAI, USDC, "ethereum", fee_tier) == POOL_3POOL
-    assert reader.resolve_pool_address(USDC, DAI, "ethereum") == POOL_3POOL
+        assert reader.resolve_pool_address(DAI, USDC, "ethereum", fee_tier) is None
+    assert reader.resolve_pool_address(USDC, DAI, "ethereum") is None
 
 
 def test_resolve_pool_address_unknown_pair_or_chain_is_none() -> None:
@@ -282,13 +282,13 @@ def test_resolve_pool_address_unknown_pair_or_chain_is_none() -> None:
     assert reader.resolve_pool_address(DAI, USDC, "solana") is None
 
 
-def test_resolve_best_pool_address_single_total_sweep() -> None:
+def test_resolve_best_pool_address_fails_closed_without_catalog() -> None:
     pool = ScriptedCurvePool()
     reader = _curve_reader(pool)
 
     best = reader.resolve_best_pool_address(DAI, USDC, "ethereum")
 
-    assert best == POOL_3POOL
+    assert best is None
 
 
 # ---------------------------------------------------------------------------
@@ -296,16 +296,11 @@ def test_resolve_best_pool_address_single_total_sweep() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_lwap_does_not_multi_count_tier_insensitive_pool() -> None:
-    """Curve resolves the same pool for every swept tier — LWAP counts it once."""
+def test_lwap_fails_closed_without_an_exact_pool() -> None:
+    """Pair-only aggregation cannot infer an address after catalog removal."""
     pool = ScriptedCurvePool()
     registry = PoolReaderRegistry(rpc_call=pool)
     aggregator = PriceAggregator(pool_registry=registry, rpc_call=pool)
 
-    envelope = aggregator.lwap(DAI, USDC, "ethereum", protocols=["curve"])
-
-    aggregated = envelope.value
-    assert aggregated.pool_count == 1
-    assert len(aggregated.sources) == 1
-    assert aggregated.sources[0].pool_address == POOL_3POOL
-    assert aggregated.price == Decimal("999500") / Decimal(10**6)
+    with pytest.raises(DataUnavailableError):
+        aggregator.lwap(DAI, USDC, "ethereum", protocols=["curve"])

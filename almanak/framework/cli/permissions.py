@@ -166,7 +166,7 @@ def permissions(  # noqa: C901
 
     # Generate manifest for each chain
     from ..permissions.generator import PermissionGenerationError, generate_manifest
-    from ..permissions.hints import PermissionHintsError
+    from ..permissions.hints import PermissionBindingError, PermissionHintsError
 
     # Filter out non-EVM chains for zodiac format (Safe/Zodiac is EVM-only)
     # This must happen before the compiler logger mutation so the early exit
@@ -244,9 +244,9 @@ def permissions(  # noqa: C901
                     config=config,
                     rpc_url=chain_rpc_url,
                 )
-            except PermissionGenerationError as exc:
-                # Fail-closed token extraction (ALM-3175): the message already
-                # names the unresolvable token(s) and the remedy — surface it
+            except (PermissionGenerationError, PermissionBindingError) as exc:
+                # Fail-closed config extraction/binding: the message already
+                # names the unresolvable identity and the remedy — surface it
                 # without a traceback.
                 raise click.ClickException(str(exc)) from exc
             except (PermissionHintsError, ImportError) as exc:

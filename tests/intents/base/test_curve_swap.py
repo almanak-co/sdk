@@ -27,7 +27,6 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.connectors.curve.adapter import CURVE_POOLS
 from almanak.connectors.curve.receipt_parser import CurveEventType, CurveReceiptParser
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents.compiler import CompilationStatus, IntentCompiler, IntentCompilerConfig
@@ -45,74 +44,14 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 CHAIN_NAME = "base"
-POOL_KEY = "4pool"
-
 # Curve 4pool on Base
 EXPECTED_POOL_ADDRESS = "0xf6C5F01C7F3148891ad0e19DF78743D31E390D1f"
-
-# Token addresses (coin order: USDC=0, USDbC=1, axlUSDC=2, crvUSD=3)
-USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"  # native USDC
-USDBC_ADDRESS = "0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA"  # bridged USDC (USDbC)
-AXLUSDC_ADDRESS = "0xEB466342C4d449BC9f53A865D5Cb90586f405215"
-CRVUSD_ADDRESS = "0x417Ac0e078398C154EdFadD9Ef675d30Be60Af93"
 
 TEST_WALLET = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
 
 
 # =============================================================================
-# Layer 1a: Pool Configuration Tests (No Anvil Required)
-# =============================================================================
-
-
-class TestCurveBasePoolConfig:
-    """Verify 4pool is correctly configured in CURVE_POOLS."""
-
-    @pytest.mark.intent(IntentType.SWAP)
-    def test_base_in_curve_pools(self):
-        """'base' chain must have a CURVE_POOLS entry."""
-        assert "base" in CURVE_POOLS
-
-    @pytest.mark.intent(IntentType.SWAP)
-    def test_4pool_present(self):
-        """4pool must be in CURVE_POOLS['base']."""
-        assert POOL_KEY in CURVE_POOLS.get("base", {}), (
-            f"'{POOL_KEY}' not found in CURVE_POOLS['base']. Found: {list(CURVE_POOLS.get('base', {}).keys())}"
-        )
-
-    @pytest.mark.intent(IntentType.SWAP)
-    def test_pool_address_correct(self):
-        """Pool address must match deployed 4pool contract."""
-        pool = CURVE_POOLS["base"][POOL_KEY]
-        assert pool["address"].lower() == EXPECTED_POOL_ADDRESS.lower()
-
-    @pytest.mark.intent(IntentType.SWAP)
-    def test_pool_type_is_stableswap(self):
-        """Pool type must be 'stableswap' (NG variant)."""
-        pool = CURVE_POOLS["base"][POOL_KEY]
-        assert pool["pool_type"] == "stableswap"
-
-    @pytest.mark.intent(IntentType.SWAP)
-    def test_pool_has_4_coins(self):
-        """4pool has 4 coins: USDC, USDbC, axlUSDC, crvUSD."""
-        pool = CURVE_POOLS["base"][POOL_KEY]
-        assert pool["n_coins"] == 4
-        assert len(pool["coin_addresses"]) == 4
-
-    @pytest.mark.intent(IntentType.SWAP)
-    def test_pool_contains_native_usdc(self):
-        """4pool must contain native USDC at index 0."""
-        pool = CURVE_POOLS["base"][POOL_KEY]
-        assert pool["coin_addresses"][0].lower() == USDC_ADDRESS.lower()
-
-    @pytest.mark.intent(IntentType.SWAP)
-    def test_pool_contains_usdbc(self):
-        """4pool must contain USDbC at index 1."""
-        pool = CURVE_POOLS["base"][POOL_KEY]
-        assert pool["coin_addresses"][1].lower() == USDBC_ADDRESS.lower()
-
-
-# =============================================================================
-# Layer 1b: SwapIntent Compilation Tests (No Anvil Required)
+# Layer 1: SwapIntent Compilation Tests (No Anvil Required)
 # =============================================================================
 
 

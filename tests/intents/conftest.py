@@ -2744,12 +2744,18 @@ def _zodiac_intent_recorder(
         return captured
 
     from almanak.framework.intents.compiler import IntentCompiler
+    from tests.intents._permission_onchain_harness import _associate_zodiac_source_intent
 
     original_compile = IntentCompiler.compile
 
     def recording_compile(self, intent):  # type: ignore[no-redef]
         captured.append(intent)
-        return original_compile(self, intent)
+        result = original_compile(self, intent)
+        # Preserve the exact input/output association. Tests may compile B
+        # before executing A, so a global "latest intent" lookup can make A's
+        # bundle validate against the wrong source intent.
+        _associate_zodiac_source_intent(result, intent)
+        return result
 
     monkeypatch.setattr(IntentCompiler, "compile", recording_compile)
     return captured

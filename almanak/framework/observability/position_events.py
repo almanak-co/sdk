@@ -1001,13 +1001,12 @@ def _realign_event_lp_pair_if_needed(event: PositionEvent, ctx: IntentEventConte
     lp_data = extracted.get("lp_open_data") or extracted.get("lp_close_data")
     if _lp_data_attr(lp_data, "coin_symbols"):
         return
-    # VIB-5988 — second, drift-proof N-coin signal. ``coin_symbols`` is resolved
-    # from a registry lookup (Curve's ``CURVE_POOLS[...]["coins"]``) while the
-    # legs are built from ``coin_addresses``; a future pool entry carrying one
+    # VIB-5988 — second, drift-proof N-coin signal. ``coin_symbols`` and legs are
+    # resolved from live pool metadata; a future partial metadata result carrying one
     # and not the other would silently re-open the mis-pairing this guard
     # exists to prevent. ``additional_amounts`` comes off the receipt itself
     # (Curve stamps it whenever the pool has >2 coins), so it cannot drift from
-    # the registry. Curve is the one connector whose legs are per-FUNDED-coin
+    # live metadata. Curve is the one connector whose legs are per-FUNDED-coin
     # while amount0/amount1 are per-POOL-INDEX, so leg index does NOT align
     # with amount slot there — the declared-legs branch must never run for it.
     if _lp_data_attr(lp_data, "additional_amounts"):

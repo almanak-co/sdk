@@ -26,7 +26,9 @@ Edit `config.json` to adjust strategy parameters. See `strategy.py` for details.
 
 | Key | Meaning |
 |---|---|
-| `pool` | Curve pool nickname (`"3pool"`) |
+| `pool` | Exact Curve pool address |
+| `lp_token` | Exact LP token address returned by the pool registry |
+| `permission_bindings` | Deployment-scoped pool address and ordered coin-address identity used for permission admission |
 | `amount_dai` / `amount_usdc` / `amount_usdt` | Per-coin deposit amounts (one per pool coin index) |
 | `min_position_usd` | Minimum total stablecoin inventory (USD) to open a position |
 | `force_action` | Force `"open"` or `"close"` for testing |

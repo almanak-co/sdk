@@ -652,12 +652,12 @@ def _coin_symbol_at(coin_symbols: Any, idx: int) -> str:
     """Read pool-coin-ordered symbol ``idx`` off an N-coin ``coin_symbols`` carrier.
 
     VIB-6051 — the fix for Curve's all-empty LP_CLOSE ledger rows. Curve pool ids
-    are registry nicknames (``"2pool"``), so the ``"WETH/USDC"`` pool-string split
+    are exact addresses, so the ``"WETH/USDC"`` pool-string split
     yields nothing and the intent carries no ``token0``/``token1``; both symbols
     resolved to ``""``, ``_lp_amount_to_human`` returned ``None`` for every
     non-zero raw, and all four money columns were persisted empty on a successful
     close. The identity was present the whole time: the Curve parser stamps
-    ``coin_symbols`` from ``CURVE_POOLS.coin_addresses`` (VIB-5429) in the SAME
+    ``coin_symbols`` from live pool metadata (VIB-5429) in the SAME
     index order as ``all_amounts`` (coin 0 = ``amount0_collected``, coin 1 =
     ``amount1_collected``, coin 2+ = ``additional_amounts``) — nothing in the
     ledger read it.

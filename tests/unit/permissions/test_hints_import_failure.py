@@ -71,7 +71,7 @@ class TestNestedImportError:
 
     def test_nested_import_error_is_reraised(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """``from x import y`` where ``y`` vanished — a renamed symbol upstream."""
-        self._patched_import(monkeypatch, ImportError("cannot import name 'CURVE_POOLS'"))
+        self._patched_import(monkeypatch, ImportError("cannot import name 'CURVE_TEST_POOLS'"))
         with pytest.raises(ImportError):
             get_permission_hints("curve")
 

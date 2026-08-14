@@ -32,7 +32,6 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.connectors.curve.adapter import CURVE_POOLS
 from almanak.connectors.curve.receipt_parser import CurveEventType, CurveReceiptParser
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import IntentCompiler, LPCloseIntent, LPOpenIntent
@@ -45,6 +44,7 @@ from tests.intents.conftest import (
     fund_erc20_token,
     get_token_balance,
 )
+from tests.support.curve_adapter import CURVE_TEST_POOLS
 
 # VIB-6046: curve now participates in LP_OPEN/LP_CLOSE synthetic discovery, so the
 # stale ``no_zodiac`` opt-out ('manifest empty for curve LP') is removed and this
@@ -112,8 +112,8 @@ def _get_lp_token_balance(web3: Web3, wallet: str) -> int:
 
 def _verify_pool_exists() -> None:
     """Pool existence check per intent-tests.md rule 8."""
-    if "polygon" not in CURVE_POOLS or POOL not in CURVE_POOLS["polygon"]:
-        pytest.skip(f"No curve {POOL} on polygon (pool not in CURVE_POOLS registry)")
+    if "polygon" not in CURVE_TEST_POOLS or POOL not in CURVE_TEST_POOLS["polygon"]:
+        pytest.skip(f"No curve {POOL} on polygon (pool not in CURVE_TEST_POOLS registry)")
 
 
 # =============================================================================

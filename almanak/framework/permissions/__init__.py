@@ -6,4 +6,5 @@ the resulting transactions.
 """
 
 from .generator import PermissionGenerationError, discover_teardown_protocols, generate_manifest  # noqa: F401
+from .hints import PermissionBindingError  # noqa: F401
 from .models import ContractPermission, FunctionPermission, PermissionManifest  # noqa: F401

@@ -1197,13 +1197,12 @@ class StrategyRunner:
 
         VIB-5628. Binds the Curve dynamic-pool-metadata resolver to this
         runner's ``GatewayClient`` so the sync ``ResultEnricher`` pipeline can
-        inject it into the Curve receipt parser — on a static ``CURVE_POOLS``
-        miss the parser then labels an uncurated pool's legs from the on-chain
-        MetaRegistry.
+        inject it into the Curve receipt parser so exact-pool legs are labelled
+        from the on-chain MetaRegistry.
 
         Returns ``None`` when no gateway client is configured (paper / dry-run /
-        unit-test modes); the parser then degrades to the legacy static-only
-        path (Empty != Zero, never fabricates a leg).
+        unit-test modes); the parser then degrades closed (Empty != Zero, never
+        fabricates a leg).
         """
         if client is None:
             client = self._get_gateway_client()

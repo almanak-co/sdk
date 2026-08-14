@@ -9,7 +9,7 @@ The cryptoswap intent test on ethereum routes through tricrypto2
 ``execTransactionWithRole`` reverted with ``AuthorizationFailed``.
 
 The fix replaces the single-pair source with iteration over
-``CURVE_POOLS[chain]`` in
+``CURVE_TEST_POOLS[chain]`` in
 ``almanak.connectors.curve.permission_hints.build_discovery_vectors``
 (the connector self-contains its discovery vectors — dispatched via
 ``almanak.framework.permissions.hints.get_discovery_vectors_override``).
@@ -40,7 +40,6 @@ from typing import Any
 import pytest
 
 from almanak.connectors.curve import permission_hints as curve_hints
-from almanak.connectors.curve.adapter import CURVE_POOLS
 from almanak.connectors.curve.receipt_parser import CURVE_NATIVE_ETH_PLACEHOLDER
 from almanak.core.intent_types import IntentType
 from almanak.framework.intents.compiler import ERC20_APPROVE_SELECTOR
@@ -48,8 +47,9 @@ from almanak.framework.permissions.discovery import discover_permissions
 from almanak.framework.permissions.generator import generate_manifest
 from almanak.framework.permissions.hints import DiscoveryContext, get_permission_hints
 from almanak.framework.permissions.synthetic_intents import build_synthetic_intents
+from tests.support.curve_adapter import CURVE_TEST_POOLS
 
-_CURVE_CHAINS = sorted(CURVE_POOLS)
+_CURVE_CHAINS = sorted(CURVE_TEST_POOLS)
 _CTX = DiscoveryContext(usdc="USDC", weth="WETH")
 # Curve's sentinel for "this coin is native gas token, not an ERC-20".
 # EXACT match against the connector's own constant, never a prefix: matching
@@ -67,6 +67,22 @@ def _selectors(permission: Any) -> set[str]:
     return {s.selector for s in permission.function_selectors}
 
 
+def _permission_binding_config(chain: str) -> dict[str, Any]:
+    """Build explicit deployment bindings for the test-only chain fixtures."""
+    return {
+        "permission_bindings": [
+            {
+                "protocol": "curve",
+                "resource_type": "pool",
+                "chain": chain,
+                "address": pool["address"],
+                "coin_addresses": pool["coin_addresses"],
+            }
+            for pool in CURVE_TEST_POOLS[chain].values()
+        ]
+    }
+
+
 def _manifest_targets(chain: str) -> set[str]:
     """Return the set of authorised target addresses for a curve SWAP manifest."""
     manifest = generate_manifest(
@@ -74,17 +90,22 @@ def _manifest_targets(chain: str) -> set[str]:
         chain=chain,
         supported_protocols=["curve"],
         intent_types=["SWAP"],
+        config=_permission_binding_config(chain),
+        # The session fixture substitutes exact metadata only when an explicit
+        # read transport is present, mirroring production admission without
+        # making this unit test perform network I/O.
+        rpc_url="http://curve-binding.test",
     )
     return {perm.target.lower() for perm in manifest.permissions}
 
 
 # Per-chain authoritative list of curve pool addresses that MUST appear on
 # the manifest when SWAP is requested. Sourced from
-# ``CURVE_POOLS[chain]`` so the assertion stays in lockstep with the
+# ``CURVE_TEST_POOLS[chain]`` so the assertion stays in lockstep with the
 # curated registry — adding a new pool to the registry automatically
 # tightens this regression.
 _EXPECTED_POOLS_BY_CHAIN: dict[str, list[tuple[str, str]]] = {
-    chain: [(name, data["address"]) for name, data in pools.items()] for chain, pools in CURVE_POOLS.items()
+    chain: [(name, data["address"]) for name, data in pools.items()] for chain, pools in CURVE_TEST_POOLS.items()
 }
 
 
@@ -97,13 +118,13 @@ class TestCurveManifestPoolCoverage:
         Both 3pool (StableSwap, USDC/USDT) AND tricrypto2 (Tricrypto,
         USDT/WETH) must be authorised. tricrypto2 is the address that
         was missing in the bug report — without iteration over
-        ``CURVE_POOLS[chain]``, the synthetic discovery only matched
+        ``CURVE_TEST_POOLS[chain]``, the synthetic discovery only matched
         3pool via the USDC/USDT hint.
         """
         targets = _manifest_targets("ethereum")
         # 3pool — StableSwap, USDC/USDT/DAI
         assert "0xbebc44782c7db0a1a60cb6fe97d0b483032ff1c7" in targets, (
-            "ethereum SWAP manifest missing 3pool — synthetic discovery must iterate CURVE_POOLS[chain] (#1903)"
+            "ethereum SWAP manifest missing 3pool — synthetic discovery must iterate CURVE_TEST_POOLS[chain] (#1903)"
         )
         # tricrypto2 — Tricrypto, USDT/WBTC/WETH (the #1903 missing target)
         assert "0xd51a44d3fae010294c616388b506acda1bfaae46" in targets, (
@@ -118,17 +139,17 @@ class TestCurveManifestPoolCoverage:
         ids=lambda v: v if isinstance(v, str) else "",
     )
     def test_every_registered_pool_is_authorised(self, chain: str, expected_pools: list[tuple[str, str]]) -> None:
-        """Every entry in ``CURVE_POOLS[chain]`` must land on the manifest.
+        """Every entry in ``CURVE_TEST_POOLS[chain]`` must land on the manifest.
 
         Drives off the curated registry so adding a new pool to
-        ``CURVE_POOLS`` automatically extends the regression coverage —
+        ``CURVE_TEST_POOLS`` automatically extends the regression coverage —
         no manual update to this test required.
         """
         targets = _manifest_targets(chain)
         missing = [(name, addr) for name, addr in expected_pools if addr.lower() not in targets]
         assert not missing, (
             f"{chain} curve SWAP manifest missing pools: {missing}. "
-            "Synthetic discovery must iterate CURVE_POOLS[chain] so every "
+            "Synthetic discovery must iterate CURVE_TEST_POOLS[chain] so every "
             "registered pool's address is authorised on the Safe."
         )
 
@@ -173,12 +194,13 @@ class TestCurveLpDiscoveryVectors:
     def test_lp_open_vectors_cover_every_registered_pool(self, chain: str) -> None:
         vectors = curve_hints.build_discovery_vectors("curve", IntentType.LP_OPEN, chain, _CTX)
         assert vectors, f"no LP_OPEN discovery vectors for curve on {chain}"
-        pools = CURVE_POOLS[chain]
+        pools = CURVE_TEST_POOLS[chain]
         covered = {v.pool for v in vectors}
         assert covered == set(pools), f"LP_OPEN vectors on {chain} cover {sorted(covered)}, expected {sorted(pools)}"
-        # A metapool gets a second (underlying/zap) vector; every other pool one.
-        expected = sum(2 if p.get("is_metapool") else 1 for p in pools.values())
-        assert len(vectors) == expected
+        # Deployment pool bindings authorize the pool itself, never a separate
+        # metapool zap. Every pool therefore contributes exactly one native
+        # deposit vector.
+        assert len(vectors) == len(pools)
 
     @pytest.mark.parametrize("chain", _CURVE_CHAINS)
     def test_lp_open_vectors_fund_every_pool_coin(self, chain: str) -> None:
@@ -188,13 +210,12 @@ class TestCurveLpDiscoveryVectors:
         ``coin_amounts`` allocation vector."""
         vectors = curve_hints.build_discovery_vectors("curve", IntentType.LP_OPEN, chain, _CTX)
         for vector in vectors:
-            pool_data = CURVE_POOLS[chain][vector.pool]
+            pool_data = CURVE_TEST_POOLS[chain][vector.pool]
             native_len = int(pool_data["n_coins"])
-            combined_len = 1 + len(pool_data.get("base_pool_coins") or []) if pool_data.get("is_metapool") else None
             assert vector.coin_amounts is not None, f"{chain}/{vector.pool}: LP_OPEN vector must set coin_amounts"
-            assert len(vector.coin_amounts) in {native_len, combined_len}, (
+            assert len(vector.coin_amounts) == native_len, (
                 f"{chain}/{vector.pool}: coin_amounts has {len(vector.coin_amounts)} entries, "
-                f"expected {native_len} (native) or {combined_len} (underlying)"
+                f"expected {native_len} for the exact pool's native deposit"
             )
             assert all(a > 0 for a in vector.coin_amounts)
 
@@ -208,7 +229,7 @@ class TestCurveLpDiscoveryVectors:
         compilation-failure warning to every manifest."""
         vectors = curve_hints.build_discovery_vectors("curve", IntentType.LP_CLOSE, chain, _CTX)
         assert vectors, f"no LP_CLOSE discovery vectors for curve on {chain}"
-        for pool_name, pool_data in CURVE_POOLS[chain].items():
+        for pool_name, pool_data in CURVE_TEST_POOLS[chain].items():
             shapes = [v for v in vectors if v.pool == pool_name]
             assert any(v.coin_index is None and v.imbalanced_amounts is None for v in shapes), (
                 f"{chain}/{pool_name}: missing proportional remove_liquidity vector"
@@ -270,7 +291,7 @@ class TestCurveLpCompiledManifest:
         permissions, _ = arbitrum_lp_permissions
         targets = _targets(permissions)
 
-        for pool_name, pool_data in CURVE_POOLS["arbitrum"].items():
+        for pool_name, pool_data in CURVE_TEST_POOLS["arbitrum"].items():
             pool_address = pool_data["address"].lower()
             assert pool_address in targets, (
                 f"curve pool {pool_name} ({pool_address}) missing from the arbitrum LP manifest"
@@ -397,20 +418,18 @@ class TestCurveLpCompiledManifest:
                 "VIB-6057 over-grant shape."
             )
 
-    def test_ethereum_metapool_zap_is_authorised(
+    def test_ethereum_metapool_zap_is_not_authorised_without_a_binding(
         self, ethereum_lp_open_permissions: tuple[list[Any], list[str]]
     ) -> None:
-        """A metapool underlying deposit routes through the zap — a target the
-        native deposit vector never touches."""
+        """Test fixture zap data cannot expand a pool-scoped deployment role."""
         permissions, warnings = ethereum_lp_open_permissions
         assert not warnings, f"curve LP_OPEN discovery on ethereum emitted warnings: {warnings}"
         targets = _targets(permissions)
 
-        zaps = [p["zap_address"].lower() for p in CURVE_POOLS["ethereum"].values() if p.get("zap_address")]
+        zaps = [p["zap_address"].lower() for p in CURVE_TEST_POOLS["ethereum"].values() if p.get("zap_address")]
         assert zaps, "ethereum registry no longer has a metapool — drop or retarget this test"
         for zap in zaps:
-            assert zap in targets, f"metapool zap {zap} missing from the ethereum LP_OPEN manifest"
-            assert _selectors(targets[zap]), f"metapool zap {zap} authorised with no selectors"
+            assert zap not in targets, f"unbound metapool zap {zap} leaked into the ethereum LP_OPEN manifest"
 
     def test_native_eth_pool_gets_send_allowed(self, ethereum_lp_open_permissions: tuple[list[Any], list[str]]) -> None:
         """Curve's stETH pool takes native ETH as coin 0, so ``add_liquidity``
@@ -421,7 +440,7 @@ class TestCurveLpCompiledManifest:
 
         native_pools = [
             p["address"].lower()
-            for p in CURVE_POOLS["ethereum"].values()
+            for p in CURVE_TEST_POOLS["ethereum"].values()
             if any(c.lower() == _NATIVE_COIN for c in p["coin_addresses"])
         ]
         assert native_pools, "ethereum registry no longer has a native-ETH pool — drop or retarget this test"

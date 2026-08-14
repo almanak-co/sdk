@@ -90,280 +90,6 @@ CURVE_ADDRESSES: dict[str, dict[str, str]] = {
     },
 }
 
-# Popular Curve pools per chain
-#
-# COIN-ORDER INVARIANT (VIB-5539). For non-USD / crypto-family pools (steth,
-# tricrypto*, weth_cbeth) the LP NAV is marked from spot reserves: reserve i
-# (read by on-chain index ``balances(i)``) is priced with the oracle price of
-# ``coin_addresses[i]``. The valuation reader
-# (``framework/valuation/curve_lp_position_reader.py``) now reads each pool
-# ``coins(i)`` live and FAILS CLOSED if it does not match ``coin_addresses[i]``,
-# so a transposed registry entry yields UNAVAILABLE rather than a ~10^10
-# confident mis-mark. Order is enforced against on-chain truth on every crypto
-# valuation — but still hand-verify ``coin_addresses`` order against on-chain
-# ``cast call <pool> 'coins(uint256)(address)' <i>`` when adding a pool, so a new
-# crypto pool is not silently marked UNAVAILABLE by a wrong-order entry.
-# TECH_DEBT(VIB-581): virtual_price values are approximate snapshots. Curve virtual_price
-# increases monotonically as fees accumulate, so these will drift over time. The safe direction
-# is under-estimating (lower min_lp = worse slippage protection but no reverts). A future
-# improvement should query virtual_price() from the pool contract at runtime via gateway RPC,
-# falling back to these static values if the RPC call fails.
-CURVE_POOLS: dict[str, dict[str, dict[str, Any]]] = {
-    "ethereum": {
-        "3pool": {
-            "address": "0xbEbc44782C7dB0a1A60Cb6fe97d0b483032FF1C7",
-            "lp_token": "0x6c3F90f043a72FA612cbac8115EE7e52BDe6E490",
-            "coins": ["DAI", "USDC", "USDT"],
-            "coin_addresses": [
-                "0x6B175474E89094C44Da98b954EedeAC495271d0F",
-                "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
-                "0xdAC17F958D2ee523a2206206994597C13D831ec7",
-            ],
-            "pool_type": "stableswap",
-            "n_coins": 3,
-            "virtual_price": Decimal("1.04"),
-        },
-        "frax_usdc": {
-            "address": "0xDcEF968d416a41Cdac0ED8702fAC8128A64241A2",
-            "lp_token": "0x3175Df0976dFA876431C2E9eE6Bc45b65d3473CC",
-            "coins": ["FRAX", "USDC"],
-            "coin_addresses": [
-                "0x853d955aCEf822Db058eb8505911ED77F175b99e",
-                "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
-            ],
-            "pool_type": "stableswap",
-            "n_coins": 2,
-            "virtual_price": Decimal("1.01"),
-        },
-        "steth": {
-            "address": "0xDC24316b9AE028F1497c275EB9192a3Ea0f67022",
-            "lp_token": "0x06325440D014e39736583c165C2963BA99fAf14E",
-            "coins": ["ETH", "stETH"],
-            "coin_addresses": [
-                "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE",
-                "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84",
-            ],
-            "pool_type": "stableswap",
-            "n_coins": 2,
-            "virtual_price": Decimal("1.06"),
-        },
-        "tricrypto2": {
-            "address": "0xD51a44d3FaE010294C616388b506AcdA1bfAAE46",
-            "lp_token": "0xc4AD29ba4B3c580e6D59105FFf484999997675Ff",
-            "coins": ["USDT", "WBTC", "WETH"],
-            "coin_addresses": [
-                "0xdAC17F958D2ee523a2206206994597C13D831ec7",
-                "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599",
-                "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
-            ],
-            "pool_type": "tricrypto",
-            "n_coins": 3,
-            "virtual_price": Decimal("1.0"),
-        },
-        # FRAX/3CRV factory metapool (VIB-5419).
-        # A Curve metapool is NATIVELY a 2-coin StableSwap pool whose coins are
-        # [meta coin, base-pool LP token]: here coins(0)=FRAX, coins(1)=3CRV.
-        # The metapool IS its own LP token (FRAX3CRV-f), so lp_token == address.
-        # Coin order verified on-chain 2026-06-25 via cast call coins(0..1):
-        #   coins(0) = FRAX (0x853d..., 18 dec)
-        #   coins(1) = 3CRV (0x6c3F..., 18 dec — the 3pool LP token)
-        #   get_virtual_price() = 1020475713094786446 -> 1.0205
-        #
-        # Two interfaces (see PoolInfo.is_metapool):
-        #   - Native 2-coin: add_liquidity([fraxAmt, 3crvAmt], min) / exchange(0,1,...)
-        #     — handled by the SAME flat-pool code paths as any 2-coin StableSwap
-        #     (Tier A). The base LP token (3CRV) is just coins[1].
-        #   - Underlying (combined coin space, index 0=FRAX, 1..3=DAI/USDC/USDT):
-        #     exchange_underlying(i,j,...) is on the metapool itself; the combined
-        #     add_liquidity/remove_liquidity route through the generic 3CRV
-        #     DepositZap (zap_address below) whose ABI takes the POOL as the first
-        #     arg (Tier B).
-        # TECH_DEBT(VIB-581): virtual_price is a snapshot; query get_virtual_price() at runtime.
-        # ACCOUNTING NOTE (VIB-5420): coins[1] (3CRV) is a base-LP token, NOT a
-        # price-oracle symbol — valuing the native LP's base-LP leg to underlying
-        # USD needs a base-pool decomposition / virtual_price mark not yet wired.
-        "frax_3crv": {
-            "address": "0xd632f22692FaC7611d2AA1C0D552930D43CAEd3B",
-            "lp_token": "0xd632f22692FaC7611d2AA1C0D552930D43CAEd3B",  # metapool IS its own LP token
-            "coins": ["FRAX", "3CRV"],
-            "coin_addresses": [
-                "0x853d955aCEf822Db058eb8505911ED77F175b99e",  # FRAX (meta coin)
-                "0x6c3F90f043a72FA612cbac8115EE7e52BDe6E490",  # 3CRV (base-pool LP token)
-            ],
-            "pool_type": "stableswap",
-            "n_coins": 2,
-            "virtual_price": Decimal("1.0205"),
-            "is_metapool": True,
-            "base_pool": "0xbEbc44782C7dB0a1A60Cb6fe97d0b483032FF1C7",  # 3pool
-            # Underlying coins exposed by the combined interface, in COMBINED index
-            # order MINUS the meta coin: i.e. base_pool_coins[k] is combined index
-            # k+1 (combined index 0 is always the meta coin). Here 3pool order:
-            #   combined 1 = DAI, combined 2 = USDC, combined 3 = USDT.
-            "base_pool_coins": ["DAI", "USDC", "USDT"],
-            "base_pool_coin_addresses": [
-                "0x6B175474E89094C44Da98b954EedeAC495271d0F",  # DAI
-                "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",  # USDC
-                "0xdAC17F958D2ee523a2206206994597C13D831ec7",  # USDT
-            ],
-            # Generic 3CRV DepositZap (Curve metapool deposit/withdraw zap).
-            # ABI: add_liquidity(address _pool, uint256[4], uint256),
-            #      remove_liquidity(address _pool, uint256, uint256[4]),
-            #      calc_token_amount(address _pool, uint256[4], bool).
-            # The POOL address is the FIRST arg (generic zap, not pool-specific).
-            "zap_address": "0xA79828DF1850E8a3A3064576f380D90aECDD3359",
-        },
-    },
-    "arbitrum": {
-        "2pool": {
-            "address": "0x7f90122BF0700F9E7e1F688fe926940E8839F353",
-            "lp_token": "0x7f90122BF0700F9E7e1F688fe926940E8839F353",
-            "coins": ["USDC.e", "USDT"],
-            "coin_addresses": [
-                "0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8",  # USDC.e (bridged), NOT native USDC
-                "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9",
-            ],
-            "pool_type": "stableswap",
-            "n_coins": 2,
-            "virtual_price": Decimal("1.022"),
-        },
-        "tricrypto": {
-            "address": "0x960ea3e3C7FB317332d990873d354E18d7645590",
-            "lp_token": "0x8e0B8c8BB9db49a46697F3a5Bb8A308e744821D2",
-            "coins": ["USDT", "WBTC", "WETH"],
-            "coin_addresses": [
-                "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9",
-                "0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f",
-                "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
-            ],
-            "pool_type": "tricrypto",
-            "n_coins": 3,
-            "virtual_price": Decimal("1.0"),
-        },
-    },
-    "base": {
-        # WETH/cbETH Twocrypto pool — ETH liquid staking yield, ~3% APY
-        # Pool: 0x11C1fBd4b3De66bC0565779b35171a6CF3E71f59 (old Twocrypto, NOT NG)
-        # LP token: 0x98244d93D42b42aB3E3A4D12A5dc0B3e7f8F32f9 (SEPARATE from pool — old-style Twocrypto)
-        # NOTE: This pool uses an OLD Twocrypto factory (not TwocryptoNG), so the LP token
-        # is a separate ERC20 contract, not the pool address itself.
-        # Verified on-chain 2026-03-19: pool.token() = 0x98244d93...F32f9
-        # TECH_DEBT(VIB-581): virtual_price is a snapshot; query pool.virtual_price() at runtime for accuracy.
-        # Queried on-chain 2026-03-19: pool.virtual_price() = 1017035434756947721 -> 1.0170
-        # Pool reserves (2026-03-19): 3804.66 WETH + 3223.99 cbETH, LP supply: 3445 LP tokens
-        "weth_cbeth": {
-            "address": "0x11C1fBd4b3De66bC0565779b35171a6CF3E71f59",
-            "lp_token": "0x98244d93D42b42aB3E3A4D12A5dc0B3e7f8F32f9",  # Separate LP token (old-style Twocrypto)
-            "coins": ["WETH", "cbETH"],
-            "coin_addresses": [
-                "0x4200000000000000000000000000000000000006",  # WETH on Base
-                "0x2Ae3F1Ec7F1F5012CFEab0185bfc7aa3cf0DEc22",  # cbETH on Base
-            ],
-            "pool_type": "cryptoswap",
-            "n_coins": 2,
-            "virtual_price": Decimal("1.017"),
-        },
-        # StableSwap NG 4pool on Base: USDC / USDbC / axlUSDC / crvUSD
-        # First 4-coin pool in the Curve adapter. StableSwap NG: LP token IS the pool address.
-        # Coin order verified on-chain 2026-03-23 via cast call coins(0..3):
-        #   coins(0) = USDC (0x8335..., 6 dec), coins(1) = USDbC (0xd9aA..., 6 dec)
-        #   coins(2) = axlUSDC (0xEB46..., 6 dec), coins(3) = crvUSD (0x417A..., 18 dec)
-        # Pool reserves (2026-03-23): ~$50K USDC, ~$50K USDbC, ~$50K axlUSDC, ~$91K crvUSD
-        # TECH_DEBT(VIB-581): virtual_price is a snapshot; query pool.virtual_price() at runtime.
-        # Queried on-chain 2026-03-23: pool.get_virtual_price() = 1019566780337011070 -> 1.0196
-        # NOTE: despite the "StableSwap NG" lp_token comment above, the deployed
-        # implementation (0x1621e58d36eb5ef26f9768ebe9db77181b1f5a02, an EIP-1167
-        # minimal-proxy target) exposes only the legacy fixed-size selectors
-        # (verified 2026-05-26 via bytecode probe). is_ng=False keeps the
-        # legacy uint256[4] calldata path. VIB-4836.
-        "4pool": {
-            "address": "0xf6C5F01C7F3148891ad0e19DF78743D31E390D1f",
-            "lp_token": "0xf6C5F01C7F3148891ad0e19DF78743D31E390D1f",
-            "coins": ["USDC", "USDbC", "axlUSDC", "crvUSD"],
-            "coin_addresses": [
-                "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",  # USDC (native) on Base
-                "0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA",  # USDbC (bridged) on Base
-                "0xEB466342C4d449BC9f53A865D5Cb90586f405215",  # axlUSDC (Axelar bridged)
-                "0x417Ac0e078398C154EdFadD9Ef675d30Be60Af93",  # crvUSD on Base
-            ],
-            "pool_type": "stableswap",
-            "n_coins": 4,
-            "virtual_price": Decimal("1.0196"),
-        },
-    },
-    "optimism": {
-        "3pool": {
-            # Curve 3pool on Optimism (DAI/USDC.e/USDT)
-            # USDC.e = bridged USDC (0x7F5...); native USDC (0x0b2...) is in a separate pool
-            "address": "0x1337BedC9D22ecbe766dF105c9623922A27963EC",
-            "lp_token": "0x1337BedC9D22ecbe766dF105c9623922A27963EC",
-            "coins": ["DAI", "USDC.e", "USDT"],
-            "coin_addresses": [
-                "0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1",  # DAI on Optimism
-                "0x7F5c764cBc14f9669B88837ca1490cCa17c31607",  # USDC.e (bridged) on Optimism
-                "0x94b008aA00579c1307B0EF2c499aD98a8ce58e58",  # USDT on Optimism
-            ],
-            "pool_type": "stableswap",
-            "n_coins": 3,
-            "virtual_price": Decimal("1.02"),
-        },
-        # crvUSD/USDC StableSwap NG pool on Optimism (VIB-1587)
-        # Contains NATIVE USDC (0x0b2C639c...) — the key missing piece vs 3pool (which uses USDC.e)
-        # StableSwap NG: LP token IS the pool address.
-        # Pool verified on Optimism Etherscan: CurveStableSwapNG "crvUSDC Pool"
-        # Coin order verified from on-chain contract via cast call (iter 114):
-        #   coins(0) = crvUSD (0xC52D...), coins(1) = USDC (0x0b2C...)
-        # BUG FIX (iter 114): previous config had coins reversed, causing approve
-        # to target wrong token -> "ERC20: insufficient allowance" on every swap.
-        # TECH_DEBT(VIB-581): virtual_price is a snapshot; query pool.virtual_price() at runtime for accuracy.
-        "crvusd_usdc": {
-            "address": "0x03771e24b7C9172d163Bf447490B142a15be3485",
-            "lp_token": "0x03771e24b7C9172d163Bf447490B142a15be3485",  # StableSwap NG: LP = pool
-            "coins": ["crvUSD", "USDC"],
-            "coin_addresses": [
-                "0xC52D7F23a2e460248Db6eE192Cb23dD12bDDCbf6",  # crvUSD on Optimism (coins[0])
-                "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85",  # USDC (native) on Optimism (coins[1])
-            ],
-            "pool_type": "stableswap",
-            "n_coins": 2,
-            "virtual_price": Decimal("1.0"),
-            "is_ng": True,  # StableSwap NG variant (VIB-4836)
-        },
-    },
-    "polygon": {
-        # frxUSD/USDT StableSwap NG pool on Polygon (VIB-5551).
-        # Replaces the aave-type am3pool (0x445FE580eF8d70FF569aB36e80c647af338db351):
-        # am3pool's deposit flow routes the underlying into the FROZEN Aave V2
-        # Polygon LendingPool, so every add_liquidity / exchange_underlying
-        # reverts (VL_RESERVE_FROZEN) on mainnet and current forks. It is removed
-        # from the registry entirely so swap/LP pool resolution can never route
-        # into a non-executable pool. Its receipt DECODE regression is kept in
-        # tests/unit/connectors/curve/test_am3pool_real_logs.py (uncurated-pool
-        # semantics); real-fork proof for THIS pool:
-        # tests/reports/vib-5551-polygon-frxusd-usdt-realfork.md.
-        # StableSwap NG: LP token IS the pool address.
-        # Coin order verified on-chain 2026-07-24 via cast call coins(0..1):
-        #   coins(0) = USDT   (0xc2132D05..., 6 dec; on-chain symbol rebranded "USDT0")
-        #   coins(1) = frxUSD (0x80Eede..., 18 dec; LayerZero OFT, ERC1967 proxy)
-        # Pool reserves (2026-07-24): ~45.2K USDT + ~47.3K frxUSD (~$92.5K, balanced).
-        # TECH_DEBT(VIB-581): virtual_price is a snapshot; query pool.get_virtual_price() at runtime.
-        # Queried on-chain 2026-07-24: get_virtual_price() = 1003956972289260014 -> 1.0039
-        "frxusd_usdt": {
-            "address": "0x5BC930b8f81F4cEEE3E3527159C3bDF453BcaAe9",
-            "lp_token": "0x5BC930b8f81F4cEEE3E3527159C3bDF453BcaAe9",  # StableSwap NG: LP = pool
-            "coins": ["USDT", "frxUSD"],
-            "coin_addresses": [
-                "0xc2132D05D31c914a87C6611C10748AEb04B58e8F",  # USDT on Polygon (coins[0])
-                "0x80Eede496655FB9047dd39d9f418d5483ED600df",  # frxUSD on Polygon (coins[1])
-            ],
-            "pool_type": "stableswap",
-            "n_coins": 2,
-            "virtual_price": Decimal("1.0039"),
-            "is_ng": True,  # StableSwap NG variant (VIB-4836)
-        },
-    },
-}
-
-
 # Conservative static gas FLOORS for Curve operations.
 #
 # These are FALLBACKS, not the primary source: ``_resolve_gas`` seeds each op's
@@ -505,7 +231,7 @@ ERC20_ALLOWANCE_SELECTOR = "0xdd62ed3e"  # allowance(address owner, address spen
 ERC20_DECIMALS_SELECTOR = "0x313ce567"  # decimals() -> uint8
 
 # Pool-state read selectors for the refresh-on-read registry (VIB-5423 / VIB-5424).
-# These let ``get_pool_info`` reconcile the hand-typed CURVE_POOLS literals against
+# These let ``get_pool_info`` reconcile a deployment binding against
 # live chain truth — discharging the TECH_DEBT(VIB-581) note above — using the
 # gateway-first ``eth_call`` seam already wired in this file. A wrong ``is_ng`` picks
 # the wrong add/remove ABI encoder (malformed calldata / silent revert); a reversed
@@ -612,6 +338,10 @@ class CurveConfig:
     # ``execTransactionWithRole`` if the strategy emits the other.
     permission_discovery: bool = False
     force_is_ng: bool | None = None
+    # Connector-internal, deployment-scoped pool descriptions used while
+    # compiling permission vectors. Runtime exact-address pools resolve live;
+    # there is deliberately no process-global pool catalog.
+    permission_pool_overrides: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         """Validate configuration."""
@@ -620,6 +350,8 @@ class CurveConfig:
 
         if self.default_slippage_bps < 0 or self.default_slippage_bps >= 10000:
             raise ValueError("Slippage must be between 0 (inclusive) and 10000 (exclusive) basis points")
+        if self.permission_pool_overrides and not self.permission_discovery:
+            raise ValueError("permission_pool_overrides are only valid during permission discovery")
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
@@ -929,7 +661,7 @@ class CurveAdapter:
 
         # Load contract addresses
         self.addresses = CURVE_ADDRESSES[self.chain]
-        self.pools = CURVE_POOLS.get(self.chain, {})
+        self.pools = dict(config.permission_pool_overrides)
 
         # TokenResolver integration
         if token_resolver is not None:
@@ -955,10 +687,10 @@ class CurveAdapter:
 
     @staticmethod
     def _build_cold_start_pool_info(name: str, pool_data: dict[str, Any]) -> PoolInfo:
-        """Build a ``PoolInfo`` from a static ``CURVE_POOLS`` entry (cold-start).
+        """Build a ``PoolInfo`` from a deployment-bound pool description.
 
-        This is the hand-typed registry value — the safe fallback used verbatim
-        when no transport is available to reconcile it against the chain. The
+        This is an admission-verified binding used verbatim when no transport is
+        available during offline permission compilation. The
         refresh-on-read path (``_refresh_pool_info_from_chain``) overrides the
         safety-critical fields (coins / coin_addresses / decimals / virtual_price
         / is_ng) with live chain truth when a gateway / RPC is wired.
@@ -979,20 +711,21 @@ class CurveAdapter:
             base_pool_coins=pool_data.get("base_pool_coins"),
             base_pool_coin_addresses=pool_data.get("base_pool_coin_addresses"),
             zap_address=pool_data.get("zap_address"),
+            coin_decimals=pool_data.get("coin_decimals"),
         )
 
     def get_pool_info(self, pool_address: str, *, refresh: bool = True) -> PoolInfo | None:
         """Get information about a pool.
 
-        The static ``CURVE_POOLS`` entry is the cold-start value; when a gateway
+        The deployment binding is the cold-start value; when a gateway
         or RPC is wired the registry is reconciled against live chain state
         (coins / coin_addresses / decimals / virtual_price / is_ng) before being
         returned — see ``_refresh_pool_info_from_chain`` (VIB-5423 / VIB-5424).
 
         Args:
             pool_address: Pool contract address
-            refresh: When ``True`` (default, calldata-producing paths) the static
-                literal is reconciled against chain truth. When ``False`` the
+            refresh: When ``True`` (default, calldata-producing paths) bound
+                metadata is reconciled against chain truth. When ``False`` the
                 read-only quote / pair-resolution path opts out of the network
                 reconcile (VIB-5423) — a warm cache entry is still reused, but no
                 new RPC reads are issued. ``is_ng`` / ``virtual_price`` are
@@ -1005,9 +738,9 @@ class CurveAdapter:
         for name, pool_data in self.pools.items():
             if pool_data["address"].lower() == pool_address.lower():
                 return self._resolve_pool_info(self._build_cold_start_pool_info(name, pool_data), refresh=refresh)
-        # VIB-5628: static miss -> resolve an UNCURATED pool from the on-chain
-        # MetaRegistry (gateway-first), so the adapter works for pools not in the
-        # hand-curated CURVE_POOLS. Returns None (preserving the unknown-pool
+        # VIB-5628: exact-address miss -> resolve the pool from the on-chain
+        # MetaRegistry (gateway-first), so the adapter works without a catalog
+        # or deployment-local binding. Returns None (preserving the unknown-pool
         # contract) when there is no read transport or the address is not a Curve
         # pool.
         if self._has_read_transport():
@@ -1068,7 +801,7 @@ class CurveAdapter:
         ``refresh=False`` opts the read-only quote path out of the reconcile.
 
         Args:
-            name: Pool name (e.g., "3pool", "frax_usdc")
+            name: Deployment-scoped pool name, when one was explicitly supplied.
             refresh: See ``get_pool_info``.
 
         Returns:
@@ -1108,7 +841,7 @@ class CurveAdapter:
 
         No-op unless ``CurveConfig.force_is_ng`` was set, which only permission
         discovery does. Applied AFTER the refresh/cache resolve so it overrides
-        both the static registry value and any live probe result — the point is
+        both the cold-start binding value and any live probe result — the point is
         to compile a chosen variant, not to observe one.
 
         **StableSwap family only.** ``is_ng`` distinguishes the StableSwap-NG
@@ -1116,7 +849,7 @@ class CurveAdapter:
         pools implement neither NG form, so forcing it there authorises a
         selector the pool does not have and the compiler would never emit for
         it — an over-grant, and precisely the failure class this PR exists to
-        close. Measured before this guard: 3 registered pools
+        close. Measured before this guard: three non-StableSwap fixtures
         (arbitrum/tricrypto, base/weth_cbeth, ethereum/tricrypto2) carried
         ``0xb72df5de`` and ``0xd40ddb8c`` for nothing.
 
@@ -1129,7 +862,7 @@ class CurveAdapter:
         return replace(pool_info, is_ng=self._force_is_ng)
 
     # =========================================================================
-    # Refresh-on-read: reconcile the static registry against live chain truth
+    # Refresh-on-read: reconcile cold-start metadata against live chain truth
     # (VIB-5423 / VIB-5424) — discharges the TECH_DEBT(VIB-581) frozen-snapshot
     # note. All reads route through the gateway-first ``eth_call`` seam already
     # used in this file; no new egress path is introduced.
@@ -1234,21 +967,21 @@ class CurveAdapter:
         """Return ``pool_info`` with safety-critical fields refreshed from chain.
 
         Reads live ``coins(i)`` / ``decimals()`` / ``get_virtual_price()`` and
-        probes the NG ABI to override the hand-typed ``coins`` / ``coin_addresses``
+        probes the NG ABI to override the bound/resolved ``coins`` / ``coin_addresses``
         / ``coin_decimals`` / ``virtual_price`` / ``is_ng`` with chain truth. Drift
-        between the static literal and the live value is logged loudly.
+        between the cold-start identity and the live value is logged loudly.
 
         Fail-safe: when no transport is available, every live read fails, or any
         unexpected error escapes a helper, the cold-start ``pool_info`` is
         returned unchanged (so a correctly-typed pool resolves to exactly today's
-        values, and a transient RPC outage never downgrades the registry).
+        values, and a transient RPC outage never downgrades the binding).
         ``is_ng`` is only overridden once transport health is independently
         confirmed by a sibling read AND the probe returns positive evidence —
-        a transient probe failure keeps the static value, never "legacy ABI".
+            a transient probe failure keeps the cold-start value, never "legacy ABI".
         """
         if not self._has_read_transport():
             logger.debug(
-                "Curve registry refresh skipped for %s: no gateway/RPC transport; using cold-start static values",
+                "Curve pool refresh skipped for %s: no gateway/RPC transport; using cold-start values",
                 pool_info.name,
             )
             return pool_info
@@ -1258,7 +991,7 @@ class CurveAdapter:
             transport_healthy = False
 
             # ``use_underlying`` (aave-type) pools intentionally track the
-            # UNDERLYING tokens (e.g. DAI/USDC.e/USDT) in the static registry,
+            # UNDERLYING tokens (e.g. DAI/USDC.e/USDT) in explicit pool metadata,
             # while on-chain ``coins(i)`` returns the pool's internal wrapped
             # aTokens. Overwriting coin_addresses with the live aTokens would
             # break approve / exchange_underlying / coin-index resolution, so the
@@ -1271,7 +1004,7 @@ class CurveAdapter:
                     transport_healthy = True
                     if [a.lower() for a in live_addresses] != [a.lower() for a in pool_info.coin_addresses]:
                         logger.warning(
-                            "Curve coin drift for %s: static=%s live=%s; trusting live chain order",
+                            "Curve coin drift for %s: cold_start=%s live=%s; trusting live chain order",
                             pool_info.name,
                             pool_info.coin_addresses,
                             live_addresses,
@@ -1295,7 +1028,7 @@ class CurveAdapter:
                     # pick the wrong add/remove encoder on real funds. Keep the
                     # cold-start value; only a clean (non-raising) probe overrides it.
                     logger.warning(
-                        "Curve is_ng probe inconclusive for %s (%s); keeping static is_ng=%s",
+                        "Curve is_ng probe inconclusive for %s (%s); keeping cold-start is_ng=%s",
                         pool_info.name,
                         exc,
                         pool_info.is_ng,
@@ -1303,7 +1036,7 @@ class CurveAdapter:
                     live_is_ng = pool_info.is_ng
                 if live_is_ng != pool_info.is_ng:
                     logger.warning(
-                        "Curve is_ng drift for %s: static=%s live=%s; trusting live ABI fingerprint",
+                        "Curve is_ng drift for %s: cold_start=%s live=%s; trusting live ABI fingerprint",
                         pool_info.name,
                         pool_info.is_ng,
                         live_is_ng,
@@ -1311,7 +1044,7 @@ class CurveAdapter:
                 refreshed.is_ng = live_is_ng
         except Exception as exc:  # noqa: BLE001 — fail-safe: any unexpected error keeps cold-start static
             logger.warning(
-                "Curve registry refresh raised unexpectedly for %s (%s); using cold-start static values",
+                "Curve pool refresh raised unexpectedly for %s (%s); using cold-start values",
                 pool_info.name,
                 exc,
             )
@@ -1319,7 +1052,7 @@ class CurveAdapter:
 
         if not transport_healthy:
             logger.warning(
-                "Curve registry refresh: no live read succeeded for %s; using cold-start static values",
+                "Curve pool refresh: no live read succeeded for %s; using cold-start values",
                 pool_info.name,
             )
             return pool_info
@@ -4070,6 +3803,5 @@ __all__ = [
     "PoolType",
     "TransactionData",
     "CURVE_ADDRESSES",
-    "CURVE_POOLS",
     "CURVE_GAS_ESTIMATES",
 ]

@@ -69,8 +69,8 @@ def _compile_under_both_abi_variants(
     DIFFERENT 4-byte selectors for ``add_liquidity``, ``remove_liquidity`` and
     ``remove_liquidity_imbalance``.
 
-    Discovery is offline by construction, so it resolves ``is_ng`` from the
-    static ``CURVE_POOLS`` registry. At execution time, however,
+    Discovery is offline after admission, so it compiles both variants from the
+    deployment binding. At execution time,
     ``_refresh_pool_info_from_chain`` probes the pool and OVERRIDES that value
     when the live ABI fingerprint disagrees ("Curve is_ng drift ... trusting
     live ABI fingerprint"). A manifest pinned to the static variant therefore
@@ -216,6 +216,40 @@ def _resolve_pool_by_asset_set(
     return matches[0]
 
 
+def _registered_pool_by_name_or_address(
+    identifier: str, chain_pools: dict[str, dict[str, Any]]
+) -> tuple[str, dict[str, Any]] | None:
+    """Return one curated pool by exact registry name or contract address."""
+    if identifier in chain_pools:
+        return identifier, chain_pools[identifier]
+    identifier_lower = identifier.lower()
+    return next(
+        (
+            (name, data)
+            for name, data in chain_pools.items()
+            if str(data.get("address", "")).lower() == identifier_lower
+        ),
+        None,
+    )
+
+
+def _deployment_pool_catalog() -> dict[str, dict[str, dict[str, Any]]]:
+    """Return deployment-local aliases available to this compiler context.
+
+    Production contexts currently carry exact pool identity on the intent, so
+    the catalog is empty. Keeping this narrow seam lets tests inject explicit
+    fixtures without restoring address-bearing SDK globals.
+    """
+    return {}
+
+
+def _deployment_pools_for_chain(chain: str) -> dict[str, dict[str, Any]]:
+    """Read the injectable deployment catalog seam for one chain."""
+    source = _deployment_pool_catalog
+    catalog = source() if callable(source) else source
+    return catalog.get(chain, {})
+
+
 def _metapool_combined_coins(pool_data: dict[str, Any]) -> set[str]:
     """Uppercased COMBINED coin symbols of a metapool (meta coin + base coins).
 
@@ -330,7 +364,7 @@ def _resolve_swap_pool_and_route(
             pool_address = meta_data["address"]
             use_metapool_underlying = True
 
-    # When the pool was given explicitly (or matched a metapool nickname) and the
+    # When the pool was given explicitly (or matched a test-injected metapool catalog) and the
     # pair lives on the combined space rather than the native coins, prefer the
     # underlying route.
     if pool_address and not use_metapool_underlying:
@@ -413,14 +447,80 @@ def _is_pool_address(value: str | None) -> bool:
     return value is not None and value.startswith("0x") and len(value) == 42
 
 
+def _validate_permission_pool_binding(intent: Any, *, chain: str, pool_data: dict[str, Any]) -> None:
+    """Revalidate an optional admission binding against the resolved live pool.
+
+    Ordinary intents carry no binding and are unchanged. Permission discovery
+    attaches one to every deployment-scoped exact-pool vector; hosted runtimes
+    may preserve the same connector parameter to get the identical check at
+    execution compilation.
+    """
+    from almanak.connectors.curve.pool_binding import permission_binding_from_intent
+
+    binding = permission_binding_from_intent(intent)
+    if binding is None:
+        return
+    binding.assert_matches_pool_data(chain=chain, pool_data=pool_data)
+
+
+def _permission_pool_override(intent: Any, *, chain: str) -> dict[str, dict[str, Any]]:
+    """Return one adapter-local pool entry for a bound discovery intent."""
+    from almanak.connectors.curve.pool_binding import permission_binding_from_intent
+
+    binding = permission_binding_from_intent(intent)
+    if binding is None:
+        return {}
+    pool_data = binding.pool_data()
+    binding.assert_matches_pool_data(chain=chain, pool_data=pool_data)
+    return {f"permission-bound:{binding.pool_address}": pool_data}
+
+
+def _swap_adapter_for_pool(
+    ctx: BaseCompilerContext,
+    intent: SwapIntent,
+    *,
+    pool_address: str,
+    slippage_bps: int,
+) -> CurveAdapter:
+    """Build a swap adapter and revalidate any admission-bound pool identity."""
+    from almanak.connectors.curve.adapter import CurveAdapter, CurveConfig
+    from almanak.connectors.curve.pool_binding import permission_binding_from_intent
+
+    discovery_mode = _discovery_mode(ctx)
+    adapter = CurveAdapter(
+        CurveConfig(
+            chain=ctx.chain,
+            wallet_address=ctx.wallet_address,
+            default_slippage_bps=slippage_bps,
+            rpc_url=None if discovery_mode else ctx.rpc_url,
+            gateway_client=None if discovery_mode else ctx.gateway_client,
+            permission_discovery=_discovery_mode(ctx),
+            permission_pool_overrides=(_permission_pool_override(intent, chain=ctx.chain) if discovery_mode else {}),
+        )
+    )
+
+    binding = permission_binding_from_intent(intent)
+    if binding is None:
+        return adapter
+
+    # Bound discovery / runtime intents require the full identity comparison
+    # before any calldata is emitted. The adapter caches this pool info for the
+    # subsequent swap call, so runtime validation does not add another read.
+    bound_pool = adapter.get_pool_info(pool_address)
+    if bound_pool is None:
+        raise ValueError(f"Curve pool binding revalidation could not resolve {pool_address} on {ctx.chain}")
+    binding.assert_matches_pool_data(chain=ctx.chain, pool_data=bound_pool.to_dict())
+    return adapter
+
+
 def _resolve_dynamic_pool(ctx: BaseCompilerContext, pool_address: str) -> tuple[str, dict[str, Any]] | None:
     """Resolve an UNCURATED Curve pool from the on-chain MetaRegistry (VIB-5628).
 
-    Builds a Curve adapter and calls ``get_pool_info``, whose static-miss path
-    resolves the pool shape (coins / decimals / lp_token / metapool / gamma-
+    Builds a Curve adapter and calls ``get_pool_info``, which resolves the pool
+    shape (coins / decimals / lp_token / metapool / gamma-
     discriminated pool_type) from Curve's MetaRegistry via the gateway-first
-    seam. Returns ``(pool_name, pool_data)`` — the same ``dict`` shape the static
-    ``CURVE_POOLS`` entries carry, so every downstream consumer is unchanged — or
+    seam. Returns ``(pool_name, pool_data)`` in the connector's canonical pool
+    metadata shape, so every downstream consumer is unchanged — or
     ``None`` when the address is not a Curve pool / there is no read transport
     (preserving today's "Unknown Curve pool" behaviour for a genuine miss).
 
@@ -463,9 +563,9 @@ def _ctx_usd_price(ctx: BaseCompilerContext) -> Callable[[str], Decimal | None]:
 def _split_pair_addresses(ctx: BaseCompilerContext, pool: str) -> tuple[str, str] | None:
     """Resolve a two-token pair string (``"CRVUSD/WBTC"``) to coin addresses.
 
-    Returns ``None`` (caller falls through to the legacy miss path) unless the
-    string is EXACTLY two resolvable tokens — 3+-token asset sets stay
-    curated-only (``find_pool_for_coins`` is pairwise), and unresolvable
+    Returns ``None`` (caller falls through to the exact-address error path) unless the
+    string is EXACTLY two resolvable tokens — 3+-token asset sets require an
+    explicit address (``find_pool_for_coins`` is pairwise), and unresolvable
     symbols cannot be enumerated.
     """
     tokens = [t.strip() for t in pool.split("/") if t.strip()]
@@ -761,17 +861,88 @@ def _resolve_pair_pool_for_close(
 class _ClosePool(NamedTuple):
     """Resolved Curve pool for an LP_CLOSE compile (VIB-5438 decomposition).
 
-    Carries the registry-resolved pool identity through the
+    Carries the resolved pool identity through the
     ``compile_lp_close`` helper chain so the dispatcher reads a single typed
     value instead of four loose locals (``name``/``address``/``data``/
-    ``lp_token``). ``data`` is the raw ``CURVE_POOLS`` entry; ``lp_token`` is the
-    already-validated non-empty LP token address.
+    ``lp_token``). ``data`` is canonical live/bound metadata; ``lp_token`` is
+    the already-validated non-empty LP token address.
     """
 
     name: str
     address: str
     data: dict[str, Any]
     lp_token: str
+
+
+def _resolve_bound_open_pool(
+    ctx: BaseCompilerContext, intent: LPOpenIntent
+) -> tuple[str, dict[str, Any], LPOpenIntent] | CompilationResult | None:
+    """Use a verified binding during discovery, with the live deployability gate."""
+    if not _discovery_mode(ctx):
+        return None
+
+    from almanak.connectors.curve.pool_binding import permission_binding_from_intent
+
+    binding = permission_binding_from_intent(intent)
+    if binding is None:
+        return None
+    if not intent.pool or intent.pool.lower() != binding.pool_address:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Curve permission binding targets {binding.pool_address}, but LP_OPEN requested {intent.pool}",
+            intent_id=intent.intent_id,
+        )
+
+    pool_data = binding.pool_data()
+    binding.assert_matches_pool_data(chain=ctx.chain, pool_data=pool_data)
+
+    from almanak.connectors.curve.pair_resolver import pool_provenance_suspect
+
+    deployable, detail = _probe_lp_open_deployability(
+        ctx,
+        binding.pool_address,
+        provenance_suspect=pool_provenance_suspect(
+            ctx.chain,
+            binding.pool_address,
+            gateway_client=ctx.gateway_client,
+            rpc_url=ctx.rpc_url,
+            timeout=ctx.rpc_timeout,
+        ),
+    )
+    if not deployable:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=(f"Curve pool {binding.pool_address} on {ctx.chain} is not LP-deployable for this wallet: {detail}"),
+            intent_id=intent.intent_id,
+        )
+    return f"permission-bound:{binding.pool_address}", pool_data, intent
+
+
+def _resolve_bound_close_pool(ctx: BaseCompilerContext, intent: LPCloseIntent) -> _ClosePool | CompilationResult | None:
+    """Use a verified binding directly for offline teardown discovery."""
+    if not _discovery_mode(ctx):
+        return None
+
+    from almanak.connectors.curve.pool_binding import permission_binding_from_intent
+
+    binding = permission_binding_from_intent(intent)
+    if binding is None:
+        return None
+    if not intent.pool or intent.pool.lower() != binding.pool_address:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Curve permission binding targets {binding.pool_address}, but LP_CLOSE requested {intent.pool}",
+            intent_id=intent.intent_id,
+        )
+
+    pool_data = binding.pool_data()
+    binding.assert_matches_pool_data(chain=ctx.chain, pool_data=pool_data)
+    return _ClosePool(
+        name=f"permission-bound:{binding.pool_address}",
+        address=binding.pool_address,
+        data=pool_data,
+        lp_token=binding.lp_token,
+    )
 
 
 class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
@@ -807,12 +978,7 @@ class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
 
     def compile_swap(self, ctx: BaseCompilerContext, intent: SwapIntent) -> CompilationResult:  # noqa: C901
         """Compile SWAP intent for Curve Finance."""
-        from almanak.connectors.curve.adapter import (
-            CURVE_ADDRESSES,
-            CURVE_POOLS,
-            CurveAdapter,
-            CurveConfig,
-        )
+        from almanak.connectors.curve.adapter import CURVE_ADDRESSES
 
         result = CompilationResult(
             status=CompilationStatus.SUCCESS,
@@ -866,11 +1032,12 @@ class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
                 )
 
             swap_params = intent.swap_params if hasattr(intent, "swap_params") and intent.swap_params else {}
-            chain_pools = CURVE_POOLS.get(ctx.chain, {})
+            # Pool identity is deployment input. The SDK deliberately carries
+            # no process-global catalog; exact addresses resolve live below.
+            chain_pools = _deployment_pools_for_chain(ctx.chain)
 
-            # VIB-5628: an explicit ``swap_params["pool"]`` ADDRESS that misses the
-            # static registry is NOT a hard error here — ``_resolve_swap_pool_and_route``
-            # returns the given address, and ``adapter.swap`` resolves the uncurated
+            # VIB-5628: an explicit ``swap_params["pool"]`` ADDRESS is returned by
+            # ``_resolve_swap_pool_and_route``, and ``adapter.swap`` resolves the
             # pool's shape (coins / decimals / gamma-discriminated pool_type) live
             # from the on-chain MetaRegistry via ``get_pool_info``. Native-coin
             # routing only; metapool-underlying routing for uncurated pools is P1-4.
@@ -907,14 +1074,12 @@ class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
                 amount_decimal,
             )
 
-            config = CurveConfig(
-                chain=ctx.chain,
-                wallet_address=ctx.wallet_address,
-                default_slippage_bps=slippage_bps,
-                rpc_url=ctx.rpc_url,
-                gateway_client=ctx.gateway_client,
+            adapter = _swap_adapter_for_pool(
+                ctx,
+                intent,
+                pool_address=pool_address,
+                slippage_bps=slippage_bps,
             )
-            adapter = CurveAdapter(config)
 
             price_ratio: Decimal | None = None
             try:
@@ -1041,8 +1206,7 @@ class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
         """Resolve the LP_OPEN target pool (VIB-5716 decomposition, mirrors
         ``_resolve_close_pool``).
 
-        Resolution order: static registry by name → static by address →
-        curated asset-set fallback (VIB-3946) → dynamic ADDRESS via the
+        Resolution order: test/deployment catalog seam → dynamic ADDRESS via the
         MetaRegistry with the VIB-5716 deployability gate → dynamic PAIR via
         MetaRegistry ``find_pool_for_coins`` (liquidity-ranked, probed).
         Returns ``(pool_name, pool_data, intent)`` on success — ``intent`` is
@@ -1051,7 +1215,7 @@ class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
         FAILED ``CompilationResult`` (unsupported chain / gated pool / honest
         miss / the legacy unknown-pool error).
         """
-        from almanak.connectors.curve.adapter import CURVE_ADDRESSES, CURVE_POOLS
+        from almanak.connectors.curve.adapter import CURVE_ADDRESSES
 
         if ctx.chain not in CURVE_ADDRESSES:
             return CompilationResult(
@@ -1060,13 +1224,15 @@ class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
                 intent_id=intent.intent_id,
             )
 
-        chain_pools = CURVE_POOLS.get(ctx.chain, {})
+        chain_pools = _deployment_pools_for_chain(ctx.chain)
 
-        if intent.pool in chain_pools:
-            return intent.pool, chain_pools[intent.pool], intent
-        for name, data in chain_pools.items():
-            if data["address"].lower() == intent.pool.lower():
-                return name, data, intent
+        bound_pool = _resolve_bound_open_pool(ctx, intent)
+        if bound_pool is not None:
+            return bound_pool
+
+        curated_pool = _registered_pool_by_name_or_address(intent.pool, chain_pools)
+        if curated_pool is not None:
+            return curated_pool[0], curated_pool[1], intent
 
         if "/" in intent.pool:
             # Asset-set fallback (e.g. "USDT/USDC", "USDT/USDC/DAI") — the LP
@@ -1145,6 +1311,7 @@ class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
             # (deposit amounts permuted to the resolved pool's coin order).
             pool_name, pool_data, intent = resolved
             pool_address = pool_data["address"]
+            _validate_permission_pool_binding(intent, chain=ctx.chain, pool_data=pool_data)
 
             n_coins = pool_data["n_coins"]
 
@@ -1164,15 +1331,19 @@ class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
             slippage_bps = _resolve_lp_slippage_bps(intent.max_slippage)
 
             def _make_adapter(force_is_ng: bool | None) -> Any:
+                discovery_mode = _discovery_mode(ctx)
                 return CurveAdapter(
                     CurveConfig(
                         chain=ctx.chain,
                         wallet_address=ctx.wallet_address,
                         default_slippage_bps=slippage_bps,
-                        rpc_url=ctx.rpc_url,
-                        gateway_client=ctx.gateway_client,
+                        rpc_url=None if discovery_mode else ctx.rpc_url,
+                        gateway_client=None if discovery_mode else ctx.gateway_client,
                         permission_discovery=_discovery_mode(ctx),
                         force_is_ng=force_is_ng,
+                        permission_pool_overrides=(
+                            _permission_pool_override(intent, chain=ctx.chain) if discovery_mode else {}
+                        ),
                     )
                 )
 
@@ -1255,15 +1426,15 @@ class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
         return result
 
     def _resolve_close_pool(self, ctx: BaseCompilerContext, intent: LPCloseIntent) -> _ClosePool | CompilationResult:
-        """Resolve the LP_CLOSE target pool from the registry (VIB-5438 decomposition).
+        """Resolve the LP_CLOSE target pool (VIB-5438 decomposition).
 
         Returns a ``_ClosePool`` on success, or the existing FAILED
         ``CompilationResult`` (unchanged error text) when the chain is
         unsupported, ``intent.pool`` is unset, the pool is unknown, or the
-        registry entry is missing an ``lp_token``. Behaviour-preserving extract
+        resolved metadata is missing an ``lp_token``. Behaviour-preserving extract
         of the original ``compile_lp_close`` resolution block.
         """
-        from almanak.connectors.curve.adapter import CURVE_ADDRESSES, CURVE_POOLS
+        from almanak.connectors.curve.adapter import CURVE_ADDRESSES
 
         if ctx.chain not in CURVE_ADDRESSES:
             return CompilationResult(
@@ -1279,23 +1450,20 @@ class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
                 intent_id=intent.intent_id,
             )
 
-        chain_pools = CURVE_POOLS.get(ctx.chain, {})
+        chain_pools = _deployment_pools_for_chain(ctx.chain)
+
+        bound_pool = _resolve_bound_close_pool(ctx, intent)
+        if bound_pool is not None:
+            return bound_pool
 
         pool_name: str = ""
         pool_address: str = intent.pool
         pool_data: dict[str, Any] | None = None
 
-        if intent.pool in chain_pools:
-            pool_name = intent.pool
-            pool_data = chain_pools[intent.pool]
+        curated_pool = _registered_pool_by_name_or_address(intent.pool, chain_pools)
+        if curated_pool is not None:
+            pool_name, pool_data = curated_pool
             pool_address = pool_data["address"]
-        else:
-            for name, data in chain_pools.items():
-                if data["address"].lower() == intent.pool.lower():
-                    pool_name = name
-                    pool_data = data
-                    pool_address = data["address"]
-                    break
 
         if pool_data is None and "/" in intent.pool:
             # Asset-set fallback (e.g. "USDT/USDC", "USDT/USDC/DAI") — the LP
@@ -1305,8 +1473,8 @@ class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
                 pool_name, pool_data = asset_match
                 pool_address = pool_data["address"]
 
-        # VIB-5628: static + asset-set miss on an ADDRESS -> resolve the UNCURATED
-        # pool live from the MetaRegistry so an uncurated LP position can be closed.
+        # VIB-5628: catalog/asset-set miss on an ADDRESS -> resolve the pool live
+        # from the MetaRegistry so an exact-address LP position can be closed.
         # Deliberately NO deployability gate here (unlike LP_OPEN): closing must
         # never be blocked by a screen — a position in a gated pool must remain
         # closeable.
@@ -1508,6 +1676,7 @@ class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
             pool = self._resolve_close_pool(ctx, intent)
             if isinstance(pool, CompilationResult):
                 return pool
+            _validate_permission_pool_binding(intent, chain=ctx.chain, pool_data=pool.data)
 
             lp_amount = self._resolve_close_lp_amount(ctx, intent, pool)
             if isinstance(lp_amount, CompilationResult):
@@ -1525,15 +1694,19 @@ class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
             )
 
             def _make_adapter(force_is_ng: bool | None) -> Any:
+                discovery_mode = _discovery_mode(ctx)
                 return CurveAdapter(
                     CurveConfig(
                         chain=ctx.chain,
                         wallet_address=ctx.wallet_address,
                         default_slippage_bps=slippage_bps,
-                        rpc_url=ctx.rpc_url,
-                        gateway_client=ctx.gateway_client,
+                        rpc_url=None if discovery_mode else ctx.rpc_url,
+                        gateway_client=None if discovery_mode else ctx.gateway_client,
                         permission_discovery=_discovery_mode(ctx),
                         force_is_ng=force_is_ng,
+                        permission_pool_overrides=(
+                            _permission_pool_override(intent, chain=ctx.chain) if discovery_mode else {}
+                        ),
                     )
                 )
 

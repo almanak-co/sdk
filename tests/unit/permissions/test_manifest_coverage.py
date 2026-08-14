@@ -11,7 +11,6 @@ independently compile synthetic intents to verify coverage.
 
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 
@@ -23,8 +22,8 @@ from almanak.framework.execution.signer.safe.constants import (
 )
 from almanak.framework.intents.compiler import (
     DEFAULT_SWAP_FEE_TIER,
-    SWAP_FEE_TIERS,
     ERC20_APPROVE_SELECTOR,
+    SWAP_FEE_TIERS,
     IntentCompiler,
     IntentCompilerConfig,
 )
@@ -123,6 +122,26 @@ def _get_compiler_for_protocol(protocol: str, chain: str) -> IntentCompiler:
 _DEMO_STRATEGIES = _collect_demo_strategies()
 
 
+def _install_curve_test_admission(protocols: list[str], monkeypatch: pytest.MonkeyPatch) -> str | None:
+    """Install the explicit MetaRegistry fixture used by generic demo sweeps."""
+    if "curve" not in protocols:
+        return None
+
+    from almanak.connectors.curve import compiler as curve_compiler
+    from almanak.connectors.curve import pair_resolver, pool_resolver
+    from tests.support.curve_pool_catalog import curve_test_metadata
+
+    monkeypatch.setattr(
+        pool_resolver,
+        "resolve_pool_metadata",
+        lambda *, chain, pool_address, **_kwargs: curve_test_metadata(chain, pool_address),
+    )
+    monkeypatch.setattr(pool_resolver, "resolution_is_definitive", lambda *_args: True)
+    monkeypatch.setattr(curve_compiler, "_probe_lp_open_deployability", lambda *_args, **_kwargs: (True, "ok"))
+    monkeypatch.setattr(pair_resolver, "pool_provenance_suspect", lambda *_args, **_kwargs: False)
+    return "http://curve-test-binding.invalid"
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -136,7 +155,12 @@ class TestManifestCoverage:
         _DEMO_STRATEGIES,
         ids=[s[0] for s in _DEMO_STRATEGIES],
     )
-    def test_manifest_covers_compiled_intents(self, name: str, path: Path) -> None:
+    def test_manifest_covers_compiled_intents(
+        self,
+        name: str,
+        path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         """Every (target, selector) from compilation must appear in the manifest."""
         cls = _load_strategy_class(path)
         assert cls is not None, f"Failed to load strategy class from {path}"
@@ -157,6 +181,13 @@ class TestManifestCoverage:
         config_path = path / "config.json"
         config = load_strategy_config(config_path)
 
+        # Curve manifests perform a live MetaRegistry admission read before
+        # compiling the immutable exact-pool binding offline. This generic
+        # demo sweep supplies the equivalent explicit test fixture; dedicated
+        # binding tests cover missing transport, identity mismatch, and target
+        # omission failures against the production resolver path.
+        rpc_url = _install_curve_test_admission(protocols, monkeypatch)
+
         for chain in chains:
             # Generate manifest. strict=False: multichain demo sweep over
             # symbol-form configs with per-chain registry gaps (ALM-3175);
@@ -167,6 +198,7 @@ class TestManifestCoverage:
                 supported_protocols=protocols,
                 intent_types=intent_types,
                 config=config,
+                rpc_url=rpc_url,
                 strict=False,
             )
 
@@ -190,7 +222,13 @@ class TestManifestCoverage:
                 compiler = _get_compiler_for_protocol(protocol, chain)
 
                 for intent_type in intent_types:
-                    synthetic_intents = build_synthetic_intents(protocol, intent_type, chain)
+                    synthetic_intents = build_synthetic_intents(
+                        protocol,
+                        intent_type,
+                        chain,
+                        strategy_config=config,
+                        rpc_url=rpc_url,
+                    )
                     if not synthetic_intents:
                         continue
 
@@ -297,7 +335,12 @@ class TestManifestCoverage:
         _DEMO_STRATEGIES,
         ids=[s[0] for s in _DEMO_STRATEGIES],
     )
-    def test_manifest_includes_multisend(self, name: str, path: Path) -> None:
+    def test_manifest_includes_multisend(
+        self,
+        name: str,
+        path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         """MultiSend address should be in manifest for strategies on supported chains."""
         cls = _load_strategy_class(path)
         assert cls is not None
@@ -314,6 +357,7 @@ class TestManifestCoverage:
             chains = ["arbitrum"]
 
         config = load_strategy_config(path / "config.json")
+        rpc_url = _install_curve_test_admission(protocols, monkeypatch)
 
         for chain in chains:
             multisend_addr = MULTISEND_ADDRESSES.get(chain.lower())
@@ -329,6 +373,7 @@ class TestManifestCoverage:
                 supported_protocols=protocols,
                 intent_types=intent_types,
                 config=config,
+                rpc_url=rpc_url,
                 strict=False,
             )
 
@@ -349,7 +394,12 @@ class TestManifestCoverage:
         _DEMO_STRATEGIES,
         ids=[s[0] for s in _DEMO_STRATEGIES],
     )
-    def test_manifest_includes_token_approvals(self, name: str, path: Path) -> None:
+    def test_manifest_includes_token_approvals(
+        self,
+        name: str,
+        path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         """Config tokens that resolve to addresses should have ERC-20 approve permissions."""
         cls = _load_strategy_class(path)
         assert cls is not None
@@ -369,6 +419,7 @@ class TestManifestCoverage:
         config = load_strategy_config(config_path)
         if not config:
             pytest.skip(f"No config.json for {name}")
+        rpc_url = _install_curve_test_admission(protocols, monkeypatch)
 
         # Collect token symbols from config using the same fields as the generator
         from almanak.framework.permissions.generator import _TOKEN_CONFIG_FIELDS
@@ -404,6 +455,7 @@ class TestManifestCoverage:
                 supported_protocols=protocols,
                 intent_types=intent_types,
                 config=config,
+                rpc_url=rpc_url,
                 strict=False,
             )
 

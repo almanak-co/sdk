@@ -99,7 +99,7 @@ _SNAPSHOT_LP_PROTOCOLS = frozenset(
         "fluid_dex_lp",
         # VIB-6046: curve joins LP discovery (LP_OPEN + LP_CLOSE). Curve pools
         # are per-pool targets, so the connector owns its vectors via
-        # ``build_discovery_vectors`` and walks its own ``CURVE_POOLS``
+        # ``build_discovery_vectors`` and walks its own ``CURVE_TEST_POOLS``
         # registry. Before this, LP_OPEN/LP_CLOSE produced an EMPTY manifest on
         # all five curve chains — which read as "curve LP works under Safe"
         # only because the wildcarded MultiSend DELEGATECALL carried the batch

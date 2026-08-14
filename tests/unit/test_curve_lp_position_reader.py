@@ -16,6 +16,7 @@ from typing import Any
 
 import pytest
 
+from almanak.connectors.curve import pool_resolver
 from almanak.framework.teardown.models import PositionInfo, PositionType
 from almanak.framework.valuation.curve_lp_position_reader import (
     CurveLpPosition,
@@ -24,6 +25,7 @@ from almanak.framework.valuation.curve_lp_position_reader import (
     _resolve_curve_pool_meta_dynamic,
 )
 from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
+from tests.support.curve_pool_catalog import curve_test_metadata
 
 # 3pool (ethereum) addresses
 POOL_3POOL = "0xbEbc44782C7dB0a1A60Cb6fe97d0b483032FF1C7"
@@ -166,17 +168,25 @@ def _make_replies(*, lp_balance_wei: int | None, virtual_price_wei: int | None) 
 # ---------------------------------------------------------------------------
 
 
-def test_resolve_pool_meta_by_name() -> None:
-    meta = _resolve_curve_pool_meta("ethereum", pool="3pool", lp_token="")
+@pytest.fixture(autouse=True)
+def _explicit_live_pool_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Feed address-selected fixtures through the production live-resolver seam."""
+
+    def resolve_pool_metadata(*, chain: str, pool_address: str, **_kwargs: Any) -> Any:
+        return curve_test_metadata(chain, pool_address)
+
+    monkeypatch.setattr(pool_resolver, "resolve_pool_metadata", resolve_pool_metadata)
+
+
+def test_resolve_pool_meta_by_name_fails_closed() -> None:
+    assert _resolve_curve_pool_meta("ethereum", pool="3pool", lp_token="") is None
+
+
+def test_resolve_pool_meta_by_exact_pool_address() -> None:
+    meta = _resolve_curve_pool_meta("ethereum", pool=POOL_3POOL, lp_token=LP_3POOL, gateway_client=object())
     assert meta is not None
     assert meta["address"].lower() == POOL_3POOL.lower()
     assert meta["coins"] == ["DAI", "USDC", "USDT"]
-
-
-def test_resolve_pool_meta_by_lp_token_address() -> None:
-    meta = _resolve_curve_pool_meta("ethereum", pool="", lp_token=LP_3POOL)
-    assert meta is not None
-    assert meta["address"].lower() == POOL_3POOL.lower()
 
 
 def test_resolve_pool_meta_unknown_returns_none() -> None:
@@ -190,6 +200,7 @@ def test_resolve_pool_meta_stale_lp_token_falls_back_to_pool_address() -> None:
         "ethereum",
         pool=POOL_3POOL,  # valid pool address
         lp_token="0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",  # unknown address
+        gateway_client=object(),
     )
     assert meta is not None
     assert meta["address"].lower() == POOL_3POOL.lower()
@@ -214,7 +225,7 @@ def test_read_position_no_gateway_returns_none() -> None:
         reader.read_position(
             protocol="curve",
             chain="ethereum",
-            pool="3pool",
+            pool=POOL_3POOL,
             lp_token=LP_3POOL,
             wallet_address=WALLET,
         )
@@ -230,7 +241,7 @@ def test_read_position_3pool_live_virtual_price() -> None:
     pos = reader.read_position(
         protocol="curve",
         chain="ethereum",
-        pool="3pool",
+        pool=POOL_3POOL,
         lp_token=LP_3POOL,
         wallet_address=WALLET,
     )
@@ -246,7 +257,7 @@ def test_read_position_measured_zero_balance() -> None:
     pos = reader.read_position(
         protocol="curve",
         chain="ethereum",
-        pool="3pool",
+        pool=POOL_3POOL,
         lp_token=LP_3POOL,
         wallet_address=WALLET,
     )
@@ -262,7 +273,7 @@ def test_read_position_unmeasured_balance_returns_none() -> None:
         reader.read_position(
             protocol="curve",
             chain="ethereum",
-            pool="3pool",
+            pool=POOL_3POOL,
             lp_token=LP_3POOL,
             wallet_address=WALLET,
         )
@@ -276,7 +287,7 @@ def test_read_position_unmeasured_virtual_price_returns_none() -> None:
         reader.read_position(
             protocol="curve",
             chain="ethereum",
-            pool="3pool",
+            pool=POOL_3POOL,
             lp_token=LP_3POOL,
             wallet_address=WALLET,
         )
@@ -295,7 +306,7 @@ def test_read_position_virtual_price_alias_fallback() -> None:
     pos = reader.read_position(
         protocol="curve",
         chain="ethereum",
-        pool="3pool",
+        pool=POOL_3POOL,
         lp_token=LP_3POOL,
         wallet_address=WALLET,
     )
@@ -320,7 +331,7 @@ def test_read_position_base_4pool_usdbc_axlusdc_values() -> None:
     pos = reader.read_position(
         protocol="curve",
         chain="base",
-        pool="4pool",
+        pool=POOL_4POOL_BASE,
         lp_token=LP_4POOL_BASE,
         wallet_address=WALLET,
     )
@@ -385,7 +396,7 @@ def test_read_position_steth_crypto_family_reads_reserves() -> None:
     pos = reader.read_position(
         protocol="curve",
         chain="ethereum",
-        pool="steth",
+        pool=POOL_STETH,
         lp_token=LP_STETH,
         wallet_address=WALLET,
     )
@@ -428,7 +439,7 @@ def test_crypto_balances_int128_selector_fallback() -> None:
     pos = reader.read_position(
         protocol="curve",
         chain="ethereum",
-        pool="steth",
+        pool=POOL_STETH,
         lp_token=LP_STETH,
         wallet_address=WALLET,
     )
@@ -455,7 +466,7 @@ def test_read_position_crypto_fails_closed_on_unreadable_input(override: dict[st
         reader.read_position(
             protocol="curve",
             chain="ethereum",
-            pool="steth",
+            pool=POOL_STETH,
             lp_token=LP_STETH,
             wallet_address=WALLET,
         )
@@ -473,7 +484,7 @@ def test_crypto_coin_order_match_returns_position_unchanged() -> None:
     # safety gate, a no-op on the happy path.
     reader = CurveLpPositionReader(_FullCalldataGatewayClient(_steth_crypto_replies()))
     pos = reader.read_position(
-        protocol="curve", chain="ethereum", pool="steth", lp_token=LP_STETH, wallet_address=WALLET
+        protocol="curve", chain="ethereum", pool=POOL_STETH, lp_token=LP_STETH, wallet_address=WALLET
     )
     assert pos is not None
     assert pos.family == "crypto"
@@ -490,7 +501,7 @@ def test_crypto_native_eth_placeholder_coin0_validates() -> None:
     # sides — so this proves the case-insensitive compare, not a same-case fluke.)
     reader = CurveLpPositionReader(_FullCalldataGatewayClient(_steth_crypto_replies(coin0_addr=ETH_NATIVE.lower())))
     pos = reader.read_position(
-        protocol="curve", chain="ethereum", pool="steth", lp_token=LP_STETH, wallet_address=WALLET
+        protocol="curve", chain="ethereum", pool=POOL_STETH, lp_token=LP_STETH, wallet_address=WALLET
     )
     assert pos is not None
     assert pos.coin_addresses[0].lower() == ETH_NATIVE.lower()
@@ -503,7 +514,9 @@ def test_crypto_coin_order_transposed_fails_closed() -> None:
     replies = _steth_crypto_replies(coin0_addr=STETH_ADDR, coin1_addr=ETH_NATIVE)
     reader = CurveLpPositionReader(_FullCalldataGatewayClient(replies))
     assert (
-        reader.read_position(protocol="curve", chain="ethereum", pool="steth", lp_token=LP_STETH, wallet_address=WALLET)
+        reader.read_position(
+            protocol="curve", chain="ethereum", pool=POOL_STETH, lp_token=LP_STETH, wallet_address=WALLET
+        )
         is None
     )
 
@@ -515,7 +528,9 @@ def test_crypto_coin_read_miss_fails_closed() -> None:
     replies = _steth_crypto_replies(coin1_addr=None)
     reader = CurveLpPositionReader(_FullCalldataGatewayClient(replies))
     assert (
-        reader.read_position(protocol="curve", chain="ethereum", pool="steth", lp_token=LP_STETH, wallet_address=WALLET)
+        reader.read_position(
+            protocol="curve", chain="ethereum", pool=POOL_STETH, lp_token=LP_STETH, wallet_address=WALLET
+        )
         is None
     )
 
@@ -544,7 +559,7 @@ def test_crypto_coins_int128_selector_fallback() -> None:
     # which coins overload the pool exposes.
     reader = CurveLpPositionReader(_FullCalldataGatewayClient(_coins_int128_fallback_replies()))
     pos = reader.read_position(
-        protocol="curve", chain="ethereum", pool="steth", lp_token=LP_STETH, wallet_address=WALLET
+        protocol="curve", chain="ethereum", pool=POOL_STETH, lp_token=LP_STETH, wallet_address=WALLET
     )
     assert pos is not None
     assert pos.family == "crypto"
@@ -567,7 +582,13 @@ def test_crypto_coin_order_validated_once_then_cached() -> None:
 
     reader._read_pool_coin_address = _counting  # type: ignore[method-assign]
 
-    kw = {"protocol": "curve", "chain": "ethereum", "pool": "steth", "lp_token": LP_STETH, "wallet_address": WALLET}
+    kw = {
+        "protocol": "curve",
+        "chain": "ethereum",
+        "pool": POOL_STETH,
+        "lp_token": LP_STETH,
+        "wallet_address": WALLET,
+    }
     assert reader.read_position(**kw) is not None
     first = calls["n"]
     assert first == 2  # coins(0), coins(1)
@@ -591,7 +612,13 @@ def test_crypto_coin_order_failure_not_cached() -> None:
 
     reader._read_pool_coin_address = _counting  # type: ignore[method-assign]
 
-    kw = {"protocol": "curve", "chain": "ethereum", "pool": "steth", "lp_token": LP_STETH, "wallet_address": WALLET}
+    kw = {
+        "protocol": "curve",
+        "chain": "ethereum",
+        "pool": POOL_STETH,
+        "lp_token": LP_STETH,
+        "wallet_address": WALLET,
+    }
     assert reader.read_position(**kw) is None
     after_first = calls["n"]
     assert after_first >= 1
@@ -656,7 +683,9 @@ def test_valuer_curve_branch_values_with_virtual_price() -> None:
     valuer = PortfolioValuer(
         _StubGatewayClient(_make_replies(lp_balance_wei=10 * 10**18, virtual_price_wei=1_019_566_780_337_011_070))
     )
-    pos = _curve_position({"pool": "3pool", "lp_token": LP_3POOL, "coins": ["DAI", "USDC", "USDT"], "wallet": WALLET})
+    pos = _curve_position(
+        {"pool": POOL_3POOL, "lp_token": LP_3POOL, "coins": ["DAI", "USDC", "USDT"], "wallet": WALLET}
+    )
     # VIB-5426: a healthy USD pool (oracle confirms the $1 peg) marks at par as
     # before. The cross-check now requires an independent oracle, so the test
     # supplies one — the par-mark behaviour is unchanged on a confirmed peg.
@@ -679,7 +708,7 @@ def test_valuer_curve_branch_uses_strategy_wallet_fallback() -> None:
     # the valuer falls back to the cached strategy wallet.
     valuer = PortfolioValuer(_StubGatewayClient(_make_replies(lp_balance_wei=10**18, virtual_price_wei=10**18)))
     valuer._strategy_wallet_address = WALLET
-    pos = _curve_position({"pool": "3pool", "lp_token": LP_3POOL, "coins": ["DAI", "USDC", "USDT"]})
+    pos = _curve_position({"pool": POOL_3POOL, "lp_token": LP_3POOL, "coins": ["DAI", "USDC", "USDT"]})
     value_usd, details, repriced = valuer._reprice_lp_enriched_dispatch(pos, "ethereum", market=_usd_market())  # type: ignore[arg-type]
     assert repriced is True
     assert value_usd == Decimal("1")
@@ -688,7 +717,7 @@ def test_valuer_curve_branch_uses_strategy_wallet_fallback() -> None:
 def test_valuer_curve_branch_no_wallet_fails_closed() -> None:
     # No wallet anywhere -> UNAVAILABLE (repriced False), never a stale estimate.
     valuer = PortfolioValuer(_StubGatewayClient(_make_replies(lp_balance_wei=10**18, virtual_price_wei=10**18)))
-    pos = _curve_position({"pool": "3pool", "lp_token": LP_3POOL, "coins": ["DAI", "USDC", "USDT"]})
+    pos = _curve_position({"pool": POOL_3POOL, "lp_token": LP_3POOL, "coins": ["DAI", "USDC", "USDT"]})
     value_usd, details, repriced = valuer._reprice_lp_enriched_dispatch(pos, "ethereum", market=None)  # type: ignore[arg-type]
     assert repriced is False
     assert details == {}
@@ -696,7 +725,9 @@ def test_valuer_curve_branch_no_wallet_fails_closed() -> None:
 
 def test_valuer_curve_branch_empty_position_measured_zero() -> None:
     valuer = PortfolioValuer(_StubGatewayClient(_make_replies(lp_balance_wei=0, virtual_price_wei=10**18)))
-    pos = _curve_position({"pool": "3pool", "lp_token": LP_3POOL, "coins": ["DAI", "USDC", "USDT"], "wallet": WALLET})
+    pos = _curve_position(
+        {"pool": POOL_3POOL, "lp_token": LP_3POOL, "coins": ["DAI", "USDC", "USDT"], "wallet": WALLET}
+    )
     value_usd, details, repriced = valuer._reprice_lp_enriched_dispatch(pos, "ethereum", market=None)  # type: ignore[arg-type]
     assert repriced is True
     assert value_usd == Decimal("0")
@@ -707,7 +738,9 @@ def test_valuer_curve_branch_unmeasured_fails_closed_not_zero() -> None:
     # virtual_price unreadable -> the position is NOT booked as $0; it is
     # UNAVAILABLE (repriced False). Empty != Zero.
     valuer = PortfolioValuer(_StubGatewayClient(_make_replies(lp_balance_wei=10**18, virtual_price_wei=None)))
-    pos = _curve_position({"pool": "3pool", "lp_token": LP_3POOL, "coins": ["DAI", "USDC", "USDT"], "wallet": WALLET})
+    pos = _curve_position(
+        {"pool": POOL_3POOL, "lp_token": LP_3POOL, "coins": ["DAI", "USDC", "USDT"], "wallet": WALLET}
+    )
     value_usd, details, repriced = valuer._reprice_lp_enriched_dispatch(pos, "ethereum", market=None)  # type: ignore[arg-type]
     assert repriced is False
     assert details == {}
@@ -731,7 +764,9 @@ def _active_3pool_valuer() -> PortfolioValuer:
 
 
 def _3pool_pos() -> PositionInfo:
-    return _curve_position({"pool": "3pool", "lp_token": LP_3POOL, "coins": ["DAI", "USDC", "USDT"], "wallet": WALLET})
+    return _curve_position(
+        {"pool": POOL_3POOL, "lp_token": LP_3POOL, "coins": ["DAI", "USDC", "USDT"], "wallet": WALLET}
+    )
 
 
 def test_curve_depeg_fires_unavailable() -> None:
@@ -815,7 +850,7 @@ def test_curve_intent_threshold_override() -> None:
 
     pos = _curve_position(
         {
-            "pool": "3pool",
+            "pool": POOL_3POOL,
             "lp_token": LP_3POOL,
             "coins": ["DAI", "USDC", "USDT"],
             "wallet": WALLET,
@@ -892,7 +927,7 @@ def _frax3crv_position() -> PositionInfo:
         chain="ethereum",
         protocol="curve",
         value_usd=Decimal("10"),
-        details={"pool": "frax_3crv", "lp_token": LP_FRAX3CRV, "wallet": WALLET},
+        details={"pool": POOL_FRAX3CRV, "lp_token": LP_FRAX3CRV, "wallet": WALLET},
     )
 
 
@@ -903,7 +938,7 @@ def test_read_position_metapool_family_expands_underlying() -> None:
     replies[(LP_FRAX3CRV.lower(), BALANCE_OF + WALLET.lower().removeprefix("0x").zfill(64))] = 10 * 10**18
     reader = CurveLpPositionReader(_FullCalldataGatewayClient(replies))
     pos = reader.read_position(
-        protocol="curve", chain="ethereum", pool="frax_3crv", lp_token=LP_FRAX3CRV, wallet_address=WALLET
+        protocol="curve", chain="ethereum", pool=POOL_FRAX3CRV, lp_token=LP_FRAX3CRV, wallet_address=WALLET
     )
     assert pos is not None
     assert pos.family == "metapool_usd"
@@ -968,7 +1003,7 @@ def _steth_position() -> PositionInfo:
         chain="ethereum",
         protocol="curve",
         value_usd=Decimal("6000"),
-        details={"pool": "steth", "lp_token": LP_STETH, "wallet": WALLET},
+        details={"pool": POOL_STETH, "lp_token": LP_STETH, "wallet": WALLET},
     )
 
 

@@ -1,7 +1,7 @@
 """Curve pair→pool dynamic resolution via the MetaRegistry (VIB-5716).
 
 Resolve a **token pair** (two coin addresses) to a deployable Curve pool when
-the static ``CURVE_POOLS`` curation and the address-based dynamic resolver
+exact-address resolution and the MetaRegistry pair resolver
 (VIB-5628, ``pool_resolver.py``) both miss. This is the "P1-4" follow-on that
 VIB-5628 deferred: MetaRegistry ``find_pool_for_coins(coin_a, coin_b, i)`` IS
 Curve's pairwise ``factory.getPool``-style resolver — enumerated until it

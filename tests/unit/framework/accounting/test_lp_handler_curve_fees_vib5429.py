@@ -7,7 +7,7 @@ resolve decimals or prices and leaves ``fees_total_usd`` NULL — the Accountant
 Test G6 ``Σ_lp_fees_null_count`` gap.
 
 The fix: the Curve receipt parser stamps the pool-coin-ordered symbols on
-``LPCloseData.coin_symbols`` (from the static ``CURVE_POOLS`` registry), and the
+``LPCloseData.coin_symbols`` (from its injected live metadata lookup), and the
 LP accounting handler prices every fee leg from them (``_curve_close_fees_usd``),
 honouring Empty ≠ Zero:
 
@@ -38,6 +38,7 @@ from almanak.framework.observability.ledger import (
     deserialize_extracted_data,
     serialize_extracted_data,
 )
+from tests.support.curve_pool_catalog import curve_test_meta_lookup
 
 CURVE_3POOL = "0xbebc44782c7db0a1a60cb6fe97d0b483032ff1c7"
 WALLET = "0x1234567890abcdef1234567890abcdef12345678"
@@ -102,11 +103,15 @@ def _roundtrip(lp_close: LPCloseData) -> LPCloseData:
 # ──────────────────────────────────────────────────────────────────────────────
 class TestPoolCoinSymbols:
     def test_3pool_returns_ordered_coins(self):
-        assert _pool_coin_symbols(CURVE_3POOL, "ethereum") == ["DAI", "USDC", "USDT"]
+        assert _pool_coin_symbols(CURVE_3POOL, "ethereum", curve_test_meta_lookup) == ["DAI", "USDC", "USDT"]
 
     def test_checksummed_address_matches(self):
         # Lookup is case-insensitive on the pool address.
-        assert _pool_coin_symbols(CURVE_3POOL.upper(), "ethereum") == ["DAI", "USDC", "USDT"]
+        assert _pool_coin_symbols(CURVE_3POOL.upper(), "ethereum", curve_test_meta_lookup) == [
+            "DAI",
+            "USDC",
+            "USDT",
+        ]
 
     def test_unknown_pool_returns_empty(self):
         assert _pool_coin_symbols("0x" + "ab" * 20, "ethereum") == []

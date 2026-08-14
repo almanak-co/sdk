@@ -21,6 +21,85 @@ import pytest
 pytest_plugins = ["tests.conftest_gateway"] if importlib.util.find_spec("almanak.gateway.server") is not None else []
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _explicit_curve_pool_fixtures():
+    """Inject test-only Curve catalogs after production removed CURVE_TEST_POOLS.
+
+    Legacy unit/integration tests intentionally exercise named representative
+    pools without network access. Their addresses now live under ``tests/`` and
+    enter connector instances through the same deployment-local override seam
+    used by bound permission compilation; production defaults remain empty.
+    """
+    from almanak.connectors.curve import compiler as curve_compiler
+    from almanak.connectors.curve import permission_hints as curve_permission_hints
+    from almanak.connectors.curve import pool_resolver as curve_pool_resolver
+    from almanak.connectors.curve.adapter import CurveAdapter
+    from almanak.connectors.curve.receipt_parser import CurveReceiptParser
+    from tests.support.curve_pool_catalog import CURVE_TEST_POOLS, curve_test_meta_lookup, curve_test_metadata
+
+    monkeypatch = pytest.MonkeyPatch()
+    original_adapter_init = CurveAdapter.__init__
+
+    def adapter_init(self, config, *args, **kwargs):
+        fixtures = {}
+        for name, pool in CURVE_TEST_POOLS.get(config.chain, {}).items():
+            metadata = curve_test_metadata(config.chain, str(pool["address"]))
+            fixtures[name] = {
+                **pool,
+                "coin_decimals": list(metadata.coin_decimals) if metadata is not None else [],
+            }
+        overrides = {**fixtures, **config.permission_pool_overrides}
+        previous = config.permission_pool_overrides
+        config.permission_pool_overrides = overrides
+        try:
+            return original_adapter_init(self, config, *args, **kwargs)
+        finally:
+            config.permission_pool_overrides = previous
+
+    monkeypatch.setattr(CurveAdapter, "__init__", adapter_init)
+    monkeypatch.setattr(curve_compiler, "_deployment_pool_catalog", lambda: CURVE_TEST_POOLS)
+
+    original_resolve_pool_metadata = curve_pool_resolver.resolve_pool_metadata
+
+    def resolve_pool_metadata(chain, pool_address, **kwargs):
+        fixture = curve_test_metadata(chain, pool_address)
+        # Explicit gateway doubles belong to the resolver's own tests and must
+        # never be shadowed. The local fixture substitutes only for RPC-backed
+        # intent admission, where CI fork providers may lack archival reads.
+        if fixture is not None and kwargs.get("gateway_client") is None and kwargs.get("rpc_url"):
+            return fixture
+        return original_resolve_pool_metadata(chain, pool_address, **kwargs)
+
+    # Permission admission in intent tests must still consume an exact config
+    # binding, but it cannot rely on archival MetaRegistry storage being
+    # available through every CI fork provider. Resolve only explicitly listed
+    # test fixtures locally; unknown pools continue through the real resolver.
+    monkeypatch.setattr(curve_pool_resolver, "resolve_pool_metadata", resolve_pool_metadata)
+
+    original_discovery_pools = curve_permission_hints._discovery_pools
+
+    def discovery_pools(chain, ctx):
+        if ctx.strategy_config:
+            return original_discovery_pools(chain, ctx)
+        return [(name, data, None) for name, data in CURVE_TEST_POOLS.get(chain, {}).items()]
+
+    monkeypatch.setattr(curve_permission_hints, "_discovery_pools", discovery_pools)
+
+    original_parser_init = CurveReceiptParser.__init__
+
+    def parser_init(self, chain="ethereum", pool_meta_lookup=None, **kwargs):
+        return original_parser_init(
+            self,
+            chain,
+            pool_meta_lookup=pool_meta_lookup or curve_test_meta_lookup,
+            **kwargs,
+        )
+
+    monkeypatch.setattr(CurveReceiptParser, "__init__", parser_init)
+    yield
+    monkeypatch.undo()
+
+
 @pytest.fixture(autouse=True)
 def _fail_on_token_resolver_defects(request: pytest.FixtureRequest):
     """Fail any test in which the token-resolution seam saw a DEFECT (VIB-6100).

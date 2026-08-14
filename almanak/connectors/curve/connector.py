@@ -66,9 +66,8 @@ CONNECTOR = Connector(
         attribute="CurveReceiptParserConnector",
     ),
     # VIB-5628: the Curve receipt parser has no gateway client of its own; on a
-    # static ``CURVE_POOLS`` miss it consults this runner-injected sync
-    # ``(pool_address, chain) -> CurvePoolMetadata | None`` lookup to label an
-    # uncurated pool's LP legs. The enricher threads the kwarg only to parsers
+    # runner-injected sync ``(pool_address, chain) -> CurvePoolMetadata | None``
+    # lookup to label exact-pool LP legs. The enricher threads the kwarg only to parsers
     # that declare it (mirrors the V4 ``pool_key_lookup`` carve-out).
     receipt_parser_kwargs=("pool_meta_lookup",),
     # VIB-5628: publish the uncurated-pool metadata lookup as a runner hook so the
@@ -86,10 +85,6 @@ CONNECTOR = Connector(
     pool_data=ImportRef(
         module="almanak.connectors.curve.pool_reader",
         attribute="POOL_DATA_SPEC",
-    ),
-    pool_reader=ImportRef(
-        module="almanak.connectors.curve.pool_reader",
-        attribute="POOL_READER_SPEC",
     ),
     # Curve's SWAP compiler ships amount_in as a human-readable Decimal (VIB-3747).
     metadata_amount_encoding=MetadataAmountEncoding(swap="human"),

@@ -155,14 +155,14 @@ def test_curve_reader_binds_its_manifest_spec() -> None:
         CurvePoolReader(rpc_call=_noop_rpc)
 
 
-def test_curve_chain_gating_comes_from_curated_pools() -> None:
-    """Curve is claimed exactly on chains with curated pools (no factory table)."""
+def test_curve_chain_gating_comes_from_connector_support() -> None:
+    """Exact-address Curve reads use connector support, not a pool catalogue."""
     registry = PoolReaderRegistry(rpc_call=_noop_rpc)
     spec = POOL_READER_REGISTRY.require("curve")
     assert spec.factory_addresses == {}
+    assert spec.known_pools == {}
     for chain in ("ethereum", "arbitrum", "optimism", "polygon", "base"):
         assert "curve" in registry.protocols_for_chain(chain), chain
-        assert spec.known_pools.get(chain), f"no curated pools gate {chain}"
     assert "curve" not in registry.protocols_for_chain("solana")
 
 

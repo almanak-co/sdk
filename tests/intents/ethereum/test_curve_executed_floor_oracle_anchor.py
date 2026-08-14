@@ -55,13 +55,13 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.connectors.curve.adapter import CURVE_POOLS
 from almanak.connectors.curve.receipt_parser import CurveEventType, CurveReceiptParser
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import IntentCompiler
 from almanak.framework.intents.compiler import CompilationStatus, IntentCompilerConfig
 from almanak.framework.intents.vocabulary import IntentType, SwapIntent
 from tests.intents.conftest import CHAIN_CONFIGS, fund_erc20_token, get_token_balance
+from tests.support.curve_adapter import CURVE_TEST_POOLS
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +73,7 @@ pytestmark = pytest.mark.no_zodiac(
 CHAIN_NAME = "ethereum"
 
 # Curve 3pool (DAI/USDC/USDT) — coin order [DAI, USDC, USDT].
-POOL = CURVE_POOLS["ethereum"]["3pool"]
+POOL = CURVE_TEST_POOLS["ethereum"]["3pool"]
 USDC_ADDR = Web3.to_checksum_address(POOL["coin_addresses"][1])
 USDT_ADDR = Web3.to_checksum_address(POOL["coin_addresses"][2])
 

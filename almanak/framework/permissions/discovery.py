@@ -10,8 +10,8 @@ picked up here.
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
-from typing import Literal, cast
+from collections.abc import Mapping, Sequence
+from typing import Any, Literal, cast
 
 from almanak.connectors._connector import CONNECTOR_REGISTRY
 from almanak.connectors._strategy_base.protocol_aliases import normalize_protocol
@@ -41,7 +41,7 @@ from ..intents.compiler import (
     IntentCompilerConfig,
 )
 from ..intents.compiler_models import CompilationResult, TransactionData
-from .hints import get_permission_hints
+from .hints import PermissionBindingError, get_permission_hints
 from .models import ContractPermission, FunctionPermission
 from .synthetic_intents import build_synthetic_intents
 
@@ -173,10 +173,11 @@ def _parse_requested_intent_types(
 class _CompilerCache:
     """Build and cache protocol-configured permission-discovery compilers."""
 
-    def __init__(self, *, chain: str, rpc_url: str | None) -> None:
+    def __init__(self, *, chain: str, rpc_url: str | None, gateway_client: Any = None) -> None:
         self._chain = chain
         self._rpc_url = rpc_url
-        self._compilers: dict[tuple[str, int, bool, bool], IntentCompiler] = {}
+        self._gateway_client = gateway_client
+        self._compilers: dict[tuple[str, int, bool, bool, bool], IntentCompiler] = {}
 
     def get(self, protocol: str) -> IntentCompiler:
         """Return a compiler configured for one protocol's discovery hints."""
@@ -191,12 +192,19 @@ class _CompilerCache:
             fee_tier = chain_fee_override or 3000
 
         uses_rpc = hints.needs_rpc_discovery and self._rpc_url is not None
+        uses_gateway = (
+            hints.needs_rpc_discovery
+            and self._gateway_client is not None
+            and getattr(self._gateway_client, "is_connected", False)
+        )
         compiler_rpc = self._rpc_url if uses_rpc else None
-        key = (mode, fee_tier, uses_rpc, hints.offline_discovery)
+        compiler_gateway = self._gateway_client if uses_gateway else None
+        key = (mode, fee_tier, uses_rpc, uses_gateway, hints.offline_discovery)
         if key not in self._compilers:
             self._compilers[key] = IntentCompiler(
                 chain=self._chain,
                 rpc_url=compiler_rpc,
+                gateway_client=compiler_gateway,
                 config=IntentCompilerConfig(
                     allow_placeholder_prices=True,
                     swap_pool_selection_mode=cast(Literal["auto", "fixed"], mode),
@@ -278,19 +286,39 @@ def _compile_synthetic_permissions(
     protocol: str,
     intent_types: list[IntentType],
     rpc_url: str | None,
+    gateway_client: Any,
+    strategy_config: Mapping[str, Any],
     compiler: IntentCompiler,
     targets: dict[str, _TargetAccumulator],
     warnings: list[str],
 ) -> None:
     """Compile synthetic intents and accumulate their transaction permissions."""
     for intent_type in intent_types:
-        for intent in build_synthetic_intents(protocol, intent_type, chain):
+        for intent in build_synthetic_intents(
+            protocol,
+            intent_type,
+            chain,
+            strategy_config=strategy_config,
+            rpc_url=rpc_url,
+            gateway_client=gateway_client,
+        ):
+            required_binding_targets = _required_binding_targets(intent)
             try:
                 result = compiler.compile(intent)
             except Exception as exc:
+                if required_binding_targets:
+                    raise PermissionBindingError(
+                        f"Required permission binding {required_binding_targets} failed to compile for "
+                        f"{protocol}/{intent_type.value} on {chain}: {exc}"
+                    ) from exc
                 warnings.append(f"Compilation error for {protocol}/{intent_type.value} on {chain}: {exc}")
                 continue
             if result.status.value != "SUCCESS":
+                if required_binding_targets:
+                    raise PermissionBindingError(
+                        f"Required permission binding {required_binding_targets} failed to compile for "
+                        f"{protocol}/{intent_type.value} on {chain}: {result.error or 'unknown compilation failure'}"
+                    )
                 warning = _compilation_failure_warning(
                     result=result,
                     chain=chain,
@@ -301,8 +329,35 @@ def _compile_synthetic_permissions(
                 if warning:
                     warnings.append(warning)
                 continue
+            emitted_targets = {transaction.to.lower() for transaction in result.transactions}
+            missing_binding_targets = set(required_binding_targets) - emitted_targets
+            if missing_binding_targets:
+                raise PermissionBindingError(
+                    f"Required permission binding {sorted(missing_binding_targets)} compiled for "
+                    f"{protocol}/{intent_type.value} on {chain} but emitted no call to that target. "
+                    "Refusing to generate a manifest whose exact pool permission is absent."
+                )
             for transaction in result.transactions:
                 _add_compiled_transaction(transaction=transaction, protocol=protocol, targets=targets)
+
+
+def _required_binding_targets(intent: Any) -> tuple[str, ...]:
+    """Return generic required targets carried by a connector-owned binding."""
+    params = getattr(intent, "protocol_params", None) or getattr(intent, "swap_params", None) or {}
+    if not isinstance(params, Mapping):
+        return ()
+    if "_permission_binding" not in params:
+        return ()
+    marker = params["_permission_binding"]
+    if not isinstance(marker, Mapping):
+        raise PermissionBindingError("Connector _permission_binding marker must be an object")
+    targets = marker.get("required_targets")
+    if not isinstance(targets, list | tuple) or not targets or any(not isinstance(target, str) for target in targets):
+        raise PermissionBindingError("Connector _permission_binding must declare non-empty string required_targets")
+    normalized = tuple(target.lower() for target in targets)
+    if len(set(normalized)) != len(normalized):
+        raise PermissionBindingError("Connector _permission_binding required_targets must be unique")
+    return normalized
 
 
 def _build_contract_permissions(
@@ -333,6 +388,8 @@ def discover_permissions(
     protocols: list[str],
     intent_types: Sequence[IntentType | str],
     rpc_url: str | None = None,
+    config: Mapping[str, Any] | None = None,
+    gateway_client: Any = None,
 ) -> tuple[list[ContractPermission], list[str]]:
     """Discover required permissions by compiling synthetic intents.
 
@@ -347,6 +404,11 @@ def discover_permissions(
         rpc_url: Optional RPC URL for on-chain queries during discovery.
             Required for protocols like Aerodrome where LP_CLOSE needs to
             resolve pool addresses via factory contract calls.
+        config: Optional deployment config. Connector-owned vector builders
+            may use it to resolve exact dynamic targets without registering
+            deployment-specific addresses in the SDK.
+        gateway_client: Preferred gateway transport for connector-owned live
+            binding resolution and compilation.
 
     Returns:
         Tuple of (permissions_list, warnings_list)
@@ -354,7 +416,8 @@ def discover_permissions(
     requested_intent_types, warnings = _parse_requested_intent_types(intent_types)
     selector_labels = _build_selector_labels(protocols)
     targets: dict[str, _TargetAccumulator] = {}
-    compilers = _CompilerCache(chain=chain, rpc_url=rpc_url)
+    strategy_config = config or {}
+    compilers = _CompilerCache(chain=chain, rpc_url=rpc_url, gateway_client=gateway_client)
 
     for protocol in protocols:
         supported_intent_types = _supported_intent_types_for(
@@ -378,6 +441,8 @@ def discover_permissions(
             protocol=protocol,
             intent_types=supported_intent_types,
             rpc_url=rpc_url,
+            gateway_client=gateway_client,
+            strategy_config=strategy_config,
             compiler=compilers.get(protocol),
             targets=targets,
             warnings=warnings,

@@ -38,7 +38,6 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.connectors.curve.adapter import CURVE_POOLS
 from almanak.connectors.curve.receipt_parser import CurveEventType, CurveReceiptParser
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import IntentCompiler, LPCloseIntent, LPOpenIntent
@@ -50,6 +49,7 @@ from tests.intents.conftest import (
     fund_erc20_token,
     get_token_balance,
 )
+from tests.support.curve_adapter import CURVE_TEST_POOLS
 
 logger = logging.getLogger(__name__)
 
@@ -185,12 +185,12 @@ class TestCurveMetapoolConfig:
     """Verify the FRAX/3CRV metapool is registered as a native 2-coin pool."""
 
     def test_metapool_registered(self):
-        assert POOL in CURVE_POOLS["ethereum"], (
-            f"'{POOL}' not in CURVE_POOLS['ethereum']: {list(CURVE_POOLS['ethereum'])}"
+        assert POOL in CURVE_TEST_POOLS["ethereum"], (
+            f"'{POOL}' not in CURVE_TEST_POOLS['ethereum']: {list(CURVE_TEST_POOLS['ethereum'])}"
         )
 
     def test_native_two_coin_shape(self):
-        pool = CURVE_POOLS["ethereum"][POOL]
+        pool = CURVE_TEST_POOLS["ethereum"][POOL]
         assert pool["n_coins"] == 2
         assert pool["coins"] == ["FRAX", "3CRV"]
         assert pool["coin_addresses"][0].lower() == FRAX_ADDRESS.lower()
@@ -199,7 +199,7 @@ class TestCurveMetapoolConfig:
         assert pool["lp_token"].lower() == POOL_ADDRESS.lower()
 
     def test_metapool_metadata(self):
-        pool = CURVE_POOLS["ethereum"][POOL]
+        pool = CURVE_TEST_POOLS["ethereum"][POOL]
         assert pool["is_metapool"] is True
         assert pool["base_pool"].lower() == THREEPOOL_ADDRESS.lower()
         # Combined coin space: meta coin (0) + base-pool coins (1..3).
@@ -229,7 +229,9 @@ class TestCurveMetapoolNativeLPLifecycle:
     the recorder has no intents to derive a manifest from and the setup's very
     first tx is denied before any curve LP call is attempted. Rewriting the
     setup to compile a real 3pool ``LPOpenIntent`` would let this run under
-    Zodiac; that is a test change, tracked separately from VIB-6046.
+    Zodiac; that is a test change, tracked separately from VIB-6046. The Tier B
+    underlying-LP sibling is also explicitly opted out because its generic zap
+    is a separate permission resource that exact pool bindings do not guess.
     """
 
     @pytest.mark.intent(IntentType.LP_OPEN, IntentType.LP_CLOSE)
@@ -366,6 +368,10 @@ class TestCurveMetapoolNativeLPLifecycle:
 
 @pytest.mark.ethereum
 @pytest.mark.lp
+@pytest.mark.no_zodiac(
+    reason="Exact Curve pool bindings intentionally authorize only MetaRegistry-verified pool resources; "
+    "the generic metapool deposit zap is a separate resource and is not yet part of the binding model"
+)
 class TestCurveMetapoolUnderlyingLP:
     """Tier B: underlying deposit over the combined coin space via the zap."""
 
@@ -416,7 +422,7 @@ class TestCurveMetapoolUnderlyingLP:
         assert open_result.status.value == "SUCCESS", f"Underlying LP_OPEN compile failed: {open_result.error}"
         assert open_result.action_bundle is not None
         # The deposit tx must target the ZAP, not the metapool directly.
-        zap_addr = CURVE_POOLS["ethereum"][POOL]["zap_address"].lower()
+        zap_addr = CURVE_TEST_POOLS["ethereum"][POOL]["zap_address"].lower()
         deposit_txs = [tx for tx in open_result.action_bundle.transactions if tx["to"].lower() == zap_addr]
         assert deposit_txs, (
             f"Underlying deposit must target the zap {zap_addr}; "

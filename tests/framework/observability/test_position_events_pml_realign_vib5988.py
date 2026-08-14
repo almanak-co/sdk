@@ -566,7 +566,7 @@ def test_ncoin_additional_amounts_guard_blocks_leg_adoption(_resolver):
     VIB-5983 mis-scaling class.
 
     `coin_symbols` normally blocks that, but it is resolved from
-    `CURVE_POOLS[...]["coins"]` while the legs come from `coin_addresses`. A
+    `CURVE_TEST_POOLS[...]["coins"]` while the legs come from `coin_addresses`. A
     future pool entry carrying one and not the other silently re-opens a
     nine-figure mis-valuation. `additional_amounts` comes off the receipt
     itself, so it cannot drift from the registry. This pins that second signal

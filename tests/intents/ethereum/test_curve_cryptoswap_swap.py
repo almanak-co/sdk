@@ -29,12 +29,12 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.connectors.curve.adapter import CURVE_POOLS
 from almanak.connectors.curve.receipt_parser import CurveEventType, CurveReceiptParser
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents.compiler import CompilationStatus, IntentCompiler, IntentCompilerConfig
 from almanak.framework.intents.vocabulary import IntentType, SwapIntent
 from tests.intents.conftest import CHAIN_CONFIGS, SWAP_MAX_SLIPPAGE, fund_erc20_token, get_token_balance
+from tests.support.curve_adapter import CURVE_TEST_POOLS
 
 logger = logging.getLogger(__name__)
 
@@ -78,41 +78,40 @@ def _fund_usdt(wallet: str, rpc_url: str, amount_usdt: Decimal = Decimal("10000"
 
 @pytest.mark.intent(IntentType.SWAP)
 class TestCurveCryptoSwapPoolConfig:
-    """Verify tricrypto2 pool is correctly configured in CURVE_POOLS."""
+    """Verify tricrypto2 pool is correctly configured in CURVE_TEST_POOLS."""
 
     def test_ethereum_in_curve_pools(self):
-        """'ethereum' chain must have a CURVE_POOLS entry."""
-        assert "ethereum" in CURVE_POOLS
+        """'ethereum' chain must have a CURVE_TEST_POOLS entry."""
+        assert "ethereum" in CURVE_TEST_POOLS
 
     def test_tricrypto2_pool_present(self):
-        """tricrypto2 pool must be in CURVE_POOLS['ethereum']."""
-        assert POOL_KEY in CURVE_POOLS.get("ethereum", {}), (
-            f"'{POOL_KEY}' not found in CURVE_POOLS['ethereum']. "
-            f"Found: {list(CURVE_POOLS.get('ethereum', {}).keys())}"
+        """tricrypto2 pool must be in CURVE_TEST_POOLS['ethereum']."""
+        assert POOL_KEY in CURVE_TEST_POOLS.get("ethereum", {}), (
+            f"'{POOL_KEY}' not found in CURVE_TEST_POOLS['ethereum']. Found: {list(CURVE_TEST_POOLS.get('ethereum', {}).keys())}"
         )
 
     def test_pool_address_correct(self):
         """Pool address must match deployed tricrypto2 contract."""
-        pool = CURVE_POOLS["ethereum"][POOL_KEY]
+        pool = CURVE_TEST_POOLS["ethereum"][POOL_KEY]
         assert pool["address"].lower() == POOL_ADDRESS.lower()
 
     def test_pool_type_is_tricrypto(self):
         """Pool type must be 'tricrypto' (CryptoSwap variant)."""
-        pool = CURVE_POOLS["ethereum"][POOL_KEY]
+        pool = CURVE_TEST_POOLS["ethereum"][POOL_KEY]
         assert pool["pool_type"] in ("tricrypto", "cryptoswap"), (
             f"Expected tricrypto/cryptoswap pool type, got {pool['pool_type']}"
         )
 
     def test_pool_has_3_coins(self):
         """tricrypto2 is a 3-coin pool: USDT, WBTC, WETH."""
-        pool = CURVE_POOLS["ethereum"][POOL_KEY]
+        pool = CURVE_TEST_POOLS["ethereum"][POOL_KEY]
         assert pool["n_coins"] == 3
         assert len(pool["coin_addresses"]) == 3
         assert len(pool["coins"]) == 3
 
     def test_pool_coins_order(self):
         """Coin order must be USDT(0), WBTC(1), WETH(2)."""
-        pool = CURVE_POOLS["ethereum"][POOL_KEY]
+        pool = CURVE_TEST_POOLS["ethereum"][POOL_KEY]
         coins = pool["coins"]
         assert coins[0] == "USDT", f"Coin 0 must be USDT, got {coins[0]}"
         assert coins[1] == "WBTC", f"Coin 1 must be WBTC, got {coins[1]}"
@@ -120,7 +119,7 @@ class TestCurveCryptoSwapPoolConfig:
 
     def test_pool_coin_addresses(self):
         """Coin addresses must match known mainnet addresses."""
-        pool = CURVE_POOLS["ethereum"][POOL_KEY]
+        pool = CURVE_TEST_POOLS["ethereum"][POOL_KEY]
         addrs = [a.lower() for a in pool["coin_addresses"]]
         assert addrs[0] == USDT_ADDRESS.lower(), f"USDT address mismatch: {addrs[0]}"
         assert addrs[1] == WBTC_ADDRESS.lower(), f"WBTC address mismatch: {addrs[1]}"
@@ -157,9 +156,7 @@ class TestCurveCryptoSwapCompilation:
 
         result = compiler.compile(intent)
 
-        assert result.status == CompilationStatus.SUCCESS, (
-            f"USDT -> WETH CryptoSwap compilation failed: {result.error}"
-        )
+        assert result.status == CompilationStatus.SUCCESS, f"USDT -> WETH CryptoSwap compilation failed: {result.error}"
         assert result.action_bundle is not None
 
     def test_weth_to_usdt_swap_compiles(self):
@@ -176,9 +173,7 @@ class TestCurveCryptoSwapCompilation:
 
         result = compiler.compile(intent)
 
-        assert result.status == CompilationStatus.SUCCESS, (
-            f"WETH -> USDT CryptoSwap compilation failed: {result.error}"
-        )
+        assert result.status == CompilationStatus.SUCCESS, f"WETH -> USDT CryptoSwap compilation failed: {result.error}"
         assert result.action_bundle is not None
 
     def test_usdt_to_wbtc_swap_compiles(self):
@@ -195,9 +190,7 @@ class TestCurveCryptoSwapCompilation:
 
         result = compiler.compile(intent)
 
-        assert result.status == CompilationStatus.SUCCESS, (
-            f"USDT -> WBTC CryptoSwap compilation failed: {result.error}"
-        )
+        assert result.status == CompilationStatus.SUCCESS, f"USDT -> WBTC CryptoSwap compilation failed: {result.error}"
         assert result.action_bundle is not None
 
     def test_compiled_swap_targets_tricrypto2_pool(self):
@@ -216,10 +209,7 @@ class TestCurveCryptoSwapCompilation:
         assert result.status == CompilationStatus.SUCCESS
 
         # Last transaction should target the pool (exchange call)
-        swap_txs = [
-            tx for tx in result.transactions
-            if tx.to.lower() == POOL_ADDRESS.lower()
-        ]
+        swap_txs = [tx for tx in result.transactions if tx.to.lower() == POOL_ADDRESS.lower()]
         assert len(swap_txs) > 0, (
             f"No transaction targeting tricrypto2 pool {POOL_ADDRESS}. "
             f"Transactions: {[(tx.to, tx.description) for tx in result.transactions]}"
@@ -269,10 +259,7 @@ class TestCurveCryptoSwapExecution:
 
         swap_amount = Decimal("100")  # 100 USDT
 
-        logger.info(
-            "Test: USDT -> WETH Curve CryptoSwap on Ethereum (tricrypto2)\n"
-            "Pool: %s", POOL_ADDRESS
-        )
+        logger.info("Test: USDT -> WETH Curve CryptoSwap on Ethereum (tricrypto2)\nPool: %s", POOL_ADDRESS)
 
         # --- Layer 4 setup: record balances BEFORE ---
         usdt_before = get_token_balance(web3, usdt_addr, funded_wallet)
@@ -307,18 +294,14 @@ class TestCurveCryptoSwapExecution:
         # --- Layer 2: Execute ---
         execution_result = await orchestrator.execute(compile_result.action_bundle)
         assert execution_result.success, (
-            f"CryptoSwap execution failed: {execution_result.error}\n"
-            "Check tricrypto2 pool address and coin indices."
+            f"CryptoSwap execution failed: {execution_result.error}\nCheck tricrypto2 pool address and coin indices."
         )
 
         # Verify gas usage is within CryptoSwap range (higher than StableSwap)
         gas_checked = False
         for tx_result in execution_result.transaction_results:
             if tx_result.receipt:
-                receipt_dict = (
-                    tx_result.receipt if isinstance(tx_result.receipt, dict)
-                    else tx_result.receipt.to_dict()
-                )
+                receipt_dict = tx_result.receipt if isinstance(tx_result.receipt, dict) else tx_result.receipt.to_dict()
                 gas_used = receipt_dict.get("gasUsed") or receipt_dict.get("gas_used", 0)
                 if isinstance(gas_used, str):
                     gas_used = int(gas_used, 16) if gas_used.startswith("0x") else int(gas_used)
@@ -326,8 +309,7 @@ class TestCurveCryptoSwapExecution:
                 if gas_used > 100_000:
                     gas_checked = True
                     assert gas_used < 550_000, (
-                        f"CryptoSwap gas usage {gas_used} exceeds 550K limit. "
-                        "Possible regression in gas estimate."
+                        f"CryptoSwap gas usage {gas_used} exceeds 550K limit. Possible regression in gas estimate."
                     )
         assert gas_checked, "No transaction with gas > 100K found -- gas regression check did not run"
 
@@ -341,10 +323,7 @@ class TestCurveCryptoSwapExecution:
         for tx_result in execution_result.transaction_results:
             if not tx_result.receipt:
                 continue
-            receipt_dict = (
-                tx_result.receipt if isinstance(tx_result.receipt, dict)
-                else tx_result.receipt.to_dict()
-            )
+            receipt_dict = tx_result.receipt if isinstance(tx_result.receipt, dict) else tx_result.receipt.to_dict()
             parse_result = parser.parse_receipt(receipt_dict)
             assert parse_result is not None, "CurveReceiptParser returned None"
 
@@ -405,8 +384,7 @@ class TestCurveCryptoSwapExecution:
             f"Expected: {expected_usdt_spent} ({swap_amount} USDT), Got: {usdt_spent}"
         )
         assert weth_received > 0, (
-            "WETH balance did not increase after CryptoSwap! "
-            "Check coin indices in tricrypto2 pool config."
+            "WETH balance did not increase after CryptoSwap! Check coin indices in tricrypto2 pool config."
         )
 
         logger.info(
@@ -464,9 +442,7 @@ class TestCurveCryptoSwapExecution:
 
         # --- Layer 2: Execute ---
         execution_result = await orchestrator.execute(compile_result.action_bundle)
-        assert execution_result.success, (
-            f"Reverse CryptoSwap execution failed: {execution_result.error}"
-        )
+        assert execution_result.success, f"Reverse CryptoSwap execution failed: {execution_result.error}"
 
         # --- Layer 3: Parse receipt ---
         parser = CurveReceiptParser(chain=CHAIN_NAME)
@@ -475,10 +451,7 @@ class TestCurveCryptoSwapExecution:
         for tx_result in execution_result.transaction_results:
             if not tx_result.receipt:
                 continue
-            receipt_dict = (
-                tx_result.receipt if isinstance(tx_result.receipt, dict)
-                else tx_result.receipt.to_dict()
-            )
+            receipt_dict = tx_result.receipt if isinstance(tx_result.receipt, dict) else tx_result.receipt.to_dict()
             parse_result = parser.parse_receipt(receipt_dict)
             if parse_result and parse_result.success and parse_result.events:
                 for event in parse_result.events:
@@ -486,9 +459,7 @@ class TestCurveCryptoSwapExecution:
                         swap_event_found = True
                         # Reverse direction: sold_id should be WETH index (2),
                         # bought_id should be USDT index (0)
-                        assert event.data["sold_id"] == 2, (
-                            f"sold_id must be 2 (WETH), got {event.data['sold_id']}"
-                        )
+                        assert event.data["sold_id"] == 2, f"sold_id must be 2 (WETH), got {event.data['sold_id']}"
                         assert event.data["bought_id"] == 0, (
                             f"bought_id must be 0 (USDT), got {event.data['bought_id']}"
                         )
@@ -506,12 +477,9 @@ class TestCurveCryptoSwapExecution:
         expected_weth_spent = int(swap_amount * Decimal(10**18))
 
         assert weth_spent == expected_weth_spent, (
-            f"WETH spent must EXACTLY equal swap amount. "
-            f"Expected: {expected_weth_spent}, Got: {weth_spent}"
+            f"WETH spent must EXACTLY equal swap amount. Expected: {expected_weth_spent}, Got: {weth_spent}"
         )
-        assert usdt_received > 0, (
-            "USDT balance did not increase after reverse CryptoSwap!"
-        )
+        assert usdt_received > 0, "USDT balance did not increase after reverse CryptoSwap!"
 
         logger.info(
             "SUCCESS: Reverse swap %.6f WETH -> %.2f USDT via tricrypto2",

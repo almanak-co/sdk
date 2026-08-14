@@ -92,11 +92,10 @@ class Curve3poolLPConfig:
     chain: str = "ethereum"
     network: str = "anvil"
 
-    # Strategy-specific config.
-    # ``pool`` is the Curve pool nickname registered in the curve adapter's
-    # CURVE_POOLS registry. "3pool" resolves to the canonical Ethereum
-    # DAI/USDC/USDT pool (0xbEbc44782C7dB0a1A60Cb6fe97d0b483032FF1C7).
-    pool: str = "3pool"
+    # Strategy-specific exact deployment identities. These are supplied by
+    # config.json; the SDK has no global Curve pool-name/address catalog.
+    pool: str = ""
+    lp_token: str = ""
 
     # Per-coin deposit amounts (human units), one per pool coin index:
     #   idx0 = DAI (18 dec), idx1 = USDC (6 dec), idx2 = USDT (6 dec)
@@ -132,6 +131,7 @@ class Curve3poolLPConfig:
             "chain": self.chain,
             "network": self.network,
             "pool": self.pool,
+            "lp_token": self.lp_token,
             "amount_dai": str(self.amount_dai),
             "amount_usdc": str(self.amount_usdc),
             "amount_usdt": str(self.amount_usdt),
@@ -195,7 +195,8 @@ class Curve3poolLPStrategy(IntentStrategy[Curve3poolLPConfig]):
 
     Configuration Parameters (from config.json):
     --------------------------------------------
-    - pool: Curve pool nickname (default "3pool")
+    - pool: Exact Curve pool address
+    - lp_token: Exact pool LP-token address
     - amount_dai / amount_usdc / amount_usdt: Per-coin deposit amounts
     - min_position_usd: Minimum total inventory (USD) to open a position
     - force_action: Force "open" or "close" for testing
@@ -203,7 +204,8 @@ class Curve3poolLPStrategy(IntentStrategy[Curve3poolLPConfig]):
     Example Config:
     ---------------
     {
-        "pool": "3pool",
+        "pool": "0x...",
+        "lp_token": "0x...",
         "amount_dai": "100",
         "amount_usdc": "100",
         "amount_usdt": "100",
@@ -217,8 +219,8 @@ class Curve3poolLPStrategy(IntentStrategy[Curve3poolLPConfig]):
 
     # The three coins of Curve 3pool, in pool-coin-index order. This ordering
     # is load-bearing: ``coin_amounts[i]`` maps to pool coin index ``i``, so it
-    # MUST match the registry order (DAI=0, USDC=1, USDT=2) in
-    # ``almanak/connectors/curve/adapter.py`` CURVE_POOLS["ethereum"]["3pool"].
+    # MUST match the deployment binding's verified order (DAI=0, USDC=1,
+    # USDT=2).
     COINS: tuple[str, ...] = ("DAI", "USDC", "USDT")
 
     # =========================================================================
@@ -235,7 +237,7 @@ class Curve3poolLPStrategy(IntentStrategy[Curve3poolLPConfig]):
         """
         super().__init__(*args, **kwargs)
 
-        # Pool nickname resolved by the Curve compiler against CURVE_POOLS.
+        # Exact address resolved live by the Curve compiler.
         self.pool = self.config.pool
 
         # Per-coin deposit amounts, aligned to COINS / pool coin index.
@@ -424,19 +426,10 @@ class Curve3poolLPStrategy(IntentStrategy[Curve3poolLPConfig]):
         )
 
     def _lp_token_address(self) -> str:
-        """Resolve the 3Crv LP token contract address for this pool.
-
-        Reads it from the Curve connector's CURVE_POOLS registry (no on-chain
-        call). Falls back to the canonical Ethereum 3Crv token address if the
-        pool nickname is not found, so teardown can always proceed.
-        """
-        from almanak.connectors.curve.adapter import CURVE_POOLS
-
-        pool_data = CURVE_POOLS.get(self.chain, {}).get(self.pool)
-        if pool_data and pool_data.get("lp_token"):
-            return str(pool_data["lp_token"])
-        # Canonical Ethereum 3Crv LP token.
-        return "0x6c3F90f043a72FA612cbac8115EE7e52BDe6E490"
+        """Return the deployment-supplied 3Crv LP-token identity."""
+        if not self.config.lp_token:
+            raise ValueError("Curve 3pool demo requires config.lp_token; the SDK does not provide pool address aliases")
+        return self.config.lp_token
 
     # =========================================================================
     # LIFECYCLE HOOKS

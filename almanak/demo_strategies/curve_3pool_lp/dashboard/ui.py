@@ -38,7 +38,7 @@ def render_custom_dashboard(
     # (reads portfolio_snapshots via the gateway; no fabricated data).
     render_nav_history_section(deployment_id, default_range="All")
 
-    pool = strategy_config.get("pool", "3pool")
+    pool = strategy_config.get("pool", "not configured")
 
     # Strategy info header
     st.markdown(f"**Deployment ID:** `{deployment_id}`")

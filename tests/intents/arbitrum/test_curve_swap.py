@@ -23,7 +23,6 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.connectors.curve.adapter import CURVE_POOLS
 from almanak.connectors.curve.receipt_parser import CurveEventType, CurveReceiptParser
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents.compiler import CompilationStatus, IntentCompiler, IntentCompilerConfig
@@ -41,73 +40,14 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 CHAIN_NAME = "arbitrum"
-POOL_KEY = "tricrypto"
-
 # Curve tricrypto pool on Arbitrum
 EXPECTED_POOL_ADDRESS = "0x960ea3e3C7FB317332d990873d354E18d7645590"
-
-# Token addresses (coin order: USDT=0, WBTC=1, WETH=2)
-USDT_ADDRESS = "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9"
-WBTC_ADDRESS = "0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f"
-WETH_ADDRESS = "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"
 
 TEST_WALLET = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
 
 
 # =============================================================================
-# Layer 1a: Pool Configuration Tests (No Anvil Required)
-# =============================================================================
-
-
-class TestCurveArbitrumPoolConfig:
-    """Verify tricrypto pool is correctly configured in CURVE_POOLS."""
-
-    @pytest.mark.intent(IntentType.SWAP)
-    def test_arbitrum_in_curve_pools(self):
-        """'arbitrum' chain must have a CURVE_POOLS entry."""
-        assert "arbitrum" in CURVE_POOLS
-
-    @pytest.mark.intent(IntentType.SWAP)
-    def test_tricrypto_pool_present(self):
-        """tricrypto pool must be in CURVE_POOLS['arbitrum']."""
-        assert POOL_KEY in CURVE_POOLS.get("arbitrum", {}), (
-            f"'{POOL_KEY}' not found in CURVE_POOLS['arbitrum']. "
-            f"Found: {list(CURVE_POOLS.get('arbitrum', {}).keys())}"
-        )
-
-    @pytest.mark.intent(IntentType.SWAP)
-    def test_pool_address_correct(self):
-        """Pool address must match deployed tricrypto contract."""
-        pool = CURVE_POOLS["arbitrum"][POOL_KEY]
-        assert pool["address"].lower() == EXPECTED_POOL_ADDRESS.lower()
-
-    @pytest.mark.intent(IntentType.SWAP)
-    def test_pool_type_is_tricrypto(self):
-        """Pool type must be 'tricrypto' (CryptoSwap variant)."""
-        pool = CURVE_POOLS["arbitrum"][POOL_KEY]
-        assert pool["pool_type"] == "tricrypto", (
-            f"Expected tricrypto pool type, got {pool['pool_type']}"
-        )
-
-    @pytest.mark.intent(IntentType.SWAP)
-    def test_pool_has_3_coins(self):
-        """tricrypto is a 3-coin pool: USDT, WBTC, WETH."""
-        pool = CURVE_POOLS["arbitrum"][POOL_KEY]
-        assert pool["n_coins"] == 3
-        assert len(pool["coin_addresses"]) == 3
-
-    @pytest.mark.intent(IntentType.SWAP)
-    def test_pool_coins_order(self):
-        """Coin order must be USDT(0), WBTC(1), WETH(2)."""
-        pool = CURVE_POOLS["arbitrum"][POOL_KEY]
-        coins = pool["coins"]
-        assert coins[0] == "USDT", f"Coin 0 must be USDT, got {coins[0]}"
-        assert coins[1] == "WBTC", f"Coin 1 must be WBTC, got {coins[1]}"
-        assert coins[2] == "WETH", f"Coin 2 must be WETH, got {coins[2]}"
-
-
-# =============================================================================
-# Layer 1b: SwapIntent Compilation Tests (No Anvil Required)
+# Layer 1: SwapIntent Compilation Tests (No Anvil Required)
 # =============================================================================
 
 
@@ -136,9 +76,7 @@ class TestCurveArbitrumSwapCompilation:
 
         result = compiler.compile(intent)
 
-        assert result.status == CompilationStatus.SUCCESS, (
-            f"USDT -> WETH Curve swap compilation failed: {result.error}"
-        )
+        assert result.status == CompilationStatus.SUCCESS, f"USDT -> WETH Curve swap compilation failed: {result.error}"
         assert result.action_bundle is not None
 
     @pytest.mark.intent(IntentType.SWAP)
@@ -156,9 +94,7 @@ class TestCurveArbitrumSwapCompilation:
 
         result = compiler.compile(intent)
 
-        assert result.status == CompilationStatus.SUCCESS, (
-            f"WETH -> USDT Curve swap compilation failed: {result.error}"
-        )
+        assert result.status == CompilationStatus.SUCCESS, f"WETH -> USDT Curve swap compilation failed: {result.error}"
         assert result.action_bundle is not None
 
     @pytest.mark.intent(IntentType.SWAP)
@@ -177,10 +113,7 @@ class TestCurveArbitrumSwapCompilation:
         result = compiler.compile(intent)
         assert result.status == CompilationStatus.SUCCESS
 
-        swap_txs = [
-            tx for tx in result.transactions
-            if tx.to.lower() == EXPECTED_POOL_ADDRESS.lower()
-        ]
+        swap_txs = [tx for tx in result.transactions if tx.to.lower() == EXPECTED_POOL_ADDRESS.lower()]
         assert len(swap_txs) > 0, (
             f"No transaction targeting tricrypto pool {EXPECTED_POOL_ADDRESS}. "
             f"Transactions: {[(tx.to, tx.description) for tx in result.transactions]}"
@@ -265,8 +198,7 @@ class TestCurveArbitrumSwapExecution:
         # --- Layer 2: Execute ---
         execution_result = await orchestrator.execute(compile_result.action_bundle)
         assert execution_result.success, (
-            f"Curve swap execution failed: {execution_result.error}\n"
-            "Check tricrypto pool address and coin indices."
+            f"Curve swap execution failed: {execution_result.error}\nCheck tricrypto pool address and coin indices."
         )
 
         logger.info("Execution success")
@@ -278,10 +210,7 @@ class TestCurveArbitrumSwapExecution:
         for tx_result in execution_result.transaction_results:
             if not tx_result.receipt:
                 continue
-            receipt_dict = (
-                tx_result.receipt if isinstance(tx_result.receipt, dict)
-                else tx_result.receipt.to_dict()
-            )
+            receipt_dict = tx_result.receipt if isinstance(tx_result.receipt, dict) else tx_result.receipt.to_dict()
             parse_result = parser.parse_receipt(receipt_dict)
             assert parse_result is not None, "CurveReceiptParser returned None"
 
@@ -316,11 +245,13 @@ class TestCurveArbitrumSwapExecution:
 
         logger.info(
             "USDT after: %.2f (spent: %.2f)",
-            usdt_after / 10**6, usdt_spent / 10**6,
+            usdt_after / 10**6,
+            usdt_spent / 10**6,
         )
         logger.info(
             "WETH after: %.6f (received: %.6f)",
-            weth_after / 10**18, weth_received / 10**18,
+            weth_after / 10**18,
+            weth_received / 10**18,
         )
 
         assert usdt_spent == expected_usdt_spent, (
@@ -328,8 +259,7 @@ class TestCurveArbitrumSwapExecution:
             f"Expected: {expected_usdt_spent} ({swap_amount} USDT), Got: {usdt_spent}"
         )
         assert weth_received > 0, (
-            "WETH balance did not increase after Curve swap! "
-            "Check coin indices in tricrypto pool config."
+            "WETH balance did not increase after Curve swap! Check coin indices in tricrypto pool config."
         )
 
         logger.info(

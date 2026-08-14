@@ -2695,6 +2695,15 @@ class ZodiacOrchestrator:
         if not protocols or not intent_types:
             return
 
+        # Curve permissions are pool-scoped. Production gets this declaration
+        # from deployment config; this late-binding intent harness has no
+        # strategy config, but it does have the compiler's exact selected pool
+        # as an independently derivable test expectation. Resolve the recorded
+        # intent against the test-only catalog, then require the compiler's
+        # bundle metadata to agree before authorizing anything.
+        if "curve" in {protocol.lower() for protocol in protocols}:
+            config["permission_bindings"] = [_curve_permission_binding_for_bundle(action_bundle, self.chain)]
+
         # Address-bound LP intents intentionally carry no user-supplied token
         # symbols: token0/token1 are authenticated from the pool at compile
         # time. The compiled metadata is therefore the first trustworthy
@@ -2789,6 +2798,96 @@ def _funding_key_for_token_ref(ref: str, chain: str) -> str | None:
         if canonical_chain_name(metadata.chain) == active_chain and metadata.symbol.upper() == stripped.upper():
             candidates.add(metadata.address.lower())
     return next(iter(candidates)) if len(candidates) == 1 else None
+
+
+def _associate_zodiac_source_intent(result: Any, intent: Any) -> None:
+    """Attach a compile input to only the bundle returned for that input."""
+    action_bundle = getattr(result, "action_bundle", None)
+    if action_bundle is not None:
+        action_bundle._zodiac_source_intent = intent
+
+
+def _curve_permission_binding_for_bundle(action_bundle: Any, chain: str) -> dict[str, Any]:
+    """Build a deployment-shaped Curve binding from independent test input.
+
+    ``CURVE_TEST_POOLS`` is deliberately test-only. The production equivalent
+    is the strategy's ``config.permission_bindings`` declaration. The recorder
+    associates each returned bundle with its own source intent, which this
+    helper resolves to one unique fixture. Compiled metadata is then used only
+    to prove that runtime routing selected that independently expected pool.
+    """
+    from almanak.framework.data.tokens.address_resolution import looks_like_evm_address
+    from tests.support.curve_pool_catalog import CURVE_TEST_POOLS
+
+    intent = getattr(action_bundle, "_zodiac_source_intent", None)
+    if intent is None or str(getattr(intent, "protocol", "")).lower() != "curve":
+        raise ValueError("Curve permission admission requires the executing bundle's recorded Curve source intent")
+    fixtures = CURVE_TEST_POOLS.get(chain, {})
+    pool_ref = getattr(intent, "pool", None)
+    if pool_ref is None and isinstance(intent, SwapIntent):
+        swap_params = getattr(intent, "swap_params", None) or {}
+        pool_ref = swap_params.get("pool")
+
+    if isinstance(pool_ref, str) and pool_ref:
+        if looks_like_evm_address(pool_ref):
+            matches = [pool for pool in fixtures.values() if str(pool.get("address", "")).lower() == pool_ref.lower()]
+        else:
+            matches = [pool for name, pool in fixtures.items() if name.lower() == pool_ref.lower()]
+            if not matches and "/" in pool_ref:
+                asset_set = [part for part in pool_ref.split("/") if part]
+                matches = [
+                    pool
+                    for pool in fixtures.values()
+                    if len(pool.get("coins") or []) == len(asset_set)
+                    and all(_curve_test_pool_contains(pool, token) for token in asset_set)
+                ]
+    elif isinstance(intent, SwapIntent):
+        matches = [
+            pool
+            for pool in fixtures.values()
+            if _curve_test_pool_contains(pool, str(intent.from_token))
+            and _curve_test_pool_contains(pool, str(intent.to_token))
+        ]
+    else:
+        matches = []
+
+    if len(matches) != 1:
+        raise ValueError(
+            f"Curve intent harness expected one independently selected test pool on {chain}, found {len(matches)}"
+        )
+    expected_pool = matches[0]
+    expected_address = str(expected_pool["address"])
+
+    metadata = getattr(action_bundle, "metadata", None) or {}
+    compiled_address = metadata.get("pool_address")
+    if not isinstance(compiled_address, str) or not looks_like_evm_address(compiled_address):
+        raise ValueError("Curve intent bundle must expose an exact metadata.pool_address for permission admission")
+    if compiled_address.lower() != expected_address.lower():
+        raise ValueError(
+            f"Curve compiler selected {compiled_address} on {chain}, but the recorded intent independently selects "
+            f"{expected_address}; refusing to authorize the compiler-selected target"
+        )
+
+    coin_addresses = expected_pool.get("coin_addresses")
+    if not isinstance(coin_addresses, list) or len(coin_addresses) < 2:
+        raise ValueError(f"Curve test fixture {expected_address} on {chain} has no ordered coin-address identity")
+    return {
+        "protocol": "curve",
+        "resource_type": "pool",
+        "chain": chain,
+        "address": expected_address,
+        "coin_addresses": list(coin_addresses),
+    }
+
+
+def _curve_test_pool_contains(pool: dict[str, Any], token_ref: str) -> bool:
+    """Match a test intent token reference against native or underlying coins."""
+    value = token_ref.strip()
+    if value.lower().startswith("0x"):
+        candidates = [*(pool.get("coin_addresses") or []), *(pool.get("base_pool_coin_addresses") or [])]
+        return value.lower() in {str(candidate).lower() for candidate in candidates}
+    candidates = [*(pool.get("coins") or []), *(pool.get("base_pool_coins") or [])]
+    return value.upper() in {str(candidate).upper() for candidate in candidates}
 
 
 def _derive_manifest_inputs(

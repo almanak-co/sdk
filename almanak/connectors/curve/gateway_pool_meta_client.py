@@ -1,7 +1,7 @@
 """Framework-side sync bridge for uncurated Curve pool metadata (VIB-5628).
 
 The Curve receipt parser holds no gateway client of its own; on a static
-``CURVE_POOLS`` miss it consults a runner-injected ``pool_meta_lookup``
+an exact pool it consults a runner-injected ``pool_meta_lookup``
 callable to label an uncurated pool's LP legs (coin addresses / symbols /
 pool type). This module builds that callable from the runner's
 ``GatewayClient``, mirroring the Uniswap V4 ``make_sync_pool_key_lookup``

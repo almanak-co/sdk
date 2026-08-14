@@ -14,7 +14,7 @@ NG dynamic-array ``add_liquidity(uint256[],uint256)`` (0xb72df5de) and
 * NG dynamic-array ``AddLiquidity`` / ``RemoveLiquidity`` decode
   (``AddLiquidityDyn`` / ``RemoveLiquidityDyn`` topics),
 * plain int128 ``TokenExchange`` decode on an NG pool,
-* accounting ``coin_symbols`` resolution from the CURVE_POOLS registry entry
+* accounting ``coin_symbols`` resolution from the CURVE_TEST_POOLS registry entry
   (``['USDT', 'frxUSD']``) — the surface the dead am3pool address once nulled
   (VIB-5434),
 * NG "LP token IS the pool" mint/burn Transfer extraction.
@@ -33,7 +33,7 @@ from unittest.mock import patch
 from almanak.connectors.curve.receipt_parser import CurveEventType, CurveReceiptParser
 
 # NG pool contract — also the LP token (StableSwap NG). Matches
-# CURVE_POOLS["polygon"]["frxusd_usdt"]["address"].
+# CURVE_TEST_POOLS["polygon"]["frxusd_usdt"]["address"].
 POOL = "0x5bc930b8f81f4ceee3e3527159c3bdf453bcaae9"
 USDT = "0xc2132d05d31c914a87c6611c10748aeb04b58e8f"
 FRXUSD = "0x80eede496655fb9047dd39d9f418d5483ed600df"

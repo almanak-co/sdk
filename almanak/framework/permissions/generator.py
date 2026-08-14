@@ -155,6 +155,7 @@ def generate_manifest(
     config: dict[str, Any] | None = None,
     rpc_url: str | None = None,
     strict: bool = True,
+    gateway_client: Any = None,
 ) -> PermissionManifest:
     """Generate a Zodiac Roles permission manifest for a strategy.
 
@@ -185,6 +186,9 @@ def generate_manifest(
             config legitimately has registry gaps on some chains): the
             omission is recorded as a manifest warning instead. Never
             silent either way.
+        gateway_client: Preferred gateway transport for connector-owned
+            deployment binding resolution. When absent, ``rpc_url`` remains
+            the compatibility path for CLI admission checks.
 
     Returns:
         Complete permission manifest
@@ -199,17 +203,21 @@ def generate_manifest(
             "Consider adding them to intent_types in @almanak_strategy() explicitly."
         )
 
+    strategy_config = config or {}
+
     # 1. Protocol permissions via compilation-based discovery
     protocol_permissions, discovery_warnings = discover_permissions(
         chain=chain,
         protocols=supported_protocols,
         intent_types=expanded_types,
         rpc_url=rpc_url,
+        config=strategy_config,
+        gateway_client=gateway_client,
     )
     all_warnings.extend(discovery_warnings)
 
     # 2. Token approval permissions from config
-    token_permissions, token_warnings = _extract_token_permissions(chain, config or {}, strict=strict)
+    token_permissions, token_warnings = _extract_token_permissions(chain, strategy_config, strict=strict)
     all_warnings.extend(token_warnings)
 
     # 3. Infrastructure permissions

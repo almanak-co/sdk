@@ -38,6 +38,7 @@ from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 if TYPE_CHECKING:
     from almanak.connectors._strategy_base.pool_data import PoolDataFacet
 
+from almanak.connectors._connector import CONNECTOR_REGISTRY
 from almanak.connectors._strategy_base.concentrated_liquidity_math import Q96
 from almanak.connectors._strategy_base.curve_pool_abi import (
     CURVE_BALANCES_INT128_SELECTOR,
@@ -825,8 +826,8 @@ class CurvePoolReader(UniswapV3PoolPriceReader):
     - **fee_tier**: on-chain ``fee()`` (1e10-scaled) converted to the v3
       1e-6 unit so the field means the same thing across reader families.
 
-    Pool resolution is curated-only (``CURVE_POOLS`` via the connector spec):
-    Curve has no pairwise ``factory.getPool``, so unknown pairs return
+    Pair-to-pool resolution is unavailable without an explicit exact address:
+    Curve has no static ``factory.getPool`` address, so pair-only lookups return
     ``None``. ``fee_tier`` arguments are accepted (total function) and
     ignored — Curve pools are not fee-tier-keyed. ``candidate_pool_keys``
     is ``(0,)``, making ``resolve_best_pool_address`` a single total lookup
@@ -1535,13 +1536,14 @@ class PoolReaderRegistry:
         return POOL_DATA_REGISTRY.supports_from(protocol, facet, PoolDataSource.LIVE_PRICE_READER)
 
     def protocols_for_chain(self, chain: str) -> list[str]:
-        """List protocols that have factory addresses for a given chain.
+        """List protocols whose reader can accept pools on a given chain.
 
         Args:
             chain: Chain name (e.g. "base", "arbitrum").
 
         Returns:
-            List of protocol names with factory support on this chain.
+            List of protocol names with factory/known-pool support, or whose
+            connector declares exact-address reads on this chain.
         """
         chain_lower = chain.lower()
         result = []
@@ -1551,4 +1553,14 @@ class PoolReaderRegistry:
             known_pools = spec.known_pools if spec is not None else getattr(cls, "_known_pools", {})
             if chain_lower in factories or chain_lower in known_pools:
                 result.append(name)
+                continue
+            # An exact-address reader need not publish a pair-to-pool address
+            # table. In that case chain support comes from the connector's
+            # canonical SupportedChainsSpec rather than being inferred from an
+            # address catalogue. Custom readers and specs with resolution data
+            # keep the historical factory/known-pool gate above.
+            if spec is not None and not factories and not known_pools:
+                connector = CONNECTOR_REGISTRY.get(spec.protocol)
+                if connector is not None and chain_lower in connector.supported_chains_for_protocol(name):
+                    result.append(name)
         return sorted(result)

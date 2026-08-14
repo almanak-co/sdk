@@ -22,10 +22,10 @@ from almanak.framework.intents.compiler import (
 ADAPTER_MODULE = "almanak.connectors.curve.adapter"
 CURVE_ADAPTER_CLS = f"{ADAPTER_MODULE}.CurveAdapter"
 CURVE_CONFIG_CLS = f"{ADAPTER_MODULE}.CurveConfig"
-CURVE_POOLS_PATH = f"{ADAPTER_MODULE}.CURVE_POOLS"
+CURVE_POOLS_PATH = "almanak.connectors.curve.compiler._deployment_pool_catalog"
 CURVE_ADDRESSES_PATH = f"{ADAPTER_MODULE}.CURVE_ADDRESSES"
 
-# Minimal CURVE_POOLS fixture — uses USDC/USDT/DAI which exist in the token registry.
+# Minimal CURVE_TEST_POOLS fixture — uses USDC/USDT/DAI which exist in the token registry.
 # FRAX is not in the default registry, so we avoid it for unit tests.
 MOCK_CURVE_POOLS = {
     "ethereum": {
@@ -53,7 +53,7 @@ MOCK_CURVE_POOLS = {
             "n_coins": 3,
         },
         # Real registered 2-coin pool — coin/address combo copied verbatim from
-        # CURVE_POOLS["ethereum"]["steth"], so the asset-set resolver tests
+        # CURVE_TEST_POOLS["ethereum"]["steth"], so the asset-set resolver tests
         # exercise a genuine prod pool (not a relabeled address).
         "steth": {
             "address": "0xDC24316b9AE028F1497c275EB9192a3Ea0f67022",
@@ -165,7 +165,7 @@ def compiler():
 class TestCurveSwap:
     """Tests for connector-owned Curve swap compilation."""
 
-    @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
+    @patch(CURVE_POOLS_PATH, new=lambda: MOCK_CURVE_POOLS)
     @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
     @patch(CURVE_ADAPTER_CLS)
     @patch(CURVE_CONFIG_CLS)
@@ -200,7 +200,7 @@ class TestCurveSwap:
         assert result.action_bundle.metadata["expected_output_human"] == "1000"
         mock_adapter.swap.assert_called_once()
 
-    @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
+    @patch(CURVE_POOLS_PATH, new=lambda: MOCK_CURVE_POOLS)
     @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
     @patch(CURVE_ADAPTER_CLS)
     @patch(CURVE_CONFIG_CLS)
@@ -227,7 +227,7 @@ class TestCurveSwap:
         # amount_in should be 500 (the direct token amount)
         assert call_kwargs.kwargs["amount_in"] == Decimal("500")
 
-    @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
+    @patch(CURVE_POOLS_PATH, new=lambda: MOCK_CURVE_POOLS)
     @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
     @patch(CURVE_ADAPTER_CLS)
     @patch(CURVE_CONFIG_CLS)
@@ -257,7 +257,7 @@ class TestCurveSwap:
         assert "non-positive amount_out_estimate" in result.error
         assert "no real slippage floor" in result.error
 
-    @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
+    @patch(CURVE_POOLS_PATH, new=lambda: MOCK_CURVE_POOLS)
     @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
     @patch(CURVE_ADAPTER_CLS)
     @patch(CURVE_CONFIG_CLS)
@@ -287,7 +287,7 @@ class TestCurveSwap:
         assert result.status == CompilationStatus.FAILED
         assert "non-positive amount_out_estimate" in result.error
 
-    @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
+    @patch(CURVE_POOLS_PATH, new=lambda: MOCK_CURVE_POOLS)
     @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
     def test_swap_no_pool_found_returns_failed(self, compiler):
         """Swap fails with helpful error when no pool matches the token pair."""
@@ -304,7 +304,7 @@ class TestCurveSwap:
         assert "No Curve pool found" in result.error
         assert "WETH" in result.error or "WBTC" in result.error
 
-    @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
+    @patch(CURVE_POOLS_PATH, new=lambda: MOCK_CURVE_POOLS)
     @patch(CURVE_ADDRESSES_PATH, {})
     def test_swap_unsupported_chain_returns_failed(self):
         """Swap fails when chain is not supported by Curve."""
@@ -323,7 +323,7 @@ class TestCurveSwap:
         assert result.status == CompilationStatus.FAILED
         assert "Curve is not supported on avalanche" in result.error
 
-    @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
+    @patch(CURVE_POOLS_PATH, new=lambda: MOCK_CURVE_POOLS)
     @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
     @patch(CURVE_ADAPTER_CLS)
     @patch(CURVE_CONFIG_CLS)
@@ -354,7 +354,7 @@ class TestCurveSwap:
 class TestCurveLPOpen:
     """Tests for connector-owned Curve LP open compilation."""
 
-    @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
+    @patch(CURVE_POOLS_PATH, new=lambda: MOCK_CURVE_POOLS)
     @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
     @patch(CURVE_ADAPTER_CLS)
     @patch(CURVE_CONFIG_CLS)
@@ -381,7 +381,7 @@ class TestCurveLPOpen:
         assert result.action_bundle.metadata["protocol"] == "curve"
         mock_adapter.add_liquidity.assert_called_once()
 
-    @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
+    @patch(CURVE_POOLS_PATH, new=lambda: MOCK_CURVE_POOLS)
     @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
     @patch(CURVE_ADAPTER_CLS)
     @patch(CURVE_CONFIG_CLS)
@@ -405,7 +405,7 @@ class TestCurveLPOpen:
         assert result.status == CompilationStatus.SUCCESS
         assert result.action_bundle.metadata["pool_name"] == "usdc_usdt"
 
-    @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
+    @patch(CURVE_POOLS_PATH, new=lambda: MOCK_CURVE_POOLS)
     @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
     @patch(CURVE_ADAPTER_CLS)
     @patch(CURVE_CONFIG_CLS)
@@ -432,7 +432,7 @@ class TestCurveLPOpen:
         assert len(amounts) == 3  # padded to n_coins=3
         assert amounts[2] == Decimal("0")  # third coin = 0
 
-    @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
+    @patch(CURVE_POOLS_PATH, new=lambda: MOCK_CURVE_POOLS)
     @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
     def test_lp_open_unknown_pool_returns_failed(self, compiler):
         """LP open fails with helpful error for unknown pool."""
@@ -465,7 +465,7 @@ class TestCurveLPAssetSetResolver:
     resolver.
     """
 
-    @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
+    @patch(CURVE_POOLS_PATH, new=lambda: MOCK_CURVE_POOLS)
     @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
     @patch(CURVE_ADAPTER_CLS)
     @patch(CURVE_CONFIG_CLS)
@@ -473,7 +473,7 @@ class TestCurveLPAssetSetResolver:
         """``ETH/stETH`` resolves to the real 2-coin ``steth`` pool (not "Unknown").
 
         Uses a genuine registered pool (coin/address combo copied verbatim from
-        the prod CURVE_POOLS), so the 2-coin acceptance case is a real one.
+        the prod CURVE_TEST_POOLS), so the 2-coin acceptance case is a real one.
         """
         mock_adapter = MagicMock()
         mock_adapter.add_liquidity.return_value = _make_mock_liq_result(success=True)
@@ -494,7 +494,7 @@ class TestCurveLPAssetSetResolver:
         assert result.action_bundle.metadata["pool_name"] == "steth"
         assert result.action_bundle.metadata["pool_address"] == STETH_POOL
 
-    @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
+    @patch(CURVE_POOLS_PATH, new=lambda: MOCK_CURVE_POOLS)
     @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
     @patch(CURVE_ADAPTER_CLS)
     @patch(CURVE_CONFIG_CLS)
@@ -523,7 +523,7 @@ class TestCurveLPAssetSetResolver:
         assert result.action_bundle.metadata["pool_name"] == "3pool"
         assert result.action_bundle.metadata["pool_address"] == THREEPOOL
 
-    @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
+    @patch(CURVE_POOLS_PATH, new=lambda: MOCK_CURVE_POOLS)
     @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
     @patch(CURVE_ADAPTER_CLS)
     @patch(CURVE_CONFIG_CLS)
@@ -591,7 +591,7 @@ class TestCurveLPAssetSetResolver:
         assert event.token0 == "", f"asset-set must not leak token0; got {event.token0!r}"
         assert event.token1 == "", f"asset-set must not leak token1; got {event.token1!r}"
 
-    @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
+    @patch(CURVE_POOLS_PATH, new=lambda: MOCK_CURVE_POOLS)
     @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
     @patch(CURVE_ADAPTER_CLS)
     @patch(CURVE_CONFIG_CLS)
@@ -615,7 +615,7 @@ class TestCurveLPAssetSetResolver:
         assert result.status == CompilationStatus.SUCCESS, result.error
         assert result.action_bundle.metadata["pool_name"] == "3pool"
 
-    @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
+    @patch(CURVE_POOLS_PATH, new=lambda: MOCK_CURVE_POOLS)
     @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
     # Pin the STATIC resolver contract: disable the VIB-5716 dynamic pair lane,
     # which would otherwise reach the live MetaRegistry whenever the test
@@ -644,7 +644,7 @@ class TestCurveLPAssetSetResolver:
         # Helpful: lists each pool's asset set so the author can self-correct.
         assert "asset sets" in result.error
 
-    @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
+    @patch(CURVE_POOLS_PATH, new=lambda: MOCK_CURVE_POOLS)
     @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
     # Static-resolver contract only — see test_lp_open_unknown_asset_set_errors_clearly.
     @patch("almanak.connectors.curve.compiler._resolve_pair_pool_for_open", new=lambda ctx, intent: None)
@@ -668,7 +668,7 @@ class TestCurveLPAssetSetResolver:
         assert result.status == CompilationStatus.FAILED
         assert "Unknown Curve pool" in result.error
 
-    @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
+    @patch(CURVE_POOLS_PATH, new=lambda: MOCK_CURVE_POOLS)
     @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
     @patch(CURVE_ADAPTER_CLS)
     @patch(CURVE_CONFIG_CLS)
@@ -717,7 +717,7 @@ class TestCurveLPAssetSetResolver:
             }
         }
 
-        with patch(CURVE_POOLS_PATH, ambiguous_pools), patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES):
+        with patch(CURVE_POOLS_PATH, new=lambda: ambiguous_pools), patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES):
             intent = LPOpenIntent(
                 pool="USDC/USDT",
                 amount0=Decimal("500"),
@@ -746,7 +746,7 @@ class TestCurveLPAssetSetResolver:
 class TestCurveLPClose:
     """Tests for connector-owned Curve LP close compilation."""
 
-    @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
+    @patch(CURVE_POOLS_PATH, new=lambda: MOCK_CURVE_POOLS)
     @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
     @patch(CURVE_ADAPTER_CLS)
     @patch(CURVE_CONFIG_CLS)
@@ -774,7 +774,7 @@ class TestCurveLPClose:
             slippage_bps=50,
         )
 
-    @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
+    @patch(CURVE_POOLS_PATH, new=lambda: MOCK_CURVE_POOLS)
     @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
     @patch(CURVE_ADAPTER_CLS)
     @patch(CURVE_CONFIG_CLS)
@@ -807,7 +807,7 @@ class TestCurveLPClose:
         assert metadata["min_amounts_raw"] == ["5193789181387575390167", "528468700"]
         assert "mirrors the pool's current reserve composition" in metadata["close_shape_note"]
 
-    @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
+    @patch(CURVE_POOLS_PATH, new=lambda: MOCK_CURVE_POOLS)
     @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
     @patch(CURVE_ADAPTER_CLS)
     @patch(CURVE_CONFIG_CLS)
@@ -841,7 +841,7 @@ class TestCurveLPClose:
         assert "close_shape_note" not in metadata
         assert "min_amounts_raw" not in metadata
 
-    @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
+    @patch(CURVE_POOLS_PATH, new=lambda: MOCK_CURVE_POOLS)
     @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
     def test_lp_close_invalid_position_id_returns_failed(self, compiler):
         """LP close fails when position_id is not a valid decimal amount."""
@@ -857,7 +857,7 @@ class TestCurveLPClose:
         assert "Invalid position_id" in result.error
         assert "not_a_number" in result.error
 
-    @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
+    @patch(CURVE_POOLS_PATH, new=lambda: MOCK_CURVE_POOLS)
     @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
     def test_lp_close_missing_pool_returns_failed(self, compiler):
         """LP close fails when pool is not provided."""
@@ -872,7 +872,7 @@ class TestCurveLPClose:
         assert result.status == CompilationStatus.FAILED
         assert "intent.pool must be set" in result.error
 
-    @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
+    @patch(CURVE_POOLS_PATH, new=lambda: MOCK_CURVE_POOLS)
     @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
     @patch(CURVE_ADAPTER_CLS)
     @patch(CURVE_CONFIG_CLS)
@@ -893,7 +893,7 @@ class TestCurveLPClose:
         assert result.status == CompilationStatus.FAILED
         assert "slippage exceeded" in result.error
 
-    @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
+    @patch(CURVE_POOLS_PATH, new=lambda: MOCK_CURVE_POOLS)
     @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
     def test_lp_close_zero_balance_returns_no_op(self, compiler):
         """LP close returns no_op ActionBundle when on-chain LP balance is zero (VIB-3668).
@@ -935,7 +935,7 @@ class TestCurveLPClose:
         assert result.status == CompilationStatus.FAILED
         assert "Curve is not supported on avalanche" in result.error
 
-    @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
+    @patch(CURVE_POOLS_PATH, new=lambda: MOCK_CURVE_POOLS)
     @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
     def test_lp_close_unknown_pool_returns_failed(self, compiler):
         """LP close fails when the pool is neither a known name nor a known address."""
@@ -950,7 +950,7 @@ class TestCurveLPClose:
         assert result.status == CompilationStatus.FAILED
         assert "Unknown Curve pool" in result.error
 
-    @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
+    @patch(CURVE_POOLS_PATH, new=lambda: MOCK_CURVE_POOLS)
     @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
     @patch(CURVE_ADAPTER_CLS)
     @patch(CURVE_CONFIG_CLS)
@@ -974,7 +974,7 @@ class TestCurveLPClose:
 
     @patch(
         CURVE_POOLS_PATH,
-        {
+        new=lambda: {
             "ethereum": {
                 "nolp_pool": {
                     "address": USDC_USDT_POOL,
@@ -995,7 +995,7 @@ class TestCurveLPClose:
         assert result.status == CompilationStatus.FAILED
         assert "missing 'lp_token'" in result.error
 
-    @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
+    @patch(CURVE_POOLS_PATH, new=lambda: MOCK_CURVE_POOLS)
     @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
     def test_lp_close_position_id_lp_token_mismatch_returns_failed(self, compiler):
         """LP close refuses when an address-form position_id != the pool's LP token."""
@@ -1008,7 +1008,7 @@ class TestCurveLPClose:
         assert result.status == CompilationStatus.FAILED
         assert "does not match" in result.error
 
-    @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
+    @patch(CURVE_POOLS_PATH, new=lambda: MOCK_CURVE_POOLS)
     @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
     def test_lp_close_balance_query_failure_returns_failed(self, compiler):
         """Address-form position_id with an unqueryable balance fails closed."""
@@ -1022,7 +1022,7 @@ class TestCurveLPClose:
         assert result.status == CompilationStatus.FAILED
         assert "Failed to query LP token balance" in result.error
 
-    @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
+    @patch(CURVE_POOLS_PATH, new=lambda: MOCK_CURVE_POOLS)
     @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
     def test_lp_close_unresolvable_lp_token_decimals_returns_failed(self, compiler):
         """Address-form position_id whose LP token decimals can't be resolved fails closed."""
@@ -1037,7 +1037,7 @@ class TestCurveLPClose:
         assert result.status == CompilationStatus.FAILED
         assert "Could not resolve decimals" in result.error
 
-    @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
+    @patch(CURVE_POOLS_PATH, new=lambda: MOCK_CURVE_POOLS)
     @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
     @patch(CURVE_ADAPTER_CLS)
     @patch(CURVE_CONFIG_CLS)
@@ -1063,7 +1063,7 @@ class TestCurveLPClose:
             slippage_bps=50,
         )
 
-    @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
+    @patch(CURVE_POOLS_PATH, new=lambda: MOCK_CURVE_POOLS)
     @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
     @patch(CURVE_ADAPTER_CLS)
     @patch(CURVE_CONFIG_CLS)

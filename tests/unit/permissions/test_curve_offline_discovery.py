@@ -20,12 +20,14 @@ from __future__ import annotations
 
 import pytest
 
-from almanak.connectors.curve.adapter import (
+from almanak.framework.permissions.discovery import discover_permissions
+from almanak.framework.permissions.hints import get_permission_hints
+from tests.support.curve_adapter import (
     ADD_LIQUIDITY_2_SELECTOR,
     ADD_LIQUIDITY_3_SELECTOR,
     ADD_LIQUIDITY_4_SELECTOR,
     ADD_LIQUIDITY_DYN_SELECTOR,
-    CURVE_POOLS,
+    CURVE_TEST_POOLS,
     REMOVE_LIQUIDITY_2_SELECTOR,
     REMOVE_LIQUIDITY_3_SELECTOR,
     REMOVE_LIQUIDITY_4_SELECTOR,
@@ -34,17 +36,15 @@ from almanak.connectors.curve.adapter import (
     CurveConfig,
     PoolType,
 )
-from almanak.framework.permissions.discovery import discover_permissions
-from almanak.framework.permissions.hints import get_permission_hints
 
-CURVE_CHAINS = sorted(CURVE_POOLS)
+CURVE_CHAINS = sorted(CURVE_TEST_POOLS)
 
 # Chains whose registry currently carries a volatile-family pool. Derived, not
 # typed, so adding/removing a pool cannot leave the per-family assertion below
 # silently unexercised.
 _CHAINS_WITH_VOLATILE_POOLS = {
     chain
-    for chain, pools in CURVE_POOLS.items()
+    for chain, pools in CURVE_TEST_POOLS.items()
     if any(p.get("pool_type") in {PoolType.CRYPTOSWAP.value, PoolType.TRICRYPTO.value} for p in pools.values())
 }
 LP_INTENTS = ["LP_OPEN", "LP_CLOSE"]
@@ -88,7 +88,7 @@ class _NoNetwork:
             self.calls.append(f"{method} {url}")
             raise AssertionError(
                 f"Permission discovery made a network call: {method} {url}. "
-                "The curve manifest must be a pure function of CURVE_POOLS "
+                "The curve manifest must be a pure function of CURVE_TEST_POOLS "
                 "(VIB-6046 D5) — a live read makes it depend on RPC weather."
             )
 
@@ -162,7 +162,7 @@ class TestBothAbiVariantsAuthorised:
 
         checked_stableswap = 0
         checked_volatile = 0
-        for name, pool in CURVE_POOLS[chain].items():
+        for name, pool in CURVE_TEST_POOLS[chain].items():
             selectors = by_target.get(pool["address"].lower())
             assert selectors, f"{chain}/{name}: pool not authorised at all"
 
@@ -237,7 +237,7 @@ class TestDiscoveryFlagsAreNotReachableFromProduction:
     def test_fail_closed_guards_still_refuse_without_the_flag(self) -> None:
         """The guards were not relaxed — only bypassed under discovery."""
         chain = "arbitrum"
-        tricrypto = CURVE_POOLS[chain].get("tricrypto")
+        tricrypto = CURVE_TEST_POOLS[chain].get("tricrypto")
         if tricrypto is None:  # pragma: no cover - registry shape guard
             pytest.skip("no tricrypto pool registered on arbitrum")
 
@@ -252,7 +252,7 @@ class TestDiscoveryFlagsAreNotReachableFromProduction:
     def test_discovery_flag_makes_the_same_call_succeed(self) -> None:
         """Same input, discovery flag on -> a positive bound instead of a refusal."""
         chain = "arbitrum"
-        tricrypto = CURVE_POOLS[chain].get("tricrypto")
+        tricrypto = CURVE_TEST_POOLS[chain].get("tricrypto")
         if tricrypto is None:  # pragma: no cover - registry shape guard
             pytest.skip("no tricrypto pool registered on arbitrum")
 

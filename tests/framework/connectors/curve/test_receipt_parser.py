@@ -7,6 +7,7 @@ from almanak.connectors.curve.receipt_parser import (
     CurveEventType,
     CurveReceiptParser,
 )
+from tests.support.curve_pool_catalog import curve_test_metadata
 
 # Test data
 POOL_ADDRESS = "0xbebc44782c7db0a1a60cb6fe97d0b483032ff1c7"
@@ -337,7 +338,7 @@ class TestCurvePrimitiveMoneyLegs:
     USDT (idx 2, 6dp), so the amounts double as a decimals-scaling check.
     """
 
-    # Ethereum 3pool (matches CURVE_POOLS["ethereum"]["3pool"]["address"]).
+    # Ethereum 3pool exact-address fixture.
     POOL = "0xbEbc44782C7dB0a1A60Cb6fe97d0b483032FF1C7"
     PROVIDER = "0x742d35cc6634c0532925a3b844bc454e4438f44e"
 
@@ -416,7 +417,7 @@ class TestCurvePrimitiveMoneyLegs:
         assert parser.extract_primitive_money_legs(receipt) is None
 
     def test_unknown_pool_returns_none(self):
-        """An AddLiquidity from a pool absent from CURVE_POOLS yields no legs.
+        """An AddLiquidity unresolved by the metadata lookup yields no legs.
 
         Without the pool-coin address map we cannot bind an amount to the coin it
         funds, so the parser returns None and the legacy two-slot path is used.
@@ -429,33 +430,24 @@ class TestCurvePrimitiveMoneyLegs:
         receipt = {"status": 1, "transactionHash": "0x" + "ef" * 32, "logs": [log]}
         assert parser.extract_primitive_money_legs(receipt) is None
 
-    def test_funded_amount_beyond_known_coins_falls_back_to_legacy(self, monkeypatch):
+    def test_funded_amount_beyond_known_coins_falls_back_to_legacy(self):
         """A funded ``token_amounts`` slot with no bound pool coin → legacy fallback.
 
-        Guards a stale / truncated ``CURVE_POOLS.coin_addresses`` (fewer coins than
-        the pool actually has): the funded coin at the unbound index must NOT be
-        silently dropped from the declared legs. Since declared legs bypass the
-        legacy path, the parser returns ``None`` so the legacy two-slot extraction
-        runs instead of declaring a lossy subset.
+        Guards a stale / truncated metadata response (fewer coins than the pool
+        actually has): the funded coin at the unbound index must NOT be silently
+        dropped from the declared legs. Since declared legs bypass the legacy
+        path, the parser returns ``None`` so the legacy two-slot extraction runs
+        instead of declaring a lossy subset.
         """
-        from almanak.connectors.curve import adapter
-
-        # Truncate 3pool to its first TWO coins (DAI, USDC) — drop USDT (idx 2).
-        pools = adapter.CURVE_POOLS
-        truncated = {
-            chain: {
-                name: (
-                    {**data, "coin_addresses": list(data.get("coin_addresses", []))[:2]}
-                    if str(data.get("address", "")).lower() == self.POOL.lower()
-                    else data
-                )
-                for name, data in chain_pools.items()
-            }
-            for chain, chain_pools in pools.items()
-        }
-        monkeypatch.setattr(adapter, "CURVE_POOLS", truncated)
-
-        parser = CurveReceiptParser(chain="ethereum")
+        full = curve_test_metadata("ethereum", self.POOL)
+        assert full is not None
+        truncated = SimpleNamespace(
+            coin_addresses=full.coin_addresses[:2],
+            coin_symbols=full.coin_symbols[:2],
+            coin_decimals=full.coin_decimals[:2],
+            pool_type=full.pool_type,
+        )
+        parser = CurveReceiptParser(chain="ethereum", pool_meta_lookup=lambda *_args: truncated)
         # USDT (idx 2) is funded but unbound to a known coin → fall back to legacy.
         assert parser.extract_primitive_money_legs(self._receipt([0, 0, 50_000_000])) is None
 

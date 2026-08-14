@@ -44,7 +44,6 @@ if TYPE_CHECKING:
     from .adapter import (
         CURVE_ADDRESSES,
         CURVE_GAS_ESTIMATES,
-        CURVE_POOLS,
         CurveAdapter,
         CurveConfig,
         LiquidityResult,
@@ -53,6 +52,7 @@ if TYPE_CHECKING:
         SwapResult,
         TransactionData,
     )
+    from .pool_binding import CurvePoolPermissionBinding
     from .receipt_parser import (
         EVENT_TOPICS,
         TOPIC_TO_EVENT,
@@ -69,9 +69,9 @@ __all__ = [
     "AddLiquidityEventData",
     "CURVE_ADDRESSES",
     "CURVE_GAS_ESTIMATES",
-    "CURVE_POOLS",
     "CurveAdapter",
     "CurveConfig",
+    "CurvePoolPermissionBinding",
     "CurveEvent",
     "CurveEventType",
     "CurveReceiptParser",
@@ -85,15 +85,16 @@ __all__ = [
     "SwapResult",
     "TOPIC_TO_EVENT",
     "TransactionData",
+    "resolve_pool_binding",
 ]
 
 _LAZY: dict[str, tuple[str, str]] = {
     "AddLiquidityEventData": (".receipt_parser", "AddLiquidityEventData"),
     "CURVE_ADDRESSES": (".adapter", "CURVE_ADDRESSES"),
     "CURVE_GAS_ESTIMATES": (".adapter", "CURVE_GAS_ESTIMATES"),
-    "CURVE_POOLS": (".adapter", "CURVE_POOLS"),
     "CurveAdapter": (".adapter", "CurveAdapter"),
     "CurveConfig": (".adapter", "CurveConfig"),
+    "CurvePoolPermissionBinding": (".pool_binding", "CurvePoolPermissionBinding"),
     "CurveEvent": (".receipt_parser", "CurveEvent"),
     "CurveEventType": (".receipt_parser", "CurveEventType"),
     "CurveReceiptParser": (".receipt_parser", "CurveReceiptParser"),
@@ -107,6 +108,7 @@ _LAZY: dict[str, tuple[str, str]] = {
     "SwapResult": (".adapter", "SwapResult"),
     "TOPIC_TO_EVENT": (".receipt_parser", "TOPIC_TO_EVENT"),
     "TransactionData": (".adapter", "TransactionData"),
+    "resolve_pool_binding": (".pool_binding", "resolve_pool_binding"),
 }
 
 _registered = False

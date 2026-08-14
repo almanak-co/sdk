@@ -20,6 +20,8 @@ import pytest
 from almanak.connectors._strategy_base import vault_post_condition as vpc
 from almanak.connectors._strategy_base.fungible_lp_post_condition import (
     _LP_TOKEN_DUST_WEI,
+)
+from almanak.connectors._strategy_base.fungible_lp_post_condition import (
     fungible_lp_teardown_post_condition as lp_hook,
 )
 from almanak.connectors._strategy_base.teardown_post_condition import get_teardown_post_condition
@@ -219,24 +221,24 @@ def test_curve_pool_table_lp_tokens_are_erc20_addresses_not_pools():
     """Drift guard for the ``fungible_lp`` teardown invariant (pr-auditor #3329).
 
     The verifier reads ``balanceOf`` on the LP-token address a position carries;
-    curve positions source that from ``CURVE_POOLS[chain][pool]['lp_token']``.
+    curve positions source that from ``CURVE_TEST_POOLS[chain][pool]['lp_token']``.
     Every entry must be a valid ERC-20 address, and for the legacy pools where
     pool != LP token (3pool/3Crv is the canonical case) the two must differ —
     a table edit that collapses them would make the verifier read the POOL
     contract and fabricate a false CHAIN_VERIFIED.
     """
     from almanak.connectors._strategy_base.vault_post_condition import _is_evm_address
-    from almanak.connectors.curve.adapter import CURVE_POOLS
+    from tests.support.curve_adapter import CURVE_TEST_POOLS
 
     checked = 0
-    for chain, pools in CURVE_POOLS.items():
+    for chain, pools in CURVE_TEST_POOLS.items():
         for name, meta in pools.items():
             lp_token = meta.get("lp_token")
             assert _is_evm_address(str(lp_token)), f"{chain}/{name}: lp_token {lp_token!r} is not an EVM address"
             checked += 1
     assert checked > 0
     # The canonical legacy split that motivates the invariant.
-    threepool = CURVE_POOLS["ethereum"]["3pool"]
+    threepool = CURVE_TEST_POOLS["ethereum"]["3pool"]
     assert threepool["lp_token"].lower() != threepool["address"].lower()
     assert threepool["lp_token"].lower() == _CURVE_3CRV_LOWER
 

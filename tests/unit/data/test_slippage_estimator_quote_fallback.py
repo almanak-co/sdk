@@ -148,24 +148,21 @@ def test_curve_with_quote_fallback_returns_estimate():
     assert Decimal(estimate.price_impact_bps) / Decimal("10000") == Decimal("0.001")
 
 
-def test_curve_pool_resolution_does_not_hijack_quote_fallback():
-    """PR #3204 (codex P1): with the Curve pool reader manifest registered AND
-    a TokenResolver on the pool-reader registry (the live builder wiring), the
-    curated Curve 2pool resolves for USDC.e/USDT on arbitrum. That pool must
-    NOT be fed into the V3 tick-walk lane (its PoolPrice has tick=None) —
-    protocol='curve' still routes through the connector swap-quote fallback.
-    Without the tick-liquidity capability gate this exact call regressed back to the
-    permanent-HOLD DataUnavailableError this file exists to prevent.
+def test_curve_catalog_free_resolution_uses_quote_fallback():
+    """Curve pair lookup stays absent after removing the SDK-wide catalog.
+
+    A deployment-selected exact pool belongs to the Curve connector's quote
+    path, not the generic V3 pool reader. The connector quote fallback must
+    therefore remain usable when pair-only pool resolution returns ``None``.
     """
     pool_registry = PoolReaderRegistry(
         rpc_call=lambda *a: b"\x00" * 32,
         token_resolver=_StubRegistryTokenResolver(),
     )
-    # Guard the guard: with the resolver wired, the Curve reader DOES resolve
-    # the curated pool — the estimator must skip it by connector capability, not
-    # accidentally by failed resolution.
+    # No exact deployment pool was supplied, so pair-only discovery cannot
+    # nominate a Curve target.
     curve_reader = pool_registry.get_reader("arbitrum", "curve")
-    assert curve_reader.resolve_pool_address("USDC.e", "USDT", "arbitrum") is not None
+    assert curve_reader.resolve_pool_address("USDC.e", "USDT", "arbitrum") is None
 
     quote_registry = _FakeSwapQuoteRegistry(registered=True, result=_FakeQuoteResult(amount_out=4_995_000))
     est = _estimator(

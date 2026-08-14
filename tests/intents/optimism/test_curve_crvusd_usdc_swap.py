@@ -4,7 +4,7 @@ Tests the SwapIntent -> Compile -> Execute -> Parse -> Verify flow for
 Curve Finance's crvUSD/USDC StableSwap NG pool on Optimism.
 
 Background:
-    The existing CURVE_POOLS["optimism"]["3pool"] uses USDC.e (bridged),
+    The existing CURVE_TEST_POOLS["optimism"]["3pool"] uses USDC.e (bridged),
     not native USDC. Strategy authors on Optimism with native USDC had no
     Curve pool to swap into crvUSD. VIB-1587 adds the crvusd_usdc pool
     (StableSwap NG, 0x03771e24...) which contains native USDC.
@@ -23,10 +23,10 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.connectors.curve.adapter import CURVE_POOLS
 from almanak.framework.intents.compiler import CompilationStatus, IntentCompiler, IntentCompilerConfig
 from almanak.framework.intents.vocabulary import IntentType, SwapIntent
 from tests.intents.conftest import CHAIN_CONFIGS, get_token_balance
+from tests.support.curve_adapter import CURVE_TEST_POOLS
 
 # =============================================================================
 # Test Configuration
@@ -58,37 +58,34 @@ def _is_anvil_running(url: str = ANVIL_URL) -> bool:
 
 
 class TestCurveOptimismPoolConfig:
-    """Verify crvusd_usdc pool is correctly configured in CURVE_POOLS."""
+    """Verify crvusd_usdc pool is correctly configured in CURVE_TEST_POOLS."""
 
     @pytest.mark.intent(IntentType.SWAP)
     def test_optimism_in_curve_pools(self):
-        """'optimism' chain must have a CURVE_POOLS entry."""
-        assert "optimism" in CURVE_POOLS, (
-            "'optimism' not found in CURVE_POOLS. "
-            "Add CURVE_POOLS['optimism'] with at least the crvusd_usdc pool."
+        """'optimism' chain must have a CURVE_TEST_POOLS entry."""
+        assert "optimism" in CURVE_TEST_POOLS, (
+            "'optimism' not found in CURVE_TEST_POOLS. Add CURVE_TEST_POOLS['optimism'] with at least the crvusd_usdc pool."
         )
 
     @pytest.mark.intent(IntentType.SWAP)
     def test_crvusd_usdc_pool_present(self):
-        """crvusd_usdc pool must be in CURVE_POOLS['optimism']."""
-        assert POOL_KEY in CURVE_POOLS.get("optimism", {}), (
-            f"'{POOL_KEY}' not found in CURVE_POOLS['optimism']. "
-            f"Found: {list(CURVE_POOLS.get('optimism', {}).keys())}"
+        """crvusd_usdc pool must be in CURVE_TEST_POOLS['optimism']."""
+        assert POOL_KEY in CURVE_TEST_POOLS.get("optimism", {}), (
+            f"'{POOL_KEY}' not found in CURVE_TEST_POOLS['optimism']. Found: {list(CURVE_TEST_POOLS.get('optimism', {}).keys())}"
         )
 
     @pytest.mark.intent(IntentType.SWAP)
     def test_pool_address_correct(self):
         """Pool address must match deployed StableSwap NG contract."""
-        pool = CURVE_POOLS["optimism"][POOL_KEY]
+        pool = CURVE_TEST_POOLS["optimism"][POOL_KEY]
         assert pool["address"].lower() == EXPECTED_POOL_ADDRESS.lower(), (
-            f"Pool address mismatch: got {pool['address']}, "
-            f"expected {EXPECTED_POOL_ADDRESS}"
+            f"Pool address mismatch: got {pool['address']}, expected {EXPECTED_POOL_ADDRESS}"
         )
 
     @pytest.mark.intent(IntentType.SWAP)
     def test_pool_contains_native_usdc(self):
         """Pool coin_addresses must include native USDC (not USDC.e)."""
-        pool = CURVE_POOLS["optimism"][POOL_KEY]
+        pool = CURVE_TEST_POOLS["optimism"][POOL_KEY]
         addresses_lower = [a.lower() for a in pool["coin_addresses"]]
         assert USDC_ADDRESS.lower() in addresses_lower, (
             f"Native USDC ({USDC_ADDRESS}) not found in pool coin_addresses: "
@@ -98,23 +95,22 @@ class TestCurveOptimismPoolConfig:
     @pytest.mark.intent(IntentType.SWAP)
     def test_pool_contains_crvusd(self):
         """Pool coin_addresses must include crvUSD."""
-        pool = CURVE_POOLS["optimism"][POOL_KEY]
+        pool = CURVE_TEST_POOLS["optimism"][POOL_KEY]
         addresses_lower = [a.lower() for a in pool["coin_addresses"]]
         assert CRVUSD_ADDRESS.lower() in addresses_lower, (
-            f"crvUSD ({CRVUSD_ADDRESS}) not found in pool coin_addresses: "
-            f"{pool['coin_addresses']}"
+            f"crvUSD ({CRVUSD_ADDRESS}) not found in pool coin_addresses: {pool['coin_addresses']}"
         )
 
     @pytest.mark.intent(IntentType.SWAP)
     def test_pool_is_stableswap_type(self):
         """Pool type must be 'stableswap' for StableSwap NG."""
-        pool = CURVE_POOLS["optimism"][POOL_KEY]
+        pool = CURVE_TEST_POOLS["optimism"][POOL_KEY]
         assert pool["pool_type"] == "stableswap"
 
     @pytest.mark.intent(IntentType.SWAP)
     def test_pool_n_coins_is_2(self):
         """crvusd_usdc is a 2-coin pool."""
-        pool = CURVE_POOLS["optimism"][POOL_KEY]
+        pool = CURVE_TEST_POOLS["optimism"][POOL_KEY]
         assert pool["n_coins"] == 2
         assert len(pool["coin_addresses"]) == 2
         assert len(pool["coins"]) == 2
@@ -122,7 +118,7 @@ class TestCurveOptimismPoolConfig:
     @pytest.mark.intent(IntentType.SWAP)
     def test_lp_token_equals_pool_address(self):
         """StableSwap NG: LP token IS the pool contract address."""
-        pool = CURVE_POOLS["optimism"][POOL_KEY]
+        pool = CURVE_TEST_POOLS["optimism"][POOL_KEY]
         assert pool["lp_token"].lower() == pool["address"].lower(), (
             "For StableSwap NG pools, lp_token must equal pool address"
         )
@@ -131,11 +127,10 @@ class TestCurveOptimismPoolConfig:
     def test_no_bridged_usdc_in_native_usdc_pool(self):
         """Pool must NOT contain USDC.e (bridged) — only native USDC."""
         bridged_usdc_e = "0x7F5c764cBc14f9669B88837ca1490cca17c31607"
-        pool = CURVE_POOLS["optimism"][POOL_KEY]
+        pool = CURVE_TEST_POOLS["optimism"][POOL_KEY]
         addresses_lower = [a.lower() for a in pool["coin_addresses"]]
         assert bridged_usdc_e.lower() not in addresses_lower, (
-            f"Pool contains USDC.e (bridged) instead of native USDC! "
-            f"Expected native USDC at {USDC_ADDRESS}"
+            f"Pool contains USDC.e (bridged) instead of native USDC! Expected native USDC at {USDC_ADDRESS}"
         )
 
 
@@ -171,7 +166,7 @@ class TestCurveOptimismSwapCompilation:
 
         assert result.status == CompilationStatus.SUCCESS, (
             f"USDC -> crvUSD swap compilation failed: {result.error}\n"
-            "Ensure CURVE_POOLS['optimism']['crvusd_usdc'] is correctly configured."
+            "Ensure CURVE_TEST_POOLS['optimism']['crvusd_usdc'] is correctly configured."
         )
         assert result.action_bundle is not None
 
@@ -190,9 +185,7 @@ class TestCurveOptimismSwapCompilation:
 
         result = compiler.compile(intent)
 
-        assert result.status == CompilationStatus.SUCCESS, (
-            f"crvUSD -> USDC swap compilation failed: {result.error}"
-        )
+        assert result.status == CompilationStatus.SUCCESS, f"crvUSD -> USDC swap compilation failed: {result.error}"
 
     @pytest.mark.intent(IntentType.SWAP)
     def test_compiled_swap_targets_correct_pool(self):
@@ -211,8 +204,11 @@ class TestCurveOptimismSwapCompilation:
         assert result.status == CompilationStatus.SUCCESS
 
         # Last transaction should be the exchange call targeting the pool
-        swap_txs = [tx for tx in result.transactions if "exchange" in tx.description.lower()
-                    or tx.to.lower() == EXPECTED_POOL_ADDRESS.lower()]
+        swap_txs = [
+            tx
+            for tx in result.transactions
+            if "exchange" in tx.description.lower() or tx.to.lower() == EXPECTED_POOL_ADDRESS.lower()
+        ]
         assert len(swap_txs) > 0, (
             f"No exchange transaction targeting pool {EXPECTED_POOL_ADDRESS} found. "
             f"Transactions: {[(tx.to, tx.description) for tx in result.transactions]}"
@@ -287,10 +283,10 @@ class TestCurveOptimismSwapOnAnvil:
 
         swap_amount = Decimal("100")  # 100 USDC
 
-        print(f"\n{'='*80}")
+        print(f"\n{'=' * 80}")
         print("Test: USDC -> crvUSD Curve Swap on Optimism (crvusd_usdc pool)")
         print(f"Pool: {EXPECTED_POOL_ADDRESS}")
-        print(f"{'='*80}")
+        print(f"{'=' * 80}")
 
         # --- Layer 4 setup: record balances before ---
         usdc_before = get_token_balance(web3, usdc_address, funded_wallet)
@@ -315,16 +311,13 @@ class TestCurveOptimismSwapOnAnvil:
         )
 
         compile_result = compiler.compile(intent)
-        assert compile_result.status == CompilationStatus.SUCCESS, (
-            f"Compilation failed: {compile_result.error}"
-        )
+        assert compile_result.status == CompilationStatus.SUCCESS, f"Compilation failed: {compile_result.error}"
         print(f"Compiled {len(compile_result.transactions)} transactions")
 
         # --- Layer 2: Execute ---
         execution_result = await orchestrator.execute(compile_result.action_bundle)
         assert execution_result.success, (
-            f"Execution failed: {execution_result.error}\n"
-            "Check pool address and coin indices are correct."
+            f"Execution failed: {execution_result.error}\nCheck pool address and coin indices are correct."
         )
         print(f"Execution success: {execution_result.success}")
 
@@ -334,12 +327,13 @@ class TestCurveOptimismSwapOnAnvil:
         if execution_result.transaction_results:
             for tx_result in execution_result.transaction_results:
                 if hasattr(tx_result, "receipt") and tx_result.receipt:
-                    receipt_dict = tx_result.receipt if isinstance(tx_result.receipt, dict) else tx_result.receipt.to_dict()
+                    receipt_dict = (
+                        tx_result.receipt if isinstance(tx_result.receipt, dict) else tx_result.receipt.to_dict()
+                    )
                     parsed = parser.parse_receipt(receipt_dict)
                     assert parsed is not None, "CurveReceiptParser returned None"
                     if parsed and hasattr(parsed, "events") and parsed.events:
-                        swap_events = [e for e in parsed.events
-                                       if "TokenExchange" in str(type(e).__name__)]
+                        swap_events = [e for e in parsed.events if "TokenExchange" in str(type(e).__name__)]
                         if swap_events:
                             parsed_swap = True
                             print(f"Parsed swap event: {swap_events[0]}")
@@ -364,8 +358,7 @@ class TestCurveOptimismSwapOnAnvil:
             f"Expected: {expected_spent} ({swap_amount} USDC), Got: {amount_spent}"
         )
         assert amount_received > 0, (
-            "crvUSD balance did not increase after swap! "
-            "Check coin indices in CURVE_POOLS['optimism']['crvusd_usdc']."
+            "crvUSD balance did not increase after swap! Check coin indices in CURVE_TEST_POOLS['optimism']['crvusd_usdc']."
         )
 
         print(f"\nSUCCESS: Swapped {amount_spent / 10**6:.2f} USDC -> {amount_received / 10**18:.4f} crvUSD")

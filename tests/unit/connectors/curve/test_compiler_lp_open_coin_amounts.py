@@ -24,7 +24,6 @@ from typing import Any
 
 import pytest
 
-from almanak.connectors.curve.adapter import CURVE_POOLS
 from almanak.connectors.curve.compiler import CurveCompiler
 from almanak.framework.intents.compiler_models import CompilationStatus
 from almanak.framework.intents.vocabulary import Intent, LPOpenIntent
@@ -205,9 +204,7 @@ class TestAmount0Amount1BackCompat:
             ("base", "4pool", [Decimal("100"), Decimal("200"), Decimal("0"), Decimal("0")]),
         ],
     )
-    def test_legacy_two_slot_mapping_preserved(
-        self, chain: str, pool: str, expected: list[Decimal]
-    ) -> None:
+    def test_legacy_two_slot_mapping_preserved(self, chain: str, pool: str, expected: list[Decimal]) -> None:
         """coin_amounts=None reproduces the exact legacy idx0/idx1 + zero-fill vector."""
         intent = LPOpenIntent(
             pool=pool,

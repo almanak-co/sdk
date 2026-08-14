@@ -98,6 +98,7 @@ class TestCurveUSDTApproval:
             max_slippage=Decimal("0.02"),
             protocol="curve",
             chain=CHAIN_NAME,
+            swap_params={"pool": POOL_3POOL},
         )
         compiled = compiler.compile(intent)
         assert compiled.status.value == "SUCCESS", compiled.error

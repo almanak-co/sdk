@@ -12,7 +12,7 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.connectors.curve.adapter import CURVE_POOLS, CurveAdapter, CurveConfig
+from tests.support.curve_adapter import CURVE_TEST_POOLS, CurveAdapter, CurveConfig
 
 
 @pytest.fixture
@@ -28,13 +28,13 @@ def adapter() -> CurveAdapter:
 
 @pytest.fixture
 def pool_address() -> str:
-    return CURVE_POOLS["ethereum"]["3pool"]["address"]
+    return CURVE_TEST_POOLS["ethereum"]["3pool"]["address"]
 
 
 @pytest.fixture
 def metapool_address() -> str:
     """A metapool (FRAX/3CRV) for the ``swap_underlying`` (zap) executed-floor path."""
-    return CURVE_POOLS["ethereum"]["frax_3crv"]["address"]
+    return CURVE_TEST_POOLS["ethereum"]["frax_3crv"]["address"]
 
 
 class TestSwapGuardWiring:
@@ -120,7 +120,7 @@ class TestVolatilePoolSkipped:
     fill tripped CI). Volatile min-out protection is the slippage floor."""
 
     def test_volatile_pool_with_divergent_oracle_is_not_blocked(self, adapter: CurveAdapter) -> None:
-        tricrypto_addr = CURVE_POOLS["ethereum"]["tricrypto2"]["address"]
+        tricrypto_addr = CURVE_TEST_POOLS["ethereum"]["tricrypto2"]["address"]
         # A wildly divergent oracle ratio would block a StableSwap pool, but a
         # volatile pool must NOT be blocked by the execution-rate guard.
         result = adapter.swap(
@@ -221,7 +221,7 @@ class TestExecutedFloorOracleAnchor:
         ``pool_quote × (1 − residual)`` so a large-but-fair high-impact fill keeps a
         drift buffer and is never false-reverted (the 637 bps arb-tricrypto lesson,
         now as no-false-revert on the executed floor)."""
-        tricrypto_addr = CURVE_POOLS["ethereum"]["tricrypto2"]["address"]
+        tricrypto_addr = CURVE_TEST_POOLS["ethereum"]["tricrypto2"]["address"]
         result = adapter.swap(
             pool_address=tricrypto_addr,
             token_in="USDT",
@@ -238,7 +238,7 @@ class TestExecutedFloorOracleAnchor:
         pool must NOT force a revert — the residual is pool-type-fixed (not driven
         by the override), so the executed floor still keeps its drift buffer below
         the quote."""
-        tricrypto_addr = CURVE_POOLS["ethereum"]["tricrypto2"]["address"]
+        tricrypto_addr = CURVE_TEST_POOLS["ethereum"]["tricrypto2"]["address"]
         result = adapter.swap(
             pool_address=tricrypto_addr,
             token_in="USDT",

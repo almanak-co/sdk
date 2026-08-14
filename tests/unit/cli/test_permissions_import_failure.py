@@ -53,7 +53,7 @@ def strategy_dir() -> Path:
     [
         (PermissionHintsError("almanak.connectors.curve.permission_hints exports no usable hints"), "malformed"),
         (ModuleNotFoundError("No module named 'some_dep'", name="some_dep"), "nested-import"),
-        (ImportError("cannot import name 'CURVE_POOLS'"), "nested-symbol"),
+        (ImportError("cannot import name 'CURVE_TEST_POOLS'"), "nested-symbol"),
     ],
 )
 def test_broken_hints_produce_an_actionable_cli_error(

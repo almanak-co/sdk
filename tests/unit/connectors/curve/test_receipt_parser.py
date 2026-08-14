@@ -1480,7 +1480,7 @@ class TestAddLiquidityV2Crypto3:
 # VIB-5433 — RemoveLiquidityOne / RemoveLiquidityImbalance decode
 # =============================================================================
 
-# Registered Curve pools used as fixtures (must exist in CURVE_POOLS so the
+# Registered Curve pools used as fixtures (must exist in CURVE_TEST_POOLS so the
 # Transfer-based proceeds resolver can map a coin address -> coin index).
 FRAX_USDC_POOL = "0xdcef968d416a41cdac0ed8702fac8128a64241a2"  # stableswap, [FRAX, USDC]
 FRAX = "0x853d955acef822db058eb8505911ed77f175b99e"

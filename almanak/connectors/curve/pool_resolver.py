@@ -1,10 +1,9 @@
 """Gateway-backed dynamic Curve pool resolution (VIB-5628).
 
 Resolve an **arbitrary (uncurated) Curve pool's metadata from just its address**
-so the compiler / valuer / receipt-parser work for pools that are NOT in the
-hand-curated static ``CURVE_POOLS`` registry. The static registry becomes a
-cache / fast-path; this module is the fallback that reads pool shape live from
-Curve's on-chain MetaRegistry.
+so the compiler / valuer / receipt-parser work from exact pool addresses without
+a hand-curated SDK registry. This module reads pool shape live from Curve's
+on-chain MetaRegistry.
 
 **No new gateway proto / no perimeter change.** Every read rides the existing
 gateway-first ``eth_call`` seam (``_strategy_base.rpc.eth_call``,

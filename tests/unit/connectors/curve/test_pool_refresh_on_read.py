@@ -1,7 +1,7 @@
 """Refresh-on-read Curve pool registry (VIB-5423 / VIB-5424).
 
 ``get_pool_info`` / ``get_pool_by_name`` no longer trust the hand-typed
-``CURVE_POOLS`` literal blindly: when a gateway / RPC transport is wired they
+``CURVE_TEST_POOLS`` literal blindly: when a gateway / RPC transport is wired they
 reconcile the safety-critical fields (``coins`` / ``coin_addresses`` /
 ``coin_decimals`` / ``virtual_price`` / ``is_ng``) against live chain state. The
 static dict becomes a cold-start fallback only — discharging the long-standing
@@ -21,7 +21,7 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.connectors.curve.adapter import (
+from tests.support.curve_adapter import (
     COINS_UINT256_SELECTOR,
     ERC20_DECIMALS_SELECTOR,
     GET_VIRTUAL_PRICE_SELECTOR,

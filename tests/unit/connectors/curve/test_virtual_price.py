@@ -9,8 +9,8 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.connectors.curve.adapter import (
-    CURVE_POOLS,
+from tests.support.curve_adapter import (
+    CURVE_TEST_POOLS,
     CurveAdapter,
     CurveConfig,
     PoolInfo,
@@ -42,24 +42,22 @@ class TestVirtualPriceInPoolData:
     """Verify virtual_price is present in all registered pools."""
 
     def test_all_pools_have_virtual_price(self) -> None:
-        """Every pool in CURVE_POOLS should have a virtual_price entry."""
-        for chain, pools in CURVE_POOLS.items():
+        """Every pool in CURVE_TEST_POOLS should have a virtual_price entry."""
+        for chain, pools in CURVE_TEST_POOLS.items():
             for pool_name, pool_data in pools.items():
-                assert "virtual_price" in pool_data, (
-                    f"Missing virtual_price for {chain}/{pool_name}"
-                )
+                assert "virtual_price" in pool_data, f"Missing virtual_price for {chain}/{pool_name}"
                 assert pool_data["virtual_price"] >= Decimal("1.0"), (
                     f"virtual_price must be >= 1.0 for {chain}/{pool_name}"
                 )
 
     def test_arbitrum_2pool_virtual_price(self) -> None:
         """Arbitrum 2pool should have virtual_price ~1.022 (from on-chain query)."""
-        vp = CURVE_POOLS["arbitrum"]["2pool"]["virtual_price"]
+        vp = CURVE_TEST_POOLS["arbitrum"]["2pool"]["virtual_price"]
         assert vp >= 1.02, f"Expected >= 1.02, got {vp}"
 
     def test_ethereum_3pool_virtual_price(self) -> None:
         """Ethereum 3pool should have virtual_price > 1.0 (mature pool)."""
-        vp = CURVE_POOLS["ethereum"]["3pool"]["virtual_price"]
+        vp = CURVE_TEST_POOLS["ethereum"]["3pool"]["virtual_price"]
         assert vp > 1.0, f"Expected > 1.0, got {vp}"
 
 
@@ -68,16 +66,16 @@ class TestPoolInfoVirtualPrice:
 
     def test_get_pool_info_includes_virtual_price(self, adapter: CurveAdapter) -> None:
         """get_pool_info should populate virtual_price from pool data."""
-        pool_address = CURVE_POOLS["ethereum"]["3pool"]["address"]
+        pool_address = CURVE_TEST_POOLS["ethereum"]["3pool"]["address"]
         pool_info = adapter.get_pool_info(pool_address)
         assert pool_info is not None
-        assert pool_info.virtual_price == CURVE_POOLS["ethereum"]["3pool"]["virtual_price"]
+        assert pool_info.virtual_price == CURVE_TEST_POOLS["ethereum"]["3pool"]["virtual_price"]
 
     def test_get_pool_by_name_includes_virtual_price(self, adapter: CurveAdapter) -> None:
         """get_pool_by_name should also populate virtual_price from pool data."""
         pool_info = adapter.get_pool_by_name("3pool")
         assert pool_info is not None
-        assert pool_info.virtual_price == CURVE_POOLS["ethereum"]["3pool"]["virtual_price"]
+        assert pool_info.virtual_price == CURVE_TEST_POOLS["ethereum"]["3pool"]["virtual_price"]
 
     def test_pool_info_default_virtual_price(self) -> None:
         """PoolInfo should default virtual_price to 1.0."""
@@ -134,8 +132,8 @@ class TestEstimateAddLiquidityWithVirtualPrice:
 
     def test_add_liquidity_min_lp_accounts_for_virtual_price(self, adapter_arb: CurveAdapter) -> None:
         """Full add_liquidity flow: min_lp should be lower than naive for Arb 2pool."""
-        pool_address = CURVE_POOLS["arbitrum"]["2pool"]["address"]
-        vp = CURVE_POOLS["arbitrum"]["2pool"]["virtual_price"]
+        pool_address = CURVE_TEST_POOLS["arbitrum"]["2pool"]["address"]
+        vp = CURVE_TEST_POOLS["arbitrum"]["2pool"]["virtual_price"]
 
         result = adapter_arb.add_liquidity(
             pool_address=pool_address,
@@ -150,9 +148,7 @@ class TestEstimateAddLiquidityWithVirtualPrice:
         naive_min_lp = 200 * 10**18 * 9950 // 10000
         adjusted_min_lp = int(Decimal(200 * 10**18) / vp) * 9950 // 10000
         assert adjusted_min_lp < naive_min_lp, "Adjusted min_lp must be lower"
-        assert result.lp_amount == adjusted_min_lp, (
-            f"Expected lp_amount={adjusted_min_lp}, got {result.lp_amount}"
-        )
+        assert result.lp_amount == adjusted_min_lp, f"Expected lp_amount={adjusted_min_lp}, got {result.lp_amount}"
 
     def test_estimate_3pool_18dec_tokens(self, adapter: CurveAdapter) -> None:
         """Test with 18-decimal tokens like DAI in 3pool."""

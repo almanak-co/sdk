@@ -1,19 +1,17 @@
 """Curve Finance permission hints for permission discovery.
 
 Curve does NOT use the generic ``synthetic_swap_pair`` mechanism. Its pools
-are pair-specific (StableSwap, CryptoSwap, Tricrypto), so a single pair only
-resolves to one curated pool per chain — leaving every other registered pool
-unauthorised on the Safe (#1903).
+are deployment resources, so a Safe manifest must compile the exact live-bound
+pool selected by the deployment rather than a chain-wide SDK catalog.
 
 Curve owns its discovery vectors via ``build_discovery_vectors`` below —
 see :func:`almanak.framework.permissions.hints.get_discovery_vectors_override`
 for the dispatcher contract.
 
 Synthetic-discovery participation (VIB-4928 / VIB-6046): ``SWAP``, ``LP_OPEN``
-and ``LP_CLOSE``. Every one of them is discovered by *compiling* real intents
-against the connector's own ``CURVE_POOLS`` registry, so the manifest can never
-drift from the calldata the compiler emits — no hand-typed target or selector
-literals live in this module.
+and ``LP_CLOSE``. Every one is discovered by *compiling* real intents against
+an immutable MetaRegistry-verified binding, so no target or selector literal
+lives in this module.
 
 LP was originally omitted, which made ``discover_permissions(...,
 intent_types=["LP_OPEN","LP_CLOSE"])`` return ``([], [])`` on all five chains
@@ -31,7 +29,7 @@ As originally shipped, a single
 ``_get_chain_rpc_url`` falls through to ``*-rpc.publicnode.com`` even when the
 compiler is built with ``rpc_url=None`` and no gateway. Those reads decided
 which selectors landed on the manifest, so the manifest was a function of
-rate-limit weather rather than of ``CURVE_POOLS``. Three consecutive runs
+rate-limit weather rather than explicit deployment input. Three consecutive runs
 produced **7 / 3 / 7 targets and 6 / 2 / 7 selectors** from identical inputs.
 
 The mechanism was ``_probe_is_ng``, which selects between the StableSwap-NG
@@ -55,26 +53,25 @@ Three changes close it, and none of them relaxes a slippage guard:
    compiles calldata to read its ``(target, selector)`` pairs and then throws
    the calldata away; it never signs or submits. The flag must never be set on
    a funds-moving path.
-3. ``CurveConfig.force_is_ng`` lets discovery compile each vector under **both**
-   ABI variants, so a live ``is_ng`` probe that disagrees with the static
-   registry at execution time still finds its selector authorised.
+3. ``CurveConfig.force_is_ng`` lets discovery compile each StableSwap vector
+   under **both** ABI variants, so runtime ABI fingerprinting always finds its
+   selector authorised.
 
-Measured after the fix — 0 network calls, 0 warnings, byte-identical across
-repeated runs: arbitrum 7 targets, base 9, ethereum 17, optimism 7, polygon 3.
+After one live admission read, calldata discovery is offline and deterministic.
 
 Same defect class, NOT fixed here: ``gmx_v2``, ``pendle``, ``traderjoe_v2`` and
 ``uniswap_v4`` hooks also derive their manifests from implicit live reads —
 they discover *nothing* with the fallback removed, which is why
 ``offline_discovery`` is opt-in per connector rather than the default.
 
-Known limitation — uncurated pools. ``CurveCompiler`` can also resolve a pool
-that is absent from ``CURVE_POOLS`` via the on-chain MetaRegistry
-(``_resolve_dynamic_pool``, VIB-5628). Such a pool address is only knowable at
-runtime, so no ahead-of-time manifest can authorise it: a Safe-wallet strategy
-must LP into a *registered* pool, or the pool must be added to ``CURVE_POOLS``
-first. Synthetic discovery is deliberately scoped to the registered set rather
-than widened with a wildcard target — a wildcard would re-introduce exactly the
-over-grant VIB-6057 is about.
+``CurveCompiler`` resolves exact pools through the on-chain MetaRegistry
+(``_resolve_dynamic_pool``, VIB-5628). Permission discovery consumes the
+deployment's exact ``pool`` plus
+ordered token-address config, resolves it through the same MetaRegistry seam,
+and adds connector-owned synthetic vectors for that immutable binding. There is
+no global pool registry and no wildcard target. A missing binding or transport,
+identity mismatch, or failed bound compile aborts manifest generation instead
+of emitting an incomplete role.
 """
 
 from __future__ import annotations
@@ -84,7 +81,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from almanak.core.intent_types import IntentType
-from almanak.framework.permissions.hints import DiscoveryContext, PermissionHints
+from almanak.framework.permissions.hints import DiscoveryContext, PermissionBindingError, PermissionHints
 
 if TYPE_CHECKING:
     from almanak.framework.intents.vocabulary import AnyIntent
@@ -98,8 +95,11 @@ PERMISSION_HINTS = PermissionHints(
     # slippage bounds for the on-chain quotes, and compiles each vector under
     # BOTH ABI variants. Opting in here suppresses the compiler's implicit
     # Anvil/public-RPC fallback, which is what made the manifest a function of
-    # rate-limit weather rather than of CURVE_POOLS (VIB-6046 D5).
+    # rate-limit weather rather than explicit bindings (VIB-6046 D5).
     offline_discovery=True,
+    # Exact pools opt into live MetaRegistry binding. Calldata compilation after
+    # admission remains offline and receives only the frozen identity.
+    needs_rpc_discovery=True,
 )
 
 # Synthetic deposit/withdrawal sizes. Permission discovery only cares about the
@@ -122,39 +122,42 @@ def build_discovery_vectors(
     """Dispatch synthetic discovery for every intent type curve owns.
 
     Curve owns SWAP, LP_OPEN and LP_CLOSE discovery because all three are
-    per-pool: the framework's chain-default token pair resolves to at most one
-    curated pool, leaving every other registered pool unauthorised on the Safe.
-    Each builder walks ``CURVE_POOLS[chain]`` so the manifest covers the whole
-    registered set.
+    per-pool. The deployment must provide exact pool and ordered coin addresses;
+    absence is an admission error, never an empty or wildcard manifest.
 
     Returns ``None`` for any other intent type so the framework default takes
     over.
     """
     if intent_type is IntentType.SWAP:
-        return _build_swap_vectors(chain)
+        return _build_swap_vectors(chain, ctx)
     if intent_type is IntentType.LP_OPEN:
-        return _build_lp_open_vectors(chain)
+        return _build_lp_open_vectors(chain, ctx)
     if intent_type is IntentType.LP_CLOSE:
-        return _build_lp_close_vectors(chain)
+        return _build_lp_close_vectors(chain, ctx)
     return None
 
 
-def _chain_pools(chain: str) -> dict[str, dict[str, Any]]:
-    """Return the registered curve pools for ``chain`` (empty dict when none)."""
-    from .adapter import CURVE_POOLS
+def _discovery_pools(chain: str, ctx: DiscoveryContext) -> list[tuple[str, dict[str, Any], Any | None]]:
+    """Return deployment-bound exact pools or fail admission closed."""
+    from .pool_binding import resolve_configured_pool_bindings
 
-    return CURVE_POOLS.get(chain, {})
+    bindings = resolve_configured_pool_bindings(
+        chain=chain,
+        config=ctx.strategy_config,
+        gateway_client=ctx.gateway_client,
+        rpc_url=ctx.rpc_url,
+    )
+    if not bindings:
+        raise PermissionBindingError(
+            f"Curve permission generation on {chain} requires an exact deployment pool binding. "
+            "Declare config.permission_bindings with protocol='curve', resource_type='pool', "
+            "address, chain, and ordered coin_addresses; SDK-wide pool catalogs and wildcard targets are unsupported."
+        )
+    return [(binding.pool_address, binding.pool_data(), binding) for binding in bindings]
 
 
-def _build_swap_vectors(chain: str) -> list[AnyIntent]:
-    """Emit one synthetic ``SwapIntent`` per curated curve pool on ``chain``.
-
-    Curve pools are pair-specific (StableSwap, CryptoSwap, Tricrypto), so a
-    single token pair only resolves to one pool. ``CurveCompiler`` walks
-    ``CURVE_POOLS[chain]`` to match pool by
-    coin pair; emitting one intent per registered pool — using the first
-    two coin addresses of each — guarantees every pool's address lands on
-    the manifest.
+def _build_swap_vectors(chain: str, ctx: DiscoveryContext) -> list[AnyIntent]:
+    """Emit one synthetic ``SwapIntent`` for every possible input coin.
 
     The price-oracle gate in ``CurveCompiler`` (price_ratio for
     CryptoSwap/Tricrypto pools) does NOT fire during permission discovery
@@ -163,22 +166,19 @@ def _build_swap_vectors(chain: str) -> list[AnyIntent]:
     WETH=$2000, WBTC=$45000, …) — every pool's coin pair resolves to a
     finite, positive price_ratio.
 
-    No registered pool sets ``use_underlying`` today — polygon's aave-type
-    am3pool was removed under VIB-5551 (frozen Aave V2 Polygon reserves made
-    it non-executable); polygon's representative is now the frxUSD/USDT
-    StableSwap-NG pool. If an aave-type pool is ever re-registered, the
-    compiler routes to ``exchange_underlying`` automatically based on the
-    pool's flags; no special-casing is needed here.
+    Wrapped-lending pools remain rejected by the MetaRegistry resolver. Exact
+    metapool bindings cover native pool calls; underlying zap calls require a
+    separately verified zap resource and are not guessed here.
 
     """
     from almanak.framework.intents.vocabulary import SwapIntent
 
-    chain_pools = _chain_pools(chain)
-    if not chain_pools:
+    pools = _discovery_pools(chain, ctx)
+    if not pools:
         return []
 
     intents: list[AnyIntent] = []
-    for pool_name, pool_data in chain_pools.items():
+    for pool_name, pool_data, binding in pools:
         coins = pool_data.get("coin_addresses") or []
         if len(coins) < 2:
             logger.warning(
@@ -187,22 +187,31 @@ def _build_swap_vectors(chain: str) -> list[AnyIntent]:
                 chain,
             )
             continue
-        intents.append(
-            SwapIntent(
-                from_token=coins[0],
-                to_token=coins[1],
-                amount=Decimal("1"),
-                protocol="curve",
-                chain=chain,
+        # ERC-20 approval and native-value authorization are input-dependent.
+        # A single coin[0] -> coin[1] vector therefore under-authorizes reverse
+        # swaps and every input at index 2+. A directed ring is sufficient and
+        # least-privilege: it exercises each input coin exactly once while the
+        # pool selector/target is identical for every output choice.
+        for index, from_coin in enumerate(coins):
+            intents.append(
+                SwapIntent(
+                    from_token=from_coin,
+                    to_token=coins[(index + 1) % len(coins)],
+                    amount=Decimal("1"),
+                    protocol="curve",
+                    chain=chain,
+                    swap_params=(
+                        {"pool": binding.pool_address, **binding.marker_params()} if binding is not None else None
+                    ),
+                )
             )
-        )
     return intents
 
 
-def _build_lp_open_vectors(chain: str) -> list[AnyIntent]:
-    """Emit synthetic ``LPOpenIntent``s covering every registered pool's deposit path.
+def _build_lp_open_vectors(chain: str, ctx: DiscoveryContext) -> list[AnyIntent]:
+    """Emit synthetic ``LPOpenIntent``s covering each bound pool's deposit path.
 
-    Two shapes, both keyed off the pool's own registry entry so the discovered
+    The shape is keyed off the verified pool binding so the discovered
     targets/selectors come from the compiler rather than from literals here:
 
     * **Native deposit** — a full ``coin_amounts`` vector of length ``n_coins``.
@@ -211,18 +220,20 @@ def _build_lp_open_vectors(chain: str) -> list[AnyIntent]:
       two-slot form zero-fills the tail, so on a 3- or 4-coin pool the trailing
       coins would never appear on the manifest and a real deposit funding them
       would revert unauthorized at ``execTransactionWithRole``.
-    * **Metapool underlying (zap) deposit** — a combined-space vector of length
-      ``1 + len(base_pool_coins)``. This routes through the pool's
-      ``zap_address``, a target that the native shape never touches.
-
-    Both are compiled offline: ``CurveCompiler.compile_lp_open`` needs no live
+    It is compiled offline: ``CurveCompiler.compile_lp_open`` needs no live
     position state, and its price-oracle gate is satisfied by the discovery
     compiler's placeholder prices (see ``_build_swap_vectors``).
+
+    Deployment bindings authorize only the exact pool they identify. Generic
+    metapool underlying deposits route through a separate zap contract, so they
+    are deliberately excluded until that resource has its own independently
+    verified deployment binding. Discovery must never guess or inherit a zap
+    target from test fixtures.
     """
     from almanak.framework.intents.vocabulary import LPOpenIntent, PriceBand
 
-    chain_pools = _chain_pools(chain)
-    if not chain_pools:
+    pools = _discovery_pools(chain, ctx)
+    if not pools:
         return []
 
     # Curve LP is fungible — there is no price range. ``LPOpenIntent`` still
@@ -232,7 +243,7 @@ def _build_lp_open_vectors(chain: str) -> list[AnyIntent]:
     band = PriceBand(lower=Decimal("1500"), upper=Decimal("4000"))
 
     intents: list[AnyIntent] = []
-    for pool_name, pool_data in chain_pools.items():
+    for pool_name, pool_data, binding in pools:
         n_coins = int(pool_data.get("n_coins") or 0)
         if n_coins < 2:
             logger.warning(
@@ -242,12 +253,7 @@ def _build_lp_open_vectors(chain: str) -> list[AnyIntent]:
                 pool_data.get("n_coins"),
             )
             continue
-        vectors: list[list[Decimal]] = [[_SYNTHETIC_COIN_AMOUNT] * n_coins]
-        if pool_data.get("is_metapool"):
-            combined_len = 1 + len(pool_data.get("base_pool_coins") or [])
-            if combined_len != n_coins:
-                vectors.append([_SYNTHETIC_COIN_AMOUNT] * combined_len)
-        for coin_amounts in vectors:
+        for coin_amounts in [[_SYNTHETIC_COIN_AMOUNT] * n_coins]:
             intents.append(
                 LPOpenIntent(
                     pool=pool_name,
@@ -262,13 +268,14 @@ def _build_lp_open_vectors(chain: str) -> list[AnyIntent]:
                     range_upper=band.upper,
                     protocol="curve",
                     chain=chain,
+                    protocol_params=binding.marker_params() if binding is not None else None,
                 )
             )
     return intents
 
 
-def _build_lp_close_vectors(chain: str) -> list[AnyIntent]:
-    """Emit synthetic ``LPCloseIntent``s covering every registered pool's exit shapes.
+def _build_lp_close_vectors(chain: str, ctx: DiscoveryContext) -> list[AnyIntent]:
+    """Emit synthetic ``LPCloseIntent``s covering each bound pool's exit shapes.
 
     ``CurveCompiler._dispatch_remove_liquidity`` picks one of three adapter
     calls — and therefore one of three *different selectors on the same pool* —
@@ -289,12 +296,12 @@ def _build_lp_close_vectors(chain: str) -> list[AnyIntent]:
     """
     from almanak.framework.intents.vocabulary import LPCloseIntent
 
-    chain_pools = _chain_pools(chain)
-    if not chain_pools:
+    pools = _discovery_pools(chain, ctx)
+    if not pools:
         return []
 
     intents: list[AnyIntent] = []
-    for pool_name, pool_data in chain_pools.items():
+    for pool_name, pool_data, binding in pools:
         n_coins = int(pool_data.get("n_coins") or 0)
         if n_coins < 2:
             logger.warning(
@@ -314,6 +321,7 @@ def _build_lp_close_vectors(chain: str) -> list[AnyIntent]:
                     position_id=_SYNTHETIC_LP_AMOUNT,
                     protocol="curve",
                     chain=chain,
+                    protocol_params=binding.marker_params() if binding is not None else None,
                     **shape,
                 )
             )

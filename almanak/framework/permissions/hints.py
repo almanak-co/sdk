@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import importlib
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from almanak.core.intent_types import IntentType
 
@@ -244,6 +244,16 @@ class PermissionHintsError(RuntimeError):
     """
 
 
+class PermissionBindingError(RuntimeError):
+    """A deployment-scoped permission target could not be verified.
+
+    Exact target addresses supplied by a strategy are required permissions,
+    not best-effort hints.  Resolution, identity validation, or compilation of
+    such a target must therefore abort manifest generation rather than degrade
+    to a warning and emit an incomplete Safe role.
+    """
+
+
 def get_permission_hints(protocol: str) -> PermissionHints:
     """Load PermissionHints for a protocol via convention-based import.
 
@@ -326,6 +336,12 @@ class DiscoveryContext:
 
     usdc: str  # default "from" token for the chain (from _get_token_pair)
     weth: str  # default "to" token for the chain (from _get_token_pair)
+    # Deployment-scoped inputs.  Connector overrides may turn these into
+    # connector-owned immutable bindings; the framework never interprets the
+    # payload or copies target addresses into a global registry.
+    strategy_config: Mapping[str, Any] = field(default_factory=dict)
+    rpc_url: str | None = None
+    gateway_client: Any = field(default=None, repr=False, compare=False)
 
 
 def get_discovery_vectors_override(

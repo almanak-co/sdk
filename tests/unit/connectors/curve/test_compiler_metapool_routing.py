@@ -22,7 +22,6 @@ from typing import Any
 
 import pytest
 
-from almanak.connectors.curve.adapter import CURVE_POOLS
 from almanak.connectors.curve.compiler import (
     CurveCompiler,
     _resolve_lp_open_amounts,
@@ -30,9 +29,10 @@ from almanak.connectors.curve.compiler import (
 )
 from almanak.framework.intents.compiler_models import CompilationStatus
 from almanak.framework.intents.vocabulary import LPOpenIntent, SwapIntent
+from tests.support.curve_adapter import CURVE_TEST_POOLS
 
 CHAIN = "ethereum"
-ETH_POOLS = CURVE_POOLS["ethereum"]
+ETH_POOLS = CURVE_TEST_POOLS["ethereum"]
 META = ETH_POOLS["frax_3crv"]
 META_ADDR = META["address"]
 THREEPOOL_ADDR = ETH_POOLS["3pool"]["address"]

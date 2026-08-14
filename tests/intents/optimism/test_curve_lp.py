@@ -25,7 +25,6 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.connectors.curve.adapter import CURVE_POOLS
 from almanak.connectors.curve.receipt_parser import CurveEventType, CurveReceiptParser
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import IntentCompiler, LPCloseIntent, LPOpenIntent
@@ -39,6 +38,7 @@ from tests.intents.conftest import (
     fund_erc20_token,
     get_token_balance,
 )
+from tests.support.curve_adapter import CURVE_TEST_POOLS
 
 # VIB-6046: curve now participates in LP_OPEN/LP_CLOSE synthetic discovery, so the
 # stale ``no_zodiac`` opt-out ('manifest empty for curve LP') is removed and this
@@ -71,7 +71,7 @@ CRVUSD_BALANCE_SLOT = 0
 
 # LP deposit amounts
 LP_AMOUNT_CRVUSD = Decimal("10")  # 10 crvUSD (18 decimals)
-LP_AMOUNT_USDC = Decimal("10")    # 10 USDC (6 decimals)
+LP_AMOUNT_USDC = Decimal("10")  # 10 USDC (6 decimals)
 
 
 # =============================================================================
@@ -98,8 +98,8 @@ def _get_lp_token_balance(web3: Web3, wallet: str) -> int:
 
 def _verify_pool_exists() -> None:
     """Pool existence check per intent-tests.md rule 8."""
-    if "optimism" not in CURVE_POOLS or POOL not in CURVE_POOLS["optimism"]:
-        pytest.skip(f"No curve {POOL} on optimism (pool not in CURVE_POOLS registry)")
+    if "optimism" not in CURVE_TEST_POOLS or POOL not in CURVE_TEST_POOLS["optimism"]:
+        pytest.skip(f"No curve {POOL} on optimism (pool not in CURVE_TEST_POOLS registry)")
 
 
 # =============================================================================
@@ -169,8 +169,8 @@ class TestCurveCrvUSDUSDCLPOpenOptimism:
             pool=POOL,
             amount0=LP_AMOUNT_CRVUSD,
             amount1=LP_AMOUNT_USDC,
-            range_lower=Decimal("1"),         # Dummy — Curve uses pool-based positions
-            range_upper=Decimal("1000000"),    # Dummy — required by LPOpenIntent validation
+            range_lower=Decimal("1"),  # Dummy — Curve uses pool-based positions
+            range_upper=Decimal("1000000"),  # Dummy — required by LPOpenIntent validation
             protocol="curve",
             chain=CHAIN_NAME,
         )
@@ -189,9 +189,7 @@ class TestCurveCrvUSDUSDCLPOpenOptimism:
 
         # --- Layer 2: Execute ---
         execution_result = await orchestrator.execute(compilation_result.action_bundle)
-        assert execution_result.success, (
-            f"Curve LP_OPEN execution failed on Optimism: {execution_result.error}"
-        )
+        assert execution_result.success, f"Curve LP_OPEN execution failed on Optimism: {execution_result.error}"
         execution_result = enrich_for_accounting(
             execution_result,
             intent,
@@ -245,20 +243,17 @@ class TestCurveCrvUSDUSDCLPOpenOptimism:
         expected_usdc_spent = int(LP_AMOUNT_USDC * Decimal(10**6))
 
         assert crvusd_spent == expected_crvusd_spent, (
-            f"crvUSD spent must EXACTLY equal LP_OPEN amount. "
-            f"Expected: {expected_crvusd_spent}, Got: {crvusd_spent}"
+            f"crvUSD spent must EXACTLY equal LP_OPEN amount. Expected: {expected_crvusd_spent}, Got: {crvusd_spent}"
         )
         assert usdc_spent == expected_usdc_spent, (
-            f"USDC spent must EXACTLY equal LP_OPEN amount. "
-            f"Expected: {expected_usdc_spent}, Got: {usdc_spent}"
+            f"USDC spent must EXACTLY equal LP_OPEN amount. Expected: {expected_usdc_spent}, Got: {usdc_spent}"
         )
         assert lp_received > 0, f"LP tokens received must be > 0, got {lp_received}"
 
         # LP token receipt extraction cross-check
         lp_received_decimal = Decimal(lp_received) / Decimal(10**18)
         assert lp_received_decimal == lp_tokens_from_receipt, (
-            f"LP tokens from balance delta ({lp_received_decimal}) "
-            f"must match receipt ({lp_tokens_from_receipt})"
+            f"LP tokens from balance delta ({lp_received_decimal}) must match receipt ({lp_tokens_from_receipt})"
         )
 
         logger.info(
@@ -334,8 +329,7 @@ class TestCurveCrvUSDUSDCLPLifecycleOptimism:
         crvusd_funded_balance = get_token_balance(web3, CRVUSD_ADDRESS, funded_wallet)
         if crvusd_funded_balance == 0:
             pytest.skip(
-                f"crvUSD funding failed at slot {CRVUSD_BALANCE_SLOT}. "
-                "Token may use a different storage layout."
+                f"crvUSD funding failed at slot {CRVUSD_BALANCE_SLOT}. Token may use a different storage layout."
             )
 
         # ==================== OPEN ====================
@@ -358,9 +352,7 @@ class TestCurveCrvUSDUSDCLPLifecycleOptimism:
 
         # Layer 1: Compile LP_OPEN
         open_result = compiler.compile(open_intent)
-        assert open_result.status.value == "SUCCESS", (
-            f"LP_OPEN compile failed: {open_result.error}"
-        )
+        assert open_result.status.value == "SUCCESS", f"LP_OPEN compile failed: {open_result.error}"
         assert open_result.action_bundle is not None
 
         # Layer 2: Execute LP_OPEN
@@ -431,21 +423,14 @@ class TestCurveCrvUSDUSDCLPLifecycleOptimism:
 
         # Layer 1: Compile LP_CLOSE
         close_result = compiler.compile(close_intent)
-        assert close_result.status.value == "SUCCESS", (
-            f"LP_CLOSE compile failed: {close_result.error}"
-        )
+        assert close_result.status.value == "SUCCESS", f"LP_CLOSE compile failed: {close_result.error}"
         assert close_result.action_bundle is not None
         close_metadata = close_result.action_bundle.metadata
         assert close_metadata["operation"] == "remove_liquidity"
         min_amounts_raw = close_metadata["min_amounts_raw"]
         assert len(min_amounts_raw) == 2
-        assert all(
-            isinstance(amount, str) and int(amount) > 0 for amount in min_amounts_raw
-        )
-        assert (
-            "mirrors the pool's current reserve composition"
-            in close_metadata["close_shape_note"]
-        )
+        assert all(isinstance(amount, str) and int(amount) > 0 for amount in min_amounts_raw)
+        assert "mirrors the pool's current reserve composition" in close_metadata["close_shape_note"]
 
         # Layer 2: Execute LP_CLOSE
         close_exec = await orchestrator.execute(close_result.action_bundle)
@@ -472,17 +457,13 @@ class TestCurveCrvUSDUSDCLPLifecycleOptimism:
             for event in parse_result.events:
                 if event.event_type == CurveEventType.REMOVE_LIQUIDITY:
                     remove_liquidity_found = True
-                    logger.info(
-                        f"RemoveLiquidity event: token_amounts={event.data.get('token_amounts')}"
-                    )
+                    logger.info(f"RemoveLiquidity event: token_amounts={event.data.get('token_amounts')}")
 
             extracted = parser.extract_lp_close_data(receipt_dict)
             if extracted is not None:
                 lp_close_data = extracted
 
-        assert remove_liquidity_found, (
-            "RemoveLiquidity event must be found in LP_CLOSE receipt."
-        )
+        assert remove_liquidity_found, "RemoveLiquidity event must be found in LP_CLOSE receipt."
 
         # Layer 4 AFTER close: balance deltas
         lp_after_close = _get_lp_token_balance(web3, funded_wallet)

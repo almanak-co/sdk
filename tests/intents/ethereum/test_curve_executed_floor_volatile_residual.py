@@ -47,7 +47,6 @@ from web3 import Web3
 from almanak.connectors._strategy_base.swap_oracle_guard import (
     DEFAULT_VOLATILE_ORACLE_FLOOR_RESIDUAL_BPS,
 )
-from almanak.connectors.curve.adapter import CURVE_POOLS, CurveAdapter, CurveConfig
 from almanak.connectors.curve.receipt_parser import CurveEventType, CurveReceiptParser
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import IntentCompiler
@@ -61,6 +60,7 @@ from tests.intents.conftest import (
     get_token_balance,
     make_intent_test_web3,
 )
+from tests.support.curve_adapter import CURVE_TEST_POOLS, CurveAdapter, CurveConfig
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +70,7 @@ pytestmark = pytest.mark.no_zodiac(
 )
 
 CHAIN_NAME = "ethereum"
-POOL = CURVE_POOLS["ethereum"]["tricrypto2"]
+POOL = CURVE_TEST_POOLS["ethereum"]["tricrypto2"]
 POOL_ADDRESS = POOL["address"]
 USDT_ADDR = Web3.to_checksum_address(POOL["coin_addresses"][0])
 WETH_ADDR = Web3.to_checksum_address(POOL["coin_addresses"][2])

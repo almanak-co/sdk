@@ -14,15 +14,15 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.connectors.curve.adapter import (
+from tests.support.curve_adapter import (
     CRYPTO_CALC_TOKEN_AMOUNT_SELECTORS,
-    CURVE_POOLS,
+    CURVE_TEST_POOLS,
     CurveAdapter,
     CurveConfig,
 )
 
-TRICRYPTO2 = CURVE_POOLS["ethereum"]["tricrypto2"]["address"]
-ARB_TRICRYPTO = CURVE_POOLS["arbitrum"]["tricrypto"]["address"]
+TRICRYPTO2 = CURVE_TEST_POOLS["ethereum"]["tricrypto2"]["address"]
+ARB_TRICRYPTO = CURVE_TEST_POOLS["arbitrum"]["tricrypto"]["address"]
 WALLET = "0x1234567890123456789012345678901234567890"
 
 

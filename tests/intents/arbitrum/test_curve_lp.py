@@ -24,7 +24,6 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.connectors.curve.adapter import CURVE_POOLS
 from almanak.connectors.curve.receipt_parser import CurveEventType, CurveReceiptParser
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import IntentCompiler, LPCloseIntent, LPOpenIntent
@@ -37,6 +36,7 @@ from tests.intents.conftest import (
     fund_erc20_token,
     get_token_balance,
 )
+from tests.support.curve_adapter import CURVE_TEST_POOLS
 
 # VIB-6046: the ``no_zodiac`` opt-out that used to sit here ("curve LP not in
 # _LP_PROTOCOLS; manifest empty for curve LP") is gone. Curve now participates in
@@ -70,7 +70,7 @@ USDC_E_BALANCE_SLOT = 51
 
 # LP deposit amounts (small to keep slippage low)
 LP_AMOUNT_USDC_E = Decimal("10")  # 10 USDC.e
-LP_AMOUNT_USDT = Decimal("10")    # 10 USDT
+LP_AMOUNT_USDT = Decimal("10")  # 10 USDT
 
 
 # =============================================================================
@@ -97,8 +97,8 @@ def _get_lp_token_balance(web3: Web3, wallet: str) -> int:
 
 def _verify_pool_exists() -> None:
     """Pool existence check per intent-tests.md rule 8."""
-    if "arbitrum" not in CURVE_POOLS or POOL not in CURVE_POOLS["arbitrum"]:
-        pytest.skip(f"No curve {POOL} on arbitrum (pool not in CURVE_POOLS registry)")
+    if "arbitrum" not in CURVE_TEST_POOLS or POOL not in CURVE_TEST_POOLS["arbitrum"]:
+        pytest.skip(f"No curve {POOL} on arbitrum (pool not in CURVE_TEST_POOLS registry)")
 
 
 # =============================================================================
@@ -161,8 +161,8 @@ class TestCurve2poolLPOpenArbitrum:
             pool=POOL,
             amount0=LP_AMOUNT_USDC_E,
             amount1=LP_AMOUNT_USDT,
-            range_lower=Decimal("1"),         # Dummy — Curve uses pool-based positions
-            range_upper=Decimal("1000000"),    # Dummy — required by LPOpenIntent validation
+            range_lower=Decimal("1"),  # Dummy — Curve uses pool-based positions
+            range_upper=Decimal("1000000"),  # Dummy — required by LPOpenIntent validation
             protocol="curve",
             chain=CHAIN_NAME,
         )
@@ -181,9 +181,7 @@ class TestCurve2poolLPOpenArbitrum:
 
         # --- Layer 2: Execute ---
         execution_result = await orchestrator.execute(compilation_result.action_bundle)
-        assert execution_result.success, (
-            f"Curve LP_OPEN execution failed on Arbitrum: {execution_result.error}"
-        )
+        assert execution_result.success, f"Curve LP_OPEN execution failed on Arbitrum: {execution_result.error}"
         execution_result = enrich_for_accounting(
             execution_result,
             intent,
@@ -237,20 +235,17 @@ class TestCurve2poolLPOpenArbitrum:
         expected_usdt_spent = int(LP_AMOUNT_USDT * Decimal(10**6))
 
         assert usdc_e_spent == expected_usdc_e_spent, (
-            f"USDC.e spent must EXACTLY equal LP_OPEN amount. "
-            f"Expected: {expected_usdc_e_spent}, Got: {usdc_e_spent}"
+            f"USDC.e spent must EXACTLY equal LP_OPEN amount. Expected: {expected_usdc_e_spent}, Got: {usdc_e_spent}"
         )
         assert usdt_spent == expected_usdt_spent, (
-            f"USDT spent must EXACTLY equal LP_OPEN amount. "
-            f"Expected: {expected_usdt_spent}, Got: {usdt_spent}"
+            f"USDT spent must EXACTLY equal LP_OPEN amount. Expected: {expected_usdt_spent}, Got: {usdt_spent}"
         )
         assert lp_received > 0, f"LP tokens received must be > 0, got {lp_received}"
         # extract_lp_tokens_received() returns human-readable Decimal (PR #999),
         # so convert raw wei balance delta to match
         lp_received_decimal = Decimal(lp_received) / Decimal(10**18)
         assert lp_received_decimal == lp_tokens_from_receipt, (
-            f"LP tokens from balance delta ({lp_received_decimal}) "
-            f"must match receipt ({lp_tokens_from_receipt})"
+            f"LP tokens from balance delta ({lp_received_decimal}) must match receipt ({lp_tokens_from_receipt})"
         )
 
         logger.info(
@@ -344,9 +339,7 @@ class TestCurve2poolLPLifecycleArbitrum:
 
         # Layer 1: Compile LP_OPEN
         open_result = compiler.compile(open_intent)
-        assert open_result.status.value == "SUCCESS", (
-            f"LP_OPEN compile failed: {open_result.error}"
-        )
+        assert open_result.status.value == "SUCCESS", f"LP_OPEN compile failed: {open_result.error}"
         assert open_result.action_bundle is not None
 
         # Layer 2: Execute LP_OPEN
@@ -380,9 +373,7 @@ class TestCurve2poolLPLifecycleArbitrum:
             if minted is not None and minted > 0:
                 lp_tokens_received = minted
 
-        assert add_liquidity_found, (
-            "AddLiquidity event must be found in LP_OPEN receipt"
-        )
+        assert add_liquidity_found, "AddLiquidity event must be found in LP_OPEN receipt"
         assert lp_tokens_received > 0, "Must extract LP tokens from LP_OPEN receipt"
 
         # Layer 5: persist LP_OPEN — VIB-4968 books a typed LP_OPEN event.
@@ -421,9 +412,7 @@ class TestCurve2poolLPLifecycleArbitrum:
 
         # Layer 1: Compile LP_CLOSE
         close_result = compiler.compile(close_intent)
-        assert close_result.status.value == "SUCCESS", (
-            f"LP_CLOSE compile failed: {close_result.error}"
-        )
+        assert close_result.status.value == "SUCCESS", f"LP_CLOSE compile failed: {close_result.error}"
         assert close_result.action_bundle is not None
 
         # Layer 2: Execute LP_CLOSE
@@ -451,9 +440,7 @@ class TestCurve2poolLPLifecycleArbitrum:
             for event in parse_result.events:
                 if event.event_type == CurveEventType.REMOVE_LIQUIDITY:
                     remove_liquidity_found = True
-                    logger.info(
-                        f"RemoveLiquidity event: token_amounts={event.data.get('token_amounts')}"
-                    )
+                    logger.info(f"RemoveLiquidity event: token_amounts={event.data.get('token_amounts')}")
 
             extracted = parser.extract_lp_close_data(receipt_dict)
             if extracted is not None:

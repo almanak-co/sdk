@@ -248,24 +248,25 @@ def run_strategy_via_cli(force_action: str = "open") -> int:
     import json
     import tempfile
 
-    config = {
-        "deployment_id": "demo_curve_3pool_lp",
-        "strategy_name": "demo_curve_3pool_lp",
-        "pool": "3pool",
-        "amount_dai": "100",
-        "amount_usdc": "100",
-        "amount_usdt": "100",
-        "min_position_usd": "100",
-        "force_action": force_action,
-        "chain": "ethereum",
-    }
+    # Reuse the deployment-owned exact pool binding from config.json. The
+    # runner must not grow a second address catalogue that can drift from the
+    # manifest input.
+    strategy_dir = Path(__file__).parent
+    with (strategy_dir / "config.json").open() as source:
+        config = json.load(source)
+    config.update(
+        {
+            "deployment_id": "demo_curve_3pool_lp",
+            "strategy_name": "demo_curve_3pool_lp",
+            "force_action": force_action,
+        }
+    )
 
     with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
         json.dump(config, f)
         config_path = f.name
 
     try:
-        strategy_dir = Path(__file__).parent
         cmd = [
             "uv",
             "run",

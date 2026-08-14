@@ -9,13 +9,13 @@ from typing import Any
 
 from web3 import Web3
 
-from almanak.connectors.curve.adapter import CURVE_POOLS
 from almanak.framework.intents import IntentCompiler, LPCloseIntent, LPOpenIntent, SwapIntent
 from almanak.framework.intents.compiler_models import CompilationStatus
 from almanak.framework.intents.state_machine import IntentStateMachine, RetryConfig, StateMachineConfig
 from almanak.framework.intents.vocabulary import IntentType
 from almanak.framework.runner.strategy_runner import RunnerConfig, SingleChainExecutionState, StrategyRunner
 from tests.intents.conftest import get_token_balance
+from tests.support.curve_pool_catalog import CURVE_TEST_POOLS
 
 CURVE_SLIPPAGE_SAFETY_POOLS = {
     "arbitrum": "2pool",
@@ -34,7 +34,7 @@ _CURVE_MONEY_PATH_INTENTS = (IntentType.SWAP, IntentType.LP_OPEN, IntentType.LP_
 
 
 def _pool_balances(web3: Web3, wallet: str, chain: str, pool_name: str) -> dict[str, int]:
-    pool = CURVE_POOLS[chain][pool_name]
+    pool = CURVE_TEST_POOLS[chain][pool_name]
     addresses = [*pool["coin_addresses"], pool["lp_token"]]
     unique_addresses = dict.fromkeys(address.lower() for address in addresses)
     return {address: get_token_balance(web3, address, wallet) for address in unique_addresses}
@@ -46,7 +46,7 @@ def _intent_with_invalid_slippage(
     intent_type: IntentType,
     invalid_slippage: object,
 ) -> SwapIntent | LPOpenIntent | LPCloseIntent:
-    pool = CURVE_POOLS[chain][pool_name]
+    pool = CURVE_TEST_POOLS[chain][pool_name]
     if intent_type == IntentType.SWAP:
         intent = SwapIntent(
             from_token=pool["coin_addresses"][0],
@@ -99,7 +99,7 @@ async def assert_curve_invalid_slippage_refusals(
         # Every selected pool is stablecoin-only. Fixed parity prices keep this
         # malformed-input safety test deterministic and avoid an irrelevant
         # external price-service dependency.
-        price_oracle={symbol: Decimal("1") for symbol in CURVE_POOLS[chain][pool_name]["coins"]},
+        price_oracle={symbol: Decimal("1") for symbol in CURVE_TEST_POOLS[chain][pool_name]["coins"]},
         rpc_url=anvil_rpc_url,
     )
     unused_dependency = SimpleNamespace()
