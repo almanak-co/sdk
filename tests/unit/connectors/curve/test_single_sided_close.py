@@ -234,7 +234,7 @@ class TestSingleSidedFailClosed:
                 pool_address=_stable_pool().address, lp_amount=Decimal("1000"), coin_index=1, slippage_bps=10001
             )
         assert result.success is False
-        assert "must be > 0" in (result.error or "")
+        assert "must be in [0, 10000)" in (result.error or "")
 
     def test_query_never_returns_zero(self) -> None:
         """The on-chain query helper raises rather than returning 0/None."""

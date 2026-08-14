@@ -14,6 +14,7 @@ from almanak.connectors._strategy_base.base.compiler import (
     PreflightOutcome,
     PreflightVerdict,
 )
+from almanak.connectors._strategy_base.slippage import SlippagePrecisionError, slippage_to_bps
 from almanak.framework.intents.compiler_models import CompilationResult, CompilationStatus, TransactionData
 from almanak.framework.intents.intent_errors import InvalidCollateralForMarketError
 from almanak.framework.intents.min_out_guard import UnprotectedTradeError
@@ -626,38 +627,31 @@ class GMXV2Compiler(BasePerpCompiler):
                     is_safety_refusal=True,
                 )
 
-        # GMX's tolerance granularity is a basis point, and `int()` TRUNCATES:
-        # any 0 < max_slippage < 0.0001 collapses to 0 bps. That is not a safety
-        # problem (0 bps is the tightest possible bound) but it is a silent
-        # degradation of an explicit user request into a bound that pins the
-        # acceptable price to spot exactly — an order that almost certainly
-        # cannot fill, while still burning the keeper execution fee. Refuse
-        # instead, and say which value was too fine to express. An explicit
-        # `max_slippage == 0` is a different, legitimate request (pin to spot on
-        # purpose) and is deliberately NOT caught here.
+        # GMX's tolerance granularity is a basis point. Canonical conversion
+        # refuses a positive sub-bp tolerance rather than silently pinning the
+        # order to spot; an explicit zero remains a legitimate request.
         # Inside its own classified try: the oracle legitimately holds price
         # values as strings (`inner_runner._fetch_prices_for_intent` stores
-        # `str(resp.price)`), so `Decimal(...)` can raise `InvalidOperation`, and
-        # `max_slippage * 10000` can raise `TypeError` on a non-Decimal. Left
-        # unguarded these fell through to the method-level `except Exception`,
-        # which produces a FAILED carrying NEITHER flag — simultaneously
-        # non-retryable in teardown (position stranded) and counted toward the
-        # circuit breaker. A malformed read is a read gap: transient.
+        # `str(resp.price)`), so `Decimal(...)` can raise `InvalidOperation`.
+        # That malformed read is a transient read gap. Slippage conversion is
+        # classified separately below: a non-Decimal intent value is deterministic
+        # caller input, so retrying cannot repair it and the compiler safety-refuses.
         try:
             price_decimal = Decimal(index_price_usd)
-            slippage_bps = int(intent.max_slippage * 10000)
         except (ArithmeticError, TypeError, ValueError) as exc:
             return CompilationResult(
                 status=CompilationStatus.FAILED,
                 error=(
-                    f"GMX V2 {leg}: the {symbol} index price or slippage tolerance could not be "
-                    f"interpreted as a number ({exc!r}); refusing to derive a bound from it."
+                    f"GMX V2 {leg}: the {symbol} index price could not be interpreted as a number "
+                    f"({exc!r}); refusing to derive a bound from it."
                 ),
                 intent_id=intent.intent_id,
                 is_transient=True,
             )
 
-        if intent.max_slippage > 0 and slippage_bps == 0:
+        try:
+            slippage_bps = slippage_to_bps(intent.max_slippage)
+        except SlippagePrecisionError:
             return CompilationResult(
                 status=CompilationStatus.FAILED,
                 error=(
@@ -666,6 +660,23 @@ class GMXV2Compiler(BasePerpCompiler):
                     "acceptable price to spot exactly — the order would burn a keeper "
                     "execution fee without being fillable. Use max_slippage >= 0.0001 "
                     "(1 bp), or exactly 0 to pin to spot deliberately."
+                ),
+                intent_id=intent.intent_id,
+                is_safety_refusal=True,
+            )
+        except ValueError as exc:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"GMX V2 {leg}: refusing invalid max_slippage={intent.max_slippage} ({exc}).",
+                intent_id=intent.intent_id,
+                is_safety_refusal=True,
+            )
+        except (ArithmeticError, TypeError) as exc:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"GMX V2 {leg}: the slippage tolerance could not be "
+                    f"interpreted as a number ({exc!r}); refusing to derive a bound from it."
                 ),
                 intent_id=intent.intent_id,
                 is_safety_refusal=True,

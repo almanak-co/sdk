@@ -54,6 +54,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
+from almanak.connectors._strategy_base.slippage import compute_min_amount_out_from_bps
 from almanak.framework.data.tokens.exceptions import TokenResolutionError
 
 from .sdk import (
@@ -515,7 +516,7 @@ class TraderJoeV2Adapter:
         token_in_addr = self.resolve_token_address(token_in)
         token_out_addr = self.resolve_token_address(token_out)
         amount_in_wei = self.to_wei(amount_in, token_in)
-        slippage = slippage_bps or self.config.default_slippage_bps
+        slippage = self.config.default_slippage_bps if slippage_bps is None else slippage_bps
         recipient_addr = recipient or self.config.wallet_address
 
         if quote is None:
@@ -543,10 +544,8 @@ class TraderJoeV2Adapter:
         # provides no protection against a drained pool (which is why the
         # compiler now always passes the guarded value).
         if amount_out_min is None:
-            amount_out_min = self.to_wei(
-                quote.amount_out * Decimal(10000 - slippage) / Decimal(10000),
-                token_out,
-            )
+            expected_amount_out = self.to_wei(quote.amount_out, token_out)
+            amount_out_min = compute_min_amount_out_from_bps(expected_amount_out, slippage)
 
         # Build transaction
         tx, gas = self.sdk.build_swap_exact_tokens_for_tokens(
@@ -729,7 +728,7 @@ class TraderJoeV2Adapter:
         token_y_addr = self.resolve_token_address(token_y)
         amount_x_wei = self.to_wei(amount_x, token_x)
         amount_y_wei = self.to_wei(amount_y, token_y)
-        slippage = slippage_bps or self.config.default_slippage_bps
+        slippage = self.config.default_slippage_bps if slippage_bps is None else slippage_bps
 
         # Get pool info
         pool_addr = self.sdk.get_pool_address(token_x_addr, token_y_addr, bin_step)
@@ -832,14 +831,14 @@ class TraderJoeV2Adapter:
         token_y_addr = self.resolve_token_address(token_y)
 
         if amount_x_min is None or amount_y_min is None:
-            slippage = slippage_bps or self.config.default_slippage_bps
+            slippage = self.config.default_slippage_bps if slippage_bps is None else slippage_bps
 
             # Calculate minimums independently so an explicit non-None value on
             # one side is not overwritten when only the other side is missing.
             if amount_x_min is None:
-                amount_x_min = int(position.amount_x * (10000 - slippage) // 10000)
+                amount_x_min = compute_min_amount_out_from_bps(position.amount_x, slippage)
             if amount_y_min is None:
-                amount_y_min = int(position.amount_y * (10000 - slippage) // 10000)
+                amount_y_min = compute_min_amount_out_from_bps(position.amount_y, slippage)
 
         tx, gas = self.sdk.build_remove_liquidity(
             token_x=token_x_addr,

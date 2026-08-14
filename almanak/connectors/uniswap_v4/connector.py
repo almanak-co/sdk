@@ -76,6 +76,10 @@ CONNECTOR = Connector(
         module="almanak.connectors.uniswap_v4.pool_reader",
         attribute="POOL_DATA_SPEC",
     ),
+    pool_reader=ImportRef(
+        module="almanak.connectors.uniswap_v4.pool_reader",
+        attribute="POOL_READER_SPEC",
+    ),
     # VIB-5634: TD-14 on-chain closure verifier. Registered under the connector's
     # slugs by the framework manifest loader; the LP_V4 primitive-label alias
     # (registry-derived positions carry ``protocol='lp_v4'``) is added generically

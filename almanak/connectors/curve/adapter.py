@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Any
 from almanak.connectors._strategy_base.base.approval_sequencing import build_approval_sequence
 from almanak.connectors._strategy_base.pool_validation_base import ZERO_ADDRESS, decode_address
 from almanak.connectors._strategy_base.rpc import eth_call, eth_call_uint256, eth_estimate_gas
+from almanak.connectors._strategy_base.slippage import compute_min_amount_out_from_bps
 from almanak.connectors._strategy_base.swap_oracle_guard import (
     DEFAULT_STABLE_ORACLE_FLOOR_RESIDUAL_BPS,
     DEFAULT_STABLE_ORACLE_FLOOR_TOLERANCE_BPS,
@@ -617,8 +618,8 @@ class CurveConfig:
         if self.chain not in CURVE_ADDRESSES:
             raise ValueError(f"Unsupported chain: {self.chain}. Supported: {list(CURVE_ADDRESSES.keys())}")
 
-        if self.default_slippage_bps < 0 or self.default_slippage_bps > 10000:
-            raise ValueError("Slippage must be between 0 and 10000 basis points")
+        if self.default_slippage_bps < 0 or self.default_slippage_bps >= 10000:
+            raise ValueError("Slippage must be between 0 (inclusive) and 10000 (exclusive) basis points")
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
@@ -1675,7 +1676,7 @@ class CurveAdapter:
             if price_ratio is not None and price_ratio <= 0:
                 raise ValueError(f"price_ratio must be positive, got {price_ratio}")
 
-            slippage_bps = slippage_bps or self.config.default_slippage_bps
+            slippage_bps = self.config.default_slippage_bps if slippage_bps is None else slippage_bps
             recipient = recipient or self.wallet_address
 
             # Get pool info
@@ -1738,7 +1739,7 @@ class CurveAdapter:
                 amount_out_estimate = self._estimate_swap_output(
                     pool_info, i, j, amount_in_wei, price_ratio=price_ratio
                 )
-            amount_out_minimum = max(1, int(amount_out_estimate * (10000 - slippage_bps) // 10000))
+            amount_out_minimum = max(1, compute_min_amount_out_from_bps(amount_out_estimate, slippage_bps))
             token_out_decimals = self._coin_decimals(pool_info, j)
 
             # P0-8 oracle/MEV min-out guard (VIB-5439): on a StableSwap pool,
@@ -1860,7 +1861,7 @@ class CurveAdapter:
             LiquidityResult with transaction data
         """
         try:
-            slippage_bps = slippage_bps or self.config.default_slippage_bps
+            slippage_bps = self.config.default_slippage_bps if slippage_bps is None else slippage_bps
             recipient = recipient or self.wallet_address
 
             # Get pool info
@@ -1885,7 +1886,7 @@ class CurveAdapter:
 
             # Estimate LP tokens (simplified)
             lp_quote = self._estimate_add_liquidity(pool_info, amounts_wei)
-            min_lp_tokens = int(lp_quote * (10000 - slippage_bps) // 10000)
+            min_lp_tokens = compute_min_amount_out_from_bps(lp_quote, slippage_bps)
             # Fail closed (VIB-5441): a positive on-chain quote that rounds to <=0
             # after integer slippage math (a tiny quote or a very wide slippage_bps)
             # would re-introduce the unprotected min_lp=0 path this PR removes — an
@@ -1974,7 +1975,7 @@ class CurveAdapter:
             per-coin minimum-received floors in native token base units.
         """
         try:
-            slippage_bps = slippage_bps or self.config.default_slippage_bps
+            slippage_bps = self.config.default_slippage_bps if slippage_bps is None else slippage_bps
             recipient = recipient or self.wallet_address
 
             # Get pool info
@@ -1991,7 +1992,7 @@ class CurveAdapter:
             # Estimate output amounts via on-chain query (or fallback to zeros)
             self._last_estimation_error: str | None = None
             min_amounts = self._estimate_remove_liquidity(pool_info, lp_amount_wei)
-            min_amounts = [int(a * (10000 - slippage_bps) // 10000) for a in min_amounts]
+            min_amounts = [compute_min_amount_out_from_bps(a, slippage_bps) for a in min_amounts]
 
             # Guard: fail closed when min_amounts are all zero — proceeding without slippage
             # protection would expose the full withdrawal to sandwich attacks.
@@ -2097,7 +2098,7 @@ class CurveAdapter:
             expected_out, used_cryptoswap = self._query_calc_withdraw_one_coin_onchain(
                 pool_info, lp_amount_wei, coin_index
             )
-            min_amount = int(expected_out * (10000 - slippage_bps) // 10000)
+            min_amount = compute_min_amount_out_from_bps(expected_out, slippage_bps)
 
             # Guard: fail closed when the floor is non-positive — proceeding with
             # min_amount<=0 would expose the entire single-sided withdrawal to a
@@ -2388,7 +2389,7 @@ class CurveAdapter:
         rpc is wired.
         """
         try:
-            slippage_bps = slippage_bps or self.config.default_slippage_bps
+            slippage_bps = self.config.default_slippage_bps if slippage_bps is None else slippage_bps
             recipient = recipient or self.wallet_address
 
             pool_info = self.get_pool_info(pool_address)
@@ -2427,7 +2428,7 @@ class CurveAdapter:
             amount_out_estimate = self._estimate_underlying_swap_output(
                 pool_info, i, j, amount_in_wei, token_in_symbol, token_out_symbol
             )
-            amount_out_minimum = max(1, int(amount_out_estimate * (10000 - slippage_bps) // 10000))
+            amount_out_minimum = max(1, compute_min_amount_out_from_bps(amount_out_estimate, slippage_bps))
             token_out_decimals = self._get_token_decimals(token_out_symbol)
 
             # P0-8 oracle/MEV min-out guard (VIB-5439). The combined coin space is
@@ -2538,7 +2539,7 @@ class CurveAdapter:
         hold/approve the underlying coins.
         """
         try:
-            slippage_bps = slippage_bps or self.config.default_slippage_bps
+            slippage_bps = self.config.default_slippage_bps if slippage_bps is None else slippage_bps
             recipient = recipient or self.wallet_address
 
             pool_info = self.get_pool_info(pool_address)
@@ -2562,7 +2563,7 @@ class CurveAdapter:
                 amounts_wei.append(int(amt * Decimal(10**decimals)))
 
             min_lp_tokens = self._estimate_add_liquidity_underlying(pool_info, zap, amounts_wei)
-            min_lp_tokens = int(min_lp_tokens * (10000 - slippage_bps) // 10000)
+            min_lp_tokens = compute_min_amount_out_from_bps(min_lp_tokens, slippage_bps)
 
             transactions: list[TransactionData] = []
             for idx, amount_wei in enumerate(amounts_wei):
@@ -2630,7 +2631,7 @@ class CurveAdapter:
         ``remove_liquidity`` guard.
         """
         try:
-            slippage_bps = slippage_bps or self.config.default_slippage_bps
+            slippage_bps = self.config.default_slippage_bps if slippage_bps is None else slippage_bps
             recipient = recipient or self.wallet_address
 
             pool_info = self.get_pool_info(pool_address)
@@ -2642,7 +2643,7 @@ class CurveAdapter:
 
             self._last_estimation_error = None
             min_amounts = self._estimate_remove_liquidity_underlying(pool_info, lp_amount_wei)
-            min_amounts = [int(a * (10000 - slippage_bps) // 10000) for a in min_amounts]
+            min_amounts = [compute_min_amount_out_from_bps(a, slippage_bps) for a in min_amounts]
 
             if all(a == 0 for a in min_amounts):
                 reason = self._last_estimation_error or "unknown"

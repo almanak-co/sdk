@@ -75,6 +75,25 @@ class TestCompileOpen:
         assert result.action_bundle.metadata["reduce_only"] is False
         assert result.action_bundle.metadata["is_long"] is True
 
+    def test_fractional_basis_point_floors_without_widening(self) -> None:
+        ctx = _ctx(lambda to, data, chain=None: _oracle_return(Decimal("59897"), 5))
+        one_bp = HyperliquidCompiler().compile_perp_open(ctx, _open_intent(max_slippage=Decimal("0.0001")))
+        one_and_a_half_bp = HyperliquidCompiler().compile_perp_open(ctx, _open_intent(max_slippage=Decimal("0.00015")))
+
+        assert one_and_a_half_bp.status == CompilationStatus.SUCCESS
+        assert (
+            one_and_a_half_bp.action_bundle.metadata["limit_px_wire"] == one_bp.action_bundle.metadata["limit_px_wire"]
+        )
+
+    def test_positive_sub_basis_point_is_a_safety_refusal(self) -> None:
+        ctx = _ctx(lambda to, data, chain=None: _oracle_return(Decimal("59897"), 5))
+        result = HyperliquidCompiler().compile_perp_open(ctx, _open_intent(max_slippage=Decimal("0.00005")))
+
+        assert result.status == CompilationStatus.FAILED
+        assert result.is_safety_refusal is True
+        assert "finer than one basis point" in result.error
+        assert result.transactions == []
+
     def test_open_leverage_optin_warns_but_succeeds(self) -> None:
         # VIB-5724: a divergent leverage compiles ONLY with the explicit opt-in;
         # the compile-time warning still surfaces that leverage is not set on-venue.
@@ -119,9 +138,7 @@ class TestCompileOpen:
         # Opt-in at the default 1x must NOT invent a divergence warning: nothing
         # was requested that the venue can't honour.
         ctx = _ctx(lambda to, data, chain=None: _oracle_return(Decimal("59897"), 5))
-        result = HyperliquidCompiler().compile_perp_open(
-            ctx, _open_intent(accept_venue_leverage=True)
-        )
+        result = HyperliquidCompiler().compile_perp_open(ctx, _open_intent(accept_venue_leverage=True))
         assert result.status == CompilationStatus.SUCCESS
         assert result.warnings == []
 

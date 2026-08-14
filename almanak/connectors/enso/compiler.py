@@ -11,6 +11,11 @@ from almanak.connectors._strategy_base.base.compiler import (
     BaseProtocolCompiler,
     SwapCompilerContext,
 )
+from almanak.connectors._strategy_base.slippage import (
+    SlippagePrecisionError,
+    compute_min_amount_out,
+    slippage_to_bps,
+)
 from almanak.framework.intents._compiler_helpers import assemble_action_bundle, sum_transaction_gas
 from almanak.framework.intents.compiler_constants import MAX_UINT256
 from almanak.framework.intents.compiler_models import CompilationResult, CompilationStatus, TokenInfo, TransactionData
@@ -75,7 +80,7 @@ class EnsoCompiler(BaseProtocolCompiler[SwapCompilerContext]):
             amount_in = amount_check
 
             logger.info("Getting Enso route: %s -> %s, amount=%s", from_token.symbol, to_token.symbol, amount_in)
-            slippage_bps = int(intent.max_slippage * 10000)
+            slippage_bps = slippage_to_bps(intent.max_slippage)
             route_data = self._get_enso_route(
                 ctx,
                 from_token.address,
@@ -105,7 +110,7 @@ class EnsoCompiler(BaseProtocolCompiler[SwapCompilerContext]):
 
             total_gas = sum_transaction_gas(transactions)
             amount_out = int(route_data["amount_out"]) if route_data["amount_out"] else 0
-            min_output = int(Decimal(str(amount_out)) * (Decimal("1") - intent.max_slippage))
+            min_output = compute_min_amount_out(amount_out, intent.max_slippage)
             expected_output_human = Decimal(str(amount_out)) / Decimal(10**to_token.decimals) if amount_out else None
 
             result.action_bundle = assemble_action_bundle(
@@ -152,6 +157,11 @@ class EnsoCompiler(BaseProtocolCompiler[SwapCompilerContext]):
                 len(transactions),
                 f"{total_gas:,}",
             )
+        except SlippagePrecisionError as e:
+            logger.error("Enso SWAP refused by slippage precision guard: %s", e)
+            result.status = CompilationStatus.FAILED
+            result.error = str(e)
+            result.is_safety_refusal = True
         except Exception as e:
             logger.exception("Failed to compile Enso SWAP intent: %s", e)
             result.status = CompilationStatus.FAILED
@@ -209,7 +219,7 @@ class EnsoCompiler(BaseProtocolCompiler[SwapCompilerContext]):
                 to_token.symbol,
                 amount_in,
             )
-            slippage_bps = int(intent.max_slippage * 10000)
+            slippage_bps = slippage_to_bps(intent.max_slippage)
             dest_chain_id = CHAIN_MAPPING.get(dest_chain.lower())
             if dest_chain_id is None:
                 return CompilationResult(
@@ -289,6 +299,11 @@ class EnsoCompiler(BaseProtocolCompiler[SwapCompilerContext]):
                 bridge_fee,
                 estimated_time,
             )
+        except SlippagePrecisionError as e:
+            logger.error("Enso cross-chain SWAP refused by slippage precision guard: %s", e)
+            result.status = CompilationStatus.FAILED
+            result.error = str(e)
+            result.is_safety_refusal = True
         except Exception as e:
             logger.exception("Failed to compile cross-chain SWAP intent: %s", e)
             result.status = CompilationStatus.FAILED

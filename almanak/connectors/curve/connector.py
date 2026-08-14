@@ -87,6 +87,10 @@ CONNECTOR = Connector(
         module="almanak.connectors.curve.pool_reader",
         attribute="POOL_DATA_SPEC",
     ),
+    pool_reader=ImportRef(
+        module="almanak.connectors.curve.pool_reader",
+        attribute="POOL_READER_SPEC",
+    ),
     # Curve's SWAP compiler ships amount_in as a human-readable Decimal (VIB-3747).
     metadata_amount_encoding=MetadataAmountEncoding(swap="human"),
     # Curve LP positions are fungible ERC20 LP tokens: LPCloseIntent.position_id

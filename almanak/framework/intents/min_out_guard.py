@@ -52,7 +52,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from almanak.framework.intents._compiler_helpers import compute_min_amount_out
+from almanak.framework.intents._compiler_helpers import BPS_PER_UNIT, compute_min_amount_out
 
 __all__ = [
     "MAX_SLIPPAGE_BPS_EXCLUSIVE",
@@ -65,7 +65,7 @@ __all__ = [
 
 #: A slippage of 100% is not a tolerance, it is the absence of one: it derives a
 #: minimum of zero from any expected output. Callers must stay strictly below.
-MAX_SLIPPAGE_BPS_EXCLUSIVE = 10_000
+MAX_SLIPPAGE_BPS_EXCLUSIVE = BPS_PER_UNIT
 
 
 class UnprotectedTradeError(ValueError):
@@ -96,8 +96,8 @@ def validate_max_slippage_fraction(
     that carries one. It exists because the bound was previously written out
     longhand at seven validator sites, which is seven chances for the bound and
     its message to drift apart — and one of those sites having an inclusive ``1``
-    is enough to defeat the guard everywhere downstream, since
-    ``compute_min_amount_out(x, Decimal("1")) == 0`` for every ``x``.
+    is enough to defeat downstream guards: the unvalidated arithmetic
+    ``x * (1 - Decimal("1"))`` collapses every positive ``x`` to zero.
 
     ``1`` is rejected rather than clamped. A caller asking for 100% tolerance is
     asking for no floor at all; degrading that to "the largest tolerance we do

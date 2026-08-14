@@ -107,6 +107,12 @@ CONNECTOR = Connector(
         module="almanak.connectors.aerodrome.pool_reader",
         attribute="POOL_DATA_SPECS",
     ),
+    # Preserve the static live-price capability signal while the lifecycle
+    # matrix still consumes the deprecated pool_reader manifest field.
+    pool_reader=ImportRef(
+        module="almanak.connectors.aerodrome.pool_reader",
+        attribute="POOL_READER_SPEC",
+    ),
     agent_read_connector=ImportRef(
         module="almanak.connectors.aerodrome.agent_read_provider",
         attribute="AerodromeSlipstreamAgentReadConnector",

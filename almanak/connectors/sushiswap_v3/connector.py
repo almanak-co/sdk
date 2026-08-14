@@ -58,6 +58,10 @@ CONNECTOR = Connector(
         module="almanak.connectors.sushiswap_v3.pool_reader",
         attribute="POOL_DATA_SPEC",
     ),
+    pool_reader=ImportRef(
+        module="almanak.connectors.sushiswap_v3.pool_reader",
+        attribute="POOL_READER_SPEC",
+    ),
     agent_read_connector=ImportRef(
         module="almanak.connectors.sushiswap_v3.agent_read_provider",
         attribute="SushiswapV3AgentReadConnector",

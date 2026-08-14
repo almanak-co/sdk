@@ -27,12 +27,12 @@ from almanak.connectors._strategy_base.base.compiler import (
     BaseProtocolCompiler,
     SwapCompilerContext,
 )
+from almanak.connectors._strategy_base.slippage import compute_min_amount_out
 from almanak.framework.intents._compiler_helpers import (
     PriceImpactDecision,
     assemble_action_bundle,
     check_price_impact,
     choose_safer_quote,
-    compute_min_amount_out,
     sum_transaction_gas,
 )
 from almanak.framework.intents.compiler_models import CompilationResult, CompilationStatus, TransactionData

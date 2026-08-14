@@ -30,6 +30,8 @@ from typing import TYPE_CHECKING, Any
 from web3 import Web3
 from web3.contract import Contract
 
+from almanak.connectors._strategy_base.slippage import compute_min_amount_out_from_bps
+
 if TYPE_CHECKING:
     from almanak.framework.data.tokens.resolver import TokenResolver as TokenResolverType
     from almanak.framework.gateway_client import GatewayClient
@@ -438,7 +440,7 @@ class SwapParams:
     def amount_out_minimum(self) -> int:
         """Calculate minimum output with slippage."""
         # This would be calculated based on quote
-        return int(self.min_out * (10000 - self.slippage_bps) // 10000)
+        return compute_min_amount_out_from_bps(self.min_out, self.slippage_bps)
 
 
 @dataclass
@@ -684,7 +686,7 @@ class PendleSDK:
             Transaction data for execution
         """
         # Calculate min output with slippage
-        min_pt_out_with_slippage = int(min_pt_out * (10000 - slippage_bps) // 10000)
+        min_pt_out_with_slippage = compute_min_amount_out_from_bps(min_pt_out, slippage_bps)
 
         # Use token_mint_sy if provided, otherwise use token_in
         # For yield-bearing markets, token_mint_sy should be the yield-bearing token
@@ -758,7 +760,7 @@ class PendleSDK:
         Returns:
             Transaction data for execution
         """
-        min_token_out_with_slippage = int(min_token_out * (10000 - slippage_bps) // 10000)
+        min_token_out_with_slippage = compute_min_amount_out_from_bps(min_token_out, slippage_bps)
 
         # Use token_redeem_sy if provided, otherwise default to token_out
         redeem_sy_address = token_redeem_sy if token_redeem_sy else token_out
@@ -834,7 +836,7 @@ class PendleSDK:
         Returns:
             Transaction data for execution
         """
-        min_yt_out_with_slippage = int(min_yt_out * (10000 - slippage_bps) // 10000)
+        min_yt_out_with_slippage = compute_min_amount_out_from_bps(min_yt_out, slippage_bps)
 
         mint_sy_address = token_mint_sy if token_mint_sy else token_in
 
@@ -903,7 +905,7 @@ class PendleSDK:
         Returns:
             Transaction data for execution
         """
-        min_token_out_with_slippage = int(min_token_out * (10000 - slippage_bps) // 10000)
+        min_token_out_with_slippage = compute_min_amount_out_from_bps(min_token_out, slippage_bps)
 
         # Build TokenOutput struct
         token_output = (
@@ -970,7 +972,7 @@ class PendleSDK:
         Returns:
             Transaction data for execution
         """
-        min_lp_out_with_slippage = int(min_lp_out * (10000 - slippage_bps) // 10000)
+        min_lp_out_with_slippage = compute_min_amount_out_from_bps(min_lp_out, slippage_bps)
 
         # Build TokenInput struct
         token_input = (
@@ -1045,7 +1047,7 @@ class PendleSDK:
         Returns:
             Transaction data for execution
         """
-        min_token_out_with_slippage = int(min_token_out * (10000 - slippage_bps) // 10000)
+        min_token_out_with_slippage = compute_min_amount_out_from_bps(min_token_out, slippage_bps)
 
         # Build TokenOutput struct
         token_output = (
@@ -1112,7 +1114,7 @@ class PendleSDK:
         Returns:
             Transaction data for execution
         """
-        min_token_out_with_slippage = int(min_token_out * (10000 - slippage_bps) // 10000)
+        min_token_out_with_slippage = compute_min_amount_out_from_bps(min_token_out, slippage_bps)
 
         # Build TokenOutput struct
         token_output = (

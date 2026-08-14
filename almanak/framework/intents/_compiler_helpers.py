@@ -41,6 +41,86 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 
+BPS_PER_UNIT = 10_000
+
+
+class SlippagePrecisionError(ValueError):
+    """Raised when a non-zero tolerance cannot be represented in whole bps."""
+
+
+def slippage_to_bps(max_slippage: Decimal) -> int:
+    """Convert a fractional tolerance to whole basis points without loosening it.
+
+    Basis-point fields cannot faithfully represent an arbitrary ``Decimal``
+    fraction.  This helper establishes one repository-wide policy:
+
+    * floor toward zero in the non-negative legal domain, so the encoded
+      tolerance is never wider than the caller requested;
+    * allow an explicit zero tolerance; and
+    * refuse a positive tolerance below one basis point instead of silently
+      collapsing it to zero and producing an unexpectedly unfillable order.
+
+    Args:
+        max_slippage: Fractional tolerance (``Decimal("0.005")`` = 50 bps).
+            Must be a finite ``Decimal`` in ``[0, 1)``.
+
+    Returns:
+        The tolerance in whole basis points.
+
+    Raises:
+        TypeError: If ``max_slippage`` is not a ``Decimal``.
+        ValueError: If it is non-finite or outside ``[0, 1)``.
+        SlippagePrecisionError: If a positive value is below one basis point.
+    """
+    if not isinstance(max_slippage, Decimal):
+        raise TypeError(f"max_slippage must be a Decimal (got {type(max_slippage).__name__})")
+    if not max_slippage.is_finite():
+        raise ValueError(f"max_slippage must be finite (got {max_slippage})")
+    if max_slippage < Decimal("0") or max_slippage >= Decimal("1"):
+        raise ValueError(f"max_slippage must be in [0, 1) (got {max_slippage})")
+
+    numerator, denominator = max_slippage.as_integer_ratio()
+    bps = numerator * BPS_PER_UNIT // denominator
+    if max_slippage > 0 and bps == 0:
+        raise SlippagePrecisionError(
+            f"max_slippage={max_slippage} is positive but finer than one basis point; "
+            "use exactly 0 or at least Decimal('0.0001')"
+        )
+    return bps
+
+
+def compute_min_amount_out_from_bps(expected_amount: int, slippage_bps: int) -> int:
+    """Return an integer output floor for a whole-basis-point tolerance.
+
+    Integer arithmetic makes the rounding contract explicit and independent of
+    the process-wide ``Decimal`` context: the result always floors toward zero.
+    ``expected_amount == 0`` remains legal because one-sided LP operations may
+    deliberately carry a zero desired amount for one leg; callers that require a
+    strictly positive floor must additionally use ``require_protective_min``.
+
+    Args:
+        expected_amount: Expected output in the token's smallest unit. Must be
+            non-negative.
+        slippage_bps: Whole basis points in ``[0, 10_000)``.
+
+    Returns:
+        ``expected_amount * (10_000 - slippage_bps) // 10_000``.
+
+    Raises:
+        TypeError: If either argument is not an integer.
+        ValueError: If either argument is outside its legal domain.
+    """
+    if not isinstance(expected_amount, int) or isinstance(expected_amount, bool):
+        raise TypeError(f"expected_amount must be an int (got {type(expected_amount).__name__})")
+    if not isinstance(slippage_bps, int) or isinstance(slippage_bps, bool):
+        raise TypeError(f"slippage_bps must be an int (got {type(slippage_bps).__name__})")
+    if expected_amount < 0:
+        raise ValueError(f"expected_amount must be >= 0 (got {expected_amount})")
+    if slippage_bps < 0 or slippage_bps >= BPS_PER_UNIT:
+        raise ValueError(f"slippage_bps must be in [0, {BPS_PER_UNIT}) (got {slippage_bps})")
+    return expected_amount * (BPS_PER_UNIT - slippage_bps) // BPS_PER_UNIT
+
+
 def compute_min_amount_out(expected_amount: int, max_slippage: Decimal) -> int:
     """Return the lower bound for a transaction output given slippage tolerance.
 
@@ -60,18 +140,28 @@ def compute_min_amount_out(expected_amount: int, max_slippage: Decimal) -> int:
             minimum correctly through this helper.
 
     Returns:
-        ``int(expected_amount * (1 - max_slippage))`` using Decimal arithmetic
-        so rounding matches the existing compiler code exactly. Always ``int``.
+        The exact mathematical floor of ``expected_amount * (1 - max_slippage)``.
+        Integer-ratio arithmetic makes the result independent of the process-wide
+        ``Decimal`` context. Always ``int``.
 
     Raises:
+        TypeError: If ``expected_amount`` is not an integer or ``max_slippage``
+            is not a ``Decimal``.
         ValueError: If ``expected_amount`` is negative, or ``max_slippage`` is
-            outside ``[0, 1)``.
+            non-finite or outside ``[0, 1)``.
     """
+    if not isinstance(expected_amount, int) or isinstance(expected_amount, bool):
+        raise TypeError(f"expected_amount must be an int (got {type(expected_amount).__name__})")
+    if not isinstance(max_slippage, Decimal):
+        raise TypeError(f"max_slippage must be a Decimal (got {type(max_slippage).__name__})")
     if expected_amount < 0:
         raise ValueError(f"expected_amount must be >= 0 (got {expected_amount})")
+    if not max_slippage.is_finite():
+        raise ValueError(f"max_slippage must be finite (got {max_slippage})")
     if max_slippage < Decimal("0") or max_slippage >= Decimal("1"):
         raise ValueError(f"max_slippage must be in [0, 1) (got {max_slippage})")
-    return int(Decimal(str(expected_amount)) * (Decimal("1") - max_slippage))
+    slippage_numerator, denominator = max_slippage.as_integer_ratio()
+    return expected_amount * (denominator - slippage_numerator) // denominator
 
 
 def choose_safer_quote(oracle_estimate: int, quoter_amount: int | None) -> tuple[int, bool]:

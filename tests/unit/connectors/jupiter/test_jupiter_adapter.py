@@ -5,12 +5,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from almanak.connectors._strategy_base.slippage import SlippagePrecisionError
 from almanak.connectors.jupiter.adapter import JupiterAdapter, SolanaTransactionData
 from almanak.connectors.jupiter.client import JupiterConfig
 from almanak.connectors.jupiter.models import JupiterQuote, JupiterSwapTransaction
 from almanak.framework.data.tokens.exceptions import TokenResolutionError
 from almanak.framework.intents.vocabulary import SwapIntent
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -217,6 +217,33 @@ class TestJupiterAdapterCompileSwap:
         assert bundle.metadata["input_mint"] == USDC_MINT
         assert bundle.metadata["output_mint"] == WSOL_MINT
         assert bundle.metadata["deferred_swap"] is True
+
+    @patch("almanak.connectors.jupiter.adapter.JupiterClient")
+    def test_compile_swap_propagates_sub_bp_precision_error(
+        self,
+        mock_client_cls,
+        jupiter_config,
+        mock_token_resolver,
+        price_provider,
+    ):
+        mock_client = MagicMock()
+        mock_client_cls.return_value = mock_client
+        adapter = JupiterAdapter(
+            config=jupiter_config,
+            price_provider=price_provider,
+            token_resolver=mock_token_resolver,
+        )
+        intent = SwapIntent(
+            from_token="USDC",
+            to_token="SOL",
+            amount=Decimal("100"),
+            max_slippage=Decimal("0.00005"),
+        )
+
+        with pytest.raises(SlippagePrecisionError, match="basis point"):
+            adapter.compile_swap_intent(intent)
+
+        mock_client.get_quote.assert_not_called()
 
     @patch("almanak.connectors.jupiter.adapter.JupiterClient")
     def test_compile_swap_with_amount_usd(

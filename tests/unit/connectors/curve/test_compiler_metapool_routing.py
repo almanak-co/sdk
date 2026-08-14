@@ -187,6 +187,48 @@ class _StubContext:
 
 
 class TestCompileMetapoolE2E:
+    def test_compile_swap_classifies_sub_bp_slippage_as_safety_refusal(self) -> None:
+        intent = SwapIntent(
+            from_token="FRAX",
+            to_token="USDT",
+            amount=Decimal("50"),
+            max_slippage=Decimal("0.00005"),
+            protocol="curve",
+            chain=CHAIN,
+        )
+        result = CurveCompiler().compile_swap(_StubContext(services=_StubServices()), intent)
+
+        assert result.status == CompilationStatus.FAILED
+        assert result.is_safety_refusal is True
+        assert result.transactions == []
+        assert "basis point" in (result.error or "")
+
+    @pytest.mark.parametrize(
+        ("invalid_slippage", "expected_error"),
+        [
+            ("0.005", "must be a Decimal"),
+            (Decimal("1"), "must be in [0, 1)"),
+        ],
+    )
+    def test_compile_swap_classifies_post_validation_invalid_slippage_as_safety_refusal(
+        self, invalid_slippage: object, expected_error: str
+    ) -> None:
+        intent = SwapIntent(
+            from_token="FRAX",
+            to_token="USDT",
+            amount=Decimal("50"),
+            max_slippage=Decimal("0.005"),
+            protocol="curve",
+            chain=CHAIN,
+        ).model_copy(update={"max_slippage": invalid_slippage})
+
+        result = CurveCompiler().compile_swap(_StubContext(services=_StubServices()), intent)
+
+        assert result.status == CompilationStatus.FAILED
+        assert result.is_safety_refusal is True
+        assert result.transactions == []
+        assert expected_error in (result.error or "")
+
     def test_compile_swap_routes_underlying(self) -> None:
         """FRAX -> USDT compiles to an exchange_underlying bundle on the metapool."""
         intent = SwapIntent(

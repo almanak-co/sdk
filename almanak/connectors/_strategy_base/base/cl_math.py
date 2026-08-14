@@ -6,7 +6,7 @@ import logging
 from decimal import Decimal
 from typing import Any
 
-from almanak.framework.intents._compiler_helpers import compute_min_amount_out
+from almanak.connectors._strategy_base.slippage import compute_min_amount_out
 from almanak.framework.intents.compiler_models import CompilationResult, CompilationStatus
 from almanak.framework.intents.min_out_guard import UnprotectedTradeError
 

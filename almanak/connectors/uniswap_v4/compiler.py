@@ -10,6 +10,7 @@ from almanak.connectors._strategy_base.base.compiler import (
     BaseProtocolCompiler,
     SwapCompilerContext,
 )
+from almanak.connectors._strategy_base.slippage import SlippagePrecisionError, slippage_to_bps
 from almanak.framework.intents.compiler_models import CompilationResult, CompilationStatus, TransactionData
 from almanak.framework.intents.vocabulary import CollectFeesIntent, IntentType, LPCloseIntent, LPOpenIntent, SwapIntent
 
@@ -66,7 +67,7 @@ class UniswapV4Compiler(BaseProtocolCompiler[SwapCompilerContext]):
                     intent_id=intent.intent_id,
                 )
 
-            slippage_bps = int(intent.max_slippage * 10000)
+            slippage_bps = slippage_to_bps(intent.max_slippage)
             adapter = self._adapter(ctx, default_slippage_bps=slippage_bps)
             # VIB-2058: thread the swap-safety knobs from the runtime context so the
             # adapter can fail closed on a missing executable quote and run the
@@ -111,6 +112,14 @@ class UniswapV4Compiler(BaseProtocolCompiler[SwapCompilerContext]):
                 total_gas_estimate=action_bundle.metadata.get("gas_estimate", 0),
             )
 
+        except SlippagePrecisionError as e:
+            logger.error("Uniswap V4 SWAP refused by slippage precision guard: %s", e)
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=str(e),
+                intent_id=intent.intent_id,
+                is_safety_refusal=True,
+            )
         except ValueError as e:
             return CompilationResult(
                 status=CompilationStatus.FAILED,

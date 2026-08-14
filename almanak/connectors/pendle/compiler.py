@@ -18,6 +18,11 @@ from almanak.connectors._strategy_base.base.compiler import (
     PreflightOutcome,
     PreflightVerdict,
 )
+from almanak.connectors._strategy_base.slippage import (
+    SlippagePrecisionError,
+    compute_min_amount_out,
+    slippage_to_bps,
+)
 from almanak.framework.intents import compiler_constants
 from almanak.framework.intents.compiler_models import CompilationResult, CompilationStatus, TokenInfo, TransactionData
 from almanak.framework.intents.vocabulary import IntentType
@@ -465,7 +470,7 @@ def _build_pre_swap_tx(
 
     pre_swap_adapter = compiler._ctx.services.default_swap_adapter(v3_protocol)
 
-    pre_swap_min_out = int(Decimal(str(estimated_mint_sy_output)) * (Decimal("1") - intent.max_slippage))
+    pre_swap_min_out = compute_min_amount_out(estimated_mint_sy_output, intent.max_slippage)
     # Cap Pendle input to the guaranteed pre-swap minimum. When max_slippage > 2%, the V3
     # DEX swap may legally return less than the 2%-buffered estimate, so the Pendle step
     # must not try to spend more than the swap guarantees.
@@ -774,7 +779,7 @@ def compile_pendle_swap(compiler, intent: SwapIntent) -> CompilationResult:
             return market_or_err
         market = market_or_err
 
-        slippage_bps = int(intent.max_slippage * Decimal("10000"))
+        slippage_bps = slippage_to_bps(intent.max_slippage)
         # For YT sells the floor must be denominated in OUTPUT (underlying) units, so read the
         # YT/asset exchange rate (= 1 - ptToAsset, gateway-routed) and feed it to the floor calc.
         # VIB-5329: without this the floor used the raw YT count and reverted every near-expiry sell.
@@ -889,6 +894,11 @@ def compile_pendle_swap(compiler, intent: SwapIntent) -> CompilationResult:
             f"{len(transactions)} txs, {total_gas} gas"
         )
 
+    except SlippagePrecisionError as exc:
+        logger.error("Pendle SWAP refused by slippage precision guard: %s", exc)
+        result.status = CompilationStatus.FAILED
+        result.error = str(exc)
+        result.is_safety_refusal = True
     except Exception:
         logger.exception("Failed to compile Pendle SWAP intent")
         result.status = CompilationStatus.FAILED

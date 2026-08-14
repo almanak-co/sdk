@@ -734,10 +734,7 @@ class TestPriceIsReachableOnTheProductionPath:
 
     @pytest.mark.parametrize(
         ("chain", "market"),
-        [
-            pytest.param(chain, record.label, id=f"{chain}-{record.label}")
-            for chain, record in FIXTURE_MARKETS
-        ],
+        [pytest.param(chain, record.label, id=f"{chain}-{record.label}") for chain, record in FIXTURE_MARKETS],
     )
     def test_every_catalogued_market_compiles_the_CLOSE_leg(self, chain: str, market: str) -> None:
         """Guard the teardown-reachable compile path across the whole catalogue."""
@@ -871,6 +868,17 @@ class TestSubBasisPointToleranceIsRefusedNotTruncated:
         assert result.status == CompilationStatus.SUCCESS, result.error
         # 3000 * 1.0001 == 3000.3
         assert _decode_acceptable_price(result) == int(Decimal("3000.3") * 10**12)
+
+    def test_non_decimal_tolerance_is_permanent_safety_refusal(self) -> None:
+        legal = _open_intent(is_long=True)
+        malformed = legal.model_copy(update={"max_slippage": "0.005"})
+
+        result = _compile(_make_open_compiler(), malformed)
+
+        assert result.status == CompilationStatus.FAILED
+        assert result.is_safety_refusal is True
+        assert result.is_transient is False
+        assert result.transactions == []
 
 
 class TestPlaceholderPricesCannotProduceABound:

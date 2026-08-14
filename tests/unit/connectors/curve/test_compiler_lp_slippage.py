@@ -183,6 +183,33 @@ class TestResolveLpSlippageBps:
 
 
 class TestLpOpenSlippage:
+    def test_sub_bp_slippage_is_a_safety_refusal(self) -> None:
+        result = _compile_open(_open_intent("2pool", Decimal("0.00005")), "arbitrum")
+
+        assert result.status == CompilationStatus.FAILED
+        assert result.is_safety_refusal is True
+        assert result.transactions == []
+        assert "basis point" in (result.error or "")
+
+    @pytest.mark.parametrize(
+        ("invalid_slippage", "expected_error"),
+        [
+            ("0.005", "must be a Decimal"),
+            (Decimal("1"), "must be in [0, 1)"),
+        ],
+    )
+    def test_post_validation_invalid_slippage_is_a_safety_refusal(
+        self, invalid_slippage: object, expected_error: str
+    ) -> None:
+        intent = _open_intent("2pool", Decimal("0.005")).model_copy(update={"max_slippage": invalid_slippage})
+
+        result = _compile_open(intent, "arbitrum")
+
+        assert result.status == CompilationStatus.FAILED
+        assert result.is_safety_refusal is True
+        assert result.transactions == []
+        assert expected_error in (result.error or "")
+
     def test_default_matches_50bps_explicit(self) -> None:
         """No max_slippage reproduces the historical 50 bps min_mint byte-for-byte."""
         default = _open_min_mint(_compile_open(_open_intent("2pool", None), "arbitrum"))
@@ -218,6 +245,33 @@ class TestLpOpenSlippage:
 
 
 class TestLpCloseSlippage:
+    def test_sub_bp_slippage_is_a_safety_refusal(self) -> None:
+        result = _compile_close(_close_intent("2pool", Decimal("0.00005")), "arbitrum")
+
+        assert result.status == CompilationStatus.FAILED
+        assert result.is_safety_refusal is True
+        assert result.transactions == []
+        assert "basis point" in (result.error or "")
+
+    @pytest.mark.parametrize(
+        ("invalid_slippage", "expected_error"),
+        [
+            ("0.005", "must be a Decimal"),
+            (Decimal("1"), "must be in [0, 1)"),
+        ],
+    )
+    def test_post_validation_invalid_slippage_is_a_safety_refusal(
+        self, invalid_slippage: object, expected_error: str
+    ) -> None:
+        intent = _close_intent("2pool", Decimal("0.005")).model_copy(update={"max_slippage": invalid_slippage})
+
+        result = _compile_close(intent, "arbitrum")
+
+        assert result.status == CompilationStatus.FAILED
+        assert result.is_safety_refusal is True
+        assert result.transactions == []
+        assert expected_error in (result.error or "")
+
     def test_default_matches_50bps_explicit(self) -> None:
         default = _close_min_amounts(_compile_close(_close_intent("2pool", None), "arbitrum"), 2)
         explicit_50 = _close_min_amounts(_compile_close(_close_intent("2pool", Decimal("0.005")), "arbitrum"), 2)

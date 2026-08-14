@@ -119,7 +119,9 @@ class TestGetQuote:
             "from_evm_chain_id": 42161,
             "to_evm_chain_id": 10,
             "amount_wei": "1000000000",
-            "min_amount_wei": "995000000",
+            # Slippage is applied to the quoted 999.4 USDC output, not the
+            # pre-fee 1000 USDC input: floor(999_400_000 * 0.995).
+            "min_amount_wei": "994403000",
             "lz_fee_wei": "3000000000000000",
             "token": "USDC",
         }
@@ -133,6 +135,16 @@ class TestGetQuote:
         quote = adapter.get_quote("USDC", Decimal("50"), "Arbitrum", "OPTIMISM")
         assert quote.from_chain == "arbitrum"
         assert quote.to_chain == "optimism"
+
+    def test_positive_sub_basis_point_slippage_is_refused(self, adapter):
+        with pytest.raises(StargateQuoteError, match="finer than one basis point"):
+            adapter.get_quote(
+                "USDC",
+                Decimal("100"),
+                "arbitrum",
+                "optimism",
+                max_slippage=Decimal("0.00005"),
+            )
 
     def test_token_resolution_error_propagates_unwrapped(self):
         error = TokenResolutionError(token="USDC", chain="arbitrum", reason="registry down")

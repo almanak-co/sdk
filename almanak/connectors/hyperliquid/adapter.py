@@ -763,7 +763,7 @@ class HyperliquidAdapter:
             # Calculate price for market orders with slippage
             effective_price = price
             if order_type == HyperliquidOrderType.MARKET:
-                slippage = slippage_bps or self.config.default_slippage_bps
+                slippage = self.config.default_slippage_bps if slippage_bps is None else slippage_bps
                 slippage_factor = Decimal(slippage) / Decimal("10000")
                 if is_buy:
                     effective_price = price * (1 + slippage_factor)

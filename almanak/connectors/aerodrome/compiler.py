@@ -20,6 +20,7 @@ from almanak.connectors._strategy_base.base.cl_math import (
 )
 from almanak.connectors._strategy_base.base.compiler import BaseConcentratedLiquidityCompiler, CLCompilerContext
 from almanak.connectors._strategy_base.cl_range import PriceBandToTicksError, price_band_to_ticks
+from almanak.connectors._strategy_base.slippage import SlippagePrecisionError, slippage_to_bps
 from almanak.framework.intents import compiler_constants
 from almanak.framework.intents.compiler_models import CompilationResult, CompilationStatus
 from almanak.framework.intents.min_out_guard import UnprotectedTradeError
@@ -1399,7 +1400,7 @@ def compile_swap_aerodrome(compiler, intent: SwapIntent) -> CompilationResult:  
         config = AerodromeConfig(
             chain=compiler.chain,
             wallet_address=compiler.wallet_address,
-            default_slippage_bps=int(intent.max_slippage * Decimal("10000")),
+            default_slippage_bps=slippage_to_bps(intent.max_slippage),
             price_provider=compiler.price_oracle,
             rpc_url=compiler._get_chain_rpc_url(),
             gateway_client=compiler._gateway_client,
@@ -1478,6 +1479,11 @@ def compile_swap_aerodrome(compiler, intent: SwapIntent) -> CompilationResult:  
             f"Compiled Aerodrome SWAP intent ({routing}): {from_token.symbol} -> {to_token.symbol}, {len(transactions)} txs, {total_gas} gas"
         )
 
+    except SlippagePrecisionError as e:
+        logger.error("Aerodrome SWAP refused by slippage precision guard: %s", e)
+        result.status = CompilationStatus.FAILED
+        result.error = str(e)
+        result.is_safety_refusal = True
     except Exception as e:
         logger.exception(f"Failed to compile Aerodrome SWAP intent: {e}")
         result.status = CompilationStatus.FAILED

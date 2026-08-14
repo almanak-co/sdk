@@ -30,6 +30,7 @@ import logging
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
+from almanak.connectors._strategy_base.slippage import SlippagePrecisionError, slippage_to_bps
 from almanak.framework.data.tokens.exceptions import TokenResolutionError
 from almanak.framework.execution.solana.types import SolanaTransactionData
 from almanak.framework.intents.vocabulary import IntentType, SwapIntent
@@ -254,7 +255,7 @@ class JupiterAdapter:
                 return self._error_bundle(intent, "Either amount or amount_usd must be specified")
 
             # Convert slippage from decimal to basis points
-            slippage_bps = int(intent.max_slippage * 10000)
+            slippage_bps = slippage_to_bps(intent.max_slippage)
 
             # Get quote from Jupiter
             quote = self.client.get_quote(
@@ -317,6 +318,8 @@ class JupiterAdapter:
                 },
             )
 
+        except SlippagePrecisionError:
+            raise
         except Exception as e:
             logger.exception(f"Failed to compile Jupiter swap intent: {e}")
             return self._error_bundle(intent, str(e))

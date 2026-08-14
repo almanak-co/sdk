@@ -23,6 +23,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
+from almanak.connectors._strategy_base.slippage import compute_min_amount_out_from_bps, slippage_to_bps
 from almanak.core.chains._helpers import native_symbols_for
 from almanak.framework.data.tokens.exceptions import TokenResolutionError
 
@@ -148,8 +149,8 @@ class UniswapV3Config:
         if self.chain not in UNISWAP_V3_ADDRESSES:
             raise ValueError(f"Unsupported chain: {self.chain}. Supported: {list(UNISWAP_V3_ADDRESSES.keys())}")
 
-        if self.default_slippage_bps < 0 or self.default_slippage_bps > 10000:
-            raise ValueError("Slippage must be between 0 and 10000 basis points")
+        if self.default_slippage_bps < 0 or self.default_slippage_bps >= 10000:
+            raise ValueError("Slippage must be between 0 (inclusive) and 10000 (exclusive) basis points")
 
         if self.default_fee_tier not in FEE_TIERS:
             raise ValueError(f"Invalid fee tier: {self.default_fee_tier}. Valid tiers: {list(FEE_TIERS.keys())}")
@@ -400,7 +401,7 @@ class UniswapV3Adapter:
         """
         try:
             # Use defaults from config if not specified
-            slippage_bps = slippage_bps or self.config.default_slippage_bps
+            slippage_bps = self.config.default_slippage_bps if slippage_bps is None else slippage_bps
             fee_tier = fee_tier or self.config.default_fee_tier
             recipient = recipient or self.wallet_address
 
@@ -430,7 +431,7 @@ class UniswapV3Adapter:
             # For now, use a simple estimate
             quote = self._get_quote_exact_input(token_in_address, token_out_address, amount_in_wei, fee_tier)
 
-            amount_out_minimum = int(quote.amount_out * (10000 - slippage_bps) // 10000)
+            amount_out_minimum = compute_min_amount_out_from_bps(quote.amount_out, slippage_bps)
 
             # Build transactions
             transactions: list[TransactionData] = []
@@ -517,7 +518,7 @@ class UniswapV3Adapter:
         """
         try:
             # Use defaults from config if not specified
-            slippage_bps = slippage_bps or self.config.default_slippage_bps
+            slippage_bps = self.config.default_slippage_bps if slippage_bps is None else slippage_bps
             fee_tier = fee_tier or self.config.default_fee_tier
             recipient = recipient or self.wallet_address
 
@@ -659,7 +660,7 @@ class UniswapV3Adapter:
             raise ValueError("Either amount or amount_usd must be specified")
 
         # Convert slippage from decimal to basis points
-        slippage_bps = int(intent.max_slippage * 10000)
+        slippage_bps = slippage_to_bps(intent.max_slippage)
 
         # Build the swap
         result = self.swap_exact_input(

@@ -11,21 +11,24 @@ branch without Anvil / RPC / Web3 mocks.
 
 from __future__ import annotations
 
-from decimal import Decimal
+from decimal import Decimal, localcontext
 
 import pytest
 
 from almanak.framework.intents._compiler_helpers import (
     PriceImpactDecision,
+    SlippagePrecisionError,
     assemble_action_bundle,
     check_price_impact,
     choose_lifi_gas_estimate,
     choose_safer_quote,
     compute_deadline,
     compute_min_amount_out,
+    compute_min_amount_out_from_bps,
     normalise_gateway_or_rpc,
     parse_lifi_tx_value,
     probe_traderjoe_bin_step,
+    slippage_to_bps,
     sum_transaction_gas,
 )
 from almanak.framework.intents.compiler_models import TransactionData
@@ -95,6 +98,96 @@ class TestComputeMinAmountOut:
         max_slippage = Decimal("0.005")
         compiler_result = int(Decimal(str(expected_output)) * (Decimal("1") - max_slippage))
         assert compute_min_amount_out(expected_output, max_slippage) == compiler_result
+
+    def test_result_is_independent_of_decimal_context(self) -> None:
+        expected = 10**60 + 123
+        slippage = Decimal("0.12345678901234567890123456789")
+        numerator, denominator = slippage.as_integer_ratio()
+        exact = expected * (denominator - numerator) // denominator
+
+        with localcontext() as context:
+            context.prec = 2
+            assert compute_min_amount_out(expected, slippage) == exact
+
+    @pytest.mark.parametrize("value", [Decimal("NaN"), Decimal("Infinity"), Decimal("-Infinity")])
+    def test_non_finite_slippage_raises(self, value: Decimal) -> None:
+        with pytest.raises(ValueError, match="finite"):
+            compute_min_amount_out(1_000_000, value)
+
+
+# ---------------------------------------------------------------------------
+# canonical basis-point conversion and min-out arithmetic
+# ---------------------------------------------------------------------------
+
+
+class TestSlippageToBps:
+    @pytest.mark.parametrize(
+        ("fraction", "expected_bps"),
+        [
+            (Decimal("0"), 0),
+            (Decimal("0.0001"), 1),
+            (Decimal("0.00015"), 1),
+            (Decimal("0.005"), 50),
+            (Decimal("0.999999"), 9_999),
+        ],
+    )
+    def test_floors_without_widening(self, fraction: Decimal, expected_bps: int) -> None:
+        assert slippage_to_bps(fraction) == expected_bps
+
+    def test_positive_sub_basis_point_refuses_zero_collapse(self) -> None:
+        with pytest.raises(SlippagePrecisionError, match="finer than one basis point"):
+            slippage_to_bps(Decimal("0.000099999"))
+
+    @pytest.mark.parametrize("fraction", [Decimal("-0.0001"), Decimal("1"), Decimal("1.1")])
+    def test_out_of_range_raises(self, fraction: Decimal) -> None:
+        with pytest.raises(ValueError, match=r"\[0, 1\)"):
+            slippage_to_bps(fraction)
+
+    @pytest.mark.parametrize("fraction", [Decimal("NaN"), Decimal("Infinity"), Decimal("-Infinity")])
+    def test_non_finite_raises(self, fraction: Decimal) -> None:
+        with pytest.raises(ValueError, match="finite"):
+            slippage_to_bps(fraction)
+
+    def test_requires_decimal_input(self) -> None:
+        with pytest.raises(TypeError, match="must be a Decimal"):
+            slippage_to_bps(0.005)  # type: ignore[arg-type]
+
+    def test_result_is_independent_of_decimal_context(self) -> None:
+        tolerance = Decimal("0.000199999999999999999999999999")
+        with localcontext() as context:
+            context.prec = 2
+            assert slippage_to_bps(tolerance) == 1
+
+
+class TestComputeMinAmountOutFromBps:
+    @pytest.mark.parametrize("expected_amount", [0, 1, 999, 10**24])
+    @pytest.mark.parametrize("slippage_bps", [0, 1, 50, 9_999])
+    def test_matches_fraction_helper(self, expected_amount: int, slippage_bps: int) -> None:
+        fraction = Decimal(slippage_bps) / Decimal(10_000)
+        assert compute_min_amount_out_from_bps(expected_amount, slippage_bps) == compute_min_amount_out(
+            expected_amount, fraction
+        )
+
+    def test_large_amount_is_exact_under_small_decimal_context(self) -> None:
+        expected = 10**80 + 123_456_789
+        with localcontext() as context:
+            context.prec = 2
+            assert compute_min_amount_out_from_bps(expected, 37) == expected * 9_963 // 10_000
+
+    @pytest.mark.parametrize("slippage_bps", [-1, 10_000, 10_001])
+    def test_invalid_bps_raises(self, slippage_bps: int) -> None:
+        with pytest.raises(ValueError, match=r"\[0, 10000\)"):
+            compute_min_amount_out_from_bps(1_000_000, slippage_bps)
+
+    @pytest.mark.parametrize("value", [-1, -(10**18)])
+    def test_negative_expected_amount_raises(self, value: int) -> None:
+        with pytest.raises(ValueError, match=">= 0"):
+            compute_min_amount_out_from_bps(value, 50)
+
+    @pytest.mark.parametrize(("expected_amount", "slippage_bps"), [(1.0, 50), (1, 50.0), (True, 50), (1, False)])
+    def test_requires_integer_inputs(self, expected_amount: object, slippage_bps: object) -> None:
+        with pytest.raises(TypeError, match="must be an int"):
+            compute_min_amount_out_from_bps(expected_amount, slippage_bps)  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------
@@ -523,16 +616,10 @@ class TestParseLifiTxValue:
 
 class TestChooseLifiGasEstimate:
     def test_prefers_total_gas_estimate_when_positive(self) -> None:
-        assert (
-            choose_lifi_gas_estimate(total_gas_estimate=350_000, gas_limit="0xABCDE")
-            == 350_000
-        )
+        assert choose_lifi_gas_estimate(total_gas_estimate=350_000, gas_limit="0xABCDE") == 350_000
 
     def test_falls_back_to_gas_limit_decimal_when_estimate_zero(self) -> None:
-        assert (
-            choose_lifi_gas_estimate(total_gas_estimate=0, gas_limit="250000")
-            == 250_000
-        )
+        assert choose_lifi_gas_estimate(total_gas_estimate=0, gas_limit="250000") == 250_000
 
     def test_falls_back_to_gas_limit_hex_when_estimate_zero(self) -> None:
         assert choose_lifi_gas_estimate(total_gas_estimate=0, gas_limit="0x3D090") == 0x3D090
@@ -541,23 +628,14 @@ class TestChooseLifiGasEstimate:
         assert choose_lifi_gas_estimate(total_gas_estimate=0, gas_limit=None) == 200_000
 
     def test_custom_default(self) -> None:
-        assert (
-            choose_lifi_gas_estimate(total_gas_estimate=0, gas_limit=None, default=300_000)
-            == 300_000
-        )
+        assert choose_lifi_gas_estimate(total_gas_estimate=0, gas_limit=None, default=300_000) == 300_000
 
     def test_negative_total_gas_estimate_treated_as_missing(self) -> None:
         # Defensive: a negative value is nonsense; treat same as zero.
-        assert (
-            choose_lifi_gas_estimate(total_gas_estimate=-1, gas_limit="150000")
-            == 150_000
-        )
+        assert choose_lifi_gas_estimate(total_gas_estimate=-1, gas_limit="150000") == 150_000
 
     def test_unparseable_gas_limit_falls_back_to_default(self) -> None:
-        assert (
-            choose_lifi_gas_estimate(total_gas_estimate=0, gas_limit="not-a-number")
-            == 200_000
-        )
+        assert choose_lifi_gas_estimate(total_gas_estimate=0, gas_limit="not-a-number") == 200_000
 
     def test_zero_gas_limit_falls_back_to_default(self) -> None:
         # A gas_limit of 0 can't cover the 21k intrinsic cost — treat as unusable.
@@ -790,9 +868,7 @@ class TestNormaliseGatewayOrRpc:
             supplied = True
             return "http://rpc"
 
-        client, rpc = normalise_gateway_or_rpc(
-            gateway_client=gw, rpc_url_supplier=supplier
-        )
+        client, rpc = normalise_gateway_or_rpc(gateway_client=gw, rpc_url_supplier=supplier)
         assert client is gw
         assert rpc is None
         # Supplier is not invoked on the gateway path.

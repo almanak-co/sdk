@@ -44,6 +44,7 @@ from typing import ClassVar
 from eth_utils import keccak
 
 from almanak.connectors._strategy_base.base.compiler import BasePerpCompiler, PerpCompilerContext
+from almanak.connectors._strategy_base.slippage import SlippagePrecisionError, slippage_to_bps
 from almanak.framework.intents.compiler_models import CompilationResult, CompilationStatus, TransactionData
 from almanak.framework.intents.vocabulary import IntentType, PerpCloseIntent, PerpOpenIntent, PerpWithdrawIntent
 from almanak.framework.models.reproduction_bundle import ActionBundle
@@ -141,7 +142,14 @@ class HyperliquidCompiler(BasePerpCompiler):
                 "cannot anchor a fail-closed order band",
             )
 
-        slippage_bps = self._slippage_bps(intent.max_slippage)
+        try:
+            slippage_bps = self._slippage_bps(intent.max_slippage)
+        except (SlippagePrecisionError, TypeError, ValueError) as exc:
+            return self._fail(
+                intent.intent_id,
+                f"PERP_OPEN cannot encode max_slippage={intent.max_slippage}: {exc}",
+                is_safety_refusal=True,
+            )
         try:
             human_size = Decimal(intent.size_usd) / ref_price
             sz_wire = size_to_wire(human_size, market.sz_decimals)
@@ -230,8 +238,16 @@ class HyperliquidCompiler(BasePerpCompiler):
             )
 
         try:
-            sz_wire = self._close_size_wire(intent, position, market, ref_price)
             slippage_bps = self._slippage_bps(intent.max_slippage)
+        except (SlippagePrecisionError, TypeError, ValueError) as exc:
+            return self._fail(
+                intent.intent_id,
+                f"PERP_CLOSE cannot encode max_slippage={intent.max_slippage}: {exc}",
+                is_safety_refusal=True,
+            )
+
+        try:
+            sz_wire = self._close_size_wire(intent, position, market, ref_price)
             limit_px = market_limit_price(ref_price, slippage_bps, is_buy=close_is_buy, sz_decimals=market.sz_decimals)
         except ValueError as exc:
             return self._fail(intent.intent_id, f"close sizing failed: {exc}")
@@ -467,8 +483,7 @@ class HyperliquidCompiler(BasePerpCompiler):
 
     @staticmethod
     def _slippage_bps(max_slippage: Decimal) -> int:
-        bps = int((Decimal(max_slippage) * Decimal(10_000)).to_integral_value())
-        return max(0, min(bps, 10_000))
+        return slippage_to_bps(max_slippage)
 
     @staticmethod
     def _cloid(intent_id: str) -> int:

@@ -27,6 +27,8 @@ import logging
 from dataclasses import dataclass
 from decimal import Decimal
 
+from almanak.framework.intents._compiler_helpers import slippage_to_bps
+
 from .vocabulary import (
     BorrowIntent,
     FlashLoanCallbackIntent,
@@ -167,7 +169,7 @@ def build_pt_leverage_loop(
     if initial_amount <= 0:
         raise ValueError("initial_amount must be positive")
 
-    max_slippage_bps = int(max_slippage * 10000)
+    max_slippage_bps = slippage_to_bps(max_slippage)
     validation = _validate_leverage_params(
         target_leverage=target_leverage,
         lltv=lltv,

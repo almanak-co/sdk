@@ -55,6 +55,7 @@ if TYPE_CHECKING:
 from eth_hash.auto import keccak as keccak256
 
 from almanak.connectors._strategy_base import concentrated_liquidity_math as cl_math
+from almanak.connectors._strategy_base.slippage import compute_min_amount_out_from_bps
 
 from .addresses import SUSHISWAP_V3
 
@@ -917,7 +918,7 @@ class SushiSwapV3SDK:
             ... )
         """
         # Calculate minimum output with slippage
-        amount_out_minimum = int(quote.amount_out * (10000 - slippage_bps) // 10000)
+        amount_out_minimum = compute_min_amount_out_from_bps(quote.amount_out, slippage_bps)
 
         calldata = self._encode_exact_input_single(
             token_in=quote.token_in,

@@ -12,13 +12,17 @@ from almanak.connectors._strategy_base.base.compiler import (
     BaseProtocolCompiler,
     SwapCompilerContext,
 )
+from almanak.connectors._strategy_base.slippage import (
+    SlippagePrecisionError,
+    compute_min_amount_out,
+    slippage_to_bps,
+)
 from almanak.framework.execution.fork_signal import resolve_managed_fork
 from almanak.framework.intents._compiler_helpers import (
     PriceImpactDecision,
     assemble_action_bundle,
     check_price_impact,
     choose_safer_quote,
-    compute_min_amount_out,
     normalise_gateway_or_rpc,
     sum_transaction_gas,
 )
@@ -1367,7 +1371,7 @@ class _TraderJoeV2CompileImpl:
             )
 
             router_address = TJ_ADDRESSES[self.chain]["router"]
-            slippage_bps = int(intent.max_slippage * Decimal("10000"))
+            slippage_bps = slippage_to_bps(intent.max_slippage)
             tj_adapter = TraderJoeV2Adapter(
                 TraderJoeV2Config(
                     chain=self.chain,
@@ -1508,6 +1512,14 @@ class _TraderJoeV2CompileImpl:
                 warnings=[],
             )
 
+        except SlippagePrecisionError as e:
+            logger.error("TraderJoe V2 SWAP refused by slippage precision guard: %s", e)
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                intent_id=intent.intent_id,
+                error=str(e),
+                is_safety_refusal=True,
+            )
         except Exception as e:
             logger.exception("Failed to compile TraderJoe V2 SWAP intent: %s", e)
             return CompilationResult(

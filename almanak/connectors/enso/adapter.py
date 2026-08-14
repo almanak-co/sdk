@@ -46,6 +46,7 @@ from typing import TYPE_CHECKING, Any
 
 from eth_abi import decode, encode
 
+from almanak.connectors._strategy_base.slippage import compute_min_amount_out_from_bps, slippage_to_bps
 from almanak.framework.data.tokens.exceptions import TokenResolutionError
 from almanak.framework.intents.vocabulary import IntentType, SwapIntent
 from almanak.framework.market import PriceUnavailableError
@@ -314,7 +315,7 @@ class EnsoAdapter:
                 return self._error_bundle(intent, "Either amount or amount_usd must be specified")
 
             # Convert slippage from decimal to basis points
-            slippage_bps = int(intent.max_slippage * 10000)
+            slippage_bps = slippage_to_bps(intent.max_slippage)
 
             # Get route from Enso
             route_tx = self.client.get_route(
@@ -471,7 +472,7 @@ class EnsoAdapter:
             token_in, inner_data = decode(["(uint8,bytes)", "bytes"], bytes.fromhex(calldata))
 
             # Calculate minimum amount out with slippage
-            min_amount_out = amount_out * (10000 - slippage_bps) // 10000
+            min_amount_out = compute_min_amount_out_from_bps(amount_out, slippage_bps)
             if min_amount_out <= 0:
                 logger.warning("Calculated min_amount_out is 0, using 1")
                 min_amount_out = 1

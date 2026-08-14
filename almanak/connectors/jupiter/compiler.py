@@ -6,6 +6,7 @@ import logging
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from almanak.connectors._strategy_base.base.compiler import BaseCompilerContext, BaseProtocolCompiler
+from almanak.connectors._strategy_base.slippage import SlippagePrecisionError
 from almanak.framework.intents.compiler_models import CompilationResult, CompilationStatus
 from almanak.framework.intents.vocabulary import IntentType
 
@@ -56,6 +57,11 @@ class JupiterCompiler(BaseProtocolCompiler[BaseCompilerContext]):
                 result.error = bundle.metadata["error"]
             else:
                 result.action_bundle = bundle
+        except SlippagePrecisionError as exc:
+            logger.error("Jupiter SWAP refused by slippage precision guard: %s", exc)
+            result.status = CompilationStatus.FAILED
+            result.error = str(exc)
+            result.is_safety_refusal = True
         except Exception as exc:
             logger.exception("Jupiter swap compilation failed: %s", exc)
             result.status = CompilationStatus.FAILED

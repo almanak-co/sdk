@@ -20,6 +20,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from almanak.connectors._strategy_base.slippage import SlippagePrecisionError
 from almanak.connectors.uniswap_v4.adapter import (
     UniswapV4Adapter,
     UniswapV4Config,
@@ -165,4 +166,18 @@ def test_compile_reraises_not_softbundle():
 
     # Must raise, not return an ActionBundle with empty transactions + metadata["error"].
     with pytest.raises(UniswapV4EstimatedPriceWithoutOptInError):
+        adapter.compile_lp_open_intent(intent, _PRICE_ORACLE)
+
+
+def test_compile_propagates_slippage_precision_error():
+    """Canonical conversion refusals must reach the compiler safety classifier."""
+    adapter = _make_adapter(rpc_url="http://localhost:8545")
+    intent = _make_intent(max_slippage=Decimal("0.05"))
+    precision_error = SlippagePrecisionError("positive slippage is finer than one basis point")
+
+    with (
+        patch.object(adapter._sdk, "get_pool_sqrt_price", return_value=2**96),
+        patch("almanak.connectors.uniswap_v4.adapter.slippage_to_bps", side_effect=precision_error),
+        pytest.raises(SlippagePrecisionError, match="basis point"),
+    ):
         adapter.compile_lp_open_intent(intent, _PRICE_ORACLE)

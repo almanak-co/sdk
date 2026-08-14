@@ -51,6 +51,7 @@ from almanak.connectors._strategy_base.bridge_base import (
     BridgeStatusError,
     BridgeTransactionError,
 )
+from almanak.connectors._strategy_base.slippage import compute_min_amount_out_from_bps, slippage_to_bps
 from almanak.framework.data.tokens.exceptions import TokenResolutionError
 
 if TYPE_CHECKING:
@@ -426,6 +427,11 @@ class StargateBridgeAdapter(BridgeAdapter):
 
             # Output amount after fees
             output_amount = amount - protocol_fee
+            output_amount_wei = amount_wei - protocol_fee_wei
+            min_amount_wei = compute_min_amount_out_from_bps(
+                output_amount_wei,
+                slippage_to_bps(max_slippage),
+            )
 
             # Get estimated time
             estimated_time = self.estimate_completion_time(from_chain, to_chain)
@@ -450,7 +456,7 @@ class StargateBridgeAdapter(BridgeAdapter):
                     "from_evm_chain_id": from_evm_chain_id,
                     "to_evm_chain_id": to_evm_chain_id,
                     "amount_wei": str(amount_wei),
-                    "min_amount_wei": str(int(amount_wei * (1 - max_slippage))),
+                    "min_amount_wei": str(min_amount_wei),
                     "lz_fee_wei": str(int(lz_fee * Decimal(10**18))),
                     "token": token,
                 },

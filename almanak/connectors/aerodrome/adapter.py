@@ -38,6 +38,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
+from almanak.connectors._strategy_base.slippage import compute_min_amount_out_from_bps, slippage_to_bps
 from almanak.core.chains._helpers import native_symbols_for
 from almanak.framework.data.tokens.exceptions import TokenResolutionError
 from almanak.framework.intents.vocabulary import IntentType, SwapIntent
@@ -135,8 +136,8 @@ class AerodromeConfig:
         if self.chain not in AERODROME_ADDRESSES:
             raise ValueError(f"Unsupported chain: {self.chain}. Supported: {list(AERODROME_ADDRESSES.keys())}")
 
-        if self.default_slippage_bps < 0 or self.default_slippage_bps > 10000:
-            raise ValueError("Slippage must be between 0 and 10000 basis points")
+        if self.default_slippage_bps < 0 or self.default_slippage_bps >= 10000:
+            raise ValueError("Slippage must be between 0 (inclusive) and 10000 (exclusive) basis points")
 
         # Validate price_provider requirement
         if self.price_provider is None and not self.allow_placeholder_prices:
@@ -497,7 +498,7 @@ class AerodromeAdapter:
         """
         try:
             # Use defaults from config if not specified
-            slippage_bps = slippage_bps or self.config.default_slippage_bps
+            slippage_bps = self.config.default_slippage_bps if slippage_bps is None else slippage_bps
             recipient = recipient or self.wallet_address
 
             # Resolve token addresses
@@ -546,7 +547,7 @@ class AerodromeAdapter:
             else:
                 quote = self._get_quote_exact_input(actual_token_in, token_out_address, amount_in_wei, stable)
 
-            amount_out_minimum = int(quote.amount_out * (10000 - slippage_bps) // 10000)
+            amount_out_minimum = compute_min_amount_out_from_bps(quote.amount_out, slippage_bps)
 
             # Build transactions
             transactions: list[TransactionData] = []
@@ -640,7 +641,7 @@ class AerodromeAdapter:
             LiquidityResult with transaction data
         """
         try:
-            slippage_bps = slippage_bps or self.config.default_slippage_bps
+            slippage_bps = self.config.default_slippage_bps if slippage_bps is None else slippage_bps
             recipient = recipient or self.wallet_address
 
             # Resolve token addresses
@@ -744,7 +745,7 @@ class AerodromeAdapter:
             LiquidityResult with transaction data
         """
         try:
-            slippage_bps = slippage_bps or self.config.default_slippage_bps
+            slippage_bps = self.config.default_slippage_bps if slippage_bps is None else slippage_bps
             recipient = recipient or self.wallet_address
 
             # Resolve token addresses
@@ -958,7 +959,7 @@ class AerodromeAdapter:
                 # pool-aligned mins computed after ``slot0`` recomputation,
                 # which the Decimal path cannot replicate. The Decimal path
                 # computes mins as a basis-points cut of user-supplied amounts
-                # (``int(amount * (10000 - slippage_bps) // 10000)`` below) —
+                # (``compute_min_amount_out_from_bps(amount, slippage_bps)`` below) —
                 # a tolerance that does not reflect post-compile price
                 # movement. New callers should pass wei-overload kwargs; this
                 # branch will be removed in a future release.
@@ -1038,8 +1039,8 @@ class AerodromeAdapter:
                 amount0_min = amount0_min_override
                 amount1_min = amount1_min_override
             else:
-                amount0_min = int(amount0_desired * (10000 - slippage_bps) // 10000)
-                amount1_min = int(amount1_desired * (10000 - slippage_bps) // 10000)
+                amount0_min = compute_min_amount_out_from_bps(amount0_desired, slippage_bps)
+                amount1_min = compute_min_amount_out_from_bps(amount1_desired, slippage_bps)
             mint_tx_dict = self.sdk.build_cl_mint_tx(
                 token0=token0_address,
                 token1=token1_address,
@@ -1320,7 +1321,7 @@ class AerodromeAdapter:
             raise ValueError("Either amount or amount_usd must be specified")
 
         # Convert slippage from decimal to basis points
-        slippage_bps = int(intent.max_slippage * 10000)
+        slippage_bps = slippage_to_bps(intent.max_slippage)
 
         # Build the swap
         result = self.swap_exact_input(

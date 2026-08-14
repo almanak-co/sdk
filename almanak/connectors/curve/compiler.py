@@ -17,6 +17,7 @@ from almanak.connectors._strategy_base.base.compiler import (
     BaseProtocolCompiler,
     SwapCompilerContext,
 )
+from almanak.connectors._strategy_base.slippage import slippage_to_bps
 from almanak.framework.intents.compiler_models import CompilationResult, CompilationStatus
 from almanak.framework.intents.vocabulary import CollectFeesIntent, IntentType, LPCloseIntent, LPOpenIntent, SwapIntent
 from almanak.framework.models.reproduction_bundle import ActionBundle
@@ -27,6 +28,18 @@ logger = logging.getLogger(__name__)
 # tolerance. 50 bps (0.5%) — the historical Curve LP default. Kept as a named
 # constant so the fallback is explicit at both the LP_OPEN and LP_CLOSE sites.
 _DEFAULT_LP_SLIPPAGE_BPS = 50
+
+
+class _CurveSlippageConversionError(ValueError):
+    """A canonical slippage conversion failure at a Curve money-path seam."""
+
+
+def _convert_slippage_to_bps(max_slippage: Decimal) -> int:
+    """Convert validated or post-validation-mutated intent slippage safely."""
+    try:
+        return slippage_to_bps(max_slippage)
+    except (TypeError, ValueError) as exc:
+        raise _CurveSlippageConversionError(str(exc)) from exc
 
 
 def _discovery_mode(ctx: Any) -> bool:
@@ -94,15 +107,15 @@ def _compile_under_both_abi_variants(
 def _resolve_lp_slippage_bps(max_slippage: Decimal | None) -> int:
     """Convert an intent's optional ``max_slippage`` to integer basis points.
 
-    Mirrors the SWAP path's ``int(intent.max_slippage * Decimal("10000"))``
-    conversion so LP and SWAP read the same field in the same units. When
+    Uses the repository's canonical fraction-to-bps conversion so LP and SWAP
+    read the same field with the same rounding and precision policy. When
     ``max_slippage`` is ``None`` (the historical case — LP intents never carried
     a slippage field before audit P0-7), fall back to the built-in
     ``_DEFAULT_LP_SLIPPAGE_BPS`` so existing callers are byte-for-byte unchanged.
     """
     if max_slippage is None:
         return _DEFAULT_LP_SLIPPAGE_BPS
-    return int(max_slippage * Decimal("10000"))
+    return _convert_slippage_to_bps(max_slippage)
 
 
 def _resolve_oracle_guard_bps(swap_params: dict[str, Any]) -> int | None:
@@ -883,7 +896,7 @@ class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
                     intent_id=intent.intent_id,
                 )
 
-            slippage_bps = int(intent.max_slippage * Decimal("10000"))
+            slippage_bps = _convert_slippage_to_bps(intent.max_slippage)
 
             logger.info(
                 "Compiling Curve SWAP: %s -> %s, pool=%s (%s), amount=%s",
@@ -1010,6 +1023,11 @@ class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
                 total_gas,
             )
 
+        except _CurveSlippageConversionError as e:
+            logger.error("Curve SWAP refused by slippage validation guard: %s", e)
+            result.status = CompilationStatus.FAILED
+            result.error = str(e)
+            result.is_safety_refusal = True
         except Exception as e:
             logger.exception("Failed to compile Curve SWAP intent")
             result.status = CompilationStatus.FAILED
@@ -1224,6 +1242,11 @@ class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
                 total_gas,
             )
 
+        except _CurveSlippageConversionError as e:
+            logger.error("Curve LP_OPEN refused by slippage validation guard: %s", e)
+            result.status = CompilationStatus.FAILED
+            result.error = str(e)
+            result.is_safety_refusal = True
         except Exception as e:
             logger.exception("Failed to compile Curve LP_OPEN intent")
             result.status = CompilationStatus.FAILED
@@ -1571,6 +1594,11 @@ class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
                 total_gas,
             )
 
+        except _CurveSlippageConversionError as e:
+            logger.error("Curve LP_CLOSE refused by slippage validation guard: %s", e)
+            result.status = CompilationStatus.FAILED
+            result.error = str(e)
+            result.is_safety_refusal = True
         except Exception as e:
             logger.exception("Failed to compile Curve LP_CLOSE intent")
             result.status = CompilationStatus.FAILED

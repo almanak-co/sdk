@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING
 
 from almanak.connectors._strategy_base import concentrated_liquidity_math as cl_math
 from almanak.connectors._strategy_base.rpc import eth_call, eth_call_hex
+from almanak.connectors._strategy_base.slippage import compute_min_amount_out_from_bps
 from almanak.connectors._strategy_base.v4_pool_abi import V4_DEFAULT_TICK_SPACING
 
 from .addresses import UNISWAP_V4
@@ -938,7 +939,7 @@ class UniswapV4SDK:
         Returns:
             SwapTransaction with encoded calldata.
         """
-        amount_out_minimum = quote.amount_out * (10000 - slippage_bps) // 10000
+        amount_out_minimum = compute_min_amount_out_from_bps(quote.amount_out, slippage_bps)
 
         # Detect WETH and substitute native ETH for the V4 pool
         weth_in = self._is_wrapped_native(quote.token_in)

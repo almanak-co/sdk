@@ -272,6 +272,21 @@ def test_auto_cl_hit_routes_cl_no_fallback() -> None:
     assert swap_call.call_args.kwargs["use_classic"] is False
 
 
+def test_positive_sub_basis_point_slippage_is_a_safety_refusal() -> None:
+    """A non-zero tolerance finer than one basis point must fail before the adapter runs."""
+    compiler = _FakeSwapCompiler()
+    result, swap_call = _run(
+        compiler,
+        _intent(max_slippage=Decimal("0.00005")),
+        cl_return=_confirmed(),
+    )
+
+    assert result.status == CompilationStatus.FAILED
+    assert result.is_safety_refusal is True
+    assert "finer than one basis point" in (result.error or "")
+    swap_call.assert_not_called()
+
+
 def test_auto_cl_miss_falls_back_to_classic_dai_usdbc() -> None:
     """DAI/USDbC: no CL pool at any candidate spacing -> bounded fallback to the
     Classic stable pool (both legs are stablecoins -> stable-first)."""

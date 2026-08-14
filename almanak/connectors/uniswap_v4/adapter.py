@@ -32,6 +32,11 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
+from almanak.connectors._strategy_base.slippage import (
+    SlippagePrecisionError,
+    compute_min_amount_out_from_bps,
+    slippage_to_bps,
+)
 from almanak.connectors.uniswap_v4.hooks import HookFlags, compute_pool_id
 from almanak.connectors.uniswap_v4.sdk import (
     NATIVE_CURRENCY,
@@ -288,7 +293,7 @@ class UniswapV4Adapter:
                 the compiler boundary (``UniswapV4Compiler.compile_swap``). The
                 ``success=False`` returns above are the *retryable* failures.
         """
-        slippage_bps = slippage_bps or self.default_slippage_bps
+        slippage_bps = self.default_slippage_bps if slippage_bps is None else slippage_bps
         fee_tier = fee_tier or self.default_fee_tier
 
         # Resolve tokens
@@ -399,7 +404,7 @@ class UniswapV4Adapter:
         )
         transactions.append(swap_tx)
 
-        amount_out_minimum = quote.amount_out * (10000 - slippage_bps) // 10000
+        amount_out_minimum = compute_min_amount_out_from_bps(quote.amount_out, slippage_bps)
 
         return SwapResult(
             success=True,
@@ -606,7 +611,7 @@ class UniswapV4Adapter:
         else:
             raise ValueError("Either amount or amount_usd must be specified")
 
-        slippage_bps = int(intent.max_slippage * 10000)
+        slippage_bps = slippage_to_bps(intent.max_slippage)
 
         # Compute price ratio for cross-decimal quote accuracy
         from almanak.framework.intents.compiler_queries import lenient_oracle_price
@@ -908,7 +913,7 @@ class UniswapV4Adapter:
                     effective_slippage * 100,
                     price_source,
                 )
-            slippage_bps = int(effective_slippage * 10000)
+            slippage_bps = slippage_to_bps(effective_slippage)
             slippage_mult = Decimal(10000 + slippage_bps) / Decimal(10000)
             liquidity_amount0 = int(Decimal(amount0_wei) / slippage_mult)
             liquidity_amount1 = int(Decimal(amount1_wei) / slippage_mult)
@@ -1022,6 +1027,8 @@ class UniswapV4Adapter:
                 metadata=metadata,
             )
 
+        except SlippagePrecisionError:
+            raise
         except UniswapV4FailLoudError:
             # VIB-4475: V0 scope violations and VIB-2180: estimated-price-without-opt-in
             # are fail-loud money-safety guards, not soft-error bundles. The strategy

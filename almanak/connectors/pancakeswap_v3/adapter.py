@@ -38,6 +38,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
+from almanak.connectors._strategy_base.slippage import compute_min_amount_out_from_bps
 from almanak.framework.data.tokens.exceptions import TokenResolutionError
 
 if TYPE_CHECKING:
@@ -113,8 +114,8 @@ class PancakeSwapV3Config:
             raise ValueError(f"Invalid chain: {self.chain}. Valid chains: {valid_chains}")
         if not self.wallet_address.startswith("0x") or len(self.wallet_address) != 42:
             raise ValueError(f"Invalid wallet address: {self.wallet_address}. Must be 0x-prefixed 40 hex chars.")
-        if self.default_slippage_bps < 0 or self.default_slippage_bps > 10000:
-            raise ValueError(f"Invalid slippage: {self.default_slippage_bps}. Must be 0-10000 bps.")
+        if self.default_slippage_bps < 0 or self.default_slippage_bps >= 10000:
+            raise ValueError(f"Invalid slippage: {self.default_slippage_bps}. Must be in [0, 10000) bps.")
         if self.default_fee_tier not in FEE_TIERS:
             raise ValueError(f"Invalid fee tier: {self.default_fee_tier}. Valid tiers: {FEE_TIERS}")
         # Validate price_provider requirement
@@ -536,12 +537,10 @@ class PancakeSwapV3Adapter:
         # Calculate expected output amount
         expected_output = usd_after_fee / price_out
 
-        # Apply slippage tolerance
-        min_output = expected_output * Decimal(10000 - slippage_bps) / Decimal(10000)
-
-        # Convert to wei
+        # Convert the quote to atomic units before applying the canonical floor.
         decimals_out = self._get_decimals(token_out)
-        return int(min_output * Decimal(10**decimals_out))
+        expected_output_wei = int(expected_output * Decimal(10**decimals_out))
+        return compute_min_amount_out_from_bps(expected_output_wei, slippage_bps)
 
     def _calculate_max_input(
         self,
