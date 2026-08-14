@@ -45,6 +45,7 @@ REQUIRED_GATES = [
     ("check-orphan-scripts", "scripts/ci/check_orphan_scripts.py"),
     ("check-import-provenance", "scripts/ci/check_import_provenance.py"),
     ("check-chain-truth", "scripts/ci/check_chain_truth_agreement.py"),
+    ("check-lifecycle-capability-ratchet", "scripts/ci/check_lifecycle_capability_ratchet.py"),
     # ALM-3183 added ``check-placeholder-prices``. Same reasoning: the whole
     # point of that gate is to catch the SECOND copy of a hardcoded price table,
     # which by definition nobody is looking for. A gate that only exists as a
@@ -180,12 +181,7 @@ def test_a_real_step_does_satisfy_the_guard(tmp_path, monkeypatch):
     # fixture is stale" (VIB-6231 hit exactly that).
     steps_yaml = "".join(f"      - run: make {target}\n" for target, _script in REQUIRED_GATES)
     (wf_dir / "lint.yml").write_text(
-        "name: Lint\n"
-        "on: [push]\n"
-        "jobs:\n"
-        "  lint:\n"
-        "    runs-on: ubuntu-latest\n"
-        "    steps:\n" + steps_yaml,
+        "name: Lint\non: [push]\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n" + steps_yaml,
         encoding="utf-8",
     )
     steps = _run_steps()

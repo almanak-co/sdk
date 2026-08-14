@@ -1,4 +1,4 @@
-.PHONY: all help clean test test-unit test-acceptance-pack test-connectors test-intents test-integration test-all test-ci test-coverage crap crap-fresh crap-diff crap-diff-fresh test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single test-accounting-matrix test-accounting-matrix-quick list-demo-strategies check-pendle-expiry set-almanak-code-version build-platform-wheels build-platform-runner build publish lint lint-check format format-check security docs docs-cli docs-generated docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop audit-intent-paths check-xfail-hygiene check-xfail-liveness check-config-boundary check-connector-registry check-strategy-taxonomy check-teardown-state-persistence check-connector-chains check-chain-truth check-demos check-intent-coverage check-orphan-scripts check-import-provenance check-deployment-scoped-tables check-deployment-id-proto-surface check-gateway-isolation check-decimal-policy check-decimal-policy-baseline regen-contract-baselines check-accounting-ratchet check-accounting-merge-gate scan-coupling scan-coupling-report scan-coupling-baseline check-hardcoded-addresses check-hardcoded-addresses-baseline check-placeholder-prices check-permission-coverage check-ci-status
+.PHONY: all help clean test test-unit test-acceptance-pack test-connectors test-intents test-integration test-all test-ci test-coverage crap crap-fresh crap-diff crap-diff-fresh test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single test-accounting-matrix test-accounting-matrix-quick list-demo-strategies check-pendle-expiry set-almanak-code-version build-platform-wheels build-platform-runner build publish lint lint-check format format-check security docs docs-cli docs-generated docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop audit-intent-paths check-xfail-hygiene check-xfail-liveness check-config-boundary check-connector-registry check-lifecycle-capability-ratchet check-lifecycle-capability-baseline check-strategy-taxonomy check-teardown-state-persistence check-connector-chains check-chain-truth check-demos check-intent-coverage check-orphan-scripts check-import-provenance check-deployment-scoped-tables check-deployment-id-proto-surface check-gateway-isolation check-decimal-policy check-decimal-policy-baseline regen-contract-baselines check-accounting-ratchet check-accounting-merge-gate scan-coupling scan-coupling-report scan-coupling-baseline check-hardcoded-addresses check-hardcoded-addresses-baseline check-placeholder-prices check-permission-coverage check-ci-status
 
 # Load .env file if it exists
 -include .env
@@ -106,6 +106,16 @@ check-config-boundary:
 # intent-test coverage gate and future tooling.
 check-connector-registry: ## Validate connector manifests against the registry
 	uv run python scripts/ci/check_connector_registry.py --verbose
+
+# Canonical lifecycle-capability debt ratchet (VIB-6651). This internal,
+# offline report gate freezes exact scoped state rows. New UNDECLARED debt,
+# removed scope, and state drift fail; forward fixes also require shrinking the
+# reviewed baseline in the same PR so the stronger state is locked in.
+check-lifecycle-capability-ratchet: ## Check lifecycle capability state non-regression
+	uv run python scripts/ci/check_lifecycle_capability_ratchet.py
+
+check-lifecycle-capability-baseline: ## Refresh reviewed lifecycle capability state after a forward change
+	uv run python scripts/ci/check_lifecycle_capability_ratchet.py --write-baseline
 
 # Zodiac permission-coverage preflight (VIB-6018, gating VIB-6057). Fails when a
 # hosted-relevant (connector, intent, chain) triple yields ZERO non-infrastructure

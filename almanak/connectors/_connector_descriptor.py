@@ -32,6 +32,11 @@ from almanak.connectors._strategy_base.protocol_ownership import (
 )
 from almanak.connectors._strategy_base.solana_program import SolanaProgramSpec
 from almanak.connectors._strategy_base.vault_representatives import VaultRepresentativeSpec
+from almanak.core.capability_obligations import (
+    ExactTargetFeature,
+    ObligationDeclaration,
+    SupportClaim,
+)
 from almanak.core.chains import ChainDescriptor
 from almanak.core.intent_types import IntentType
 
@@ -75,6 +80,7 @@ __all__ = [
     "KNOWN_PROTOCOL_VENDORS",
     "MATRIX_CHAIN_DISPLAY_ORDER",
     "LendingReadDecl",
+    "LifecycleObligationDecl",
     "LiquidationDefault",
     "MetadataAmountEncoding",
     "PerpsReadDecl",
@@ -88,6 +94,66 @@ __all__ = [
 
 class ConnectorDiscoveryError(Exception):
     """Connector discovery or validation failed."""
+
+
+@dataclass(frozen=True, init=False)
+class LifecycleObligationDecl:
+    """Connector-owned exact evidence-backed lifecycle obligation declaration."""
+
+    protocol: str
+    chain: str
+    intent: IntentType
+    claim: SupportClaim
+    declaration: ObligationDeclaration
+    rule_id: str
+    source_ref: str
+    source_detail: str
+    exact_target_feature: ExactTargetFeature | None
+
+    def __init__(
+        self,
+        *,
+        protocol: str,
+        chain: ChainDescriptor,
+        intent: IntentType,
+        claim: SupportClaim,
+        declaration: ObligationDeclaration,
+        rule_id: str,
+        source_ref: str,
+        source_detail: str,
+        exact_target_feature: ExactTargetFeature | None = None,
+    ) -> None:
+        if not isinstance(protocol, str) or not protocol or protocol != protocol.lower() or "-" in protocol:
+            raise ValueError("LifecycleObligationDecl.protocol must be lowercase and hyphen-free")
+        chain_names = canonical_chain_names_from_refs(
+            "LifecycleObligationDecl",
+            "chain",
+            (chain,),
+            allow_none=False,
+        )
+        assert chain_names is not None
+        if type(intent) is not IntentType:
+            raise TypeError("LifecycleObligationDecl.intent must be an IntentType")
+        if type(claim) is not SupportClaim:
+            raise TypeError("LifecycleObligationDecl.claim must be a SupportClaim")
+        if type(declaration) is not ObligationDeclaration:
+            raise TypeError("LifecycleObligationDecl.declaration must be an ObligationDeclaration")
+        if exact_target_feature is not None and type(exact_target_feature) is not ExactTargetFeature:
+            raise TypeError("exact_target_feature must be an ExactTargetFeature or None")
+        for field_name, value in (
+            ("rule_id", rule_id),
+            ("source_ref", source_ref),
+            ("source_detail", source_detail),
+        ):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"LifecycleObligationDecl.{field_name} must be a non-empty string")
+            object.__setattr__(self, field_name, value.strip())
+        object.__setattr__(self, "protocol", protocol)
+        object.__setattr__(self, "chain", chain_names[0])
+        object.__setattr__(self, "intent", intent)
+        object.__setattr__(self, "claim", claim)
+        object.__setattr__(self, "declaration", declaration)
+        object.__setattr__(self, "exact_target_feature", exact_target_feature)
 
 
 @dataclass(frozen=True)
@@ -1188,6 +1254,7 @@ class Connector:
     flash_loan_synthetic_discovery: bool = False
     strategy_intents: tuple[IntentType, ...] | None = None
     strategy_matrix_entries: tuple[StrategyMatrixEntry, ...] | None = None
+    lifecycle_declarations: tuple[LifecycleObligationDecl, ...] = field(default_factory=tuple)
     external_ids: Mapping[str, str] | None = None
 
     def __post_init__(self) -> None:
@@ -1741,6 +1808,8 @@ class Connector:
     def _validate_strategy_support(self) -> None:
         """Validate optional strategy-side registration metadata."""
         if self.strategy_intents is None:
+            if self.lifecycle_declarations:
+                raise ValueError("Connector.lifecycle_declarations require strategy_intents and supported_chains")
             if self.supported_chains is not None:
                 raise ValueError("Connector.supported_chains may only be set when strategy_intents is set")
             if self.strategy_matrix_entries is not None:
@@ -1779,6 +1848,36 @@ class Connector:
                 f"unowned keys: {sorted(unowned_protocols)!r}"
             )
         self._validate_strategy_matrix_entries()
+        self._validate_lifecycle_declarations()
+
+    def _validate_lifecycle_declarations(self) -> None:
+        if not isinstance(self.lifecycle_declarations, tuple):
+            raise TypeError("Connector.lifecycle_declarations must be a tuple")
+        if not all(type(item) is LifecycleObligationDecl for item in self.lifecycle_declarations):
+            raise TypeError("Connector.lifecycle_declarations must contain LifecycleObligationDecl values")
+        seen: set[tuple[str, str, IntentType, SupportClaim, ExactTargetFeature | None, object]] = set()
+        for item in self.lifecycle_declarations:
+            if item.protocol not in self.protocol_keys:
+                raise ValueError(f"lifecycle declaration references unowned protocol {item.protocol!r}")
+            if self.strategy_intents is None or item.intent not in self.strategy_intents:
+                raise ValueError(f"lifecycle declaration references undeclared intent {item.intent.value}")
+            supported = self.supported_chains_for(protocol=item.protocol, intent=item.intent) or ()
+            if item.chain not in supported:
+                raise ValueError(
+                    "lifecycle declaration is outside connector support: "
+                    f"{item.protocol}/{item.chain}/{item.intent.value}"
+                )
+            identity = (
+                item.protocol,
+                item.chain,
+                item.intent,
+                item.claim,
+                item.exact_target_feature,
+                item.declaration.obligation,
+            )
+            if identity in seen:
+                raise ValueError(f"duplicate lifecycle declaration for {identity!r}")
+            seen.add(identity)
 
     def _validate_strategy_matrix_entries(self) -> None:
         """Validate descriptor-owned support-matrix rows."""
