@@ -31,6 +31,7 @@ from almanak.core.capability_obligations import (
 )
 from almanak.core.chains.base import DESCRIPTOR as BASE
 from almanak.core.chains.ethereum import DESCRIPTOR as ETHEREUM
+from almanak.core.chains.linea import DESCRIPTOR as LINEA
 from almanak.core.intent_types import IntentType
 from almanak.framework.capabilities import effective_matrix as effective_matrix_module
 from almanak.framework.capabilities.effective_matrix import (
@@ -196,7 +197,9 @@ def test_connector_declaration_intent_fails_loud_before_primitive_fallback(
     )
     connector = replace(connector, lifecycle_declarations=(declaration,))
 
-    monkeypatch.setattr(effective_matrix_module, "record_for", lambda _intent: (_ for _ in ()).throw(ValueError("unknown intent")))
+    monkeypatch.setattr(
+        effective_matrix_module, "record_for", lambda _intent: (_ for _ in ()).throw(ValueError("unknown intent"))
+    )
     monkeypatch.setattr(effective_matrix_module, "primitive_for", lambda *_args: pytest.fail("fallback must not run"))
     with pytest.raises(ValueError, match="unknown intent"):
         effective_matrix_module._connector_declaration_rules((connector,))
@@ -449,11 +452,11 @@ def test_domain_specific_reader_never_leaks_into_unrelated_intent_cells() -> Non
 
 def test_all_advertised_exact_target_feature_profiles_are_reachable() -> None:
     connector = Connector(
-        name="data_swap",
+        name="uniswap_v3",
         kind=ProtocolKind.SWAP,
         compiler=_ref("Compiler"),
         swap_quote_connector=_ref("Quote"),
-        pool_reader=_ref("PoolReader"),
+        pool_data=_ref("PoolDataSpecs"),
         dex_volume=DexVolumeDecl(chains=("ethereum",), amm_family="v3_concentrated"),
         principal_token_market_reader=_ref("ReferencePrice"),
         supported_chains=SupportedChainsSpec(chains=(ETHEREUM,)),
@@ -463,6 +466,80 @@ def test_all_advertised_exact_target_feature_profiles_are_reachable() -> None:
     assert {
         cell.key.exact_target_feature for cell in matrix.cells if cell.key.claim is SupportClaim.EXACT_TARGET_DATA
     } == set(ExactTargetFeature)
+
+
+def test_pool_data_changes_candidate_provenance_without_owning_claim_identity() -> None:
+    connector = Connector(
+        name="uniswap_v3",
+        kind=ProtocolKind.SWAP,
+        compiler=_ref("Compiler"),
+        pool_data=_ref("PoolDataSpecs"),
+        supported_chains=SupportedChainsSpec(chains=(ETHEREUM,)),
+        strategy_intents=(IntentType.SWAP,),
+    )
+    matrix = build_effective_capability_matrix((connector,))
+    target_cells = tuple(cell for cell in matrix.cells if cell.key.claim is SupportClaim.EXACT_TARGET_DATA)
+    assert {cell.key.exact_target_feature for cell in target_cells} == {
+        ExactTargetFeature.TWAP,
+        ExactTargetFeature.DEPTH,
+    }
+    for cell in target_cells:
+        provider = next(row for row in cell.obligations if row.audited.obligation is ObligationId.TARGET_DATA_PROVIDER)
+        candidates = tuple(source for source in provider.sources if source.role is SourceRole.CANDIDATE)
+        assert len(candidates) == 1
+        assert candidates[0].rule_id == "manifest.pool_data.candidate.v1"
+        assert candidates[0].ref == "Connector.pool_data=almanak.example.providers:PoolDataSpecs"
+        assert provider.audited.state is ReportedObligationState.UNDECLARED
+
+
+def test_pool_data_presence_does_not_infer_new_exact_target_claims() -> None:
+    connector = Connector(
+        name="new_pool_protocol",
+        kind=ProtocolKind.SWAP,
+        compiler=_ref("Compiler"),
+        pool_data=_ref("PoolDataSpecsWithFreeFormUnsupportedReasons"),
+        supported_chains=SupportedChainsSpec(chains=(ETHEREUM,)),
+        strategy_intents=(IntentType.SWAP,),
+    )
+    matrix = build_effective_capability_matrix((connector,))
+    assert all(cell.key.claim is not SupportClaim.EXACT_TARGET_DATA for cell in matrix.cells)
+
+
+def test_frozen_pool_claim_inventory_does_not_expand_with_new_manifest_cells() -> None:
+    connector = Connector(
+        name="uniswap_v3",
+        kind=ProtocolKind.SWAP,
+        compiler=_ref("Compiler"),
+        pool_data=_ref("PoolDataSpecs"),
+        supported_chains=SupportedChainsSpec(chains=(ETHEREUM, LINEA)),
+        strategy_intents=(IntentType.SWAP,),
+    )
+    matrix = build_effective_capability_matrix((connector,))
+    target_cells = tuple(cell for cell in matrix.cells if cell.key.claim is SupportClaim.EXACT_TARGET_DATA)
+    assert {(cell.key.chain, cell.key.exact_target_feature) for cell in target_cells} == {
+        ("ethereum", ExactTargetFeature.TWAP),
+        ("ethereum", ExactTargetFeature.DEPTH),
+    }
+
+
+def test_deprecated_pool_reader_no_longer_drives_claims_or_candidates() -> None:
+    connector = Connector(
+        name="uniswap_v3",
+        kind=ProtocolKind.SWAP,
+        compiler=_ref("Compiler"),
+        pool_reader=_ref("DeprecatedPoolReader"),
+        supported_chains=SupportedChainsSpec(chains=(ETHEREUM,)),
+        strategy_intents=(IntentType.SWAP,),
+    )
+    matrix = build_effective_capability_matrix((connector,))
+    target_cells = tuple(cell for cell in matrix.cells if cell.key.claim is SupportClaim.EXACT_TARGET_DATA)
+    assert {cell.key.exact_target_feature for cell in target_cells} == {
+        ExactTargetFeature.TWAP,
+        ExactTargetFeature.DEPTH,
+    }
+    for cell in target_cells:
+        provider = next(row for row in cell.obligations if row.audited.obligation is ObligationId.TARGET_DATA_PROVIDER)
+        assert all(source.role is not SourceRole.CANDIDATE for source in provider.sources)
 
 
 def test_json_and_markdown_are_byte_stable_and_have_no_volatile_provenance() -> None:

@@ -24,6 +24,7 @@ from enum import Enum, StrEnum
 from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any
 
+from almanak.connectors._connector_descriptor import REGISTERED_POOL_TARGET_CLAIMS_V1
 from almanak.core.capability_obligations import (
     ExactTargetFeature,
     IntentSemantics,
@@ -509,7 +510,7 @@ _FIELD_PRIMITIVE_SCOPES: dict[str, frozenset[Primitive]] = {
     "fungible_lp_close": frozenset((Primitive.LP, Primitive.LP_V4)),
     "teardown_residual_discovery": frozenset((Primitive.PERP,)),
     "dex_volume": frozenset((Primitive.SWAP, Primitive.LP, Primitive.LP_V4)),
-    "pool_reader": frozenset((Primitive.SWAP, Primitive.LP, Primitive.LP_V4)),
+    "pool_data": frozenset((Primitive.SWAP, Primitive.LP, Primitive.LP_V4)),
 }
 
 
@@ -625,7 +626,7 @@ _FIELD_CANDIDATE_RULES: dict[ObligationId, tuple[tuple[str, str], ...]] = {
     ),
     ObligationId.EXACT_VENUE_BINDING: tuple(
         (field, "Venue-binding candidate; address/routing presence is not exact-target proof.")
-        for field in ("address_tables", "pool_reader", "compiler")
+        for field in ("address_tables", "pool_data", "compiler")
     ),
     ObligationId.ANVIL_GAS: (("gas_estimate_connector", "Gas-estimate candidate; funded native gas is not implied."),),
     ObligationId.ANVIL_QUOTE: (("swap_quote_connector", "Quote candidate; managed-fork availability is not implied."),),
@@ -692,11 +693,18 @@ def _certification_candidates(connector: Any, key: CapabilityCellKey) -> tuple[P
 
 _TARGET_DATA_FIELDS: dict[ExactTargetFeature, tuple[str, ...]] = {
     ExactTargetFeature.QUOTE: ("swap_quote_connector",),
-    ExactTargetFeature.TWAP: ("pool_reader",),
+    ExactTargetFeature.TWAP: ("pool_data",),
     ExactTargetFeature.OHLCV: ("dex_volume",),
-    ExactTargetFeature.DEPTH: ("pool_reader",),
+    ExactTargetFeature.DEPTH: ("pool_data",),
     ExactTargetFeature.REFERENCE_PRICE: ("perp_price_history", "principal_token_market_reader"),
 }
+
+# VIB-6659 freezes the pool-derived exact-target claim identities reviewed in
+# the original registered-strategy baseline. Claim identity is deliberately
+# independent from provider discovery: replacing the deprecated ``pool_reader``
+# signal with ``pool_data`` must change candidate provenance, never silently
+# delete audit debt or manufacture new claims for every pool-bearing connector.
+# These rows are migration inventory, not an assertion that the feature works.
 
 
 def _target_data_candidates(
@@ -711,7 +719,12 @@ def _target_data_candidates(
             connector,
             key,
             field_name,
-            "Feature provider candidate; exact venue/chain evidence remains required.",
+            (
+                "Canonical pool-data contract candidate; facet support or a free-form unsupported reason remains "
+                "provider metadata, never a lifecycle disposition."
+                if field_name == "pool_data"
+                else "Feature provider candidate; exact venue/chain evidence remains required."
+            ),
         )
         for field_name in _TARGET_DATA_FIELDS.get(feature, ())
     )
@@ -767,6 +780,10 @@ def _claim_specs(
         )
     for feature, field_names in _TARGET_DATA_FIELDS.items():
         if feature is ExactTargetFeature.QUOTE and intent is not IntentType.SWAP:
+            continue
+        if feature in (ExactTargetFeature.TWAP, ExactTargetFeature.DEPTH):
+            if (protocol, chain, intent, feature) in REGISTERED_POOL_TARGET_CLAIMS_V1:
+                claims.append((SupportClaim.EXACT_TARGET_DATA, feature))
             continue
         if any(
             (value := getattr(connector, field_name, None)) is not None

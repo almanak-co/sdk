@@ -109,9 +109,9 @@ check-connector-registry: ## Validate connector manifests against the registry
 
 # Canonical lifecycle-capability debt ratchet (VIB-6651). This internal,
 # offline report gate freezes exact scoped state rows. New UNDECLARED debt,
-# removed reviewed scope, and state drift fail; obsolete legacy UNDECLARED
-# scope and forward fixes require shrinking the reviewed baseline in the same
-# PR so the stronger state is locked in.
+# removed reviewed scope, and state drift fail. Forward fixes resolve legacy
+# UNDECLARED rows in place and advance the reviewed baseline in the same PR so
+# the stronger state is locked in; rows are never removed by the refresh path.
 check-lifecycle-capability-ratchet: ## Check lifecycle capability state non-regression
 	uv run python scripts/ci/check_lifecycle_capability_ratchet.py
 

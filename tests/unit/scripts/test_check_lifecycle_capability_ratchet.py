@@ -294,41 +294,18 @@ def test_refresh_refuses_new_gap_but_writes_forward_resolution(monkeypatch: pyte
     assert writes == [matrix]
 
 
-def test_refresh_allows_removed_legacy_undeclared_rows(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    path = tmp_path / "baseline.json"
-    matrix = object()
-    writes: list[object] = []
-    monkeypatch.setattr(ratchet, "snapshot_matrix", lambda _matrix: ())
-    monkeypatch.setattr(ratchet, "write_baseline", lambda _path, value: writes.append(value))
-
-    monkeypatch.setattr(ratchet, "load_baseline", lambda _path: (_cell(),))
-    ratchet.refresh_baseline(path, matrix)  # type: ignore[arg-type]
-    assert writes == [matrix]
-
-
-@pytest.mark.parametrize(
-    "state",
-    (
-        ReportedObligationState.SATISFIED,
-        ReportedObligationState.NOT_APPLICABLE,
-        ReportedObligationState.UNSUPPORTED,
-    ),
-)
-def test_refresh_rejects_removed_reviewed_rows(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    state: ReportedObligationState,
+def test_refresh_rejects_removed_rows_including_legacy_undeclared(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     path = tmp_path / "baseline.json"
     matrix = object()
-    monkeypatch.setattr(
-        ratchet,
-        "load_baseline",
-        lambda _path: (_cell(state),),
-    )
+    writes: list[object] = []
+    monkeypatch.setattr(ratchet, "load_baseline", lambda _path: (_cell(),))
     monkeypatch.setattr(ratchet, "snapshot_matrix", lambda _matrix: ())
+    monkeypatch.setattr(ratchet, "write_baseline", lambda _path, value: writes.append(value))
     with pytest.raises(ratchet.BaselineFormatError, match="REMOVED_BASELINE_ROW"):
         ratchet.refresh_baseline(path, matrix)  # type: ignore[arg-type]
+    assert writes == []
 
 
 def test_committed_baseline_matches_the_offline_registered_matrix(capsys: pytest.CaptureFixture[str]) -> None:

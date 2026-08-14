@@ -66,6 +66,51 @@ MATRIX_CHAIN_DISPLAY_ORDER: tuple[str, ...] = (
     "hyperevm",
 )
 
+# Reviewed VIB-6659 migration inventory for pool-derived exact-target claims.
+# Claim identity is deliberately independent from provider discovery: changing
+# the canonical pool-data provider may change candidate provenance, but it must
+# not silently add or remove existing audit debt. Protocol/chain ownership
+# belongs in this connector registration module rather than framework policy.
+_POOL_CLAIM_INTENTS = (IntentType.SWAP, IntentType.LP_OPEN, IntentType.LP_CLOSE)
+_POOL_CLAIM_INTENTS_WITH_FEES = (*_POOL_CLAIM_INTENTS, IntentType.LP_COLLECT_FEES)
+REGISTERED_POOL_TARGET_CLAIMS_V1: frozenset[tuple[str, str, IntentType, ExactTargetFeature]] = frozenset(
+    (protocol, chain, intent, feature)
+    for protocol, chain, intents in (
+        ("aerodrome", "base", _POOL_CLAIM_INTENTS),
+        ("aerodrome", "optimism", _POOL_CLAIM_INTENTS),
+        *(("curve", chain, _POOL_CLAIM_INTENTS) for chain in ("arbitrum", "base", "ethereum", "optimism", "polygon")),
+        *(
+            ("pancakeswap_v3", chain, _POOL_CLAIM_INTENTS_WITH_FEES)
+            for chain in ("arbitrum", "base", "bsc", "ethereum")
+        ),
+        *(
+            ("sushiswap_v3", chain, _POOL_CLAIM_INTENTS_WITH_FEES)
+            for chain in ("arbitrum", "base", "bsc", "ethereum", "optimism", "polygon")
+        ),
+        *(
+            ("uniswap_v3", chain, _POOL_CLAIM_INTENTS_WITH_FEES)
+            for chain in (
+                "arbitrum",
+                "avalanche",
+                "base",
+                "bsc",
+                "ethereum",
+                "monad",
+                "optimism",
+                "polygon",
+                "robinhood",
+            )
+        ),
+        *(("uniswap_v3", chain, (IntentType.SWAP,)) for chain in ("mantle", "xlayer", "zerog")),
+        *(
+            ("uniswap_v4", chain, _POOL_CLAIM_INTENTS_WITH_FEES)
+            for chain in ("arbitrum", "avalanche", "base", "bsc", "ethereum", "optimism", "polygon")
+        ),
+    )
+    for intent in intents
+    for feature in (ExactTargetFeature.TWAP, ExactTargetFeature.DEPTH)
+)
+
 __all__ = [
     "CONNECTOR_REGISTRY",
     "CONNECTOR_DESCRIPTOR_REGISTRY",
@@ -79,6 +124,7 @@ __all__ = [
     "ImportRef",
     "KNOWN_PROTOCOL_VENDORS",
     "MATRIX_CHAIN_DISPLAY_ORDER",
+    "REGISTERED_POOL_TARGET_CLAIMS_V1",
     "LendingReadDecl",
     "LifecycleObligationDecl",
     "LiquidationDefault",
