@@ -1,4 +1,4 @@
-.PHONY: all help clean test test-unit test-acceptance-pack test-connectors test-intents test-integration test-all test-ci test-coverage crap crap-fresh crap-diff crap-diff-fresh test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single test-accounting-matrix test-accounting-matrix-quick list-demo-strategies check-pendle-expiry set-almanak-code-version build-platform-wheels build-platform-runner build publish lint lint-check format format-check security docs docs-cli docs-generated docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop audit-intent-paths check-xfail-hygiene check-xfail-liveness check-config-boundary check-connector-registry check-lifecycle-capability-ratchet check-lifecycle-capability-baseline check-sdk-scoped-lifecycle-claims generate-sdk-scoped-lifecycle-claims check-strategy-taxonomy check-teardown-state-persistence check-connector-chains check-chain-truth check-demos check-intent-coverage check-orphan-scripts check-import-provenance check-deployment-scoped-tables check-deployment-id-proto-surface check-gateway-isolation check-decimal-policy check-decimal-policy-baseline regen-contract-baselines check-accounting-ratchet check-accounting-merge-gate scan-coupling scan-coupling-report scan-coupling-baseline check-hardcoded-addresses check-hardcoded-addresses-baseline check-placeholder-prices check-permission-coverage check-ci-status
+.PHONY: all help clean test test-unit test-acceptance-pack test-connectors test-intents test-integration test-all test-ci test-coverage crap crap-fresh crap-diff crap-diff-fresh test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single test-accounting-matrix test-accounting-matrix-quick list-demo-strategies check-pendle-expiry set-almanak-code-version build-platform-wheels build-platform-runner build publish lint lint-check format format-check security docs docs-cli docs-generated docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop audit-intent-paths check-xfail-hygiene check-xfail-liveness check-config-boundary check-connector-registry check-lifecycle-capability-ratchet check-lifecycle-capability-baseline check-sdk-scoped-lifecycle-claims generate-sdk-scoped-lifecycle-claims check-sdk-scoped-support-shadow generate-sdk-scoped-support-shadow check-strategy-taxonomy check-teardown-state-persistence check-connector-chains check-chain-truth check-demos check-intent-coverage check-orphan-scripts check-import-provenance check-deployment-scoped-tables check-deployment-id-proto-surface check-gateway-isolation check-decimal-policy check-decimal-policy-baseline regen-contract-baselines check-accounting-ratchet check-accounting-merge-gate scan-coupling scan-coupling-report scan-coupling-baseline check-hardcoded-addresses check-hardcoded-addresses-baseline check-placeholder-prices check-permission-coverage check-ci-status
 
 # Load .env file if it exists
 -include .env
@@ -122,9 +122,17 @@ check-lifecycle-capability-baseline: ## Refresh reviewed lifecycle capability st
 # Platform support, runtime admission, teardown, or execution behavior.
 check-sdk-scoped-lifecycle-claims: ## Verify the scoped SDK lifecycle-claims artifact
 	uv run python scripts/ci/generate_sdk_scoped_lifecycle_claims.py
+	uv run python scripts/ci/generate_sdk_scoped_support_shadow.py
 
 generate-sdk-scoped-lifecycle-claims: ## Refresh the scoped SDK lifecycle-claims artifact
 	uv run python scripts/ci/generate_sdk_scoped_lifecycle_claims.py --write
+	uv run python scripts/ci/generate_sdk_scoped_support_shadow.py --write
+
+check-sdk-scoped-support-shadow: ## Verify the inert SDK scoped-support shadow policy
+	uv run python scripts/ci/generate_sdk_scoped_support_shadow.py
+
+generate-sdk-scoped-support-shadow: ## Refresh the inert SDK scoped-support shadow policy
+	uv run python scripts/ci/generate_sdk_scoped_support_shadow.py --write
 
 # Zodiac permission-coverage preflight (VIB-6018, gating VIB-6057). Fails when a
 # hosted-relevant (connector, intent, chain) triple yields ZERO non-infrastructure

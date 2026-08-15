@@ -23,6 +23,7 @@ If this test fails, the fix is to wire the gate into
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -47,6 +48,7 @@ REQUIRED_GATES = [
     ("check-chain-truth", "scripts/ci/check_chain_truth_agreement.py"),
     ("check-lifecycle-capability-ratchet", "scripts/ci/check_lifecycle_capability_ratchet.py"),
     ("check-sdk-scoped-lifecycle-claims", "scripts/ci/generate_sdk_scoped_lifecycle_claims.py"),
+    ("check-sdk-scoped-lifecycle-claims", "scripts/ci/generate_sdk_scoped_support_shadow.py"),
     # ALM-3183 added ``check-placeholder-prices``. Same reasoning: the whole
     # point of that gate is to catch the SECOND copy of a hardcoded price table,
     # which by definition nobody is looking for. A gate that only exists as a
@@ -54,6 +56,22 @@ REQUIRED_GATES = [
     # report it as ``wired <- Makefile`` and say so cheerfully.
     ("check-placeholder-prices", "scripts/ci/check_placeholder_prices.py"),
 ]
+
+REQUIRED_NESTED_GATES = [
+    ("check-sdk-scoped-lifecycle-claims", "scripts/ci/generate_sdk_scoped_support_shadow.py"),
+]
+
+
+def _make_recipe(makefile: str, target: str) -> str:
+    """Return only the tab-indented recipe owned by one exact Make target."""
+    match = re.search(rf"^{re.escape(target)}:[^\n]*\n((?:\t[^\n]*\n?)+)", makefile, flags=re.MULTILINE)
+    return "" if match is None else match.group(1)
+
+
+def _make_recipe_executes(makefile: str, target: str, script: str) -> bool:
+    """Return whether one target owns the exact fail-propagating gate command."""
+    expected = f"uv run python {script}"
+    return expected in {line.strip() for line in _make_recipe(makefile, target).splitlines()}
 
 
 def _command_segments(run_block: str) -> list[str]:
@@ -139,6 +157,36 @@ def test_gate_runs_in_a_workflow(target: str, script: str) -> None:
         f"orphan gate counts a Makefile reference as wiring, so it would report "
         f"itself as wired while never executing in CI."
     )
+
+
+@pytest.mark.parametrize(("target", "script"), REQUIRED_NESTED_GATES)
+def test_workflow_target_executes_its_nested_gate(target: str, script: str) -> None:
+    """A workflow target cannot satisfy liveness after dropping its nested gate."""
+    makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+    assert _make_recipe_executes(makefile, target, script), (
+        f"workflow target {target!r} does not execute {script!r}; a separate Make target "
+        "does not make the workflow invocation reach it"
+    )
+
+
+def test_a_separate_make_target_does_not_make_a_nested_gate_live() -> None:
+    makefile = "parent:\n\tuv run python parent.py\n\nchild:\n\tuv run python child.py\n"
+    assert not _make_recipe_executes(makefile, "parent", "child.py")
+
+
+@pytest.mark.parametrize(
+    "recipe",
+    (
+        "\t# uv run python child.py\n",
+        "\t@echo uv run python child.py\n",
+        "\t@ echo uv run python child.py\n",
+        "\t- echo uv run python child.py\n",
+        "\tprintf 'uv run python child.py'\n",
+        "\ttest -f child.py\n",
+    ),
+)
+def test_non_executable_make_recipe_text_does_not_make_a_nested_gate_live(recipe: str) -> None:
+    assert not _make_recipe_executes(f"parent:\n{recipe}", "parent", "child.py")
 
 
 def test_a_commented_out_step_does_not_satisfy_the_guard(tmp_path, monkeypatch):
