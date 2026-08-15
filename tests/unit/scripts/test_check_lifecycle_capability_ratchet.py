@@ -358,6 +358,7 @@ def test_cli_fails_when_unsupported_review_deadline_is_due(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setattr(ratchet, "build_effective_capability_matrix", lambda: _matrix_with_unsupported(date.today()))
+    monkeypatch.setattr(ratchet, "validate_matrix_evidence", lambda _matrix: None)
     assert ratchet.main([]) == 1
     output = capsys.readouterr().out
     assert "FAIL: lifecycle capability ratchet found 1 unsupported declaration(s) due for review" in output
@@ -372,6 +373,7 @@ def test_cli_external_baseline_refresh_reports_success_after_write(
     path = tmp_path / "baseline.json"
     matrix = SimpleNamespace(cells=(object(),))
     monkeypatch.setattr(ratchet, "build_effective_capability_matrix", lambda: matrix)
+    monkeypatch.setattr(ratchet, "validate_matrix_evidence", lambda _matrix: None)
     monkeypatch.setattr(ratchet, "stale_unsupported_rows", lambda _matrix, *, as_of: ())
 
     def refresh(target: Path, _matrix: object) -> None:
@@ -381,3 +383,29 @@ def test_cli_external_baseline_refresh_reports_success_after_write(
     assert ratchet.main(["--baseline", str(path), "--write-baseline"]) == 0
     assert path.read_text(encoding="utf-8") == "written\n"
     assert str(path) in capsys.readouterr().out
+
+
+def test_cli_baseline_refresh_validates_evidence_before_writing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "baseline.json"
+    matrix = SimpleNamespace(cells=(object(),))
+    refresh_called = False
+    monkeypatch.setattr(ratchet, "build_effective_capability_matrix", lambda: matrix)
+
+    def reject_evidence(_matrix: object) -> None:
+        raise ratchet.EvidenceIntegrityError("invalid evidence sentinel")
+
+    def forbidden_refresh(_path: Path, _matrix: object) -> None:
+        nonlocal refresh_called
+        refresh_called = True
+
+    monkeypatch.setattr(ratchet, "validate_matrix_evidence", reject_evidence)
+    monkeypatch.setattr(ratchet, "refresh_baseline", forbidden_refresh)
+
+    assert ratchet.main(["--baseline", str(path), "--write-baseline"]) == 1
+    assert not refresh_called
+    assert not path.exists()
+    assert "FAIL: lifecycle capability evidence integrity: invalid evidence sentinel" in capsys.readouterr().out
