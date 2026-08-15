@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import date
+
 from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
     BacktestStrategyTypeDecl,
@@ -9,12 +11,23 @@ from almanak.connectors._connector import (
     FeeModelDecl,
     ImportRef,
     LendingReadDecl,
+    LifecycleObligationDecl,
     MetadataAmountEncoding,
     SupportedChainsSpec,
 )
+from almanak.connectors._lifecycle_declaration_bundle import LifecycleClaimCell, LifecycleDeclarationBundle
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
 from almanak.connectors.aave_v3.backtest_risk import BACKTEST_RISK as _BACKTEST_RISK
+from almanak.core.capability_obligations import (
+    EvidenceKind,
+    EvidenceRef,
+    ObligationDeclaration,
+    ObligationDisposition,
+    ObligationId,
+    Satisfied,
+    Unsupported,
+)
 from almanak.core.chains.arbitrum import DESCRIPTOR as ARBITRUM
 from almanak.core.chains.avalanche import DESCRIPTOR as AVALANCHE
 from almanak.core.chains.base import DESCRIPTOR as BASE
@@ -40,6 +53,100 @@ _SUPPORTED_CHAINS = (
     LINEA,
 )
 _BORROW_CHAINS = tuple(chain for chain in _SUPPORTED_CHAINS if chain is not MANTLE)
+
+_PRODUCTION_CHAINS = (ARBITRUM, AVALANCHE, BASE, BSC, ETHEREUM, OPTIMISM, POLYGON)
+_TEST_CHAIN_PATHS = {chain.name: ("bnb" if chain is BSC else chain.name) for chain in _PRODUCTION_CHAINS}
+_PRODUCTION_INTENTS = tuple(
+    sorted(
+        (IntentType.SUPPLY, IntentType.WITHDRAW, IntentType.BORROW, IntentType.REPAY),
+        key=lambda intent: intent.value,
+    )
+)
+_PROVIDER_REFS = {
+    ObligationId.ASSET_RESOLUTION: "almanak.connectors.aave_v3.compiler:AaveV3Compiler",
+    ObligationId.VENUE_RESOLUTION: "almanak.connectors.aave_v3.adapter:AaveV3Adapter",
+    ObligationId.AMOUNT_PROTECTION: "almanak.connectors.aave_v3.adapter:AaveV3Adapter",
+    ObligationId.COMPILER: "almanak.connectors.aave_v3.compiler:AaveV3Compiler",
+    ObligationId.RECEIPT_EVIDENCE: "almanak.connectors.aave_v3.receipt_parser:AaveV3ReceiptParser",
+    ObligationId.PERMISSION_PLAN: "almanak.connectors.aave_v3.permission_hints:PERMISSION_HINTS",
+}
+
+
+def _core_dispositions(
+    evidence: tuple[EvidenceRef, ...],
+    *,
+    receipt_evidence_supported: bool,
+) -> tuple[ObligationDeclaration, ...]:
+    dispositions = []
+    for obligation in (
+        ObligationId.ASSET_RESOLUTION,
+        ObligationId.VENUE_RESOLUTION,
+        ObligationId.AMOUNT_PROTECTION,
+        ObligationId.COMPILER,
+        ObligationId.RECEIPT_EVIDENCE,
+        ObligationId.MONEY_LEGS,
+        ObligationId.PERMISSION_PLAN,
+    ):
+        disposition: ObligationDisposition
+        if obligation is ObligationId.MONEY_LEGS:
+            disposition = Unsupported(
+                reason="Aave V3 does not emit canonical typed PrimitiveMoneyLegs for lending receipts.",
+                tracking_ref="VIB-6660",
+                owner="SDK Accounting",
+                review_by=date(2026, 10, 15),
+            )
+        elif obligation is ObligationId.RECEIPT_EVIDENCE and not receipt_evidence_supported:
+            disposition = Unsupported(
+                reason="The exact real-fork path lacks an intent-specific receipt parser assertion.",
+                tracking_ref="VIB-6661",
+                owner="SDK Capability Audit",
+                review_by=date(2026, 10, 15),
+            )
+        else:
+            disposition = Satisfied(
+                provider_ref=_PROVIDER_REFS[obligation],
+                contract_version="aave_v3.core_execution.v1",
+                test_evidence=evidence,
+            )
+        dispositions.append(ObligationDeclaration(obligation, disposition))
+    return tuple(dispositions)
+
+
+def _production_lifecycle_declarations():
+    declarations: list[LifecycleObligationDecl] = []
+    for chain in _PRODUCTION_CHAINS:
+        evidence = (
+            EvidenceRef(
+                EvidenceKind.REAL_FORK,
+                f"tests/intents/{_TEST_CHAIN_PATHS[chain.name]}/test_aave_v3_lending.py",
+            ),
+        )
+        receipt_gaps = {
+            "avalanche": frozenset({IntentType.WITHDRAW, IntentType.REPAY}),
+            "polygon": frozenset({IntentType.REPAY}),
+        }.get(chain.name, frozenset())
+        for receipt_evidence_supported, intents in (
+            (True, tuple(intent for intent in _PRODUCTION_INTENTS if intent not in receipt_gaps)),
+            (False, tuple(intent for intent in _PRODUCTION_INTENTS if intent in receipt_gaps)),
+        ):
+            if not intents:
+                continue
+            suffix = "core_execution" if receipt_evidence_supported else "receipt_gap"
+            cells = tuple(LifecycleClaimCell(protocol="aave_v3", chain=chain, intent=intent) for intent in intents)
+            declarations.extend(
+                LifecycleDeclarationBundle(
+                    bundle_id=f"aave_v3.{chain.name}.{suffix}",
+                    cells=cells,
+                    declarations=_core_dispositions(
+                        evidence,
+                        receipt_evidence_supported=receipt_evidence_supported,
+                    ),
+                    source_ref=f"Connector.lifecycle_declarations[aave_v3.{chain.name}.{suffix}]",
+                    source_detail="Exact-chain lending evidence with explicit parser and typed money-leg gaps.",
+                ).expand()
+            )
+    return tuple(declarations)
+
 
 CONNECTOR = Connector(
     name="aave_v3",
@@ -186,6 +293,7 @@ CONNECTOR = Connector(
         # here once BORROW compiles an eMode enrolment.
         intent_overrides={IntentType.BORROW: _BORROW_CHAINS},
     ),
+    lifecycle_declarations=_production_lifecycle_declarations(),
 )
 
 __all__ = ["CONNECTOR"]

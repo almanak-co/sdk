@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import date
+
 from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
     BacktestStrategyTypeDecl,
@@ -13,9 +15,19 @@ from almanak.connectors._connector import (
     SupportedChainsSpec,
     YieldPokeDecl,
 )
+from almanak.connectors._lifecycle_declaration_bundle import LifecycleClaimCell, LifecycleDeclarationBundle
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
 from almanak.connectors.morpho_blue.backtest_risk import BACKTEST_RISK as _BACKTEST_RISK
+from almanak.core.capability_obligations import (
+    EvidenceKind,
+    EvidenceRef,
+    ObligationDeclaration,
+    ObligationDisposition,
+    ObligationId,
+    Satisfied,
+    Unsupported,
+)
 from almanak.core.chains.arbitrum import DESCRIPTOR as ARBITRUM
 from almanak.core.chains.base import DESCRIPTOR as BASE
 from almanak.core.chains.ethereum import DESCRIPTOR as ETHEREUM
@@ -23,6 +35,141 @@ from almanak.core.chains.monad import DESCRIPTOR as MONAD
 from almanak.core.chains.polygon import DESCRIPTOR as POLYGON
 from almanak.core.chains.robinhood import DESCRIPTOR as ROBINHOOD
 from almanak.core.intent_types import IntentType
+
+_PROVIDER_REFS = {
+    ObligationId.ASSET_RESOLUTION: "almanak.connectors.morpho_blue.compiler:MorphoBlueCompiler",
+    ObligationId.VENUE_RESOLUTION: "almanak.connectors.morpho_blue.adapter:MorphoBlueAdapter",
+    ObligationId.AMOUNT_PROTECTION: "almanak.connectors.morpho_blue.adapter:MorphoBlueAdapter",
+    ObligationId.COMPILER: "almanak.connectors.morpho_blue.compiler:MorphoBlueCompiler",
+    ObligationId.RECEIPT_EVIDENCE: "almanak.connectors.morpho_blue.receipt_parser:MorphoBlueReceiptParser",
+    ObligationId.MONEY_LEGS: (
+        "almanak.connectors.morpho_blue.receipt_parser:MorphoBlueReceiptParser.extract_primitive_money_legs"
+    ),
+    ObligationId.PERMISSION_PLAN: "almanak.connectors.morpho_blue.permission_hints:PERMISSION_HINTS",
+}
+_MONEY_LEG_EVIDENCE = EvidenceRef(
+    EvidenceKind.CONTRACT_TEST,
+    "tests/unit/connectors/test_lending_money_legs_vib5218.py",
+)
+
+
+def _core_dispositions(
+    real_fork_ref: str,
+    *,
+    unsupported: frozenset[ObligationId] = frozenset(),
+) -> tuple[ObligationDeclaration, ...]:
+    real_fork = EvidenceRef(EvidenceKind.REAL_FORK, real_fork_ref)
+    declarations = []
+    for obligation in (
+        ObligationId.ASSET_RESOLUTION,
+        ObligationId.VENUE_RESOLUTION,
+        ObligationId.AMOUNT_PROTECTION,
+        ObligationId.COMPILER,
+        ObligationId.RECEIPT_EVIDENCE,
+        ObligationId.MONEY_LEGS,
+        ObligationId.PERMISSION_PLAN,
+    ):
+        disposition: ObligationDisposition
+        if obligation in unsupported:
+            disposition = Unsupported(
+                reason=(
+                    "Morpho collateral SUPPLY/WITHDRAW variants intentionally omit typed PrimitiveMoneyLegs."
+                    if obligation is ObligationId.MONEY_LEGS
+                    else "The exact Ethereum collateral-supply proof does not assert this obligation's complete contract."
+                ),
+                tracking_ref="VIB-6661",
+                owner="SDK Capability Audit",
+                review_by=date(2026, 10, 15),
+            )
+        else:
+            disposition = Satisfied(
+                provider_ref=_PROVIDER_REFS[obligation],
+                contract_version="morpho_blue.core_execution.v1",
+                test_evidence=(real_fork, _MONEY_LEG_EVIDENCE)
+                if obligation is ObligationId.MONEY_LEGS
+                else (real_fork,),
+            )
+        declarations.append(ObligationDeclaration(obligation, disposition))
+    return tuple(declarations)
+
+
+def _bundle(
+    chain,
+    intents,
+    *,
+    evidence_ref: str,
+    suffix: str = "core_execution",
+    unsupported: frozenset[ObligationId] = frozenset(),
+):
+    cells = tuple(
+        sorted(
+            (LifecycleClaimCell(protocol="morpho_blue", chain=chain, intent=intent) for intent in intents),
+            key=LifecycleClaimCell.sort_key,
+        )
+    )
+    return LifecycleDeclarationBundle(
+        bundle_id=f"morpho_blue.{chain.name}.{suffix}",
+        cells=cells,
+        declarations=_core_dispositions(evidence_ref, unsupported=unsupported),
+        source_ref=f"Connector.lifecycle_declarations[morpho_blue.{chain.name}.{suffix}]",
+        source_detail=(
+            "Exact-chain real-fork execution; typed money-leg evidence is attached only where declared SATISFIED."
+        ),
+    ).expand()
+
+
+def _production_lifecycle_declarations():
+    declarations = []
+    for chain in (ARBITRUM, BASE, POLYGON):
+        declarations.extend(
+            _bundle(
+                chain,
+                (IntentType.BORROW, IntentType.REPAY),
+                evidence_ref=f"tests/intents/{chain.name}/test_morpho_blue_lending.py",
+            )
+        )
+        declarations.extend(
+            _bundle(
+                chain,
+                (IntentType.SUPPLY, IntentType.WITHDRAW),
+                evidence_ref=f"tests/intents/{chain.name}/test_morpho_blue_lending.py",
+                suffix="collateral_money_leg_gap",
+                unsupported=frozenset({ObligationId.MONEY_LEGS}),
+            )
+        )
+    declarations.extend(
+        _bundle(
+            ETHEREUM,
+            (IntentType.BORROW, IntentType.REPAY),
+            evidence_ref="tests/intents/ethereum/test_morpho_blue_lending.py",
+        )
+    )
+    declarations.extend(
+        _bundle(
+            ETHEREUM,
+            (IntentType.WITHDRAW,),
+            evidence_ref="tests/intents/ethereum/test_morpho_blue_lending.py",
+            suffix="withdraw_money_leg_gap",
+            unsupported=frozenset({ObligationId.MONEY_LEGS}),
+        )
+    )
+    declarations.extend(
+        _bundle(
+            ETHEREUM,
+            (IntentType.SUPPLY,),
+            evidence_ref="tests/intents/ethereum/test_withdraw_amount_all.py",
+            suffix="supply",
+            unsupported=frozenset(
+                {
+                    ObligationId.AMOUNT_PROTECTION,
+                    ObligationId.RECEIPT_EVIDENCE,
+                    ObligationId.MONEY_LEGS,
+                }
+            ),
+        )
+    )
+    return tuple(declarations)
+
 
 CONNECTOR = Connector(
     name="morpho_blue",
@@ -149,6 +296,7 @@ CONNECTOR = Connector(
             intents=(IntentType.SUPPLY, IntentType.BORROW, IntentType.REPAY, IntentType.WITHDRAW),
         ),
     ),
+    lifecycle_declarations=_production_lifecycle_declarations(),
 )
 
 __all__ = ["CONNECTOR"]
