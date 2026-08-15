@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from almanak.connectors._amm_lifecycle_declaration import (
+    AmmCoreExecutionCell,
+    build_amm_core_execution_declarations,
+)
 from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
     BacktestStrategyTypeDecl,
@@ -12,11 +16,62 @@ from almanak.connectors._connector import (
     SupportedChainsSpec,
 )
 from almanak.connectors._strategy_base.address_table import AbiFamily, AddressTableSpec
+from almanak.core.capability_obligations import ObligationId
 from almanak.core.chains.arbitrum import DESCRIPTOR as ARBITRUM
 from almanak.core.chains.base import DESCRIPTOR as BASE
 from almanak.core.chains.bsc import DESCRIPTOR as BSC
 from almanak.core.chains.ethereum import DESCRIPTOR as ETHEREUM
 from almanak.core.intent_types import IntentType
+
+_PROVIDER_REFS = {
+    ObligationId.ASSET_RESOLUTION: "almanak.connectors.uniswap_v3.compiler:UniswapV3Compiler",
+    ObligationId.VENUE_RESOLUTION: "almanak.connectors.uniswap_v3.compiler:UniswapV3Compiler",
+    ObligationId.AMOUNT_PROTECTION: "almanak.connectors.uniswap_v3.compiler:UniswapV3Compiler",
+    ObligationId.COMPILER: "almanak.connectors.uniswap_v3.compiler:UniswapV3Compiler",
+    ObligationId.RECEIPT_EVIDENCE: "almanak.connectors.pancakeswap_v3.receipt_parser:PancakeSwapV3ReceiptParser",
+    ObligationId.MONEY_LEGS: "almanak.connectors.pancakeswap_v3.receipt_parser:PancakeSwapV3ReceiptParser",
+    ObligationId.PERMISSION_PLAN: "almanak.connectors.pancakeswap_v3.permission_hints:PERMISSION_HINTS",
+}
+
+
+def _production_lifecycle_declarations():
+    cells: list[AmmCoreExecutionCell] = []
+    for chain, folder in ((ARBITRUM, "arbitrum"), (BASE, "base"), (BSC, "bnb"), (ETHEREUM, "ethereum")):
+        swap_gap = "VIB-5974" if chain in (ARBITRUM, ETHEREUM) else None
+        cells.extend(
+            (
+                AmmCoreExecutionCell(
+                    chain=chain,
+                    intent=IntentType.SWAP,
+                    real_fork_ref=None if swap_gap else f"tests/intents/{folder}/test_pancakeswap_v3_swap.py",
+                    lane_gap_ref=swap_gap,
+                    obligation_gap_refs=(((ObligationId.AMOUNT_PROTECTION, "ALM-3041"),) if swap_gap is None else ()),
+                ),
+                AmmCoreExecutionCell(
+                    chain=chain,
+                    intent=IntentType.LP_OPEN,
+                    real_fork_ref=f"tests/intents/{folder}/test_pancakeswap_v3_lp.py",
+                ),
+                AmmCoreExecutionCell(
+                    chain=chain,
+                    intent=IntentType.LP_CLOSE,
+                    real_fork_ref=f"tests/intents/{folder}/test_pancakeswap_v3_lp.py",
+                    obligation_gap_refs=((ObligationId.AMOUNT_PROTECTION, "VIB-6220"),),
+                ),
+                AmmCoreExecutionCell(
+                    chain=chain,
+                    intent=IntentType.LP_COLLECT_FEES,
+                    lane_gap_ref="VIB-5968",
+                ),
+            )
+        )
+    return build_amm_core_execution_declarations(
+        protocol="pancakeswap_v3",
+        cells=tuple(cells),
+        provider_refs=_PROVIDER_REFS,
+        contract_version="pancakeswap_v3.core_execution.v1",
+    )
+
 
 CONNECTOR = Connector(
     name="pancakeswap_v3",
@@ -99,6 +154,7 @@ CONNECTOR = Connector(
     ),
     strategy_intents=(IntentType.SWAP, IntentType.LP_OPEN, IntentType.LP_CLOSE, IntentType.LP_COLLECT_FEES),
     supported_chains=SupportedChainsSpec(chains=(BSC, ETHEREUM, ARBITRUM, BASE)),
+    lifecycle_declarations=_production_lifecycle_declarations(),
 )
 
 __all__ = ["CONNECTOR"]

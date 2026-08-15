@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from almanak.connectors._amm_lifecycle_declaration import (
+    AmmCoreExecutionCell,
+    build_amm_core_execution_declarations,
+)
 from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
     BacktestStrategyTypeDecl,
@@ -11,6 +15,7 @@ from almanak.connectors._connector import (
     SupportedChainsSpec,
 )
 from almanak.connectors._strategy_base.address_table import AbiFamily, AddressTableSpec
+from almanak.core.capability_obligations import ObligationId
 from almanak.core.chains.arbitrum import DESCRIPTOR as ARBITRUM
 from almanak.core.chains.avalanche import DESCRIPTOR as AVALANCHE
 from almanak.core.chains.base import DESCRIPTOR as BASE
@@ -19,6 +24,59 @@ from almanak.core.chains.ethereum import DESCRIPTOR as ETHEREUM
 from almanak.core.chains.optimism import DESCRIPTOR as OPTIMISM
 from almanak.core.chains.polygon import DESCRIPTOR as POLYGON
 from almanak.core.intent_types import IntentType
+
+_PROVIDER_REFS = {
+    ObligationId.ASSET_RESOLUTION: "almanak.connectors.uniswap_v4.compiler:UniswapV4Compiler",
+    ObligationId.VENUE_RESOLUTION: "almanak.connectors.uniswap_v4.compiler:UniswapV4Compiler",
+    ObligationId.AMOUNT_PROTECTION: "almanak.connectors.uniswap_v4.compiler:UniswapV4Compiler",
+    ObligationId.COMPILER: "almanak.connectors.uniswap_v4.compiler:UniswapV4Compiler",
+    ObligationId.RECEIPT_EVIDENCE: "almanak.connectors.uniswap_v4.receipt_parser:UniswapV4ReceiptParser",
+    ObligationId.MONEY_LEGS: "almanak.connectors.uniswap_v4.receipt_parser:UniswapV4ReceiptParser",
+    ObligationId.PERMISSION_PLAN: "almanak.connectors.uniswap_v4.permission_hints:PERMISSION_HINTS",
+}
+
+
+def _production_lifecycle_declarations():
+    cells: list[AmmCoreExecutionCell] = []
+    for chain in (ARBITRUM, BASE):
+        folder = chain.name
+        cells.extend(
+            (
+                AmmCoreExecutionCell(
+                    chain=chain,
+                    intent=IntentType.SWAP,
+                    real_fork_ref=f"tests/intents/{folder}/test_uniswap_v4_swap.py",
+                ),
+                AmmCoreExecutionCell(
+                    chain=chain,
+                    intent=IntentType.LP_OPEN,
+                    lane_gap_ref="VIB-4636",
+                ),
+                AmmCoreExecutionCell(
+                    chain=chain,
+                    intent=IntentType.LP_CLOSE,
+                    real_fork_ref=("tests/intents/arbitrum/test_uniswap_v4_lp_close.py" if chain is ARBITRUM else None),
+                    lane_gap_ref=None if chain is ARBITRUM else "VIB-4636",
+                    obligation_gap_refs=(((ObligationId.AMOUNT_PROTECTION, "VIB-6226"),) if chain is ARBITRUM else ()),
+                ),
+                AmmCoreExecutionCell(
+                    chain=chain,
+                    intent=IntentType.LP_COLLECT_FEES,
+                    real_fork_ref=(
+                        "tests/intents/arbitrum/test_uniswap_v4_collect_fees.py" if chain is ARBITRUM else None
+                    ),
+                    lane_gap_ref=None if chain is ARBITRUM else "VIB-6666",
+                    obligation_gap_refs=(((ObligationId.AMOUNT_PROTECTION, "VIB-6663"),) if chain is ARBITRUM else ()),
+                ),
+            )
+        )
+    return build_amm_core_execution_declarations(
+        protocol="uniswap_v4",
+        cells=tuple(cells),
+        provider_refs=_PROVIDER_REFS,
+        contract_version="uniswap_v4.core_execution.v1",
+    )
+
 
 CONNECTOR = Connector(
     name="uniswap_v4",
@@ -115,6 +173,7 @@ CONNECTOR = Connector(
     # 4 intents). ChainRegistry canonical names are used (``bsc``, not the
     # ``bnb`` alias).
     supported_chains=SupportedChainsSpec(chains=(ETHEREUM, ARBITRUM, BASE, OPTIMISM, POLYGON, AVALANCHE, BSC)),
+    lifecycle_declarations=_production_lifecycle_declarations(),
     # Matrix output covers deployed V4 chains for both swap and LP rows.
     strategy_matrix_entries=(
         StrategyMatrixEntry(

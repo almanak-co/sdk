@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from almanak.connectors._amm_lifecycle_declaration import (
+    AmmCoreExecutionCell,
+    build_amm_core_execution_declarations,
+)
 from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
     BacktestStrategyTypeDecl,
@@ -14,9 +18,85 @@ from almanak.connectors._connector import (
     SupportedChainsSpec,
 )
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
+from almanak.core.capability_obligations import ObligationId
 from almanak.core.chains.base import DESCRIPTOR as BASE
 from almanak.core.chains.optimism import DESCRIPTOR as OPTIMISM
 from almanak.core.intent_types import IntentType
+
+_PROVIDER_REFS = {
+    ObligationId.ASSET_RESOLUTION: "almanak.connectors.aerodrome.compiler:AerodromeCompiler",
+    ObligationId.VENUE_RESOLUTION: "almanak.connectors.aerodrome.compiler:AerodromeCompiler",
+    ObligationId.AMOUNT_PROTECTION: "almanak.connectors.aerodrome.adapter:AerodromeAdapter",
+    ObligationId.COMPILER: "almanak.connectors.aerodrome.compiler:AerodromeCompiler",
+    ObligationId.RECEIPT_EVIDENCE: "almanak.connectors.aerodrome.receipt_parser:AerodromeReceiptParser",
+    ObligationId.MONEY_LEGS: "almanak.connectors.aerodrome.receipt_parser:AerodromeReceiptParser",
+    ObligationId.PERMISSION_PLAN: "almanak.connectors.aerodrome.permission_hints:PERMISSION_HINTS",
+}
+
+_SLIPSTREAM_PROVIDER_REFS = {
+    **_PROVIDER_REFS,
+    ObligationId.RECEIPT_EVIDENCE: "almanak.connectors.aerodrome.receipt_parser:AerodromeSlipstreamReceiptParser",
+    ObligationId.PERMISSION_PLAN: "almanak.connectors.aerodrome.permission_hints:PERMISSION_HINTS_SLIPSTREAM",
+}
+
+
+def _production_lifecycle_declarations():
+    cells: list[AmmCoreExecutionCell] = []
+    for chain in (BASE, OPTIMISM):
+        folder = chain.name
+        cells.extend(
+            (
+                AmmCoreExecutionCell(
+                    chain=chain,
+                    intent=IntentType.SWAP,
+                    real_fork_ref=f"tests/intents/{folder}/test_aerodrome_swap.py",
+                    obligation_gap_refs=(((ObligationId.PERMISSION_PLAN, "VIB-6016"),) if chain is BASE else ()),
+                ),
+                AmmCoreExecutionCell(
+                    chain=chain,
+                    intent=IntentType.LP_OPEN,
+                    real_fork_ref=f"tests/intents/{folder}/test_aerodrome_lp.py",
+                    obligation_gap_refs=((ObligationId.AMOUNT_PROTECTION, "VIB-6223"),),
+                ),
+                AmmCoreExecutionCell(
+                    chain=chain,
+                    intent=IntentType.LP_CLOSE,
+                    real_fork_ref=f"tests/intents/{folder}/test_aerodrome_lp.py",
+                    obligation_gap_refs=((ObligationId.AMOUNT_PROTECTION, "VIB-6223"),),
+                ),
+            )
+        )
+    classic = build_amm_core_execution_declarations(
+        protocol="aerodrome",
+        cells=tuple(cells),
+        provider_refs=_PROVIDER_REFS,
+        contract_version="aerodrome.core_execution.v1",
+    )
+    slipstream = build_amm_core_execution_declarations(
+        protocol="aerodrome_slipstream",
+        cells=(
+            AmmCoreExecutionCell(
+                chain=BASE,
+                intent=IntentType.SWAP,
+                real_fork_ref="tests/intents/base/test_aerodrome_swap.py",
+            ),
+            AmmCoreExecutionCell(
+                chain=BASE,
+                intent=IntentType.LP_OPEN,
+                real_fork_ref="tests/intents/base/test_aerodrome_slipstream_lp.py",
+            ),
+            AmmCoreExecutionCell(
+                chain=BASE,
+                intent=IntentType.LP_CLOSE,
+                real_fork_ref="tests/intents/base/test_aerodrome_slipstream_lp.py",
+                obligation_gap_refs=((ObligationId.AMOUNT_PROTECTION, "VIB-6235"),),
+            ),
+        ),
+        provider_refs=_SLIPSTREAM_PROVIDER_REFS,
+        contract_version="aerodrome_slipstream.core_execution.v1",
+    )
+    return classic + slipstream
+
 
 CONNECTOR = Connector(
     name="aerodrome",
@@ -155,6 +235,7 @@ CONNECTOR = Connector(
         # Slipstream, which has its own row.
         protocol_overrides={"aerodrome_slipstream": (BASE,)},
     ),
+    lifecycle_declarations=_production_lifecycle_declarations(),
 )
 
 __all__ = ["CONNECTOR"]

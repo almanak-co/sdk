@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from almanak.connectors._amm_lifecycle_declaration import (
+    AmmCoreExecutionCell,
+    build_amm_core_execution_declarations,
+)
 from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
     BacktestStrategyTypeDecl,
@@ -16,12 +20,69 @@ from almanak.connectors._connector import (
 )
 from almanak.connectors._strategy_base.position_read_base import CURVE_LP
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
+from almanak.core.capability_obligations import ObligationId
 from almanak.core.chains.arbitrum import DESCRIPTOR as ARBITRUM
 from almanak.core.chains.base import DESCRIPTOR as BASE
 from almanak.core.chains.ethereum import DESCRIPTOR as ETHEREUM
 from almanak.core.chains.optimism import DESCRIPTOR as OPTIMISM
 from almanak.core.chains.polygon import DESCRIPTOR as POLYGON
 from almanak.core.intent_types import IntentType
+
+_PROVIDER_REFS = {
+    ObligationId.ASSET_RESOLUTION: "almanak.connectors.curve.compiler:CurveCompiler",
+    ObligationId.VENUE_RESOLUTION: "almanak.connectors.curve.compiler:CurveCompiler",
+    ObligationId.AMOUNT_PROTECTION: "almanak.connectors.curve.compiler:CurveCompiler",
+    ObligationId.COMPILER: "almanak.connectors.curve.compiler:CurveCompiler",
+    ObligationId.RECEIPT_EVIDENCE: "almanak.connectors.curve.receipt_parser:CurveReceiptParser",
+    ObligationId.MONEY_LEGS: "almanak.connectors.curve.receipt_parser:CurveReceiptParser.extract_primitive_money_legs",
+    ObligationId.PERMISSION_PLAN: "almanak.connectors.curve.permission_hints:PERMISSION_HINTS",
+}
+
+
+def _production_lifecycle_declarations():
+    evidence = (
+        (ARBITRUM, "tests/intents/arbitrum/test_curve_swap.py", "tests/intents/arbitrum/test_curve_lp.py"),
+        (BASE, "tests/intents/base/test_curve_swap.py", "tests/intents/base/test_curve_lp_base.py"),
+        (
+            ETHEREUM,
+            "tests/intents/ethereum/test_curve_cryptoswap_swap.py",
+            "tests/intents/ethereum/test_curve_3pool_lp.py",
+        ),
+        (
+            OPTIMISM,
+            "tests/intents/optimism/test_curve_crvusd_usdc_swap.py",
+            "tests/intents/optimism/test_curve_lp.py",
+        ),
+        (POLYGON, "tests/intents/polygon/test_curve_swap.py", "tests/intents/polygon/test_curve_lp.py"),
+    )
+    cells: list[AmmCoreExecutionCell] = []
+    for chain, swap_ref, lp_ref in evidence:
+        cells.extend(
+            (
+                AmmCoreExecutionCell(
+                    chain=chain,
+                    intent=IntentType.SWAP,
+                    real_fork_ref=None if chain is OPTIMISM else swap_ref,
+                    lane_gap_ref="VIB-6668" if chain is OPTIMISM else None,
+                ),
+                AmmCoreExecutionCell(
+                    chain=chain,
+                    intent=IntentType.LP_OPEN,
+                    real_fork_ref=lp_ref,
+                    money_leg_evidence_ref=(
+                        "tests/unit/execution/test_result_enricher_curve_lp_open_legs.py" if chain is ETHEREUM else None
+                    ),
+                ),
+                AmmCoreExecutionCell(chain=chain, intent=IntentType.LP_CLOSE, real_fork_ref=lp_ref),
+            )
+        )
+    return build_amm_core_execution_declarations(
+        protocol="curve",
+        cells=tuple(cells),
+        provider_refs=_PROVIDER_REFS,
+        contract_version="curve.core_execution.v1",
+    )
+
 
 CONNECTOR = Connector(
     name="curve",
@@ -119,6 +180,7 @@ CONNECTOR = Connector(
     position_read=PositionReadDecl(kind=CURVE_LP),
     strategy_intents=(IntentType.SWAP, IntentType.LP_OPEN, IntentType.LP_CLOSE),
     supported_chains=SupportedChainsSpec(chains=(ETHEREUM, ARBITRUM, OPTIMISM, POLYGON, BASE)),
+    lifecycle_declarations=_production_lifecycle_declarations(),
 )
 
 __all__ = ["CONNECTOR"]

@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from almanak.connectors._amm_lifecycle_declaration import (
+    AmmCoreExecutionCell,
+    build_amm_core_execution_declarations,
+)
 from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
     BacktestStrategyTypeDecl,
@@ -13,6 +17,7 @@ from almanak.connectors._connector import (
 )
 from almanak.connectors._strategy_base.address_table import AbiFamily, AddressTableSpec
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
+from almanak.core.capability_obligations import ObligationId
 from almanak.core.chains.arbitrum import DESCRIPTOR as ARBITRUM
 from almanak.core.chains.avalanche import DESCRIPTOR as AVALANCHE
 from almanak.core.chains.base import DESCRIPTOR as BASE
@@ -26,6 +31,67 @@ from almanak.core.chains.robinhood import DESCRIPTOR as ROBINHOOD
 from almanak.core.chains.xlayer import DESCRIPTOR as XLAYER
 from almanak.core.chains.zerog import DESCRIPTOR as ZEROG
 from almanak.core.intent_types import IntentType
+
+_PROVIDER_REFS = {
+    ObligationId.ASSET_RESOLUTION: "almanak.connectors.uniswap_v3.compiler:UniswapV3Compiler",
+    ObligationId.VENUE_RESOLUTION: "almanak.connectors.uniswap_v3.compiler:UniswapV3Compiler",
+    ObligationId.AMOUNT_PROTECTION: "almanak.connectors.uniswap_v3.compiler:UniswapV3Compiler",
+    ObligationId.COMPILER: "almanak.connectors.uniswap_v3.compiler:UniswapV3Compiler",
+    ObligationId.RECEIPT_EVIDENCE: "almanak.connectors.uniswap_v3.receipt_parser:UniswapV3ReceiptParser",
+    ObligationId.MONEY_LEGS: "almanak.connectors.uniswap_v3.receipt_parser:UniswapV3ReceiptParser",
+    ObligationId.PERMISSION_PLAN: "almanak.connectors.uniswap_v3.permission_hints:PERMISSION_HINTS",
+}
+
+
+def _production_lifecycle_declarations():
+    cells: list[AmmCoreExecutionCell] = []
+    for chain, folder in (
+        (ARBITRUM, "arbitrum"),
+        (AVALANCHE, "avalanche"),
+        (BASE, "base"),
+        (BSC, "bnb"),
+        (ETHEREUM, "ethereum"),
+        (OPTIMISM, "optimism"),
+        (POLYGON, "polygon"),
+    ):
+        swap_ref = "tests/intents/base/test_uniswap_v3_swap_pinning.py" if chain is BASE else None
+        collect_ref = "tests/intents/ethereum/test_uniswap_v3_lp.py" if chain is ETHEREUM else None
+        cells.extend(
+            (
+                AmmCoreExecutionCell(
+                    chain=chain,
+                    intent=IntentType.SWAP,
+                    real_fork_ref=swap_ref,
+                    lane_gap_ref=None if swap_ref else "VIB-6667",
+                    obligation_gap_refs=(((ObligationId.AMOUNT_PROTECTION, "ALM-3041"),) if swap_ref else ()),
+                ),
+                AmmCoreExecutionCell(
+                    chain=chain,
+                    intent=IntentType.LP_OPEN,
+                    real_fork_ref=f"tests/intents/{folder}/test_uniswap_v3_lp.py",
+                ),
+                AmmCoreExecutionCell(
+                    chain=chain,
+                    intent=IntentType.LP_CLOSE,
+                    real_fork_ref=f"tests/intents/{folder}/test_uniswap_v3_lp.py",
+                    obligation_gap_refs=((ObligationId.AMOUNT_PROTECTION, "VIB-6220"),),
+                ),
+                AmmCoreExecutionCell(
+                    chain=chain,
+                    intent=IntentType.LP_COLLECT_FEES,
+                    real_fork_ref=collect_ref,
+                    lane_gap_ref=None if collect_ref else "VIB-5968",
+                    obligation_gap_refs=(((ObligationId.AMOUNT_PROTECTION, "VIB-6663"),) if collect_ref else ()),
+                ),
+            )
+        )
+    return build_amm_core_execution_declarations(
+        protocol="uniswap_v3",
+        cells=tuple(cells),
+        provider_refs=_PROVIDER_REFS,
+        contract_version="uniswap_v3.core_execution.v1",
+    )
+
 
 _V3_ABI_FAMILIES = (AbiFamily.V3_FACTORY, AbiFamily.V3_NPM)
 
@@ -227,6 +293,7 @@ CONNECTOR = Connector(
         # (LP_OPEN / LP_CLOSE). Intersecting here would delete proven coverage.
         protocol_overrides={"agni_finance": (MANTLE,)},
     ),
+    lifecycle_declarations=_production_lifecycle_declarations(),
 )
 
 __all__ = ["CONNECTOR"]
