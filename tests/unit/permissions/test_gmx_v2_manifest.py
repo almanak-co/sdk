@@ -25,7 +25,6 @@ from almanak.connectors.gmx_v2.adapter import GMX_CANCEL_ORDER_SELECTOR, GMX_V2_
 from almanak.framework.permissions.discovery import discover_permissions
 from almanak.framework.permissions.generator import generate_manifest
 
-_EXCHANGE_ROUTER = GMX_V2_ADDRESSES["arbitrum"]["exchange_router"].lower()
 # Derived from the signature here — NOT copied from the connector — so the test
 # fails if the connector ever authorises a selector that isn't the real
 # cancelOrder(bytes32) 4-byte selector. Cross-checked against the connector's own
@@ -43,12 +42,24 @@ def _exchange_router_selectors(intent_types: list[str], chain: str = "arbitrum")
     return {
         sel.selector.lower()
         for perm in manifest.permissions
-        if perm.target.lower() == _EXCHANGE_ROUTER
+        if perm.target.lower() == GMX_V2_ADDRESSES[chain]["exchange_router"].lower()
         for sel in perm.function_selectors
     }
 
 
-class TestGmxV2CancelManifest:
+class TestGmxV2Manifest:
+    @pytest.mark.parametrize("chain", ["arbitrum", "avalanche"])
+    @pytest.mark.parametrize("intent_type", ["PERP_OPEN", "PERP_CLOSE"])
+    def test_open_and_close_manifest_authorises_exchange_router_multicall(
+        self,
+        chain: str,
+        intent_type: str,
+    ) -> None:
+        """Each production chain and position verb authorises the compiler's
+        real ExchangeRouter.multicall surface, independently of cancellation."""
+        multicall = "0x" + function_signature_to_4byte_selector("multicall(bytes[])").hex()
+        assert multicall in _exchange_router_selectors([intent_type], chain)
+
     def test_selector_constant_matches_real_signature(self) -> None:
         """The connector's GMX_CANCEL_ORDER_SELECTOR must equal the real
         keccak('cancelOrder(bytes32)')[:4] — pins the calldata source constant
@@ -105,7 +116,8 @@ class TestGmxV2CancelManifest:
             supported_protocols=["gmx_v2"],
             intent_types=["PERP_CANCEL_ORDER"],
         )
-        er_perms = [p for p in manifest.permissions if p.target.lower() == _EXCHANGE_ROUTER]
+        exchange_router = GMX_V2_ADDRESSES["arbitrum"]["exchange_router"].lower()
+        er_perms = [p for p in manifest.permissions if p.target.lower() == exchange_router]
         assert er_perms, "ExchangeRouter permission missing from cancel manifest"
         assert all(not p.send_allowed for p in er_perms), (
             "ExchangeRouter cancel must not allow native-value send (value == 0)"
@@ -137,8 +149,9 @@ class TestNonGmxPerpCancelHarmless:
         # No connector emits a synthetic cancel intent except gmx_v2, so the
         # (protocol, PERP_CANCEL_ORDER) combination is skipped before compilation:
         # no cancel selector authorised anywhere, and no compile warning/error.
-        cancel_selectors = {
-            sel.selector.lower() for perm in permissions for sel in perm.function_selectors
-        } & {_CANCEL_ORDER_SEL, GMX_CANCEL_ORDER_SELECTOR.lower()}
+        cancel_selectors = {sel.selector.lower() for perm in permissions for sel in perm.function_selectors} & {
+            _CANCEL_ORDER_SEL,
+            GMX_CANCEL_ORDER_SELECTOR.lower(),
+        }
         assert not cancel_selectors, f"{protocol} unexpectedly authorised a cancelOrder selector"
         assert warnings == [], f"{protocol} PERP_CANCEL_ORDER discovery produced warnings: {warnings}"

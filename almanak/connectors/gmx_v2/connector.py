@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import date
+
 from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
     BacktestStrategyTypeDecl,
@@ -9,16 +11,147 @@ from almanak.connectors._connector import (
     FeeModelDecl,
     FundingHistoryDecl,
     ImportRef,
+    LifecycleObligationDecl,
     PerpPriceHistoryDecl,
     PerpsReadDecl,
     SupportedChainsSpec,
 )
+from almanak.connectors._lifecycle_declaration_bundle import LifecycleClaimCell, LifecycleDeclarationBundle
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
 from almanak.connectors.gmx_v2.backtest_risk import BACKTEST_RISK as _BACKTEST_RISK
+from almanak.core.capability_obligations import (
+    EvidenceKind,
+    EvidenceRef,
+    ObligationDeclaration,
+    ObligationDisposition,
+    ObligationId,
+    Satisfied,
+    Unsupported,
+)
 from almanak.core.chains.arbitrum import DESCRIPTOR as ARBITRUM
 from almanak.core.chains.avalanche import DESCRIPTOR as AVALANCHE
 from almanak.core.intent_types import IntentType
+
+_PROVIDER_REFS = {
+    ObligationId.ASSET_RESOLUTION: "almanak.connectors.gmx_v2.compiler:GMXV2Compiler",
+    ObligationId.VENUE_RESOLUTION: "almanak.connectors.gmx_v2.compiler:GMXV2Compiler",
+    ObligationId.AMOUNT_PROTECTION: "almanak.connectors.gmx_v2.acceptable_price:derive_acceptable_price_30dec",
+    ObligationId.COMPILER: "almanak.connectors.gmx_v2.compiler:GMXV2Compiler",
+    ObligationId.RECEIPT_EVIDENCE: "almanak.connectors.gmx_v2.receipt_parser:GMXv2ReceiptParser",
+    ObligationId.MONEY_LEGS: "almanak.connectors.gmx_v2.receipt_parser:PerpFillData",
+    ObligationId.PERMISSION_PLAN: "almanak.connectors.gmx_v2.permission_hints:PERMISSION_HINTS",
+}
+
+
+def _intent_evidence(chain: str, intent: IntentType) -> tuple[EvidenceRef, ...]:
+    suffix = {
+        IntentType.PERP_OPEN: "open",
+        IntentType.PERP_CLOSE: "close",
+        IntentType.PERP_CANCEL_ORDER: "cancel",
+    }[intent]
+    refs = [
+        EvidenceRef(
+            EvidenceKind.REAL_FORK,
+            f"tests/intents/{chain}/test_gmx_v2_perp_{suffix}.py",
+        )
+    ]
+    if intent is IntentType.PERP_OPEN:
+        refs.append(
+            EvidenceRef(
+                EvidenceKind.REAL_FORK,
+                f"tests/intents/{chain}/test_gmx_v2_perp_close.py",
+            )
+        )
+    return tuple(refs)
+
+
+def _core_dispositions(*, chain: str, intent: IntentType) -> tuple[ObligationDeclaration, ...]:
+    exact_evidence = _intent_evidence(chain, intent)
+    declarations = []
+    for obligation in (
+        ObligationId.ASSET_RESOLUTION,
+        ObligationId.VENUE_RESOLUTION,
+        ObligationId.AMOUNT_PROTECTION,
+        ObligationId.COMPILER,
+        ObligationId.RECEIPT_EVIDENCE,
+        ObligationId.MONEY_LEGS,
+        ObligationId.PERMISSION_PLAN,
+    ):
+        disposition: ObligationDisposition
+        if obligation is ObligationId.MONEY_LEGS:
+            disposition = Unsupported(
+                reason="GMX terminal settlement lacks canonical typed money-leg evidence.",
+                tracking_ref="VIB-6664",
+                owner="SDK Capability Audit",
+                review_by=date(2026, 10, 15),
+            )
+        elif obligation is ObligationId.ASSET_RESOLUTION and intent is IntentType.PERP_CANCEL_ORDER:
+            disposition = Unsupported(
+                reason="Order cancellation consumes only an order key and performs no asset resolution.",
+                tracking_ref="VIB-6663",
+                owner="SDK Capability Audit",
+                review_by=date(2026, 10, 15),
+            )
+        elif obligation is ObligationId.AMOUNT_PROTECTION and intent is IntentType.PERP_CANCEL_ORDER:
+            disposition = Unsupported(
+                reason="Profile v1 has no typed amount-protection applicability rule for order cancellation.",
+                tracking_ref="VIB-6663",
+                owner="SDK Capability Audit",
+                review_by=date(2026, 10, 15),
+            )
+        elif obligation is ObligationId.RECEIPT_EVIDENCE and intent is IntentType.PERP_OPEN:
+            disposition = Unsupported(
+                reason="Submission parsing is proven, but terminal keeper receipt correlation is not exact.",
+                tracking_ref="VIB-6152",
+                owner="SDK Capability Audit",
+                review_by=date(2026, 10, 15),
+            )
+        else:
+            evidence = exact_evidence
+            if obligation is ObligationId.AMOUNT_PROTECTION:
+                evidence += (
+                    EvidenceRef(
+                        EvidenceKind.CONTRACT_TEST,
+                        "tests/unit/connectors/gmx_v2/test_gmx_v2_acceptable_price_vib6219.py",
+                    ),
+                )
+            elif obligation is ObligationId.PERMISSION_PLAN:
+                evidence += (
+                    EvidenceRef(
+                        EvidenceKind.CONTRACT_TEST,
+                        "tests/unit/permissions/test_gmx_v2_manifest.py",
+                    ),
+                )
+            disposition = Satisfied(
+                provider_ref=_PROVIDER_REFS[obligation],
+                contract_version="gmx_v2.async_core_execution.v1",
+                test_evidence=evidence,
+            )
+        declarations.append(ObligationDeclaration(obligation, disposition))
+    return tuple(declarations)
+
+
+def _production_lifecycle_declarations():
+    declarations: list[LifecycleObligationDecl] = []
+    for chain in (ARBITRUM, AVALANCHE):
+        for intent in (IntentType.PERP_OPEN, IntentType.PERP_CLOSE, IntentType.PERP_CANCEL_ORDER):
+            suffix = intent.value.lower()
+            bundle_id = f"gmx_v2.{chain.name}.{suffix}"
+            declarations.extend(
+                LifecycleDeclarationBundle(
+                    bundle_id=bundle_id,
+                    cells=(LifecycleClaimCell(protocol="gmx_v2", chain=chain, intent=intent),),
+                    declarations=_core_dispositions(chain=chain.name, intent=intent),
+                    source_ref=f"Connector.lifecycle_declarations[{bundle_id}]",
+                    source_detail=(
+                        "Exact submission identity plus terminal settlement/refund evidence; "
+                        "submission alone is never treated as fulfillment."
+                    ),
+                ).expand()
+            )
+    return tuple(declarations)
+
 
 CONNECTOR = Connector(
     name="gmx_v2",
@@ -123,6 +256,7 @@ CONNECTOR = Connector(
     # cancellation is a position close.
     strategy_intents=(IntentType.PERP_OPEN, IntentType.PERP_CLOSE, IntentType.PERP_CANCEL_ORDER),
     supported_chains=SupportedChainsSpec(chains=(ARBITRUM, AVALANCHE)),
+    lifecycle_declarations=_production_lifecycle_declarations(),
 )
 
 __all__ = ["CONNECTOR"]
