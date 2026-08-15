@@ -46,6 +46,7 @@ REQUIRED_GATES = [
     ("check-import-provenance", "scripts/ci/check_import_provenance.py"),
     ("check-chain-truth", "scripts/ci/check_chain_truth_agreement.py"),
     ("check-lifecycle-capability-ratchet", "scripts/ci/check_lifecycle_capability_ratchet.py"),
+    ("check-sdk-scoped-lifecycle-claims", "scripts/ci/generate_sdk_scoped_lifecycle_claims.py"),
     # ALM-3183 added ``check-placeholder-prices``. Same reasoning: the whole
     # point of that gate is to catch the SECOND copy of a hardcoded price table,
     # which by definition nobody is looking for. A gate that only exists as a
