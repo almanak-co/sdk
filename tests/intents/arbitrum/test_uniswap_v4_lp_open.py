@@ -20,7 +20,11 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.connectors.uniswap_v4.receipt_parser import UniswapV4ReceiptParser
+from almanak.connectors.uniswap_v4.receipt_parser import (
+    TRANSFER_EVENT_TOPIC,
+    ParseResult,
+    UniswapV4ReceiptParser,
+)
 from almanak.framework.execution.orchestrator import (
     ExecutionContext,
     ExecutionOrchestrator,
@@ -106,7 +110,7 @@ def _assert_identity(row: dict, *, event_type: str, wallet: str) -> None:
 
 
 def _assert_v4_open_position_hash(payload: dict) -> None:
-    """V4 LP_OPEN should populate the lot-matching anchor (VIB-4473).
+    """V4 LP_OPEN must populate the lot-matching anchor (VIB-4473).
 
     Unlike V3 (where ``position_hash`` is always ``None``), the Uniswap V4
     receipt parser computes ``keccak(positionManager, tickLower, tickUpper,
@@ -114,31 +118,52 @@ def _assert_v4_open_position_hash(payload: dict) -> None:
     the LP_OPEN payload — so the persisted ``accounting_events`` row MUST
     carry a real 0x-prefixed 32-byte hash, NOT ``None``.
 
-    VIB-4636 (genuine production gap, surfaced by this Layer-5 rollout):
-    the result-enrichment path invokes the V4 parser on per-tx receipts
-    that don't carry the ``ModifyLiquidity`` mint (``total_logs=1``);
-    ``_AGGREGATE_FIELDS`` aggregates ``lp_close_data`` but not
-    ``lp_open_data``, so ``position_hash`` never reaches the payload. The
-    on-chain LP_OPEN is correct (Layers 1–4 + amounts/pool/ticks/confidence
-    all hard-assert green); only the books anchor is dropped. Encode the
-    TRUE current behavior via a runtime xfail that fires ONLY on the exact
-    ``position_hash is None`` signature and auto-reactivates (the hard
-    asserts below run) the moment VIB-4636 lands. Pattern mirrors the
-    merged VIB-4633/4634/4635 Compound/Morpho gap encodings.
+    VIB-4636 shipped this aggregation fix in PR #2660. Keep the assertion
+    hard so a recurrence cannot silently demote this production evidence
+    lane back to xfail.
     """
     ph = payload["position_hash"]
-    if ph is None:
-        pytest.xfail(
-            "VIB-4636: V4 LP_OPEN position_hash anchor (VIB-4473) is not "
-            "persisted onto the accounting_events payload — enrichment path "
-            "drops the mint-sourced lp_open_data. On-chain LP_OPEN verified "
-            "correct above (amounts/pool/ticks/confidence hard-asserted)."
-        )
-    # Reactivates automatically once VIB-4636 wires position_hash through.
     assert isinstance(ph, str) and ph.startswith("0x"), (
         f"V4 position_hash must be 0x-prefixed hex, got {ph!r}"
     )
     assert len(ph) == 66, f"V4 position_hash must be a 32-byte keccak hash, got {ph!r}"
+    assert all(char in "0123456789abcdefABCDEF" for char in ph[2:]), (
+        f"V4 position_hash must contain exactly 32 hex bytes, got {ph!r}"
+    )
+
+
+def _assert_parsed_position_manager_mint(
+    parse_result: ParseResult,
+    receipt: dict,
+    position_manager: str,
+    position_id: int,
+) -> None:
+    zero = "0x0000000000000000000000000000000000000000"
+    manager = position_manager.lower()
+    raw_manager_mints: list[tuple[int, str]] = []
+    for log in receipt.get("logs", []):
+        topics = log.get("topics", [])
+        if len(topics) < 4 or str(topics[0]).lower() != TRANSFER_EVENT_TOPIC.lower():
+            continue
+        if str(log.get("address", "")).lower() != manager:
+            continue
+        if int(str(topics[1]), 16) != 0:
+            continue
+        raw_manager_mints.append(
+            (int(str(topics[3]), 16), "0x" + str(topics[2])[-40:].lower())
+        )
+
+    assert len(raw_manager_mints) == 1 and raw_manager_mints[0][0] == position_id, (
+        "receipt must contain exactly one PositionManager ERC-721 mint matching the extracted position_id"
+    )
+    parsed_manager_mint_recipients = [
+        transfer.to_address.lower()
+        for transfer in parse_result.transfer_events
+        if transfer.token.lower() == manager and transfer.from_address.lower() == zero
+    ]
+    assert parsed_manager_mint_recipients == [raw_manager_mints[0][1]], (
+        "parse_receipt() must surface exactly the PositionManager mint transfer identified in the raw receipt"
+    )
 
 
 # =============================================================================
@@ -251,6 +276,8 @@ class TestUniswapV4LPOpenIntent:
         parser = UniswapV4ReceiptParser(chain=CHAIN_NAME)
         position_id = None
         liquidity = None
+        saw_modify_liquidity_event = False
+        parsed_position_manager_mint = False
 
         for i, tx_result in enumerate(execution_result.transaction_results):
             print(f"\nTransaction {i+1}:")
@@ -260,10 +287,22 @@ class TestUniswapV4LPOpenIntent:
             if tx_result.receipt:
                 receipt_dict = tx_result.receipt.to_dict()
 
+                # Exercise the production parser entry point, not only its
+                # extraction helpers, so receipt evidence cannot pass vacuously.
+                parse_result = parser.parse_receipt(receipt_dict)
+                if parse_result.modify_liquidity_events:
+                    saw_modify_liquidity_event = True
                 # Extract position_id from ERC-721 Transfer (mint) event
                 extracted_id = parser.extract_position_id(receipt_dict)
                 if extracted_id is not None:
                     position_id = extracted_id
+                    _assert_parsed_position_manager_mint(
+                        parse_result,
+                        receipt_dict,
+                        parser.position_manager,
+                        extracted_id,
+                    )
+                    parsed_position_manager_mint = True
                     print(f"  Position ID (NFT tokenId): {position_id}")
 
                 # Extract liquidity from ModifyLiquidity event
@@ -276,6 +315,10 @@ class TestUniswapV4LPOpenIntent:
         assert position_id > 0, f"Position ID must be positive, got {position_id}"
         assert liquidity is not None, "Must extract liquidity from ModifyLiquidity event"
         assert liquidity > 0, f"Liquidity must be positive, got {liquidity}"
+        assert saw_modify_liquidity_event, (
+            "parse_receipt() must surface the ModifyLiquidity event for an LP_OPEN"
+        )
+        assert parsed_position_manager_mint
 
         # Layer 4: Balance Deltas
         weth_after = get_token_balance(web3, weth_addr, funded_wallet)
@@ -318,10 +361,8 @@ class TestUniswapV4LPOpenIntent:
         assert payload["position_key"] == accounting_row["position_key"]
         assert payload["pool_address"].startswith("0x"), "LP_OPEN must persist canonical pool address"
         # V4 difference vs V3: position_hash IS populated (VIB-4473 anchor).
-        # Gap-aware FIRST: on the VIB-4636 enrich-path drop the persisted
-        # lp_open_data (amounts + anchor) is missing/garbage, so xfail here
-        # before the exact-amount asserts rather than hard-failing on
-        # corrupted books (CodeRabbit PR #2369 / VIB-4636).
+        # Assert it before the exact amounts so a broken enrichment path fails
+        # at the missing lot identity rather than cascading into noisy values.
         _assert_v4_open_position_hash(payload)
         # Tie the persisted amounts to the exact Layer-4 spend — `>= 0`
         # would pass on a zero or mis-scaled row (CodeRabbit PR #2369).

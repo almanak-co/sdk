@@ -7,11 +7,26 @@ from pathlib import Path
 import pytest
 
 from almanak.connectors._amm_lifecycle_declaration import AmmCoreExecutionCell
+from almanak.connectors.uniswap_v4.receipt_parser import (
+    TRANSFER_EVENT_TOPIC,
+    ParseResult,
+    TransferEventData,
+)
 from almanak.core.capability_obligations import ObligationId, Satisfied, Unsupported
 from almanak.core.chains.base import DESCRIPTOR as BASE
 from almanak.core.intent_types import IntentType
 from almanak.framework.capabilities.obligation_profiles import ReportedObligationState
 from scripts.ci.production_claim_universe import build_production_core_execution_matrix
+from tests.intents.arbitrum.test_uniswap_v4_lp_open import _assert_parsed_position_manager_mint
+from tests.intents.arbitrum.test_uniswap_v4_lp_open import (
+    _assert_v4_open_position_hash as _assert_arbitrum_v4_open_position_hash,
+)
+from tests.intents.base.test_uniswap_v4_lp_close import (
+    _assert_v4_open_position_hash as _assert_base_v4_close_basis_position_hash,
+)
+from tests.intents.base.test_uniswap_v4_lp_open import (
+    _assert_v4_open_position_hash as _assert_base_v4_open_position_hash,
+)
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 _AMM_PROTOCOLS = {
@@ -23,6 +38,84 @@ _AMM_PROTOCOLS = {
     "uniswap_v3",
     "uniswap_v4",
 }
+
+
+@pytest.mark.parametrize(
+    "assert_position_hash",
+    (
+        _assert_arbitrum_v4_open_position_hash,
+        _assert_base_v4_open_position_hash,
+        _assert_base_v4_close_basis_position_hash,
+    ),
+)
+def test_revalidated_v4_position_hash_rejects_non_hex_bytes(assert_position_hash) -> None:
+    with pytest.raises(AssertionError, match="32 hex bytes"):
+        assert_position_hash({"position_hash": "0x" + "z" * 64})
+
+
+def test_v4_parser_mint_filter_rejects_unrelated_transfer_events() -> None:
+    zero = "0x0000000000000000000000000000000000000000"
+    position_manager = "0x1111111111111111111111111111111111111111"
+    parsed = ParseResult(
+        transfer_events=[
+            TransferEventData(
+                token="0x2222222222222222222222222222222222222222",
+                from_address=zero,
+                to_address="0x3333333333333333333333333333333333333333",
+                amount=7,
+            ),
+            TransferEventData(
+                token=position_manager,
+                from_address="0x4444444444444444444444444444444444444444",
+                to_address="0x3333333333333333333333333333333333333333",
+                amount=8,
+            ),
+        ]
+    )
+    receipt = {
+        "logs": [
+            {
+                "address": position_manager,
+                "topics": [
+                    TRANSFER_EVENT_TOPIC,
+                    "0x" + "0" * 64,
+                    "0x" + "0" * 24 + "3" * 40,
+                    "0x" + "0" * 63 + "9",
+                ],
+                "data": "0x",
+            }
+        ]
+    }
+    with pytest.raises(AssertionError, match="surface exactly the PositionManager"):
+        _assert_parsed_position_manager_mint(parsed, receipt, position_manager, 9)
+
+    parsed.transfer_events.append(
+        TransferEventData(
+            token=position_manager,
+            from_address=zero,
+            to_address="0x3333333333333333333333333333333333333333",
+            amount=0,
+        )
+    )
+    _assert_parsed_position_manager_mint(parsed, receipt, position_manager, 9)
+
+    with pytest.raises(AssertionError, match="matching the extracted position_id"):
+        _assert_parsed_position_manager_mint(parsed, receipt, position_manager, 10)
+
+    receipt["logs"].append(
+        {
+            "address": position_manager,
+            "topics": [
+                TRANSFER_EVENT_TOPIC,
+                "0x" + "0" * 64,
+                "0x" + "0" * 24 + "3" * 40,
+                "0x" + "0" * 63 + "8",
+            ],
+            "data": "0x",
+        }
+    )
+    with pytest.raises(AssertionError, match="exactly one PositionManager"):
+        _assert_parsed_position_manager_mint(parsed, receipt, position_manager, 9)
 
 
 def _amm_cells():
@@ -44,8 +137,8 @@ def test_production_amm_projection_is_exact_and_has_zero_undeclared() -> None:
     assert len(cells) == 100
     assert sum(len(cell.obligations) for cell in cells) == 700
     assert Counter(row.state for cell in cells for row in cell.obligations) == {
-        ReportedObligationState.SATISFIED: 392,
-        ReportedObligationState.UNSUPPORTED: 308,
+        ReportedObligationState.SATISFIED: 407,
+        ReportedObligationState.UNSUPPORTED: 293,
     }
     assert not [row for cell in cells for row in cell.obligations if row.state is ReportedObligationState.UNDECLARED]
     assert [cell.key.sort_key() for cell in cells if cell.claim_satisfied] == [
@@ -65,16 +158,16 @@ def test_amm_unsupported_rows_preserve_exact_owned_gap_taxonomy() -> None:
         "VIB-5968": 112,
         "VIB-5974": 14,
         "VIB-6016": 1,
-        "VIB-4636": 21,
         "VIB-6220": 17,
         "VIB-6223": 4,
-        "VIB-6226": 1,
+        "VIB-6226": 2,
         "VIB-6235": 1,
-        "VIB-6662": 70,
+        "VIB-6662": 73,
         "VIB-6663": 2,
         "VIB-6666": 7,
         "VIB-6667": 42,
         "VIB-6668": 7,
+        "VIB-6669": 2,
     }
     for disposition in unsupported:
         assert type(disposition) is Unsupported
@@ -93,8 +186,42 @@ def test_all_missing_positive_lanes_fail_the_entire_core_claim_closed() -> None:
         "pancakeswap_v3": 6,
         "sushiswap_v3": 6,
         "uniswap_v3": 12,
-        "uniswap_v4": 4,
+        "uniswap_v4": 1,
     }
+
+
+def test_revalidated_uniswap_v4_lp_lanes_keep_only_exact_obligation_gaps() -> None:
+    expected_gaps = {
+        ("arbitrum", "LP_OPEN"): {
+            ObligationId.AMOUNT_PROTECTION: "VIB-6669",
+            ObligationId.MONEY_LEGS: "VIB-6662",
+        },
+        ("base", "LP_OPEN"): {
+            ObligationId.AMOUNT_PROTECTION: "VIB-6669",
+            ObligationId.MONEY_LEGS: "VIB-6662",
+        },
+        ("base", "LP_CLOSE"): {
+            ObligationId.AMOUNT_PROTECTION: "VIB-6226",
+            ObligationId.MONEY_LEGS: "VIB-6662",
+        },
+    }
+    cells = {
+        (cell.key.chain, cell.key.intent.value): cell
+        for cell in _amm_cells()
+        if cell.key.protocol == "uniswap_v4" and (cell.key.chain, cell.key.intent.value) in expected_gaps
+    }
+    assert set(cells) == set(expected_gaps)
+    for key, cell in cells.items():
+        unsupported = {
+            row.audited.obligation: row.audited.disposition.tracking_ref
+            for row in cell.obligations
+            if type(row.audited.disposition) is Unsupported
+        }
+        assert unsupported == expected_gaps[key]
+        assert Counter(row.state for row in cell.obligations) == {
+            ReportedObligationState.SATISFIED: 5,
+            ReportedObligationState.UNSUPPORTED: 2,
+        }
 
 
 def test_alm_3041_owns_only_the_nine_exact_v3_swap_amount_rows() -> None:

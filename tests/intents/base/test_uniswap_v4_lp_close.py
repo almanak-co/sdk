@@ -149,25 +149,18 @@ def _assert_v4_open_position_hash(payload: dict) -> None:
     This close path reuses the setup ``LP_OPEN`` accounting row as the
     lot-matching basis, so it must verify that row actually persisted the
     V4 ``position_hash`` anchor — otherwise the close test could pass
-    without ever covering the LP_OPEN-side accounting regression once the
-    outer xfail is lifted. Gap-aware: encodes the TRUE current behavior via
-    a runtime xfail that fires ONLY on the exact ``position_hash is None``
-    signature and auto-reactivates the hard asserts the moment VIB-4636
-    lands (same pattern as the merged VIB-4633/4634/4635 gap encodings).
+    without ever covering the LP_OPEN-side accounting regression. VIB-4636
+    shipped the aggregation fix in PR #2660, so this remains a hard
+    non-vacuity assertion rather than a conditional xfail.
     """
     ph = payload["position_hash"]
-    if ph is None:
-        pytest.xfail(
-            "VIB-4636: V4 LP_OPEN position_hash anchor (VIB-4473) is not "
-            "persisted onto the accounting_events payload — enrichment path "
-            "drops the mint-sourced lp_open_data. On-chain LP_OPEN verified "
-            "correct above (amounts/pool/ticks/confidence hard-asserted)."
-        )
-    # Reactivates automatically once VIB-4636 wires position_hash through.
     assert isinstance(ph, str) and ph.startswith("0x"), (
         f"V4 position_hash must be 0x-prefixed hex, got {ph!r}"
     )
     assert len(ph) == 66, f"V4 position_hash must be a 32-byte keccak hash, got {ph!r}"
+    assert all(char in "0123456789abcdefABCDEF" for char in ph[2:]), (
+        f"V4 position_hash must contain exactly 32 hex bytes, got {ph!r}"
+    )
 
 
 def _payload_fee(raw) -> Decimal | None:
@@ -297,8 +290,7 @@ async def _open_v4_position_with_accounting(
         eth_call_reader=eth_call_reader,
     )
     _assert_identity(open_accounting_row, event_type="LP_OPEN", wallet=funded_wallet)
-    # Verify the reused close-basis row carries the V4 lot-matching anchor
-    # (gap-aware: xfails on the VIB-4636 signature, auto-reactivates on fix).
+    # Verify the reused close-basis row carries the V4 lot-matching anchor.
     _assert_v4_open_position_hash(_payload(open_accounting_row))
 
     return position_id, liquidity, currency0, currency1, open_accounting_row

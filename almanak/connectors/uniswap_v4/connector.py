@@ -50,14 +50,14 @@ def _production_lifecycle_declarations():
                 AmmCoreExecutionCell(
                     chain=chain,
                     intent=IntentType.LP_OPEN,
-                    lane_gap_ref="VIB-4636",
+                    real_fork_ref=f"tests/intents/{folder}/test_uniswap_v4_lp_open.py",
+                    obligation_gap_refs=((ObligationId.AMOUNT_PROTECTION, "VIB-6669"),),
                 ),
                 AmmCoreExecutionCell(
                     chain=chain,
                     intent=IntentType.LP_CLOSE,
-                    real_fork_ref=("tests/intents/arbitrum/test_uniswap_v4_lp_close.py" if chain is ARBITRUM else None),
-                    lane_gap_ref=None if chain is ARBITRUM else "VIB-4636",
-                    obligation_gap_refs=(((ObligationId.AMOUNT_PROTECTION, "VIB-6226"),) if chain is ARBITRUM else ()),
+                    real_fork_ref=f"tests/intents/{folder}/test_uniswap_v4_lp_close.py",
+                    obligation_gap_refs=((ObligationId.AMOUNT_PROTECTION, "VIB-6226"),),
                 ),
                 AmmCoreExecutionCell(
                     chain=chain,
