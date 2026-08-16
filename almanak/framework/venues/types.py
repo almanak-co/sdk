@@ -11,8 +11,10 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Any
 
 from almanak.core.asset_identity import AssetIdentity
 from almanak.core.chains import ChainRegistry
@@ -233,6 +235,13 @@ class VenueObservedFact:
         target_key = ("", "", "") if self.target_ref is None else self.target_ref.sort_key
         return (self.name, self.value, target_key)
 
+    def to_wire(self) -> dict[str, object]:
+        return {
+            "name": self.name,
+            "value": self.value,
+            "targetRef": None if self.target_ref is None else self.target_ref.to_wire(),
+        }
+
 
 def _validate_exact_tuple(value: object, item_type: type, field_name: str, *, allow_empty: bool) -> tuple:
     if type(value) is not tuple:
@@ -344,6 +353,67 @@ class ExactVenueBinding:
         ).encode("utf-8")
 
 
+def canonical_venue_binding_preimage_bytes(data: Mapping[str, Any]) -> bytes:
+    """Validate and canonicalize an exact version-1 binding wire preimage.
+
+    This validates persisted metadata without constructing a verified-success
+    value: only a connector verifier may produce :class:`ExactVenueBinding`.
+    """
+    expected_keys = {
+        "schemaVersion",
+        "chain",
+        "protocol",
+        "primitive",
+        "identityRefs",
+        "bindingComponents",
+        "orderedAssets",
+        "bindingPolicyVersion",
+    }
+    if type(data) is not dict or set(data) != expected_keys:
+        raise ValueError("venue binding preimage has an invalid version-1 shape")
+    if type(data["schemaVersion"]) is not int or data["schemaVersion"] != VENUE_BINDING_SCHEMA_VERSION:
+        raise ValueError("venue binding preimage has an unsupported schemaVersion")
+
+    def require_list(name: str) -> list[Any]:
+        value = data[name]
+        if type(value) is not list:
+            raise TypeError(f"venue binding {name} must be a list")
+        return value
+
+    refs = tuple(
+        VenueTargetRef(
+            role=VenueTargetRole(item["role"]),
+            reference_namespace=VenueReferenceNamespace(item["referenceNamespace"]),
+            reference=item["reference"],
+        )
+        for item in require_list("identityRefs")
+        if type(item) is dict and set(item) == {"reference", "referenceNamespace", "role"}
+    )
+    components = tuple(
+        VenueBindingComponent(name=item["name"], value=item["value"])
+        for item in require_list("bindingComponents")
+        if type(item) is dict and set(item) == {"name", "value"}
+    )
+    assets = tuple(AssetIdentity.from_wire(item) for item in require_list("orderedAssets"))
+    if len(refs) != len(data["identityRefs"]) or len(components) != len(data["bindingComponents"]):
+        raise ValueError("venue binding preimage contains malformed nested values")
+    primitive_value = data["primitive"]
+    if type(primitive_value) is not str:
+        raise TypeError("venue binding primitive must be a string")
+    binding = ExactVenueBinding._verified(
+        chain=data["chain"],
+        protocol=data["protocol"],
+        primitive=Primitive(primitive_value),
+        identity_refs=refs,
+        binding_components=components,
+        ordered_assets=assets,
+        binding_policy_version=data["bindingPolicyVersion"],
+    )
+    if binding.to_preimage_wire() != data:
+        raise ValueError("venue binding preimage is not canonical")
+    return binding.canonical_preimage_bytes()
+
+
 @dataclass(frozen=True, slots=True)
 class VenueVerificationEvidence:
     """Block-anchored evidence emitted by one declared connector verifier."""
@@ -380,6 +450,16 @@ class VenueVerificationEvidence:
         for fact in facts:
             if fact.target_ref is not None:
                 fact.target_ref.validate_chain(self.chain)
+
+    def to_wire(self) -> dict[str, object]:
+        return {
+            "chain": self.chain,
+            "verifierRef": self.verifier_ref,
+            "verifierContractVersion": self.verifier_contract_version,
+            "blockNumber": self.block_number,
+            "blockHash": self.block_hash,
+            "observedFacts": [fact.to_wire() for fact in self.observed_facts],
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -482,4 +562,5 @@ __all__ = [
     "VenueVerificationResult",
     "VerifiedVenueBinding",
     "build_verified_venue_binding",
+    "canonical_venue_binding_preimage_bytes",
 ]

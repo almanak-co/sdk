@@ -21,16 +21,19 @@ To run:
     uv run pytest tests/intents/base/test_pancakeswap_v3_swap.py -v -s
 """
 
+import os
 from decimal import Decimal
 
 import pytest
 from web3 import Web3
 
 from almanak.connectors.pancakeswap_v3.receipt_parser import PancakeSwapV3ReceiptParser
+from almanak.connectors.uniswap_v3.pool_validation import validate_v3_pool
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import SwapIntent
 from almanak.framework.intents.compiler import IntentCompiler
 from almanak.framework.intents.vocabulary import IntentType
+from almanak.framework.venues import correlate_verified_venue_receipts
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
     SWAP_MAX_SLIPPAGE,
@@ -80,7 +83,7 @@ class TestPancakeSwapV3SwapIntent:
         web3: Web3,
         funded_wallet: str,
         orchestrator: ExecutionOrchestrator,
-        price_oracle: dict[str, Decimal],
+        anvil_eth_call_adapter,
     ):
         """Test USDC -> WETH swap using SwapIntent on PancakeSwap V3 (Base).
 
@@ -95,6 +98,15 @@ class TestPancakeSwapV3SwapIntent:
         token_in = tokens["USDC"]
         token_out = tokens["WETH"]
         fail_if_v3_pool_missing(web3, CHAIN_NAME, "pancakeswap_v3", token_in, token_out, POOL_FEE_TIER)
+        exact_pool = validate_v3_pool(
+            CHAIN_NAME,
+            "pancakeswap_v3",
+            token_in,
+            token_out,
+            POOL_FEE_TIER,
+            web3.provider.endpoint_uri,  # type: ignore[attr-defined]
+        )
+        assert exact_pool.exists and exact_pool.pool_address
 
         in_decimals = get_token_decimals(web3, token_in)
         out_decimals = get_token_decimals(web3, token_out)
@@ -131,6 +143,7 @@ class TestPancakeSwapV3SwapIntent:
             max_slippage=SWAP_MAX_SLIPPAGE,
             protocol="pancakeswap_v3",
             chain=CHAIN_NAME,
+            swap_params={"pool": Web3.to_checksum_address(exact_pool.pool_address)},
         )
 
         # Layer 1: compile. ``rpc_url`` is load-bearing — the compiler uses it
@@ -138,8 +151,9 @@ class TestPancakeSwapV3SwapIntent:
         compiler = IntentCompiler(
             chain=CHAIN_NAME,
             wallet_address=funded_wallet,
-            price_oracle=price_oracle,
+            price_oracle={"USDC": Decimal("1"), "WETH": Decimal("3000")},
             rpc_url=orchestrator.rpc_url,
+            venue_verification_gateway_factory=lambda: anvil_eth_call_adapter,
         )
 
         compilation_result = compiler.compile(intent)
@@ -147,12 +161,34 @@ class TestPancakeSwapV3SwapIntent:
             f"Compilation failed: {compilation_result.error}"
         )
         assert compilation_result.action_bundle is not None, "ActionBundle must be created"
+        assert compilation_result.action_bundle.metadata["pinned_pool"].lower() == exact_pool.pool_address.lower()
+        assert isinstance(compilation_result.action_bundle.metadata["venue_binding_hash"], str)
+        expected_binding_hash = compilation_result.action_bundle.metadata["venue_binding_hash"]
+        assert isinstance(expected_binding_hash, str)
 
         print(f"ActionBundle created with {len(compilation_result.action_bundle.transactions)} transactions")
 
         # Layer 2: execute
         execution_result = await orchestrator.execute(compilation_result.action_bundle)
         assert execution_result.success, f"Execution failed: {execution_result.error}"
+        fork_block = int(os.environ["ANVIL_FORK_BLOCK_BASE"])
+        assert execution_result.transaction_results
+        for tx_result in execution_result.transaction_results:
+            assert tx_result.tx_hash.startswith("0x") and len(tx_result.tx_hash) == 66
+            assert tx_result.receipt is not None
+            assert tx_result.receipt.status == 1
+            assert tx_result.receipt.block_number >= fork_block
+        metadata = compilation_result.action_bundle.metadata
+        operational_targets = {ref["reference"].lower() for ref in metadata["venue_operational_refs"]}
+        assert any(
+            (tx["to"] if isinstance(tx, dict) else tx.to).lower() in operational_targets
+            for tx in compilation_result.action_bundle.transactions
+        )
+        assert correlate_verified_venue_receipts(
+            bundle_metadata=metadata,
+            expected_binding_hash=expected_binding_hash,
+            receipts=tuple(tx.receipt.to_dict() for tx in execution_result.transaction_results if tx.receipt),
+        ) == metadata["venue_binding_hash"]
         print(f"Execution successful: {len(execution_result.transaction_results)} transactions confirmed")
 
         # Layer 3: parse receipts. At least one tx in the bundle must emit a
@@ -171,6 +207,9 @@ class TestPancakeSwapV3SwapIntent:
             if parse_result.swaps:
                 saw_swap_event = True
                 for swap_data in parse_result.swaps:
+                    assert swap_data.pool.lower() == exact_pool.pool_address.lower(), (
+                        "Parsed Swap event must be emitted by the exact factory-verified pool"
+                    )
                     assert swap_data.amount0 != 0, "Amount0 must be non-zero in swap event"
                     assert swap_data.amount1 != 0, "Amount1 must be non-zero in swap event"
 

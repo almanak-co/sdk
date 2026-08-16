@@ -14,6 +14,7 @@ from almanak.connectors._connector import (
     FeeModelDecl,
     ImportRef,
     SupportedChainsSpec,
+    VenueVerifierDecl,
 )
 from almanak.connectors._strategy_base.address_table import AbiFamily, AddressTableSpec
 from almanak.core.capability_obligations import ObligationId
@@ -22,6 +23,7 @@ from almanak.core.chains.base import DESCRIPTOR as BASE
 from almanak.core.chains.bsc import DESCRIPTOR as BSC
 from almanak.core.chains.ethereum import DESCRIPTOR as ETHEREUM
 from almanak.core.intent_types import IntentType
+from almanak.framework.primitives.types import Primitive
 
 _PROVIDER_REFS = {
     ObligationId.ASSET_RESOLUTION: "almanak.connectors.uniswap_v3.compiler:UniswapV3Compiler",
@@ -151,6 +153,20 @@ CONNECTOR = Connector(
     compiler=ImportRef(
         module="almanak.connectors.uniswap_v3.compiler",
         attribute="UniswapV3Compiler",
+    ),
+    venue_verifiers=(
+        VenueVerifierDecl(
+            protocol="pancakeswap_v3",
+            verifier=ImportRef(
+                module="almanak.connectors._strategy_base.v3_venue_verifier",
+                attribute="V3VenueVerifier",
+            ),
+            contract_version="v3_exact_pool.v1",
+            binding_policy_version=1,
+            chains=(ARBITRUM, BASE, BSC, ETHEREUM),
+            primitives=(Primitive.LP, Primitive.SWAP),
+            component_names=("fee",),
+        ),
     ),
     strategy_intents=(IntentType.SWAP, IntentType.LP_OPEN, IntentType.LP_CLOSE, IntentType.LP_COLLECT_FEES),
     supported_chains=SupportedChainsSpec(chains=(BSC, ETHEREUM, ARBITRUM, BASE)),

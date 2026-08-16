@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -232,8 +233,9 @@ def test_lp_open_compiles_mint_for_exact_address_without_substitution(monkeypatc
         "almanak.connectors.uniswap_v3.pool_validation.validate_v3_pool",
         lambda *_args, **_kwargs: _confirmed(),
     )
-    monkeypatch.setattr(UniswapV3Compiler, "_compute_lp_ticks", staticmethod(lambda **_kwargs: (-10, 10, 10)))
-    monkeypatch.setattr(UniswapV3Compiler, "_fetch_lp_pool_slot0", lambda *_args: (2**96, 0))
+    compute_ticks = MagicMock(return_value=(-10, 10, 10))
+    monkeypatch.setattr(UniswapV3Compiler, "_compute_lp_ticks", staticmethod(compute_ticks))
+    monkeypatch.setattr(UniswapV3Compiler, "_fetch_lp_pool_slot0", lambda *_args: (2**96, 20))
     monkeypatch.setattr(
         "almanak.connectors.uniswap_v3.compiler.maybe_recompute_lp_amounts_from_slot0",
         lambda **kwargs: (kwargs["amount0_desired"], kwargs["amount1_desired"]),
@@ -242,6 +244,12 @@ def test_lp_open_compiles_mint_for_exact_address_without_substitution(monkeypatc
     monkeypatch.setattr(
         "almanak.connectors.uniswap_v3.compiler.compute_lp_slippage_mins",
         lambda **_kwargs: (900_000, 9 * 10**17),
+    )
+    monkeypatch.setattr(UniswapV3Compiler, "_verify_exact_v3_binding", staticmethod(lambda **_kwargs: object()))
+    monkeypatch.setattr(
+        UniswapV3Compiler,
+        "_verified_venue_metadata",
+        staticmethod(lambda _verified: {"venue_binding_hash": "a" * 64}),
     )
     intent = LPOpenIntent(
         pool=POOL,
@@ -257,8 +265,64 @@ def test_lp_open_compiles_mint_for_exact_address_without_substitution(monkeypatc
     assert result.status is CompilationStatus.SUCCESS
     assert result.action_bundle is not None
     assert result.action_bundle.metadata["pool"] == POOL
+    assert result.action_bundle.metadata["venue_binding_hash"] == "a" * 64
     mint = adapter.get_mint_calldata.call_args.kwargs
     assert (mint["token0"], mint["token1"], mint["fee"]) == (USDC, WETH, 500)
+    assert (mint["amount0_desired"], mint["amount1_desired"]) == (1_000_000, 10**18)
+    assert compute_ticks.call_args.kwargs["tokens_swapped"] is False
+    assert compute_ticks.call_args.kwargs["range_lower"] == Decimal("0.9")
+    assert compute_ticks.call_args.kwargs["range_upper"] == Decimal("1.1")
+    assert any("does not contain" in warning and "ZERO fees" in warning for warning in result.warnings)
+
+
+def test_lp_open_exact_verifier_refuses_before_approval_or_mint(monkeypatch: pytest.MonkeyPatch) -> None:
+    ctx = _ctx(gateway=_Gateway())
+    adapter = MagicMock()
+    adapter.get_position_manager_address.return_value = "0x3333333333333333333333333333333333333333"
+    object.__setattr__(ctx, "lp_adapter_factory", lambda _protocol: adapter)
+    monkeypatch.setattr(
+        UniswapV3Compiler,
+        "_resolve_lp_pool_and_amounts",
+        MagicMock(
+            return_value=(
+                TokenInfo("USDC", USDC, 6),
+                TokenInfo("WETH", WETH, 18),
+                500,
+                Decimal("0.9"),
+                Decimal("1.1"),
+                1_000_000,
+                10**18,
+                False,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        UniswapV3Compiler,
+        "_verify_exact_v3_binding",
+        staticmethod(
+            lambda **kwargs: CompilationResult(
+                status=CompilationStatus.FAILED,
+                error="Exact venue refused: factory_mismatch",
+                is_safety_refusal=True,
+                intent_id=kwargs["intent_id"],
+            )
+        ),
+    )
+    intent = LPOpenIntent(
+        pool=POOL,
+        amount0=Decimal("1"),
+        amount1=Decimal("1"),
+        range_lower=Decimal("0.9"),
+        range_upper=Decimal("1.1"),
+        protocol="uniswap_v3",
+    )
+
+    result = UniswapV3Compiler().compile_lp_open(ctx, intent)
+
+    assert result.status is CompilationStatus.FAILED
+    assert result.is_safety_refusal is True
+    ctx.services.build_approve_tx.assert_not_called()
+    adapter.get_mint_calldata.assert_not_called()
 
 
 def test_exact_pool_refuses_different_factory_pool(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -474,6 +538,86 @@ def test_compile_lp_close_wires_identity_only_for_active_exact_address(
     else:
         assert result.status is CompilationStatus.SUCCESS
         identity.assert_not_called()
+
+
+@pytest.mark.parametrize("verified", [True, False])
+def test_active_exact_close_preserves_continuity_and_certifies_only_verified_binding(
+    monkeypatch: pytest.MonkeyPatch, verified: bool
+) -> None:
+    ctx = _ctx(gateway=_Gateway())
+    adapter = MagicMock()
+    adapter.get_position_manager_address.return_value = "0x3333333333333333333333333333333333333333"
+    object.__setattr__(ctx, "lp_adapter_factory", lambda _protocol: adapter)
+    ctx.services.query_position_liquidity.return_value = 1
+    ctx.services.query_position_tokens_owed.return_value = (0, 0)
+    verified_binding = SimpleNamespace(
+        binding=SimpleNamespace(binding_hash="a" * 64, to_preimage_wire=lambda: {"schemaVersion": 1}),
+        operational_refs=(
+            SimpleNamespace(to_wire=lambda: {"role": "position_manager", "reference": "0x" + "3" * 40}),
+        ),
+        evidence=SimpleNamespace(
+            block_number=123,
+            block_hash="0x" + "b" * 64,
+            verifier_ref="tests.fake:Verifier",
+            verifier_contract_version="test.v1",
+            to_wire=lambda: {"blockNumber": 123, "observedFacts": []},
+        ),
+    )
+    monkeypatch.setattr(
+        UniswapV3Compiler,
+        "_validate_exact_lp_close_identity",
+        MagicMock(return_value=verified_binding if verified else None),
+    )
+    monkeypatch.setattr(UniswapV3Compiler, "_extend_lp_close_transactions", MagicMock())
+
+    result = UniswapV3Compiler().compile_lp_close(
+        ctx,
+        LPCloseIntent(position_id="42", pool=POOL, protocol="uniswap_v3"),
+    )
+
+    assert result.status is CompilationStatus.SUCCESS
+    assert result.action_bundle is not None
+    if verified:
+        assert result.action_bundle.metadata["venue_binding_hash"] == "a" * 64
+    else:
+        assert "venue_binding_hash" not in result.action_bundle.metadata
+
+
+def test_active_exact_close_preserves_continuity_on_typed_transport_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = _ctx(gateway=_Gateway())
+    object.__setattr__(
+        ctx,
+        "venue_verification_gateway_factory",
+        lambda: (_ for _ in ()).throw(ValueError("gateway transport unavailable")),
+    )
+    monkeypatch.setattr(
+        UniswapV3Compiler,
+        "_resolve_exact_lp_pool",
+        staticmethod(
+            lambda **_kwargs: (
+                TokenInfo("USDC", USDC, 6),
+                TokenInfo("WETH", WETH, 18),
+                500,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        "almanak.connectors.uniswap_v3.pool_validation.read_v3_position_binding",
+        lambda *_args, **_kwargs: V3PositionBinding(token0=USDC, token1=WETH, fee_tier=500),
+    )
+
+    result = UniswapV3Compiler._validate_exact_lp_close_identity(
+        ctx=ctx,
+        protocol="uniswap_v3",
+        pool_address=POOL,
+        position_manager="0x3333333333333333333333333333333333333333",
+        token_id=42,
+        intent_id="close-1",
+    )
+
+    assert result is None
 
 
 def test_position_binding_decoder_reads_positions_tuple(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -340,6 +340,7 @@ def test_gateway_compiler_is_built_fail_closed_not_placeholder_enabled(monkeypat
     assert captured["price_oracle"] == {}
     # The gateway pre-flight flag (VIB-6111) must survive the change.
     assert captured["config"].gateway_internal_preflight is True
+    assert callable(captured["venue_verification_gateway_factory"])
     # And the built compiler is genuinely not in placeholder mode.
     assert compiler._using_placeholders is False
     assert compiler.price_oracle == {}

@@ -13,6 +13,7 @@ Covers three layers:
 """
 
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
@@ -127,6 +128,27 @@ def test_cross_chain_swap_rejects_pinning() -> None:
             chain="base",
             destination_chain="arbitrum",
             swap_params={"fee_tier": 500},
+        )
+
+
+@pytest.mark.parametrize("bad_hash", ["A" * 64, "a" * 63, "0x" + "a" * 64, 1, True])
+def test_quote_contract_rejects_malformed_venue_binding_hash(bad_hash: object) -> None:
+    from almanak.connectors._strategy_base.swap_quote_registry import SwapQuoteRequest, SwapQuoteResult
+
+    with pytest.raises(ValueError, match="venue_binding_hash"):
+        SwapQuoteRequest(
+            chain="arbitrum",
+            protocol="uniswap_v3",
+            token_in=USDC_ARB,
+            token_out=WETH_ARB,
+            amount_in=1,
+            venue_binding_hash=bad_hash,  # type: ignore[arg-type]
+        )
+    with pytest.raises(ValueError, match="venue_binding_hash"):
+        SwapQuoteResult(
+            amount_out=1,
+            source="test",
+            venue_binding_hash=bad_hash,  # type: ignore[arg-type]
         )
 
 
@@ -391,9 +413,75 @@ def _patch_pool_reads(
         )
 
     monkeypatch.setattr(pv, "validate_v3_pool", fake_validate)
+    verified = SimpleNamespace(
+        binding=SimpleNamespace(binding_hash="a" * 64, to_preimage_wire=lambda: {"schemaVersion": 1}),
+        operational_refs=(SimpleNamespace(to_wire=lambda: {"role": "router", "reference": "0x" + "1" * 40}),),
+        evidence=SimpleNamespace(
+            block_number=123,
+            block_hash="0x" + "b" * 64,
+            verifier_ref="tests.fake:Verifier",
+            verifier_contract_version="test.v1",
+            to_wire=lambda: {"blockNumber": 123, "observedFacts": []},
+        ),
+    )
+    monkeypatch.setattr(
+        "almanak.connectors.uniswap_v3.compiler.UniswapV3Compiler._verify_exact_v3_binding",
+        staticmethod(lambda **_kwargs: verified),
+    )
 
 
 class TestCompilerPoolAddressPinning:
+    @pytest.mark.parametrize(
+        ("protocol", "chain", "primitive"),
+        (
+            ("sushiswap_v3", "arbitrum", "swap"),
+            ("agni_finance", "mantle", "swap"),
+            ("uniswap_v3", "mantle", "swap"),
+        ),
+    )
+    def test_staged_exact_verifier_does_not_capture_unmigrated_lanes(
+        self, protocol: str, chain: str, primitive: str
+    ) -> None:
+        from almanak.connectors.uniswap_v3.compiler import UniswapV3Compiler
+
+        assert not UniswapV3Compiler._exact_venue_verifier_applies(
+            ctx=SimpleNamespace(chain=chain), protocol=protocol, primitive=primitive
+        )
+
+    def test_exact_verifier_refuses_before_approval_or_calldata(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from almanak.framework.intents.compiler import _ConnectorCompilerServices
+        from almanak.framework.intents.compiler_models import CompilationResult, CompilationStatus
+
+        _patch_pool_reads(
+            monkeypatch,
+            binding=V3PoolBinding(token0=WETH_ARB.lower(), token1=USDC_ARB.lower(), fee_tier=500),
+        )
+        monkeypatch.setattr(
+            "almanak.connectors.uniswap_v3.compiler.UniswapV3Compiler._verify_exact_v3_binding",
+            staticmethod(
+                lambda **kwargs: CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error="Exact venue refused: factory_mismatch",
+                    is_safety_refusal=True,
+                    intent_id=kwargs["intent_id"],
+                )
+            ),
+        )
+
+        def unexpected_approval(*_args, **_kwargs):
+            raise AssertionError("approval must not be built before exact venue verification")
+
+        def unexpected_calldata(*_args, **_kwargs):
+            raise AssertionError("swap calldata must not be built before exact venue verification")
+
+        monkeypatch.setattr(_ConnectorCompilerServices, "build_approve_tx", unexpected_approval)
+        monkeypatch.setattr(DefaultSwapAdapter, "get_swap_calldata", unexpected_calldata)
+        result = _offline_compiler().compile(_swap_intent(swap_params={"pool": PINNED_POOL}))
+
+        assert result.status.value == "FAILED"
+        assert result.is_safety_refusal is True
+        assert "factory_mismatch" in result.error
+
     def test_pinned_pool_resolves_and_pins_its_tier(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _patch_pool_reads(
             monkeypatch,
@@ -406,6 +494,7 @@ class TestCompilerPoolAddressPinning:
         assert metadata["selected_fee_tier"] == 500
         assert metadata["fee_selection_source"] == "intent_pinned"
         assert metadata["pinned_pool"] == PINNED_POOL
+        assert metadata["venue_binding_hash"] == "a" * 64
 
     def test_pinned_pool_pair_mismatch_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
         other_token = "0x912CE59144191C1204E64559FE8253a0e49E6548"  # ARB
@@ -615,3 +704,29 @@ class TestRegistryQuotePinEnforcement:
         metadata = result.action_bundle.metadata
         assert metadata["selected_fee_tier"] == 500
         assert metadata["fee_selection_source"] == "intent_pinned"
+
+    def test_exact_pool_quote_without_matching_binding_is_discarded(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from almanak.connectors._strategy_base.swap_quote_registry import SwapQuoteResult
+        from almanak.connectors._strategy_swap_quote_registry import SWAP_QUOTE_REGISTRY
+
+        _patch_pool_reads(
+            monkeypatch,
+            binding=V3PoolBinding(token0=WETH_ARB.lower(), token1=USDC_ARB.lower(), fee_tier=500),
+        )
+        seen_hashes: list[str | None] = []
+
+        def wrong_binding_quote(ctx, request):
+            seen_hashes.append(request.venue_binding_hash)
+            return SwapQuoteResult(
+                amount_out=999,
+                source="wrong-binding",
+                venue_binding_hash="b" * 64,
+                metadata={"fee_tier": 500},
+            )
+
+        monkeypatch.setattr(SWAP_QUOTE_REGISTRY, "quote_swap", wrong_binding_quote)
+        result = _offline_compiler().compile(_swap_intent(swap_params={"pool": PINNED_POOL}))
+
+        assert result.status.value == "SUCCESS"
+        assert seen_hashes == ["a" * 64]
+        assert int(result.action_bundle.metadata["min_amount_out"]) > 999

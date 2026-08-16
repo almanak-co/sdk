@@ -26,6 +26,7 @@ To run:
     uv run pytest tests/intents/base/test_uniswap_v3_swap_pinning.py -v -s
 """
 
+import os
 from decimal import Decimal
 from typing import Any
 
@@ -41,6 +42,7 @@ from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import SwapIntent
 from almanak.framework.intents.compiler import IntentCompiler
 from almanak.framework.intents.vocabulary import IntentType
+from almanak.framework.venues import correlate_verified_venue_receipts
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
     SWAP_MAX_SLIPPAGE,
@@ -289,7 +291,7 @@ class TestUniswapV3SwapPinning:
         web3: Web3,
         funded_wallet: str,
         orchestrator: ExecutionOrchestrator,
-        price_oracle: dict[str, Decimal],
+        anvil_eth_call_adapter,
     ):
         """A ``pool`` address pin resolves on-chain and executes against that pool."""
         tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
@@ -315,16 +317,37 @@ class TestUniswapV3SwapPinning:
         compiler = IntentCompiler(
             chain=CHAIN_NAME,
             wallet_address=funded_wallet,
-            price_oracle=price_oracle,
+            price_oracle={"USDC": Decimal("1"), "WETH": Decimal("3000")},
             rpc_url=orchestrator.rpc_url,
+            venue_verification_gateway_factory=lambda: anvil_eth_call_adapter,
         )
 
         compilation_result = compiler.compile(intent)
         assert compilation_result.status.value == "SUCCESS", f"Layer 1: compilation failed: {compilation_result.error}"
         assert compilation_result.action_bundle is not None
+        expected_binding_hash = compilation_result.action_bundle.metadata["venue_binding_hash"]
+        assert isinstance(expected_binding_hash, str)
 
         execution_result = await orchestrator.execute(compilation_result.action_bundle)
         assert execution_result.success, f"Layer 2: {execution_result.error}"
+        fork_block = int(os.environ["ANVIL_FORK_BLOCK_BASE"])
+        assert execution_result.transaction_results
+        for tx_result in execution_result.transaction_results:
+            assert tx_result.tx_hash.startswith("0x") and len(tx_result.tx_hash) == 66
+            assert tx_result.receipt is not None
+            assert tx_result.receipt.status == 1
+            assert tx_result.receipt.block_number >= fork_block
+        metadata = compilation_result.action_bundle.metadata or {}
+        operational_targets = {ref["reference"].lower() for ref in metadata["venue_operational_refs"]}
+        assert any(
+            (tx["to"] if isinstance(tx, dict) else tx.to).lower() in operational_targets
+            for tx in compilation_result.action_bundle.transactions
+        )
+        assert correlate_verified_venue_receipts(
+            bundle_metadata=metadata,
+            expected_binding_hash=expected_binding_hash,
+            receipts=tuple(tx.receipt.to_dict() for tx in execution_result.transaction_results if tx.receipt),
+        ) == metadata["venue_binding_hash"]
 
         # Layer 3: receipt parsing
         parser = UniswapV3ReceiptParser(chain=CHAIN_NAME)
@@ -358,7 +381,6 @@ class TestUniswapV3SwapPinning:
             f"A pool-address pin must execute against exactly that pool. "
             f"Pinned {pinned}, Swap event(s) came from {pools}"
         )
-        metadata = compilation_result.action_bundle.metadata or {}
         assert (metadata.get("pinned_pool") or "").lower() == pinned, (
             f"Bundle metadata must record the pinned pool, got {metadata.get('pinned_pool')!r}"
         )
@@ -368,6 +390,7 @@ class TestUniswapV3SwapPinning:
         assert int(metadata.get("selected_fee_tier")) == 3000, (
             f"Pool pin must resolve the pool's own tier (3000), got {metadata.get('selected_fee_tier')!r}"
         )
+        assert isinstance(metadata.get("venue_binding_hash"), str)
         print("\nPINNED POOL ADDRESS VERIFIED ON-CHAIN")
 
 
@@ -396,7 +419,7 @@ class TestUniswapV3PinningRefusals:
         web3: Web3,
         funded_wallet: str,
         orchestrator: ExecutionOrchestrator,
-        price_oracle: dict[str, Decimal],
+        anvil_eth_call_adapter,
     ):
         """Pinning a USDC/WETH pool on a wstETH->USDC swap must be refused."""
         tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
@@ -419,8 +442,9 @@ class TestUniswapV3PinningRefusals:
         compiler = IntentCompiler(
             chain=CHAIN_NAME,
             wallet_address=funded_wallet,
-            price_oracle=price_oracle,
+            price_oracle={"USDC": Decimal("1"), "WETH": Decimal("3000"), "wstETH": Decimal("3500")},
             rpc_url=orchestrator.rpc_url,
+            venue_verification_gateway_factory=lambda: anvil_eth_call_adapter,
         )
         result = compiler.compile(intent)
 
@@ -447,7 +471,7 @@ class TestUniswapV3PinningRefusals:
         web3: Web3,
         funded_wallet: str,
         orchestrator: ExecutionOrchestrator,
-        price_oracle: dict[str, Decimal],
+        anvil_eth_call_adapter,
     ):
         """A real PancakeSwap V3 pool must not satisfy a ``uniswap_v3`` pin.
 
@@ -483,8 +507,9 @@ class TestUniswapV3PinningRefusals:
         compiler = IntentCompiler(
             chain=CHAIN_NAME,
             wallet_address=funded_wallet,
-            price_oracle=price_oracle,
+            price_oracle={"USDC": Decimal("1"), "WETH": Decimal("3000")},
             rpc_url=orchestrator.rpc_url,
+            venue_verification_gateway_factory=lambda: anvil_eth_call_adapter,
         )
         result = compiler.compile(intent)
 

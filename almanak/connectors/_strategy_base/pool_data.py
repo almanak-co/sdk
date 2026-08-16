@@ -357,7 +357,7 @@ def unsupported_pool_data_spec(
         aliases=aliases,
         reference_kind=reference_kind,
         bindings={},
-        unsupported={facet: reason for facet in PoolDataFacet},
+        unsupported=dict.fromkeys(PoolDataFacet, reason),
     )
 
 

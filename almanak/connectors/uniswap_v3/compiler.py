@@ -6,7 +6,7 @@ import logging
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, ClassVar
+from typing import Any, ClassVar, cast
 
 from almanak.connectors._strategy_base.base.cl_math import (
     compute_lp_slippage_mins,
@@ -106,9 +106,6 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
                     intent_id=intent.intent_id,
                 )
 
-            if not from_token.is_native:
-                transactions.extend(ctx.services.build_approve_tx(from_token.address, router_address, amount_in))
-
             deadline = int(datetime.now(UTC).timestamp()) + ctx.default_deadline_seconds
             value, actual_from_token, actual_to_token = self._resolve_swap_wrap_addresses(
                 ctx=ctx,
@@ -118,20 +115,21 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
                 warnings=warnings,
             )
 
-            pin_or_fail = self._resolve_pinned_pool(
+            pin_or_fail = self._resolve_verified_swap_pin(
                 ctx=ctx,
                 intent=intent,
                 protocol=protocol,
                 actual_from_token=actual_from_token,
                 actual_to_token=actual_to_token,
+                router_address=router_address,
+                adapter=adapter,
             )
             if isinstance(pin_or_fail, CompilationResult):
                 return pin_or_fail
-            pinned_fee_tier: int | None = None
-            pinned_pool: str | None = None
-            if pin_or_fail is not None:
-                pinned_fee_tier, pinned_pool = pin_or_fail
-                adapter.pin_fee_tier(pinned_fee_tier)
+            pinned_fee_tier, pinned_pool, verified_venue = pin_or_fail
+
+            if not from_token.is_native:
+                transactions.extend(ctx.services.build_approve_tx(from_token.address, router_address, amount_in))
 
             quoter_amount = self._quote_swap_via_registry(
                 ctx=ctx,
@@ -144,6 +142,7 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
                 adapter=adapter,
                 pinned_fee_tier=pinned_fee_tier,
                 pinned_pool=pinned_pool,
+                venue_binding_hash=(verified_venue.binding.binding_hash if verified_venue is not None else None),
             )
             if quoter_amount is None:
                 try:
@@ -231,6 +230,7 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
                     "pinned_pool": pinned_pool,
                     "deadline": deadline,
                     "chain": ctx.chain,
+                    **self._verified_venue_metadata(verified_venue),
                 },
             )
             result.transactions = transactions
@@ -272,6 +272,23 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
             token0_info, token1_info, fee_tier, range_lower, range_upper, amount0, amount1, tokens_swapped = (
                 resolved_pool
             )
+
+            verified_venue = None
+            if self._looks_like_bare_address(intent.pool) and self._exact_venue_verifier_applies(
+                ctx=ctx, protocol=protocol, primitive="lp"
+            ):
+                verified_venue = self._verify_exact_v3_binding(
+                    ctx=ctx,
+                    protocol=protocol,
+                    pool_address=intent.pool,
+                    ordered_token_addresses=(token0_info.address.lower(), token1_info.address.lower()),
+                    fee_tier=fee_tier,
+                    primitive="lp",
+                    expected_operational_address=position_manager,
+                    intent_id=intent.intent_id,
+                )
+                if isinstance(verified_venue, CompilationResult):
+                    return verified_venue
 
             if self._looks_like_bare_address(intent.pool):
                 # _resolve_exact_lp_pool already performed the authoritative
@@ -461,6 +478,7 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
                     # NOT be preflight-blocked). None for the common auto-mode
                     # case; a string when the author disambiguated explicitly.
                     "registry_handle": intent.registry_handle,
+                    **self._verified_venue_metadata(verified_venue),
                 },
             )
             result.transactions = transactions
@@ -554,8 +572,9 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
             liquidity, position_has_activity = state_or_fail
 
             no_op = liquidity == 0 and not position_has_activity
+            verified_venue = None
             if not no_op and intent.pool is not None and self._looks_like_bare_address(intent.pool):
-                identity_failure = self._validate_exact_lp_close_identity(
+                exact_identity = self._validate_exact_lp_close_identity(
                     ctx=ctx,
                     protocol=protocol,
                     pool_address=intent.pool,
@@ -563,8 +582,9 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
                     token_id=token_id,
                     intent_id=intent.intent_id,
                 )
-                if identity_failure is not None:
-                    return identity_failure
+                if isinstance(exact_identity, CompilationResult):
+                    return exact_identity
+                verified_venue = exact_identity
 
             self._extend_lp_close_transactions(
                 ctx=ctx,
@@ -590,6 +610,7 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
                 "position_manager": position_manager,
                 "deadline": deadline,
                 "chain": ctx.chain,
+                **self._verified_venue_metadata(verified_venue),
             }
             if no_op:
                 metadata["no_op"] = True
@@ -628,7 +649,7 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
         position_manager: str,
         token_id: int,
         intent_id: str,
-    ) -> CompilationResult | None:
+    ) -> Any | CompilationResult | None:
         """Require an address-bound close NFT to belong to that exact pool."""
         exact = UniswapV3Compiler._resolve_exact_lp_pool(
             ctx=ctx,
@@ -685,7 +706,19 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
                 ),
                 intent_id=intent_id,
             )
-        return None
+        if not UniswapV3Compiler._exact_venue_verifier_applies(ctx=ctx, protocol=protocol, primitive="lp"):
+            return None
+        return UniswapV3Compiler._verify_exact_v3_binding(
+            ctx=ctx,
+            protocol=protocol,
+            pool_address=pool_address,
+            ordered_token_addresses=(token0_info.address.lower(), token1_info.address.lower()),
+            fee_tier=fee_tier,
+            primitive="lp",
+            expected_operational_address=position_manager,
+            intent_id=intent_id,
+            allow_unavailable_for_risk_reduction=True,
+        )
 
     def compile_collect_fees(self, ctx: CLCompilerContext, intent: CollectFeesIntent) -> CompilationResult:
         protocol = self._protocol(ctx, intent.protocol)
@@ -950,6 +983,49 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
         return binding.fee_tier, pinned_pool
 
     @staticmethod
+    def _resolve_verified_swap_pin(
+        *,
+        ctx: CLCompilerContext,
+        intent: SwapIntent,
+        protocol: str,
+        actual_from_token: str,
+        actual_to_token: str,
+        router_address: str,
+        adapter: Any,
+    ) -> tuple[int | None, str | None, Any | None] | CompilationResult:
+        pin = UniswapV3Compiler._resolve_pinned_pool(
+            ctx=ctx,
+            intent=intent,
+            protocol=protocol,
+            actual_from_token=actual_from_token,
+            actual_to_token=actual_to_token,
+        )
+        if isinstance(pin, CompilationResult):
+            return pin
+        if pin is None:
+            return None, None, None
+        fee_tier, pool_address = pin
+        adapter.pin_fee_tier(fee_tier)
+        if pool_address is None:
+            return fee_tier, None, None
+        if not UniswapV3Compiler._exact_venue_verifier_applies(ctx=ctx, protocol=protocol, primitive="swap"):
+            return fee_tier, pool_address, None
+        sorted_tokens = sorted((actual_from_token.lower(), actual_to_token.lower()))
+        verified = UniswapV3Compiler._verify_exact_v3_binding(
+            ctx=ctx,
+            protocol=protocol,
+            pool_address=pool_address,
+            ordered_token_addresses=(sorted_tokens[0], sorted_tokens[1]),
+            fee_tier=fee_tier,
+            primitive="swap",
+            expected_operational_address=router_address,
+            intent_id=intent.intent_id,
+        )
+        if isinstance(verified, CompilationResult):
+            return verified
+        return fee_tier, pool_address, verified
+
+    @staticmethod
     def _quote_swap_via_registry(
         *,
         ctx: CLCompilerContext,
@@ -962,6 +1038,7 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
         adapter: Any,
         pinned_fee_tier: int | None = None,
         pinned_pool: str | None = None,
+        venue_binding_hash: str | None = None,
     ) -> int | None:
         request = SwapQuoteRequest(
             chain=ctx.chain,
@@ -977,6 +1054,7 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
             if pinned_fee_tier is not None
             else (ctx.fixed_swap_fee_tier if ctx.swap_pool_selection_mode == "fixed" else None),
             pool_address=pinned_pool,
+            venue_binding_hash=venue_binding_hash,
         )
         ensure_swap_quote_registry_loaded()
         try:
@@ -989,6 +1067,14 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
             return None
 
         if quote is None:
+            return None
+
+        if venue_binding_hash is not None and quote.venue_binding_hash != venue_binding_hash:
+            logger.warning(
+                "Swap quote provider for %s did not preserve exact venue binding %s; discarding quote",
+                protocol,
+                venue_binding_hash,
+            )
             return None
 
         selected_fee = quote.metadata.get("fee_tier")
@@ -1284,6 +1370,129 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
     @staticmethod
     def _looks_like_bare_address(pool: str) -> bool:
         return isinstance(pool, str) and pool.lower().startswith("0x") and "/" not in pool
+
+    @staticmethod
+    def _exact_venue_verifier_applies(*, ctx: CLCompilerContext, protocol: str, primitive: str) -> bool:
+        """Limit the staged cutover to the manifest's exact protocol/chain scope.
+
+        The shared V3 compiler also serves forks that have not migrated to the
+        exact-venue contract.  Their existing factory-authenticated pin path
+        must remain usable until those connectors publish their own verifier.
+        """
+        from almanak.connectors._strategy_base.venue_verifier_registry import VenueVerifierRegistry
+        from almanak.framework.primitives.types import Primitive
+
+        registry = VenueVerifierRegistry()
+        if not registry.has(protocol):
+            return False
+        declaration = registry.declaration(protocol)
+        return ctx.chain in declaration.chains and Primitive(primitive) in declaration.primitives
+
+    @staticmethod
+    def _verify_exact_v3_binding(
+        *,
+        ctx: CLCompilerContext,
+        protocol: str,
+        pool_address: str,
+        ordered_token_addresses: tuple[str, str],
+        fee_tier: int,
+        primitive: str,
+        expected_operational_address: str,
+        intent_id: str,
+        allow_unavailable_for_risk_reduction: bool = False,
+    ) -> Any | CompilationResult:
+        """Verify one already-discovered exact pool through its declared provider."""
+        factory = ctx.venue_verification_gateway_factory
+        if not callable(factory):
+            if allow_unavailable_for_risk_reduction:
+                return None
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"Exact venue verification is unavailable for {protocol} on {ctx.chain}",
+                is_safety_refusal=True,
+                intent_id=intent_id,
+            )
+
+        from almanak.connectors._strategy_base.venue_verifier_registry import VenueVerifierRegistry
+        from almanak.core.asset_identity import AssetIdentity, AssetNamespace
+        from almanak.framework.primitives.types import Primitive
+        from almanak.framework.venues import (
+            VenueBindingComponent,
+            VenueBindingFailure,
+            VenueBindingFailureState,
+            VenueReferenceNamespace,
+            VenueTargetRef,
+            VenueTargetRole,
+            VenueVerificationRequest,
+            VerifiedVenueBinding,
+        )
+
+        primitive_value = Primitive(primitive)
+        request = VenueVerificationRequest(
+            chain=ctx.chain,
+            protocol=protocol,
+            primitive=primitive_value,
+            requested_refs=(
+                VenueTargetRef(
+                    role=VenueTargetRole.POOL,
+                    reference_namespace=VenueReferenceNamespace.EVM_ADDRESS,
+                    reference=pool_address.lower(),
+                ),
+            ),
+            ordered_assets=tuple(
+                AssetIdentity(ctx.chain, AssetNamespace.ERC20, address) for address in ordered_token_addresses
+            ),
+            binding_components=(VenueBindingComponent(name="fee", value=str(fee_tier)),),
+            binding_policy_version=1,
+        )
+        registry = VenueVerifierRegistry()
+        verifier = registry.load_class(protocol)()
+        try:
+            gateway = factory()
+        except (ConnectionError, OSError, TimeoutError, ValueError) as exc:
+            if allow_unavailable_for_risk_reduction:
+                return None
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"Exact venue verification transport is unavailable: {exc}",
+                is_safety_refusal=True,
+                intent_id=intent_id,
+            )
+        result = registry.validate_result(request, verifier.verify_venue(request, gateway))
+        if type(result) is VenueBindingFailure:
+            if allow_unavailable_for_risk_reduction and result.state is VenueBindingFailureState.UNAVAILABLE:
+                return None
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"Exact venue refused: {result.reason_code.value}: {result.detail}",
+                is_safety_refusal=True,
+                intent_id=intent_id,
+            )
+        verified_result = cast(VerifiedVenueBinding, result)
+        operational_addresses = {ref.reference for ref in verified_result.operational_refs}
+        if expected_operational_address.lower() not in operational_addresses:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"Exact venue verifier did not authorize compiler target "
+                    f"{expected_operational_address.lower()} for {protocol}"
+                ),
+                is_safety_refusal=True,
+                intent_id=intent_id,
+            )
+        return verified_result
+
+    @staticmethod
+    def _verified_venue_metadata(verified: Any | None) -> dict[str, Any]:
+        if verified is None:
+            return {}
+        binding = verified.binding
+        return {
+            "venue_binding_hash": binding.binding_hash,
+            "venue_binding": binding.to_preimage_wire(),
+            "venue_operational_refs": [ref.to_wire() for ref in verified.operational_refs],
+            "venue_verification": verified.evidence.to_wire(),
+        }
 
     @staticmethod
     def _resolve_exact_lp_pool(

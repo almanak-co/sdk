@@ -7,6 +7,7 @@ only, base-unit amounts in and out, and no USD price dependency.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -34,6 +35,14 @@ class SwapQuoteUnavailable(Exception):
     """Connector could not fetch an executable quote for the request."""
 
 
+_BINDING_HASH = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _validate_binding_hash(value: str | None) -> None:
+    if value is not None and (type(value) is not str or _BINDING_HASH.fullmatch(value) is None):
+        raise ValueError("venue_binding_hash must be a lowercase 64-character SHA-256 hex digest")
+
+
 @dataclass(frozen=True, kw_only=True)
 class SwapQuoteRequest:
     """Exact-input swap quote request.
@@ -53,11 +62,13 @@ class SwapQuoteRequest:
     token_out_decimals: int | None = None
     fee_tier: int | None = None
     pool_address: str | None = None
+    venue_binding_hash: str | None = None
     extra: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
 
     def __post_init__(self) -> None:
         if self.amount_in <= 0:
             raise ValueError(f"SwapQuoteRequest.amount_in must be positive, got {self.amount_in}")
+        _validate_binding_hash(self.venue_binding_hash)
         object.__setattr__(self, "extra", MappingProxyType(dict(self.extra)))
 
 
@@ -68,11 +79,13 @@ class SwapQuoteResult:
     amount_out: int
     source: str
     gas_estimate: int | None = None
+    venue_binding_hash: str | None = None
     metadata: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
 
     def __post_init__(self) -> None:
         if self.amount_out <= 0:
             raise ValueError(f"SwapQuoteResult.amount_out must be positive, got {self.amount_out}")
+        _validate_binding_hash(self.venue_binding_hash)
         object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
 
 

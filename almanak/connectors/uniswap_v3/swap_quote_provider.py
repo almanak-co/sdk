@@ -48,6 +48,7 @@ class UniswapV3SwapQuoteConnector(SwapQuoteConnector, SwapQuoteCapability):
         return SwapQuoteResult(
             amount_out=amount_out,
             source="uniswap_v3_quoter",
+            venue_binding_hash=request.venue_binding_hash,
             metadata={
                 "fee_tier": selected_fee,
                 "fee_selection": adapter.last_fee_selection,

@@ -1,5 +1,6 @@
 """Four-layer exact-address Uniswap V3 LP lifecycle on Arbitrum Anvil."""
 
+import os
 from decimal import Decimal
 
 import pytest
@@ -9,6 +10,7 @@ from almanak.connectors.uniswap_v3.receipt_parser import UniswapV3ReceiptParser
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import IntentCompiler, LPCloseIntent, LPOpenIntent
 from almanak.framework.intents.vocabulary import IntentType
+from almanak.framework.venues import correlate_verified_venue_receipts
 from tests.intents._lp_setup_helpers import query_position_liquidity
 from tests.intents.conftest import CHAIN_CONFIGS, get_token_balance, get_token_decimals
 
@@ -32,7 +34,6 @@ class TestUniswapV3ExactPoolLP:
         web3: Web3,
         funded_wallet: str,
         orchestrator: ExecutionOrchestrator,
-        price_oracle: dict[str, Decimal],
         anvil_rpc_url: str,
         anvil_eth_call_adapter,
     ):
@@ -57,9 +58,10 @@ class TestUniswapV3ExactPoolLP:
         compiler = IntentCompiler(
             chain=CHAIN_NAME,
             wallet_address=funded_wallet,
-            price_oracle=price_oracle,
+            price_oracle={"USDC": Decimal("1"), "WETH": Decimal("3000")},
             rpc_url=anvil_rpc_url,
             gateway_client=anvil_eth_call_adapter,
+            venue_verification_gateway_factory=lambda: anvil_eth_call_adapter,
         )
 
         # Layers 1-2: exact-address compilation and managed-Anvil execution.
@@ -69,8 +71,29 @@ class TestUniswapV3ExactPoolLP:
         )
         assert open_compilation.action_bundle is not None
         assert open_compilation.action_bundle.metadata["pool"].lower() == EXACT_POOL.lower()
+        open_binding_hash = open_compilation.action_bundle.metadata["venue_binding_hash"]
+        assert isinstance(open_binding_hash, str)
+        open_operational_targets = {
+            ref["reference"].lower() for ref in open_compilation.action_bundle.metadata["venue_operational_refs"]
+        }
+        assert any(
+            (tx["to"] if isinstance(tx, dict) else tx.to).lower() in open_operational_targets
+            for tx in open_compilation.action_bundle.transactions
+        )
         open_execution = await orchestrator.execute(open_compilation.action_bundle)
         assert open_execution.success, f"Exact-pool LP_OPEN execution failed: {open_execution.error}"
+        fork_block = int(os.environ["ANVIL_FORK_BLOCK_ARBITRUM"])
+        assert open_execution.transaction_results
+        for tx_result in open_execution.transaction_results:
+            assert tx_result.tx_hash.startswith("0x") and len(tx_result.tx_hash) == 66
+            assert tx_result.receipt is not None
+            assert tx_result.receipt.status == 1
+            assert tx_result.receipt.block_number >= fork_block
+        assert correlate_verified_venue_receipts(
+            bundle_metadata=open_compilation.action_bundle.metadata,
+            expected_binding_hash=open_binding_hash,
+            receipts=tuple(tx.receipt.to_dict() for tx in open_execution.transaction_results if tx.receipt),
+        ) == open_binding_hash
 
         # Layer 3: the production parser must recover the minted position.
         parser = UniswapV3ReceiptParser(chain=CHAIN_NAME)
@@ -106,8 +129,28 @@ class TestUniswapV3ExactPoolLP:
             f"Exact-pool LP_CLOSE compilation failed: {close_compilation.error}"
         )
         assert close_compilation.action_bundle is not None
+        assert close_compilation.action_bundle.metadata["venue_binding_hash"] == open_binding_hash
+        close_operational_targets = {
+            ref["reference"].lower() for ref in close_compilation.action_bundle.metadata["venue_operational_refs"]
+        }
+        assert close_operational_targets == open_operational_targets
+        assert any(
+            (tx["to"] if isinstance(tx, dict) else tx.to).lower() in close_operational_targets
+            for tx in close_compilation.action_bundle.transactions
+        )
         close_execution = await orchestrator.execute(close_compilation.action_bundle)
         assert close_execution.success, f"Exact-pool LP_CLOSE execution failed: {close_execution.error}"
+        assert close_execution.transaction_results
+        for tx_result in close_execution.transaction_results:
+            assert tx_result.tx_hash.startswith("0x") and len(tx_result.tx_hash) == 66
+            assert tx_result.receipt is not None
+            assert tx_result.receipt.status == 1
+            assert tx_result.receipt.block_number >= fork_block
+        assert correlate_verified_venue_receipts(
+            bundle_metadata=close_compilation.action_bundle.metadata,
+            expected_binding_hash=open_binding_hash,
+            receipts=tuple(tx.receipt.to_dict() for tx in close_execution.transaction_results if tx.receipt),
+        ) == open_binding_hash
 
         close_data = None
         for tx_result in close_execution.transaction_results:

@@ -14,6 +14,7 @@ from almanak.connectors._connector import (
     FeeModelDecl,
     ImportRef,
     SupportedChainsSpec,
+    VenueVerifierDecl,
 )
 from almanak.connectors._strategy_base.address_table import AbiFamily, AddressTableSpec
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
@@ -31,6 +32,7 @@ from almanak.core.chains.robinhood import DESCRIPTOR as ROBINHOOD
 from almanak.core.chains.xlayer import DESCRIPTOR as XLAYER
 from almanak.core.chains.zerog import DESCRIPTOR as ZEROG
 from almanak.core.intent_types import IntentType
+from almanak.framework.primitives.types import Primitive
 
 _PROVIDER_REFS = {
     ObligationId.ASSET_RESOLUTION: "almanak.connectors.uniswap_v3.compiler:UniswapV3Compiler",
@@ -267,6 +269,20 @@ CONNECTOR = Connector(
     primitive=ImportRef(
         module="almanak.connectors.uniswap_v3.primitive",
         attribute="PRIMITIVE",
+    ),
+    venue_verifiers=(
+        VenueVerifierDecl(
+            protocol="uniswap_v3",
+            verifier=ImportRef(
+                module="almanak.connectors._strategy_base.v3_venue_verifier",
+                attribute="V3VenueVerifier",
+            ),
+            contract_version="v3_exact_pool.v1",
+            binding_policy_version=1,
+            chains=(ARBITRUM, AVALANCHE, BASE, BSC, ETHEREUM, OPTIMISM, POLYGON),
+            primitives=(Primitive.LP, Primitive.SWAP),
+            component_names=("fee",),
+        ),
     ),
     strategy_intents=(IntentType.SWAP, IntentType.LP_OPEN, IntentType.LP_CLOSE, IntentType.LP_COLLECT_FEES),
     supported_chains=SupportedChainsSpec(

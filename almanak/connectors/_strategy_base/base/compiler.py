@@ -117,6 +117,9 @@ class BaseCompilerContext:
     price_oracle: Any
     cache: Any
     services: CompilerServices
+    # Lazy, connector-neutral construction seam. Only an exact-venue path may
+    # invoke it; ordinary and non-migrated compilations perform no extra reads.
+    venue_verification_gateway_factory: Any = None
     default_protocol: str = ""
     # Universal tx concept — any on-chain tx (swap, LP, lending supply,
     # perp open, bridge call) wants a block-timestamp-relative deadline.

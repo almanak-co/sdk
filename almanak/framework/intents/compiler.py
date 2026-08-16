@@ -520,6 +520,7 @@ class IntentCompiler:
         default_lp_slippage: Decimal = LP_SLIPPAGE_DEFAULT,
         config: IntentCompilerConfig | None = None,
         gateway_client: "GatewayClient | None" = None,
+        venue_verification_gateway_factory: Any | None = None,
         token_resolver: "TokenResolverType | None" = None,
         chain_wallets: dict[str, str] | None = None,
     ) -> None:
@@ -613,6 +614,9 @@ class IntentCompiler:
         self.rpc_timeout = rpc_timeout
         self._web3: Web3 | None = None
         self._gateway_client = gateway_client
+        if venue_verification_gateway_factory is None and gateway_client is not None:
+            venue_verification_gateway_factory = self._gateway_venue_verification_factory(gateway_client)
+        self._venue_verification_gateway_factory = venue_verification_gateway_factory
         # Lowercase chain keys at construction so lookups via ``dest_chain.lower()``
         # match — otherwise a caller passing e.g. ``{"Base": "0x..."}`` would silently
         # fall through to ``self.wallet_address`` and misroute a bridge destination.
@@ -766,6 +770,7 @@ class IntentCompiler:
             "allow_placeholder_prices": config.allow_placeholder_prices,
             "token_resolver": getattr(self, "_token_resolver", None),
             "gateway_client": getattr(self, "_gateway_client", None),
+            "venue_verification_gateway_factory": getattr(self, "_venue_verification_gateway_factory", None),
             "price_oracle": getattr(self, "price_oracle", None),
             "cache": getattr(self, "_connector_compiler_cache", {}),
             "services": _ConnectorCompilerServices(self),
@@ -776,6 +781,17 @@ class IntentCompiler:
             # SwapCompilerContext — see _swap_compiler_context_kwargs.
             "default_deadline_seconds": self.default_deadline_seconds,
         }
+
+    @staticmethod
+    def _gateway_venue_verification_factory(gateway_client: Any):
+        """Create no verifier transport until an exact venue is requested."""
+
+        def build():
+            from almanak.framework.venues import GatewayClientVenueVerificationGateway
+
+            return GatewayClientVenueVerificationGateway(gateway_client)
+
+        return build
 
     def _swap_compiler_context_kwargs(self) -> dict[str, Any]:
         """Build kwargs for a swap-pipeline context (base + swap-specific knobs).

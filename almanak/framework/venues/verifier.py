@@ -31,6 +31,18 @@ class VenueVerificationGateway(Protocol):
     ) -> bytes:
         """Execute one chain-specific read through the gateway gRPC client."""
 
+    def code(
+        self,
+        *,
+        chain: str,
+        target: VenueTargetRef,
+        block_number: int | None = None,
+    ) -> bytes:
+        """Return deployed bytecode for an operational target."""
+
+    def block_number(self, *, chain: str) -> int:
+        """Return the gateway-observed chain head used to pin verification."""
+
     def block_hash(self, *, chain: str, block_number: int) -> str:
         """Return the canonical hash for a gateway-observed block."""
 

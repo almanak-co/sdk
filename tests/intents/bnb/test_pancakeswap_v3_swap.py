@@ -70,6 +70,7 @@ class TestPancakeSwapV3SwapIntent:
         web3: Web3,
         funded_wallet: str,
         orchestrator: ExecutionOrchestrator,
+        anvil_eth_call_adapter,
         price_oracle: dict[str, Decimal],
         tmp_path,
     ):
@@ -115,6 +116,7 @@ class TestPancakeSwapV3SwapIntent:
             price_oracle=exact_prices,
             rpc_url=orchestrator.rpc_url,
             token_resolver=resolver,
+            venue_verification_gateway_factory=lambda: anvil_eth_call_adapter,
         )
         parser = PancakeSwapV3ReceiptParser(chain=CHAIN_NAME)
 

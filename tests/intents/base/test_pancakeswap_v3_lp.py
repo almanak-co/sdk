@@ -20,12 +20,15 @@ To run:
 """
 
 import json
+import os
 from decimal import Decimal
 
 import pytest
 from web3 import Web3
 
+from almanak.connectors._strategy_base.v3_pool_validation import read_v3_position_binding
 from almanak.connectors.pancakeswap_v3.receipt_parser import PancakeSwapV3ReceiptParser
+from almanak.connectors.uniswap_v3.pool_validation import validate_v3_pool
 from almanak.framework.execution.extracted_data import LPCloseData
 from almanak.framework.execution.orchestrator import (
     ExecutionContext,
@@ -40,6 +43,7 @@ from almanak.framework.intents import (
     SwapIntent,
 )
 from almanak.framework.intents.vocabulary import CollectFeesIntent, IntentType
+from almanak.framework.venues import correlate_verified_venue_receipts
 from tests.intents._lp_setup_helpers import (
     collect_all_tokens,
     decrease_all_liquidity,
@@ -65,6 +69,7 @@ POSITION_MANAGER = LP_POSITION_MANAGERS["base"]["pancakeswap_v3"]
 # After sorting by address on Base: token0=WETH (0x4200...), token1=USDC (0x8335...)
 # So amount0=WETH, amount1=USDC, range is in USDC-per-WETH terms.
 POOL = "WETH/USDC/500"
+POOL_FEE_TIER = 500
 LP_AMOUNT_WETH = Decimal("0.1")   # amount0 (WETH after sorting on Base)
 LP_AMOUNT_USDC = Decimal("250")   # amount1 (USDC after sorting on Base)
 
@@ -239,7 +244,6 @@ class TestPancakeSwapV3LPOpenIntent:
         web3: Web3,
         funded_wallet: str,
         orchestrator: ExecutionOrchestrator,
-        price_oracle: dict[str, Decimal],
         anvil_rpc_url: str,
         layer5_accounting_harness,
         anvil_eth_call_adapter,
@@ -261,6 +265,15 @@ class TestPancakeSwapV3LPOpenIntent:
 
         usdc_decimals = get_token_decimals(web3, usdc_addr)
         weth_decimals = get_token_decimals(web3, weth_addr)
+        exact_pool = validate_v3_pool(
+            CHAIN_NAME,
+            "pancakeswap_v3",
+            usdc_addr,
+            weth_addr,
+            POOL_FEE_TIER,
+            web3.provider.endpoint_uri,  # type: ignore[attr-defined]
+        )
+        assert exact_pool.exists and exact_pool.pool_address
 
         print(f"\n{'=' * 80}")
         print("Test: LP Open WETH/USDC via LPOpenIntent (PancakeSwap V3)")
@@ -282,7 +295,7 @@ class TestPancakeSwapV3LPOpenIntent:
 
         # 2. Create LPOpenIntent
         intent = LPOpenIntent(
-            pool=POOL,
+            pool=Web3.to_checksum_address(exact_pool.pool_address),
             amount0=LP_AMOUNT_WETH,
             amount1=LP_AMOUNT_USDC,
             range_lower=RANGE_LOWER,
@@ -295,8 +308,10 @@ class TestPancakeSwapV3LPOpenIntent:
         compiler = IntentCompiler(
             chain=CHAIN_NAME,
             wallet_address=funded_wallet,
-            price_oracle=price_oracle,
+            price_oracle={"USDC": Decimal("1"), "WETH": Decimal("3000")},
             rpc_url=anvil_rpc_url,
+            gateway_client=anvil_eth_call_adapter,
+            venue_verification_gateway_factory=lambda: anvil_eth_call_adapter,
         )
 
         print("\nCompiling LPOpenIntent to ActionBundle...")
@@ -304,14 +319,36 @@ class TestPancakeSwapV3LPOpenIntent:
 
         assert compilation_result.status.value == "SUCCESS", f"Compilation failed: {compilation_result.error}"
         assert compilation_result.action_bundle is not None, "ActionBundle must be created"
+        assert compilation_result.action_bundle.metadata["pool"].lower() == exact_pool.pool_address.lower()
+        assert isinstance(compilation_result.action_bundle.metadata["venue_binding_hash"], str)
 
         print(f"ActionBundle created with {len(compilation_result.action_bundle.transactions)} transactions")
+        expected_binding_hash = compilation_result.action_bundle.metadata["venue_binding_hash"]
+        assert isinstance(expected_binding_hash, str)
 
         # 4. Execute
         print("\nExecuting via ExecutionOrchestrator...")
         execution_result = await orchestrator.execute(compilation_result.action_bundle)
 
         assert execution_result.success, f"Execution failed: {execution_result.error}"
+        fork_block = int(os.environ["ANVIL_FORK_BLOCK_BASE"])
+        assert execution_result.transaction_results
+        for tx_result in execution_result.transaction_results:
+            assert tx_result.tx_hash.startswith("0x") and len(tx_result.tx_hash) == 66
+            assert tx_result.receipt is not None
+            assert tx_result.receipt.status == 1
+            assert tx_result.receipt.block_number >= fork_block
+        metadata = compilation_result.action_bundle.metadata
+        operational_targets = {ref["reference"].lower() for ref in metadata["venue_operational_refs"]}
+        assert any(
+            (tx["to"] if isinstance(tx, dict) else tx.to).lower() in operational_targets
+            for tx in compilation_result.action_bundle.transactions
+        )
+        assert correlate_verified_venue_receipts(
+            bundle_metadata=metadata,
+            expected_binding_hash=expected_binding_hash,
+            receipts=tuple(tx.receipt.to_dict() for tx in execution_result.transaction_results if tx.receipt),
+        ) == metadata["venue_binding_hash"]
         execution_result = _enrich_for_accounting(
             execution_result,
             intent,
@@ -339,6 +376,24 @@ class TestPancakeSwapV3LPOpenIntent:
 
         assert position_id is not None, "Must extract position ID from mint receipt"
         print(f"\nPosition ID: {position_id}")
+
+        minted_position = read_v3_position_binding(
+            POSITION_MANAGER,
+            position_id,
+            anvil_rpc_url,
+            chain=CHAIN_NAME,
+            gateway_client=anvil_eth_call_adapter,
+        )
+        assert minted_position is not None, "Minted NFT must expose its V3 position identity"
+        assert (
+            minted_position.token0.lower(),
+            minted_position.token1.lower(),
+            minted_position.fee_tier,
+        ) == (
+            weth_addr.lower(),
+            usdc_addr.lower(),
+            POOL_FEE_TIER,
+        ), "Minted NFT must belong to the exact requested pool tuple"
 
         # 6. Verify on-chain position has liquidity
         liquidity = query_position_liquidity(web3, POSITION_MANAGER, position_id)
@@ -372,7 +427,7 @@ class TestPancakeSwapV3LPOpenIntent:
             chain=CHAIN_NAME,
             wallet_address=funded_wallet,
             expected_event_type="LP_OPEN",
-            price_oracle=price_oracle,
+            price_oracle={"USDC": Decimal("1"), "WETH": Decimal("3000")},
             eth_call_reader=anvil_eth_call_adapter,
         )
         _assert_identity(accounting_row, event_type="LP_OPEN", wallet=funded_wallet)

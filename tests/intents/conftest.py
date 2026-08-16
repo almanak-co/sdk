@@ -18,7 +18,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 import pytest_asyncio
@@ -36,6 +36,9 @@ from almanak.framework.accounting.lp_accounting import _get_pool_address
 from almanak.framework.accounting.processor import AccountingProcessor, write_outbox_entry
 from almanak.framework.observability.ledger import build_ledger_entry
 from almanak.framework.state.backends.sqlite import SQLiteConfig, SQLiteStore
+
+if TYPE_CHECKING:
+    from almanak.framework.gateway_client import V4PositionState
 
 # =============================================================================
 # Test Timeouts (Fail Fast)
@@ -174,6 +177,7 @@ class AnvilEthCallAdapter:
         to: str,
         data: str,
         *,
+        block: int | None = None,
         raise_on_error: bool = False,
     ) -> str | None:
         del chain, raise_on_error
@@ -181,9 +185,38 @@ class AnvilEthCallAdapter:
             {
                 "to": Web3.to_checksum_address(to),
                 "data": data,
-            }
+            },
+            block_identifier="latest" if block is None else block,
         )
         return Web3.to_hex(result)
+
+    def read(self, *, chain: str, target: Any, payload: bytes, block_number: int | None = None) -> bytes:
+        result = self.eth_call(
+            chain,
+            target.reference,
+            Web3.to_hex(payload),
+            block=block_number,
+            raise_on_error=True,
+        )
+        if result is None:
+            raise ValueError("managed-Anvil venue read returned no data")
+        return bytes.fromhex(result[2:])
+
+    def code(self, *, chain: str, target: Any, block_number: int | None = None) -> bytes:
+        del chain
+        result = self.web3.eth.get_code(
+            Web3.to_checksum_address(target.reference),
+            block_identifier="latest" if block_number is None else block_number,
+        )
+        return bytes(result)
+
+    def block_number(self, *, chain: str) -> int:
+        del chain
+        return self.web3.eth.block_number
+
+    def block_hash(self, *, chain: str, block_number: int) -> str:
+        del chain
+        return "0x" + bytes(self.web3.eth.get_block(block_number)["hash"]).hex()
 
     def query_position_liquidity(
         self,

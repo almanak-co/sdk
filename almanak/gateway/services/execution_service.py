@@ -378,11 +378,23 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
             rpc_url=rpc_url,
             config=config,
             chain_wallets=self._registered_chain_wallets,
+            venue_verification_gateway_factory=self._venue_verification_gateway_factory(chain),
         )
 
         self._compiler_cache[cache_key] = (compiler, now)
         logger.info(f"Created IntentCompiler for chain={chain}, wallet={wallet_address[:10]}...")
         return compiler
+
+    def _venue_verification_gateway_factory(self, chain: str):
+        """Return a lazy chain-bound adapter factory; ordinary compiles never invoke it."""
+        network = self.settings.network
+
+        def build():
+            from almanak.gateway.services.venue_verification_gateway import GatewayRpcVenueVerificationGateway
+
+            return GatewayRpcVenueVerificationGateway(chain=chain, network=network)
+
+        return build
 
     def _warn_if_resolved_to_public_rpc(self, chain: str, rpc_url: str) -> None:
         """Emit a one-time ERROR when the hosted gateway resolved ``chain`` to a public RPC.
