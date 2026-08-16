@@ -63,6 +63,7 @@ from datetime import datetime
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
+from almanak.core.asset_identity import AssetIdentity, AssetNamespace
 from almanak.core.chains import ChainRegistry
 from almanak.core.enums import ChainFamily
 
@@ -726,42 +727,9 @@ class TokenResolver:
         Example:
             resolver.resolve_caip19("eip155:1/erc20:0x6b175474e89094c44da98b954eedeac495271d0f")
         """
-        # Late import mirrors ``TokenRef.to_caip19`` — the CAIP-19 codec depends
-        # on ``defaults``/``models`` which this module also imports.
-        from .caip import parse_caip19
-
-        parsed = parse_caip19(caip19)
-        descriptor = ChainRegistry.by_caip2(parsed.caip2)
-        namespace = parsed.asset_namespace
-        if namespace == "slip44":
-            # Native asset. The reference MUST match the chain's registered
-            # native SLIP-44 coin type, else a foreign coin type (e.g.
-            # eip155:1/slip44:501 — SOL on Ethereum) would alias to native ETH.
-            expected = descriptor.native.slip44
-            if expected is None:
-                raise ValueError(f"Chain {descriptor.name!r} has no registered native SLIP-44 coin type")
-            if parsed.asset_reference != str(expected):
-                raise ValueError(
-                    f"CAIP-19 slip44 reference {parsed.asset_reference!r} does not match "
-                    f"{descriptor.name!r} native coin type {expected}"
-                )
-            # Keep the reverse path address-native. Routing through the native
-            # symbol would re-enter the deprecated symbol resolution path even
-            # though the caller supplied stable CAIP-19 identity.
-            target = NATIVE_SENTINEL
-        else:
-            # Fungible asset. The namespace must match the chain family (erc20
-            # on EVM, token/SPL on Solana); anything else (unsupported namespace
-            # like erc721, or a family mismatch) is rejected rather than treated
-            # as an address.
-            expected_ns = "erc20" if descriptor.family is ChainFamily.EVM else "token"
-            if namespace != expected_ns:
-                raise ValueError(
-                    f"Unsupported CAIP-19 asset namespace {namespace!r} for {descriptor.name!r} "
-                    f"(expected {expected_ns!r} or 'slip44')"
-                )
-            target = parsed.asset_reference
-        return self.resolve(target, descriptor.name, log_errors=log_errors, skip_gateway=skip_gateway)
+        identity = AssetIdentity.from_caip19(caip19)
+        target = NATIVE_SENTINEL if identity.asset_namespace is AssetNamespace.NATIVE else identity.asset_reference
+        return self.resolve(target, identity.chain, log_errors=log_errors, skip_gateway=skip_gateway)
 
     def resolve(  # noqa: C901
         self, token: str, chain: str, *, log_errors: bool = True, skip_gateway: bool = False

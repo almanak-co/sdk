@@ -18,7 +18,16 @@ from enum import Enum
 from types import MappingProxyType
 from typing import Any
 
+from almanak.core.asset_identity import (
+    AssetIdentity,
+    AssetNamespace,
+    KnownDecimals,
+    NativeAssetIdentityResult,
+    NativeIdentityUnavailable,
+    resolve_native_asset_identity,
+)
 from almanak.core.chains import ChainRegistry
+from almanak.core.constants import ETH_ADDRESS
 from almanak.core.enums import ChainFamily
 
 
@@ -128,6 +137,48 @@ class TokenRef:
         from .caip import token_ref_to_caip19
 
         return token_ref_to_caip19(self)
+
+    @property
+    def asset_identity(self) -> AssetIdentity:
+        """Return a writer-safe identity, failing loudly when native identity is unavailable."""
+        result = self.resolve_asset_identity()
+        if isinstance(result, NativeIdentityUnavailable):
+            raise ValueError(
+                f"Chain {result.chain!r} has no SLIP-44 coin type; native asset identity cannot be constructed"
+            )
+        return result
+
+    def resolve_asset_identity(self) -> NativeAssetIdentityResult:
+        """Return identity or a typed refusal without inventing a native sentinel."""
+        descriptor = ChainRegistry.get(self.chain)
+        normalized_native = normalize_token_address_for_chain(ETH_ADDRESS, self.chain)
+        if self.address == normalized_native:
+            return resolve_native_asset_identity(self.chain)
+        namespace = AssetNamespace.TOKEN if descriptor.family is ChainFamily.SOLANA else AssetNamespace.ERC20
+        return AssetIdentity(self.chain, namespace, self.address)
+
+    @classmethod
+    def from_asset_identity(
+        cls,
+        identity: AssetIdentity,
+        *,
+        decimals: KnownDecimals,
+        symbol: str | None = None,
+        provenance: str | None = None,
+    ) -> "TokenRef":
+        """Adapt writer-safe identity without inferring required amount metadata."""
+        if type(identity) is not AssetIdentity:
+            raise TypeError(f"identity must be AssetIdentity, got {type(identity).__name__}")
+        if type(decimals) is not KnownDecimals:
+            raise TypeError(f"decimals must be KnownDecimals, got {type(decimals).__name__}")
+        address = ETH_ADDRESS if identity.asset_namespace is AssetNamespace.NATIVE else identity.asset_reference
+        return cls(
+            chain=identity.chain,
+            address=address,
+            decimals=decimals.value,
+            symbol=symbol,
+            provenance=provenance,
+        )
 
 
 class BridgeType(Enum):
@@ -279,6 +330,36 @@ class ResolvedToken:
             symbol=self.symbol,
             provenance=self.source,
         )
+
+    @property
+    def asset_identity(self) -> AssetIdentity:
+        """Return this resolved token's writer-safe identity."""
+        result = self.resolve_asset_identity()
+        if isinstance(result, NativeIdentityUnavailable):
+            raise ValueError(
+                f"Chain {result.chain!r} has no SLIP-44 coin type; native asset identity cannot be constructed"
+            )
+        return result
+
+    def resolve_asset_identity(self) -> NativeAssetIdentityResult:
+        """Reconcile authoritative native metadata with the compatibility address."""
+        if type(self.is_native) is not bool:
+            raise TypeError(f"ResolvedToken.is_native must be bool, got {type(self.is_native).__name__}")
+        token_ref = self.token_ref
+        native_sentinel = normalize_token_address_for_chain(ETH_ADDRESS, self.chain)
+        address_is_sentinel = token_ref.address == native_sentinel
+        if self.is_native:
+            return resolve_native_asset_identity(self.chain)
+        if address_is_sentinel:
+            raise ValueError(
+                f"ResolvedToken for {self.chain!r} contradicts its native sentinel address with is_native=False"
+            )
+        return token_ref.resolve_asset_identity()
+
+    @property
+    def asset_decimals(self) -> KnownDecimals:
+        """Return measured decimals in the closed amount-metadata type."""
+        return KnownDecimals(self.decimals)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
