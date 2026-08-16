@@ -44,12 +44,16 @@ class _Gateway:
     fail_head: bool = False
     changing_hash: bool = False
     hash_reads: int = 0
+    response_overrides: dict[tuple[VenueTargetRole, str], bytes] = field(default_factory=dict)
 
     def read(self, *, chain, target, payload, block_number=None):
         self.reads.append((chain, target.role, block_number))
         if self.fail:
             raise ValueError("upstream unavailable")
         selector = "0x" + payload[:4].hex()
+        override = self.response_overrides.get((target.role, selector))
+        if override is not None:
+            return override
         if target.role is VenueTargetRole.POOL and selector == V3_TOKEN0_SELECTOR:
             return _word_address(TOKEN0)
         if target.role is VenueTargetRole.POOL and selector == V3_TOKEN1_SELECTOR:
@@ -141,6 +145,51 @@ def test_gateway_failure_and_missing_operational_code_fail_closed() -> None:
     assert unavailable.reason_code is VenueBindingFailureReason.GATEWAY_UNAVAILABLE
     assert type(missing_code) is VenueBindingFailure
     assert missing_code.reason_code is VenueBindingFailureReason.TARGET_MISMATCH
+
+
+@pytest.mark.parametrize(
+    "malformed_word",
+    (
+        b"\x00" * 31,
+        b"\x00" * 33,
+        b"\x00" * 64,
+        b"\x01" + b"\x00" * 11 + bytes.fromhex(TOKEN0[2:]),
+    ),
+    ids=("short", "oversized", "concatenated", "dirty-padding"),
+)
+def test_malformed_address_words_fail_closed(malformed_word: bytes) -> None:
+    gateway = _Gateway(
+        response_overrides={(VenueTargetRole.POOL, V3_TOKEN0_SELECTOR): malformed_word},
+    )
+
+    result = V3VenueVerifier().verify_venue(_request(), gateway)
+
+    assert type(result) is VenueBindingFailure
+    assert result.state is VenueBindingFailureState.UNAVAILABLE
+    assert result.reason_code is VenueBindingFailureReason.GATEWAY_UNAVAILABLE
+
+
+@pytest.mark.parametrize(
+    "malformed_word",
+    (
+        b"\x00" * 31,
+        b"\x00" * 33,
+        b"\x00" * 64,
+        b"\x01" + b"\x00" * 28 + (500).to_bytes(3, "big"),
+    ),
+    ids=("short", "oversized", "concatenated", "dirty-padding"),
+)
+def test_malformed_fee_words_fail_closed(malformed_word: bytes) -> None:
+    gateway = _Gateway(
+        response_overrides={(VenueTargetRole.POOL, V3_FEE_SELECTOR): malformed_word},
+    )
+
+    result = V3VenueVerifier().verify_venue(_request(), gateway)
+
+    assert type(result) is VenueBindingFailure
+    assert result.state is VenueBindingFailureState.UNAVAILABLE
+    assert result.reason_code is VenueBindingFailureReason.GATEWAY_UNAVAILABLE
+    assert all(role is not VenueTargetRole.FACTORY for _, role, _ in gateway.reads)
 
 
 def test_head_block_failure_is_a_closed_unavailable_result() -> None:

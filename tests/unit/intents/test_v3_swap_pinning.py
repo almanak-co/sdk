@@ -434,6 +434,22 @@ class TestCompilerPoolAddressPinning:
     @pytest.mark.parametrize(
         ("protocol", "chain", "primitive"),
         (
+            ("uniswap_v3", "arbitrum", "swap"),
+            ("uniswap_v3", "base", "lp"),
+            ("pancakeswap_v3", "base", "swap"),
+            ("pancakeswap_v3", "bsc", "lp"),
+        ),
+    )
+    def test_staged_exact_verifier_captures_declared_lanes(self, protocol: str, chain: str, primitive: str) -> None:
+        from almanak.connectors.uniswap_v3.compiler import UniswapV3Compiler
+
+        assert UniswapV3Compiler._exact_venue_verifier_applies(
+            ctx=SimpleNamespace(chain=chain), protocol=protocol, primitive=primitive
+        )
+
+    @pytest.mark.parametrize(
+        ("protocol", "chain", "primitive"),
+        (
             ("sushiswap_v3", "arbitrum", "swap"),
             ("agni_finance", "mantle", "swap"),
             ("uniswap_v3", "mantle", "swap"),

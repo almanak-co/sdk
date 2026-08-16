@@ -32,6 +32,9 @@ VERIFIER_CONTRACT_VERSION = "v3_exact_pool.v1"
 BINDING_POLICY_VERSION = 1
 _MAX_SANE_FEE = 1_000_000
 _ZERO_ADDRESS = "0x" + "0" * 40
+_ABI_WORD_BYTES = 32
+_ABI_ADDRESS_PADDING_BYTES = 12
+_ABI_FEE_VALUE_BYTES = 3
 
 
 def _address_ref(role: VenueTargetRole, address: str) -> VenueTargetRef:
@@ -43,9 +46,19 @@ def _address_ref(role: VenueTargetRole, address: str) -> VenueTargetRef:
 
 
 def _decode_address(raw: bytes) -> str:
-    if len(raw) < 32:
-        raise ValueError("address result is shorter than one ABI word")
-    return "0x" + raw[-20:].hex()
+    if type(raw) is not bytes or len(raw) != _ABI_WORD_BYTES:
+        raise ValueError("address result must be exactly one 32-byte ABI word")
+    if raw[:_ABI_ADDRESS_PADDING_BYTES] != b"\x00" * _ABI_ADDRESS_PADDING_BYTES:
+        raise ValueError("address result has non-zero ABI padding")
+    return "0x" + raw[_ABI_ADDRESS_PADDING_BYTES:].hex()
+
+
+def _decode_fee(raw: bytes) -> int:
+    if type(raw) is not bytes or len(raw) != _ABI_WORD_BYTES:
+        raise ValueError("fee result must be exactly one 32-byte ABI word")
+    if raw[:-_ABI_FEE_VALUE_BYTES] != b"\x00" * (_ABI_WORD_BYTES - _ABI_FEE_VALUE_BYTES):
+        raise ValueError("fee result has non-zero ABI padding")
+    return int.from_bytes(raw[-_ABI_FEE_VALUE_BYTES:], "big")
 
 
 def _evidence(
@@ -204,9 +217,7 @@ class V3VenueVerifier(BaseVenueVerifier):
                 payload=bytes.fromhex(V3_FEE_SELECTOR[2:]),
                 block_number=observed_block,
             )
-            if len(fee_raw) < 32:
-                raise ValueError("fee result is shorter than one ABI word")
-            fee = int.from_bytes(fee_raw[:32], "big")
+            fee = _decode_fee(fee_raw)
             factory_ref = next(ref for ref in operational_refs if ref.role is VenueTargetRole.FACTORY)
             canonical_pool = _decode_address(
                 gateway.read(
