@@ -80,6 +80,11 @@ class DataMeta:
         forward_filled: True when the value carries synthetic forward-filled
             data points (e.g. flat OHLCV candles synthesised for a quiet DEX
             pool, VIB-4875) rather than purely observed values.
+        freshness_reference_at: Optional clock used to evaluate freshness.
+            Live data leaves this unset and is compared with wall clock.
+            Historical simulations set it to the simulated tick so an exact
+            block observation is not incorrectly stale merely because the
+            backtest is replayed later.
     """
 
     source: str
@@ -92,6 +97,7 @@ class DataMeta:
     cache_hit: bool = False
     proxy_source: str | None = None
     forward_filled: bool = False
+    freshness_reference_at: datetime | None = None
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.confidence <= 1.0:
@@ -147,7 +153,8 @@ class DataEnvelope[T]:
     @property
     def is_fresh(self) -> bool:
         """Convenience: data observed within the last 60 seconds."""
-        age = (datetime.now(UTC) - self.meta.observed_at).total_seconds()
+        reference_at = self.meta.freshness_reference_at or datetime.now(UTC)
+        age = (reference_at - self.meta.observed_at).total_seconds()
         return age < 60
 
     @property

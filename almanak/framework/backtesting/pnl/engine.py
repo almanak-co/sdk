@@ -862,13 +862,14 @@ def create_market_snapshot_from_state(
     # Soft-empty lanes explain themselves once per run (ALM-2943): live
     # snapshots leave this None, which disables the ledger notes.
     snapshot._backtest_soft_empty_noted = soft_empty_noted if soft_empty_noted is not None else set()
-    # pool_analytics/best_pool have no historical analytics plane in a
-    # backtest (TVL/volume/fee-APR would be fabricated — Empty != Zero), so
-    # the refusal stays — but under a truthful key/message instead of the
-    # live-misconfiguration "unconfigured".
+    # A caller that omits the run-scoped historical analytics reader still
+    # gets a truthful refusal instead of the live-misconfiguration
+    # "unconfigured".  Engine/readiness paths wire that reader for declared
+    # exact-pool dependencies; direct factory callers may intentionally omit
+    # it (Empty != Zero).
     snapshot._pool_analytics_refusal_detail = (
-        "pool_analytics is not simulated in backtests: TVL/volume/fee analytics need a historical "
-        "pool-data plane; gate on market.pool_price()/market.ohlcv() instead"
+        "pool_analytics is unavailable in this backtest snapshot: no historical pool-analytics "
+        "reader was wired for the requested run"
     )
     # Views that refuse must land their refusals in THIS tick's
     # decision-input ledger (the snapshot is fresh per tick).
@@ -2112,14 +2113,18 @@ class BacktestPoolHistoryReader:
 
 
 class BacktestPoolAnalyticsReader:
-    """Serves ``market.pool_analytics()`` from the run's pool-history lane.
+    """Serves ``market.pool_analytics()`` from exact state plus pool history.
 
-    Same parity rationale and daily plane as :class:`BacktestPoolHistoryReader`
-    (the engine already consumed pool-day TVL/volume internally while the
-    accessor refused). Serve shape, per the ``PoolAnalytics`` contract:
+    Exact-block token balances are the authoritative TVL plane when an exact
+    pool was declared and prewarmed.  They are valued with the same tick's
+    historical USD prices; the completed-day pool-history lane remains the
+    source for volume. Serve shape, per the ``PoolAnalytics`` contract:
 
-    - ``tvl_usd`` / ``volume_24h_usd`` from the newest COMPLETED pool-day
-      (the tick's own day-bar would include the tick's future).
+    - ``tvl_usd`` from exact-block balances plus historical token prices. A
+      completed-day TVL remains the compatibility fallback for runs without
+      an exact-state declaration.
+    - ``volume_24h_usd`` from the newest COMPLETED pool-day (the tick's own
+      day-bar would include the tick's future).
     - ``volume_7d_usd`` summed over the last 7 completed days when every
       day measured; otherwise unmeasured.
     - ``fee_apr`` / ``fee_apy`` UNMEASURED in this plane (declared in
@@ -2138,21 +2143,21 @@ class BacktestPoolAnalyticsReader:
         self._provider = provider
         self._chain = str(chain) if chain else None
         self._timestamp: datetime | None = None
+        self._market_state: Any | None = None
+        self._pool_state_view: Any | None = None
 
-    def bind(self, timestamp: datetime) -> None:
-        self._timestamp = timestamp
-
-    def get_pool_analytics(
+    def bind(
         self,
-        pool_address: str,
-        chain: str,
-        protocol: str | None = None,
-    ) -> Any:
-        from datetime import timedelta as _timedelta
+        timestamp: datetime,
+        *,
+        market_state: Any | None = None,
+        pool_state_view: Any | None = None,
+    ) -> None:
+        self._timestamp = timestamp
+        self._market_state = market_state
+        self._pool_state_view = pool_state_view
 
-        from almanak.framework.data.models import DataClassification, DataMeta
-        from almanak.framework.data.pools.analytics import DataEnvelope, PoolAnalytics
-
+    def _validated_context(self, chain: str, protocol: str | None) -> tuple[datetime, str, str]:
         if self._timestamp is None:
             raise ValueError("pool_analytics unavailable: backtest reader is not bound to a tick")
         if not protocol:
@@ -2160,62 +2165,203 @@ class BacktestPoolAnalyticsReader:
                 "pool_analytics unavailable in backtest without a protocol hint: the pool-history "
                 "plane is protocol-scoped — pass protocol= (e.g. 'uniswap_v3')"
             )
-        target_chain = (chain or self._chain or "").lower()
+        return self._timestamp, (chain or self._chain or "").lower(), protocol
 
-        newest_day = (self._timestamp - _timedelta(days=1)).date()
-        rows = []
-        for offset in range(7):
-            day = newest_day - _timedelta(days=offset)
-            rows.append(
-                self._provider.daily_history(pool_address=pool_address, chain=target_chain, protocol=protocol, day=day)
+    def _read_exact_state_tvl(self, pool_address: str, target_chain: str, protocol: str) -> Any | None:
+        if self._pool_state_view is None:
+            return None
+        if self._market_state is None:
+            raise ValueError("pool_analytics exact-state reader is missing the bound historical market state")
+
+        from almanak.framework.market.errors import PoolPriceUnavailableError
+
+        try:
+            return self._pool_state_view.read_pool_tvl_usd(
+                pool_address=pool_address,
+                chain=target_chain,
+                protocol=protocol,
+                market_state=self._market_state,
             )
-        newest = rows[0]
-        if newest is None or (newest.tvl is None and newest.volume_24h is None):
+        except PoolPriceUnavailableError as exc:
+            # Exact state is declared pool-by-pool.  A reader bound for pool A
+            # must not disable completed-day history fallback for pool B.
+            if exc.reason == "exact pool was not declared and prewarmed":
+                return None
+            raise
+
+    def _completed_history(
+        self,
+        pool_address: str,
+        target_chain: str,
+        protocol: str,
+        timestamp: datetime,
+    ) -> tuple[Any, list[Any | None]]:
+        newest_day = (timestamp - timedelta(days=1)).date()
+        rows = [
+            self._provider.daily_history(
+                pool_address=pool_address,
+                chain=target_chain,
+                protocol=protocol,
+                day=newest_day - timedelta(days=offset),
+            )
+            for offset in range(7)
+        ]
+        return newest_day, rows
+
+    @staticmethod
+    def _require_measured_pool(
+        pool_address: str,
+        target_chain: str,
+        protocol: str,
+        newest_day: Any,
+        newest: Any | None,
+        state_tvl: Any | None,
+    ) -> None:
+        history_measured = newest is not None and (newest.tvl is not None or newest.volume_24h is not None)
+        if state_tvl is None and not history_measured:
             raise ValueError(
                 f"pool-history plane measured no data for pool {pool_address} on {target_chain} "
                 f"({protocol}) for {newest_day} — the pool may be outside provider coverage"
             )
 
-        unmeasured: set[str] = {"fee_apr", "fee_apy"}  # not derivable from this plane
-        tvl = newest.tvl
-        if tvl is None:
-            unmeasured.add("tvl_usd")
-        volume_24h = newest.volume_24h
-        if volume_24h is None:
-            unmeasured.add("volume_24h_usd")
-        day_volumes = [row.volume_24h if row is not None else None for row in rows]
-        measured_volumes = [volume for volume in day_volumes if volume is not None]
-        if len(measured_volumes) < len(day_volumes):
-            volume_7d = None
-            unmeasured.add("volume_7d_usd")
-        else:
-            volume_7d = sum(measured_volumes, Decimal("0"))
-        sources = {
-            source for row in rows if row is not None for source in (row.tvl_source, row.volume_source) if source
-        }
+    @staticmethod
+    def _seven_day_volume(rows: list[Any | None]) -> Decimal | None:
+        volumes = [row.volume_24h for row in rows if row is not None and row.volume_24h is not None]
+        if len(volumes) != len(rows):
+            return None
+        return sum(volumes, Decimal("0"))
 
+    @staticmethod
+    def _analytics_tvl(newest: Any | None, state_tvl: Any | None) -> Decimal | None:
+        if state_tvl is not None:
+            return state_tvl.value.tvl_usd
+        return getattr(newest, "tvl", None)
+
+    @staticmethod
+    def _measured_or_zero(value: Decimal | None) -> Decimal:
+        return value if value is not None else Decimal("0")
+
+    @staticmethod
+    def _token_weights(state_tvl: Any | None) -> tuple[float, float]:
+        if state_tvl is None:
+            return 0.5, 0.5
+        return state_tvl.value.token0_weight, state_tvl.value.token1_weight
+
+    @classmethod
+    def _build_pool_analytics(
+        cls,
+        pool_address: str,
+        target_chain: str,
+        protocol: str,
+        newest: Any | None,
+        rows: list[Any | None],
+        state_tvl: Any | None,
+    ) -> tuple[Any, set[str]]:
+        from almanak.framework.data.pools.analytics import PoolAnalytics
+
+        tvl = cls._analytics_tvl(newest, state_tvl)
+        volume_24h = getattr(newest, "volume_24h", None)
+        volume_7d = cls._seven_day_volume(rows)
+        token0_weight, token1_weight = cls._token_weights(state_tvl)
+        unmeasured = {"fee_apr", "fee_apy"}
+        unmeasured.update(
+            field_name
+            for field_name, value in (
+                ("tvl_usd", tvl),
+                ("volume_24h_usd", volume_24h),
+                ("volume_7d_usd", volume_7d),
+            )
+            if value is None
+        )
         analytics = PoolAnalytics(
             pool_address=pool_address,
             chain=target_chain,
             protocol=protocol,
-            tvl_usd=tvl if tvl is not None else Decimal("0"),
-            volume_24h_usd=volume_24h if volume_24h is not None else Decimal("0"),
-            volume_7d_usd=volume_7d if volume_7d is not None else Decimal("0"),
+            tvl_usd=cls._measured_or_zero(tvl),
+            volume_24h_usd=cls._measured_or_zero(volume_24h),
+            volume_7d_usd=cls._measured_or_zero(volume_7d),
             fee_apr=0.0,
             fee_apy=0.0,
             utilization_rate=None,
+            token0_weight=token0_weight,
+            token1_weight=token1_weight,
             unmeasured_fields=frozenset(unmeasured),
         )
-        confidence = max(0.85 - 0.15 * len(unmeasured & set(self._MONEY_FIELDS)), 0.1)
-        meta = DataMeta(
-            source="backtest_pool_history:" + ("+".join(sorted(sources)) if sources else "unknown"),
-            observed_at=self._timestamp,  # bound tick — deterministic
-            finality=DataFinality.OFF_CHAIN,
-            staleness_ms=0,
+        return analytics, unmeasured
+
+    @staticmethod
+    def _history_sources(rows: list[Any | None]) -> set[str]:
+        return {source for row in rows if row is not None for source in (row.tvl_source, row.volume_source) if source}
+
+    @staticmethod
+    def _analytics_sources(rows: list[Any | None], state_tvl: Any | None) -> set[str]:
+        sources = BacktestPoolAnalyticsReader._history_sources(rows)
+        if state_tvl is not None:
+            sources.add(state_tvl.meta.source)
+        return sources
+
+    @staticmethod
+    def _state_meta_fields(state_tvl: Any | None, timestamp: datetime) -> tuple[Any, Any, Any, int, bool]:
+        if state_tvl is None:
+            return timestamp, None, DataFinality.OFF_CHAIN, 0, False
+        meta = state_tvl.meta
+        return meta.observed_at, meta.block_number, meta.finality, meta.staleness_ms, meta.cache_hit
+
+    @staticmethod
+    def _build_pool_analytics_meta(
+        rows: list[Any | None],
+        state_tvl: Any | None,
+        timestamp: datetime,
+        unmeasured: set[str],
+    ) -> Any:
+        from almanak.framework.data.models import DataMeta
+
+        sources = BacktestPoolAnalyticsReader._analytics_sources(rows, state_tvl)
+        observed_at, block_number, finality, staleness_ms, cache_hit = BacktestPoolAnalyticsReader._state_meta_fields(
+            state_tvl, timestamp
+        )
+        confidence = max(0.85 - 0.15 * len(unmeasured & set(BacktestPoolAnalyticsReader._MONEY_FIELDS)), 0.1)
+        return DataMeta(
+            source="backtest_pool_analytics:" + ("+".join(sorted(sources)) or "unknown"),
+            observed_at=observed_at,
+            block_number=block_number,
+            finality=finality,
+            staleness_ms=staleness_ms,
             latency_ms=0,
             confidence=confidence,
-            cache_hit=False,
+            cache_hit=cache_hit,
+            freshness_reference_at=timestamp,
         )
+
+    def get_pool_analytics(
+        self,
+        pool_address: str,
+        chain: str,
+        protocol: str | None = None,
+    ) -> Any:
+        from almanak.framework.data.models import DataClassification, DataEnvelope
+
+        timestamp, target_chain, validated_protocol = self._validated_context(chain, protocol)
+        state_tvl = self._read_exact_state_tvl(pool_address, target_chain, validated_protocol)
+        newest_day, rows = self._completed_history(pool_address, target_chain, validated_protocol, timestamp)
+        newest = rows[0]
+        self._require_measured_pool(
+            pool_address,
+            target_chain,
+            validated_protocol,
+            newest_day,
+            newest,
+            state_tvl,
+        )
+        analytics, unmeasured = self._build_pool_analytics(
+            pool_address,
+            target_chain,
+            validated_protocol,
+            newest,
+            rows,
+            state_tvl,
+        )
+        meta = self._build_pool_analytics_meta(rows, state_tvl, timestamp, unmeasured)
         return DataEnvelope(value=analytics, meta=meta, classification=DataClassification.INFORMATIONAL)
 
     def best_pool(self, *args: Any, **kwargs: Any) -> Any:

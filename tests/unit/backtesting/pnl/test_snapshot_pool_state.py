@@ -11,7 +11,8 @@ from types import SimpleNamespace
 import grpc
 import pytest
 
-from almanak.framework.backtesting.pnl.data_manifest import LANE_POOL_STATE, RunDataManifest
+from almanak.framework.backtesting.pnl.data_manifest import LANE_POOL_STATE, LANE_POOL_TVL, RunDataManifest
+from almanak.framework.backtesting.pnl.data_provider import HistoricalPriceObservation, MarketState
 from almanak.framework.backtesting.pnl.providers.snapshot_pool_state import (
     HistoricalPoolStatePoint,
     HistoricalPoolStateTarget,
@@ -19,6 +20,7 @@ from almanak.framework.backtesting.pnl.providers.snapshot_pool_state import (
     declared_historical_pool_state_targets,
     fetch_historical_pool_state_points,
 )
+from almanak.framework.backtesting.pnl.types import DataConfidence
 from almanak.framework.data.interfaces import DataSourceTimeout, DataSourceUnavailable
 from almanak.framework.data.models import DataClassification
 from almanak.framework.market.errors import PoolPriceUnavailableError
@@ -187,6 +189,133 @@ def test_snapshot_serves_execution_grade_pool_price_and_reserves() -> None:
     assert len(entries) == 1
     assert entries[0]["lane"] == LANE_POOL_STATE
     assert entries[0]["count"] == 2
+
+
+def test_snapshot_values_exact_pool_balances_with_tick_prices() -> None:
+    manifest = RunDataManifest()
+    source = SnapshotPoolStateSource(
+        start_time=START,
+        end_time=END,
+        sample_interval_seconds=3_600,
+        manifest=manifest,
+        fetcher=_fetcher,
+    )
+    asyncio.run(source.materialize_history(TARGET))
+    state = MarketState(
+        timestamp=END,
+        prices={("polygon", TOKEN0): Decimal("2"), ("polygon", TOKEN1): Decimal("1")},
+        price_observations={
+            ("polygon", TOKEN0): HistoricalPriceObservation(
+                price=Decimal("2"), timestamp=END, source="coingecko", confidence=DataConfidence.MEDIUM
+            ),
+            ("polygon", TOKEN1): HistoricalPriceObservation(
+                price=Decimal("1"), timestamp=END, source="coingecko", confidence=DataConfidence.MEDIUM
+            ),
+        },
+        chain="polygon",
+    )
+
+    envelope = source.view_at(END).read_pool_tvl_usd(POOL, "polygon", "uniswap_v3", state)
+
+    assert envelope.value.tvl_usd == Decimal("11")
+    assert envelope.value.token0_value_usd == Decimal("6")
+    assert envelope.value.token1_value_usd == Decimal("5")
+    assert envelope.meta.block_number == 460
+    assert envelope.meta.staleness_ms == 10_000
+    assert envelope.is_fresh
+    assert "historical:on_chain_archive" in envelope.meta.source
+    assert any(entry["lane"] == LANE_POOL_TVL for entry in manifest.entries())
+
+
+def test_snapshot_ignores_scalar_only_leg_and_values_it_through_exact_pool_spot() -> None:
+    def balanced_fetcher(**_kwargs):
+        return [
+            HistoricalPoolStatePoint(
+                1_000,
+                100,
+                2**96,
+                0,
+                9_000,
+                TOKEN0,
+                TOKEN1,
+                18,
+                18,
+                500,
+                2 * 10**18,
+                4 * 10**18,
+                "on_chain_archive",
+            ),
+            HistoricalPoolStatePoint(
+                4_590,
+                460,
+                2**96,
+                0,
+                9_000,
+                TOKEN0,
+                TOKEN1,
+                18,
+                18,
+                500,
+                2 * 10**18,
+                4 * 10**18,
+                "on_chain_archive",
+            ),
+        ]
+
+    source = SnapshotPoolStateSource(
+        start_time=START,
+        end_time=END,
+        sample_interval_seconds=3_600,
+        fetcher=balanced_fetcher,
+    )
+    asyncio.run(source.materialize_history(TARGET))
+    state = MarketState(
+        timestamp=END,
+        prices={("polygon", TOKEN0): Decimal("10"), ("polygon", TOKEN1): Decimal("999999")},
+        price_observations={
+            ("polygon", TOKEN0): HistoricalPriceObservation(
+                price=Decimal("10"), timestamp=END, source="coingecko", confidence=DataConfidence.MEDIUM
+            )
+        },
+        chain="polygon",
+    )
+
+    envelope = source.view_at(END).read_pool_tvl_usd(POOL, "polygon", "uniswap_v3", state)
+
+    assert envelope.value.tvl_usd == Decimal("60")
+    assert envelope.meta.confidence == pytest.approx(0.95)
+
+
+def test_snapshot_tvl_refuses_scalar_prices_without_measured_observations() -> None:
+    source = SnapshotPoolStateSource(
+        start_time=START,
+        end_time=END,
+        sample_interval_seconds=3_600,
+        fetcher=_fetcher,
+    )
+    asyncio.run(source.materialize_history(TARGET))
+    state = MarketState(
+        timestamp=END,
+        prices={("polygon", TOKEN0): Decimal("2"), ("polygon", TOKEN1): Decimal("1")},
+        chain="polygon",
+    )
+
+    with pytest.raises(ValueError, match="no historical USD price for either pool token"):
+        source.view_at(END).read_pool_tvl_usd(POOL, "polygon", "uniswap_v3", state)
+
+
+def test_snapshot_tvl_refuses_when_neither_pool_token_has_a_price() -> None:
+    source = SnapshotPoolStateSource(
+        start_time=START,
+        end_time=END,
+        sample_interval_seconds=3_600,
+        fetcher=_fetcher,
+    )
+    asyncio.run(source.materialize_history(TARGET))
+    state = MarketState(timestamp=END, prices={}, chain="polygon")
+
+    with pytest.raises(ValueError, match="no historical USD price for either pool token"):
+        source.view_at(END).read_pool_tvl_usd(POOL, "polygon", "uniswap_v3", state)
 
 
 def test_gateway_fetch_validates_and_maps_exact_pool_state(monkeypatch: pytest.MonkeyPatch) -> None:

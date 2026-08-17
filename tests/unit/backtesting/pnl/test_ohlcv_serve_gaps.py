@@ -123,23 +123,23 @@ class TestProxyWarnOrdering:
 
 
 class TestPoolAnalyticsTruthfulRefusal:
-    def test_backtest_refusal_key_is_not_simulated_with_guidance(self):
+    def test_backtest_refusal_key_reports_missing_historical_reader(self):
         view = _view(_engine_with_series("WETH", [3000.0] * 30))
         snapshot = _snapshot(view)
 
-        with pytest.raises(ValueError, match="not simulated in backtests"):
+        with pytest.raises(ValueError, match="no historical pool-analytics reader was wired"):
             snapshot.pool_analytics(BASE_WETH_USDC_POOL)
 
         assert ("pool_analytics", "not_simulated") in snapshot._critical_data_failures
         detail = snapshot._critical_data_failures[("pool_analytics", "not_simulated")]
-        assert "pool_price" in detail and "ohlcv" in detail
+        assert "no historical pool-analytics reader was wired" in detail
         assert ("pool_analytics", "unconfigured") not in snapshot._critical_data_failures
 
     def test_best_pool_shares_the_truthful_key(self):
         view = _view(_engine_with_series("WETH", [3000.0] * 30))
         snapshot = _snapshot(view)
 
-        with pytest.raises(ValueError, match="not simulated in backtests"):
+        with pytest.raises(ValueError, match="no historical pool-analytics reader was wired"):
             snapshot.best_pool("WETH", "USDC")
         assert ("best_pool", "not_simulated") in snapshot._critical_data_failures
 

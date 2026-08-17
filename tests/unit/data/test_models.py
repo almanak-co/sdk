@@ -197,6 +197,17 @@ class TestDataEnvelope:
         env = DataEnvelope(value=1, meta=meta)
         assert env.is_fresh is False
 
+    def test_is_fresh_uses_historical_reference_clock(self):
+        tick = datetime(2025, 1, 1, tzinfo=UTC)
+        meta = _make_meta(
+            observed_at=tick - timedelta(seconds=10),
+            freshness_reference_at=tick,
+            staleness_ms=10_000,
+        )
+        env = DataEnvelope(value=1, meta=meta)
+
+        assert env.is_fresh is True
+
     def test_is_execution_grade_false(self):
         meta = _make_meta()
         env = DataEnvelope(value=1, meta=meta)

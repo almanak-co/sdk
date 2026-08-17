@@ -13,9 +13,10 @@ from almanak.core.finality import DataFinality
 from almanak.framework.backtesting.pnl.data_manifest import (
     CONSUMER_STRATEGY_DECISION,
     LANE_POOL_STATE,
+    LANE_POOL_TVL,
     OUTCOME_SERVED,
 )
-from almanak.framework.backtesting.pnl.data_provider import is_address_like
+from almanak.framework.backtesting.pnl.data_provider import MarketState, is_address_like
 from almanak.framework.backtesting.pnl.providers.perp._gateway_history import run_sync_gateway_call
 from almanak.framework.data.interfaces import DataSourceUnavailable, data_source_error_from_grpc
 from almanak.framework.data.models import DataClassification, DataEnvelope, DataMeta
@@ -226,6 +227,17 @@ class HistoricalPoolStatePoint:
     reserve0_raw: int
     reserve1_raw: int
     source: str
+
+
+@dataclass(frozen=True, slots=True)
+class HistoricalPoolTVL:
+    """Exact-block pool balances valued on the historical USD price plane."""
+
+    tvl_usd: Decimal
+    token0_value_usd: Decimal
+    token1_value_usd: Decimal
+    token0_weight: float
+    token1_weight: float
 
 
 def _get_pool_state_series_response(client: Any, request: Any) -> Any:
@@ -466,6 +478,26 @@ class SnapshotPoolStateSource:
                 ladder=_ARCHIVE_LADDER,
             )
 
+    def record_tvl(
+        self,
+        target: HistoricalPoolStateTarget,
+        point: HistoricalPoolStatePoint,
+        tick_ts: int,
+        source: str,
+        detail: str,
+    ) -> None:
+        if self._manifest is not None:
+            self._manifest.record(
+                lane=LANE_POOL_TVL,
+                key=target.manifest_key,
+                consumer=CONSUMER_STRATEGY_DECISION,
+                source=source,
+                outcome=OUTCOME_SERVED,
+                at=datetime.fromtimestamp(tick_ts, UTC),
+                detail=detail,
+                ladder=_ARCHIVE_LADDER,
+            )
+
 
 class SnapshotPoolStateView:
     """Per-tick pool reader/registry backed by archive state."""
@@ -519,7 +551,11 @@ class SnapshotPoolStateView:
         raise PoolPriceUnavailableError(pool_address, "exact pool was not declared and prewarmed")
 
     @staticmethod
-    def _pool_price(target: HistoricalPoolStateTarget, point: HistoricalPoolStatePoint) -> DataEnvelope[PoolPrice]:
+    def _pool_price(
+        target: HistoricalPoolStateTarget,
+        point: HistoricalPoolStatePoint,
+        tick_ts: int,
+    ) -> DataEnvelope[PoolPrice]:
         raw_price = (Decimal(point.sqrt_price_x96) / Decimal(2**96)) ** 2
         price = raw_price * (Decimal(10) ** (point.token0_decimals - point.token1_decimals))
         observed_at = datetime.fromtimestamp(point.timestamp, UTC)
@@ -540,8 +576,10 @@ class SnapshotPoolStateView:
                 observed_at=observed_at,
                 block_number=point.block_number,
                 finality=DataFinality.LATEST,
+                staleness_ms=(tick_ts - point.timestamp) * 1000,
                 confidence=1.0,
                 cache_hit=True,
+                freshness_reference_at=datetime.fromtimestamp(tick_ts, UTC),
             ),
             classification=DataClassification.EXECUTION_GRADE,
         )
@@ -554,7 +592,119 @@ class SnapshotPoolStateView:
                 return self._fallback.read_pool_price(pool_address, chain)
             raise
         self._source.record(target, point, self._tick_ts, OUTCOME_SERVED, "slot0/liquidity archive state")
-        return self._pool_price(target, point)
+        return self._pool_price(target, point, self._tick_ts)
+
+    @staticmethod
+    def _historical_price(
+        market_state: MarketState,
+        chain: str,
+        token_address: str,
+    ) -> tuple[Decimal | None, datetime, str]:
+        token_key = (chain, token_address)
+        try:
+            price = market_state.get_price(token_key)
+        except KeyError:
+            tick = market_state.timestamp
+            tick = tick.replace(tzinfo=UTC) if tick.tzinfo is None else tick.astimezone(UTC)
+            return None, tick, ""
+        observation = market_state.get_price_observation(token_key)
+        if observation is None:
+            tick = market_state.timestamp
+            tick = tick.replace(tzinfo=UTC) if tick.tzinfo is None else tick.astimezone(UTC)
+            # Scalar-only prices from custom/legacy providers do not prove an
+            # historical observation time or source.  They may still value the
+            # portfolio, but must not satisfy strict historical pool-TVL
+            # readiness or be promoted to fully measured analytics.
+            return None, tick, ""
+        if not price.is_finite() or price <= 0:
+            raise ValueError(f"invalid historical USD price for {chain}:{token_address}: {price!r}")
+        observed_at = observation.timestamp
+        observed_at = observed_at.replace(tzinfo=UTC) if observed_at.tzinfo is None else observed_at.astimezone(UTC)
+        if observation.is_stale:
+            return None, observed_at, observation.source or "market_state"
+        return price, observed_at, observation.source or "market_state"
+
+    def read_pool_tvl_usd(
+        self,
+        pool_address: str,
+        chain: str,
+        protocol: str,
+        market_state: MarketState,
+    ) -> DataEnvelope[HistoricalPoolTVL]:
+        """Value exact-block token balances without requiring an off-chain TVL feed.
+
+        Both independently measured historical USD prices are preferred.  If
+        only one pool token has USD coverage, the other leg is valued through
+        this exact pool's same-block spot ratio.  No current reserve or price
+        is ever backfilled into a historical tick.
+        """
+        target, point = self._source._resolve(chain, protocol, pool_address, self._tick_ts)
+        chain_key = target.chain
+        reserve0 = Decimal(point.reserve0_raw) / Decimal(10**point.token0_decimals)
+        reserve1 = Decimal(point.reserve1_raw) / Decimal(10**point.token1_decimals)
+        price0, observed0, source0 = self._historical_price(market_state, chain_key, point.token0)
+        price1, observed1, source1 = self._historical_price(market_state, chain_key, point.token1)
+        pool_price = (Decimal(point.sqrt_price_x96) / Decimal(2**96)) ** 2
+        pool_price *= Decimal(10) ** (point.token0_decimals - point.token1_decimals)
+
+        derived_leg = ""
+        if price0 is None and price1 is None:
+            raise ValueError(
+                f"historical pool TVL cannot be valued for {target.manifest_key} at "
+                f"{datetime.fromtimestamp(self._tick_ts, UTC).isoformat()}: no historical USD price "
+                f"for either pool token ({point.token0}, {point.token1})"
+            )
+        if price0 is None:
+            assert price1 is not None
+            price0 = price1 * pool_price
+            observed0, source0 = observed1, source1
+            derived_leg = "token0_via_exact_pool_spot"
+        elif price1 is None:
+            price1 = price0 / pool_price
+            observed1, source1 = observed0, source0
+            derived_leg = "token1_via_exact_pool_spot"
+
+        value0 = reserve0 * price0
+        value1 = reserve1 * price1
+        tvl = value0 + value1
+        if not tvl.is_finite() or tvl < 0:
+            raise ValueError(f"invalid derived historical TVL for {target.manifest_key}: {tvl!r}")
+        if tvl == 0:
+            weight0 = weight1 = 0.5
+        else:
+            weight0 = float(value0 / tvl)
+            weight1 = float(value1 / tvl)
+
+        block_observed_at = datetime.fromtimestamp(point.timestamp, UTC)
+        observed_at = min(block_observed_at, observed0, observed1)
+        price_sources = "+".join(sorted({source for source in (source0, source1) if source})) or "market_state"
+        source = f"historical:{point.source}+historical_price:{price_sources}"
+        detail = (
+            f"balanceOf exact block={point.block_number}; token0={point.token0}; token1={point.token1}; "
+            f"valuation={derived_leg or 'two_historical_usd_prices'}"
+        )
+        self._source.record(target, point, self._tick_ts, OUTCOME_SERVED, "balanceOf archive state for TVL")
+        self._source.record_tvl(target, point, self._tick_ts, source, detail)
+        return DataEnvelope(
+            value=HistoricalPoolTVL(
+                tvl_usd=tvl,
+                token0_value_usd=value0,
+                token1_value_usd=value1,
+                token0_weight=weight0,
+                token1_weight=weight1,
+            ),
+            meta=DataMeta(
+                source=source,
+                observed_at=observed_at,
+                block_number=point.block_number,
+                finality=DataFinality.LATEST,
+                staleness_ms=max(0, (self._tick_ts - int(observed_at.timestamp())) * 1000),
+                confidence=1.0 if not derived_leg else 0.95,
+                cache_hit=True,
+                freshness_reference_at=datetime.fromtimestamp(self._tick_ts, UTC),
+            ),
+            classification=DataClassification.INFORMATIONAL,
+        )
 
     async def get_pool_reserves(self, pool_address: str, chain: str) -> Any:
         from almanak.framework.data.defi.pools import PoolReserves

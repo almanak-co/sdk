@@ -8,10 +8,10 @@ Strategies declare their prewarm requirements with
 :class:`HistoricalTWAPTarget` through ``get_backtest_twap_targets()`` or a
 ``backtest_twap_targets`` attribute. A deliberately narrow compatibility
 decoder recognizes the generated strategy shape that predates that typed
-contract (``swap_pool`` / ``protocol`` plus either
-``pool_twap_window_seconds`` or ``twap_window_seconds`` and matching pool /
-protocol instance attributes). It never searches arbitrary config or discovers
-pools from pair labels.
+contract (``swap_pool`` / ``protocol`` plus
+``pool_twap_window_seconds``, ``twap_window_seconds``, or the generated
+``twap_window_minutes`` shape and matching pool/protocol instance attributes).
+It never searches arbitrary config or discovers pools from pair labels.
 """
 
 from __future__ import annotations
@@ -114,7 +114,9 @@ def _legacy_exact_pool_target(
     """Decode only the pre-contract generated exact-pool strategy shape.
 
     Compatibility is intentionally conjunctive: the exact pool, protocol, and
-    one recognized window key must be present; initialized pool and protocol
+    one recognized window key must be present (including the generated
+    ``twap_window_minutes`` + initialized ``twap_window_seconds`` shape);
+    initialized pool and protocol
     attributes must match them; and strategy metadata must declare the same
     protocol.  The current generator emits ``pool_twap_window_seconds`` as a
     config-only dependency while passing its value literally to ``market.twap``;
@@ -127,7 +129,11 @@ def _legacy_exact_pool_target(
     raw_pool = strategy_config.get("swap_pool")
     raw_protocol = strategy_config.get("protocol")
     window_key = next(
-        (key for key in ("pool_twap_window_seconds", "twap_window_seconds") if key in strategy_config),
+        (
+            key
+            for key in ("pool_twap_window_seconds", "twap_window_seconds", "twap_window_minutes")
+            if key in strategy_config
+        ),
         None,
     )
     if window_key is None:
@@ -136,7 +142,7 @@ def _legacy_exact_pool_target(
     if not isinstance(raw_pool, str) or not isinstance(raw_protocol, str) or raw_window is None:
         return None
     try:
-        window = int(raw_window)
+        window = int(raw_window) * (60 if window_key == "twap_window_minutes" else 1)
     except (TypeError, ValueError):
         return None
     pool = raw_pool.strip().lower()
@@ -145,10 +151,11 @@ def _legacy_exact_pool_target(
         str(getattr(strategy, attribute, "")).strip().lower() == pool for attribute in ("swap_pool", "pool")
     )
     missing = object()
-    strategy_window = getattr(strategy, window_key, missing)
-    strategy_window_matches = (
-        strategy_window == window if window_key == "twap_window_seconds" or strategy_window is not missing else True
-    )
+    strategy_window_attribute = "twap_window_seconds" if window_key == "twap_window_minutes" else window_key
+    strategy_window = getattr(strategy, strategy_window_attribute, missing)
+    strategy_window_matches = strategy_window == window if window_key != "pool_twap_window_seconds" else True
+    if window_key == "pool_twap_window_seconds" and strategy_window is not missing:
+        strategy_window_matches = strategy_window == window
     if (
         not strategy_pool_matches
         or str(getattr(strategy, "protocol", "")).strip().lower().replace("-", "_") != protocol
@@ -430,6 +437,7 @@ class SnapshotTWAPView:
                 staleness_ms=(self._tick_ts - point.timestamp) * 1000,
                 confidence=1.0,
                 cache_hit=True,
+                freshness_reference_at=datetime.fromtimestamp(self._tick_ts, UTC),
             ),
             classification=DataClassification.EXECUTION_GRADE,
         )

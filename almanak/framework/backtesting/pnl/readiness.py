@@ -84,6 +84,7 @@ async def check_backtest_readiness(
         "funding_history",
         "historical_exact_pool_twap",
         "historical_exact_pool_state",
+        "historical_pool_analytics",
     )
     readiness_config = copy.deepcopy(config)
     readiness_config.preflight_validation = True
@@ -137,14 +138,25 @@ async def check_backtest_readiness(
                 readiness_config,
                 state.data_broker.manifest,
             )
-            await _engine_helpers._prepare_declared_historical_pool_state(
+            pool_state_source = await _engine_helpers._prepare_declared_historical_pool_state(
                 strategy,
                 state.strategy_config,
                 readiness_config,
                 state.data_broker.manifest,
             )
+            analytics_targets = _engine_helpers._declared_historical_pool_analytics(
+                strategy,
+                state.strategy_config,
+                readiness_config,
+            )
+            from almanak.framework.backtesting.pnl.data_broker import pool_history_provider
+            from almanak.framework.backtesting.pnl.engine import BacktestPoolAnalyticsReader
+
+            analytics_reader = BacktestPoolAnalyticsReader(pool_history_provider(), readiness_config.chain)
 
             async for timestamp, market_state in backtester.data_provider.iterate(state.data_config):
+                if token_addresses:
+                    market_state.register_symbol_aliases(token_addresses)
                 for token in state.data_config.tokens:
                     price_token = _engine_helpers._normalize_token(
                         token,
@@ -171,6 +183,17 @@ async def check_backtest_readiness(
                             f"Invalid historical USD price for {token!r} at {timestamp.isoformat()}: {price!r}"
                         )
                     observations_checked += 1
+                exact_pool_view = pool_state_source.view_at(timestamp) if pool_state_source is not None else None
+                analytics_reader.bind(
+                    timestamp,
+                    market_state=market_state,
+                    pool_state_view=exact_pool_view,
+                )
+                observations_checked += _engine_helpers._validate_declared_historical_pool_analytics(
+                    analytics_reader,
+                    analytics_targets,
+                    timestamp,
+                )
 
         warnings: list[str] = []
         if preflight_report is not None:

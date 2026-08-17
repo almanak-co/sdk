@@ -37,7 +37,10 @@ Design notes
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+import pickle
+import tempfile
+from collections.abc import AsyncIterator, Mapping
+from contextlib import closing, nullcontext
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -101,7 +104,7 @@ from almanak.framework.backtesting.pnl.portfolio import (
 )
 from almanak.framework.backtesting.pnl.run_context import BacktestRunContext
 from almanak.framework.data.interfaces import DataSourceError
-from almanak.framework.market.errors import PriceUnavailableError
+from almanak.framework.market.errors import PoolPriceUnavailableError, PriceUnavailableError
 
 if TYPE_CHECKING:
     from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
@@ -836,13 +839,17 @@ async def _prepare_declared_historical_pool_state(
     manifest: Any | None,
 ) -> Any | None:
     """Prewarm exact-address archive pool state before simulation tick 1."""
+    from almanak.framework.backtesting.pnl.providers.snapshot_pool_analytics import (
+        declared_historical_pool_analytics_targets,
+    )
     from almanak.framework.backtesting.pnl.providers.snapshot_pool_state import (
+        HistoricalPoolStateTarget,
         SnapshotPoolStateSource,
         declared_historical_pool_state_targets,
     )
 
     try:
-        targets = declared_historical_pool_state_targets(
+        state_targets = declared_historical_pool_state_targets(
             strategy,
             strategy_config,
             default_chain=config.chain,
@@ -855,6 +862,38 @@ async def _prepare_declared_historical_pool_state(
             error_count=1,
             warning_count=0,
         ) from exc
+    try:
+        analytics_targets = declared_historical_pool_analytics_targets(
+            strategy,
+            strategy_config,
+            default_chain=config.chain,
+        )
+    except ValueError as exc:
+        raise PreflightValidationError(
+            message=f"Historical pool-analytics declaration is invalid: {exc}",
+            failed_checks=["historical_pool_analytics"],
+            recommendations=[
+                "Declare HistoricalPoolAnalyticsTarget values with an exact chain, protocol, pool address, "
+                "required fields, and optional freshness limit."
+            ],
+            error_count=1,
+            warning_count=0,
+        ) from exc
+
+    state_target_keys = {target.key for target in state_targets}
+    targets_by_key = {target.key: target for target in state_targets}
+    for analytics_target in analytics_targets:
+        if "tvl_usd" not in analytics_target.required_fields:
+            continue
+        targets_by_key.setdefault(
+            analytics_target.key,
+            HistoricalPoolStateTarget(
+                analytics_target.chain,
+                analytics_target.protocol,
+                analytics_target.pool_address,
+            ),
+        )
+    targets = tuple(targets_by_key.values())
     if not targets:
         return None
     run_chain = config.chain.strip().lower()
@@ -877,9 +916,13 @@ async def _prepare_declared_historical_pool_state(
         try:
             count = await source.materialize_history(target)
         except (DataSourceError, ValueError) as exc:
+            analytics_only = target.key not in state_target_keys
             raise PreflightValidationError(
-                message=f"Historical exact-pool state preflight failed for {target.manifest_key}: {exc}",
-                failed_checks=["historical_exact_pool_state"],
+                message=(
+                    f"Historical {'pool-analytics state' if analytics_only else 'exact-pool state'} "
+                    f"preflight failed for {target.manifest_key}: {exc}"
+                ),
+                failed_checks=["historical_pool_analytics" if analytics_only else "historical_exact_pool_state"],
                 recommendations=[
                     "Verify the exact pool existed throughout the requested window and configure an archive-capable gateway RPC."
                 ],
@@ -888,6 +931,136 @@ async def _prepare_declared_historical_pool_state(
             ) from exc
         logger.info("Prewarmed %d exact-pool state observations for %s before tick 1", count, target.manifest_key)
     return source
+
+
+def _declared_historical_pool_analytics(
+    strategy: BacktestableStrategy,
+    strategy_config: Mapping[str, Any],
+    config: PnLBacktestConfig,
+) -> tuple[Any, ...]:
+    from almanak.framework.backtesting.pnl.providers.snapshot_pool_analytics import (
+        declared_historical_pool_analytics_targets,
+    )
+
+    try:
+        return declared_historical_pool_analytics_targets(
+            strategy,
+            strategy_config,
+            default_chain=config.chain,
+        )
+    except ValueError as exc:
+        raise PreflightValidationError(
+            message=f"Historical pool-analytics declaration is invalid: {exc}",
+            failed_checks=["historical_pool_analytics"],
+            recommendations=["Declare exact HistoricalPoolAnalyticsTarget values for every required pool field."],
+            error_count=1,
+            warning_count=0,
+        ) from exc
+
+
+def _validate_declared_historical_pool_analytics(
+    reader: Any,
+    targets: tuple[Any, ...],
+    timestamp: datetime,
+) -> int:
+    from almanak.framework.backtesting.pnl.providers.snapshot_pool_analytics import (
+        validate_historical_pool_analytics,
+    )
+
+    try:
+        return validate_historical_pool_analytics(reader, targets, timestamp)
+    except (DataSourceError, PoolPriceUnavailableError, ValueError) as exc:
+        raise PreflightValidationError(
+            message=f"Historical pool-analytics preflight failed: {exc}",
+            failed_checks=["historical_pool_analytics"],
+            recommendations=[
+                "Ensure the exact pool has archive state and at least one pool token has historical USD prices "
+                "throughout the requested range, or remove fields the strategy does not require."
+            ],
+            error_count=1,
+            warning_count=0,
+        ) from exc
+
+
+async def _spool_validated_historical_pool_analytics_grid(
+    *,
+    backtester: PnLBacktester,
+    data_config: HistoricalDataConfig,
+    reader: Any,
+    targets: tuple[Any, ...],
+    pool_state_source: Any | None,
+    token_addresses: Mapping[str, tuple[str, str]],
+) -> Any:
+    """Validate and disk-spool the exact grid consumed by simulation."""
+    spool = tempfile.TemporaryFile(mode="w+b")
+    try:
+        async for timestamp, market_state in backtester.data_provider.iterate(data_config):
+            if token_addresses:
+                market_state.register_symbol_aliases(token_addresses)
+            reader.bind(
+                timestamp,
+                market_state=market_state,
+                pool_state_view=pool_state_source.view_at(timestamp) if pool_state_source is not None else None,
+            )
+            _validate_declared_historical_pool_analytics(reader, targets, timestamp)
+            pickle.dump((timestamp, market_state), spool, protocol=pickle.HIGHEST_PROTOCOL)
+        spool.seek(0)
+        return spool
+    except BaseException:
+        spool.close()
+        raise
+
+
+class _SpooledMarketStateIterator:
+    """Async iterator with synchronous, deterministic spool cleanup."""
+
+    def __init__(self, spool: Any) -> None:
+        self._spool = spool
+
+    def __aiter__(self) -> _SpooledMarketStateIterator:
+        return self
+
+    async def __anext__(self) -> tuple[datetime, MarketState]:
+        if self._spool.closed:
+            raise StopAsyncIteration
+        try:
+            return pickle.load(self._spool)
+        except EOFError:
+            self.close()
+            raise StopAsyncIteration from None
+
+    def close(self) -> None:
+        self._spool.close()
+
+
+def _market_state_iterator_scope(iterator: Any) -> Any:
+    if isinstance(iterator, _SpooledMarketStateIterator):
+        return closing(iterator)
+    return nullcontext()
+
+
+async def _prepare_historical_pool_analytics_iteration(
+    *,
+    backtester: PnLBacktester,
+    data_config: HistoricalDataConfig,
+    reader: Any,
+    targets: tuple[Any, ...],
+    pool_state_source: Any | None,
+    token_addresses: Mapping[str, tuple[str, str]],
+    bt_logger: BacktestLogger,
+) -> AsyncIterator[tuple[datetime, MarketState]]:
+    if not targets:
+        return backtester.data_provider.iterate(data_config)
+    with bt_logger.phase("historical_pool_analytics_preflight"):
+        spool = await _spool_validated_historical_pool_analytics_grid(
+            backtester=backtester,
+            data_config=data_config,
+            reader=reader,
+            targets=targets,
+            pool_state_source=pool_state_source,
+            token_addresses=token_addresses,
+        )
+    return _SpooledMarketStateIterator(spool)
 
 
 # =============================================================================
@@ -1471,6 +1644,7 @@ async def execute_iteration_loop(
         state.data_broker.manifest if state.data_broker is not None else None,
     )
     _bind_historical_pool_descriptors(backtester, pool_state_source)
+    pool_analytics_targets = _declared_historical_pool_analytics(strategy, state.strategy_config, config)
 
     # Stable for the whole run: provider registrations happen during
     # initialize_backtest, before this loop starts.
@@ -1573,9 +1747,19 @@ async def execute_iteration_loop(
     # (wallet_activity / prediction_price ledger notes).
     soft_empty_noted: set[str] = set()
 
-    with bt_logger.phase("simulation"):
+    market_state_iterator = await _prepare_historical_pool_analytics_iteration(
+        backtester=backtester,
+        data_config=state.data_config,
+        reader=pool_analytics_reader,
+        targets=pool_analytics_targets,
+        pool_state_source=pool_state_source,
+        token_addresses=token_addresses,
+        bt_logger=bt_logger,
+    )
+
+    with bt_logger.phase("simulation"), _market_state_iterator_scope(market_state_iterator):
         # Iterate through historical data
-        async for timestamp, market_state in backtester.data_provider.iterate(state.data_config):
+        async for timestamp, market_state in market_state_iterator:
             state.tick_count += 1
 
             if state.tick_count == 1:
@@ -1625,12 +1809,21 @@ async def execute_iteration_loop(
             pool_price_view.bind(market_state, timestamp)
             slippage_view.bind(market_state, timestamp)
             pool_history_reader.bind(timestamp)
-            pool_analytics_reader.bind(timestamp)
             rate_history_reader.bind(timestamp)
             exact_pool_view = (
                 pool_state_source.view_at(timestamp, fallback=pool_price_view)
                 if pool_state_source is not None
                 else None
+            )
+            pool_analytics_reader.bind(
+                timestamp,
+                market_state=market_state,
+                pool_state_view=exact_pool_view,
+            )
+            _validate_declared_historical_pool_analytics(
+                pool_analytics_reader,
+                pool_analytics_targets,
+                timestamp,
             )
             snapshot = create_market_snapshot_from_state(
                 market_state=market_state,

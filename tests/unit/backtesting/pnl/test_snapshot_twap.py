@@ -82,6 +82,25 @@ def test_decoder_accepts_current_generated_pool_and_window_names() -> None:
     assert declared_historical_twap_targets(strategy, config, default_chain="bsc") == ()
 
 
+def test_decoder_accepts_generated_minute_window_with_seconds_attribute() -> None:
+    config = {
+        "swap_pool": POOL,
+        "protocol": "pancakeswap_v3",
+        "twap_window_minutes": 5,
+    }
+    strategy = SimpleNamespace(
+        swap_pool=POOL,
+        protocol="pancakeswap_v3",
+        twap_window_seconds=300,
+        STRATEGY_METADATA=SimpleNamespace(supported_protocols=["pancakeswap_v3"]),
+    )
+
+    assert declared_historical_twap_targets(strategy, config, default_chain="bsc") == (GENERATED_TARGET,)
+
+    strategy.twap_window_seconds = 301
+    assert declared_historical_twap_targets(strategy, config, default_chain="bsc") == ()
+
+
 def test_decoder_fails_preflight_for_curve_twap() -> None:
     config = {
         "swap_pool": POOL,
@@ -127,6 +146,7 @@ def test_snapshot_view_serves_exact_archived_pool_observation_with_provenance() 
     assert envelope.meta.block_number == 460
     assert envelope.meta.finality is DataFinality.LATEST
     assert envelope.meta.staleness_ms == 10_000
+    assert envelope.is_fresh
     entry = manifest.entries()[0]
     assert entry["lane"] == LANE_TWAP
     assert entry["ladder"] == ["archive_observe"]
