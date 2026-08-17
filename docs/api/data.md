@@ -2,6 +2,28 @@
 
 Price oracles, balance providers, OHLCV sources, and the indicator/analytics primitives consumed by `MarketSnapshot`.
 
+## Data Envelope
+
+Every gateway-backed `MarketSnapshot` accessor returns a `DataEnvelope[T]`:
+`.value` holds the typed payload and `.meta` carries provenance
+(source, staleness, confidence, finality). Unavailability is signalled by a
+typed `MarketSnapshotError` subclass — never by missing attributes on the
+payload. Fields that could not be measured are `None` **and** named in the
+payload's `unmeasured_fields` (Empty != Zero contract); see the
+[Market Snapshot HOLD contract](market.md#hold-contract-for-data-unavailable-errors).
+
+### DataEnvelope
+
+::: almanak.framework.data.DataEnvelope
+    options:
+      show_root_heading: true
+
+### DataMeta
+
+::: almanak.framework.data.DataMeta
+    options:
+      show_root_heading: true
+
 ## Price Data
 
 ### PriceOracle
@@ -19,6 +41,15 @@ Price oracles, balance providers, OHLCV sources, and the indicator/analytics pri
 ### PriceAggregator
 
 ::: almanak.framework.data.PriceAggregator
+    options:
+      show_root_heading: true
+
+### PoolPrice
+
+The exact-pool price DTO returned by `MarketSnapshot.pool_price(...)` /
+`pool_price_by_pair(...)` (as `DataEnvelope[PoolPrice]`).
+
+::: almanak.framework.data.PoolPrice
     options:
       show_root_heading: true
 
@@ -49,6 +80,20 @@ Price oracles, balance providers, OHLCV sources, and the indicator/analytics pri
 ### PoolAnalytics
 
 ::: almanak.framework.data.PoolAnalytics
+    options:
+      show_root_heading: true
+
+### PoolAnalyticsResult
+
+::: almanak.framework.data.PoolAnalyticsResult
+    options:
+      show_root_heading: true
+
+### TokenPools
+
+The result of `MarketSnapshot.token_pools(...)` (as `DataEnvelope[TokenPools]`).
+
+::: almanak.framework.data.pools.analytics.TokenPools
     options:
       show_root_heading: true
 
@@ -128,11 +173,35 @@ high-level child-spawn, low-level spawn syscalls, FFI).
     options:
       show_root_heading: true
 
+### SlippageEstimate
+
+The result of `MarketSnapshot.estimate_slippage(...)` (as
+`DataEnvelope[SlippageEstimate]`). Slippage and impact are **integer basis
+points** (`effective_slippage_bps`, `price_impact_bps`). When no estimate is
+possible the accessor raises `SlippageEstimateUnavailableError` — it does not
+return a payload with missing attributes.
+
+::: almanak.framework.data.SlippageEstimate
+    options:
+      show_root_heading: true
+
 ## Volatility and Risk
 
 ### RealizedVolatilityCalculator
 
 ::: almanak.framework.data.RealizedVolatilityCalculator
+    options:
+      show_root_heading: true
+
+### VolatilityResult
+
+::: almanak.framework.data.VolatilityResult
+    options:
+      show_root_heading: true
+
+### VolConeResult
+
+::: almanak.framework.data.VolConeResult
     options:
       show_root_heading: true
 
@@ -142,11 +211,29 @@ high-level child-spawn, low-level spawn syscalls, FFI).
     options:
       show_root_heading: true
 
+### PortfolioRisk
+
+::: almanak.framework.data.PortfolioRisk
+    options:
+      show_root_heading: true
+
+### RollingSharpeResult
+
+::: almanak.framework.data.RollingSharpeResult
+    options:
+      show_root_heading: true
+
 ## Yield and Rates
 
 ### YieldAggregator
 
 ::: almanak.framework.data.YieldAggregator
+    options:
+      show_root_heading: true
+
+### YieldOpportunity
+
+::: almanak.framework.data.YieldOpportunity
     options:
       show_root_heading: true
 
@@ -159,9 +246,39 @@ accessors. The underlying `RateMonitor` is a framework-internal gRPC client
 of the gateway `RateHistoryService` and is no longer a public strategy API
 (deprecated for direct use as of VIB-4859 / VIB-4869).
 
+### LendingRateSnapshot
+
+The per-row DTO returned by `MarketSnapshot.lending_rate_history(...)`
+(as `DataEnvelope[list[LendingRateSnapshot]]`).
+
+::: almanak.framework.data.LendingRateSnapshot
+    options:
+      show_root_heading: true
+
 ### GatewayFundingRateProvider
 
 ::: almanak.framework.data.GatewayFundingRateProvider
+    options:
+      show_root_heading: true
+
+### FundingRateSnapshot
+
+The per-row DTO returned by `MarketSnapshot.funding_rate_history(...)`
+(as `DataEnvelope[list[FundingRateSnapshot]]`).
+
+::: almanak.framework.data.FundingRateSnapshot
+    options:
+      show_root_heading: true
+
+### FundingRateSpread
+
+::: almanak.framework.data.FundingRateSpread
+    options:
+      show_root_heading: true
+
+### LSTExchangeRate
+
+::: almanak.framework.data.LSTExchangeRate
     options:
       show_root_heading: true
 
@@ -170,6 +287,50 @@ of the gateway `RateHistoryService` and is no longer a public strategy API
 ### ILCalculator
 
 ::: almanak.framework.data.ILCalculator
+    options:
+      show_root_heading: true
+
+### ILExposure
+
+::: almanak.framework.data.ILExposure
+    options:
+      show_root_heading: true
+
+### ProjectedILResult
+
+::: almanak.framework.data.ProjectedILResult
+    options:
+      show_root_heading: true
+
+## Prediction Markets
+
+DTOs returned by the `MarketSnapshot` prediction-market accessors.
+
+### PredictionMarket
+
+::: almanak.framework.data.PredictionMarket
+    options:
+      show_root_heading: true
+
+### PredictionPosition
+
+::: almanak.framework.data.PredictionPosition
+    options:
+      show_root_heading: true
+
+### PredictionOrder
+
+::: almanak.framework.data.PredictionOrder
+    options:
+      show_root_heading: true
+
+## Health
+
+### HealthReport
+
+The report returned by `MarketSnapshot.health()`.
+
+::: almanak.framework.data.HealthReport
     options:
       show_root_heading: true
 

@@ -162,6 +162,7 @@ requires-dist = [
 
 [tool.poetry]
 include = [
+    { path = "almanak/py.typed", format = ["sdist", "wheel"] },
     { path = "almanak/bin/*", format = ["sdist", "wheel"] },
     { path = "almanak/connectors/gmx_v2/permission_seed.json", format = ["sdist", "wheel"] },
     { path = "almanak/llms/llms-full.txt", format = ["sdist", "wheel"] },
