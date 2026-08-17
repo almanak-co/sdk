@@ -1,5 +1,24 @@
 """Writer-safe exact-venue contracts."""
 
+from .data import (
+    EXACT_VENUE_DATA_SCHEMA_VERSION,
+    DepthParameters,
+    ExactVenueDataResult,
+    ExactVenueFeatureParameters,
+    ExactVenueFeatureRequest,
+    ExactVenueObservation,
+    OhlcvParameters,
+    QuoteParameters,
+    ReferencePriceMethod,
+    ReferencePriceParameters,
+    TwapParameters,
+    VenueDataAnchorKind,
+    VenueDataFailure,
+    VenueDataFailureReason,
+    VenueDataFailureState,
+    VenueDataProvenance,
+    VenueObservationAnchor,
+)
 from .gateway import GatewayClientVenueVerificationGateway
 from .receipt import VenueReceiptCorrelationError, correlate_verified_venue_receipts
 from .types import (
@@ -22,13 +41,29 @@ from .types import (
 from .verifier import BaseVenueVerifier, VenueVerificationGateway, VenueVerificationRequest
 
 __all__ = [
+    "EXACT_VENUE_DATA_SCHEMA_VERSION",
     "VENUE_BINDING_SCHEMA_VERSION",
     "BaseVenueVerifier",
+    "DepthParameters",
     "ExactVenueBinding",
+    "ExactVenueDataResult",
+    "ExactVenueFeatureParameters",
+    "ExactVenueFeatureRequest",
+    "ExactVenueObservation",
+    "OhlcvParameters",
+    "QuoteParameters",
+    "ReferencePriceMethod",
+    "ReferencePriceParameters",
+    "TwapParameters",
     "VenueBindingComponent",
     "VenueBindingFailure",
     "VenueBindingFailureReason",
     "VenueBindingFailureState",
+    "VenueDataFailure",
+    "VenueDataAnchorKind",
+    "VenueDataFailureReason",
+    "VenueDataFailureState",
+    "VenueDataProvenance",
     "VenueObservedFact",
     "VenueReferenceNamespace",
     "VenueReceiptCorrelationError",
@@ -40,6 +75,7 @@ __all__ = [
     "VenueVerificationRequest",
     "VenueVerificationResult",
     "VerifiedVenueBinding",
+    "VenueObservationAnchor",
     "build_verified_venue_binding",
     "canonical_venue_binding_preimage_bytes",
     "correlate_verified_venue_receipts",
