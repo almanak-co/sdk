@@ -58,7 +58,7 @@ class TestTransfersByToken:
             _transfer_log(WETH, POOL, WALLET, 29331153505356442),
             _transfer_log(USDC, POOL, WALLET, 55056478),
         ]
-        totals = transfers_by_token(logs, from_address=POOL)
+        totals = transfers_by_token(logs, chain="arbitrum", from_address=POOL)
         assert totals == {WETH: 29331153505356442, USDC: 55056478}
 
     def test_sums_split_legs_rather_than_last_write_wins(self):
@@ -66,15 +66,15 @@ class TestTransfersByToken:
             _transfer_log(USDC, POOL, WALLET, 40_000_000),
             _transfer_log(USDC, POOL, WALLET, 15_056_478),
         ]
-        assert transfers_by_token(logs, from_address=POOL) == {USDC: 55_056_478}
+        assert transfers_by_token(logs, chain="arbitrum", from_address=POOL) == {USDC: 55_056_478}
 
     def test_filters_by_direction(self):
         logs = [
             _transfer_log(USDC, WALLET, POOL, 100),
             _transfer_log(WETH, POOL, WALLET, 200),
         ]
-        assert transfers_by_token(logs, to_address=POOL) == {USDC: 100}
-        assert transfers_by_token(logs, from_address=POOL) == {WETH: 200}
+        assert transfers_by_token(logs, chain="arbitrum", to_address=POOL) == {USDC: 100}
+        assert transfers_by_token(logs, chain="arbitrum", from_address=POOL) == {WETH: 200}
 
     def test_skips_lp_token_mint_and_burn(self):
         logs = [
@@ -82,7 +82,7 @@ class TestTransfersByToken:
             _transfer_log(POOL, WALLET, ZERO, 999),  # LP-token burn
             _transfer_log(USDC, POOL, WALLET, 100),
         ]
-        assert transfers_by_token(logs, from_address=POOL) == {USDC: 100}
+        assert transfers_by_token(logs, chain="arbitrum", from_address=POOL) == {USDC: 100}
 
     def test_ignores_non_transfer_and_malformed_logs(self):
         logs = [
@@ -91,11 +91,21 @@ class TestTransfersByToken:
             {"address": WETH, "topics": None, "data": None},
             _transfer_log(USDC, POOL, WALLET, 7),
         ]
-        assert transfers_by_token(logs, from_address=POOL) == {USDC: 7}
+        assert transfers_by_token(logs, chain="arbitrum", from_address=POOL) == {USDC: 7}
 
     def test_empty_logs_is_empty_mapping(self):
-        assert transfers_by_token([]) == {}
-        assert transfers_by_token(None) == {}
+        assert transfers_by_token([], chain="arbitrum") == {}
+        assert transfers_by_token(None, chain="arbitrum") == {}
+
+    def test_omitted_filters_scan_all_transfers(self):
+        assert transfers_by_token([_transfer_log(USDC, POOL, WALLET, 7)], chain="arbitrum") == {USDC: 7}
+
+    @pytest.mark.parametrize("filter_name", ["from_address", "to_address"])
+    @pytest.mark.parametrize("malformed_filter", ["", "malformed-pool", "0x1234"])
+    def test_supplied_malformed_filter_fails_closed(self, filter_name, malformed_filter):
+        kwargs = {filter_name: malformed_filter}
+
+        assert transfers_by_token([_transfer_log(USDC, POOL, WALLET, 7)], chain="arbitrum", **kwargs) == {}
 
     def test_accepts_bytes_topics_and_address(self):
         entry = {
@@ -107,7 +117,24 @@ class TestTransfersByToken:
             ],
             "data": "0x" + format(42, "064x"),
         }
-        assert transfers_by_token([entry], from_address=POOL) == {USDC: 42}
+        assert transfers_by_token([entry], chain="arbitrum", from_address=POOL) == {USDC: 42}
+
+    @pytest.mark.parametrize(
+        "malformed_emitter",
+        [
+            "0x",
+            "0x" + "g" * 40,
+            "0x" + "a" * 39,
+            "0x" + "a" * 41,
+            bytes.fromhex("aa" * 19),
+            bytes.fromhex("aa" * 21),
+        ],
+    )
+    def test_skips_transfer_logs_with_malformed_emitters(self, malformed_emitter):
+        entry = _transfer_log(USDC, POOL, WALLET, 42)
+        entry["address"] = malformed_emitter
+
+        assert transfers_by_token([entry], chain="arbitrum", from_address=POOL) == {}
 
 
 class TestCurrenciesForAmounts:
@@ -481,7 +508,9 @@ class TestV3OpenGuardBranches:
         from almanak.framework.execution.extract_result import ExtractError
 
         result = parser.extract_lp_open_data_result(self._receipt(logs))
-        assert isinstance(result, ExtractError), f"truncated payload must be a typed ExtractError, got {type(result).__name__}"
+        assert isinstance(result, ExtractError), (
+            f"truncated payload must be a typed ExtractError, got {type(result).__name__}"
+        )
         assert "Truncated IncreaseLiquidity payload" in result.error
 
     def test_malformed_token_id_topic_is_skipped_not_crashed(self):

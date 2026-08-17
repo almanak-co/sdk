@@ -73,6 +73,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, Final
 
+from almanak.core.addresses import normalize_address
+
 #: Reserved receipt key carrying the effective trading wallet.
 #:
 #: Stamped by ``almanak.framework.execution.result_enricher.ResultEnricher``
@@ -114,22 +116,11 @@ def normalize_wallet_address(value: Any) -> str:
     Accepts the shapes receipts arrive in: ``str``, ``bytes`` / ``HexBytes``,
     or anything with a ``hex()`` method.
 
-    **Normative, not yet universal.** Anything deciding whether an address may
-    be attributed to, keyed on, or stamped onto a receipt MUST call this rather
-    than reimplementing the check — that is the rule, and the
-    attribution/stamp pair now satisfies it. It is *not* a claim that every
-    address helper in the tree already routes here: `gmx_v2/runner_hooks.py`
-    still carries its own `len == 42` + `int(value, 16)` copy (same hole this
-    function closes, on a different path), and `enso/receipt_parser.py`,
-    `lp_leg_identity.py` and `base/receipt_parser.py` define weaker
-    module-local variants for their own purposes. Migrating those is follow-up
-    work on VIB-6049, not something this docstring should imply is done.
-    Two independent copies would drift — and the specific way they drift is
-    dangerous: if attribution accepted a value the stamp rejected (or vice
-    versa), a signal could be attributed to the leader while its money legs were
-    resolved against the *signer*, producing an amount-correct, wrongly-attributed
-    result. Sharing one function makes them equal by construction rather than by
-    coincidence (VIB-6049).
+    This remains the normative EVM receipt-attribution validator. The shared
+    core helper owns chain-aware casing; this function additionally owns the
+    strict 20-byte shape required before a value may be stamped as the trading
+    wallet. Keeping validation here ensures attribution and stamping accept the
+    same set of values by construction (VIB-6049 / ALM-3195).
     """
     if value is None:
         return ""
@@ -150,7 +141,9 @@ def normalize_wallet_address(value: Any) -> str:
             return ""
         if not text.startswith("0x"):
             text = "0x" + text
-    text = text.strip().lower()
+    # This helper's contract is deliberately EVM-only; core owns the casing
+    # decision while the checks below retain the receipt-attribution guard.
+    text = normalize_address(text, "ethereum")
     if not text.startswith("0x"):
         return ""
     if len(text) != 42:
@@ -161,11 +154,7 @@ def normalize_wallet_address(value: Any) -> str:
     return text
 
 
-#: Alias for this module's own four internal call sites, which referenced the
-#: private name before it became the shared acceptance test. No other module
-#: imports it — the identically-named helpers in ``enso/``, ``gmx_v2/``,
-#: ``lp_leg_identity.py`` and ``receipt_parser.py`` are independent module-local
-#: definitions, not this one.
+#: Compatibility alias for this module's internal call sites.
 _normalize_address = normalize_wallet_address
 
 

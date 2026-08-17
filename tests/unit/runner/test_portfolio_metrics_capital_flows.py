@@ -68,6 +68,8 @@ from almanak.framework.runner.runner_state import (
     CapitalFlowMeasurementError,
     _build_metrics_for_snapshot,
     _capital_flow_strategy_tx_hashes,
+    _capital_flow_token_universe,
+    _capital_flow_wallet,
     _populate_capital_flows,
     _recover_capital_flow_record,
     _write_valuation_into_strategy_state,
@@ -87,7 +89,20 @@ USDC = "0x" + "aa" * 20
 MYSTERY = "0x" + "bb" * 20
 CHAIN = "arbitrum"
 OTHER_CHAIN = "base"
+SOLANA_ADDRESS = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 DEPLOYMENT = "deployment:0123456789ab"
+
+
+def test_capital_flow_producer_preserves_solana_address_case() -> None:
+    snapshot = SimpleNamespace(
+        token_prices={f"solana:{SOLANA_ADDRESS}": {"symbol": "USDC", "decimals": 6}},
+        wallet_balances=[SimpleNamespace(address=SOLANA_ADDRESS, symbol="USDC")],
+    )
+    runner = SimpleNamespace(_multichain_wallet_for=lambda chain: SOLANA_ADDRESS)
+
+    assert set(_capital_flow_token_universe(snapshot, "solana", primary=True)) == {SOLANA_ADDRESS}
+    assert _capital_flow_wallet(runner, "solana") == SOLANA_ADDRESS
+
 
 #: Budgets for the forked-child SIGTERM test below (VIB-6043 review).
 #:
@@ -197,7 +212,7 @@ def _log(
 ) -> dict[str, Any]:
     return {
         "address": token,
-        "topics": [TRANSFER_SIG, pad_address_topic(frm), pad_address_topic(to)],
+        "topics": [TRANSFER_SIG, pad_address_topic(frm, CHAIN), pad_address_topic(to, CHAIN)],
         "data": hex(amount),
         "transactionHash": tx,
         "blockNumber": block,
@@ -452,6 +467,19 @@ def _snapshot(
     )
 
 
+def _solana_snapshot() -> PortfolioSnapshot:
+    return PortfolioSnapshot(
+        timestamp=datetime(2026, 7, 19, 12, 0, tzinfo=UTC),
+        deployment_id=DEPLOYMENT,
+        total_value_usd=Decimal("1000"),
+        available_cash_usd=Decimal("0"),
+        value_confidence=ValueConfidence.HIGH,
+        chain="solana",
+        wallet_balances=[TokenBalance("USDC", Decimal("1"), Decimal("1"), SOLANA_ADDRESS)],
+        token_prices={f"solana:{SOLANA_ADDRESS}": {"price_usd": "1", "symbol": "USDC", "decimals": 6}},
+    )
+
+
 def _metrics(
     *, deposits: Decimal | None = Decimal("0"), withdrawals: Decimal | None = Decimal("0")
 ) -> PortfolioMetrics:
@@ -532,6 +560,29 @@ def _clear_caches() -> None:
 
 
 class TestEraInitialization:
+    @pytest.mark.asyncio
+    async def test_non_evm_legacy_era_fails_closed_before_web3(self):
+        runner = FakeRunner(
+            FakeStateManager(ledger=[_ledger_row(chain="solana")]),
+            wallet=SOLANA_ADDRESS,
+            primary="solana",
+        )
+        metrics, snapshot = _metrics(), _solana_snapshot()
+
+        with (
+            patch("almanak.framework.runner.runner_state.is_hosted", return_value=False),
+            patch("almanak.framework.web3.get_gateway_web3") as get_gateway_web3,
+        ):
+            await _populate_capital_flows(runner, metrics, snapshot, deployment_id=DEPLOYMENT)
+
+        get_gateway_web3.assert_not_called()
+        record = snapshot.snapshot_metadata[CAPITAL_FLOWS_KEY]
+        assert record["status"] == STATUS_UNMEASURED
+        assert record["unmeasured_reason"] == REASON_CHAIN_UNSCANNABLE
+        assert record["cursors"] == {}
+        assert metrics.deposits_usd is None
+        assert metrics.withdrawals_usd is None
+
     @pytest.mark.asyncio
     async def test_pending_while_ledger_empty(self):
         """No anchor tx yet ⇒ pending; the columns keep their current values."""
@@ -827,6 +878,88 @@ class TestDegradedPaths:
         assert record["cursors"] == {CHAIN: 5_000_000}
         assert metrics.deposits_usd is None
         assert metrics.withdrawals_usd is None
+
+    @pytest.mark.asyncio
+    async def test_non_evm_unscannable_is_persisted_before_web3(self, tmp_path):
+        """The pre-Web3 family guard poisons both durable mirrors."""
+        db_path = str(tmp_path / "capital-flow-non-evm.db")
+        manager = _sqlite_state_manager(db_path)
+        await manager.initialize()
+        prior = CapitalFlowRecord(
+            status=STATUS_MEASURED,
+            cursors={"solana": 10},
+            era_start={"solana": 10},
+            deposits_usd=Decimal("5"),
+            withdrawals_usd=Decimal("2"),
+        ).to_record()
+        await manager.save_state(
+            StateData(
+                deployment_id=DEPLOYMENT,
+                version=1,
+                state={CAPITAL_FLOWS_KEY: json.dumps(prior, sort_keys=True)},
+            )
+        )
+
+        class _DatabaseState:
+            async def get_latest_snapshot(self, deployment_id: str) -> Any:
+                return await manager.get_latest_snapshot(deployment_id)
+
+            async def load_state(self, deployment_id: str) -> Any:
+                return await manager.load_state(deployment_id)
+
+            async def save_state(self, state: Any, expected_version: int | None = None) -> Any:
+                return await manager.save_state(state, expected_version=expected_version)
+
+            async def get_ledger_entries(self, deployment_id: str, limit: int = 100, **kwargs: Any) -> list[Any]:
+                del deployment_id, limit, kwargs
+                return [_ledger_row(chain="solana")]
+
+            async def get_all_deployment_ids(self) -> list[str]:
+                return [DEPLOYMENT]
+
+        runner = FakeRunner(
+            _DatabaseState(),  # type: ignore[arg-type]
+            wallet=SOLANA_ADDRESS,
+            primary="solana",
+        )
+        metrics, snapshot = _metrics(), _solana_snapshot()
+
+        try:
+            with (
+                patch("almanak.framework.runner.runner_state.is_hosted", return_value=False),
+                patch("almanak.framework.web3.get_gateway_web3") as get_gateway_web3,
+            ):
+                await _populate_capital_flows(runner, metrics, snapshot, deployment_id=DEPLOYMENT)
+
+            get_gateway_web3.assert_not_called()
+            record = snapshot.snapshot_metadata[CAPITAL_FLOWS_KEY]
+            assert record["status"] == STATUS_UNMEASURED
+            assert record["unmeasured_reason"] == REASON_CHAIN_UNSCANNABLE
+            assert record["cursors"] == {"solana": 10}
+            assert metrics.deposits_usd is None
+            assert metrics.withdrawals_usd is None
+
+            await manager.save_portfolio_snapshot(snapshot)
+            await _write_valuation_into_strategy_state(runner, DEPLOYMENT, snapshot)
+        finally:
+            await manager.close()
+
+        reopened = _sqlite_state_manager(db_path)
+        await reopened.initialize()
+        try:
+            persisted_snapshot = await reopened.get_latest_snapshot(DEPLOYMENT)
+            persisted_state = await reopened.load_state(DEPLOYMENT)
+            snapshot_record = persisted_snapshot.snapshot_metadata[CAPITAL_FLOWS_KEY]
+            state_record = json.loads(persisted_state.state[CAPITAL_FLOWS_KEY])
+
+            for persisted in (snapshot_record, state_record):
+                assert persisted["status"] == STATUS_UNMEASURED
+                assert persisted["unmeasured_reason"] == REASON_CHAIN_UNSCANNABLE
+                assert persisted["cursors"] == {"solana": 10}
+                assert persisted["deposits_usd"] is None
+                assert persisted["withdrawals_usd"] is None
+        finally:
+            await reopened.close()
 
     @pytest.mark.asyncio
     async def test_unpriceable_flow_poisons(self):
@@ -1869,6 +2002,28 @@ class TestRecovery:
 
 
 class TestMultiChain:
+    @pytest.mark.asyncio
+    async def test_non_evm_chain_join_poisons_before_cursor_skip_or_web3(self):
+        runner = _measured_runner(
+            chains={CHAIN: 100},
+            ledger=[_ledger_row(), _ledger_row(tx="0xsol", chain="solana", seconds=5)],
+        )
+        metrics, snapshot = _metrics(), _snapshot()
+
+        with (
+            patch("almanak.framework.runner.runner_state.is_hosted", return_value=False),
+            patch("almanak.framework.web3.get_gateway_web3") as get_gateway_web3,
+        ):
+            await _populate_capital_flows(runner, metrics, snapshot, deployment_id=DEPLOYMENT)
+
+        get_gateway_web3.assert_not_called()
+        record = snapshot.snapshot_metadata[CAPITAL_FLOWS_KEY]
+        assert record["status"] == STATUS_UNMEASURED
+        assert record["unmeasured_reason"] == REASON_CHAIN_UNSCANNABLE
+        assert record["cursors"] == {CHAIN: 100}
+        assert metrics.deposits_usd is None
+        assert metrics.withdrawals_usd is None
+
     @pytest.mark.asyncio
     async def test_per_chain_cursors_advance_independently(self):
         runner = _measured_runner(

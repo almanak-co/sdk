@@ -75,6 +75,7 @@ from typing import Any
 import aiohttp
 import grpc
 
+from almanak.core.addresses import normalize_address
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.data._history_common import (
     _CHAIN_TO_CG_ONCHAIN_NETWORK,
@@ -171,12 +172,9 @@ def _normalize_pool_address(address: str, chain: str) -> str:
 
     EVM addresses are case-insensitive → lowercased for cache-key stability.
     Solana base58 addresses are case-sensitive → preserve original case.
-    Mirrors ``almanak.framework.data.tokens.resolver._normalize_address_for_chain``.
+    Delegates to the core address identity rule.
     """
-    address = address.strip()
-    if is_solana_family(chain):
-        return address
-    return address.lower()
+    return normalize_address(address, chain)
 
 
 def _validate_pool_address(address: str, chain: str) -> bool:

@@ -1629,7 +1629,7 @@ class SushiSwapV3ReceiptParser:
             # which may be the OPPOSITE of the user's pool label). See the
             # uniswap_v3 twin for the full rationale.
             currency0, currency1 = currencies_for_amounts(
-                transfers_by_token(logs, to_address=pool_address) if pool_address else {},
+                transfers_by_token(logs, chain=self.chain, to_address=pool_address) if pool_address else {},
                 amount0,
                 amount1,
             )
@@ -1858,7 +1858,7 @@ class SushiSwapV3ReceiptParser:
                     # burn): the collect-only receipt carries no Burn, so the
                     # Burn-derived ``pool_address`` is empty there and the
                     # leg-identity scan would silently find no counterparty.
-                    collect_pool_address = collect_pool_address or log_emitter_address(log)
+                    collect_pool_address = collect_pool_address or log_emitter_address(log, chain=self.chain)
 
                 elif first_topic == burn_topic and len(topics) >= 4:
                     # Burn event - liquidity being removed
@@ -1915,7 +1915,7 @@ class SushiSwapV3ReceiptParser:
             # aggregator prefers); a burn-only receipt moves no tokens, so both
             # stay ``None`` — honestly unidentified rather than guessed.
             currency0, currency1 = currencies_for_amounts(
-                transfers_by_token(logs, from_address=pool_address or collect_pool_address)
+                transfers_by_token(logs, chain=self.chain, from_address=pool_address or collect_pool_address)
                 if (pool_address or collect_pool_address)
                 else {},
                 amount0_collected,

@@ -1819,7 +1819,7 @@ class UniswapV3ReceiptParser:
             # wallet -> pool transfers is exact. ``None`` on a miss — consumers
             # fail closed rather than guess.
             currency0, currency1 = currencies_for_amounts(
-                transfers_by_token(logs, to_address=pool_address) if pool_address else {},
+                transfers_by_token(logs, chain=self.chain, to_address=pool_address) if pool_address else {},
                 amount0,
                 amount1,
             )
@@ -2028,7 +2028,7 @@ class UniswapV3ReceiptParser:
                     # burn): the collect-only receipt carries no Burn, so the
                     # Burn-derived ``pool_address`` is empty there and the
                     # leg-identity scan would silently find no counterparty.
-                    collect_pool_address = collect_pool_address or log_emitter_address(log)
+                    collect_pool_address = collect_pool_address or log_emitter_address(log, chain=self.chain)
 
                 elif first_topic == burn_topic and len(topics) >= 4:
                     # uint128 amount (padded) ‖ uint256 amount0 ‖ uint256 amount1
@@ -2118,7 +2118,7 @@ class UniswapV3ReceiptParser:
             # so there is nothing to bind and both stay ``None``: honestly
             # unidentified rather than guessed.
             currency0, currency1 = currencies_for_amounts(
-                transfers_by_token(logs, from_address=pool_address or collect_pool_address)
+                transfers_by_token(logs, chain=self.chain, from_address=pool_address or collect_pool_address)
                 if (pool_address or collect_pool_address)
                 else {},
                 amount0_collected,

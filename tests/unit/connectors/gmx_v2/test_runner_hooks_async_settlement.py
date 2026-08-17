@@ -11,13 +11,22 @@ from almanak.connectors._strategy_base.runner_hook_registry import (
     AsyncSettlementVerdict,
 )
 from almanak.connectors.gmx_v2.anvil_order_executor import GmxAnvilOrderExecutionResult
-from almanak.connectors.gmx_v2.runner_hooks import GmxV2RunnerHookConnector
+from almanak.connectors.gmx_v2.runner_hooks import GmxV2RunnerHookConnector, _validated_address
 
 _KEY = "0x" + "ab" * 32
 _MARKET = "0x" + "11" * 20
 _OTHER_MARKET = "0x" + "22" * 20
 _COLLATERAL = "0x" + "33" * 20
 _RAW_USD = 10**30
+
+
+def test_gmx_address_validation_uses_core_casing_without_accepting_python_hex_extensions() -> None:
+    mixed = "0x" + "Aa" * 20
+    underscore_digit_separator = "0x" + "a" * 38 + "_b"
+
+    assert _validated_address(mixed, "arbitrum") == mixed.lower()
+    assert _validated_address(underscore_digit_separator, "arbitrum") is None
+    assert _validated_address("0x" + "0" * 40, "arbitrum") is None
 
 
 def _order(*, size_delta_usd: str = "100") -> SimpleNamespace:

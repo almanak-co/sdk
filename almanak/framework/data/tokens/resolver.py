@@ -63,6 +63,7 @@ from datetime import datetime
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
+from almanak.core.addresses import normalize_address
 from almanak.core.asset_identity import AssetIdentity, AssetNamespace
 from almanak.core.chains import ChainRegistry
 from almanak.core.enums import ChainFamily
@@ -76,7 +77,7 @@ from .exceptions import (
     TokenNotFoundError,
     TokenResolutionError,
 )
-from .models import CHAIN_ID_MAP, BridgeType, ResolvedToken, Token, normalize_token_address_for_chain
+from .models import CHAIN_ID_MAP, BridgeType, ResolvedToken, Token
 
 if TYPE_CHECKING:
     import grpc
@@ -248,15 +249,6 @@ def _validate_address(address: str, chain: str) -> None:
             chain=chain,
             reason="Address contains invalid hex characters",
         )
-
-
-def _normalize_address_for_chain(address: str, chain: str) -> str:
-    """Normalize an address for comparison/indexing.
-
-    EVM addresses are case-insensitive -> lowercase.
-    Solana base58 addresses are case-sensitive -> preserve case.
-    """
-    return normalize_token_address_for_chain(address, chain)
 
 
 _STATIC_ADDRESS_CANONICAL_SYMBOLS: dict[tuple[str, str], str] = {
@@ -528,7 +520,7 @@ class TokenResolver:
                 # one contract uniquely, so a collision here is always a
                 # JSON authoring bug rather than legitimate ambiguity).
                 if address:
-                    addr_key = _normalize_address_for_chain(address, chain_lower)
+                    addr_key = normalize_address(address, chain_lower)
                     chain_addresses = self._static_address_index.setdefault(chain_lower, {})
                     if addr_key in chain_addresses:
                         existing_addr = chain_addresses[addr_key]
@@ -585,7 +577,7 @@ class TokenResolver:
         for metadata in PROTOCOL_METADATA_REGISTRY.synthetic_tokens():
             chain = metadata.chain
             chain_lower = chain.lower()
-            addr_key = _normalize_address_for_chain(metadata.address, chain_lower)
+            addr_key = normalize_address(metadata.address, chain_lower)
             seen_addresses = seen_by_chain.setdefault(chain_lower, set())
             if addr_key in seen_addresses:
                 continue  # Skip case-variant duplicates
@@ -822,7 +814,7 @@ class TokenResolver:
             # be blocked by a stale gateway-era miss.
             neg_key = (
                 chain_lower,
-                _normalize_address_for_chain(token, chain_lower) if is_address else token.upper(),
+                normalize_address(token, chain_lower) if is_address else token.upper(),
             )
             if not skip_gateway and self._check_negative_cache(neg_key):
                 self._record_negative_cache_hit(token, chain_lower, neg_key, start_time)
@@ -965,7 +957,7 @@ class TokenResolver:
         Returns:
             ResolvedToken if found in cache or static, None if gateway lookup needed.
         """
-        addr_key = _normalize_address_for_chain(address, chain_lower)
+        addr_key = normalize_address(address, chain_lower)
 
         # 1. Check cache (memory + disk)
         cached = self._cache.get(chain_lower, address=addr_key)
@@ -1171,7 +1163,7 @@ class TokenResolver:
         Returns:
             Static decimals if there's a mismatch, None if OK or not in registry
         """
-        addr_key = _normalize_address_for_chain(address, chain_lower)
+        addr_key = normalize_address(address, chain_lower)
         chain_index = self._static_address_index.get(chain_lower, {})
         static_token = chain_index.get(addr_key)
         if static_token is not None:
@@ -1281,9 +1273,7 @@ class TokenResolver:
                 _try_record_metric("record_token_resolution_onchain_lookup", chain_lower, "integrity_rejected")
                 return None
 
-            if _normalize_address_for_chain(resolved_address, chain_lower) != _normalize_address_for_chain(
-                address, chain_lower
-            ):
+            if normalize_address(resolved_address, chain_lower) != normalize_address(address, chain_lower):
                 logger.warning(
                     "token_gateway_integrity_rejected: returned address mismatch (requested=%s, returned=%s, chain=%s)",
                     address,
@@ -1640,8 +1630,8 @@ class TokenResolver:
         chain_config = token.get_chain_config(chain_lower)
 
         # Determine if native token
-        addr_norm = _normalize_address_for_chain(address, chain_lower)
-        is_native = addr_norm == _normalize_address_for_chain(NATIVE_SENTINEL, chain_lower)
+        addr_norm = normalize_address(address, chain_lower)
+        is_native = addr_norm == normalize_address(NATIVE_SENTINEL, chain_lower)
         if chain_config:
             is_native = chain_config.is_native
 
@@ -1652,7 +1642,7 @@ class TokenResolver:
 
         # Check if wrapped native by comparing address to WRAPPED_NATIVE registry
         wrapped_addr = WRAPPED_NATIVE.get(chain_lower, "")
-        is_wrapped_native = bool(wrapped_addr and addr_norm == _normalize_address_for_chain(wrapped_addr, chain_lower))
+        is_wrapped_native = bool(wrapped_addr and addr_norm == normalize_address(wrapped_addr, chain_lower))
 
         return ResolvedToken(
             symbol=token.symbol,
@@ -1976,7 +1966,7 @@ class TokenResolver:
                     continue
                 # Try the raw key (address path) and the uppercase key
                 # (symbol path). Both are cheap.
-                self._negative_cache.pop((chain_lower, _normalize_address_for_chain(raw, chain_lower)), None)
+                self._negative_cache.pop((chain_lower, normalize_address(raw, chain_lower)), None)
                 self._negative_cache.pop((chain_lower, raw.upper()), None)
 
     def clear_negative_cache(self) -> None:
@@ -2032,9 +2022,9 @@ class TokenResolver:
         # circuit a resolve for a token that has just been registered.
         with self._lock:
             self._cache.put(token)
-            self._negative_cache.pop((chain_lower, _normalize_address_for_chain(token.symbol, chain_lower)), None)
+            self._negative_cache.pop((chain_lower, normalize_address(token.symbol, chain_lower)), None)
             self._negative_cache.pop((chain_lower, token.symbol.upper()), None)
-            self._negative_cache.pop((chain_lower, _normalize_address_for_chain(token.address, chain_lower)), None)
+            self._negative_cache.pop((chain_lower, normalize_address(token.address, chain_lower)), None)
             logger.debug(f"Registered token {token.symbol} on {chain_lower}")
 
     def register_token(
@@ -2102,7 +2092,7 @@ class TokenResolver:
         try:
             resolved = ResolvedToken(
                 symbol=symbol,
-                address=_normalize_address_for_chain(address, chain_lower),
+                address=normalize_address(address, chain_lower),
                 decimals=decimals,
                 chain=chain_lower,
                 chain_id=chain_id,

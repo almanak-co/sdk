@@ -1629,7 +1629,9 @@ class AerodromeReceiptParser:
                     "",
                 )
                 currency0, currency1 = currencies_for_amounts(
-                    transfers_by_token(receipt.get("logs", []), from_address=burn_pool) if burn_pool else {},
+                    transfers_by_token(receipt.get("logs", []), chain=self.chain, from_address=burn_pool)
+                    if burn_pool
+                    else {},
                     total_amount0,
                     total_amount1,
                 )
@@ -2249,7 +2251,7 @@ class AerodromeSlipstreamReceiptParser(AerodromeReceiptParser):
             # order, which may be the OPPOSITE of the user's pool label). See the
             # uniswap_v3 twin for the full rationale.
             currency0, currency1 = currencies_for_amounts(
-                transfers_by_token(logs, to_address=pool_address) if pool_address else {},
+                transfers_by_token(logs, chain=self.chain, to_address=pool_address) if pool_address else {},
                 amount0,
                 amount1,
             )
@@ -2448,7 +2450,7 @@ class AerodromeSlipstreamReceiptParser(AerodromeReceiptParser):
                     # the collected amounts, so the value-match there is exact.
                     recipient = HexDecoder.decode_address_from_data(data, 0)
                     currency0, currency1 = currencies_for_amounts(
-                        transfers_by_token(logs, to_address=recipient) if recipient else {},
+                        transfers_by_token(logs, chain=self.chain, to_address=recipient) if recipient else {},
                         amount0,
                         amount1,
                     )

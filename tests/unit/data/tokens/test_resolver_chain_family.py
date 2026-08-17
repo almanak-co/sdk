@@ -6,8 +6,7 @@ Before W3 these call sites branched on the chain-name string literal
 :class:`almanak.core.enums.ChainFamily`. These tests pin the new
 semantics:
 
-1. Solana-family chains keep base58 case in
-   ``_normalize_address_for_chain`` and select the SPL base58 pattern in
+1. Solana-family chains keep base58 case in ``normalize_address`` and select the SPL base58 pattern in
    ``_is_address`` / ``_validate_address``.
 2. EVM-family chains lowercase addresses and require the 0x-hex pattern.
 3. Unknown chain names fall through to the EVM branch — this matches
@@ -22,13 +21,13 @@ from __future__ import annotations
 
 import pytest
 
+from almanak.core.addresses import normalize_address
 from almanak.core.chains import ChainRegistry
 from almanak.core.enums import ChainFamily
 from almanak.framework.data.tokens.exceptions import InvalidTokenAddressError
 from almanak.framework.data.tokens.resolver import (
     _is_address,
     _is_solana_chain,
-    _normalize_address_for_chain,
     _validate_address,
 )
 
@@ -79,22 +78,21 @@ class TestNormalizeAddressForChain:
     def test_solana_address_case_preserved(self) -> None:
         # Solana base58 is case-sensitive — lowercasing yields a
         # different (invalid) address.
-        normalized = _normalize_address_for_chain(SOL_MINT_USDC, "solana")
+        normalized = normalize_address(SOL_MINT_USDC, "solana")
         assert normalized == SOL_MINT_USDC
 
     def test_evm_address_lowercased(self) -> None:
         # EVM hex is case-insensitive; we lowercase for cache-key
         # stability.
-        normalized = _normalize_address_for_chain(EVM_ADDR_MIXED_CASE, "arbitrum")
+        normalized = normalize_address(EVM_ADDR_MIXED_CASE, "arbitrum")
         assert normalized == EVM_ADDR_LOWER
 
     def test_evm_address_lowercased_on_every_registered_evm_chain(self) -> None:
         for descriptor in ChainRegistry.all():
             if descriptor.family is ChainFamily.EVM:
-                got = _normalize_address_for_chain(EVM_ADDR_MIXED_CASE, descriptor.name)
+                got = normalize_address(EVM_ADDR_MIXED_CASE, descriptor.name)
                 assert got == EVM_ADDR_LOWER, (
-                    f"{descriptor.name}: expected EVM-family address to be "
-                    f"lowercased, got {got!r}"
+                    f"{descriptor.name}: expected EVM-family address to be lowercased, got {got!r}"
                 )
 
 

@@ -81,8 +81,7 @@ class FluidDexLpReceiptParser(BaseReceiptParser[dict, dict]):
         # sibling ``FluidReceiptParser`` contract. The Transfer-log scan is
         # chain-agnostic (wrapper addresses are globally unique), but we store the
         # chain for parity and future per-chain scoping.
-        super().__init__(registry=None, known_topics={_TRANSFER_TOPIC0})
-        self.chain = chain.lower()
+        super().__init__(registry=None, known_topics={_TRANSFER_TOPIC0}, chain=chain)
 
     # -- BaseReceiptParser abstract hooks (unused — extract_* scan directly) --
 

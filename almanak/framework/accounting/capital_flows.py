@@ -47,6 +47,10 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Any, Protocol
 
+from almanak.core.addresses import normalize_address
+from almanak.core.chains import ChainRegistry
+from almanak.core.enums import ChainFamily
+
 logger = logging.getLogger(__name__)
 
 # keccak256("Transfer(address,address,uint256)")
@@ -216,9 +220,22 @@ def _norm_hex(value: Any) -> str:
     return text if text.startswith("0x") else "0x" + text
 
 
-def normalize_address(value: Any) -> str:
-    """Lowercase 0x-prefixed 20-byte address form used as the module's key."""
-    return _norm_hex(value)
+def _normalize_address_value(value: Any, chain: str) -> str:
+    """Coerce an RPC address shape, then apply the core chain casing rule."""
+    if value is None:
+        text = "0x"
+    elif isinstance(value, bytes | bytearray):
+        text = "0x" + bytes(value).hex()
+    else:
+        text = str(value).strip()
+        if not text or text.lower() == "none":
+            text = "0x"
+
+    normalized = normalize_address(text, chain)
+    descriptor = ChainRegistry.try_resolve(str(chain))
+    if descriptor is not None and descriptor.family is ChainFamily.SOLANA:
+        return normalized
+    return normalized if normalized.startswith("0x") else "0x" + normalized
 
 
 def normalize_tx_hash(value: Any) -> str:
@@ -231,9 +248,9 @@ def _topic_to_address(topic: Any) -> str:
     return "0x" + _norm_hex(topic)[2:].rjust(64, "0")[-40:]
 
 
-def pad_address_topic(address: str) -> str:
+def pad_address_topic(address: str, chain: str) -> str:
     """Left-pad an address into the 32-byte topic form used by eth_getLogs."""
-    return "0x" + normalize_address(address)[2:].rjust(64, "0")
+    return "0x" + _normalize_address_value(address, chain)[2:].rjust(64, "0")
 
 
 def _selector_of(calldata: Any) -> str:
@@ -267,7 +284,7 @@ def _log_field(log: Any, key: str) -> Any:
     return getattr(log, key, None)
 
 
-def to_rpc_address(address: str) -> str:
+def to_rpc_address(address: str, chain: str) -> str:
     """EIP-55 checksum an address for the RPC wire.
 
     The module keys everything by lowercase address, but web3.py's validation
@@ -278,7 +295,7 @@ def to_rpc_address(address: str) -> str:
     """
     from web3 import Web3  # checksum utility only; no provider is constructed
 
-    return Web3.to_checksum_address(normalize_address(address))
+    return Web3.to_checksum_address(_normalize_address_value(address, chain))
 
 
 def classify_counterparty_code(code: Any) -> CounterpartyKind:
@@ -403,7 +420,7 @@ def clear_provenance_caches() -> None:
 
 def resolve_counterparty_kind(web3: Web3Like, chain: str, address: str) -> CounterpartyKind:
     """Resolve EOA vs CONTRACT via ``eth_getCode``, cached by (chain, address)."""
-    address = normalize_address(address)
+    address = _normalize_address_value(address, chain)
     if address == ZERO_ADDRESS:
         return CounterpartyKind.MINT_BURN
 
@@ -413,7 +430,7 @@ def resolve_counterparty_kind(web3: Web3Like, chain: str, address: str) -> Count
         return cached
 
     try:
-        code = web3.eth.get_code(to_rpc_address(address))
+        code = web3.eth.get_code(to_rpc_address(address, chain))
     except Exception as exc:  # noqa: BLE001 - provider errors are opaque
         logger.warning("eth_getCode failed for %s on %s: %s", address, chain, exc)
         return CounterpartyKind.UNKNOWN
@@ -446,8 +463,8 @@ def resolve_tx_endpoints(web3: Web3Like, chain: str, tx_hash: str) -> TxEndpoint
         return None
     raw_to = _log_field(tx, "to")
     endpoints = TxEndpoints(
-        sender=normalize_address(sender),
-        to=normalize_address(raw_to) if raw_to is not None else None,
+        sender=_normalize_address_value(sender, chain),
+        to=_normalize_address_value(raw_to, chain) if raw_to is not None else None,
         selector=_selector_of(_log_field(tx, "input")),
     )
     _TX_ENDPOINTS_CACHE.put(cache_key, endpoints)
@@ -486,6 +503,7 @@ def wallet_initiated(
     endpoints: TxEndpoints | None,
     wallet: str,
     *,
+    chain: str,
     wallet_executed_as_safe: bool | None = None,
 ) -> bool | None:
     """Did ``wallet`` itself authorise this transaction? ``None`` = unknown.
@@ -591,8 +609,8 @@ def wallet_initiated(
     """
     if endpoints is None:
         return None
-    wallet = normalize_address(wallet)
-    # ``normalize_address`` returns the sentinel "0x" for an absent/malformed
+    wallet = _normalize_address_value(wallet, chain)
+    # The boundary coercer returns the sentinel "0x" for an absent/malformed
     # value; matching against it would make every endpoint "the wallet".
     if len(wallet) != 42:
         return None
@@ -620,14 +638,16 @@ def resolve_wallet_initiated(web3: Web3Like, chain: str, tx_hash: str, wallet: s
     if endpoints is None:
         return None
     executed = (
-        wallet_executed_as_safe(web3, chain, tx_hash, wallet) if _is_smart_account_arm(endpoints, wallet) else None
+        wallet_executed_as_safe(web3, chain, tx_hash, wallet)
+        if _is_smart_account_arm(endpoints, wallet, chain)
+        else None
     )
-    return wallet_initiated(endpoints, wallet, wallet_executed_as_safe=executed)
+    return wallet_initiated(endpoints, wallet, chain=chain, wallet_executed_as_safe=executed)
 
 
-def _is_smart_account_arm(endpoints: TxEndpoints, wallet: str) -> bool:
+def _is_smart_account_arm(endpoints: TxEndpoints, wallet: str, chain: str) -> bool:
     """True when the ``tx.to == wallet`` arm applies and needs corroborating."""
-    wallet = normalize_address(wallet)
+    wallet = _normalize_address_value(wallet, chain)
     return (
         len(wallet) == 42
         and endpoints.sender != wallet
@@ -653,7 +673,7 @@ def wallet_executed_as_safe(web3: Web3Like, chain: str, tx_hash: str, wallet: st
     signature-validating path. See :func:`wallet_initiated` for the full
     reasoning.
     """
-    wallet = normalize_address(wallet)
+    wallet = _normalize_address_value(wallet, chain)
     if len(wallet) != 42:
         return None
     logs = resolve_tx_logs(web3, chain, tx_hash)
@@ -663,7 +683,7 @@ def wallet_executed_as_safe(web3: Web3Like, chain: str, tx_hash: str, wallet: st
         topics = _log_field(log, "topics") or []
         if not topics or _norm_hex(topics[0]) != SAFE_EXECUTION_SUCCESS_TOPIC:
             continue
-        if normalize_address(_log_field(log, "address")) == wallet:
+        if _normalize_address_value(_log_field(log, "address"), chain) == wallet:
             return True
     return False
 
@@ -681,7 +701,7 @@ class _RawTransfer:
     log_index: int
 
 
-def _parse_transfer_log(log: Any) -> _RawTransfer | None:
+def _parse_transfer_log(log: Any, chain: str) -> _RawTransfer | None:
     """Parse one Transfer log, or ``None`` when it is not a plain ERC-20 one."""
     topics = _log_field(log, "topics") or []
     # ERC-721 shares the Transfer signature but indexes the tokenId as a fourth
@@ -690,7 +710,7 @@ def _parse_transfer_log(log: Any) -> _RawTransfer | None:
         return None
     try:
         return _RawTransfer(
-            token_address=normalize_address(_log_field(log, "address")),
+            token_address=_normalize_address_value(_log_field(log, "address"), chain),
             from_address=_topic_to_address(topics[1]),
             to_address=_topic_to_address(topics[2]),
             raw_amount=_to_int(_log_field(log, "data")),
@@ -757,19 +777,20 @@ def _build_observation(
 def _fetch_chunk_logs(
     web3: Web3Like,
     *,
+    chain: str,
     wallet: str,
     token_addresses: list[str],
     from_block: int,
     to_block: int,
 ) -> list[Any]:
     """Two eth_getLogs calls (inbound + outbound) for one block chunk."""
-    wallet_topic = pad_address_topic(wallet)
+    wallet_topic = pad_address_topic(wallet, chain)
     base = {
         "fromBlock": from_block,
         "toBlock": to_block,
         # Checksummed at the wire: web3.py's middleware rejects lowercase
         # address filters outright (VIB-5866 real-fork finding).
-        "address": [to_rpc_address(addr) for addr in token_addresses],
+        "address": [to_rpc_address(addr, chain) for addr in token_addresses],
     }
     inflows = web3.eth.get_logs({**base, "topics": [TRANSFER_SIG, None, wallet_topic]})
     outflows = web3.eth.get_logs({**base, "topics": [TRANSFER_SIG, wallet_topic, None]})
@@ -786,15 +807,26 @@ def scan_chain_transfers(
     token_universe: Mapping[str, TokenInfo],
     ledger_tx_hashes: Iterable[str] = (),
 ) -> ChainScanResult:
-    """Scan ``(from_block_exclusive, min(head, from+MAX_BLOCKS_PER_CYCLE)]``.
+    """Scan EVM ERC-20 transfers in a bounded block interval.
 
     Returns every ERC-20 transfer in the token universe that touches ``wallet``,
     classified. Self-transfers are dropped and a transfer seen by both topic
-    filters is emitted once.
+    filters is emitted once. Registered non-EVM chain families fail closed as
+    range-unmeasurable without making an EVM RPC.
     """
     chain = chain.lower()
-    wallet = normalize_address(wallet)
-    universe = {normalize_address(addr): info for addr, info in token_universe.items()}
+    descriptor = ChainRegistry.try_resolve(chain)
+    if descriptor is not None and descriptor.family is not ChainFamily.EVM:
+        return ChainScanResult(
+            chain=chain,
+            from_block=from_block_exclusive,
+            to_block=head_block,
+            status=ScanStatus.RANGE_UNMEASURABLE,
+            error=f"capital-flow transfer scanning is unsupported for {descriptor.family.value.lower()} chains",
+        )
+
+    wallet = _normalize_address_value(wallet, chain)
+    universe = {_normalize_address_value(addr, chain): info for addr, info in token_universe.items()}
     ledger = frozenset(normalize_tx_hash(h) for h in ledger_tx_hashes)
 
     if head_block - from_block_exclusive > MAX_BACKLOG_BLOCKS:
@@ -822,6 +854,7 @@ def scan_chain_transfers(
         try:
             logs = _fetch_chunk_logs(
                 web3,
+                chain=chain,
                 wallet=wallet,
                 token_addresses=token_addresses,
                 from_block=cursor,
@@ -848,7 +881,7 @@ def scan_chain_transfers(
             continue
 
         for log in logs:
-            raw = _parse_transfer_log(log)
+            raw = _parse_transfer_log(log, chain)
             if raw is None or raw.from_address == raw.to_address:
                 continue
             collected[(raw.tx_hash, raw.log_index)] = raw

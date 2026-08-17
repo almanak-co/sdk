@@ -26,6 +26,7 @@ import logging
 import re
 from dataclasses import dataclass
 
+from almanak.core.addresses import normalize_address
 from almanak.core.chains._helpers import is_solana_chain
 
 logger = logging.getLogger(__name__)
@@ -146,7 +147,6 @@ def canonicalize_token_for_read(
     chain_lower = effective_chain.lower()
 
     # ── 4. Determine input form ────────────────────────────────────────────────
-    is_solana = is_solana_chain(chain_lower)
     is_evm_address = _is_evm_address(token)
     is_sol_address = _is_solana_address(token, chain_lower)
     is_address = is_evm_address or is_sol_address
@@ -157,8 +157,7 @@ def canonicalize_token_for_read(
 
         resolved = get_token_resolver().resolve(token, chain_lower, log_errors=False, skip_gateway=True)
         # ResolvedToken has .symbol (str), .address (str), .chain (Chain enum).
-        # The resolver already normalizes: EVM addresses are lowercased, Solana
-        # base58 addresses are preserved as-is (per _normalize_address_for_chain).
+        # The resolver already applies the core chain-aware address rule.
         return CanonicalToken(
             chain=chain_lower,
             address=resolved.address,
@@ -173,8 +172,7 @@ def canonicalize_token_for_read(
         return None
 
     if is_address:
-        # Preserve Solana addresses case-sensitively; lowercase EVM.
-        normalized_addr = token if is_solana else token.lower()
+        normalized_addr = normalize_address(token, chain_lower)
         return CanonicalToken(chain=chain_lower, address=normalized_addr, symbol="")
 
     # Symbol form: upper-case, no address.

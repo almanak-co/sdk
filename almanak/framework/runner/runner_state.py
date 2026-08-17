@@ -18,11 +18,14 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from almanak.core.addresses import normalize_address
+from almanak.core.chains import ChainRegistry
+from almanak.core.enums import ChainFamily
+
 from ..accounting.capital_flows import (
     ScanStatus,
     TokenInfo,
     TransferObservation,
-    normalize_address,
     normalize_tx_hash,
     scan_chain_transfers,
 )
@@ -1321,7 +1324,7 @@ def _capital_flow_wallet(runner: Any, chain: str) -> str | None:
     wallet = resolver(chain) if callable(resolver) else None
     if not wallet:
         wallet = getattr(getattr(runner, "balance_provider", None), "wallet_address", None)
-    return str(wallet).lower() if wallet else None
+    return normalize_address(str(wallet), chain) if wallet else None
 
 
 def _capital_flow_token_universe(snapshot: PortfolioSnapshot, chain: str, *, primary: bool) -> dict[str, TokenInfo]:
@@ -1339,7 +1342,7 @@ def _capital_flow_token_universe(snapshot: PortfolioSnapshot, chain: str, *, pri
             continue
         decimals = meta.get("decimals") if isinstance(meta, dict) else None
         symbol = meta.get("symbol") if isinstance(meta, dict) else None
-        universe[normalize_address(address)] = TokenInfo(
+        universe[normalize_address(address, chain)] = TokenInfo(
             symbol=str(symbol) if symbol else None,
             decimals=int(decimals) if isinstance(decimals, int) else None,
         )
@@ -1347,7 +1350,10 @@ def _capital_flow_token_universe(snapshot: PortfolioSnapshot, chain: str, *, pri
         for balance in getattr(snapshot, "wallet_balances", None) or []:
             address = getattr(balance, "address", "") or ""
             if address:
-                universe.setdefault(normalize_address(address), TokenInfo(symbol=getattr(balance, "symbol", None)))
+                universe.setdefault(
+                    normalize_address(address, chain),
+                    TokenInfo(symbol=getattr(balance, "symbol", None)),
+                )
     return universe
 
 
@@ -1632,6 +1638,24 @@ async def _advance_capital_flows(
         return pending_record(), None
 
     chains = _capital_flow_chains(runner, snapshot, ledger_rows)
+    unsupported_families = {
+        descriptor.family
+        for chain in chains
+        if (descriptor := ChainRegistry.try_resolve(chain)) is not None and descriptor.family is not ChainFamily.EVM
+    }
+    if unsupported_families:
+        # The transfer scanner is ERC-20-only. Reject registered non-EVM
+        # families before opening a Web3 adapter or reading ``eth_blockNumber``:
+        # the Solana gateway allowlist correctly rejects that EVM method, which
+        # would otherwise leave a measured record deferred forever. This guard
+        # also catches a non-EVM chain joining an already-measured era before
+        # the cursor-less "start at head" branch can silently skip it.
+        logger.warning(
+            "capital_flows: unsupported chain family",
+            families=sorted(family.value for family in unsupported_families),
+        )
+        return poison(prior, REASON_CHAIN_UNSCANNABLE), None
+
     handles, failure = _open_capital_flow_handles(runner, chains)
     if failure == "no_gateway":
         return prior, DETAIL_NO_GATEWAY

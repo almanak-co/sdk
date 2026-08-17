@@ -14,17 +14,18 @@ from almanak.framework.accounting.capital_flows import (
     MAX_BACKLOG_BLOCKS,
     MAX_BLOCKS_PER_CYCLE,
     MIN_CHUNK_BLOCKS,
+    SAFE_EXEC_TRANSACTION_SELECTOR,
+    SAFE_EXECUTION_SUCCESS_TOPIC,
     TRANSFER_SIG,
     ZERO_ADDRESS,
     ChainScanResult,
     CounterpartyKind,
     FlowClassification,
-    SAFE_EXEC_TRANSACTION_SELECTOR,
-    SAFE_EXECUTION_SUCCESS_TOPIC,
     ScanStatus,
     TokenInfo,
     TransferDirection,
     TxEndpoints,
+    _normalize_address_value,
     clear_provenance_caches,
     pad_address_topic,
     scan_chain_transfers,
@@ -44,6 +45,13 @@ UNIVERSE = {
 }
 
 
+def test_accounting_address_coercion_delegates_chain_sensitive_casing_to_core() -> None:
+    solana_address = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+
+    assert _normalize_address_value("0x" + "Aa" * 20, "arbitrum") == "0x" + "aa" * 20
+    assert _normalize_address_value(solana_address, "solana") == solana_address
+
+
 def _log(
     *,
     token: str = USDC,
@@ -55,7 +63,7 @@ def _log(
     log_index: int = 0,
     extra_topic: str | None = None,
 ) -> dict:
-    topics = [TRANSFER_SIG, pad_address_topic(sender), pad_address_topic(recipient)]
+    topics = [TRANSFER_SIG, pad_address_topic(sender, "arbitrum"), pad_address_topic(recipient, "arbitrum")]
     if extra_topic is not None:
         topics.append(extra_topic)
     return {
@@ -428,6 +436,7 @@ def test_unreadable_receipt_leaves_the_smart_account_arm_unknown():
         wallet_initiated(
             TxEndpoints(sender=EOA, to=WALLET, selector=SAFE_EXEC_TRANSACTION_SELECTOR),
             WALLET,
+            chain="arbitrum",
             wallet_executed_as_safe=None,
         )
         is None
@@ -526,15 +535,21 @@ def test_nested_safe_and_4337_entries_fail_conservatively():
     entry_point = "0x6666666666666666666666666666666666666666"
 
     nested = TxEndpoints(sender=EOA, to=owner_safe, selector=SAFE_EXEC_TRANSACTION_SELECTOR)
-    assert wallet_initiated(nested, WALLET, wallet_executed_as_safe=True) is False
+    assert wallet_initiated(nested, WALLET, chain="arbitrum", wallet_executed_as_safe=True) is False
 
     erc4337 = TxEndpoints(sender=EOA, to=entry_point, selector="0x7bb37428")
-    assert wallet_initiated(erc4337, WALLET, wallet_executed_as_safe=True) is False
+    assert wallet_initiated(erc4337, WALLET, chain="arbitrum", wallet_executed_as_safe=True) is False
 
     # And the 4337 module selector is rejected even if tx.to WERE the wallet.
-    assert wallet_initiated(
-        TxEndpoints(sender=EOA, to=WALLET, selector="0x7bb37428"), WALLET, wallet_executed_as_safe=True
-    ) is False
+    assert (
+        wallet_initiated(
+            TxEndpoints(sender=EOA, to=WALLET, selector="0x7bb37428"),
+            WALLET,
+            chain="arbitrum",
+            wallet_executed_as_safe=True,
+        )
+        is False
+    )
 
 
 def test_eoa_arm_never_pays_for_a_receipt():
@@ -588,19 +603,19 @@ def test_zodiac_module_routed_outflow_is_not_a_withdrawal():
 
 def test_wallet_initiated_is_unknown_not_false_when_endpoints_are_unknown():
     """Empty != Zero at the provenance layer: unknown endpoints are ``None``."""
-    assert wallet_initiated(None, WALLET) is None
-    assert wallet_initiated(TxEndpoints(sender=EOA, to=None), WALLET) is False
-    assert wallet_initiated(TxEndpoints(sender=WALLET, to=USDC), WALLET) is True
+    assert wallet_initiated(None, WALLET, chain="arbitrum") is None
+    assert wallet_initiated(TxEndpoints(sender=EOA, to=None), WALLET, chain="arbitrum") is False
+    assert wallet_initiated(TxEndpoints(sender=WALLET, to=USDC), WALLET, chain="arbitrum") is True
     # The smart-account arm is corroborated, never assumed.
     signed = TxEndpoints(sender=EOA, to=WALLET, selector=SAFE_EXEC_TRANSACTION_SELECTOR)
-    assert wallet_initiated(signed, WALLET, wallet_executed_as_safe=True) is True
-    assert wallet_initiated(signed, WALLET, wallet_executed_as_safe=False) is False
-    assert wallet_initiated(signed, WALLET, wallet_executed_as_safe=None) is None
+    assert wallet_initiated(signed, WALLET, chain="arbitrum", wallet_executed_as_safe=True) is True
+    assert wallet_initiated(signed, WALLET, chain="arbitrum", wallet_executed_as_safe=False) is False
+    assert wallet_initiated(signed, WALLET, chain="arbitrum", wallet_executed_as_safe=None) is None
     # A module entry never reaches the event check at all.
     module_entry = TxEndpoints(sender=EOA, to=WALLET, selector="0x468721a7")
-    assert wallet_initiated(module_entry, WALLET, wallet_executed_as_safe=True) is False
+    assert wallet_initiated(module_entry, WALLET, chain="arbitrum", wallet_executed_as_safe=True) is False
     # A malformed wallet must never make every endpoint match.
-    assert wallet_initiated(TxEndpoints(sender=EOA, to=None), "") is None
+    assert wallet_initiated(TxEndpoints(sender=EOA, to=None), "", chain="arbitrum") is None
 
 
 def test_contract_creation_tx_has_no_target_and_does_not_match():
@@ -770,6 +785,27 @@ def test_backlog_beyond_cap_is_range_unmeasurable():
     assert result.status is ScanStatus.RANGE_UNMEASURABLE
     assert result.observations == ()
     assert result.error is not None
+
+
+def test_solana_scan_fails_closed_without_evm_rpc():
+    eth = FakeEth([])
+    result = scan_chain_transfers(
+        FakeWeb3(eth),
+        chain="solana",
+        wallet="6qXE4b9HQiLSkhVcCdEYJ1J6cv8nSyAVthAcZKGHsfYC",
+        from_block_exclusive=10,
+        head_block=20,
+        token_universe={"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": TokenInfo(symbol="USDC", decimals=6)},
+    )
+
+    assert result.status is ScanStatus.RANGE_UNMEASURABLE
+    assert result.to_block == 20
+    assert result.observations == ()
+    assert result.error is not None and "unsupported for solana chains" in result.error
+    assert eth.log_calls == []
+    assert eth.code_calls == []
+    assert eth.tx_calls == []
+    assert eth.receipt_calls == []
 
 
 def test_chunk_halving_then_success():

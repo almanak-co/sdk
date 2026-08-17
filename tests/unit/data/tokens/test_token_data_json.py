@@ -18,6 +18,8 @@ from pathlib import Path
 
 import pytest
 
+from almanak.core.addresses import normalize_address
+
 DATA_DIR = Path(__file__).resolve().parents[4] / "almanak" / "framework" / "data" / "tokens" / "data"
 
 PY_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -83,9 +85,7 @@ class TestTokensJsonSchema:
     def test_addresses_are_valid_format(self, tokens_blob: dict) -> None:
         for rec in tokens_blob["tokens"]:
             for chain, addr in rec["addresses"].items():
-                assert _is_valid_address(addr, chain), (
-                    f"{rec['var_name']} on {chain}: invalid address format {addr!r}"
-                )
+                assert _is_valid_address(addr, chain), f"{rec['var_name']} on {chain}: invalid address format {addr!r}"
 
     def test_no_unhandled_symbol_collisions_per_chain(self, tokens_blob: dict) -> None:
         """Multiple records sharing ``(chain, symbol)`` are allowed in the
@@ -166,20 +166,14 @@ class TestTokensJsonSchema:
         for rec in tokens_blob["tokens"]:
             for chain, addr in rec["addresses"].items():
                 chain_l = chain.lower()
-                # Solana mints are case-sensitive base58; every other chain
-                # is EVM hex (case-insensitive). Normalize the same way
-                # ``resolver._normalize_address_for_chain`` does so this
-                # test matches what the resolver actually indexes on.
-                norm_addr = addr if chain_l == "solana" else addr.lower()
+                norm_addr = normalize_address(addr, chain_l)
                 key = (chain_l, norm_addr)
                 # Known-overlap allow-list stores lowercased Solana entries
                 # too, so lowercase ours only for that check.
                 if (chain_l, norm_addr.lower()) in known_overlaps:
                     continue
                 if key in seen:
-                    pytest.fail(
-                        f"duplicate ({chain}, {addr}): {seen[key]!r} and {rec['var_name']!r}"
-                    )
+                    pytest.fail(f"duplicate ({chain}, {addr}): {seen[key]!r} and {rec['var_name']!r}")
                 seen[key] = rec["var_name"]
 
 
@@ -196,9 +190,7 @@ class TestSymbolAliasesJsonSchema:
         for chain, chain_aliases in aliases_blob["aliases"].items():
             for alias, addr in chain_aliases.items():
                 assert alias == alias.upper(), f"alias {alias!r} must be uppercase"
-                assert _is_valid_address(addr, chain), (
-                    f"alias {chain}/{alias}: invalid address {addr!r}"
-                )
+                assert _is_valid_address(addr, chain), f"alias {chain}/{alias}: invalid address {addr!r}"
 
 
 class TestLegacyImportsStillWork:

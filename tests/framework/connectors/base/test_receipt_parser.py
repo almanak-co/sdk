@@ -67,10 +67,10 @@ MOCK_EVENT_NAME_TO_TYPE = {
 class MockReceiptParser(BaseReceiptParser[MockEvent, MockParseResult]):
     """Mock parser implementation for testing."""
 
-    def __init__(self):
+    def __init__(self, chain: str = ""):
         """Initialize mock parser."""
         registry = EventRegistry(MOCK_EVENT_TOPICS, MOCK_EVENT_NAME_TO_TYPE)
-        super().__init__(registry=registry)
+        super().__init__(registry=registry, chain=chain)
         self.decode_call_count = 0
         self.create_call_count = 0
         self.build_call_count = 0
@@ -183,6 +183,12 @@ class TestBaseReceiptParserInitialization:
 
         parser = CustomParser()
         assert parser.known_topics == {"0xabc", "0xdef"}
+
+    def test_log_address_uses_parser_chain_casing(self):
+        solana_address = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+
+        assert MockReceiptParser(chain="solana")._coerce_log_address(solana_address) == solana_address
+        assert MockReceiptParser(chain="arbitrum")._coerce_log_address("0x" + "Aa" * 20) == "0x" + "aa" * 20
 
 
 class TestParseReceiptBasic:

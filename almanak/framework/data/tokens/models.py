@@ -18,6 +18,7 @@ from enum import Enum
 from types import MappingProxyType
 from typing import Any
 
+from almanak.core.addresses import normalize_address
 from almanak.core.asset_identity import (
     AssetIdentity,
     AssetNamespace,
@@ -49,12 +50,7 @@ def normalize_token_address_for_chain(address: str, chain: str) -> str:
     """
     if not isinstance(address, str):
         raise TypeError("Token address must be a string")
-
-    address = address.strip()
-    descriptor = ChainRegistry.try_resolve(str(chain))
-    if descriptor is not None and descriptor.family is ChainFamily.SOLANA:
-        return address
-    return address.lower()
+    return normalize_address(address, chain)
 
 
 @dataclass(frozen=True, eq=False)

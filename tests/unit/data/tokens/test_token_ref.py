@@ -6,9 +6,9 @@ from datetime import datetime
 
 import pytest
 
+from almanak.core.addresses import normalize_address
 from almanak.framework.data.tokens import NATIVE_SENTINEL, TokenRef, normalize_token_address_for_chain
 from almanak.framework.data.tokens.models import CHAIN_ID_MAP, BridgeType, ResolvedToken
-from almanak.framework.data.tokens.resolver import _normalize_address_for_chain
 
 USDC_ARBITRUM_MIXED = "0xAf88d065E77c8cC2239327C5EDb3A432268e5831"
 USDC_ARBITRUM_LOWER = "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
@@ -78,13 +78,11 @@ def test_token_ref_same_address_different_chain_is_distinct() -> None:
 
 
 def test_token_ref_normalization_matches_resolver_helper() -> None:
-    assert normalize_token_address_for_chain(USDC_ARBITRUM_MIXED, "arbitrum") == _normalize_address_for_chain(
+    assert normalize_token_address_for_chain(USDC_ARBITRUM_MIXED, "arbitrum") == normalize_address(
         USDC_ARBITRUM_MIXED, "arbitrum"
     )
     assert normalize_token_address_for_chain(f" {USDC_ARBITRUM_MIXED}\n", "arbitrum") == USDC_ARBITRUM_LOWER
-    assert normalize_token_address_for_chain(USDC_SOLANA, "solana") == _normalize_address_for_chain(
-        USDC_SOLANA, "solana"
-    )
+    assert normalize_token_address_for_chain(USDC_SOLANA, "solana") == normalize_address(USDC_SOLANA, "solana")
     assert normalize_token_address_for_chain(f"\t{USDC_SOLANA} ", "solana") == USDC_SOLANA
     assert normalize_token_address_for_chain(USDC_SOLANA, "solana") == USDC_SOLANA
 

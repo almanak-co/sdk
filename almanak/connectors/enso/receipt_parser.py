@@ -14,6 +14,7 @@ from typing import Any
 
 from almanak.connectors._strategy_base.base.hex_utils import HexDecoder
 from almanak.connectors._strategy_base.base.receipt_wallet import resolve_trading_wallet
+from almanak.core.addresses import normalize_address
 from almanak.framework.data.tokens import TokenResolutionError, resolve_token_decimals
 from almanak.framework.execution.extracted_data import ProtocolFees, SwapAmounts
 from almanak.framework.utils.log_formatters import format_gas_cost, format_tx_hash
@@ -327,7 +328,10 @@ class EnsoReceiptParser:
             except (ValueError, IndexError):
                 continue
 
-            token_address = self._normalize_address(log.get("address", ""))
+            raw_token_address = log.get("address", "")
+            if isinstance(raw_token_address, bytes):
+                raw_token_address = "0x" + raw_token_address.hex()
+            token_address = normalize_address(str(raw_token_address), self._chain or "") if raw_token_address else ""
 
             if log_from == wallet:
                 transfers_from_wallet.append((token_address, amount))
@@ -411,13 +415,6 @@ class EnsoReceiptParser:
                 f"Could not resolve decimals for {token_address} on {self._chain}, swap amounts will be unavailable"
             )
             return None
-
-    @staticmethod
-    def _normalize_address(address: Any) -> str:
-        """Normalize an address to lowercase hex string."""
-        if isinstance(address, bytes):
-            address = "0x" + address.hex()
-        return str(address).lower() if address else ""
 
     def parse_approval_receipt(
         self,

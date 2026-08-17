@@ -27,6 +27,7 @@ from almanak.connectors.gmx_v2.perp_settlement import (
     resolve_perp_settlements,
 )
 from almanak.connectors.gmx_v2.teardown_reads import read_open_positions, read_pending_orders
+from almanak.core.addresses import normalize_address
 from almanak.framework.web3.gateway_provider import GatewayWeb3Provider
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,7 @@ logger = logging.getLogger(__name__)
 _PROTOCOL = ProtocolName("gmx_v2")
 _USD_SCALE = Decimal(10**30)
 _PositionKey = tuple[str, str, bool]
+_HEX_DIGITS = frozenset("0123456789abcdef")
 
 
 @dataclass(frozen=True)
@@ -80,22 +82,24 @@ def _intent_type_str(intent: Any) -> str:
     return str(getattr(raw, "value", raw))
 
 
-def _normalize_address(value: Any) -> str | None:
-    address = str(value or "").lower()
-    if len(address) != 42 or not address.startswith("0x"):
+def _validated_address(value: Any, chain: str) -> str | None:
+    """Validate a GMX EVM address after applying the core casing rule."""
+    address = normalize_address(str(value or ""), chain)
+    if (
+        len(address) != 42
+        or not address.startswith("0x")
+        or any(character not in _HEX_DIGITS for character in address[2:])
+    ):
         return None
-    try:
-        return address if int(address, 16) != 0 else None
-    except ValueError:
-        return None
+    return address if any(character != "0" for character in address[2:]) else None
 
 
-def _requested_position_deltas(orders: tuple[Any, ...]) -> dict[_PositionKey, int] | None:
+def _requested_position_deltas(orders: tuple[Any, ...], chain: str) -> dict[_PositionKey, int] | None:
     """Return exact GMX target -> requested raw USD delta, or None if unmeasured."""
     targets: dict[_PositionKey, int] = {}
     for order in orders:
-        market = _normalize_address(getattr(order, "market", None))
-        collateral = _normalize_address(getattr(order, "collateral_token", None))
+        market = _validated_address(getattr(order, "market", None), chain)
+        collateral = _validated_address(getattr(order, "collateral_token", None), chain)
         is_long = getattr(order, "is_long", None)
         try:
             size_delta = Decimal(str(getattr(order, "size_delta_usd", None)))
@@ -108,13 +112,13 @@ def _requested_position_deltas(orders: tuple[Any, ...]) -> dict[_PositionKey, in
     return targets or None
 
 
-def _active_position_sizes(positions: Any) -> dict[_PositionKey, int]:
+def _active_position_sizes(positions: Any, chain: str) -> dict[_PositionKey, int]:
     sizes: dict[_PositionKey, int] = {}
     for position in positions.positions:
         if not getattr(position, "is_active", False):
             continue
-        market = _normalize_address(getattr(position, "market", None))
-        collateral = _normalize_address(getattr(position, "collateral_token", None))
+        market = _validated_address(getattr(position, "market", None), chain)
+        collateral = _validated_address(getattr(position, "collateral_token", None), chain)
         is_long = getattr(position, "is_long", None)
         if market is None or collateral is None or not isinstance(is_long, bool):
             continue
@@ -213,7 +217,7 @@ def _capture_settlement_baseline(
     if not pending_after_baseline.ok or not requested_keys.issubset(_pending_order_keys(pending_after_baseline)):
         return _observation_failed("GMX order changed state while its position baseline was being measured")
 
-    baseline = _GmxSettlementBaseline(tuple(sorted(_active_position_sizes(positions).items())))
+    baseline = _GmxSettlementBaseline(tuple(sorted(_active_position_sizes(positions, chain).items())))
     return _pending_verdict(
         requested_keys,
         reason="GMX order remains pending; exact target position baseline captured",
@@ -381,7 +385,7 @@ def _baseline_free_verdict(
             "absence of a target position is not measurable and cannot mean 'closed'"
         )
 
-    current_sizes = _active_position_sizes(positions)
+    current_sizes = _active_position_sizes(positions, chain)
 
     # KEY ABSENCE IS NOT CLOSURE.
     #
@@ -485,7 +489,7 @@ def _final_position_verdict(
         )
 
     intent_type = _intent_type_str(intent)
-    current_sizes = _active_position_sizes(positions)
+    current_sizes = _active_position_sizes(positions, chain)
     target_reached = _position_delta_reached(
         intent_type,
         requested_deltas,
@@ -591,7 +595,7 @@ class GmxV2RunnerHookConnector(
     ) -> AsyncSettlementVerdict:
         """Measure whether the submitted order reached the intent's target state."""
         requested_keys = {str(getattr(order, "order_id", "") or "").lower() for order in orders}
-        requested_deltas = _requested_position_deltas(orders)
+        requested_deltas = _requested_position_deltas(orders, chain)
         if not requested_keys or "" in requested_keys or requested_deltas is None:
             return _observation_failed(
                 "GMX order target identity or size delta was unmeasured",

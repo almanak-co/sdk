@@ -348,6 +348,26 @@ def test_solana_pool_address_is_not_lowercased_by_framework_reader():
     assert sent_request.pool_address == solana_addr  # case preserved
 
 
+@pytest.mark.parametrize(
+    ("chain", "raw_address", "expected_address"),
+    [
+        ("Arbitrum", _ANTONIS_POOL.upper(), _ANTONIS_POOL),
+        ("Solana", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"),
+    ],
+)
+def test_pool_analytics_request_normalizes_address_by_chain_family(chain, raw_address, expected_address):
+    stub = MagicMock()
+    stub.GetPoolAnalytics.return_value = _make_response(chain=chain.lower())
+    reader = PoolAnalyticsReader(gateway_client=_fake_gateway_with_stub(stub))
+
+    reader.get_pool_analytics(pool_address=raw_address, chain=chain)
+
+    request = stub.GetPoolAnalytics.call_args.args[0]
+    assert isinstance(request, gateway_pb2.PoolAnalyticsRequest)
+    assert request.chain == chain.lower()
+    assert request.pool_address == expected_address
+
+
 def test_best_pool_raises_datasource_unavailable_for_hold_path():
     """``best_pool`` is deferred to VIB-4729 (SearchPools RPC). Until then
     it must raise ``DataSourceUnavailable`` so the runner's HOLD path fires
@@ -436,6 +456,26 @@ def test_list_token_pools_decodes_rows_and_carries_both_caveats():
     assert stub.ListTokenPools.call_args.args[0].token_address == _BTT
     # Strict by default: opting in is the caller's explicit choice.
     assert stub.ListTokenPools.call_args.args[0].allow_fallback_provider is False
+
+
+@pytest.mark.parametrize(
+    ("chain", "raw_address", "expected_address"),
+    [
+        ("Ethereum", _BTT.upper(), _BTT),
+        ("Solana", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"),
+    ],
+)
+def test_token_pools_request_normalizes_address_by_chain_family(chain, raw_address, expected_address):
+    stub = MagicMock()
+    stub.ListTokenPools.return_value = _token_pools_response()
+    reader = PoolAnalyticsReader(gateway_client=_fake_gateway_with_stub(stub))
+
+    reader.list_token_pools(token_address=raw_address, chain=chain)
+
+    request = stub.ListTokenPools.call_args.args[0]
+    assert isinstance(request, gateway_pb2.TokenPoolsRequest)
+    assert request.chain == chain.lower()
+    assert request.token_address == expected_address
 
 
 def test_list_token_pools_keeps_unmeasured_money_as_none():

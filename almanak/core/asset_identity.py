@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
+from almanak.core.addresses import normalize_address
 from almanak.core.chains import ChainRegistry, parse_caip2
 from almanak.core.enums import ChainFamily
 
@@ -192,7 +193,7 @@ class AssetIdentity:
                 raise ValueError(
                     f"ERC-20 asset reference on {descriptor.name!r} must be '0x' plus 40 hexadecimal characters"
                 )
-            reference = reference.lower()
+            reference = normalize_address(reference, descriptor.name)
         elif descriptor.family is ChainFamily.SOLANA:
             if self.asset_namespace is not AssetNamespace.TOKEN:
                 raise ValueError(
@@ -203,6 +204,7 @@ class AssetIdentity:
                 raise ValueError(f"Solana asset reference on {descriptor.name!r} must be a 32-44 character base58 mint")
             if _base58_decoded_length(reference) != 32:
                 raise ValueError(f"Solana asset reference on {descriptor.name!r} must decode to exactly 32 bytes")
+            reference = normalize_address(reference, descriptor.name)
         else:  # pragma: no cover - registry additions must extend this contract first
             raise ValueError(f"Unsupported chain family for asset identity: {descriptor.family.value}")
 

@@ -41,8 +41,7 @@ A 2-tuple ``(chain, token_address)``:
 * ``token_address`` — the contract address on that chain. EVM addresses
   are lowercased hex (``"0xaf88..."``); Solana mint addresses retain their
   original base58 case. This matches the existing repo convention used by
-  :func:`_normalize_address_for_chain` in
-  :mod:`almanak.framework.data.tokens.resolver`.
+  :func:`almanak.core.addresses.normalize_address`.
 
 Idempotency
 -----------
@@ -63,6 +62,7 @@ resolver exception hierarchy need no new branches.
 
 from __future__ import annotations
 
+from almanak.core.addresses import normalize_address
 from almanak.framework.data.tokens.exceptions import (
     InvalidTokenAddressError,
     TokenResolutionError,
@@ -71,7 +71,6 @@ from almanak.framework.data.tokens.resolver import (
     SOLANA_ADDRESS_PATTERN,
     _is_solana_chain,
     _looks_like_address,
-    _normalize_address_for_chain,
     _normalize_chain,
     _validate_address,
     get_token_resolver,
@@ -125,7 +124,7 @@ def canonicalize_token_identity(token: str, chain: str) -> tuple[str, str]:
     The chain in the returned tuple is the resolver's lowercased chain
     string. The address is lowercased hex on EVM chains and original-case
     base58 on Solana — matching the existing repo convention from
-    :func:`_normalize_address_for_chain`.
+    :func:`almanak.core.addresses.normalize_address`.
 
     Args:
         token: Token identifier — symbol (case-insensitive) OR address
@@ -208,7 +207,7 @@ def canonicalize_token_identity(token: str, chain: str) -> tuple[str, str]:
     resolver = get_token_resolver()
     resolved = resolver.resolve(stripped, chain_lower, skip_gateway=True)
 
-    canonical_address = _normalize_address_for_chain(resolved.address, chain_lower)
+    canonical_address = normalize_address(resolved.address, chain_lower)
     return (chain_lower, canonical_address)
 
 

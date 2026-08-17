@@ -37,7 +37,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from almanak.connectors._strategy_base.base import HexDecoder
+from almanak.connectors._strategy_base.base import HexDecoder, normalize_wallet_address
+from almanak.core.addresses import normalize_address
 
 logger = logging.getLogger(__name__)
 
@@ -49,14 +50,10 @@ TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523
 _ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 
 
-def _normalize_address(value: Any) -> str:
-    """Lowercase hex address from a str / bytes / HexBytes log field (``""`` if absent)."""
-    if value is None:
-        return ""
-    if isinstance(value, bytes | bytearray):
-        return "0x" + bytes(value).hex()
-    text = str(value).strip().lower()
-    return text if text.startswith("0x") else ""
+def _coerce_evm_address(value: Any, chain: str) -> str:
+    """Validate an EVM log field, delegating canonical casing to core."""
+    validated = normalize_wallet_address(value)
+    return normalize_address(validated, chain) if validated else ""
 
 
 def _log_field(log_entry: Any, key: str) -> Any:
@@ -75,8 +72,8 @@ def _first_topic(topics: Any) -> str:
     return str(first).strip().lower()
 
 
-def log_emitter_address(log_entry: Any) -> str:
-    """Lowercase address of the contract that emitted ``log_entry`` (``""`` if absent).
+def log_emitter_address(log_entry: Any, *, chain: str) -> str:
+    """Canonical address of the contract that emitted ``log_entry`` (``""`` if absent).
 
     The V3-family pool emits Burn AND Collect, so its own log's emitter is the pool
     — the counterparty a leg-identity transfer scan needs. Shared because three
@@ -86,12 +83,13 @@ def log_emitter_address(log_entry: Any) -> str:
     Burn-derived address is empty and the scan silently found no counterparty
     (VIB-6053 — the close half of the fix regressed on exactly that shape).
     """
-    return _normalize_address(_log_field(log_entry, "address"))
+    return _coerce_evm_address(_log_field(log_entry, "address"), chain)
 
 
 def transfers_by_token(
     logs: Any,
     *,
+    chain: str,
     to_address: str | None = None,
     from_address: str | None = None,
     skip_zero_address: bool = True,
@@ -106,6 +104,8 @@ def transfers_by_token(
     Filters are ANDed and matched case-insensitively; pass ``to_address`` for a
     deposit scan (wallet → pool) and ``from_address`` for a withdrawal scan
     (pool → wallet). With neither, every Transfer in the receipt is accumulated.
+    An explicitly supplied malformed filter fails closed with an empty mapping;
+    only ``None`` means that filter was omitted.
 
     Values ACCUMULATE per token (``+=``), so a leg split across several transfers
     — a router hop, a fee-on-transfer top-up — is summed rather than last-write-wins.
@@ -115,11 +115,13 @@ def transfers_by_token(
     ``skip_zero_address`` drops mint/burn transfers (LP-token supply changes),
     which are never pool-coin movements.
 
-    Returns ``{lowercase_token_address: summed_raw_value}``. Never raises: a
+    Returns ``{canonical_token_address: summed_raw_value}``. Never raises: a
     malformed log is skipped, not fatal — this runs on the accounting write path.
     """
-    want_to = (to_address or "").strip().lower()
-    want_from = (from_address or "").strip().lower()
+    want_to = _coerce_evm_address(to_address, chain)
+    want_from = _coerce_evm_address(from_address, chain)
+    if (to_address is not None and not want_to) or (from_address is not None and not want_from):
+        return {}
     totals: dict[str, int] = {}
 
     for entry in logs or []:
@@ -135,7 +137,7 @@ def transfers_by_token(
                 continue
             if want_from and src != want_from:
                 continue
-            token = _normalize_address(_log_field(entry, "address"))
+            token = _coerce_evm_address(_log_field(entry, "address"), chain)
             if not token:
                 continue
             data = _log_field(entry, "data")

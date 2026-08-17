@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any, TypeVar
 
 from almanak.connectors._strategy_base.base.registry import EventRegistry
+from almanak.core.addresses import normalize_address
 
 logger = logging.getLogger(__name__)
 
@@ -193,15 +194,18 @@ class BaseReceiptParser[TEvent, TResult](ABC):
         self,
         registry: EventRegistry | None = None,
         known_topics: set[str] | None = None,
+        chain: str = "",
     ) -> None:
         """Initialize the base parser.
 
         Args:
             registry: EventRegistry for topic lookups (optional)
             known_topics: Set of known topic signatures (optional, used if no registry)
+            chain: Chain whose address-casing rules apply to parsed log emitters.
         """
         self.registry = registry
         self.known_topics = known_topics or (set(registry.known_topics) if registry else set())
+        self.chain = chain.strip().lower()
 
     def parse_receipt(self, receipt: dict[str, Any], **kwargs) -> TResult:
         """Parse a transaction receipt (template method).
@@ -326,7 +330,7 @@ class BaseReceiptParser[TEvent, TResult](ABC):
                 return None
 
             # Get contract address
-            contract_address = self._normalize_address(log.get("address", ""))
+            contract_address = self._coerce_log_address(log.get("address", ""))
 
             # Get raw data
             data = self._normalize_data(log.get("data", ""))
@@ -593,12 +597,11 @@ class BaseReceiptParser[TEvent, TResult](ABC):
             result = "0x" + result
         return result
 
-    @staticmethod
-    def _normalize_address(address: Any) -> str:
-        """Normalize address to hex string with 0x prefix."""
+    def _coerce_log_address(self, address: Any) -> str:
+        """Coerce a log address, then apply the core chain casing rule."""
         if isinstance(address, bytes):
-            return "0x" + address.hex()
-        return str(address).lower() if address else ""
+            address = "0x" + address.hex()
+        return normalize_address(str(address), self.chain) if address else ""
 
     @staticmethod
     def _normalize_data(data: Any) -> str:

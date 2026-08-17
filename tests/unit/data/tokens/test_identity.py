@@ -136,7 +136,7 @@ def test_weth_canonicalizes_on_each_evm_chain(chain: str, expected_address: str)
 
 def test_usdc_solana_canonicalizes_with_case_preserved() -> None:
     """Solana is the non-EVM chain that proves the case-preserving branch
-    of ``_normalize_address_for_chain`` is wired up. Base58 is
+    of the core address normalizer is wired up. Base58 is
     case-sensitive — lowercasing it would break the address."""
     out = canonicalize_token_identity("USDC", "solana")
     assert out == ("solana", USDC_SOLANA)

@@ -35,8 +35,7 @@ from typing import TYPE_CHECKING
 
 import grpc
 
-from almanak.core.chains import ChainRegistry
-from almanak.core.enums import ChainFamily
+from almanak.core.addresses import normalize_address
 from almanak.core.finality import DataFinality
 from almanak.framework.data.interfaces import DataSourceUnavailable
 from almanak.framework.data.models import (
@@ -315,17 +314,7 @@ class PoolAnalyticsReader:
         from almanak.gateway.proto import gateway_pb2
 
         chain_norm = chain.lower()
-        # Chain-aware address normalize: strip on both branches so a
-        # copy-pasted EVM address with stray whitespace can't reach the
-        # gateway as a different string and fail validation. EVM is
-        # case-insensitive hex → lowercase; Solana base58 is
-        # case-sensitive → preserve case (lower-casing yields a
-        # different address).
-        pool_addr_norm = pool_address.strip()
-        descriptor = ChainRegistry.try_resolve(chain_norm)
-        is_solana = descriptor is not None and descriptor.family is ChainFamily.SOLANA
-        if not is_solana:
-            pool_addr_norm = pool_addr_norm.lower()
+        pool_addr_norm = normalize_address(pool_address, chain_norm)
         protocol_norm = (protocol or "").lower()
 
         request = gateway_pb2.PoolAnalyticsRequest(
@@ -468,15 +457,10 @@ class PoolAnalyticsReader:
         from almanak.gateway.proto import gateway_pb2
 
         chain_norm = chain.lower()
-        # Chain-aware normalize, matching get_pool_analytics: EVM is
-        # case-insensitive hex -> lowercase; Solana base58 is case-sensitive
-        # -> preserve. Not cosmetic — GeckoTerminal answers a CHECKSUMMED EVM
-        # address with an empty list rather than an error, so a missed
-        # lowercase reads as "this token has no venues" (VIB-6599 trap).
-        token_norm = token_address.strip()
-        descriptor = ChainRegistry.try_resolve(chain_norm)
-        if not (descriptor is not None and descriptor.family is ChainFamily.SOLANA):
-            token_norm = token_norm.lower()
+        # Not cosmetic: GeckoTerminal answers a checksummed EVM address with
+        # an empty list rather than an error, while Solana base58 must retain
+        # case. Route both through the core identity rule.
+        token_norm = normalize_address(token_address, chain_norm)
 
         request = gateway_pb2.TokenPoolsRequest(
             chain=chain_norm,

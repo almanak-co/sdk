@@ -296,8 +296,7 @@ class PancakeSwapV3ReceiptParser(BaseReceiptParser[SwapEventData, ParseResult]):
             chain: Blockchain network (for position manager address lookup)
         """
         registry = EventRegistry(EVENT_TOPICS, EVENT_NAME_TO_TYPE)
-        super().__init__(registry=registry)
-        self.chain = chain.lower()
+        super().__init__(registry=registry, chain=chain)
 
     def _decode_log_data(
         self,
@@ -1057,7 +1056,7 @@ class PancakeSwapV3ReceiptParser(BaseReceiptParser[SwapEventData, ParseResult]):
                     # leg-identity scan would silently find no counterparty. Kept
                     # out of ``pool_address`` itself so the VIB-4305 registry
                     # anchor keeps its existing Burn-only semantics.
-                    collect_pool_address = collect_pool_address or log_emitter_address(log)
+                    collect_pool_address = collect_pool_address or log_emitter_address(log, chain=self.chain)
 
                 elif first_topic == burn_topic and len(topics) >= 4:
                     # uint128 amount (padded) ‖ uint256 amount0 ‖ uint256 amount1
@@ -1118,7 +1117,7 @@ class PancakeSwapV3ReceiptParser(BaseReceiptParser[SwapEventData, ParseResult]):
             # aggregator prefers); a burn-only receipt moves no tokens, so both
             # stay ``None`` — honestly unidentified rather than guessed.
             currency0, currency1 = currencies_for_amounts(
-                transfers_by_token(logs, from_address=pool_address or collect_pool_address)
+                transfers_by_token(logs, chain=self.chain, from_address=pool_address or collect_pool_address)
                 if (pool_address or collect_pool_address)
                 else {},
                 amount0_collected,
@@ -1326,7 +1325,7 @@ class PancakeSwapV3ReceiptParser(BaseReceiptParser[SwapEventData, ParseResult]):
             # order, which may be the OPPOSITE of the user's pool label). See the
             # uniswap_v3 twin for the full rationale.
             currency0, currency1 = currencies_for_amounts(
-                transfers_by_token(logs, to_address=pool_address) if pool_address else {},
+                transfers_by_token(logs, chain=self.chain, to_address=pool_address) if pool_address else {},
                 amount0,
                 amount1,
             )

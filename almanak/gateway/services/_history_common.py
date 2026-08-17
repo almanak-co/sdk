@@ -41,6 +41,7 @@ from dataclasses import dataclass
 
 import grpc
 
+from almanak.core.addresses import normalize_address
 from almanak.core.chains._helpers import solana_chain_names
 from almanak.core.chains._registry import ChainRegistry
 from almanak.gateway.proto import gateway_pb2
@@ -98,14 +99,10 @@ def normalize_pool_address(address: str, chain: str) -> str:
     EVM addresses are case-insensitive → ``strip().lower()``.
     Solana base58 addresses are case-sensitive → ``strip()`` ONLY.
 
-    Mirrors ``almanak.framework.data.tokens.resolver._normalize_address_for_chain``
-    and ``pool_analytics_service._normalize_pool_address``. Centralizing
-    here avoids three copies of the same rule drifting.
+    Delegates to the core address identity rule so history, analytics, token,
+    and accounting keys cannot drift.
     """
-    address = address.strip()
-    if is_solana_chain(chain):
-        return address
-    return address.lower()
+    return normalize_address(address, chain)
 
 
 def validate_pool_address_syntax(address: str, chain: str) -> bool:
