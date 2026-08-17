@@ -14,6 +14,7 @@ from almanak.gateway.utils.rpc_provider import (
     get_rpc_url_cached,
     get_supported_chains,
     has_api_key_configured,
+    inject_poa_middleware,
     is_local_rpc,
     is_poa_chain,
 )
@@ -24,6 +25,7 @@ __all__ = [
     "get_cached_web3",
     "get_rpc_url",
     "get_rpc_url_cached",
+    "inject_poa_middleware",
     "is_poa_chain",
     "is_local_rpc",
     "get_supported_chains",

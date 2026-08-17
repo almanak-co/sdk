@@ -123,6 +123,38 @@ def test_get_web3_reuses_single_instance_per_chain_under_concurrency(monkeypatch
     assert len({id(w) for w in instances}) == 1
 
 
+def test_get_web3_applies_descriptor_poa_policy_before_caching(monkeypatch) -> None:
+    """The async rate-history client uses the shared POA chain policy."""
+    servicer = RateHistoryServiceServicer(GatewaySettings())
+    injected: list[tuple[object, str]] = []
+
+    class _FakeWeb3:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+    import web3 as web3_mod
+
+    import almanak.gateway.utils as gw_utils
+
+    monkeypatch.setattr(web3_mod, "AsyncWeb3", _FakeWeb3)
+    monkeypatch.setattr(web3_mod, "AsyncHTTPProvider", lambda *a, **k: object())
+    monkeypatch.setattr(gw_utils, "get_rpc_url", lambda chain, network=None: "http://rpc.test")
+    monkeypatch.setattr(
+        gw_utils,
+        "inject_poa_middleware",
+        lambda web3, chain: injected.append((web3, chain)),
+    )
+    monkeypatch.setattr(
+        "almanak.gateway.services.rate_history_service.build_ssl_context",
+        lambda: None,
+    )
+
+    instance = asyncio.run(servicer._get_web3("bsc"))
+
+    assert injected == [(instance, "bsc")]
+    assert servicer._web3_cache["bsc"] is instance
+
+
 def test_close_isolates_oracle_reader_failures_and_clears_cache() -> None:
     servicer = RateHistoryServiceServicer(GatewaySettings())
     failing = AsyncMock()

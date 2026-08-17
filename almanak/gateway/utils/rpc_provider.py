@@ -46,6 +46,7 @@ Environment Variables:
 import logging
 from enum import StrEnum
 from functools import lru_cache
+from typing import Any
 
 from almanak.config.gateway_runtime import (
     anvil_generic_port_string,
@@ -524,6 +525,38 @@ def is_poa_chain(chain: str) -> bool:
     return chain_lower in POA_CHAINS
 
 
+def inject_poa_middleware(web3: Any, chain: str) -> None:
+    """Configure a Web3 client for descriptor-declared POA block formats.
+
+    The helper accepts both synchronous ``Web3`` and ``AsyncWeb3`` clients;
+    both expose the same middleware-onion API. Chain membership is derived
+    from :class:`RpcProfile` through :func:`is_poa_chain`, so callers must not
+    maintain service- or connector-local chain lists.
+
+    Args:
+        web3: A synchronous or asynchronous Web3 client.
+        chain: Canonical chain name or registered alias.
+    """
+    if not is_poa_chain(chain):
+        return
+
+    import web3 as web3_module
+    import web3.middleware as web3_middleware
+
+    poa_middleware = getattr(web3_middleware, "ExtraDataToPOAMiddleware", None)
+    if poa_middleware is None:
+        # web3.py 6 has distinct sync and async legacy middleware factories.
+        # Injecting geth_poa_middleware into AsyncWeb3 fails when the middleware
+        # is awaited, so select the legacy name from the concrete client type.
+        legacy_name = "async_geth_poa_middleware" if isinstance(web3, web3_module.AsyncWeb3) else "geth_poa_middleware"
+        poa_middleware = getattr(web3_middleware, legacy_name, None)
+        if poa_middleware is None:
+            logger.warning("POA middleware unavailable for chain %s; block reads may fail", chain)
+            return
+
+    web3.middleware_onion.inject(poa_middleware, layer=0)
+
+
 def is_local_rpc(rpc_url: str) -> bool:
     """Check if an RPC URL is a local endpoint (Anvil, Hardhat, etc.).
 
@@ -608,10 +641,10 @@ def get_cached_web3(chain: str, network: Network = Network.MAINNET):  # noqa: AN
 
     Uses the same URL resolution as ``get_rpc_url``. The returned instance is
     cached at the process level so multiple gateway services share a single
-    HTTPProvider connection pool instead of each instantiating their own. POA
-    chains (Polygon, BSC, Avalanche, Sonic) automatically have the
+    HTTPProvider connection pool instead of each instantiating their own.
+    Descriptor-declared POA chains automatically have the
     ``ExtraDataToPOAMiddleware`` injected so ``eth.get_block("latest")`` does
-    not raise on the 32-byte ``extraData`` field.
+    not reject the chain's non-standard ``extraData`` field.
 
     The cache key is ``(chain, network)``; tests that need a fresh client (e.g.
     after env mutation) should call ``get_cached_web3.cache_clear()``.
@@ -635,27 +668,7 @@ def _get_cached_web3(chain: str, network: Network):  # noqa: ANN201
 
     rpc_url = get_rpc_url(chain, network=network)
     w3 = Web3(Web3.HTTPProvider(rpc_url))
-
-    # POA chains include a 32-byte extraData on every block; the default
-    # web3.py block validator rejects that as malformed. Inject the POA
-    # middleware so eth.get_block("latest") works for fee_history / EIP-1559
-    # checks downstream.
-    if is_poa_chain(chain):
-        try:
-            from web3.middleware import ExtraDataToPOAMiddleware
-
-            w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
-        except ImportError:
-            # Older web3.py releases name it differently. Best-effort: if
-            # neither name resolves, callers that read latest block extraData
-            # will see a clear web3 error instead of a silent malformation.
-            try:
-                from web3.middleware import geth_poa_middleware  # type: ignore[attr-defined]
-
-                w3.middleware_onion.inject(geth_poa_middleware, layer=0)
-            except ImportError:
-                logger.warning("POA middleware unavailable for chain %s; latest-block reads may fail", chain)
-
+    inject_poa_middleware(w3, chain)
     return w3
 
 
@@ -681,6 +694,7 @@ __all__ = [
     "get_rpc_url_cached",
     "get_supported_chains",
     "has_api_key_configured",
+    "inject_poa_middleware",
     "is_local_rpc",
     "is_poa_chain",
     "_get_custom_url",

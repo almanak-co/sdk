@@ -672,13 +672,14 @@ class RateHistoryServiceServicer(gateway_pb2_grpc.RateHistoryServiceServicer):
 
             from web3 import AsyncHTTPProvider, AsyncWeb3
 
-            from almanak.gateway.utils import get_rpc_url
+            from almanak.gateway.utils import get_rpc_url, inject_poa_middleware
 
             network = self.settings.network
             rpc_url = get_rpc_url(chain, network=network)
             web3 = AsyncWeb3(
                 AsyncHTTPProvider(rpc_url, request_kwargs={"ssl": build_ssl_context()}),
             )
+            inject_poa_middleware(web3, chain)
             self._web3_cache[chain] = web3
             return web3
 

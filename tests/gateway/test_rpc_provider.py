@@ -1,9 +1,15 @@
 """Tests for RPC provider env var precedence and custom URL resolution."""
 
+import asyncio
 import os
+from typing import Any
 from unittest.mock import patch
 
 import pytest
+from web3 import AsyncWeb3
+from web3.exceptions import ExtraDataLengthError
+from web3.providers import AsyncBaseProvider
+from web3.types import RPCEndpoint, RPCResponse
 
 from almanak.gateway.utils.rpc_provider import (
     NodeProvider,
@@ -13,6 +19,7 @@ from almanak.gateway.utils.rpc_provider import (
     _has_generic_url,
     get_rpc_url,
     has_api_key_configured,
+    inject_poa_middleware,
 )
 
 
@@ -109,6 +116,87 @@ class TestHasCustomUrl:
 
     def test_returns_false_when_empty(self):
         assert _has_custom_url("arbitrum") is False
+
+
+class _PoABlockProvider(AsyncBaseProvider):
+    """Minimal async provider returning the BSC block shape from ALM-3325."""
+
+    async def make_request(self, method: RPCEndpoint, params: Any) -> RPCResponse:
+        assert method == "eth_getBlockByNumber"
+        return {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "number": "0x0",
+                "timestamp": "0x5e9f5c4e",
+                "extraData": "0x" + ("11" * 517),
+            },
+        }
+
+
+class TestPoAMiddleware:
+    """Descriptor-driven middleware configuration for sync and async clients."""
+
+    @pytest.mark.parametrize("chain", ["bsc", "bnb", "polygon", "avalanche"])
+    def test_injects_middleware_for_poa_chains(self, chain: str) -> None:
+        web3 = AsyncWeb3(_PoABlockProvider())
+
+        inject_poa_middleware(web3, chain)
+        block = asyncio.run(web3.eth.get_block(0))
+
+        assert block["number"] == 0
+        assert len(block["proofOfAuthorityData"]) == 517
+
+    def test_plain_client_reproduces_extra_data_failure(self) -> None:
+        web3 = AsyncWeb3(_PoABlockProvider())
+
+        with pytest.raises(ExtraDataLengthError, match="517 bytes"):
+            asyncio.run(web3.eth.get_block(0))
+
+    def test_does_not_inject_middleware_for_non_poa_chain(self) -> None:
+        web3 = AsyncWeb3(_PoABlockProvider())
+
+        inject_poa_middleware(web3, "ethereum")
+
+        with pytest.raises(ExtraDataLengthError, match="517 bytes"):
+            asyncio.run(web3.eth.get_block(0))
+
+    @pytest.mark.parametrize("async_client", [True, False], ids=["async", "sync"])
+    def test_selects_matching_web3_v6_legacy_middleware(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        async_client: bool,
+    ) -> None:
+        import web3 as web3_mod
+        import web3.middleware as web3_middleware
+
+        class _RecordingOnion:
+            def __init__(self) -> None:
+                self.injected: list[tuple[object, int]] = []
+
+            def inject(self, middleware: object, *, layer: int) -> None:
+                self.injected.append((middleware, layer))
+
+        class _FakeAsyncWeb3:
+            def __init__(self) -> None:
+                self.middleware_onion = _RecordingOnion()
+
+        class _FakeSyncWeb3:
+            def __init__(self) -> None:
+                self.middleware_onion = _RecordingOnion()
+
+        async_middleware = object()
+        sync_middleware = object()
+        monkeypatch.setattr(web3_mod, "AsyncWeb3", _FakeAsyncWeb3)
+        monkeypatch.delattr(web3_middleware, "ExtraDataToPOAMiddleware")
+        monkeypatch.setattr(web3_middleware, "async_geth_poa_middleware", async_middleware, raising=False)
+        monkeypatch.setattr(web3_middleware, "geth_poa_middleware", sync_middleware, raising=False)
+
+        web3 = _FakeAsyncWeb3() if async_client else _FakeSyncWeb3()
+        inject_poa_middleware(web3, "bsc")
+
+        expected = async_middleware if async_client else sync_middleware
+        assert web3.middleware_onion.injected == [(expected, 0)]
 
 
 class TestGetRpcUrl:
