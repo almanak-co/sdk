@@ -5,7 +5,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any, ClassVar
 
-from almanak.connectors._strategy_base.base.compiler import BaseCompilerContext
+from almanak.connectors._strategy_base.base.compiler import BaseCompilerContext, CompilerServicesFacadeMixin
 from almanak.connectors._strategy_base.base.lending import BaseLendingCompiler
 from almanak.connectors._strategy_base.base.lending import aave_helpers as _aave_helpers
 from almanak.connectors.morpho_blue.adapter import MORPHO_BLUE_ADDRESSES
@@ -13,7 +13,7 @@ from almanak.framework.intents.compiler_models import CompilationResult, Compila
 from almanak.framework.intents.vocabulary import BorrowIntent, RepayIntent, SupplyIntent, WithdrawIntent
 
 
-class _LendingCompilerAdapter:
+class _LendingCompilerAdapter(CompilerServicesFacadeMixin):
     """Per-call adapter exposing the legacy IntentCompiler surface that the
     relocated lending bodies in ``aave_helpers`` still consume.
 
@@ -23,27 +23,6 @@ class _LendingCompilerAdapter:
     follow-up; this adapter is the bounded, single-connector seam in the
     meantime.
     """
-
-    __slots__ = (
-        "_ctx",
-        "chain",
-        "wallet_address",
-        "rpc_url",
-        "rpc_timeout",
-        "price_oracle",
-        "_gateway_client",
-        "_token_resolver",
-    )
-
-    def __init__(self, ctx: BaseCompilerContext) -> None:
-        self._ctx = ctx
-        self.chain = ctx.chain
-        self.wallet_address = ctx.wallet_address
-        self.rpc_url = ctx.rpc_url
-        self.rpc_timeout = ctx.rpc_timeout
-        self.price_oracle = ctx.price_oracle
-        self._gateway_client = ctx.gateway_client
-        self._token_resolver = ctx.token_resolver
 
     # Lending preflight caches read these attribute names off the compiler.
     # We back them with ``ctx.cache`` so the framework owns lifetime.
@@ -62,24 +41,6 @@ class _LendingCompilerAdapter:
     @property
     def _lending_borrow_capacity_cache(self) -> dict:
         return self._ctx.cache.setdefault("lending_borrow_capacity", {})
-
-    def _resolve_token(self, token: str) -> Any:
-        return self._ctx.services.resolve_token(token)
-
-    def _build_approve_tx(self, token_address: str, spender: str, amount: int) -> list:
-        return self._ctx.services.build_approve_tx(token_address, spender, amount)
-
-    def _format_amount(self, amount: int, decimals: int) -> str:
-        return self._ctx.services.format_amount(amount, decimals)
-
-    def _query_erc20_balance(self, token_address: str, wallet_address: str) -> int | None:
-        return self._ctx.services.query_erc20_balance(token_address, wallet_address)
-
-    def _get_wrapped_native_address(self) -> str | None:
-        return self._ctx.services.get_wrapped_native_address()
-
-    def _get_chain_rpc_url(self) -> str | None:
-        return self._ctx.rpc_url
 
 
 def _failed(intent: Any, error: str) -> CompilationResult:

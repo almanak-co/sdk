@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, cast
 from almanak.connectors._strategy_base.base.compiler import (
     BaseCompilerContext,
     BaseProtocolCompiler,
+    CompilerServicesFacadeMixin,
     SwapCompilerContext,
 )
 from almanak.connectors._strategy_base.slippage import (
@@ -102,41 +103,11 @@ class TraderJoeV2Compiler(BaseProtocolCompiler[SwapCompilerContext]):
         return _TraderJoeV2CompileImpl(ctx)._compile_collect_fees_traderjoe_v2(intent)
 
 
-class _TraderJoeV2CompileImpl:
+class _TraderJoeV2CompileImpl(CompilerServicesFacadeMixin):
     """Per-call adapter that preserves the pre-fold TraderJoe compiler body."""
 
     def __init__(self, ctx: SwapCompilerContext) -> None:
-        self._ctx = ctx
-        self.chain = ctx.chain
-        self.wallet_address = ctx.wallet_address
-        self.rpc_timeout = ctx.rpc_timeout
-        self.price_oracle = ctx.price_oracle
-        self._gateway_client = ctx.gateway_client
-        self._token_resolver = ctx.token_resolver
-
-    def _get_chain_rpc_url(self) -> str | None:
-        return self._ctx.rpc_url
-
-    def _resolve_token(self, token: str) -> TokenInfo | None:
-        return self._ctx.services.resolve_token(token)
-
-    def _require_token_price(self, symbol: str) -> Decimal:
-        return self._ctx.services.require_token_price(symbol)
-
-    def _require_token_price_for(self, token: TokenInfo) -> Decimal:
-        return self._ctx.services.require_token_price_for(token)
-
-    def _usd_to_token_amount(self, usd_amount: Decimal, token: TokenInfo) -> int:
-        return self._ctx.services.usd_to_token_amount(usd_amount, token)
-
-    def _build_approve_tx(self, token_address: str, spender: str, amount: int) -> list[TransactionData]:
-        return self._ctx.services.build_approve_tx(token_address, spender, amount)
-
-    def _validate_pool(self, result: Any, intent_id: str) -> CompilationResult | None:
-        return self._ctx.services.validate_pool(result, intent_id)
-
-    def _format_amount(self, amount: int, decimals: int) -> str:
-        return self._ctx.services.format_amount(amount, decimals)
+        super().__init__(ctx)
 
     @staticmethod
     def _parse_traderjoe_v2_pool_spec(
@@ -353,6 +324,7 @@ class _TraderJoeV2CompileImpl:
                     chain=self.chain,
                     wallet_address=self.wallet_address,
                     rpc_url=rpc_url,
+                    default_deadline_seconds=self.default_deadline_seconds,
                     gateway_client=gateway_client,
                 )
             )
@@ -504,6 +476,7 @@ class _TraderJoeV2CompileImpl:
                 chain=self.chain,
                 wallet_address=self.wallet_address,
                 rpc_url=rpc_url,
+                default_deadline_seconds=self.default_deadline_seconds,
                 gateway_client=gateway_client,
             )
             tj_adapter = TraderJoeV2Adapter(config)
@@ -792,6 +765,7 @@ class _TraderJoeV2CompileImpl:
                 chain=self.chain,
                 wallet_address=self.wallet_address,
                 rpc_url=rpc_url,
+                default_deadline_seconds=self.default_deadline_seconds,
                 gateway_client=gateway_client,
             )
             tj_adapter = TraderJoeV2Adapter(config)
@@ -1237,7 +1211,7 @@ class _TraderJoeV2CompileImpl:
         Returns ``(amount_out_min_wei, oracle_estimate_wei, quoter_amount_wei)``
         on success, or a FAILED :class:`CompilationResult` when the guard trips.
         """
-        ctx = self._ctx
+        ctx = cast(SwapCompilerContext, self._ctx)
         # Oracle-derived expected output (wei), independent of the pool quote.
         # A missing price degrades to 0 (== "no oracle to compare against"): the
         # guard then skips rather than hard-failing a swap on a flaky feed. Only
@@ -1381,6 +1355,7 @@ class _TraderJoeV2CompileImpl:
                     wallet_address=self.wallet_address,
                     rpc_url=rpc_url,
                     default_slippage_bps=slippage_bps,
+                    default_deadline_seconds=self.default_deadline_seconds,
                     gateway_client=gateway_client,
                 )
             )

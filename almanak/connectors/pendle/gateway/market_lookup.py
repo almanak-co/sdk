@@ -29,10 +29,13 @@ Usage:
 
 import asyncio
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from almanak.connectors._base.chain_ids import chain_ids_from_supported_chains, chain_names_by_id
+from almanak.connectors.pendle.connector import CONNECTOR
 from almanak.gateway.services._protocol_lookup import ProtocolTokenLookup
 
 logger = logging.getLogger(__name__)
@@ -40,19 +43,10 @@ logger = logging.getLogger(__name__)
 # Pendle cross-chain bulk assets endpoint (free, no auth, single call covers every chain)
 PENDLE_ASSETS_URL = "https://api-v2.pendle.finance/core/v1/assets/all"
 
-# EVM chains supported by Pendle that we currently map to gateway chain names.
-# Kept in sync with ``almanak.connectors.pendle.api_client.CHAIN_ID_MAP``.
-# Pendle's /assets/all endpoint also returns entries for newer chains (Sonic,
-# Mantle, Berachain, ...); those are skipped during index building because the
-# gateway doesn't yet know how to talk to them.
-PENDLE_CHAIN_IDS: dict[str, int] = {
-    "ethereum": 1,
-    "arbitrum": 42161,
-    "optimism": 10,
-    "base": 8453,
-    "bsc": 56,
-}
-_CHAIN_NAME_BY_ID: dict[int, str] = {v: k for k, v in PENDLE_CHAIN_IDS.items()}
+# EVM chains supported by the connector. Assets returned for other chains are
+# ignored until those chains are declared and executable end to end.
+PENDLE_CHAIN_IDS: Mapping[str, int] = chain_ids_from_supported_chains(CONNECTOR.supported_chains)
+_CHAIN_NAME_BY_ID: Mapping[int, str] = chain_names_by_id(PENDLE_CHAIN_IDS)
 
 # Pendle's /assets/all returns these tag values for the token types we care
 # about.  PENDLE_LP is the market/pool token; keep it under the generic

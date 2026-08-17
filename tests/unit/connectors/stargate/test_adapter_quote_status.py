@@ -85,7 +85,9 @@ class TestGetQuote:
     @pytest.mark.parametrize("missing_chain", ["arbitrum", "optimism"])
     def test_missing_evm_chain_id_rejected(self, adapter, monkeypatch, missing_chain):
         _skip_validation(monkeypatch, adapter)
-        monkeypatch.delitem(stargate_adapter.EVM_CHAIN_IDS, missing_chain)
+        chain_ids = dict(stargate_adapter.EVM_CHAIN_IDS)
+        del chain_ids[missing_chain]
+        monkeypatch.setattr(stargate_adapter, "EVM_CHAIN_IDS", chain_ids)
         with pytest.raises(StargateQuoteError, match=f"Unsupported EVM chain: {missing_chain}"):
             adapter.get_quote("USDC", Decimal("100"), "arbitrum", "optimism")
 

@@ -36,6 +36,7 @@ from almanak.connectors._strategy_base import concentrated_liquidity_math as cl_
 from almanak.connectors._strategy_base.rpc import eth_call, eth_call_hex
 from almanak.connectors._strategy_base.slippage import compute_min_amount_out_from_bps
 from almanak.connectors._strategy_base.v4_pool_abi import V4_DEFAULT_TICK_SPACING
+from almanak.framework.intents._compiler_helpers import deadline_from_now
 
 from .addresses import UNISWAP_V4
 
@@ -934,7 +935,7 @@ class UniswapV4SDK:
             quote: Swap quote with amounts.
             recipient: Address to receive output tokens.
             slippage_bps: Slippage tolerance in basis points.
-            deadline: Transaction deadline (0 = 30 minutes from now).
+            deadline: Transaction deadline (0 = 5 minutes from now).
 
         Returns:
             SwapTransaction with encoded calldata.
@@ -953,7 +954,7 @@ class UniswapV4SDK:
         is_native_out = pool_token_out.lower() == NATIVE_CURRENCY
 
         if deadline == 0:
-            deadline = int(time.time()) + 1800  # 30 minutes
+            deadline = deadline_from_now(300)  # Direct SDK fallback.
 
         # Build a modified quote that uses native ETH for the pool key
         pool_quote = SwapQuote(
@@ -1183,13 +1184,13 @@ class UniswapV4SDK:
 
         Args:
             params: LPMintParams with pool key, tick range, liquidity, etc.
-            deadline: TX deadline (0 = 30 minutes from now).
+            deadline: TX deadline (0 = 5 minutes from now).
 
         Returns:
             SwapTransaction targeting PositionManager.
         """
         if deadline == 0:
-            deadline = int(time.time()) + 1800
+            deadline = deadline_from_now(300)
 
         position_manager = self.addresses["position_manager"]
 
@@ -1264,14 +1265,14 @@ class UniswapV4SDK:
             currency0: Token0 address (sorted).
             currency1: Token1 address (sorted).
             recipient: Address to receive withdrawn tokens.
-            deadline: TX deadline (0 = 30 minutes from now).
+            deadline: TX deadline (0 = 5 minutes from now).
             burn: Whether to burn the NFT after withdrawal.
 
         Returns:
             SwapTransaction targeting PositionManager.
         """
         if deadline == 0:
-            deadline = int(time.time()) + 1800
+            deadline = deadline_from_now(300)
 
         position_manager = self.addresses["position_manager"]
 
@@ -1320,13 +1321,13 @@ class UniswapV4SDK:
             currency1: Token1 address (sorted).
             recipient: Address to receive fees.
             hook_data: Optional hook data for hooked pools.
-            deadline: TX deadline (0 = 30 minutes from now).
+            deadline: TX deadline (0 = 5 minutes from now).
 
         Returns:
             SwapTransaction targeting PositionManager.
         """
         if deadline == 0:
-            deadline = int(time.time()) + 1800
+            deadline = deadline_from_now(300)
 
         position_manager = self.addresses["position_manager"]
 

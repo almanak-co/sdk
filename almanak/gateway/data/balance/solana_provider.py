@@ -37,6 +37,7 @@ from typing import Any
 
 import aiohttp
 
+from almanak.core.retry import RetryPolicy
 from almanak.framework.data.interfaces import (
     BalanceResult,
     DataSourceError,
@@ -81,7 +82,11 @@ class SolanaBalanceProvider:
         self._chain = chain.lower()
         self._cache_ttl = cache_ttl
         self._request_timeout = request_timeout
-        self._max_retries = max_retries
+        self._retry_policy = RetryPolicy(
+            max_attempts=max_retries,
+            initial_delay_seconds=retry_delay,
+        )
+        self._max_retries = self._retry_policy.max_attempts
         self._retry_delay = retry_delay
         self._session: aiohttp.ClientSession | None = None
 
@@ -132,7 +137,7 @@ class SolanaBalanceProvider:
         session = await self._get_session()
         last_error: Exception | None = None
 
-        for attempt in range(self._max_retries):
+        for attempt in self._retry_policy.attempt_numbers:
             try:
                 payload = {
                     "jsonrpc": "2.0",
@@ -161,8 +166,8 @@ class SolanaBalanceProvider:
                 logger.warning(
                     "Solana RPC %s failed (attempt %d/%d): %s",
                     method,
-                    attempt + 1,
-                    self._max_retries,
+                    attempt,
+                    self._retry_policy.max_attempts,
                     str(e),
                 )
             except DataSourceError:
@@ -172,18 +177,17 @@ class SolanaBalanceProvider:
                 logger.warning(
                     "Solana RPC %s error (attempt %d/%d): %s",
                     method,
-                    attempt + 1,
-                    self._max_retries,
+                    attempt,
+                    self._retry_policy.max_attempts,
                     str(e),
                 )
 
-            if attempt < self._max_retries - 1:
-                wait_time = self._retry_delay * (2**attempt)
-                await asyncio.sleep(wait_time)
+            if self._retry_policy.can_retry(attempt):
+                await asyncio.sleep(self._retry_policy.delay_for_attempt(attempt))
 
         raise DataSourceUnavailable(
             source="solana_balance_provider",
-            reason=f"RPC call {method} failed after {self._max_retries} attempts: {last_error}",
+            reason=f"RPC call {method} failed after {self._retry_policy.max_attempts} attempts: {last_error}",
         )
 
     def _get_cached(self, token_key: str) -> BalanceResult | None:

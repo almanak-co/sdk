@@ -2,8 +2,8 @@
 
 .. deprecated:: 2.25.0
     This module is deprecated and scheduled for removal in Almanak SDK 3.0.0.
-    It has no callers inside the SDK, and R17 (ALM-3197) owns the design of the
-    unified retry home that replaces it. It is retained only so that the five
+    It has no callers inside the SDK and is replaced by the explicit-attempt
+    :class:`almanak.core.retry.RetryPolicy` (ALM-3197). It is retained only so that the five
     names it exported through ``almanak.framework.utils`` — which ``.syncinclude``
     publishes to the public mirror — do not disappear without a deprecation
     cycle. Importing this module, or resolving one of its names through
@@ -66,9 +66,8 @@ logger = logging.getLogger(__name__)
 
 DEPRECATION_MESSAGE = (
     "almanak.framework.utils.retry is deprecated and will be removed in "
-    "Almanak SDK 3.0.0. It has no callers inside the SDK; the unified retry "
-    "home is designed under ALM-3197. Vendor these helpers into your own code "
-    "if you depend on them."
+    "Almanak SDK 3.0.0. Use almanak.core.retry.RetryPolicy for explicit "
+    "total-attempt budgets (ALM-3197)."
 )
 
 _DEPRECATION_EMITTED = False

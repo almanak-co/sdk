@@ -61,6 +61,7 @@ class _FakeSwapCompiler:
     def __init__(self, *, weth_price: Decimal, max_impact: Decimal = Decimal("0.30")) -> None:
         self.chain = "base"
         self.wallet_address = "0x" + "11" * 20
+        self.default_deadline_seconds = 300
         self.price_oracle = {"USDC": Decimal("1"), "WETH": weth_price}
         self._gateway_client = None
         self._config = SimpleNamespace(
@@ -247,6 +248,7 @@ class _FakeLpCompiler:
     def __init__(self, current_tick: int) -> None:
         self.chain = "base"
         self.wallet_address = "0x" + "11" * 20
+        self.default_deadline_seconds = 300
         self.price_oracle = {"USDC": Decimal("1"), "WETH": Decimal("1500")}
         self._gateway_client = None
         self.default_lp_slippage = Decimal("0.99")

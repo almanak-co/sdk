@@ -48,6 +48,7 @@ from web3 import AsyncHTTPProvider, AsyncWeb3
 from web3.exceptions import ContractLogicError, Web3Exception
 
 from almanak.core.chains import DEFAULT_CHAIN
+from almanak.core.retry import RetryPolicy
 from almanak.framework.data.interfaces import (
     BalanceResult,
     DataSourceError,
@@ -406,7 +407,7 @@ class Web3BalanceProvider:
             chain: Chain name (ethereum, arbitrum, optimism, polygon, base)
             cache_ttl: Cache time-to-live in seconds. Default 5.
             request_timeout: HTTP request timeout in seconds. Default 10.
-            max_retries: Maximum number of retries on RPC failure. Default 3.
+            max_retries: Legacy name for the total RPC attempt count. Default 3.
             retry_delay: Base delay between retries in seconds. Default 0.5.
             token_resolver: Optional TokenResolver instance. Defaults to get_token_resolver().
         """
@@ -422,14 +423,22 @@ class Web3BalanceProvider:
         self._chain = chain.lower()
         self._cache_ttl = cache_ttl
         self._request_timeout = request_timeout
-        self._max_retries = max_retries
+        self._retry_policy = RetryPolicy(
+            max_attempts=max_retries,
+            initial_delay_seconds=retry_delay,
+        )
+        self._max_retries = self._retry_policy.max_attempts
         self._retry_delay = retry_delay
         # VIB-3350: a block-pinned read can race a read-replica that has not yet
         # indexed the receipt block. That lag clears on its own, so a pinned read
         # gets its OWN bounded retry budget on top of the inner transient retries
         # (and is explicitly classified + metered) instead of failing closed on
         # the first generic budget. Non-lag errors are never retried by it.
-        self._block_lag_max_retries = block_lag_max_retries
+        self._block_lag_retry_policy = RetryPolicy(
+            max_attempts=max(1, block_lag_max_retries),
+            initial_delay_seconds=retry_delay,
+        )
+        self._block_lag_max_retries = self._block_lag_retry_policy.max_attempts
 
         # Initialize Web3 with async HTTP provider
         # Use certifi SSL context to avoid macOS system-cert issues (e.g. xlayer public RPC)
@@ -744,9 +753,8 @@ class Web3BalanceProvider:
         transient retries, recording an ``indexer_lag_retries`` metric. Any
         non-lag error propagates immediately — it is not retried here.
         """
-        attempts = max(1, self._block_lag_max_retries)
         last_exc: BaseException | None = None
-        for lag_attempt in range(attempts):
+        for lag_attempt in self._block_lag_retry_policy.attempt_numbers:
             try:
                 if token_meta.is_native:
                     return await self._get_native_balance_with_retry(block=block)
@@ -759,12 +767,12 @@ class Web3BalanceProvider:
                 logger.warning(
                     "Block-pinned read indexer lag @ block %d (lag-retry %d/%d): %s",
                     block,
-                    lag_attempt + 1,
-                    attempts,
+                    lag_attempt,
+                    self._block_lag_retry_policy.max_attempts,
                     _lag_error_text(exc),
                 )
-                if lag_attempt < attempts - 1:
-                    await asyncio.sleep(self._retry_delay * (2**lag_attempt))
+                if self._block_lag_retry_policy.can_retry(lag_attempt):
+                    await asyncio.sleep(self._block_lag_retry_policy.delay_for_attempt(lag_attempt))
         # Budget exhausted: re-raise the last lag error so _get_balance_at_block
         # converts it to DataSourceUnavailable (the caller then degrades).
         assert last_exc is not None  # loop ran ≥1 time and only lag reaches here
@@ -1059,7 +1067,7 @@ class Web3BalanceProvider:
         """
         last_error: Exception | None = None
 
-        for attempt in range(self._max_retries):
+        for attempt in self._retry_policy.attempt_numbers:
             try:
                 balance = await asyncio.wait_for(
                     self._w3.eth.get_balance(self._wallet_address, block_identifier=block)
@@ -1074,8 +1082,8 @@ class Web3BalanceProvider:
                 last_error = e
                 logger.warning(
                     "Timeout getting native balance (attempt %d/%d)",
-                    attempt + 1,
-                    self._max_retries,
+                    attempt,
+                    self._retry_policy.max_attempts,
                 )
 
             except Web3Exception as e:
@@ -1083,8 +1091,8 @@ class Web3BalanceProvider:
                 logger.warning(
                     "RPC error getting native balance: %s (attempt %d/%d)",
                     str(e),
-                    attempt + 1,
-                    self._max_retries,
+                    attempt,
+                    self._retry_policy.max_attempts,
                 )
 
             except Exception as e:
@@ -1092,8 +1100,8 @@ class Web3BalanceProvider:
                 logger.warning(
                     "Error getting native balance: %s (attempt %d/%d)",
                     str(e),
-                    attempt + 1,
-                    self._max_retries,
+                    attempt,
+                    self._retry_policy.max_attempts,
                 )
 
             # VIB-5736: a 401/403 auth/entitlement error is deterministic — the
@@ -1118,12 +1126,11 @@ class Web3BalanceProvider:
                 break
 
             # Wait before retry (exponential backoff)
-            if attempt < self._max_retries - 1:
-                wait_time = self._retry_delay * (2**attempt)
-                await asyncio.sleep(wait_time)
+            if self._retry_policy.can_retry(attempt):
+                await asyncio.sleep(self._retry_policy.delay_for_attempt(attempt))
 
         raise RPCError(
-            f"Failed to get native balance after {self._max_retries} attempts",
+            f"Failed to get native balance after {self._retry_policy.max_attempts} attempts",
             rpc_url=self._mask_rpc_url(self._rpc_url),
             method="eth_getBalance",
             original_error=last_error,
@@ -1151,7 +1158,7 @@ class Web3BalanceProvider:
         checksum_address = AsyncWeb3.to_checksum_address(token_address)
         contract = self._w3.eth.contract(address=checksum_address, abi=ERC20_ABI)
 
-        for attempt in range(self._max_retries):
+        for attempt in self._retry_policy.attempt_numbers:
             try:
                 call = contract.functions.balanceOf(self._wallet_address)
                 balance = await asyncio.wait_for(
@@ -1166,8 +1173,8 @@ class Web3BalanceProvider:
                 logger.warning(
                     "Timeout getting ERC20 balance for %s (attempt %d/%d)",
                     token_address,
-                    attempt + 1,
-                    self._max_retries,
+                    attempt,
+                    self._retry_policy.max_attempts,
                 )
 
             except ContractLogicError as e:
@@ -1185,8 +1192,8 @@ class Web3BalanceProvider:
                     "RPC error getting ERC20 balance for %s: %s (attempt %d/%d)",
                     token_address,
                     str(e),
-                    attempt + 1,
-                    self._max_retries,
+                    attempt,
+                    self._retry_policy.max_attempts,
                 )
 
             except Exception as e:
@@ -1195,8 +1202,8 @@ class Web3BalanceProvider:
                     "Error getting ERC20 balance for %s: %s (attempt %d/%d)",
                     token_address,
                     str(e),
-                    attempt + 1,
-                    self._max_retries,
+                    attempt,
+                    self._retry_policy.max_attempts,
                 )
 
             # VIB-5736: fail fast on a deterministic 401/403 auth/entitlement
@@ -1218,12 +1225,11 @@ class Web3BalanceProvider:
                 break
 
             # Wait before retry (exponential backoff)
-            if attempt < self._max_retries - 1:
-                wait_time = self._retry_delay * (2**attempt)
-                await asyncio.sleep(wait_time)
+            if self._retry_policy.can_retry(attempt):
+                await asyncio.sleep(self._retry_policy.delay_for_attempt(attempt))
 
         raise RPCError(
-            f"Failed to get ERC20 balance for {token_address} after {self._max_retries} attempts",
+            f"Failed to get ERC20 balance for {token_address} after {self._retry_policy.max_attempts} attempts",
             rpc_url=self._mask_rpc_url(self._rpc_url),
             method="balanceOf",
             original_error=last_error,

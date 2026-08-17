@@ -501,8 +501,9 @@ class OkxIntegration(BaseIntegration):
         """
         self._metrics.total_requests += 1
         url = f"{self._base_url}{path}"
+        retry_policy = self._rate_limit_retry_policy()
 
-        for attempt in range(1 + self.rate_limit_max_retries):
+        for attempt in retry_policy.attempt_numbers:
             start_time = time.time()
 
             wait_time = await self._rate_limiter.acquire()
@@ -541,25 +542,29 @@ class OkxIntegration(BaseIntegration):
                             retry_after = float(response.headers.get("Retry-After", "5"))
                         except (ValueError, TypeError):
                             retry_after = 5.0
-                        retry_after = min(max(retry_after, 0), self.rate_limit_max_wait)
+                        retry_after = max(retry_after, 0)
+                        delay = retry_policy.delay_for_attempt(
+                            attempt,
+                            retry_after_seconds=retry_after,
+                        )
 
-                        if attempt < self.rate_limit_max_retries:
+                        if retry_policy.can_retry(attempt):
                             logger.info(
                                 "%s rate limited on %s, retrying in %.1fs (attempt %d/%d)",
                                 self.name,
                                 path,
-                                retry_after,
-                                attempt + 1,
-                                self.rate_limit_max_retries,
+                                delay,
+                                attempt,
+                                retry_policy.max_attempts - 1,
                             )
-                            await asyncio.sleep(retry_after)
+                            await asyncio.sleep(delay)
                             continue
 
                         self._metrics.rate_limited_requests += 1
                         self._metrics.failed_requests += 1
                         self._metrics.last_error = f"Rate limited after {self.rate_limit_max_retries} retries"
                         self._metrics.last_error_time = datetime.now(UTC)
-                        raise IntegrationRateLimitError(self.name, retry_after)
+                        raise IntegrationRateLimitError(self.name, delay)
 
                     if response.status >= 400:
                         error_text = await response.text()

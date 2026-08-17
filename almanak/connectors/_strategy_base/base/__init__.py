@@ -40,6 +40,7 @@ from almanak.connectors._strategy_base.base.compiler import (
     CLAdapterFactoryContext,
     CLCompilerContext,
     CompilerServices,
+    CompilerServicesFacadeMixin,
 )
 from almanak.connectors._strategy_base.base.event import BaseEvent
 from almanak.connectors._strategy_base.base.hex_utils import HexDecoder
@@ -69,6 +70,7 @@ __all__ = [
     "CLAdapterFactoryContext",
     "CLCompilerContext",
     "CompilerServices",
+    "CompilerServicesFacadeMixin",
     "BaseReceiptParser",
     "DefaultSwapAdapter",
     "EventRegistry",

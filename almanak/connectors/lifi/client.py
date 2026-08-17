@@ -23,6 +23,7 @@ Example:
 """
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -30,28 +31,20 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from almanak.connectors._base.chain_ids import chain_ids_from_supported_chains, chain_names_by_id
+from almanak.connectors.lifi.connector import CONNECTOR
+
 from .exceptions import LiFiAPIError, LiFiConfigError, LiFiRouteNotFoundError
 from .models import LiFiOrderStrategy, LiFiStatusResponse, LiFiStep
 
 logger = logging.getLogger(__name__)
 
 
-# Chain name to chain ID mapping
-CHAIN_MAPPING: dict[str, int] = {
-    "ethereum": 1,
-    "optimism": 10,
-    "bsc": 56,
-    "gnosis": 100,
-    "polygon": 137,
-    "base": 8453,
-    "arbitrum": 42161,
-    "avalanche": 43114,
-    "sonic": 146,
-    "linea": 59144,
-}
+# Chain IDs are a read-only compatibility view of the connector manifest.
+CHAIN_MAPPING: Mapping[str, int] = chain_ids_from_supported_chains(CONNECTOR.supported_chains)
 
 # Reverse mapping
-CHAIN_ID_TO_NAME: dict[int, str] = {v: k for k, v in CHAIN_MAPPING.items()}
+CHAIN_ID_TO_NAME: Mapping[int, str] = chain_names_by_id(CHAIN_MAPPING)
 
 # LiFi Diamond proxy address (same on most EVM chains)
 LIFI_DIAMOND_ADDRESS = "0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE"

@@ -84,6 +84,8 @@ class TestRetryPolicy:
     def test_default_values(self):
         policy = RetryPolicy()
         assert policy.max_retries == 3
+        assert policy.max_attempts == 4
+        assert list(policy.attempt_numbers) == [1, 2, 3, 4]
         assert policy.initial_delay_seconds == 1.0
         assert policy.max_delay_seconds == 60.0
         assert policy.backoff_multiplier == 2.0

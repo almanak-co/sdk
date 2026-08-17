@@ -45,6 +45,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
 
+from almanak.core.retry import RetryPolicy
 from almanak.framework.data.tokens.exceptions import AmbiguousTokenError
 from almanak.integrations.chains import integration_chain_id, integration_chain_map
 
@@ -65,8 +66,7 @@ DEFAULT_HTTP_TIMEOUT_S = 8.0
 
 # Public rate limit is 300 req/min. One-level exponential backoff handles the
 # rare 429; beyond that we fail through to TokenNotFoundError.
-BACKOFF_INITIAL_S = 0.5
-BACKOFF_MAX_RETRIES = 1  # total tries = 1 initial + 1 retry
+DEXSCREENER_RETRY_POLICY = RetryPolicy(max_attempts=2, initial_delay_seconds=0.5)
 
 # =============================================================================
 # Gating thresholds (boot-configurable via GatewaySettings)
@@ -258,12 +258,12 @@ async def _fetch_pairs(
     timeout = aiohttp.ClientTimeout(total=http_timeout_s)
 
     async def _do_request(s: aiohttp.ClientSession) -> list[dict[str, Any]]:
-        for attempt in range(BACKOFF_MAX_RETRIES + 1):
+        for attempt in DEXSCREENER_RETRY_POLICY.attempt_numbers:
             try:
                 async with s.get(url, params=params, timeout=timeout) as resp:
                     if resp.status == 429:
-                        if attempt < BACKOFF_MAX_RETRIES:
-                            sleep_for = BACKOFF_INITIAL_S * (2**attempt)
+                        if DEXSCREENER_RETRY_POLICY.can_retry(attempt):
+                            sleep_for = DEXSCREENER_RETRY_POLICY.delay_for_attempt(attempt)
                             logger.info(
                                 "dexscreener_rate_limited symbol=%s attempt=%d sleeping=%.2fs",
                                 symbol,
@@ -273,7 +273,8 @@ async def _fetch_pairs(
                             await asyncio.sleep(sleep_for)
                             continue
                         raise DexScreenerError(
-                            f"DexScreener rate-limited after {BACKOFF_MAX_RETRIES + 1} attempts for symbol={symbol}"
+                            "DexScreener rate-limited after "
+                            f"{DEXSCREENER_RETRY_POLICY.max_attempts} attempts for symbol={symbol}"
                         )
                     if resp.status != 200:
                         raise DexScreenerError(f"HTTP {resp.status} for symbol={symbol}")
@@ -282,8 +283,8 @@ async def _fetch_pairs(
                 raise
             except TimeoutError as exc:
                 logger.warning("dexscreener_timeout symbol=%s attempt=%d", symbol, attempt)
-                if attempt < BACKOFF_MAX_RETRIES:
-                    await asyncio.sleep(BACKOFF_INITIAL_S * (2**attempt))
+                if DEXSCREENER_RETRY_POLICY.can_retry(attempt):
+                    await asyncio.sleep(DEXSCREENER_RETRY_POLICY.delay_for_attempt(attempt))
                     continue
                 raise DexScreenerError(f"Timed out searching DexScreener for {symbol}") from exc
             except Exception as exc:

@@ -31,6 +31,7 @@ Example:
 
 import logging
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -41,6 +42,7 @@ from eth_abi import encode
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from almanak.connectors._base.chain_ids import chain_ids_from_supported_chains, chain_names_by_id
 from almanak.connectors._strategy_base.bridge_base import (
     BridgeAdapter,
     BridgeError,
@@ -52,6 +54,7 @@ from almanak.connectors._strategy_base.bridge_base import (
     BridgeStatusError,
     BridgeTransactionError,
 )
+from almanak.connectors.across.connector import CONNECTOR
 from almanak.framework.data.tokens.decimals import resolve_token_decimals
 from almanak.framework.data.tokens.exceptions import TokenResolutionError
 
@@ -59,20 +62,6 @@ if TYPE_CHECKING:
     from almanak.framework.data.tokens.resolver import TokenResolver as TokenResolverType
 
 logger = logging.getLogger(__name__)
-
-# Chain ID to chain name mapping for TokenResolver
-_CHAIN_ID_TO_NAME: dict[int, str] = {
-    1: "ethereum",
-    10: "optimism",
-    42161: "arbitrum",
-    8453: "base",
-    137: "polygon",
-    43114: "avalanche",
-    56: "bsc",
-    59144: "linea",
-    324: "zksync",
-}
-
 
 # =============================================================================
 # Exceptions
@@ -108,19 +97,12 @@ class AcrossStatusError(AcrossError, BridgeStatusError):
 # =============================================================================
 
 
-# Chain ID mapping for Across-supported chains
-ACROSS_CHAIN_IDS: dict[str, int] = {
-    "ethereum": 1,
-    "optimism": 10,
-    "polygon": 137,
-    "arbitrum": 42161,
-    "base": 8453,
-    "linea": 59144,
-    "zksync": 324,
-}
+# EVM chain IDs for the routes this connector advertises.
+ACROSS_CHAIN_IDS: Mapping[str, int] = chain_ids_from_supported_chains(CONNECTOR.supported_chains)
 
 # Reverse mapping
-ACROSS_CHAIN_ID_TO_NAME: dict[int, str] = {v: k for k, v in ACROSS_CHAIN_IDS.items()}
+ACROSS_CHAIN_ID_TO_NAME: Mapping[int, str] = chain_names_by_id(ACROSS_CHAIN_IDS)
+_CHAIN_ID_TO_NAME = ACROSS_CHAIN_ID_TO_NAME
 
 # Across SpokePool contract addresses per chain
 # These are the V3 SpokePool addresses

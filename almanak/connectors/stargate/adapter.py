@@ -30,9 +30,11 @@ Example:
 
 import logging
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 import requests
@@ -40,6 +42,7 @@ from eth_abi import encode
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from almanak.connectors._base.chain_ids import chain_ids_from_supported_chains, chain_names_by_id
 from almanak.connectors._strategy_base.bridge_base import (
     BridgeAdapter,
     BridgeError,
@@ -52,6 +55,7 @@ from almanak.connectors._strategy_base.bridge_base import (
     BridgeTransactionError,
 )
 from almanak.connectors._strategy_base.slippage import compute_min_amount_out_from_bps, slippage_to_bps
+from almanak.connectors.stargate.connector import CONNECTOR
 from almanak.framework.data.tokens.decimals import resolve_token_decimals
 from almanak.framework.data.tokens.exceptions import TokenResolutionError
 
@@ -59,18 +63,6 @@ if TYPE_CHECKING:
     from almanak.framework.data.tokens.resolver import TokenResolver as TokenResolverType
 
 logger = logging.getLogger(__name__)
-
-# Chain ID to chain name mapping for TokenResolver
-_CHAIN_ID_TO_NAME: dict[int, str] = {
-    1: "ethereum",
-    10: "optimism",
-    42161: "arbitrum",
-    8453: "base",
-    137: "polygon",
-    43114: "avalanche",
-    56: "bsc",
-}
-
 
 # =============================================================================
 # Exceptions
@@ -106,31 +98,27 @@ class StargateStatusError(StargateError, BridgeStatusError):
 # =============================================================================
 
 
-# LayerZero chain IDs (endpoint IDs) for Stargate V2
-# These differ from EVM chain IDs
-STARGATE_CHAIN_IDS: dict[str, int] = {
-    "ethereum": 30101,
-    "arbitrum": 30110,
-    "optimism": 30111,
-    "polygon": 30109,
-    "base": 30184,
-    "avalanche": 30106,
-    "bsc": 30102,
-}
+# LayerZero endpoint IDs for Stargate V2. These are not EVM chain IDs.
+STARGATE_ENDPOINT_IDS: Mapping[str, int] = MappingProxyType(
+    {
+        "ethereum": 30101,
+        "arbitrum": 30110,
+        "optimism": 30111,
+        "polygon": 30109,
+        "base": 30184,
+        "avalanche": 30106,
+        "bsc": 30102,
+    }
+)
+# Backward-compatible public name. New code should say endpoint explicitly.
+STARGATE_CHAIN_IDS = STARGATE_ENDPOINT_IDS
 
 # EVM chain IDs for transaction building
-EVM_CHAIN_IDS: dict[str, int] = {
-    "ethereum": 1,
-    "arbitrum": 42161,
-    "optimism": 10,
-    "polygon": 137,
-    "base": 8453,
-    "avalanche": 43114,
-    "bsc": 56,
-}
+EVM_CHAIN_IDS: Mapping[str, int] = chain_ids_from_supported_chains(CONNECTOR.supported_chains)
+_CHAIN_ID_TO_NAME = chain_names_by_id(EVM_CHAIN_IDS)
 
 # Reverse mapping for LayerZero chain IDs
-STARGATE_CHAIN_ID_TO_NAME: dict[int, str] = {v: k for k, v in STARGATE_CHAIN_IDS.items()}
+STARGATE_CHAIN_ID_TO_NAME: Mapping[int, str] = chain_names_by_id(STARGATE_ENDPOINT_IDS)
 
 # Stargate V2 Router (StargatePoolNative for ETH, StargatePool for tokens)
 # These are the OFT/Pool addresses for Stargate V2
@@ -388,8 +376,8 @@ class StargateBridgeAdapter(BridgeAdapter):
             raise StargateQuoteError(error_msg or "Invalid transfer parameters")
 
         # Get chain IDs
-        from_lz_chain_id = STARGATE_CHAIN_IDS.get(from_chain.lower())
-        to_lz_chain_id = STARGATE_CHAIN_IDS.get(to_chain.lower())
+        from_lz_chain_id = STARGATE_ENDPOINT_IDS.get(from_chain.lower())
+        to_lz_chain_id = STARGATE_ENDPOINT_IDS.get(to_chain.lower())
         from_evm_chain_id = EVM_CHAIN_IDS.get(from_chain.lower())
         to_evm_chain_id = EVM_CHAIN_IDS.get(to_chain.lower())
 
@@ -797,7 +785,7 @@ class StargateBridgeAdapter(BridgeAdapter):
         routes = []
 
         # Generate all valid chain pairs based on token support
-        chains = list(STARGATE_CHAIN_IDS.keys())
+        chains = list(STARGATE_ENDPOINT_IDS.keys())
         for from_chain in chains:
             for to_chain in chains:
                 if from_chain == to_chain:
@@ -993,6 +981,7 @@ __all__ = [
     "StargateTransactionError",
     "StargateStatusError",
     "STARGATE_CHAIN_IDS",
+    "STARGATE_ENDPOINT_IDS",
     "STARGATE_ROUTER_ADDRESSES",
     "STARGATE_POOL_IDS",
     "STARGATE_SUPPORTED_TOKENS",

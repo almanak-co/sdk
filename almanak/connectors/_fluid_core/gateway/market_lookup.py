@@ -29,10 +29,13 @@ Usage:
 
 import asyncio
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from almanak.connectors._base.chain_ids import chain_ids_from_supported_chains
+from almanak.connectors.fluid.connector import CONNECTOR
 from almanak.gateway.services._protocol_lookup import ProtocolTokenLookup
 
 logger = logging.getLogger(__name__)
@@ -40,14 +43,8 @@ logger = logging.getLogger(__name__)
 # Per-chain endpoint pattern; Fluid has no cross-chain aggregate.
 _FLUID_CHAIN_URL_TEMPLATE = "https://api.fluid.instadapp.io/v2/lending/{chain_id}/tokens"
 
-# chainID → gateway chain name.  Fluid deploys on ethereum, arbitrum,
-# base, polygon today.  Anything unmapped is silently dropped.
-FLUID_CHAIN_IDS: dict[str, int] = {
-    "ethereum": 1,
-    "arbitrum": 42161,
-    "base": 8453,
-    "polygon": 137,
-}
+# EVM chains are projected from Fluid's intent-aware support union.
+FLUID_CHAIN_IDS: Mapping[str, int] = chain_ids_from_supported_chains(CONNECTOR.supported_chains)
 
 # Disk cache path and TTL
 CACHE_PATH = Path.home() / ".almanak" / "fluid_market_cache.json"

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Mapping
-from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, ClassVar, cast
 
@@ -36,6 +35,7 @@ from almanak.framework.intents._compiler_helpers import (
     assemble_action_bundle,
     check_price_impact,
     choose_safer_quote,
+    deadline_from_now,
     sum_transaction_gas,
 )
 from almanak.framework.intents.compiler_constants import (
@@ -107,7 +107,7 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
                     intent_id=intent.intent_id,
                 )
 
-            deadline = int(datetime.now(UTC).timestamp()) + ctx.default_deadline_seconds
+            deadline = deadline_from_now(ctx.default_deadline_seconds)
             value, actual_from_token, actual_to_token = self._resolve_swap_wrap_addresses(
                 ctx=ctx,
                 from_token=from_token,
@@ -409,7 +409,7 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
                 amount1_desired=amount1_desired,
             )
 
-            deadline = int(datetime.now(UTC).timestamp()) + ctx.default_deadline_seconds
+            deadline = deadline_from_now(ctx.default_deadline_seconds)
             mint_calldata = adapter.get_mint_calldata(
                 token0=token0_info.address,
                 token1=token1_info.address,
@@ -561,7 +561,7 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
                     intent_id=intent.intent_id,
                 )
 
-            deadline = int(datetime.now(UTC).timestamp()) + ctx.default_deadline_seconds
+            deadline = deadline_from_now(ctx.default_deadline_seconds)
             state_or_fail = self._query_lp_close_position_state(
                 ctx=ctx,
                 position_manager=position_manager,

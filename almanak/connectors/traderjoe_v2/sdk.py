@@ -47,6 +47,8 @@ from typing import TYPE_CHECKING, Any, cast
 from web3 import Web3
 from web3.contract import Contract
 
+from almanak.framework.intents._compiler_helpers import deadline_from_now
+
 from .addresses import TRADERJOE_V2 as TRADERJOE_V2_ADDRESSES
 
 if TYPE_CHECKING:
@@ -328,8 +330,8 @@ class TraderJoeV2SDK:
         # LBFactory.getLBPairInformation is immutable (pair address never changes)
         self._pool_address_cache: dict[tuple[str, str, int], str] = {}
 
-        # Default deadline (100 days)
-        self.deadline = int(time.time()) + DEADLINE_SECONDS
+        # Direct-SDK fallback; compiler paths always pass their configured deadline.
+        self.deadline = deadline_from_now(DEADLINE_SECONDS)
 
         logger.debug(
             f"TraderJoe V2 SDK initialized for {chain}: Router={self.router_address}, Factory={self.factory_address}"
@@ -662,13 +664,13 @@ class TraderJoeV2SDK:
             path: List of token addresses [tokenIn, tokenOut] or multi-hop
             bin_steps: List of binSteps for each pair in the path
             recipient: Address to receive output tokens
-            deadline: Transaction deadline (default: current time + 100 days)
+            deadline: Transaction deadline (default: current time + 5 minutes)
 
         Returns:
             Tuple of (transaction dict, estimated gas)
         """
         if deadline is None:
-            deadline = int(time.time()) + DEADLINE_SECONDS
+            deadline = deadline_from_now(DEADLINE_SECONDS)
 
         # Convert addresses
         path = [Web3.to_checksum_address(addr) for addr in path]
@@ -740,7 +742,7 @@ class TraderJoeV2SDK:
             Tuple of (transaction dict, estimated gas)
         """
         if deadline is None:
-            deadline = int(time.time()) + DEADLINE_SECONDS
+            deadline = deadline_from_now(DEADLINE_SECONDS)
 
         liquidity_params = {
             "tokenX": Web3.to_checksum_address(token_x),
@@ -816,7 +818,7 @@ class TraderJoeV2SDK:
             raise TraderJoeV2SDKError("Mismatch between bin IDs and amounts length")
 
         if deadline is None:
-            deadline = int(time.time()) + DEADLINE_SECONDS
+            deadline = deadline_from_now(DEADLINE_SECONDS)
 
         to_addr = Web3.to_checksum_address(to)
 

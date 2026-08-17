@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from almanak.core.chains import DEFAULT_CHAIN
+from almanak.core.retry import RetryPolicy as CoreRetryPolicy
 
 if TYPE_CHECKING:
     from almanak.framework.gateway_client import GatewayClient
@@ -49,10 +50,11 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class RetryPolicy:
-    """Retry configuration for intent execution.
+    """Backward-compatible runner view of the canonical retry policy.
 
     Mirrors the RetryConfig from IntentStateMachine but works at the
     gateway gRPC level rather than the local orchestrator level.
+    ``max_retries`` remains the number of additional attempts after the first.
     """
 
     max_retries: int = 3
@@ -60,10 +62,29 @@ class RetryPolicy:
     max_delay_seconds: float = 60.0
     backoff_multiplier: float = 2.0
 
+    def __post_init__(self) -> None:
+        self._policy()
+
+    @property
+    def max_attempts(self) -> int:
+        """Total attempts, including the initial execution."""
+        return self.max_retries + 1
+
+    @property
+    def attempt_numbers(self) -> range:
+        return self._policy().attempt_numbers
+
     def delay_for_attempt(self, attempt: int) -> float:
         """Calculate delay for a retry attempt using exponential backoff."""
-        delay = self.initial_delay_seconds * (self.backoff_multiplier**attempt)
-        return min(delay, self.max_delay_seconds)
+        return self._policy().delay_for_attempt(attempt + 1)
+
+    def _policy(self) -> CoreRetryPolicy:
+        return CoreRetryPolicy(
+            max_attempts=self.max_attempts,
+            initial_delay_seconds=self.initial_delay_seconds,
+            max_delay_seconds=self.max_delay_seconds,
+            backoff_multiplier=self.backoff_multiplier,
+        )
 
 
 @dataclass
@@ -326,8 +347,9 @@ class IntentExecutionService:
         max_retries = self._retry_policy.max_retries
         attempts = 0
 
-        for attempt in range(max_retries + 1):
-            attempts = attempt + 1
+        for attempt_number in self._retry_policy.attempt_numbers:
+            attempts = attempt_number
+            attempt = attempt_number - 1  # Compatibility for helper/hook APIs.
 
             # Phase 1: Compile intent (RPC + response validation + retry).
             compile_outcome = await compile_intent_phase(

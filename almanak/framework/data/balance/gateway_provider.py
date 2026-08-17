@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 from almanak.core.chains import DEFAULT_CHAIN
+from almanak.core.retry import RetryPolicy
 from almanak.framework.accounting.gas_pricing import native_token_for_chain
 from almanak.framework.data.interfaces import BalanceProvider, BalanceResult
 from almanak.framework.gateway_client import GatewayClient
@@ -22,9 +23,8 @@ from almanak.gateway.proto import gateway_pb2
 
 logger = logging.getLogger(__name__)
 
-# Retry configuration
-_MAX_RETRIES = 3
-_BACKOFF_BASE_SECONDS = 0.5  # 0.5s, 1s, 2s
+# Retry configuration: the budget includes the initial request.
+_RETRY_POLICY = RetryPolicy(max_attempts=3, initial_delay_seconds=0.5)
 
 # Error substrings that indicate transient/retryable RPC failures
 _RETRYABLE_ERROR_PATTERNS = (
@@ -52,7 +52,7 @@ class GatewayBalanceProvider(BalanceProvider):
     which has access to the RPC endpoints and can query on-chain balances.
 
     Resilience features (VIB-1712):
-    - Retries up to 3 times with exponential backoff (0.5s, 1s, 2s) on
+    - Makes up to 3 total attempts with exponential backoff (0.5s, 1s) on
       transient RPC errors (429, timeouts, connection errors).
     - Caches successful reads with a configurable TTL (default 30s).
     - On total failure after retries, returns last-known cached balance
@@ -114,7 +114,7 @@ class GatewayBalanceProvider(BalanceProvider):
         """Get token balance from gateway with retry and cached fallback.
 
         On transient RPC errors (rate-limit 429, timeouts, connection errors)
-        the call is retried up to 3 times with exponential backoff.  On total
+        the provider makes up to three total attempts with exponential backoff. On total
         failure the last cached balance is returned with ``stale=True``.
 
         Args:
@@ -143,7 +143,7 @@ class GatewayBalanceProvider(BalanceProvider):
         block_tag = as_of_block if (as_of_block is not None and as_of_block > 0) else 0
         last_error: Exception | None = None
 
-        for attempt in range(_MAX_RETRIES):
+        for attempt in _RETRY_POLICY.attempt_numbers:
             try:
                 request = gateway_pb2.BalanceRequest(
                     token=token,
@@ -205,13 +205,13 @@ class GatewayBalanceProvider(BalanceProvider):
                     # Non-retryable error -- break immediately
                     break
 
-                if attempt < _MAX_RETRIES - 1:
-                    backoff = _BACKOFF_BASE_SECONDS * (2**attempt)
+                if _RETRY_POLICY.can_retry(attempt):
+                    backoff = _RETRY_POLICY.delay_for_attempt(attempt)
                     logger.warning(
                         "Balance request for %s failed (attempt %d/%d), retrying in %.1fs: %s",
                         token,
-                        attempt + 1,
-                        _MAX_RETRIES,
+                        attempt,
+                        _RETRY_POLICY.max_attempts,
                         backoff,
                         error_msg,
                     )
@@ -232,7 +232,7 @@ class GatewayBalanceProvider(BalanceProvider):
             logger.warning(
                 "Returning cached (stale) balance for %s after %d failed attempts: %s",
                 token,
-                _MAX_RETRIES,
+                _RETRY_POLICY.max_attempts,
                 error_msg,
             )
             return replace(cached_result, stale=True)

@@ -8,7 +8,6 @@ LP close, redeem).
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -24,6 +23,7 @@ from almanak.connectors._strategy_base.slippage import (
     slippage_to_bps,
 )
 from almanak.framework.intents import compiler_constants
+from almanak.framework.intents._compiler_helpers import deadline_from_now
 from almanak.framework.intents.compiler_models import CompilationResult, CompilationStatus, TokenInfo, TransactionData
 from almanak.framework.intents.vocabulary import IntentType
 from almanak.framework.models.reproduction_bundle import ActionBundle
@@ -483,7 +483,7 @@ def _build_pre_swap_tx(
             f"Use {mint_sy_token.symbol} directly as from_token or reduce max_slippage.",
         )
 
-    deadline = int(datetime.now(UTC).timestamp()) + compiler.default_deadline_seconds
+    deadline = deadline_from_now(compiler.default_deadline_seconds)
     pre_swap_calldata = pre_swap_adapter.get_swap_calldata(
         from_token=actual_from_address,
         to_token=token_mint_sy,

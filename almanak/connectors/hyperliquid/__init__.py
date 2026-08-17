@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from .adapter import (
         HYPERLIQUID_API_URLS,
         HYPERLIQUID_CHAIN_IDS,
+        HYPERLIQUID_EIP712_DOMAIN_IDS,
         HYPERLIQUID_GAS_ESTIMATES,
         HYPERLIQUID_WS_URLS,
         CancelResult,
@@ -55,6 +56,7 @@ __all__ = [
     "ExternalSigner",
     "HYPERLIQUID_API_URLS",
     "HYPERLIQUID_CHAIN_IDS",
+    "HYPERLIQUID_EIP712_DOMAIN_IDS",
     "HYPERLIQUID_GAS_ESTIMATES",
     "HYPERLIQUID_WS_URLS",
     "HyperliquidAdapter",
@@ -98,6 +100,7 @@ _LAZY: dict[str, tuple[str, str]] = {
     "ExternalSigner": (".adapter", "ExternalSigner"),
     "HYPERLIQUID_API_URLS": (".adapter", "HYPERLIQUID_API_URLS"),
     "HYPERLIQUID_CHAIN_IDS": (".adapter", "HYPERLIQUID_CHAIN_IDS"),
+    "HYPERLIQUID_EIP712_DOMAIN_IDS": (".adapter", "HYPERLIQUID_EIP712_DOMAIN_IDS"),
     "HYPERLIQUID_GAS_ESTIMATES": (".adapter", "HYPERLIQUID_GAS_ESTIMATES"),
     "HYPERLIQUID_WS_URLS": (".adapter", "HYPERLIQUID_WS_URLS"),
     "HyperliquidAdapter": (".adapter", "HyperliquidAdapter"),

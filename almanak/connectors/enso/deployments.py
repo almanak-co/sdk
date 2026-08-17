@@ -1,0 +1,40 @@
+"""Enso deployment addresses shared by strategy and gateway compatibility views."""
+
+from __future__ import annotations
+
+# Enso Router addresses per deployed chain. ChainRegistry decides which of
+# these deployments belong to the SDK chain inventory.
+ROUTER_ADDRESSES: dict[int, str] = {
+    1: "0xF75584eF6673aD213a685a1B58Cc0330B8eA22Cf",  # Ethereum
+    10: "0xF75584eF6673aD213a685a1B58Cc0330B8eA22Cf",  # Optimism
+    56: "0xF75584eF6673aD213a685a1B58Cc0330B8eA22Cf",  # BSC
+    100: "0xF75584eF6673aD213a685a1B58Cc0330B8eA22Cf",  # Gnosis
+    137: "0xF75584eF6673aD213a685a1B58Cc0330B8eA22Cf",  # Polygon
+    324: "0x1BD8CefD703CF6b8fF886AD2E32653C32bc62b5C",  # zkSync
+    8453: "0xF75584eF6673aD213a685a1B58Cc0330B8eA22Cf",  # Base
+    42161: "0xF75584eF6673aD213a685a1B58Cc0330B8eA22Cf",  # Arbitrum
+    43114: "0xF75584eF6673aD213a685a1B58Cc0330B8eA22Cf",  # Avalanche
+    146: "0xF75584eF6673aD213a685a1B58Cc0330B8eA22Cf",  # Sonic
+    59144: "0xA146d46823f3F594B785200102Be5385CAfCE9B5",  # Linea
+    80094: "0xF75584eF6673aD213a685a1B58Cc0330B8eA22Cf",  # Berachain
+    11155111: "0xF75584eF6673aD213a685a1B58Cc0330B8eA22Cf",  # Sepolia
+}
+
+# Enso Delegate addresses per deployed chain (for borrow operations).
+DELEGATE_ADDRESSES: dict[int, str] = {
+    1: "0x7663fd40081dcCd47805c00e613B6beAc3B87F08",
+    10: "0x7663fd40081dcCd47805c00e613B6beAc3B87F08",
+    56: "0x7663fd40081dcCd47805c00e613B6beAc3B87F08",
+    100: "0x7663fd40081dcCd47805c00e613B6beAc3B87F08",
+    137: "0x7663fd40081dcCd47805c00e613B6beAc3B87F08",
+    324: "0x4c3Db0fFf66f98d84429Bf60E7622e206Fc4947c",
+    8453: "0x7663fd40081dcCd47805c00e613B6beAc3B87F08",
+    42161: "0x7663fd40081dcCd47805c00e613B6beAc3B87F08",
+    43114: "0x7663fd40081dcCd47805c00e613B6beAc3B87F08",
+    146: "0x7663fd40081dcCd47805c00e613B6beAc3B87F08",
+    59144: "0xEe41aB55411a957c43C469F74867fa4671F9f017",
+    80094: "0x7663fd40081dcCd47805c00e613B6beAc3B87F08",
+    11155111: "0x7663fd40081dcCd47805c00e613B6beAc3B87F08",
+}
+
+__all__ = ["DELEGATE_ADDRESSES", "ROUTER_ADDRESSES"]

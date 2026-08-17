@@ -57,6 +57,7 @@ from typing import TYPE_CHECKING
 from almanak.connectors._strategy_base.slippage import compute_min_amount_out_from_bps
 from almanak.framework.data.tokens.decimals import resolve_token_decimals
 from almanak.framework.data.tokens.exceptions import TokenResolutionError
+from almanak.framework.intents._compiler_helpers import deadline_from_now
 
 from .sdk import (
     DEFAULT_GAS_ESTIMATES,
@@ -122,6 +123,7 @@ class TraderJoeV2Config:
     gateway_client: "GatewayClient | None" = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        deadline_from_now(self.default_deadline_seconds, now_ts=0)
         if self.rpc_url is None and self.gateway_client is None:
             raise TraderJoeV2SDKError("TraderJoeV2Config requires either rpc_url (deprecated) or gateway_client")
 
@@ -546,6 +548,7 @@ class TraderJoeV2Adapter:
             path=[token_in_addr, token_out_addr],
             bin_steps=[bin_step],
             recipient=recipient_addr,
+            deadline=deadline_from_now(self.config.default_deadline_seconds),
         )
 
         return TransactionData(
@@ -778,6 +781,7 @@ class TraderJoeV2Adapter:
             distribution_y=distribution_y,
             to=self.config.wallet_address,
             refund_to=self.config.wallet_address,
+            deadline=deadline_from_now(self.config.default_deadline_seconds),
         )
 
         return TransactionData(
@@ -841,6 +845,7 @@ class TraderJoeV2Adapter:
             ids=position.bin_ids,
             amounts=list(position.balances.values()),
             to=self.config.wallet_address,
+            deadline=deadline_from_now(self.config.default_deadline_seconds),
         )
 
         return TransactionData(

@@ -36,6 +36,7 @@ def _compiler() -> IntentCompiler:
     c.chain = "base"
     c.wallet_address = "0x" + "11" * 20
     c.price_oracle = {}
+    c.default_deadline_seconds = 300
     c._gateway_client = None
     c._get_aerodrome_pool_address = MagicMock()
     return c

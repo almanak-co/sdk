@@ -52,9 +52,9 @@ class TestBuildRoutes:
         # Known pairs use the constants table.
         assert routes[("arbitrum", "ethereum")].estimated_time_seconds == 240
         assert routes[("arbitrum", "optimism")].estimated_time_seconds == 120
-        # Pairs absent from the table (linea/zksync rows) fall back to 180s.
-        assert routes[("linea", "zksync")].estimated_time_seconds == 180
-        assert routes[("zksync", "ethereum")].estimated_time_seconds == 180
+        # Pairs absent from the table (Linea rows) fall back to 180s.
+        assert routes[("linea", "ethereum")].estimated_time_seconds == 180
+        assert routes[("ethereum", "linea")].estimated_time_seconds == 180
 
     def test_eth_synthesized_when_only_weth_supported(self, adapter, monkeypatch):
         monkeypatch.setattr(

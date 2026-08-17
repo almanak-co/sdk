@@ -103,6 +103,46 @@ def test_pass_int_keyed_addresses(module, tmp_path: Path) -> None:
     assert violations == [], violations
 
 
+def test_pass_canonical_chain_id_map(module, tmp_path: Path) -> None:
+    """Literal ``*_CHAIN_IDS`` maps must agree with ChainRegistry."""
+    _redirect_to_tmp(module, tmp_path)
+    _make_connector(
+        tmp_path,
+        "fakebridge",
+        'FAKE_CHAIN_IDS: dict[str, int] = {"ethereum": 1, "arbitrum": 42161}\n',
+    )
+    violations, inspection = module.run()
+    assert violations == []
+    assert inspection.chain_id_dicts_validated == 1
+
+
+def test_fail_chain_id_map_value_drift(module, tmp_path: Path) -> None:
+    """A registered chain paired with the wrong numeric ID is rejected."""
+    _redirect_to_tmp(module, tmp_path)
+    _make_connector(
+        tmp_path,
+        "fakebridge",
+        'FAKE_CHAIN_IDS: dict[str, int] = {"ethereum": 30101}\n',
+    )
+    violations, _ = module.run()
+    assert len(violations) == 1
+    assert violations[0].key == "ethereum=30101"
+    assert "ChainRegistry value 1" in violations[0].message
+
+
+def test_non_evm_endpoint_id_namespace_is_outside_chain_id_gate(module, tmp_path: Path) -> None:
+    """Explicit endpoint-ID names are not misclassified as EIP-155 maps."""
+    _redirect_to_tmp(module, tmp_path)
+    _make_connector(
+        tmp_path,
+        "fakebridge",
+        'FAKE_ENDPOINT_IDS: dict[str, int] = {"ethereum": 30101}\n',
+    )
+    violations, inspection = module.run()
+    assert violations == []
+    assert inspection.chain_id_dicts_validated == 0
+
+
 def test_fail_enum_keyed_addresses(module, tmp_path: Path) -> None:
     """Chain.X-keyed dicts are rejected: the Chain enum was removed (VIB-4851).
 

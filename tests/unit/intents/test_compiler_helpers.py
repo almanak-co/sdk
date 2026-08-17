@@ -25,6 +25,7 @@ from almanak.framework.intents._compiler_helpers import (
     compute_deadline,
     compute_min_amount_out,
     compute_min_amount_out_from_bps,
+    deadline_from_now,
     normalise_gateway_or_rpc,
     parse_lifi_tx_value,
     probe_traderjoe_bin_step,
@@ -384,33 +385,45 @@ class TestCheckPriceImpact:
 
 
 # ---------------------------------------------------------------------------
-# compute_deadline
+# deadline_from_now
 # ---------------------------------------------------------------------------
 
 
-class TestComputeDeadline:
+class TestDeadlineFromNow:
     def test_adds_seconds_to_explicit_now(self) -> None:
-        assert compute_deadline(600, now_ts=1_700_000_000) == 1_700_000_600
+        assert deadline_from_now(600, now_ts=1_700_000_000) == 1_700_000_600
 
     def test_uses_current_time_when_now_ts_none(self) -> None:
         import time
 
         before = int(time.time())
-        result = compute_deadline(300)
+        result = deadline_from_now(300)
         after = int(time.time())
         assert before + 300 <= result <= after + 300
 
     def test_zero_raises(self) -> None:
         with pytest.raises(ValueError, match="> 0"):
-            compute_deadline(0, now_ts=1_700_000_000)
+            deadline_from_now(0, now_ts=1_700_000_000)
 
     def test_negative_raises(self) -> None:
         with pytest.raises(ValueError, match="> 0"):
-            compute_deadline(-1, now_ts=1_700_000_000)
+            deadline_from_now(-1, now_ts=1_700_000_000)
+
+    @pytest.mark.parametrize("invalid", [True, 300.0, "300"])
+    def test_non_integer_raises(self, invalid: object) -> None:
+        with pytest.raises(TypeError, match="must be an int"):
+            deadline_from_now(invalid, now_ts=1_700_000_000)  # type: ignore[arg-type]
+
+    def test_non_integer_now_raises(self) -> None:
+        with pytest.raises(TypeError, match="now_ts must be an int"):
+            deadline_from_now(300, now_ts=1_700_000_000.5)  # type: ignore[arg-type]
 
     def test_explicit_zero_now_ts_allowed(self) -> None:
         """now_ts=0 is a legitimate (if absurd) value; helper must not reject it."""
-        assert compute_deadline(600, now_ts=0) == 600
+        assert deadline_from_now(600, now_ts=0) == 600
+
+    def test_legacy_name_remains_compatible(self) -> None:
+        assert compute_deadline(600, now_ts=1_700_000_000) == 1_700_000_600
 
 
 # ---------------------------------------------------------------------------
@@ -553,7 +566,7 @@ class TestHelperComposition:
         # ``49_000_000_000_000_000 * 0.995 == 48_755_000_000_000_000`` exactly.
         assert min_out == 48_755_000_000_000_000
 
-        deadline = compute_deadline(600, now_ts=1_700_000_000)
+        deadline = deadline_from_now(600, now_ts=1_700_000_000)
         assert deadline == 1_700_000_600
 
         tx = _make_tx(gas=200_000, tx_type="swap")

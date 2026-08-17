@@ -86,6 +86,108 @@ class CompilerServices(Protocol):
     def default_swap_adapter(self, protocol: str) -> DefaultSwapAdapter: ...
 
 
+class CompilerServicesFacadeMixin:
+    """Compatibility facade for connector compiler implementations.
+
+    Connector-owned compiler bodies still consume the historical
+    ``IntentCompiler`` attribute and ``_helper`` surface.  This mixin keeps
+    that temporary surface in one place while routing every operation through
+    :class:`CompilerServices`.  Implementations only need to retain their
+    connector-specific state and methods.
+
+    The primitive attributes are copied deliberately: several characterization
+    tests and legacy helpers construct these adapters without a context and set
+    attributes directly.  Service calls, however, always remain context-backed.
+    """
+
+    def __init__(self, ctx: BaseCompilerContext) -> None:
+        self._ctx = ctx
+        self.chain = ctx.chain
+        self.wallet_address = ctx.wallet_address
+        self.rpc_url = ctx.rpc_url
+        self.rpc_timeout = ctx.rpc_timeout
+        self.price_oracle = ctx.price_oracle
+        self.default_deadline_seconds = ctx.default_deadline_seconds
+        self._gateway_client = ctx.gateway_client
+        self._token_resolver = ctx.token_resolver
+        self._gateway_internal_preflight = ctx.gateway_internal_preflight
+
+    def _get_chain_rpc_url(self) -> str | None:
+        return self._ctx.rpc_url
+
+    def _resolve_token(self, token: str, chain: str | None = None) -> TokenInfo | None:
+        if chain is None:
+            return self._ctx.services.resolve_token(token)
+        return self._ctx.services.resolve_token(token, chain)
+
+    def _resolve_dest_wallet(self, dest_chain: str) -> str:
+        return self._ctx.services.resolve_dest_wallet(dest_chain)
+
+    def _require_token_price(self, symbol: str) -> Decimal:
+        return self._ctx.services.require_token_price(symbol)
+
+    def _require_token_price_for(self, token: TokenInfo) -> Decimal:
+        return self._ctx.services.require_token_price_for(token)
+
+    def _assert_prices_available(self, tokens: list[str | None]) -> None:
+        self._ctx.services.assert_prices_available(tokens)
+
+    def _usd_to_token_amount(self, usd_amount: Decimal, token: TokenInfo) -> int:
+        return self._ctx.services.usd_to_token_amount(usd_amount, token)
+
+    def _calculate_expected_output(self, amount_in: int, from_token: TokenInfo, to_token: TokenInfo) -> int:
+        return self._ctx.services.calculate_expected_output(amount_in, from_token, to_token)
+
+    def _build_approve_tx(self, token_address: str, spender: str, amount: int) -> list[TransactionData]:
+        return self._ctx.services.build_approve_tx(token_address, spender, amount)
+
+    def _validate_pool(self, result: Any, intent_id: str) -> CompilationResult | None:
+        return self._ctx.services.validate_pool(result, intent_id)
+
+    def _format_amount(self, amount: int, decimals: int) -> str:
+        return self._ctx.services.format_amount(amount, decimals)
+
+    def _parse_pool_info(self, pool: str) -> tuple[TokenInfo, TokenInfo, int, bool] | None:
+        return self._ctx.services.parse_pool_info(pool)
+
+    def _price_to_tick(self, price: Decimal, *, token0_decimals: int, token1_decimals: int) -> int:
+        return self._ctx.services.price_to_tick(
+            price,
+            token0_decimals=token0_decimals,
+            token1_decimals=token1_decimals,
+        )
+
+    def _get_tick_spacing(self, fee_tier: int) -> int:
+        return self._ctx.services.get_tick_spacing(fee_tier)
+
+    def _get_wrapped_native_address(self) -> str | None:
+        return self._ctx.services.get_wrapped_native_address()
+
+    def _query_position_liquidity(self, position_manager: str, token_id: int) -> int | None:
+        return self._ctx.services.query_position_liquidity(position_manager, token_id)
+
+    def _query_position_tokens_owed(self, position_manager: str, token_id: int) -> tuple[int | None, int | None]:
+        return self._ctx.services.query_position_tokens_owed(position_manager, token_id)
+
+    def _query_erc20_balance(self, token_address: str, wallet_address: str) -> int | None:
+        return self._ctx.services.query_erc20_balance(token_address, wallet_address)
+
+    def _query_erc20_balance_for_chain(self, token_address: str, wallet_address: str, chain: str) -> int | None:
+        return self._ctx.services.query_erc20_balance_for_chain(token_address, wallet_address, chain)
+
+    def _query_native_balance_for_chain(self, wallet_address: str, chain: str) -> int | None:
+        return self._ctx.services.query_native_balance_for_chain(wallet_address, chain)
+
+    def eth_call(self, to: str, data: str, *, chain: str | None = None) -> str | None:
+        return self._ctx.services.eth_call(to, data, chain=chain)
+
+    def _eth_call(self, to: str, data: str, *, chain: str | None = None) -> str | None:
+        return self.eth_call(to, data, chain=chain)
+
+    def _default_swap_adapter(self, protocol: str) -> DefaultSwapAdapter:
+        return self._ctx.services.default_swap_adapter(protocol)
+
+
 @dataclass(frozen=True, kw_only=True)
 class BaseCompilerContext:
     """Primitive-agnostic context passed from the framework compiler to connectors.
@@ -125,9 +227,17 @@ class BaseCompilerContext:
     default_protocol: str = ""
     # Universal tx concept — any on-chain tx (swap, LP, lending supply,
     # perp open, bridge call) wants a block-timestamp-relative deadline.
-    # Default mirrors IntentCompilerConfig so direct construction in
+    # Default mirrors IntentCompiler so direct construction in
     # unit-test fixtures keeps working without per-fixture updates.
-    default_deadline_seconds: int = 600
+    default_deadline_seconds: int = 300
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.default_deadline_seconds, int) or isinstance(self.default_deadline_seconds, bool):
+            raise TypeError(
+                f"default_deadline_seconds must be an int (got {type(self.default_deadline_seconds).__name__})"
+            )
+        if self.default_deadline_seconds <= 0:
+            raise ValueError(f"default_deadline_seconds must be > 0 (got {self.default_deadline_seconds})")
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -616,6 +726,7 @@ __all__ = [
     "BaseStakingCompiler",
     "CLCompilerContext",
     "CompilerServices",
+    "CompilerServicesFacadeMixin",
     "PerpCompilerContext",
     "PreflightOutcome",
     "PreflightVerdict",

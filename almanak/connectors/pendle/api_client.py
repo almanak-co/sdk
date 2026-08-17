@@ -12,8 +12,12 @@ Caching: 15s TTL by default, configurable per instance.
 import logging
 import threading
 import time
+from collections.abc import Mapping
 from decimal import Decimal
 from typing import Any
+
+from almanak.connectors._base.chain_ids import chain_ids_from_supported_chains
+from almanak.connectors.pendle.connector import CONNECTOR
 
 from .models import PendleMarketData, PendleSwapQuote
 
@@ -22,14 +26,8 @@ logger = logging.getLogger(__name__)
 # Pendle API base URL
 PENDLE_API_BASE = "https://api-v2.pendle.finance/core"
 
-# Chain ID mapping consistent with almanak/core/enums.py
-CHAIN_ID_MAP: dict[str, int] = {
-    "ethereum": 1,
-    "arbitrum": 42161,
-    "optimism": 10,
-    "base": 8453,
-    "bsc": 56,
-}
+# Chain IDs are a read-only compatibility view of the connector manifest.
+CHAIN_ID_MAP: Mapping[str, int] = chain_ids_from_supported_chains(CONNECTOR.supported_chains)
 
 
 class PendleAPIError(Exception):

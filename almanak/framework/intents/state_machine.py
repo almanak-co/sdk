@@ -36,6 +36,8 @@ from datetime import UTC, datetime
 from enum import Enum, StrEnum, auto
 from typing import Any, Optional
 
+from almanak.core.retry import RetryPolicy
+
 from ..models.reproduction_bundle import ActionBundle
 from .compiler import (
     CompilationResult,
@@ -441,14 +443,14 @@ def is_sadflow_state(state: IntentState) -> bool:
 
 @dataclass
 class RetryConfig:
-    """Configuration for retry logic.
+    """Backward-compatible state-machine view of the canonical retry policy.
 
     Attributes:
-        max_retries: Maximum number of retry attempts (default 3).
+        max_retries: Additional attempts after the initial execution (default 3).
         initial_delay_seconds: Initial delay between retries in seconds (default 1.0).
         max_delay_seconds: Maximum delay between retries (default 60.0).
         exponential_base: Base for exponential backoff (default 2.0).
-        jitter_factor: Random jitter factor (0-1) to add to delays (default 0.1).
+        jitter_factor: Symmetric random jitter ratio from 0 to 1 (default 0.1).
     """
 
     max_retries: int = 3
@@ -456,6 +458,22 @@ class RetryConfig:
     max_delay_seconds: float = 60.0
     exponential_base: float = 2.0
     jitter_factor: float = 0.1
+
+    def __post_init__(self) -> None:
+        self._policy()
+
+    @property
+    def max_attempts(self) -> int:
+        """Total attempts, including the initial execution."""
+        return self.max_retries + 1
+
+    def can_retry(self, attempt_number: int) -> bool:
+        """Whether another execution remains after a one-based attempt."""
+        return self._policy().can_retry(attempt_number)
+
+    def delay_for_attempt_number(self, attempt_number: int) -> float:
+        """Calculate delay after a one-based attempt."""
+        return self._policy().delay_for_attempt(attempt_number)
 
     def calculate_delay(self, attempt: int) -> float:
         """Calculate delay for a given retry attempt.
@@ -468,20 +486,16 @@ class RetryConfig:
         Returns:
             Delay in seconds.
         """
-        import random
+        return self.delay_for_attempt_number(attempt + 1)
 
-        # Exponential backoff: initial_delay * base^attempt
-        delay = self.initial_delay_seconds * (self.exponential_base**attempt)
-
-        # Apply max cap
-        delay = min(delay, self.max_delay_seconds)
-
-        # Add jitter
-        if self.jitter_factor > 0:
-            jitter = delay * self.jitter_factor * random.random()
-            delay += jitter
-
-        return delay
+    def _policy(self) -> RetryPolicy:
+        return RetryPolicy(
+            max_attempts=self.max_attempts,
+            initial_delay_seconds=self.initial_delay_seconds,
+            max_delay_seconds=self.max_delay_seconds,
+            backoff_multiplier=self.exponential_base,
+            jitter_ratio=self.jitter_factor,
+        )
 
 
 @dataclass
@@ -1015,7 +1029,7 @@ class IntentStateMachine:
             error_message=self._last_error or "Unknown error",
             error_type=self._error_type,
             attempt_number=self._retry_count + 1,  # 1-indexed for user
-            max_attempts=self.config.retry_config.max_retries,
+            max_attempts=self.config.retry_config.max_attempts,
             action_bundle=self.action_bundle,
             receipt=self._receipt,
             state=self._state,
@@ -1254,7 +1268,8 @@ class IntentStateMachine:
                     logger.warning(f"on_sadflow_enter hook raised exception: {e}")
 
         # Check if we have retries left
-        if self._retry_count >= self.config.retry_config.max_retries:
+        attempt_number = self._retry_count + 1
+        if not self.config.retry_config.can_retry(attempt_number):
             # Exhausted retries - fail
             self._completed_at = datetime.now(UTC)
             self._call_sadflow_exit(success=False)
@@ -1267,7 +1282,7 @@ class IntentStateMachine:
             )
 
         # Calculate retry delay
-        delay = self.config.retry_config.calculate_delay(self._retry_count)
+        delay = self.config.retry_config.delay_for_attempt_number(attempt_number)
 
         # Build default retry action
         default_action = SadflowAction.retry(custom_delay=delay)
@@ -1322,7 +1337,7 @@ class IntentStateMachine:
 
         logger.info(
             f"Retrying intent {self.intent.intent_id} "
-            f"(attempt {self._retry_count}/{self.config.retry_config.max_retries}, "
+            f"(attempt {self._retry_count + 1}/{self.config.retry_config.max_attempts}, "
             f"delay={delay:.2f}s)"
         )
 

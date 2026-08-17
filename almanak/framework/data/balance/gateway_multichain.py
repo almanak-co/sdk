@@ -21,7 +21,7 @@ import logging
 import time
 from decimal import Decimal
 
-from almanak.framework.data.balance.gateway_provider import _BACKOFF_BASE_SECONDS, _MAX_RETRIES, _is_retryable
+from almanak.framework.data.balance.gateway_provider import _RETRY_POLICY, _is_retryable
 from almanak.framework.gateway_client import GatewayClient
 from almanak.framework.market import TokenBalance
 from almanak.gateway.proto import gateway_pb2
@@ -39,7 +39,7 @@ class MultiChainGatewayBalanceProvider:
     so the CLI process never makes direct RPC calls.
 
     Resilience features (VIB-1712):
-    - Retries up to 3 times with exponential backoff on transient RPC errors.
+    - Makes up to 3 total attempts with exponential backoff on transient RPC errors.
     - Caches successful reads with a configurable TTL (default 30s).
     - On total failure, returns last-known cached balance. If no cache exists,
       returns a zero balance (preserving the original error-swallowing contract).
@@ -75,7 +75,7 @@ class MultiChainGatewayBalanceProvider:
     def get_balance(self, token: str, chain: str) -> TokenBalance:
         """Get balance for a token on a specific chain via gateway.
 
-        Retries up to 3 times with exponential backoff on transient errors.
+        Makes up to three total attempts with exponential backoff on transient errors.
         Falls back to cached value on total failure.
 
         Args:
@@ -98,7 +98,7 @@ class MultiChainGatewayBalanceProvider:
         cache_key = (token, chain_lower)
         last_error: Exception | None = None
 
-        for attempt in range(_MAX_RETRIES):
+        for attempt in _RETRY_POLICY.attempt_numbers:
             try:
                 response = self._client.market.GetBalance(
                     gateway_pb2.BalanceRequest(
@@ -130,14 +130,14 @@ class MultiChainGatewayBalanceProvider:
                 if not _is_retryable(error_msg):
                     break
 
-                if attempt < _MAX_RETRIES - 1:
-                    backoff = _BACKOFF_BASE_SECONDS * (2**attempt)
+                if _RETRY_POLICY.can_retry(attempt):
+                    backoff = _RETRY_POLICY.delay_for_attempt(attempt)
                     logger.warning(
                         "Balance request for %s on %s failed (attempt %d/%d), retrying in %.1fs: %s",
                         token,
                         chain_lower,
-                        attempt + 1,
-                        _MAX_RETRIES,
+                        attempt,
+                        _RETRY_POLICY.max_attempts,
                         backoff,
                         error_msg,
                     )
@@ -154,7 +154,7 @@ class MultiChainGatewayBalanceProvider:
                 "Returning STALE cached balance for %s on %s after %d failed attempts: %s",
                 token,
                 chain_lower,
-                _MAX_RETRIES,
+                _RETRY_POLICY.max_attempts,
                 error_msg,
             )
             return cached_result

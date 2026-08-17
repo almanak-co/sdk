@@ -18,7 +18,6 @@ CL-context factory.
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, ClassVar
 
@@ -34,6 +33,7 @@ from almanak.framework.intents._compiler_helpers import (
     assemble_action_bundle,
     check_price_impact,
     choose_safer_quote,
+    deadline_from_now,
     sum_transaction_gas,
 )
 from almanak.framework.intents.compiler_models import CompilationResult, CompilationStatus, TransactionData
@@ -123,7 +123,7 @@ class CamelotCompiler(BaseProtocolCompiler[SwapCompilerContext]):
             if not from_token.is_native:
                 transactions.extend(ctx.services.build_approve_tx(from_token.address, router_address, amount_in))
 
-            deadline = int(datetime.now(UTC).timestamp()) + ctx.default_deadline_seconds
+            deadline = deadline_from_now(ctx.default_deadline_seconds)
 
             value = 0
             actual_from_token = from_token.address

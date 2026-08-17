@@ -24,6 +24,7 @@ import grpc
 from eth_utils import keccak
 
 from almanak.core.chains._helpers import rpc_rate_limit_map
+from almanak.core.retry import RetryPolicy
 from almanak.core.rpc_network import Network
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.metrics import record_rpc_latency, record_rpc_request
@@ -568,6 +569,12 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
     _RETRY_MAX_ATTEMPTS: int = 3
     _RETRY_BASE_DELAY: float = 0.5
     _RETRY_MAX_AFTER: float = 5.0  # cap honored Retry-After header to avoid stalling decide loop
+    _RETRY_POLICY = RetryPolicy(
+        max_attempts=_RETRY_MAX_ATTEMPTS,
+        initial_delay_seconds=_RETRY_BASE_DELAY,
+        max_delay_seconds=_RETRY_MAX_AFTER,
+        jitter_ratio=0.5,
+    )
 
     # VIB-4985 / ALM-2777: receipt-indexer-lag retry.
     # A *pinned* post-execution read (block=receipt.block_number, VIB-4589/F7)
@@ -648,10 +655,12 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
         }
 
         # Non-idempotent tx-submission methods get a single attempt.
-        max_attempts = 1 if method in self._NON_RETRYABLE_WRITE_METHODS else self._RETRY_MAX_ATTEMPTS
+        retry_policy = (
+            RetryPolicy(max_attempts=1) if method in self._NON_RETRYABLE_WRITE_METHODS else self._RETRY_POLICY
+        )
 
         last_error: dict | None = None
-        for attempt in range(1, max_attempts + 1):
+        for attempt in retry_policy.attempt_numbers:
             try:
                 async with session.post(
                     rpc_url,
@@ -664,7 +673,7 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
                             "code": -32603,
                             "message": f"HTTP {response.status}: {error_text}",
                         }
-                        if attempt < max_attempts:
+                        if retry_policy.can_retry(attempt):
                             retry_after = self._parse_retry_after(response.headers.get("Retry-After"))
                             await self._retry_sleep(attempt, retry_after=retry_after)
                             continue
@@ -675,8 +684,10 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
                         # VIB-4985: some providers wrap "Unknown block" indexer
                         # lag in a non-2xx (e.g. HTTP 400). Retry that family;
                         # any other non-2xx still fails fast.
-                        if self._is_indexer_lag_error(error_text) and attempt < max_attempts:
-                            self._record_indexer_lag_retry(method, chain, attempt, max_attempts, error_text)
+                        if self._is_indexer_lag_error(error_text) and retry_policy.can_retry(attempt):
+                            self._record_indexer_lag_retry(
+                                method, chain, attempt, retry_policy.max_attempts, error_text
+                            )
                             await self._retry_sleep(attempt)
                             continue
                         return None, {"code": -32603, "message": f"HTTP {response.status}: {error_text}"}
@@ -693,8 +704,10 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
                         # All other JSON-RPC errors (reverts, auth, bad params)
                         # propagate immediately as before.
                         error_message = rpc_error.get("message", "") if isinstance(rpc_error, dict) else ""
-                        if self._is_indexer_lag_error(error_message) and attempt < max_attempts:
-                            self._record_indexer_lag_retry(method, chain, attempt, max_attempts, error_message)
+                        if self._is_indexer_lag_error(error_message) and retry_policy.can_retry(attempt):
+                            self._record_indexer_lag_retry(
+                                method, chain, attempt, retry_policy.max_attempts, error_message
+                            )
                             await self._retry_sleep(attempt)
                             continue
                         return None, rpc_error
@@ -719,13 +732,13 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
                         ),
                     }
                 last_error = {"code": -32603, "message": f"Network error: {e!s}"}
-                if attempt < max_attempts:
+                if retry_policy.can_retry(attempt):
                     await self._retry_sleep(attempt)
                     continue
                 return None, last_error
             except TimeoutError:
                 last_error = {"code": -32603, "message": "Request timeout"}
-                if attempt < max_attempts:
+                if retry_policy.can_retry(attempt):
                     await self._retry_sleep(attempt)
                     continue
                 return None, last_error
@@ -781,13 +794,8 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
         retries across a portfolio of strategies hitting the same upstream.
         """
         import asyncio
-        import random
 
-        if retry_after is not None:
-            delay = min(retry_after, self._RETRY_MAX_AFTER)
-        else:
-            base = self._RETRY_BASE_DELAY * (2 ** (attempt - 1))
-            delay = base * random.uniform(0.5, 1.5)
+        delay = self._RETRY_POLICY.delay_for_attempt(attempt, retry_after_seconds=retry_after)
         await asyncio.sleep(delay)
 
     async def Call(

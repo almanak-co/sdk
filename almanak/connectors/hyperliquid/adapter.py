@@ -60,11 +60,13 @@ HYPERLIQUID_WS_URLS: dict[str, str] = {
     "testnet": "wss://api.hyperliquid-testnet.xyz/ws",
 }
 
-# Chain IDs for EIP-712 signing
-HYPERLIQUID_CHAIN_IDS: dict[str, int] = {
+# EIP-712 signing-domain IDs; these network labels are not canonical chains.
+HYPERLIQUID_EIP712_DOMAIN_IDS: dict[str, int] = {
     "mainnet": 1337,  # Hyperliquid L1 chain ID
     "testnet": 421614,  # Hyperliquid testnet (Arbitrum Sepolia based)
 }
+# Backward-compatible public alias.
+HYPERLIQUID_CHAIN_IDS = HYPERLIQUID_EIP712_DOMAIN_IDS
 
 # EIP-712 domain for Hyperliquid
 HYPERLIQUID_EIP712_DOMAIN: dict[str, dict[str, Any]] = {
@@ -219,7 +221,7 @@ class HyperliquidConfig:
     @property
     def chain_id(self) -> int:
         """Get chain ID for configured network."""
-        return HYPERLIQUID_CHAIN_IDS[self.network]
+        return HYPERLIQUID_EIP712_DOMAIN_IDS[self.network]
 
     @property
     def eip712_domain(self) -> dict[str, Any]:
@@ -1243,5 +1245,6 @@ __all__ = [
     "HYPERLIQUID_API_URLS",
     "HYPERLIQUID_WS_URLS",
     "HYPERLIQUID_CHAIN_IDS",
+    "HYPERLIQUID_EIP712_DOMAIN_IDS",
     "HYPERLIQUID_GAS_ESTIMATES",
 ]

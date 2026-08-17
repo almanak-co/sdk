@@ -147,6 +147,7 @@ class _FakeSwapCompiler:
     def __init__(self, *, chain: str = "base", offline: bool = False, tokens: dict | None = None) -> None:
         self.chain = chain
         self.wallet_address = "0x" + "11" * 20
+        self.default_deadline_seconds = 300
         self.price_oracle = {"USDC": Decimal("1"), "WETH": Decimal("1500"), "DAI": Decimal("1"), "USDbC": Decimal("1")}
         self._gateway_client = None
         self._config = SimpleNamespace(

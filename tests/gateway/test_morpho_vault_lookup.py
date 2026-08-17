@@ -92,10 +92,10 @@ class TestBuildIndices:
         lookup = MorphoVaultLookup()
         lookup._build_indices(SAMPLE_VAULTS)
 
-        # Ethereum (1), Base (8453), Arbitrum (42161) → mapped
+        # Only the connector's advertised Ethereum and Base chains are mapped.
         assert "ethereum" in lookup._symbol_indices
         assert "base" in lookup._symbol_indices
-        assert "arbitrum" in lookup._symbol_indices
+        assert "arbitrum" not in lookup._symbol_indices
         # HyperEVM 999 → unmapped
         assert "hyperEVM" not in lookup._symbol_indices
         # 999 must not leak through as a stringified chain id either

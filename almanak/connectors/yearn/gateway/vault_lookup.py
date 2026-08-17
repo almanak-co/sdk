@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from almanak.core.chains import ChainRegistry
 from almanak.gateway.services._protocol_lookup import ProtocolTokenLookup
 
 logger = logging.getLogger(__name__)
@@ -44,21 +45,6 @@ logger = logging.getLogger(__name__)
 # ``hideAlways=true`` filters out deprecated/test vaults; ``limit=1000``
 # covers the full set today with room to grow.
 YEARN_VAULTS_URL = "https://ydaemon.yearn.fi/vaults?hideAlways=true&limit=1000"
-
-# chainID → gateway chain name.  ydaemon also returns Katana (747474)
-# which we don't support yet; unmapped chains are silently dropped.
-_CHAIN_ID_TO_NAME: dict[int, str] = {
-    1: "ethereum",
-    10: "optimism",
-    42161: "arbitrum",
-    8453: "base",
-    137: "polygon",
-    # Note: ydaemon also reports Gnosis (chain id 100), but the gateway's
-    # ``ALLOWED_CHAINS`` and the ``Chain`` enum don't include Gnosis
-    # today, so any Gnosis request would be rejected upstream before it
-    # reaches this lookup. Re-add once Gnosis lands in both
-    # ``almanak.core.enums.Chain`` and ``ALLOWED_CHAINS``.
-}
 
 # Disk cache path and TTL
 CACHE_PATH = Path.home() / ".almanak" / "yearn_vault_cache.json"
@@ -155,10 +141,11 @@ class YearnVaultLookup(ProtocolTokenLookup):
             try:
                 chain_id_raw = vault.get("chainID")
                 chain_id = int(chain_id_raw) if isinstance(chain_id_raw, int | float) else -1
-                chain = _CHAIN_ID_TO_NAME.get(chain_id)
-                if chain is None:
+                descriptor = ChainRegistry.try_resolve_id(chain_id)
+                if descriptor is None:
                     skipped_chains.add(chain_id)
                     continue
+                chain = descriptor.name
 
                 symbol = str(vault.get("symbol", "")).strip()
                 address = str(vault.get("address", "")).strip().lower()

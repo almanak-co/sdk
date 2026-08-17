@@ -34,10 +34,13 @@ Usage:
 
 import asyncio
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from almanak.connectors._base.chain_ids import chain_ids_from_supported_chains, chain_names_by_id
+from almanak.connectors.aave_v3.connector import CONNECTOR
 from almanak.gateway.services._protocol_lookup import ProtocolTokenLookup
 
 logger = logging.getLogger(__name__)
@@ -47,25 +50,9 @@ logger = logging.getLogger(__name__)
 # pagination, no per-chain iteration.
 AAVE_GRAPHQL_URL = "https://api.v3.aave.com/graphql"
 
-# EVM chains supported by Aave v3 that we map to gateway chain names.
-# Aave also deploys on a few testnets (Base Sepolia, etc.) that we skip.
-AAVE_CHAIN_IDS: dict[str, int] = {
-    "ethereum": 1,
-    "arbitrum": 42161,
-    "optimism": 10,
-    "base": 8453,
-    "bsc": 56,
-    "polygon": 137,
-    "avalanche": 43114,
-    "linea": 59144,
-    # Note: Aave also deploys on Gnosis (chain id 100), but the gateway's
-    # ``ALLOWED_CHAINS`` and the ``Chain`` enum don't include Gnosis today,
-    # so any Gnosis request would be rejected upstream before it reaches
-    # this lookup. Adding ``"gnosis": 100`` here would be dead code.
-    # Re-add once Gnosis lands in both ``almanak.core.enums.Chain`` and
-    # ``almanak.gateway.validation.ALLOWED_CHAINS``.
-}
-_CHAIN_NAME_BY_ID: dict[int, str] = {v: k for k, v in AAVE_CHAIN_IDS.items()}
+# EVM chains are projected from the connector's end-to-end support truth.
+AAVE_CHAIN_IDS: Mapping[str, int] = chain_ids_from_supported_chains(CONNECTOR.supported_chains)
+_CHAIN_NAME_BY_ID: Mapping[int, str] = chain_names_by_id(AAVE_CHAIN_IDS)
 
 # GraphQL query — keep the shape minimal.  We only need symbol/address/decimals
 # for aToken + vToken + underlyingToken.  Including underlyingToken lets the

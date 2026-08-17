@@ -37,6 +37,7 @@ from almanak.connectors._strategy_base.slippage import compute_min_amount_out_fr
 from almanak.core.chains._helpers import native_symbols_for
 from almanak.framework.data.tokens.decimals import resolve_token_decimals
 from almanak.framework.data.tokens.exceptions import TokenResolutionError
+from almanak.framework.intents._compiler_helpers import deadline_from_now
 
 from .sdk import (
     FACTORY_ADDRESSES,
@@ -97,8 +98,8 @@ ERC20_APPROVE_SELECTOR = "0x095ea7b3"
 # Max uint256 for unlimited approvals
 MAX_UINT256 = 2**256 - 1
 
-# Default deadline (100 days in seconds)
-DEFAULT_DEADLINE_SECONDS = 8640000
+# Direct-adapter default; compiler paths pass their context value explicitly.
+DEFAULT_DEADLINE_SECONDS = 300
 
 
 # =============================================================================
@@ -138,7 +139,7 @@ class SushiSwapV3Config:
     wallet_address: str
     default_slippage_bps: int = 50
     default_fee_tier: int = DEFAULT_FEE_TIER
-    deadline_seconds: int = 300
+    deadline_seconds: int = DEFAULT_DEADLINE_SECONDS
     price_provider: dict[str, Decimal] | None = None
     allow_placeholder_prices: bool = False
 
@@ -152,6 +153,8 @@ class SushiSwapV3Config:
 
         if self.default_fee_tier not in FEE_TIERS:
             raise ValueError(f"Invalid fee tier: {self.default_fee_tier}. Valid tiers: {FEE_TIERS}")
+
+        deadline_from_now(self.deadline_seconds, now_ts=0)
 
         # Validate price_provider requirement
         if self.price_provider is None and not self.allow_placeholder_prices:
@@ -740,7 +743,7 @@ class SushiSwapV3Adapter:
                 transactions.append(approve1_tx)
 
             # Build mint transaction
-            deadline = int(datetime.now(UTC).timestamp()) + self.config.deadline_seconds
+            deadline = deadline_from_now(self.config.deadline_seconds)
             mint_params = MintParams(
                 token0=sorted_token0,
                 token1=sorted_token1,
@@ -815,7 +818,7 @@ class SushiSwapV3Adapter:
         """
         try:
             recipient = recipient or self.wallet_address
-            deadline = int(datetime.now(UTC).timestamp()) + self.config.deadline_seconds
+            deadline = deadline_from_now(self.config.deadline_seconds)
 
             transactions: list[TransactionData] = []
 
@@ -887,7 +890,7 @@ class SushiSwapV3Adapter:
         value: int = 0,
     ) -> TransactionData:
         """Build exactInputSingle swap transaction."""
-        deadline = int(datetime.now(UTC).timestamp()) + self.config.deadline_seconds
+        deadline = deadline_from_now(self.config.deadline_seconds)
 
         # Encode parameters
         calldata = (
@@ -934,7 +937,7 @@ class SushiSwapV3Adapter:
         value: int = 0,
     ) -> TransactionData:
         """Build exactOutputSingle swap transaction."""
-        deadline = int(datetime.now(UTC).timestamp()) + self.config.deadline_seconds
+        deadline = deadline_from_now(self.config.deadline_seconds)
 
         # Encode parameters
         calldata = (

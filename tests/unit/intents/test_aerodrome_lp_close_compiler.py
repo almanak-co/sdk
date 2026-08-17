@@ -27,6 +27,7 @@ def _make_compiler() -> IntentCompiler:
     compiler.chain = "base"
     compiler.wallet_address = "0x" + "11" * 20
     compiler.price_oracle = {}
+    compiler.default_deadline_seconds = 300
     compiler._gateway_client = None
     compiler._get_aerodrome_pool_address = MagicMock()
     return compiler
@@ -53,7 +54,7 @@ def test_aerodrome_lp_close_zero_lp_balance_is_noop_success() -> None:
         patch.object(compiler, "_get_chain_rpc_url", return_value="http://localhost:8545"),
         patch.object(compiler, "_get_aerodrome_pool_address", return_value="0x" + "cc" * 20),
         patch.object(compiler, "_query_erc20_balance", return_value=0),
-        patch("almanak.connectors.aerodrome.AerodromeAdapter") as mock_adapter_cls,
+        patch("almanak.connectors.aerodrome.AerodromeAdapter"),
     ):
         result = compile_lp_close_aerodrome(compiler, intent)
 

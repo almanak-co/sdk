@@ -34,12 +34,16 @@ Example:
 """
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+
+from almanak.connectors._base.chain_ids import chain_ids_from_registered_ids, chain_names_by_id
+from almanak.connectors.enso.deployments import DELEGATE_ADDRESSES, ROUTER_ADDRESSES
 
 from .exceptions import (
     EnsoAPIError,
@@ -62,59 +66,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# Chain ID mapping
-CHAIN_MAPPING: dict[str, int] = {
-    "ethereum": 1,
-    "optimism": 10,
-    "bsc": 56,
-    "gnosis": 100,
-    "polygon": 137,
-    "zksync": 324,
-    "base": 8453,
-    "arbitrum": 42161,
-    "avalanche": 43114,
-    "sonic": 146,
-    "linea": 59144,
-    "berachain": 80094,
-    "sepolia": 11155111,
-}
+# Enso's API/deployment surface is broader than advertised end-to-end strategy
+# support. Keep the router table as deployment truth and ChainRegistry as ID
+# truth; unregistered external deployments are omitted.
+CHAIN_MAPPING: Mapping[str, int] = chain_ids_from_registered_ids(ROUTER_ADDRESSES)
 
 # Reverse mapping
-CHAIN_ID_TO_NAME: dict[int, str] = {v: k for k, v in CHAIN_MAPPING.items()}
-
-# Enso Router addresses per chain
-ROUTER_ADDRESSES: dict[int, str] = {
-    1: "0xF75584eF6673aD213a685a1B58Cc0330B8eA22Cf",  # Ethereum
-    10: "0xF75584eF6673aD213a685a1B58Cc0330B8eA22Cf",  # Optimism
-    56: "0xF75584eF6673aD213a685a1B58Cc0330B8eA22Cf",  # BSC
-    100: "0xF75584eF6673aD213a685a1B58Cc0330B8eA22Cf",  # Gnosis
-    137: "0xF75584eF6673aD213a685a1B58Cc0330B8eA22Cf",  # Polygon
-    324: "0x1BD8CefD703CF6b8fF886AD2E32653C32bc62b5C",  # zkSync
-    8453: "0xF75584eF6673aD213a685a1B58Cc0330B8eA22Cf",  # Base
-    42161: "0xF75584eF6673aD213a685a1B58Cc0330B8eA22Cf",  # Arbitrum
-    43114: "0xF75584eF6673aD213a685a1B58Cc0330B8eA22Cf",  # Avalanche
-    146: "0xF75584eF6673aD213a685a1B58Cc0330B8eA22Cf",  # Sonic
-    59144: "0xA146d46823f3F594B785200102Be5385CAfCE9B5",  # Linea
-    80094: "0xF75584eF6673aD213a685a1B58Cc0330B8eA22Cf",  # Berachain
-    11155111: "0xF75584eF6673aD213a685a1B58Cc0330B8eA22Cf",  # Sepolia
-}
-
-# Enso Delegate addresses per chain (for borrow operations)
-DELEGATE_ADDRESSES: dict[int, str] = {
-    1: "0x7663fd40081dcCd47805c00e613B6beAc3B87F08",
-    10: "0x7663fd40081dcCd47805c00e613B6beAc3B87F08",
-    56: "0x7663fd40081dcCd47805c00e613B6beAc3B87F08",
-    100: "0x7663fd40081dcCd47805c00e613B6beAc3B87F08",
-    137: "0x7663fd40081dcCd47805c00e613B6beAc3B87F08",
-    324: "0x4c3Db0fFf66f98d84429Bf60E7622e206Fc4947c",
-    8453: "0x7663fd40081dcCd47805c00e613B6beAc3B87F08",
-    42161: "0x7663fd40081dcCd47805c00e613B6beAc3B87F08",
-    43114: "0x7663fd40081dcCd47805c00e613B6beAc3B87F08",
-    146: "0x7663fd40081dcCd47805c00e613B6beAc3B87F08",
-    59144: "0xEe41aB55411a957c43C469F74867fa4671F9f017",
-    80094: "0x7663fd40081dcCd47805c00e613B6beAc3B87F08",  # Berachain
-    11155111: "0x7663fd40081dcCd47805c00e613B6beAc3B87F08",
-}
+CHAIN_ID_TO_NAME: Mapping[int, str] = chain_names_by_id(CHAIN_MAPPING)
 
 
 @dataclass

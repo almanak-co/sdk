@@ -173,8 +173,8 @@ AERODROME_GAS_ESTIMATES: dict[str, int] = {
 # Maximum uint256 value
 MAX_UINT256 = 2**256 - 1
 
-# Default deadline (100 days in seconds)
-DEFAULT_DEADLINE_SECONDS = 8640000
+# Direct-SDK default retained for backward-compatible imports.
+DEFAULT_DEADLINE_SECONDS = 300
 
 
 # =============================================================================

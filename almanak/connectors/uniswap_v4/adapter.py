@@ -50,6 +50,7 @@ from almanak.connectors.uniswap_v4.sdk import (
 from almanak.core.chains import ChainRegistry
 from almanak.core.chains._helpers import native_symbols_for
 from almanak.framework.data.tokens import TokenNotFoundError, build_swap_token_meta, get_token_resolver
+from almanak.framework.intents._compiler_helpers import deadline_from_now
 
 from .addresses import UNISWAP_V4
 
@@ -144,6 +145,7 @@ class UniswapV4Config:
             compiler context (ALM-3184). ``None`` means undeclared, in which
             case the price-impact guard probes the node rather than trusting
             the shape of ``rpc_url``.
+        default_deadline_seconds: Transaction deadline in seconds.
     """
 
     chain: str
@@ -159,6 +161,10 @@ class UniswapV4Config:
     # landed in managed_fork, gateway_client stayed None, and the adapter quietly
     # lost gateway routing. New fields go here, at the end.
     managed_fork: bool | None = None
+    default_deadline_seconds: int = 300
+
+    def __post_init__(self) -> None:
+        deadline_from_now(self.default_deadline_seconds, now_ts=0)
 
 
 # =============================================================================
@@ -192,6 +198,7 @@ class UniswapV4Adapter:
             self.default_fee_tier = config.default_fee_tier
             self.default_slippage_bps = config.default_slippage_bps
             self.managed_fork = config.managed_fork
+            self.default_deadline_seconds = config.default_deadline_seconds
             self._gateway_client = gateway_client or config.gateway_client
         elif chain is not None:
             self.chain = chain.lower()
@@ -200,6 +207,7 @@ class UniswapV4Adapter:
             self.default_fee_tier = 3000
             self.default_slippage_bps = 50
             self.managed_fork = None
+            self.default_deadline_seconds = 300
             self._gateway_client = gateway_client
         else:
             raise ValueError("Either chain or config must be provided")
@@ -401,6 +409,7 @@ class UniswapV4Adapter:
             quote=quote,
             recipient=self.wallet_address,
             slippage_bps=slippage_bps,
+            deadline=deadline_from_now(self.default_deadline_seconds),
         )
         transactions.append(swap_tx)
 
@@ -955,7 +964,10 @@ class UniswapV4Adapter:
                 transactions.append(self._sdk.build_permit2_approve_tx(token_addr, position_manager, amount_max))
 
             # Mint position TX
-            mint_tx = self._sdk.build_mint_position_tx(mint_params)
+            mint_tx = self._sdk.build_mint_position_tx(
+                mint_params,
+                deadline=deadline_from_now(self.default_deadline_seconds),
+            )
             transactions.append(mint_tx)
 
             # Build token metadata dicts
@@ -1121,6 +1133,7 @@ class UniswapV4Adapter:
             currency0=currency0,
             currency1=currency1,
             recipient=self.wallet_address,
+            deadline=deadline_from_now(self.default_deadline_seconds),
             burn=False,
         )
 
@@ -1179,6 +1192,7 @@ class UniswapV4Adapter:
             currency1=currency1,
             recipient=self.wallet_address,
             hook_data=hook_data,
+            deadline=deadline_from_now(self.default_deadline_seconds),
         )
 
         return ActionBundle(

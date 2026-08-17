@@ -103,6 +103,15 @@ class TestConfigValidation:
         cfg = TraderJoeV2Config(chain="avalanche", wallet_address=WALLET, rpc_url="http://x")
         assert cfg.rpc_url == "http://x"
 
+    def test_config_rejects_expired_deadline(self) -> None:
+        with pytest.raises(ValueError, match="> 0"):
+            TraderJoeV2Config(
+                chain="avalanche",
+                wallet_address=WALLET,
+                rpc_url="http://x",
+                default_deadline_seconds=0,
+            )
+
     def test_unsupported_chain_raises_in_adapter(self) -> None:
         cfg = TraderJoeV2Config(chain="solana", wallet_address=WALLET, rpc_url="http://x")
         with pytest.raises(TraderJoeV2SDKError, match="not supported"):
@@ -242,8 +251,10 @@ class TestBuildSwapTransaction:
             path=[TOKEN_X, TOKEN_Y],
         )
 
-        tx = adapter.build_swap_transaction("WAVAX", "USDC", Decimal("1"), bin_step=20, quote=quote)
+        with patch("almanak.connectors.traderjoe_v2.adapter.deadline_from_now", return_value=12345):
+            tx = adapter.build_swap_transaction("WAVAX", "USDC", Decimal("1"), bin_step=20, quote=quote)
         assert tx.to == ROUTER
+        assert sdk.build_swap_exact_tokens_for_tokens.call_args.kwargs["deadline"] == 12345
         # get_swap_quote should NOT have been triggered.
         sdk.get_pool_address.assert_not_called()
 

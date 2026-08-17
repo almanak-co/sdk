@@ -308,7 +308,7 @@ class TestConstructor:
             PendleMarketResolver("solana")
 
     def test_accepts_valid_chains(self):
-        for chain in ["ethereum", "arbitrum", "optimism", "base", "bsc"]:
+        for chain in CHAIN_ID_MAP:
             # Should not raise -- we mock the API client so no real HTTP calls
             mock_client = MagicMock(spec=PendleAPIClient)
             mock_client.chain = chain

@@ -10,10 +10,10 @@ parsing and a protocol-agnostic bin-step probe used by TraderJoe V2 swap
 compilation.
 
 Scope / contract:
-    - Every helper here MUST be pure. Anything that needs ``self._gateway_client``,
-      ``self._allowance_cache``, RPC access, logging, or time-of-day MUST NOT
-      live here. Use callables the caller passes in (e.g. ``now_ts``) if a
-      deterministic clock is needed.
+    - Every helper here MUST be free of compiler and connector state. Anything
+      that needs ``self._gateway_client``, ``self._allowance_cache``, RPC access,
+      or logging MUST NOT live here. The deadline helper accepts ``now_ts`` so
+      callers can make its one clock read deterministic in tests.
     - Helpers do NOT build error messages that tests grep. The caller builds
       the final ``CompilationResult.error`` string so existing string assertions
       in ``tests/unit/intents/test_compiler_swap_lp_characterization.py``
@@ -308,12 +308,12 @@ def check_price_impact(
 # ---------------------------------------------------------------------------
 
 
-def compute_deadline(default_deadline_seconds: int, *, now_ts: int | None = None) -> int:
+def deadline_from_now(default_deadline_seconds: int, *, now_ts: int | None = None) -> int:
     """Compute a Unix deadline timestamp for a compiled transaction.
 
-    Mirrors the ``int(datetime.now(UTC).timestamp()) + self.default_deadline_seconds``
-    line that appears in both ``_compile_swap`` and ``_compile_lp_open``. Accepts
-    an injectable ``now_ts`` so tests don't need to patch module globals.
+    This is the canonical clock and validation boundary for transaction
+    deadlines. Accepts an injectable ``now_ts`` so tests don't need to patch
+    module globals.
 
     Args:
         default_deadline_seconds: Seconds to add to the current time. Must be
@@ -326,12 +326,22 @@ def compute_deadline(default_deadline_seconds: int, *, now_ts: int | None = None
         Unix timestamp in seconds.
 
     Raises:
+        TypeError: If either supplied value is not an integer.
         ValueError: If ``default_deadline_seconds`` is not positive.
     """
+    if not isinstance(default_deadline_seconds, int) or isinstance(default_deadline_seconds, bool):
+        raise TypeError(f"default_deadline_seconds must be an int (got {type(default_deadline_seconds).__name__})")
     if default_deadline_seconds <= 0:
         raise ValueError(f"default_deadline_seconds must be > 0 (got {default_deadline_seconds})")
+    if now_ts is not None and (not isinstance(now_ts, int) or isinstance(now_ts, bool)):
+        raise TypeError(f"now_ts must be an int (got {type(now_ts).__name__})")
     base = now_ts if now_ts is not None else int(datetime.now(UTC).timestamp())
     return base + default_deadline_seconds
+
+
+def compute_deadline(default_deadline_seconds: int, *, now_ts: int | None = None) -> int:
+    """Backward-compatible name for :func:`deadline_from_now`."""
+    return deadline_from_now(default_deadline_seconds, now_ts=now_ts)
 
 
 # ---------------------------------------------------------------------------

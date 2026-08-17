@@ -134,7 +134,7 @@ class TestAcrossManifest:
             supported_protocols=["across"],
             intent_types=["BRIDGE"],
         )
-        zk_spoke = ACROSS_SPOKE_POOL_ADDRESSES[ACROSS_CHAIN_IDS["zksync"]].lower()
+        zk_spoke = ACROSS_SPOKE_POOL_ADDRESSES[324].lower()
         assert all(p.target.lower() != zk_spoke for p in manifest.permissions)
 
     def test_bridged_token_approve_comes_from_config(self) -> None:

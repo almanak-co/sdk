@@ -42,6 +42,7 @@ from almanak.connectors._strategy_base.slippage import compute_min_amount_out_fr
 from almanak.core.chains._helpers import native_symbols_for
 from almanak.framework.data.tokens.decimals import resolve_token_decimals
 from almanak.framework.data.tokens.exceptions import TokenResolutionError
+from almanak.framework.intents._compiler_helpers import deadline_from_now
 from almanak.framework.intents.vocabulary import IntentType, SwapIntent
 from almanak.framework.models.reproduction_bundle import ActionBundle
 
@@ -139,6 +140,8 @@ class AerodromeConfig:
 
         if self.default_slippage_bps < 0 or self.default_slippage_bps >= 10000:
             raise ValueError("Slippage must be between 0 (inclusive) and 10000 (exclusive) basis points")
+
+        deadline_from_now(self.deadline_seconds, now_ts=0)
 
         # Validate price_provider requirement
         if self.price_provider is None and not self.allow_placeholder_prices:
@@ -1013,9 +1016,7 @@ class AerodromeAdapter:
 
             web3 = self._get_web3()
 
-            from datetime import UTC, datetime
-
-            deadline = int(datetime.now(UTC).timestamp()) + self.config.deadline_seconds
+            deadline = deadline_from_now(self.config.deadline_seconds)
 
             transactions: list[TransactionData] = []
 
@@ -1147,9 +1148,7 @@ class AerodromeAdapter:
                     gas_estimate=0,
                 )
 
-            from datetime import UTC, datetime
-
-            deadline = int(datetime.now(UTC).timestamp()) + self.config.deadline_seconds
+            deadline = deadline_from_now(self.config.deadline_seconds)
 
             transactions: list[TransactionData] = []
 
@@ -1389,7 +1388,7 @@ class AerodromeAdapter:
 
         Route struct: { address from, address to, bool stable, address factory }
         """
-        deadline = int(datetime.now(UTC).timestamp()) + self.config.deadline_seconds
+        deadline = deadline_from_now(self.config.deadline_seconds)
 
         # Encode Route struct
         route_data = self._encode_route(token_in, token_out, stable)
@@ -1452,7 +1451,7 @@ class AerodromeAdapter:
             address recipient, uint256 deadline, uint256 amountIn,
             uint256 amountOutMinimum, uint160 sqrtPriceLimitX96
         """
-        deadline = int(datetime.now(UTC).timestamp()) + self.config.deadline_seconds
+        deadline = deadline_from_now(self.config.deadline_seconds)
 
         calldata = (
             CL_EXACT_INPUT_SINGLE_SELECTOR
@@ -1499,7 +1498,7 @@ class AerodromeAdapter:
         recipient: str,
     ) -> TransactionData:
         """Build addLiquidity transaction."""
-        deadline = int(datetime.now(UTC).timestamp()) + self.config.deadline_seconds
+        deadline = deadline_from_now(self.config.deadline_seconds)
 
         calldata = (
             ADD_LIQUIDITY_SELECTOR
@@ -1538,7 +1537,7 @@ class AerodromeAdapter:
         recipient: str,
     ) -> TransactionData:
         """Build removeLiquidity transaction."""
-        deadline = int(datetime.now(UTC).timestamp()) + self.config.deadline_seconds
+        deadline = deadline_from_now(self.config.deadline_seconds)
 
         calldata = (
             REMOVE_LIQUIDITY_SELECTOR

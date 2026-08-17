@@ -11,12 +11,15 @@ API key is held in gateway, keeping credentials secure.
 
 import json
 import logging
+from collections.abc import Mapping
 from typing import Any
 
 import aiohttp
 import grpc
 from pydantic import BaseModel, Field
 
+from almanak.connectors._base.chain_ids import chain_ids_from_registered_ids
+from almanak.connectors.enso.deployments import ROUTER_ADDRESSES
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
 from almanak.gateway.utils.ssl_context import build_ssl_context
@@ -113,23 +116,8 @@ def _normalize_amount_out(value: list[int | str] | int | str | None) -> str:
 
 ENSO_BASE_URL = "https://api.enso.finance"
 
-# Chain ID mapping
-# Keep aligned with almanak/connectors/enso/client.py:CHAIN_MAPPING.
-CHAIN_MAPPING = {
-    "ethereum": 1,
-    "optimism": 10,
-    "bsc": 56,
-    "gnosis": 100,
-    "polygon": 137,
-    "zksync": 324,
-    "base": 8453,
-    "arbitrum": 42161,
-    "avalanche": 43114,
-    "sonic": 146,
-    "linea": 59144,
-    "berachain": 80094,
-    "sepolia": 11155111,
-}
+# Match the registered subset of Enso's router deployments.
+CHAIN_MAPPING: Mapping[str, int] = chain_ids_from_registered_ids(ROUTER_ADDRESSES)
 
 
 class EnsoServiceServicer(gateway_pb2_grpc.EnsoServiceServicer):

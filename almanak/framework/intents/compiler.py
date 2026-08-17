@@ -22,7 +22,6 @@ Example:
 
 import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -218,6 +217,7 @@ from ._compiler_helpers import (
     check_price_impact,
     choose_safer_quote,
     compute_min_amount_out,
+    deadline_from_now,
     sum_transaction_gas,
 )
 from .compiler_adapters import (  # noqa: F401
@@ -612,6 +612,10 @@ class IntentCompiler:
         from almanak.connectors._strategy_base.protocol_aliases import normalize_protocol
 
         self.default_protocol = normalize_protocol(self.chain, default_protocol)
+        if not isinstance(default_deadline_seconds, int) or isinstance(default_deadline_seconds, bool):
+            raise TypeError(f"default_deadline_seconds must be an int (got {type(default_deadline_seconds).__name__})")
+        if default_deadline_seconds <= 0:
+            raise ValueError(f"default_deadline_seconds must be > 0 (got {default_deadline_seconds})")
         self.default_deadline_seconds = default_deadline_seconds
         self.rpc_url = rpc_url
         self.rpc_timeout = rpc_timeout
@@ -1825,14 +1829,7 @@ class IntentCompiler:
                 transactions.extend(self._build_approve_tx(from_token.address, router_address, amount_in))
 
             # Step 6: Handle native wrapping + select fee tier + quoter.
-            # Use direct arithmetic (not ``compute_deadline``) here because
-            # ``default_deadline_seconds`` is not validated in ``__init__`` and
-            # the pre-refactor swap path silently produced ``now + N`` for any
-            # ``N`` (including 0 / negative); ``compute_deadline`` would raise.
-            # Preserving byte-for-byte behaviour avoids a runtime regression
-            # for any deployment that intentionally or accidentally uses
-            # ``default_deadline_seconds <= 0``.
-            deadline = int(datetime.now(UTC).timestamp()) + self.default_deadline_seconds
+            deadline = deadline_from_now(self.default_deadline_seconds)
             value, actual_from_token, actual_to_token = self._resolve_swap_wrap_addresses(
                 from_token=from_token,
                 to_token=to_token,

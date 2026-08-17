@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from almanak.core.chains import ChainRegistry
+from almanak.core.retry import RetryPolicy
 from almanak.gateway.utils.ssl_context import build_ssl_context
 from almanak.integrations._base import OracleDataUnavailable
 from almanak.integrations.chainlink.catalog import CATALOG
@@ -93,6 +94,10 @@ class ChainlinkHistoryReader:
         self._request_timeout_seconds = request_timeout_seconds
         self._history_timeout_seconds = history_timeout_seconds
         self._rpc_retries = rpc_retries
+        self._rpc_retry_policy = RetryPolicy(
+            max_attempts=rpc_retries + 1,
+            initial_delay_seconds=0.1,
+        )
         self._rpc_semaphore = asyncio.Semaphore(min(DEFAULT_RPC_CONCURRENCY, self._batch_size))
         self._web3: object | None = None
         self._web3_lock = asyncio.Lock()
@@ -155,8 +160,9 @@ class ChainlinkHistoryReader:
                         await asyncio.sleep(0.1)
                         continue
                     return None
-                if transport_failures < self._rpc_retries:
-                    await asyncio.sleep(0.1 * (2**transport_failures))
+                attempt_number = transport_failures + 1
+                if self._rpc_retry_policy.can_retry(attempt_number):
+                    await asyncio.sleep(self._rpc_retry_policy.delay_for_attempt(attempt_number))
                     transport_failures += 1
                     continue
                 raise ChainlinkHistoryUnavailable(
@@ -190,13 +196,13 @@ class ChainlinkHistoryReader:
         )
 
     async def _required_call(self, address: str, calldata: str, *, operation: str) -> bytes:
-        for attempt in range(self._rpc_retries + 1):
+        for attempt in self._rpc_retry_policy.attempt_numbers:
             try:
                 async with self._rpc_semaphore:
                     return await self._eth_call(address, calldata)
             except Exception as exc:
-                if attempt < self._rpc_retries:
-                    await asyncio.sleep(0.1 * (2**attempt))
+                if self._rpc_retry_policy.can_retry(attempt):
+                    await asyncio.sleep(self._rpc_retry_policy.delay_for_attempt(attempt))
                     continue
                 raise ChainlinkHistoryUnavailable(
                     f"{operation} unavailable for feed {address} after bounded retries"

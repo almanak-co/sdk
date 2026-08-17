@@ -25,6 +25,7 @@ from typing import Any
 
 import aiohttp
 
+from almanak.core.retry import RetryPolicy
 from almanak.gateway.utils.ssl_context import build_ssl_context
 
 logger = logging.getLogger(__name__)
@@ -417,8 +418,9 @@ class BaseIntegration(ABC):
         """
         self._metrics.total_requests += 1
         url = self._url_for_path(path)
+        retry_policy = self._rate_limit_retry_policy()
 
-        for attempt in range(1 + self.rate_limit_max_retries):
+        for attempt in retry_policy.attempt_numbers:
             start_time = time.time()
 
             # Apply rate limiting
@@ -449,25 +451,29 @@ class BaseIntegration(ABC):
                             retry_after = float(response.headers.get("Retry-After", "5"))
                         except (ValueError, TypeError):
                             retry_after = 5.0
-                        retry_after = min(max(retry_after, 0), self.rate_limit_max_wait)
+                        retry_after = max(retry_after, 0)
+                        delay = retry_policy.delay_for_attempt(
+                            attempt,
+                            retry_after_seconds=retry_after,
+                        )
 
-                        if attempt < self.rate_limit_max_retries:
+                        if retry_policy.can_retry(attempt):
                             logger.info(
                                 "%s rate limited on %s, retrying in %.1fs (attempt %d/%d)",
                                 self.name,
                                 path,
-                                retry_after,
-                                attempt + 1,
-                                self.rate_limit_max_retries,
+                                delay,
+                                attempt,
+                                retry_policy.max_attempts - 1,
                             )
-                            await asyncio.sleep(retry_after)
+                            await asyncio.sleep(delay)
                             continue
 
                         self._metrics.rate_limited_requests += 1
                         self._metrics.failed_requests += 1
                         self._metrics.last_error = f"Rate limited after {self.rate_limit_max_retries} retries"
                         self._metrics.last_error_time = datetime.now(UTC)
-                        raise IntegrationRateLimitError(self.name, retry_after)
+                        raise IntegrationRateLimitError(self.name, delay)
 
                     # Handle errors
                     if response.status >= 400:
@@ -512,6 +518,14 @@ class BaseIntegration(ABC):
                     f"Timeout after {self._request_timeout}s",
                     code="TIMEOUT",
                 ) from None
+
+    def _rate_limit_retry_policy(self) -> RetryPolicy:
+        """Build the explicit total-attempt policy for one logical request."""
+        return RetryPolicy(
+            max_attempts=self.rate_limit_max_retries + 1,
+            initial_delay_seconds=5.0,
+            max_delay_seconds=self.rate_limit_max_wait,
+        )
 
     async def _cached_fetch(
         self,

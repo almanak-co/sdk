@@ -29,8 +29,8 @@ if TYPE_CHECKING:
 # inside the SDK, but `.syncinclude` publishes `almanak/` wholesale, so they are
 # importable public surface on the released package (2.24.0) and cannot vanish
 # without a deprecation cycle. Resolving one imports `.retry` lazily, which
-# emits a one-shot DeprecationWarning. Removal target: 3.0.0 (ALM-3197 owns the
-# unified retry home that replaces them).
+# emits a one-shot DeprecationWarning. Removal target: 3.0.0; use
+# ``almanak.core.retry.RetryPolicy`` as the replacement (ALM-3197).
 _DEPRECATED_RETRY_NAMES = frozenset(
     {
         "DEFAULT_RETRY_CONFIG",

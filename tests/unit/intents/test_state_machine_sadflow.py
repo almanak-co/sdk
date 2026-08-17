@@ -55,6 +55,14 @@ def _config(max_retries: int = 3) -> StateMachineConfig:
     )
 
 
+def test_retry_config_exposes_total_attempt_budget() -> None:
+    retry_config = RetryConfig(max_retries=3, jitter_factor=0.0)
+
+    assert retry_config.max_attempts == 4
+    assert retry_config.can_retry(3) is True
+    assert retry_config.can_retry(4) is False
+
+
 def _sm_in_sadflow(
     error: str | None = TRANSIENT_ERROR,
     max_retries: int = 3,

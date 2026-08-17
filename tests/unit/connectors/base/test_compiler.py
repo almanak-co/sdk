@@ -3,6 +3,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
+
 from almanak.connectors._strategy_base.base.compiler import BaseCompilerContext, BaseProtocolCompiler
 from almanak.framework.intents.compiler_models import CompilationResult, CompilationStatus
 
@@ -53,6 +55,17 @@ def test_base_protocol_compiler_dispatches_supported_intents():
     assert compiler.compile(ctx, SimpleNamespace(intent_type="LP_OPEN")).intent_id == "lp_open"
     assert compiler.compile(ctx, SimpleNamespace(intent_type="LP_CLOSE")).intent_id == "lp_close"
     assert compiler.compile(ctx, SimpleNamespace(intent_type="LP_COLLECT_FEES")).intent_id == "collect"
+
+
+def test_base_context_uses_canonical_deadline_default():
+    assert _ctx().default_deadline_seconds == 300
+
+
+@pytest.mark.parametrize("invalid", [0, -1, True, 300.0])
+def test_base_context_rejects_invalid_deadline(invalid):
+    values = {**_ctx().__dict__, "default_deadline_seconds": invalid}
+    with pytest.raises((TypeError, ValueError), match="default_deadline_seconds"):
+        BaseCompilerContext(**values)
 
 
 def test_check_context_rejects_wrong_context_type():

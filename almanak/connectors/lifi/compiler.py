@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -380,7 +381,7 @@ class LiFiCompiler(BaseProtocolCompiler[SwapCompilerContext]):
     def _validate_lifi_chains(
         ctx: SwapCompilerContext,
         intent: SwapIntent,
-        chain_mapping: dict[str, int],
+        chain_mapping: Mapping[str, int],
     ) -> tuple[str, str, int, int, bool] | CompilationResult:
         source_chain = intent.chain or ctx.chain
         dest_chain = intent.destination_chain or source_chain

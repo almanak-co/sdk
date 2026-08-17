@@ -11,6 +11,7 @@ from almanak.connectors.uniswap_v4.adapter import (
     UniswapV4Adapter,
     UniswapV4Config,
 )
+from almanak.connectors.uniswap_v4.compiler import UniswapV4Compiler
 from almanak.connectors.uniswap_v4.sdk import SwapQuote
 from almanak.framework.data.tokens import TokenNotFoundError
 
@@ -73,11 +74,12 @@ class TestConfigPositionalAbi:
         assert adapter._gateway_client is client
         assert adapter.managed_fork is None
 
-    def test_managed_fork_is_the_last_field(self):
+    def test_new_config_fields_are_appended(self):
         """Pins the append-last rule so the next added field cannot repeat this."""
         import dataclasses
 
-        assert [f.name for f in dataclasses.fields(UniswapV4Config)][-1] == "managed_fork"
+        names = [f.name for f in dataclasses.fields(UniswapV4Config)]
+        assert names[-2:] == ["managed_fork", "default_deadline_seconds"]
 
 
 class TestAdapterInit:
@@ -94,6 +96,25 @@ class TestAdapterInit:
         adapter = UniswapV4Adapter(config=config)
         assert adapter.chain == "ethereum"
         assert adapter.default_fee_tier == 500
+
+    def test_compiler_context_deadline_reaches_adapter(self):
+        ctx = MagicMock()
+        ctx.chain = "arbitrum"
+        ctx.wallet_address = _TEST_WALLET
+        ctx.rpc_url = None
+        ctx.managed_fork = False
+        ctx.default_deadline_seconds = 917
+        ctx.token_resolver = _make_resolver()
+        ctx.gateway_client = None
+
+        adapter = UniswapV4Compiler._adapter(ctx)
+
+        assert adapter.default_deadline_seconds == 917
+
+    @pytest.mark.parametrize("invalid", [0, -1])
+    def test_config_rejects_expired_deadline(self, invalid):
+        with pytest.raises(ValueError, match="> 0"):
+            UniswapV4Config(chain="arbitrum", default_deadline_seconds=invalid)
 
     def test_init_unsupported_chain(self):
         with pytest.raises(ValueError, match="not supported"):

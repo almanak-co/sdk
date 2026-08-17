@@ -358,6 +358,7 @@ class UniswapV4Compiler(BaseProtocolCompiler[SwapCompilerContext]):
             # ALM-3184: thread the managed-fork declaration so the adapter's
             # price-impact guard keys on a positive signal, not on the URL.
             "managed_fork": ctx.managed_fork,
+            "default_deadline_seconds": ctx.default_deadline_seconds,
         }
         if default_slippage_bps is not None:
             kwargs["default_slippage_bps"] = default_slippage_bps

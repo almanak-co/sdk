@@ -11,14 +11,18 @@ import logging
 from dataclasses import dataclass
 from decimal import Decimal
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from almanak.connectors._strategy_base.base.cl_math import (
     compute_lp_slippage_mins,
     lp_range_excludes_spot_warning,
     maybe_recompute_lp_amounts_from_slot0,
 )
-from almanak.connectors._strategy_base.base.compiler import BaseConcentratedLiquidityCompiler, CLCompilerContext
+from almanak.connectors._strategy_base.base.compiler import (
+    BaseConcentratedLiquidityCompiler,
+    CLCompilerContext,
+    CompilerServicesFacadeMixin,
+)
 from almanak.connectors._strategy_base.cl_range import PriceBandToTicksError, price_band_to_ticks
 from almanak.connectors._strategy_base.slippage import SlippagePrecisionError, slippage_to_bps
 from almanak.framework.data.tokens import build_swap_token_meta
@@ -107,19 +111,12 @@ class AerodromeCompiler(BaseConcentratedLiquidityCompiler):
         )
 
 
-class _AerodromeCompileImpl:
+class _AerodromeCompileImpl(CompilerServicesFacadeMixin):
     """Per-call adapter exposing framework services to relocated Aerodrome functions."""
 
     def __init__(self, ctx: CLCompilerContext) -> None:
-        self._ctx = ctx
-        self.chain = ctx.chain
-        self.wallet_address = ctx.wallet_address
-        self.price_oracle = ctx.price_oracle
-        self.rpc_timeout = ctx.rpc_timeout
+        super().__init__(ctx)
         self.default_lp_slippage = ctx.default_lp_slippage
-        self.default_deadline_seconds = ctx.default_deadline_seconds
-        self._gateway_client = ctx.gateway_client
-        self._token_resolver = ctx.token_resolver
         self._config = SimpleNamespace(
             swap_pool_selection_mode=ctx.swap_pool_selection_mode,
             fixed_swap_fee_tier=ctx.fixed_swap_fee_tier,
@@ -133,50 +130,10 @@ class _AerodromeCompileImpl:
             permission_discovery=ctx.permission_discovery,
         )
 
-    def _get_chain_rpc_url(self) -> str | None:
-        return self._ctx.rpc_url
-
-    def _resolve_token(self, token: str):
-        return self._ctx.services.resolve_token(token)
-
-    def _require_token_price(self, symbol: str) -> Decimal:
-        return self._ctx.services.require_token_price(symbol)
-
-    def _require_token_price_for(self, token: TokenInfo) -> Decimal:
-        return self._ctx.services.require_token_price_for(token)
-
-    def _usd_to_token_amount(self, usd_amount: Decimal, token: Any) -> int:
-        return self._ctx.services.usd_to_token_amount(usd_amount, token)
-
-    def _build_approve_tx(self, token_address: str, spender: str, amount: int):
-        return self._ctx.services.build_approve_tx(token_address, spender, amount)
-
-    def _validate_pool(self, result: Any, intent_id: str):
-        return self._ctx.services.validate_pool(result, intent_id)
-
-    def _format_amount(self, amount: int, decimals: int) -> str:
-        return self._ctx.services.format_amount(amount, decimals)
-
-    def _price_to_tick(self, price: Decimal, *, token0_decimals: int, token1_decimals: int) -> int:
-        return self._ctx.services.price_to_tick(
-            price,
-            token0_decimals=token0_decimals,
-            token1_decimals=token1_decimals,
-        )
-
-    def _get_tick_spacing(self, fee_tier: int) -> int:
-        return self._ctx.services.get_tick_spacing(fee_tier)
-
-    def _get_wrapped_native_address(self) -> str | None:
-        return self._ctx.services.get_wrapped_native_address()
-
-    def _query_erc20_balance(self, token_address: str, wallet_address: str) -> int | None:
-        return self._ctx.services.query_erc20_balance(token_address, wallet_address)
-
     def _fetch_lp_pool_slot0(self, pool_check: Any) -> Any:
         # Shared V3-family slot0 read, lifted to the CL compiler base so
         # slipstream reuses it without importing the Uniswap V3 connector.
-        return BaseConcentratedLiquidityCompiler._fetch_lp_pool_slot0(self._ctx, pool_check)
+        return BaseConcentratedLiquidityCompiler._fetch_lp_pool_slot0(cast(CLCompilerContext, self._ctx), pool_check)
 
     def _get_aerodrome_pool_address(self, token_a: str, token_b: str, stable: bool) -> str | None:
         return get_aerodrome_pool_address(self, token_a, token_b, stable)
@@ -595,6 +552,7 @@ def compile_lp_open_aerodrome(compiler, intent: LPOpenIntent) -> CompilationResu
         config = AerodromeConfig(
             chain=compiler.chain,
             wallet_address=compiler.wallet_address,
+            deadline_seconds=compiler.default_deadline_seconds,
             price_provider=compiler.price_oracle,
             rpc_url=compiler._get_chain_rpc_url(),
             gateway_client=compiler._gateway_client,
@@ -878,6 +836,7 @@ def compile_lp_close_aerodrome(compiler, intent: LPCloseIntent) -> CompilationRe
         config = AerodromeConfig(
             chain=compiler.chain,
             wallet_address=compiler.wallet_address,
+            deadline_seconds=compiler.default_deadline_seconds,
             price_provider=compiler.price_oracle,
             rpc_url=compiler._get_chain_rpc_url(),
             gateway_client=compiler._gateway_client,
@@ -1414,6 +1373,7 @@ def compile_swap_aerodrome(compiler, intent: SwapIntent) -> CompilationResult:  
             chain=compiler.chain,
             wallet_address=compiler.wallet_address,
             default_slippage_bps=slippage_to_bps(intent.max_slippage),
+            deadline_seconds=compiler.default_deadline_seconds,
             price_provider=compiler.price_oracle,
             rpc_url=compiler._get_chain_rpc_url(),
             gateway_client=compiler._gateway_client,
@@ -1700,6 +1660,7 @@ def compile_lp_open_aerodrome_slipstream(compiler, intent: LPOpenIntent) -> Comp
         config = AerodromeConfig(
             chain=compiler.chain,
             wallet_address=compiler.wallet_address,
+            deadline_seconds=compiler.default_deadline_seconds,
             price_provider=compiler.price_oracle,
             rpc_url=compiler._get_chain_rpc_url(),
             gateway_client=compiler._gateway_client,
@@ -1861,6 +1822,7 @@ def compile_lp_close_aerodrome_slipstream(compiler, intent: LPCloseIntent) -> Co
         config = AerodromeConfig(
             chain=compiler.chain,
             wallet_address=compiler.wallet_address,
+            deadline_seconds=compiler.default_deadline_seconds,
             price_provider=compiler.price_oracle,
             rpc_url=compiler._get_chain_rpc_url(),
             gateway_client=compiler._gateway_client,
@@ -2030,6 +1992,7 @@ def compile_collect_fees_aerodrome_slipstream(compiler, intent: CollectFeesInten
         config = AerodromeConfig(
             chain=compiler.chain,
             wallet_address=compiler.wallet_address,
+            deadline_seconds=compiler.default_deadline_seconds,
             price_provider=compiler.price_oracle,
             rpc_url=compiler._get_chain_rpc_url(),
             gateway_client=compiler._gateway_client,

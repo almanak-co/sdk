@@ -430,6 +430,8 @@ def _euler_ctx(*, eth_call_result, prices=None):
         token_resolver=object(),
         price_oracle=None,
         rpc_timeout=10.0,
+        default_deadline_seconds=300,
+        gateway_internal_preflight=False,
         services=services,
     )
 

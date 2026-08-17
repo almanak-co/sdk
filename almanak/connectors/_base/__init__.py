@@ -18,6 +18,13 @@ hard-fails on any strategy-side file that imports from ``_base.gateway_*``
 or any ``connectors/*/gateway/*`` submodule. See PR 2169 / VIB-4121.
 """
 
+from .chain_ids import chain_ids_from_registered_ids, chain_ids_from_supported_chains, chain_names_by_id
 from .types import ProtocolKind, ProtocolName
 
-__all__ = ["ProtocolKind", "ProtocolName"]
+__all__ = [
+    "ProtocolKind",
+    "ProtocolName",
+    "chain_ids_from_registered_ids",
+    "chain_ids_from_supported_chains",
+    "chain_names_by_id",
+]

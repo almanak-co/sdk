@@ -30,10 +30,13 @@ Usage:
 
 import asyncio
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from almanak.connectors._base.chain_ids import chain_ids_from_supported_chains, chain_names_by_id
+from almanak.connectors.morpho_vault.connector import CONNECTOR
 from almanak.gateway.services._protocol_lookup import ProtocolTokenLookup
 
 logger = logging.getLogger(__name__)
@@ -42,18 +45,9 @@ logger = logging.getLogger(__name__)
 # with a large ``first`` returns all whitelisted vaults in one response.
 MORPHO_GRAPHQL_URL = "https://blue-api.morpho.org/graphql"
 
-# EVM chains supported by Morpho that we map to gateway chain names.
-# Morpho also operates on newer chains (Katana, HyperEVM, Sonic) that
-# the gateway does not yet know how to talk to; those are skipped at
-# index-build time.
-MORPHO_CHAIN_IDS: dict[str, int] = {
-    "ethereum": 1,
-    "arbitrum": 42161,
-    "optimism": 10,
-    "base": 8453,
-    "polygon": 137,
-}
-_CHAIN_NAME_BY_ID: dict[int, str] = {v: k for k, v in MORPHO_CHAIN_IDS.items()}
+# EVM chains are projected from the connector's end-to-end support truth.
+MORPHO_CHAIN_IDS: Mapping[str, int] = chain_ids_from_supported_chains(CONNECTOR.supported_chains)
+_CHAIN_NAME_BY_ID: Mapping[int, str] = chain_names_by_id(MORPHO_CHAIN_IDS)
 
 # GraphQL query — ask only for whitelisted vaults (avoids scam / unlisted
 # deployments).  We pull ``first: 1000`` which is the Morpho API's maximum
