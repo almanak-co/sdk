@@ -40,8 +40,8 @@ The correct contract is:
      enrichment failure.  This ensures the accounting failure is never silently
      downgraded to a warning.
 
-See ``docs/internal/vib-3159-followup.md`` for the migration plan covering
-the remaining receipt parsers.
+See ``docs/internal/blueprints/19-receipt-parser-base-infrastructure.md`` for
+the shared fail-closed extraction and V3-fork parser architecture.
 """
 
 from __future__ import annotations

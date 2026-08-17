@@ -13,21 +13,22 @@ from decimal import Decimal
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from almanak.connectors._strategy_base import v3_receipt_parser_helpers, v3_registry_payload
+from almanak.connectors._strategy_base import v3_registry_payload
 from almanak.connectors._strategy_base.base import EventRegistry, HexDecoder
 from almanak.connectors._strategy_base.lp_leg_identity import (
     currencies_for_amounts,
     log_emitter_address,
     transfers_by_token,
 )
-from almanak.framework.data.tokens import build_swap_token_meta_extract_kwargs
-from almanak.framework.execution.events import SwapResultPayload
-from almanak.framework.execution.extract_result import (
-    ExtractError,
-    ExtractMissing,
-    ExtractOk,
-    ExtractResult,
+from almanak.connectors._strategy_base.v3_fork_receipt_parser import (
+    V3_STANDARD_LP_DATA_WORDS,
+    V3_STANDARD_LP_TOPIC_COUNTS,
+    V3_STANDARD_TRANSFER_LAYOUTS,
+    V3ForkReceiptParser,
+    V3ForkSpec,
 )
+from almanak.framework.execution.events import SwapResultPayload
+from almanak.framework.execution.extract_result import ExtractResult
 
 if TYPE_CHECKING:
     from almanak.framework.execution.extracted_data import (
@@ -122,6 +123,33 @@ EVENT_NAME_TO_TYPE: dict[str, UniswapV3EventType] = {
     "Transfer": UniswapV3EventType.TRANSFER,
     "Approval": UniswapV3EventType.APPROVAL,
 }
+
+UNISWAP_V3_RECEIPT_SPEC = V3ForkSpec(
+    protocol_name="Uniswap V3",
+    event_topics=EVENT_TOPICS,
+    event_name_to_type={
+        **EVENT_NAME_TO_TYPE,
+        "IncreaseLiquidity": UniswapV3EventType.UNKNOWN,
+        "DecreaseLiquidity": UniswapV3EventType.UNKNOWN,
+    },
+    position_manager_addresses=POSITION_MANAGER_ADDRESSES,
+    default_position_manager="0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
+    strict_decode_fields={
+        "Swap": frozenset(
+            {
+                "amount0",
+                "amount1",
+                "sqrt_price_x96",
+                "liquidity",
+                "tick",
+                "pool_address",
+            }
+        )
+    },
+    strict_topic_counts={"Swap": 3, **V3_STANDARD_LP_TOPIC_COUNTS},
+    strict_data_words={"Swap": 5, **V3_STANDARD_LP_DATA_WORDS},
+    strict_event_layouts=V3_STANDARD_TRANSFER_LAYOUTS,
+)
 
 
 # =============================================================================
@@ -374,7 +402,7 @@ class ParseResult:
 # =============================================================================
 
 
-class UniswapV3ReceiptParser:
+class UniswapV3ReceiptParser(V3ForkReceiptParser):
     """Parser for Uniswap V3 transaction receipts.
 
     Refactored to use base infrastructure utilities for hex decoding
@@ -393,6 +421,7 @@ class UniswapV3ReceiptParser:
             "protocol_fees",  # VIB-3204 — extract_protocol_fees implemented below
         }
     )
+    V3_FORK_SPEC = UNISWAP_V3_RECEIPT_SPEC
 
     def __init__(
         self,
@@ -427,7 +456,10 @@ class UniswapV3ReceiptParser:
         self.token1_decimals = token1_decimals
         self.quoted_price = quoted_price
 
-        self.registry = EventRegistry(EVENT_TOPICS, EVENT_NAME_TO_TYPE)
+        self.registry = EventRegistry(
+            dict(self.v3_fork_spec.event_topics),
+            dict(self.v3_fork_spec.event_name_to_type),
+        )
 
         # Try to resolve symbols and decimals from addresses via TokenResolver
         if self.token0_address and not self.token0_symbol:
@@ -472,19 +504,6 @@ class UniswapV3ReceiptParser:
             self.token0_decimals = 18
         if self.token1_decimals is None:
             self.token1_decimals = 18
-
-    def _resolve_token_info(self, token: str) -> tuple[str, int | None]:
-        """Back-compat delegate - see ``v3_receipt_parser_helpers.resolve_token_info``."""
-        return v3_receipt_parser_helpers.resolve_token_info(token, self.chain)
-
-    def build_extract_kwargs(
-        self,
-        *,
-        field: str,
-        bundle_metadata: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Return canonical typed swap metadata for receipt extraction."""
-        return build_swap_token_meta_extract_kwargs(field=field, bundle_metadata=bundle_metadata, chain=self.chain)
 
     def parse_receipt(
         self,
@@ -604,93 +623,6 @@ class UniswapV3ReceiptParser:
                 error=str(e),
             )
 
-    def parse_logs(self, logs: list[dict[str, Any]]) -> list[UniswapV3Event]:
-        """Parse a list of logs.
-
-        Args:
-            logs: List of log dicts
-
-        Returns:
-            List of parsed events
-        """
-        events = []
-        for log in logs:
-            event = self._parse_log(log, "", 0)
-            if event:
-                events.append(event)
-        return events
-
-    def _parse_log(
-        self,
-        log: dict[str, Any],
-        tx_hash: str,
-        block_number: int,
-    ) -> UniswapV3Event | None:
-        """Parse a single log entry.
-
-        Args:
-            log: Log dict
-            tx_hash: Transaction hash
-            block_number: Block number
-
-        Returns:
-            Parsed event or None if not recognized
-        """
-        try:
-            topics = log.get("topics", [])
-            if not topics:
-                return None
-
-            # Normalize first topic (event signature)
-            first_topic = topics[0]
-            if isinstance(first_topic, bytes):
-                first_topic = "0x" + first_topic.hex()
-            else:
-                first_topic = str(first_topic)
-            first_topic = first_topic.lower()
-
-            # Check if known event
-            event_name = self.registry.get_event_name(first_topic)
-            if event_name is None:
-                return None
-
-            event_type = self.registry.get_event_type(event_name) or UniswapV3EventType.UNKNOWN
-
-            # Get raw data
-            data = HexDecoder.normalize_hex(log.get("data", ""))
-
-            # Normalize contract address
-            contract_address = log.get("address", "")
-            if isinstance(contract_address, bytes):
-                contract_address = "0x" + contract_address.hex()
-
-            # Convert topics to strings
-            topics_str = []
-            for topic in topics:
-                if isinstance(topic, bytes):
-                    topics_str.append("0x" + topic.hex())
-                else:
-                    topics_str.append(str(topic))
-
-            # Parse log data
-            parsed_data = self._decode_log_data(event_name, topics, data, contract_address)
-
-            return UniswapV3Event(
-                event_type=event_type,
-                event_name=event_name,
-                log_index=log.get("logIndex", 0),
-                transaction_hash=tx_hash,
-                block_number=block_number,
-                contract_address=contract_address,
-                data=parsed_data,
-                raw_topics=topics_str,
-                raw_data=data,
-            )
-
-        except Exception as e:
-            logger.warning(f"Failed to parse log: {e}")
-            return None
-
     def _decode_log_data(
         self,
         event_name: str,
@@ -716,13 +648,31 @@ class UniswapV3ReceiptParser:
         else:
             return {"raw_data": data}
 
-    def _decode_swap_data(self, topics: list[Any], data: str, address: str) -> dict[str, Any]:
-        """Back-compat delegate - see ``v3_receipt_parser_helpers.decode_swap_data``."""
-        return v3_receipt_parser_helpers.decode_swap_data(topics, data, address, log=logger)
-
-    def _decode_transfer_data(self, topics: list[Any], data: str, address: str) -> dict[str, Any]:
-        """Back-compat delegate - see ``v3_receipt_parser_helpers.decode_transfer_data``."""
-        return v3_receipt_parser_helpers.decode_transfer_data(topics, data, address, log=logger)
+    def _create_v3_event(
+        self,
+        *,
+        event_type: UniswapV3EventType,
+        event_name: str,
+        log_index: int,
+        tx_hash: str,
+        block_number: int,
+        contract_address: str,
+        decoded_data: dict[str, Any],
+        raw_topics: list[str],
+        raw_data: str,
+    ) -> UniswapV3Event:
+        """Create a Uniswap event from the shared V3 log template."""
+        return UniswapV3Event(
+            event_type=event_type,
+            event_name=event_name,
+            log_index=log_index,
+            transaction_hash=tx_hash,
+            block_number=block_number,
+            contract_address=contract_address,
+            data=decoded_data,
+            raw_topics=raw_topics,
+            raw_data=raw_data,
+        )
 
     def _parse_swap_event(self, event: UniswapV3Event) -> SwapEventData | None:
         """Parse a Swap event into typed data."""
@@ -951,13 +901,6 @@ class UniswapV3ReceiptParser:
         return entries
 
     @staticmethod
-    def _build_hint_map(
-        swap_token_meta: dict[str, dict[str, Any]] | None,
-    ) -> dict[str, tuple[str, int]]:
-        """Back-compat delegate - see ``v3_receipt_parser_helpers.build_hint_map``."""
-        return v3_receipt_parser_helpers.build_hint_map(swap_token_meta, log=logger)
-
-    @staticmethod
     def _meta_override_for_slot(
         meta: dict[str, Any] | None,
         existing_address: str | None,
@@ -1136,28 +1079,13 @@ class UniswapV3ReceiptParser:
     # The raw public methods below preserve their legacy return types so
     # strategies and tests that call them directly keep working.
 
-    def _strict_parse(self, receipt: dict[str, Any]) -> ExtractResult[Any] | None:
-        """Back-compat delegate - see ``v3_receipt_parser_helpers.strict_parse``."""
-        return v3_receipt_parser_helpers.strict_parse(self, receipt)
-
     def extract_position_id_result(self, receipt: dict[str, Any]) -> ExtractResult[int]:
         """Fail-closed variant of :meth:`extract_position_id` — see VIB-3159."""
-        err = self._strict_parse(receipt)
-        if err is not None:
-            return err
-        try:
-            logs = receipt.get("logs", [])
-        except Exception as exc:  # noqa: BLE001 — malformed receipt shape
-            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
-        if not logs:
-            return ExtractMissing(reason="no logs in receipt")
-        try:
-            value = self.extract_position_id(receipt)
-        except Exception as exc:  # noqa: BLE001
-            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
-        if value is None:
-            return ExtractMissing(reason="no Mint Transfer event from position manager")
-        return ExtractOk(value=value)
+        return self._wrap_extract(
+            self.extract_position_id,
+            receipt,
+            "no Mint Transfer event from position manager",
+        )
 
     def extract_swap_amounts_result(
         self,
@@ -1173,29 +1101,22 @@ class UniswapV3ReceiptParser:
         VIB-3164: forwards ``swap_token_meta`` so compiler-supplied token
         decimals resolve when the TokenResolver misses.
         """
-        err = self._strict_parse(receipt)
-        if err is not None:
-            return err
-        try:
-            value = self.extract_swap_amounts(receipt, expected_out=expected_out, swap_token_meta=swap_token_meta)
-        except Exception as exc:  # noqa: BLE001
-            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
-        if value is None:
-            return ExtractMissing(reason="no Swap event in receipt")
-        return ExtractOk(value=value)
+        return self._wrap_extract(
+            self.extract_swap_amounts,
+            receipt,
+            "no Swap event in receipt",
+            parse_kwargs={"swap_token_meta": swap_token_meta},
+            expected_out=expected_out,
+            swap_token_meta=swap_token_meta,
+        )
 
     def extract_lp_close_data_result(self, receipt: dict[str, Any]) -> ExtractResult[LPCloseData]:
         """Fail-closed variant of :meth:`extract_lp_close_data` — see VIB-3159."""
-        err = self._strict_parse(receipt)
-        if err is not None:
-            return err
-        try:
-            value = self.extract_lp_close_data(receipt)
-        except Exception as exc:  # noqa: BLE001
-            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
-        if value is None:
-            return ExtractMissing(reason="no Collect/Burn event in receipt")
-        return ExtractOk(value=value)
+        return self._wrap_extract(
+            self.extract_lp_close_data,
+            receipt,
+            "no Collect/Burn event in receipt",
+        )
 
     def extract_lp_open_data_result(self, receipt: dict[str, Any]) -> ExtractResult[LPOpenData]:
         """Fail-closed variant of :meth:`extract_lp_open_data` — see VIB-3159.
@@ -1206,35 +1127,19 @@ class UniswapV3ReceiptParser:
         treat genuine parse failures as missing data — exactly the
         ghost-position class of bug VIB-3159 addresses.
         """
-        err = self._strict_parse(receipt)
-        if err is not None:
-            return err
-        try:
-            logs = receipt.get("logs", [])
-        except Exception as exc:  # noqa: BLE001 — malformed receipt shape
-            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
-        if not logs:
-            return ExtractMissing(reason="no logs in receipt")
-        try:
-            value = self.extract_lp_open_data(receipt)
-        except Exception as exc:  # noqa: BLE001
-            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
-        if value is None:
-            return ExtractMissing(reason="no IncreaseLiquidity event from position manager")
-        return ExtractOk(value=value)
+        return self._wrap_extract(
+            self.extract_lp_open_data,
+            receipt,
+            "no IncreaseLiquidity event from position manager",
+        )
 
     def extract_liquidity_result(self, receipt: dict[str, Any]) -> ExtractResult[int]:
         """Fail-closed variant of :meth:`extract_liquidity` — see VIB-3159."""
-        err = self._strict_parse(receipt)
-        if err is not None:
-            return err
-        try:
-            value = self.extract_liquidity(receipt)
-        except Exception as exc:  # noqa: BLE001
-            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
-        if value is None:
-            return ExtractMissing(reason="no Mint event in receipt")
-        return ExtractOk(value=value)
+        return self._wrap_extract(
+            self.extract_liquidity,
+            receipt,
+            "no Mint event in receipt",
+        )
 
     def extract_position_id(self, receipt: dict[str, Any]) -> int | None:  # noqa: C901
         """Extract LP position ID (NFT tokenId) from a transaction receipt.
@@ -2235,19 +2140,6 @@ class UniswapV3ReceiptParser:
             except (ValueError, TypeError):
                 return None
         return None
-
-    def _nft_manager_address(self) -> str:
-        """Return the canonical NPM address for ``self.chain``, lowercased.
-
-        The address is part of the ``physical_identity_hash`` input tuple
-        (per T08 invariant #1). It is a parser-side configuration constant
-        — NOT an off-chain RPC call — so the hash stays receipt-derivable
-        from the receipt + parser config alone.
-        """
-        addr = POSITION_MANAGER_ADDRESSES.get(self.chain, "").lower()
-        if not addr:
-            addr = "0xC36442b4a4522E871399CD717aBDD847Ab11FE88".lower()
-        return addr
 
     def _resolve_fee_tier_from_pool_event(self, receipt: dict[str, Any]) -> int | None:
         """Best-effort fee-tier resolution from receipt-side hints.

@@ -805,6 +805,37 @@ def _collect_cl_log(amount0: int, amount1: int, log_index: int = 0) -> dict:
 
 
 class TestSlipstreamReceiptParser:
+    def test_solidly_swap_uses_legacy_four_amount_codec(self) -> None:
+        parser = AerodromeSlipstreamReceiptParser(chain="base")
+
+        parsed = parser.parse_receipt(_receipt([_swap_log(100, 0, 0, 90)]))
+
+        assert parsed.success is True
+        assert len(parsed.swap_events) == 1
+        assert parsed.swap_events[0].amount0_in == 100
+        assert parsed.swap_events[0].amount1_out == 90
+
+    def test_malformed_solidly_swap_fails_closed(self) -> None:
+        parser = AerodromeSlipstreamReceiptParser(chain="base")
+        malformed = _swap_log(100, 0, 0, 90)
+        malformed["data"] = "0x" + _pad32(100)
+        receipt = _receipt([malformed])
+
+        parsed = parser.parse_receipt(receipt)
+
+        assert parsed.success is False
+        assert isinstance(parser.extract_swap_amounts_result(receipt), ExtractError)
+
+    def test_malformed_known_swap_fails_closed(self) -> None:
+        parser = AerodromeSlipstreamReceiptParser(chain="base")
+        malformed = _slipstream_swap_cl_log(tick=1)
+        malformed["data"] = "0x" + _pad32(1) + _pad32(2)
+        receipt = _receipt([malformed])
+
+        parsed = parser.parse_receipt(receipt)
+        assert parsed.success is False
+        assert isinstance(parser.extract_swap_amounts_result(receipt), ExtractError)
+
     def test_extract_position_id_from_mint(self) -> None:
         parser = AerodromeSlipstreamReceiptParser(chain="base")
         receipt = _receipt([_erc721_transfer_mint_log(token_id=12345)])

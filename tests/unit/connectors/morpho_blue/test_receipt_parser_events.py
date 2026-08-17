@@ -537,9 +537,9 @@ class TestParseEdgeCases:
             "data": "0x12",  # way too short
             "logIndex": 0,
         }
-        # This is parsed without a crash even with short data because HexDecoder pads it.
         result = parser.parse_receipt(_wrap_receipt(log))
-        assert result.success
+        assert result.success is False
+        assert "Morpho Blue Supply decode failed" in (result.error or "")
 
     def test_address_as_bytes(self, parser: MorphoBlueReceiptParser) -> None:
         log = _supply_log()

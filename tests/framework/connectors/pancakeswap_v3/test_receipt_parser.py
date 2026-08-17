@@ -43,6 +43,7 @@ class TestPancakeSwapV3ReceiptParserBasic:
                         + "00" * 15  # liquidity
                         + "00" * 31
                         + "0a"  # tick = 10
+                        + "00" * 64  # protocolFeesToken0, protocolFeesToken1
                     ),
                 }
             ],
@@ -101,8 +102,12 @@ class TestPancakeSwapV3ReceiptParserBasic:
             "logs": [
                 {
                     "address": "0xpool",
-                    "topics": [EVENT_TOPICS["Swap"]],
-                    "data": "0x" + "00" * 160,
+                    "topics": [
+                        EVENT_TOPICS["Swap"],
+                        "0x" + "00" * 32,
+                        "0x" + "11" * 32,
+                    ],
+                    "data": "0x" + "00" * 224,
                 },
                 {
                     "address": "0xpool",

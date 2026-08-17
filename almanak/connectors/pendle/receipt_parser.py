@@ -24,12 +24,8 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from almanak.connectors._strategy_base.base import EventRegistry, HexDecoder
-from almanak.framework.execution.extract_result import (
-    ExtractError,
-    ExtractMissing,
-    ExtractOk,
-    ExtractResult,
-)
+from almanak.connectors._strategy_base.fail_closed_extract import FailClosedExtractMixin
+from almanak.framework.execution.extract_result import ExtractResult
 from almanak.framework.execution.extracted_data import LPCloseData, LPOpenData, SwapAmounts
 
 if TYPE_CHECKING:
@@ -511,7 +507,7 @@ class ParseResult:
 # =============================================================================
 
 
-class PendleReceiptParser:
+class PendleReceiptParser(FailClosedExtractMixin):
     """
     Parser for Pendle Protocol transaction receipts.
 
@@ -1713,76 +1709,6 @@ class PendleReceiptParser:
     # unchanged for direct callers (strategies, intent tests) that expect the
     # legacy return type — mirroring the canonical aave_v3 migration.
     # =========================================================================
-
-    def _strict_parse(
-        self,
-        receipt: dict[str, Any],
-        parse_kwargs: dict[str, Any] | None = None,
-    ) -> ExtractError | None:
-        """Run ``parse_receipt`` and return ``ExtractError`` if it crashed or
-        reported failure; ``None`` when parsing succeeded.
-
-        ``parse_receipt`` swallows decode exceptions internally and returns a
-        ``ParseResult(success=False, error=...)`` (see its ``except`` branch),
-        so both the raising case and the reported-failure case must be checked
-        to surface a parse error rather than treating it as "no event"
-        (VIB-3159 / VIB-5354). Canonical idiom shared with aave_v3 / uniswap_v3.
-
-        ``parse_kwargs`` are the PARSE-AFFECTING kwargs the wrapped extractor
-        itself forwards into ``parse_receipt`` (e.g. ``intent_swap_type`` /
-        ``token_*`` for :meth:`extract_swap_amounts` — VIB-3751 YT amount
-        reconstruction). They MUST be forwarded here so the strict probe parses
-        the receipt the same way the real extractor does; otherwise the probe
-        could report success while the real (kwarg-driven) parse fails, or
-        vice-versa (VIB-5368). Extractors whose kwargs are post-parse only
-        (``pt_address`` / ``out_token_*`` — the four VIB-5354 methods) pass
-        ``None`` (the default) and the probe runs ``parse_receipt(receipt)``.
-        """
-        try:
-            parsed = self.parse_receipt(receipt, **(parse_kwargs or {}))
-        except Exception as exc:  # noqa: BLE001 — malformed receipt shape
-            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
-        if not parsed.success:
-            return ExtractError(error=parsed.error or "parse_receipt reported failure")
-        return None
-
-    def _wrap_extract(
-        self,
-        fn: Any,
-        receipt: dict[str, Any],
-        missing_reason: str,
-        parse_kwargs: dict[str, Any] | None = None,
-        **kwargs: Any,
-    ) -> ExtractResult[Any]:
-        """Shared wrapper for the tagged extractors.
-
-        Runs ``_strict_parse`` first so an actual parse crash / reported failure
-        propagates as ``ExtractError`` rather than being silently swallowed by
-        the legacy extractor's ``except Exception: return None``. A ``None``
-        from the legacy method then means a genuinely absent event
-        (``ExtractMissing``); any value is wrapped in ``ExtractOk``.
-
-        ``parse_kwargs`` is the subset of the extractor's kwargs that it forwards
-        into ``parse_receipt`` and which CHANGE how the receipt parses. For
-        extractors whose kwargs are post-parse only (``pt_address`` /
-        ``out_token_*`` — the four VIB-5354 methods) leave it ``None`` and the
-        probe runs ``parse_receipt(receipt)``. For :meth:`extract_swap_amounts`
-        (VIB-5368) the YT-reconstruction kwargs DO reach ``parse_receipt``, so
-        they are threaded through ``parse_kwargs`` to keep the strict probe and
-        the real extractor in agreement. ``**kwargs`` are forwarded verbatim to
-        ``fn`` (and are a superset of ``parse_kwargs`` for the swap path —
-        ``expected_out`` is post-parse so it stays out of ``parse_kwargs``).
-        """
-        err = self._strict_parse(receipt, parse_kwargs)
-        if err is not None:
-            return err
-        try:
-            value = fn(receipt, **kwargs)
-        except Exception as exc:  # noqa: BLE001 — extractor crash is accounting-critical
-            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
-        if value is None:
-            return ExtractMissing(reason=missing_reason)
-        return ExtractOk(value=value)
 
     def extract_position_id_result(self, receipt: dict[str, Any]) -> ExtractResult[str]:
         """Fail-closed variant of :meth:`extract_position_id` — see VIB-5354."""

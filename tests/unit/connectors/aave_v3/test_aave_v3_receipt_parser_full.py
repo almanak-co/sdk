@@ -30,11 +30,9 @@ test_protocol_fees.py / test_format_token_amount.py files:
 
 from __future__ import annotations
 
-import dataclasses
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -55,7 +53,6 @@ from almanak.connectors.aave_v3.receipt_parser import (
     WithdrawEventData,
 )
 from almanak.framework.execution.extract_result import ExtractError
-
 
 # =============================================================================
 # Common helpers (mirror test_aave_v3_receipt_enrichment.py)
@@ -632,23 +629,20 @@ class TestDecodingErrorPaths:
         if event_name in ("Supply", "Borrow"):
             topics.append(_pad_address(USER_ADDRESS))
 
-        events = parser.parse_logs(
-            [
-                {
-                    "topics": topics,
-                    "data": "0x" + "00" * 4,
-                    "address": POOL_ADDRESS,
-                }
-            ]
+        result = parser.parse_receipt(
+            {
+                "logs": [
+                    {
+                        "topics": topics,
+                        "data": "0x" + "00" * 4,
+                        "address": POOL_ADDRESS,
+                    }
+                ]
+            }
         )
-        # Truncated data: HexDecoder pads short data with zeros, so the typed
-        # decoder still succeeds and emits exactly one event with the correct
-        # event name. If the decoder ever switches to the except branch, the
-        # data dict will carry "raw_data" instead — accept either shape but
-        # never accept "no event emitted" or "event with empty data".
-        assert len(events) == 1
-        assert events[0].event_name == event_name
-        assert events[0].data, "decoded event data must be non-empty"
+
+        assert result.success is False
+        assert event_name in (result.error or "")
 
 
 # =============================================================================
@@ -729,13 +723,13 @@ def _borrow_log_with_amount(amount: int) -> dict:
         + _encode_uint256(amount)
         + _encode_uint256(2)
         + _encode_uint256(50_000_000_000_000_000_000_000_000)
-        + _encode_uint256(0)
     )
     return {
         "topics": [
             EVENT_TOPICS["Borrow"],
             _pad_address(USDC_ADDRESS),
             _pad_address(USER_ADDRESS),
+            _encode_uint256(0),
         ],
         "data": "0x" + data,
         "address": POOL_ADDRESS,

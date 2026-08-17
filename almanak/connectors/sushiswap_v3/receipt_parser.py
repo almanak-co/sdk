@@ -38,7 +38,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from almanak.connectors._strategy_base import v3_receipt_parser_helpers, v3_registry_payload
+from almanak.connectors._strategy_base import v3_registry_payload
 from almanak.connectors._strategy_base.base import (
     EventRegistry,
     HexDecoder,
@@ -50,18 +50,19 @@ from almanak.connectors._strategy_base.lp_leg_identity import (
     log_emitter_address,
     transfers_by_token,
 )
+from almanak.connectors._strategy_base.v3_fork_receipt_parser import (
+    V3_STANDARD_LP_DATA_WORDS,
+    V3_STANDARD_LP_TOPIC_COUNTS,
+    V3_STANDARD_TRANSFER_LAYOUTS,
+    V3ForkReceiptParser,
+    V3ForkSpec,
+)
 from almanak.framework.data.tokens import (
     TokenResolutionError,
-    build_swap_token_meta_extract_kwargs,
     resolve_token_decimals,
 )
 from almanak.framework.execution.events import SwapResultPayload
-from almanak.framework.execution.extract_result import (
-    ExtractError,
-    ExtractMissing,
-    ExtractOk,
-    ExtractResult,
-)
+from almanak.framework.execution.extract_result import ExtractResult
 
 if TYPE_CHECKING:
     from almanak.framework.execution.extracted_data import (
@@ -192,6 +193,32 @@ EVENT_NAME_TO_TYPE: dict[str, SushiSwapV3EventType] = {
     "Transfer": SushiSwapV3EventType.TRANSFER,
     "Approval": SushiSwapV3EventType.APPROVAL,
 }
+
+SUSHISWAP_V3_RECEIPT_SPEC = V3ForkSpec(
+    protocol_name="SushiSwap V3",
+    event_topics=EVENT_TOPICS,
+    event_name_to_type={
+        **EVENT_NAME_TO_TYPE,
+        "IncreaseLiquidity": SushiSwapV3EventType.UNKNOWN,
+        "DecreaseLiquidity": SushiSwapV3EventType.UNKNOWN,
+    },
+    position_manager_addresses=POSITION_MANAGER_ADDRESSES,
+    strict_decode_fields={
+        "Swap": frozenset(
+            {
+                "amount0",
+                "amount1",
+                "sqrt_price_x96",
+                "liquidity",
+                "tick",
+                "pool_address",
+            }
+        )
+    },
+    strict_topic_counts={"Swap": 3, **V3_STANDARD_LP_TOPIC_COUNTS},
+    strict_data_words={"Swap": 5, **V3_STANDARD_LP_DATA_WORDS},
+    strict_event_layouts=V3_STANDARD_TRANSFER_LAYOUTS,
+)
 
 
 # =============================================================================
@@ -439,7 +466,7 @@ class ParseResult:
 # =============================================================================
 
 
-class SushiSwapV3ReceiptParser:
+class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
     """Parser for SushiSwap V3 transaction receipts.
 
     Note: This parser uses HexDecoder and EventRegistry from the base module.
@@ -478,6 +505,7 @@ class SushiSwapV3ReceiptParser:
             "lp_close_data",
         }
     )
+    V3_FORK_SPEC = SUSHISWAP_V3_RECEIPT_SPEC
 
     def __init__(
         self,
@@ -512,7 +540,10 @@ class SushiSwapV3ReceiptParser:
         self.token1_decimals = token1_decimals
         self.quoted_price = quoted_price
 
-        self.registry = EventRegistry(EVENT_TOPICS, EVENT_NAME_TO_TYPE)
+        self.registry = EventRegistry(
+            dict(self.v3_fork_spec.event_topics),
+            dict(self.v3_fork_spec.event_name_to_type),
+        )
 
         # Try to resolve symbols and decimals from addresses via TokenResolver
         if self.token0_address and not self.token0_symbol:
@@ -543,10 +574,6 @@ class SushiSwapV3ReceiptParser:
             logger.debug(f"token0 decimals unresolved for chain={self.chain} (address={self.token0_address})")
         if self.token1_decimals is None:
             logger.debug(f"token1 decimals unresolved for chain={self.chain} (address={self.token1_address})")
-
-    def _resolve_token_info(self, token: str) -> tuple[str, int | None]:
-        """Back-compat delegate - see ``v3_receipt_parser_helpers.resolve_token_info``."""
-        return v3_receipt_parser_helpers.resolve_token_info(token, self.chain)
 
     def _resolve_decimals(self, token_address: str) -> int | None:
         """Resolve token decimals via the token resolver.
@@ -672,93 +699,6 @@ class SushiSwapV3ReceiptParser:
                 error=str(e),
             )
 
-    def parse_logs(self, logs: list[dict[str, Any]]) -> list[SushiSwapV3Event]:
-        """Parse a list of logs.
-
-        Args:
-            logs: List of log dicts
-
-        Returns:
-            List of parsed events
-        """
-        events = []
-        for log in logs:
-            event = self._parse_log(log, "", 0)
-            if event:
-                events.append(event)
-        return events
-
-    def _parse_log(
-        self,
-        log: dict[str, Any],
-        tx_hash: str,
-        block_number: int,
-    ) -> SushiSwapV3Event | None:
-        """Parse a single log entry.
-
-        Args:
-            log: Log dict
-            tx_hash: Transaction hash
-            block_number: Block number
-
-        Returns:
-            Parsed event or None if not recognized
-        """
-        try:
-            topics = log.get("topics", [])
-            if not topics:
-                return None
-
-            # Normalize first topic (event signature)
-            first_topic = topics[0]
-            if isinstance(first_topic, bytes):
-                first_topic = "0x" + first_topic.hex()
-            else:
-                first_topic = str(first_topic)
-            first_topic = first_topic.lower()
-
-            # Check if known event
-            event_name = self.registry.get_event_name(first_topic)
-            if event_name is None:
-                return None
-
-            event_type = self.registry.get_event_type(event_name) or SushiSwapV3EventType.UNKNOWN
-
-            # Get raw data
-            data = HexDecoder.normalize_hex(log.get("data", ""))
-
-            # Normalize contract address
-            contract_address = log.get("address", "")
-            if isinstance(contract_address, bytes):
-                contract_address = "0x" + contract_address.hex()
-
-            # Convert topics to strings
-            topics_str = []
-            for topic in topics:
-                if isinstance(topic, bytes):
-                    topics_str.append("0x" + topic.hex())
-                else:
-                    topics_str.append(str(topic))
-
-            # Parse log data
-            parsed_data = self._decode_log_data(event_name, topics, data, contract_address)
-
-            return SushiSwapV3Event(
-                event_type=event_type,
-                event_name=event_name,
-                log_index=log.get("logIndex", 0),
-                transaction_hash=tx_hash,
-                block_number=block_number,
-                contract_address=contract_address,
-                data=parsed_data,
-                raw_topics=topics_str,
-                raw_data=data,
-            )
-
-        except Exception as e:
-            logger.warning(f"Failed to parse log: {e}")
-            return None
-
     def _decode_log_data(
         self,
         event_name: str,
@@ -784,13 +724,31 @@ class SushiSwapV3ReceiptParser:
         else:
             return {"raw_data": data}
 
-    def _decode_swap_data(self, topics: list[Any], data: str, address: str) -> dict[str, Any]:
-        """Back-compat delegate - see ``v3_receipt_parser_helpers.decode_swap_data``."""
-        return v3_receipt_parser_helpers.decode_swap_data(topics, data, address, log=logger)
-
-    def _decode_transfer_data(self, topics: list[Any], data: str, address: str) -> dict[str, Any]:
-        """Back-compat delegate - see ``v3_receipt_parser_helpers.decode_transfer_data``."""
-        return v3_receipt_parser_helpers.decode_transfer_data(topics, data, address, log=logger)
+    def _create_v3_event(
+        self,
+        *,
+        event_type: SushiSwapV3EventType,
+        event_name: str,
+        log_index: int,
+        tx_hash: str,
+        block_number: int,
+        contract_address: str,
+        decoded_data: dict[str, Any],
+        raw_topics: list[str],
+        raw_data: str,
+    ) -> SushiSwapV3Event:
+        """Create a SushiSwap event from the shared V3 log template."""
+        return SushiSwapV3Event(
+            event_type=event_type,
+            event_name=event_name,
+            log_index=log_index,
+            transaction_hash=tx_hash,
+            block_number=block_number,
+            contract_address=contract_address,
+            data=decoded_data,
+            raw_topics=raw_topics,
+            raw_data=raw_data,
+        )
 
     def _parse_swap_event(self, event: SushiSwapV3Event) -> SwapEventData | None:
         """Parse a Swap event into typed data."""
@@ -1042,22 +1000,6 @@ class SushiSwapV3ReceiptParser:
     # =============================================================================
     # Swap Amounts Extraction (for Result Enrichment)
     # =============================================================================
-
-    def build_extract_kwargs(
-        self,
-        *,
-        field: str,
-        bundle_metadata: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Return canonical typed swap metadata for receipt extraction."""
-        return build_swap_token_meta_extract_kwargs(field=field, bundle_metadata=bundle_metadata, chain=self.chain)
-
-    @staticmethod
-    def _build_hint_map(
-        swap_token_meta: dict[str, dict[str, Any]] | None,
-    ) -> dict[str, tuple[str, int]]:
-        """Back-compat delegate - see ``v3_receipt_parser_helpers.build_hint_map``."""
-        return v3_receipt_parser_helpers.build_hint_map(swap_token_meta, log=logger)
 
     def _resolve_swap_decimals_with_hints(
         self,
@@ -2023,19 +1965,6 @@ class SushiSwapV3ReceiptParser:
                 return None
         return None
 
-    def _nft_manager_address(self) -> str:
-        """Return the canonical Sushi V3 NPM address for ``self.chain``, lowercased.
-
-        The address is part of the ``physical_identity_hash`` input tuple
-        (per T08 invariant #1). It is a parser-side configuration constant
-        — NOT an off-chain RPC call — so the hash stays receipt-derivable
-        from the receipt + parser config alone. Returns the empty string
-        on unsupported chains rather than falling back to the Uniswap V3
-        NPM (which is a different deployment); the caller treats empty as
-        a path-applicability miss.
-        """
-        return POSITION_MANAGER_ADDRESSES.get(self.chain, "").lower()
-
     def extract_registry_payload_open(
         self,
         receipt: dict[str, Any],
@@ -2190,9 +2119,21 @@ class SushiSwapV3ReceiptParser:
     # Fail-closed result variants (VIB-3159 / Blueprint 19)
     # =============================================================================
 
-    def _strict_parse(self, receipt: dict[str, Any]) -> ExtractResult[Any] | None:
-        """Back-compat delegate - see ``v3_receipt_parser_helpers.strict_parse``."""
-        return v3_receipt_parser_helpers.strict_parse(self, receipt)
+    def extract_swap_amounts_result(
+        self,
+        receipt: dict[str, Any],
+        *,
+        expected_out: Decimal | None = None,
+        swap_token_meta: dict[str, dict[str, Any]] | None = None,
+    ) -> ExtractResult[SwapAmounts]:
+        """Fail-closed variant used by the framework's result enricher."""
+        return self._wrap_extract(
+            self.extract_swap_amounts,
+            receipt,
+            "no Swap event in receipt",
+            expected_out=expected_out,
+            swap_token_meta=swap_token_meta,
+        )
 
     def extract_lp_open_data_result(self, receipt: dict[str, Any]) -> ExtractResult[LPOpenData]:
         """Fail-closed variant of :meth:`extract_lp_open_data` — see VIB-3159.
@@ -2203,22 +2144,11 @@ class SushiSwapV3ReceiptParser:
         treat genuine parse failures as missing data — exactly the
         ghost-position class of bug VIB-3159 addresses.
         """
-        err = self._strict_parse(receipt)
-        if err is not None:
-            return err
-        try:
-            logs = receipt.get("logs", [])
-        except Exception as exc:  # noqa: BLE001 — malformed receipt shape
-            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
-        if not logs:
-            return ExtractMissing(reason="no logs in receipt")
-        try:
-            value = self.extract_lp_open_data(receipt)
-        except Exception as exc:  # noqa: BLE001
-            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
-        if value is None:
-            return ExtractMissing(reason="no IncreaseLiquidity event from SushiSwap V3 position manager")
-        return ExtractOk(value=value)
+        return self._wrap_extract(
+            self.extract_lp_open_data,
+            receipt,
+            "no logs or no IncreaseLiquidity event from SushiSwap V3 position manager",
+        )
 
     # Backward compatibility methods
     def is_sushiswap_event(self, topic: str | bytes) -> bool:

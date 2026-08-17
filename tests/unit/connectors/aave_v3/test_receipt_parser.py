@@ -47,6 +47,7 @@ def sample_supply_log() -> dict:
             EVENT_TOPICS["Supply"],  # Event signature
             "0x000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e5831",  # reserve (indexed)
             "0x0000000000000000000000001234567890123456789012345678901234567890",  # onBehalfOf (indexed)
+            "0x000000000000000000000000000000000000000000000000000000000000002a",  # referralCode (indexed)
         ],
         "data": (
             "0x"
@@ -54,8 +55,6 @@ def sample_supply_log() -> dict:
             "0000000000000000000000001234567890123456789012345678901234567890"
             # amount (uint256) - 1000 USDC = 1000000000 (6 decimals)
             "000000000000000000000000000000000000000000000000000000003b9aca00"
-            # referralCode (uint16)
-            "0000000000000000000000000000000000000000000000000000000000000000"
         ),
         "logIndex": 5,
     }
@@ -70,6 +69,7 @@ def sample_borrow_log() -> dict:
             EVENT_TOPICS["Borrow"],  # Event signature
             "0x00000000000000000000000082af49447d8a07e3bd95bd0d56f35241523fbab1",  # reserve (indexed)
             "0x0000000000000000000000001234567890123456789012345678901234567890",  # onBehalfOf (indexed)
+            "0x000000000000000000000000000000000000000000000000000000000000002a",  # referralCode (indexed)
         ],
         "data": (
             "0x"
@@ -81,8 +81,6 @@ def sample_borrow_log() -> dict:
             "0000000000000000000000000000000000000000000000000000000000000002"
             # borrowRate (uint256) - 5% APY in ray
             "000000000000000000000000000000000000000001743b34e18439b502000000"
-            # referralCode (uint16)
-            "0000000000000000000000000000000000000000000000000000000000000000"
         ),
         "logIndex": 10,
     }
@@ -101,12 +99,12 @@ def sample_receipt() -> dict:
                     EVENT_TOPICS["Supply"],
                     "0x000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e5831",
                     "0x0000000000000000000000001234567890123456789012345678901234567890",
+                    "0x0000000000000000000000000000000000000000000000000000000000000000",
                 ],
                 "data": (
                     "0x"
                     "0000000000000000000000001234567890123456789012345678901234567890"
                     "000000000000000000000000000000000000000000000000000000003b9aca00"
-                    "0000000000000000000000000000000000000000000000000000000000000000"
                 ),
                 "logIndex": 0,
             },
@@ -116,6 +114,7 @@ def sample_receipt() -> dict:
                     EVENT_TOPICS["Borrow"],
                     "0x00000000000000000000000082af49447d8a07e3bd95bd0d56f35241523fbab1",
                     "0x0000000000000000000000001234567890123456789012345678901234567890",
+                    "0x0000000000000000000000000000000000000000000000000000000000000000",
                 ],
                 "data": (
                     "0x"
@@ -123,7 +122,6 @@ def sample_receipt() -> dict:
                     "0000000000000000000000000000000000000000000000000de0b6b3a7640000"
                     "0000000000000000000000000000000000000000000000000000000000000002"
                     "000000000000000000000000000000000000000001743b34e18439b502000000"
-                    "0000000000000000000000000000000000000000000000000000000000000000"
                 ),
                 "logIndex": 1,
             },
@@ -268,6 +266,7 @@ class TestSupplyEventParsing:
         assert "reserve" in event.data
         assert "user" in event.data
         assert "amount" in event.data
+        assert event.data["referral_code"] == 42
 
     def test_supply_event_data_class(self) -> None:
         """Test SupplyEventData class."""
@@ -310,6 +309,7 @@ class TestBorrowEventParsing:
         assert "user" in event.data
         assert "amount" in event.data
         assert "interest_rate_mode" in event.data
+        assert event.data["referral_code"] == 42
 
     def test_borrow_event_data_class(self) -> None:
         """Test BorrowEventData class."""
@@ -624,11 +624,11 @@ class TestEdgeCases:
                 bytes.fromhex(EVENT_TOPICS["Supply"][2:]),
                 bytes.fromhex("000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e5831"),
                 bytes.fromhex("0000000000000000000000001234567890123456789012345678901234567890"),
+                bytes.fromhex("000000000000000000000000000000000000000000000000000000000000002a"),
             ],
             "data": bytes.fromhex(
                 "0000000000000000000000001234567890123456789012345678901234567890"
                 "000000000000000000000000000000000000000000000000000000003b9aca00"
-                "0000000000000000000000000000000000000000000000000000000000000000"
             ),
             "logIndex": 0,
         }

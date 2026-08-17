@@ -36,13 +36,13 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from almanak.connectors._strategy_base.base import EventRegistry, HexDecoder
-from almanak.framework.data.tokens import TokenResolutionError, resolve_token_decimals
-from almanak.framework.execution.extract_result import (
-    ExtractError,
-    ExtractMissing,
-    ExtractOk,
-    ExtractResult,
+from almanak.connectors._strategy_base.fail_closed_extract import (
+    FailClosedExtractMixin,
+    RecognizedEventDecodeError,
+    validate_recognized_event_layout,
 )
+from almanak.framework.data.tokens import TokenResolutionError, resolve_token_decimals
+from almanak.framework.execution.extract_result import ExtractResult
 from almanak.framework.utils.log_formatters import format_address, format_gas_cost, format_tx_hash
 
 if TYPE_CHECKING:
@@ -120,6 +120,27 @@ EVENT_TOPICS: dict[str, str] = {
 
 # Reverse lookup: topic -> event name
 TOPIC_TO_EVENT: dict[str, str] = {v: k for k, v in EVENT_TOPICS.items()}
+
+_STRICT_EXTRACT_EVENT_LAYOUTS: dict[str, frozenset[tuple[int, int]]] = {
+    "Supply": frozenset({(4, 2)}),
+    "Withdraw": frozenset({(4, 1)}),
+    "Borrow": frozenset({(4, 4)}),
+    "Repay": frozenset({(4, 2)}),
+    # ERC-20 and ERC-721 overload the same Transfer signature. Both are valid
+    # event envelopes, but only the ERC-20 form contributes fungible amounts.
+    "Transfer": frozenset({(3, 1), (4, 0)}),
+}
+
+_ERC20_TRANSFER_LAYOUT = {"Transfer": frozenset({(3, 1)})}
+
+
+def _is_erc20_transfer_layout(topics: list[Any], data: Any) -> bool:
+    """Return whether a Transfer log has the exact ERC-20 ABI envelope."""
+    try:
+        validate_recognized_event_layout("ERC-20", "Transfer", topics, data, _ERC20_TRANSFER_LAYOUT)
+    except RecognizedEventDecodeError:
+        return False
+    return True
 
 
 # =============================================================================
@@ -692,7 +713,7 @@ class ParseResult:
 # =============================================================================
 
 
-class AaveV3ReceiptParser:
+class AaveV3ReceiptParser(FailClosedExtractMixin):
     """Parser for Aave V3 transaction receipts.
 
     This parser extracts and decodes Aave V3 events from transaction receipts,
@@ -961,6 +982,14 @@ class AaveV3ReceiptParser:
 
             event_type = self.registry.get_event_type(event_name) or AaveV3EventType.UNKNOWN
 
+            validate_recognized_event_layout(
+                "Aave V3",
+                event_name,
+                topics,
+                log.get("data", ""),
+                _STRICT_EXTRACT_EVENT_LAYOUTS,
+            )
+
             # Get raw data
             data = log.get("data", "")
             if isinstance(data, bytes):
@@ -993,6 +1022,8 @@ class AaveV3ReceiptParser:
                 raw_data=data,
             )
 
+        except RecognizedEventDecodeError:
+            raise
         except Exception as e:
             logger.warning(f"Failed to parse log: {e}")
             return None
@@ -1058,20 +1089,20 @@ class AaveV3ReceiptParser:
         """Decode Supply event data.
 
         Supply(address indexed reserve, address user, address indexed onBehalfOf,
-               uint256 amount, uint16 referralCode)
+               uint256 amount, uint16 indexed referralCode)
         """
         try:
-            # Indexed: reserve (topic 1), onBehalfOf (topic 2)
+            # Indexed: reserve (topic 1), onBehalfOf (topic 2), referralCode (topic 3)
             reserve = HexDecoder.topic_to_address(indexed_topics[0]) if len(indexed_topics) > 0 else ""
             on_behalf_of = HexDecoder.topic_to_address(indexed_topics[1]) if len(indexed_topics) > 1 else ""
 
-            # Non-indexed: user, amount, referralCode
+            # Non-indexed: user, amount
             return {
                 "reserve": reserve,
                 "user": HexDecoder.decode_address_from_data(data, 0),
                 "on_behalf_of": on_behalf_of,
                 "amount": str(Decimal(HexDecoder.decode_uint256(data, 32))),
-                "referral_code": HexDecoder.decode_uint256(data, 64),
+                "referral_code": HexDecoder.decode_uint256(HexDecoder.normalize_hex(indexed_topics[2]), 0),
             }
 
         except Exception as e:
@@ -1114,10 +1145,10 @@ class AaveV3ReceiptParser:
 
         Borrow(address indexed reserve, address user, address indexed onBehalfOf,
                uint256 amount, uint256 interestRateMode, uint256 borrowRate,
-               uint16 referralCode)
+               uint16 indexed referralCode)
         """
         try:
-            # Indexed: reserve, onBehalfOf
+            # Indexed: reserve, onBehalfOf, referralCode
             reserve = HexDecoder.topic_to_address(indexed_topics[0]) if len(indexed_topics) > 0 else ""
             on_behalf_of = HexDecoder.topic_to_address(indexed_topics[1]) if len(indexed_topics) > 1 else ""
 
@@ -1132,7 +1163,7 @@ class AaveV3ReceiptParser:
                 "amount": str(Decimal(HexDecoder.decode_uint256(data, 32))),
                 "interest_rate_mode": HexDecoder.decode_uint256(data, 64),
                 "borrow_rate": str(borrow_rate),
-                "referral_code": HexDecoder.decode_uint256(data, 128),
+                "referral_code": HexDecoder.decode_uint256(HexDecoder.normalize_hex(indexed_topics[2]), 0),
             }
 
         except Exception as e:
@@ -1436,59 +1467,25 @@ class AaveV3ReceiptParser:
     # ---- VIB-3159: tagged-variant wrappers ------------------------------------
     # See uniswap_v3/receipt_parser.py for rationale.
 
-    def _strict_parse(self, receipt: dict[str, Any]) -> ExtractResult[Any] | None:
-        """Run ``parse_receipt`` and short-circuit with ``ExtractError`` if it
-        reports a crash. See uniswap_v3 equivalent for rationale (VIB-3159)."""
-        try:
-            parsed = self.parse_receipt(receipt)
-        except Exception as exc:  # noqa: BLE001 — malformed receipt shape
-            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
-        if not parsed.success:
-            return ExtractError(error=parsed.error or "parse_receipt reported failure")
-        return None
-
-    def _wrap_amount(
-        self,
-        fn: Any,
-        receipt: dict[str, Any],
-        missing_reason: str,
-    ) -> ExtractResult[int]:
-        """Shared wrapper for integer-amount extract methods.
-
-        Calls ``parse_receipt`` first so actual parse crashes propagate as
-        ``ExtractError`` rather than being silently swallowed by the legacy
-        extractor's ``except Exception: return None`` (VIB-3159).
-        """
-        err = self._strict_parse(receipt)
-        if err is not None:
-            return err
-        try:
-            value = fn(receipt)
-        except Exception as exc:  # noqa: BLE001
-            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
-        if value is None:
-            return ExtractMissing(reason=missing_reason)
-        return ExtractOk(value=value)
-
     def extract_supply_amount_result(self, receipt: dict[str, Any]) -> ExtractResult[int]:
         """Fail-closed variant of :meth:`extract_supply_amount` — see VIB-3159."""
-        return self._wrap_amount(self.extract_supply_amount, receipt, "no Supply event in receipt")
+        return self._wrap_extract(self.extract_supply_amount, receipt, "no Supply event in receipt")
 
     def extract_withdraw_amount_result(self, receipt: dict[str, Any]) -> ExtractResult[int]:
         """Fail-closed variant of :meth:`extract_withdraw_amount` — see VIB-3159."""
-        return self._wrap_amount(self.extract_withdraw_amount, receipt, "no Withdraw event in receipt")
+        return self._wrap_extract(self.extract_withdraw_amount, receipt, "no Withdraw event in receipt")
 
     def extract_borrow_amount_result(self, receipt: dict[str, Any]) -> ExtractResult[int]:
         """Fail-closed variant of :meth:`extract_borrow_amount` — see VIB-3159."""
-        return self._wrap_amount(self.extract_borrow_amount, receipt, "no Borrow event in receipt")
+        return self._wrap_extract(self.extract_borrow_amount, receipt, "no Borrow event in receipt")
 
     def extract_repay_amount_result(self, receipt: dict[str, Any]) -> ExtractResult[int]:
         """Fail-closed variant of :meth:`extract_repay_amount` — see VIB-3159."""
-        return self._wrap_amount(self.extract_repay_amount, receipt, "no Repay event in receipt")
+        return self._wrap_extract(self.extract_repay_amount, receipt, "no Repay event in receipt")
 
     def extract_a_token_received_result(self, receipt: dict[str, Any]) -> ExtractResult[int]:
         """Fail-closed variant of :meth:`extract_a_token_received` — see VIB-3159."""
-        return self._wrap_amount(self.extract_a_token_received, receipt, "no aToken Mint Transfer event")
+        return self._wrap_extract(self.extract_a_token_received, receipt, "no aToken Mint Transfer event")
 
     def extract_supply_amount(self, receipt: dict[str, Any]) -> int | None:
         """Extract supply amount from a transaction receipt.
@@ -1591,7 +1588,7 @@ class AaveV3ReceiptParser:
 
             for log in logs:
                 topics = log.get("topics", [])
-                if len(topics) < 3:
+                if not _is_erc20_transfer_layout(topics, log.get("data", "")):
                     continue
 
                 first_topic = topics[0]
@@ -1663,7 +1660,7 @@ class AaveV3ReceiptParser:
 
             for log in logs:
                 topics = log.get("topics", [])
-                if len(topics) < 3:
+                if not _is_erc20_transfer_layout(topics, log.get("data", "")):
                     continue
 
                 first_topic = topics[0]
@@ -1856,7 +1853,7 @@ class AaveV3ReceiptParser:
 
             for log in logs:
                 topics = log.get("topics", [])
-                if len(topics) < 3:
+                if not _is_erc20_transfer_layout(topics, log.get("data", "")):
                     continue
 
                 first_topic = topics[0]

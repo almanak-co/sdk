@@ -17,7 +17,6 @@ from almanak.connectors.aave_v3.receipt_parser import (
 )
 from almanak.framework.execution.extracted_data import ProtocolFees
 
-
 USDC_ADDRESS = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
 USER_ADDRESS = "0x1234567890abcdef1234567890abcdef12345678"
 POOL_ADDRESS = "0x794a61358D6845594F94dc1DB02A252b5b4814aD"

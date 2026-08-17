@@ -1,9 +1,8 @@
-"""Receipt-parser helpers byte-identical across the V3 fork family.
+"""Protocol-neutral codecs and token helpers for the V3 fork family.
 
-Relocated verbatim from ``UniswapV3ReceiptParser`` /
-``SushiSwapV3ReceiptParser`` (which keep delegating methods). Helpers
-that log accept a ``log`` parameter so each parser's records keep its
-own module logger name (tests filter ``caplog`` by logger name).
+Helpers that log accept a ``log`` parameter so each parser's records keep its
+own module logger name (tests filter ``caplog`` by logger name). Receipt parse
+failures are handled by :mod:`fail_closed_extract`, not by this codec module.
 
 This module must not import any concrete connector.
 """
@@ -15,7 +14,6 @@ from typing import Any
 
 from almanak.connectors._strategy_base.base import HexDecoder, resolve_token_decimals
 from almanak.framework.data.tokens import TokenResolutionError, build_token_meta_hint_map
-from almanak.framework.execution.extract_result import ExtractError, ExtractResult
 
 logger = logging.getLogger(__name__)
 
@@ -135,22 +133,3 @@ def build_hint_map(
 ) -> dict[str, tuple[str, int]]:
     """Map compiler token metadata to ``{address: (symbol, decimals)}``."""
     return {address.lower(): value for address, value in build_token_meta_hint_map(swap_token_meta).items()}
-
-
-def strict_parse(parser: Any, receipt: dict[str, Any]) -> ExtractResult[Any] | None:
-    """Run ``parse_receipt`` and short-circuit with ``ExtractError`` if it
-    reports a crash.
-
-    Returns ``None`` when parsing succeeded (caller should proceed), or an
-    ``ExtractError`` variant when it did not. This is the strict
-    counterpart to the legacy ``extract_*`` methods, which silently
-    swallow exceptions and return ``None`` - making the "benign missing"
-    and "crashed parsing" cases indistinguishable (VIB-3159).
-    """
-    try:
-        parsed = parser.parse_receipt(receipt)
-    except Exception as exc:  # noqa: BLE001 — malformed receipt shape
-        return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
-    if not parsed.success:
-        return ExtractError(error=parsed.error or "parse_receipt reported failure")
-    return None

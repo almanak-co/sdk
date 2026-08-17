@@ -40,6 +40,7 @@ from typing import Any
 from eth_abi import decode as abi_decode
 
 from almanak.connectors._strategy_base.base import EventRegistry, HexDecoder
+from almanak.connectors._strategy_base.fail_closed_extract import FailClosedExtractMixin
 from almanak.connectors.gmx_v2 import market_catalog
 from almanak.connectors.gmx_v2.addresses import GMX_V2
 from almanak.framework.data.tokens import TokenResolutionError, resolve_token_decimals
@@ -804,7 +805,7 @@ class ParseResult:
 # =============================================================================
 
 
-class GMXv2ReceiptParser:
+class GMXv2ReceiptParser(FailClosedExtractMixin):
     """Parser for GMX v2 transaction receipts.
 
     This parser extracts and decodes GMX v2 events from transaction receipts,
@@ -1809,37 +1810,6 @@ class GMXv2ReceiptParser:
     # ---- VIB-3159: tagged-variant wrappers ----------------------------------
     # See uniswap_v3/receipt_parser.py for rationale. The legacy raw methods
     # below keep their return types for direct callers.
-
-    def _strict_parse(self, receipt: dict[str, Any]) -> ExtractResult[Any] | None:
-        """Run ``parse_receipt`` and short-circuit with ``ExtractError`` if it
-        reports a crash. See uniswap_v3 equivalent for rationale (VIB-3159)."""
-        try:
-            parsed = self.parse_receipt(receipt)
-        except Exception as exc:  # noqa: BLE001 — malformed receipt shape
-            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
-        if not parsed.success:
-            return ExtractError(error=parsed.error or "parse_receipt reported failure")
-        return None
-
-    def _wrap_extract(
-        self,
-        fn: Any,
-        receipt: dict[str, Any],
-        missing_reason: str,
-    ) -> ExtractResult[Any]:
-        """Calls ``parse_receipt`` first so actual parse crashes propagate as
-        ``ExtractError`` rather than being silently swallowed by the legacy
-        extractor's ``except Exception: return None`` (VIB-3159)."""
-        err = self._strict_parse(receipt)
-        if err is not None:
-            return err
-        try:
-            value = fn(receipt)
-        except Exception as exc:  # noqa: BLE001
-            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
-        if value is None:
-            return ExtractMissing(reason=missing_reason)
-        return ExtractOk(value=value)
 
     def extract_swap_amounts_result(self, receipt: dict[str, Any]) -> ExtractResult[Any]:
         """Fail-closed variant of :meth:`extract_swap_amounts` — see VIB-3159."""

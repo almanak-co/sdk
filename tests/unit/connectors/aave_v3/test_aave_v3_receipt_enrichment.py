@@ -65,13 +65,12 @@ def _make_borrow_receipt(
 
     # Borrow event
     # Borrow(address indexed reserve, address user, address indexed onBehalfOf,
-    #        uint256 amount, uint256 interestRateMode, uint256 borrowRate, uint16 referralCode)
+    #        uint256 amount, uint256 interestRateMode, uint256 borrowRate, uint16 indexed referralCode)
     borrow_data = (
         _encode_uint256(int(USER_ADDRESS, 16))  # user (non-indexed address)
         + _encode_uint256(borrow_amount)  # amount
         + _encode_uint256(interest_rate_mode)  # interestRateMode
         + _encode_uint256(borrow_rate_ray)  # borrowRate
-        + _encode_uint256(0)  # referralCode
     )
     logs.append({
         "address": POOL_ADDRESS,
@@ -79,6 +78,7 @@ def _make_borrow_receipt(
             EVENT_TOPICS["Borrow"],
             _pad_address(USDC_ADDRESS),  # reserve (indexed)
             _pad_address(USER_ADDRESS),  # onBehalfOf (indexed)
+            _encode_uint256(0),  # referralCode (indexed)
         ],
         "data": "0x" + borrow_data,
         "logIndex": 0,
@@ -121,7 +121,6 @@ def _make_supply_receipt(
     supply_data = (
         _encode_uint256(int(USER_ADDRESS, 16))  # user
         + _encode_uint256(supply_amount)  # amount
-        + _encode_uint256(0)  # referralCode
     )
     logs.append({
         "address": POOL_ADDRESS,
@@ -129,6 +128,7 @@ def _make_supply_receipt(
             EVENT_TOPICS["Supply"],
             _pad_address(WETH_ADDRESS),  # reserve (indexed)
             _pad_address(USER_ADDRESS),  # onBehalfOf (indexed)
+            _encode_uint256(0),  # referralCode (indexed)
         ],
         "data": "0x" + supply_data,
         "logIndex": 0,

@@ -511,7 +511,21 @@ class TestV3OpenGuardBranches:
         assert isinstance(result, ExtractError), (
             f"truncated payload must be a typed ExtractError, got {type(result).__name__}"
         )
-        assert "Truncated IncreaseLiquidity payload" in result.error
+        assert "PancakeSwap V3 IncreaseLiquidity decode failed: malformed data" in result.error
+
+    def test_lp_open_result_tags_extractor_exception_after_successful_probe(self):
+        parser, _ = self._parser()
+
+        def fail_extract(_receipt):
+            raise RuntimeError("open extractor failed")
+
+        parser.extract_lp_open_data = fail_extract
+        result = parser.extract_lp_open_data_result(self._receipt([]))
+
+        from almanak.framework.execution.extract_result import ExtractError
+
+        assert isinstance(result, ExtractError)
+        assert result.error == "RuntimeError: open extractor failed"
 
     def test_malformed_token_id_topic_is_skipped_not_crashed(self):
         parser, mod = self._parser()

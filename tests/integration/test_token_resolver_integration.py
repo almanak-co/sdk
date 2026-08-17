@@ -883,6 +883,7 @@ class TestPerformanceCacheHitRate:
 # ============================================================================
 
 
+@pytest.mark.benchmark
 class TestPerformanceLookupLatency:
     """Test lookup latency targets for cached tokens."""
 

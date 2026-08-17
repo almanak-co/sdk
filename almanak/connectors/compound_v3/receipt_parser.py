@@ -12,12 +12,8 @@ from enum import Enum
 from typing import Any
 
 from almanak.connectors._strategy_base.base import EventRegistry, HexDecoder
-from almanak.framework.execution.extract_result import (
-    ExtractError,
-    ExtractMissing,
-    ExtractOk,
-    ExtractResult,
-)
+from almanak.connectors._strategy_base.fail_closed_extract import FailClosedExtractMixin
+from almanak.framework.execution.extract_result import ExtractResult
 from almanak.framework.utils.log_formatters import format_address, format_gas_cost, format_tx_hash
 
 logger = logging.getLogger(__name__)
@@ -177,7 +173,7 @@ class ParseResult:
 # =============================================================================
 
 
-class CompoundV3ReceiptParser:
+class CompoundV3ReceiptParser(FailClosedExtractMixin):
     """Parser for Compound V3 transaction receipts.
 
     Refactored to use base infrastructure utilities for hex decoding
@@ -583,46 +579,6 @@ class CompoundV3ReceiptParser:
     # Extraction Methods for Result Enrichment
     # =========================================================================
 
-    def _strict_parse(self, receipt: dict[str, Any]) -> ExtractResult[Any] | None:
-        """Run ``parse_receipt`` and short-circuit with ``ExtractError`` if it
-        crashed or reported failure; otherwise return ``None`` (carry on).
-
-        Mirrors ``MorphoBlueReceiptParser._strict_parse`` (VIB-3159): an actual
-        parse crash must propagate as ``ExtractError`` rather than be swallowed
-        by the legacy extractor's ``except Exception: return None``.
-        """
-        try:
-            parsed = self.parse_receipt(receipt)
-        except Exception as exc:  # noqa: BLE001 - any parse crash is accounting-broken
-            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
-        if not parsed.success:
-            return ExtractError(error=parsed.error or "parse_receipt reported failure")
-        return None
-
-    def _wrap_amount(
-        self,
-        fn: Any,
-        receipt: dict[str, Any],
-        missing_reason: str,
-    ) -> ExtractResult[int]:
-        """Fail-closed wrapper for a raw ``int | None`` amount extractor (VIB-3159).
-
-        Calls ``parse_receipt`` first so a real parse crash surfaces as
-        ``ExtractError``; a ``None`` from the raw extractor (no matching event)
-        becomes ``ExtractMissing`` (benign, Empty ≠ Zero), and a present value
-        becomes ``ExtractOk``.
-        """
-        err = self._strict_parse(receipt)
-        if err is not None:
-            return err
-        try:
-            value = fn(receipt)
-        except Exception as exc:  # noqa: BLE001
-            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
-        if value is None:
-            return ExtractMissing(reason=missing_reason)
-        return ExtractOk(value=value)
-
     def extract_supply_collateral_amount(self, receipt: dict[str, Any]) -> int | None:
         """Extract collateral-supply amount from a ``SupplyCollateral`` event.
 
@@ -661,7 +617,11 @@ class CompoundV3ReceiptParser:
 
     def extract_supply_collateral_amount_result(self, receipt: dict[str, Any]) -> ExtractResult[int]:
         """Fail-closed variant of :meth:`extract_supply_collateral_amount` — see VIB-3159."""
-        return self._wrap_amount(self.extract_supply_collateral_amount, receipt, "no SupplyCollateral event in receipt")
+        return self._wrap_extract(
+            self.extract_supply_collateral_amount,
+            receipt,
+            "no SupplyCollateral event in receipt",
+        )
 
     def extract_supply_amount(self, receipt: dict[str, Any]) -> int | None:
         """Extract supply amount from transaction receipt.

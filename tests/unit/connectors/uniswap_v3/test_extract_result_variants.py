@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from almanak.connectors.uniswap_v3.receipt_parser import UniswapV3ReceiptParser
+from almanak.connectors.uniswap_v3.receipt_parser import EVENT_TOPICS, UniswapV3ReceiptParser
 from almanak.framework.execution.extract_result import (
     ExtractError,
     ExtractMissing,
@@ -74,6 +74,22 @@ def test_extract_swap_amounts_result_crash_is_error(parser: UniswapV3ReceiptPars
     out = parser.extract_swap_amounts_result({"logs": []})
     assert isinstance(out, ExtractError)
     assert "induced swap crash" in out.error
+
+
+def test_malformed_known_swap_fails_closed(parser: UniswapV3ReceiptParser) -> None:
+    address_topic = "0x" + "00" * 12 + "11" * 20
+    receipt = {
+        "logs": [
+            {
+                "address": "0x" + "22" * 20,
+                "topics": [EVENT_TOPICS["Swap"], address_topic, address_topic],
+                "data": "0x" + f"{1:064x}" + f"{2:064x}",
+            }
+        ]
+    }
+
+    assert parser.parse_receipt(receipt).success is False
+    assert isinstance(parser.extract_swap_amounts_result(receipt), ExtractError)
 
 
 def test_extract_lp_close_data_result_empty_is_missing(parser: UniswapV3ReceiptParser) -> None:

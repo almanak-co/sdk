@@ -16,15 +16,16 @@ def create_supply_log(reserve, user, on_behalf_of, amount, referral_code=0):
     """Create Supply log.
 
     Supply(address indexed reserve, address user, address indexed onBehalfOf,
-           uint256 amount, uint16 referralCode)
+           uint256 amount, uint16 indexed referralCode)
     """
-    data = f"0x{'00' * 12}{user[2:].lower()}{amount:064x}{referral_code:064x}"
+    data = f"0x{'00' * 12}{user[2:].lower()}{amount:064x}"
     return {
         "address": AAVE_POOL_ADDRESS,
         "topics": [
             "0x2b627736bca15cd5381dcf80b0bf11fd197d01a037c52b927a881a10fb73ba61",
             f"0x000000000000000000000000{reserve[2:].lower()}",
             f"0x000000000000000000000000{on_behalf_of[2:].lower()}",
+            f"0x{referral_code:064x}",
         ],
         "data": data,
         "logIndex": 0,
@@ -56,15 +57,16 @@ def create_borrow_log(reserve, user, on_behalf_of, amount, rate_mode=2, borrow_r
 
     Borrow(address indexed reserve, address user, address indexed onBehalfOf,
            uint256 amount, uint256 interestRateMode, uint256 borrowRate,
-           uint16 referralCode)
+           uint16 indexed referralCode)
     """
-    data = f"0x{'00' * 12}{user[2:].lower()}{amount:064x}{rate_mode:064x}{borrow_rate:064x}{referral_code:064x}"
+    data = f"0x{'00' * 12}{user[2:].lower()}{amount:064x}{rate_mode:064x}{borrow_rate:064x}"
     return {
         "address": AAVE_POOL_ADDRESS,
         "topics": [
             "0xb3d084820fb1a9decffb176436bd02558d15fac9b0ddfed8c465bc7359d7dce0",
             f"0x000000000000000000000000{reserve[2:].lower()}",
             f"0x000000000000000000000000{on_behalf_of[2:].lower()}",
+            f"0x{referral_code:064x}",
         ],
         "data": data,
         "logIndex": 2,

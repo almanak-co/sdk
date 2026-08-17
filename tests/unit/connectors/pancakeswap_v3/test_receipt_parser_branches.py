@@ -26,6 +26,7 @@ from almanak.connectors.pancakeswap_v3.receipt_parser import (
     ParseResult,
     SwapEventData,
 )
+from almanak.framework.execution.extract_result import ExtractError
 
 POSITION_MANAGER = POSITION_MANAGER_ADDRESSES["bsc"].lower()
 
@@ -164,6 +165,32 @@ class TestDecodeLogData:
         assert result["protocol_fees_token1"] == 22
         # Address normalized to lowercase
         assert result["pool_address"] == "0x" + "cc" * 20
+
+    def test_malformed_known_swap_fails_receipt_and_tagged_extract(self):
+        parser = PancakeSwapV3ReceiptParser(chain="bsc")
+        receipt = {
+            "transactionHash": "0xabc",
+            "blockNumber": 1,
+            "status": 1,
+            "logs": [
+                {
+                    "topics": [
+                        EVENT_TOPICS["Swap"],
+                        _addr_topic("0x" + "11" * 20),
+                        _addr_topic("0x" + "22" * 20),
+                    ],
+                    "data": "0x01",
+                    "address": "0x" + "33" * 20,
+                    "logIndex": 0,
+                }
+            ],
+        }
+
+        parsed = parser.parse_receipt(receipt)
+        extracted = parser.extract_swap_amounts_result(receipt)
+
+        assert parsed.success is False
+        assert isinstance(extracted, ExtractError)
 
 
 class TestCreateEvent:

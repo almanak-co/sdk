@@ -307,7 +307,7 @@ def test_primitive_money_legs_unknown_pool_is_missing(parser: CurveReceiptParser
 
 def test_parse_receipt_crash_short_circuits_to_error(parser: CurveReceiptParser) -> None:
     """A crash in ``parse_receipt`` itself (the most common ghost source) is
-    caught by ``_strict_parse`` and surfaced as ExtractError before the
+    caught by ``_parse_receipt_for_extract`` and surfaced as ExtractError before the
     field-specific extractor even runs."""
 
     def boom(_receipt: dict[str, Any]) -> Any:

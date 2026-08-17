@@ -25,6 +25,14 @@ from almanak.connectors.aave_v3.receipt_parser import AaveV3ReceiptParser
 from almanak.connectors.aerodrome.receipt_parser import AerodromeReceiptParser
 from almanak.connectors.gmx_v2.receipt_parser import GMXv2ReceiptParser
 from almanak.connectors.morpho_blue.receipt_parser import MorphoBlueReceiptParser
+from almanak.connectors.pancakeswap_v3.receipt_parser import (
+    EVENT_TOPICS as PANCAKESWAP_V3_EVENT_TOPICS,
+)
+from almanak.connectors.pancakeswap_v3.receipt_parser import PancakeSwapV3ReceiptParser
+from almanak.connectors.sushiswap_v3.receipt_parser import (
+    EVENT_TOPICS as SUSHISWAP_V3_EVENT_TOPICS,
+)
+from almanak.connectors.sushiswap_v3.receipt_parser import SushiSwapV3ReceiptParser
 from almanak.connectors.uniswap_v3.receipt_parser import UniswapV3ReceiptParser
 from almanak.framework.execution.extract_result import (
     CriticalAccountingError,
@@ -293,6 +301,39 @@ def test_extract_error_raised_inside_method_is_caught_as_variant() -> None:
     assert isinstance(excinfo.value.original, ValueError)
 
 
+@pytest.mark.parametrize(
+    ("parser", "swap_topic"),
+    [
+        (PancakeSwapV3ReceiptParser(chain="bsc"), PANCAKESWAP_V3_EVENT_TOPICS["Swap"]),
+        (SushiSwapV3ReceiptParser(chain="arbitrum"), SUSHISWAP_V3_EVENT_TOPICS["Swap"]),
+    ],
+)
+def test_v3_fork_malformed_swap_fails_through_live_enricher(parser: Any, swap_topic: str) -> None:
+    """Production dispatch must select the tagged wrapper, not legacy None."""
+    address_topic = "0x" + "00" * 12 + "11" * 20
+    receipt = _FakeReceipt(
+        logs=[
+            {
+                "address": "0x" + "22" * 20,
+                "topics": [swap_topic, address_topic, address_topic],
+                "data": "0x01",
+                "logIndex": 0,
+            }
+        ]
+    )
+    enricher = ResultEnricher(parser_registry=_registry_with(parser), live_mode=True)
+
+    with pytest.raises(CriticalAccountingError) as excinfo:
+        enricher.enrich(
+            _make_result(receipt),
+            _FakeIntent(intent_type="SWAP", protocol="fakeproto"),
+            _FakeContext(),
+        )
+
+    assert excinfo.value.field_name == "swap_amounts"
+    assert type(parser).__name__ in str(excinfo.value)
+
+
 def test_extract_error_paper_mode_warns_and_counts() -> None:
     enricher = ResultEnricher(parser_registry=_registry_with(_ErrorReturnParser()), live_mode=False)
     intent = _FakeIntent(intent_type="SWAP", protocol="fakeproto")
@@ -475,7 +516,7 @@ def test_all_connectors_parse_reports_failure_is_error() -> None:
     )
 
     def failed(cls: Any) -> Any:
-        def _parse(_receipt: dict[str, Any]) -> Any:
+        def _parse(_receipt: dict[str, Any], **_kwargs: Any) -> Any:
             return cls(success=False, error="simulated receipt-parse failure")
 
         return _parse

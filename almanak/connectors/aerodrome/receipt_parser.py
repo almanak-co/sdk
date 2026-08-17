@@ -18,9 +18,15 @@ from almanak.connectors._strategy_base.base import (
     resolve_swap_token_symbol_with_fallback,
     resolve_trading_wallet,
 )
+from almanak.connectors._strategy_base.fail_closed_extract import FailClosedExtractMixin
 from almanak.connectors._strategy_base.lp_leg_identity import (
     currencies_for_amounts,
     transfers_by_token,
+)
+from almanak.connectors._strategy_base.v3_fork_receipt_parser import (
+    V3_STANDARD_TRANSFER_LAYOUTS,
+    V3ForkReceiptParser,
+    V3ForkSpec,
 )
 from almanak.framework.data.tokens import (
     TokenResolutionError,
@@ -28,12 +34,7 @@ from almanak.framework.data.tokens import (
     build_token_meta_hint_map,
     resolve_token_decimals,
 )
-from almanak.framework.execution.extract_result import (
-    ExtractError,
-    ExtractMissing,
-    ExtractOk,
-    ExtractResult,
-)
+from almanak.framework.execution.extract_result import ExtractResult
 
 if TYPE_CHECKING:
     from almanak.framework.execution.extracted_data import (
@@ -411,7 +412,7 @@ class ParseResult:
 # =============================================================================
 
 
-class AerodromeReceiptParser:
+class AerodromeReceiptParser(FailClosedExtractMixin):
     """Parser for Aerodrome transaction receipts.
 
     Refactored to use base infrastructure utilities for hex decoding
@@ -1168,17 +1169,6 @@ class AerodromeReceiptParser:
     # See uniswap_v3/receipt_parser.py for the rationale. The raw methods
     # preserve their legacy return types so direct callers keep working.
 
-    def _strict_parse(self, receipt: dict[str, Any]) -> ExtractResult[Any] | None:
-        """Run ``parse_receipt`` and short-circuit with ``ExtractError`` if it
-        reports a crash. See uniswap_v3 equivalent for rationale (VIB-3159)."""
-        try:
-            parsed = self.parse_receipt(receipt)
-        except Exception as exc:  # noqa: BLE001 — malformed receipt shape
-            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
-        if not parsed.success:
-            return ExtractError(error=parsed.error or "parse_receipt reported failure")
-        return None
-
     def extract_swap_amounts_result(
         self,
         receipt: dict[str, Any],
@@ -1197,55 +1187,25 @@ class AerodromeReceiptParser:
         omitting it would cause the enricher's TypeError fallback to silently drop
         ``expected_out`` too (see result_enricher.py §_invoke_extract).
         """
-        err = self._strict_parse(receipt)
-        if err is not None:
-            return err
-        try:
-            value = self.extract_swap_amounts(receipt, expected_out=expected_out, swap_token_meta=swap_token_meta)
-        except Exception as exc:  # noqa: BLE001
-            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
-        if value is None:
-            return ExtractMissing(reason="no Swap event in receipt")
-        return ExtractOk(value=value)
+        return self._wrap_extract(
+            self.extract_swap_amounts,
+            receipt,
+            "no Swap event in receipt",
+            expected_out=expected_out,
+            swap_token_meta=swap_token_meta,
+        )
 
     def extract_lp_close_data_result(self, receipt: dict[str, Any]) -> ExtractResult["LPCloseData"]:
         """Fail-closed variant of :meth:`extract_lp_close_data` — see VIB-3159."""
-        err = self._strict_parse(receipt)
-        if err is not None:
-            return err
-        try:
-            value = self.extract_lp_close_data(receipt)
-        except Exception as exc:  # noqa: BLE001
-            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
-        if value is None:
-            return ExtractMissing(reason="no Burn event in receipt")
-        return ExtractOk(value=value)
+        return self._wrap_extract(self.extract_lp_close_data, receipt, "no Burn event in receipt")
 
     def extract_position_id_result(self, receipt: dict[str, Any]) -> ExtractResult[str]:
         """Fail-closed variant of :meth:`extract_position_id` — see VIB-3159."""
-        err = self._strict_parse(receipt)
-        if err is not None:
-            return err
-        try:
-            value = self.extract_position_id(receipt)
-        except Exception as exc:  # noqa: BLE001
-            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
-        if value is None:
-            return ExtractMissing(reason="no LP position Transfer event")
-        return ExtractOk(value=value)
+        return self._wrap_extract(self.extract_position_id, receipt, "no LP position Transfer event")
 
     def extract_liquidity_result(self, receipt: dict[str, Any]) -> ExtractResult[int]:
         """Fail-closed variant of :meth:`extract_liquidity` — see VIB-3159."""
-        err = self._strict_parse(receipt)
-        if err is not None:
-            return err
-        try:
-            value = self.extract_liquidity(receipt)
-        except Exception as exc:  # noqa: BLE001
-            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
-        if value is None:
-            return ExtractMissing(reason="no Mint event in receipt")
-        return ExtractOk(value=value)
+        return self._wrap_extract(self.extract_liquidity, receipt, "no Mint event in receipt")
 
     def extract_swap_amounts(
         self,
@@ -1971,8 +1931,65 @@ def _build_slipstream_npm_addresses() -> dict[str, str]:
 
 _SLIPSTREAM_NPM_ADDRESSES: dict[str, str] = _build_slipstream_npm_addresses()
 
+SLIPSTREAM_RECEIPT_SPEC = V3ForkSpec(
+    protocol_name="Aerodrome Slipstream",
+    event_topics={
+        **EVENT_TOPICS,
+        "MintCL": _SLIPSTREAM_POOL_MINT_TOPIC,
+        "BurnCL": _SLIPSTREAM_POOL_BURN_TOPIC,
+    },
+    event_name_to_type={
+        **EVENT_NAME_TO_TYPE,
+        "MintCL": AerodromeEventType.UNKNOWN,
+        "BurnCL": AerodromeEventType.UNKNOWN,
+        "IncreaseLiquidity": AerodromeEventType.UNKNOWN,
+        "DecreaseLiquidity": AerodromeEventType.UNKNOWN,
+        "CollectCL": AerodromeEventType.UNKNOWN,
+    },
+    position_manager_addresses=_SLIPSTREAM_NPM_ADDRESSES,
+    strict_decode_fields={
+        "Swap": frozenset(
+            {
+                "amount0_in",
+                "amount1_in",
+                "amount0_out",
+                "amount1_out",
+                "pool_address",
+            }
+        ),
+        "SwapCL": frozenset(
+            {
+                "amount0_in",
+                "amount1_in",
+                "amount0_out",
+                "amount1_out",
+                "pool_address",
+            }
+        ),
+    },
+    strict_topic_counts={
+        "Swap": 3,
+        "SwapCL": 3,
+        "MintCL": 4,
+        "BurnCL": 4,
+        "IncreaseLiquidity": 2,
+        "DecreaseLiquidity": 2,
+        "CollectCL": 2,
+    },
+    strict_data_words={
+        "Swap": 4,
+        "SwapCL": 5,
+        "MintCL": 4,
+        "BurnCL": 3,
+        "IncreaseLiquidity": 3,
+        "DecreaseLiquidity": 3,
+        "CollectCL": 3,
+    },
+    strict_event_layouts=V3_STANDARD_TRANSFER_LAYOUTS,
+)
 
-class AerodromeSlipstreamReceiptParser(AerodromeReceiptParser):
+
+class AerodromeSlipstreamReceiptParser(V3ForkReceiptParser, AerodromeReceiptParser):
     """Receipt parser for Aerodrome Slipstream CL (concentrated liquidity) transactions.
 
     Extends AerodromeReceiptParser to handle NFT position events from the
@@ -2006,6 +2023,42 @@ class AerodromeSlipstreamReceiptParser(AerodromeReceiptParser):
             "fees1",
         }
     )
+    V3_FORK_SPEC = SLIPSTREAM_RECEIPT_SPEC
+
+    def _decode_swap_data(
+        self,
+        topics: list[Any],
+        data: str,
+        address: str,
+    ) -> dict[str, Any]:
+        """Decode the legacy Solidly ``Swap`` event with its four amount legs."""
+        return AerodromeReceiptParser._decode_swap_data(self, topics, data, address)
+
+    def _create_v3_event(
+        self,
+        *,
+        event_type: AerodromeEventType,
+        event_name: str,
+        log_index: int,
+        tx_hash: str,
+        block_number: int,
+        contract_address: str,
+        decoded_data: dict[str, Any],
+        raw_topics: list[str],
+        raw_data: str,
+    ) -> AerodromeEvent:
+        """Create an Aerodrome event from the shared V3 log template."""
+        return AerodromeEvent(
+            event_type=event_type,
+            event_name=event_name,
+            log_index=log_index,
+            transaction_hash=tx_hash,
+            block_number=block_number,
+            contract_address=contract_address,
+            data=decoded_data,
+            raw_topics=raw_topics,
+            raw_data=raw_data,
+        )
 
     def extract_position_id(self, receipt: dict[str, Any]) -> str | None:
         """Extract NFT tokenId from LP mint receipt.
@@ -2587,16 +2640,11 @@ class AerodromeSlipstreamReceiptParser(AerodromeReceiptParser):
 
     def extract_lp_close_data_result(self, receipt: dict[str, Any]) -> ExtractResult["LPCloseData"]:
         """Fail-closed variant of extract_lp_close_data for Slipstream CL."""
-        err = self._strict_parse(receipt)
-        if err is not None:
-            return err
-        try:
-            value = self.extract_lp_close_data(receipt)
-        except Exception as exc:  # noqa: BLE001
-            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
-        if value is None:
-            return ExtractMissing(reason="no Collect or DecreaseLiquidity event in receipt")
-        return ExtractOk(value=value)
+        return self._wrap_extract(
+            self.extract_lp_close_data,
+            receipt,
+            "no Collect or DecreaseLiquidity event in receipt",
+        )
 
     def extract_lp_open_data_result(self, receipt: dict[str, Any]) -> ExtractResult["LPOpenData"]:
         """Fail-closed variant of extract_lp_open_data for Slipstream CL.
@@ -2606,42 +2654,27 @@ class AerodromeSlipstreamReceiptParser(AerodromeReceiptParser):
         variant. The bare ``extract_lp_open_data`` returns ``None`` on
         missing event and propagates exceptions unchanged.
         """
-        err = self._strict_parse(receipt)
-        if err is not None:
-            return err
-        try:
-            value = self.extract_lp_open_data(receipt)
-        except Exception as exc:  # noqa: BLE001
-            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
-        if value is None:
-            return ExtractMissing(reason="no IncreaseLiquidity event in receipt")
-        return ExtractOk(value=value)
+        return self._wrap_extract(
+            self.extract_lp_open_data,
+            receipt,
+            "no IncreaseLiquidity event in receipt",
+        )
 
     def extract_position_id_result(self, receipt: dict[str, Any]) -> ExtractResult[str]:
         """Fail-closed variant of extract_position_id for Slipstream CL."""
-        err = self._strict_parse(receipt)
-        if err is not None:
-            return err
-        try:
-            value = self.extract_position_id(receipt)
-        except Exception as exc:  # noqa: BLE001
-            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
-        if value is None:
-            return ExtractMissing(reason="no ERC-721 mint Transfer event found")
-        return ExtractOk(value=value)
+        return self._wrap_extract(
+            self.extract_position_id,
+            receipt,
+            "no ERC-721 mint Transfer event found",
+        )
 
     def extract_liquidity_result(self, receipt: dict[str, Any]) -> ExtractResult[int]:
         """Fail-closed variant of extract_liquidity for Slipstream CL."""
-        err = self._strict_parse(receipt)
-        if err is not None:
-            return err
-        try:
-            value = self.extract_liquidity(receipt)
-        except Exception as exc:  # noqa: BLE001
-            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
-        if value is None:
-            return ExtractMissing(reason="no IncreaseLiquidity event in receipt")
-        return ExtractOk(value=value)
+        return self._wrap_extract(
+            self.extract_liquidity,
+            receipt,
+            "no IncreaseLiquidity event in receipt",
+        )
 
     # =========================================================================
     # Registry-mode payload builders (VIB-4305 / T12 follow-up to PR #2241).
@@ -2661,22 +2694,6 @@ class AerodromeSlipstreamReceiptParser(AerodromeReceiptParser):
     # (token_id from DecreaseLiquidity, pool from Pool Burn, NPM address)
     # is Slipstream-specific because the emitter addresses and event
     # signatures differ from canonical UniV3.
-
-    def _nft_manager_address(self) -> str:
-        """Return the canonical Slipstream NPM address for ``self.chain``.
-
-        Sourced from ``_SLIPSTREAM_NPM_ADDRESSES`` (built at import time from
-        ``almanak.core.contracts.AERODROME[<chain>]['cl_nft']``). The address
-        is part of the ``physical_identity_hash`` input tuple (T08 invariant
-        #1) and is a parser-side configuration constant — NEVER an off-chain
-        RPC call — so the hash stays receipt-derivable from the receipt +
-        parser config alone.
-
-        Returns an empty string when no NPM is registered for the chain,
-        matching the "Empty ≠ zero" contract: the caller (registry-payload
-        builder) refuses to compose a payload on empty.
-        """
-        return _SLIPSTREAM_NPM_ADDRESSES.get((self.chain or "").lower(), "")
 
     def _decreaseliquidity_token_id(self, receipt: dict[str, Any]) -> int | None:
         """Recover ``tokenId`` from a ``DecreaseLiquidity`` log on the close

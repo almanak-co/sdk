@@ -23,18 +23,18 @@ from almanak.connectors._strategy_base.lp_leg_identity import (
     log_emitter_address,
     transfers_by_token,
 )
+from almanak.connectors._strategy_base.v3_fork_receipt_parser import (
+    V3_STANDARD_LP_DATA_WORDS,
+    V3_STANDARD_LP_TOPIC_COUNTS,
+    V3_STANDARD_TRANSFER_LAYOUTS,
+    V3ForkReceiptParser,
+    V3ForkSpec,
+)
 from almanak.framework.data.tokens import (
     TokenResolutionError,
-    build_swap_token_meta_extract_kwargs,
-    build_token_meta_hint_map,
     resolve_token_decimals,
 )
-from almanak.framework.execution.extract_result import (
-    ExtractError,
-    ExtractMissing,
-    ExtractOk,
-    ExtractResult,
-)
+from almanak.framework.execution.extract_result import ExtractResult
 
 if TYPE_CHECKING:
     from almanak.framework.execution.extracted_data import (
@@ -140,6 +140,33 @@ def _build_pancakeswap_v3_npm_addresses() -> dict[str, str]:
 
 
 POSITION_MANAGER_ADDRESSES: dict[str, str] = _build_pancakeswap_v3_npm_addresses()
+
+PANCAKESWAP_V3_RECEIPT_SPEC = V3ForkSpec(
+    protocol_name="PancakeSwap V3",
+    event_topics=EVENT_TOPICS,
+    event_name_to_type={
+        **EVENT_NAME_TO_TYPE,
+        "IncreaseLiquidity": PancakeSwapV3EventType.UNKNOWN,
+        "DecreaseLiquidity": PancakeSwapV3EventType.UNKNOWN,
+    },
+    position_manager_addresses=POSITION_MANAGER_ADDRESSES,
+    strict_decode_fields={
+        "Swap": frozenset(
+            {
+                "amount0",
+                "amount1",
+                "sqrt_price_x96",
+                "liquidity",
+                "tick",
+                "protocol_fees_token0",
+                "protocol_fees_token1",
+            }
+        )
+    },
+    strict_topic_counts={"Swap": 3, **V3_STANDARD_LP_TOPIC_COUNTS},
+    strict_data_words={"Swap": 7, **V3_STANDARD_LP_DATA_WORDS},
+    strict_event_layouts=V3_STANDARD_TRANSFER_LAYOUTS,
+)
 
 # Zero address for detecting mints
 ZERO_ADDRESS_PADDED = "0x" + "0" * 64
@@ -269,7 +296,7 @@ class _SwapDecimals:
 # =============================================================================
 
 
-class PancakeSwapV3ReceiptParser(BaseReceiptParser[SwapEventData, ParseResult]):
+class PancakeSwapV3ReceiptParser(V3ForkReceiptParser, BaseReceiptParser[SwapEventData, ParseResult]):
     """Parser for PancakeSwap V3 transaction receipts.
 
     Uses base infrastructure for common parsing logic while handling
@@ -288,6 +315,7 @@ class PancakeSwapV3ReceiptParser(BaseReceiptParser[SwapEventData, ParseResult]):
             "protocol_fees",  # VIB-3204 — extract_protocol_fees implemented below
         }
     )
+    V3_FORK_SPEC = PANCAKESWAP_V3_RECEIPT_SPEC
 
     def __init__(self, chain: str = "bsc", **kwargs: Any) -> None:
         """Initialize the parser.
@@ -295,7 +323,7 @@ class PancakeSwapV3ReceiptParser(BaseReceiptParser[SwapEventData, ParseResult]):
         Args:
             chain: Blockchain network (for position manager address lookup)
         """
-        registry = EventRegistry(EVENT_TOPICS, EVENT_NAME_TO_TYPE)
+        registry = EventRegistry(dict(self.v3_fork_spec.event_topics), dict(self.v3_fork_spec.event_name_to_type))
         super().__init__(registry=registry, chain=chain)
 
     def _decode_log_data(
@@ -381,6 +409,32 @@ class PancakeSwapV3ReceiptParser(BaseReceiptParser[SwapEventData, ParseResult]):
             protocol_fees_token1=decoded_data.get("protocol_fees_token1", 0),
         )
 
+    def _create_v3_event(
+        self,
+        *,
+        event_type: Any,
+        event_name: str,
+        log_index: int,
+        tx_hash: str,
+        block_number: int,
+        contract_address: str,
+        decoded_data: dict[str, Any],
+        raw_topics: list[str],
+        raw_data: str,
+    ) -> SwapEventData | None:
+        """Adapt the V3 template to Pancake's swap-only event model."""
+        _ = event_type
+        return self._create_event(
+            event_name=event_name,
+            log_index=log_index,
+            tx_hash=tx_hash,
+            block_number=block_number,
+            contract_address=contract_address,
+            decoded_data=decoded_data,
+            raw_topics=raw_topics,
+            raw_data=raw_data,
+        )
+
     def _build_result(
         self,
         events: list[SwapEventData],
@@ -414,22 +468,6 @@ class PancakeSwapV3ReceiptParser(BaseReceiptParser[SwapEventData, ParseResult]):
     # =============================================================================
     # Extraction Methods (for Result Enrichment)
     # =============================================================================
-
-    def build_extract_kwargs(
-        self,
-        *,
-        field: str,
-        bundle_metadata: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Return canonical typed swap metadata for receipt extraction."""
-        return build_swap_token_meta_extract_kwargs(field=field, bundle_metadata=bundle_metadata, chain=self.chain)
-
-    @staticmethod
-    def _build_hint_map(
-        swap_token_meta: dict[str, dict[str, Any]] | None,
-    ) -> dict[str, tuple[str, int]]:
-        """Map compiler token metadata to ``{address: (symbol, decimals)}``."""
-        return {address.lower(): value for address, value in build_token_meta_hint_map(swap_token_meta).items()}
 
     def extract_swap_amounts(
         self,
@@ -1462,23 +1500,21 @@ class PancakeSwapV3ReceiptParser(BaseReceiptParser[SwapEventData, ParseResult]):
     # "parser crashed" from "no event present"
     # =============================================================================
 
-    def _strict_parse(self, receipt: dict[str, Any]) -> ExtractResult[Any] | None:
-        """Run ``parse_receipt`` and short-circuit with ``ExtractError`` if it
-        reports a crash.
-
-        Returns ``None`` when parsing succeeded (caller should proceed), or an
-        ``ExtractError`` variant when it did not. This is the strict
-        counterpart to the legacy ``extract_*`` methods, which silently
-        swallow exceptions and return ``None`` — making the "benign missing"
-        and "crashed parsing" cases indistinguishable (VIB-3159).
-        """
-        try:
-            parsed = self.parse_receipt(receipt)
-        except Exception as exc:  # noqa: BLE001 — malformed receipt shape
-            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
-        if not parsed.success:
-            return ExtractError(error=parsed.error or "parse_receipt reported failure")
-        return None
+    def extract_swap_amounts_result(
+        self,
+        receipt: dict[str, Any],
+        *,
+        expected_out: Decimal | None = None,
+        swap_token_meta: dict[str, dict[str, Any]] | None = None,
+    ) -> ExtractResult["SwapAmounts"]:
+        """Fail-closed variant used by the framework's result enricher."""
+        return self._wrap_extract(
+            self.extract_swap_amounts,
+            receipt,
+            "no Swap event in receipt",
+            expected_out=expected_out,
+            swap_token_meta=swap_token_meta,
+        )
 
     def extract_lp_open_data_result(self, receipt: dict[str, Any]) -> ExtractResult["LPOpenData"]:
         """Fail-closed variant of :meth:`extract_lp_open_data` — see VIB-3159.
@@ -1490,16 +1526,11 @@ class PancakeSwapV3ReceiptParser(BaseReceiptParser[SwapEventData, ParseResult]):
         genuine parse failures as missing data — the same ghost-position
         class of bug VIB-3159 addresses for Uniswap V3.
         """
-        err = self._strict_parse(receipt)
-        if err is not None:
-            return err
-        try:
-            value = self.extract_lp_open_data(receipt)
-        except Exception as exc:  # noqa: BLE001
-            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
-        if value is None:
-            return ExtractMissing(reason="no IncreaseLiquidity event from position manager")
-        return ExtractOk(value=value)
+        return self._wrap_extract(
+            self.extract_lp_open_data,
+            receipt,
+            "no IncreaseLiquidity event from position manager",
+        )
 
     # =============================================================================
     # Registry Payload Extraction (VIB-4305 / T12 mirror of Uniswap V3)
@@ -1520,21 +1551,6 @@ class PancakeSwapV3ReceiptParser(BaseReceiptParser[SwapEventData, ParseResult]):
     # duplicated — they operate on the receipt-only payload dict, which is
     # the same shape across V3 forks.
     # =============================================================================
-
-    def _nft_manager_address(self) -> str:
-        """Return the canonical PancakeSwap V3 NPM address for ``self.chain``.
-
-        The address is part of the ``physical_identity_hash`` input tuple
-        (per T08 invariant #1). It is a parser-side configuration constant —
-        NOT an off-chain RPC call — so the hash stays receipt-derivable
-        from the receipt + parser config alone. Returns the empty string
-        when the chain is unsupported; the caller treats that as "fall back
-        to accounting_only" rather than substituting a known-good NPM (the
-        Uniswap V3 implementation defaults to mainnet NPM as a safety net;
-        for PancakeSwap we prefer fail-loud — there is no single canonical
-        NPM the way Uniswap V3 has one).
-        """
-        return POSITION_MANAGER_ADDRESSES.get(self.chain, "").lower()
 
     def _decreaseliquidity_token_id(self, receipt: dict[str, Any]) -> int | None:
         """Recover ``tokenId`` from a ``DecreaseLiquidity`` log on the close-side

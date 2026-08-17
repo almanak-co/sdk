@@ -448,7 +448,7 @@ class TestPancakeSwapV3ExtractLpOpenDataResult:
         }
         result = parser.extract_lp_open_data_result(_receipt([truncated]))
         assert isinstance(result, ExtractError)
-        assert "Truncated IncreaseLiquidity" in str(result.error)
+        assert "IncreaseLiquidity decode failed: malformed data" in str(result.error)
 
     def test_result_wrapper_ok(self) -> None:
         """Successful extraction → ExtractOk(value=LPOpenData)."""

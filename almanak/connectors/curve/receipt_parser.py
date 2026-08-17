@@ -13,6 +13,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from almanak.connectors._strategy_base.base import EventRegistry, HexDecoder, resolve_trading_wallet
+from almanak.connectors._strategy_base.fail_closed_extract import FailClosedExtractMixin
 from almanak.framework.data.tokens import TokenResolutionError, resolve_token_decimals
 from almanak.framework.execution.extract_result import (
     ExtractError,
@@ -461,7 +462,7 @@ def _pool_type(
 # =============================================================================
 
 
-class CurveReceiptParser:
+class CurveReceiptParser(FailClosedExtractMixin):
     """Parser for Curve Finance transaction receipts.
 
     Refactored to use base infrastructure utilities for hex decoding
@@ -2166,24 +2167,17 @@ class CurveReceiptParser:
     #     (benign, unchanged);
     #   * extractor returns a value                          -> ``ExtractOk``.
 
-    def _strict_parse(self, receipt: dict[str, Any]) -> "ParseResult | ExtractError":
+    def _parse_receipt_for_extract(self, receipt: dict[str, Any]) -> "ParseResult | ExtractError":
         """Run ``parse_receipt`` and return the parsed ``ParseResult`` on a clean
         parse, or an ``ExtractError`` if it crashes / returns ``None`` / reports
         failure. Returning the ``ParseResult`` lets each wrapper presence-check
-        its own event(s) against chain truth (VIB-5432).
-
-        Note: unlike the aerodrome equivalent, Curve's ``parse_receipt`` has
-        ``return None`` paths, so a ``None`` result is guarded explicitly (an
-        un-parseable receipt is an error, not a missing event)."""
-        try:
-            parsed = self.parse_receipt(receipt)
-        except Exception as exc:  # noqa: BLE001 — malformed receipt shape
-            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
-        if parsed is None:
-            return ExtractError(error="parse_receipt returned None")
-        if not parsed.success:
-            return ExtractError(error=parsed.error or "parse_receipt reported failure")
-        return parsed
+        its own event(s) against chain truth (VIB-5432)."""
+        result = self._parse_receipt_result(receipt)
+        if isinstance(result, ExtractError):
+            return result
+        if isinstance(result, ExtractOk) and isinstance(result.value, ParseResult):
+            return result.value
+        return ExtractError(error="unexpected parse result shape")
 
     @staticmethod
     def _event_present(parsed: "ParseResult", *event_types: CurveEventType) -> bool:
@@ -2260,7 +2254,7 @@ class CurveReceiptParser:
 
         Never raises: a malformed candidate log is skipped (the same log would
         make the extractor return ``None`` under its own swallow, and structural
-        receipt corruption is already caught by ``_strict_parse``)."""
+        receipt corruption is already caught by ``_parse_receipt_for_extract``)."""
         zero_addr = "0x0000000000000000000000000000000000000000"
         transfer_topic = EVENT_TOPICS["Transfer"].lower()
         logs = receipt.get("logs", [])
@@ -2328,7 +2322,7 @@ class CurveReceiptParser:
         It MUST stay in this signature: the ResultEnricher calls this wrapper,
         and a missing kwarg would trip the enricher's TypeError fallback and
         silently drop ``expected_out``."""
-        parsed = self._strict_parse(receipt)
+        parsed = self._parse_receipt_for_extract(receipt)
         if isinstance(parsed, ExtractError):
             return parsed
         try:
@@ -2358,7 +2352,7 @@ class CurveReceiptParser:
         Presence = a mint Transfer (from the zero address). A present mint whose
         LP-token address is malformed yields ``None`` from the extractor, which
         is a decode failure -> ``ExtractError`` (not a missing event)."""
-        parsed = self._strict_parse(receipt)
+        parsed = self._parse_receipt_for_extract(receipt)
         if isinstance(parsed, ExtractError):
             return parsed
         try:
@@ -2378,7 +2372,7 @@ class CurveReceiptParser:
         Delegates to ``extract_lp_tokens_received``; presence = a mint Transfer
         (from the zero address). A present mint whose amount cannot be decoded
         is an ``ExtractError``."""
-        parsed = self._strict_parse(receipt)
+        parsed = self._parse_receipt_for_extract(receipt)
         if isinstance(parsed, ExtractError):
             return parsed
         try:
@@ -2397,7 +2391,7 @@ class CurveReceiptParser:
 
         Presence = a mint Transfer (from the zero address). A present mint whose
         amount cannot be decoded is an ``ExtractError``."""
-        parsed = self._strict_parse(receipt)
+        parsed = self._parse_receipt_for_extract(receipt)
         if isinstance(parsed, ExtractError):
             return parsed
         try:
@@ -2417,7 +2411,7 @@ class CurveReceiptParser:
         Presence = an ``AddLiquidity`` event in the parsed receipt. A present
         ``AddLiquidity`` we fail to assemble into ``LPOpenData`` is an
         ``ExtractError`` (the LP_OPEN ghost-position case)."""
-        parsed = self._strict_parse(receipt)
+        parsed = self._parse_receipt_for_extract(receipt)
         if isinstance(parsed, ExtractError):
             return parsed
         try:
@@ -2458,7 +2452,7 @@ class CurveReceiptParser:
         instead convert every unregistered-pool deposit — a common, benign
         fallback — into a fatal accounting halt. ``None`` is therefore the benign
         ``ExtractMissing`` here; only a genuine raise (caught below) is an error."""
-        parsed = self._strict_parse(receipt)
+        parsed = self._parse_receipt_for_extract(receipt)
         if isinstance(parsed, ExtractError):
             return parsed
         try:
@@ -2476,7 +2470,7 @@ class CurveReceiptParser:
         ``RemoveLiquidityImbalance`` event in the parsed receipt. A present
         removal we fail to decode is an ``ExtractError`` (the LP_CLOSE
         ghost-position case)."""
-        parsed = self._strict_parse(receipt)
+        parsed = self._parse_receipt_for_extract(receipt)
         if isinstance(parsed, ExtractError):
             return parsed
         try:
@@ -2516,7 +2510,7 @@ class CurveReceiptParser:
         ``extract_protocol_fees`` always returns a ``ProtocolFees`` (with an
         ``unavailable_reason`` when fees aren't recoverable, never ``None``), so
         the only non-``ExtractOk`` outcome here is a genuine decode crash."""
-        parsed = self._strict_parse(receipt)
+        parsed = self._parse_receipt_for_extract(receipt)
         if isinstance(parsed, ExtractError):
             return parsed
         try:

@@ -39,12 +39,12 @@ from typing import TYPE_CHECKING, Any
 
 from almanak.connectors._strategy_base.base.hex_utils import HexDecoder
 from almanak.connectors._strategy_base.base.registry import EventRegistry
-from almanak.framework.execution.extract_result import (
-    ExtractError,
-    ExtractMissing,
-    ExtractOk,
-    ExtractResult,
+from almanak.connectors._strategy_base.fail_closed_extract import (
+    FailClosedExtractMixin,
+    RecognizedEventDecodeError,
+    validate_recognized_event_layout,
 )
+from almanak.framework.execution.extract_result import ExtractResult
 from almanak.framework.utils.log_formatters import format_gas_cost, format_tx_hash
 
 if TYPE_CHECKING:
@@ -116,6 +116,18 @@ EVENT_TOPICS: dict[str, str] = {
 }
 
 TOPIC_TO_EVENT: dict[str, str] = {v: k for k, v in EVENT_TOPICS.items()}
+
+_STRICT_EXTRACT_EVENT_LAYOUTS: dict[str, frozenset[tuple[int, int]]] = {
+    "Supply": frozenset({(4, 2)}),
+    "Withdraw": frozenset({(4, 3)}),
+    "Borrow": frozenset({(4, 3)}),
+    "Repay": frozenset({(4, 2)}),
+    "SupplyCollateral": frozenset({(4, 1)}),
+    "WithdrawCollateral": frozenset({(4, 2)}),
+    # ERC-20 and ERC-721 overload the same Transfer signature. Preserve valid
+    # NFT logs without interpreting their indexed token ID as fungible value.
+    "Transfer": frozenset({(3, 1), (4, 0)}),
+}
 
 EVENT_NAME_TO_TYPE: dict[str, MorphoBlueEventType] = {
     "Supply": MorphoBlueEventType.SUPPLY,
@@ -582,7 +594,7 @@ class ParseResult:
 # =============================================================================
 
 
-class MorphoBlueReceiptParser:
+class MorphoBlueReceiptParser(FailClosedExtractMixin):
     """Parser for Morpho Blue transaction receipts.
 
     This parser extracts and decodes events from Morpho Blue transactions,
@@ -726,6 +738,14 @@ class MorphoBlueReceiptParser:
             if event_type is None:
                 event_type = MorphoBlueEventType.UNKNOWN
 
+            validate_recognized_event_layout(
+                "Morpho Blue",
+                event_name,
+                topics,
+                log.get("data", ""),
+                _STRICT_EXTRACT_EVENT_LAYOUTS,
+            )
+
             # Get contract address
             contract_address = log.get("address", "")
             if isinstance(contract_address, bytes):
@@ -760,6 +780,8 @@ class MorphoBlueReceiptParser:
                 timestamp=timestamp or datetime.now(tz=None),
             )
 
+        except RecognizedEventDecodeError:
+            raise
         except Exception as e:
             logger.warning(f"Failed to parse log at index {log_index}: {e}")
             return None
@@ -797,6 +819,8 @@ class MorphoBlueReceiptParser:
         elif event_name == "AccrueInterest":
             return self._parse_accrue_interest(topics, data_hex)
         elif event_name == "Transfer":
+            if len(topics) == 4:
+                return {"raw_data": data, "indexed_topics": topics[1:]}
             return self._parse_transfer(topics, data_hex)
         elif event_name == "Approval":
             return self._parse_approval(topics, data_hex)
@@ -1123,60 +1147,33 @@ class MorphoBlueReceiptParser:
     # ---- VIB-3159: tagged-variant wrappers ----------------------------------
     # See uniswap_v3/receipt_parser.py for the rationale.
 
-    def _strict_parse(self, receipt: dict[str, Any]) -> ExtractResult[Any] | None:
-        """Run ``parse_receipt`` and short-circuit with ``ExtractError`` if it
-        reports a crash. See uniswap_v3 equivalent for rationale (VIB-3159)."""
-        try:
-            parsed = self.parse_receipt(receipt)
-        except Exception as exc:  # noqa: BLE001 — malformed receipt shape
-            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
-        if not parsed.success:
-            return ExtractError(error=parsed.error or "parse_receipt reported failure")
-        return None
-
-    def _wrap_amount(
-        self,
-        fn: Any,
-        receipt: dict[str, Any],
-        missing_reason: str,
-    ) -> ExtractResult[int]:
-        """Calls ``parse_receipt`` first so actual parse crashes propagate as
-        ``ExtractError`` rather than being silently swallowed by the legacy
-        extractor's ``except Exception: return None`` (VIB-3159)."""
-        err = self._strict_parse(receipt)
-        if err is not None:
-            return err
-        try:
-            value = fn(receipt)
-        except Exception as exc:  # noqa: BLE001
-            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
-        if value is None:
-            return ExtractMissing(reason=missing_reason)
-        return ExtractOk(value=value)
-
     def extract_supply_amount_result(self, receipt: dict[str, Any]) -> ExtractResult[int]:
         """Fail-closed variant of :meth:`extract_supply_amount` — see VIB-3159."""
-        return self._wrap_amount(self.extract_supply_amount, receipt, "no Supply event in receipt")
+        return self._wrap_extract(self.extract_supply_amount, receipt, "no Supply event in receipt")
 
     def extract_withdraw_amount_result(self, receipt: dict[str, Any]) -> ExtractResult[int]:
         """Fail-closed variant of :meth:`extract_withdraw_amount` — see VIB-3159."""
-        return self._wrap_amount(self.extract_withdraw_amount, receipt, "no Withdraw event in receipt")
+        return self._wrap_extract(self.extract_withdraw_amount, receipt, "no Withdraw event in receipt")
 
     def extract_borrow_amount_result(self, receipt: dict[str, Any]) -> ExtractResult[int]:
         """Fail-closed variant of :meth:`extract_borrow_amount` — see VIB-3159."""
-        return self._wrap_amount(self.extract_borrow_amount, receipt, "no Borrow event in receipt")
+        return self._wrap_extract(self.extract_borrow_amount, receipt, "no Borrow event in receipt")
 
     def extract_repay_amount_result(self, receipt: dict[str, Any]) -> ExtractResult[int]:
         """Fail-closed variant of :meth:`extract_repay_amount` — see VIB-3159."""
-        return self._wrap_amount(self.extract_repay_amount, receipt, "no Repay event in receipt")
+        return self._wrap_extract(self.extract_repay_amount, receipt, "no Repay event in receipt")
 
     def extract_supply_collateral_amount_result(self, receipt: dict[str, Any]) -> ExtractResult[int]:
         """Fail-closed variant of :meth:`extract_supply_collateral_amount` — see VIB-3159."""
-        return self._wrap_amount(self.extract_supply_collateral_amount, receipt, "no SupplyCollateral event in receipt")
+        return self._wrap_extract(
+            self.extract_supply_collateral_amount,
+            receipt,
+            "no SupplyCollateral event in receipt",
+        )
 
     def extract_withdraw_collateral_amount_result(self, receipt: dict[str, Any]) -> ExtractResult[int]:
         """Fail-closed variant of :meth:`extract_withdraw_collateral_amount` — see VIB-3159."""
-        return self._wrap_amount(
+        return self._wrap_extract(
             self.extract_withdraw_collateral_amount, receipt, "no WithdrawCollateral event in receipt"
         )
 

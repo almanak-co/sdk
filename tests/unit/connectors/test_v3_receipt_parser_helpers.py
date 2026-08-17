@@ -1,17 +1,14 @@
 """Unit tests for ``almanak.connectors._strategy_base.v3_receipt_parser_helpers``.
 
-Tests the canonical implementations of the five receipt-parser helpers
-extracted from ``UniswapV3ReceiptParser`` / ``SushiSwapV3ReceiptParser``
-(plan 014 Stage C). The per-parser tests continue to exercise the delegate
-methods; this file pins the shared module-level function behaviour directly.
+Tests the canonical V3 codec and token-helper implementations. The concrete
+parser tests exercise the template methods; this file pins shared module-level
+function behaviour directly.
 
 Cover at minimum (per plan 014 Step 10):
 - decode_swap_data: happy path + malformed-data fallback
 - decode_transfer_data: happy path + malformed-data fallback
 - build_hint_map: None -> {}; malformed entry skipped; address lowercased
 - resolve_token_info: resolver failure -> ("", None)
-- strict_parse: parse_receipt raises -> ExtractError; success=False ->
-  ExtractError; success=True -> None
 """
 
 from __future__ import annotations
@@ -26,11 +23,8 @@ from almanak.connectors._strategy_base.v3_receipt_parser_helpers import (
     decode_swap_data,
     decode_transfer_data,
     resolve_token_info,
-    strict_parse,
 )
 from almanak.framework.data.tokens import TokenResolutionError
-from almanak.framework.execution.extract_result import ExtractError
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -296,43 +290,3 @@ class TestResolveTokenInfo:
             mock_get_resolver.return_value = mock_resolver
             result = resolve_token_info("0xunknown", "arbitrum")
         assert result == ("", None)
-
-
-# ---------------------------------------------------------------------------
-# strict_parse
-# ---------------------------------------------------------------------------
-
-
-class TestStrictParse:
-    """strict_parse: exception -> ExtractError; success=False -> ExtractError; success -> None."""
-
-    def test_parse_receipt_raises_returns_extract_error(self) -> None:
-        """When parse_receipt raises, returns ExtractError."""
-        parser = MagicMock()
-        parser.parse_receipt.side_effect = ValueError("malformed receipt")
-        result = strict_parse(parser, {})
-        assert isinstance(result, ExtractError)
-        assert "ValueError" in result.error
-
-    def test_parse_receipt_success_false_returns_extract_error(self) -> None:
-        """When parse_receipt returns success=False, returns ExtractError."""
-        parser = MagicMock()
-        parser.parse_receipt.return_value = SimpleNamespace(success=False, error="boom")
-        result = strict_parse(parser, {})
-        assert isinstance(result, ExtractError)
-        assert result.error == "boom"
-
-    def test_parse_receipt_success_false_no_error_message(self) -> None:
-        """success=False with None error field: fallback message used."""
-        parser = MagicMock()
-        parser.parse_receipt.return_value = SimpleNamespace(success=False, error=None)
-        result = strict_parse(parser, {})
-        assert isinstance(result, ExtractError)
-        assert result.error  # non-empty
-
-    def test_parse_receipt_success_true_returns_none(self) -> None:
-        """When parse_receipt returns success=True, returns None (proceed)."""
-        parser = MagicMock()
-        parser.parse_receipt.return_value = SimpleNamespace(success=True, error=None)
-        result = strict_parse(parser, {"logs": []})
-        assert result is None

@@ -467,7 +467,10 @@ class TestAerodromeSwapIntent:
         for tx_result in execution_result.transaction_results:
             if tx_result.receipt is None:
                 continue
-            from almanak.connectors.aerodrome.receipt_parser import AerodromeReceiptParser
+            from almanak.connectors.aerodrome.receipt_parser import (
+                AerodromeReceiptParser,
+                AerodromeSlipstreamReceiptParser,
+            )
 
             token0_addr, token1_addr = sorted([token_in.lower(), token_out.lower()])
             parser = AerodromeReceiptParser(chain=CHAIN_NAME, token0_address=token0_addr, token1_address=token1_addr)
@@ -476,6 +479,19 @@ class TestAerodromeSwapIntent:
                 swap_results_parsed += 1
                 assert parse_result.swap_result.amount_in_decimal > 0
                 assert parse_result.swap_result.amount_out_decimal > 0
+                # Slipstream intentionally delegates legacy Solidly Swap logs to
+                # the Classic codec. Keep the real-receipt cross-parser guard in
+                # addition to the dedicated Slipstream SwapCL assertion below.
+                slipstream_parser = AerodromeSlipstreamReceiptParser(
+                    chain=CHAIN_NAME,
+                    token0_address=token0_addr,
+                    token1_address=token1_addr,
+                )
+                slipstream_result = slipstream_parser.parse_receipt(tx_result.receipt.to_dict())
+                assert slipstream_result.success
+                assert slipstream_result.swap_result is not None
+                assert slipstream_result.swap_result.amount_in == parse_result.swap_result.amount_in
+                assert slipstream_result.swap_result.amount_out == parse_result.swap_result.amount_out
         assert swap_results_parsed >= 1, "Layer 3: must parse at least one Classic swap event"
 
         # Layer 4: bilateral balance deltas.
@@ -735,10 +751,14 @@ class TestAerodromeSwapIntent:
         for tx_result in execution_result.transaction_results:
             if tx_result.receipt is None:
                 continue
-            from almanak.connectors.aerodrome.receipt_parser import AerodromeReceiptParser
+            from almanak.connectors.aerodrome.receipt_parser import AerodromeSlipstreamReceiptParser
 
             token0_addr, token1_addr = sorted([token_in.lower(), token_out.lower()])
-            parser = AerodromeReceiptParser(chain=CHAIN_NAME, token0_address=token0_addr, token1_address=token1_addr)
+            parser = AerodromeSlipstreamReceiptParser(
+                chain=CHAIN_NAME,
+                token0_address=token0_addr,
+                token1_address=token1_addr,
+            )
             parse_result = parser.parse_receipt(tx_result.receipt.to_dict())
             if parse_result.success and parse_result.swap_result:
                 swap_results_parsed += 1

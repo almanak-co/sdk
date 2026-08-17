@@ -780,8 +780,9 @@ class TestMultipleEvents:
                         EVENT_TOPICS["Supply"],
                         SAMPLE_MARKET_ID,
                         pad_address(CALLER_ADDRESS),
+                        pad_address(ON_BEHALF_OF_ADDRESS),
                     ],
-                    "data": "0x" + encode_address(CALLER_ADDRESS) + encode_uint256(assets) + encode_uint256(shares),
+                    "data": "0x" + encode_uint256(assets) + encode_uint256(shares),
                     "address": MORPHO_ADDRESS,
                 },
             ],
@@ -816,11 +817,10 @@ class TestEdgeCases:
                     "topics": [
                         bytes.fromhex(EVENT_TOPICS["Supply"][2:]),  # bytes instead of hex
                         bytes.fromhex(SAMPLE_MARKET_ID[2:]),
+                        bytes.fromhex(pad_address(CALLER_ADDRESS)[2:]),
                         bytes.fromhex(pad_address(ON_BEHALF_OF_ADDRESS)[2:]),
                     ],
-                    "data": bytes.fromhex(
-                        encode_address(CALLER_ADDRESS) + encode_uint256(assets) + encode_uint256(shares)
-                    ),
+                    "data": bytes.fromhex(encode_uint256(assets) + encode_uint256(shares)),
                     "address": bytes.fromhex(MORPHO_ADDRESS[2:]),
                 }
             ],
@@ -857,9 +857,10 @@ class TestEdgeCases:
                     "topics": [
                         EVENT_TOPICS["Supply"],
                         SAMPLE_MARKET_ID,
+                        pad_address(CALLER_ADDRESS),
                         pad_address(ON_BEHALF_OF_ADDRESS),
                     ],
-                    "data": "0x" + encode_address(CALLER_ADDRESS) + encode_uint256(1000) + encode_uint256(1000),
+                    "data": "0x" + encode_uint256(1000) + encode_uint256(1000),
                     "address": MORPHO_ADDRESS,
                 }
             ],

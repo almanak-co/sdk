@@ -422,6 +422,15 @@ class TestExtractLpOpenData:
 
 
 class TestExtractLpOpenDataResult:
+    def test_malformed_known_swap_fails_closed(self) -> None:
+        parser = SushiSwapV3ReceiptParser(chain="arbitrum")
+        malformed = _pool_swap_log(tick=1)
+        malformed["data"] = "0x" + _pad32(1) + _pad32(2)
+        receipt = _receipt([malformed])
+
+        assert parser.parse_receipt(receipt).success is False
+        assert isinstance(parser.extract_swap_amounts_result(receipt), ExtractError)
+
     def test_returns_ok_on_happy_path(self) -> None:
         parser = SushiSwapV3ReceiptParser(chain="arbitrum")
         logs = [
