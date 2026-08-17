@@ -45,6 +45,13 @@ from decimal import Decimal
 from enum import IntEnum
 from typing import TYPE_CHECKING, Any
 
+from almanak.connectors._strategy_base.erc20_abi import (
+    ERC20_APPROVE_SELECTOR as ERC20_APPROVE_SELECTOR,
+)
+from almanak.connectors._strategy_base.erc20_abi import (
+    MAX_UINT256,
+    encode_approve,
+)
 from almanak.framework.data.tokens.decimals import resolve_token_decimals
 from almanak.framework.data.tokens.exceptions import TokenResolutionError
 from almanak.framework.deployment.mode import is_hosted
@@ -86,12 +93,6 @@ MORPHO_LIQUIDATE_SELECTOR = "0xd8eabcb8"  # liquidate(MarketParams,address,uint2
 MORPHO_FLASH_LOAN_SELECTOR = "0xe0232b42"  # flashLoan(address,uint256,bytes)
 MORPHO_SET_AUTHORIZATION_SELECTOR = "0xeecea000"  # setAuthorization(address,bool)
 MORPHO_ACCRUE_INTEREST_SELECTOR = "0x151c1ade"  # accrueInterest(MarketParams)
-
-# ERC20 approve selector
-ERC20_APPROVE_SELECTOR = "0x095ea7b3"
-
-# Max values
-MAX_UINT256 = 2**256 - 1
 
 # Gas estimates for Morpho Blue operations
 DEFAULT_GAS_ESTIMATES: dict[str, int] = {
@@ -1446,8 +1447,7 @@ class MorphoBlueAdapter:
                 decimals = self._get_decimals(token)
                 amount_wei = int(amount * Decimal(10**decimals))
 
-            # Build calldata: approve(address spender, uint256 amount)
-            calldata = ERC20_APPROVE_SELECTOR + self._pad_address(target) + self._pad_uint256(amount_wei)
+            calldata = encode_approve(target, amount_wei)
 
             amount_str = "unlimited" if amount is None else str(amount)
             return TransactionResult(

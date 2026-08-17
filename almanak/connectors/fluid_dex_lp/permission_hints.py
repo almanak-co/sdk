@@ -66,6 +66,7 @@ the wrapper is later re-enabled.
 
 from __future__ import annotations
 
+from almanak.connectors._base.erc20_abi import ERC20_APPROVE_SELECTOR
 from almanak.connectors._fluid_core.addresses import (
     FLUID_DEX_LP_NATIVE_SENTINEL,
     FLUID_SMARTLENDING_MARKETS,
@@ -76,7 +77,7 @@ from almanak.framework.permissions.hints import PermissionHints, StaticPermissio
 
 # ERC-20 ``approve(address,uint256)`` — emitted on each funded token leg
 # (spender = wrapper) by the LP_OPEN compile path before ``deposit``.
-_ERC20_APPROVE_SELECTOR = "0x095ea7b3"
+_ERC20_APPROVE_SELECTOR = ERC20_APPROVE_SELECTOR  # Backward-compatible private alias.
 _ERC20_APPROVE_SIG = "approve(address,uint256)"
 
 # SmartLending wrapper selectors (verified on-chain, smart_lending_sdk.py).

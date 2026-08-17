@@ -11,12 +11,8 @@ chain-specific contract addresses.
 
 from __future__ import annotations
 
-from almanak.connectors._strategy_base.yield_poke_base import (
-    PokeResult,
-    _pad_address,
-    _pad_uint256,
-    _send_tx,
-)
+from almanak.connectors._strategy_base.erc20_abi import pad_address, pad_uint256
+from almanak.connectors._strategy_base.yield_poke_base import PokeResult, _send_tx
 from almanak.connectors.morpho_blue.addresses import MORPHO_BLUE, MORPHO_MARKETS
 
 __all__ = ["poke_morpho_blue"]
@@ -40,11 +36,11 @@ def _accrue_interest_calldata(market: dict) -> str:
     """ABI-encode accrueInterest(MarketParams) for a MORPHO_MARKETS entry."""
     return (
         MORPHO_ACCRUE_SIG
-        + _pad_address(market["loan_token_address"])
-        + _pad_address(market["collateral_token_address"])
-        + _pad_address(market["oracle"])
-        + _pad_address(market["irm"])
-        + _pad_uint256(market["lltv"])
+        + pad_address(market["loan_token_address"])
+        + pad_address(market["collateral_token_address"])
+        + pad_address(market["oracle"])
+        + pad_address(market["irm"])
+        + pad_uint256(market["lltv"])
     )
 
 

@@ -17,7 +17,7 @@ Covers:
 from __future__ import annotations
 
 from decimal import Decimal
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -205,6 +205,10 @@ class TestPadHelpers:
         assert "0x" not in result
         assert result.endswith("abcdef1234567890abcdef1234567890abcdef12")
 
+    def test_pad_address_rejects_malformed_input(self):
+        with pytest.raises(ValueError, match="address must be 20 bytes"):
+            SushiSwapV3Adapter._pad_address("0xabc")
+
     def test_pad_uint256(self):
         result = SushiSwapV3Adapter._pad_uint256(0)
         assert result == "0" * 64
@@ -212,6 +216,11 @@ class TestPadHelpers:
     def test_pad_uint256_large(self):
         result = SushiSwapV3Adapter._pad_uint256(2**256 - 1)
         assert result == "f" * 64
+
+    @pytest.mark.parametrize("value", [-1, 1 << 256])
+    def test_pad_uint256_rejects_out_of_range_values(self, value):
+        with pytest.raises(ValueError, match="uint256 value must be"):
+            SushiSwapV3Adapter._pad_uint256(value)
 
     def test_pad_uint24(self):
         result = SushiSwapV3Adapter._pad_uint24(3000)
@@ -327,7 +336,7 @@ class TestQuoteExactOutput:
 
 class TestBuildApproveTx:
     def test_creates_approve_when_no_allowance(self, adapter):
-        tx = adapter._build_approve_tx(USDC_ARB, "0xabc", 1000)
+        tx = adapter._build_approve_tx(USDC_ARB, "0x" + "ab" * 20, 1000)
         assert tx is not None
         assert tx.tx_type == "approve"
         assert tx.to == USDC_ARB
@@ -335,20 +344,23 @@ class TestBuildApproveTx:
         assert tx.data.startswith("0x095ea7b3")
 
     def test_skips_approve_when_cached_sufficient(self, adapter):
-        adapter.set_allowance(USDC_ARB, "0xabc", 10**30)
-        tx = adapter._build_approve_tx(USDC_ARB, "0xabc", 1000)
+        spender = "0x" + "ab" * 20
+        adapter.set_allowance(USDC_ARB, spender, 10**30)
+        tx = adapter._build_approve_tx(USDC_ARB, spender, 1000)
         assert tx is None
 
     def test_creates_approve_when_cached_insufficient(self, adapter):
-        adapter.set_allowance(USDC_ARB, "0xabc", 100)
-        tx = adapter._build_approve_tx(USDC_ARB, "0xabc", 1000)
+        spender = "0x" + "ab" * 20
+        adapter.set_allowance(USDC_ARB, spender, 100)
+        tx = adapter._build_approve_tx(USDC_ARB, spender, 1000)
         assert tx is not None
 
     def test_clear_allowance_cache(self, adapter):
-        adapter.set_allowance(USDC_ARB, "0xabc", 10**30)
+        spender = "0x" + "ab" * 20
+        adapter.set_allowance(USDC_ARB, spender, 10**30)
         adapter.clear_allowance_cache()
         # Next approve should create a tx
-        tx = adapter._build_approve_tx(USDC_ARB, "0xabc", 1000)
+        tx = adapter._build_approve_tx(USDC_ARB, spender, 1000)
         assert tx is not None
 
 
@@ -457,6 +469,20 @@ class TestSwapExactInput:
         # Only swap (no approve)
         assert len(result.transactions) == 1
         assert result.transactions[0].tx_type == "swap"
+
+    def test_reemits_approve_after_abandoned_and_failed_bundle(self, adapter):
+        first = adapter.swap_exact_input("USDC", "WETH", Decimal("1"))
+        retry = adapter.swap_exact_input("USDC", "WETH", Decimal("1"))
+
+        assert any(tx.tx_type == "approve" for tx in first.transactions)
+        assert any(tx.tx_type == "approve" for tx in retry.transactions)
+
+        with patch.object(adapter, "_build_exact_input_single_tx", side_effect=RuntimeError("build failed")):
+            failed = adapter.swap_exact_input("USDC", "WETH", Decimal("1"))
+        after_failure = adapter.swap_exact_input("USDC", "WETH", Decimal("1"))
+
+        assert failed.success is False
+        assert any(tx.tx_type == "approve" for tx in after_failure.transactions)
 
 
 # -------------------------------------------------------------------------

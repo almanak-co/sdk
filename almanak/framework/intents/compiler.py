@@ -42,6 +42,17 @@ from almanak.connectors._strategy_base.base.compiler import (
 )
 from almanak.connectors._strategy_base.base.swap_adapter import DefaultSwapAdapter
 from almanak.connectors._strategy_base.compiler_registry import get_compiler as get_connector_compiler
+from almanak.connectors._strategy_base.erc20_abi import (
+    ERC20_ALLOWANCE_SELECTOR as ERC20_ALLOWANCE_SELECTOR,
+)
+from almanak.connectors._strategy_base.erc20_abi import (
+    ERC20_APPROVE_SELECTOR as ERC20_APPROVE_SELECTOR,
+)
+from almanak.connectors._strategy_base.erc20_abi import (
+    AllowanceCache,
+    encode_allowance,
+    encode_approve,
+)
 from almanak.connectors._strategy_base.pool_validation_base import PoolValidationReason
 from almanak.core.chains import DEFAULT_CHAIN
 from almanak.core.chains._helpers import is_solana_chain, wrapped_to_native_symbol_map
@@ -244,8 +255,6 @@ from .compiler_constants import (  # noqa: F401
     CHAIN_TOKENS,
     DEFAULT_GAS_ESTIMATES,
     DEFAULT_SWAP_FEE_TIER,
-    ERC20_ALLOWANCE_SELECTOR,
-    ERC20_APPROVE_SELECTOR,
     ERC20_TRANSFER_FROM_SELECTOR,
     ERC20_TRANSFER_SELECTOR,
     LENDING_POOL_ADDRESSES,
@@ -686,8 +695,11 @@ class IntentCompiler:
         self._expand_native_aliases_in_price_oracle()
         self._placeholder_warning_logged = False
 
-        # Allowance cache (token -> spender -> amount)
-        self._allowance_cache: dict[str, dict[str, int]] = {}
+        # ERC-20 allowances are EVM-only. The cache separates confirmed reads
+        # from optimistic approvals emitted into the current action bundle.
+        self._allowance_cache: AllowanceCache | None = (
+            None if is_solana_chain(self.chain) else AllowanceCache(self.wallet_address)
+        )
         self._connector_compiler_cache: dict[str, Any] = {}
         # Log stablecoin price fallbacks once per symbol per compiler instance.
         self._stablecoin_fallback_logged: set[str] = set()
@@ -1131,6 +1143,11 @@ class IntentCompiler:
 
         is_outermost = tracking_depth == 0
         if is_outermost:
+            # Every public compile starts a new action bundle. Planned
+            # allowances from an earlier bundle may already have been consumed
+            # on-chain, so they cannot suppress approvals in this one. Nested
+            # compilation stays within the same bundle and retains the cache.
+            self.clear_planned_allowance_cache()
             peg_fallbacks.clear()
             peg_fallbacks.update(pending_peg_fallbacks)
         self._peg_tracking_depth = tracking_depth + 1
@@ -2616,9 +2633,24 @@ class IntentCompiler:
 
         Returns:
             List of TransactionData for approval (may be empty, 1, or 2 transactions)
+
+        Raises:
+            ValueError: If ERC-20 approvals are unavailable for the active chain family.
         """
+        if self._allowance_cache is None:
+            raise ValueError("ERC-20 approvals are not available for this chain family")
+
+        # Planned approvals belong to this unexecuted bundle and therefore are
+        # not visible to an on-chain allowance query yet. Reuse them before the
+        # fresh read so repeated spends in one bundle do not emit duplicate
+        # approvals. Confirmed cached values deliberately do not take this path:
+        # when a transport is available they must still be checked on-chain.
+        planned_allowance = self._allowance_cache.get_planned(token_address, spender)
+        if planned_allowance is not None and planned_allowance >= amount:
+            logger.debug(f"Sufficient planned allowance exists for {token_address} -> {spender}: {planned_allowance}")
+            return []
+
         token_lower = token_address.lower()
-        spender_lower = spender.lower()
         requires_zero_first = token_lower in APPROVE_ZERO_FIRST_TOKENS
         on_chain_allowance = 0
 
@@ -2628,14 +2660,14 @@ class IntentCompiler:
             on_chain_allowance = self._query_allowance(token_address, spender)
             if on_chain_allowance >= amount:
                 # Already have sufficient on-chain allowance - update cache and skip
-                self._allowance_cache.setdefault(token_lower, {})[spender_lower] = on_chain_allowance
+                self._allowance_cache.record_confirmed(token_address, spender, on_chain_allowance)
                 logger.debug(
                     f"Sufficient on-chain allowance exists for {token_address} -> {spender}: {on_chain_allowance}"
                 )
                 return []
         else:
             # No way to query on-chain - check cache as fallback but log warning
-            cached = self._allowance_cache.get(token_lower, {}).get(spender_lower, 0)
+            cached = self._allowance_cache.get(token_address, spender) or 0
             if cached >= amount:
                 logger.warning(
                     f"Using cached allowance for {token_address} -> {spender} (no RPC available). "
@@ -2643,17 +2675,11 @@ class IntentCompiler:
                 )
                 return []
 
-        # Build approve calldata helper
-        def build_approve_calldata(approve_amount: int) -> str:
-            spender_padded = spender_lower.replace("0x", "").zfill(64)
-            amount_padded = hex(approve_amount)[2:].zfill(64)
-            return ERC20_APPROVE_SELECTOR + spender_padded + amount_padded
-
         def _make_approve_tx(value: int, *, is_reset: bool) -> TransactionData:
             return TransactionData(
                 to=token_address,
                 value=0,
-                data=build_approve_calldata(value),
+                data=encode_approve(spender, value),
                 gas_estimate=get_gas_estimate(self.chain, "approve"),
                 description=(
                     f"Reset approval to 0 for {spender[:10]}..."
@@ -2702,7 +2728,7 @@ class IntentCompiler:
         # mislead a later spend into skipping a genuinely-needed approve. Mirrors
         # CurveAdapter._build_approve_txs.
         if transactions:
-            self._allowance_cache.setdefault(token_lower, {})[spender_lower] = approval_amount
+            self._allowance_cache.record_planned(token_address, spender, approval_amount)
 
         return transactions
 
@@ -2745,10 +2771,7 @@ class IntentCompiler:
                 self._web3 = Web3(Web3.HTTPProvider(self.rpc_url))
 
             assert self._web3 is not None
-            # Build allowance call: allowance(owner, spender)
-            owner_padded = self.wallet_address.lower().replace("0x", "").zfill(64)
-            spender_padded = spender.lower().replace("0x", "").zfill(64)
-            calldata = ERC20_ALLOWANCE_SELECTOR + owner_padded + spender_padded
+            calldata = encode_allowance(self.wallet_address, spender)
 
             raw_result = self._web3.eth.call(
                 {
@@ -3004,13 +3027,22 @@ class IntentCompiler:
             spender: Spender address
             amount: Allowance amount
         """
-        if token_address not in self._allowance_cache:
-            self._allowance_cache[token_address] = {}
-        self._allowance_cache[token_address][spender] = amount
+        if self._allowance_cache is None:
+            raise ValueError("ERC-20 allowances are not available for this chain family")
+        self._allowance_cache.record_confirmed(token_address, spender, amount)
 
     def clear_allowance_cache(self) -> None:
         """Clear the allowance cache."""
-        self._allowance_cache.clear()
+        allowance_cache = getattr(self, "_allowance_cache", None)
+        if allowance_cache is not None:
+            allowance_cache.clear()
+
+    def clear_planned_allowance_cache(self) -> None:
+        """Clear approvals planned for the last execution attempt."""
+        allowance_cache = getattr(self, "_allowance_cache", None)
+        clear_planned = getattr(allowance_cache, "clear_planned", None)
+        if callable(clear_planned):
+            clear_planned()
 
     def _query_position_liquidity(self, position_manager: str, token_id: int) -> int | None:
         """Delegates to CompilerQueries.query_position_liquidity (see compiler_queries.py)."""

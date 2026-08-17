@@ -38,12 +38,13 @@ import logging
 from typing import Any
 
 from almanak.connectors._strategy_base.base import HexDecoder, normalize_wallet_address
+from almanak.connectors._strategy_base.erc20_abi import ERC20_TRANSFER_TOPIC
 from almanak.core.addresses import normalize_address
 
 logger = logging.getLogger(__name__)
 
 # keccak256("Transfer(address,address,uint256)")
-TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+TRANSFER_TOPIC = ERC20_TRANSFER_TOPIC
 
 # Mint / burn counterparty — a Transfer to or from the zero address is an LP-token
 # mint or burn, never a pool-coin movement.

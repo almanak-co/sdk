@@ -9131,6 +9131,12 @@ class StrategyRunner:
             )
 
             if execution_result.success:
+                # Planned allowances describe only the bundle that just crossed
+                # the execution boundary. Keep confirmed reads, but never let an
+                # optimistic plan suppress an approval in a later bundle.
+                clear_planned = getattr(compiler, "clear_planned_allowance_cache", None)
+                if callable(clear_planned):
+                    clear_planned()
                 logger.info(
                     f"Execution successful for {deployment_id}: "
                     f"gas_used={execution_result.total_gas_used}, "
@@ -9147,9 +9153,15 @@ class StrategyRunner:
 
         except Exception as e:
             logger.error(f"Execution error: {e}", exc_info=True)
-            # On timeout exceptions, approvals likely succeeded -- keep cache.
+            # A timeout may have landed approvals, so retain confirmed reads.
+            # Planned values are not chain evidence and must not survive the
+            # execution boundary.
             is_timeout = "timeout" in str(e).lower()
-            if not is_timeout:
+            if is_timeout:
+                clear_planned = getattr(compiler, "clear_planned_allowance_cache", None)
+                if callable(clear_planned):
+                    clear_planned()
+            else:
                 compiler.clear_allowance_cache()
             # Set failed receipt to trigger sadflow
             state_machine.set_receipt(
@@ -9164,12 +9176,15 @@ class StrategyRunner:
     def _single_chain_reset_caches_after_failure(
         self, compiler: Any, execution_result: ExecutionResult, *, reconciliation_required: bool
     ) -> None:
-        """Refresh execution caches unless a plain timeout may have landed approvals."""
+        """Refresh allowance state after an execution failure."""
         is_timeout = bool(
             not reconciliation_required and execution_result.error and "timeout" in execution_result.error.lower()
         )
         if is_timeout:
-            logger.info("Timeout error -- preserving allowance cache for retry")
+            clear_planned = getattr(compiler, "clear_planned_allowance_cache", None)
+            if callable(clear_planned):
+                clear_planned()
+            logger.info("Timeout error -- preserving confirmed allowances and clearing planned values")
         else:
             compiler.clear_allowance_cache()
 

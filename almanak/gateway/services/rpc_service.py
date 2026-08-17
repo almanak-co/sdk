@@ -23,6 +23,7 @@ import aiohttp
 import grpc
 from eth_utils import keccak
 
+from almanak.connectors._base.erc20_abi import encode_allowance, encode_balance_of
 from almanak.core.chains._helpers import rpc_rate_limit_map
 from almanak.core.retry import RetryPolicy
 from almanak.core.rpc_network import Network
@@ -1271,11 +1272,7 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
             context.set_details(f"Chain '{chain}' is not configured")
             return gateway_pb2.AllowanceResponse(success=False, error=f"Chain '{chain}' is not configured")
 
-        # Build eth_call params for allowance(owner, spender)
-        # ERC-20 allowance selector: 0xdd62ed3e
-        owner_padded = owner_address.lower().replace("0x", "").zfill(64)
-        spender_padded = spender_address.lower().replace("0x", "").zfill(64)
-        calldata = "0xdd62ed3e" + owner_padded + spender_padded
+        calldata = encode_allowance(owner_address, spender_address)
 
         params = [
             {"to": token_address, "data": calldata},
@@ -1378,10 +1375,7 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
             context.set_details(f"Chain '{chain}' is not configured")
             return gateway_pb2.BalanceQueryResponse(success=False, error=f"Chain '{chain}' is not configured")
 
-        # Build eth_call params for balanceOf(address)
-        # ERC-20 balanceOf selector: 0x70a08231
-        wallet_padded = wallet_address.lower().replace("0x", "").zfill(64)
-        calldata = "0x70a08231" + wallet_padded
+        calldata = encode_balance_of(wallet_address)
 
         params = [
             {"to": token_address, "data": calldata},

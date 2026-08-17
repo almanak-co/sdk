@@ -285,6 +285,28 @@ class TestSwap:
         assert result.transactions[-1].tx_type == "swap"
         assert result.transactions[:-1] and all(t.tx_type == "approve" for t in result.transactions[:-1])
 
+    def test_reemits_approve_after_abandoned_and_failed_bundle(self, adapter: CurveAdapter) -> None:
+        pool_address = CURVE_TEST_POOLS["ethereum"]["3pool"]["address"]
+        swap_kwargs = {
+            "pool_address": pool_address,
+            "token_in": "USDC",
+            "token_out": "DAI",
+            "amount_in": Decimal("1"),
+        }
+
+        first = adapter.swap(**swap_kwargs)
+        retry = adapter.swap(**swap_kwargs)
+
+        assert any(tx.tx_type == "approve" for tx in first.transactions)
+        assert any(tx.tx_type == "approve" for tx in retry.transactions)
+
+        with patch.object(adapter, "_build_exchange_tx", side_effect=RuntimeError("build failed")):
+            failed = adapter.swap(**swap_kwargs)
+        after_failure = adapter.swap(**swap_kwargs)
+
+        assert failed.success is False
+        assert any(tx.tx_type == "approve" for tx in after_failure.transactions)
+
     def test_swap_skips_approve_when_cached(self, adapter: CurveAdapter) -> None:
         """Test swap skips approve when allowance is cached."""
         pool_address = CURVE_TEST_POOLS["ethereum"]["3pool"]["address"]

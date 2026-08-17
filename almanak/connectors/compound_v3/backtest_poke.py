@@ -19,11 +19,8 @@ Addresses are Arbitrum-specific (the only chain declared on the connector's
 
 from __future__ import annotations
 
-from almanak.connectors._strategy_base.yield_poke_base import (
-    PokeResult,
-    _pad_address,
-    _send_tx,
-)
+from almanak.connectors._strategy_base.erc20_abi import pad_address
+from almanak.connectors._strategy_base.yield_poke_base import PokeResult, _send_tx
 from almanak.connectors.compound_v3.addresses import COMPOUND_V3_COMET_ADDRESSES
 
 __all__ = ["poke_compound_v3"]
@@ -43,7 +40,7 @@ async def poke_compound_v3(rpc_url: str, wallet_address: str) -> PokeResult:
     failures still accrue the remaining Comets and report which markets failed.
     """
     try:
-        data = COMPOUND_ACCRUE_SIG + _pad_address(wallet_address)
+        data = COMPOUND_ACCRUE_SIG + pad_address(wallet_address)
     except Exception as e:
         return PokeResult(protocol="compound_v3", success=False, error=str(e))
 

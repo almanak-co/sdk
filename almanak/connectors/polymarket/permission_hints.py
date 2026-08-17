@@ -12,6 +12,7 @@ return ActionBundles with empty `transactions=[]` (off-chain). We declare
 the on-chain entry points statically so the manifest matches reality.
 """
 
+from almanak.connectors._base.erc20_abi import ERC20_APPROVE_SELECTOR
 from almanak.connectors.polymarket.models import (
     COLLATERAL_OFFRAMP,
     COLLATERAL_ONRAMP,
@@ -26,7 +27,6 @@ from almanak.connectors.polymarket.models import (
 from almanak.framework.permissions.hints import PermissionHints, StaticPermissionEntry
 
 # Selectors — keccak256(signature)[:4]
-_APPROVE = "0x095ea7b3"  # approve(address,uint256)
 _SET_APPROVAL_FOR_ALL = "0xa22cb465"  # setApprovalForAll(address,bool)
 _WRAP = "0x62355638"  # wrap(address,address,uint256)
 _UNWRAP = "0x8cc7104f"  # unwrap(address,address,uint256)
@@ -40,18 +40,18 @@ _POLYGON_STATIC_PERMISSIONS = [
     StaticPermissionEntry(
         target=USDCE_POLYGON,
         label="USDC.e (bridged) — Onramp source",
-        selectors={_APPROVE: "approve(address,uint256)"},
+        selectors={ERC20_APPROVE_SELECTOR: "approve(address,uint256)"},
     ),
     StaticPermissionEntry(
         target=USDC_NATIVE_POLYGON,
         label="USDC native (Circle) — future Onramp source",
-        selectors={_APPROVE: "approve(address,uint256)"},
+        selectors={ERC20_APPROVE_SELECTOR: "approve(address,uint256)"},
     ),
     # pUSD — approve to both V2 exchanges
     StaticPermissionEntry(
         target=PUSD,
         label="pUSD (V2 spendable collateral)",
-        selectors={_APPROVE: "approve(address,uint256)"},
+        selectors={ERC20_APPROVE_SELECTOR: "approve(address,uint256)"},
     ),
     # CollateralOnramp.wrap — wrap source asset → pUSD
     StaticPermissionEntry(
@@ -103,7 +103,7 @@ _POLYGON_STATIC_PERMISSIONS = [
 PERMISSION_HINTS = PermissionHints(
     static_permissions={"polygon": _POLYGON_STATIC_PERMISSIONS},
     selector_labels={
-        _APPROVE: "approve(address,uint256)",
+        ERC20_APPROVE_SELECTOR: "approve(address,uint256)",
         _SET_APPROVAL_FOR_ALL: "setApprovalForAll(address,bool)",
         _WRAP: "wrap(address,address,uint256)",
         _UNWRAP: "unwrap(address,address,uint256)",

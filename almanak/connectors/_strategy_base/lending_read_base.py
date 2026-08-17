@@ -61,6 +61,8 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
+from almanak.connectors._strategy_base.erc20_abi import ERC20_BALANCE_OF_SELECTOR, pad_address
+
 logger = logging.getLogger(__name__)
 
 __all__ = [
@@ -145,12 +147,6 @@ class LendingReadSpec:
 # ---------------------------------------------------------------------------
 # Shared ABI helpers (Aave V2 / V3 fork family)
 # ---------------------------------------------------------------------------
-
-
-def pad_address(address: str) -> str:
-    """Left-pad an address to 32 bytes (64 hex chars), no ``0x`` prefix."""
-    addr = address.lower().replace("0x", "")
-    return addr.zfill(64)
 
 
 def decode_uint_hex(hex_data: str, word_index: int) -> int:
@@ -1007,7 +1003,7 @@ _COMPOUND_V3_USER_COLLATERAL_SELECTOR = "0x2b92a07d"
 # borrowBalanceOf(address user) → uint256
 _COMPOUND_V3_BORROW_BALANCE_SELECTOR = "0x374c49b4"
 # balanceOf(address user) → uint256 (supplied base-asset balance)
-_COMPOUND_V3_BALANCE_OF_SELECTOR = "0x70a08231"
+_COMPOUND_V3_BALANCE_OF_SELECTOR = ERC20_BALANCE_OF_SELECTOR
 # No-debt / base-asset-supply HF sentinel, also the serialisation cap.
 _COMPOUND_HF_SENTINEL = Decimal("999999")
 

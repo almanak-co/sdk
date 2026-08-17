@@ -17,6 +17,8 @@ from almanak.framework.data.position_health import (
     get_health_factor,
 )
 
+TEST_WALLET = "0x1111111111111111111111111111111111111111"
+
 # =========================================================================
 # PositionHealth Tests
 # =========================================================================
@@ -478,7 +480,7 @@ class TestAaveHealthFactorProvider:
             health_factor="1.75",
         )
         provider = PositionHealthProvider(chain="ethereum", gateway_client=gw)
-        health = provider.get_health("aave_v3", "ethereum_pool", "0xabc")
+        health = provider.get_health("aave_v3", "ethereum_pool", TEST_WALLET)
 
         assert health.health_factor == Decimal("1.75")
         assert health.protocol == "aave_v3"
@@ -495,7 +497,7 @@ class TestAaveHealthFactorProvider:
         hf = get_health_factor(
             chain="ethereum",
             protocol="aave_v3",
-            wallet="0xabc",
+            wallet=TEST_WALLET,
             market="ethereum_pool",
             gateway_client=gw,
         )
@@ -512,14 +514,14 @@ class TestAaveHealthFactorProvider:
         )
         provider = PositionHealthProvider(chain="unknown_chain_x", gateway_client=gw)
         with pytest.raises(ValueError, match="Failed to read aave_v3 account state"):
-            provider.get_health("aave_v3", "m", "0xabc")
+            provider.get_health("aave_v3", "m", TEST_WALLET)
 
     def test_aave_missing_gateway_raises(self):
         # VIB-4851: the rpc_url-only Web3(HTTPProvider) path (a gateway-boundary
         # violation) is gone. A missing gateway client must fail closed.
         provider = PositionHealthProvider(chain="ethereum", gateway_client=None)
         with pytest.raises(ValueError, match="GatewayClient is required"):
-            provider.get_health("aave_v3", "m", "0xabc")
+            provider.get_health("aave_v3", "m", TEST_WALLET)
 
     def test_aave_hf_supported_on_bsc(self):
         """Regression (ALM-2794): bsc health used to raise "not configured".
@@ -539,7 +541,7 @@ class TestAaveHealthFactorProvider:
             health_factor="1.6",
         )
         provider = PositionHealthProvider(chain="bsc", gateway_client=gw)
-        health = provider.get_health("aave_v3", "bsc_pool", "0xabc")
+        health = provider.get_health("aave_v3", "bsc_pool", TEST_WALLET)
 
         assert health.health_factor == Decimal("1.6")
         assert health.protocol == "aave_v3"
@@ -560,7 +562,7 @@ class TestAaveHealthFactorProvider:
         )
         provider = PositionHealthProvider(chain="bnb", gateway_client=gw)
         assert provider._chain == "bsc"  # canonicalized at construction
-        health = provider.get_health("aave_v3", "bsc_pool", "0xabc")
+        health = provider.get_health("aave_v3", "bsc_pool", TEST_WALLET)
 
         assert health.protocol == "aave_v3"
 
@@ -634,7 +636,7 @@ class TestMorphoHealthFactorProvider:
             patch(self._MARKET_PARAMS_TARGET, return_value=same_asset_params),
         ):
             provider = PositionHealthProvider(chain="ethereum", gateway_client=MagicMock())
-            health = provider.get_health("morpho_blue", "0xmarket", "0xabc")
+            health = provider.get_health("morpho_blue", "0xmarket", TEST_WALLET)
 
         assert health.health_factor == Decimal("1.83")
         assert health.protocol == "morpho_blue"
@@ -655,7 +657,7 @@ class TestMorphoHealthFactorProvider:
             provider = PositionHealthProvider(chain="ethereum", gateway_client=MagicMock())
             # No price override -> must raise to avoid silent miscalculation.
             with pytest.raises(ValueError, match="Price overrides required"):
-                provider.get_health("morpho_blue", "0xmarket", "0xabc")
+                provider.get_health("morpho_blue", "0xmarket", TEST_WALLET)
 
     def test_morpho_dispatch_via_get_health_factor(self):
         from almanak.connectors._strategy_base.lending_read_base import LendingAccountState
@@ -681,7 +683,7 @@ class TestMorphoHealthFactorProvider:
             hf = get_health_factor(
                 chain="ethereum",
                 protocol="morpho",  # alias
-                wallet="0xabc",
+                wallet=TEST_WALLET,
                 market="0xmarket",
                 gateway_client=MagicMock(),
             )
@@ -797,7 +799,7 @@ class TestMorphoHealthFactorProvider:
             patch(self._MARKET_PARAMS_TARGET, return_value=single_leg_params),
         ):
             provider = PositionHealthProvider(chain="avalanche", gateway_client=MagicMock())
-            health = provider.get_health("euler_v2", "usdc", "0xabc")
+            health = provider.get_health("euler_v2", "usdc", TEST_WALLET)
 
         assert health.collateral_value_usd == Decimal("500")
         assert health.debt_value_usd == Decimal("0")  # measured zero, not unmeasured
@@ -896,7 +898,7 @@ class TestPTPositionHealthSeam:
             pt = provider.get_pt_position_health(
                 morpho_market_id="0xmarket",
                 pendle_market_address="0xpendle",
-                user_address="0xabc",
+                user_address=TEST_WALLET,
             )
 
         # Base (seam-derived) health fields preserved.
@@ -933,7 +935,7 @@ class TestPTPositionHealthSeam:
                 morpho_market_id="0xmarket",
                 principal_token_market_address="0xptmarket",
                 principal_token_protocol="pendle",
-                user_address="0xabc",
+                user_address=TEST_WALLET,
             )
 
         default_reader.assert_not_called()
@@ -965,7 +967,7 @@ class TestPTPositionHealthSeam:
             pt = provider.get_pt_position_health(
                 morpho_market_id="0xmarket",
                 pendle_market_address="0xpendle",
-                user_address="0xabc",
+                user_address=TEST_WALLET,
             )
 
         assert pt.days_to_maturity == 0
@@ -994,7 +996,7 @@ class TestPTPositionHealthSeam:
             pt = provider.get_pt_position_health(
                 morpho_market_id="0xmarket",
                 pendle_market_address="0xpendle",
-                user_address="0xabc",
+                user_address=TEST_WALLET,
             )
 
         # Base health preserved; PT metrics fall back to their defaults.
@@ -1019,7 +1021,7 @@ class TestPTPositionHealthSeam:
                     morpho_market_id="0xmarket",
                     principal_token_market_address="0xptmarket",
                     principal_token_protocol="DOES_NOT_EXIST",
-                    user_address="0xabc",
+                    user_address=TEST_WALLET,
                 )
 
         seam.assert_not_called()
@@ -1030,7 +1032,7 @@ class TestPTPositionHealthSeam:
         with pytest.raises(ValueError, match="principal_token_market_address is required"):
             provider.get_pt_position_health(
                 morpho_market_id="0xmarket",
-                user_address="0xabc",
+                user_address=TEST_WALLET,
             )
 
     def test_pt_health_requires_user_address(self):
@@ -1139,7 +1141,7 @@ class TestCompoundHealthFactorProvider:
             weth_balance_raw=int(Decimal("1") * Decimal("1e18")),
         )
         provider = PositionHealthProvider(chain="ethereum", gateway_client=gw)
-        health = provider.get_health("compound_v3", "usdc", "0xabc")
+        health = provider.get_health("compound_v3", "usdc", TEST_WALLET)
 
         assert health.protocol == "compound_v3"
         # HF = liquidation_threshold / debt = (1 * 2000 * 0.895) / 1000 = 1.79
@@ -1151,7 +1153,7 @@ class TestCompoundHealthFactorProvider:
         # Borrow 0, no collateral balances (all skipped) -> HF Infinity, collateral 0.
         gw = self._make_gateway(borrow_raw=0, weth_balance_raw=0)
         provider = PositionHealthProvider(chain="ethereum", gateway_client=gw)
-        health = provider.get_health("compound_v3", "usdc", "0xabc")
+        health = provider.get_health("compound_v3", "usdc", TEST_WALLET)
 
         assert health.health_factor == Decimal("Infinity")
         assert health.collateral_value_usd == Decimal("0")
@@ -1162,13 +1164,13 @@ class TestCompoundHealthFactorProvider:
         gw = self._make_gateway(borrow_raw=0)
         provider = PositionHealthProvider(chain="ethereum", gateway_client=gw)
         with pytest.raises(ValueError, match="not found"):
-            provider.get_health("compound_v3", "nonexistent_market_xyz", "0xabc")
+            provider.get_health("compound_v3", "nonexistent_market_xyz", TEST_WALLET)
 
     def test_compound_unknown_chain_raises(self):
         gw = self._make_gateway(borrow_raw=0)
         provider = PositionHealthProvider(chain="chain_that_does_not_exist", gateway_client=gw)
         with pytest.raises(ValueError, match="not configured"):
-            provider.get_health("compound_v3", "usdc", "0xabc")
+            provider.get_health("compound_v3", "usdc", TEST_WALLET)
 
     def test_compound_weth_base_requires_price_oracle(self):
         """WETH/AERO (non-stable) Compound base markets MUST fail closed when no
@@ -1179,7 +1181,7 @@ class TestCompoundHealthFactorProvider:
         gw = self._make_gateway(borrow_raw=10 * 10**18, weth_balance_raw=0)
         provider = PositionHealthProvider(chain="ethereum", gateway_client=gw)
         with pytest.raises(ValueError, match=r"not a recognized USD stablecoin"):
-            provider.get_health("compound_v3", "weth", "0xabc")
+            provider.get_health("compound_v3", "weth", TEST_WALLET)
 
     def test_compound_async_price_oracle_path(self):
         """Compound V3 supports the async PriceOracle Protocol for non-stable bases."""
@@ -1197,7 +1199,7 @@ class TestCompoundHealthFactorProvider:
             gateway_client=gw,
             price_oracle=_AsyncOracle(),
         )
-        health = provider.get_health("compound_v3", "weth", "0xabc")
+        health = provider.get_health("compound_v3", "weth", TEST_WALLET)
         # 1 WETH debt * $2500 = $2500 debt value; no collateral -> HF=0.
         assert health.debt_value_usd == Decimal("2500")
 
@@ -1213,7 +1215,7 @@ class TestCompoundHealthFactorProvider:
             gateway_client=gw,
             price_oracle=_oracle,
         )
-        health = provider.get_health("compound_v3", "weth", "0xabc")
+        health = provider.get_health("compound_v3", "weth", TEST_WALLET)
         # 2 WETH debt * $1800 = $3600 debt value.
         assert health.debt_value_usd == Decimal("3600")
 
@@ -1224,11 +1226,11 @@ class TestUnsupportedProtocol:
     def test_unsupported_protocol(self):
         provider = PositionHealthProvider(rpc_url="http://x", chain="ethereum")
         with pytest.raises(ValueError, match="Unsupported protocol"):
-            provider.get_health("unknown_proto", "m", "0xabc")
+            provider.get_health("unknown_proto", "m", TEST_WALLET)
 
     def test_unsupported_via_dispatch(self):
         with pytest.raises(ValueError, match="Unsupported protocol"):
-            get_health_factor(chain="ethereum", protocol="unknown_proto", wallet="0xabc", market="m")
+            get_health_factor(chain="ethereum", protocol="unknown_proto", wallet=TEST_WALLET, market="m")
 
 
 class TestProviderAdapter:
@@ -1243,9 +1245,9 @@ class TestProviderAdapter:
             lltv=Decimal("0.8"),
         )
         adapter = _PositionHealthProviderAdapter(inner, "aave_v3")
-        hf = adapter.get_health_factor("0xabc", "m")
+        hf = adapter.get_health_factor(TEST_WALLET, "m")
         assert hf == Decimal("2.5")
-        inner.get_health.assert_called_once_with(protocol="aave_v3", market_id="m", user_address="0xabc")
+        inner.get_health.assert_called_once_with(protocol="aave_v3", market_id="m", user_address=TEST_WALLET)
 
 
 class TestVIB4851ReviewFixes:
@@ -1273,7 +1275,7 @@ class TestVIB4851ReviewFixes:
         crafted = self._aave_state(debt=Decimal("5000"), hf=Decimal("1.6"))
         with patch(self._SEAM_TARGET, return_value=crafted) as mock_seam:
             provider = PositionHealthProvider(chain="ethereum", gateway_client=MagicMock())
-            health = provider.get_health("spark", "spark", "0xabc")
+            health = provider.get_health("spark", "spark", TEST_WALLET)
         assert health.protocol == "spark"
         assert health.health_factor == Decimal("1.6")
         # Spark is Aave-family: lltv derived from bps (8500 -> 0.85), not state.lltv.
@@ -1287,7 +1289,7 @@ class TestVIB4851ReviewFixes:
         crafted = self._aave_state(debt=Decimal("0.01"), hf=Decimal("999999"))
         with patch(self._SEAM_TARGET, return_value=crafted):
             provider = PositionHealthProvider(chain="ethereum", gateway_client=MagicMock())
-            health = provider.get_health("aave_v3", "aave_v3", "0xabc")
+            health = provider.get_health("aave_v3", "aave_v3", TEST_WALLET)
         assert health.health_factor == Decimal("999999")
         assert health.health_factor.is_finite()
         assert health.debt_value_usd == Decimal("0.01")
@@ -1297,7 +1299,7 @@ class TestVIB4851ReviewFixes:
         crafted = self._aave_state(debt=Decimal("0"), hf=Decimal("999999"))
         with patch(self._SEAM_TARGET, return_value=crafted):
             provider = PositionHealthProvider(chain="ethereum", gateway_client=MagicMock())
-            health = provider.get_health("aave_v3", "aave_v3", "0xabc")
+            health = provider.get_health("aave_v3", "aave_v3", TEST_WALLET)
         assert health.health_factor == Decimal("Infinity")
 
     def test_same_asset_lone_debt_override_not_dropped(self):
@@ -1323,7 +1325,7 @@ class TestVIB4851ReviewFixes:
             patch(self._MARKET_PARAMS_TARGET, return_value=same_asset_params),
         ):
             provider = PositionHealthProvider(chain="ethereum", gateway_client=MagicMock())
-            provider.get_health("morpho_blue", "0xmarket", "0xabc", debt_price_usd=Decimal("2000"))
+            provider.get_health("morpho_blue", "0xmarket", TEST_WALLET, debt_price_usd=Decimal("2000"))
         # The lone override survives as the single consistent key (not reset to 1).
         assert mock_seam.call_args.kwargs["price_oracle"] == {"WETH": Decimal("2000")}
 
@@ -1333,7 +1335,7 @@ class TestVIB4851ReviewFixes:
         with patch(self._SEAM_TARGET, return_value=None):
             provider = PositionHealthProvider(chain="ethereum", gateway_client=MagicMock())
             with pytest.raises(ValueError, match="Failed to read"):
-                provider.get_health("aave_v3", None, "0xabc")
+                provider.get_health("aave_v3", None, TEST_WALLET)
 
 
 class TestMarketScopedHealthSeam:
@@ -1380,7 +1382,7 @@ class TestMarketScopedHealthSeam:
             health = provider.get_health(
                 "silo_v2",
                 "wsteth/usdc",
-                "0xabc",
+                TEST_WALLET,
                 collateral_price_usd=Decimal("2500"),
                 debt_price_usd=Decimal("1"),
             )
@@ -1397,7 +1399,7 @@ class TestMarketScopedHealthSeam:
         with patch(self._MARKET_PARAMS_TARGET, return_value=cross_asset_params):
             provider = PositionHealthProvider(chain="arbitrum", gateway_client=MagicMock())
             with pytest.raises(ValueError, match="Price overrides required"):
-                provider.get_health("silo_v2", "wsteth/usdc", "0xabc")
+                provider.get_health("silo_v2", "wsteth/usdc", TEST_WALLET)
 
     def test_euler_same_asset_defaults_to_one(self):
         """Euler same-asset markets need no overrides (the price cancels in HF)."""
@@ -1407,7 +1409,7 @@ class TestMarketScopedHealthSeam:
             patch(self._MARKET_PARAMS_TARGET, return_value=same_asset_params),
         ):
             provider = PositionHealthProvider(chain="ethereum", gateway_client=MagicMock())
-            health = provider.get_health("euler_v2", "weth", "0xabc")
+            health = provider.get_health("euler_v2", "weth", TEST_WALLET)
 
         assert health.health_factor == Decimal("1.83")
         assert health.protocol == "euler_v2"
@@ -1430,7 +1432,7 @@ class TestMarketScopedHealthSeam:
             patch(self._MARKET_PARAMS_TARGET, return_value=benqi_params),
         ):
             provider = PositionHealthProvider(chain="avalanche", gateway_client=MagicMock())
-            health = provider.get_health("benqi", "savax/avax", "0xabc")
+            health = provider.get_health("benqi", "savax/avax", TEST_WALLET)
 
         assert health.health_factor == Decimal("2.10")
         assert health.protocol == "benqi"
@@ -1442,14 +1444,14 @@ class TestMarketScopedHealthSeam:
         """A per-market protocol with no market id fails closed before reading."""
         provider = PositionHealthProvider(chain="arbitrum", gateway_client=MagicMock())
         with pytest.raises(ValueError, match="market_id is required"):
-            provider.get_health("silo_v2", "", "0xabc")
+            provider.get_health("silo_v2", "", TEST_WALLET)
 
     def test_market_scoped_off_catalogue_market_fails_closed(self):
         """An off-catalogue market raises 'not found' (never reads unpriced legs)."""
         with patch(self._MARKET_PARAMS_TARGET, return_value=None):
             provider = PositionHealthProvider(chain="ethereum", gateway_client=MagicMock())
             with pytest.raises(ValueError, match="not found"):
-                provider.get_health("euler_v2", "0xnope", "0xabc")
+                provider.get_health("euler_v2", "0xnope", TEST_WALLET)
 
     def test_compound_still_routes_to_market_health(self):
         """Dispatch order: a market-health-capable protocol never takes the
@@ -1458,7 +1460,7 @@ class TestMarketScopedHealthSeam:
         # The market-health path demands a gateway client up front; reaching this
         # error (rather than the account-state read) proves the routing.
         with pytest.raises(ValueError, match="GatewayClient is required to read compound_v3 health"):
-            provider.get_health("compound_v3", "usdc", "0xabc")
+            provider.get_health("compound_v3", "usdc", TEST_WALLET)
 
 
 class TestVib5911WholeAccountUsdPrices:
@@ -1526,7 +1528,7 @@ class TestVib5911WholeAccountUsdPrices:
             patch(self._SEAM_TARGET, return_value=crafted) as mock_seam,
             patch(self._MARKET_PARAMS_TARGET, return_value=self._BENQI_PARAMS),
         ):
-            health = provider.get_health("benqi", "benqi", "0xabc")
+            health = provider.get_health("benqi", "benqi", TEST_WALLET)
         assert health.health_factor == Decimal("2.4")
         assert health.price_source == PRICE_SOURCE_USD_ORACLE
         assert mock_seam.call_args.kwargs["price_oracle"] == {
@@ -1694,7 +1696,7 @@ class TestMorphoOracleDefaultPricing:
         )
         with patch(self._MARKET_PARAMS_TARGET, return_value=self._market_params()):
             provider = PositionHealthProvider(chain="ethereum", gateway_client=gateway)
-            health = provider.get_health("morpho_blue", self._MARKET_ID, "0xabc")
+            health = provider.get_health("morpho_blue", self._MARKET_ID, TEST_WALLET)
 
         assert health.health_factor == Decimal("1.72")
         assert health.collateral_value_usd == Decimal("6000")
@@ -1719,7 +1721,7 @@ class TestMorphoOracleDefaultPricing:
             health = provider.get_health(
                 "morpho_blue",
                 self._MARKET_ID,
-                "0xabc",
+                TEST_WALLET,
                 collateral_price_usd=Decimal("2000"),
                 debt_price_usd=Decimal("1"),
             )
@@ -1748,7 +1750,7 @@ class TestMorphoOracleDefaultPricing:
                 gateway_client=gateway,
                 price_oracle=lambda symbol: usd_quotes[symbol],
             )
-            health = provider.get_health("morpho_blue", self._MARKET_ID, "0xabc")
+            health = provider.get_health("morpho_blue", self._MARKET_ID, TEST_WALLET)
 
         # HF = (3 * 2000 * 0.86) / 3000 = 1.72 exactly -- USD-oracle priced.
         assert health.health_factor == Decimal("1.72")
@@ -1768,7 +1770,7 @@ class TestMorphoOracleDefaultPricing:
             # USDC resolves via the stablecoin table, but wstETH has no USD
             # source -> the default chain must fail closed.
             with pytest.raises(ValueError, match="Price overrides required"):
-                provider.get_health("morpho_blue", self._MARKET_ID, "0xabc")
+                provider.get_health("morpho_blue", self._MARKET_ID, TEST_WALLET)
 
     def test_partial_override_still_fails_closed(self):
         """Exactly one override is ambiguous -> raise, never mix provenance."""
@@ -1782,4 +1784,4 @@ class TestMorphoOracleDefaultPricing:
         with patch(self._MARKET_PARAMS_TARGET, return_value=self._market_params()):
             provider = PositionHealthProvider(chain="ethereum", gateway_client=gateway)
             with pytest.raises(ValueError, match="Price overrides required"):
-                provider.get_health("morpho_blue", self._MARKET_ID, "0xabc", collateral_price_usd=Decimal("3000"))
+                provider.get_health("morpho_blue", self._MARKET_ID, TEST_WALLET, collateral_price_usd=Decimal("3000"))

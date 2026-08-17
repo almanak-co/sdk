@@ -22,8 +22,6 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "PokeFunction",
     "PokeResult",
-    "_pad_address",
-    "_pad_uint256",
     "_send_tx",
     "_verify_receipt_status",
 ]
@@ -40,21 +38,6 @@ class PokeResult:
 
 
 PokeFunction = Callable[[str, str], Coroutine[Any, Any, PokeResult]]
-
-
-def _pad_address(addr: str) -> str:
-    """Left-pad an address to 32 bytes for ABI encoding."""
-    hex_part = addr[2:] if addr.startswith("0x") else None
-    if hex_part is None or len(hex_part) != 40 or any(c not in "0123456789abcdefABCDEF" for c in hex_part):
-        raise ValueError(f"Address must be a 0x-prefixed 40-hex-char string, got {addr!r}")
-    return hex_part.lower().zfill(64)
-
-
-def _pad_uint256(value: int) -> str:
-    """Encode a uint256 as 32-byte hex."""
-    if not isinstance(value, int) or value < 0 or value >= 2**256:
-        raise ValueError(f"uint256 must be a non-negative int below 2**256, got {value!r}")
-    return hex(value)[2:].zfill(64)
 
 
 # Receipt polling bounds: with Anvil's default automine (the paper harness

@@ -28,6 +28,8 @@ from almanak.framework.accounting.lending_accounting import (
     read_lending_account_state,
 )
 
+TEST_WALLET = "0x1111111111111111111111111111111111111111"
+
 # VIB-4929 PR-3a: the generic reader resolves the Aave pool through
 # ``AddressRegistry`` (not the legacy ``AAVE_V3_POOL_ADDRESSES`` map), so these
 # tests use ``arbitrum`` — a chain with a real registered Aave pool — and assert
@@ -119,7 +121,7 @@ class TestReadAaveAccountStateForwardsBlock:
         result = read_lending_account_state(
             protocol="aave_v3",
             chain=chain,
-            wallet_address="0xwallet",
+            wallet_address=TEST_WALLET,
             market_id=None,
             gateway_client=gateway,
             price_oracle=None,
@@ -163,7 +165,7 @@ class TestCaptureLendingPostStateForwardsBlock:
         capture_lending_post_state(
             intent=intent,
             chain=chain,
-            wallet_address="0xwallet",
+            wallet_address=TEST_WALLET,
             gateway_client=gateway,
             price_oracle=None,
             block=42_000_000,
@@ -380,7 +382,7 @@ class TestBuildLendingAccountingEventPinsBlock:
             cycle_id="cycle-001",
             execution_mode="paper",
             chain="arbitrum",
-            wallet_address="0xwallet",
+            wallet_address=TEST_WALLET,
             gateway_client=gateway,
             basis_store=FIFOBasisStore(),
             price_oracle=None,
@@ -424,7 +426,7 @@ class TestBuildLendingAccountingEventPinsBlock:
             cycle_id="cycle-001",
             execution_mode="paper",
             chain="arbitrum",
-            wallet_address="0xwallet",
+            wallet_address=TEST_WALLET,
             gateway_client=gateway,
             basis_store=FIFOBasisStore(),
             price_oracle=None,

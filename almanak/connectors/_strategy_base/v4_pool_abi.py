@@ -22,6 +22,8 @@ from __future__ import annotations
 
 from eth_utils import function_signature_to_4byte_selector, keccak
 
+from almanak.connectors._strategy_base.erc20_abi import pad_address
+
 # Native ETH / "no hooks" sentinel — V4 encodes both as the zero address.
 V4_ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 
@@ -49,11 +51,7 @@ V4_GET_LIQUIDITY_SELECTOR = _selector("getLiquidity(bytes32)")
 
 def _pad_address_word(addr: str) -> str:
     """Left-pad a 20-byte address to a 32-byte ABI word (hex, no 0x)."""
-    clean = addr.lower().removeprefix("0x")
-    if len(clean) != 40:
-        raise ValueError(f"address must be 20 bytes, got {len(clean) // 2}")
-    int(clean, 16)
-    return clean.zfill(64)
+    return pad_address(addr)
 
 
 def _pad_uint24_word(value: int) -> str:

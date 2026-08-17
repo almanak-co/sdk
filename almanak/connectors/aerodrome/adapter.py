@@ -38,6 +38,16 @@ from decimal import Decimal
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
+from almanak.connectors._strategy_base.erc20_abi import (
+    ERC20_APPROVE_SELECTOR as ERC20_APPROVE_SELECTOR,
+)
+from almanak.connectors._strategy_base.erc20_abi import (
+    MAX_UINT256,
+    AllowanceCache,
+    encode_approve,
+    pad_address,
+    pad_uint256,
+)
 from almanak.connectors._strategy_base.slippage import compute_min_amount_out_from_bps, slippage_to_bps
 from almanak.core.chains._helpers import native_symbols_for
 from almanak.framework.data.tokens.decimals import resolve_token_decimals
@@ -49,7 +59,6 @@ from almanak.framework.models.reproduction_bundle import ActionBundle
 from .sdk import (
     AERODROME_ADDRESSES,
     AERODROME_GAS_ESTIMATES,
-    MAX_UINT256,
     AerodromeSDK,
 )
 
@@ -77,9 +86,6 @@ SWAP_EXACT_TOKENS_SELECTOR = "0xcac88ea9"
 CL_EXACT_INPUT_SINGLE_SELECTOR = "0xa026383e"
 # Slipstream CL Quoter: quoteExactInputSingle((address,address,uint256,int24,uint160))
 CL_QUOTE_EXACT_INPUT_SINGLE_SELECTOR = "0x9e7defe6"
-
-# ERC20 approve selector
-ERC20_APPROVE_SELECTOR = "0x095ea7b3"
 
 # Default deadline (5 minutes)
 DEFAULT_DEADLINE_SECONDS = 300
@@ -458,8 +464,7 @@ class AerodromeAdapter:
         else:
             self._price_provider = config.price_provider if config.price_provider is not None else {}
 
-        # Allowance cache (token -> amount approved)
-        self._allowance_cache: dict[str, int] = {}
+        self._allowance_cache = AllowanceCache(self.wallet_address)
 
         logger.info(
             f"AerodromeAdapter initialized for chain={self.chain}, "
@@ -500,6 +505,7 @@ class AerodromeAdapter:
         Returns:
             SwapResult with transaction data
         """
+        self.clear_planned_allowance_cache()
         try:
             # Use defaults from config if not specified
             slippage_bps = self.config.default_slippage_bps if slippage_bps is None else slippage_bps
@@ -644,6 +650,7 @@ class AerodromeAdapter:
         Returns:
             LiquidityResult with transaction data
         """
+        self.clear_planned_allowance_cache()
         try:
             slippage_bps = self.config.default_slippage_bps if slippage_bps is None else slippage_bps
             recipient = recipient or self.wallet_address
@@ -748,6 +755,7 @@ class AerodromeAdapter:
         Returns:
             LiquidityResult with transaction data
         """
+        self.clear_planned_allowance_cache()
         try:
             slippage_bps = self.config.default_slippage_bps if slippage_bps is None else slippage_bps
             recipient = recipient or self.wallet_address
@@ -900,6 +908,7 @@ class AerodromeAdapter:
         Returns:
             CLLiquidityResult with transaction data
         """
+        self.clear_planned_allowance_cache()
         try:
             if "cl_nft" not in self.addresses:
                 return CLLiquidityResult(
@@ -1113,6 +1122,7 @@ class AerodromeAdapter:
         Returns:
             LiquidityResult with transaction data
         """
+        self.clear_planned_allowance_cache()
         try:
             # slippage_bps is accepted for API compatibility but is not applied to
             # decreaseLiquidity amount0Min/amount1Min.  Computing precise expected
@@ -1240,6 +1250,7 @@ class AerodromeAdapter:
         Returns:
             LiquidityResult with a single ``collect`` transaction
         """
+        self.clear_planned_allowance_cache()
         try:
             recipient = recipient or self.wallet_address
             web3 = self._get_web3()
@@ -1571,18 +1582,12 @@ class AerodromeAdapter:
         amount: int,
     ) -> TransactionData | None:
         """Build an ERC-20 approve transaction if needed."""
-        # Check cache for existing allowance
-        cache_key = f"{token_address}:{spender}"
-        cached = self._allowance_cache.get(cache_key, 0)
-        if cached >= amount:
+        if self._allowance_cache.is_sufficient(token_address, spender, amount):
             logger.debug(f"Sufficient allowance exists for {token_address}")
             return None
 
-        # Build approve calldata
-        calldata = ERC20_APPROVE_SELECTOR + self._pad_address(spender) + self._pad_uint256(MAX_UINT256)
-
-        # Update cache
-        self._allowance_cache[cache_key] = MAX_UINT256
+        calldata = encode_approve(spender, MAX_UINT256)
+        self._allowance_cache.record_planned(token_address, spender, MAX_UINT256)
 
         token_symbol = self._get_token_symbol(token_address)
 
@@ -1891,12 +1896,12 @@ class AerodromeAdapter:
     @staticmethod
     def _pad_address(addr: str) -> str:
         """Pad address to 32 bytes."""
-        return addr.lower().replace("0x", "").zfill(64)
+        return pad_address(addr)
 
     @staticmethod
     def _pad_uint256(value: int) -> str:
         """Pad uint256 to 32 bytes."""
-        return hex(value)[2:].zfill(64)
+        return pad_uint256(value)
 
     @staticmethod
     def _pad_int24(value: int) -> str:
@@ -1916,12 +1921,15 @@ class AerodromeAdapter:
 
     def set_allowance(self, token: str, spender: str, amount: int) -> None:
         """Set cached allowance (for testing)."""
-        cache_key = f"{token}:{spender}"
-        self._allowance_cache[cache_key] = amount
+        self._allowance_cache.record_confirmed(token, spender, amount)
 
     def clear_allowance_cache(self) -> None:
         """Clear the allowance cache."""
         self._allowance_cache.clear()
+
+    def clear_planned_allowance_cache(self) -> None:
+        """Clear optimistic approvals emitted into the current bundle."""
+        self._allowance_cache.clear_planned()
 
 
 # =============================================================================

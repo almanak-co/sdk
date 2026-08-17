@@ -28,6 +28,14 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from almanak.connectors._strategy_base.base.approval_sequencing import build_approval_sequence
+from almanak.connectors._strategy_base.erc20_abi import (
+    MAX_UINT256,
+    AllowanceCache,
+    encode_allowance,
+    encode_approve,
+    pad_address,
+    pad_uint256,
+)
 from almanak.connectors._strategy_base.pool_validation_base import ZERO_ADDRESS, decode_address
 from almanak.connectors._strategy_base.rpc import eth_call, eth_call_uint256, eth_estimate_gas
 from almanak.connectors._strategy_base.slippage import compute_min_amount_out_from_bps
@@ -227,8 +235,6 @@ STABLE_CALC_TOKEN_AMOUNT_SELECTORS: dict[int, str] = {
 GET_DY_SELECTOR = "0x5e0d443f"  # get_dy(int128,int128,uint256)
 GET_DY_UINT256_SELECTOR = "0x556d6e9f"  # get_dy(uint256,uint256,uint256)
 GET_DY_UNDERLYING_SELECTOR = "0x07211ef7"  # get_dy_underlying(int128,int128,uint256)
-ERC20_APPROVE_SELECTOR = "0x095ea7b3"  # approve(address,uint256)
-ERC20_ALLOWANCE_SELECTOR = "0xdd62ed3e"  # allowance(address owner, address spender)
 ERC20_DECIMALS_SELECTOR = "0x313ce567"  # decimals() -> uint8
 
 # Pool-state read selectors for the refresh-on-read registry (VIB-5423 / VIB-5424).
@@ -272,10 +278,6 @@ CRYPTO_CALC_TOKEN_AMOUNT_SELECTORS: dict[int, tuple[str, str]] = {
     2: ("0xed8e84f3", "0x8d8ea727"),  # calc_token_amount(uint256[2],bool) | (uint256[2])
     3: ("0x3883e119", "0x5b6f1b5a"),  # calc_token_amount(uint256[3],bool) | (uint256[3])
 }
-
-# Max uint256 for unlimited approvals
-MAX_UINT256 = 2**256 - 1
-
 
 # =============================================================================
 # Enums
@@ -672,8 +674,7 @@ class CurveAdapter:
 
             self._token_resolver = get_token_resolver()
 
-        # Allowance cache (token -> amount approved)
-        self._allowance_cache: dict[str, int] = {}
+        self._allowance_cache = AllowanceCache(self.wallet_address)
 
         # Refresh-on-read cache (VIB-5423): lowercased pool address -> PoolInfo
         # reconciled against live chain state. A pool is read once per adapter
@@ -1406,6 +1407,7 @@ class CurveAdapter:
         Returns:
             SwapResult with transaction data
         """
+        self.clear_planned_allowance_cache()
         try:
             if price_ratio is not None and price_ratio <= 0:
                 raise ValueError(f"price_ratio must be positive, got {price_ratio}")
@@ -1594,6 +1596,7 @@ class CurveAdapter:
         Returns:
             LiquidityResult with transaction data
         """
+        self.clear_planned_allowance_cache()
         try:
             slippage_bps = self.config.default_slippage_bps if slippage_bps is None else slippage_bps
             recipient = recipient or self.wallet_address
@@ -1708,6 +1711,7 @@ class CurveAdapter:
             LiquidityResult with transaction data. ``amounts`` contains the
             per-coin minimum-received floors in native token base units.
         """
+        self.clear_planned_allowance_cache()
         try:
             slippage_bps = self.config.default_slippage_bps if slippage_bps is None else slippage_bps
             recipient = recipient or self.wallet_address
@@ -1799,6 +1803,7 @@ class CurveAdapter:
         Returns:
             LiquidityResult with transaction data
         """
+        self.clear_planned_allowance_cache()
         try:
             # Honor an explicit slippage_bps=0 (exact-quote request); only fall back
             # to the config default when the caller passed None. `... or default`
@@ -1937,6 +1942,7 @@ class CurveAdapter:
             LiquidityResult with transaction data (operation
             ``remove_liquidity_imbalance``), or ``success=False`` on any guard.
         """
+        self.clear_planned_allowance_cache()
         try:
             # Honor an explicit slippage_bps=0 (exact-quote request); only fall back
             # to the config default when the caller passed None (cf. single-sided).
@@ -2122,6 +2128,7 @@ class CurveAdapter:
         the on-chain ``get_dy_underlying`` quote is preferred when a gateway /
         rpc is wired.
         """
+        self.clear_planned_allowance_cache()
         try:
             slippage_bps = self.config.default_slippage_bps if slippage_bps is None else slippage_bps
             recipient = recipient or self.wallet_address
@@ -2272,6 +2279,7 @@ class CurveAdapter:
         the base-LP plus the meta coin into the metapool — a user only has to
         hold/approve the underlying coins.
         """
+        self.clear_planned_allowance_cache()
         try:
             slippage_bps = self.config.default_slippage_bps if slippage_bps is None else slippage_bps
             recipient = recipient or self.wallet_address
@@ -2364,6 +2372,7 @@ class CurveAdapter:
         unavailable, fails closed (no slippage floor) — mirrors the native
         ``remove_liquidity`` guard.
         """
+        self.clear_planned_allowance_cache()
         try:
             slippage_bps = self.config.default_slippage_bps if slippage_bps is None else slippage_bps
             recipient = recipient or self.wallet_address
@@ -2883,8 +2892,7 @@ class CurveAdapter:
         Returns:
             Zero, one, or two ``TransactionData`` (reset + approve) in order.
         """
-        cache_key = self._allowance_cache_key(token_address, spender)
-        current = self._current_allowance(cache_key, token_address, spender)
+        current = self._current_allowance(token_address, spender)
         # Delegate the money-critical ordering (skip-if-sufficient, reset-before-
         # approve, fail-safe on unconfirmed allowance) to the SHARED sequencing
         # primitive (VIB-5492) so it can never drift from the framework compiler's
@@ -2902,10 +2910,10 @@ class CurveAdapter:
         if not txs:
             logger.debug("Sufficient allowance for %s (%d >= %d)", token_address, current, amount)
             return []
-        self._allowance_cache[cache_key] = MAX_UINT256
+        self._allowance_cache.record_planned(token_address, spender, MAX_UINT256)
         return txs
 
-    def _current_allowance(self, cache_key: str, token_address: str, spender: str) -> int | None:
+    def _current_allowance(self, token_address: str, spender: str) -> int | None:
         """Return the current allowance, or ``None`` when it cannot be confirmed.
 
         Returns the cached value when present (set by a prior approve in this bundle
@@ -2916,13 +2924,12 @@ class CurveAdapter:
         with — so the caller fails toward a safe reset rather than assuming zero
         and emitting a lone ``approve(MAX)`` that could revert on a USDT-class token.
         """
-        if cache_key in self._allowance_cache:
-            return self._allowance_cache[cache_key]
+        cached = self._allowance_cache.get(token_address, spender)
+        if cached is not None:
+            return cached
         if self._gateway_client is not None or self._rpc_url:
             try:
-                calldata = (
-                    ERC20_ALLOWANCE_SELECTOR + self._pad_address(self.wallet_address) + self._pad_address(spender)
-                )
+                calldata = encode_allowance(self.wallet_address, spender)
                 onchain = eth_call_uint256(
                     chain=self.chain,
                     to=token_address,
@@ -2932,22 +2939,15 @@ class CurveAdapter:
                     timeout=10.0,
                 )
                 if onchain is not None:
-                    self._allowance_cache[cache_key] = onchain
+                    self._allowance_cache.record_confirmed(token_address, spender, onchain)
                     return onchain
             except Exception as exc:  # noqa: BLE001 — unknown allowance on any read failure
                 logger.debug("On-chain allowance read failed for %s: %s; treating as unknown", token_address, exc)
         return None  # could not confirm allowance → caller resets to be safe
 
-    @staticmethod
-    def _allowance_cache_key(token_address: str, spender: str) -> str:
-        """Case-normalized allowance cache key (token:spender), lowercased so a
-        checksummed and a lowercase address hit the same cache entry — a casing
-        miss would otherwise re-approve a USDT and revert."""
-        return f"{token_address.lower()}:{spender.lower()}"
-
     def _single_approve_tx(self, token_address: str, spender: str, value: int) -> TransactionData:
         """Build one ERC-20 ``approve(spender, value)`` transaction."""
-        calldata = ERC20_APPROVE_SELECTOR + self._pad_address(spender) + self._pad_uint256(value)
+        calldata = encode_approve(spender, value)
         # _get_token_symbol falls back to truncated address for unresolved tokens (e.g., 3CRV)
         token_symbol = self._get_token_symbol(token_address)
         action = "Reset approval for" if value == 0 else "Approve"
@@ -3748,12 +3748,12 @@ class CurveAdapter:
     @staticmethod
     def _pad_address(addr: str) -> str:
         """Pad address to 32 bytes."""
-        return addr.lower().replace("0x", "").zfill(64)
+        return pad_address(addr)
 
     @staticmethod
     def _pad_uint256(value: int) -> str:
         """Pad uint256 to 32 bytes."""
-        return hex(value)[2:].zfill(64)
+        return pad_uint256(value)
 
     @staticmethod
     def _pad_int128(value: int) -> str:
@@ -3775,11 +3775,15 @@ class CurveAdapter:
             spender: Spender address
             amount: Allowance amount
         """
-        self._allowance_cache[self._allowance_cache_key(token, spender)] = amount
+        self._allowance_cache.record_confirmed(token, spender, amount)
 
     def clear_allowance_cache(self) -> None:
         """Clear the allowance cache."""
         self._allowance_cache.clear()
+
+    def clear_planned_allowance_cache(self) -> None:
+        """Clear optimistic approvals emitted into the current bundle."""
+        self._allowance_cache.clear_planned()
 
 
 # =============================================================================

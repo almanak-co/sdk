@@ -962,6 +962,33 @@ class TestSingleChainExecuteClob:
 
 
 # =============================================================================
+# _single_chain_reset_caches_after_failure - allowance cache lifecycle
+# =============================================================================
+
+
+class TestSingleChainAllowanceCacheReset:
+    def test_timeout_clears_planned_but_preserves_confirmed_allowances(self) -> None:
+        runner = _make_runner()
+        compiler = MagicMock()
+        result = ExecutionResult(success=False, phase=ExecutionPhase.CONFIRMATION, error="RPC timeout")
+
+        runner._single_chain_reset_caches_after_failure(compiler, result, reconciliation_required=False)
+
+        compiler.clear_planned_allowance_cache.assert_called_once_with()
+        compiler.clear_allowance_cache.assert_not_called()
+
+    def test_non_timeout_failure_clears_all_allowances(self) -> None:
+        runner = _make_runner()
+        compiler = MagicMock()
+        result = ExecutionResult(success=False, phase=ExecutionPhase.SUBMISSION, error="transaction reverted")
+
+        runner._single_chain_reset_caches_after_failure(compiler, result, reconciliation_required=False)
+
+        compiler.clear_allowance_cache.assert_called_once_with()
+        compiler.clear_planned_allowance_cache.assert_not_called()
+
+
+# =============================================================================
 # _single_chain_execute_onchain - native price refresh
 # =============================================================================
 

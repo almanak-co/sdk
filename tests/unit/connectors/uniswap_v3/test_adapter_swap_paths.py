@@ -10,17 +10,17 @@ with a mocked TokenResolver (no network).
 from __future__ import annotations
 
 from decimal import Decimal
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from almanak.connectors.uniswap_v3.adapter import (
     DEFAULT_DEADLINE_SECONDS,
+    ERC20_APPROVE_SELECTOR,
     EXACT_INPUT_SINGLE_SELECTOR,
     EXACT_INPUT_SINGLE_V1_SELECTOR,
     EXACT_OUTPUT_SINGLE_SELECTOR,
     EXACT_OUTPUT_SINGLE_V1_SELECTOR,
-    ERC20_APPROVE_SELECTOR,
     SwapQuote,
     SwapResult,
     SwapType,
@@ -293,6 +293,20 @@ class TestSwapExactInput:
         assert result.success is True
         assert all(tx.tx_type == "swap" for tx in result.transactions)
 
+    def test_reemits_approve_after_abandoned_and_failed_bundle(self, adapter: UniswapV3Adapter) -> None:
+        first = adapter.swap_exact_input("USDC", "WETH", Decimal("1"))
+        retry = adapter.swap_exact_input("USDC", "WETH", Decimal("1"))
+
+        assert any(tx.tx_type == "approve" for tx in first.transactions)
+        assert any(tx.tx_type == "approve" for tx in retry.transactions)
+
+        with patch.object(adapter, "_build_exact_input_single_tx", side_effect=RuntimeError("build failed")):
+            failed = adapter.swap_exact_input("USDC", "WETH", Decimal("1"))
+        after_failure = adapter.swap_exact_input("USDC", "WETH", Decimal("1"))
+
+        assert failed.success is False
+        assert any(tx.tx_type == "approve" for tx in after_failure.transactions)
+
 
 # ---------------------------------------------------------------------------
 # swap_exact_output
@@ -552,10 +566,11 @@ class TestApproveAndAllowance:
         assert tx is None
 
     def test_clear_allowance_cache(self, adapter: UniswapV3Adapter) -> None:
-        adapter.set_allowance(USDC.address, "0xabc", 100)
-        assert adapter._allowance_cache != {}
+        spender = "0x" + "ab" * 20
+        adapter.set_allowance(USDC.address, spender, 100)
+        assert adapter._allowance_cache.get(USDC.address, spender) == 100
         adapter.clear_allowance_cache()
-        assert adapter._allowance_cache == {}
+        assert adapter._allowance_cache.get(USDC.address, spender) is None
 
 
 # ---------------------------------------------------------------------------
@@ -598,16 +613,25 @@ class TestTokenHelpers:
 
 class TestPadHelpers:
     def test_pad_address(self) -> None:
-        out = UniswapV3Adapter._pad_address("0xabcD")
+        out = UniswapV3Adapter._pad_address("0xABCDEF1234567890abcdef1234567890ABCDEF12")
         assert len(out) == 64
-        assert out.endswith("abcd")
+        assert out.endswith("abcdef1234567890abcdef1234567890abcdef12")
         # Lowercased and zero-padded
-        assert out.startswith("0" * 60)
+        assert out.startswith("0" * 24)
+
+    def test_pad_address_rejects_malformed_input(self) -> None:
+        with pytest.raises(ValueError, match="address must be 20 bytes"):
+            UniswapV3Adapter._pad_address("0xabc")
 
     def test_pad_uint256(self) -> None:
         out = UniswapV3Adapter._pad_uint256(255)
         assert len(out) == 64
         assert int(out, 16) == 255
+
+    @pytest.mark.parametrize("value", [-1, 1 << 256])
+    def test_pad_uint256_rejects_out_of_range_values(self, value: int) -> None:
+        with pytest.raises(ValueError, match="uint256 value must be"):
+            UniswapV3Adapter._pad_uint256(value)
 
     def test_pad_uint24(self) -> None:
         out = UniswapV3Adapter._pad_uint24(3000)

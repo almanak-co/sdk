@@ -11,7 +11,7 @@ Targets uncovered branches in:
 """
 
 from decimal import Decimal
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -179,6 +179,20 @@ class TestSwapExactInputCL:
         )
         assert result.success is False
         assert "boom" in (result.error or "")
+
+    def test_reemits_approve_after_abandoned_and_failed_bundle(self, adapter: AerodromeAdapter) -> None:
+        first = adapter.swap_exact_input("USDC", "WETH", Decimal("1"))
+        retry = adapter.swap_exact_input("USDC", "WETH", Decimal("1"))
+
+        assert any(tx.tx_type == "approve" for tx in first.transactions)
+        assert any(tx.tx_type == "approve" for tx in retry.transactions)
+
+        with patch.object(adapter, "_build_swap_exact_input_cl_tx", side_effect=RuntimeError("build failed")):
+            failed = adapter.swap_exact_input("USDC", "WETH", Decimal("1"))
+        after_failure = adapter.swap_exact_input("USDC", "WETH", Decimal("1"))
+
+        assert failed.success is False
+        assert any(tx.tx_type == "approve" for tx in after_failure.transactions)
 
 
 class TestSwapExactInputClassic:
@@ -506,6 +520,10 @@ class TestPaddingHelpers:
         assert len(out) == 64
         assert out == "abcdef1234567890abcdef1234567890abcdef12".rjust(64, "0")
 
+    def test_pad_address_rejects_malformed_input(self) -> None:
+        with pytest.raises(ValueError, match="address must be 20 bytes"):
+            AerodromeAdapter._pad_address("0xabc")
+
     def test_pad_uint256_zero(self) -> None:
         out = AerodromeAdapter._pad_uint256(0)
         assert out == "0" * 64
@@ -513,6 +531,11 @@ class TestPaddingHelpers:
     def test_pad_uint256_value(self) -> None:
         out = AerodromeAdapter._pad_uint256(255)
         assert out == "0" * 62 + "ff"
+
+    @pytest.mark.parametrize("value", [-1, 1 << 256])
+    def test_pad_uint256_rejects_out_of_range_values(self, value: int) -> None:
+        with pytest.raises(ValueError, match="uint256 value must be"):
+            AerodromeAdapter._pad_uint256(value)
 
     def test_pad_int24_negative_two_complement(self) -> None:
         # -1 in two's complement = 2^256 - 1 = all f's

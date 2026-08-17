@@ -51,6 +51,8 @@ from eth_abi import encode as abi_encode
 from hexbytes import HexBytes
 from web3 import Web3
 
+from almanak.connectors._base.erc20_abi import MAX_UINT256, encode_approve
+
 from .models import (
     COLLATERAL_OFFRAMP,
     COLLATERAL_ONRAMP,
@@ -70,9 +72,6 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 # Constants
 # =============================================================================
-
-# Maximum uint256 for unlimited approvals
-MAX_UINT256 = 2**256 - 1
 
 # Threshold above which an ERC-20 allowance is treated as "infinite" (i.e.
 # the wallet has applied a MAX_UINT256 approval and we don't need to re-submit).
@@ -432,12 +431,9 @@ class CtfSDK:
         asset = Web3.to_checksum_address(asset)
         spender = Web3.to_checksum_address(spender)
 
-        selector = bytes(Web3.keccak(text="approve(address,uint256)")[:4])
-        data = selector + abi_encode(["address", "uint256"], [spender, amount])
-
         return TransactionData(
             to=asset,
-            data="0x" + data.hex(),
+            data=encode_approve(spender, amount),
             gas_estimate=GAS_ESTIMATES["approve_erc20"],
             description=f"Approve {asset[:10]}... spending for {spender[:10]}...",
         )

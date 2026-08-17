@@ -50,6 +50,7 @@ from almanak.connectors._fluid_core.vault_sdk import (
 )
 from almanak.connectors._strategy_base.base.compiler import BaseCompilerContext
 from almanak.connectors._strategy_base.base.lending import BaseLendingCompiler
+from almanak.connectors._strategy_base.erc20_abi import encode_approve
 from almanak.framework.intents._compiler_helpers import assemble_action_bundle, sum_transaction_gas
 from almanak.framework.intents.compiler_constants import get_gas_estimate
 from almanak.framework.intents.compiler_models import CompilationResult, CompilationStatus, TransactionData
@@ -68,9 +69,6 @@ _ORACLE_PRICE_SCALE = 10**27
 _BPS = 10**4
 
 
-_ERC20_APPROVE_SELECTOR = "0x095ea7b3"
-
-
 def _exact_erc20_approve_txs(token_address: str, spender: str, amount: int, chain: str) -> list[TransactionData]:
     """Build an ERC-20 approve with the EXACT ``amount`` (no headroom buffer).
 
@@ -79,13 +77,11 @@ def _exact_erc20_approve_txs(token_address: str, spender: str, amount: int, chai
     exactly the declared amount — no accrual, no slippage — so an exact approval
     is both correct and the minimum-trust posture (UAT card D2.M1 contract).
     """
-    spender_padded = spender.lower().replace("0x", "").zfill(64)
-    amount_padded = hex(amount)[2:].zfill(64)
     return [
         TransactionData(
             to=token_address,
             value=0,
-            data=_ERC20_APPROVE_SELECTOR + spender_padded + amount_padded,
+            data=encode_approve(spender, amount),
             gas_estimate=get_gas_estimate(chain, "approve"),
             description=f"Approve {spender[:10]}... to spend {amount} (exact)",
             tx_type="approve",

@@ -23,6 +23,8 @@ from __future__ import annotations
 
 from eth_utils import function_signature_to_4byte_selector
 
+from almanak.connectors._strategy_base.erc20_abi import pad_uint256
+
 
 def _selector(signature: str) -> str:
     """0x-prefixed 4-byte selector derived from a function signature."""
@@ -56,13 +58,12 @@ CURVE_FEE_SCALE_TO_V3_UNITS = 10**4
 CURVE_POOL_KEY = 0
 
 
-def _pad_uint256(value: int) -> str:
-    """Left-pad a non-negative int to a 32-byte ABI word (hex, no 0x)."""
-    if value < 0:
-        raise ValueError(f"cannot ABI-encode negative value {value} as a padded word")
-    if value >= 1 << 256:
-        raise ValueError(f"value {value} exceeds uint256 — would overflow a 32-byte ABI word")
-    return hex(value)[2:].zfill(64)
+def _pad_curve_index(value: int) -> str:
+    """Encode an index accepted by both Curve's uint256 and int128 ABIs."""
+    encoded = pad_uint256(value)
+    if value >= 1 << 127:
+        raise ValueError(f"Curve index must be in [0, 2**127), got {value}")
+    return encoded
 
 
 def encode_index_call(selector: str, index: int) -> str:
@@ -71,12 +72,12 @@ def encode_index_call(selector: str, index: int) -> str:
     Valid for BOTH the uint256 and int128 ABI families: a non-negative index
     encodes identically in either, only the selector differs.
     """
-    return selector + _pad_uint256(index)
+    return selector + _pad_curve_index(index)
 
 
 def encode_get_dy(selector: str, i: int, j: int, dx: int) -> str:
     """Calldata for ``get_dy(i, j, dx)`` in either ABI family."""
-    return selector + _pad_uint256(i) + _pad_uint256(j) + _pad_uint256(dx)
+    return selector + _pad_curve_index(i) + _pad_curve_index(j) + pad_uint256(dx)
 
 
 __all__ = [

@@ -22,6 +22,8 @@ from almanak.connectors._strategy_base.curve_pool_abi import (
     CURVE_FEE_SELECTOR,
     CURVE_GET_DY_INT128_SELECTOR,
     CURVE_GET_DY_UINT256_SELECTOR,
+    encode_get_dy,
+    encode_index_call,
 )
 from almanak.framework.data.exceptions import DataUnavailableError
 from almanak.framework.data.models import DataClassification
@@ -135,6 +137,24 @@ def test_derived_selectors_match_adapter_literals() -> None:
     assert CURVE_BALANCES_UINT256_SELECTOR == adapter.BALANCES_UINT256_SELECTOR
     assert CURVE_BALANCES_INT128_SELECTOR == adapter.BALANCES_INT128_SELECTOR
     assert CURVE_FEE_SELECTOR == "0xddca3f43"  # fee() — signature-identical to v3
+
+
+@pytest.mark.parametrize("bad_index", [-1, 1 << 127])
+def test_curve_index_encoding_rejects_values_outside_int128_range(bad_index: int) -> None:
+    with pytest.raises(ValueError):
+        encode_index_call(CURVE_COINS_UINT256_SELECTOR, bad_index)
+
+    with pytest.raises(ValueError):
+        encode_get_dy(CURVE_GET_DY_UINT256_SELECTOR, bad_index, 0, 1)
+
+    with pytest.raises(ValueError):
+        encode_get_dy(CURVE_GET_DY_UINT256_SELECTOR, 0, bad_index, 1)
+
+
+def test_curve_get_dy_keeps_dx_as_full_uint256() -> None:
+    calldata = encode_get_dy(CURVE_GET_DY_INT128_SELECTOR, 0, 1, (1 << 256) - 1)
+
+    assert calldata.endswith("f" * 64)
 
 
 # ---------------------------------------------------------------------------

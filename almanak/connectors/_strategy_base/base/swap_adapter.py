@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Literal
 
+from almanak.connectors._strategy_base.erc20_abi import pad_address, pad_uint256
 from almanak.core.chains._helpers import chain_wrapped_native_symbol_map
 
 logger = logging.getLogger(__name__)
@@ -653,13 +654,12 @@ class DefaultSwapAdapter:
     @staticmethod
     def _pad_address(addr: str) -> str:
         """Pad address to 32 bytes."""
-        addr_clean = addr.lower().replace("0x", "")
-        return addr_clean.zfill(64)
+        return pad_address(addr)
 
     @staticmethod
     def _pad_uint256(value: int) -> str:
         """Pad uint256 to 32 bytes."""
-        return hex(value)[2:].zfill(64)
+        return pad_uint256(value)
 
     @staticmethod
     def _pad_uint160(value: int) -> str:

@@ -73,6 +73,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, Final
 
+from almanak.connectors._strategy_base.erc20_abi import ERC20_TRANSFER_TOPIC
 from almanak.core.addresses import normalize_address
 
 #: Reserved receipt key carrying the effective trading wallet.
@@ -97,7 +98,7 @@ _SAFE_EXECUTION_TOPICS: Final[frozenset[str]] = frozenset(
 
 #: ``keccak256("Transfer(address,address,uint256)")`` — used to corroborate a
 #: Safe candidate by requiring it to actually move tokens in the same receipt.
-_ERC20_TRANSFER_TOPIC: Final[str] = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+_ERC20_TRANSFER_TOPIC: Final[str] = ERC20_TRANSFER_TOPIC
 
 
 #: The only characters a normalised address payload may contain. Used instead of

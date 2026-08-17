@@ -11,6 +11,7 @@ ERC-4626 function selectors:
 - approve(address,uint256)           = 0x095ea7b3
 """
 
+from almanak.connectors._base.erc20_abi import ERC20_APPROVE_SELECTOR
 from almanak.connectors.morpho_vault.addresses import METAMORPHO_VAULTS
 from almanak.framework.permissions.hints import PermissionHints, StaticPermissionEntry
 
@@ -23,7 +24,7 @@ def _build_static_permissions() -> dict[str, list[StaticPermissionEntry]]:
             StaticPermissionEntry(
                 target=addrs["underlying"].lower(),
                 label=f"ERC-20 ({addrs['underlying'][:6]}...{addrs['underlying'][-4:]})",
-                selectors={"0x095ea7b3": "approve(address,uint256)"},
+                selectors={ERC20_APPROVE_SELECTOR: "approve(address,uint256)"},
             ),
             # Deposit into the vault
             StaticPermissionEntry(

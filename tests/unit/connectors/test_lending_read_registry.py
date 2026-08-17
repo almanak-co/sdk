@@ -40,6 +40,8 @@ from almanak.framework.valuation.lending_position_reader import (
 # ---------------------------------------------------------------------------
 
 _LEGACY_SELECTOR = "0x28dd2d01"  # getUserReserveData(address asset, address user)
+_TEST_ASSET = "0xaaaa000000000000000000000000000000000000"
+_TEST_WALLET = "0xbbbb000000000000000000000000000000000000"
 
 # The old module built this dict at import from the aave_v3 address table.
 _LEGACY_AAVE_V3_POOL_DATA_PROVIDER: dict[str, str] = {
@@ -130,8 +132,8 @@ def test_canonical_is_total_for_invalid_input(protocol):
 
 
 def test_aave_alias_normalises_to_aave_v3():
-    plan_alias = LendingReadRegistry.resolve("aave", "arbitrum", "0xAsset", "0xWallet")
-    plan_canon = LendingReadRegistry.resolve("aave_v3", "arbitrum", "0xAsset", "0xWallet")
+    plan_alias = LendingReadRegistry.resolve("aave", "arbitrum", _TEST_ASSET, _TEST_WALLET)
+    plan_canon = LendingReadRegistry.resolve("aave_v3", "arbitrum", _TEST_ASSET, _TEST_WALLET)
     assert plan_alias is not None and plan_canon is not None
     assert plan_alias.target_address == plan_canon.target_address
 
@@ -193,7 +195,7 @@ def test_unknown_protocol_resolves_to_none():
 
 
 def test_plan_decoder_is_the_connector_parser():
-    plan = LendingReadRegistry.resolve("aave_v3", "arbitrum", "0xa", "0xb")
+    plan = LendingReadRegistry.resolve("aave_v3", "arbitrum", _TEST_ASSET, _TEST_WALLET)
     assert plan is not None
     assert plan.parse_result is AAVE_FORK_RESERVE_READ.parse_result
     assert isinstance(plan, LendingReadPlan)
@@ -253,7 +255,7 @@ def test_reader_explicit_protocol_routes_to_that_connector():
     gateway = _mock_gateway_returning(result_hex)
     reader = LendingPositionReader(gateway_client=gateway)
 
-    got = reader.read_position("ethereum", "0xAsset", "0xWallet", protocol="spark")
+    got = reader.read_position("ethereum", _TEST_ASSET, _TEST_WALLET, protocol="spark")
     assert got is not None and got.current_atoken_balance == 42
 
     rpc_request = gateway._rpc_stub.Call.call_args.args[0]
@@ -294,7 +296,7 @@ def test_read_positions_filters_inactive_like_legacy():
     positions = reader.read_positions(
         "arbitrum",
         ["0xaaaa000000000000000000000000000000000000", "0xbbbb000000000000000000000000000000000000"],
-        "0xWallet",
+        _TEST_WALLET,
     )
     assert len(positions) == 1
     assert positions[0].current_atoken_balance == 1_000

@@ -13,7 +13,7 @@ The fix: use _get_chain_rpc_url() so the Anvil fork RPC is detected and used.
 
 import os
 from decimal import Decimal
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -30,7 +30,7 @@ MORPHO_ADAPTER_CLS = f"{MORPHO_ADAPTER_MODULE}.MorphoBlueAdapter"
 MORPHO_CONFIG_CLS = f"{MORPHO_ADAPTER_MODULE}.MorphoBlueConfig"
 
 TEST_WALLET = "0x1234567890123456789012345678901234567890"
-TEST_MORPHO_ADDR = "0xBBBBbbbb219152Bea9549d07bB35d3f7a35e3Ef"
+TEST_MORPHO_ADDR = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 TEST_MARKET_ID = "0xb323495f7e4148be5643a4ea4a8221eef163e4bccfdedc2a6f4696baacbc86cc"
 ANVIL_PORT = "8547"
 ANVIL_RPC_URL = f"http://127.0.0.1:{ANVIL_PORT}"
@@ -157,8 +157,7 @@ class TestMorphoBlueRepayFullRpcUrl:
         mock_get_rpc_url.assert_called_once_with("base")
         config_call_kwargs = mock_config_cls.call_args.kwargs
         assert config_call_kwargs.get("rpc_url") is None, (
-            f"Expected rpc_url=None when get_rpc_url returns None, "
-            f"got: {config_call_kwargs.get('rpc_url')!r}"
+            f"Expected rpc_url=None when get_rpc_url returns None, got: {config_call_kwargs.get('rpc_url')!r}"
         )
 
     @patch(MORPHO_CONFIG_CLS)
@@ -196,8 +195,7 @@ class TestMorphoBlueRepayFullRpcUrl:
 
         config_call_kwargs = mock_config_cls.call_args.kwargs
         assert config_call_kwargs.get("rpc_url") == explicit_rpc, (
-            f"Explicit rpc_url must take precedence, "
-            f"got: {config_call_kwargs.get('rpc_url')!r}"
+            f"Explicit rpc_url must take precedence, got: {config_call_kwargs.get('rpc_url')!r}"
         )
 
     @patch(MORPHO_CONFIG_CLS)

@@ -37,6 +37,7 @@ from almanak.connectors._fluid_core.sdk import (
     FluidSDK,
     FluidSDKError,
 )
+from almanak.connectors._strategy_base.erc20_abi import MAX_UINT256, encode_approve
 from almanak.framework.data.tokens.decimals import resolve_token_decimals
 from almanak.framework.data.tokens.exceptions import TokenResolutionError
 
@@ -45,10 +46,6 @@ if TYPE_CHECKING:
     from almanak.framework.gateway_client import GatewayClient
 
 logger = logging.getLogger(__name__)
-
-# Max uint256 for unlimited approvals
-MAX_UINT256 = 2**256 - 1
-
 
 # =============================================================================
 # Data Classes
@@ -325,27 +322,7 @@ class FluidAdapter:
         """
         approve_amount = amount if amount is not None else MAX_UINT256
 
-        # Use ABI encoding for safety (avoid manual hex encoding on money-critical path)
-        erc20_approve_abi = [
-            {
-                "inputs": [
-                    {"name": "spender", "type": "address"},
-                    {"name": "amount", "type": "uint256"},
-                ],
-                "name": "approve",
-                "outputs": [{"type": "bool"}],
-                "stateMutability": "nonpayable",
-                "type": "function",
-            }
-        ]
-        token_contract = Web3().eth.contract(
-            address=Web3.to_checksum_address(token_address),
-            abi=erc20_approve_abi,
-        )
-        data = token_contract.encode_abi(
-            "approve",
-            [Web3.to_checksum_address(spender), approve_amount],
-        )
+        data = encode_approve(spender, approve_amount)
 
         return TransactionData(
             to=Web3.to_checksum_address(token_address),

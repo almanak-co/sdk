@@ -11,6 +11,15 @@ import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+from almanak.connectors._base.erc20_abi import (
+    ERC20_ALLOWANCE_SELECTOR as ERC20_ALLOWANCE_SELECTOR,
+)
+from almanak.connectors._base.erc20_abi import (
+    ERC20_APPROVE_SELECTOR as ERC20_APPROVE_SELECTOR,
+)
+from almanak.connectors._base.erc20_abi import (
+    MAX_UINT256 as MAX_UINT256,
+)
 from almanak.framework.data.tokens.defaults import DEFAULT_TOKENS
 
 if TYPE_CHECKING:
@@ -835,8 +844,6 @@ def _lending_pool_data_providers() -> dict[str, dict[str, str]]:
 
 
 # Standard ERC20 function selectors
-ERC20_APPROVE_SELECTOR = "0x095ea7b3"  # approve(address,uint256)
-ERC20_ALLOWANCE_SELECTOR = "0xdd62ed3e"  # allowance(address,address)
 ERC20_TRANSFER_SELECTOR = "0xa9059cbb"  # transfer(address,uint256)
 ERC20_TRANSFER_FROM_SELECTOR = "0x23b872dd"  # transferFrom(address,address,uint256)
 
@@ -972,8 +979,6 @@ def _balancer_vault_addresses() -> dict[str, str]:
     return _build_balancer_vault_addresses()
 
 
-# Max uint256 for unlimited approvals
-MAX_UINT256 = 2**256 - 1
 # Max uint128 for collecting all fees/tokens
 MAX_UINT128 = 2**128 - 1
 
