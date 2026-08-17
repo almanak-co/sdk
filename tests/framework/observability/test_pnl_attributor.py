@@ -928,11 +928,25 @@ class TestStampEntryStateOnOpen:
             value_usd="4000",
         )
         asyncio.get_event_loop().run_until_complete(store.save_position_event(open_event))
+        observed_at = open_event.timestamp.isoformat()
         asyncio.get_event_loop().run_until_complete(
             stamp_entry_state_on_open(
                 store,
                 open_event,
-                price_oracle={"WETH": Decimal("2000"), "USDC": Decimal("1")},
+                price_oracle={
+                    "WETH": {
+                        "price_usd": "2000",
+                        "oracle_source": "chainlink",
+                        "observed_at": observed_at,
+                        "confidence": "HIGH",
+                    },
+                    "USDC": {
+                        "price_usd": "1",
+                        "oracle_source": "chainlink",
+                        "observed_at": observed_at,
+                        "confidence": "HIGH",
+                    },
+                },
             )
         )
 
@@ -942,6 +956,8 @@ class TestStampEntryStateOnOpen:
         entry_state = json.loads(events[0]["attribution_json"])["entry_state"]
         assert entry_state["price0"] == "2000"
         assert entry_state["price1"] == "1"
+        assert entry_state["price0_source"] == "chainlink"
+        assert entry_state["price0_observed_at"] == observed_at
 
     def test_stamp_entry_state_unmeasured_amount_is_null_not_zero(self, store):
         """VIB-5036 / Empty != Zero: an unmeasured open amount is stamped as

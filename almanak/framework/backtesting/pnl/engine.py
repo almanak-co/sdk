@@ -2685,6 +2685,7 @@ def _seed_snapshot_prices(snapshot: MarketSnapshot, market_state: MarketState) -
                 timestamp=observation.timestamp,
                 source=observation.source,
                 confidence=_snapshot_price_confidence(observation),
+                stale=observation.is_stale,
             ),
         )
 

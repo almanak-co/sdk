@@ -30,8 +30,9 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
-from typing import Any, Literal
+from typing import Any
 
+from almanak.framework.accounting.price_snapshot import ConfidenceLiteral, PriceSnapshot
 from almanak.framework.accounting.receipts import (
     FailedReceipt,
     LendingReceipt,
@@ -39,75 +40,6 @@ from almanak.framework.accounting.receipts import (
     PerpReceipt,
     SwapReceipt,
 )
-
-ConfidenceLiteral = Literal["HIGH", "ESTIMATED", "STALE", "UNAVAILABLE"]
-
-
-@dataclass(frozen=True)
-class PriceSnapshot:
-    """Parsed view over ``transaction_ledger.price_inputs_json``.
-
-    Shape: ``{symbol_or_address: {"price_usd": str, "oracle_source": str,
-    "fetched_at": iso8601, "confidence": HIGH|ESTIMATED|STALE|UNAVAILABLE}}``.
-    """
-
-    raw: dict[str, dict[str, Any]]
-
-    def usd(self, symbol_or_address: str) -> Decimal | None:
-        """Return USD price, or None when missing/unparseable."""
-        entry = self.raw.get(symbol_or_address) or self.raw.get(symbol_or_address.lower())
-        if not entry:
-            return None
-        try:
-            return Decimal(str(entry.get("price_usd")))
-        except (InvalidOperation, TypeError):
-            return None
-
-    def confidence(self, symbol_or_address: str) -> ConfidenceLiteral:
-        """Return the confidence tag for a priced asset.
-
-        An unrecognised confidence string (e.g. a future enum value the SDK
-        doesn't know about, a typo'd tag from an external feed) collapses
-        to ``UNAVAILABLE`` rather than ``ESTIMATED`` — defaulting to
-        ``ESTIMATED`` would let an unknown / malformed tag look like a
-        measured-but-derived value, which is the opposite of the safe
-        default. Operators can recognise ``UNAVAILABLE`` rows and either
-        fix the source feed or extend the taxonomy; ``ESTIMATED`` would
-        bury the drift.
-        """
-        entry = self.raw.get(symbol_or_address) or self.raw.get(symbol_or_address.lower())
-        if not entry:
-            return "UNAVAILABLE"
-        c = entry.get("confidence")
-        if c in ("HIGH", "ESTIMATED", "STALE", "UNAVAILABLE"):
-            return c
-        return "UNAVAILABLE"
-
-    def oracle_source(self, symbol_or_address: str) -> str | None:
-        entry = self.raw.get(symbol_or_address) or self.raw.get(symbol_or_address.lower())
-        return None if entry is None else entry.get("oracle_source")
-
-    def is_empty(self) -> bool:
-        return not self.raw
-
-    @classmethod
-    def from_json(cls, s: str) -> PriceSnapshot:
-        if not s:
-            return cls(raw={})
-        try:
-            d = json.loads(s)
-        except (json.JSONDecodeError, TypeError):
-            return cls(raw={})
-        if not isinstance(d, dict):
-            return cls(raw={})
-        # Drop entries that are not the expected nested-dict shape — without
-        # this, ``usd()`` / ``confidence()`` later call ``.get()`` on whatever
-        # the writer dropped in (a bare number, a string, a list) and crash
-        # the read path. The writer-side normalization in
-        # ``observability/ledger.py`` should already ensure shape, but the
-        # reader is defensive against historical or external rows.
-        cleaned: dict[str, dict[str, Any]] = {k: v for k, v in d.items() if isinstance(v, dict)}
-        return cls(raw=cleaned)
 
 
 @dataclass(frozen=True)

@@ -16,12 +16,14 @@ The doubles here therefore do NOT ignore the chain arg (unlike the legacy
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
+from almanak.framework.data.interfaces import PriceResult
 from almanak.framework.data.market_snapshot import AmbiguousChainError
 from almanak.framework.market.builders import MarketSnapshotBuilder
 from almanak.framework.portfolio.models import TokenBalance, ValueConfidence
@@ -38,14 +40,34 @@ class _ChainSensitiveOracle:
     ``MarketSnapshot`` recognises it as chain-aware and threads ``chain=`` in.
     """
 
-    def __init__(self, table: dict[tuple[str, str], Decimal]):
+    def __init__(self, table: dict[tuple[str, str], Decimal | PriceResult]):
         self._table = {(c, t.upper()): p for (c, t), p in table.items()}
 
     def __call__(self, token: str, quote: str = "USD", chain: str | None = None) -> Decimal:
         key = (chain or "", (token or "").upper())
         if key in self._table:
-            return self._table[key]
+            value = self._table[key]
+            return value.price if isinstance(value, PriceResult) else value
         raise ValueError(f"no price for {token} on {chain}")
+
+    def get_price_result(
+        self,
+        token: str,
+        quote: str = "USD",
+        chain: str | None = None,
+    ) -> PriceResult:
+        """Expose measured provenance while retaining the callable contract."""
+        key = (chain or "", (token or "").upper())
+        value = self._table.get(key)
+        if isinstance(value, PriceResult):
+            return value
+        return PriceResult(
+            price=self(token, quote, chain),
+            source=f"chain_sensitive_test_oracle:{chain}",
+            timestamp=datetime.now(UTC),
+            confidence=1.0,
+            stale=False,
+        )
 
 
 class _ChainSensitiveBalances:
@@ -66,7 +88,7 @@ class _ChainSensitiveBalances:
 def _multichain_market(
     *,
     chains: tuple[str, ...] = ("arbitrum", "hyperevm"),
-    prices: dict[tuple[str, str], Decimal],
+    prices: dict[tuple[str, str], Decimal | PriceResult],
     balances: dict[tuple[str, str], Decimal],
 ):
     strategy_stub = SimpleNamespace(chain=chains[0], wallet_address=WALLET)
@@ -185,6 +207,49 @@ def test_same_symbol_sums_across_chains():
     snap = _valuer_no_discovery().value(strat, market, iteration_number=1)
     assert snap.available_cash_usd == Decimal("50")
     assert snap.value_confidence == ValueConfidence.HIGH
+
+
+def test_same_symbol_emits_chain_bound_price_observations():
+    arb_observed_at = datetime(2026, 8, 14, 10, 0, tzinfo=UTC)
+    hyper_observed_at = datetime(2026, 8, 14, 10, 1, tzinfo=UTC)
+    market = _multichain_market(
+        prices={
+            ("arbitrum", "USDC"): PriceResult(
+                price=Decimal("1.00"),
+                source="chainlink_arbitrum",
+                timestamp=arb_observed_at,
+                confidence=1.0,
+            ),
+            ("hyperevm", "USDC"): PriceResult(
+                price=Decimal("1.01"),
+                source="chainlink_hyperevm",
+                timestamp=hyper_observed_at,
+                confidence=0.7,
+            ),
+            ("arbitrum", "ETH"): Decimal("2000"),
+            ("hyperevm", "HYPE"): Decimal("10"),
+        },
+        balances={
+            ("arbitrum", "USDC"): Decimal("30"),
+            ("hyperevm", "USDC"): Decimal("20"),
+            ("arbitrum", "ETH"): Decimal("0"),
+            ("hyperevm", "HYPE"): Decimal("0"),
+        },
+    )
+
+    snap = _valuer_no_discovery().value(_MultiChainStrategy(tracked=("USDC",)), market, iteration_number=1)
+    records = [record for record in snap.token_prices.values() if record["symbol"] == "USDC"]
+
+    assert len(records) == 2
+    assert {(record["price_usd"], record["oracle_source"], record["observed_at"]) for record in records} == {
+        ("1.00", "chainlink_arbitrum", arb_observed_at.isoformat()),
+        ("1.01", "chainlink_hyperevm", hyper_observed_at.isoformat()),
+    }
+    assert {key.split(":", 1)[0] for key, record in snap.token_prices.items() if record["symbol"] == "USDC"} == {
+        "arbitrum",
+        "hyperevm",
+    }
+    assert snap.value_confidence is ValueConfidence.STALE
 
 
 def test_token_failing_on_all_chains_degrades():

@@ -540,12 +540,20 @@ class SwapAccountingEvent:
     # VIB-4905 (F1): pro-rated USD proceeds attributable to the unmatched
     # portion.  ``None`` when ``amount_in_usd`` was unavailable.
     unmatched_proceeds_usd: Decimal | None = None
+    # ALM-3191: ``price_*`` describes the token_in observation used for
+    # proceeds/basis valuation; the explicit ``price_out_*`` pair describes
+    # the acquired leg. The asymmetric names retain the requested public
+    # ``price_source`` / ``price_observed_at`` fields without collapsing two
+    # potentially different providers into one ambiguous source.
+    price_source: str | None = None
+    price_observed_at: datetime | None = None
+    price_out_source: str | None = None
+    price_out_observed_at: datetime | None = None
     schema_version: int = 1
-    # VIB-4166 (T6) — see module docstring for bump policy.
-    # VIB-4905 (F1) bumped to 2: payload contract gained the three
-    # partial-match fields above.  Replay path tolerates v1 payloads via
-    # ``.get(..., None)``.
-    primitive_version: int = 2
+    # Kept in lock-step with PRIMITIVE_VERSIONS[Primitive.SWAP]. ALM-3191
+    # bumps v6→v7 for the additive per-leg provenance fields above; replay
+    # tolerates earlier payloads through optional reads.
+    primitive_version: int = 7
 
     def to_payload_json(self) -> str:
         def _enc(v: Any) -> Any:
@@ -553,6 +561,8 @@ class SwapAccountingEvent:
                 # VIB-5213 (US-007): money crosses the serialization seam as a
                 # MeasuredMoney. Byte-identical to ``str(v)`` for finite Decimals.
                 return encode_money_payload(v)
+            if isinstance(v, datetime):
+                return v.isoformat()
             if isinstance(v, AccountingConfidence | SwapEventType):
                 return v.value
             return v
@@ -582,6 +592,10 @@ class SwapAccountingEvent:
             # VIB-3938 — see LPAccountingEvent.to_payload_json for rationale.
             "unavailable_reason": self.unavailable_reason or None,
             "swap_position_key": self.swap_position_key,
+            "price_source": self.price_source,
+            "price_observed_at": _enc(self.price_observed_at),
+            "price_out_source": self.price_out_source,
+            "price_out_observed_at": _enc(self.price_out_observed_at),
             "schema_version": self.schema_version,
             "primitive_version": self.primitive_version,
         }
@@ -592,6 +606,10 @@ class SwapAccountingEvent:
         d = json.loads(payload)
         schema_version = _validate_schema_version(d, "SwapAccountingEvent")
         primitive_version = _validate_primitive_version(d, "SwapAccountingEvent")
+
+        def _dt(value: Any) -> datetime | None:
+            return datetime.fromisoformat(value) if value else None
+
         return cls(
             identity=identity,
             event_type=SwapEventType(d["event_type"]),
@@ -619,6 +637,10 @@ class SwapAccountingEvent:
             confidence=AccountingConfidence(d.get("confidence", AccountingConfidence.HIGH.value)),
             unavailable_reason=d.get("unavailable_reason") or "",
             swap_position_key=d.get("swap_position_key", ""),
+            price_source=d.get("price_source"),
+            price_observed_at=_dt(d.get("price_observed_at")),
+            price_out_source=d.get("price_out_source"),
+            price_out_observed_at=_dt(d.get("price_out_observed_at")),
             schema_version=schema_version,
             primitive_version=primitive_version,
         )

@@ -31,12 +31,14 @@ These tests prove:
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
+from almanak.framework.market import PriceData
 from almanak.framework.runner._run_loop_helpers import _ensure_coin_symbols_in_teardown_oracle
 from almanak.framework.runner.strategy_runner import RunnerConfig, StrategyRunner
 
@@ -75,7 +77,14 @@ def _market(chain: str = "ethereum", prices: dict[str, Decimal] | None = None):
     market = MagicMock()
     market.chain = chain
     market.price.side_effect = lambda sym, chain=None: prices.get(sym)
-    market.price_data.side_effect = lambda sym, chain=None: SimpleNamespace(source="coingecko")
+    market.price_data.side_effect = lambda sym, chain=None: PriceData(
+        price=prices[sym],
+        source="coingecko",
+        timestamp=datetime(2026, 8, 14, 12, tzinfo=UTC),
+        confidence="HIGH",
+        raw_confidence=1.0,
+        stale=False,
+    )
     return market
 
 
@@ -157,8 +166,11 @@ def test_iteration_prices_all_pool_coins_by_symbol_nested():
     assert out["WBTC"] == {
         "price_usd": "58000",
         "oracle_source": "coingecko",
-        "fetched_at": "",
+        "fetched_at": "2026-08-14T12:00:00+00:00",
+        "observed_at": "2026-08-14T12:00:00+00:00",
         "confidence": "HIGH",
+        "raw_confidence": 1.0,
+        "stale": False,
     }
     assert out["USDT"]["price_usd"] == "1"
     assert out["WETH"]["price_usd"] == "1574"
@@ -210,8 +222,14 @@ def test_iteration_noop_without_coin_symbols():
 # ── teardown lane: _ensure_coin_symbols_in_teardown_oracle ───────────────────
 
 
-def _agg(price, *, source="coingecko", confidence="HIGH"):
-    return SimpleNamespace(price=price, timestamp=None, confidence=confidence, source=source)
+def _agg(price, *, source="coingecko", confidence=1.0):
+    return SimpleNamespace(
+        price=price,
+        timestamp=datetime(2026, 8, 14, 12, tzinfo=UTC),
+        confidence=confidence,
+        source=source,
+        stale=False,
+    )
 
 
 class _AsyncPriceOracle:

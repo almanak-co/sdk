@@ -330,13 +330,15 @@ def test_position_key_withdraw_is_owned_but_deferred():
     assert market == "0xyt"
 
 
-# --- version stamp == 6 for PT events after augment (VIB-5314 SWAP bump) ------
+# --- version stamp == 7 for PT events after ALM-3191 SWAP bump ----------------
 
 
 @pytest.mark.parametrize("event_type", ["PT_BUY", "PT_SELL", "PT_REDEEM"])
-def test_pt_events_stamp_primitive_version_6(event_type: str):
-    """PT_BUY / PT_SELL / PT_REDEEM all taxonomy-map to SWAP, now bumped to v6
-    (v5→v6 = PT_SELL/PT_REDEEM realized_yield_usd is STRICTLY USD-or-None, with the
+def test_pt_events_stamp_primitive_version_7(event_type: str):
+    """PT_BUY / PT_SELL / PT_REDEEM all taxonomy-map to SWAP, now bumped to v7.
+
+    v6→v7 adds per-leg price provenance; v5→v6 made
+    PT_SELL/PT_REDEEM realized_yield_usd STRICTLY USD-or-None, with the
     SY-denominated value carried separately in realized_yield_sy; v4→v5 was PT_BUY
     populating the buy-time ``sy_price``; v3→v4 was the raw-18 → human unit move)."""
     import json as _json
@@ -344,7 +346,7 @@ def test_pt_events_stamp_primitive_version_6(event_type: str):
     from almanak.framework.accounting.writer import augment_accounting_payload
 
     decoded = _json.loads(augment_accounting_payload(_json.dumps({"event_type": event_type}), is_live=True))
-    assert decoded["primitive_version"] == 6
+    assert decoded["primitive_version"] == 7
 
 
 # --- golden: _build_pt_buy payload is byte-identical to the buy contract -----

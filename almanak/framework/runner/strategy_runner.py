@@ -8517,6 +8517,24 @@ class StrategyRunner:
         # single result, but a defensive dedupe keeps the price() calls minimal).
         return list(dict.fromkeys(addresses))
 
+    @staticmethod
+    def _cached_market_price_entry(market: Any, token: str, chain: str, price: Decimal) -> dict[str, object]:
+        """Export typed cached provenance, or an explicitly unavailable scalar."""
+        from almanak.framework.market.models import PriceData
+
+        try:
+            price_data = market.price_data(token, chain=chain)
+            if isinstance(price_data, PriceData):
+                return price_data.to_oracle_entry()
+        except Exception:  # noqa: BLE001 — absence is represented below
+            logger.debug(
+                "Cached price provenance unavailable for token=%s chain=%s",
+                token,
+                chain,
+                exc_info=True,
+            )
+        return PriceData(price=price).to_oracle_entry()
+
     def _backfill_address_priced_legs(
         self,
         market: Any | None,
@@ -8590,7 +8608,6 @@ class StrategyRunner:
                 or resolved.coingecko_id is not None
             ):
                 continue
-            source = "unknown"
             try:
                 # ``price()`` engages the address oracle paths and caches the
                 # entry; ``price_data()`` then reads back the same cached entry
@@ -8603,11 +8620,6 @@ class StrategyRunner:
                 if raw_price is None:
                     continue
                 price = Decimal(str(raw_price))
-                if with_sources:
-                    try:
-                        source = getattr(market.price_data(address, chain=chain), "source", "") or "unknown"
-                    except Exception:  # noqa: BLE001 — provenance is best-effort
-                        source = "unknown"
             except Exception:  # noqa: BLE001 — best-effort; miss → leave absent
                 logger.debug(
                     "VIB-5124 address-backfill: price(%s) failed for %s on %s",
@@ -8622,12 +8634,7 @@ class StrategyRunner:
             if not price.is_finite() or price <= 0:
                 continue
             if with_sources:
-                oracle[symbol] = {
-                    "price_usd": str(price),
-                    "oracle_source": source,
-                    "fetched_at": "",
-                    "confidence": "HIGH",
-                }
+                oracle[symbol] = self._cached_market_price_entry(market, address, chain, price)
             else:
                 oracle[symbol] = price
             logger.debug(
@@ -8745,7 +8752,6 @@ class StrategyRunner:
             # Case-insensitive presence check mirrors _backfill_address_priced_legs.
             if any(key in oracle for key in (symbol, symbol.lower())):
                 continue
-            source = "unknown"
             try:
                 raw_price = market.price(symbol, chain=chain)
                 # Skip explicitly before Decimal() — a None price is a miss, not a
@@ -8754,11 +8760,6 @@ class StrategyRunner:
                 if raw_price is None:
                     continue
                 price = Decimal(str(raw_price))
-                if with_sources:
-                    try:
-                        source = getattr(market.price_data(symbol, chain=chain), "source", "") or "unknown"
-                    except Exception:  # noqa: BLE001 — provenance is best-effort
-                        source = "unknown"
             except Exception:  # noqa: BLE001 — best-effort; miss → leave absent
                 logger.debug(
                     "VIB-5553 coin-symbol backfill: price(%s) failed on %s",
@@ -8773,12 +8774,7 @@ class StrategyRunner:
             if not price.is_finite() or price <= 0:
                 continue
             if with_sources:
-                oracle[symbol] = {
-                    "price_usd": str(price),
-                    "oracle_source": source,
-                    "fetched_at": "",
-                    "confidence": "HIGH",
-                }
+                oracle[symbol] = self._cached_market_price_entry(market, symbol, chain, price)
             else:
                 oracle[symbol] = price
             logger.debug(

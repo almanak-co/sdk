@@ -99,7 +99,7 @@ Missing-data semantics (critical)
 
 import json
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -332,6 +332,30 @@ def _price_for_token(prices: dict, token: str, *, chain: str | None = None) -> D
 
     found = lookup_price(prices, token=token, chain=chain, quote="USD")
     return found.price if found is not None else None
+
+
+def _price_provenance_for_token(
+    prices: dict,
+    token: str,
+    *,
+    chain: str | None = None,
+) -> tuple[str | None, str | None]:
+    """Return source/time from the exact record selected by price lookup."""
+    if not prices or not token:
+        return None, None
+    from collections.abc import Mapping
+
+    from almanak.framework.market.price_store import lookup_price
+
+    found = lookup_price(prices, token=token, chain=chain, quote="USD")
+    if found is None or not isinstance(found.raw, Mapping):
+        return None, None
+    source = found.raw.get("oracle_source")
+    observed_at = found.raw.get("observed_at") or found.raw.get("fetched_at")
+    return (
+        str(source) if source else None,
+        str(observed_at) if observed_at else None,
+    )
 
 
 def _scale_raw_amount_to_human(raw: Decimal, token: str, chain: str) -> Decimal | None:
@@ -1174,6 +1198,10 @@ def build_entry_state(
     amount1: Any,
     price0: Any = None,
     price1: Any = None,
+    price0_source: str | None = None,
+    price0_observed_at: str | None = None,
+    price1_source: str | None = None,
+    price1_observed_at: str | None = None,
     coin_symbols: list[str] | None = None,
 ) -> dict[str, Any]:
     """Package initial token amounts and prices for later IL attribution.
@@ -1204,6 +1232,10 @@ def build_entry_state(
         "amount1": _s(amount1),
         "price0": _s(price0),
         "price1": _s(price1),
+        "price0_source": price0_source,
+        "price0_observed_at": price0_observed_at,
+        "price1_source": price1_source,
+        "price1_observed_at": price1_observed_at,
     }
     if coin_symbols:
         state["coin_symbols"] = [str(c) for c in coin_symbols]
@@ -1217,26 +1249,33 @@ async def _fetch_latest_token_prices(
     token1: str = "",
     chain: str = "",
     price_oracle: Any = None,
+    as_of: datetime | str | None = None,
+    max_age_seconds: int = 300,
 ) -> dict[str, Any] | None:
     """Read per-token prices for IL attribution.
 
-    Primary source: latest PortfolioSnapshot.token_prices (already archived).
-    Fallback (VIB-3420): when no snapshot exists yet (first-iteration OPEN
-    before the first snapshot is written), query the price oracle directly so
-    that entry_state prices are never silently null.
+    Primary source: the PortfolioSnapshot at or before ``as_of`` (already
+    archived), with a five-minute observation-age ceiling by default.
+    Fallback (VIB-3420): when no snapshot exists yet, query the price oracle
+    directly. When ``as_of`` is supplied, that observation is still subject to
+    the same no-future/five-minute rule and may therefore fail closed.
 
     Returns None only when both sources are unavailable. Callers must treat
     None as UNAVAILABLE and emit il_usd=None rather than a misleading zero.
     """
-    if hasattr(store, "get_latest_snapshot"):
-        try:
-            snapshot = await store.get_latest_snapshot(deployment_id)
-            if snapshot is not None:
-                snapshot_prices = getattr(snapshot, "token_prices", None)
-                if isinstance(snapshot_prices, dict) and snapshot_prices:
-                    return snapshot_prices
-        except Exception:  # noqa: BLE001
-            logger.debug("Failed to fetch latest snapshot for %s", deployment_id, exc_info=True)
+    as_of_dt = _coerce_timestamp(as_of)
+    if as_of is not None and as_of_dt is None:
+        return None
+    if as_of_dt is not None:
+        if as_of_dt.tzinfo is None:
+            as_of_dt = as_of_dt.replace(tzinfo=UTC)
+        as_of_dt = as_of_dt.astimezone(UTC)
+    if max_age_seconds <= 0:
+        raise ValueError("max_age_seconds must be positive")
+
+    snapshot_prices = await _fetch_snapshot_prices(store, deployment_id, as_of_dt, max_age_seconds)
+    if snapshot_prices:
+        return snapshot_prices
 
     # Fallback: use the price oracle when no snapshot exists yet.
     # This covers the common case where a strategy opens its first position on
@@ -1248,25 +1287,181 @@ async def _fetch_latest_token_prices(
     #      caller can look up token0/token1 in the same format.
     #   2. Async protocol (PriceOracle with get_aggregated_price): per-token
     #      async calls are made and results are collected into a dict.
+    return await _fetch_oracle_prices(
+        price_oracle,
+        token0=token0,
+        token1=token1,
+        chain=chain,
+        as_of=as_of_dt,
+        max_age_seconds=max_age_seconds,
+    )
+
+
+async def _fetch_snapshot_prices(
+    store: Any,
+    deployment_id: str,
+    as_of: datetime | None,
+    max_age_seconds: int,
+) -> dict[str, Any] | None:
+    """Read and filter the archived snapshot appropriate to event time."""
+    snapshot = None
+    try:
+        if as_of is not None and hasattr(store, "get_snapshot_at"):
+            snapshot = await store.get_snapshot_at(deployment_id, as_of)
+        elif hasattr(store, "get_latest_snapshot"):
+            snapshot = await store.get_latest_snapshot(deployment_id)
+    except Exception:  # noqa: BLE001
+        logger.debug("Failed to fetch portfolio snapshot for %s", deployment_id, exc_info=True)
+    snapshot_prices = getattr(snapshot, "token_prices", None)
+    if not isinstance(snapshot_prices, dict) or not snapshot_prices:
+        return None
+    filtered = _filter_prices_as_of(snapshot_prices, as_of, max_age_seconds)
+    return filtered or None
+
+
+async def _fetch_oracle_prices(
+    price_oracle: Any,
+    *,
+    token0: str,
+    token1: str,
+    chain: str,
+    as_of: datetime | None,
+    max_age_seconds: int,
+) -> dict[str, Any] | None:
+    """Fetch complete provider results when no archived observation is usable."""
     if price_oracle is None or not (token0 or token1):
         return None
-
     if isinstance(price_oracle, dict):
-        # Plain dict oracle — return as-is if non-empty so _price_for_token
-        # can do its symbol/address matching. If the dict uses symbol keys but
-        # the event uses address tokens, _price_for_token will return None for
-        # those tokens, which is honest (UNAVAILABLE) rather than wrong.
-        return price_oracle if price_oracle else None
+        filtered = _filter_prices_as_of(price_oracle, as_of, max_age_seconds)
+        return filtered or None
+
+    from almanak.framework.market.models import PriceData
 
     prices: dict[str, Any] = {}
     for token in filter(None, [token0, token1]):
         try:
             result = await price_oracle.get_aggregated_price(token, chain=chain or None)
             if result is not None and getattr(result, "price", None) is not None:
-                prices[token.lower()] = str(result.price)
+                prices[token.lower()] = PriceData.from_price_result(result).to_oracle_entry()
         except Exception:  # noqa: BLE001
             logger.debug("Price oracle fallback failed for token %s", token, exc_info=True)
-    return prices if prices else None
+    filtered = _filter_prices_as_of(prices, as_of, max_age_seconds)
+    return filtered or None
+
+
+def _filter_prices_as_of(
+    prices: dict[str, Any],
+    as_of: datetime | None,
+    max_age_seconds: int,
+) -> dict[str, Any]:
+    """Keep only observations valid at an event-time boundary."""
+    if as_of is None:
+        return prices
+    from almanak.framework.portfolio.models import ValueConfidence
+
+    filtered: dict[str, Any] = {}
+    for key, value in prices.items():
+        if not isinstance(value, dict):
+            continue
+        try:
+            confidence = ValueConfidence.parse_optional(
+                value.get("confidence"),
+                field_name=f"event-time price {key}.confidence",
+            )
+        except ValueError:
+            continue
+        if confidence in (None, ValueConfidence.STALE, ValueConfidence.UNAVAILABLE):
+            continue
+        observed_at = _coerce_timestamp(value.get("observed_at") or value.get("fetched_at"))
+        if observed_at is None:
+            continue
+        if observed_at.tzinfo is None:
+            observed_at = observed_at.replace(tzinfo=UTC)
+        age_seconds = (as_of - observed_at.astimezone(UTC)).total_seconds()
+        if 0 <= age_seconds <= max_age_seconds:
+            filtered[key] = value
+    return filtered
+
+
+def _event_string(event: Any, field: str) -> str:
+    """Read an optional event field as a non-null string."""
+    return getattr(event, field, "") or ""
+
+
+def _entry_coin_symbols(open_event: Any) -> list[str] | None:
+    """Return the transient pool-coin universe when the event carries one."""
+    raw_coins = getattr(open_event, "coin_symbols", None)
+    if not isinstance(raw_coins, list | tuple) or not raw_coins:
+        return None
+    return [str(coin) for coin in raw_coins]
+
+
+async def _build_open_entry_state(store: Any, open_event: Any, price_oracle: Any) -> dict[str, Any]:
+    """Build the IL sidecar from measurements valid at the OPEN event time."""
+    token0 = _event_string(open_event, "token0")
+    token1 = _event_string(open_event, "token1")
+    chain = _event_string(open_event, "chain")
+
+    # VIB-5036: OPEN amounts are raw-by-contract. Keep an unmeasured amount
+    # null, and scale measured amounts to human units for the IL sidecar.
+    amount0 = _stamp_amount_to_human(getattr(open_event, "amount0", None), token0, chain)
+    amount1 = _stamp_amount_to_human(getattr(open_event, "amount1", None), token1, chain)
+    prices = await _fetch_latest_token_prices(
+        store,
+        open_event.deployment_id,
+        token0=token0,
+        token1=token1,
+        chain=chain,
+        price_oracle=price_oracle,
+        as_of=getattr(open_event, "timestamp", None),
+    )
+    price_records = prices if prices is not None else {}
+    price0_source, price0_observed_at = _price_provenance_for_token(price_records, token0, chain=chain)
+    price1_source, price1_observed_at = _price_provenance_for_token(price_records, token1, chain=chain)
+    return build_entry_state(
+        token0=token0,
+        token1=token1,
+        amount0=amount0,
+        amount1=amount1,
+        price0=_price_for_token(price_records, token0, chain=chain),
+        price1=_price_for_token(price_records, token1, chain=chain),
+        price0_source=price0_source,
+        price0_observed_at=price0_observed_at,
+        price1_source=price1_source,
+        price1_observed_at=price1_observed_at,
+        # VIB-5896: preserve the full pool-coin universe so CLOSE-time IL can
+        # fail closed for N-coin pools instead of pricing a two-token subset.
+        coin_symbols=_entry_coin_symbols(open_event),
+    )
+
+
+def _merge_open_entry_state(open_event: Any, entry_state: dict[str, Any]) -> str:
+    """Merge entry_state with attribution fields written by other subsystems."""
+    existing: dict[str, Any] = {}
+    raw = getattr(open_event, "attribution_json", "") or ""
+    if raw and raw != "{}":
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                existing = parsed
+        except (json.JSONDecodeError, TypeError):
+            pass
+    existing["entry_state"] = entry_state
+    return json.dumps(existing)
+
+
+async def _persist_open_entry_state(store: Any, open_event: Any, new_json: str) -> None:
+    """Persist the merged attribution through the store's supported seam."""
+    open_event.attribution_json = new_json
+    if hasattr(store, "update_position_attribution"):
+        await store.update_position_attribution(
+            open_event.id,
+            new_json,
+            getattr(open_event, "attribution_version", 0) or 0,
+            deployment_id=getattr(open_event, "deployment_id", "") or "",
+        )
+        return
+    await store.save_position_event(open_event)
 
 
 async def stamp_entry_state_on_open(
@@ -1274,89 +1469,14 @@ async def stamp_entry_state_on_open(
     open_event: Any,
     price_oracle: Any = None,
 ) -> None:
-    """Persist entry_state on the OPEN event's attribution_json (VIB-3205).
-
-    Called by StrategyRunner after ``save_position_event`` for OPEN events so
-    that the later CLOSE-time ``compute_impermanent_loss`` can evaluate HODL
-    value. entry_state captures the initial token amounts + per-token prices
-    read from the latest ``PortfolioSnapshot.token_prices``.
-
-    price_oracle is used as a fallback when no snapshot exists yet (VIB-3420).
-    This covers the common case where a strategy opens its first LP position on
-    the first iteration before the portfolio valuer has produced a snapshot.
-    Without this fallback, impermanent_loss_usd is permanently null for these
-    positions.
-    """
+    """Persist an event-time, provenance-bearing IL sidecar on an OPEN event."""
     try:
-        token0 = getattr(open_event, "token0", "") or ""
-        token1 = getattr(open_event, "token1", "") or ""
-        # VIB-5036: the OPEN event's amount0/amount1 columns are raw-by-contract
-        # (smallest unit). entry_state is an IL-only sidecar — store HUMAN
-        # amounts here so compute_impermanent_loss can price them directly
-        # (raw × USD price was ~1e18 nonsense pre-fix). Falls back to the raw
-        # string only when decimals can't be resolved (no worse than pre-fix).
-        chain = getattr(open_event, "chain", "") or ""
-        # Empty != Zero: pass the raw value straight through (NO ``or "0"``
-        # coercion) so an unmeasured amount is stamped as null, not a
-        # fabricated measured zero. _stamp_amount_to_human returns None for
-        # unmeasured/unparseable input.
-        amount0 = _stamp_amount_to_human(getattr(open_event, "amount0", "") or None, token0, chain)
-        amount1 = _stamp_amount_to_human(getattr(open_event, "amount1", "") or None, token1, chain)
-
-        prices = await _fetch_latest_token_prices(
-            store,
-            open_event.deployment_id,
-            token0=token0,
-            token1=token1,
-            chain=chain,
-            price_oracle=price_oracle,
-        )
-        price0 = _price_for_token(prices, token0, chain=chain) if prices else None
-        price1 = _price_for_token(prices, token1, chain=chain) if prices else None
-
-        # VIB-5896 — thread the pool-coin universe (stamped transiently on the
-        # in-memory PositionEvent by ``_apply_lp_open`` for N-coin fungible
-        # venues) into entry_state so CLOSE-time IL can fail closed on >2-coin
-        # pools instead of computing a subset-HODL off the 2-slot amounts.
-        raw_coins = getattr(open_event, "coin_symbols", None)
-        coin_symbols = [str(c) for c in raw_coins] if isinstance(raw_coins, list | tuple) and raw_coins else None
-
-        entry_state = build_entry_state(
-            token0=token0,
-            token1=token1,
-            amount0=amount0,
-            amount1=amount1,
-            price0=price0,
-            price1=price1,
-            coin_symbols=coin_symbols,
-        )
-
-        # Merge with any existing attribution_json content to preserve
-        # fields written by other subsystems.
-        existing: dict[str, Any] = {}
-        raw = getattr(open_event, "attribution_json", "") or ""
-        if raw and raw != "{}":
-            try:
-                parsed = json.loads(raw)
-                if isinstance(parsed, dict):
-                    existing = parsed
-            except (json.JSONDecodeError, TypeError):
-                existing = {}
-        existing["entry_state"] = entry_state
-
-        new_json = json.dumps(existing)
-        open_event.attribution_json = new_json
-        if hasattr(store, "update_position_attribution"):
-            await store.update_position_attribution(
-                open_event.id, new_json, getattr(open_event, "attribution_version", 0) or 0
-            )
-        else:
-            await store.save_position_event(open_event)
+        entry_state = await _build_open_entry_state(store, open_event, price_oracle)
+        new_json = _merge_open_entry_state(open_event, entry_state)
+        await _persist_open_entry_state(store, open_event, new_json)
     except Exception:  # noqa: BLE001
-        # VIB-3205 audit fix (pr-auditor Important #5): escalate from debug
-        # to warning. This is a financially-sensitive module — losing
-        # entry_state on OPEN permanently breaks IL for that position,
-        # and debug-level logs are invisible in production.
+        # Losing entry_state on OPEN permanently breaks IL for that position;
+        # keep the original fail-soft behavior but make the loss observable.
         logger.warning("Failed to stamp entry_state on OPEN", exc_info=True)
 
 
@@ -1410,7 +1530,10 @@ async def run_attribution_on_close(
         prices = await _fetch_latest_token_prices(
             store,
             close_event.deployment_id,
+            token0=getattr(close_event, "token0", "") or "",
+            token1=getattr(close_event, "token1", "") or "",
             chain=getattr(close_event, "chain", "") or "",
+            as_of=getattr(close_event, "timestamp", None),
         )
         if prices:
             close_attr = close_dict.get("attribution_json") or "{}"

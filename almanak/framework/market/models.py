@@ -16,12 +16,13 @@ enforces this.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from almanak.framework.portfolio.models import ValueConfidence
@@ -118,11 +119,12 @@ class TokenBalance:
 
 @dataclass
 class PriceData:
-    """Price data for a token.
+    """Price data plus the provider's original provenance.
 
-    Includes ``source`` (the named provider that produced the datum) so
-    accounting writers can stamp ``transaction_ledger.price_inputs_json`` with
-    the real provider name (VIB-3889).
+    ``None`` means the corresponding property was not measured. In particular,
+    legacy scalar and preloaded prices do not invent an observation time or a
+    confidence level. ``raw_confidence`` retains the provider's precise score;
+    ``confidence`` is the conservative accounting vocabulary derived from it.
     """
 
     price: Decimal
@@ -130,9 +132,112 @@ class PriceData:
     change_24h_pct: Decimal = Decimal("0")
     high_24h: Decimal = Decimal("0")
     low_24h: Decimal = Decimal("0")
-    timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
+    timestamp: datetime | None = None
     source: str = ""
-    confidence: str = "HIGH"
+    confidence: ValueConfidence | str | None = None
+    stale: bool | None = None
+    raw_confidence: float | None = None
+
+    def __post_init__(self) -> None:
+        from almanak.framework.portfolio.models import ValueConfidence
+
+        self.price = Decimal(str(self.price))
+        if self.raw_confidence is not None and not 0.0 <= self.raw_confidence <= 1.0:
+            raise ValueError("raw_confidence must be between 0.0 and 1.0")
+        declared_confidence = ValueConfidence.parse_optional(self.confidence, field_name="price confidence")
+        observed_confidence: ValueConfidence | None = None
+        if self.raw_confidence is not None:
+            observed_confidence = self._confidence_from_observation(self.raw_confidence, self.stale is True)
+        elif self.stale is True:
+            observed_confidence = ValueConfidence.STALE
+
+        if declared_confidence is None:
+            self.confidence = observed_confidence
+        elif observed_confidence is None:
+            self.confidence = declared_confidence
+        else:
+            # A declared coarse value can be less trusted than the raw provider
+            # metadata, but it can never override that metadata with a more
+            # trusted value. This prevents contradictory boundary objects such
+            # as HIGH + stale=True or HIGH + raw_confidence=0.4 from escaping as
+            # fabricated HIGH provenance.
+            confidence_rank = {
+                ValueConfidence.HIGH: 0,
+                ValueConfidence.ESTIMATED: 1,
+                ValueConfidence.STALE: 2,
+                ValueConfidence.UNAVAILABLE: 3,
+            }
+            self.confidence = max(
+                (declared_confidence, observed_confidence),
+                key=confidence_rank.__getitem__,
+            )
+
+    @staticmethod
+    def _confidence_from_observation(raw_confidence: float, stale: bool) -> ValueConfidence:
+        """Map precise provider metadata to the conservative coarse vocabulary."""
+        from almanak.framework.portfolio.models import ValueConfidence
+
+        if raw_confidence < 0.5:
+            return ValueConfidence.UNAVAILABLE
+        if stale or raw_confidence < 0.8:
+            return ValueConfidence.STALE
+        if raw_confidence < 1.0:
+            return ValueConfidence.ESTIMATED
+        return ValueConfidence.HIGH
+
+    @property
+    def observed_at(self) -> datetime | None:
+        """The provider observation time (``timestamp`` compatibility alias)."""
+        return self.timestamp
+
+    @classmethod
+    def from_price_result(cls, result: Any) -> PriceData:
+        """Preserve available provider metadata without inventing missing fields.
+
+        Some legacy aggregators return a scalar or a duck-typed result instead
+        of the canonical :class:`PriceResult`. Keep their usable price while
+        treating absent or malformed provenance as unmeasured.
+        """
+        price = getattr(result, "price", result)
+        confidence_value = getattr(result, "confidence", None)
+        if confidence_value is None:
+            raw_confidence = None
+        else:
+            try:
+                raw_confidence = float(confidence_value)
+            except (TypeError, ValueError):
+                raw_confidence = None
+        if raw_confidence is not None and (not math.isfinite(raw_confidence) or not 0.0 <= raw_confidence <= 1.0):
+            raw_confidence = None
+
+        timestamp_value = getattr(result, "timestamp", None)
+        timestamp = timestamp_value if isinstance(timestamp_value, datetime) else None
+        stale_value = getattr(result, "stale", None)
+        stale = stale_value if isinstance(stale_value, bool) else None
+        return cls(
+            price=price,
+            timestamp=timestamp,
+            source=str(getattr(result, "source", "") or ""),
+            stale=stale,
+            raw_confidence=raw_confidence,
+        )
+
+    def to_oracle_entry(self) -> dict[str, object]:
+        """Return the canonical ledger/snapshot price-input record."""
+        from almanak.framework.portfolio.models import ValueConfidence
+
+        observed_at = self.observed_at.isoformat() if self.observed_at is not None else ""
+        confidence = self.confidence.value if isinstance(self.confidence, ValueConfidence) else "UNAVAILABLE"
+        return {
+            "price_usd": str(self.price),
+            "oracle_source": self.source or "unknown",
+            # Keep the legacy key while making its observation semantics explicit.
+            "fetched_at": observed_at,
+            "observed_at": observed_at,
+            "confidence": confidence,
+            "raw_confidence": self.raw_confidence,
+            "stale": self.stale,
+        }
 
 
 class ReferenceMarketStatus(StrEnum):

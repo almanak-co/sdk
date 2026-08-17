@@ -63,6 +63,18 @@ def test_sync_wrapper_passes_chain_to_chain_aware_oracle() -> None:
     assert oracle.calls == [("ETH", "USD", "base")]
 
 
+def test_sync_wrapper_exposes_complete_price_result_for_market_snapshot() -> None:
+    oracle = _ChainAwareOracle()
+    sync_price = create_sync_price_oracle_func(oracle)
+
+    result = sync_price.get_price_result("ETH", "USD", "base")  # type: ignore[attr-defined]
+
+    assert isinstance(result, PriceResult)
+    assert result.price == Decimal("2500.50")
+    assert result.source == "test"
+    assert result.confidence == 1.0
+
+
 def test_sync_wrapper_falls_back_to_legacy_oracle_signature() -> None:
     oracle = _LegacyOracle()
 

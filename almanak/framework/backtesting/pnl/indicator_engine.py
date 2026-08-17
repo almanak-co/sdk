@@ -747,6 +747,8 @@ class BacktestIndicatorEngine:
                     timestamp=existing.timestamp,
                     source=existing.source,
                     confidence=existing.confidence,
+                    stale=existing.stale,
+                    raw_confidence=existing.raw_confidence,
                 ),
             )
 

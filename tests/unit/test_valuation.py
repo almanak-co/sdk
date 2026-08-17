@@ -1210,6 +1210,32 @@ class TestDeployedCapitalUsd:
             "external data is advisory metadata, not a value certification"
         )
 
+    def test_stale_confidence_preserved_through_external_reconciliation(self):
+        """External advisory data cannot upgrade stale framework prices."""
+        valuer = PortfolioValuer()
+        framework_snapshot = PortfolioSnapshot(
+            timestamp=datetime(2026, 8, 14, 12, 0, tzinfo=UTC),
+            deployment_id="stale-price-strat",
+            total_value_usd=Decimal("0"),
+            available_cash_usd=Decimal("0"),
+            value_confidence=ValueConfidence.STALE,
+        )
+        external = {
+            "total_value_usd": Decimal("12345"),
+            "provider": "zerion",
+            "cache_hit": False,
+            "timestamp": datetime(2026, 8, 14, 12, 0, tzinfo=UTC),
+            "positions": [],
+        }
+
+        reconciled = valuer._build_external_reconciled_snapshot(
+            framework_snapshot,
+            external,
+            {"reconciliation_status": "external_won_zero_framework"},
+        )
+
+        assert reconciled.value_confidence is ValueConfidence.STALE
+
     def test_borrow_with_negative_strategy_value_is_trusted_not_no_path(self):
         """VIB-4584 / F3.1 — strategies may report BORROW debt either as a
         positive gross amount (framework negates) or as an already-normalised

@@ -611,7 +611,7 @@ class TestUnverifiablePreflightReachesTheRightConsumers:
 
         with patch.object(
             cl.AddressRegistry, "addresses_for", return_value={"pool_data_provider": TEST_ASSET_ADDR}
-        ):
+        ), patch.object(cl, "_resolve_pool_data_provider", return_value=TEST_ASSET_ADDR):
             with pytest.raises(cl.ReserveConfigUnverifiableError) as excinfo:
                 cl._check_aave_v3_collateral_eligibility(compiler, TEST_ASSET_ADDR, "WETH")
 

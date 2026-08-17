@@ -19,7 +19,7 @@ Coverage:
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import grpc
 import pytest
@@ -437,12 +437,9 @@ def _make_update_servicer(
     if not has_method:
         del warm.update_position_attribution
     elif raise_exc is not None:
-        warm.update_position_attribution = MagicMock(side_effect=raise_exc)
+        warm.update_position_attribution = AsyncMock(side_effect=raise_exc)
     else:
-        async def _coro(*_args, **_kwargs):
-            return update_return
-
-        warm.update_position_attribution = _coro
+        warm.update_position_attribution = AsyncMock(return_value=update_return)
     state_manager.warm_backend = warm
     servicer._state_manager = state_manager
     return servicer
@@ -511,11 +508,18 @@ async def test_update_attribution_success() -> None:
         event_id="11111111-1111-1111-1111-111111111111",
         attribution_json='{"realized_pnl_usd":"0"}',
         attribution_version=3,
+        deployment_id="deploy-pnl-1",
     )
     resp = await servicer.UpdatePositionAttribution(req, ctx)
     ctx.set_code.assert_not_called()
     assert resp.success is True
     assert resp.error == ""
+    servicer._state_manager.warm_backend.update_position_attribution.assert_awaited_once_with(
+        "11111111-1111-1111-1111-111111111111",
+        '{"realized_pnl_usd":"0"}',
+        3,
+        deployment_id="deploy-pnl-1",
+    )
 
 
 @pytest.mark.asyncio
@@ -574,6 +578,25 @@ async def test_update_attribution_blank_deployment_id_rejected() -> None:
     resp = await servicer.UpdatePositionAttribution(req, ctx)
     ctx.set_code.assert_called_once_with(grpc.StatusCode.INVALID_ARGUMENT)
     assert resp.success is False
+
+
+@pytest.mark.asyncio
+async def test_update_attribution_malformed_deployment_id_rejected_before_backend() -> None:
+    servicer = _make_update_servicer()
+    ctx = _make_context()
+    req = gateway_pb2.UpdatePositionAttributionRequest(
+        event_id="11111111-1111-1111-1111-111111111111",
+        attribution_json="{}",
+        attribution_version=1,
+        deployment_id="deploy/pnl",
+    )
+
+    resp = await servicer.UpdatePositionAttribution(req, ctx)
+
+    ctx.set_code.assert_called_once_with(grpc.StatusCode.INVALID_ARGUMENT)
+    assert resp.success is False
+    assert "deployment_id: invalid format" in resp.error
+    servicer._state_manager.warm_backend.update_position_attribution.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

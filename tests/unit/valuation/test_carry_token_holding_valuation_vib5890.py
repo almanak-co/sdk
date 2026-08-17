@@ -30,6 +30,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from almanak.framework.market import PriceData
 from almanak.framework.portfolio.models import ValueConfidence
 from almanak.framework.teardown.models import (
     PositionInfo,
@@ -131,11 +132,32 @@ def _carry_market(
     return market
 
 
+class _TypedCarryMarket:
+    """Carry fixture exposing real, chain-bound cached price provenance."""
+
+    chains = ("bsc",)
+
+    def __init__(self) -> None:
+        self._delegate = _carry_market()
+
+    def __getattr__(self, name):
+        return getattr(self._delegate, name)
+
+    def price_data(self, token: str, *, chain: str | None = None) -> PriceData:
+        if token != "USDT" or chain != "bsc":
+            raise ValueError(f"No typed observation for {token} on {chain}")
+        return PriceData(
+            price=_USDT_PRICE,
+            source="chainlink",
+            timestamp=datetime(2026, 8, 14, 12, tzinfo=UTC),
+            raw_confidence=1.0,
+            stale=False,
+        )
+
+
 def _usdt_position(snapshot) -> object:
     return next(
-        p
-        for p in snapshot.positions
-        if p.position_type == PositionType.TOKEN and p.details.get("asset") == "USDT"
+        p for p in snapshot.positions if p.position_type == PositionType.TOKEN and p.details.get("asset") == "USDT"
     )
 
 
@@ -191,13 +213,22 @@ def test_repriced_token_has_matching_token_price_record():
     ), snapshot.token_prices
 
 
+def test_repriced_token_record_preserves_its_chain_bound_provenance():
+    snapshot = PortfolioValuer().value(_carry_strategy(), _TypedCarryMarket())
+
+    key, record = next((key, record) for key, record in snapshot.token_prices.items() if record.get("symbol") == "USDT")
+    assert key.startswith("bsc:")
+    assert record["price_usd"] == str(_USDT_PRICE)
+    assert record["oracle_source"] == "chainlink"
+    assert record["observed_at"] == "2026-08-14T12:00:00+00:00"
+    assert record["confidence"] == "HIGH"
+
+
 def test_live_balance_is_preferred_over_cached_amount():
     """The mark uses the LIVE wallet balance (self-correcting for drift), not the
     strategy's cached ``details["amount"]``."""
     live_balance = Decimal("0.95")  # deliberately != cached _HELD_USDT_AMOUNT
-    snapshot = PortfolioValuer().value(
-        _carry_strategy(), _carry_market(usdt_balance=live_balance)
-    )
+    snapshot = PortfolioValuer().value(_carry_strategy(), _carry_market(usdt_balance=live_balance))
 
     usdt = _usdt_position(snapshot)
     assert usdt.details.get("spot_amount_source") == "live_balance"
@@ -208,9 +239,7 @@ def test_live_balance_is_preferred_over_cached_amount():
 def test_cached_amount_used_when_live_balance_unavailable():
     """When the live balance read fails, the cached amount is the fallback (and the
     source is stamped so the staleness is auditable)."""
-    snapshot = PortfolioValuer().value(
-        _carry_strategy(), _carry_market(usdt_balance=None)
-    )
+    snapshot = PortfolioValuer().value(_carry_strategy(), _carry_market(usdt_balance=None))
 
     usdt = _usdt_position(snapshot)
     assert usdt.details.get("spot_amount_source") == "cached_amount"
@@ -222,9 +251,7 @@ def test_non_finite_or_non_positive_price_is_unmeasured_not_fabricated(bad_price
     """Empty ≠ Zero: a NaN / Inf / zero / negative price never yields a fabricated
     $0 or a NaN mark — the holding is unmeasured and the snapshot drops to
     UNAVAILABLE."""
-    snapshot = PortfolioValuer().value(
-        _carry_strategy(), _carry_market(usdt_price=bad_price)
-    )
+    snapshot = PortfolioValuer().value(_carry_strategy(), _carry_market(usdt_price=bad_price))
 
     usdt = _usdt_position(snapshot)
     assert usdt.value_usd == Decimal("0")  # unmeasured — NOT a priced value / NaN
@@ -277,9 +304,7 @@ def test_unmeasurable_amount_is_unavailable_not_measured_zero(bad_amount):
 def test_non_finite_live_balance_falls_back_to_cached_amount():
     """A NaN/Inf live balance is rejected (Empty ≠ Zero) and the cached amount is
     used instead — a poisoned balance never poisons the mark."""
-    snapshot = PortfolioValuer().value(
-        _carry_strategy(), _carry_market(usdt_balance=Decimal("NaN"))
-    )
+    snapshot = PortfolioValuer().value(_carry_strategy(), _carry_market(usdt_balance=Decimal("NaN")))
 
     usdt = _usdt_position(snapshot)
     assert usdt.details.get("spot_amount_source") == "cached_amount"

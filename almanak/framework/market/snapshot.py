@@ -253,6 +253,25 @@ def _price_oracle_supports_chain_arg(price_oracle: PriceOracle) -> bool:
     return len(positional_params) >= 3
 
 
+def _call_price_result_getter(method: Any, token: str, quote: str, chain: str) -> Any:
+    """Call a provenance getter without inventing an unsupported chain kwarg."""
+    if method is None:
+        raise RuntimeError("Price oracle result capability is unavailable")
+    accepts_chain = True
+    try:
+        signature = inspect.signature(method)
+        accepts_chain = "chain" in signature.parameters or any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values()
+        )
+    except (TypeError, ValueError):
+        # Preserve the provenance-aware protocol when an opaque callable cannot
+        # expose its signature.
+        pass
+    if accepts_chain:
+        return method(token, quote, chain=chain)
+    return method(token, quote)
+
+
 class _PricesAccessor:
     """Hybrid dict-callable accessor for ``MarketSnapshot.prices``.
 
@@ -377,25 +396,6 @@ def _balance_provider_supports_chain_arg(balance_provider: Any) -> bool:
     return False
 
 
-# Provider-name keywords matched against the oracle's qualified name to
-# infer ``PriceData.source`` (VIB-3889). Order matters — first match wins.
-_PROVIDER_NAME_HINTS: tuple[tuple[str, str], ...] = (
-    ("coingecko", "coingecko"),
-    ("chainlink", "chainlink"),
-    ("binance", "binance"),
-    ("thegraph", "thegraph"),
-    ("graph", "thegraph"),
-    ("uniswap", "uniswap"),
-    ("aggregat", "aggregator"),
-    ("dex_twap", "dex_twap"),
-    ("twap", "dex_twap"),
-    ("gateway_oracle", "aggregator"),
-    ("gatewaypriceoracle", "aggregator"),
-    ("marketservice", "aggregator"),
-    ("gateway", "aggregator"),
-)
-
-
 def _pt_price_confidence(*, stale: bool, confidence_band: int) -> Any:
     """Combine the gateway's coarse band + ``stale`` flag into ``ValueConfidence``.
 
@@ -417,42 +417,6 @@ def _pt_price_confidence(*, stale: bool, confidence_band: int) -> Any:
     if confidence_band == gateway_pb2.PT_PRICE_CONFIDENCE_BAND_ESTIMATED:
         return ValueConfidence.ESTIMATED
     return ValueConfidence.UNAVAILABLE
-
-
-def _infer_oracle_source(price_oracle: PriceOracle) -> str:
-    """Best-effort source-name extraction from a price-oracle callable."""
-    candidates: list[str] = []
-
-    def _harvest(obj: Any) -> None:
-        for attr in ("__qualname__", "__module__", "__name__"):
-            value = getattr(obj, attr, None)
-            if isinstance(value, str):
-                candidates.append(value)
-        cls = type(obj)
-        for attr in ("__qualname__", "__module__", "__name__"):
-            value = getattr(cls, attr, None)
-            if isinstance(value, str):
-                candidates.append(value)
-
-    _harvest(price_oracle)
-    func = getattr(price_oracle, "func", None)
-    if func is not None:
-        _harvest(func)
-    seen: set[int] = {id(price_oracle)}
-    cursor: Any = price_oracle
-    while True:
-        wrapped = getattr(cursor, "__wrapped__", None)
-        if wrapped is None or id(wrapped) in seen:
-            break
-        seen.add(id(wrapped))
-        _harvest(wrapped)
-        cursor = wrapped
-
-    haystack = " ".join(candidates).lower()
-    for needle, source_name in _PROVIDER_NAME_HINTS:
-        if needle in haystack:
-            return source_name
-    return ""
 
 
 # =============================================================================
@@ -916,11 +880,32 @@ class MarketSnapshot:
         # itself callable (a MagicMock with side_effect IS callable).
         if self._price_oracle:
             try:
+                # Capability detection must inspect the concrete object rather
+                # than dynamic attribute lookup: ``MagicMock`` fabricates any
+                # requested attribute and would otherwise be mistaken for a
+                # provenance-aware oracle.
+                declared_result_getter = inspect.getattr_static(
+                    self._price_oracle,
+                    "get_price_result",
+                    None,
+                )
+                use_result_capability = callable(declared_result_getter)
+                result_getter = (
+                    self._price_oracle.get_price_result  # type: ignore[attr-defined]
+                    if use_result_capability
+                    else None
+                )
                 use_aggregator = not callable(self._price_oracle) and hasattr(
                     self._price_oracle,
                     "get_aggregated_price",
                 )
-                if use_aggregator:
+                if use_result_capability:
+                    result = _call_price_result_getter(result_getter, oracle_token, quote, requested_chain)
+                    if asyncio.iscoroutine(result):
+                        result = self._run_async_bridged(result)
+                    price_value = getattr(result, "price", result)
+                    price_data = PriceData.from_price_result(result)
+                elif use_aggregator:
                     # ``self._price_oracle`` is typed Callable; mypy can't see
                     # through the runtime hasattr check.
                     method = self._price_oracle.get_aggregated_price  # type: ignore[attr-defined]
@@ -942,19 +927,16 @@ class MarketSnapshot:
                     else:
                         result = coro
                     price_value = getattr(result, "price", result)
+                    price_data = PriceData.from_price_result(result)
                 else:
                     price_value = (
                         self._price_oracle(oracle_token, quote, requested_chain)
                         if _price_oracle_supports_chain_arg(self._price_oracle)
                         else self._price_oracle(oracle_token, quote)
                     )
-                # VIB-3889: stamp the inferred source on the cached entry
-                # so ``get_price_oracle_dict(with_sources=True)`` carries
-                # the actual provider name into ``price_inputs_json``.
-                price_data = PriceData(
-                    price=price_value,
-                    source=_infer_oracle_source(self._price_oracle),
-                )
+                    # A scalar oracle supplied no provenance. Preserve that
+                    # absence instead of inferring a provider from callable names.
+                    price_data = PriceData(price=price_value)
                 self._price_store.put(
                     token,
                     chain=requested_chain,
@@ -4699,7 +4681,8 @@ class MarketSnapshot:
         Args:
             with_sources: When ``True`` (VIB-3889), return the canonical
                 nested shape ``{symbol: {price_usd, oracle_source,
-                fetched_at, confidence}}`` so downstream writers
+                observed_at, fetched_at, confidence, raw_confidence, stale}}``
+                so downstream writers
                 (transaction_ledger.price_inputs_json) carry the actual
                 provider name rather than "unknown". Default ``False``
                 preserves the legacy flat ``{symbol: price}`` return.
@@ -4713,19 +4696,7 @@ class MarketSnapshot:
         def _value(record: StoredPrice[PriceData]) -> Any:
             if not with_sources:
                 return record.price
-            price_data = record.data
-            timestamp = getattr(price_data, "timestamp", None)
-            source = getattr(price_data, "source", "") or "unknown"
-            confidence = getattr(price_data, "confidence", "UNAVAILABLE")
-            confidence = getattr(confidence, "value", confidence)
-            if confidence not in {"HIGH", "ESTIMATED", "STALE", "UNAVAILABLE"}:
-                confidence = "UNAVAILABLE"
-            return {
-                "price_usd": str(record.price),
-                "oracle_source": source,
-                "fetched_at": timestamp.isoformat() if timestamp is not None and source != "preloaded" else "",
-                "confidence": confidence,
-            }
+            return record.data.to_oracle_entry()
 
         descriptor = ChainRegistry.try_resolve(str(self._chain))
         primary_chain = descriptor.name if descriptor is not None else str(self._chain).strip().lower()

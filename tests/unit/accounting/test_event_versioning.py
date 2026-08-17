@@ -360,7 +360,7 @@ def test_primitive_versions_explicit_per_primitive_pinning() -> None:
         # VIB-5314: bumped 5→6 — PT_SELL/PT_REDEEM ``realized_yield_usd`` is now
         # STRICTLY USD-or-None (never SY-units); new ``realized_yield_sy`` carries
         # the SY-denominated value separately.
-        Primitive.SWAP: 6,
+        Primitive.SWAP: 7,
         Primitive.VAULT: 1,
         # VIB-5666: vault SETTLEMENT primitive (greenfield, v1).
         Primitive.SETTLEMENT: 1,
@@ -679,10 +679,9 @@ def test_augment_paper_unknown_event_type_falls_back_to_utility_for_primitive_ve
         decoded = json.loads(augment_accounting_payload(payload, is_live=False))
     assert decoded["primitive_version"] == PRIMITIVE_VERSIONS[Primitive.UTILITY]
     assert decoded["matching_policy_version"] == MATCHING_POLICY_VERSIONS[Primitive.UTILITY]
-    assert any(
-        "FROBNICATE" in record.message and record.levelname == "ERROR"
-        for record in caplog.records
-    ), f"Expected ERROR log mentioning 'FROBNICATE'; got records: {[r.message for r in caplog.records]}"
+    assert any("FROBNICATE" in record.message and record.levelname == "ERROR" for record in caplog.records), (
+        f"Expected ERROR log mentioning 'FROBNICATE'; got records: {[r.message for r in caplog.records]}"
+    )
 
 
 def test_augment_live_unknown_event_type_raises() -> None:
@@ -790,9 +789,7 @@ def test_to_payload_json_serialises_primitive_version_as_json_integer(
 
 
 @pytest.mark.parametrize("event_type,model_cls", sorted(_PAYLOAD_MODELS.items()))
-def test_versioned_pydantic_base_accepts_primitive_version(
-    event_type: str, model_cls: type
-) -> None:
+def test_versioned_pydantic_base_accepts_primitive_version(event_type: str, model_cls: type) -> None:
     """The pydantic _Versioned read rail must accept and preserve primitive_version."""
     # Build a minimal payload that satisfies each model's required fields.
     base = _minimal_payload_for_model(event_type)
@@ -924,18 +921,14 @@ def test_per_primitive_isolation_under_bump(
         Primitive.PREDICTION: "PREDICTION_OPEN",
     }
     # Bumped event gets v99.
-    bumped_decoded = json.loads(
-        augment_accounting_payload(json.dumps({"event_type": probe_event_type}), is_live=True)
-    )
+    bumped_decoded = json.loads(augment_accounting_payload(json.dumps({"event_type": probe_event_type}), is_live=True))
     assert bumped_decoded["primitive_version"] == 99
 
     # Every sibling primitive still gets its declared (non-bumped) version.
     for sibling_primitive, sibling_et in sibling_event_types.items():
         if sibling_primitive == bumped_primitive:
             continue
-        decoded = json.loads(
-            augment_accounting_payload(json.dumps({"event_type": sibling_et}), is_live=True)
-        )
+        decoded = json.loads(augment_accounting_payload(json.dumps({"event_type": sibling_et}), is_live=True))
         assert decoded["primitive_version"] == PRIMITIVE_VERSIONS[sibling_primitive], (
             f"Bumping {bumped_primitive.name} to v99 contaminated {sibling_primitive.name}: "
             f"got {decoded['primitive_version']}, expected {PRIMITIVE_VERSIONS[sibling_primitive]}"
@@ -950,9 +943,7 @@ def test_every_event_type_in_whitelist_resolves_a_primitive_version(
     canonical event_type produces a positive int primitive_version. Catches
     "added a new event_type to the enum but forgot to add a TAXONOMY row"
     at the writer level."""
-    decoded = json.loads(
-        augment_accounting_payload(json.dumps({"event_type": event_type}), is_live=True)
-    )
+    decoded = json.loads(augment_accounting_payload(json.dumps({"event_type": event_type}), is_live=True))
     pv = decoded["primitive_version"]
     assert type(pv) is int and pv >= 1, (
         f"event_type={event_type!r} produced primitive_version={pv!r} "
@@ -999,11 +990,7 @@ def test_no_production_code_reads_raw_primitive_versions_dict() -> None:
                 for alias in node.names:
                     if alias.name == "PRIMITIVE_VERSIONS":
                         violations.append((rel, node.lineno, "import"))
-            if (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Name)
-                and node.func.id == "getattr"
-            ):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "getattr":
                 for arg in node.args:
                     if isinstance(arg, ast.Constant) and arg.value == "PRIMITIVE_VERSIONS":
                         violations.append((rel, node.lineno, "getattr-string"))
@@ -1035,11 +1022,7 @@ def test_writer_imports_primitive_version_accessor_and_does_not_index_raw_dict()
             for alias in node.names:
                 if alias.name == "PRIMITIVE_VERSIONS":
                     bypasses.append((node.lineno, "import"))
-        if (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id == "getattr"
-        ):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "getattr":
             for arg in node.args:
                 if isinstance(arg, ast.Constant) and arg.value == "PRIMITIVE_VERSIONS":
                     bypasses.append((node.lineno, "getattr-string"))

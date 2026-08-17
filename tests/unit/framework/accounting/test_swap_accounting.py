@@ -101,7 +101,21 @@ def _make_ledger_row(
 
 
 def _price_json(prices: dict[str, str]) -> str:
-    return json.dumps(prices)
+    observed_at = "2026-08-14T12:00:00+00:00"
+    return json.dumps(
+        {
+            symbol: {
+                "price_usd": price,
+                "oracle_source": "chainlink",
+                "fetched_at": observed_at,
+                "observed_at": observed_at,
+                "confidence": "HIGH",
+                "raw_confidence": 1.0,
+                "stale": False,
+            }
+            for symbol, price in prices.items()
+        }
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -140,6 +154,10 @@ class TestHandleSwapBasic:
         assert event.gas_usd == Decimal("0.50")
         assert event.confidence == AccountingConfidence.HIGH
         assert event.unavailable_reason == ""
+        assert event.price_source == "chainlink"
+        assert event.price_observed_at == datetime(2026, 8, 14, 12, tzinfo=UTC)
+        assert event.price_out_source == "chainlink"
+        assert event.price_out_observed_at == datetime(2026, 8, 14, 12, tzinfo=UTC)
         assert event.identity.deployment_id == _DEPLOYMENT_ID
         assert event.identity.chain == "arbitrum"
         assert event.identity.protocol == "enso"
@@ -167,7 +185,7 @@ class TestHandleSwapBasic:
         ``amount_in_usd=Decimal(0)``, ``effective_price=Decimal(0)`` — a
         sentinel indistinguishable from a measured zero swap. Pin the
         corrected contract: ``None`` for every measured-amount field, plus
-        ``confidence=ESTIMATED`` with a clear ``unavailable_reason``.
+        ``confidence=UNAVAILABLE`` with a clear ``unavailable_reason``.
         """
         basis = FIFOBasisStore()
         outbox = _make_outbox_row()
@@ -187,7 +205,7 @@ class TestHandleSwapBasic:
         assert event.amount_in_usd is None, "USD conversion must skip when amount is None"
         assert event.amount_out_usd is None
         assert event.effective_price is None
-        assert event.confidence == AccountingConfidence.ESTIMATED
+        assert event.confidence == AccountingConfidence.UNAVAILABLE
         assert "unmeasured" in event.unavailable_reason
         # FIFO matching + lot recording must skip on unmeasured rows so we
         # don't consume or record fake-zero lots.
@@ -217,7 +235,7 @@ class TestHandleSwapBasic:
         )
         event = handle_swap(outbox, ledger, basis)
         assert event is not None
-        assert event.confidence == AccountingConfidence.ESTIMATED
+        assert event.confidence == AccountingConfidence.UNAVAILABLE
         assert "unmeasured" in event.unavailable_reason
         assert "missing prices" not in event.unavailable_reason, (
             "Forcing amount_*_usd to None on unmeasured rows must NOT cause "
@@ -253,7 +271,7 @@ class TestHandleSwapBasic:
             "effective_price; the unmeasured contract overrides the upstream "
             "value. See docs/internal/blueprints/27-accounting.md 'Empty != zero'."
         )
-        assert event.confidence == AccountingConfidence.ESTIMATED
+        assert event.confidence == AccountingConfidence.UNAVAILABLE
         assert "unmeasured" in event.unavailable_reason
 
     def test_unparsable_amount_in_yields_none_amount_in(self) -> None:
@@ -288,7 +306,7 @@ class TestHandleSwapBasic:
         # FIFO must skip on unmeasured to avoid wrong lot consumption.
         assert event.realized_pnl_usd is None
         assert event.cost_basis_recorded is False
-        assert event.confidence == AccountingConfidence.ESTIMATED
+        assert event.confidence == AccountingConfidence.UNAVAILABLE
         assert "unmeasured" in event.unavailable_reason
 
     def test_cost_basis_recorded_with_basis_store(self) -> None:
@@ -428,7 +446,7 @@ class TestHandleSwapNoPriorLot:
 
 
 class TestHandleSwapMissingPrices:
-    """Missing prices produce ESTIMATED confidence."""
+    """Missing prices produce UNAVAILABLE confidence."""
 
     def test_handle_swap_missing_prices(self) -> None:
         outbox = _make_outbox_row()
@@ -437,13 +455,13 @@ class TestHandleSwapMissingPrices:
         event = handle_swap(outbox, ledger, None)
 
         assert event is not None
-        assert event.confidence == AccountingConfidence.ESTIMATED
+        assert event.confidence == AccountingConfidence.UNAVAILABLE
         assert event.amount_in_usd is None
         assert event.amount_out_usd is None
         assert "price" in event.unavailable_reason.lower()
 
     def test_handle_swap_partial_prices(self) -> None:
-        """Only token_in price known → amount_out_usd is None, confidence ESTIMATED."""
+        """Only token_in price known → amount_out_usd is None, confidence UNAVAILABLE."""
         price_json = _price_json({"USDC": "1.0"})
         outbox = _make_outbox_row()
         ledger = _make_ledger_row(price_inputs_json=price_json)
@@ -451,7 +469,7 @@ class TestHandleSwapMissingPrices:
         event = handle_swap(outbox, ledger, None)
 
         assert event is not None
-        assert event.confidence == AccountingConfidence.ESTIMATED
+        assert event.confidence == AccountingConfidence.UNAVAILABLE
         assert event.amount_in_usd == Decimal("100")  # USDC price known
         assert event.amount_out_usd is None  # WETH price unknown
 
@@ -492,6 +510,10 @@ class TestSwapPayloadRoundtrip:
             confidence=AccountingConfidence.HIGH,
             unavailable_reason="",
             swap_position_key=f"swap:{_CHAIN.lower()}:{_WALLET.lower()}",
+            price_source="chainlink",
+            price_observed_at=datetime(2026, 8, 14, 12, tzinfo=UTC),
+            price_out_source="coingecko",
+            price_out_observed_at=datetime(2026, 8, 14, 11, 59, 59, tzinfo=UTC),
         )
 
         payload = event.to_payload_json()
@@ -511,6 +533,10 @@ class TestSwapPayloadRoundtrip:
         assert restored.gas_usd == Decimal("0.50")
         assert restored.confidence == AccountingConfidence.HIGH
         assert restored.swap_position_key == event.swap_position_key
+        assert restored.price_source == "chainlink"
+        assert restored.price_observed_at == datetime(2026, 8, 14, 12, tzinfo=UTC)
+        assert restored.price_out_source == "coingecko"
+        assert restored.price_out_observed_at == datetime(2026, 8, 14, 11, 59, 59, tzinfo=UTC)
 
     def test_payload_roundtrip_preserves_unmeasured_none(self) -> None:
         """An unmeasured swap (decimals could not be resolved by the receipt
@@ -1111,8 +1137,8 @@ class TestSwapAddressKeyedTokenResolution:
         assert event.amount_in_usd == Decimal("2.0")
         assert event.amount_out_usd == Decimal("2.000")
 
-    def test_handle_swap_unresolvable_address_falls_through_to_estimated(self) -> None:
-        """Resolver miss → ESTIMATED with the ORIGINAL address in
+    def test_handle_swap_unresolvable_address_falls_through_to_unavailable(self) -> None:
+        """Resolver miss → UNAVAILABLE with the ORIGINAL address in
         ``unavailable_reason``. Empty != zero — never fabricate a phantom
         symbol the auditor can't trace back to chain state.
         """
@@ -1133,7 +1159,7 @@ class TestSwapAddressKeyedTokenResolution:
         event = handle_swap(outbox, ledger, FIFOBasisStore())
 
         assert event is not None
-        assert event.confidence == AccountingConfidence.ESTIMATED
+        assert event.confidence == AccountingConfidence.UNAVAILABLE
         # token_out resolves fine → USD amount is computed.
         assert event.amount_out_usd == Decimal("2.000")
         # token_in misses → USD amount is None.
@@ -1151,7 +1177,7 @@ class TestSwapAddressKeyedTokenResolution:
     def test_handle_swap_no_chain_falls_through(self) -> None:
         """Defensive: a ledger row with no ``chain`` cannot be resolved
         (cross-chain address ambiguity). The handler must fall through to
-        ESTIMATED with the original address rather than raising.
+        UNAVAILABLE with the original address rather than raising.
         """
         price_json = _price_json({"USDC": "1.0", "WETH": "2000.0"})
         outbox = _make_outbox_row()
@@ -1168,7 +1194,7 @@ class TestSwapAddressKeyedTokenResolution:
         event = handle_swap(outbox, ledger, FIFOBasisStore())
 
         assert event is not None
-        assert event.confidence == AccountingConfidence.ESTIMATED
+        assert event.confidence == AccountingConfidence.UNAVAILABLE
         # Both lookups miss → both USD amounts None.
         assert event.amount_in_usd is None
         assert event.amount_out_usd is None

@@ -1991,8 +1991,9 @@ def build_ledger_entry(
     price_inputs_json = ""
     if price_oracle:
         # Shape per AttemptNo17 §1.2 G12: {symbol: {price_usd, oracle_source,
-        # fetched_at, confidence}}. The runner may pass the new shape directly
-        # OR the legacy flat {symbol: price} shape. Normalize to the new shape.
+        # observed_at, fetched_at, confidence, raw_confidence, stale}}. The
+        # runner may pass the new shape directly OR the legacy flat
+        # {symbol: price} shape. Normalize to the new shape.
         normalised: dict[str, Any] = {}
         for sym, val in price_oracle.items():
             if isinstance(val, dict) and "price_usd" in val:
@@ -2002,7 +2003,10 @@ def build_ledger_entry(
                     "price_usd": str(val) if val is not None else None,
                     "oracle_source": "unknown",
                     "fetched_at": "",
-                    "confidence": "ESTIMATED",
+                    "observed_at": "",
+                    "confidence": "UNAVAILABLE",
+                    "raw_confidence": None,
+                    "stale": None,
                 }
         price_inputs_json = _safe_json(normalised)
 

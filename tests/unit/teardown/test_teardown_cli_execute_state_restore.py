@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import importlib
 import json
+from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 from click.testing import CliRunner
+
+from almanak.framework.data.interfaces import PriceResult
 
 teardown_cli_module = importlib.import_module("almanak.framework.cli.teardown")
 
@@ -266,7 +269,12 @@ class _FakeAggOracle:
         self.calls.append(token.upper())
         key = token.upper()
         if key in self._prices:
-            return SimpleNamespace(price=self._prices[key])
+            return PriceResult(
+                price=self._prices[key],
+                source="gateway_test",
+                timestamp=datetime.now(UTC),
+                confidence=1.0,
+            )
         raise ValueError(f"Cannot determine price for {token}/{quote} on {chain}")
 
 
@@ -351,7 +359,12 @@ def test_inject_balance_provider_wires_price_oracle(monkeypatch: pytest.MonkeyPa
 
     class FakePriceOracle:
         async def get_aggregated_price(self, token, quote="USD", chain=None):
-            return SimpleNamespace(price=Decimal("1"))
+            return PriceResult(
+                price=Decimal("1"),
+                source="gateway_test",
+                timestamp=datetime.now(UTC),
+                confidence=1.0,
+            )
 
     class FakeBalanceProvider:
         def __init__(self, **kwargs):

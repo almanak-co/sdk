@@ -22,12 +22,15 @@ These tests prove:
 
 from __future__ import annotations
 
+import logging
+from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from almanak.framework.market import PriceData
 from almanak.framework.runner.strategy_runner import RunnerConfig, StrategyRunner
 
 # Arbitrum addresses for the fixtures.
@@ -78,7 +81,14 @@ def _market(chain: str = "arbitrum", prices: dict[str, Decimal] | None = None):
         raise ValueError(f"no price for {token}")
 
     market.price.side_effect = _price
-    market.price_data.return_value = SimpleNamespace(source="coingecko_contract")
+    market.price_data.return_value = PriceData(
+        price=Decimal("1.04"),
+        source="coingecko_contract",
+        timestamp=datetime(2026, 8, 14, 12, tzinfo=UTC),
+        confidence="HIGH",
+        raw_confidence=1.0,
+        stale=False,
+    )
     return market
 
 
@@ -205,6 +215,28 @@ def test_nested_with_sources_shape_carries_provenance():
     assert out["SUSDAI"]["price_usd"] == "1.04"
     assert out["SUSDAI"]["oracle_source"] == "coingecko_contract"
     assert out["SUSDAI"]["confidence"] == "HIGH"
+    assert out["SUSDAI"]["observed_at"] == "2026-08-14T12:00:00+00:00"
+    assert out["SUSDAI"]["raw_confidence"] == 1.0
+
+
+def test_cached_provenance_failure_is_visible_and_fails_closed(caplog):
+    market = MagicMock()
+    market.price_data.side_effect = RuntimeError("cache unavailable")
+
+    with caplog.at_level(logging.DEBUG, logger="almanak.framework.runner.strategy_runner"):
+        entry = StrategyRunner._cached_market_price_entry(
+            market,
+            SUSDAI_ADDR,
+            "arbitrum",
+            Decimal("1.04"),
+        )
+
+    assert entry["price_usd"] == "1.04"
+    assert entry["oracle_source"] == "unknown"
+    assert entry["observed_at"] == ""
+    assert entry["confidence"] == "UNAVAILABLE"
+    assert SUSDAI_ADDR in caplog.text
+    assert "chain=arbitrum" in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -240,7 +272,9 @@ def test_lp_close_legs_also_backfilled():
     resolver.resolve.side_effect = _resolve
 
     with patch(RESOLVER_PATH, return_value=resolver):
-        out = runner._backfill_address_priced_legs(market, {"USDC": Decimal("1.00")}, _intent(), result, with_sources=False)
+        out = runner._backfill_address_priced_legs(
+            market, {"USDC": Decimal("1.00")}, _intent(), result, with_sources=False
+        )
 
     assert out["SUSDAI"] == Decimal("1.04")
 

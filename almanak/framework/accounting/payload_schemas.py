@@ -256,7 +256,9 @@ PRIMITIVE_VERSIONS: dict[Primitive, int] = {
     # one that may carry SY-units in the *_usd field. The FIFO algo is unchanged →
     # matching_policy_version is NOT bumped. (Branch is unmerged/pre-production, so
     # no backfill obligation — Blueprint 27 §10.6.)
-    Primitive.SWAP: 6,
+    # ALM-3191 (v6→v7): SWAP payloads now retain the token-in and token-out
+    # oracle source/observation time. The FIFO matching policy is unchanged.
+    Primitive.SWAP: 7,
     Primitive.VAULT: PRIMITIVE_VERSION_DEFAULT,
     # VIB-5666: vault SETTLEMENT primitive contract v1 — SettlementAccountingEvent
     # emits {assets_delta, shares_delta, new_total_assets, fee_shares} for the
@@ -730,6 +732,10 @@ class SwapEventPayload(_Versioned):
     confidence: ConfidenceLiteral
     unavailable_reason: str | None = None
     swap_position_key: str | None = None
+    price_source: str | None = None
+    price_observed_at: str | None = None
+    price_out_source: str | None = None
+    price_out_observed_at: str | None = None
 
     @model_validator(mode="after")
     def _enforce_unmeasured_reason(self) -> SwapEventPayload:

@@ -73,10 +73,13 @@ def test_reshapes_into_build_ledger_entry_form():
     assert set(out.keys()) == {"USDC", "WETH"}
     assert out["USDC"]["price_usd"] == "1.0"
     assert out["WETH"]["price_usd"] == "3245.50"
-    assert out["USDC"]["oracle_source"] == "portfolio_valuer"
-    assert out["WETH"]["oracle_source"] == "portfolio_valuer"
-    assert out["USDC"]["confidence"] == "HIGH"
-    assert out["USDC"]["fetched_at"] == "2026-05-01T12:00:00+00:00"
+    assert out["USDC"]["oracle_source"] == "unknown"
+    assert out["WETH"]["oracle_source"] == "unknown"
+    assert out["USDC"]["confidence"] == "UNAVAILABLE"
+    assert out["USDC"]["fetched_at"] == ""
+    assert out["USDC"]["observed_at"] == ""
+    assert out["USDC"]["raw_confidence"] is None
+    assert out["USDC"]["stale"] is None
 
 
 def test_drops_entries_missing_symbol_or_price():
@@ -92,19 +95,22 @@ def test_drops_entries_missing_symbol_or_price():
     assert out == {
         "USDC": {
             "price_usd": "1.0",
-            "oracle_source": "portfolio_valuer",
-            "fetched_at": "2026-05-01T12:00:00+00:00",
-            "confidence": "HIGH",
+            "oracle_source": "unknown",
+            "fetched_at": "",
+            "observed_at": "",
+            "confidence": "UNAVAILABLE",
+            "raw_confidence": None,
+            "stale": None,
         }
     }
 
 
 def test_unknown_confidence_is_surfaced():
     snap = _snapshot(
-        token_prices={"a:b": {"price_usd": "1.0", "symbol": "X"}},
+        token_prices={"a:b": {"price_usd": "1.0", "symbol": "X", "confidence": "DEGRADED_BIN_STEP_AUTODETECT"}},
         confidence="DEGRADED_BIN_STEP_AUTODETECT",
     )
-    with pytest.raises(ValueError, match="invalid teardown snapshot.value_confidence"):
+    with pytest.raises(ValueError, match="invalid teardown token price X.confidence"):
         _portfolio_snapshot_to_price_oracle(snap)
 
 
@@ -115,7 +121,7 @@ def test_missing_confidence_remains_empty_on_price_inputs():
     )
     out = _portfolio_snapshot_to_price_oracle(snap)
     assert out is not None
-    assert out["X"]["confidence"] == ""
+    assert out["X"]["confidence"] == "UNAVAILABLE"
 
 
 def test_decimal_price_preserved_as_string():
@@ -166,12 +172,14 @@ class _FakeOracle:
                 source=self._source,
                 timestamp=datetime(2026, 5, 3, 14, 30, tzinfo=UTC),
                 confidence="UNAVAILABLE",
+                stale=True,
             )
         return SimpleNamespace(
             price=Decimal(self._price),
             source=self._source,
             timestamp=datetime(2026, 5, 3, 14, 30, tzinfo=UTC),
-            confidence="HIGH",
+            confidence=1.0,
+            stale=False,
         )
 
 

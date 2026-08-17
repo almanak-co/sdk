@@ -138,13 +138,15 @@ class TestNcoinThreadingEndToEnd:
             async def get_latest_snapshot(self, deployment_id):
                 return SimpleNamespace(token_prices={"DAI": "1", "USDC": "1", "USDT": "1"})
 
-            async def update_position_attribution(self, event_id, attribution_json, version):
+            async def update_position_attribution(self, event_id, attribution_json, version, *, deployment_id=""):
                 captured["json"] = attribution_json
+                captured["deployment_id"] = deployment_id
 
         await stamp_entry_state_on_open(_Store(), event)
 
         entry = json.loads(captured["json"])["entry_state"]
         assert entry["coin_symbols"] == ["DAI", "USDC", "USDT"]
+        assert captured["deployment_id"] == "deployment:test"
         # ...and the CLOSE-time IL gate fires off exactly this persisted shape.
         open_evt = {"attribution_json": captured["json"]}
         assert compute_impermanent_loss(open_evt, _close_evt()) is None

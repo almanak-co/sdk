@@ -48,6 +48,7 @@ from almanak.framework.accounting.models import (
     LendingEventType,
 )
 from almanak.framework.accounting.writer import AccountingWriter
+from almanak.framework.data.interfaces import PriceResult
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import (
     BorrowIntent,
@@ -141,17 +142,29 @@ def _make_identity(
 def _make_mock_snapshot(token_prices: dict[str, str], deployment_id: str = "test-deploy") -> PortfolioSnapshot:
     """Create a minimal PortfolioSnapshot with known token prices.
 
-    token_prices should be a flat map: {"WETH": "3000", "USDC": "1.00"}.
-    _price_for_token supports this flat format directly.
+    The records use the canonical provenance-rich shape so event-time
+    attribution can verify freshness instead of trusting legacy scalars.
     """
+    observed_at = datetime.now(UTC)
     return PortfolioSnapshot(
-        timestamp=datetime.now(UTC),
+        timestamp=observed_at,
         deployment_id=deployment_id,
         total_value_usd=Decimal("10000"),
         available_cash_usd=Decimal("0"),
         positions=[],
         wallet_balances=[],
-        token_prices=token_prices,  # type: ignore[arg-type]
+        token_prices={
+            token: {
+                "price_usd": price,
+                "oracle_source": "intent_test_fixture",
+                "fetched_at": observed_at.isoformat(),
+                "observed_at": observed_at.isoformat(),
+                "confidence": "HIGH",
+                "raw_confidence": 1.0,
+                "stale": False,
+            }
+            for token, price in token_prices.items()
+        },
     )
 
 
@@ -735,26 +748,33 @@ class TestLPAccountingE2E:
 
             # Build a mock price oracle that can respond to get_aggregated_price
             class MockOracle:
-                def __init__(self, prices: dict[str, Decimal]) -> None:
+                def __init__(self, prices: dict[str, Decimal], observed_at: datetime) -> None:
                     self._prices = prices
+                    self._observed_at = observed_at
 
                 async def get_aggregated_price(self, token: str, quote: str = "USD", **_: object) -> object:
-                    class Result:
-                        def __init__(self, p: Decimal | None) -> None:
-                            self.price = p
-
                     token_upper = token.upper()
                     # Match by symbol or address
                     for symbol, price in self._prices.items():
                         if symbol.upper() == token_upper:
-                            return Result(price)
+                            return PriceResult(
+                                price=price,
+                                source="intent_test_fixture",
+                                timestamp=self._observed_at,
+                                confidence=1.0,
+                            )
                     # Try address lookup
                     for sym, addr in CHAIN_CONFIG.get("tokens", {}).items():
                         if addr.lower() == token.lower() and sym in self._prices:
-                            return Result(self._prices[sym])
-                    return Result(None)
+                            return PriceResult(
+                                price=self._prices[sym],
+                                source="intent_test_fixture",
+                                timestamp=self._observed_at,
+                                confidence=1.0,
+                            )
+                    raise ValueError(f"no price for {token}/{quote}")
 
-            oracle = MockOracle(price_oracle)
+            oracle = MockOracle(price_oracle, open_event.timestamp)
 
             # Call stamp_entry_state_on_open WITH oracle fallback (VIB-3420 fix)
             await stamp_entry_state_on_open(store, open_event, price_oracle=oracle)

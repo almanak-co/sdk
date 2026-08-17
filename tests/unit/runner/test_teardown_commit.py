@@ -25,6 +25,7 @@ Plus a few smaller invariants:
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -816,7 +817,8 @@ def _make_price_oracle(
     quotes: dict[str, str | None],
     *,
     source: str = "gateway",
-    confidence: str = "HIGH",
+    confidence: float = 1.0,
+    stale: bool = False,
 ) -> MagicMock:
     """Build a fake :class:`PriceOracle` whose ``get_aggregated_price`` returns
     a structured result for each symbol in ``quotes``. ``None`` value ⇒ the
@@ -833,7 +835,8 @@ def _make_price_oracle(
             price=quotes[symbol],
             source=source,
             confidence=confidence,
-            timestamp=None,
+            timestamp=datetime(2026, 5, 12, tzinfo=UTC),
+            stale=stale,
         )
 
     oracle = MagicMock(name="PriceOracle")
@@ -918,7 +921,12 @@ async def test_vib4318_pre_teardown_quote_wins_on_collision(
     # If our helper queried USDC, the gateway would return a wrong / stale
     # quote. The assertion is that the helper does NOT overwrite the
     # pre-teardown entry on collision.
-    runner.price_oracle = _make_price_oracle({"USDC": "0.99"}, source="gateway", confidence="STALE")
+    runner.price_oracle = _make_price_oracle(
+        {"USDC": "0.99"},
+        source="gateway",
+        confidence=0.7,
+        stale=True,
+    )
 
     intent = _make_swap_intent(from_token="USDC", to_token="USDT")
     result = _make_execution_result(tx_hash="0xusdc_usdt")

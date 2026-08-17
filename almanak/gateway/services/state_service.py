@@ -2564,7 +2564,8 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         attribution_json never reaches disk in gateway-sidecar mode.
 
         Mirrors the SQLite signature
-        ``update_position_attribution(event_id, attribution_json, attribution_version)``.
+        ``update_position_attribution(event_id, attribution_json,
+        attribution_version, deployment_id=...)``.
         Non-blocking write: returns ``success=false`` on backend error rather
         than raising, since pnl_attributor wraps the call in a logged
         ``try/except`` already and a transient blip should degrade
@@ -2600,16 +2601,25 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         # CR audit (PR #2018): if the caller scoped the request with
         # deployment_id (optional, future-proofing for the hosted PostgresStore
         # write path where multi-tenant scoping matters), reject blank /
-        # whitespace-only values so the field can't silently degrade. SQLite's
-        # WHERE clause keys on the UUID event_id which is globally unique
-        # by construction, so deployment_id remains a defense-in-depth scope
-        # rather than a query filter today.
-        if request.deployment_id and not request.deployment_id.strip():
+        # whitespace-only values and enforce the canonical ID format before
+        # the value crosses the gateway boundary. SQLite's WHERE clause keys
+        # on the UUID event_id which is globally unique by construction, so
+        # deployment_id remains a defense-in-depth scope rather than a query
+        # filter today.
+        deployment_id = request.deployment_id or ""
+        if deployment_id and not deployment_id.strip():
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details("deployment_id must be non-empty when provided")
             return gateway_pb2.UpdatePositionAttributionResponse(
                 success=False, error="deployment_id must be non-empty when provided"
             )
+        if deployment_id:
+            try:
+                deployment_id = validate_deployment_id(deployment_id)
+            except ValidationError as e:
+                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                context.set_details(str(e))
+                return gateway_pb2.UpdatePositionAttributionResponse(success=False, error=str(e))
 
         try:
             await self._ensure_initialized()
@@ -2627,7 +2637,10 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                 return gateway_pb2.UpdatePositionAttributionResponse(success=False, error=error)
 
             result = await warm.update_position_attribution(
-                event_id, attribution_json, int(request.attribution_version or 0)
+                event_id,
+                attribution_json,
+                int(request.attribution_version or 0),
+                deployment_id=deployment_id,
             )
             if not result:
                 # Either the row was missing (event_id never INSERTed) or the

@@ -587,8 +587,8 @@ def create_sync_price_oracle_func(
 
     supports_chain_kwarg = _price_oracle_supports_chain_kwarg(price_oracle.get_aggregated_price)
 
-    def sync_price(token: str, quote: str = "USD", chain: str | None = None) -> Decimal:
-        """Fetch price synchronously."""
+    def sync_price_result(token: str, quote: str = "USD", chain: str | None = None) -> Any:
+        """Fetch the complete provider result synchronously."""
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -613,16 +613,16 @@ def create_sync_price_oracle_func(
             )
             result = asyncio.run(coro)
 
-        return result.price
+        return result
 
-    # VIB-3895: stamp the underlying oracle on the sync wrapper so
-    # `_infer_oracle_source` can unwrap and reach the real provider's
-    # class identity (e.g. ``GatewayPriceOracle``). Without this,
-    # `_infer_oracle_source` only sees ``sync_price`` and returns ""
-    # → every ``transaction_ledger.price_inputs_json`` row carries
-    # ``oracle_source: "unknown"`` even when the gateway aggregator is
-    # correctly fanning out to the real providers.
-    sync_price.__wrapped__ = price_oracle  # type: ignore[attr-defined]
+    def sync_price(token: str, quote: str = "USD", chain: str | None = None) -> Decimal:
+        """Keep the established scalar contract for non-snapshot consumers."""
+        return sync_price_result(token, quote, chain).price
+
+    # ALM-3191: MarketSnapshot consumes this capability to retain the exact
+    # PriceResult. Indicators and legacy callers continue using ``sync_price``
+    # and therefore still receive a Decimal.
+    sync_price.get_price_result = sync_price_result  # type: ignore[attr-defined]
     return sync_price
 
 

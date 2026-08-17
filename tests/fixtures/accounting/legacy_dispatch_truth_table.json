@@ -244,11 +244,15 @@
         "unmatched_proceeds_usd": null,
         "cost_basis_recorded": false,
         "gas_usd": null,
-        "confidence": "ESTIMATED",
-        "unavailable_reason": "missing prices in price_inputs_json: USDC price, WETH price; swap amounts unmeasured (token decimals could not be resolved by receipt parser)",
+        "confidence": "UNAVAILABLE",
+        "unavailable_reason": "missing prices in price_inputs_json: USDC price, WETH price; swap amounts unmeasured (token decimals could not be resolved by receipt parser); price provenance degraded: USDC=UNAVAILABLE, WETH=UNAVAILABLE",
         "swap_position_key": "swap:arbitrum:0xabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd",
+        "price_source": null,
+        "price_observed_at": null,
+        "price_out_source": null,
+        "price_out_observed_at": null,
         "schema_version": 1,
-        "primitive_version": 2
+        "primitive_version": 7
       }
     },
     {

@@ -17,6 +17,7 @@ the snapshot) by the canonical ``valuation/net_debt.py::compute_net_debt_project
 (VIB-5222) — the single netting implementation every consumer routes through.
 """
 
+import inspect
 import json
 import logging
 from dataclasses import dataclass
@@ -2059,6 +2060,32 @@ class PortfolioValuer:
                 Decimal("0"),
             )
 
+            # Token-price observations are already cached by the price reads
+            # above. Pull their typed metadata without another provider call.
+            # A legacy MarketDataSource without ``price_data`` keeps the prior
+            # compatibility behavior; a typed source that reports no metadata
+            # is explicitly UNAVAILABLE rather than HIGH.
+            spot_priced_assets = [
+                p.details["asset"]
+                for p in positions
+                if p.details.get("valuation_source") == "spot_amount_price"
+                and isinstance(p.details.get("asset"), str)
+                and p.details["asset"]
+            ]
+            # ``prices`` also contains native gas assets and can contain
+            # connector-discovered spot assets. Every price that contributed
+            # to valuation must participate in confidence aggregation.
+            price_record_tokens = [*tracked_tokens, *spot_priced_assets, *prices]
+            price_data_by_token, typed_price_data = self._collect_price_data(
+                market,
+                chain,
+                prices,
+                price_record_tokens,
+            )
+            price_confidence = (
+                self._aggregate_price_confidence(price_data_by_token, prices) if typed_price_data else None
+            )
+
             # Step 5: Determine confidence level
             confidence = self._determine_value_confidence(
                 positions=positions,
@@ -2066,6 +2093,7 @@ class PortfolioValuer:
                 positions_unavailable=positions_unavailable,
                 wallet_data_incomplete=wallet_data_incomplete,
                 stable_depeg=bool(stable_depeg),
+                price_confidence=price_confidence,
             )
 
             # Step 6: Build audit-safe token price map (chain:address keyed).
@@ -2075,14 +2103,12 @@ class PortfolioValuer:
             # when the asset is not in the strategy's tracked-token set (the carry's
             # held USDT is not tracked). ``_build_token_price_records`` iterates the
             # token list, so the asset must be added here, not only to ``prices``.
-            spot_priced_assets = [
-                p.details["asset"]
-                for p in positions
-                if p.details.get("valuation_source") == "spot_amount_price"
-                and isinstance(p.details.get("asset"), str)
-                and p.details["asset"]
-            ]
-            token_price_records = self._build_token_price_records(chain, prices, [*tracked_tokens, *spot_priced_assets])
+            token_price_records = self._build_token_price_records(
+                chain,
+                prices,
+                price_record_tokens,
+                price_data_by_token=price_data_by_token if typed_price_data else None,
+            )
 
             # VIB-4909: ``PositionType.TOKEN`` is sometimes a wallet
             # pseudo-position (SWAP-class strategies surface a tracked wallet
@@ -2205,6 +2231,7 @@ class PortfolioValuer:
         positions_unavailable: bool,
         wallet_data_incomplete: bool,
         stable_depeg: bool = False,
+        price_confidence: ValueConfidence | None = None,
     ) -> ValueConfidence:
         """Compute the snapshot-level confidence from per-position + wallet signals.
 
@@ -2230,16 +2257,25 @@ class PortfolioValuer:
         has_any_value = bool(wallet_balances or positions)
         if not has_any_value and (positions_unavailable or wallet_data_incomplete):
             return ValueConfidence.UNAVAILABLE
-        if positions_unavailable or wallet_data_incomplete:
-            return ValueConfidence.ESTIMATED
+        confidence = (
+            ValueConfidence.ESTIMATED if positions_unavailable or wallet_data_incomplete else ValueConfidence.HIGH
+        )
         # VIB-5018 / VIB-4586 — a position valued through an approximate path
         # (e.g. Uniswap V4 LP, which reconstructs amounts from a price-ratio tick
         # rather than an authoritative pool slot0 read) downgrades the snapshot to
         # ESTIMATED. The value is real and traceable, but a reader must not treat
         # it as HIGH-confidence on-chain truth.
         if any(p.details.get("valuation_status") == "estimated" for p in positions):
-            return ValueConfidence.ESTIMATED
-        return ValueConfidence.HIGH
+            confidence = ValueConfidence.ESTIMATED
+        if price_confidence is None:
+            return confidence
+        rank = {
+            ValueConfidence.HIGH: 0,
+            ValueConfidence.ESTIMATED: 1,
+            ValueConfidence.STALE: 2,
+            ValueConfidence.UNAVAILABLE: 3,
+        }
+        return max((confidence, price_confidence), key=rank.__getitem__)
 
     def _prefetch_accounting_events(self, deployment_id: str) -> None:
         """Fetch all accounting events for the deployment once per snapshot.
@@ -2767,17 +2803,21 @@ class PortfolioValuer:
         else:
             metadata.pop("nav_basis_coverage", None)
 
-        # VIB-4584 / F3.1: preserve UNAVAILABLE when the framework couldn't
-        # value at least one position through a registered path. External
-        # portfolio totals are advisory — they cannot retroactively certify
-        # a value the framework never verified. Without this guard, an
-        # external Zerion read would silently downgrade UNAVAILABLE →
-        # ESTIMATED and hide the data-quality signal F3.1 was added to
-        # surface.
-        reconciled_confidence = (
-            ValueConfidence.UNAVAILABLE
-            if framework_snapshot.value_confidence == ValueConfidence.UNAVAILABLE
-            else ValueConfidence.ESTIMATED
+        # VIB-4584 / F3.1: external portfolio totals are advisory — they can
+        # reduce a framework HIGH observation to ESTIMATED, but can never
+        # upgrade a less-trusted framework verdict. Price provenance makes
+        # STALE reachable here, so preserve the worse of the two inputs rather
+        # than handling only UNAVAILABLE specially.
+        confidence_rank = {
+            ValueConfidence.HIGH: 0,
+            ValueConfidence.ESTIMATED: 1,
+            ValueConfidence.STALE: 2,
+            ValueConfidence.UNAVAILABLE: 3,
+        }
+        framework_confidence = framework_snapshot.value_confidence or ValueConfidence.UNAVAILABLE
+        reconciled_confidence = max(
+            (framework_confidence, ValueConfidence.ESTIMATED),
+            key=confidence_rank.__getitem__,
         )
 
         return PortfolioSnapshot(
@@ -2791,6 +2831,7 @@ class PortfolioValuer:
             error=framework_snapshot.error,
             positions=merged_positions,
             wallet_balances=framework_snapshot.wallet_balances,
+            token_prices=framework_snapshot.token_prices,
             chain=framework_snapshot.chain,
             iteration_number=framework_snapshot.iteration_number,
             snapshot_metadata=metadata,
@@ -3140,10 +3181,94 @@ class PortfolioValuer:
         return agg_status, list(native_added.values())
 
     @staticmethod
+    def _collect_price_data(
+        market: MarketDataSource,
+        chain: str,
+        prices: dict[str, Decimal],
+        tokens: list[str],
+    ) -> tuple[dict[str, list[tuple[str, Any]]], bool]:
+        """Read chain-bound typed observations already populated in the cache."""
+        try:
+            inspect.getattr_static(market, "price_data")
+        except AttributeError:
+            # MagicMock and other dynamic objects manufacture arbitrary
+            # attributes on access; they have not declared this capability.
+            return {}, False
+        getter = getattr(market, "price_data", None)
+        if not callable(getter):
+            return {}, False
+        market_chains = getattr(market, "chains", ())
+        if isinstance(market_chains, str):
+            market_chains = (market_chains,)
+        else:
+            try:
+                market_chains = tuple(market_chains)
+            except TypeError:
+                market_chains = ()
+        candidate_chains = tuple(
+            dict.fromkeys(
+                candidate
+                for candidate in [
+                    _chain_key(chain),
+                    *(str(candidate) for candidate in market_chains),
+                ]
+                if candidate is not None
+            )
+        )
+        price_data: dict[str, list[tuple[str, Any]]] = {}
+        for token in dict.fromkeys(tokens):
+            if token not in prices:
+                continue
+            observations: list[tuple[str, Any]] = []
+            for candidate_chain in candidate_chains:
+                try:
+                    observations.append((candidate_chain, getter(token, chain=candidate_chain)))
+                except Exception:  # noqa: BLE001 — absent on one chain is benign
+                    continue
+            if observations:
+                # Keep chain, numeric value, and provenance as one observation.
+                # The symbol-level compatibility map may aggregate balances,
+                # but snapshot records must never combine one chain's scalar
+                # with another chain's metadata.
+                price_data[token] = observations
+        return price_data, True
+
+    @staticmethod
+    def _aggregate_price_confidence(
+        price_data_by_token: dict[str, Any],
+        prices: dict[str, Decimal],
+    ) -> ValueConfidence | None:
+        """Return the worst coarse confidence across every used USD price."""
+        if not prices:
+            return None
+        rank = {
+            ValueConfidence.HIGH: 0,
+            ValueConfidence.ESTIMATED: 1,
+            ValueConfidence.STALE: 2,
+            ValueConfidence.UNAVAILABLE: 3,
+        }
+        confidences: list[ValueConfidence] = []
+        for token in prices:
+            observations = price_data_by_token.get(token)
+            if not observations:
+                confidences.append(ValueConfidence.UNAVAILABLE)
+                continue
+            if not isinstance(observations, list):
+                observations = [("", observations)]
+            for _observation_chain, data in observations:
+                confidence = ValueConfidence.parse_optional(
+                    getattr(data, "confidence", None),
+                    field_name=f"token price {token}.confidence",
+                )
+                confidences.append(confidence or ValueConfidence.UNAVAILABLE)
+        return max(confidences, key=rank.__getitem__)
+
+    @staticmethod
     def _build_token_price_records(
         chain: str,
         prices: dict[str, Decimal],
         tracked_tokens: list[str],
+        price_data_by_token: dict[str, Any] | None = None,
     ) -> dict[str, dict]:
         """Build an audit-safe token price map keyed by chain:address.
 
@@ -3158,31 +3283,64 @@ class PortfolioValuer:
         except Exception:
             resolver = None
 
-        for token in tracked_tokens:
-            price = prices.get(token)
-            if price is None or price <= 0:
-                continue
+        def _store_record(token: str, record_chain: str, price: Decimal, price_data: Any = None) -> None:
+            record_key = f"{record_chain}:{token}"
             try:
                 if resolver:
-                    resolved = resolver.resolve(token, chain)
+                    resolved = resolver.resolve(token, record_chain)
                     address = resolved.address if resolved else token
                     decimals = resolved.decimals if resolved else None
                 else:
                     address = token
                     decimals = None
-                key = f"{chain}:{address.lower()}" if address.startswith("0x") else f"{chain}:{token}"
-                token_price_records[key] = {
+                record_key = f"{record_chain}:{address.lower()}" if address.startswith("0x") else record_key
+                token_price_records[record_key] = {
                     "price_usd": str(price),
                     "symbol": token,
                     "decimals": decimals,
                 }
             except Exception:
                 # Best-effort: fall back to symbol-only key
-                token_price_records[f"{chain}:{token}"] = {
+                token_price_records[record_key] = {
                     "price_usd": str(price),
                     "symbol": token,
                     "decimals": None,
                 }
+            record = token_price_records[record_key]
+            if price_data is not None:
+                oracle_entry = price_data.to_oracle_entry()
+                record.update(
+                    {
+                        "oracle_source": oracle_entry["oracle_source"],
+                        "fetched_at": oracle_entry["fetched_at"],
+                        "observed_at": oracle_entry["observed_at"],
+                        "confidence": oracle_entry["confidence"],
+                        "raw_confidence": oracle_entry["raw_confidence"],
+                        "stale": oracle_entry["stale"],
+                    }
+                )
+
+        for token in dict.fromkeys(tracked_tokens):
+            price = prices.get(token)
+            if price is None or price <= 0:
+                continue
+            observations = (price_data_by_token or {}).get(token)
+            if observations and not isinstance(observations, list):
+                observations = [(_chain_key(chain) or chain, observations)]
+            wrote_typed_record = False
+            for observation_chain, price_data in observations or []:
+                observed_price = Decimal(str(getattr(price_data, "price", "0")))
+                if observed_price <= 0:
+                    continue
+                _store_record(
+                    token,
+                    _chain_key(observation_chain) or observation_chain,
+                    observed_price,
+                    price_data,
+                )
+                wrote_typed_record = True
+            if not wrote_typed_record:
+                _store_record(token, _chain_key(chain) or chain, price)
         return token_price_records
 
     def _get_positions(

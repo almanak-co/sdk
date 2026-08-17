@@ -45,7 +45,6 @@ from almanak.framework.accounting.payload_schemas import (
 )
 from almanak.framework.primitives.types import Primitive
 
-
 # ---------------------------------------------------------------------------
 # Helpers — mirror the shape used in test_swap_accounting.py so the writer
 # input contract stays canonical across the two files.
@@ -113,7 +112,21 @@ def _ledger(
 
 
 def _prices(weth_usd: str = "2000.0", usdc_usd: str = "1.0") -> str:
-    return json.dumps({"WETH": weth_usd, "USDC": usdc_usd})
+    observed_at = "2026-08-14T12:00:00+00:00"
+    return json.dumps(
+        {
+            symbol: {
+                "price_usd": price,
+                "oracle_source": "chainlink",
+                "observed_at": observed_at,
+                "fetched_at": observed_at,
+                "confidence": "HIGH",
+                "raw_confidence": 1.0,
+                "stale": False,
+            }
+            for symbol, price in {"WETH": weth_usd, "USDC": usdc_usd}.items()
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -126,7 +139,7 @@ def test_swap_matching_policy_version_bumped_to_v4() -> None:
     assert MATCHING_POLICY_VERSIONS[Primitive.SWAP] == 4
 
 
-def test_swap_primitive_version_bumped_to_v2() -> None:
+def test_swap_primitive_version_bumped_to_v7() -> None:
     """SWAP primitive contract version.
 
     VIB-4905 (F1) took it to v2 (partial-match field bundle); VIB-4988 took it
@@ -135,10 +148,11 @@ def test_swap_primitive_version_bumped_to_v2() -> None:
     human units, uniform with PT_REDEEM); VIB-5316 took it to v5 (PT_BUY now
     populates the buy-time ``sy_price`` the held-PT USD cost basis is anchored
     to); VIB-5314 took it to v6 (PT_SELL/PT_REDEEM realized_yield_usd is strictly
-    USD-or-None with a separate realized_yield_sy field). The assertion tracks the
-    current value.
+    USD-or-None with a separate realized_yield_sy field); ALM-3191 takes it to
+    v7 by adding per-leg price source and observation time. The assertion tracks
+    the current value.
     """
-    assert PRIMITIVE_VERSIONS[Primitive.SWAP] == 6
+    assert PRIMITIVE_VERSIONS[Primitive.SWAP] == 7
 
 
 # ---------------------------------------------------------------------------

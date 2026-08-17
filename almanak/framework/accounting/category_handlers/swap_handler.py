@@ -28,6 +28,7 @@ from almanak.framework.accounting.models import (
     SwapAccountingEvent,
     SwapEventType,
 )
+from almanak.framework.accounting.price_snapshot import ConfidenceLiteral, PriceSnapshot
 from almanak.framework.models.run_mode import RunMode
 
 if TYPE_CHECKING:
@@ -43,16 +44,13 @@ def _determine_confidence(
     token_in: str,
     token_out: str,
     amounts_unmeasured: bool,
+    price_confidence_in: ConfidenceLiteral,
+    price_confidence_out: ConfidenceLiteral,
 ) -> tuple[AccountingConfidence, str]:
     """Compute the SwapAccountingEvent confidence + unavailable_reason.
 
-    HIGH confidence requires that both legs have USD prices in
-    ``price_inputs_json`` AND the receipt parser resolved token decimals
-    (so ledger ``amount_in`` / ``amount_out`` are not empty strings). Any
-    gap drops the row to ESTIMATED with a typed reason composed of all
-    applicable causes — important for auditing because both gaps can
-    co-occur on the same row and downstream consumers should see all of
-    them, not just the first.
+    HIGH confidence requires measured amounts and HIGH provider confidence on
+    both price legs. Any gap or degradation is retained rather than upgraded.
 
     The price-presence signal is passed in as an explicit boolean rather
     than inferred from ``amount_*_usd is None``: when ``amounts_unmeasured``
@@ -72,9 +70,21 @@ def _determine_confidence(
         # Surface the parser-side decimals failure so an auditor can see
         # exactly why ``effective_price`` is None on this row.
         reasons.append("swap amounts unmeasured (token decimals could not be resolved by receipt parser)")
-    if reasons:
-        return AccountingConfidence.ESTIMATED, "; ".join(reasons)
-    return AccountingConfidence.HIGH, ""
+    ranked = {
+        "HIGH": 0,
+        "ESTIMATED": 1,
+        "STALE": 2,
+        "UNAVAILABLE": 3,
+    }
+    worst = max((price_confidence_in, price_confidence_out), key=ranked.__getitem__)
+    if amounts_unmeasured or not has_price_in or not has_price_out:
+        worst = "UNAVAILABLE"
+    if worst != "HIGH":
+        reasons.append(
+            f"price provenance degraded: {token_in or 'token_in'}={price_confidence_in}, "
+            f"{token_out or 'token_out'}={price_confidence_out}"
+        )
+    return AccountingConfidence(worst), "; ".join(reasons)
 
 
 def _parse_timestamp(raw_ts: Any) -> datetime:
@@ -402,6 +412,7 @@ def handle_swap(
     # ``Decimal(0)`` placeholder would produce ``$0`` and conflate with a
     # measured zero-USD swap.
     price_oracle = parse_price_inputs(ledger_row.get("price_inputs_json"))
+    price_snapshot = PriceSnapshot.from_json(ledger_row.get("price_inputs_json") or "")
 
     # VIB-4304: ``price_inputs_json`` is symbol-keyed (e.g. ``"WETH"``)
     # but several connectors' receipt parsers (Aerodrome confirmed; likely
@@ -478,6 +489,8 @@ def handle_swap(
         token_in=token_in,
         token_out=token_out,
         amounts_unmeasured=amounts_unmeasured,
+        price_confidence_in=price_snapshot.confidence(token_in_key),
+        price_confidence_out=price_snapshot.confidence(token_out_key),
     )
 
     # ── Event identity ───────────────────────────────────────────────────────
@@ -519,6 +532,10 @@ def handle_swap(
         realized_pnl_usd_matched=realized_pnl_usd_matched,
         unmatched_amount_in=unmatched_amount_in,
         unmatched_proceeds_usd=unmatched_proceeds_usd,
+        price_source=price_snapshot.oracle_source(token_in_key),
+        price_observed_at=price_snapshot.observed_at(token_in_key),
+        price_out_source=price_snapshot.oracle_source(token_out_key),
+        price_out_observed_at=price_snapshot.observed_at(token_out_key),
     )
 
 

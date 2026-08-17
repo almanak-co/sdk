@@ -32,11 +32,8 @@ from typing import TYPE_CHECKING, Any, assert_never, cast
 
 from almanak.core.chains._helpers import is_solana_chain
 from almanak.core.lifecycle import LifecycleCommand, LifecycleState
-from almanak.framework.portfolio.models import (
-    ValueConfidence,
-    is_measured_accounting_snapshot,
-    serialize_value_confidence,
-)
+from almanak.framework.market.models import PriceData
+from almanak.framework.portfolio.models import ValueConfidence, is_measured_accounting_snapshot
 
 from ..api.timeline import TimelineEvent, TimelineEventType, add_event
 from ..state.exceptions import AccountingPersistenceError
@@ -1267,13 +1264,14 @@ def _portfolio_snapshot_to_price_oracle(snapshot: Any | None) -> dict | None:
     PortfolioSnapshot stores prices keyed by ``chain:address`` with values
     ``{"price_usd": str, "symbol": str, "decimals": int|None}``. The ledger
     writer expects either a flat ``{symbol: usd}`` dict or the shaped
-    ``{symbol: {price_usd, oracle_source, fetched_at, confidence}}`` form
+    ``{symbol: {price_usd, oracle_source, observed_at, fetched_at,
+    confidence, raw_confidence, stale}}`` form
     (Accounting-AttemptNo17 §1.2 G12).
 
-    This converter emits the shaped form, stamps ``oracle_source="portfolio_valuer"``
-    so auditors can grep "exposure by oracle" against teardown rows, and
-    threads the snapshot timestamp through as ``fetched_at``. Confidence is
-    inherited from the snapshot's ValueConfidence.
+    This converter preserves each token record's price provenance. Legacy
+    token-price records remain explicitly unmeasured; the enclosing snapshot's
+    timestamp and confidence describe the NAV calculation, not the oracle
+    observation, and must not be substituted for it.
 
     Returns ``None`` when the snapshot is missing or has no token prices —
     callers fall back to the ``price_oracle=None`` path on
@@ -1286,15 +1284,6 @@ def _portfolio_snapshot_to_price_oracle(snapshot: Any | None) -> dict | None:
     if not token_prices:
         return None
 
-    confidence = ValueConfidence.parse_optional(
-        getattr(snapshot, "value_confidence", None),
-        field_name="teardown snapshot.value_confidence",
-    )
-    confidence_text = serialize_value_confidence(confidence)
-
-    timestamp = getattr(snapshot, "timestamp", None)
-    fetched_at = timestamp.isoformat() if timestamp is not None and hasattr(timestamp, "isoformat") else ""
-
     oracle: dict[str, dict[str, Any]] = {}
     for _key, val in token_prices.items():
         if not isinstance(val, dict):
@@ -1303,15 +1292,40 @@ def _portfolio_snapshot_to_price_oracle(snapshot: Any | None) -> dict | None:
         price_usd = val.get("price_usd")
         if not symbol or price_usd is None:
             continue
+        observed_at = val.get("observed_at") or val.get("fetched_at") or ""
+        confidence = ValueConfidence.parse_optional(
+            val.get("confidence"),
+            field_name=f"teardown token price {symbol}.confidence",
+        )
         # Last-write-wins on duplicate symbol across chains: teardown is
         # single-chain so this collision is rare, but stamp determinism.
         oracle[str(symbol)] = {
             "price_usd": str(price_usd),
-            "oracle_source": "portfolio_valuer",
-            "fetched_at": fetched_at,
-            "confidence": confidence_text,
+            "oracle_source": val.get("oracle_source") or "unknown",
+            "fetched_at": observed_at,
+            "observed_at": observed_at,
+            "confidence": confidence.value if confidence is not None else "UNAVAILABLE",
+            "raw_confidence": val.get("raw_confidence"),
+            "stale": val.get("stale"),
         }
     return oracle or None
+
+
+def _price_result_to_oracle_entry(result: Any) -> dict[str, object] | None:
+    """Validate and preserve one gateway ``PriceResult`` for accounting."""
+    raw_price = getattr(result, "price", None)
+    if raw_price is None:
+        return None
+    try:
+        price = Decimal(str(raw_price))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+    if not price.is_finite() or price <= 0:
+        return None
+    try:
+        return PriceData.from_price_result(result).to_oracle_entry()
+    except (AttributeError, TypeError, ValueError):
+        return None
 
 
 async def _ensure_native_gas_in_teardown_oracle(
@@ -1379,29 +1393,18 @@ async def _ensure_native_gas_in_teardown_oracle(
         )
         return oracle
 
-    price = getattr(result, "price", None)
-    if price is None:
+    entry = _price_result_to_oracle_entry(result)
+    if entry is None:
         # Empty != Zero: a missing native price stays missing — never fabricate.
         # Returns the oracle untouched (``None`` stays ``None``).
         return oracle
-    timestamp = getattr(result, "timestamp", None)
-    fetched_at = timestamp.isoformat() if timestamp is not None and hasattr(timestamp, "isoformat") else ""
-    confidence_attr = getattr(result, "confidence", None)
-    confidence_str = str(confidence_attr or "ESTIMATED").upper()
-    if confidence_str not in {"HIGH", "ESTIMATED", "STALE", "UNAVAILABLE"}:
-        confidence_str = "ESTIMATED"
     # Initialise the stash when it arrived empty / None AND we have a real
     # native price to add (mutate-in-place when it already exists). Returning
     # the initialised dict propagates to ``commit_teardown_intent``'s
     # ``price_oracle=teardown_price_oracle`` so the ledger writer stamps both
     # ``gas_usd`` and ``price_inputs_json`` on the teardown row.
     merged: dict = oracle if oracle else {}
-    merged[native_symbol] = {
-        "price_usd": str(price),
-        "oracle_source": getattr(result, "source", "") or "gateway",
-        "fetched_at": fetched_at,
-        "confidence": confidence_str,
-    }
+    merged[native_symbol] = entry
     return merged
 
 
@@ -1596,22 +1599,11 @@ async def _ensure_intent_tokens_in_teardown_oracle(
             )
             continue
 
-        price = getattr(result, "price", None)
-        if price is None:
+        entry = _price_result_to_oracle_entry(result)
+        if entry is None:
             # Empty ≠ Zero: a missing price stays missing — never fabricate.
             continue
-        timestamp = getattr(result, "timestamp", None)
-        fetched_at = timestamp.isoformat() if timestamp is not None and hasattr(timestamp, "isoformat") else ""
-        confidence_attr = getattr(result, "confidence", None)
-        confidence_str = str(confidence_attr or "ESTIMATED").upper()
-        if confidence_str not in {"HIGH", "ESTIMATED", "STALE", "UNAVAILABLE"}:
-            confidence_str = "ESTIMATED"
-        merged[token] = {
-            "price_usd": str(price),
-            "oracle_source": getattr(result, "source", "") or "gateway",
-            "fetched_at": fetched_at,
-            "confidence": confidence_str,
-        }
+        merged[token] = entry
 
     return merged or None
 
@@ -1703,25 +1695,15 @@ async def _ensure_receipt_legs_in_teardown_oracle(
                 exc,
             )
             continue
-        price = getattr(agg, "price", None)
-        # Empty≠Zero + fail-closed on ≤ 0: a real token leg is never worth ≤ $0.
-        if price is None or price <= 0:
+        entry = _price_result_to_oracle_entry(agg)
+        # Empty≠Zero + fail-closed on invalid/≤ 0 prices or missing provenance.
+        if entry is None:
             continue
-        timestamp = getattr(agg, "timestamp", None)
-        fetched_at = timestamp.isoformat() if timestamp is not None and hasattr(timestamp, "isoformat") else ""
-        confidence_str = str(getattr(agg, "confidence", None) or "ESTIMATED").upper()
-        if confidence_str not in {"HIGH", "ESTIMATED", "STALE", "UNAVAILABLE"}:
-            confidence_str = "ESTIMATED"
-        merged[symbol] = {
-            "price_usd": str(price),
-            "oracle_source": getattr(agg, "source", "") or "gateway",
-            "fetched_at": fetched_at,
-            "confidence": confidence_str,
-        }
+        merged[symbol] = entry
         logger.debug(
             "VIB-5124 teardown address-backfill: priced %s ($%s) by address %s on %s",
             symbol,
-            price,
+            entry["price_usd"],
             address,
             chain_lower,
         )
@@ -1797,38 +1779,14 @@ async def _ensure_coin_symbols_in_teardown_oracle(
                 exc,
             )
             continue
-        raw_price = getattr(agg, "price", None)
-        # A None price is a miss (Empty ≠ Zero — leave the key absent). Normalise to
-        # Decimal BEFORE any comparison: ``get_aggregated_price`` may return a float
-        # or Decimal, and a non-finite NaN would either RAISE on ``<= 0`` (Decimal
-        # NaN) or slip past it (float nan <= 0 is False) and persist "nan" into
-        # price_inputs_json. Reject non-finite / ≤ 0 up front, mirroring the
-        # iteration-lane sibling ``_backfill_coin_symbol_legs``.
-        if raw_price is None:
+        entry = _price_result_to_oracle_entry(agg)
+        if entry is None:
             continue
-        try:
-            price = Decimal(str(raw_price))
-        except (InvalidOperation, ValueError, TypeError):
-            continue
-        # Fail closed on a non-finite / non-positive price (Empty ≠ Zero): a real
-        # token leg is never worth ≤ $0, so NaN / 0 / negative is a miss, not a value.
-        if not price.is_finite() or price <= 0:
-            continue
-        timestamp = getattr(agg, "timestamp", None)
-        fetched_at = timestamp.isoformat() if timestamp is not None and hasattr(timestamp, "isoformat") else ""
-        confidence_str = str(getattr(agg, "confidence", None) or "ESTIMATED").upper()
-        if confidence_str not in {"HIGH", "ESTIMATED", "STALE", "UNAVAILABLE"}:
-            confidence_str = "ESTIMATED"
-        merged[symbol] = {
-            "price_usd": str(price),
-            "oracle_source": getattr(agg, "source", "") or "gateway",
-            "fetched_at": fetched_at,
-            "confidence": confidence_str,
-        }
+        merged[symbol] = entry
         logger.debug(
             "VIB-5553 teardown coin-symbol backfill: priced %s ($%s) on %s",
             symbol,
-            price,
+            entry["price_usd"],
             chain_lower,
         )
 

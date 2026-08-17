@@ -8,18 +8,14 @@ Validates Phase 1c of the Dashboard Accounting PRD:
 """
 
 import asyncio
-import json
 import sqlite3
-import tempfile
 from datetime import UTC, datetime
 from decimal import Decimal
-from pathlib import Path
 
 import pytest
 
 from almanak.framework.portfolio.models import (
     PortfolioSnapshot,
-    PositionValue,
     TokenBalance,
     ValueConfidence,
 )
@@ -336,3 +332,33 @@ class TestBuildTokenPriceRecords:
             tracked_tokens=["UNKNOWN_TOKEN"],
         )
         assert len(records) >= 1
+
+    def test_preserves_typed_price_provenance(self):
+        from datetime import UTC, datetime
+
+        from almanak.framework.market import PriceData
+        from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
+
+        observed_at = datetime(2026, 8, 14, 12, tzinfo=UTC)
+        records = PortfolioValuer._build_token_price_records(
+            chain="testchain",
+            prices={"WETH": Decimal("3450")},
+            tracked_tokens=["WETH"],
+            price_data_by_token={
+                "WETH": PriceData(
+                    price=Decimal("3450"),
+                    source="chainlink",
+                    timestamp=observed_at,
+                    confidence="ESTIMATED",
+                    raw_confidence=0.91,
+                    stale=False,
+                )
+            },
+        )
+
+        record = next(iter(records.values()))
+        assert record["oracle_source"] == "chainlink"
+        assert record["observed_at"] == observed_at.isoformat()
+        assert record["confidence"] == "ESTIMATED"
+        assert record["raw_confidence"] == 0.91
+        assert record["stale"] is False

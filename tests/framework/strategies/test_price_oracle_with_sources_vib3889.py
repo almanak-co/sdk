@@ -18,17 +18,28 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from decimal import Decimal
+from types import SimpleNamespace
 
+from almanak.framework.data.interfaces import PriceResult
+from almanak.framework.market import MarketSnapshot, PriceData
+from almanak.framework.market.builders import MarketSnapshotBuilder
 from almanak.framework.observability.ledger import build_ledger_entry
-from almanak.framework.market import MarketSnapshot
-from almanak.framework.market import PriceData
 
 
-def _market(prices: dict | None = None, cache: dict | None = None) -> MarketSnapshot:
-    snap = MarketSnapshot(
+def _market(
+    prices: dict | None = None,
+    cache: dict | None = None,
+    price_oracle: object | None = None,
+) -> MarketSnapshot:
+    strategy = SimpleNamespace(
         chain="arbitrum",
         wallet_address="0xwallet",
-        timestamp=datetime.now(tz=UTC),
+        _price_oracle=price_oracle,
+    )
+    snap = MarketSnapshotBuilder.for_strategy_runner(
+        strategy=strategy,
+        chain="arbitrum",
+        runtime_surface="unit_test",
     )
     if prices:
         for k, v in prices.items():
@@ -50,14 +61,17 @@ def test_with_sources_false_returns_flat_dict():
     assert result == {"WETH": Decimal("2301.69"), "USDC": Decimal("1.0001")}
 
 
-def test_with_sources_true_returns_nested_shape_for_pre_populated_prices():
-    """Pre-populated prices have no provider — labelled "preloaded"."""
+def test_with_sources_true_marks_pre_populated_provenance_unavailable():
+    """A scalar preload has a label, but no provider observation metadata."""
     market = _market(prices={"WETH": Decimal("2301.69")})
     result = market.get_price_oracle_dict(with_sources=True)
     assert "WETH" in result
     assert result["WETH"]["price_usd"] == "2301.69"
     assert result["WETH"]["oracle_source"] == "preloaded"
-    assert result["WETH"]["confidence"] == "HIGH"
+    assert result["WETH"]["confidence"] == "UNAVAILABLE"
+    assert result["WETH"]["observed_at"] == ""
+    assert result["WETH"]["raw_confidence"] is None
+    assert result["WETH"]["stale"] is None
 
 
 def test_with_sources_true_propagates_cache_source():
@@ -67,17 +81,26 @@ def test_with_sources_true_propagates_cache_source():
             price=Decimal("2301.69"),
             timestamp=datetime(2026, 5, 2, 11, 9, tzinfo=UTC),
             source="coingecko",
+            confidence="HIGH",
+            raw_confidence=1.0,
+            stale=False,
         ),
         "USDC/USD": PriceData(
             price=Decimal("1.0001"),
             timestamp=datetime(2026, 5, 2, 11, 9, tzinfo=UTC),
             source="chainlink",
+            confidence="ESTIMATED",
+            raw_confidence=0.9,
+            stale=False,
         ),
     }
     market = _market(cache=cached)
     result = market.get_price_oracle_dict(with_sources=True)
     assert result["WETH"]["oracle_source"] == "coingecko"
     assert result["USDC"]["oracle_source"] == "chainlink"
+    assert result["WETH"]["observed_at"] == "2026-05-02T11:09:00+00:00"
+    assert result["WETH"]["raw_confidence"] == 1.0
+    assert result["USDC"]["confidence"] == "ESTIMATED"
 
 
 def test_with_sources_true_falls_back_to_unknown_when_source_empty():
@@ -92,80 +115,47 @@ def test_with_sources_true_falls_back_to_unknown_when_source_empty():
     assert result["WETH"]["oracle_source"] == "unknown"
 
 
-# ──────────────────────────────────────────────────────────────────────────
-# _infer_oracle_source — provider name extracted from callable identity
-# ──────────────────────────────────────────────────────────────────────────
-
-
-def test_infer_oracle_source_from_qualname():
-    """The runner's price_oracle is typically a bound method like
-    ``CoingeckoProvider.get_price`` — qualname lets us infer the source
-    without changing the callable signature."""
-    from almanak.framework.market.snapshot import _infer_oracle_source
-
-    class CoingeckoProvider:
-        def get_price(self, token, quote, chain):
-            return Decimal("1")
-
-    oracle = CoingeckoProvider().get_price
-    assert _infer_oracle_source(oracle) == "coingecko"
-
-
-def test_infer_oracle_source_from_module():
-    """When qualname is generic, the module path can carry the hint
-    (e.g. a free function ``almanak.framework.data.price.chainlink.fetch``)."""
-    from almanak.framework.market.snapshot import _infer_oracle_source
-
-    def _fetch(token, quote, chain):
-        return Decimal("1")
-
-    _fetch.__module__ = "almanak.framework.data.price.chainlink"
-    assert _infer_oracle_source(_fetch) == "chainlink"
-
-
-def test_infer_oracle_source_returns_empty_for_unknown_callable():
-    """Lambda or anonymous oracle → empty string (callers default to
-    "unknown" downstream — strictly better than pre-VIB-3889 always-
-    "unknown" because at least named providers identify themselves)."""
-    from almanak.framework.market.snapshot import _infer_oracle_source
-
-    assert _infer_oracle_source(lambda token, quote: Decimal("1")) == ""
-
-
-def test_infer_oracle_source_handles_functools_partial():
-    """``functools.partial`` is the canonical way to bind chain to a
-    free-function oracle — the helper unwraps ``.func`` to find the
-    underlying provider."""
-    import functools
-
-    from almanak.framework.market.snapshot import _infer_oracle_source
-
-    def _binance_get_price(token, quote, chain):
-        return Decimal("1")
-
-    bound = functools.partial(_binance_get_price, chain="arbitrum")
-    assert _infer_oracle_source(bound) == "binance"
-
-
-def test_intent_strategy_price_caches_inferred_source():
-    """Integration: ``MarketSnapshot.price()`` writes a cache entry whose
-    ``source`` matches the inferred provider name. Without this the
-    runner's per-cycle oracle would still produce "unknown" downstream."""
+def test_scalar_oracle_does_not_infer_source_or_fabricate_confidence():
+    """Callable identity is not data provenance, even when provider-named."""
 
     class CoingeckoProvider:
         def get_price(self, token: str, quote: str, chain: str) -> Decimal:
             return Decimal("2301.69")
 
-    market = MarketSnapshot(
-        chain="arbitrum",
-        wallet_address="0xwallet",
-        price_oracle=CoingeckoProvider().get_price,
-        timestamp=datetime.now(tz=UTC),
-    )
+    market = _market(price_oracle=CoingeckoProvider().get_price)
     # First read populates the cache.
     market.price("WETH")
     nested = market.get_price_oracle_dict(with_sources=True)
-    assert nested["WETH"]["oracle_source"] == "coingecko"
+    assert nested["WETH"]["oracle_source"] == "unknown"
+    assert nested["WETH"]["confidence"] == "UNAVAILABLE"
+    assert nested["WETH"]["observed_at"] == ""
+
+
+def test_aggregated_price_result_preserves_end_to_end_provenance():
+    observed_at = datetime(2026, 5, 2, 11, 9, tzinfo=UTC)
+
+    class Aggregator:
+        async def get_aggregated_price(self, token, quote, *, chain=None):
+            return PriceResult(
+                price=Decimal("2301.69"),
+                source="chainlink",
+                timestamp=observed_at,
+                confidence=0.91,
+                stale=False,
+            )
+
+    market = _market(price_oracle=Aggregator())
+    assert market.price("WETH") == Decimal("2301.69")
+    entry = market.get_price_oracle_dict(with_sources=True)["WETH"]
+    assert entry == {
+        "price_usd": "2301.69",
+        "oracle_source": "chainlink",
+        "fetched_at": observed_at.isoformat(),
+        "observed_at": observed_at.isoformat(),
+        "confidence": "ESTIMATED",
+        "raw_confidence": 0.91,
+        "stale": False,
+    }
 
 
 def test_ledger_writer_preserves_nested_oracle_source_through_round_trip():
@@ -262,3 +252,5 @@ def test_ledger_writer_legacy_flat_oracle_still_normalises_to_unknown():
     decoded = json.loads(entry.price_inputs_json)
     assert decoded["WETH"]["oracle_source"] == "unknown"
     assert decoded["WETH"]["price_usd"] == "2301.69"
+    assert decoded["WETH"]["confidence"] == "UNAVAILABLE"
+    assert decoded["WETH"]["observed_at"] == ""
