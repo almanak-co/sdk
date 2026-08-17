@@ -63,8 +63,8 @@ SUSDE_DECIMALS = 18
 # and stakes it for sUSDe rather than seeding sUSDe directly.
 SUSDE_BALANCE_SLOT = 4
 
-# Currently active sUSDe YT market on Ethereum (Pendle market 0x177768...,
-# expires 2026-08-13). The prior sUSDe YT (expired 2026-05-07) broke this
+# Currently active sUSDe YT market on Ethereum (Pendle market 0x47ad2c...,
+# expires 2026-11-26). The prior sUSDe YT (expired 2026-08-13) broke this
 # test on 2026-05-11 when the weekly fork-block rollover bootstrapped a
 # post-expiry pin and the Pendle Router started reverting
 # `swapExactTokenForYt`. Rotate this address when the new market gets
@@ -72,31 +72,14 @@ SUSDE_BALANCE_SLOT = 4
 # it. The VIB-3751 bug this test guards is decimals + swap-type
 # classification; it does not depend on the specific YT identity. From
 # almanak/connectors/pendle/sdk.py YT_TOKEN_INFO["ethereum"].
-YT_SUSDE_ADDRESS = "0x45a699a11a4a17fe0931ef3cea4bfc3235e659f2"
+YT_SUSDE_ADDRESS = "0x89e6e5f7c3a60e7d6347f054051a29a272f4ce44"
 YT_SUSDE_DECIMALS = 18
 
-
-def _enrich_oracle_with_susde(price_oracle: dict[str, Decimal]) -> dict[str, Decimal]:
-    """Add SUSDE/sUSDe price to oracle if missing.
-
-    The default Ethereum oracle in ``conftest.py::_fetch_prices_sync`` only
-    fetches symbols listed in ``CHAIN_CONFIGS["ethereum"]["tokens"]`` (USDC,
-    WETH, USDT, wstETH). The compiler needs an sUSDe price to size the swap
-    when ``amount_usd`` is used and to drive slippage estimation.
-
-    sUSDe is roughly pegged to USDe ($1) plus accrued staking yield; the
-    in-test price doesn't have to be exact because the swap uses
-    ``amount`` (not ``amount_usd``) — but the compiler's pre-flight valuation
-    code path still reads it for slippage / sanity checks.
-    """
-    enriched = dict(price_oracle)
-    if "SUSDE" not in enriched:
-        # Conservative default: sUSDe trades within a few % of USDe.
-        # Real prices will be fetched by tests that pass enrich_oracle through.
-        enriched["SUSDE"] = Decimal("1.10")
-    if "sUSDe" not in enriched:
-        enriched["sUSDe"] = enriched["SUSDE"]
-    return enriched
+# These exact amount-in regressions must not depend on mutable CoinGecko data.
+_FIXED_PRICE_ORACLE = {
+    "SUSDE": Decimal("1.10"),
+    "sUSDe": Decimal("1.10"),
+}
 
 
 # =============================================================================
@@ -124,9 +107,8 @@ class TestPendleYTSwapIntent:
         anvil_rpc_url: str,
         funded_wallet: str,
         orchestrator: ExecutionOrchestrator,
-        price_oracle: dict[str, Decimal],
     ):
-        """SwapIntent(50 sUSDe -> YT-sUSDe-13AUG2026) must report amount_in ≈ 50,
+        """SwapIntent(50 sUSDe -> YT-sUSDe-26NOV2026) must report amount_in ≈ 50,
         NOT ≈ 60_898 (internal PT flash-mint), AND the wallet's sUSDe balance
         delta must match it. Guards the full Compile -> Execute -> Receipt
         -> Enrich pipeline.
@@ -152,7 +134,7 @@ class TestPendleYTSwapIntent:
         )
 
         print(f"\n{'='*80}")
-        print("VIB-3751 regression: 50 sUSDe -> YT-sUSDe-13AUG2026 via Pendle")
+        print("VIB-3751 regression: 50 sUSDe -> YT-sUSDe-26NOV2026 via Pendle")
         print(f"{'='*80}")
         print(f"sUSDe before: {susde_before / 10**SUSDE_DECIMALS:.4f}")
         print(f"YT before:    {yt_before / 10**YT_SUSDE_DECIMALS:.4f}")
@@ -160,7 +142,7 @@ class TestPendleYTSwapIntent:
         # --- Build & compile intent ---
         intent = SwapIntent(
             from_token="sUSDe",
-            to_token="YT-sUSDe-13AUG2026",
+            to_token="YT-sUSDe-26NOV2026",
             amount=susde_amount_human,
             max_slippage=Decimal("0.20"),
             protocol="pendle",
@@ -170,7 +152,7 @@ class TestPendleYTSwapIntent:
         compiler = IntentCompiler(
             chain=CHAIN_NAME,
             wallet_address=funded_wallet,
-            price_oracle=_enrich_oracle_with_susde(price_oracle),
+            price_oracle=_FIXED_PRICE_ORACLE,
             rpc_url=anvil_rpc_url,
         )
         compilation_result = compiler.compile(intent)
@@ -307,7 +289,6 @@ class TestPendleYTSwapIntent:
         anvil_rpc_url: str,
         funded_wallet: str,
         orchestrator: ExecutionOrchestrator,
-        price_oracle: dict[str, Decimal],
     ):
         """Verify the production ResultEnricher path threads compiler-supplied
         decimals end-to-end so non-18-decimal markets would not silently
@@ -333,7 +314,7 @@ class TestPendleYTSwapIntent:
 
         intent = SwapIntent(
             from_token="sUSDe",
-            to_token="YT-sUSDe-13AUG2026",
+            to_token="YT-sUSDe-26NOV2026",
             amount=susde_amount_human,
             max_slippage=Decimal("0.20"),
             protocol="pendle",
@@ -342,7 +323,7 @@ class TestPendleYTSwapIntent:
         compiler = IntentCompiler(
             chain=CHAIN_NAME,
             wallet_address=funded_wallet,
-            price_oracle=_enrich_oracle_with_susde(price_oracle),
+            price_oracle=_FIXED_PRICE_ORACLE,
             rpc_url=anvil_rpc_url,
         )
         compilation_result = compiler.compile(intent)

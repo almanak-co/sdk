@@ -114,13 +114,17 @@ MARKET_BY_PT_TOKEN: dict[str, dict[str, str]] = {
     "ethereum": {
         # NOTE ON ORDER: permission_hints._market_grid() picks the FIRST
         # fully-supported market in this dict's insertion order as the canonical
-        # Zodiac synthetic / LP_CLOSE market for ethereum. The sUSDe-13AUG2026
+        # Zodiac synthetic / LP_CLOSE market for ethereum. The sUSDe-26NOV2026
         # market MUST stay first so the on-chain Zodiac LP_CLOSE coverage
         # (tests/intents/ethereum/test_pendle_lp.py::test_lp_close_returns_susde)
         # keeps resolving to it. The VIB-5324 stETH demo-roll market is appended
         # below — it is resolved by symbol for the SWAP demo and does not need to
         # be the canonical synthetic market.
-        # PT-sUSDe-13AUG2026 (active sUSDe market — replaced 7MAY2026 after expiry)
+        # PT-sUSDe-26NOV2026 (LIVE — canonical Ethereum Pendle market)
+        "PT-SUSDE-26NOV2026": "0x47ad2cd1dd15739a7a035b9d3b7828d916fef77e",
+        "PT-sUSDE-26NOV2026": "0x47ad2cd1dd15739a7a035b9d3b7828d916fef77e",
+        "PT-sUSDe-26NOV2026": "0x47ad2cd1dd15739a7a035b9d3b7828d916fef77e",
+        # PT-sUSDe-13AUG2026 (expired 2026-08-13; retained for historical parsing)
         "PT-SUSDE-13AUG2026": "0x177768caf9d0e036725a51d3f60d7e20f2d4d194",
         "PT-sUSDE-13AUG2026": "0x177768caf9d0e036725a51d3f60d7e20f2d4d194",
         "PT-sUSDe-13AUG2026": "0x177768caf9d0e036725a51d3f60d7e20f2d4d194",
@@ -179,7 +183,11 @@ PT_TOKEN_INFO: dict[str, dict[str, tuple[str, int]]] = {
         "PT-stETH-30DEC2027": ("0xb253Eff1104802b97aC7E3aC9FdD73AecE295a2c", 18),
         "PT-WSTETH-30DEC2027": ("0xb253Eff1104802b97aC7E3aC9FdD73AecE295a2c", 18),
         "PT-wstETH-30DEC2027": ("0xb253Eff1104802b97aC7E3aC9FdD73AecE295a2c", 18),
-        # PT-sUSDe-13AUG2026: (address, decimals) - active sUSDe PT (replaced 7MAY2026)
+        # PT-sUSDe-26NOV2026: (address, decimals) - active sUSDe PT
+        "PT-SUSDE-26NOV2026": ("0xb195b618ea52b77cb2a58846f452f59f8dfa9390", 18),
+        "PT-sUSDE-26NOV2026": ("0xb195b618ea52b77cb2a58846f452f59f8dfa9390", 18),
+        "PT-sUSDe-26NOV2026": ("0xb195b618ea52b77cb2a58846f452f59f8dfa9390", 18),
+        # PT-sUSDe-13AUG2026: (address, decimals) - expired 2026-08-13
         "PT-SUSDE-13AUG2026": ("0x5a19fa369f2895dcd8d2cee62e4ceae58ef92bbb", 18),
         "PT-sUSDE-13AUG2026": ("0x5a19fa369f2895dcd8d2cee62e4ceae58ef92bbb", 18),
         "PT-sUSDe-13AUG2026": ("0x5a19fa369f2895dcd8d2cee62e4ceae58ef92bbb", 18),
@@ -218,7 +226,11 @@ YT_TOKEN_INFO: dict[str, dict[str, tuple[str, int]]] = {
         "YT-stETH-30DEC2027": ("0x04B7Fa1e727d7290D6E24fA9b426d0c940283a95", 18),
         "YT-WSTETH-30DEC2027": ("0x04B7Fa1e727d7290D6E24fA9b426d0c940283a95", 18),
         "YT-wstETH-30DEC2027": ("0x04B7Fa1e727d7290D6E24fA9b426d0c940283a95", 18),
-        # YT-sUSDe-13AUG2026 — active sUSDe YT (replaced 7MAY2026 after expiry)
+        # YT-sUSDe-26NOV2026 — active sUSDe YT
+        "YT-SUSDE-26NOV2026": ("0x89e6e5f7c3a60e7d6347f054051a29a272f4ce44", 18),
+        "YT-sUSDE-26NOV2026": ("0x89e6e5f7c3a60e7d6347f054051a29a272f4ce44", 18),
+        "YT-sUSDe-26NOV2026": ("0x89e6e5f7c3a60e7d6347f054051a29a272f4ce44", 18),
+        # YT-sUSDe-13AUG2026 — expired 2026-08-13; retained for historical parsing
         "YT-SUSDE-13AUG2026": ("0x45a699a11a4a17fe0931ef3cea4bfc3235e659f2", 18),
         "YT-sUSDE-13AUG2026": ("0x45a699a11a4a17fe0931ef3cea4bfc3235e659f2", 18),
         "YT-sUSDe-13AUG2026": ("0x45a699a11a4a17fe0931ef3cea4bfc3235e659f2", 18),
@@ -268,7 +280,11 @@ MARKET_BY_YT_TOKEN: dict[str, dict[str, str]] = {
         "YT-stETH-30DEC2027": "0x34280882267ffa6383B363E278B027Be083bBe3b",
         "YT-WSTETH-30DEC2027": "0x34280882267ffa6383B363E278B027Be083bBe3b",
         "YT-wstETH-30DEC2027": "0x34280882267ffa6383B363E278B027Be083bBe3b",
-        # YT-sUSDe-13AUG2026 shares the market 0x177768... with PT-sUSDe-13AUG2026
+        # YT-sUSDe-26NOV2026 shares the live market with PT-sUSDe-26NOV2026
+        "YT-SUSDE-26NOV2026": "0x47ad2cd1dd15739a7a035b9d3b7828d916fef77e",
+        "YT-sUSDE-26NOV2026": "0x47ad2cd1dd15739a7a035b9d3b7828d916fef77e",
+        "YT-sUSDe-26NOV2026": "0x47ad2cd1dd15739a7a035b9d3b7828d916fef77e",
+        # YT-sUSDe-13AUG2026 shares the expired market with PT-sUSDe-13AUG2026
         "YT-SUSDE-13AUG2026": "0x177768caf9d0e036725a51d3f60d7e20f2d4d194",
         "YT-sUSDE-13AUG2026": "0x177768caf9d0e036725a51d3f60d7e20f2d4d194",
         "YT-sUSDe-13AUG2026": "0x177768caf9d0e036725a51d3f60d7e20f2d4d194",
@@ -298,7 +314,9 @@ MARKET_TOKEN_MINT_SY: dict[str, dict[str, str]] = {
         # Anvil-fundable, non-rebasing demo funding token, so from_token=WSTETH
         # equals tokenMintSy and no V3 pre-swap leg is inserted (VIB-5324).
         "0x34280882267ffa6383b363e278b027be083bbe3b": "0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0",  # wstETH
-        # sUSDe-13AUG2026 market - SY is minted from sUSDe (active, replaced 7MAY2026)
+        # sUSDe-26NOV2026 market - SY is minted from sUSDe (active)
+        "0x47ad2cd1dd15739a7a035b9d3b7828d916fef77e": "0x9D39A5DE30e57443BfF2A8307A4256c8797A3497",  # sUSDe
+        # sUSDe-13AUG2026 market - SY is minted from sUSDe (expired)
         "0x177768caf9d0e036725a51d3f60d7e20f2d4d194": "0x9D39A5DE30e57443BfF2A8307A4256c8797A3497",  # sUSDe
         # sUSDe-7MAY2026 market - SY is minted from sUSDe
         "0x8dae8ece668cf80d348873f23d456448e8694883": "0x9D39A5DE30e57443BfF2A8307A4256c8797A3497",  # sUSDe

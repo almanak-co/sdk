@@ -9,9 +9,9 @@ Aave-style lending withdraw). The compiler routes ``WithdrawIntent`` with
 PT-to-token redemption via the Pendle Router. See
 ``almanak/connectors/pendle/compiler.py::compile_pendle_redeem``.
 
-Active Ethereum market (as of 2026-05-12):
+Active Ethereum market (as of 2026-08-17):
 
-* PT-sUSDe-13AUG2026 (market ``0x177768...``)
+* PT-sUSDe-26NOV2026 (market ``0x47ad2c...``)
 * underlying SY mint: sUSDe (``0x9D39A5DE30e57443BfF2A8307A4256c8797A3497``)
 * LP pair token: sUSDe (single-sided liquidity)
 
@@ -84,15 +84,15 @@ pytestmark = pytest.mark.intent(
 
 CHAIN_NAME = "ethereum"
 
-# Active PT-sUSDe-13AUG2026 market on Ethereum.
+# Active PT-sUSDe-26NOV2026 market on Ethereum.
 # The market (LP token) and PT token are distinct addresses in Pendle V2:
 # market = the AMM pool (also the LP token minted on add-liquidity).
 # PT = the principal token minted from SY (separate ERC20).
 # See almanak/connectors/pendle/sdk.py: PENDLE_MARKETS vs PT_TOKENS.
-PENDLE_SUSDE_MARKET = "0x177768caf9d0e036725a51d3f60d7e20f2d4d194"
-PT_SUSDE_ADDRESS = "0x5a19fa369f2895dcd8d2cee62e4ceae58ef92bbb"
+PENDLE_SUSDE_MARKET = "0x47ad2cd1dd15739a7a035b9d3b7828d916fef77e"
+PT_SUSDE_ADDRESS = "0xb195b618ea52b77cb2a58846f452f59f8dfa9390"
 # YT pair (required for WithdrawIntent PT/YT redemption pre-maturity).
-YT_SUSDE_ADDRESS = "0x45a699a11a4a17fe0931ef3cea4bfc3235e659f2"
+YT_SUSDE_ADDRESS = "0x89e6e5f7c3a60e7d6347f054051a29a272f4ce44"
 
 # Underlying / SY mint token for this market.
 SUSDE_ADDRESS = "0x9D39A5DE30e57443BfF2A8307A4256c8797A3497"
@@ -102,6 +102,14 @@ SUSDE_SYMBOL = "sUSDe"
 SUSDE_BALANCE_SLOT = 4
 
 LP_DEPOSIT_AMOUNT = Decimal("50")  # 50 sUSDe (~$50)
+
+# The active-market regression must not depend on mutable CoinGecko prices.
+# These intents size explicit token amounts; the oracle is used only for
+# compiler valuation/slippage context.
+_FIXED_PRICE_ORACLE = {
+    "SUSDE": Decimal("1.10"),
+    "sUSDe": Decimal("1.10"),
+}
 
 # Pendle LP requires range_lower/upper for the LPOpenIntent schema, but
 # the Pendle compiler ignores them (single-sided liquidity, no ticks).
@@ -223,7 +231,7 @@ def _assert_pendle_lp_payload(
 @pytest.mark.ethereum
 @pytest.mark.lp
 class TestPendleLPOpenEthereum:
-    """4-layer test for Pendle LP_OPEN on Ethereum (PT-sUSDe-13AUG2026)."""
+    """4-layer test for Pendle LP_OPEN on Ethereum (PT-sUSDe-26NOV2026)."""
 
     @pytest.mark.asyncio
     async def test_lp_open_susde_into_pendle_market(
@@ -232,11 +240,10 @@ class TestPendleLPOpenEthereum:
         anvil_rpc_url: str,
         funded_wallet: str,
         orchestrator: ExecutionOrchestrator,
-        price_oracle: dict[str, Decimal],
         layer5_accounting_harness,
         anvil_eth_call_adapter,
     ) -> None:
-        """Open a single-sided sUSDe LP position in PT-sUSDe-13AUG2026."""
+        """Open a single-sided sUSDe LP position in PT-sUSDe-26NOV2026."""
         # Seed sUSDe (10x deposit amount for headroom)
         deposit_wei = int(LP_DEPOSIT_AMOUNT * Decimal(10**18))
         fund_erc20_token(
@@ -270,7 +277,7 @@ class TestPendleLPOpenEthereum:
         compiler = IntentCompiler(
             chain=CHAIN_NAME,
             wallet_address=funded_wallet,
-            price_oracle=_enrich_oracle_with_susde(price_oracle),
+            price_oracle=_FIXED_PRICE_ORACLE,
             rpc_url=anvil_rpc_url,
         )
         compilation_result = compiler.compile(intent)
@@ -344,7 +351,7 @@ class TestPendleLPOpenEthereum:
             chain=CHAIN_NAME,
             wallet_address=funded_wallet,
             expected_event_type="PENDLE_LP_OPEN",
-            price_oracle=_enrich_oracle_with_susde(price_oracle),
+            price_oracle=_FIXED_PRICE_ORACLE,
             eth_call_reader=anvil_eth_call_adapter,
         )
         _assert_pendle_lp_identity(accounting_row, event_type="PENDLE_LP_OPEN", wallet=funded_wallet)
@@ -364,7 +371,6 @@ class TestPendleLPOpenEthereum:
         anvil_rpc_url: str,
         funded_wallet: str,
         orchestrator: ExecutionOrchestrator,
-        price_oracle: dict[str, Decimal],
         layer5_accounting_harness,
         anvil_eth_call_adapter,
     ) -> None:
@@ -392,7 +398,7 @@ class TestPendleLPOpenEthereum:
         compiler = IntentCompiler(
             chain=CHAIN_NAME,
             wallet_address=funded_wallet,
-            price_oracle=_enrich_oracle_with_susde(price_oracle),
+            price_oracle=_FIXED_PRICE_ORACLE,
             rpc_url=anvil_rpc_url,
         )
         compilation_result = compiler.compile(intent)
@@ -421,7 +427,7 @@ class TestPendleLPOpenEthereum:
             result=failed_result,
             chain=CHAIN_NAME,
             wallet_address=funded_wallet,
-            price_oracle=_enrich_oracle_with_susde(price_oracle),
+            price_oracle=_FIXED_PRICE_ORACLE,
             eth_call_reader=anvil_eth_call_adapter,
         )
 
@@ -434,14 +440,13 @@ class TestPendleLPOpenEthereum:
 @pytest.mark.ethereum
 @pytest.mark.lp
 class TestPendleLPCloseEthereum:
-    """4-layer test for Pendle LP_CLOSE on Ethereum (PT-sUSDe-13AUG2026)."""
+    """4-layer test for Pendle LP_CLOSE on Ethereum (PT-sUSDe-26NOV2026)."""
 
     async def _open_lp_position(
         self,
         web3: Web3,
         funded_wallet: str,
         orchestrator: ExecutionOrchestrator,
-        price_oracle: dict[str, Decimal],
         anvil_rpc_url: str,
     ) -> int:
         """Helper: open an LP position and return the LP balance."""
@@ -467,7 +472,7 @@ class TestPendleLPCloseEthereum:
         compiler = IntentCompiler(
             chain=CHAIN_NAME,
             wallet_address=funded_wallet,
-            price_oracle=_enrich_oracle_with_susde(price_oracle),
+            price_oracle=_FIXED_PRICE_ORACLE,
             rpc_url=anvil_rpc_url,
         )
         result = compiler.compile(intent)
@@ -492,7 +497,6 @@ class TestPendleLPCloseEthereum:
         anvil_rpc_url: str,
         funded_wallet: str,
         orchestrator: ExecutionOrchestrator,
-        price_oracle: dict[str, Decimal],
         layer5_accounting_harness,
         anvil_eth_call_adapter,
     ) -> None:
@@ -501,7 +505,7 @@ class TestPendleLPCloseEthereum:
 
         # Setup: open
         lp_amount = await self._open_lp_position(
-            web3, funded_wallet, orchestrator, price_oracle, anvil_rpc_url
+            web3, funded_wallet, orchestrator, anvil_rpc_url
         )
 
         # Layer 4 setup
@@ -521,7 +525,7 @@ class TestPendleLPCloseEthereum:
         compiler = IntentCompiler(
             chain=CHAIN_NAME,
             wallet_address=funded_wallet,
-            price_oracle=_enrich_oracle_with_susde(price_oracle),
+            price_oracle=_FIXED_PRICE_ORACLE,
             rpc_url=anvil_rpc_url,
         )
         compilation_result = compiler.compile(intent)
@@ -591,7 +595,7 @@ class TestPendleLPCloseEthereum:
             chain=CHAIN_NAME,
             wallet_address=funded_wallet,
             expected_event_type="PENDLE_LP_CLOSE",
-            price_oracle=_enrich_oracle_with_susde(price_oracle),
+            price_oracle=_FIXED_PRICE_ORACLE,
             eth_call_reader=anvil_eth_call_adapter,
         )
         _assert_pendle_lp_identity(accounting_row, event_type="PENDLE_LP_CLOSE", wallet=funded_wallet)
@@ -661,7 +665,7 @@ class TestPendleWithdrawEthereum:
 
         buy_intent = SwapIntent(
             from_token="sUSDe",
-            to_token="PT-sUSDe-13AUG2026",
+            to_token="PT-sUSDe-26NOV2026",
             amount=buy_amount,
             max_slippage=Decimal("0.20"),
             protocol="pendle",

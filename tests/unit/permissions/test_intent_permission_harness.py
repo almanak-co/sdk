@@ -19,7 +19,7 @@ from tests.intents._permission_onchain_harness import (
     [
         ("base", "sUSDai", "0x0B2b2B2076d95dda7817e785989fE353fe955ef9"),
         ("ethereum", "sUSDe", "0x9D39A5DE30e57443BfF2A8307A4256c8797A3497"),
-        ("ethereum", "YT-sUSDe-13AUG2026", "0x45a699a11a4a17fe0931ef3cea4bfc3235e659f2"),
+        ("ethereum", "YT-sUSDe-26NOV2026", "0x89e6e5f7c3a60e7d6347f054051a29a272f4ce44"),
         ("arbitrum", "sUSDai", "0x0B2b2B2076d95dda7817e785989fE353fe955ef9"),
         ("arbitrum", "PT-SUSDAI-15OCT2026", "0xb459db106f645d698e74027eef6019a26a0675cc"),
         ("polygon", "frxUSD", "0x80eede496655fb9047dd39d9f418d5483ed600df"),
