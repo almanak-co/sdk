@@ -126,6 +126,19 @@ class TestAerodromeSwapIntent:
         assert compilation_result.status.value == "SUCCESS", f"Compilation failed: {compilation_result.error}"
         assert compilation_result.action_bundle is not None, "ActionBundle must be created"
 
+        bundle_metadata = compilation_result.action_bundle.metadata
+        swap_token_meta = bundle_metadata["swap_token_meta"]
+        assert swap_token_meta["token_in"] == {
+            "address": token_in.lower(),
+            "symbol": "USDC",
+            "decimals": in_decimals,
+        }
+        assert swap_token_meta["token_out"] == {
+            "address": token_out.lower(),
+            "symbol": "WETH",
+            "decimals": out_decimals,
+        }
+
         print(f"ActionBundle created with {len(compilation_result.action_bundle.transactions)} transactions")
 
         # Execute via ExecutionOrchestrator
@@ -164,7 +177,8 @@ class TestAerodromeSwapIntent:
                 token0_address=token0_addr,
                 token1_address=token1_addr,
             )
-            parse_result = parser.parse_receipt(tx_result.receipt.to_dict())
+            receipt = tx_result.receipt.to_dict()
+            parse_result = parser.parse_receipt(receipt)
 
             if parse_result.success and parse_result.swap_result:
                 swap_results_parsed += 1
@@ -179,6 +193,16 @@ class TestAerodromeSwapIntent:
                     "Receipt parser: amount_out_decimal must be positive"
                 )
                 assert parse_result.swap_result.effective_price > 0, "Receipt parser: effective_price must be positive"
+
+                extract_kwargs = parser.build_extract_kwargs(
+                    field="swap_amounts",
+                    bundle_metadata=bundle_metadata,
+                )
+                assert extract_kwargs == {"swap_token_meta": swap_token_meta}
+                swap_amounts = parser.extract_swap_amounts(receipt, **extract_kwargs)
+                assert swap_amounts is not None
+                assert swap_amounts.amount_in_decimal == parse_result.swap_result.amount_in_decimal
+                assert swap_amounts.amount_out_decimal == parse_result.swap_result.amount_out_decimal
 
                 # L3 semantic verification
                 assert_swap_semantic_match(

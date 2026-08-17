@@ -45,6 +45,7 @@ from decimal import Decimal
 from enum import IntEnum
 from typing import TYPE_CHECKING, Any
 
+from almanak.framework.data.tokens.decimals import resolve_token_decimals
 from almanak.framework.data.tokens.exceptions import TokenResolutionError
 from almanak.framework.deployment.mode import is_hosted
 
@@ -1555,16 +1556,7 @@ class MorphoBlueAdapter:
         Raises:
             TokenResolutionError: If decimals cannot be determined
         """
-        try:
-            resolved = self._token_resolver.resolve(token, self.chain)
-            return resolved.decimals
-        except TokenResolutionError as e:
-            raise TokenResolutionError(
-                token=token,
-                chain=str(self.chain),
-                reason=f"[MorphoBlueAdapter] Cannot determine decimals: {e.reason}",
-                suggestions=e.suggestions,
-            ) from e
+        return resolve_token_decimals(token, self.chain, resolver=self._token_resolver)
 
     def _default_price_oracle(self, token: str) -> Decimal:
         """Placeholder price oracle (returns 1.0).

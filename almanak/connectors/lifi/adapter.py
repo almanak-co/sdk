@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
+from almanak.framework.data.tokens.decimals import resolve_token_decimals
 from almanak.framework.data.tokens.exceptions import TokenResolutionError
 from almanak.framework.intents.vocabulary import IntentType, SwapIntent
 from almanak.framework.market import PriceUnavailableError
@@ -227,16 +228,7 @@ class LiFiAdapter:
             TokenResolutionError: If decimals cannot be determined
         """
         chain_name = chain or self._get_chain_name()
-        try:
-            resolved = self._token_resolver.resolve(token, chain_name)
-            return resolved.decimals
-        except TokenResolutionError as e:
-            raise TokenResolutionError(
-                token=token,
-                chain=chain_name,
-                reason=f"[LiFiAdapter] Cannot determine decimals: {e.reason}",
-                suggestions=e.suggestions,
-            ) from e
+        return resolve_token_decimals(token, chain_name, resolver=self._token_resolver)
 
     def compile_swap_intent(
         self,

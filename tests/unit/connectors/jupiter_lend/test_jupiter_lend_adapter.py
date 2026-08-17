@@ -18,7 +18,7 @@ def _make_adapter():
     config = JupiterLendConfig(wallet_address=WALLET)
     mock_resolver = MagicMock()
     # Return realistic decimals for Solana tokens
-    mock_resolver.get_decimals.return_value = 6
+    mock_resolver.resolve.return_value.decimals = 6
     adapter = JupiterLendAdapter(config=config, token_resolver=mock_resolver)
     return adapter
 

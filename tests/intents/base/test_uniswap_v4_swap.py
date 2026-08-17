@@ -117,6 +117,19 @@ class TestUniswapV4SwapIntent:
         )
         assert compilation_result.action_bundle is not None, "ActionBundle must be created"
 
+        bundle_metadata = compilation_result.action_bundle.metadata
+        swap_token_meta = bundle_metadata["swap_token_meta"]
+        assert swap_token_meta["token_in"] == {
+            "address": token_in.lower(),
+            "symbol": "USDC",
+            "decimals": in_decimals,
+        }
+        assert swap_token_meta["token_out"] == {
+            "address": token_out.lower(),
+            "symbol": "WETH",
+            "decimals": out_decimals,
+        }
+
         print(f"ActionBundle created with {len(compilation_result.action_bundle.transactions)} transactions")
 
         # Layer 2: Execution
@@ -135,12 +148,22 @@ class TestUniswapV4SwapIntent:
             print(f"  Gas used: {tx_result.gas_used}")
 
             if tx_result.receipt:
-                parse_result = parser.parse_receipt(tx_result.receipt.to_dict())
+                receipt = tx_result.receipt.to_dict()
+                extract_kwargs = parser.build_extract_kwargs(
+                    field="swap_amounts",
+                    bundle_metadata=bundle_metadata,
+                )
+                assert extract_kwargs == {"swap_token_meta": swap_token_meta}
+                parse_result = parser.parse_receipt(receipt, **extract_kwargs)
 
                 if parse_result.swap_result:
                     parsed_swap = True
                     assert parse_result.swap_result.amount_in > 0, "Parsed amount_in must be > 0"
                     assert parse_result.swap_result.amount_out > 0, "Parsed amount_out must be > 0"
+                    swap_amounts = parser.extract_swap_amounts(receipt, **extract_kwargs)
+                    assert swap_amounts is not None
+                    assert swap_amounts.amount_in_decimal == parse_result.swap_result.amount_in_decimal
+                    assert swap_amounts.amount_out_decimal == parse_result.swap_result.amount_out_decimal
                     print(f"  Swap event: amount_in={parse_result.swap_result.amount_in}, "
                           f"amount_out={parse_result.swap_result.amount_out}")
 

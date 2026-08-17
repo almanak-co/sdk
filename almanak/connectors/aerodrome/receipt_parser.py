@@ -22,6 +22,12 @@ from almanak.connectors._strategy_base.lp_leg_identity import (
     currencies_for_amounts,
     transfers_by_token,
 )
+from almanak.framework.data.tokens import (
+    TokenResolutionError,
+    build_swap_token_meta_extract_kwargs,
+    build_token_meta_hint_map,
+    resolve_token_decimals,
+)
 from almanak.framework.execution.extract_result import (
     ExtractError,
     ExtractMissing,
@@ -509,7 +515,7 @@ class AerodromeReceiptParser:
             resolver = get_token_resolver()
             resolved = resolver.resolve(token, self.chain)
             return resolved.symbol, resolved.decimals
-        except Exception:
+        except TokenResolutionError:
             return "", None
 
     def _resolve_decimals(self, token_address: str) -> int | None:
@@ -520,12 +526,8 @@ class AerodromeReceiptParser:
         if not token_address:
             return None
         try:
-            from almanak.framework.data.tokens.resolver import get_token_resolver
-
-            resolver = get_token_resolver()
-            resolved = resolver.resolve(token_address, self.chain)
-            return resolved.decimals
-        except Exception:
+            return resolve_token_decimals(token_address, self.chain)
+        except TokenResolutionError:
             return None
 
     def parse_receipt(  # noqa: C901
@@ -1152,63 +1154,15 @@ class AerodromeReceiptParser:
         field: str,
         bundle_metadata: dict[str, Any],
     ) -> dict[str, Any]:
-        """Return Aerodrome-owned kwargs for ResultEnricher extraction calls.
-
-        VIB-3164: the compiler records full token identity
-        (``from_token`` / ``to_token`` dicts with address, symbol, decimals —
-        see ``compile_swap_aerodrome``) in ``ActionBundle.metadata``.
-        Threading it here lets ``_resolve_swap_decimals`` resolve decimals when
-        the TokenResolver misses or Transfer events cannot be classified,
-        instead of dropping the whole SwapAmounts row.
-
-        Native-token entries are skipped: the receipt's Transfer events carry
-        the wrapped token's address, so a native entry can never match by
-        address, and its decimals (18) equal the fallback anyway.
-        """
-        if field != "swap_amounts":
-            return {}
-        meta: dict[str, dict[str, Any]] = {}
-        for metadata_key, slot in (("from_token", "token_in"), ("to_token", "token_out")):
-            raw = bundle_metadata.get(metadata_key)
-            if not isinstance(raw, dict) or raw.get("is_native"):
-                continue
-            address = raw.get("address")
-            decimals = raw.get("decimals")
-            if not address or decimals is None:
-                continue
-            try:
-                decimals_int = int(decimals)
-            except (TypeError, ValueError):
-                logger.debug("Could not coerce %s.decimals=%r to int; skipping hint", metadata_key, decimals)
-                continue
-            meta[slot] = {
-                "address": str(address).lower(),
-                "symbol": str(raw.get("symbol") or ""),
-                "decimals": decimals_int,
-            }
-        return {"swap_token_meta": meta} if meta else {}
+        """Return canonical typed swap metadata for receipt extraction."""
+        return build_swap_token_meta_extract_kwargs(field=field, bundle_metadata=bundle_metadata, chain=self.chain)
 
     @staticmethod
     def _build_hint_map(
         swap_token_meta: dict[str, dict[str, Any]] | None,
     ) -> dict[str, tuple[str, int]]:
         """Map compiler token metadata to ``{address: (symbol, decimals)}``."""
-        hints: dict[str, tuple[str, int]] = {}
-        if not swap_token_meta:
-            return hints
-        for slot in ("token_in", "token_out"):
-            entry = swap_token_meta.get(slot)
-            if not isinstance(entry, dict):
-                continue
-            address = entry.get("address")
-            decimals = entry.get("decimals")
-            if not address or decimals is None:
-                continue
-            try:
-                hints[str(address).lower()] = (str(entry.get("symbol") or ""), int(decimals))
-            except (TypeError, ValueError):
-                logger.debug("Ignoring malformed token hint: %r", entry)
-        return hints
+        return {address.lower(): value for address, value in build_token_meta_hint_map(swap_token_meta).items()}
 
     # ---- VIB-3159: tagged-variant wrappers ------------------------------------
     # See uniswap_v3/receipt_parser.py for the rationale. The raw methods
@@ -1503,14 +1457,14 @@ class AerodromeReceiptParser:
         """
         addr_in = token_in_addr.lower() if token_in_addr else ""
         addr_out = token_out_addr.lower() if token_out_addr else ""
-
+        in_decimals: int | None
+        out_decimals: int | None
         if hint_by_addr and addr_in in hint_by_addr:
-            in_decimals: int | None = hint_by_addr[addr_in][1]
+            in_decimals = resolve_token_decimals(token_in_addr, self.chain, hints=hint_by_addr)
         else:
             in_decimals = self._resolve_decimals(token_in_addr) if token_in_addr else None
-
         if hint_by_addr and addr_out in hint_by_addr:
-            out_decimals: int | None = hint_by_addr[addr_out][1]
+            out_decimals = resolve_token_decimals(token_out_addr, self.chain, hints=hint_by_addr)
         else:
             out_decimals = self._resolve_decimals(token_out_addr) if token_out_addr else None
 

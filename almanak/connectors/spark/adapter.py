@@ -38,6 +38,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
+from almanak.framework.data.tokens.decimals import resolve_token_decimals
 from almanak.framework.data.tokens.exceptions import TokenResolutionError
 
 if TYPE_CHECKING:
@@ -454,16 +455,7 @@ class SparkAdapter:
         Raises:
             TokenResolutionError: If decimals cannot be determined
         """
-        try:
-            resolved = self._token_resolver.resolve(asset, self.chain)
-            return resolved.decimals
-        except TokenResolutionError as e:
-            raise TokenResolutionError(
-                token=asset,
-                chain=str(self.chain),
-                reason=f"[SparkAdapter] Cannot determine decimals: {e.reason}",
-                suggestions=e.suggestions,
-            ) from e
+        return resolve_token_decimals(asset, self.chain, resolver=self._token_resolver)
 
     @staticmethod
     def _pad_address(addr: str) -> str:

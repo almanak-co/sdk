@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any
 
 from almanak.connectors._strategy_base.slippage import compute_min_amount_out_from_bps, slippage_to_bps
 from almanak.core.chains._helpers import native_symbols_for
+from almanak.framework.data.tokens.decimals import resolve_token_decimals
 from almanak.framework.data.tokens.exceptions import TokenResolutionError
 
 from .addresses import UNISWAP_V3 as UNISWAP_V3_ADDRESSES
@@ -1032,16 +1033,7 @@ class UniswapV3Adapter:
 
     def _get_token_decimals(self, symbol: str) -> int:
         """Get token decimals from symbol using TokenResolver."""
-        try:
-            resolved = self._token_resolver.resolve(symbol, self.chain)
-            return resolved.decimals
-        except TokenResolutionError as e:
-            raise TokenResolutionError(
-                token=symbol,
-                chain=str(self.chain),
-                reason=f"[UniswapV3Adapter] Cannot determine decimals: {e.reason}",
-                suggestions=e.suggestions,
-            ) from e
+        return resolve_token_decimals(symbol, self.chain, resolver=self._token_resolver)
 
     def _uses_v1_router(self) -> bool:
         """Return True when this chain/protocol must use the legacy V1 SwapRouter ABI.

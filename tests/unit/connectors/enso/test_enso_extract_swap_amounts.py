@@ -14,6 +14,7 @@ from almanak.connectors.enso.receipt_parser import (
     TRANSFER_EVENT_SIGNATURE,
     EnsoReceiptParser,
 )
+from almanak.framework.data.tokens import TokenNotFoundError
 from almanak.framework.execution.extracted_data import SwapAmounts
 
 # ---------------------------------------------------------------------------
@@ -74,9 +75,7 @@ def test_parse_swap_receipt_gas_logging_preserves_amount_out(
 ) -> None:
     """Wire or unmeasured gas cannot change a successful Transfer result."""
     amount_out = 500_000_000_000_000_000
-    receipt = _make_receipt(
-        logs=[_transfer_log(TOKEN_OUT, "0xrouter", WALLET, amount_out)]
-    )
+    receipt = _make_receipt(logs=[_transfer_log(TOKEN_OUT, "0xrouter", WALLET, amount_out)])
     if gas_used is None:
         receipt.pop("gasUsed")
     else:
@@ -156,9 +155,7 @@ class TestExtractSwapAmountsBasic:
     def test_returns_none_when_no_transfer_to_wallet(self):
         """Only outgoing transfers (no incoming) -> None."""
         parser = EnsoReceiptParser()
-        receipt = _make_receipt(
-            logs=[_transfer_log(TOKEN_IN, WALLET, "0xrouter", 100)]
-        )
+        receipt = _make_receipt(logs=[_transfer_log(TOKEN_IN, WALLET, "0xrouter", 100)])
         assert parser.extract_swap_amounts(receipt) is None
 
     def test_returns_none_when_amount_out_zero(self):
@@ -231,9 +228,7 @@ class TestExtractSwapAmountsInputOnly:
     def test_only_outgoing_transfer(self):
         """When there's only a Transfer FROM wallet but none TO, returns None."""
         parser = EnsoReceiptParser()
-        receipt = _make_receipt(
-            logs=[_transfer_log(TOKEN_IN, WALLET, "0xrouter", 1000)]
-        )
+        receipt = _make_receipt(logs=[_transfer_log(TOKEN_IN, WALLET, "0xrouter", 1000)])
         assert parser.extract_swap_amounts(receipt) is None
 
 
@@ -278,9 +273,7 @@ class TestExtractSwapAmountsBytesTopics:
         parser = EnsoReceiptParser()
 
         wallet_bytes = bytes.fromhex(WALLET[2:])
-        receipt = _make_receipt(
-            logs=[_transfer_log(TOKEN_OUT, ROUTER, WALLET, 100)]
-        )
+        receipt = _make_receipt(logs=[_transfer_log(TOKEN_OUT, ROUTER, WALLET, 100)])
         receipt["from"] = wallet_bytes
 
         with patch.object(parser, "_resolve_decimals", return_value=18):
@@ -321,7 +314,7 @@ class TestResolveDecimals:
         parser = EnsoReceiptParser(chain="arbitrum")
 
         mock_resolver = MagicMock()
-        mock_resolver.resolve.side_effect = Exception("not found")
+        mock_resolver.resolve.side_effect = TokenNotFoundError(token="0xdeadbeef", chain="arbitrum")
 
         with patch(
             "almanak.framework.data.tokens.get_token_resolver",

@@ -21,6 +21,7 @@ from almanak.connectors._strategy_base.base.cl_math import (
 from almanak.connectors._strategy_base.base.compiler import BaseConcentratedLiquidityCompiler, CLCompilerContext
 from almanak.connectors._strategy_base.cl_range import PriceBandToTicksError, price_band_to_ticks
 from almanak.connectors._strategy_base.slippage import SlippagePrecisionError, slippage_to_bps
+from almanak.framework.data.tokens import build_swap_token_meta
 from almanak.framework.intents import compiler_constants
 from almanak.framework.intents.compiler_models import CompilationResult, CompilationStatus
 from almanak.framework.intents.min_out_guard import UnprotectedTradeError
@@ -1453,6 +1454,7 @@ def compile_swap_aerodrome(compiler, intent: SwapIntent) -> CompilationResult:  
         metadata: dict[str, Any] = {
             "from_token": from_token.to_dict(),
             "to_token": to_token.to_dict(),
+            "swap_token_meta": build_swap_token_meta(from_token, to_token, chain=compiler.chain),
             "amount_in": str(amount_decimal),
             "routing": routing,
             "routing_fallback": route.fallback_used,

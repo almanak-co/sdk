@@ -13,8 +13,6 @@ import inspect
 from decimal import Decimal
 from unittest.mock import patch
 
-import pytest
-
 from almanak.connectors.sushiswap_v3.receipt_parser import (
     EVENT_TOPICS,
     SushiSwapV3ReceiptParser,
@@ -310,6 +308,19 @@ class TestFallbackPreservesFailClosed:
         assert any(
             "Cannot compute swap amounts" in msg for msg in caplog.messages
         )
+
+    def test_hint_resolution_error_uses_specific_fail_closed_warning(self, caplog):
+        import logging
+
+        parser = _make_parser(chain="unknown_chain")
+        receipt = _make_full_receipt()
+
+        caplog.set_level(logging.WARNING)
+        result = parser.extract_swap_amounts(receipt, swap_token_meta=_FULL_META)
+
+        assert result is None
+        assert any("Cannot compute swap amounts: token decimals unknown" in msg for msg in caplog.messages)
+        assert not any("Failed to extract swap amounts" in msg for msg in caplog.messages)
 
 
 # ---------------------------------------------------------------------------

@@ -13,6 +13,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from almanak.connectors._strategy_base.base import EventRegistry, HexDecoder, resolve_trading_wallet
+from almanak.framework.data.tokens import TokenResolutionError, resolve_token_decimals
 from almanak.framework.execution.extract_result import (
     ExtractError,
     ExtractMissing,
@@ -1619,12 +1620,8 @@ class CurveReceiptParser:
         if not token_address:
             return None
         try:
-            from almanak.framework.data.tokens import get_token_resolver
-
-            resolver = get_token_resolver()
-            token = resolver.resolve(token_address, self.chain)
-            return token.decimals
-        except Exception:
+            return resolve_token_decimals(token_address, self.chain)
+        except TokenResolutionError:
             logger.warning(f"Could not resolve decimals for {token_address}")
             return None
 

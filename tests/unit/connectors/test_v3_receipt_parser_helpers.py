@@ -28,6 +28,7 @@ from almanak.connectors._strategy_base.v3_receipt_parser_helpers import (
     resolve_token_info,
     strict_parse,
 )
+from almanak.framework.data.tokens import TokenResolutionError
 from almanak.framework.execution.extract_result import ExtractError
 
 
@@ -289,7 +290,9 @@ class TestResolveTokenInfo:
             "almanak.framework.data.tokens.resolver.get_token_resolver"
         ) as mock_get_resolver:
             mock_resolver = MagicMock()
-            mock_resolver.resolve.side_effect = KeyError("token not found")
+            mock_resolver.resolve.side_effect = TokenResolutionError(
+                token="0xunknown", chain="arbitrum", reason="token not found"
+            )
             mock_get_resolver.return_value = mock_resolver
             result = resolve_token_info("0xunknown", "arbitrum")
         assert result == ("", None)

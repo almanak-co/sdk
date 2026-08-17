@@ -20,6 +20,7 @@ from almanak.connectors._strategy_base.lp_leg_identity import (
     log_emitter_address,
     transfers_by_token,
 )
+from almanak.framework.data.tokens import build_swap_token_meta_extract_kwargs
 from almanak.framework.execution.events import SwapResultPayload
 from almanak.framework.execution.extract_result import (
     ExtractError,
@@ -482,41 +483,8 @@ class UniswapV3ReceiptParser:
         field: str,
         bundle_metadata: dict[str, Any],
     ) -> dict[str, Any]:
-        """Return Uniswap-V3-owned kwargs for ResultEnricher extraction calls.
-
-        VIB-3164: the compiler records full token identity
-        (``from_token`` / ``to_token`` dicts with address, symbol, decimals —
-        see ``UniswapV3Compiler.compile_swap``) in ``ActionBundle.metadata``.
-        Threading it here lets ``_build_swap_result`` resolve decimals when
-        the TokenResolver misses or Transfer events cannot be classified,
-        instead of falling through to the 18-decimal default.
-
-        Native-token entries are skipped: the receipt's Transfer events carry
-        the wrapped token's address, so a native entry can never match by
-        address, and its decimals (18) equal the fallback anyway.
-        """
-        if field != "swap_amounts":
-            return {}
-        meta: dict[str, dict[str, Any]] = {}
-        for metadata_key, slot in (("from_token", "token_in"), ("to_token", "token_out")):
-            raw = bundle_metadata.get(metadata_key)
-            if not isinstance(raw, dict) or raw.get("is_native"):
-                continue
-            address = raw.get("address")
-            decimals = raw.get("decimals")
-            if not address or decimals is None:
-                continue
-            try:
-                decimals_int = int(decimals)
-            except (TypeError, ValueError):
-                logger.debug("Could not coerce %s.decimals=%r to int; skipping hint", metadata_key, decimals)
-                continue
-            meta[slot] = {
-                "address": str(address).lower(),
-                "symbol": str(raw.get("symbol") or ""),
-                "decimals": decimals_int,
-            }
-        return {"swap_token_meta": meta} if meta else {}
+        """Return canonical typed swap metadata for receipt extraction."""
+        return build_swap_token_meta_extract_kwargs(field=field, bundle_metadata=bundle_metadata, chain=self.chain)
 
     def parse_receipt(
         self,

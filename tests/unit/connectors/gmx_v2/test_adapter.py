@@ -928,7 +928,7 @@ class TestGMXv2AdapterHelpers:
         assert adapter._get_token_decimals("USDC") == 6
         assert adapter._get_token_decimals("WETH") == 18
         assert adapter._get_token_decimals("WBTC") == 8
-        with pytest.raises(TokenResolutionError, match=r"\[GMXV2Adapter\].*Cannot determine decimals"):
+        with pytest.raises(TokenResolutionError, match="UNKNOWN"):
             adapter._get_token_decimals("UNKNOWN")
 
     def test_clear_all(self, adapter: GMXv2Adapter) -> None:

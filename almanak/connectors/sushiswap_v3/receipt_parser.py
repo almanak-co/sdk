@@ -50,6 +50,11 @@ from almanak.connectors._strategy_base.lp_leg_identity import (
     log_emitter_address,
     transfers_by_token,
 )
+from almanak.framework.data.tokens import (
+    TokenResolutionError,
+    build_swap_token_meta_extract_kwargs,
+    resolve_token_decimals,
+)
 from almanak.framework.execution.events import SwapResultPayload
 from almanak.framework.execution.extract_result import (
     ExtractError,
@@ -551,12 +556,8 @@ class SushiSwapV3ReceiptParser:
         if not token_address:
             return None
         try:
-            from almanak.framework.data.tokens.resolver import get_token_resolver
-
-            resolver = get_token_resolver()
-            resolved = resolver.resolve(token_address, self.chain)
-            return resolved.decimals
-        except Exception:
+            return resolve_token_decimals(token_address, self.chain)
+        except TokenResolutionError:
             return None
 
     def parse_receipt(
@@ -1048,41 +1049,8 @@ class SushiSwapV3ReceiptParser:
         field: str,
         bundle_metadata: dict[str, Any],
     ) -> dict[str, Any]:
-        """Return SushiSwapV3-owned kwargs for ResultEnricher extraction calls.
-
-        VIB-3164: the compiler records full token identity
-        (``from_token`` / ``to_token`` dicts with address, symbol, decimals —
-        see ``UniswapV3Compiler.compile_swap``) in ``ActionBundle.metadata``.
-        Threading it here lets ``_resolve_swap_decimals_with_hints`` resolve
-        decimals when the TokenResolver misses or Transfer events cannot be
-        classified, instead of dropping the whole SwapAmounts row.
-
-        Native-token entries are skipped: the receipt's Transfer events carry
-        the wrapped token's address, so a native entry can never match by
-        address, and its decimals (18) equal the fallback anyway.
-        """
-        if field != "swap_amounts":
-            return {}
-        meta: dict[str, dict[str, Any]] = {}
-        for metadata_key, slot in (("from_token", "token_in"), ("to_token", "token_out")):
-            raw = bundle_metadata.get(metadata_key)
-            if not isinstance(raw, dict) or raw.get("is_native"):
-                continue
-            address = raw.get("address")
-            decimals = raw.get("decimals")
-            if not address or decimals is None:
-                continue
-            try:
-                decimals_int = int(decimals)
-            except (TypeError, ValueError):
-                logger.debug("Could not coerce %s.decimals=%r to int; skipping hint", metadata_key, decimals)
-                continue
-            meta[slot] = {
-                "address": str(address).lower(),
-                "symbol": str(raw.get("symbol") or ""),
-                "decimals": decimals_int,
-            }
-        return {"swap_token_meta": meta} if meta else {}
+        """Return canonical typed swap metadata for receipt extraction."""
+        return build_swap_token_meta_extract_kwargs(field=field, bundle_metadata=bundle_metadata, chain=self.chain)
 
     @staticmethod
     def _build_hint_map(
@@ -1135,20 +1103,24 @@ class SushiSwapV3ReceiptParser:
                     token_out_addr = str(out_slot["address"]).lower()
 
         # Per-address resolution: hints win over TokenResolver
-        in_decimals: int | None
-        out_decimals: int | None
         addr_in = token_in_addr.lower() if token_in_addr else ""
         addr_out = token_out_addr.lower() if token_out_addr else ""
-
-        if addr_in in hint_by_addr:
-            in_decimals = hint_by_addr[addr_in][1]
-        else:
-            in_decimals = self._resolve_decimals(token_in_addr) if token_in_addr else None
-
-        if addr_out in hint_by_addr:
-            out_decimals = hint_by_addr[addr_out][1]
-        else:
-            out_decimals = self._resolve_decimals(token_out_addr) if token_out_addr else None
+        in_decimals: int | None
+        out_decimals: int | None
+        try:
+            if addr_in in hint_by_addr:
+                in_decimals = resolve_token_decimals(token_in_addr, self.chain, hints=hint_by_addr)
+            else:
+                in_decimals = self._resolve_decimals(token_in_addr) if token_in_addr else None
+        except TokenResolutionError:
+            in_decimals = None
+        try:
+            if addr_out in hint_by_addr:
+                out_decimals = resolve_token_decimals(token_out_addr, self.chain, hints=hint_by_addr)
+            else:
+                out_decimals = self._resolve_decimals(token_out_addr) if token_out_addr else None
+        except TokenResolutionError:
+            out_decimals = None
 
         if in_decimals is None or out_decimals is None:
             logger.warning(

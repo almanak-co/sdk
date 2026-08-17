@@ -35,6 +35,7 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from almanak.framework.data.tokens.decimals import resolve_token_decimals
 from almanak.framework.data.tokens.exceptions import TokenResolutionError
 
 if TYPE_CHECKING:
@@ -1310,16 +1311,7 @@ class AerodromeSDK:
         Raises:
             TokenResolutionError: If decimals cannot be determined
         """
-        try:
-            resolved = self._token_resolver.resolve(symbol, self.chain)
-            return resolved.decimals
-        except TokenResolutionError as e:
-            raise TokenResolutionError(
-                token=symbol,
-                chain=str(self.chain),
-                reason=f"[AerodromeSDK] Cannot determine decimals: {e.reason}",
-                suggestions=e.suggestions,
-            ) from e
+        return resolve_token_decimals(symbol, self.chain, resolver=self._token_resolver)
 
 
 # =============================================================================

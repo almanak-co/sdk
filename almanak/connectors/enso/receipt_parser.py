@@ -14,6 +14,7 @@ from typing import Any
 
 from almanak.connectors._strategy_base.base.hex_utils import HexDecoder
 from almanak.connectors._strategy_base.base.receipt_wallet import resolve_trading_wallet
+from almanak.framework.data.tokens import TokenResolutionError, resolve_token_decimals
 from almanak.framework.execution.extracted_data import ProtocolFees, SwapAmounts
 from almanak.framework.utils.log_formatters import format_gas_cost, format_tx_hash
 
@@ -404,12 +405,8 @@ class EnsoReceiptParser:
             )
             return None
         try:
-            from almanak.framework.data.tokens import get_token_resolver
-
-            resolver = get_token_resolver()
-            token = resolver.resolve(token_address, self._chain)
-            return token.decimals
-        except Exception:
+            return resolve_token_decimals(token_address, self._chain)
+        except TokenResolutionError:
             logger.warning(
                 f"Could not resolve decimals for {token_address} on {self._chain}, swap amounts will be unavailable"
             )

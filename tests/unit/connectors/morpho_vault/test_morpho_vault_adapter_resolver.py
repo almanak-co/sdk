@@ -94,7 +94,7 @@ class TestDecimalsResolution:
             suggestions=[],
         )
         adapter = _make_adapter(resolver)
-        with pytest.raises(TokenResolutionError, match="Cannot determine decimals"):
+        with pytest.raises(TokenResolutionError, match="Not found"):
             adapter._get_decimals("UNKNOWN")
 
 
@@ -127,10 +127,16 @@ class TestDepositTokenResolution:
         mock_sdk.get_vault_asset.return_value = ASSET_ADDR
         mock_sdk.get_max_deposit.return_value = 10**30
         mock_sdk.build_approve_tx.return_value = {
-            "to": ASSET_ADDR, "data": "0x", "value": "0", "gas_estimate": 60000,
+            "to": ASSET_ADDR,
+            "data": "0x",
+            "value": "0",
+            "gas_estimate": 60000,
         }
         mock_sdk.build_deposit_tx.return_value = {
-            "to": VAULT_ADDR, "data": "0x", "value": "0", "gas_estimate": 450000,
+            "to": VAULT_ADDR,
+            "data": "0x",
+            "value": "0",
+            "gas_estimate": 450000,
         }
         adapter._sdk = mock_sdk
 

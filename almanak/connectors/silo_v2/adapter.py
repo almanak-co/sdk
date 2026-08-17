@@ -23,6 +23,8 @@ from decimal import Decimal
 
 from web3 import Web3
 
+from almanak.framework.data.tokens import resolve_token_decimals
+
 logger = logging.getLogger(__name__)
 
 # =============================================================================
@@ -302,11 +304,7 @@ class SiloV2Adapter:
 
         market, silo_address, asset_idx = result
 
-        # Get decimals from token resolver
-        from almanak.framework.data.tokens import get_token_resolver
-
-        resolver = get_token_resolver()
-        decimals = resolver.get_decimals(self.chain, asset)
+        decimals = resolve_token_decimals(asset, self.chain)
         amount_wei = int(amount * Decimal(10**decimals))
 
         calldata = self._encode_deposit(amount_wei, self.wallet_address, collateral_type)
@@ -357,10 +355,7 @@ class SiloV2Adapter:
 
         market, silo_address, _asset_idx = result
 
-        from almanak.framework.data.tokens import get_token_resolver
-
-        resolver = get_token_resolver()
-        decimals = resolver.get_decimals(self.chain, asset)
+        decimals = resolve_token_decimals(asset, self.chain)
 
         if withdraw_all:
             if amount <= 0:
@@ -457,10 +452,7 @@ class SiloV2Adapter:
                 error=f"Borrow asset {borrow_asset} not found in market {market.market_name}",
             )
 
-        from almanak.framework.data.tokens import get_token_resolver
-
-        resolver = get_token_resolver()
-        decimals = resolver.get_decimals(self.chain, borrow_asset)
+        decimals = resolve_token_decimals(borrow_asset, self.chain)
         borrow_amount_wei = int(borrow_amount * Decimal(10**decimals))
 
         calldata = self._encode_borrow(borrow_amount_wei, self.wallet_address, self.wallet_address)
@@ -516,10 +508,7 @@ class SiloV2Adapter:
         market, silo_address, _asset_idx = result
 
         if repay_all:
-            from almanak.framework.data.tokens import get_token_resolver
-
-            resolver = get_token_resolver()
-            decimals = resolver.get_decimals(self.chain, asset)
+            decimals = resolve_token_decimals(asset, self.chain)
 
             if amount > 0:
                 # Caller provided an explicit amount — use it directly
@@ -532,10 +521,7 @@ class SiloV2Adapter:
             calldata = self._encode_repay(amount_wei, self.wallet_address)
             amount_display = "all"
         else:
-            from almanak.framework.data.tokens import get_token_resolver
-
-            resolver = get_token_resolver()
-            decimals = resolver.get_decimals(self.chain, asset)
+            decimals = resolve_token_decimals(asset, self.chain)
             amount_wei = int(amount * Decimal(10**decimals))
             calldata = self._encode_repay(amount_wei, self.wallet_address)
             amount_display = str(amount)

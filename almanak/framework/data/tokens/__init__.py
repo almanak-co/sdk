@@ -50,6 +50,7 @@ Example:
 """
 
 from .caip import ParsedAsset, parse_caip19, token_ref_to_caip19
+from .decimals import DecimalsCache, DecimalsHint, DecimalsHints, resolve_token_decimals
 from .defaults import (
     AAVE,
     ARB,
@@ -84,6 +85,14 @@ from .exceptions import (
     TokenResolutionTimeoutError,
 )
 from .identity import canonicalize_token_identity
+from .metadata import (
+    SwapTokenMeta,
+    TokenMeta,
+    build_swap_token_meta,
+    build_swap_token_meta_extract_kwargs,
+    build_token_meta_hint_map,
+    parse_swap_token_meta,
+)
 from .models import (
     BridgeType,
     ChainToken,
@@ -104,11 +113,17 @@ __all__ = [
     "get_token_resolver",
     "create_token_resolver",
     "TokenResolver",
+    "resolve_token_decimals",
+    "DecimalsCache",
+    "DecimalsHint",
+    "DecimalsHints",
     # Read-side canonical identity helper (W1-4 / VIB-TA-8)
     "canonicalize_token_identity",
     # Resolved token model
     "ResolvedToken",
     "TokenRef",
+    "TokenMeta",
+    "SwapTokenMeta",
     "BridgeType",
     "ChainTokenConfig",
     # CAIP-19 asset-id codec (VIB-5175)
@@ -138,6 +153,10 @@ __all__ = [
     "Token",
     "ChainToken",
     "normalize_token_address_for_chain",
+    "build_swap_token_meta",
+    "build_swap_token_meta_extract_kwargs",
+    "build_token_meta_hint_map",
+    "parse_swap_token_meta",
     "get_coingecko_id",
     "get_coingecko_ids",
     # Utility functions

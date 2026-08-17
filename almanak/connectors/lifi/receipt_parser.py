@@ -19,6 +19,7 @@ from typing import Any
 
 from almanak.connectors._strategy_base.base.hex_utils import HexDecoder
 from almanak.connectors._strategy_base.base.receipt_wallet import resolve_trading_wallet
+from almanak.framework.data.tokens import TokenResolutionError, resolve_token_decimals
 from almanak.framework.execution.extracted_data import BridgeData, ProtocolFees, SwapAmounts
 
 logger = logging.getLogger(__name__)
@@ -404,10 +405,8 @@ class LiFiReceiptParser:
         decimals = self._get_decimals(source_token_addr, chain=source_chain)
         if decimals is None and token:
             try:
-                from almanak.framework.data.tokens import get_token_resolver
-
-                decimals = get_token_resolver().resolve(token, source_chain).decimals
-            except Exception:
+                decimals = resolve_token_decimals(token, source_chain)
+            except TokenResolutionError:
                 decimals = None
         if decimals is None:
             logger.warning(
@@ -455,10 +454,8 @@ class LiFiReceiptParser:
         if not amount_sent_decimal.is_finite() or amount_sent_decimal <= 0:
             return None
         try:
-            from almanak.framework.data.tokens import get_token_resolver
-
-            decimals = get_token_resolver().resolve(token, source_chain).decimals
-        except Exception:
+            decimals = resolve_token_decimals(token, source_chain)
+        except TokenResolutionError:
             logger.warning(
                 "LiFi bridge_data: native-asset path cannot resolve decimals (token=%s, chain=%s)",
                 token,
@@ -705,12 +702,8 @@ class LiFiReceiptParser:
             logger.debug("LiFi _get_decimals: no chain available for resolution")
             return None
         try:
-            from almanak.framework.data.tokens import get_token_resolver
-
-            resolver = get_token_resolver()
-            token = resolver.resolve(token_address, chain_name)
-            return token.decimals
-        except Exception:
+            return resolve_token_decimals(token_address, chain_name)
+        except TokenResolutionError:
             logger.debug(f"Could not resolve decimals for {token_address} on {chain_name}")
             return None
 

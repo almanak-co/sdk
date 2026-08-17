@@ -17,7 +17,7 @@ from almanak.connectors.stargate.receipt_parser import (
     TRANSFER_EVENT_SIGNATURE,
     StargateReceiptParser,
 )
-
+from almanak.framework.data.tokens import TokenNotFoundError
 
 # ---------------------------------------------------------------------------
 # Hex helpers
@@ -63,21 +63,17 @@ class _StubResolver:
 
 class _FailingResolver:
     def resolve(self, token, chain, *, log_errors=True, skip_gateway=False):
-        raise ValueError("no such token")
+        raise TokenNotFoundError(token=token, chain=chain)
 
 
 @pytest.fixture
 def stub_resolver(monkeypatch):
-    monkeypatch.setattr(
-        "almanak.framework.data.tokens.get_token_resolver", lambda: _StubResolver()
-    )
+    monkeypatch.setattr("almanak.framework.data.tokens.get_token_resolver", lambda: _StubResolver())
 
 
 @pytest.fixture
 def failing_resolver(monkeypatch):
-    monkeypatch.setattr(
-        "almanak.framework.data.tokens.get_token_resolver", lambda: _FailingResolver()
-    )
+    monkeypatch.setattr("almanak.framework.data.tokens.get_token_resolver", lambda: _FailingResolver())
 
 
 # ---------------------------------------------------------------------------
@@ -100,7 +96,7 @@ def make_oft_sent_log(
         "address": STARGATE_ETH_USDC_POOL,
         "topics": [
             OFT_SENT_TOPIC,
-            GUID,              # guid (indexed bytes32)
+            GUID,  # guid (indexed bytes32)
             addr_topic(WALLET),  # fromAddress (indexed)
         ],
         "data": "0x" + word(dst_eid) + word(amount_sent) + word(amount_received),

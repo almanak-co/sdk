@@ -28,6 +28,7 @@ from typing import Any
 
 from almanak.connectors._strategy_base.base.hex_utils import HexDecoder
 from almanak.connectors._strategy_base.base.receipt_wallet import resolve_trading_wallet
+from almanak.framework.data.tokens import TokenResolutionError, resolve_token_decimals
 from almanak.framework.execution.extracted_data import BridgeData
 
 from .adapter import ACROSS_CHAIN_ID_TO_NAME, ACROSS_SPOKE_POOL_ADDRESSES
@@ -288,23 +289,17 @@ class AcrossReceiptParser:
         decimals cannot be determined we return ``None`` and the parser
         surfaces ``ExtractMissing`` upstream.
         """
-        try:
-            from almanak.framework.data.tokens import get_token_resolver
-        except Exception:
-            return None
-
-        resolver = get_token_resolver()
         # Prefer address when present — it disambiguates bridged variants
         # (USDC.e vs native USDC) without relying on symbol aliases.
         if token_address:
             try:
-                return resolver.resolve(token_address, chain).decimals
-            except Exception:
+                return resolve_token_decimals(token_address, chain)
+            except TokenResolutionError:
                 pass
         if token_symbol:
             try:
-                return resolver.resolve(token_symbol, chain).decimals
-            except Exception:
+                return resolve_token_decimals(token_symbol, chain)
+            except TokenResolutionError:
                 pass
         return None
 

@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
+from almanak.framework.data.tokens.decimals import resolve_token_decimals
 from almanak.framework.data.tokens.exceptions import TokenResolutionError
 
 from .sdk import (
@@ -402,29 +403,11 @@ class MetaMorphoAdapter:
 
     def _get_decimals(self, token: str) -> int:
         """Get decimals for a token using TokenResolver."""
-        try:
-            resolved = self._token_resolver.resolve(token, self.chain)
-            return resolved.decimals
-        except TokenResolutionError as e:
-            raise TokenResolutionError(
-                token=token,
-                chain=self.chain,
-                reason=f"[MetaMorphoAdapter] Cannot determine decimals: {e.reason}",
-                suggestions=e.suggestions,
-            ) from e
+        return resolve_token_decimals(token, self.chain, resolver=self._token_resolver)
 
     def _get_decimals_for_address(self, token_address: str) -> int:
         """Get decimals for a token by address using TokenResolver."""
-        try:
-            resolved = self._token_resolver.resolve(token_address, self.chain)
-            return resolved.decimals
-        except TokenResolutionError as e:
-            raise TokenResolutionError(
-                token=token_address,
-                chain=self.chain,
-                reason=f"[MetaMorphoAdapter] Cannot determine decimals for {token_address}: {e.reason}",
-                suggestions=e.suggestions,
-            ) from e
+        return resolve_token_decimals(token_address, self.chain, resolver=self._token_resolver)
 
 
 # =============================================================================

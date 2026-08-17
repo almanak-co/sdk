@@ -12,6 +12,7 @@ import logging
 from decimal import Decimal
 from typing import Any
 
+from almanak.framework.data.tokens import TokenResolutionError, resolve_token_decimals
 from almanak.framework.execution.extracted_data import SwapAmounts
 
 logger = logging.getLogger(__name__)
@@ -231,12 +232,8 @@ class JupiterReceiptParser:
         if not mint:
             return None
         try:
-            from almanak.framework.data.tokens import get_token_resolver
-
-            resolver = get_token_resolver()
-            token = resolver.resolve(mint, self._chain)
-            return token.decimals
-        except Exception:
+            return resolve_token_decimals(mint, self._chain)
+        except TokenResolutionError:
             logger.warning(f"Could not resolve decimals for {mint}, swap amounts may be incomplete")
             return None
 

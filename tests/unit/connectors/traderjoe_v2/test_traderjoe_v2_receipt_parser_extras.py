@@ -25,6 +25,7 @@ from almanak.connectors.traderjoe_v2.receipt_parser import (
     TraderJoeV2EventType,
     TraderJoeV2ReceiptParser,
 )
+from almanak.framework.data.tokens import TokenResolutionError
 
 WALLET = "0x" + "11" * 20
 WALLET_WITH_PREFIX = WALLET
@@ -431,9 +432,9 @@ class TestExtractSwapAmountsSlippage:
             ],
         }
         mock_resolver = MagicMock()
-        mock_resolver.get_decimals.return_value = 18
+        mock_resolver.resolve.return_value = MagicMock(decimals=18)
         with patch(
-            "almanak.connectors.traderjoe_v2.receipt_parser.get_token_resolver",
+            "almanak.framework.data.tokens.get_token_resolver",
             return_value=mock_resolver,
         ):
             result = parser.extract_swap_amounts(receipt, expected_out=Decimal("100"))
@@ -442,8 +443,8 @@ class TestExtractSwapAmountsSlippage:
         assert result.slippage_bps == 100
         assert result.expected_out_decimal == Decimal("100")
 
-    def test_slippage_suppressed_when_decimals_resolver_fails(self, parser: TraderJoeV2ReceiptParser) -> None:
-        """If decimals lookup raises, slippage_bps stays None even with expected_out."""
+    def test_missing_decimals_suppresses_measured_row(self, parser: TraderJoeV2ReceiptParser) -> None:
+        """A swap is not reported as measured when either token is unresolved."""
         receipt = {
             "status": 1,
             "transactionHash": "0x" + "0b" * 32,
@@ -465,27 +466,17 @@ class TestExtractSwapAmountsSlippage:
             ],
         }
         mock_resolver = MagicMock()
-        # Decimals lookup for slippage gate raises, but the earlier
-        # _resolve_token_decimals call returns 18 (fallback). The strict
-        # gate then catches the exception and leaves slippage_bps as None.
-        call_count = [0]
-
-        def get_decimals(chain: str, addr: str) -> int:
-            call_count[0] += 1
-            # Fail the strict slippage gate (last call); succeed earlier.
-            if call_count[0] >= 3:
-                raise RuntimeError("registry down")
-            return 18
-
-        mock_resolver.get_decimals.side_effect = get_decimals
+        mock_resolver.resolve.side_effect = [
+            MagicMock(decimals=18),
+            TokenResolutionError(token=TOKEN_Y, chain="avalanche", reason="registry down"),
+        ]
         with patch(
-            "almanak.connectors.traderjoe_v2.receipt_parser.get_token_resolver",
+            "almanak.framework.data.tokens.get_token_resolver",
             return_value=mock_resolver,
         ):
             result = parser.extract_swap_amounts(receipt, expected_out=Decimal("100"))
 
-        assert result is not None
-        assert result.slippage_bps is None
+        assert result is None
 
     def test_no_swap_returns_none(self, parser: TraderJoeV2ReceiptParser) -> None:
         receipt = {

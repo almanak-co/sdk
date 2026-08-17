@@ -24,6 +24,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
+from almanak.framework.data.tokens.decimals import resolve_token_decimals
 from almanak.framework.data.tokens.exceptions import TokenResolutionError
 
 from . import market_catalog
@@ -1176,8 +1177,7 @@ class GMXv2Adapter:
             Token decimals
         """
         try:
-            resolved = self._token_resolver.resolve(collateral_address, self.chain)
-            return resolved.decimals
+            return resolve_token_decimals(collateral_address, self.chain, resolver=self._token_resolver)
         except TokenResolutionError:
             # Common GMX collateral tokens - fallback for known addresses
             # Covers both Arbitrum and Avalanche chains
@@ -1185,15 +1185,7 @@ class GMXv2Adapter:
             fallback = _KNOWN_COLLATERAL_DECIMALS.get(addr_lower)
             if fallback is not None:
                 return fallback
-            # Unknown collateral token -- log warning and default to 18.
-            # This is a best-effort fallback for the read-only position query path;
-            # most GMX V2 collateral tokens are WETH (18) when not stablecoins.
-            logger.warning(
-                "gmx_v2_unknown_collateral_decimals: defaulting to 18 for %s on %s",
-                collateral_address,
-                self.chain,
-            )
-            return 18
+            raise
 
     def _get_index_token_decimals(self, market_address: str) -> int:
         """Get the decimals for a market's index token.
@@ -1553,16 +1545,7 @@ class GMXv2Adapter:
 
     def _get_token_decimals(self, token: str) -> int:
         """Get token decimals using TokenResolver."""
-        try:
-            resolved = self._token_resolver.resolve(token, self.chain)
-            return resolved.decimals
-        except TokenResolutionError as e:
-            raise TokenResolutionError(
-                token=token,
-                chain=str(self.chain),
-                reason=f"[GMXV2Adapter] Cannot determine decimals: {e.reason}",
-                suggestions=e.suggestions,
-            ) from e
+        return resolve_token_decimals(token, self.chain, resolver=self._token_resolver)
 
     def _get_position_key(self, market: str, collateral_token: str, is_long: bool) -> str:
         """Generate position key for internal tracking."""

@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 from almanak.connectors.sushiswap_v3.receipt_parser import (
     SushiSwapV3ReceiptParser,
 )
+from almanak.framework.data.tokens import TokenResolutionError
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -57,7 +58,7 @@ class TestResolveDecimals:
         mock_resolver.resolve.return_value = mock_token
 
         with patch(
-            "almanak.framework.data.tokens.resolver.get_token_resolver",
+            "almanak.framework.data.tokens.get_token_resolver",
             return_value=mock_resolver,
         ):
             assert parser._resolve_decimals("0xUSDC") == 6
@@ -68,10 +69,12 @@ class TestResolveDecimals:
         parser = SushiSwapV3ReceiptParser(chain="arbitrum")
 
         mock_resolver = MagicMock()
-        mock_resolver.resolve.side_effect = Exception("not found")
+        mock_resolver.resolve.side_effect = TokenResolutionError(
+            token="0xdeadbeef", chain="arbitrum", reason="not found"
+        )
 
         with patch(
-            "almanak.framework.data.tokens.resolver.get_token_resolver",
+            "almanak.framework.data.tokens.get_token_resolver",
             return_value=mock_resolver,
         ):
             assert parser._resolve_decimals("0xdeadbeef") is None

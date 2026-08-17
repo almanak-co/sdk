@@ -29,6 +29,7 @@ from almanak.connectors._strategy_base.swap_quote_registry import (
     SwapQuoteUnavailable,
 )
 from almanak.connectors._strategy_swap_quote_registry import SWAP_QUOTE_REGISTRY, ensure_swap_quote_registry_loaded
+from almanak.framework.data.tokens import build_swap_token_meta
 from almanak.framework.execution.fork_signal import resolve_managed_fork
 from almanak.framework.intents._compiler_helpers import (
     PriceImpactDecision,
@@ -217,6 +218,7 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
                 metadata={
                     "from_token": from_token.to_dict(),
                     "to_token": to_token.to_dict(),
+                    "swap_token_meta": build_swap_token_meta(from_token, to_token, chain=ctx.chain),
                     "amount_in": str(amount_in),
                     "min_amount_out": str(min_output),
                     "expected_output_human": str(expected_output_human),

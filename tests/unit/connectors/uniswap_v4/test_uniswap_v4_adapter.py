@@ -617,6 +617,18 @@ class TestCompileSwapIntent:
         assert bundle.metadata["from_token"]["address"] is not None
         assert bundle.metadata["to_token"]["symbol"] == "WETH"
         assert bundle.metadata["to_token"]["address"] is not None
+        assert bundle.metadata["swap_token_meta"] == {
+            "token_in": {
+                "address": bundle.metadata["from_token"]["address"].lower(),
+                "symbol": "USDC",
+                "decimals": 6,
+            },
+            "token_out": {
+                "address": bundle.metadata["to_token"]["address"].lower(),
+                "symbol": "WETH",
+                "decimals": 18,
+            },
+        }
 
     def test_compile_with_amount_usd(self):
         config = UniswapV4Config(chain="arbitrum", wallet_address=_TEST_WALLET)

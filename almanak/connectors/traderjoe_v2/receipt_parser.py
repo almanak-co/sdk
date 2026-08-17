@@ -12,7 +12,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from almanak.connectors._strategy_base.base import EventRegistry, HexDecoder
-from almanak.framework.data.tokens import get_token_resolver
+from almanak.framework.data.tokens import TokenResolutionError, get_token_resolver, resolve_token_decimals
 
 if TYPE_CHECKING:
     from almanak.connectors._strategy_base.primitive_money_leg import PrimitiveMoneyLeg, PrimitiveMoneyLegs
@@ -659,11 +659,11 @@ class TraderJoeV2ReceiptParser:
     # Extraction Methods (for Result Enrichment)
     # =============================================================================
 
-    def _resolve_token_decimals(self, token_address: str | None) -> int:
+    def _resolve_token_decimals(self, token_address: str | None) -> int | None:
         """Resolve token decimals from address using the token resolver.
 
         Requires self._chain to be set (passed to __init__ via chain= kwarg).
-        Returns 18 as fallback when chain is unknown or resolution fails.
+        Returns ``None`` when chain or token metadata is unavailable.
 
         Args:
             token_address: ERC-20 token contract address
@@ -674,21 +674,20 @@ class TraderJoeV2ReceiptParser:
         if not token_address or not self._chain:
             if token_address and not self._chain:
                 logger.warning(
-                    "No chain configured for decimal resolution, defaulting to 18 for %s",
+                    "No chain configured for decimal resolution for %s",
                     token_address,
                 )
-            return 18
+            return None
         try:
-            resolver = get_token_resolver()
-            return resolver.get_decimals(self._chain, token_address)
-        except Exception as e:  # noqa: BLE001
+            return resolve_token_decimals(token_address, self._chain)
+        except TokenResolutionError as e:
             logger.warning(
-                "Token decimal resolution failed for %s on %s, falling back to 18: %s",
+                "Token decimal resolution failed for %s on %s: %s",
                 token_address,
                 self._chain,
                 e,
             )
-            return 18
+            return None
 
     def extract_swap_amounts(
         self,
@@ -699,7 +698,7 @@ class TraderJoeV2ReceiptParser:
         """Extract swap amounts from a transaction receipt.
 
         Uses actual token decimals when chain is known (passed to __init__).
-        Falls back to 18 decimals when chain is unavailable.
+        Returns no measured row when decimals are unavailable.
 
         Args:
             receipt: Transaction receipt dict with 'logs' field
@@ -727,19 +726,14 @@ class TraderJoeV2ReceiptParser:
             # Resolve actual token decimals (avoids VIB-593 wrong amount_in_decimal for USDC)
             token_in_decimals = self._resolve_token_decimals(sr.token_in)
             token_out_decimals = self._resolve_token_decimals(sr.token_out)
+            if token_in_decimals is None or token_out_decimals is None:
+                return None
 
             amount_in_decimal = Decimal(str(amount_in)) / Decimal(10**token_in_decimals)
             amount_out_decimal = Decimal(str(amount_out)) / Decimal(10**token_out_decimals)
             effective_price = amount_out_decimal / amount_in_decimal if amount_in_decimal > 0 else Decimal(0)
 
             # VIB-3203 Phase B: realized slippage when enricher supplies a quote.
-            # Decimal resolution above silently falls back to 18 when the token
-            # is unknown — that's safe for amount logging but corrupts slippage
-            # math (a USDC fallback would scale amount_out_decimal by 1e12).
-            # Suppress slippage_bps unless we can confirm the token_out decimals
-            # via a strict resolver lookup. ``self._chain`` must be set, AND the
-            # resolver must succeed — otherwise leave slippage_bps as None.
-            # Amounts themselves still surface for legacy paths.
             slippage_bps: int | None = None
             if (
                 expected_out is not None
@@ -748,16 +742,8 @@ class TraderJoeV2ReceiptParser:
                 and self._chain
                 and sr.token_out
             ):
-                try:
-                    get_token_resolver().get_decimals(self._chain, sr.token_out)
-                    realized = (expected_out - amount_out_decimal) / expected_out
-                    slippage_bps = int(realized * Decimal(10_000))
-                except Exception as decimals_exc:  # noqa: BLE001 — strict gate, suppress slippage
-                    logger.debug(
-                        "TJ V2 slippage suppressed for %s: token_out decimals unconfirmed (%s)",
-                        sr.token_out,
-                        decimals_exc,
-                    )
+                realized = (expected_out - amount_out_decimal) / expected_out
+                slippage_bps = int(realized * Decimal(10_000))
 
             return SwapAmounts(
                 amount_in=amount_in,
@@ -1190,8 +1176,8 @@ class TraderJoeV2ReceiptParser:
         * a measured raw ``0`` → measured zero (principal kept on-chain);
         * a non-zero raw whose token decimals cannot be strictly resolved →
           UNMEASURED (never a wrongly-scaled value — mirrors the ledger's
-          ``_lp_amount_to_human`` discipline, NOT the 18-decimal fallback
-          ``_resolve_token_decimals`` uses for best-effort logging);
+          ``_lp_amount_to_human`` discipline; ``_resolve_token_decimals``
+          returns ``None`` when resolution is unavailable or fails);
         * a non-integer / missing raw → UNMEASURED.
         """
         from almanak.connectors._strategy_base.primitive_money_leg import PrimitiveMoneyLeg
@@ -1246,8 +1232,8 @@ class TraderJoeV2ReceiptParser:
 
         * a measured raw ``0`` → measured zero;
         * a non-zero raw whose token decimals cannot be strictly resolved →
-          UNMEASURED (never a wrongly-scaled value — NOT the 18-decimal best-effort
-          fallback ``_resolve_token_decimals`` uses for logging);
+          UNMEASURED (never a wrongly-scaled value; ``_resolve_token_decimals``
+          returns ``None`` when resolution is unavailable or fails);
         * a non-integer / missing raw → UNMEASURED.
 
         Stamping the two INPUT legs lets the LP accounting handler compute a

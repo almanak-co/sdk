@@ -52,6 +52,7 @@ from almanak.connectors._strategy_base.bridge_base import (
     BridgeStatusError,
     BridgeTransactionError,
 )
+from almanak.framework.data.tokens.decimals import resolve_token_decimals
 from almanak.framework.data.tokens.exceptions import TokenResolutionError
 
 if TYPE_CHECKING:
@@ -873,16 +874,7 @@ class AcrossBridgeAdapter(BridgeAdapter):
                 chain=str(chain_id),
                 reason=f"[AcrossBridgeAdapter] Unknown chain ID: {chain_id}",
             )
-        try:
-            resolved = self._token_resolver.resolve(token, chain_name)
-            return resolved.decimals
-        except TokenResolutionError as e:
-            raise TokenResolutionError(
-                token=token,
-                chain=str(chain_name),
-                reason=f"[AcrossBridgeAdapter] Cannot determine decimals: {e.reason}",
-                suggestions=e.suggestions,
-            ) from e
+        return resolve_token_decimals(token, chain_name, resolver=self._token_resolver)
 
 
 # =============================================================================

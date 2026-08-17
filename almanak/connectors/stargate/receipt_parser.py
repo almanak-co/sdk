@@ -23,6 +23,7 @@ from typing import Any
 
 from almanak.connectors._strategy_base.base.hex_utils import HexDecoder
 from almanak.connectors._strategy_base.base.receipt_wallet import resolve_trading_wallet
+from almanak.framework.data.tokens import TokenResolutionError, resolve_token_decimals
 from almanak.framework.execution.extracted_data import BridgeData
 
 from .adapter import STARGATE_CHAIN_ID_TO_NAME, STARGATE_ROUTER_ADDRESSES
@@ -224,21 +225,15 @@ class StargateReceiptParser:
         chain: str,
     ) -> int | None:
         """Resolve token decimals via the unified TokenResolver."""
-        try:
-            from almanak.framework.data.tokens import get_token_resolver
-        except Exception:
-            return None
-
-        resolver = get_token_resolver()
         if token_address:
             try:
-                return resolver.resolve(token_address, chain).decimals
-            except Exception:
+                return resolve_token_decimals(token_address, chain)
+            except TokenResolutionError:
                 pass
         if token_symbol:
             try:
-                return resolver.resolve(token_symbol, chain).decimals
-            except Exception:
+                return resolve_token_decimals(token_symbol, chain)
+            except TokenResolutionError:
                 pass
         return None
 

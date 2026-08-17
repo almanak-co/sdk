@@ -49,7 +49,7 @@ from almanak.connectors.uniswap_v4.sdk import (
 )
 from almanak.core.chains import ChainRegistry
 from almanak.core.chains._helpers import native_symbols_for
-from almanak.framework.data.tokens import TokenNotFoundError, get_token_resolver
+from almanak.framework.data.tokens import TokenNotFoundError, build_swap_token_meta, get_token_resolver
 
 from .addresses import UNISWAP_V4
 
@@ -687,6 +687,7 @@ class UniswapV4Adapter:
             "intent_id": intent.intent_id,
             "from_token": from_token_dict,
             "to_token": to_token_dict,
+            "swap_token_meta": build_swap_token_meta(from_token_dict, to_token_dict, chain=self.chain),
             "amount_in": str(result.amount_in),
             "amount_out_minimum": str(result.amount_out_minimum),
             "slippage_bps": slippage_bps,

@@ -38,6 +38,7 @@ from almanak.connectors.aerodrome.receipt_parser import (
     SwapEventData,
     TransferEventData,
 )
+from almanak.framework.data.tokens import NATIVE_SENTINEL
 from almanak.framework.execution.extract_result import (
     ExtractError,
     ExtractMissing,
@@ -1333,6 +1334,14 @@ class TestResolveHelpers:
         sym, dec = parser._resolve_token_info(USDC)
         # Symbol may differ depending on registry but decimals should be 6
         assert dec == 6
+
+    def test_resolve_token_info_preserves_native_sentinel(self) -> None:
+        parser = AerodromeReceiptParser(chain="base")
+
+        symbol, decimals = parser._resolve_token_info(NATIVE_SENTINEL)
+
+        assert symbol == "ETH"
+        assert decimals == 18
 
     def test_resolve_decimals_returns_none_for_empty(self) -> None:
         parser = AerodromeReceiptParser(chain="base")

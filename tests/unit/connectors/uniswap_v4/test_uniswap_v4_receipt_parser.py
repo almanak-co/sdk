@@ -12,6 +12,7 @@ from almanak.connectors.uniswap_v4.receipt_parser import (
     UniswapV4EventType,
     UniswapV4ReceiptParser,
 )
+from almanak.framework.data.tokens import TokenNotFoundError
 
 # =============================================================================
 # Helper: build mock receipts
@@ -802,7 +803,7 @@ class _StubTokenResolver:
     def resolve(self, token: str, chain: str, **kwargs):  # noqa: ARG002
         key = token.lower()
         if key not in self._decimals:
-            raise LookupError(f"unknown token {token}")
+            raise TokenNotFoundError(token=token, chain=chain, reason="unknown token")
         return _StubResolvedToken(self._decimals[key])
 
 

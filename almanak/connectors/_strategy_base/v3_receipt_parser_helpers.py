@@ -13,7 +13,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from almanak.connectors._strategy_base.base import HexDecoder
+from almanak.connectors._strategy_base.base import HexDecoder, resolve_token_decimals
+from almanak.framework.data.tokens import TokenResolutionError, build_token_meta_hint_map
 from almanak.framework.execution.extract_result import ExtractError, ExtractResult
 
 logger = logging.getLogger(__name__)
@@ -32,10 +33,16 @@ def resolve_token_info(token: str, chain: str) -> tuple[str, int | None]:
     try:
         from almanak.framework.data.tokens.resolver import get_token_resolver
 
-        resolver = get_token_resolver()
+        try:
+            resolver = get_token_resolver()
+        except Exception as exc:
+            raise TokenResolutionError(
+                token=token, chain=chain, reason=f"Token resolver is unavailable: {exc}"
+            ) from exc
         resolved = resolver.resolve(token, chain)
-        return resolved.symbol, resolved.decimals
-    except Exception:
+        decimals = resolve_token_decimals(token, chain, resolver=resolver)
+        return resolved.symbol, decimals
+    except TokenResolutionError:
         return "", None
 
 
@@ -127,22 +134,7 @@ def build_hint_map(
     log: logging.Logger = logger,
 ) -> dict[str, tuple[str, int]]:
     """Map compiler token metadata to ``{address: (symbol, decimals)}``."""
-    hints: dict[str, tuple[str, int]] = {}
-    if not swap_token_meta:
-        return hints
-    for slot in ("token_in", "token_out"):
-        entry = swap_token_meta.get(slot)
-        if not isinstance(entry, dict):
-            continue
-        address = entry.get("address")
-        decimals = entry.get("decimals")
-        if not address or decimals is None:
-            continue
-        try:
-            hints[str(address).lower()] = (str(entry.get("symbol") or ""), int(decimals))
-        except (TypeError, ValueError):
-            log.debug("Ignoring malformed token hint: %r", entry)
-    return hints
+    return {address.lower(): value for address, value in build_token_meta_hint_map(swap_token_meta).items()}
 
 
 def strict_parse(parser: Any, receipt: dict[str, Any]) -> ExtractResult[Any] | None:

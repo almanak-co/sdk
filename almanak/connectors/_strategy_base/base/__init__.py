@@ -58,6 +58,7 @@ from almanak.connectors._strategy_base.base.receipt_wallet import (
 )
 from almanak.connectors._strategy_base.base.registry import EventRegistry
 from almanak.connectors._strategy_base.base.swap_adapter import DefaultSwapAdapter
+from almanak.framework.data.tokens import SwapTokenMeta, TokenMeta, resolve_token_decimals
 
 __all__ = [
     "TRADING_WALLET_KEY",
@@ -73,7 +74,10 @@ __all__ = [
     "EventRegistry",
     "HexDecoder",
     "ParseResult",
+    "SwapTokenMeta",
+    "TokenMeta",
     "normalize_wallet_address",
+    "resolve_token_decimals",
     "resolve_swap_token_symbol",
     "resolve_swap_token_symbol_with_fallback",
     "resolve_trading_wallet",

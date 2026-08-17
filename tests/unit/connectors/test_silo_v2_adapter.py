@@ -1,6 +1,7 @@
 """Unit tests for Silo V2 adapter — MAX_UINT256 fallback paths."""
 
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -77,7 +78,7 @@ class TestSiloV2WithdrawAll:
         redeem it knows reverts on-chain; the caller must resolve the redeemable
         share balance (maxRedeem / balanceOf) and use redeem_shares().
         """
-        mock_resolver.return_value.get_decimals.return_value = 6
+        mock_resolver.return_value.resolve.return_value = SimpleNamespace(decimals=6)
         result = adapter.withdraw(asset="USDC", amount=Decimal("0"), withdraw_all=True)
         assert result.success is False
         assert result.tx_data is None
@@ -103,7 +104,7 @@ class TestSiloV2WithdrawAll:
     @patch("almanak.framework.data.tokens.get_token_resolver")
     def test_withdraw_all_with_amount_uses_withdraw(self, mock_resolver, adapter):
         """withdraw_all=True with amount > 0 uses withdraw() with the provided amount."""
-        mock_resolver.return_value.get_decimals.return_value = 6
+        mock_resolver.return_value.resolve.return_value = SimpleNamespace(decimals=6)
         result = adapter.withdraw(asset="USDC", amount=Decimal("1000"), withdraw_all=True)
         assert result.success is True
         assert result.tx_data is not None
@@ -113,7 +114,7 @@ class TestSiloV2WithdrawAll:
     @patch("almanak.framework.data.tokens.get_token_resolver")
     def test_withdraw_sub_base_unit_amount_refuses_zero_encode(self, mock_resolver, adapter):
         """A positive amount that truncates to 0 base units must FAIL, not encode withdraw(0)."""
-        mock_resolver.return_value.get_decimals.return_value = 6
+        mock_resolver.return_value.resolve.return_value = SimpleNamespace(decimals=6)
         # 0.0000001 USDC * 10**6 = 0.1 -> int() truncates to 0 wei.
         result = adapter.withdraw(asset="USDC", amount=Decimal("0.0000001"), withdraw_all=False)
         assert result.success is False
@@ -127,7 +128,7 @@ class TestSiloV2RepayAll:
     @patch("almanak.framework.data.tokens.get_token_resolver")
     def test_repay_all_zero_amount_uses_max_uint256(self, mock_resolver, adapter):
         """repay_all=True with amount=0 uses repay(MAX_UINT256)."""
-        mock_resolver.return_value.get_decimals.return_value = 6
+        mock_resolver.return_value.resolve.return_value = SimpleNamespace(decimals=6)
         result = adapter.repay(asset="USDC", amount=Decimal("0"), repay_all=True)
         assert result.success is True
         assert result.tx_data is not None
@@ -138,7 +139,7 @@ class TestSiloV2RepayAll:
     @patch("almanak.framework.data.tokens.get_token_resolver")
     def test_repay_all_with_amount_uses_provided_amount(self, mock_resolver, adapter):
         """repay_all=True with amount > 0 uses the provided amount."""
-        mock_resolver.return_value.get_decimals.return_value = 6
+        mock_resolver.return_value.resolve.return_value = SimpleNamespace(decimals=6)
         result = adapter.repay(asset="USDC", amount=Decimal("500"), repay_all=True)
         assert result.success is True
         assert result.tx_data is not None

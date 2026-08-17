@@ -12,7 +12,6 @@ from decimal import Decimal
 import pytest
 
 from almanak.connectors.aerodrome.addresses import AERODROME_TOKENS as TOKEN_ADDRESSES
-
 from almanak.connectors.aerodrome.receipt_parser import (
     BURN_EVENT_TOPIC,
     MINT_EVENT_TOPIC,
@@ -500,6 +499,7 @@ class TestTokenConstants:
 
         assert symbol == "USDC"
         assert decimals == 6
+        fake_resolver.resolve.assert_called_once_with(usdc_addr, "base")
 
 
 # =============================================================================

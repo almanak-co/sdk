@@ -39,6 +39,12 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from almanak.connectors._strategy_base.base import HexDecoder, resolve_swap_token_symbol
+from almanak.framework.data.tokens import (
+    TokenResolutionError,
+    build_swap_token_meta_extract_kwargs,
+    build_token_meta_hint_map,
+    resolve_token_decimals,
+)
 from almanak.framework.observability.metrics import (
     V4LPDropOutcome,
     V4LPDropReason,
@@ -1702,29 +1708,28 @@ class UniswapV4ReceiptParser:
         Returns (None, None) on any failure; callers must handle missing
         decimals by falling back to Decimal(0) for human-readable fields.
         """
-        resolver = self._token_resolver
-        if resolver is None:
-            try:
-                from almanak.framework.data.tokens import get_token_resolver
-
-                resolver = get_token_resolver()
-            except Exception:
-                logger.debug("Could not load token_resolver for decimal conversion")
-
         token_in_decimals: int | None = None
         token_out_decimals: int | None = None
-        if resolver and token_in_addr:
+        if token_in_addr:
             try:
-                token_in_decimals = resolver.resolve(token_in_addr, self.chain).decimals
-            except Exception:
+                if self._token_resolver is None:
+                    token_in_decimals = resolve_token_decimals(token_in_addr, self.chain)
+                else:
+                    token_in_decimals = resolve_token_decimals(token_in_addr, self.chain, resolver=self._token_resolver)
+            except TokenResolutionError:
                 logger.warning(
                     "Could not resolve decimals for token_in %s — decimal amounts will be zero",
                     token_in_addr,
                 )
-        if resolver and token_out_addr:
+        if token_out_addr:
             try:
-                token_out_decimals = resolver.resolve(token_out_addr, self.chain).decimals
-            except Exception:
+                if self._token_resolver is None:
+                    token_out_decimals = resolve_token_decimals(token_out_addr, self.chain)
+                else:
+                    token_out_decimals = resolve_token_decimals(
+                        token_out_addr, self.chain, resolver=self._token_resolver
+                    )
+            except TokenResolutionError:
                 logger.warning(
                     "Could not resolve decimals for token_out %s — decimal amounts will be zero",
                     token_out_addr,
@@ -1779,64 +1784,15 @@ class UniswapV4ReceiptParser:
         field: str,
         bundle_metadata: dict[str, Any],
     ) -> dict[str, Any]:
-        """Return UniswapV4-owned kwargs for ResultEnricher extraction calls.
-
-        VIB-3164: the adapter records full token identity
-        (``from_token`` / ``to_token`` dicts with address, symbol, decimals —
-        see ``uniswap_v4/adapter.py``) in ``ActionBundle.metadata``.
-        Threading it here lets ``_build_swap_result`` resolve decimals when the
-        TokenResolver misses or Transfer events cannot classify token addresses.
-
-        Native-token entries are skipped: the receipt's Transfer events carry
-        the wrapped token's address, so a native entry can never match by
-        address, and its decimals (18) equal the fallback anyway.
-        Note: ``decimals`` may be ``None`` in the adapter when it missed during
-        compilation; such entries are skipped by the ``decimals is None`` guard.
-        """
-        if field != "swap_amounts":
-            return {}
-        meta: dict[str, dict[str, Any]] = {}
-        for metadata_key, slot in (("from_token", "token_in"), ("to_token", "token_out")):
-            raw = bundle_metadata.get(metadata_key)
-            if not isinstance(raw, dict) or raw.get("is_native"):
-                continue
-            address = raw.get("address")
-            decimals = raw.get("decimals")
-            if not address or decimals is None:
-                continue
-            try:
-                decimals_int = int(decimals)
-            except (TypeError, ValueError):
-                logger.debug("Could not coerce %s.decimals=%r to int; skipping hint", metadata_key, decimals)
-                continue
-            meta[slot] = {
-                "address": str(address).lower(),
-                "symbol": str(raw.get("symbol") or ""),
-                "decimals": decimals_int,
-            }
-        return {"swap_token_meta": meta} if meta else {}
+        """Return canonical typed swap metadata for receipt extraction."""
+        return build_swap_token_meta_extract_kwargs(field=field, bundle_metadata=bundle_metadata, chain=self.chain)
 
     @staticmethod
     def _build_hint_map(
         swap_token_meta: dict[str, dict[str, Any]] | None,
     ) -> dict[str, tuple[str, int]]:
         """Map compiler token metadata to ``{address: (symbol, decimals)}``."""
-        hints: dict[str, tuple[str, int]] = {}
-        if not swap_token_meta:
-            return hints
-        for slot in ("token_in", "token_out"):
-            entry = swap_token_meta.get(slot)
-            if not isinstance(entry, dict):
-                continue
-            address = entry.get("address")
-            decimals = entry.get("decimals")
-            if not address or decimals is None:
-                continue
-            try:
-                hints[str(address).lower()] = (str(entry.get("symbol") or ""), int(decimals))
-            except (TypeError, ValueError):
-                logger.debug("Ignoring malformed token hint: %r", entry)
-        return hints
+        return {address.lower(): value for address, value in build_token_meta_hint_map(swap_token_meta).items()}
 
     @staticmethod
     def _apply_token_meta_addresses(
@@ -1877,14 +1833,34 @@ class UniswapV4ReceiptParser:
         overrides either side from the hint map if the address (lowercased)
         is present. Simplest correct shape: delegate then override.
         """
-        token_in_decimals, token_out_decimals = self._resolve_token_decimals(token_in_addr, token_out_addr)
-        if hint_by_addr:
-            addr_in = token_in_addr.lower() if token_in_addr else ""
-            addr_out = token_out_addr.lower() if token_out_addr else ""
-            if addr_in in hint_by_addr:
-                token_in_decimals = hint_by_addr[addr_in][1]
-            if addr_out in hint_by_addr:
-                token_out_decimals = hint_by_addr[addr_out][1]
+        token_in_decimals: int | None = None
+        token_out_decimals: int | None = None
+        if token_in_addr:
+            try:
+                if self._token_resolver is None:
+                    token_in_decimals = resolve_token_decimals(token_in_addr, self.chain, hints=hint_by_addr)
+                else:
+                    token_in_decimals = resolve_token_decimals(
+                        token_in_addr,
+                        self.chain,
+                        hints=hint_by_addr,
+                        resolver=self._token_resolver,
+                    )
+            except TokenResolutionError:
+                pass
+        if token_out_addr:
+            try:
+                if self._token_resolver is None:
+                    token_out_decimals = resolve_token_decimals(token_out_addr, self.chain, hints=hint_by_addr)
+                else:
+                    token_out_decimals = resolve_token_decimals(
+                        token_out_addr,
+                        self.chain,
+                        hints=hint_by_addr,
+                        resolver=self._token_resolver,
+                    )
+            except TokenResolutionError:
+                pass
         return token_in_decimals, token_out_decimals
 
     def _build_swap_result(

@@ -24,12 +24,13 @@ from almanak.connectors.uniswap_v4.receipt_parser import (
     EVENT_TOPICS,
     UniswapV4ReceiptParser,
 )
+from almanak.framework.data.tokens import TokenResolutionError
 
 # ---------------------------------------------------------------------------
 # Constants — fake addresses the real TokenResolver does NOT know
 # ---------------------------------------------------------------------------
 
-FAKE_TOKEN_IN_ADDR = "0x" + "a1" * 20   # 6-decimal token (USDC-like)
+FAKE_TOKEN_IN_ADDR = "0x" + "a1" * 20  # 6-decimal token (USDC-like)
 FAKE_TOKEN_IN_DECIMALS = 6
 FAKE_TOKEN_IN_SYMBOL = "FAKE6"
 
@@ -59,8 +60,8 @@ def _encode_uint(value: int) -> str:
 
 
 def _build_swap_log(
-    amount0: int = -100_000_000,           # swapper PAYS token0 (6-decimal in)
-    amount1: int = 1_079_340_000_000_000_000_000,   # swapper RECEIVES token1 (18-decimal out)
+    amount0: int = -100_000_000,  # swapper PAYS token0 (6-decimal in)
+    amount1: int = 1_079_340_000_000_000_000_000,  # swapper RECEIVES token1 (18-decimal out)
     pool_id: str = FAKE_POOL_ID,
     sender: str = FAKE_SENDER,
 ) -> dict:
@@ -69,9 +70,9 @@ def _build_swap_log(
         + _encode_int128(amount0)
         + _encode_int128(amount1)
         + _encode_uint(79228162514264337593543950336)  # sqrtPriceX96
-        + _encode_uint(10**18)                         # liquidity
-        + _encode_int128(0)                             # tick
-        + _encode_uint(3000)                            # fee
+        + _encode_uint(10**18)  # liquidity
+        + _encode_int128(0)  # tick
+        + _encode_uint(3000)  # fee
     )
     return {
         "address": POOL_MANAGER_ARB,
@@ -148,6 +149,73 @@ def _make_parser() -> UniswapV4ReceiptParser:
         chain="arbitrum",
         token_resolver=_make_failing_resolver(),
     )
+
+
+class TestResolveTokenDecimals:
+    def test_uses_injected_resolver_for_both_tokens(self):
+        resolver = MagicMock()
+        parser = UniswapV4ReceiptParser(chain="arbitrum", token_resolver=resolver)
+
+        with patch(
+            "almanak.connectors.uniswap_v4.receipt_parser.resolve_token_decimals",
+            side_effect=[FAKE_TOKEN_IN_DECIMALS, FAKE_TOKEN_OUT_DECIMALS],
+        ) as resolve_decimals:
+            result = parser._resolve_token_decimals(FAKE_TOKEN_IN_ADDR, FAKE_TOKEN_OUT_ADDR)
+
+        assert result == (FAKE_TOKEN_IN_DECIMALS, FAKE_TOKEN_OUT_DECIMALS)
+        assert resolve_decimals.call_args_list == [
+            ((FAKE_TOKEN_IN_ADDR, "arbitrum"), {"resolver": resolver}),
+            ((FAKE_TOKEN_OUT_ADDR, "arbitrum"), {"resolver": resolver}),
+        ]
+
+    def test_uses_global_resolver_when_none_is_injected(self):
+        parser = UniswapV4ReceiptParser(chain="arbitrum")
+
+        with patch(
+            "almanak.connectors.uniswap_v4.receipt_parser.resolve_token_decimals",
+            side_effect=[FAKE_TOKEN_IN_DECIMALS, FAKE_TOKEN_OUT_DECIMALS],
+        ) as resolve_decimals:
+            result = parser._resolve_token_decimals(FAKE_TOKEN_IN_ADDR, FAKE_TOKEN_OUT_ADDR)
+
+        assert result == (FAKE_TOKEN_IN_DECIMALS, FAKE_TOKEN_OUT_DECIMALS)
+        assert resolve_decimals.call_args_list == [
+            ((FAKE_TOKEN_IN_ADDR, "arbitrum"), {}),
+            ((FAKE_TOKEN_OUT_ADDR, "arbitrum"), {}),
+        ]
+
+    def test_skips_missing_addresses(self):
+        parser = UniswapV4ReceiptParser(chain="arbitrum")
+
+        with patch("almanak.connectors.uniswap_v4.receipt_parser.resolve_token_decimals") as resolve_decimals:
+            result = parser._resolve_token_decimals(None, None)
+
+        assert result == (None, None)
+        resolve_decimals.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("failing_token", "expected"),
+        [
+            (FAKE_TOKEN_IN_ADDR, (None, FAKE_TOKEN_OUT_DECIMALS)),
+            (FAKE_TOKEN_OUT_ADDR, (FAKE_TOKEN_IN_DECIMALS, None)),
+        ],
+    )
+    def test_preserves_the_other_side_when_resolution_fails(self, failing_token, expected):
+        parser = UniswapV4ReceiptParser(chain="arbitrum", token_resolver=MagicMock())
+
+        def resolve_decimals(token, chain, *, resolver):  # noqa: ARG001
+            if token == failing_token:
+                raise TokenResolutionError(token=token, chain=chain, reason="unavailable")
+            if token == FAKE_TOKEN_IN_ADDR:
+                return FAKE_TOKEN_IN_DECIMALS
+            return FAKE_TOKEN_OUT_DECIMALS
+
+        with patch(
+            "almanak.connectors.uniswap_v4.receipt_parser.resolve_token_decimals",
+            side_effect=resolve_decimals,
+        ):
+            result = parser._resolve_token_decimals(FAKE_TOKEN_IN_ADDR, FAKE_TOKEN_OUT_ADDR)
+
+        assert result == expected
 
 
 # ---------------------------------------------------------------------------
@@ -255,12 +323,18 @@ class TestAddressMismatchSkip:
 
         # Resolver returns known decimals for other_in/other_out
         mock_resolver = MagicMock()
+
         def resolve_side(addr, chain):  # noqa: E306
             if addr.lower() == other_in.lower():
-                t = MagicMock(); t.decimals = 6; return t
+                t = MagicMock()
+                t.decimals = 6
+                return t
             elif addr.lower() == other_out.lower():
-                t = MagicMock(); t.decimals = 18; return t
+                t = MagicMock()
+                t.decimals = 18
+                return t
             raise Exception("unknown")
+
         mock_resolver.resolve.side_effect = resolve_side
         parser._token_resolver = mock_resolver
 
@@ -326,8 +400,12 @@ class TestHintWinsOverResolver:
 
         # Give the resolver wrong decimals (18 for the 6-decimal token)
         mock_resolver = MagicMock()
+
         def wrong_resolve(addr, chain):  # noqa: E306
-            t = MagicMock(); t.decimals = 18; return t
+            t = MagicMock()
+            t.decimals = 18
+            return t
+
         mock_resolver.resolve.side_effect = wrong_resolve
         parser._token_resolver = mock_resolver
 

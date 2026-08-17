@@ -23,6 +23,7 @@ from typing import Any
 
 from almanak.connectors._fluid_core.sdk import FLUID_ADDRESSES, FLUID_NATIVE_TOKEN
 from almanak.connectors._strategy_base.base import HexDecoder, resolve_trading_wallet
+from almanak.framework.data.tokens import TokenResolutionError, resolve_token_decimals
 from almanak.framework.execution.extracted_data import LPCloseData, SwapAmounts
 
 logger = logging.getLogger(__name__)
@@ -85,7 +86,6 @@ ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 # Lowercased for receipt-side comparisons; 18 decimals on every
 # supported chain (ETH on arbitrum/base/ethereum, POL on polygon).
 _FLUID_NATIVE_SENTINEL = FLUID_NATIVE_TOKEN.lower()
-_NATIVE_DECIMALS = 18  # decimal-policy-exempt: native gas tokens (ETH/POL) are 18-decimal protocol invariants
 
 
 # =============================================================================
@@ -203,7 +203,7 @@ class FluidReceiptParser:
 
     def __init__(self, chain: str = "arbitrum") -> None:
         self.chain = chain.lower()
-        self._decimals_cache: dict[str, int | None] = {}
+        self._decimals_cache: dict[tuple[str, str], int | None] = {}
 
     def parse_receipt(self, receipt: dict[str, Any]) -> FluidParseResult:
         """Parse a Fluid DEX transaction receipt.
@@ -597,27 +597,9 @@ class FluidReceiptParser:
         if not token_address:
             return None
 
-        if token_address.lower() == _FLUID_NATIVE_SENTINEL:
-            return _NATIVE_DECIMALS
-
-        cache_key = f"{self.chain}:{token_address.lower()}"
-        if cache_key in self._decimals_cache:
-            return self._decimals_cache[cache_key]
-
         try:
-            from almanak.framework.data.tokens import get_token_resolver
-            from almanak.framework.data.tokens.exceptions import TokenNotFoundError, TokenResolutionError
-
-            resolver = get_token_resolver()
-            resolved = resolver.resolve(token_address, self.chain)
-            self._decimals_cache[cache_key] = resolved.decimals
-            return resolved.decimals
-        except TokenNotFoundError:
-            # Token genuinely unknown — safe to cache as None
-            self._decimals_cache[cache_key] = None
-            return None
-        except (TokenResolutionError, Exception):
-            # Transient failure (RPC timeout, resolver error, etc.) — do NOT cache, allow retry
+            return resolve_token_decimals(token_address, self.chain, cache=self._decimals_cache)
+        except TokenResolutionError:
             return None
 
     @staticmethod

@@ -37,6 +37,7 @@ from almanak.connectors._fluid_core.sdk import (
     FluidSDK,
     FluidSDKError,
 )
+from almanak.framework.data.tokens.decimals import resolve_token_decimals
 from almanak.framework.data.tokens.exceptions import TokenResolutionError
 
 if TYPE_CHECKING:
@@ -187,7 +188,7 @@ class FluidAdapter:
         Returns:
             Token decimals (never defaults to 18 — raises if unknown)
         """
-        return self._token_resolver.get_decimals(self.chain, token)
+        return resolve_token_decimals(token, self.chain, resolver=self._token_resolver)
 
     # =========================================================================
     # Pool Discovery + Quoting

@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
+from almanak.framework.data.tokens.decimals import resolve_token_decimals
 from almanak.framework.data.tokens.exceptions import TokenResolutionError
 
 from .constants import (
@@ -202,12 +203,11 @@ class CurvanceAdapter:
     def _token_decimals(self, symbol: str) -> int:
         """Look up decimals for a token on the adapter's chain."""
         try:
-            token = self._token_resolver.resolve(symbol, self.chain)
+            return resolve_token_decimals(symbol, self.chain, resolver=self._token_resolver)
         except TokenResolutionError as e:
             raise ValueError(
                 f"Cannot resolve token '{symbol}' on {self.chain} — ensure it's registered in the token registry: {e}"
             ) from e
-        return token.decimals
 
     # -------------------------------------------------------------------------
     # Transaction builders

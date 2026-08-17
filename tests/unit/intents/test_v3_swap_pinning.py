@@ -228,6 +228,10 @@ class TestCompilerFeeTierPinning:
         assert metadata["selected_fee_tier"] == 500
         assert metadata["fee_selection_source"] == "intent_pinned"
         assert metadata["pinned_pool"] is None
+        assert metadata["swap_token_meta"] == {
+            "token_in": {"address": USDC_ARB.lower(), "symbol": "USDC", "decimals": 6},
+            "token_out": {"address": WETH_ARB.lower(), "symbol": "WETH", "decimals": 18},
+        }
 
     def test_pinned_fee_tier_overrides_auto_config(self) -> None:
         compiler = _offline_compiler()

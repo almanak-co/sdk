@@ -36,6 +36,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from almanak.connectors._strategy_base.base import EventRegistry, HexDecoder
+from almanak.framework.data.tokens import TokenResolutionError, resolve_token_decimals
 from almanak.framework.execution.extract_result import (
     ExtractError,
     ExtractMissing,
@@ -65,17 +66,13 @@ def _format_token_amount(raw_amount: Decimal, token_address: str, chain: str) ->
         Human-readable amount string (e.g., "0.0027" or "1,500.50")
     """
     try:
-        from almanak.framework.data.tokens import get_token_resolver
-
-        resolver = get_token_resolver()
-        resolved = resolver.resolve(token_address, chain)
-        decimals = resolved.decimals
+        decimals = resolve_token_decimals(token_address, chain)
         human_amount = raw_amount / Decimal(10**decimals)
         # Use up to 6 significant digits for readability
         if human_amount == 0:
             return "0"
         return f"{human_amount:,.6f}".rstrip("0").rstrip(".")
-    except Exception:
+    except TokenResolutionError:
         # Fallback to raw amount if resolver fails
         return f"{raw_amount:,.0f} (raw)"
 

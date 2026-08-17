@@ -31,6 +31,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from almanak.connectors._strategy_base.slippage import SlippagePrecisionError, slippage_to_bps
+from almanak.framework.data.tokens.decimals import resolve_token_decimals
 from almanak.framework.data.tokens.exceptions import TokenResolutionError
 from almanak.framework.execution.solana.types import SolanaTransactionData
 from almanak.framework.intents.vocabulary import IntentType, SwapIntent
@@ -172,16 +173,7 @@ class JupiterAdapter:
         Raises:
             TokenResolutionError: If decimals cannot be determined
         """
-        try:
-            resolved = self._token_resolver.resolve(token, "solana")
-            return resolved.decimals
-        except TokenResolutionError as e:
-            raise TokenResolutionError(
-                token=token,
-                chain="solana",
-                reason=f"[JupiterAdapter] Cannot determine decimals: {e.reason}",
-                suggestions=e.suggestions,
-            ) from e
+        return resolve_token_decimals(token, "solana", resolver=self._token_resolver)
 
     def compile_swap_intent(
         self,

@@ -40,7 +40,6 @@ from almanak.connectors.aave_v3.adapter import (
     create_adapter_with_prices,
 )
 
-
 TEST_WALLET = "0x1234567890123456789012345678901234567890"
 
 
@@ -640,7 +639,7 @@ class TestResolveAssetErrorWrapping:
         assert "ZZZ" in str(exc.value)
         assert "AaveV3Adapter" in exc.value.reason
 
-    def test_get_decimals_wraps_token_resolution_error(self) -> None:
+    def test_get_decimals_preserves_token_resolution_error(self) -> None:
         from almanak.framework.data.tokens.exceptions import TokenResolutionError
 
         config = AaveV3Config(
@@ -655,4 +654,4 @@ class TestResolveAssetErrorWrapping:
         adapter = AaveV3Adapter(config, token_resolver=resolver)
         with pytest.raises(TokenResolutionError) as exc:
             adapter._get_decimals("ZZZ")
-        assert "AaveV3Adapter" in exc.value.reason
+        assert exc.value.reason == "x"

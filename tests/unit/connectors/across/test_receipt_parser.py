@@ -17,7 +17,7 @@ from almanak.connectors.across.receipt_parser import (
     V3_FUNDS_DEPOSITED_TOPIC,
     AcrossReceiptParser,
 )
-
+from almanak.framework.data.tokens import TokenNotFoundError
 
 # ---------------------------------------------------------------------------
 # Hex helpers
@@ -70,21 +70,17 @@ class _StubResolver:
 
 class _FailingResolver:
     def resolve(self, token, chain, *, log_errors=True, skip_gateway=False):
-        raise ValueError("no such token")
+        raise TokenNotFoundError(token=token, chain=chain)
 
 
 @pytest.fixture
 def stub_resolver(monkeypatch):
-    monkeypatch.setattr(
-        "almanak.framework.data.tokens.get_token_resolver", lambda: _StubResolver()
-    )
+    monkeypatch.setattr("almanak.framework.data.tokens.get_token_resolver", lambda: _StubResolver())
 
 
 @pytest.fixture
 def failing_resolver(monkeypatch):
-    monkeypatch.setattr(
-        "almanak.framework.data.tokens.get_token_resolver", lambda: _FailingResolver()
-    )
+    monkeypatch.setattr("almanak.framework.data.tokens.get_token_resolver", lambda: _FailingResolver())
 
 
 # ---------------------------------------------------------------------------
@@ -108,9 +104,9 @@ def make_deposit_log(
         "address": log_address,
         "topics": [
             V3_FUNDS_DEPOSITED_TOPIC,
-            "0x" + word(dest_chain_id),   # indexed destinationChainId
-            "0x" + word(deposit_id),       # indexed depositId
-            addr_topic(DEPOSITOR),          # indexed depositor
+            "0x" + word(dest_chain_id),  # indexed destinationChainId
+            "0x" + word(deposit_id),  # indexed depositId
+            addr_topic(DEPOSITOR),  # indexed depositor
         ],
         "data": "0x" + addr_word(USDC) + addr_word(OUTPUT_TOKEN) + word(input_amount) + word(output_amount),
         "logIndex": 0,

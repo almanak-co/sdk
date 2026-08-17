@@ -3,8 +3,6 @@
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from almanak.connectors.aave_v3.receipt_parser import _format_token_amount
 
 
@@ -93,8 +91,12 @@ class TestFormatTokenAmount:
     @patch("almanak.framework.data.tokens.get_token_resolver")
     def test_resolver_resolve_failure_returns_raw(self, mock_get_resolver):
         """When resolver.resolve() raises, returns raw amount with '(raw)' suffix."""
+        from almanak.framework.data.tokens import TokenResolutionError
+
         mock_resolver = MagicMock()
-        mock_resolver.resolve.side_effect = Exception("Unknown token")
+        mock_resolver.resolve.side_effect = TokenResolutionError(
+            token="0xunknown", chain="ethereum", reason="Unknown token"
+        )
         mock_get_resolver.return_value = mock_resolver
 
         result = _format_token_amount(Decimal("1000000"), "0xunknown", "ethereum")

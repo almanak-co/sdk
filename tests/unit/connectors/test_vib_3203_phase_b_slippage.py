@@ -187,9 +187,7 @@ class TestTraderJoeV2ExtractSwapAmountsAcceptsKwarg:
         assert param.kind == inspect.Parameter.KEYWORD_ONLY
 
     def test_slippage_suppressed_when_chain_unset(self) -> None:
-        """If the parser was constructed without a chain, decimal resolution
-        falls back to 18 — so realized slippage is computed against
-        potentially-mis-scaled amounts. Suppress slippage_bps in this case."""
+        """Without a chain, decimal resolution fails closed to no measured row."""
         from almanak.connectors.traderjoe_v2.receipt_parser import (
             ParsedSwapResult,
             ParseResult,
@@ -218,11 +216,7 @@ class TestTraderJoeV2ExtractSwapAmountsAcceptsKwarg:
                 expected_out=Decimal("0.99"),
             )
 
-        assert isinstance(result, SwapAmounts)
-        # amounts continue to surface for legacy paths (existing behaviour)
-        assert result.amount_out > 0
-        # but slippage MUST stay None because decimals couldn't be confirmed
-        assert result.slippage_bps is None
+        assert result is None
 
 
 class TestGmxV2ExtractSwapAmountsAcceptsKwargButIgnoresIt:

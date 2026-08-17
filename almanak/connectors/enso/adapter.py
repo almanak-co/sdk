@@ -47,6 +47,7 @@ from typing import TYPE_CHECKING, Any
 from eth_abi import decode, encode
 
 from almanak.connectors._strategy_base.slippage import compute_min_amount_out_from_bps, slippage_to_bps
+from almanak.framework.data.tokens.decimals import resolve_token_decimals
 from almanak.framework.data.tokens.exceptions import TokenResolutionError
 from almanak.framework.intents.vocabulary import IntentType, SwapIntent
 from almanak.framework.market import PriceUnavailableError
@@ -244,16 +245,7 @@ class EnsoAdapter:
         Raises:
             TokenResolutionError: If decimals cannot be determined
         """
-        try:
-            resolved = self._token_resolver.resolve(token, self.chain)
-            return resolved.decimals
-        except TokenResolutionError as e:
-            raise TokenResolutionError(
-                token=token,
-                chain=str(self.chain),
-                reason=f"[EnsoAdapter] Cannot determine decimals: {e.reason}",
-                suggestions=e.suggestions,
-            ) from e
+        return resolve_token_decimals(token, self.chain, resolver=self._token_resolver)
 
     def compile_swap_intent(
         self,

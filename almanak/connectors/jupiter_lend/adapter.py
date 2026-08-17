@@ -26,6 +26,7 @@ import logging
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
+from almanak.framework.data.tokens.decimals import resolve_token_decimals
 from almanak.framework.execution.solana.types import SolanaTransactionData
 from almanak.framework.intents.vocabulary import (
     BorrowIntent,
@@ -390,7 +391,7 @@ class JupiterLendAdapter:
             TokenNotFoundError/TokenResolutionError: If decimals cannot be resolved.
                 Compilation must fail explicitly rather than sending unrounded amounts.
         """
-        return self._token_resolver.get_decimals("solana", token_symbol)
+        return resolve_token_decimals(token_symbol, "solana", resolver=self._token_resolver)
 
     def _error_bundle(self, intent_type: IntentType, intent_id: str, error: str) -> ActionBundle:
         """Create an error ActionBundle."""

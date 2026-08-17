@@ -468,17 +468,15 @@ def _make_swap_receipt(token_in_address: str, amount_in_raw: int, token_out_addr
 class TestExtractSwapAmountsDecimals:
     """Tests for VIB-593: extract_swap_amounts uses actual token decimals (not hardcoded 18)."""
 
-    def test_without_chain_defaults_to_18_decimals(self):
-        """Without chain, both token decimals default to 18."""
+    def test_without_chain_returns_unmeasured(self):
+        """Without chain, the parser refuses to guess token decimals."""
         parser = TraderJoeV2ReceiptParser()  # no chain
         # 1 WAVAX (18 decimals) in, 13.75 WAVAX out
         amount_in_raw = 10**18  # 1 token with 18 decimals
         amount_out_raw = 10**18  # same
         receipt = _make_swap_receipt(WAVAX_ADDRESS, amount_in_raw, USDC_ADDRESS, amount_out_raw)
         result = parser.extract_swap_amounts(receipt)
-        assert result is not None
-        assert result.amount_in_decimal == Decimal(amount_in_raw) / Decimal(10**18)
-        assert result.amount_out_decimal == Decimal(amount_out_raw) / Decimal(10**18)
+        assert result is None
 
     def test_with_chain_uses_resolver_decimals(self):
         """With chain set, extract_swap_amounts resolves actual token decimals."""
@@ -490,11 +488,11 @@ class TestExtractSwapAmountsDecimals:
         receipt = _make_swap_receipt(USDC_ADDRESS, usdc_amount_raw, WAVAX_ADDRESS, wavax_amount_raw)
 
         mock_resolver = MagicMock()
-        mock_resolver.get_decimals.side_effect = lambda chain, addr: 6 if addr.lower() == USDC_ADDRESS.lower() else 18
+        mock_resolver.resolve.side_effect = lambda token, chain: MagicMock(
+            decimals=6 if token.lower() == USDC_ADDRESS.lower() else 18
+        )
 
-        with patch(
-            "almanak.connectors.traderjoe_v2.receipt_parser.get_token_resolver", return_value=mock_resolver
-        ):
+        with patch("almanak.framework.data.tokens.get_token_resolver", return_value=mock_resolver):
             result = parser.extract_swap_amounts(receipt)
 
         assert result is not None
@@ -505,8 +503,8 @@ class TestExtractSwapAmountsDecimals:
         # With correct 18-decimal resolution for WAVAX: 1492740000000000000 / 10^18 = 1.49274
         assert result.amount_out_decimal == Decimal("1.49274")
 
-    def test_resolver_failure_falls_back_to_18(self):
-        """When token resolver raises, decimals fall back to 18."""
+    def test_resolver_failure_returns_unmeasured(self):
+        """When token resolution fails, the parser does not invent 18 decimals."""
         parser = TraderJoeV2ReceiptParser(chain="avalanche")
 
         amount_in_raw = 10**18
@@ -514,15 +512,12 @@ class TestExtractSwapAmountsDecimals:
         receipt = _make_swap_receipt(WAVAX_ADDRESS, amount_in_raw, USDC_ADDRESS, amount_out_raw)
 
         with patch(
-            "almanak.connectors.traderjoe_v2.receipt_parser.get_token_resolver",
+            "almanak.framework.data.tokens.get_token_resolver",
             side_effect=Exception("resolver unavailable"),
         ):
             result = parser.extract_swap_amounts(receipt)
 
-        assert result is not None
-        # Falls back to 18 decimals for both
-        assert result.amount_in_decimal == Decimal(amount_in_raw) / Decimal(10**18)
-        assert result.amount_out_decimal == Decimal(amount_out_raw) / Decimal(10**18)
+        assert result is None
 
     def test_chain_stored_on_instance(self):
         """chain parameter is stored and accessible."""
@@ -544,11 +539,11 @@ class TestExtractSwapAmountsDecimals:
         receipt = _make_swap_receipt(USDC_ADDRESS, usdc_raw, WAVAX_ADDRESS, 10**18)
 
         mock_resolver = MagicMock()
-        mock_resolver.get_decimals.side_effect = lambda chain, addr: 6 if addr.lower() == USDC_ADDRESS.lower() else 18
+        mock_resolver.resolve.side_effect = lambda token, chain: MagicMock(
+            decimals=6 if token.lower() == USDC_ADDRESS.lower() else 18
+        )
 
-        with patch(
-            "almanak.connectors.traderjoe_v2.receipt_parser.get_token_resolver", return_value=mock_resolver
-        ):
+        with patch("almanak.framework.data.tokens.get_token_resolver", return_value=mock_resolver):
             result = parser.extract_swap_amounts(receipt)
 
         assert result is not None
