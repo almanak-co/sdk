@@ -124,6 +124,9 @@ class LPAccountingEvent:
         # static pool registry, not the empty 2-token labels). ``None`` for 2-coin
         # / concentrated-liquidity venues that already populate ``token0``/``token1``.
         coin_symbols: list[str] | None = None,
+        # ALM-3190 — pool-coin-ordered contract addresses. Peg provenance is
+        # authorized by these exact chain-scoped identities, never by symbols.
+        coin_addresses: list[str] | None = None,
     ) -> None:
         self.identity = identity
         self.event_type = event_type.value
@@ -151,6 +154,7 @@ class LPAccountingEvent:
         self.position_hash = position_hash
         self.position_id = position_id
         self.coin_symbols = coin_symbols
+        self.coin_addresses = coin_addresses
 
     def to_payload_json(self) -> str:
         def _enc(v: Any) -> Any:
@@ -232,6 +236,8 @@ class LPAccountingEvent:
                 # VIB-5429 — N-coin pool-coin identity (Curve). ``None`` for 2-coin
                 # venues; round-trips as a JSON list of upper-case symbols.
                 "coin_symbols": self.coin_symbols,
+                # ALM-3190 — exact N-coin identities for replay-safe peg gating.
+                "coin_addresses": self.coin_addresses,
                 "schema_version": self.schema_version,
                 "primitive_version": self.primitive_version,
             }

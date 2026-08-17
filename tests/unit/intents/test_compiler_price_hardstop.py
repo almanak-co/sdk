@@ -15,6 +15,7 @@ The gate MUST:
 """
 
 from decimal import Decimal
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -114,3 +115,24 @@ class TestAssertPricesAvailable:
         mint = "So11111111111111111111111111111111111111112"
         compiler._resolve_token = lambda token, chain=None: _Info()  # type: ignore[method-assign]
         compiler.assert_prices_available([mint])  # no raise == passed
+
+    def test_resolver_failure_preserves_measured_symbol_fallback(self) -> None:
+        """Resolver outages cannot mask a caller-supplied measured price."""
+        compiler = _priced_compiler({"WETH": Decimal("3000")})
+        compiler._token_resolver = object()
+        resolver = MagicMock(side_effect=RuntimeError("resolver unavailable"))
+        compiler._resolve_token = resolver  # type: ignore[method-assign]
+
+        compiler.assert_prices_available(["WETH"])
+        resolver.assert_called_once_with("WETH")
+
+    def test_resolver_failure_still_reports_unpriced_symbol(self) -> None:
+        """A resolver error is not allowed to turn an unmeasured token into a price."""
+        compiler = _priced_compiler({})
+        compiler._token_resolver = object()
+        resolver = MagicMock(side_effect=RuntimeError("resolver unavailable"))
+        compiler._resolve_token = resolver  # type: ignore[method-assign]
+
+        with pytest.raises(ValueError, match="WETH"):
+            compiler.assert_prices_available(["WETH"])
+        resolver.assert_called_once_with("WETH")

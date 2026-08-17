@@ -39,6 +39,7 @@ from almanak.framework.data.interfaces import (
     PriceResult,
 )
 from almanak.framework.data.tokens import TokenResolutionError, get_token_resolver
+from almanak.framework.data.tokens.pegs import is_pegged
 from almanak.gateway.data.price.aggregator import is_stablecoin_for_fallback
 from almanak.gateway.utils import get_rpc_url
 from almanak.gateway.utils.ssl_context import build_ssl_context
@@ -275,7 +276,9 @@ class ChainlinkPriceSource(BasePriceSource):
         token_upper = token.upper()
 
         # Check cache
-        cache_key = f"{token_upper}/USD" + (":measured" if bypass_stablecoin_fallback else "")
+        identity = getattr(getattr(resolved_token, "token_ref", None), "identity_key", None)
+        cache_subject = f"{identity[0]}:{identity[1]}" if identity is not None else token_upper
+        cache_key = f"{cache_subject}/USD" + (":measured" if bypass_stablecoin_fallback else "")
         cached = self._cache.get(cache_key)
         if cached:
             result, cached_at = cached
@@ -285,12 +288,18 @@ class ChainlinkPriceSource(BasePriceSource):
         # Stablecoins: $1.00 without RPC. ``resolved_token`` lets us
         # disambiguate symbol clashes (e.g. Polymarket pUSD vs ``Pleasing USD``).
         if not bypass_stablecoin_fallback and is_stablecoin_for_fallback(token, resolved_token):
+            peg = is_pegged(resolved_token.token_ref) if resolved_token is not None else None
+            if peg is None:
+                raise DataSourceUnavailable(source=self.source_name, reason="peg_identity_unavailable")
+            assert resolved_token is not None
+            identity = resolved_token.token_ref.identity_key
             result = PriceResult(
-                price=Decimal("1.00"),
+                price=peg,
                 source=self.source_name,
                 timestamp=datetime.now(UTC),
                 confidence=0.99,
                 stale=False,
+                peg_tokens=(f"{identity[0]}:{identity[1]}",),
             )
             self._cache[cache_key] = (result, time.time())
             return result

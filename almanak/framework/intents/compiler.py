@@ -111,6 +111,9 @@ class _ConnectorCompilerServices:
     def require_token_price(self, symbol: str) -> Decimal:
         return self.compiler._require_token_price(symbol)
 
+    def require_token_price_for(self, token: "TokenInfo") -> Decimal:
+        return self.compiler._require_token_price_for(token)
+
     def assert_prices_available(self, tokens: list[str | None]) -> None:
         return self.compiler.assert_prices_available(tokens)
 
@@ -683,6 +686,9 @@ class IntentCompiler:
         self._connector_compiler_cache: dict[str, Any] = {}
         # Log stablecoin price fallbacks once per symbol per compiler instance.
         self._stablecoin_fallback_logged: set[str] = set()
+        self._peg_fallbacks: set[str] = set()
+        self._pending_peg_fallbacks: set[str] = set()
+        self._peg_tracking_depth = 0
 
         effective_protocol = self._family.default_swap_protocol() or default_protocol
         logger.info(
@@ -1093,14 +1099,59 @@ class IntentCompiler:
             logger.warning("Pool validation: %s (reason=%s)", result.warning, result.reason.value)
         return None
 
+    def compile(self, intent: AnyIntent) -> CompilationResult:
+        """Compile and stamp structured synthetic-peg provenance."""
+        # VIB-4165 fail-fast: this call must remain directly in ``compile`` and
+        # above its exception-converting dispatch. Besides keeping the safety
+        # refusal visible at the public boundary, an AST regression test pins
+        # this placement so a future extraction cannot silently swallow it.
+        _raise_if_placeholder_intent(intent.intent_type)
+
+        # Some connector-focused test doubles and lightweight subclasses build
+        # an IntentCompiler without calling ``super().__init__``. Peg tracking
+        # is observational metadata, so initialize that state lazily instead of
+        # making those otherwise-supported compiler shapes crash before
+        # dispatch. ``_record_peg_fallback`` mirrors this defensive seam.
+        peg_fallbacks = getattr(self, "_peg_fallbacks", None)
+        if not isinstance(peg_fallbacks, set):
+            peg_fallbacks = set()
+            self._peg_fallbacks = peg_fallbacks
+        pending_peg_fallbacks = getattr(self, "_pending_peg_fallbacks", None)
+        if not isinstance(pending_peg_fallbacks, set):
+            pending_peg_fallbacks = set()
+            self._pending_peg_fallbacks = pending_peg_fallbacks
+        tracking_depth = getattr(self, "_peg_tracking_depth", 0)
+        if not isinstance(tracking_depth, int):
+            tracking_depth = 0
+
+        is_outermost = tracking_depth == 0
+        if is_outermost:
+            peg_fallbacks.clear()
+            peg_fallbacks.update(pending_peg_fallbacks)
+        self._peg_tracking_depth = tracking_depth + 1
+        try:
+            result = self._compile_intent(intent)
+        finally:
+            self._peg_tracking_depth -= 1
+            if is_outermost:
+                pending_peg_fallbacks.clear()
+
+        peg_tokens = sorted(peg_fallbacks)
+        result.used_peg = bool(peg_tokens)
+        result.peg_tokens = peg_tokens
+        if result.action_bundle is not None:
+            result.action_bundle.metadata["price_provenance"] = {
+                "used_peg": result.used_peg,
+                "peg_tokens": peg_tokens,
+            }
+        return result
+
     # crap-allowlist: VIB-4222 — pre-existing primitive-dispatch ladder
-    # (cc=31, the SWAP/LP_OPEN/LP_CLOSE/.../UNWRAP_NATIVE if/elif chain). T5
-    # (VIB-4165) only added a 1-line `_raise_if_placeholder_intent` call plus
-    # an 8-line comment ABOVE the dispatch — zero new branches, zero new
-    # control flow. The function was already over threshold on main; the
-    # registry-pattern refactor that decomposes this ladder is tracked under
+    # (SWAP/LP_OPEN/LP_CLOSE/.../UNWRAP_NATIVE). ALM-3190 extracted the
+    # unchanged ladder from ``compile`` so the public boundary can stamp peg
+    # provenance; decomposing the dispatcher itself remains tracked by
     # VIB-4222.
-    def compile(self, intent: AnyIntent) -> CompilationResult:  # noqa: C901
+    def _compile_intent(self, intent: AnyIntent) -> CompilationResult:  # noqa: C901
         """Compile an intent into an ActionBundle.
 
         This is the main entry point for compiling intents. It dispatches
@@ -1112,15 +1163,6 @@ class IntentCompiler:
         Returns:
             CompilationResult with ActionBundle and metadata
         """
-        # VIB-4165 fail-fast: refuse to compile P0 placeholder intent types
-        # BEFORE entering the outer try/except below. The outer block catches
-        # ``Exception`` and converts errors to ``CompilationResult.FAILED`` —
-        # if the placeholder check ran inside it, ``NotImplementedError`` would
-        # be silently swallowed and the placeholder would compile to a FAILED
-        # result rather than raise. That is exactly the silent-failure mode
-        # HRC-5 of the primitives refactor PRD was created to prevent.
-        _raise_if_placeholder_intent(intent.intent_type)
-
         try:
             # Step 0: Resolve amount="all" before dispatching.
             # This is the single mandatory resolution point for all intent types.
@@ -2724,20 +2766,6 @@ class IntentCompiler:
             logger.warning(f"Failed to query allowance for {token_address}: {e}")
             return 0
 
-    # Lazy-loaded from almanak.core.constants to avoid circular import
-    # (compiler -> data/__init__ -> prediction_provider -> connectors -> execution -> compiler)
-    _KNOWN_STABLECOINS: ClassVar[frozenset[str] | None] = None
-
-    @classmethod
-    def _get_known_stablecoins(cls) -> frozenset[str]:
-        known = cls._KNOWN_STABLECOINS
-        if known is None:
-            from almanak.core.constants import STABLECOINS
-
-            known = frozenset(s.upper() for s in STABLECOINS)
-            cls._KNOWN_STABLECOINS = known
-        return known
-
     # Wrapped native tokens map to their native counterpart for price lookups.
     # Wrapped natives are 1:1 pegged by the WETH9 contract (deposit/withdraw at par),
     # so ETH price == WETH price. When the oracle only has "ETH", a lookup for
@@ -2801,6 +2829,35 @@ class IntentCompiler:
         """Delegates to CompilerQueries.require_token_price (see compiler_queries.py)."""
         return self._queries.require_token_price(symbol)
 
+    def _require_token_price_for(self, token: TokenInfo) -> Decimal:
+        """Require a price using the token's exact chain-scoped identity."""
+        return self._queries.require_token_price_for(token)
+
+    def _record_peg_fallback(self, token_ref: object) -> None:
+        """Record one exact identity whose synthetic peg affected compilation."""
+        identity = getattr(token_ref, "identity_key", None)
+        if isinstance(identity, tuple) and len(identity) == 2:
+            peg_fallbacks = getattr(self, "_peg_fallbacks", None)
+            if not isinstance(peg_fallbacks, set):
+                peg_fallbacks = set()
+                self._peg_fallbacks = peg_fallbacks
+            peg_fallbacks.add(f"{identity[0]}:{identity[1]}")
+
+    def _seed_peg_fallbacks(self, identities: set[str] | frozenset[str]) -> None:
+        """Carry gateway-served synthetic-peg identities into the next compile.
+
+        The gateway resolves and prices tokens before ``compile`` starts. When
+        its aggregator returns a synthetic stablecoin peg, the scalar oracle
+        value alone cannot distinguish that peg from a measured $1 price. This
+        one-shot seed preserves the exact identities until the outermost
+        compile stamps result/bundle provenance, then clears them.
+        """
+        pending = getattr(self, "_pending_peg_fallbacks", None)
+        if not isinstance(pending, set):
+            pending = set()
+            self._pending_peg_fallbacks = pending
+        pending.update(identities)
+
     def assert_prices_available(self, tokens: list[str | None]) -> None:
         """Fail closed if any token lacks a real USD price (VIB-2928 HARD STOP).
 
@@ -2833,10 +2890,28 @@ class IntentCompiler:
             if self._using_placeholders:
                 missing.append(token)
                 continue
-            # Fast path: the token is already a symbol the oracle can price
-            # (incl. known-stablecoin / wrapped-native aliases).
+            # Resolve identity first. Registry pegs are never authorized by the
+            # symbol-only helper; an exact TokenInfo is required.
+            # A handful of connector-level compiler fixtures intentionally
+            # omit the resolver but provide a complete measured symbol oracle.
+            # Keep that supported seam: the symbol helper can consume measured
+            # values and no longer grants stablecoin pegs. Production compilers
+            # always carry a resolver and therefore take the exact-identity path.
+            info = None
+            if getattr(self, "_token_resolver", None) is not None:
+                try:
+                    info = self._resolve_token(token)
+                except Exception as exc:  # noqa: BLE001 - measured symbol fallback remains valid
+                    # Resolution is an identity-enrichment step, not a reason to
+                    # discard a measured symbol price already supplied by the
+                    # caller. Keep the gate fail-closed below: if the symbol is
+                    # also unpriced, the original token is reported missing.
+                    logger.debug("Price-gate token resolution failed for %s: %s", token, exc)
             try:
-                self._require_token_price(token)
+                if info is not None:
+                    self._require_token_price_for(info)
+                else:
+                    self._require_token_price(token)
                 continue
             except ValueError:
                 pass
@@ -2846,11 +2921,10 @@ class IntentCompiler:
             # and non-EVM base58 mints alike, so a priceable token identified by
             # address is not falsely rejected.
             symbol = token
-            info = self._resolve_token(token)
             if info is not None and getattr(info, "symbol", None) and info.symbol != token:
                 symbol = info.symbol
                 try:
-                    self._require_token_price(symbol)
+                    self._require_token_price_for(info)
                     continue
                 except ValueError:
                     pass

@@ -11,7 +11,6 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
-from almanak.core.constants import CURVE_USD_STABLE_SYMBOLS
 from almanak.framework.accounting.category_handlers._price_helpers import (
     load_raw_price_inputs,
     parse_price_inputs,
@@ -31,6 +30,8 @@ from almanak.framework.data.tokens.best_effort import (
     resolve_token_best_effort,
     resolve_token_decimals_best_effort,
 )
+from almanak.framework.data.tokens.models import TokenRef
+from almanak.framework.data.tokens.pegs import is_pegged, is_within_peg
 from almanak.framework.market.price_store import lookup_price
 from almanak.framework.models.run_mode import RunMode
 
@@ -1210,36 +1211,66 @@ def _coin_decimals(symbol: str, chain: str) -> int | None:
     return resolve_token_decimals_best_effort(symbol, chain, context="lp_handler curve coin decimals")
 
 
-def _is_usd_stable_pool(coin_symbols: list[str]) -> bool:
-    """True when EVERY coin in the pool is a recognized ~$1 USD stablecoin.
+CurveLeg = tuple[str, str | None, Decimal | None]
 
-    VIB-5536 — single source of truth for "is this a USD-stable pool" is the
-    conservative ``CURVE_USD_STABLE_SYMBOLS`` frozenset in
-    ``almanak.core.constants``. It is shared verbatim with the Curve NAV
-    repricer (``framework/valuation/curve_lp_position_reader._USD_STABLE_SYMBOLS``,
-    an alias of the SAME object), so the basis-peg here and the NAV mark there
-    can never drift. Home is ``core`` (a lower layer than both valuation and
-    accounting) so accounting no longer imports backward from valuation — that
-    was the interim VIB-5429 lazy import this replaces.
 
-    A pool with ANY non-stable coin (tricrypto WBTC/WETH, a metapool's base-LP
-    token) is NOT a USD-numeraire pool: its principal legs stay UNAVAILABLE
-    (``None``) so G6 correctly FAILs for it — that valuation is the NAV repricer's
-    scope, never pegged to $1 here to force a green cell.
+def _curve_pool_peg_values(
+    legs: list[CurveLeg],
+    price_oracle: dict[str, Decimal],
+    *,
+    chain: str,
+) -> list[Decimal] | None:
+    """Return per-leg pegs only for a fully identified, non-depegged pool.
+
+    Every leg must map to a registry-authorized ``(chain, address)`` identity.
+    Symbols never grant eligibility. When the execution-block oracle measured
+    any member outside the SDK-wide peg tolerance, fallback is disabled for the
+    whole pool so a missing sibling price cannot hide a live depeg.
     """
-    if not coin_symbols:
-        return False
-    return all((c or "").upper() in CURVE_USD_STABLE_SYMBOLS for c in coin_symbols)
+    if not legs:
+        return None
+
+    pegs: list[Decimal] = []
+    for symbol, address, _amount in legs:
+        if not address:
+            return None
+        try:
+            token_ref = TokenRef(chain=chain, address=address, decimals=0, symbol=symbol)
+        except (TypeError, ValueError):
+            return None
+        peg = is_pegged(token_ref)
+        if peg is None:
+            return None
+        measured = lookup_price(
+            price_oracle,
+            chain=chain,
+            address=address,
+            symbol=symbol,
+            quote="USD",
+            infer_symbol_from_address=False,
+        )
+        if measured is not None and (measured.price <= 0 or not is_within_peg(measured.price, peg)):
+            logger.warning(
+                "Curve peg fallback disabled by live depeg: chain=%s address=%s symbol=%s price=%s peg=%s",
+                chain,
+                address,
+                symbol,
+                measured.price,
+                peg,
+            )
+            return None
+        pegs.append(peg)
+    return pegs
 
 
 def _value_curve_legs_usd(
-    legs: list[tuple[str, Decimal | None]],
+    legs: list[CurveLeg],
     price_oracle: dict[str, Decimal],
-    is_usd_stable: bool,
+    peg_values: list[Decimal] | None,
     *,
     chain: str,
 ) -> tuple[Decimal | None, bool]:
-    """Sum ``(symbol, human_amount)`` legs to USD. Returns ``(usd, used_peg)``.
+    """Sum exact-identity Curve legs to USD. Returns ``(usd, used_peg)``.
 
     VIB-5429 — the shared pricing primitive for both Curve fee and principal
     legs. Empty ≠ Zero (CLAUDE.md §Accounting):
@@ -1248,29 +1279,36 @@ def _value_curve_legs_usd(
         (whole-hook unmeasured — never fold an unmeasured leg in as zero).
       * A measured-zero leg contributes exactly ``$0`` and needs no price.
       * A NON-ZERO leg with an oracle price ⇒ ``amount × price``.
-      * A NON-ZERO leg with NO oracle price: priced at the ``$1`` USD-stable peg
-        ONLY when ``is_usd_stable`` (and ``used_peg`` becomes ``True`` so the
-        caller can stamp provenance); otherwise ⇒ ``(None, False)`` (fail closed —
-        a non-stable coin is not assumed to be $1).
+      * A NON-ZERO leg with NO oracle price uses its address-authorized peg only
+        when ``peg_values`` contains a complete, live-gated pool vector.
 
     Returns ``(None, False)`` when there are no legs at all (nothing measured).
     """
     total = Decimal(0)
     has_any = False
     used_peg = False
-    for symbol, amount in legs:
+    for index, (symbol, address, amount) in enumerate(legs):
         if amount is None:
             return None, False  # unmeasured leg ⇒ whole-hook None
         has_any = True
         if amount == 0:
             continue  # measured-zero leg: $0, no price needed
-        price = _oracle_price(price_oracle, symbol, chain=chain)
+        found = lookup_price(
+            price_oracle,
+            chain=chain,
+            address=address,
+            symbol=symbol,
+            quote="USD",
+            infer_symbol_from_address=False,
+        )
+        price = found.price if found is not None else None
+        if price is not None and price <= 0:
+            return None, False
         if price is None:
-            if is_usd_stable:
-                price = Decimal("1")  # USD-stable peg (provenance-stamped by caller)
-                used_peg = True
-            else:
+            if peg_values is None or len(peg_values) != len(legs):
                 return None, False  # non-stable, unpriceable ⇒ fail closed
+            price = peg_values[index]
+            used_peg = True
         total += amount * price
     return (total if has_any else None), used_peg
 
@@ -1279,8 +1317,9 @@ def _curve_legs(
     raw_amounts: list[Any],
     coin_symbols: list[str],
     chain: str,
-) -> list[tuple[str, Decimal | None]] | None:
-    """Build one ``(symbol, human_amount)`` leg per pool coin, scaled from wei.
+    coin_addresses: list[str] | None = None,
+) -> list[CurveLeg] | None:
+    """Build one ``(symbol, address, human_amount)`` leg per pool coin.
 
     VIB-5429 — iterates ``coin_symbols`` (the authoritative per-coin universe),
     NOT ``raw_amounts``: every pool coin MUST be accounted for. A coin with no
@@ -1292,12 +1331,15 @@ def _curve_legs(
     $0). Returns ``None`` only when a present leg's token decimals cannot be
     resolved (cannot scale ⇒ fail closed).
     """
-    legs: list[tuple[str, Decimal | None]] = []
+    if coin_addresses and len(coin_addresses) != len(coin_symbols):
+        return None
+    legs: list[CurveLeg] = []
     for i, symbol in enumerate(coin_symbols):
+        address = coin_addresses[i] if coin_addresses else None
         raw = raw_amounts[i] if i < len(raw_amounts) else None
         coerced = _as_int(raw)
         if coerced is None:
-            legs.append((symbol, None))  # unmeasured coin ⇒ propagate
+            legs.append((symbol, address, None))  # unmeasured coin ⇒ propagate
             continue
         if coerced == 0:
             # A measured-zero leg scales to ``Decimal(0)`` for ANY decimals, so it
@@ -1305,12 +1347,16 @@ def _curve_legs(
             # Otherwise a balanced removal's zero leg whose symbol the static
             # registry can't resolve would fail-close the WHOLE Curve valuation
             # (e.g. fees_total_usd → None) over a coin that contributes exactly $0.
-            legs.append((symbol, Decimal(0)))
+            legs.append((symbol, address, Decimal(0)))
             continue
-        decimals = _coin_decimals(symbol, chain)
+        decimals = resolve_token_decimals_best_effort(
+            address or symbol,
+            chain,
+            context="lp_handler curve coin decimals",
+        )
         if decimals is None:
             return None  # NON-ZERO leg we cannot scale ⇒ fail closed
-        legs.append((symbol, Decimal(coerced) / (Decimal(10) ** decimals)))
+        legs.append((symbol, address, Decimal(coerced) / (Decimal(10) ** decimals)))
     return legs
 
 
@@ -1336,10 +1382,11 @@ def _curve_close_fees_usd(
     coin_symbols = getattr(lp_close_data, "coin_symbols", None)
     if not coin_symbols:
         return None
-    legs = _curve_legs(lp_close_data.all_fees, coin_symbols, chain)
+    legs = _curve_legs(lp_close_data.all_fees, coin_symbols, chain, getattr(lp_close_data, "coin_addresses", None))
     if legs is None:
         return None
-    fees_usd, _used_peg = _value_curve_legs_usd(legs, price_oracle, _is_usd_stable_pool(coin_symbols), chain=chain)
+    peg_values = _curve_pool_peg_values(legs, price_oracle, chain=chain)
+    fees_usd, _used_peg = _value_curve_legs_usd(legs, price_oracle, peg_values, chain=chain)
     return fees_usd
 
 
@@ -1356,8 +1403,8 @@ def _curve_lp_principal_usd(
     (no token0/token1 on the ledger row) → the LP_CLOSE ``realized_pnl_usd`` is
     NULL → Accountant Test G6 ``Σ_lp_usd_null_count``. Values every coin leg the
     parser measured against the price oracle, with a ``$1`` USD-stable peg for
-    unpriced legs ONLY when the pool's coins are ALL recognized USD-stables
-    (``_is_usd_stable_pool``) — a non-stable/crypto/metapool pool stays
+    unpriced legs ONLY when every pool coin has an exact registry peg identity
+    and no measured member is depegged — a non-stable/crypto/metapool pool stays
     UNAVAILABLE (``None``), correctly leaving G6 FAIL for it (the NAV repricer's
     scope).
 
@@ -1379,10 +1426,11 @@ def _curve_lp_principal_usd(
     all_amounts = getattr(lp_data, "all_amounts", None)
     if all_amounts is None:
         return None, False
-    legs = _curve_legs(all_amounts, coin_symbols, chain)
+    legs = _curve_legs(all_amounts, coin_symbols, chain, getattr(lp_data, "coin_addresses", None))
     if legs is None:
         return None, False
-    return _value_curve_legs_usd(legs, price_oracle, _is_usd_stable_pool(coin_symbols), chain=chain)
+    peg_values = _curve_pool_peg_values(legs, price_oracle, chain=chain)
+    return _value_curve_legs_usd(legs, price_oracle, peg_values, chain=chain)
 
 
 def _resolve_curve_lp_basis_and_confidence(
@@ -2044,6 +2092,8 @@ def handle_lp(
         # so a proportional close's measured USD basis self-documents WHICH coins
         # back it, even though token0/token1 are empty (no 2-token direction).
         coin_symbols=getattr(lp_data, "coin_symbols", None),
+        # ALM-3190 — exact N-coin identities for replay-safe peg gating.
+        coin_addresses=getattr(lp_data, "coin_addresses", None),
     )
 
 

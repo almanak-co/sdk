@@ -37,6 +37,8 @@ class CompilerServices(Protocol):
 
     def require_token_price(self, symbol: str) -> Decimal: ...
 
+    def require_token_price_for(self, token: TokenInfo) -> Decimal: ...
+
     def assert_prices_available(self, tokens: list[str | None]) -> None:
         """Raise ``ValueError`` unless every token has a REAL, non-placeholder price.
 

@@ -14,12 +14,15 @@ token the static registry does not contain.
 """
 
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
 from almanak.framework.intents.compiler import IntentCompiler, IntentCompilerConfig
-from almanak.framework.intents.compiler_models import TokenInfo
+from almanak.framework.intents.compiler_models import CompilationResult, CompilationStatus, TokenInfo
+from almanak.framework.intents.vocabulary import IntentType
+from almanak.framework.models.reproduction_bundle import ActionBundle
 
 # ALM-3173: real registry-unknown token (SPCXB on BSC). Absent from
 # data/tokens.json — the point of these tests. If it ever gets added to the
@@ -108,16 +111,54 @@ class TestAddressFirstLookup:
         price = compiler._queries.require_token_price_for(_spcxb())
         assert price == Decimal("115")
 
+    @pytest.mark.parametrize(
+        ("address", "decimals"),
+        [
+            ("not-an-address", 18),
+            (SPCXB_ADDR, 78),
+        ],
+    )
+    def test_invalid_identity_keeps_measured_symbol_fallback(self, address: str, decimals: int):
+        compiler = _compiler({"SPCXB": Decimal("115")})
+        token = TokenInfo(symbol="SPCXB", address=address, decimals=decimals)
+
+        assert compiler._queries.require_token_price_for(token) == Decimal("115")
+
     def test_missing_everywhere_still_fails_closed(self):
         compiler = _compiler({"USDT": Decimal("1")})
         with pytest.raises(ValueError, match="missing in the price oracle"):
             compiler._queries.require_token_price_for(_spcxb())
 
     def test_zero_address_price_is_a_miss_not_a_hit(self):
-        """Zero under the address key must not defeat the fail-closed path."""
+        """Zero under the address key blocks every lower-priority fallback."""
         compiler = _compiler({f"BSC:{SPCXB_ADDR.upper()}": Decimal("0")})
         with pytest.raises(ValueError, match="price oracle"):
             compiler._queries.require_token_price_for(_spcxb())
+
+    def test_missing_pegged_identity_uses_registry_peg_and_records_provenance(self, caplog):
+        compiler = _compiler({})
+        usdt = TokenInfo(symbol="USDT", address=USDT_BSC_ADDR, decimals=18)
+
+        with caplog.at_level("WARNING"):
+            price = compiler._queries.require_token_price_for(usdt)
+
+        assert price == Decimal("1")
+        assert compiler._peg_fallbacks == {f"bsc:{USDT_BSC_ADDR}"}
+        assert "used_peg=true" in caplog.text
+
+    def test_measured_zero_for_pegged_identity_refuses_registry_peg(self):
+        compiler = _compiler({f"bsc:{USDT_BSC_ADDR}": Decimal("0")})
+        usdt = TokenInfo(symbol="USDT", address=USDT_BSC_ADDR, decimals=18)
+
+        with pytest.raises(ValueError, match="refuses to replace measured zero"):
+            compiler._queries.require_token_price_for(usdt)
+
+    def test_measured_depeg_wins_over_registry_peg(self):
+        compiler = _compiler({f"bsc:{USDT_BSC_ADDR}": Decimal("0.96")})
+        usdt = TokenInfo(symbol="USDT", address=USDT_BSC_ADDR, decimals=18)
+
+        assert compiler._queries.require_token_price_for(usdt) == Decimal("0.96")
+        assert compiler._peg_fallbacks == set()
 
     def test_native_token_keeps_symbol_path(self):
         """Natives price by symbol; their sentinel address is not an oracle key."""
@@ -165,3 +206,42 @@ class TestCompilePathsUseAddressFirstJoin:
         with patch.object(compiler, "_require_token_price", return_value=Decimal("3")):
             price = compiler._queries.require_token_price_for(_spcxb())
         assert price == Decimal("3")
+
+    def test_compile_stamps_peg_provenance_on_result_and_bundle(self):
+        compiler = _compiler({})
+        usdt = TokenInfo(symbol="USDT", address=USDT_BSC_ADDR, decimals=18)
+
+        def compile_with_peg(_intent):
+            compiler._require_token_price_for(usdt)
+            return CompilationResult(
+                status=CompilationStatus.SUCCESS,
+                action_bundle=ActionBundle(intent_type="TEST"),
+            )
+
+        with patch.object(compiler, "_compile_intent", side_effect=compile_with_peg):
+            result = compiler.compile(SimpleNamespace(intent_type=IntentType.HOLD))  # type: ignore[arg-type]
+
+        identity = f"bsc:{USDT_BSC_ADDR}"
+        assert result.used_peg is True
+        assert result.peg_tokens == [identity]
+        assert result.action_bundle is not None
+        assert result.action_bundle.metadata["price_provenance"] == {
+            "used_peg": True,
+            "peg_tokens": [identity],
+        }
+
+    def test_compile_lazily_initializes_tracking_for_lightweight_subclass(self):
+        """Compiler test doubles that skip the base initializer still dispatch."""
+        compiler = object.__new__(IntentCompiler)
+        compiled = CompilationResult(
+            status=CompilationStatus.SUCCESS,
+            action_bundle=ActionBundle(intent_type="TEST"),
+        )
+
+        with patch.object(compiler, "_compile_intent", return_value=compiled):
+            result = compiler.compile(SimpleNamespace(intent_type=IntentType.HOLD))  # type: ignore[arg-type]
+
+        assert result.used_peg is False
+        assert result.peg_tokens == []
+        assert compiler._peg_tracking_depth == 0
+        assert compiler._peg_fallbacks == set()

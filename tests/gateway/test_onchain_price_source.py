@@ -7,9 +7,26 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from almanak.framework.data.tokens.models import ResolvedToken
 from almanak.integrations.chainlink.catalog import CATALOG
 from almanak.integrations.chainlink.gateway.live import ChainlinkPriceSource
 from almanak.integrations.chainlink.models import ChainlinkFeedObservation
+
+
+def _resolved_stable(symbol: str, address: str, chain: str, chain_id: int) -> ResolvedToken:
+    return ResolvedToken(
+        symbol=symbol,
+        address=address,
+        decimals=6 if symbol in {"USDC", "USDT"} else 18,
+        chain=chain,
+        chain_id=chain_id,
+        is_stablecoin=True,
+    )
+
+
+ARBITRUM_USDC = _resolved_stable("USDC", "0xaf88d065e77c8cC2239327C5EDb3A432268e5831", "arbitrum", 42161)
+ARBITRUM_USDT = _resolved_stable("USDT", "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9", "arbitrum", 42161)
+ETHEREUM_DAI = _resolved_stable("DAI", "0x6B175474E89094C44Da98b954EedeAC495271d0F", "ethereum", 1)
 
 
 @pytest.fixture(autouse=True)
@@ -62,7 +79,7 @@ class TestStablecoins:
     @pytest.mark.asyncio
     async def test_usdc_returns_one(self):
         source = ChainlinkPriceSource(chain="arbitrum")
-        result = await source.get_price("USDC", "USD")
+        result = await source.get_price("USDC", "USD", resolved_token=ARBITRUM_USDC)
 
         assert result.price == Decimal("1.00")
         assert result.source == "onchain"
@@ -73,7 +90,7 @@ class TestStablecoins:
     @pytest.mark.asyncio
     async def test_usdt_returns_one(self):
         source = ChainlinkPriceSource(chain="arbitrum")
-        result = await source.get_price("USDT", "USD")
+        result = await source.get_price("USDT", "USD", resolved_token=ARBITRUM_USDT)
 
         assert result.price == Decimal("1.00")
         assert result.confidence == 0.99
@@ -82,7 +99,7 @@ class TestStablecoins:
     @pytest.mark.asyncio
     async def test_dai_returns_one(self):
         source = ChainlinkPriceSource(chain="ethereum")
-        result = await source.get_price("DAI", "USD")
+        result = await source.get_price("DAI", "USD", resolved_token=ETHEREUM_DAI)
 
         assert result.price == Decimal("1.00")
         await source.close()
@@ -90,7 +107,7 @@ class TestStablecoins:
     @pytest.mark.asyncio
     async def test_stablecoin_case_insensitive(self):
         source = ChainlinkPriceSource(chain="arbitrum")
-        result = await source.get_price("usdc", "USD")
+        result = await source.get_price("usdc", "USD", resolved_token=ARBITRUM_USDC)
 
         assert result.price == Decimal("1.00")
         await source.close()
@@ -357,8 +374,8 @@ class TestCache:
         """Stablecoin results are cached too."""
         source = ChainlinkPriceSource(chain="arbitrum", cache_ttl=60.0)
 
-        result1 = await source.get_price("USDC", "USD")
-        result2 = await source.get_price("USDC", "USD")
+        result1 = await source.get_price("USDC", "USD", resolved_token=ARBITRUM_USDC)
+        result2 = await source.get_price("USDC", "USD", resolved_token=ARBITRUM_USDC)
 
         assert result1.price == result2.price == Decimal("1.00")
         await source.close()
@@ -412,9 +429,10 @@ class TestErrorHandling:
         with patch("almanak.integrations.chainlink.gateway.live.get_rpc_url", side_effect=ValueError("No RPC")):
             source = ChainlinkPriceSource(chain="nonexistent", network="mainnet")
 
-        # Stablecoins still work (no RPC needed)
-        result = await source.get_price("USDC", "USD")
-        assert result.price == Decimal("1.00")
+        # A bare symbol has no exact peg identity and therefore cannot bypass
+        # the missing RPC configuration.
+        with pytest.raises(DataSourceUnavailable, match="No RPC URL"):
+            await source.get_price("USDC", "USD")
 
         # Non-stablecoins fail
         with pytest.raises(DataSourceUnavailable, match="No RPC URL"):
@@ -504,7 +522,7 @@ class TestSessionCleanup:
         source = ChainlinkPriceSource(chain="arbitrum")
 
         # Force session creation via a stablecoin call (no RPC needed)
-        await source.get_price("USDC", "USD")
+        await source.get_price("USDC", "USD", resolved_token=ARBITRUM_USDC)
 
         # No session created for stablecoins, so create one manually
         import aiohttp

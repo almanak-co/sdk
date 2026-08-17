@@ -1819,6 +1819,7 @@ class CurveReceiptParser:
                 # for an unknown pool ⇒ ``None`` (handler keeps its legacy path).
                 open_pool_address = _canonical_pool_address(event)
                 coin_symbols = _pool_coin_symbols(open_pool_address, self.chain, self._pool_meta_lookup) or None
+                coin_addresses = _pool_coin_addresses(open_pool_address, self.chain, self._pool_meta_lookup) or None
 
                 return LPOpenData(
                     # Fungible LP: no NFT id. ``0`` is the canonical
@@ -1838,6 +1839,7 @@ class CurveReceiptParser:
                     pool_address=open_pool_address,
                     position_hash=None,  # Curve has no V4 position-key hash.
                     coin_symbols=coin_symbols,
+                    coin_addresses=coin_addresses,
                 )
 
             return None
@@ -2079,6 +2081,7 @@ class CurveReceiptParser:
                 # for an unknown pool ⇒ ``None`` (handler keeps its legacy path).
                 close_pool_address = _canonical_pool_address(event)
                 coin_symbols = _pool_coin_symbols(close_pool_address, self.chain, self._pool_meta_lookup) or None
+                coin_addresses = _pool_coin_addresses(close_pool_address, self.chain, self._pool_meta_lookup) or None
 
                 return LPCloseData(
                     amount0_collected=amount0,
@@ -2089,6 +2092,7 @@ class CurveReceiptParser:
                     additional_amounts=additional_amounts,
                     additional_fees=additional_fees,
                     coin_symbols=coin_symbols,
+                    coin_addresses=coin_addresses,
                     # VIB-4968 — stamp the canonical Curve pool address (the
                     # RemoveLiquidity* event emitter IS the pool contract).
                     # This is the chain-data-first source the LP accounting

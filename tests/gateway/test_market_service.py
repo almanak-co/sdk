@@ -168,6 +168,53 @@ class TestMarketServiceGetBalance:
                 mock_provider.invalidate_cache.assert_called_once_with("WETH")
 
     @pytest.mark.asyncio
+    async def test_get_balance_prices_when_identity_resolution_fails(self, market_service, mock_context):
+        """Best-effort identity metadata must not cancel symbol pricing."""
+        from datetime import UTC, datetime
+
+        from almanak.framework.data.interfaces import BalanceResult, PriceResult
+
+        wallet = "0x1234567890123456789012345678901234567890"
+        balance = BalanceResult(
+            balance=Decimal("2"),
+            token="WETH",
+            address="0x4200000000000000000000000000000000000006",
+            decimals=18,
+            raw_balance=2 * 10**18,
+            timestamp=datetime.now(UTC),
+            stale=False,
+        )
+        price = PriceResult(
+            price=Decimal("2500"),
+            source="measured",
+            timestamp=datetime.now(UTC),
+            confidence=1.0,
+            stale=False,
+        )
+        provider = MagicMock()
+        provider.get_balance = AsyncMock(return_value=balance)
+        aggregator = MagicMock()
+        aggregator.get_aggregated_price = AsyncMock(return_value=price)
+        market_service._initialized = True
+
+        with (
+            patch.object(market_service, "_get_balance_provider", return_value=provider),
+            patch.object(market_service, "_aggregator_for", return_value=aggregator),
+            patch.object(
+                market_service,
+                "_resolve_token_for_pricing",
+                new=AsyncMock(side_effect=RuntimeError("resolver unavailable")),
+            ),
+        ):
+            response = await market_service.GetBalance(
+                gateway_pb2.BalanceRequest(token="WETH", chain="base", wallet_address=wallet),
+                mock_context,
+            )
+
+        assert response.balance_usd == "5000"
+        aggregator.get_aggregated_price.assert_awaited_once_with("WETH", "USD", resolved_token=None)
+
+    @pytest.mark.asyncio
     async def test_get_balance_unknown_address_dynamic_resolution(self, market_service, mock_context):
         """GetBalance resolves an unknown ERC20 address on-chain and returns the balance.
 

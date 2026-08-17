@@ -40,6 +40,19 @@ def run_async[T](coro: Coroutine[Any, Any, T]) -> T:
         loop.close()
 
 
+def test_price_result_peg_provenance_round_trips_canonically() -> None:
+    result = PriceResult(
+        price=Decimal("1"),
+        source="aggregated",
+        timestamp=datetime.now(UTC),
+        confidence=0.9,
+        peg_tokens=("ethereum:0xbbb", "ethereum:0xaaa", "ethereum:0xbbb"),
+    )
+
+    assert result.peg_tokens == ("ethereum:0xaaa", "ethereum:0xbbb")
+    assert PriceResult.from_dict(result.to_dict()).peg_tokens == result.peg_tokens
+
+
 # =============================================================================
 # Mock Price Source
 # =============================================================================

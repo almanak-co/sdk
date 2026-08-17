@@ -229,8 +229,8 @@ def test_chain_qualified_symbol_lookup_canonicalizes_chain_alias() -> None:
     assert found is not None and found.price == Decimal("2000")
 
 
-def test_lenient_oracle_price_walks_past_zero_to_stablecoin_peg() -> None:
-    assert lenient_oracle_price({"USDC": Decimal("0")}, "USDC", "arbitrum") == Decimal("1")
+def test_lenient_oracle_price_zero_blocks_lower_priority_stablecoin_peg() -> None:
+    assert lenient_oracle_price({"USDC": Decimal("0")}, "USDC", "arbitrum") is None
 
 
 def test_lenient_oracle_price_walks_past_zero_to_wrapped_native_alias() -> None:

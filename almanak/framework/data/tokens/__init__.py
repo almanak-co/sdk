@@ -97,10 +97,20 @@ from .models import (
     BridgeType,
     ChainToken,
     ChainTokenConfig,
+    PegClass,
     ResolvedToken,
     Token,
     TokenRef,
     normalize_token_address_for_chain,
+)
+from .pegs import (
+    PEG_DEVIATION_THRESHOLD_BPS,
+    PEG_REGISTRY,
+    is_pegged,
+    is_within_peg,
+    peg_class_for,
+    peg_deviation_bps,
+    peg_for_identity,
 )
 from .resolver import TokenResolver, create_token_resolver, get_token_resolver
 from .utils import denormalize, normalize
@@ -125,7 +135,15 @@ __all__ = [
     "TokenMeta",
     "SwapTokenMeta",
     "BridgeType",
+    "PegClass",
     "ChainTokenConfig",
+    "PEG_REGISTRY",
+    "PEG_DEVIATION_THRESHOLD_BPS",
+    "is_pegged",
+    "is_within_peg",
+    "peg_for_identity",
+    "peg_class_for",
+    "peg_deviation_bps",
     # CAIP-19 asset-id codec (VIB-5175)
     "ParsedAsset",
     "parse_caip19",

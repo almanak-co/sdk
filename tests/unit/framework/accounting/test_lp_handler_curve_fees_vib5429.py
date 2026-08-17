@@ -28,7 +28,7 @@ from almanak.framework.accounting.category_handlers.lp_handler import (
     _curve_close_fees_usd,
     _curve_legs,
     _curve_lp_principal_usd,
-    _is_usd_stable_pool,
+    _curve_pool_peg_values,
     _value_curve_legs_usd,
     handle_lp,
 )
@@ -41,6 +41,11 @@ from almanak.framework.observability.ledger import (
 from tests.support.curve_pool_catalog import curve_test_meta_lookup
 
 CURVE_3POOL = "0xbebc44782c7db0a1a60cb6fe97d0b483032ff1c7"
+DAI = "0x6B175474E89094C44Da98b954EedeAC495271d0F"
+USDC = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+USDT = "0xdAC17F958D2ee523a2206206994597C13D831ec7"
+WETH = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+THREE_POOL_ADDRESSES = [DAI, USDC, USDT]
 WALLET = "0x1234567890abcdef1234567890abcdef12345678"
 POSITION_KEY = f"lp:curve:ethereum:{WALLET}:3pool"
 
@@ -87,6 +92,7 @@ def _close_data(**overrides) -> LPCloseData:
         "fees1": 0,
         "additional_fees": {2: 0},
         "coin_symbols": ["DAI", "USDC", "USDT"],
+        "coin_addresses": THREE_POOL_ADDRESSES,
         "pool_address": CURVE_3POOL,
     }
     base.update(overrides)
@@ -150,6 +156,7 @@ class TestCurveCloseFeesUsd:
         # leg fails closed (UNAVAILABLE), never fabricated at $1.
         lc = _close_data(
             coin_symbols=["DAI", "USDC", "WETH"],
+            coin_addresses=[DAI, USDC, WETH],
             additional_fees={2: 1_000_000_000_000_000_000},  # 1.0 WETH fee, unpriced
         )
         assert _curve_close_fees_usd(lc, "ethereum", {"USDC": Decimal("1")}) is None
@@ -212,32 +219,30 @@ class TestHandleLpCurveCloseFees:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# _is_usd_stable_pool — the peg gate (single source: core's shared frozenset)
+# _curve_pool_peg_values — exact-identity peg gate
 # ──────────────────────────────────────────────────────────────────────────────
-class TestIsUsdStablePool:
-    def test_all_stable_coins(self):
-        assert _is_usd_stable_pool(["DAI", "USDC", "USDT"]) is True
+class TestCurvePoolPegValues:
+    def test_all_exact_registry_identities_are_eligible(self):
+        legs = _curve_legs([0, 0, 0], ["DAI", "USDC", "USDT"], "ethereum", THREE_POOL_ADDRESSES)
+        assert legs is not None
+        assert _curve_pool_peg_values(legs, {}, chain="ethereum") == [Decimal("1")] * 3
 
-    def test_any_nonstable_coin_disqualifies(self):
-        assert _is_usd_stable_pool(["USDT", "WBTC", "WETH"]) is False
-        assert _is_usd_stable_pool(["DAI", "USDC", "WETH"]) is False
+    def test_symbol_match_with_unregistered_address_is_ineligible(self):
+        legs = [("USDC", "0x1111111111111111111111111111111111111111", Decimal("1"))]
+        assert _curve_pool_peg_values(legs, {}, chain="ethereum") is None
 
-    def test_empty_is_not_stable(self):
-        assert _is_usd_stable_pool([]) is False
+    def test_missing_addresses_are_ineligible(self):
+        assert _curve_pool_peg_values([("USDC", None, Decimal("1"))], {}, chain="ethereum") is None
 
-    def test_gate_reads_shared_core_constant(self):
-        # VIB-5536: the peg gate reads ``CURVE_USD_STABLE_SYMBOLS`` from
-        # ``almanak.core.constants`` (a lower layer than both accounting and
-        # valuation) — no backward import from valuation, no lazy re-import, so
-        # there is no import-failure degradation path to exercise: core is a hard
-        # dependency of this module. The valuation NAV repricer aliases the SAME
-        # object, so basis-peg and NAV-mark can never drift.
-        from almanak.core.constants import CURVE_USD_STABLE_SYMBOLS
-        from almanak.framework.accounting.category_handlers import lp_handler
-        from almanak.framework.valuation.curve_lp_position_reader import _USD_STABLE_SYMBOLS
+    def test_live_depeg_disables_whole_pool(self):
+        legs = _curve_legs([0, 0, 0], ["DAI", "USDC", "USDT"], "ethereum", THREE_POOL_ADDRESSES)
+        assert legs is not None
+        assert _curve_pool_peg_values(legs, {"USDC": Decimal("0.96")}, chain="ethereum") is None
 
-        assert lp_handler.CURVE_USD_STABLE_SYMBOLS is CURVE_USD_STABLE_SYMBOLS
-        assert _USD_STABLE_SYMBOLS is CURVE_USD_STABLE_SYMBOLS
+    def test_live_zero_disables_whole_pool(self):
+        legs = _curve_legs([0, 0, 0], ["DAI", "USDC", "USDT"], "ethereum", THREE_POOL_ADDRESSES)
+        assert legs is not None
+        assert _curve_pool_peg_values(legs, {"USDC": Decimal("0")}, chain="ethereum") is None
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -260,7 +265,7 @@ class TestCurveLpPrincipalUsd:
     def test_close_nonstable_pool_unpriced_fails_closed(self):
         # tricrypto-style pool: WETH unpriced and non-stable ⇒ UNAVAILABLE (None),
         # so G6 correctly stays FAIL for crypto pools (NAV repricer's scope).
-        lc = _close_data(coin_symbols=["DAI", "USDC", "WETH"])
+        lc = _close_data(coin_symbols=["DAI", "USDC", "WETH"], coin_addresses=[DAI, USDC, WETH])
         usd, used_peg = _curve_lp_principal_usd(lc, "LP_CLOSE", "ethereum", {"USDC": Decimal("1")})
         assert usd is None
         assert used_peg is False
@@ -274,6 +279,7 @@ class TestCurveLpPrincipalUsd:
             amount1=10_000_000,  # 10 USDC (6 dec)
             additional_amounts={2: 0},  # USDT measured-zero
             coin_symbols=["DAI", "USDC", "USDT"],
+            coin_addresses=THREE_POOL_ADDRESSES,
             pool_address=CURVE_3POOL,
         )
         usd, used_peg = _curve_lp_principal_usd(lo, "LP_OPEN", "ethereum", {"USDC": Decimal("1.00")})
@@ -298,6 +304,7 @@ def _open_data(**overrides) -> LPOpenData:
         "amount1": 10_000_000,  # 10 USDC
         "additional_amounts": {2: 0},  # USDT
         "coin_symbols": ["DAI", "USDC", "USDT"],
+        "coin_addresses": THREE_POOL_ADDRESSES,
         "pool_address": CURVE_3POOL,
     }
     base.update(overrides)
@@ -378,7 +385,7 @@ class TestCurveLegsZeroShortCircuit:
         # must still scale to Decimal(0) (short-circuit BEFORE _coin_decimals) —
         # NOT fail-close the whole valuation. The unknown symbol's leg is 0.
         legs = _curve_legs([1_000_000, 0], ["USDC", _GARBAGE], "ethereum")
-        assert legs == [("USDC", Decimal("1")), (_GARBAGE, Decimal(0))]
+        assert legs == [("USDC", None, Decimal("1")), (_GARBAGE, None, Decimal(0))]
 
     def test_nonzero_leg_with_unresolvable_decimals_fails_closed(self):
         # A NON-ZERO leg we cannot scale ⇒ whole-hook None (cannot value it).
@@ -386,21 +393,21 @@ class TestCurveLegsZeroShortCircuit:
 
     def test_unmeasured_leg_propagates_none(self):
         legs = _curve_legs([None, 0], ["USDC", "USDT"], "ethereum")
-        assert legs == [("USDC", None), ("USDT", Decimal(0))]
+        assert legs == [("USDC", None, None), ("USDT", None, Decimal(0))]
 
 
 class TestValueCurveLegsUsdEdges:
     def test_no_legs_returns_none(self):
-        assert _value_curve_legs_usd([], {}, True, chain="ethereum") == (None, False)
+        assert _value_curve_legs_usd([], {}, [], chain="ethereum") == (None, False)
 
     def test_all_measured_zero_no_prices_is_zero(self):
         usd, used_peg = _value_curve_legs_usd(
-            [("DAI", Decimal(0)), ("USDC", Decimal(0))], {}, is_usd_stable=False, chain="ethereum"
+            [("DAI", DAI, Decimal(0)), ("USDC", USDC, Decimal(0))], {}, peg_values=None, chain="ethereum"
         )
         assert usd == Decimal(0) and used_peg is False
 
     def test_nonzero_unpriced_nonstable_fails_closed(self):
-        assert _value_curve_legs_usd([("WETH", Decimal("1"))], {}, is_usd_stable=False, chain="ethereum") == (
+        assert _value_curve_legs_usd([("WETH", WETH, Decimal("1"))], {}, peg_values=None, chain="ethereum") == (
             None,
             False,
         )
@@ -409,7 +416,7 @@ class TestValueCurveLegsUsdEdges:
         token = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
         prices = {f"base:{token}": Decimal("1"), f"ethereum:{token}": Decimal("2000")}
 
-        assert _value_curve_legs_usd([(token, Decimal("2"))], prices, is_usd_stable=False, chain="base") == (
+        assert _value_curve_legs_usd([("USDC", token, Decimal("2"))], prices, peg_values=None, chain="base") == (
             Decimal("2"),
             False,
         )

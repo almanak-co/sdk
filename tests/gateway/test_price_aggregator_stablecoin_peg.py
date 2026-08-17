@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -32,7 +33,36 @@ from almanak.framework.data.interfaces import (
     DataSourceRateLimited,
     PriceResult,
 )
+from almanak.framework.data.tokens.models import BridgeType, ResolvedToken
 from almanak.gateway.data.price.aggregator import PriceAggregator
+
+USDC_ADDRESS = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+USDT_ADDRESS = "0xdAC17F958D2ee523a2206206994597C13D831ec7"
+
+
+def _resolved_stable(symbol: str, address: str) -> ResolvedToken:
+    return ResolvedToken(
+        symbol=symbol,
+        address=address,
+        decimals=6,
+        chain="ethereum",
+        chain_id=1,
+        name=symbol,
+        is_stablecoin=True,
+        is_native=False,
+        is_wrapped_native=False,
+        canonical_symbol=symbol,
+        bridge_type=BridgeType.NATIVE,
+        source="static",
+    )
+
+
+USDC_RESOLVED = _resolved_stable("USDC", USDC_ADDRESS)
+USDT_RESOLVED = _resolved_stable("USDT", USDT_ADDRESS)
+USDC_IDENTITY = USDC_RESOLVED.token_ref.identity_key
+USDT_IDENTITY = USDT_RESOLVED.token_ref.identity_key
+USDC_IDENTITY_LABEL = f"{USDC_IDENTITY[0]}:{USDC_IDENTITY[1]}"
+USDT_IDENTITY_LABEL = f"{USDT_IDENTITY[0]}:{USDT_IDENTITY[1]}"
 
 
 class _Source(BasePriceSource):
@@ -54,6 +84,7 @@ class _Source(BasePriceSource):
         bypass_price: Decimal | None = None,
         confidence: float = 0.95,
         stale: bool = False,
+        peg_tokens: tuple[str, ...] = (),
     ) -> None:
         self._name = name
         self.price = price
@@ -62,6 +93,7 @@ class _Source(BasePriceSource):
         self._bypass_price = bypass_price
         self._confidence = confidence
         self._stale = stale
+        self._peg_tokens = peg_tokens
         self.calls: list[str] = []
         self.call_kwargs: list[dict[str, object]] = []
 
@@ -92,6 +124,7 @@ class _Source(BasePriceSource):
             timestamp=datetime.now(UTC),
             confidence=self._confidence,
             stale=self._stale,
+            peg_tokens=self._peg_tokens,
         )
 
     async def close(self) -> None:
@@ -105,6 +138,18 @@ class _Source(BasePriceSource):
 
 class TestStablecoinPegFastPath:
     @pytest.mark.asyncio
+    async def test_bare_stable_symbol_does_not_authorize_peg(self) -> None:
+        """Symbol text alone cannot grant synthetic pricing."""
+        source = _Source(
+            "coingecko",
+            raises=DataSourceRateLimited(source="coingecko", retry_after=1.0),
+        )
+        aggregator = PriceAggregator(sources=[source])
+
+        with pytest.raises(AllDataSourcesFailed):
+            await aggregator.get_aggregated_price("USDC", "USD")
+
+    @pytest.mark.asyncio
     async def test_stable_usd_returns_peg_without_upstream_call(self) -> None:
         """A stable/USD pair returns $1.00 from the fast-path and NONE of the
         upstream sources are queried — that's the per-iteration cost cut."""
@@ -112,13 +157,67 @@ class TestStablecoinPegFastPath:
         binance = _Source("binance", price=Decimal("1.001"))
         aggregator = PriceAggregator(sources=[binance, cg])
 
-        result = await aggregator.get_aggregated_price("USDC", "USD")
+        result = await aggregator.get_aggregated_price("USDC", "USD", resolved_token=USDC_RESOLVED)
 
         assert result.price == Decimal("1.00")
         assert result.source == "stablecoin_peg"
+        assert result.peg_tokens == (USDC_IDENTITY_LABEL,)
         # Critical: no upstream price call for either source.
         assert cg.calls == []
         assert binance.calls == []
+
+    @pytest.mark.asyncio
+    async def test_provider_synthetic_provenance_survives_aggregation(self) -> None:
+        """Fan-in cannot disguise a provider-authored peg as measured data."""
+        synthetic = _Source(
+            "binance",
+            price=Decimal("1"),
+            peg_tokens=(USDC_IDENTITY_LABEL,),
+        )
+        measured = _Source("chainlink", price=Decimal("0.999"))
+        aggregator = PriceAggregator(sources=[synthetic, measured])
+
+        # Exercise fan-in rather than the aggregate-level stablecoin fast path.
+        with patch.object(aggregator, "_maybe_stablecoin_peg", new=AsyncMock(return_value=None)):
+            result = await aggregator.get_aggregated_price("USDC", "USD", resolved_token=USDC_RESOLVED)
+
+        assert result.source == "aggregated"
+        assert result.peg_tokens == (USDC_IDENTITY_LABEL,)
+
+    @pytest.mark.asyncio
+    async def test_verification_excludes_provider_pegs_that_would_outvote_depeg(self) -> None:
+        """Two synthetic $1 inputs cannot outlier a measured $0.80 depeg."""
+        measured = _Source(
+            "chainlink",
+            price=Decimal("1"),
+            bypass_price=Decimal("0.80"),
+            stale=True,
+        )
+        binance = _Source(
+            "binance",
+            price=Decimal("1"),
+            peg_tokens=(USDC_IDENTITY_LABEL,),
+        )
+        hypercore = _Source(
+            "hypercore_oracle",
+            price=Decimal("1"),
+            peg_tokens=(USDC_IDENTITY_LABEL,),
+        )
+        aggregator = PriceAggregator(
+            sources=[measured, binance, hypercore],
+            stablecoin_verify=True,
+        )
+
+        result = await aggregator.get_aggregated_price("USDC", "USD", resolved_token=USDC_RESOLVED)
+
+        assert result.price == Decimal("0.80")
+        assert result.source == "aggregated"
+        assert result.peg_tokens == ()
+        assert measured.call_kwargs == [{"resolved_token": USDC_RESOLVED, "bypass_stablecoin_fallback": True}]
+        details = aggregator.get_last_details("USDC", "USD")
+        assert details["sources_ok"] == ["chainlink"]
+        assert "binance" in details["sources_failed"]
+        assert "hypercore_oracle" in details["sources_failed"]
 
     @pytest.mark.asyncio
     async def test_non_stable_token_skips_fast_path(self) -> None:
@@ -139,7 +238,7 @@ class TestStablecoinPegFastPath:
         cg = _Source("coingecko", price=Decimal("0.92"))
         aggregator = PriceAggregator(sources=[cg])
 
-        result = await aggregator.get_aggregated_price("USDC", "EUR")
+        result = await aggregator.get_aggregated_price("USDC", "EUR", resolved_token=USDC_RESOLVED)
 
         assert result.source != "stablecoin_peg"
         assert cg.calls == ["USDC"]
@@ -151,7 +250,7 @@ class TestStablecoinPegFastPath:
         cg = _Source("coingecko", price=Decimal("1.0"))
         aggregator = PriceAggregator(sources=[cg], stablecoin_verify=True)
 
-        result = await aggregator.get_aggregated_price("USDC", "USD")
+        result = await aggregator.get_aggregated_price("USDC", "USD", resolved_token=USDC_RESOLVED)
 
         assert result.source != "stablecoin_peg"
         assert cg.calls == ["USDC"]
@@ -166,10 +265,10 @@ class TestStablecoinPegFastPath:
         )
         aggregator = PriceAggregator(sources=[onchain], stablecoin_verify=True)
 
-        result = await aggregator.get_aggregated_price("USDC", "USD")
+        result = await aggregator.get_aggregated_price("USDC", "USD", resolved_token=USDC_RESOLVED)
 
         assert result.price == Decimal("0.80")
-        assert onchain.call_kwargs == [{"resolved_token": None, "bypass_stablecoin_fallback": True}]
+        assert onchain.call_kwargs == [{"resolved_token": USDC_RESOLVED, "bypass_stablecoin_fallback": True}]
 
 
 class TestStablecoinPegChainlinkSanityCheck:
@@ -182,11 +281,11 @@ class TestStablecoinPegChainlinkSanityCheck:
         )
         aggregator = PriceAggregator(sources=[onchain], stablecoin_chainlink_check_interval=1)
 
-        result = await aggregator.get_aggregated_price("USDC", "USD")
+        result = await aggregator.get_aggregated_price("USDC", "USD", resolved_token=USDC_RESOLVED)
 
         assert result.price == Decimal("0.80")
         assert result.source == "onchain_chainlink"
-        assert onchain.call_kwargs == [{"resolved_token": None, "bypass_stablecoin_fallback": True}]
+        assert onchain.call_kwargs == [{"resolved_token": USDC_RESOLVED, "bypass_stablecoin_fallback": True}]
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -207,15 +306,15 @@ class TestStablecoinPegChainlinkSanityCheck:
         )
         aggregator = PriceAggregator(sources=[onchain], stablecoin_chainlink_check_interval=1)
 
-        result = await aggregator.get_aggregated_price("USDC", "USD")
+        result = await aggregator.get_aggregated_price("USDC", "USD", resolved_token=USDC_RESOLVED)
 
         assert result.source != "stablecoin_peg"
         assert result.price == Decimal("0.80")
-        assert aggregator._depegged_tokens == {"USDC"}
+        assert aggregator._depegged_tokens == {USDC_IDENTITY}
         assert onchain.calls == ["USDC", "USDC"]
         assert onchain.call_kwargs == [
-            {"resolved_token": None, "bypass_stablecoin_fallback": True},
-            {"resolved_token": None, "bypass_stablecoin_fallback": True},
+            {"resolved_token": USDC_RESOLVED, "bypass_stablecoin_fallback": True},
+            {"resolved_token": USDC_RESOLVED, "bypass_stablecoin_fallback": True},
         ]
 
     @pytest.mark.asyncio
@@ -223,7 +322,7 @@ class TestStablecoinPegChainlinkSanityCheck:
         onchain = _Source("chainlink", raises=TypeError("unexpected bypass keyword"))
         aggregator = PriceAggregator(sources=[onchain], stablecoin_chainlink_check_interval=1)
 
-        result = await aggregator.get_aggregated_price("USDC", "USD")
+        result = await aggregator.get_aggregated_price("USDC", "USD", resolved_token=USDC_RESOLVED)
 
         assert result.source == "stablecoin_peg"
 
@@ -248,7 +347,7 @@ class TestStablecoinPegChainlinkSanityCheck:
 
         # Call #1 -> check runs; #2,#3 -> skip; #4 -> check runs again.
         for _ in range(4):
-            result = await aggregator.get_aggregated_price("USDC", "USD")
+            result = await aggregator.get_aggregated_price("USDC", "USD", resolved_token=USDC_RESOLVED)
             assert result.source == "stablecoin_peg"
 
         # Sanity check hit the on-chain source on calls #1 and #4 only.
@@ -265,7 +364,7 @@ class TestStablecoinPegChainlinkSanityCheck:
             stablecoin_chainlink_check_interval=0,
         )
 
-        result = await aggregator.get_aggregated_price("USDC", "USD")
+        result = await aggregator.get_aggregated_price("USDC", "USD", resolved_token=USDC_RESOLVED)
 
         assert result.source == "stablecoin_peg"
         assert onchain.calls == []
@@ -283,7 +382,7 @@ class TestStablecoinPegChainlinkSanityCheck:
         )
 
         with caplog.at_level("WARNING"):
-            result = await aggregator.get_aggregated_price("USDC", "USD")
+            result = await aggregator.get_aggregated_price("USDC", "USD", resolved_token=USDC_RESOLVED)
 
         # Fail closed: the peg is NOT returned.
         assert result.price != Decimal("1.00")
@@ -304,7 +403,7 @@ class TestStablecoinPegChainlinkSanityCheck:
             stablecoin_chainlink_check_interval=1,
         )
 
-        result = await aggregator.get_aggregated_price("USDC", "USD")
+        result = await aggregator.get_aggregated_price("USDC", "USD", resolved_token=USDC_RESOLVED)
 
         # Did NOT short-circuit to the $1.00 peg fast-path.
         assert result.source != "stablecoin_peg"
@@ -322,7 +421,7 @@ class TestStablecoinPegChainlinkSanityCheck:
             stablecoin_chainlink_check_interval=1,
         )
 
-        result = await aggregator.get_aggregated_price("USDC", "USD")
+        result = await aggregator.get_aggregated_price("USDC", "USD", resolved_token=USDC_RESOLVED)
 
         assert result.price == Decimal("1.00")
         assert result.source == "stablecoin_peg"
@@ -338,13 +437,17 @@ class TestStablecoinPegChainlinkSanityCheck:
 
         with caplog.at_level("WARNING"):
             for _ in range(4):
-                result = await aggregator.get_aggregated_price("USDC", "USD")
+                result = await aggregator.get_aggregated_price("USDC", "USD", resolved_token=USDC_RESOLVED)
                 assert result.source == "stablecoin_peg"
 
-        outage_warnings = [record for record in caplog.records if "peg verifier unavailable for USDC" in record.message]
+        outage_warnings = [
+            record
+            for record in caplog.records
+            if f"peg verifier unavailable for {USDC_IDENTITY_LABEL}" in record.message
+        ]
         assert len(outage_warnings) == 1
         assert "after 2 consecutive checks" in outage_warnings[0].message
-        assert aggregator._stablecoin_verifier_failures == {"USDC": 4}
+        assert aggregator._stablecoin_verifier_failures == {USDC_IDENTITY: 4}
 
     @pytest.mark.asyncio
     async def test_verifier_failure_streaks_are_token_scoped(self, caplog) -> None:
@@ -356,17 +459,17 @@ class TestStablecoinPegChainlinkSanityCheck:
         )
 
         with caplog.at_level("WARNING"):
-            await aggregator.get_aggregated_price("USDC", "USD")
-            await aggregator.get_aggregated_price("USDT", "USD")
+            await aggregator.get_aggregated_price("USDC", "USD", resolved_token=USDC_RESOLVED)
+            await aggregator.get_aggregated_price("USDT", "USD", resolved_token=USDT_RESOLVED)
 
-        assert aggregator._stablecoin_verifier_failures == {"USDC": 1, "USDT": 1}
+        assert aggregator._stablecoin_verifier_failures == {USDC_IDENTITY: 1, USDT_IDENTITY: 1}
         assert not any("peg verifier unavailable" in record.message for record in caplog.records)
 
         with caplog.at_level("WARNING"):
-            await aggregator.get_aggregated_price("USDT", "USD")
+            await aggregator.get_aggregated_price("USDT", "USD", resolved_token=USDT_RESOLVED)
 
-        assert aggregator._stablecoin_verifier_failures == {"USDC": 1, "USDT": 2}
-        assert any("peg verifier unavailable for USDT" in record.message for record in caplog.records)
+        assert aggregator._stablecoin_verifier_failures == {USDC_IDENTITY: 1, USDT_IDENTITY: 2}
+        assert any(f"peg verifier unavailable for {USDT_IDENTITY_LABEL}" in record.message for record in caplog.records)
 
     @pytest.mark.asyncio
     async def test_successful_verification_resets_failure_streak(self, caplog) -> None:
@@ -377,26 +480,31 @@ class TestStablecoinPegChainlinkSanityCheck:
             stablecoin_verifier_failure_warning_threshold=2,
         )
 
-        await aggregator.get_aggregated_price("USDC", "USD")
-        assert aggregator._stablecoin_verifier_failures == {"USDC": 1}
+        await aggregator.get_aggregated_price("USDC", "USD", resolved_token=USDC_RESOLVED)
+        assert aggregator._stablecoin_verifier_failures == {USDC_IDENTITY: 1}
 
         onchain._raises = None
         onchain.price = Decimal("1.00")
-        await aggregator.get_aggregated_price("USDC", "USD")
+        await aggregator.get_aggregated_price("USDC", "USD", resolved_token=USDC_RESOLVED)
         assert aggregator._stablecoin_verifier_failures == {}
 
         onchain._raises = RuntimeError("new outage")
         with caplog.at_level("WARNING"):
-            await aggregator.get_aggregated_price("USDC", "USD")
+            await aggregator.get_aggregated_price("USDC", "USD", resolved_token=USDC_RESOLVED)
 
-        assert aggregator._stablecoin_verifier_failures == {"USDC": 1}
-        assert not any("peg verifier unavailable for USDC" in record.message for record in caplog.records)
+        assert aggregator._stablecoin_verifier_failures == {USDC_IDENTITY: 1}
+        assert not any(
+            f"peg verifier unavailable for {USDC_IDENTITY_LABEL}" in record.message for record in caplog.records
+        )
 
         with caplog.at_level("WARNING"):
-            await aggregator.get_aggregated_price("USDC", "USD")
+            await aggregator.get_aggregated_price("USDC", "USD", resolved_token=USDC_RESOLVED)
 
-        assert aggregator._stablecoin_verifier_failures == {"USDC": 2}
-        assert sum("peg verifier unavailable for USDC" in record.message for record in caplog.records) == 1
+        assert aggregator._stablecoin_verifier_failures == {USDC_IDENTITY: 2}
+        assert (
+            sum(f"peg verifier unavailable for {USDC_IDENTITY_LABEL}" in record.message for record in caplog.records)
+            == 1
+        )
 
     @pytest.mark.asyncio
     async def test_slow_onchain_check_is_latency_bounded_and_returns_peg(self, caplog) -> None:
@@ -419,7 +527,7 @@ class TestStablecoinPegChainlinkSanityCheck:
         start = loop.time()
         with caplog.at_level("WARNING"), pytest.MonkeyPatch.context() as mp:
             mp.setattr(agg_mod, "STABLECOIN_PEG_CHECK_TIMEOUT_SECONDS", 0.05)
-            result = await aggregator.get_aggregated_price("USDC", "USD")
+            result = await aggregator.get_aggregated_price("USDC", "USD", resolved_token=USDC_RESOLVED)
         elapsed = loop.time() - start
 
         # Latency-bounded: nowhere near the 5s source delay.
@@ -448,13 +556,13 @@ class TestStablecoinDepegLatch:
         )
 
         # Call #1: sampled -> de-peg detected, fails closed, latches.
-        first = await aggregator.get_aggregated_price("USDC", "USD")
+        first = await aggregator.get_aggregated_price("USDC", "USD", resolved_token=USDC_RESOLVED)
         assert first.source != "stablecoin_peg"
         assert first.price == Decimal("0.80")
 
         # Call #2: NOT a sampled call (interval=50). Without the latch this would
         # return $1.00. With the latch it must keep failing closed.
-        second = await aggregator.get_aggregated_price("USDC", "USD")
+        second = await aggregator.get_aggregated_price("USDC", "USD", resolved_token=USDC_RESOLVED)
         assert second.source != "stablecoin_peg"
         assert second.price != Decimal("1.00")
         assert second.price == Decimal("0.80")
@@ -473,12 +581,12 @@ class TestStablecoinDepegLatch:
         )
 
         # Call #1: de-peg detected -> latched, live price returned.
-        first = await aggregator.get_aggregated_price("USDC", "USD")
+        first = await aggregator.get_aggregated_price("USDC", "USD", resolved_token=USDC_RESOLVED)
         assert first.source != "stablecoin_peg"
         assert first.price == Decimal("0.80")
 
         # Call #2: still latched, still de-pegged -> still failing closed.
-        second = await aggregator.get_aggregated_price("USDC", "USD")
+        second = await aggregator.get_aggregated_price("USDC", "USD", resolved_token=USDC_RESOLVED)
         assert second.source != "stablecoin_peg"
         assert second.price == Decimal("0.80")
 
@@ -488,7 +596,7 @@ class TestStablecoinDepegLatch:
         # Call #3: latch forces a check this call; recovery detected -> latch
         # clears AND the peg fast-path resumes on the SAME call.
         with caplog.at_level("WARNING"):
-            third = await aggregator.get_aggregated_price("USDC", "USD")
+            third = await aggregator.get_aggregated_price("USDC", "USD", resolved_token=USDC_RESOLVED)
         assert third.source == "stablecoin_peg"
         assert third.price == Decimal("1.00")
         assert any("RE-PEGGED" in rec.message for rec in caplog.records)
@@ -496,7 +604,7 @@ class TestStablecoinDepegLatch:
         # Call #4: back on the normal 1-in-N cadence — the peg is served and (not
         # being a sampled call) the on-chain source is NOT consulted again.
         calls_before = len(onchain.calls)
-        fourth = await aggregator.get_aggregated_price("USDC", "USD")
+        fourth = await aggregator.get_aggregated_price("USDC", "USD", resolved_token=USDC_RESOLVED)
         assert fourth.source == "stablecoin_peg"
         assert len(onchain.calls) == calls_before
 
@@ -505,19 +613,19 @@ class TestStablecoinDepegLatch:
         onchain = _Source("chainlink", price=Decimal("0.80"))
         aggregator = PriceAggregator(sources=[onchain], stablecoin_chainlink_check_interval=1)
 
-        first = await aggregator.get_aggregated_price("USDC", "USD")
+        first = await aggregator.get_aggregated_price("USDC", "USD", resolved_token=USDC_RESOLVED)
         assert first.source != "stablecoin_peg"
-        assert aggregator._depegged_tokens == {"USDC"}
+        assert aggregator._depegged_tokens == {USDC_IDENTITY}
 
         onchain.price = Decimal("1.00")
         onchain._stale = True
-        second = await aggregator.get_aggregated_price("USDC", "USD")
+        second = await aggregator.get_aggregated_price("USDC", "USD", resolved_token=USDC_RESOLVED)
 
         assert second.source != "stablecoin_peg"
-        assert aggregator._depegged_tokens == {"USDC"}
+        assert aggregator._depegged_tokens == {USDC_IDENTITY}
 
         onchain._stale = False
-        third = await aggregator.get_aggregated_price("USDC", "USD")
+        third = await aggregator.get_aggregated_price("USDC", "USD", resolved_token=USDC_RESOLVED)
         assert third.source == "stablecoin_peg"
         assert aggregator._depegged_tokens == set()
 
@@ -526,14 +634,14 @@ class TestStablecoinDepegLatch:
         onchain = _Source("chainlink", price=Decimal("0.80"))
         aggregator = PriceAggregator(sources=[onchain], stablecoin_chainlink_check_interval=1)
 
-        await aggregator.get_aggregated_price("USDC", "USD")
-        assert aggregator._depegged_tokens == {"USDC"}
+        await aggregator.get_aggregated_price("USDC", "USD", resolved_token=USDC_RESOLVED)
+        assert aggregator._depegged_tokens == {USDC_IDENTITY}
 
         onchain._raises = RuntimeError("feed unavailable")
         with pytest.raises(AllDataSourcesFailed):
-            await aggregator.get_aggregated_price("USDC", "USD")
+            await aggregator.get_aggregated_price("USDC", "USD", resolved_token=USDC_RESOLVED)
 
-        assert aggregator._depegged_tokens == {"USDC"}
+        assert aggregator._depegged_tokens == {USDC_IDENTITY}
 
 
 # =============================================================================

@@ -251,6 +251,10 @@ class LPCloseData:
     # close payload to NULLs. ``None`` (concentrated-liquidity / two-coin venues
     # that already carry token0/token1) ⇒ handler keeps its existing 2-leg path.
     coin_symbols: list[str] | None = None
+    # ALM-3190 — pool-coin-ordered contract addresses, index-aligned with
+    # ``coin_symbols`` and ``all_amounts`` / ``all_fees``. Synthetic peg
+    # eligibility is keyed exclusively by these chain-scoped identities.
+    coin_addresses: list[str] | None = None
     # VIB-4275 — per-position discriminator (closing leg's NFT token id). The
     # close RECEIPT does not re-emit the token id (a Burn carries no NFT id),
     # so parsers leave this ``None``; the runner stamps it from the close
@@ -347,6 +351,8 @@ class LPCloseData:
             "currency1": self.currency1,
             # VIB-5429 — pool-coin-ordered symbols (round-trips as a JSON list).
             "coin_symbols": self.coin_symbols,
+            # ALM-3190 — exact identities used by address-keyed peg gating.
+            "coin_addresses": self.coin_addresses,
             # VIB-4275 — per-position discriminator (closing leg's token id).
             "position_id": self.position_id,
             # VIB-4848 (T8) — fee separation taxonomy.
@@ -422,6 +428,9 @@ class LPOpenData:
     # basis per coin (Curve fungible LP_OPEN carries no token0/token1 on the
     # ledger row). ``None`` for concentrated-liquidity / 2-coin venues.
     coin_symbols: list[str] | None = None
+    # ALM-3190 — exact pool-coin identities in the same index order. Peg
+    # fallback is unavailable when this vector is absent or incomplete.
+    coin_addresses: list[str] | None = None
 
     @property
     def all_amounts(self) -> list[int | None]:
@@ -463,6 +472,8 @@ class LPOpenData:
             "currency1": self.currency1,
             # VIB-5429 — pool-coin-ordered symbols (round-trips as a JSON list).
             "coin_symbols": self.coin_symbols,
+            # ALM-3190 — exact identities used by address-keyed peg gating.
+            "coin_addresses": self.coin_addresses,
         }
         if self.additional_amounts:
             d["additional_amounts"] = {str(k): str(v) for k, v in self.additional_amounts.items()}

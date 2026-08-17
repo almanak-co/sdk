@@ -20,6 +20,8 @@ from almanak.framework.data.interfaces import (
     DataSourceUnavailable,
     PriceResult,
 )
+from almanak.framework.data.tokens import TokenRef, is_pegged
+from almanak.framework.data.tokens.defaults import DEFAULT_TOKENS
 from almanak.gateway.utils.ssl_context import build_ssl_context
 from almanak.integrations.binance.integration import BINANCE_UNSAFE_MARKET_BASES
 
@@ -69,10 +71,6 @@ _TOKEN_TO_BINANCE_SYMBOL: dict[str, str] = {
 # probing: Binance can retain ghost ticker rows after the tradeable market is
 # gone, and those rows are not safe at execution-grade confidence.
 _DYNAMIC_RESOLUTION_DENYLIST = BINANCE_UNSAFE_MARKET_BASES
-
-# Stablecoins that are always $1
-_STABLECOINS = {"USDC", "USDT", "DAI", "USDC.E", "USDT.E", "USDBC", "BUSD", "USDE", "USDT0", "USDG", "GHO"}
-
 
 # Quote currencies to try when dynamically resolving unknown tokens (VIB-645).
 # Order matters: USDT is the most common, USDC and FDUSD are fallbacks.
@@ -138,6 +136,12 @@ def _corroborated_binance_base(resolved_token: object | None) -> str | None:
     if not isinstance(coingecko_id, str):
         return None
     return _COINGECKO_ID_TO_BINANCE_BASE.get(coingecko_id.strip().lower())
+
+
+def _registry_peg(resolved_token: object | None) -> Decimal | None:
+    """Return a peg only for a strict registry-backed token identity."""
+    token_ref = getattr(resolved_token, "token_ref", None)
+    return is_pegged(token_ref) if isinstance(token_ref, TokenRef) else None
 
 
 class BinancePriceSource(BasePriceSource):
@@ -209,13 +213,18 @@ class BinancePriceSource(BasePriceSource):
 
         token_upper = token.upper()
 
-        # Stablecoins
-        if token_upper in _STABLECOINS:
+        # Synthetic stablecoin prices require exact chain+address identity.
+        peg = _registry_peg(resolved_token)
+        if peg is not None:
+            token_ref = getattr(resolved_token, "token_ref", None)
+            assert isinstance(token_ref, TokenRef)
+            identity = token_ref.identity_key
             return PriceResult(
-                price=Decimal("1.0"),
+                price=peg,
                 source=self.source_name,
                 timestamp=datetime.now(UTC),
                 confidence=1.0,
+                peg_tokens=(f"{identity[0]}:{identity[1]}",),
             )
 
         # Look up Binance symbol: curated table -> corroborated dynamic resolution.
@@ -258,6 +267,7 @@ class BinancePriceSource(BasePriceSource):
                     timestamp=stale_result.timestamp,
                     confidence=0.7,
                     stale=True,
+                    peg_tokens=stale_result.peg_tokens,
                 )
             raise DataSourceUnavailable(
                 source=self.source_name,
@@ -413,7 +423,8 @@ class BinancePriceSource(BasePriceSource):
 
     @property
     def supported_tokens(self) -> list[str]:
-        return list(_TOKEN_TO_BINANCE_SYMBOL.keys()) + list(_STABLECOINS)
+        pegged_symbols = {token.symbol for token in DEFAULT_TOKENS if token.peg_class is not None}
+        return list(_TOKEN_TO_BINANCE_SYMBOL.keys()) + sorted(pegged_symbols)
 
     @property
     def cache_ttl_seconds(self) -> int:

@@ -225,6 +225,8 @@ class CompilationResult:
     is_safety_refusal: bool = False
     retry_after_seconds: float | None = None
     warnings: list[str] = field(default_factory=list)
+    used_peg: bool = False
+    peg_tokens: list[str] = field(default_factory=list)
     intent_id: str = ""
     compiled_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
@@ -240,6 +242,8 @@ class CompilationResult:
             "is_safety_refusal": self.is_safety_refusal,
             "retry_after_seconds": self.retry_after_seconds,
             "warnings": self.warnings,
+            "used_peg": self.used_peg,
+            "peg_tokens": self.peg_tokens,
             "intent_id": self.intent_id,
             "compiled_at": self.compiled_at.isoformat(),
         }

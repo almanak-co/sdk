@@ -202,6 +202,18 @@ class BridgeType(Enum):
     CANONICAL = "CANONICAL"
 
 
+class PegClass(Enum):
+    """Registry-owned synthetic price class for a token identity.
+
+    A peg class is permission to use a configured reference value when live
+    pricing is unavailable; it is deliberately separate from
+    :attr:`Token.is_stablecoin`, which is descriptive metadata and must never
+    authorize a fabricated price by itself.
+    """
+
+    USD = "USD"
+
+
 @dataclass
 class ChainTokenConfig:
     """Chain-specific configuration overrides for a token.
@@ -291,6 +303,7 @@ class ResolvedToken:
     name: str | None = None
     coingecko_id: str | None = None
     is_stablecoin: bool = False
+    peg_class: PegClass | None = None
     is_native: bool = False
     is_wrapped_native: bool = False
     canonical_symbol: str | None = None
@@ -372,6 +385,7 @@ class ResolvedToken:
             "name": self.name,
             "coingecko_id": self.coingecko_id,
             "is_stablecoin": self.is_stablecoin,
+            "peg_class": self.peg_class.value if self.peg_class is not None else None,
             "is_native": self.is_native,
             "is_wrapped_native": self.is_wrapped_native,
             "canonical_symbol": self.canonical_symbol,
@@ -394,6 +408,7 @@ class ResolvedToken:
             name=data.get("name"),
             coingecko_id=data.get("coingecko_id"),
             is_stablecoin=data.get("is_stablecoin", False),
+            peg_class=PegClass(data["peg_class"]) if data.get("peg_class") else None,
             is_native=data.get("is_native", False),
             is_wrapped_native=data.get("is_wrapped_native", False),
             canonical_symbol=data.get("canonical_symbol"),
@@ -480,6 +495,7 @@ class Token:
     addresses: dict[str, str] = field(default_factory=dict)
     coingecko_id: str | None = None
     is_stablecoin: bool = False
+    peg_class: PegClass | None = None
     chain_overrides: dict[str, ChainTokenConfig] = field(default_factory=dict)
     approve_zero_first_chains: tuple[str, ...] = ()
 
@@ -565,6 +581,7 @@ class Token:
             "addresses": self.addresses,
             "coingecko_id": self.coingecko_id,
             "is_stablecoin": self.is_stablecoin,
+            "peg_class": self.peg_class.value if self.peg_class is not None else None,
             "chain_overrides": {
                 chain: {
                     "address": config.address,
@@ -596,6 +613,7 @@ class Token:
             addresses=data.get("addresses", {}),
             coingecko_id=data.get("coingecko_id"),
             is_stablecoin=data.get("is_stablecoin", False),
+            peg_class=PegClass(data["peg_class"]) if data.get("peg_class") else None,
             chain_overrides=chain_overrides,
             approve_zero_first_chains=tuple(data.get("approve_zero_first_chains", ())),
         )

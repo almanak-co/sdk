@@ -71,6 +71,7 @@
         "position_hash": null,
         "position_id": null,
         "coin_symbols": null,
+        "coin_addresses": null,
         "schema_version": 1,
         "primitive_version": 1
       }
@@ -109,6 +110,7 @@
         "position_hash": null,
         "position_id": null,
         "coin_symbols": null,
+        "coin_addresses": null,
         "schema_version": 1,
         "primitive_version": 1
       }

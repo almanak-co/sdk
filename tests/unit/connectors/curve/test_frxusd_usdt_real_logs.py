@@ -214,8 +214,9 @@ class TestFrxusdUsdtRealLogDecode:
         assert open_data.amount1 == ADD_AMOUNTS[1]
         # Accounting coin-symbol resolution from the registry entry: a Curve
         # LP_OPEN ledger row carries no token0/token1, so accounting prices each
-        # coin through these symbols (both CURVE_USD_STABLE_SYMBOLS members).
+        # coin through the aligned symbol/address vectors.
         assert open_data.coin_symbols == ["USDT", "frxUSD"]
+        assert [address.lower() for address in open_data.coin_addresses or []] == [USDT, FRXUSD]
 
     def test_lp_tokens_received(self):
         parser = CurveReceiptParser(chain="polygon")
@@ -245,3 +246,4 @@ class TestFrxusdUsdtRealLogDecode:
         assert close_data.amount0_collected == REMOVE_AMOUNTS[0]
         assert close_data.amount1_collected == REMOVE_AMOUNTS[1]
         assert close_data.coin_symbols == ["USDT", "frxUSD"]
+        assert [address.lower() for address in close_data.coin_addresses or []] == [USDT, FRXUSD]

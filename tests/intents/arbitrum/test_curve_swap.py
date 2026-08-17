@@ -179,25 +179,26 @@ class TestCurveArbitrumSwapExecution:
             price_oracle=price_oracle,
             rpc_url=anvil_rpc_url,
         )
+        # Exercise the address-first USD conversion path added by ALM-3190.
+        # Multiplying by the same measured price used by the compiler keeps the
+        # expected on-chain input exactly 100 USDT.
         intent = SwapIntent(
-            from_token="USDT",
-            to_token="WETH",
-            amount=swap_amount,
+            from_token=usdt_addr,
+            to_token=weth_addr,
+            amount_usd=swap_amount * price_oracle["USDT"],
             max_slippage=SWAP_MAX_SLIPPAGE,
             protocol="curve",
             chain=CHAIN_NAME,
         )
 
         compile_result = compiler.compile(intent)
-        assert compile_result.status == CompilationStatus.SUCCESS, (
-            f"Curve swap compilation failed: {compile_result.error}"
-        )
+        assert compile_result.status.value == "SUCCESS", f"Curve swap compilation failed: {compile_result.error}"
         assert compile_result.action_bundle is not None
         logger.info("Compiled %d transactions", len(compile_result.transactions))
 
         # --- Layer 2: Execute ---
         execution_result = await orchestrator.execute(compile_result.action_bundle)
-        assert execution_result.success, (
+        assert execution_result.success is True, (
             f"Curve swap execution failed: {execution_result.error}\nCheck tricrypto pool address and coin indices."
         )
 
@@ -206,6 +207,8 @@ class TestCurveArbitrumSwapExecution:
         # --- Layer 3: Parse receipt ---
         parser = CurveReceiptParser(chain=CHAIN_NAME)
         swap_event_found = False
+        parsed_usdt_spent = 0
+        parsed_weth_received = 0
 
         for tx_result in execution_result.transaction_results:
             if not tx_result.receipt:
@@ -222,6 +225,8 @@ class TestCurveArbitrumSwapExecution:
                         assert "tokens_bought" in event.data, "Missing tokens_bought in swap event"
                         assert event.data["tokens_sold"] > 0, "tokens_sold must be > 0"
                         assert event.data["tokens_bought"] > 0, "tokens_bought must be > 0"
+                        parsed_usdt_spent += event.data["tokens_sold"]
+                        parsed_weth_received += event.data["tokens_bought"]
                         logger.info(
                             "Swap event: sold_id=%s tokens_sold=%s bought_id=%s tokens_bought=%s",
                             event.data.get("sold_id"),
@@ -257,6 +262,12 @@ class TestCurveArbitrumSwapExecution:
         assert usdt_spent == expected_usdt_spent, (
             f"USDT spent must EXACTLY equal swap amount. "
             f"Expected: {expected_usdt_spent} ({swap_amount} USDT), Got: {usdt_spent}"
+        )
+        assert parsed_usdt_spent == usdt_spent, (
+            f"Curve receipt sold amount must equal wallet delta: parsed={parsed_usdt_spent}, delta={usdt_spent}"
+        )
+        assert parsed_weth_received == weth_received, (
+            f"Curve receipt bought amount must equal wallet delta: parsed={parsed_weth_received}, delta={weth_received}"
         )
         assert weth_received > 0, (
             "WETH balance did not increase after Curve swap! Check coin indices in tricrypto pool config."

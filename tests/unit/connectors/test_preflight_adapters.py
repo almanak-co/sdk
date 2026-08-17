@@ -25,8 +25,14 @@ from almanak.connectors.pendle.compiler import PendleCompiler
 from almanak.framework.intents.vocabulary import IntentType
 
 
-def _token(symbol: str, *, is_native: bool = False, decimals: int = 18):
-    return SimpleNamespace(symbol=symbol, address="0x" + "ab" * 20, decimals=decimals, is_native=is_native)
+def _token(
+    symbol: str,
+    *,
+    is_native: bool = False,
+    decimals: int = 18,
+    address: str = "0x" + "ab" * 20,
+):
+    return SimpleNamespace(symbol=symbol, address=address, decimals=decimals, is_native=is_native)
 
 
 # ---------------------------------------------------------------------------
@@ -50,9 +56,7 @@ def _pendle_ctx():
 
 
 def _swap_intent(from_token="USDC", to_token="PT-wstETH"):
-    return SimpleNamespace(
-        intent_type=IntentType.SWAP, intent_id="p-1", from_token=from_token, to_token=to_token
-    )
+    return SimpleNamespace(intent_type=IntentType.SWAP, intent_id="p-1", from_token=from_token, to_token=to_token)
 
 
 def test_pendle_buying_into_expired_market_is_infeasible():
@@ -197,7 +201,8 @@ def test_gmx_sufficient_native_balance_is_feasible():
     sdk.get_execution_fee.return_value = 5_000_000_000_000_000
     with patch.object(GMXV2Compiler, "_build_sdk", return_value=sdk):
         verdict = compiler.preflight(
-            _gmx_ctx(native_balance_wei=100 * 10**18), _perp_open_intent()  # 100 ETH (managed Anvil)
+            _gmx_ctx(native_balance_wei=100 * 10**18),
+            _perp_open_intent(),  # 100 ETH (managed Anvil)
         )
     assert verdict.outcome is PreflightOutcome.FEASIBLE
 
@@ -407,10 +412,15 @@ def test_erc20_all_bridge_defers_to_compile_path():
 
 def _euler_ctx(*, eth_call_result, prices=None):
     services = MagicMock()
-    services.resolve_token.side_effect = lambda sym: _token(sym, decimals=6 if sym == "USDC" else 18)
+    services.resolve_token.side_effect = lambda sym: _token(
+        sym,
+        decimals=6 if sym == "USDC" else 18,
+        address="0x" + ("cd" if sym == "USDC" else "ab") * 20,
+    )
     services.eth_call.return_value = eth_call_result
     prices = prices or {}
     services.require_token_price.side_effect = lambda sym: prices.get(sym, Decimal("1"))
+    services.require_token_price_for.side_effect = lambda token: prices.get(token.symbol, Decimal("1"))
     return SimpleNamespace(
         chain="ethereum",
         wallet_address="0x" + "1" * 40,
@@ -481,6 +491,24 @@ def test_euler_within_ltv_is_feasible():
     with p_adapter, p_config:
         verdict = compiler.preflight(ctx, _borrow_intent(borrow_amount=Decimal("500")))
     assert verdict.outcome is PreflightOutcome.FEASIBLE
+
+
+def test_euler_capacity_prices_exact_resolved_tokens() -> None:
+    """Capacity sizing must pass TokenInfo identities, never symbol strings."""
+    compiler = EulerV2Compiler()
+    p_adapter, p_config = _patch_euler_adapter()
+    ctx = _euler_ctx(eth_call_result=_hex_uint(8000), prices={"WETH": Decimal("2000"), "USDC": Decimal("1")})
+
+    with p_adapter, p_config:
+        verdict = compiler.preflight(ctx, _borrow_intent(borrow_amount=Decimal("500")))
+
+    assert verdict.outcome is PreflightOutcome.FEASIBLE
+    priced_tokens = [call.args[0] for call in ctx.services.require_token_price_for.call_args_list]
+    assert [(token.symbol, token.address) for token in priced_tokens] == [
+        ("WETH", "0x" + "ab" * 20),
+        ("USDC", "0x" + "cd" * 20),
+    ]
+    ctx.services.require_token_price.assert_not_called()
 
 
 def test_euler_zero_collateral_borrow_is_feasible():

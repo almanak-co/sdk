@@ -35,13 +35,13 @@ from typing import Any
 import aiohttp
 
 from almanak.core.chains._helpers import native_coingecko_ids
-from almanak.core.constants import STABLECOINS
 from almanak.framework.data.interfaces import (
     BasePriceSource,
     DataSourceRateLimited,
     DataSourceUnavailable,
     PriceResult,
 )
+from almanak.framework.data.tokens import TokenRef, is_pegged
 from almanak.gateway.utils.rpc_provider import _get_gateway_api_key
 from almanak.gateway.utils.ssl_context import build_ssl_context
 from almanak.integrations.chains import integration_chain_map
@@ -649,6 +649,7 @@ class CoinGeckoPriceSource(BasePriceSource):
             timestamp=stale.result.timestamp,
             confidence=stale.result.confidence * self._stale_confidence_multiplier,
             stale=True,
+            peg_tokens=stale.result.peg_tokens,
         )
 
     def _stale_or_raise_unavailable(
@@ -826,18 +827,22 @@ class CoinGeckoPriceSource(BasePriceSource):
                 return address_result
 
         if token_id is None:
-            # Stablecoin fallback: tokens like FUSDT0, USDbC, etc. may not be
-            # listed on CoinGecko but are known USD-pegged stablecoins.
-            if token_upper in STABLECOINS and quote_upper == "USD":
-                logger.info(f"Token {token_upper} not on CoinGecko, using stablecoin fallback ($1.00)")
+            # Synthetic fallback requires an exact registry identity. A symbol
+            # alone cannot distinguish same-ticker contracts across chains.
+            token_ref = getattr(resolved_token, "token_ref", None)
+            peg = is_pegged(token_ref) if isinstance(token_ref, TokenRef) else None
+            if peg is not None and quote_upper == "USD":
+                logger.info("Token %s not on CoinGecko, using stablecoin fallback (%s)", token_upper, peg)
+                assert isinstance(token_ref, TokenRef)
+                identity = token_ref.identity_key
                 result = PriceResult(
-                    price=Decimal("1"),
+                    price=peg,
                     source=f"{self.source_name}/stablecoin_fallback",
                     timestamp=datetime.now(UTC),
                     confidence=0.9,
                     stale=False,
+                    peg_tokens=(f"{identity[0]}:{identity[1]}",),
                 )
-                self._update_cache(token_upper, quote_upper, result, 0.0)
                 self._metrics.successful_requests += 1
                 return result
 

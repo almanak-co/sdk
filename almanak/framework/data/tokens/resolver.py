@@ -1663,6 +1663,7 @@ class TokenResolver:
             name=token.name,
             coingecko_id=token.coingecko_id,
             is_stablecoin=token.is_stablecoin,
+            peg_class=token.peg_class,
             is_native=is_native,
             is_wrapped_native=is_wrapped_native,
             canonical_symbol=token.symbol,

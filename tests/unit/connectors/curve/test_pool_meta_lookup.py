@@ -150,6 +150,7 @@ class TestParserLegLabeling:
         assert open_data.pool_address == UNCURATED_POOL
         # Legs that would be EMPTY without the transport are now labelled.
         assert open_data.coin_symbols == ["USDC", "WBTC", "WETH"]
+        assert open_data.coin_addresses == [USDC, WBTC, WETH]
 
     def test_lp_open_symbols_empty_without_transport(self) -> None:
         receipt = _build_add_liquidity_receipt(UNCURATED_POOL, [1_000_000, 0, 0])
@@ -158,6 +159,7 @@ class TestParserLegLabeling:
         assert open_data is not None
         # Static miss + no transport -> None (legacy path), never a fabricated leg.
         assert open_data.coin_symbols is None
+        assert open_data.coin_addresses is None
 
     def test_primitive_money_legs_bound_to_coins_with_transport(self) -> None:
         # Single-sided USDC deposit (coin index 0): the leg must bind to USDC.

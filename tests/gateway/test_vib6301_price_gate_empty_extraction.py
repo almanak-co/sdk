@@ -178,7 +178,11 @@ async def test_bypass_leaves_a_real_but_empty_oracle_not_placeholders(intent_typ
         except ValueError as exc:
             seen["eth_price"] = exc
         try:
-            seen["usdc_price"] = compiler._require_token_price("USDC")
+            # ALM-3190: a peg is authorized by the resolved chain/address
+            # identity, never by the symbol-only helper.
+            usdc = compiler._resolve_token("USDC")
+            assert usdc is not None
+            seen["usdc_price"] = compiler._require_token_price_for(usdc)
         except ValueError as exc:
             seen["usdc_price"] = exc
         return _success_result()
@@ -196,7 +200,7 @@ async def test_bypass_leaves_a_real_but_empty_oracle_not_placeholders(intent_typ
     assert seen["price_oracle"] == {}
     # ETH used to compile at the fabricated $2000; it must now be unpriceable.
     assert isinstance(seen["eth_price"], ValueError)
-    # USDC still prices — a real peg through the known-stablecoin fallback.
+    # USDC still prices — a registry peg through its exact token identity.
     assert seen["usdc_price"] == Decimal("1")
 
     # The finally-block restore still returns the compiler to its prior state.

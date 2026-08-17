@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 import time
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
@@ -80,6 +81,16 @@ PRICE_SENSITIVE_INTENT_TYPES = frozenset(
 # inheriting a fabricated oracle. Must remain a subset of
 # PRICE_SENSITIVE_INTENT_TYPES — the gate never reaches it otherwise.
 PRICE_OPTIONAL_CLOSE_INTENT_TYPES = frozenset({"LPCLOSE", "PERPCLOSE"})
+_SYNTHETIC_PEG_PRICE_SOURCES = frozenset({"stablecoin_peg", "stablecoin_fallback"})
+
+
+@dataclass(frozen=True)
+class _FetchedPriceBatch:
+    """Self-served prices plus provenance needed by the compiler boundary."""
+
+    prices: dict[str, Decimal]
+    sources: dict[str, str]
+    peg_tokens: frozenset[str]
 
 
 class ReceiptSetSerializationError(RuntimeError):
@@ -238,7 +249,7 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
             self._solana_route_refresher = _GatewaySolanaRouteRefresher()
         return self._solana_route_refresher
 
-    async def _fetch_prices_for_tokens(self, tokens: list[str]) -> dict[str, Decimal]:
+    async def _fetch_prices_for_tokens(self, tokens: list[str], chain: str) -> _FetchedPriceBatch:
         """Fetch prices from the gateway's own market service for the given tokens.
 
         Used as a fallback when the caller doesn't provide prices (e.g., multi-chain
@@ -247,10 +258,11 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
         prices like USDC=$1 and WETH=$2100 are valid regardless of chain.
 
         Returns:
-            Dict mapping token symbol -> USD price as Decimal. Empty if market service unavailable.
+            Prices plus their sources and exact synthetic-peg identities. All
+            fields are empty if the market service is unavailable.
         """
         if not self.market_servicer:
-            return {}
+            return _FetchedPriceBatch({}, {}, frozenset())
 
         # Ensure the market service's price aggregator is initialized.
         # It uses lazy init (_ensure_initialized) which only runs on first
@@ -261,18 +273,65 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
             await ensure_init()
 
         prices: dict[str, Decimal] = {}
-        aggregator = getattr(self.market_servicer, "_price_aggregator", None)
+        sources: dict[str, str] = {}
+        peg_tokens: set[str] = set()
+        aggregator_for = getattr(self.market_servicer, "_aggregator_for", None)
+        aggregator = (
+            aggregator_for(chain)
+            if aggregator_for is not None
+            else getattr(
+                self.market_servicer,
+                "_price_aggregator",
+                None,
+            )
+        )
         if not aggregator:
-            return {}
+            return _FetchedPriceBatch({}, {}, frozenset())
 
         for token in tokens:
             try:
-                result = await aggregator.get_aggregated_price(token, "USD")
+                resolver = getattr(self.market_servicer, "_resolve_token_for_pricing", None)
+                resolved_token = await resolver(token, chain) if resolver is not None else None
+                result = await aggregator.get_aggregated_price(token, "USD", resolved_token=resolved_token)
                 if result and result.price:
-                    prices[token.upper()] = Decimal(str(result.price))
+                    source = str(getattr(result, "source", ""))
+                    token_ref = getattr(resolved_token, "token_ref", None)
+                    identity = getattr(token_ref, "identity_key", None)
+                    expected_identity = (
+                        f"{identity[0]}:{identity[1]}" if isinstance(identity, tuple) and len(identity) == 2 else None
+                    )
+                    raw_peg_tokens = getattr(result, "peg_tokens", ())
+                    reported_peg_tokens = (
+                        {str(item) for item in raw_peg_tokens}
+                        if isinstance(raw_peg_tokens, list | tuple | set | frozenset)
+                        else set()
+                    )
+                    is_legacy_synthetic = source.lower() in _SYNTHETIC_PEG_PRICE_SOURCES
+                    if reported_peg_tokens or is_legacy_synthetic:
+                        # A synthetic price must name exactly the identity that
+                        # this request resolved. Foreign or identity-free
+                        # provenance is not auditable and cannot enter the
+                        # compiler as though it were a measured scalar.
+                        if expected_identity is None or (
+                            reported_peg_tokens and reported_peg_tokens != {expected_identity}
+                        ):
+                            logger.error(
+                                "Discarding synthetic price source=%s for %s on %s: "
+                                "expected exact identity %s, reported %s",
+                                source,
+                                token,
+                                chain,
+                                expected_identity,
+                                sorted(reported_peg_tokens),
+                            )
+                            continue
+                        peg_tokens.add(expected_identity)
+                    key = token.upper()
+                    prices[key] = Decimal(str(result.price))
+                    sources[key] = source
             except Exception as e:
-                logger.debug(f"Self-serve price fetch failed for {token}: {e}")
-        return prices
+                logger.warning("Self-serve price fetch failed for %s on %s: %s", token, chain, e)
+        return _FetchedPriceBatch(prices, sources, frozenset(peg_tokens))
 
     @staticmethod
     def _extract_token_symbols_from_intent(intent: object, *, default_chain: str | None = None) -> list[str]:
@@ -785,9 +844,20 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
         from the gateway's own market service.
         """
         intent_tokens = self._extract_token_symbols_from_intent(intent, default_chain=getattr(compiler, "chain", None))
-        self_served = await self._fetch_prices_for_tokens(intent_tokens) if intent_tokens else {}
+        self_served = (
+            await self._fetch_prices_for_tokens(intent_tokens, getattr(compiler, "chain", ""))
+            if intent_tokens
+            else _FetchedPriceBatch({}, {}, frozenset())
+        )
+        # Preserve the long-standing private seam used by lightweight gateway
+        # fixtures and embedders that override this fetcher with a plain price
+        # dict. Such values carry no synthetic provenance, so treating their
+        # source set as empty is accurate; the production implementation above
+        # always returns the richer batch.
+        if isinstance(self_served, dict):
+            self_served = _FetchedPriceBatch(self_served, {}, frozenset())
         # Require prices for ALL extracted tokens to prevent partial placeholder usage
-        all_covered = intent_tokens and all(t.upper() in self_served for t in intent_tokens)
+        all_covered = intent_tokens and all(t.upper() in self_served.prices for t in intent_tokens)
         # LP_CLOSE/PERP_CLOSE with only position_id may have no extractable
         # tokens. The original rationale here was "these operations don't need
         # prices (decreaseLiquidity/collect)" — true of an LP close, and NOT
@@ -824,9 +894,28 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
                 error_code="NO_PRICES_AVAILABLE",
             )
         elif all_covered and hasattr(compiler, "update_prices"):
-            compiler.update_prices(self_served)
+            if self_served.peg_tokens:
+                seed_peg_fallbacks = getattr(compiler, "_seed_peg_fallbacks", None)
+                if not callable(seed_peg_fallbacks):
+                    error_msg = (
+                        f"Synthetic peg provenance cannot be preserved for {intent_type} compilation. "
+                        "Refusing to treat a gateway fallback as a measured price."
+                    )
+                    logger.error(error_msg)
+                    return gateway_pb2.CompilationResult(
+                        success=False,
+                        error=error_msg,
+                        error_code="NO_PRICES_AVAILABLE",
+                    )
+                seed_peg_fallbacks(self_served.peg_tokens)
+            compiler.update_prices(self_served.prices)
             logger.info(
-                f"Self-served {len(self_served)} prices for {intent_type} compilation: {list(self_served.keys())}"
+                "Self-served %d prices for %s compilation: %s (sources=%s, peg_tokens=%s)",
+                len(self_served.prices),
+                intent_type,
+                list(self_served.prices),
+                self_served.sources,
+                sorted(self_served.peg_tokens),
             )
         else:
             error_msg = (

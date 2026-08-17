@@ -112,11 +112,14 @@ class TestAerodromeSwapIntent:
 
         print(f"\nCreated SwapIntent: {intent.from_token} -> {intent.to_token}, amount={intent.amount}")
 
-        # Compile intent with real prices from CoinGecko
+        # Deliberately omit USDC's measured mark. The compiler must authorize
+        # the fallback from Base USDC's exact registry identity, stamp that
+        # provenance, and still complete the real fork flow below.
+        peg_oracle = {key: value for key, value in price_oracle.items() if key.upper() != "USDC"}
         compiler = IntentCompiler(
             chain=CHAIN_NAME,
             wallet_address=funded_wallet,
-            price_oracle=price_oracle,
+            price_oracle=peg_oracle,
             rpc_url=anvil_rpc_url,
         )
 
@@ -125,6 +128,13 @@ class TestAerodromeSwapIntent:
 
         assert compilation_result.status.value == "SUCCESS", f"Compilation failed: {compilation_result.error}"
         assert compilation_result.action_bundle is not None, "ActionBundle must be created"
+        peg_identity = f"base:{token_in.lower()}"
+        assert compilation_result.used_peg is True
+        assert compilation_result.peg_tokens == [peg_identity]
+        assert compilation_result.action_bundle.metadata["price_provenance"] == {
+            "used_peg": True,
+            "peg_tokens": [peg_identity],
+        }
 
         bundle_metadata = compilation_result.action_bundle.metadata
         swap_token_meta = bundle_metadata["swap_token_meta"]

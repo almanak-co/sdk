@@ -9,11 +9,16 @@ Validates that:
 
 import json
 from decimal import Decimal
-from unittest.mock import AsyncMock, MagicMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from almanak.framework.intents.compiler import CompilationStatus
+from almanak.framework.data.tokens import TokenRef
+from almanak.framework.intents.compiler import CompilationStatus, IntentCompiler, IntentCompilerConfig
+from almanak.framework.intents.compiler_models import CompilationResult
+from almanak.framework.intents.vocabulary import IntentType
+from almanak.framework.models.reproduction_bundle import ActionBundle
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2
 from almanak.gateway.services.execution_service import ExecutionServiceServicer
@@ -446,8 +451,10 @@ async def test_fetch_prices_returns_empty_without_market_servicer():
     service = ExecutionServiceServicer(settings)
     service.market_servicer = None
 
-    result = await service._fetch_prices_for_tokens(["USDC", "WETH"])
-    assert result == {}
+    result = await service._fetch_prices_for_tokens(["USDC", "WETH"], "arbitrum")
+    assert result.prices == {}
+    assert result.sources == {}
+    assert result.peg_tokens == frozenset()
 
 
 @pytest.mark.asyncio
@@ -457,8 +464,10 @@ async def test_fetch_prices_returns_empty_without_aggregator():
     service = ExecutionServiceServicer(settings)
     service.market_servicer = MagicMock(spec=[])  # No _price_aggregator attr
 
-    result = await service._fetch_prices_for_tokens(["USDC", "WETH"])
-    assert result == {}
+    result = await service._fetch_prices_for_tokens(["USDC", "WETH"], "arbitrum")
+    assert result.prices == {}
+    assert result.sources == {}
+    assert result.peg_tokens == frozenset()
 
 
 @pytest.mark.asyncio
@@ -470,32 +479,38 @@ async def test_fetch_prices_returns_decimals_from_aggregator():
     mock_aggregator = AsyncMock()
     price_result = MagicMock()
     price_result.price = 2100.50
+    price_result.source = "aggregated"
 
     mock_aggregator.get_aggregated_price = AsyncMock(return_value=price_result)
 
     mock_market = MagicMock()
     mock_market._ensure_initialized = AsyncMock()
     mock_market._price_aggregator = mock_aggregator
+    mock_market._aggregator_for = MagicMock(return_value=mock_aggregator)
+    mock_market._resolve_token_for_pricing = AsyncMock(return_value=None)
     service.market_servicer = mock_market
 
-    result = await service._fetch_prices_for_tokens(["WETH"])
-    assert "WETH" in result
-    assert isinstance(result["WETH"], Decimal)
-    assert result["WETH"] == Decimal("2100.5")
+    result = await service._fetch_prices_for_tokens(["WETH"], "arbitrum")
+    assert "WETH" in result.prices
+    assert isinstance(result.prices["WETH"], Decimal)
+    assert result.prices["WETH"] == Decimal("2100.5")
+    assert result.sources == {"WETH": "aggregated"}
+    assert result.peg_tokens == frozenset()
 
 
 @pytest.mark.asyncio
-async def test_fetch_prices_handles_partial_failures():
+async def test_fetch_prices_handles_partial_failures(caplog):
     """_fetch_prices_for_tokens returns available prices even if some fail."""
     settings = GatewaySettings()
     service = ExecutionServiceServicer(settings)
 
     mock_aggregator = AsyncMock()
 
-    async def mock_get_price(token, quote):
+    async def mock_get_price(token, quote, **kwargs):
         if token == "USDC":
             result = MagicMock()
             result.price = 1.0
+            result.source = "aggregated"
             return result
         raise Exception("CoinGecko rate limited")
 
@@ -504,11 +519,101 @@ async def test_fetch_prices_handles_partial_failures():
     mock_market = MagicMock()
     mock_market._ensure_initialized = AsyncMock()
     mock_market._price_aggregator = mock_aggregator
+    mock_market._aggregator_for = MagicMock(return_value=mock_aggregator)
+    mock_market._resolve_token_for_pricing = AsyncMock(return_value=None)
     service.market_servicer = mock_market
 
-    result = await service._fetch_prices_for_tokens(["USDC", "UNKNOWN_TOKEN"])
-    assert "USDC" in result
-    assert "UNKNOWN_TOKEN" not in result
+    with caplog.at_level("WARNING", logger="almanak.gateway.services.execution_service"):
+        result = await service._fetch_prices_for_tokens(["USDC", "UNKNOWN_TOKEN"], "arbitrum")
+    assert "USDC" in result.prices
+    assert "UNKNOWN_TOKEN" not in result.prices
+    assert "Self-serve price fetch failed for UNKNOWN_TOKEN on arbitrum" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_gateway_synthetic_peg_stamps_exact_compile_provenance():
+    """A self-served $1 fallback remains synthetic through compilation."""
+    settings = GatewaySettings(network="mainnet")
+    service = ExecutionServiceServicer(settings)
+    service._extract_token_symbols_from_intent = MagicMock(return_value=["USDC"])
+
+    usdc_address = "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
+    token_ref = TokenRef(chain="arbitrum", address=usdc_address, decimals=6, symbol="USDC")
+    resolved = SimpleNamespace(token_ref=token_ref)
+    identity = f"arbitrum:{usdc_address}"
+    price_result = SimpleNamespace(price=Decimal("1"), source="aggregated", peg_tokens=(identity,))
+    aggregator = MagicMock()
+    aggregator.get_aggregated_price = AsyncMock(return_value=price_result)
+    market = MagicMock()
+    market._ensure_initialized = AsyncMock()
+    market._aggregator_for = MagicMock(return_value=aggregator)
+    market._resolve_token_for_pricing = AsyncMock(return_value=resolved)
+    service.market_servicer = market
+
+    compiler = IntentCompiler(
+        chain="arbitrum",
+        config=IntentCompilerConfig(allow_placeholder_prices=True),
+    )
+    gate_error = await service._enforce_mainnet_price_gate(compiler, MagicMock(), "supply")
+
+    assert gate_error is None
+    assert compiler.price_oracle == {"USDC": Decimal("1")}
+    compiled = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        action_bundle=ActionBundle(intent_type="TEST"),
+    )
+    with patch.object(compiler, "_compile_intent", return_value=compiled):
+        result = compiler.compile(SimpleNamespace(intent_type=IntentType.HOLD))  # type: ignore[arg-type]
+
+    assert result.used_peg is True
+    assert result.peg_tokens == [identity]
+    assert result.action_bundle is not None
+    assert result.action_bundle.metadata["price_provenance"] == {
+        "used_peg": True,
+        "peg_tokens": [identity],
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["foreign_identity", "identity_free_legacy"])
+async def test_gateway_rejects_unauditable_synthetic_price(case: str):
+    """Foreign or identity-free synthetic $1 marks must fail the mainnet gate."""
+    settings = GatewaySettings(network="mainnet")
+    service = ExecutionServiceServicer(settings)
+    service._extract_token_symbols_from_intent = MagicMock(return_value=["USDC"])
+
+    usdc_address = "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
+    token_ref = TokenRef(chain="arbitrum", address=usdc_address, decimals=6, symbol="USDC")
+    if case == "foreign_identity":
+        resolved = SimpleNamespace(token_ref=token_ref)
+        source = "aggregated"
+        peg_tokens = ("base:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",)
+    else:
+        resolved = None
+        source = "stablecoin_fallback"
+        peg_tokens = ()
+
+    aggregator = MagicMock()
+    aggregator.get_aggregated_price = AsyncMock(
+        return_value=SimpleNamespace(price=Decimal("1"), source=source, peg_tokens=peg_tokens)
+    )
+    market = MagicMock()
+    market._ensure_initialized = AsyncMock()
+    market._aggregator_for = MagicMock(return_value=aggregator)
+    market._resolve_token_for_pricing = AsyncMock(return_value=resolved)
+    service.market_servicer = market
+
+    compiler = IntentCompiler(
+        chain="arbitrum",
+        config=IntentCompilerConfig(allow_placeholder_prices=True),
+    )
+    gate_error = await service._enforce_mainnet_price_gate(compiler, MagicMock(), "supply")
+
+    assert gate_error is not None
+    assert gate_error.success is False
+    assert gate_error.error_code == "NO_PRICES_AVAILABLE"
+    assert compiler._using_placeholders is True
+    assert compiler._pending_peg_fallbacks == set()
 
 
 @pytest.mark.asyncio
@@ -522,6 +627,7 @@ async def test_mainnet_self_serve_prices_used_when_no_price_map():
     compiler = MagicMock()
     compiler.price_oracle = None
     compiler._using_placeholders = True
+    compiler.chain = "arbitrum"
     compiler.compile.return_value = _make_compilation_result()
 
     captured_prices = {}
@@ -548,7 +654,7 @@ async def test_mainnet_self_serve_prices_used_when_no_price_map():
     # Set up market servicer with mock aggregator
     mock_aggregator = AsyncMock()
 
-    async def mock_get_price(token, quote):
+    async def mock_get_price(token, quote, **kwargs):
         prices = {"USDC": 1.0, "WETH": 2100.0}
         result = MagicMock()
         result.price = prices.get(token, 0)
@@ -558,6 +664,8 @@ async def test_mainnet_self_serve_prices_used_when_no_price_map():
     mock_market = MagicMock()
     mock_market._ensure_initialized = AsyncMock()
     mock_market._price_aggregator = mock_aggregator
+    mock_market._aggregator_for = MagicMock(return_value=mock_aggregator)
+    mock_market._resolve_token_for_pricing = AsyncMock(return_value=None)
     service.market_servicer = mock_market
 
     context = MagicMock()

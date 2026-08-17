@@ -337,3 +337,55 @@ async def test_getprice_rejects_invalid_chain_with_invalid_argument(bad_chain):
     assert context.set_details.call_count == 1
     assert bad_chain in context.set_details.call_args.args[0] or "not allowed" in context.set_details.call_args.args[0]
     assert response.price == ""
+
+
+@pytest.mark.asyncio
+async def test_getprice_rejects_valid_but_unconfigured_chain_before_routing():
+    """An enum-valid chain cannot fall back to another configured aggregator."""
+    import grpc
+
+    settings = _market_settings_stub(["base"])
+    servicer = MarketServiceServicer(settings)
+    await servicer._ensure_initialized()
+
+    context = MagicMock()
+    request = gateway_pb2.PriceRequest(token="ETH", quote="USD", chain="arbitrum")
+
+    with (
+        patch.object(servicer, "_get_onchain_lookup", new=AsyncMock()) as onchain_lookup,
+        patch.object(servicer, "_aggregator_for") as aggregator_for,
+    ):
+        response = await servicer.GetPrice(request, context)
+
+    context.set_code.assert_called_once_with(grpc.StatusCode.INVALID_ARGUMENT)
+    assert "not configured" in context.set_details.call_args.args[0]
+    assert response.price == ""
+    onchain_lookup.assert_not_awaited()
+    aggregator_for.assert_not_called()
+    await servicer.close()
+
+
+@pytest.mark.asyncio
+async def test_getprice_explicit_chain_requires_prior_registration_on_no_chain_gateway():
+    """A no-chain gateway must not dial an RPC from an unregistered price hint."""
+    import grpc
+
+    settings = _market_settings_stub([])
+    servicer = MarketServiceServicer(settings)
+    await servicer._ensure_initialized()
+
+    context = MagicMock()
+    request = gateway_pb2.PriceRequest(token=RENBTC_ADDRESS, quote="USD", chain="base")
+
+    with (
+        patch.object(servicer, "_get_onchain_lookup", new=AsyncMock()) as onchain_lookup,
+        patch.object(servicer, "_aggregator_for") as aggregator_for,
+    ):
+        response = await servicer.GetPrice(request, context)
+
+    context.set_code.assert_called_once_with(grpc.StatusCode.INVALID_ARGUMENT)
+    assert "not configured" in context.set_details.call_args.args[0]
+    assert response.price == ""
+    onchain_lookup.assert_not_awaited()
+    aggregator_for.assert_not_called()
+    await servicer.close()

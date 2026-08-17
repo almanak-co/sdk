@@ -68,6 +68,26 @@ class _FakeMarket:
         return dict(self._cache)
 
 
+class _ChainScopedFakeMarket(_FakeMarket):
+    """Fake whose priceability is keyed by exact ``(symbol, chain)``."""
+
+    def __init__(self, priceable: dict[tuple[str, str], Decimal]):
+        super().__init__({})
+        self._chain_priceable = priceable
+
+    def price(self, token: str, quote: str = "USD", *, chain=None) -> Decimal:
+        self.price_calls.append(token)
+        self.price_call_chains.append((token, chain))
+        key = (token.upper(), chain)
+        if key in self._chain_priceable:
+            value = self._chain_priceable[key]
+            # Deliberately expose the legacy bare-symbol view. Validation must
+            # still refuse to reuse this mark for a different chain identity.
+            self._cache[token.upper()] = value
+            return value
+        raise ValueError(f"Cannot determine price for {token}/{quote} on {chain}")
+
+
 # ---------------------------------------------------------------------------
 # extract_required_tokens
 # ---------------------------------------------------------------------------
@@ -204,6 +224,15 @@ def test_warm_stablecoin_fallback_when_unpriced():
     assert oracle is not None
 
 
+def test_warm_stablecoin_measured_zero_blocks_peg_fallback():
+    """Measured zero is unusable evidence, not permission to expose the peg."""
+    market = _FakeMarket({"WETH": Decimal("3400"), "ETH": Decimal("3400"), "DAI": Decimal("0")})
+    intent = Intent.swap(from_token="WETH", to_token="DAI", amount="all", chain="arbitrum")
+
+    with pytest.raises(TeardownPriceOracleError, match="DAI"):
+        warm_and_validate_oracle(market, [intent], "arbitrum")
+
+
 def test_warm_raises_named_error_for_unpriceable_token():
     """A genuinely unpriceable non-stable token fails loud with its name."""
     # ARB is neither priceable, a wrapped-native, nor a stablecoin.
@@ -256,6 +285,28 @@ def test_warm_threads_each_intents_chain_into_price_call():
     assert chain_by_token["DEGEN"] == "base"
     # Native gas tokens carry a concrete chain (not None).
     assert chain_by_token["ETH"] in {"arbitrum", "base"}
+
+
+def test_warm_multichain_duplicate_symbol_validates_each_identity() -> None:
+    """A price on one chain cannot satisfy the same symbol on another chain."""
+    market = _ChainScopedFakeMarket(
+        {
+            ("PUSD", "polygon"): Decimal("1"),
+            ("MATIC", "polygon"): Decimal("0.5"),
+            ("POL", "polygon"): Decimal("0.5"),
+            ("ETH", "base"): Decimal("3000"),
+        }
+    )
+    intents = [
+        {"token": "PUSD", "chain": "polygon", "type": "SUPPLY"},
+        {"token": "PUSD", "chain": "base", "type": "SUPPLY"},
+    ]
+
+    with pytest.raises(TeardownPriceOracleError, match="PUSD@base"):
+        warm_and_validate_oracle(market, intents, None)
+
+    assert ("PUSD", "polygon") in market.price_call_chains
+    assert ("PUSD", "base") in market.price_call_chains
 
 
 def test_warm_multichain_warms_both_native_gas_tokens():
@@ -325,6 +376,26 @@ class _FakeMarketWithPt(_FakeMarket):
         return PtPriceData(symbol=symbol, chain=chain or "", price=None, confidence=ValueConfidence.UNAVAILABLE)
 
 
+class _ChainScopedFakeMarketWithPt(_ChainScopedFakeMarket):
+    """Chain-keyed market for duplicate PT-symbol regression coverage."""
+
+    def __init__(
+        self,
+        priceable: dict[tuple[str, str], Decimal],
+        pt_results: dict[tuple[str, str], PtPriceData],
+    ):
+        super().__init__(priceable)
+        self._pt_results = pt_results
+        self.pt_price_calls: list[tuple[str, str | None]] = []
+
+    def pt_price(self, symbol: str, chain=None, maturity=None, *, quote: str = "USD") -> PtPriceData:
+        self.pt_price_calls.append((symbol, chain))
+        existing = self._pt_results.get((symbol.upper(), chain))
+        if existing is not None:
+            return existing
+        return PtPriceData(symbol=symbol, chain=chain or "", price=None, confidence=ValueConfidence.UNAVAILABLE)
+
+
 _PT_SYMBOL = "PT-SUSDAI-15OCT2026"
 _YT_SYMBOL = "YT-SUSDAI-15OCT2026"
 
@@ -371,6 +442,46 @@ def test_warm_pt_token_merges_measured_high_price():
     assert (_PT_SYMBOL, "arbitrum") in market.pt_price_calls
     # ...and NOT via the generic GetPrice path (no spurious price() call for it).
     assert _PT_SYMBOL not in [t.upper() for t in market.price_calls]
+
+
+def test_warm_duplicate_pt_symbol_keeps_each_chain_price() -> None:
+    """Equal PT labels on two chains cannot overwrite one another in teardown."""
+    market = _ChainScopedFakeMarketWithPt(
+        {
+            ("USDC", "arbitrum"): Decimal("1"),
+            ("USDC", "base"): Decimal("1"),
+            ("ETH", "arbitrum"): Decimal("3400"),
+            ("ETH", "base"): Decimal("3400"),
+        },
+        {
+            (_PT_SYMBOL, "arbitrum"): PtPriceData(
+                symbol=_PT_SYMBOL,
+                chain="arbitrum",
+                price=Decimal("0.91"),
+                confidence=ValueConfidence.HIGH,
+            ),
+            (_PT_SYMBOL, "base"): PtPriceData(
+                symbol=_PT_SYMBOL,
+                chain="base",
+                price=Decimal("0.96"),
+                confidence=ValueConfidence.HIGH,
+            ),
+        },
+    )
+    intents = [
+        Intent.swap(from_token=_PT_SYMBOL, to_token="USDC", amount=Decimal("100"), chain="arbitrum"),
+        Intent.swap(from_token=_PT_SYMBOL, to_token="USDC", amount=Decimal("100"), chain="base"),
+    ]
+
+    oracle = warm_and_validate_oracle(market, intents, None)
+
+    assert oracle is not None
+    assert oracle[f"arbitrum:{_PT_SYMBOL}"] == Decimal("0.91")
+    assert oracle[f"base:{_PT_SYMBOL}"] == Decimal("0.96")
+    assert _PT_SYMBOL not in oracle
+    assert len(market.pt_price_calls) == 2
+    assert market.pt_price_calls.count((_PT_SYMBOL, "arbitrum")) == 1
+    assert market.pt_price_calls.count((_PT_SYMBOL, "base")) == 1
 
 
 def test_warm_pt_token_stale_but_measured_is_accepted():
@@ -1069,9 +1180,7 @@ def test_discover_lp_close_with_pool_string_resolves_native_via_alias():
     from almanak.framework.intents.vocabulary import LPCloseIntent
 
     market = _FakeMarket({"WETH": Decimal("3400"), "USDC": Decimal("1")})
-    close = LPCloseIntent(
-        position_id="42", protocol="uniswap_v3", chain="ethereum", pool="WETH/USDC/3000"
-    )
+    close = LPCloseIntent(position_id="42", protocol="uniswap_v3", chain="ethereum", pool="WETH/USDC/3000")
 
     # Must NOT raise: WETH/USDC price fine and native ETH resolves via the alias.
     oracle = warm_and_validate_oracle(market, [close], "ethereum", raise_on_missing=True)
@@ -1092,9 +1201,7 @@ def test_discover_lp_close_pool_string_still_fails_loud_on_unpriceable_pool_toke
 
     # Neither the pool's non-stable token nor native ETH is priceable.
     market = _FakeMarket({"USDC": Decimal("1")})
-    close = LPCloseIntent(
-        position_id="42", protocol="uniswap_v3", chain="ethereum", pool="WBTC/USDC/3000"
-    )
+    close = LPCloseIntent(position_id="42", protocol="uniswap_v3", chain="ethereum", pool="WBTC/USDC/3000")
 
     with pytest.raises(TeardownPriceOracleError) as exc:
         warm_and_validate_oracle(market, [close], "ethereum", raise_on_missing=True)

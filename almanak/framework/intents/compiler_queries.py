@@ -45,8 +45,9 @@ from __future__ import annotations
 
 import logging
 import re
+import warnings
 from decimal import Decimal
-from enum import Enum
+from enum import StrEnum
 from types import MappingProxyType
 from typing import TYPE_CHECKING, ClassVar, Protocol
 
@@ -100,7 +101,7 @@ def format_amount(amount: int, decimals: int) -> str:
     return f"{decimal_amount:,.4f}"
 
 
-class PlaceholderPriceUse(str, Enum):
+class PlaceholderPriceUse(StrEnum):
     """Why a caller is reaching for the placeholder price table (ALM-3183).
 
     ``get_placeholder_prices`` takes this as a REQUIRED keyword so that no call
@@ -361,18 +362,32 @@ class CompilerQueryHost(Protocol):
 
     def _require_token_price(self, symbol: str) -> Decimal: ...
 
+    def _record_peg_fallback(self, token_ref: object) -> None: ...
+
     def _query_erc20_balance(self, token_address: str, wallet_address: str) -> int | None: ...
 
     def _query_native_balance(self, wallet_address: str) -> int | None: ...
 
     def _get_rpc_url_for_chain(self, chain: str) -> str | None: ...
 
-    def _get_known_stablecoins(self) -> frozenset[str]: ...
-
 
 # =============================================================================
 # CompilerQueries collaborator
 # =============================================================================
+
+
+def _static_token_ref(token: str, chain: str | None):
+    """Resolve a legacy compiler token input to static identity, or ``None``."""
+    if not chain:
+        return None
+    try:
+        from almanak.framework.data.tokens import SymbolTokenResolutionWarning, get_token_resolver
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", SymbolTokenResolutionWarning)
+            return get_token_resolver().resolve(token, chain, log_errors=False, skip_gateway=True).token_ref
+    except Exception:
+        return None
 
 
 def lenient_oracle_price(price_oracle: dict | None, token: str, chain: str | None = None) -> Decimal | None:
@@ -407,16 +422,18 @@ def lenient_oracle_price(price_oracle: dict | None, token: str, chain: str | Non
     if native:
         aliases.add(native.upper())
     aliases.update(w.upper() for w, n in IntentCompiler._WRAPPED_TO_NATIVE.items() if n.upper() == symbol_upper)
-    peg = Decimal("1") if symbol_upper in IntentCompiler._get_known_stablecoins() else None
-    # A degraded read may leave a zero under an earlier-precedence key while
-    # the same asset remains measurable through a wrapped/native alias or peg.
-    # Remove only the rejected key and re-run the canonical ladder; this keeps
-    # precedence centralized in ``lookup_price`` instead of recreating it here.
+    from almanak.framework.data.tokens.pegs import is_pegged
+
+    token_ref = _static_token_ref(token_str, chain)
+    peg = is_pegged(token_ref) if token_ref is not None else None
+    # A zero at an identity/symbol price key is measured unusable evidence and
+    # must never be removed to expose a lower-priority synthetic peg. Wrapped
+    # native aliases remain eligible because they are measured prices, not pegs.
     remaining = dict(price_oracle or {})
     while True:
         found = lookup_price(
             remaining,
-            token=token_str,
+            token=token_ref or token_str,
             chain=chain,
             symbol=symbol_upper,
             aliases=aliases,
@@ -426,7 +443,11 @@ def lenient_oracle_price(price_oracle: dict | None, token: str, chain: str | Non
             return None
         if found.price > 0:
             return found.price
+        if found.used_peg:
+            return None
         if found.key is None:
+            return None
+        if peg is not None:
             return None
         remaining.pop(found.key, None)
 
@@ -643,9 +664,62 @@ class CompilerQueries:
         on the compiler keep propagating (see
         test_compiler_queries_extraction.py seam contract).
         """
-        price = self._price_from_address_keys(token)
-        if price is not None:
-            return price
+        from almanak.framework.data.tokens import TokenRef, is_pegged
+        from almanak.framework.market.price_store import lookup_price
+
+        address = getattr(token, "address", None)
+        decimals = getattr(token, "decimals", None)
+        if not address or not isinstance(decimals, int):
+            return self._host._require_token_price(token.symbol)
+
+        try:
+            token_ref = TokenRef(
+                chain=self._host.chain,
+                address=address,
+                decimals=decimals,
+                symbol=token.symbol,
+                provenance="intent_compiler",
+            )
+        except ValueError:
+            # Identity validation is an optimization boundary here: retain
+            # the measured symbol path when this TokenInfo cannot form one.
+            return self._host._require_token_price(token.symbol)
+        symbol_upper = token.symbol.upper()
+        native_alias = self._host._WRAPPED_TO_NATIVE.get(symbol_upper)
+        aliases = (native_alias,) if native_alias else ()
+        peg = is_pegged(token_ref)
+        found = lookup_price(
+            self._host.price_oracle,
+            token=token_ref,
+            symbol=symbol_upper,
+            aliases=aliases,
+            peg=peg,
+            infer_symbol_from_address=False,
+        )
+        if found is not None:
+            if found.price <= 0:
+                raise ValueError(
+                    f"Price for '{token.symbol}' ({token_ref.chain}:{token_ref.address}) is zero in the price "
+                    "oracle. Compilation refuses to replace measured zero/off-peg evidence with a synthetic peg."
+                )
+            if found.used_peg:
+                identity = f"{token_ref.chain}:{token_ref.address}"
+                if identity not in self._host._stablecoin_fallback_logged:
+                    logger.warning(
+                        "Price for %s at %s missing from live oracle; using registry peg %s (used_peg=true)",
+                        token.symbol,
+                        identity,
+                        found.price,
+                    )
+                    self._host._stablecoin_fallback_logged.add(identity)
+                else:
+                    logger.debug("Reusing registry peg for %s at %s", token.symbol, identity)
+                self._host._record_peg_fallback(token_ref)
+            return found.price
+
+        # Preserve the compiler host seam for measured symbol/native aliases
+        # and test-only placeholder mode. That helper no longer owns any
+        # stablecoin peg, so this cannot reintroduce symbol-authorized pegs.
         return self._host._require_token_price(token.symbol)
 
     def _price_from_address_keys(self, token: TokenInfo) -> Decimal | None:
@@ -725,7 +799,7 @@ class CompilerQueries:
         if alias is not None and alias.price > 0:
             return alias.price
 
-        fallback = self._placeholder_or_stablecoin_price(symbol, symbol_upper)
+        fallback = self._placeholder_price()
         if fallback is not None:
             return fallback
 
@@ -739,17 +813,9 @@ class CompilerQueries:
             "Compilation requires a valid price to calculate amounts and slippage."
         )
 
-    def _placeholder_or_stablecoin_price(self, symbol: str, symbol_upper: str) -> Decimal | None:
-        """Return the explicit $1 fallback, logging stablecoin use once."""
-        is_stablecoin = symbol_upper in self._host._get_known_stablecoins()
-        if not self._host._using_placeholders and not is_stablecoin:
-            return None
-        if is_stablecoin and symbol not in self._host._stablecoin_fallback_logged:
-            logger.info(f"Price for '{symbol}' not in oracle cache, using stablecoin fallback ($1.00)")
-            self._host._stablecoin_fallback_logged.add(symbol)
-        elif is_stablecoin:
-            logger.debug(f"Reusing stablecoin fallback price for '{symbol}'")
-        return Decimal("1")
+    def _placeholder_price(self) -> Decimal | None:
+        """Return the explicitly enabled test-only placeholder, if allowed."""
+        return Decimal("1") if self._host._using_placeholders else None
 
     # ------------------------------------------------------------------
     # Pool parsing

@@ -26,8 +26,8 @@ Design notes:
 - Token extraction handles both decompiled ``Intent`` objects (``execute``
   path) and serialized intent dicts (``resume`` path, which stores
   ``pending_intents_json``).
-- Validation mirrors the compiler's own resolution leniency
-  (case-insensitive, wrapped<->native alias, known-stablecoin $1 fallback) so
+- Validation uses the compiler's own resolution helper
+  (case-insensitive, wrapped<->native alias, exact registry peg fallback) so
   we only fail loud when a token is *genuinely* unpriceable — not when the
   compiler would have resolved it anyway.
 - Pendle PT/YT symbols are not carried by the generic ``GetPrice`` oracle the
@@ -50,8 +50,8 @@ from typing import Any
 
 from almanak.framework.intents.compiler import (
     _CHAIN_NATIVE_SYMBOLS,
-    IntentCompiler,
 )
+from almanak.framework.intents.compiler_queries import lenient_oracle_price
 
 logger = logging.getLogger(__name__)
 
@@ -227,6 +227,41 @@ def _record_intent_token_fields(
                     record(resolved, intent_chain)
 
 
+def _required_token_chain_entries(intents: list[Any], fallback_chain: str | None) -> list[tuple[str, str | None]]:
+    """Return every distinct required ``(symbol, chain)`` identity in plan order."""
+    entries: list[tuple[str, str | None]] = []
+    seen_entries: set[tuple[str, str | None]] = set()
+    chains_in_plan: list[str] = []
+    seen_chains: set[str] = set()
+
+    def _record(symbol: str, chain: str | None) -> None:
+        key = symbol.strip().upper()
+        normalized_chain = chain.strip() if isinstance(chain, str) and chain.strip() else None
+        entry = (key, normalized_chain)
+        if entry not in seen_entries:
+            seen_entries.add(entry)
+            entries.append(entry)
+
+    for intent in intents:
+        raw_chain = _intent_field(intent, "chain")
+        intent_chain = raw_chain.strip() if isinstance(raw_chain, str) and raw_chain.strip() else fallback_chain
+        if isinstance(intent_chain, str) and intent_chain.strip():
+            normalized_chain = intent_chain.strip()
+            if normalized_chain not in seen_chains:
+                seen_chains.add(normalized_chain)
+                chains_in_plan.append(normalized_chain)
+
+        _record_intent_token_fields(intent, intent_chain, _record)
+
+    if not chains_in_plan and fallback_chain:
+        chains_in_plan.append(fallback_chain)
+    for plan_chain in chains_in_plan:
+        for native in _CHAIN_NATIVE_SYMBOLS.get(plan_chain.lower(), frozenset()):
+            _record(native, plan_chain)
+
+    return entries
+
+
 def extract_required_token_chains(intents: list[Any], fallback_chain: str | None) -> dict[str, str | None]:
     """Map every token symbol a teardown plan needs priced to its chain.
 
@@ -243,39 +278,17 @@ def extract_required_token_chains(intents: list[Any], fallback_chain: str | None
     token is left un-warmed.
 
     Symbols are returned upper-cased to match ``get_price_oracle_dict()`` keys.
-    When a token appears on multiple chains, the first-seen chain wins (the warm
-    call only needs *a* valid chain to populate the cache; later validation is
-    chain-agnostic).
+    This compatibility projection retains the first-seen chain when a symbol
+    appears on multiple chains. Identity-aware warming uses the uncollapsed
+    entries from :func:`_required_token_chain_entries` instead.
 
     ``fallback_chain`` is used only for tokens on an intent that declares no
     chain, and to seed native-gas warming when no intent carries a chain.
     """
     token_chains: dict[str, str | None] = {}
-    chains_in_plan: set[str] = set()
-
-    def _record(symbol: str, chain: str | None) -> None:
-        key = symbol.strip().upper()
-        # First-seen chain wins; never overwrite a concrete chain with None.
-        if key not in token_chains or (token_chains[key] is None and chain is not None):
-            token_chains[key] = chain
-
-    for intent in intents:
-        raw_chain = _intent_field(intent, "chain")
-        intent_chain = raw_chain.strip() if isinstance(raw_chain, str) and raw_chain.strip() else fallback_chain
-        if isinstance(intent_chain, str) and intent_chain.strip():
-            chains_in_plan.add(intent_chain.strip())
-
-        _record_intent_token_fields(intent, intent_chain, _record)
-
-    # Native gas token(s) for EVERY chain in the plan — ledger gas pricing
-    # needs each one. A multi-chain teardown that only warmed one chain's gas
-    # token would leave the others ``price_missing`` (VIB-4842 Codex review P2).
-    if not chains_in_plan and fallback_chain:
-        chains_in_plan.add(fallback_chain)
-    for plan_chain in chains_in_plan:
-        for native in _CHAIN_NATIVE_SYMBOLS.get(plan_chain.lower(), frozenset()):
-            _record(native, plan_chain)
-
+    for symbol, token_chain in _required_token_chain_entries(intents, fallback_chain):
+        if symbol not in token_chains or (token_chains[symbol] is None and token_chain is not None):
+            token_chains[symbol] = token_chain
     return token_chains
 
 
@@ -409,56 +422,66 @@ def _is_usable_price(value: Any) -> bool:
         return False
 
 
-def _can_resolve_price(symbol: str, oracle: dict[str, Any]) -> bool:
+def _can_resolve_price(symbol: str, oracle: dict[str, Any], chain: str | None = None) -> bool:
     """Mirror the compiler's price-resolution leniency for validation.
 
-    Returns ``True`` when ``symbol`` would resolve to a non-zero price in
-    ``_require_token_price`` — directly, case-insensitively, via the
-    wrapped<->native alias (BOTH directions), or via the known-stablecoin $1
-    fallback.
+    The shared lookup preserves address/symbol precedence, wrapped/native
+    aliases, exact registry pegs, and the measured-zero hard stop.
     """
-    symbol_upper = symbol.upper()
+    price = lenient_oracle_price(oracle, symbol, chain)
+    return price is not None and price > 0
 
-    # Direct / case-insensitive match with a non-zero price.
-    for key, val in oracle.items():
-        if key.upper() == symbol_upper and val is not None and val != 0:
-            return True
 
-    # Wrapped<->native alias, BOTH directions. Mirror the compiler's
-    # bidirectional ``_expand_native_aliases_in_price_oracle``, which copies a
-    # known price across a wrapped/native pair from whichever side is present
-    # (``WETH`` -> ``ETH`` *and* ``ETH`` -> ``WETH``). A one-directional check
-    # here false-positives a ``TeardownPriceOracleError`` for, e.g., a native
-    # ``ETH`` requirement when the oracle only holds ``WETH`` — blocking a
-    # risk-reducing teardown the compiler would have priced fine (VIB-4842).
-    aliases: set[str] = set()
-    native_alias = IntentCompiler._WRAPPED_TO_NATIVE.get(symbol_upper)
-    if native_alias:
-        aliases.add(native_alias.upper())
-    aliases.update(
-        wrapped.upper()
-        for wrapped, native in IntentCompiler._WRAPPED_TO_NATIVE.items()
-        if native.upper() == symbol_upper
-    )
-    for alias in aliases:
-        for key, val in oracle.items():
-            if key.upper() == alias and val is not None and val != 0:
-                return True
+def _can_resolve_identity_price(symbol: str, oracle: dict[str, Any], chain: str | None) -> bool:
+    """Resolve only an exact chain/address price or exact registry peg."""
+    if not chain:
+        return False
+    try:
+        from almanak.framework.data.tokens import canonicalize_token_identity, peg_for_identity
+        from almanak.framework.market.price_store import lookup_price
 
-    # Known stablecoins fall back to $1.00 in the compiler.
-    if symbol_upper in IntentCompiler._get_known_stablecoins():
-        return True
+        identity_chain, address = canonicalize_token_identity(symbol, chain)
+        found = lookup_price(
+            oracle,
+            chain=identity_chain,
+            address=address,
+            symbol="",
+            peg=peg_for_identity(identity_chain, address),
+            infer_symbol_from_address=False,
+        )
+    except Exception:  # noqa: BLE001 — best-effort validation helper
+        return False
+    return found is not None and found.price > 0
 
-    return False
+
+def _entry_sort_key(entry: tuple[str, str | None]) -> tuple[str, str]:
+    return (entry[0], entry[1] or "")
+
+
+def _entry_label(entry: tuple[str, str | None]) -> str:
+    symbol, chain = entry
+    return f"{symbol}@{chain}" if chain else symbol
+
+
+def _can_resolve_entry(
+    entry: tuple[str, str | None],
+    oracle: dict[str, Any],
+    duplicate_symbols: set[str],
+) -> bool:
+    symbol, chain = entry
+    if symbol in duplicate_symbols:
+        # A bare symbol mark from another chain cannot validate this identity.
+        return _can_resolve_identity_price(symbol, oracle, chain)
+    return _can_resolve_price(symbol, oracle, chain)
 
 
 def _warm_pt_yt_prices(
     market: Any,
-    required: set[str],
-    token_chains: dict[str, str | None],
+    required: set[tuple[str, str | None]],
     oracle: dict[str, Any],
-    priced_ok: set[str],
-    warm_errors: dict[str, str],
+    priced_ok: set[tuple[str, str | None]],
+    warm_errors: dict[tuple[str, str | None], str],
+    duplicate_symbols: set[str],
 ) -> None:
     """Warm Pendle PT/YT prices via the dedicated ``market.pt_price()`` RPC.
 
@@ -490,21 +513,26 @@ def _warm_pt_yt_prices(
         # returned no usable price" fallback. Record a PT/YT-specific source so the
         # loud failure names the dedicated warm path (Empty != Zero: still absent →
         # the guard hard-stops).
-        for token in sorted(required):
-            if _is_pt_yt_symbol(token) and token.upper() not in priced_ok and not _can_resolve_price(token, oracle):
-                warm_errors.setdefault(token, "market.pt_price() is unavailable on this market snapshot")
+        for entry in sorted(required, key=_entry_sort_key):
+            token, _token_chain = entry
+            if (
+                _is_pt_yt_symbol(token)
+                and entry not in priced_ok
+                and not _can_resolve_entry(entry, oracle, duplicate_symbols)
+            ):
+                warm_errors.setdefault(entry, "market.pt_price() is unavailable on this market snapshot")
         return
-    for token in sorted(required):
+    for entry in sorted(required, key=_entry_sort_key):
+        token, token_chain = entry
         if not _is_pt_yt_symbol(token):
             continue
         # Already resolvable (e.g. via the lenient lookup) — no RPC needed.
-        if token.upper() in priced_ok or _can_resolve_price(token, oracle):
+        if entry in priced_ok or _can_resolve_entry(entry, oracle, duplicate_symbols):
             continue
-        token_chain = token_chains.get(token)
         try:
             pt_data = market.pt_price(token, chain=token_chain) if token_chain else market.pt_price(token)
         except Exception as exc:  # noqa: BLE001 — validation re-checks below
-            warm_errors[token] = str(exc)
+            warm_errors[entry] = str(exc)
             logger.warning(
                 "Teardown oracle warm: pt_price(%s, chain=%s) failed: %s",
                 token,
@@ -514,13 +542,16 @@ def _warm_pt_yt_prices(
             continue
         pt_value = getattr(pt_data, "price", None)
         if _is_usable_price(pt_value):
-            oracle[token.upper()] = pt_value
-            priced_ok.add(token.upper())
+            oracle_key = (
+                f"{token_chain}:{token.upper()}" if token in duplicate_symbols and token_chain else token.upper()
+            )
+            oracle[oracle_key] = pt_value
+            priced_ok.add(entry)
         else:
             # Empty != Zero: do NOT fabricate. Leave the PT absent (the guard
             # still hard-stops) and record why for the loud error message.
             warm_errors.setdefault(
-                token,
+                entry,
                 "market.pt_price() returned no usable price (UNAVAILABLE / None / zero — Empty != Zero)",
             )
 
@@ -569,8 +600,7 @@ def warm_and_validate_oracle(
     if market is None or not hasattr(market, "get_price_oracle_dict"):
         return None
 
-    token_chains = extract_required_token_chains(intents, chain)
-    required = set(token_chains.keys())
+    required_entries = set(_required_token_chain_entries(intents, chain))
     # VIB-6219: perp index symbols are warmed but NOT required — see
     # `extract_warmable_token_chains`. Merged into `token_chains` so the warm
     # loop prices each on its own chain; deliberately absent from `required` so
@@ -578,7 +608,7 @@ def warm_and_validate_oracle(
     # aborting the whole unwind. A symbol that is ALREADY required (e.g. it is
     # also a collateral token) keeps its required status — `setdefault` never
     # downgrades.
-    best_effort: set[str] = set()
+    best_effort_entries: set[tuple[str, str | None]] = set()
     warmable = extract_warmable_token_chains(intents, chain)
     # Address-first perp intents carry the market-token ADDRESS, which the
     # symbol parser cannot turn into a price symbol. Resolve those through the
@@ -587,24 +617,31 @@ def warm_and_validate_oracle(
     for symbol, symbol_chain in resolve_perp_index_chains_via_gateway(market, intents, chain).items():
         warmable.setdefault(symbol, symbol_chain)
     for symbol, symbol_chain in warmable.items():
-        if symbol not in token_chains:
-            token_chains[symbol] = symbol_chain
-            best_effort.add(symbol)
-    if not required and not best_effort:
+        entry = (symbol, symbol_chain)
+        if entry not in required_entries:
+            best_effort_entries.add(entry)
+    if not required_entries and not best_effort_entries:
         # Nothing to warm (e.g. LP_CLOSE-only plan whose tokens resolve
         # on-chain at compile time). Return whatever the oracle already holds.
         fetched = market.get_price_oracle_dict()
         return fetched if fetched is not None else None
 
     can_price = hasattr(market, "price")
-    warm_errors: dict[str, str] = {}
+    warm_errors: dict[tuple[str, str | None], str] = {}
     # Tokens for which ``price()`` returned a usable (non-None, non-zero) value.
     # This is the authoritative "is priceable" signal — the oracle dict is a
     # secondary reflection that a real ``MarketSnapshot`` populates from the
     # same call, but which a token may legitimately resolve past via the
     # wrapped<->native alias even when its own key is absent.
-    priced_ok: set[str] = set()
-    for token in sorted(required | best_effort):
+    priced_ok: set[tuple[str, str | None]] = set()
+    all_entries = required_entries | best_effort_entries
+    symbol_chains: dict[str, set[str | None]] = {}
+    for token, token_chain in all_entries:
+        symbol_chains.setdefault(token, set()).add(token_chain)
+    duplicate_symbols = {token for token, chains in symbol_chains.items() if len(chains) > 1}
+
+    for entry in sorted(all_entries, key=_entry_sort_key):
+        token, token_chain = entry
         if not can_price:
             break
         # PT/YT symbols are not carried by the generic GetPrice oracle — they are
@@ -618,11 +655,10 @@ def warm_and_validate_oracle(
         # ``chain=`` only when known — ``chain=None`` lets MarketSnapshot apply
         # its single-chain default (and raise AmbiguousChainError on a genuinely
         # ambiguous multi-chain snapshot, which we surface as a warm error).
-        token_chain = token_chains.get(token)
         try:
             value = market.price(token, chain=token_chain) if token_chain else market.price(token)
         except Exception as exc:  # noqa: BLE001 — validation re-checks below
-            warm_errors[token] = str(exc)
+            warm_errors[entry] = str(exc)
             logger.warning(
                 "Teardown oracle warm: price(%s, chain=%s) failed: %s",
                 token,
@@ -631,7 +667,7 @@ def warm_and_validate_oracle(
             )
         else:
             if _is_usable_price(value):
-                priced_ok.add(token.upper())
+                priced_ok.add(entry)
 
     fetched = market.get_price_oracle_dict()
     oracle: dict[str, Any] = fetched if fetched is not None else {}
@@ -641,21 +677,33 @@ def warm_and_validate_oracle(
     # merge MEASURED prices into ``oracle`` / ``priced_ok`` (VIB-5537). Empty !=
     # Zero is preserved: an UNAVAILABLE / None / zero PT is left absent so the
     # guard still hard-stops on a genuinely unpriceable PT.
-    _warm_pt_yt_prices(market, required, token_chains, oracle, priced_ok, warm_errors)
+    _warm_pt_yt_prices(
+        market,
+        required_entries,
+        oracle,
+        priced_ok,
+        warm_errors,
+        duplicate_symbols,
+    )
 
     # A token is genuinely missing only when it neither returned a usable
     # ``price()`` value NOR resolves through the compiler's lenient lookup
     # (direct / case-insensitive / wrapped-native alias / stablecoin fallback).
-    missing = [
-        token for token in sorted(required) if token.upper() not in priced_ok and not _can_resolve_price(token, oracle)
+    missing_entries = [
+        entry
+        for entry in sorted(required_entries, key=_entry_sort_key)
+        if entry not in priced_ok and not _can_resolve_entry(entry, oracle, duplicate_symbols)
     ]
-    if missing:
-        first = missing[0]
-        sources = warm_errors.get(first, "market.price() returned no usable price")
+    if missing_entries:
+        first_entry = missing_entries[0]
+        first = _entry_label(first_entry)
+        missing = [_entry_label(entry) for entry in missing_entries]
+        required = [_entry_label(entry) for entry in sorted(required_entries, key=_entry_sort_key)]
+        sources = warm_errors.get(first_entry, "market.price() returned no usable price")
         if raise_on_missing:
             raise TeardownPriceOracleError(
                 f"Teardown pre-flight: price for '{first}' is missing from the oracle "
-                f"after warming (required tokens: {', '.join(sorted(required))}; "
+                f"after warming (required tokens: {', '.join(required)}; "
                 f"all still-missing: {', '.join(missing)}). "
                 f"Sources tried for '{first}': {sources}. "
                 "Refusing to compile closing intents with an incomplete oracle."

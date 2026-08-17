@@ -30,6 +30,7 @@ from almanak.framework.models.reproduction_bundle import ActionBundle
 from almanak.framework.teardown.lp_clamp import LpClampUnresolved, bound_close_amount
 
 if TYPE_CHECKING:
+    from almanak.framework.intents.compiler_models import TokenInfo
     from almanak.framework.intents.vocabulary import CollectFeesIntent, LPCloseIntent, LPOpenIntent, SwapIntent
 
 logger = logging.getLogger("almanak.framework.intents.compiler")
@@ -141,6 +142,9 @@ class _AerodromeCompileImpl:
     def _require_token_price(self, symbol: str) -> Decimal:
         return self._ctx.services.require_token_price(symbol)
 
+    def _require_token_price_for(self, token: TokenInfo) -> Decimal:
+        return self._ctx.services.require_token_price_for(token)
+
     def _usd_to_token_amount(self, usd_amount: Decimal, token: Any) -> int:
         return self._ctx.services.usd_to_token_amount(usd_amount, token)
 
@@ -189,6 +193,14 @@ def _looks_like_evm_address(value: str) -> bool:
         return False
 
 
+def _require_resolved_token_price(compiler: Any, token: TokenInfo) -> Decimal:
+    """Use exact identity in production while preserving the legacy test seam."""
+    exact_lookup = getattr(compiler, "_require_token_price_for", None)
+    if callable(exact_lookup):
+        return exact_lookup(token)
+    return compiler._require_token_price(token.symbol)
+
+
 def _aerodrome_swap_price_impact_guard(
     compiler,
     intent: SwapIntent,
@@ -229,8 +241,8 @@ def _aerodrome_swap_price_impact_guard(
     # the guard then skips rather than hard-failing on a data gap.
     oracle_estimate_wei = 0
     try:
-        from_price = compiler._require_token_price(from_token.symbol)
-        to_price = compiler._require_token_price(to_token.symbol)
+        from_price = _require_resolved_token_price(compiler, from_token)
+        to_price = _require_resolved_token_price(compiler, to_token)
         if to_price > 0:
             oracle_out_human = (amount_decimal * from_price) / to_price
             oracle_estimate_wei = int(oracle_out_human * Decimal(10**to_token.decimals))
@@ -1350,7 +1362,7 @@ def compile_swap_aerodrome(compiler, intent: SwapIntent) -> CompilationResult:  
         # Calculate input amount
         amount_decimal: Decimal
         if intent.amount_usd is not None:
-            price = compiler._require_token_price(from_token.symbol)
+            price = _require_resolved_token_price(compiler, from_token)
             amount_decimal = intent.amount_usd / price
         elif intent.amount is not None:
             if intent.amount == "all":

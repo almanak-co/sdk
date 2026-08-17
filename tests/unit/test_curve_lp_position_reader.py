@@ -17,6 +17,8 @@ from typing import Any
 import pytest
 
 from almanak.connectors.curve import pool_resolver
+from almanak.framework.data.tokens.models import TokenRef
+from almanak.framework.data.tokens.pegs import is_pegged
 from almanak.framework.teardown.models import PositionInfo, PositionType
 from almanak.framework.valuation.curve_lp_position_reader import (
     CurveLpPosition,
@@ -70,6 +72,8 @@ STETH_ADDR = "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84"
 POOL_FRAX3CRV = "0xd632f22692FaC7611d2AA1C0D552930D43CAEd3B"
 LP_FRAX3CRV = "0xd632f22692FaC7611d2AA1C0D552930D43CAEd3B"
 FRAX_ADDR = "0x853d955aCEf822Db058eb8505911ED77F175b99e"
+MIM_ADDR = "0x99D8a9C45b2ecA8864373A26D1459e3Dff1e17F3"
+WETH_ADDR = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
 DAI_ADDR = "0x6B175474E89094C44Da98b954EedeAC495271d0F"
 USDC_ADDR = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
 USDT_ADDR = "0xdAC17F958D2ee523a2206206994597C13D831ec7"
@@ -343,13 +347,15 @@ def test_read_position_base_4pool_usdbc_axlusdc_values() -> None:
 
 
 def test_usdbc_and_axlusdc_in_usd_stable_allowlist() -> None:
-    # Peg justification (audit P0-3): both are 1:1 USDC wrappers. The allowlist
-    # check upper-cases coin symbols, so the canonical-cased entries must match
-    # the registry's mixed-case "USDbC" / "axlUSDC".
-    from almanak.framework.valuation.curve_lp_position_reader import _USD_STABLE_SYMBOLS
-
-    assert "USDbC".upper() in _USD_STABLE_SYMBOLS
-    assert "axlUSDC".upper() in _USD_STABLE_SYMBOLS
+    # Peg justification (audit P0-3) now lives on exact Base identities.
+    pos = CurveLpPositionReader(
+        _StubGatewayClient(_make_replies(lp_balance_wei=0, virtual_price_wei=10**18))
+    ).read_position(protocol="curve", chain="base", pool="4pool", lp_token=LP_4POOL_BASE, wallet_address=WALLET)
+    assert pos is not None
+    assert all(
+        is_pegged(TokenRef(chain="base", address=address, decimals=0, symbol=symbol)) == Decimal("1")
+        for symbol, address in zip(pos.coins, pos.coin_addresses, strict=True)
+    )
 
 
 # ── VIB-5428 — crypto / non-USD pool spot-reserves reads ──────────────────────
@@ -749,11 +755,8 @@ def test_valuer_curve_branch_unmeasured_fails_closed_not_zero() -> None:
 def test_valuer_metapool_shape_usd_pegged_values() -> None:
     # A crvUSD/USDC StableSwap pool (USD-pegged base + coin) values identically.
     # Resolve a real USD-stable pool from the registry if one exists; otherwise
-    # this asserts the USD-stable allowlist accepts crvUSD.
-    from almanak.framework.valuation.curve_lp_position_reader import _USD_STABLE_SYMBOLS
-
-    assert "CRVUSD" in _USD_STABLE_SYMBOLS
-    assert "USDC" in _USD_STABLE_SYMBOLS
+    # this asserts the Ethereum identities are peg-authorized.
+    assert is_pegged(TokenRef(chain="ethereum", address=USDC_ADDR, decimals=0, symbol="USDC")) == Decimal("1")
 
 
 # ── VIB-5426 / audit P0-2 — oracle-vs-pool depeg cross-check ──────────────────
@@ -813,6 +816,30 @@ def test_curve_oracle_miss_distinct_from_depeg() -> None:
         "ethereum",
         market=_usd_market(USDT=None),  # type: ignore[arg-type]
     )
+    assert repriced is True
+    assert value_usd == Decimal("0")
+    assert details["valuation_status"] == "no_path"
+    assert details["unavailable_reason"] == "curve_oracle_price_unavailable"
+
+
+def test_curve_exact_address_zero_cannot_fall_back_to_symbol_peg() -> None:
+    """A measured zero at the exact address disables the whole pool peg."""
+    valuer = _active_3pool_valuer()
+    market = _StubMarket(
+        {
+            "DAI": Decimal("1"),
+            "USDC": Decimal("1"),
+            "USDT": Decimal("1"),
+            USDC_ADDR: Decimal("0"),
+        }
+    )
+
+    value_usd, details, repriced = valuer._reprice_lp_enriched_dispatch(
+        _3pool_pos(),
+        "ethereum",
+        market=market,  # type: ignore[arg-type]
+    )
+
     assert repriced is True
     assert value_usd == Decimal("0")
     assert details["valuation_status"] == "no_path"
@@ -1132,18 +1159,24 @@ def test_valuer_crypto_no_market_fails_closed() -> None:
 def test_classify_family_branches() -> None:
     classify = CurveLpPositionReader._classify_family
     # plain USD stable
-    assert classify({"coins": ["DAI", "USDC", "USDT"]}, ["DAI", "USDC", "USDT"], coins_overridden=False) == "usd_stable"
+    plain = {
+        "coins": ["DAI", "USDC", "USDT"],
+        "coin_addresses": [DAI_ADDR, USDC_ADDR, USDT_ADDR],
+    }
+    assert classify(plain, ["DAI", "USDC", "USDT"], chain="ethereum", coins_overridden=False) == "usd_stable"
     # USD metapool
     meta_usd = {
         "is_metapool": True,
         "base_pool": POOL_3POOL,
         "base_pool_coins": ["DAI", "USDC", "USDT"],
+        "base_pool_coin_addresses": [DAI_ADDR, USDC_ADDR, USDT_ADDR],
         "coins": ["FRAX", "3CRV"],
+        "coin_addresses": [FRAX_ADDR, LP_3POOL],
     }
-    assert classify(meta_usd, ["FRAX", "3CRV"], coins_overridden=False) == "metapool_usd"
+    assert classify(meta_usd, ["FRAX", "3CRV"], chain="ethereum", coins_overridden=False) == "metapool_usd"
     # crypto (non-USD) with full addresses
     meta_crypto = {"coins": ["USDT", "WBTC", "WETH"], "coin_addresses": [USDT_ADDR, "0xb", "0xc"]}
-    assert classify(meta_crypto, ["USDT", "WBTC", "WETH"], coins_overridden=False) == "crypto"
+    assert classify(meta_crypto, ["USDT", "WBTC", "WETH"], chain="ethereum", coins_overridden=False) == "crypto"
 
 
 def test_classify_family_fails_closed() -> None:
@@ -1153,22 +1186,26 @@ def test_classify_family_fails_closed() -> None:
         "is_metapool": True,
         "base_pool": "0xbase",
         "base_pool_coins": ["WETH", "USDC"],  # not all USD
+        "base_pool_coin_addresses": [WETH_ADDR, USDC_ADDR],
         "coins": ["MIM", "crvFRAX"],
+        "coin_addresses": [MIM_ADDR, LP_3POOL],
     }
-    assert classify(meta_bad_base, ["MIM", "crvFRAX"], coins_overridden=False) is None
+    assert classify(meta_bad_base, ["MIM", "crvFRAX"], chain="ethereum", coins_overridden=False) is None
     # metapool whose META coin is non-USD → fail closed
     meta_bad_meta = {
         "is_metapool": True,
         "base_pool": POOL_3POOL,
         "base_pool_coins": ["DAI", "USDC", "USDT"],
+        "base_pool_coin_addresses": [DAI_ADDR, USDC_ADDR, USDT_ADDR],
         "coins": ["WETH", "3CRV"],
+        "coin_addresses": [WETH_ADDR, LP_3POOL],
     }
-    assert classify(meta_bad_meta, ["WETH", "3CRV"], coins_overridden=False) is None
+    assert classify(meta_bad_meta, ["WETH", "3CRV"], chain="ethereum", coins_overridden=False) is None
     # non-USD pool MISSING coin addresses → cannot price → fail closed
     meta_no_addr = {"coins": ["WETH", "WBTC"], "coin_addresses": []}
-    assert classify(meta_no_addr, ["WETH", "WBTC"], coins_overridden=False) is None
+    assert classify(meta_no_addr, ["WETH", "WBTC"], chain="ethereum", coins_overridden=False) is None
     # empty coins → fail closed
-    assert classify({"coins": []}, [], coins_overridden=False) is None
+    assert classify({"coins": []}, [], chain="ethereum", coins_overridden=False) is None
 
 
 # ── VIB-5428 — uint256 over-long-return decode (FRAX/3CRV metapool quirk) ──────
@@ -1198,7 +1235,7 @@ def test_classify_family_override_cannot_reclassify_crypto() -> None:
     # family (the valuer would mis-map an address to the wrong coin).
     classify = CurveLpPositionReader._classify_family
     meta_crypto = {"coins": ["USDT", "WBTC", "WETH"], "coin_addresses": [USDT_ADDR, "0xb", "0xc"]}
-    assert classify(meta_crypto, ["WBTC", "WETH"], coins_overridden=True) is None
+    assert classify(meta_crypto, ["WBTC", "WETH"], chain="ethereum", coins_overridden=True) is None
 
 
 if __name__ == "__main__":

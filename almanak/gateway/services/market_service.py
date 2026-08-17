@@ -10,6 +10,7 @@ import logging
 import math
 import re
 import time
+import warnings
 from decimal import Decimal
 from types import MappingProxyType
 from typing import Any
@@ -613,6 +614,36 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             return self._price_aggregators[chain]
         return self._price_aggregators[self._primary_chain]
 
+    def _configured_chains(self) -> set[str]:
+        """Return the gateway's canonical, case-normalized chain boundary."""
+        return {chain.lower() for chain in (self.settings.chains or []) if chain}
+
+    def _chain_configuration_error(self, chain: str) -> str | None:
+        """Explain why ``chain`` cannot be routed by this gateway, if applicable."""
+        if chain in self._configured_chains():
+            return None
+        return f"Chain '{chain}' is not configured on this gateway"
+
+    async def _auto_reinitialize_balance_chains(self, requested_chains: list[str]) -> None:
+        """Late-register valid balance chains when the gateway started unconfigured."""
+        if self.settings.chains:
+            return
+
+        valid_chains: list[str] = []
+        for requested_chain in requested_chains:
+            try:
+                chain = validate_chain(requested_chain or "arbitrum")
+            except ValidationError:
+                continue
+            if chain not in valid_chains:
+                valid_chains.append(chain)
+
+        for chain in valid_chains:
+            try:
+                await self.reinitialize(chain)
+            except Exception as e:
+                logger.warning("MarketService balance auto-reinit failed for chain %s: %s", chain, e)
+
     @staticmethod
     async def _close_aggregator_sources(aggregators: dict[str, Any]) -> None:
         """Close every distinct price source across ``aggregators`` exactly once,
@@ -953,18 +984,21 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
     ) -> Any | None:
         """Resolve a token input (symbol or address) into a ResolvedToken.
 
-        Only resolves EVM contract addresses via on-chain ERC20 metadata.
-        Returns None when the input is a symbol, chain is unknown, or the
-        on-chain lookup fails — callers then fall through to the normal
-        symbol-based aggregator path.
+        Static registry resolution runs first for both symbols and addresses,
+        giving the aggregator an exact ``(chain, address)`` identity before it
+        considers any synthetic peg. Unknown EVM addresses then fall back to
+        on-chain ERC-20 metadata. Returns ``None`` when no identity can be
+        established, so price sources may still attempt their ordinary
+        measured symbol path without gaining peg permission.
 
         The returned ResolvedToken carries the chain and address needed by
         price sources that support address-based lookups (e.g. CoinGecko's
         /simple/token_price/{platform} endpoint).
         """
-        if not _EVM_ADDRESS_RE.match(token):
-            return None
+        is_evm_address = bool(_EVM_ADDRESS_RE.match(token))
 
+        settings = getattr(self, "settings", None)
+        settings_chains = getattr(settings, "chains", None) or []
         chain = (requested_chain or "").lower()
         if not chain:
             # No explicit chain. Only infer from settings if it is UNAMBIGUOUS —
@@ -972,16 +1006,21 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             # would otherwise silently query the wrong RPC for a token that
             # lives on a secondary chain, returning either "not a contract" or
             # (worse) a price from a same-address token on the wrong chain.
-            configured = [c for c in (self.settings.chains or []) if c]
+            configured = [c for c in settings_chains if c]
             if len(configured) == 1:
                 chain = configured[0].lower()
-            elif len(configured) > 1:
+            elif len(configured) > 1 and is_evm_address:
                 # Strict contract (Phase 2, VIB-3259): multi-chain gateway MUST
                 # receive an explicit chain for address-based lookups. Raise
                 # so GetPrice can translate to gRPC INVALID_ARGUMENT — silently
                 # skipping here would just cascade into a confusing "Unknown
                 # token" downstream with no hint at the real cause.
                 raise MultiChainAmbiguousPriceRequest(token, configured)
+            elif len(configured) > 1 and getattr(self, "_primary_chain", _NO_CHAIN_KEY) != _NO_CHAIN_KEY:
+                # Bare-symbol requests historically route through the primary
+                # chain's aggregator. Resolve against that same chain so the
+                # identity used for peg gating cannot drift from routing.
+                chain = self._primary_chain
             else:
                 # Zero configured chains: nothing we can do. Fall through to
                 # symbol-based resolution (caller may still get a price from a
@@ -996,7 +1035,7 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             chain = validate_chain(chain)
         except ValidationError as e:
             logger.info(
-                "Address price lookup for %s skipped: chain %r not allowed (%s)",
+                "Token price identity lookup for %s skipped: chain %r not allowed (%s)",
                 token,
                 requested_chain or chain,
                 e,
@@ -1007,18 +1046,43 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         # can be in ALLOWED_CHAINS but not in this gateway's settings.chains,
         # which would still let a caller force an on-chain lookup on a chain
         # the operator never opted into.
-        configured_chains = {c.lower() for c in (self.settings.chains or []) if c}
-        if configured_chains and chain not in configured_chains:
+        configured_chains = {c.lower() for c in settings_chains if c}
+        if chain not in configured_chains:
             logger.info(
-                "Address price lookup for %s on %s skipped: chain not in gateway's configured chains %s",
+                "Token price identity lookup for %s on %s skipped: chain not in gateway's configured chains %s",
                 token,
                 chain,
                 sorted(configured_chains),
             )
             return None
 
-        if is_solana_chain(chain):
+        # The static registry is authoritative for peg metadata. Resolve it
+        # before any network lookup, including on Solana where no EVM metadata
+        # fallback exists. Suppress the public symbol-deprecation warning here:
+        # this is the legacy gRPC boundary translating a symbol into identity,
+        # not new strategy code persisting symbol identity.
+        try:
+            from almanak.framework.data.tokens import SymbolTokenResolutionWarning, get_token_resolver
+            from almanak.framework.data.tokens.pegs import is_pegged
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", SymbolTokenResolutionWarning)
+                resolved = get_token_resolver().resolve(token, chain, log_errors=False, skip_gateway=True)
+            # Preserve the measured bare-symbol path for ordinary assets. A
+            # symbol is resolved here only when the gateway needs an exact peg
+            # identity; address requests always retain their resolved identity.
+            if is_evm_address or is_pegged(resolved.token_ref) is not None:
+                return resolved
             return None
+        except Exception as exc:
+            logger.debug(
+                "Static token price identity resolution failed for %s on %s: %s",
+                token,
+                chain,
+                exc,
+            )
+            if not is_evm_address or is_solana_chain(chain):
+                return None
 
         try:
             from almanak.core.chains import ChainRegistry
@@ -1096,6 +1160,10 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             except ValidationError as e:
                 context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
                 context.set_details(str(e))
+                return gateway_pb2.PriceResponse()
+            if error := self._chain_configuration_error(requested_chain):
+                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                context.set_details(error)
                 return gateway_pb2.PriceResponse()
 
         # If the caller sent a contract address, resolve it on-chain so every
@@ -1898,15 +1966,6 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         """
         await self._ensure_initialized()
 
-        # If we initialized with CoinGecko-only (no chain at startup) and
-        # now have a chain from the request, upgrade to full pricing stack.
-        if request.chain and not self.settings.chains:
-            try:
-                chain = validate_chain(request.chain)
-                await self.reinitialize(chain)
-            except Exception as e:
-                logger.warning("MarketService auto-reinit failed for chain %s: %s", request.chain, e)
-
         token = request.token
 
         # Validate chain
@@ -1915,6 +1974,16 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         except ValidationError as e:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
+            return gateway_pb2.BalanceResponse()
+
+        # A gateway started without chain configuration may learn its first
+        # balance chain from the request. Once any chain is configured, however,
+        # the allowlist is a hard boundary: never query another chain's provider
+        # or fall back to the primary chain's price aggregator.
+        await self._auto_reinitialize_balance_chains([chain])
+        if error := self._chain_configuration_error(chain):
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(error)
             return gateway_pb2.BalanceResponse()
 
         # Validate wallet address format (chain-aware: EVM hex or Solana base58)
@@ -1965,7 +2034,17 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             balance_usd = ""
             price_aggregator = self._aggregator_for(chain)
             try:
-                price_result = await price_aggregator.get_aggregated_price(token, "USD")
+                price_identity = await self._resolve_token_for_pricing(token, chain)
+            except Exception:
+                # Identity metadata is best-effort. Keep the primary symbol
+                # price path available when static/on-chain resolution fails.
+                price_identity = None
+            try:
+                price_result = await price_aggregator.get_aggregated_price(
+                    token,
+                    "USD",
+                    resolved_token=price_identity,
+                )
                 balance_usd = str(result.balance * price_result.price)
             except Exception:
                 # USD conversion optional. Try the native->wrapped alias (e.g.
@@ -2025,12 +2104,20 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         """
         await self._ensure_initialized()
 
+        # Match unary GetBalance's late-registration contract. Resolve all valid
+        # request chains before concurrent item processing so a no-chain gateway
+        # cannot nondeterministically register only whichever task runs first.
+        await self._auto_reinitialize_balance_chains([req.chain for req in request.requests])
+
         async def _get_single_balance(req: gateway_pb2.BalanceRequest) -> gateway_pb2.BalanceResponse:
             """Get a single balance, returning error in response on failure."""
             try:
                 chain = validate_chain(req.chain or "arbitrum")
             except ValidationError as e:
                 return gateway_pb2.BalanceResponse(error=str(e))
+
+            if error := self._chain_configuration_error(chain):
+                return gateway_pb2.BalanceResponse(error=error)
 
             try:
                 wallet_address = validate_address_for_chain(req.wallet_address, chain, "wallet_address")
@@ -2074,7 +2161,17 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
                 balance_usd = ""
                 price_aggregator = self._aggregator_for(chain)
                 try:
-                    price_result = await price_aggregator.get_aggregated_price(token, "USD")
+                    price_identity = await self._resolve_token_for_pricing(token, chain)
+                except Exception:
+                    # Identity metadata is best-effort. Keep the primary symbol
+                    # price path available when static/on-chain resolution fails.
+                    price_identity = None
+                try:
+                    price_result = await price_aggregator.get_aggregated_price(
+                        token,
+                        "USD",
+                        resolved_token=price_identity,
+                    )
                     balance_usd = str(result.balance * price_result.price)
                 except Exception:
                     # Try native->wrapped alias (MATIC/POL -> WMATIC) before giving up.

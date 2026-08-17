@@ -10,6 +10,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from almanak.gateway.data.price.multi_dex import (
+    DexQuote,
+    MultiDexPriceResult,
     MultiDexPriceService,
     TokenNotSupportedError,
 )
@@ -379,7 +381,8 @@ class TestGetCurveQuote:
     @pytest.mark.asyncio
     async def test_stable_pair_uses_peg_price_and_stable_parameters(self, service):
         amount = Decimal("100000")
-        quote = await service._get_curve_quote("USDC", "USDT", amount)
+        with patch.object(service, "_get_default_price", return_value=Decimal("1")):
+            quote = await service._get_curve_quote("USDC", "USDT", amount)
 
         assert quote.dex == "curve"
         assert quote.chain == "ethereum"
@@ -394,7 +397,8 @@ class TestGetCurveQuote:
     @pytest.mark.asyncio
     async def test_large_stable_trade_scales_impact_per_million(self, service):
         amount = Decimal("5000000")
-        quote = await service._get_curve_quote("USDT", "DAI", amount)
+        with patch.object(service, "_get_default_price", return_value=Decimal("1")):
+            quote = await service._get_curve_quote("USDT", "DAI", amount)
 
         assert quote.price_impact_bps == 5  # 1 bp per $1M
         assert quote.route == "3pool"
@@ -427,15 +431,14 @@ class TestGetCurveQuote:
         assert quote.price_impact_bps == 5
         # _estimate_slippage(100000, "curve") = int(2 * 1.0) = 2 bps
         assert quote.slippage_estimate_bps == 2
-        expected_out = (
-            amount * Decimal("0.05") * Decimal("0.995") * (Decimal(10000 - 5) / Decimal(10000))
-        )
+        expected_out = amount * Decimal("0.05") * Decimal("0.995") * (Decimal(10000 - 5) / Decimal(10000))
         assert quote.amount_out == expected_out
         assert quote.price == expected_out / amount
 
     @pytest.mark.asyncio
     async def test_zero_amount_yields_zero_price_without_division_error(self, service):
-        quote = await service._get_curve_quote("USDC", "USDT", Decimal("0"))
+        with patch.object(service, "_get_default_price", return_value=Decimal("1")):
+            quote = await service._get_curve_quote("USDC", "USDT", Decimal("0"))
 
         assert quote.amount_out == Decimal("0")
         assert quote.price == Decimal("0")

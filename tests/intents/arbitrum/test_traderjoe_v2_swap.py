@@ -76,9 +76,7 @@ class TestTraderJoeV2SwapCompilation:
 
         # VIB-1928: must NOT fail with VIB-1406 guard error
         if result.status == CompilationStatus.FAILED:
-            assert "VIB-1406" not in (result.error or ""), (
-                "TraderJoe V2 swap still blocked by VIB-1406 guard!"
-            )
+            assert "VIB-1406" not in (result.error or ""), "TraderJoe V2 swap still blocked by VIB-1406 guard!"
             assert "not yet supported" not in (result.error or ""), (
                 "TraderJoe V2 swap still returns 'not yet supported' error!"
             )
@@ -144,19 +142,20 @@ class TestTraderJoeV2SwapExecution:
             price_oracle=price_oracle,
             rpc_url=anvil_rpc_url,
         )
+        # Exercise TraderJoe's address-first amount_usd conversion. Using the
+        # same measured WETH mark keeps the exact input at 0.01 WETH so the
+        # Layer-4 balance assertion remains byte-for-byte deterministic.
         intent = SwapIntent(
-            from_token="WETH",
-            to_token="USDC",
-            amount=swap_amount,
+            from_token=weth_addr,
+            to_token=usdc_addr,
+            amount_usd=swap_amount * price_oracle["WETH"],
             max_slippage=Decimal("0.03"),  # 3% slippage for DEX
             protocol="traderjoe_v2",
             chain=CHAIN_NAME,
         )
 
         compile_result = compiler.compile(intent)
-        assert compile_result.status == CompilationStatus.SUCCESS, (
-            f"TraderJoe V2 swap compilation failed: {compile_result.error}"
-        )
+        assert compile_result.status.value == "SUCCESS", f"TraderJoe V2 swap compilation failed: {compile_result.error}"
         assert compile_result.action_bundle is not None
         assert compile_result.action_bundle.metadata.get("protocol") == "traderjoe_v2"
         logger.info(
@@ -167,37 +166,38 @@ class TestTraderJoeV2SwapExecution:
 
         # --- Layer 2: Execute ---
         execution_result = await orchestrator.execute(compile_result.action_bundle)
-        assert execution_result.success, (
-            f"TraderJoe V2 swap execution failed: {execution_result.error}"
-        )
+        assert execution_result.success is True, f"TraderJoe V2 swap execution failed: {execution_result.error}"
         logger.info("Execution success")
 
         # --- Layer 3: Parse receipt ---
         parser = TraderJoeV2ReceiptParser(chain=CHAIN_NAME)
-        swap_amounts_extracted = False
+        parsed_weth_spent: int | None = None
+        parsed_usdc_received: int | None = None
 
         for tx_result in execution_result.transaction_results:
             if not tx_result.receipt:
                 continue
-            receipt_dict = (
-                tx_result.receipt if isinstance(tx_result.receipt, dict)
-                else tx_result.receipt.to_dict()
-            )
+            receipt_dict = tx_result.receipt if isinstance(tx_result.receipt, dict) else tx_result.receipt.to_dict()
 
-            swap_amounts = parser.extract_swap_amounts(receipt_dict)
-            if swap_amounts is not None:
-                swap_amounts_extracted = True
-                assert swap_amounts.amount_in > 0, "SwapAmounts.amount_in must be > 0"
-                assert swap_amounts.amount_out > 0, "SwapAmounts.amount_out must be > 0"
+            parse_result = parser.parse_receipt(receipt_dict)
+            assert parse_result.success is True, f"TraderJoe receipt parsing failed: {parse_result.error}"
+            if parse_result.swap_result is not None:
+                assert parse_result.swap_result.success is True, "TraderJoe swap result parsing failed"
+                assert parse_result.swap_result.amount_in is not None
+                assert parse_result.swap_result.amount_out is not None
+                assert parse_result.swap_result.amount_in > 0, "ParsedSwapResult.amount_in must be > 0"
+                assert parse_result.swap_result.amount_out > 0, "ParsedSwapResult.amount_out must be > 0"
+                parsed_weth_spent = parse_result.swap_result.amount_in
+                parsed_usdc_received = parse_result.swap_result.amount_out
                 logger.info(
-                    "SwapAmounts: in=%s out=%s effective_price=%s",
-                    swap_amounts.amount_in,
-                    swap_amounts.amount_out,
-                    swap_amounts.effective_price,
+                    "ParsedSwapResult: in=%s out=%s price=%s",
+                    parsed_weth_spent,
+                    parsed_usdc_received,
+                    parse_result.swap_result.price,
                 )
 
-        assert swap_amounts_extracted, (
-            "TraderJoeV2ReceiptParser.extract_swap_amounts() returned None. "
+        assert parsed_weth_spent is not None and parsed_usdc_received is not None, (
+            "TraderJoeV2ReceiptParser.parse_receipt() returned no swap result. "
             "Verify Transfer event parsing works for LBRouter v2.1 swaps."
         )
 
@@ -213,12 +213,15 @@ class TestTraderJoeV2SwapExecution:
         logger.info("USDC after: %.2f (received: %.2f)", usdc_after / 10**6, usdc_received / 10**6)
 
         assert weth_spent == expected_weth_spent, (
-            f"WETH spent must EXACTLY equal swap amount. "
-            f"Expected: {expected_weth_spent}, Got: {weth_spent}"
+            f"WETH spent must EXACTLY equal swap amount. Expected: {expected_weth_spent}, Got: {weth_spent}"
         )
-        assert usdc_received > 0, (
-            "USDC balance did not increase after TraderJoe V2 swap (no-op guard)!"
+        assert parsed_weth_spent == weth_spent, (
+            f"TraderJoe receipt input must equal wallet delta: parsed={parsed_weth_spent}, delta={weth_spent}"
         )
+        assert parsed_usdc_received == usdc_received, (
+            f"TraderJoe receipt output must equal wallet delta: parsed={parsed_usdc_received}, delta={usdc_received}"
+        )
+        assert usdc_received > 0, "USDC balance did not increase after TraderJoe V2 swap (no-op guard)!"
 
         logger.info(
             "SUCCESS: Swapped %.4f WETH -> %.2f USDC via TraderJoe V2",
@@ -284,9 +287,7 @@ class TestTraderJoeV2SwapExecution:
 
         # --- Layer 2: Execute ---
         execution_result = await orchestrator.execute(compile_result.action_bundle)
-        assert execution_result.success, (
-            f"Reverse TJ V2 swap execution failed: {execution_result.error}"
-        )
+        assert execution_result.success, f"Reverse TJ V2 swap execution failed: {execution_result.error}"
 
         # --- Layer 3: Parse receipt ---
         parser = TraderJoeV2ReceiptParser(chain=CHAIN_NAME)
@@ -295,10 +296,7 @@ class TestTraderJoeV2SwapExecution:
         for tx_result in execution_result.transaction_results:
             if not tx_result.receipt:
                 continue
-            receipt_dict = (
-                tx_result.receipt if isinstance(tx_result.receipt, dict)
-                else tx_result.receipt.to_dict()
-            )
+            receipt_dict = tx_result.receipt if isinstance(tx_result.receipt, dict) else tx_result.receipt.to_dict()
             swap_amounts = parser.extract_swap_amounts(receipt_dict)
             if swap_amounts is not None:
                 swap_amounts_extracted = True
@@ -316,8 +314,7 @@ class TestTraderJoeV2SwapExecution:
         expected_usdc_spent = int(swap_amount * Decimal(10**6))
 
         assert usdc_spent == expected_usdc_spent, (
-            f"USDC spent must EXACTLY equal swap amount. "
-            f"Expected: {expected_usdc_spent}, Got: {usdc_spent}"
+            f"USDC spent must EXACTLY equal swap amount. Expected: {expected_usdc_spent}, Got: {usdc_spent}"
         )
         assert weth_received > 0, "WETH balance did not increase after reverse swap (no-op guard)!"
 

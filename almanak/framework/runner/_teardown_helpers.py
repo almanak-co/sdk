@@ -513,31 +513,37 @@ def _warm_teardown_pt_yt_prices(
         return
     try:
         from ..teardown.oracle_warmup import (
+            _entry_label,
+            _entry_sort_key,
+            _required_token_chain_entries,
             _warm_pt_yt_prices,
-            extract_required_token_chains,
         )
 
         chain: str | None = getattr(strategy, "chain", None) or getattr(teardown_market, "chain", None)
-        token_chains = extract_required_token_chains(teardown_intents, chain)
-        pt_priced_ok: set[str] = set()
-        pt_warm_errors: dict[str, str] = {}
+        required_entries = set(_required_token_chain_entries(teardown_intents, chain))
+        symbol_chains: dict[str, set[str | None]] = {}
+        for symbol, token_chain in required_entries:
+            symbol_chains.setdefault(symbol, set()).add(token_chain)
+        duplicate_symbols = {symbol for symbol, chains in symbol_chains.items() if len(chains) > 1}
+        pt_priced_ok: set[tuple[str, str | None]] = set()
+        pt_warm_errors: dict[tuple[str, str | None], str] = {}
         _warm_pt_yt_prices(
             teardown_market,
-            set(token_chains.keys()),
-            token_chains,
+            required_entries,
             price_oracle,
             pt_priced_ok,
             pt_warm_errors,
+            duplicate_symbols,
         )
         if pt_priced_ok:
             logger.info(
                 "Teardown runner: PT/YT prices warmed into oracle: %s",
-                sorted(pt_priced_ok),
+                [_entry_label(entry) for entry in sorted(pt_priced_ok, key=_entry_sort_key)],
             )
         if pt_warm_errors:
             logger.warning(
                 "Teardown runner: PT/YT price warm errors (best-effort): %s",
-                pt_warm_errors,
+                {_entry_label(entry): reason for entry, reason in pt_warm_errors.items()},
             )
     except Exception as _pt_warm_exc:  # noqa: BLE001
         logger.warning(

@@ -12,13 +12,32 @@ Three surfaces:
 """
 
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import eth_abi
 import pytest
 
 from almanak.framework.data.interfaces import DataSourceUnavailable, PriceResult
+from almanak.framework.data.tokens.models import ResolvedToken
 from almanak.gateway.data.price.hyperevm import HypercoreOraclePriceSource
+
+HYPEREVM_USDC = ResolvedToken(
+    symbol="USDC",
+    address="0xb88339CB7199b77E23DB6E890353E22632Ba630f",
+    decimals=6,
+    chain="hyperevm",
+    chain_id=999,
+    is_stablecoin=True,
+)
+HYPEREVM_USDT0 = ResolvedToken(
+    symbol="USDT0",
+    address="0xB8CE59FC3717ada4C02eaDF9682A9e934F625ebb",
+    decimals=6,
+    chain="hyperevm",
+    chain_id=999,
+    is_stablecoin=True,
+)
 
 
 def _oracle_blob(wire: int) -> str:
@@ -61,7 +80,7 @@ class TestHypercoreOraclePriceSource:
         """USDC returns the $1.00 peg with NO eth_call."""
         source = HypercoreOraclePriceSource()
         with patch.object(source, "_eth_call", new=AsyncMock()) as call:
-            result = await source.get_price("USDC", "USD")
+            result = await source.get_price("USDC", "USD", resolved_token=HYPEREVM_USDC)
         assert result.price == Decimal("1.00")
         assert result.source == "hypercore_oracle"
         call.assert_not_awaited()
@@ -71,8 +90,21 @@ class TestHypercoreOraclePriceSource:
     async def test_usdt0_returns_peg_without_rpc(self):
         source = HypercoreOraclePriceSource()
         with patch.object(source, "_eth_call", new=AsyncMock()) as call:
-            result = await source.get_price("USDT0", "USD")
+            result = await source.get_price("USDT0", "USD", resolved_token=HYPEREVM_USDT0)
         assert result.price == Decimal("1.00")
+        call.assert_not_awaited()
+        await source.close()
+
+    @pytest.mark.asyncio
+    async def test_duck_typed_identity_cannot_authorize_peg(self):
+        """Only a strict TokenRef can authorize a registry-backed synthetic peg."""
+        source = HypercoreOraclePriceSource()
+        duck_ref = SimpleNamespace(token_ref=SimpleNamespace(identity_key=HYPEREVM_USDC.token_ref.identity_key))
+
+        with patch.object(source, "_eth_call", new=AsyncMock()) as call:
+            with pytest.raises(DataSourceUnavailable):
+                await source.get_price("USDC", "USD", resolved_token=duck_ref)  # type: ignore[arg-type]
+
         call.assert_not_awaited()
         await source.close()
 

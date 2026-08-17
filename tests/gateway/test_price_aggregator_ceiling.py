@@ -7,6 +7,7 @@ to strategies.
 
 from datetime import UTC, datetime
 from decimal import Decimal
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -121,9 +122,9 @@ class TestStablecoinFallback:
         all sources fail. This is the original PR's intent: pUSD has no
         Chainlink / CoinGecko listing, so the fallback IS the price source.
 
-        ``stablecoin_verify=True`` disables the VIB-4841 proactive peg
-        fast-path so this test exercises the *all-sources-failed* fallback
-        branch specifically (the fast-path is covered by TestStablecoinPeg)."""
+        The aggregate fast path is patched out so this test exercises the
+        *all-sources-failed* fallback branch specifically. Verification mode
+        intentionally forbids this synthetic fallback."""
         from almanak.framework.data.tokens.models import BridgeType, ResolvedToken
         from almanak.gateway.data.price.aggregator import PriceAggregator
 
@@ -131,7 +132,7 @@ class TestStablecoinFallback:
             MockPriceSource("chainlink", error="no feed"),
             MockPriceSource("coingecko", error="404 not listed"),
         ]
-        aggregator = PriceAggregator(sources=sources, stablecoin_verify=True)
+        aggregator = PriceAggregator(sources=sources)
 
         polymarket_pusd = ResolvedToken(
             symbol="PUSD",
@@ -148,10 +149,39 @@ class TestStablecoinFallback:
             bridge_type=BridgeType.NATIVE,
             source="static",
         )
-        result = await aggregator.get_aggregated_price("PUSD", "USD", resolved_token=polymarket_pusd)
+        with patch.object(aggregator, "_maybe_stablecoin_peg", new=AsyncMock(return_value=None)):
+            result = await aggregator.get_aggregated_price("PUSD", "USD", resolved_token=polymarket_pusd)
 
         assert result.price == Decimal("1.00")
         assert result.source == "stablecoin_fallback"
+        identity = polymarket_pusd.token_ref.identity_key
+        assert result.peg_tokens == (f"{identity[0]}:{identity[1]}",)
+
+    @pytest.mark.asyncio
+    async def test_verification_mode_refuses_all_sources_failed_peg_fallback(self) -> None:
+        """An operator-requested live check cannot degrade to synthetic par."""
+        from almanak.framework.data.tokens.models import BridgeType, ResolvedToken
+        from almanak.gateway.data.price.aggregator import PriceAggregator
+
+        sources = [MockPriceSource("chainlink", error="no feed")]
+        aggregator = PriceAggregator(sources=sources, stablecoin_verify=True)
+        polymarket_pusd = ResolvedToken(
+            symbol="PUSD",
+            address="0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB",
+            decimals=6,
+            chain="polygon",
+            chain_id=137,
+            name="Polymarket USD",
+            is_stablecoin=True,
+            is_native=False,
+            is_wrapped_native=False,
+            canonical_symbol="USDC",
+            bridge_type=BridgeType.NATIVE,
+            source="static",
+        )
+
+        with pytest.raises(AllDataSourcesFailed):
+            await aggregator.get_aggregated_price("PUSD", "USD", resolved_token=polymarket_pusd)
 
     @pytest.mark.asyncio
     async def test_pusd_with_other_address_does_not_fall_back(self) -> None:
@@ -204,26 +234,18 @@ class TestStablecoinFallback:
             await aggregator.get_aggregated_price("PUSD", "USD")
 
     @pytest.mark.asyncio
-    async def test_usdc_without_resolved_token_still_falls_back(self) -> None:
-        """USDC's symbol IS unambiguous across the EVM token set, so it
-        remains in the symbol-keyed allowlist and the legacy bare-symbol
-        path keeps working with no resolved_token.
-
-        ``stablecoin_verify=True`` disables the VIB-4841 peg fast-path so this
-        test exercises the all-sources-failed fallback branch (the fast-path
-        is covered by TestStablecoinPeg)."""
+    async def test_usdc_without_resolved_token_does_not_fall_back(self) -> None:
+        """Even a familiar symbol cannot authorize a synthetic price."""
         from almanak.gateway.data.price.aggregator import PriceAggregator
 
         sources = [
             MockPriceSource("chainlink", error="rate limited"),
             MockPriceSource("coingecko", error="rate limited"),
         ]
-        aggregator = PriceAggregator(sources=sources, stablecoin_verify=True)
+        aggregator = PriceAggregator(sources=sources)
 
-        result = await aggregator.get_aggregated_price("USDC", "USD")
-
-        assert result.price == Decimal("1.00")
-        assert result.source == "stablecoin_fallback"
+        with pytest.raises(AllDataSourcesFailed):
+            await aggregator.get_aggregated_price("USDC", "USD")
 
     @pytest.mark.asyncio
     async def test_non_usd_quote_does_not_use_fallback(self) -> None:

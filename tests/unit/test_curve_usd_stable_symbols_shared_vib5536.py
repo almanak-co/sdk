@@ -1,88 +1,35 @@
-"""VIB-5536 — the Curve USD-numeraire allowlist has ONE home, shared by identity.
+"""ALM-3190: Curve accounting and NAV share the address-keyed peg registry."""
 
-``CURVE_USD_STABLE_SYMBOLS`` was relocated from
-``framework/valuation/curve_lp_position_reader._USD_STABLE_SYMBOLS`` (valuation)
-down to ``almanak.core.constants`` so BOTH the Curve NAV repricer (valuation)
-and the Curve basis-peg (accounting LP handler) share a single source of truth
-without accounting importing backward from valuation (the interim VIB-5429
-lazy import). These tests pin that contract: same object by identity, byte-
-identical membership, and a deliberately-stricter set than the broad
-``STABLECOINS`` hint (which correctly includes yield-bearing dollar tokens that
-trade above $1 and must NOT be pegged to $1 in a Curve LP mark).
-"""
+from decimal import Decimal
 
-from __future__ import annotations
-
-from almanak.core.constants import CURVE_USD_STABLE_SYMBOLS, STABLECOINS
-
-# The exact membership the frozenset carried immediately before the VIB-5536
-# relocation. A change here is a real change to a NAV-peg / basis-peg
-# correctness claim ("this token is ~$1 on every supported chain"), never an
-# incidental edit — update this literal only alongside that decision.
-_EXPECTED_MEMBERSHIP = frozenset(
-    {
-        "USDC",
-        "USDC.E",
-        "USDT",
-        "DAI",
-        "FRAX",
-        "CRVUSD",
-        "USDD",
-        "TUSD",
-        "BUSD",
-        "GUSD",
-        "LUSD",
-        "MIM",
-        "SUSD",
-        "USDP",
-        "DOLA",
-        "GHO",
-        "PYUSD",
-        "USDE",
-        "USDBC",
-        "AXLUSDC",
-        # VIB-5551: frxUSD (Frax USD) — fully-reserved $1 numeraire, the FRAX v3
-        # successor. Added with the Polygon frxUSD/USDT NG pool that replaces the
-        # frozen-Aave am3pool as the Polygon Curve representative.
-        "FRXUSD",
-    }
-)
+from almanak.framework.data.tokens.models import TokenRef
+from almanak.framework.data.tokens.pegs import PEG_REGISTRY, is_pegged
 
 
-def test_constant_importable_from_core_with_expected_membership() -> None:
-    """The set is importable from its new lower-layer home, byte-identical."""
-    assert CURVE_USD_STABLE_SYMBOLS == _EXPECTED_MEMBERSHIP
-    assert isinstance(CURVE_USD_STABLE_SYMBOLS, frozenset)
+def _ref(address: str, symbol: str) -> TokenRef:
+    return TokenRef(chain="ethereum", address=address, decimals=18, symbol=symbol)
 
 
-def test_both_consumers_reference_the_same_object() -> None:
-    """Valuation repricer and accounting LP handler share ONE object (no drift).
-
-    Identity (``is``), not just equality — two equal-but-separate frozensets
-    would silently drift the day one side is edited. This test fails loudly if a
-    future change forks the list back into a duplicate.
-    """
+def test_curve_consumers_share_the_central_identity_api() -> None:
     from almanak.framework.accounting.category_handlers import lp_handler
-    from almanak.framework.valuation.curve_lp_position_reader import _USD_STABLE_SYMBOLS
+    from almanak.framework.valuation import curve_lp_position_reader
 
-    # Valuation still exposes the historical module-local name (an alias).
-    assert _USD_STABLE_SYMBOLS is CURVE_USD_STABLE_SYMBOLS
-    # Accounting LP handler binds the same object at module scope (no backward
-    # import from valuation, no lazy re-import).
-    assert lp_handler.CURVE_USD_STABLE_SYMBOLS is CURVE_USD_STABLE_SYMBOLS
+    assert lp_handler.is_pegged is is_pegged
+    assert curve_lp_position_reader.is_pegged is is_pegged
 
 
-def test_stricter_than_broad_stablecoins_hint() -> None:
-    """The Curve peg set is conservative and must NOT collapse into STABLECOINS.
+def test_registry_is_address_keyed_and_includes_soft_peg_identity() -> None:
+    mim = _ref("0x99D8a9C45b2ecA8864373A26D1459e3Dff1e17F3", "MIM")
+    squatter = _ref("0x1111111111111111111111111111111111111111", "MIM")
 
-    ``STABLECOINS`` is a looser "dollar-ish" hint that includes yield-bearing /
-    rebasing dollar tokens (e.g. SDAI, SUSDE) which trade ABOVE $1. Pegging a
-    Curve LP to $1 on those would mis-mark it, so the two sets are distinct.
-    """
-    assert CURVE_USD_STABLE_SYMBOLS != STABLECOINS
-    # Yield-bearing dollar tokens that STABLECOINS carries must stay OUT of the
-    # strict Curve peg set.
-    assert "SDAI" in STABLECOINS
-    assert "SUSDE" in STABLECOINS
-    assert "SDAI" not in CURVE_USD_STABLE_SYMBOLS
-    assert "SUSDE" not in CURVE_USD_STABLE_SYMBOLS
+    assert mim.identity_key in PEG_REGISTRY
+    assert is_pegged(mim) == Decimal("1")
+    assert is_pegged(squatter) is None
+
+
+def test_yield_bearing_dollar_tokens_are_not_par_pegged() -> None:
+    sdai = _ref("0x83F20F44975D03b1b09e64809B757c47f942BEeA", "SDAI")
+    susde = _ref("0x9D39A5DE30e57443BfF2A8307A4256c8797A3497", "SUSDE")
+
+    assert is_pegged(sdai) is None
+    assert is_pegged(susde) is None

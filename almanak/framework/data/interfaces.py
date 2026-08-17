@@ -413,6 +413,8 @@ class PriceResult:
             - 0.5-0.79: Stale data from cache
             - < 0.5: Highly degraded, use with caution
         stale: Whether the data is from cache due to source unavailability
+        peg_tokens: Exact ``chain:address`` identities whose synthetic pegs
+            contributed to this result. Empty means the result is measured.
 
     Example:
         # Fresh price from live source
@@ -440,6 +442,7 @@ class PriceResult:
     confidence: float
     stale: bool = False
     source_details: dict[str, Any] | None = None
+    peg_tokens: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         """Validate confidence is within bounds."""
@@ -448,6 +451,9 @@ class PriceResult:
         if not isinstance(self.price, Decimal):
             # Allow conversion from float/int for convenience
             object.__setattr__(self, "price", Decimal(str(self.price)))
+        # Canonical, immutable provenance makes aggregation deterministic and
+        # prevents callers from accidentally mutating evidence after pricing.
+        object.__setattr__(self, "peg_tokens", tuple(sorted(set(self.peg_tokens or ()))))
 
     @property
     def age_seconds(self) -> float:
@@ -469,6 +475,7 @@ class PriceResult:
             "stale": self.stale,
             "age_seconds": self.age_seconds,
             "source_details": self.source_details,
+            "peg_tokens": list(self.peg_tokens),
         }
 
     @classmethod
@@ -481,6 +488,7 @@ class PriceResult:
             confidence=data["confidence"],
             stale=data.get("stale", False),
             source_details=data.get("source_details"),
+            peg_tokens=tuple(data.get("peg_tokens") or ()),
         )
 
 

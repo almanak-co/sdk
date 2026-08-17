@@ -854,28 +854,17 @@ class MultiDexPriceService:
         This helper is used ONLY to generate simulated DEX quotes when no real
         price feed and no test mock are wired. It is NOT a production oracle.
 
-        Behaviour:
-        * Stablecoin <-> stablecoin: returns ``Decimal("1")`` (peg assumption
-          derived from ``almanak.core.constants.STABLECOINS``, the single
-          source of truth for stablecoin identification in the SDK).
-        * Everything else: raises :class:`QuoteUnavailableError` so the caller
-          ``get_prices_across_dexs`` reports the DEX as unavailable instead of
-          fabricating a fake price from a hardcoded dict (historically this
-          module shipped stale prices like ``MATIC=$0.50``, ``WBTC=$45000``,
-          ``ETH=$2500`` that produced divergent USD valuations — see VIB-3137).
+        Symbol-only inputs cannot prove token identity, so every unmocked pair
+        raises :class:`QuoteUnavailableError`.  In particular, a stable-looking
+        symbol is not permission to fabricate a 1:1 quote: peg eligibility is
+        address-keyed by :func:`almanak.framework.data.tokens.is_pegged`.
 
         Callers that need real prices must either:
         * Pass a mock via ``set_mock_quote()`` (unit tests), or
         * Wire a real ``PriceAggregator``-backed oracle (production).
         """
-        from almanak.core.constants import STABLECOINS
-
         token_in_upper = token_in.upper()
         token_out_upper = token_out.upper()
-
-        # Stable <-> stable: 1:1 peg is a design invariant, not a hardcoded price.
-        if token_in_upper in STABLECOINS and token_out_upper in STABLECOINS:
-            return Decimal("1")
 
         # No hardcoded fallback dict: fail loud. The caller's exception handler
         # in ``get_prices_across_dexs`` downgrades this to a missing quote, and

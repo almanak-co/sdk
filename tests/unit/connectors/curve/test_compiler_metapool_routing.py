@@ -176,6 +176,9 @@ class _StubServices:
         # All combined-space coins are USD stables.
         return Decimal("1")
 
+    def require_token_price_for(self, token: _StubToken) -> Decimal:
+        return self.require_token_price(token.symbol)
+
 
 @dataclass
 class _StubContext:

@@ -552,7 +552,12 @@ def _ctx_usd_price(ctx: BaseCompilerContext) -> Callable[[str], Decimal | None]:
 
     def lookup(symbol: str) -> Decimal | None:
         try:
-            price = ctx.services.require_token_price(symbol)
+            token = ctx.services.resolve_token(symbol)
+            price = (
+                ctx.services.require_token_price_for(token)
+                if token is not None
+                else ctx.services.require_token_price(symbol)
+            )
         except Exception:  # noqa: BLE001 — unpriceable coin is a screening signal, not an error
             return None
         return price if price and price > 0 else None
@@ -1011,7 +1016,7 @@ class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
                 )
 
             if intent.amount_usd is not None:
-                price = ctx.services.require_token_price(from_token.symbol)
+                price = ctx.services.require_token_price_for(from_token)
                 amount_decimal = intent.amount_usd / price
             elif intent.amount is not None:
                 if intent.amount == "all":
@@ -1083,8 +1088,8 @@ class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
 
             price_ratio: Decimal | None = None
             try:
-                price_in = ctx.services.require_token_price(from_token.symbol)
-                price_out = ctx.services.require_token_price(to_token.symbol)
+                price_in = ctx.services.require_token_price_for(from_token)
+                price_out = ctx.services.require_token_price_for(to_token)
                 if price_out > 0:
                     price_ratio = price_in / price_out
             except (ValueError, ZeroDivisionError):

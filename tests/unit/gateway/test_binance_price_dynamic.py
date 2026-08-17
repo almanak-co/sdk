@@ -8,6 +8,7 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 
 from almanak.framework.data.interfaces import DataSourceUnavailable
+from almanak.framework.data.tokens.models import ResolvedToken
 from almanak.gateway.data.ohlcv.binance_provider import BINANCE_SYMBOL_MAP
 from almanak.gateway.data.price.binance import (
     _NEGATIVE_CACHE_TTL,
@@ -23,6 +24,16 @@ class _StubIdentity:
     """Minimal stand-in for ``ResolvedToken`` — the gate reads only the CG id."""
 
     coingecko_id: str | None
+
+
+USDC_RESOLVED = ResolvedToken(
+    symbol="USDC",
+    address="0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+    decimals=6,
+    chain="ethereum",
+    chain_id=1,
+    is_stablecoin=True,
+)
 
 
 def _mock_session(*, status: int = 200, price: str = "42.50") -> MagicMock:
@@ -167,9 +178,10 @@ class TestBinanceDynamicResolution:
     @pytest.mark.asyncio()
     async def test_stablecoins_bypass_dynamic_resolution(self, source):
         """Stablecoins should always return $1 without any API call."""
-        result = await source.get_price("USDC")
+        result = await source.get_price("USDC", resolved_token=USDC_RESOLVED)
         assert result.price == 1
         assert result.confidence == 1.0
+        assert result.peg_tokens == ("ethereum:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",)
 
     @pytest.mark.asyncio()
     async def test_static_tokens_get_full_confidence(self, source):
@@ -460,7 +472,7 @@ class TestDynamicProbeCorroborationGate:
         mock_session = _mock_session()
 
         with patch.object(source, "_get_session", return_value=mock_session):
-            result = await source.get_price("USDC")
+            result = await source.get_price("USDC", resolved_token=USDC_RESOLVED)
 
         assert result.price == 1
         assert result.confidence == 1.0

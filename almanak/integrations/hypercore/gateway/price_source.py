@@ -63,6 +63,8 @@ from almanak.framework.data.interfaces import (
     DataSourceUnavailable,
     PriceResult,
 )
+from almanak.framework.data.tokens import TokenRef
+from almanak.framework.data.tokens.pegs import is_pegged
 from almanak.gateway.utils import get_rpc_url
 from almanak.gateway.utils.ssl_context import build_ssl_context
 
@@ -82,22 +84,6 @@ def _canonical_chain(chain: object | None) -> str | None:
         return None
     desc = ChainRegistry.try_resolve(str(chain).lower())
     return desc.name if desc is not None else str(chain).lower()
-
-
-# HyperEVM stablecoins that peg to $1.00 (verified on-chain, 6 decimals). We
-# return the peg directly rather than round-tripping an external API — matching
-# the stablecoin fast-path in the other price sources. This is the ONLY
-# fabricated constant here; every other unresolved input is a MISS, not a zero.
-#
-# Scoped to the stablecoins ACTUALLY registered on hyperevm in the static token
-# registry (tokens.json: USDC + USDT0, both is_stablecoin=True). We deliberately
-# do NOT peg symbols with no hyperevm registry entry (e.g. USDT, USDC.E): pegging
-# a symbol the rest of the stack cannot resolve is a soft Empty≠Zero violation —
-# the source would assert a price for something the resolver treats as
-# unresolvable. Keeping this list to registered symbols means the peg set and the
-# registry cannot drift.
-_STABLECOIN_SYMBOLS = frozenset({"USDC", "USDT0"})
-_STABLECOIN_PEG_PRICE = Decimal("1.00")
 
 
 class HypercoreOraclePriceSource(BasePriceSource):
@@ -213,8 +199,13 @@ class HypercoreOraclePriceSource(BasePriceSource):
 
         token_upper = token.upper()
 
-        # 1. Cache.
-        cache_key = f"{token_upper}/USD"
+        token_ref = getattr(resolved_token, "token_ref", None)
+        identity = token_ref.identity_key if isinstance(token_ref, TokenRef) else None
+        peg = is_pegged(token_ref) if isinstance(token_ref, TokenRef) else None
+
+        # 1. Cache. Identity-bound requests use identity-bound cache keys so a
+        # same-symbol contract can never read another contract's synthetic peg.
+        cache_key = f"{identity[0]}:{identity[1]}/USD" if identity is not None else f"{token_upper}/USD"
         cached = self._cache.get(cache_key)
         if cached is not None:
             result, cached_at = cached
@@ -222,14 +213,16 @@ class HypercoreOraclePriceSource(BasePriceSource):
             if time.monotonic() - cached_at < self._cache_ttl:
                 return result
 
-        # 2. Stablecoin peg (no RPC). Deliberate constant — see module docstring.
-        if token_upper in _STABLECOIN_SYMBOLS:
+        # 2. Stablecoin peg (no RPC), authorized by exact registry identity.
+        if peg is not None:
+            assert identity is not None
             result = PriceResult(
-                price=_STABLECOIN_PEG_PRICE,
+                price=peg,
                 source=self.source_name,
                 timestamp=datetime.now(UTC),
                 confidence=0.99,
                 stale=False,
+                peg_tokens=(f"{identity[0]}:{identity[1]}",),
             )
             self._cache[cache_key] = (result, time.monotonic())
             return result

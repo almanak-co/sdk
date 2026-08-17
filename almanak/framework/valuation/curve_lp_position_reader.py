@@ -46,13 +46,8 @@ from typing import Any
 
 from almanak.connectors._strategy_base.position_read_base import CURVE_LP
 from almanak.connectors._strategy_base.position_read_registry import PositionReadRegistry
-
-# Curve USD-numeraire allowlist — shared with the accounting LP handler's
-# basis-peg via ``almanak.core.constants`` (VIB-5536; see the ``_USD_STABLE_SYMBOLS``
-# note further down). Aliased to the original module-local name so this reader's
-# internal references and existing callers/tests that import it from here keep
-# working unchanged.
-from almanak.core.constants import CURVE_USD_STABLE_SYMBOLS as _USD_STABLE_SYMBOLS
+from almanak.framework.data.tokens.models import TokenRef
+from almanak.framework.data.tokens.pegs import is_pegged
 
 logger = logging.getLogger(__name__)
 
@@ -98,13 +93,19 @@ _NATIVE_ETH_ADDRESSES = frozenset(
 )
 _NATIVE_ETH_DECIMALS = 18  # decimal-policy-exempt: native ETH is always 18-dec (VIB-5428)
 
-# ``_USD_STABLE_SYMBOLS`` — the USD-pegged StableSwap numeraire allowlist —
-# is imported at the top of this module from ``almanak.core.constants``
-# (``CURVE_USD_STABLE_SYMBOLS``, VIB-5536). Every coin of a member pool tracks
-# ~$1, so the LP token's underlying-invariant unit IS a USD unit (peg = $1); a
-# pool with any non-member coin is non-USD-numeraire (peg != 1) and out of v1
-# scope. The allowlist is deliberately conservative — adding a coin asserts
-# "this token is a ~$1 USD stablecoin" and must be true on every supported chain.
+
+def _all_registry_pegged(chain: str, symbols: list[str], addresses: list[str]) -> bool:
+    """Whether every aligned pool coin has an exact registry peg identity."""
+    if not symbols or len(symbols) != len(addresses):
+        return False
+    for symbol, address in zip(symbols, addresses, strict=True):
+        try:
+            token_ref = TokenRef(chain=chain, address=address, decimals=0, symbol=symbol)
+        except (TypeError, ValueError):
+            return False
+        if is_pegged(token_ref) is None:
+            return False
+    return True
 
 
 @dataclass
@@ -302,15 +303,6 @@ class CurveLpPositionReader:
         if not pool_address or not lp_token_address:
             return None
 
-        family = self._classify_family(meta, pool_coins, coins_overridden=coins is not None)
-        if family is None:
-            logger.debug(
-                "Curve pool %s coins %s fits no safely-valuable family — fail closed (not mis-marked)",
-                pool_address,
-                pool_coins,
-            )
-            return None
-
         # Coin addresses (registry, same order as ``meta["coins"]``) for the
         # depeg cross-check's by-address oracle pricing (VIB-5426). Carry them
         # ONLY when they align 1:1 with the resolved coins — a caller-supplied
@@ -321,6 +313,15 @@ class CurveLpPositionReader:
         coin_addresses = (
             meta_coin_addresses if (pool_coins == meta_coins and len(meta_coin_addresses) == len(pool_coins)) else []
         )
+
+        family = self._classify_family(meta, pool_coins, chain=chain, coins_overridden=coins is not None)
+        if family is None:
+            logger.debug(
+                "Curve pool %s coins %s fits no safely-valuable family — fail closed (not mis-marked)",
+                pool_address,
+                pool_coins,
+            )
+            return None
 
         # LP-token balance for the wallet (live, gateway eth_call). None → fail
         # closed (unmeasured). A measured zero means an empty position.
@@ -378,7 +379,13 @@ class CurveLpPositionReader:
         )
 
     @staticmethod
-    def _classify_family(meta: dict[str, Any], pool_coins: list[str], *, coins_overridden: bool) -> str | None:
+    def _classify_family(
+        meta: dict[str, Any],
+        pool_coins: list[str],
+        *,
+        chain: str,
+        coins_overridden: bool,
+    ) -> str | None:
         """Classify a pool into its valuation family, or ``None`` (fail closed).
 
         * ``"metapool_usd"`` — a USD metapool: ``is_metapool`` with a resolvable
@@ -402,29 +409,32 @@ class CurveLpPositionReader:
 
         if bool(meta.get("is_metapool")):
             base_pool = str(meta.get("base_pool") or "")
-            base_coins = [str(c).upper() for c in (meta.get("base_pool_coins") or [])]
-            meta_native_coins = [str(c).upper() for c in (meta.get("coins") or [])]
+            base_coins = [str(c) for c in (meta.get("base_pool_coins") or [])]
+            base_addresses = [str(a) for a in (meta.get("base_pool_coin_addresses") or [])]
+            meta_native_coins = [str(c) for c in (meta.get("coins") or [])]
+            meta_native_addresses = [str(a) for a in (meta.get("coin_addresses") or [])]
             if len(meta_native_coins) < 2 or not base_pool or not base_coins:
                 return None
             # Standard Curve metapool layout: coins = [meta coin(s)…, base-LP].
             # Every meta coin and every base-pool coin must be a USD stable for
             # the $1 numeraire to hold end to end.
             meta_coins = meta_native_coins[:-1]
-            if not meta_coins or not all(c in _USD_STABLE_SYMBOLS for c in meta_coins):
+            meta_addresses = meta_native_addresses[:-1]
+            if not _all_registry_pegged(chain, meta_coins, meta_addresses):
                 return None
-            if not all(c in _USD_STABLE_SYMBOLS for c in base_coins):
+            if not _all_registry_pegged(chain, base_coins, base_addresses):
                 return None
             return "metapool_usd"
 
-        if all(c.upper() in _USD_STABLE_SYMBOLS for c in pool_coins):
+        meta_addresses = [str(a) for a in (meta.get("coin_addresses") or [])]
+        meta_coins_canon = [str(c) for c in (meta.get("coins") or [])]
+        if pool_coins == meta_coins_canon and _all_registry_pegged(chain, pool_coins, meta_addresses):
             return "usd_stable"
 
         # Non-USD / volatile: valuable from spot reserves × oracle prices only
         # when every coin has a registry address to price by. A coins override
         # that breaks the 1:1 address alignment forfeits this family (the valuer
         # would mis-map an address to the wrong coin).
-        meta_addresses = [str(a) for a in (meta.get("coin_addresses") or [])]
-        meta_coins_canon = [str(c) for c in (meta.get("coins") or [])]
         if coins_overridden and pool_coins != meta_coins_canon:
             return None
         if len(meta_addresses) == len(pool_coins) and all(meta_addresses):

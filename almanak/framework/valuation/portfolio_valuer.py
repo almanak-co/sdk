@@ -6927,9 +6927,11 @@ class PortfolioValuer:
 
         Prices by ADDRESS first (engages the oracle's by-address market sources —
         CoinGecko / DexScreener — which a bare symbol skips, and which is what
-        makes a real depeg visible), then falls back to the symbol. A miss /
-        non-positive price → ``None`` (Empty ≠ Zero — the caller degrades to
-        UNAVAILABLE, never a fabricated value). ``market`` absent → all ``None`` →
+        makes a real depeg visible), then falls back to the symbol only when
+        the higher-priority lookup is genuinely unavailable. A measured
+        non-positive price hard-stops that coin as ``None`` (Empty ≠ Zero — the
+        caller degrades to UNAVAILABLE, never a fabricated value). ``market``
+        absent → all ``None`` →
         fail closed: the cross-check cannot run without an oracle, so the position
         is unmeasured, not par-marked. Mirrors the fungible-LP ``_price_leg`` seam.
 
@@ -6966,11 +6968,14 @@ class PortfolioValuer:
                     candidate = Decimal(str(market.price(key, chain=_chain_key(chain))))
                 except Exception:  # noqa: BLE001 — try the next key, else None (Empty ≠ Zero)
                     continue
-                # Fail closed on a non-positive price: a real coin is never worth
-                # <= $0, so a 0 / negative is an oracle miss, not a measured value.
-                if candidate > 0:
-                    priced = candidate
+                # A successful non-positive observation is measured evidence,
+                # not a lookup miss. Stop immediately: letting a lower-priority
+                # symbol (often $1 for a stablecoin) overwrite an exact-address
+                # zero would hide the depeg this cross-check exists to catch.
+                if candidate <= 0:
                     break
+                priced = candidate
+                break
             prices.append(priced)
         return prices
 

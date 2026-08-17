@@ -396,14 +396,18 @@ class TestStablecoinAddressFallback:
         assert price == Decimal("1")
         assert provider._historical_cache.get(f"base:{_USDC_BASE_ADDRESS.lower()}", _TS) == Decimal("1")
 
-    def test_stablecoin_fallback_treats_resolver_none_as_miss(self) -> None:
-        """A resolver miss should not dereference attributes on None."""
+    def test_stablecoin_fallback_is_registry_keyed_not_resolver_metadata(self) -> None:
+        """Descriptive resolver metadata cannot revoke an exact registry peg."""
         provider = CoinGeckoDataProvider(retry_config=_fast_retry())
 
-        with patch("almanak.framework.backtesting.pnl.providers.coingecko.get_token_resolver") as resolver_factory:
-            resolver_factory.return_value.resolve.return_value = None
+        assert provider._stablecoin_fallback_cache_id(("base", _USDC_BASE_ADDRESS)) == (
+            f"base:{_USDC_BASE_ADDRESS.lower()}"
+        )
 
-            assert provider._stablecoin_fallback_cache_id(("base", _USDC_BASE_ADDRESS)) is None
+    def test_stablecoin_symbol_squatter_address_is_not_pegged(self) -> None:
+        provider = CoinGeckoDataProvider(retry_config=_fast_retry())
+
+        assert provider._stablecoin_fallback_cache_id(("base", "0x1111111111111111111111111111111111111111")) is None
 
     def test_flat_stablecoin_ohlcv_rejects_non_positive_interval(self) -> None:
         """Stablecoin fallback candles must not enter a non-advancing loop."""

@@ -15,6 +15,7 @@ other, chain-valid sources instead of poisoning the median.
 """
 
 from decimal import Decimal
+from unittest.mock import patch
 
 import pytest
 
@@ -35,9 +36,14 @@ def _resolved(chain: str, *, symbol: str = "ETH", is_stablecoin: bool = False) -
     """
     desc = ChainRegistry.try_resolve(chain.lower())
     canonical = desc.name if desc is not None else chain.lower()
+    usdc_addresses = {
+        "arbitrum": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+        "bsc": "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d",
+        "hyperevm": "0xb88339CB7199b77E23DB6E890353E22632Ba630f",
+    }
     return ResolvedToken(
         symbol=symbol,
-        address="0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+        address=usdc_addresses.get(canonical, "0x1111111111111111111111111111111111111111"),
         decimals=18,
         chain=chain,
         chain_id=CHAIN_ID_MAP.get(canonical, 0),
@@ -82,18 +88,17 @@ class TestChainlinkSourceChainGuard:
 
         assert isinstance(result, PriceResult)
         assert result.price == Decimal("1.00")
+        assert result.peg_tokens == (f"arbitrum:{rt.address.lower()}",)
         await source.close()
 
     @pytest.mark.asyncio
-    async def test_none_resolved_token_skips_guard(self):
-        """A bare-symbol request (``resolved_token=None``) must skip the guard
-        entirely — that is today's lenient symbol behaviour (lead decision 1)."""
-        source = ChainlinkPriceSource(chain="arbitrum")
+    async def test_none_resolved_token_skips_guard_but_cannot_peg(self):
+        """A bare symbol skips the chain guard but has no peg authority."""
+        with patch("almanak.integrations.chainlink.gateway.live.get_rpc_url", side_effect=ValueError("No RPC")):
+            source = ChainlinkPriceSource(chain="arbitrum")
 
-        # USDC symbol → $1.00 stablecoin fast-path, no RPC, no guard.
-        result = await source.get_price("USDC", "USD", resolved_token=None)
-
-        assert result.price == Decimal("1.00")
+        with pytest.raises(DataSourceUnavailable):
+            await source.get_price("USDC", "USD", resolved_token=None)
         await source.close()
 
     @pytest.mark.asyncio
@@ -106,6 +111,7 @@ class TestChainlinkSourceChainGuard:
         result = await source.get_price("USDC", "USD", resolved_token=rt)
 
         assert result.price == Decimal("1.00")
+        assert result.peg_tokens == (f"bsc:{rt.address.lower()}",)
         await source.close()
 
 
@@ -140,14 +146,14 @@ class TestHypercoreOracleChainGuard:
         result = await source.get_price("USDC", "USD", resolved_token=rt)
 
         assert result.price == Decimal("1.00")
+        assert result.peg_tokens == (f"hyperevm:{rt.address.lower()}",)
         await source.close()
 
     @pytest.mark.asyncio
-    async def test_none_resolved_token_skips_guard(self):
-        """Bare-symbol (``resolved_token=None``) skips the venue guard."""
+    async def test_none_resolved_token_skips_guard_but_cannot_peg(self):
+        """Bare-symbol input skips the venue guard but has no peg authority."""
         source = HypercoreOraclePriceSource()
 
-        result = await source.get_price("USDC", "USD", resolved_token=None)
-
-        assert result.price == Decimal("1.00")
+        with pytest.raises(DataSourceUnavailable):
+            await source.get_price("USDC", "USD", resolved_token=None)
         await source.close()

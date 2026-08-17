@@ -466,6 +466,8 @@ class LPOpenEventPayload(_Versioned):
     # 2-token token0/token1 model doesn't apply to a proportional N-coin close, so
     # this carries the position's true coin identity. ``None`` for 2-coin venues.
     coin_symbols: list[str] | None = None
+    # ALM-3190 — pool-coin-ordered addresses used for exact peg eligibility.
+    coin_addresses: list[str] | None = None
     confidence: ConfidenceLiteral
     unavailable_reason: str | None = None
 
@@ -517,6 +519,8 @@ class LPCloseEventPayload(_Versioned):
     # measured cost_basis/realized_pnl self-documents which coins back it. ``None``
     # for 2-coin venues that already populate token0/token1.
     coin_symbols: list[str] | None = None
+    # ALM-3190 — pool-coin-ordered addresses used for exact peg eligibility.
+    coin_addresses: list[str] | None = None
     confidence: ConfidenceLiteral
     unavailable_reason: str | None = None
 

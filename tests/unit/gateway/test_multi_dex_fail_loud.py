@@ -7,13 +7,9 @@ service would silently fabricate a fake quote from those numbers, producing
 divergent USD valuations downstream (the MATIC vs POL issue in VIB-3137 is
 one surface).
 
-The fix:
-
-* Stablecoin <-> stablecoin pair: still priced 1:1 (peg is a design invariant,
-  sourced from the canonical ``STABLECOINS`` constant — not a hardcoded dict).
-* Everything else: fail loud via ``QuoteUnavailableError`` so the caller
-  understands the DEX is unavailable in simulation and must provide a mock
-  or wire a real oracle.
+The fix is to fail loud via ``QuoteUnavailableError`` for every symbol-only
+pair. Even a stable-looking symbol cannot authorize a peg quote without a
+chain/address identity.
 """
 
 from __future__ import annotations
@@ -69,17 +65,20 @@ class TestFailLoudOnNonStablePairs:
             service._get_default_price("ARB", "USDC")
 
 
-class TestStablecoinPegPreserved:
-    """Stable <-> stable pairs keep 1:1 behaviour (peg is a design invariant)."""
+class TestSymbolOnlyStablecoinPairFailsLoud:
+    """Stable-looking symbols cannot authorize a synthetic 1:1 quote."""
 
-    def test_usdc_to_dai_is_one(self, service):
-        assert service._get_default_price("USDC", "DAI") == Decimal("1")
+    def test_usdc_to_dai_raises(self, service):
+        with pytest.raises(QuoteUnavailableError):
+            service._get_default_price("USDC", "DAI")
 
-    def test_usdc_to_usdt_is_one(self, service):
-        assert service._get_default_price("USDC", "USDT") == Decimal("1")
+    def test_usdc_to_usdt_raises(self, service):
+        with pytest.raises(QuoteUnavailableError):
+            service._get_default_price("USDC", "USDT")
 
-    def test_case_insensitive_stablecoin_check(self, service):
-        assert service._get_default_price("usdc", "dai") == Decimal("1")
+    def test_case_insensitive_stablecoin_symbols_still_raise(self, service):
+        with pytest.raises(QuoteUnavailableError):
+            service._get_default_price("usdc", "dai")
 
 
 class TestPartialFailureDoesNotBreakService:

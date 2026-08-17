@@ -218,8 +218,8 @@ class EulerV2Compiler(BaseLendingCompiler):
         if intent.collateral_amount == Decimal("0"):
             return PreflightVerdict.feasible()
         try:
-            collateral_price = ctx.services.require_token_price(collateral_token.symbol)
-            borrow_price = ctx.services.require_token_price(borrow_token.symbol)
+            collateral_price = ctx.services.require_token_price_for(collateral_token)
+            borrow_price = ctx.services.require_token_price_for(borrow_token)
         except Exception as exc:  # noqa: BLE001 - missing price → can't size capacity, fail-open
             # Fail-open is deliberate (the on-chain EVC solvency check still
             # guards the borrow), but it must not be silent: a skipped capacity

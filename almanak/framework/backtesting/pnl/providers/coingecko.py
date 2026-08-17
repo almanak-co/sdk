@@ -47,9 +47,11 @@ from almanak.config.backtest import backtest_config_from_env
 from almanak.core.chains import DEFAULT_CHAIN
 from almanak.core.chains._helpers import native_coingecko_ids
 from almanak.core.chains._registry import ChainRegistry
-from almanak.core.constants import STABLECOINS
 from almanak.framework.backtesting.config import BacktestDataConfig
-from almanak.framework.data.tokens import NATIVE_SENTINEL, TokenResolutionError, get_token_resolver
+from almanak.framework.data.tokens import (
+    NATIVE_SENTINEL,
+    peg_for_identity,
+)
 from almanak.integrations.chains import integration_chain_id, integration_chain_map
 
 from ..cadence import canonical_timeframe_for_cadence
@@ -1199,14 +1201,10 @@ class CoinGeckoDataProvider:
 
         chain, address = token_key
         try:
-            resolved = get_token_resolver().resolve(address, chain, log_errors=False, skip_gateway=True)
-        except TokenResolutionError:
+            peg = peg_for_identity(chain, address)
+        except ValueError:
             return None
-
-        if resolved is None:
-            return None
-
-        if resolved.is_stablecoin or resolved.symbol.upper() in STABLECOINS:
+        if peg is not None:
             return self._address_cache_id((chain, address))
         return None
 

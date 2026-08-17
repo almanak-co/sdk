@@ -123,6 +123,9 @@ class _TraderJoeV2CompileImpl:
     def _require_token_price(self, symbol: str) -> Decimal:
         return self._ctx.services.require_token_price(symbol)
 
+    def _require_token_price_for(self, token: TokenInfo) -> Decimal:
+        return self._ctx.services.require_token_price_for(token)
+
     def _usd_to_token_amount(self, usd_amount: Decimal, token: TokenInfo) -> int:
         return self._ctx.services.usd_to_token_amount(usd_amount, token)
 
@@ -929,7 +932,7 @@ class _TraderJoeV2CompileImpl:
         be provided" branch.
         """
         if intent.amount_usd is not None:
-            price = self._require_token_price(from_token.symbol)
+            price = self._require_token_price_for(from_token)
             return intent.amount_usd / price
         if intent.amount is not None:
             if intent.amount == "all":

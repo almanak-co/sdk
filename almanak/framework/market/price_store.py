@@ -57,6 +57,11 @@ class PriceLookupResult:
     key: Any
     match: PriceMatch
 
+    @property
+    def used_peg(self) -> bool:
+        """Whether this result came from the explicit synthetic-peg branch."""
+        return self.match == "peg"
+
 
 def _normalized_quote(quote: str | None) -> str:
     return (quote or "USD").strip().upper() or "USD"
