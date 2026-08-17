@@ -174,6 +174,11 @@ class TestCanonicalizeSymbol:
     def test_matic_to_wmatic(self):
         assert _canonicalize_symbol("MATIC") == "WMATIC"
 
+    def test_pol_unchanged_without_chain_context(self):
+        # POL is also an Ethereum ERC-20, so the global canonicalizer must not
+        # apply Polygon's native POL/WPOL compatibility pair.
+        assert _canonicalize_symbol("POL") == "POL"
+
     def test_avax_to_wavax(self):
         assert _canonicalize_symbol("AVAX") == "WAVAX"
 
@@ -208,6 +213,11 @@ class TestResolveInstrument:
     def test_pair_string_whitespace(self):
         inst = resolve_instrument("  ETH / USDC  ", "arbitrum")
         assert inst.base == "WETH"
+        assert inst.quote == "USDC"
+
+    def test_ethereum_pol_erc20_is_not_rewritten_to_wpol(self):
+        inst = resolve_instrument("POL/USDC", "ethereum")
+        assert inst.base == "POL"
         assert inst.quote == "USDC"
 
     def test_single_symbol_defaults_quote_usdc(self):

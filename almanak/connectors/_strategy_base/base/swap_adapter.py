@@ -7,6 +7,8 @@ from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Literal
 
+from almanak.core.chains._helpers import chain_wrapped_native_symbol_map
+
 logger = logging.getLogger(__name__)
 
 
@@ -41,22 +43,9 @@ _BRIDGED_USDC_PROBE_CHAINS: frozenset[str] = frozenset(
     }
 )
 
-_CHAIN_WRAPPED_NATIVE: dict[str, str] = {
-    "ethereum": "WETH",
-    "arbitrum": "WETH",
-    "optimism": "WETH",
-    "base": "WETH",
-    "polygon": "WMATIC",
-    "avalanche": "WAVAX",
-    "plasma": "WXPL",
-    "bsc": "WBNB",
-    "mantle": "WMNT",
-    "sonic": "WS",
-    "xlayer": "WOKB",
-    "monad": "WMON",
-    "zerog": "W0G",
-    "berachain": "WBERA",
-}
+# Read-only registry projection used by the stable/wrapped-native fee heuristic.
+# Adding a chain no longer requires editing this shared adapter. ALM-3198.
+_CHAIN_WRAPPED_NATIVE: Mapping[str, str] = chain_wrapped_native_symbol_map()
 
 
 class DefaultSwapAdapter:

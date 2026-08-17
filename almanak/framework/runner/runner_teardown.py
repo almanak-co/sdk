@@ -2914,8 +2914,8 @@ def get_fallback_teardown_prices(market: Any) -> dict[str, Decimal] | None:
     if wrapped is None:
         logger.warning(
             "Wrapped native unknown for chain %s (native=%s); skipping wrapped "
-            "fallback price fetch. Add an entry to _NATIVE_TO_WRAPPED in "
-            "almanak/framework/data/models.py.",
+            "fallback price fetch. Declare NativeToken.wrapped_symbol on the "
+            "chain descriptor.",
             chain_key,
             native,
         )

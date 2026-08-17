@@ -90,6 +90,109 @@ def native_symbols_for(chain: str) -> frozenset[str]:
     return frozenset({native.symbol.upper(), *(s.upper() for s in native.accepted_symbols)})
 
 
+def _add_unique_symbol_mapping(
+    result: dict[str, str],
+    *,
+    source: str,
+    target: str,
+    projection: str,
+) -> None:
+    """Add one uppercased symbol mapping, rejecting cross-chain ambiguity."""
+    source_upper = source.upper()
+    target_upper = target.upper()
+    existing = result.get(source_upper)
+    if existing is not None and existing != target_upper:
+        raise ValueError(f"{projection}: symbol {source!r} maps to both {existing!r} and {target_upper!r}")
+    result[source_upper] = target_upper
+
+
+def native_to_wrapped_symbol_map() -> Mapping[str, str]:
+    """Read-only canonical native-symbol -> wrapped-symbol projection.
+
+    This global view deliberately excludes accepted-native aliases because its
+    consumers have no chain context. In particular, mapping ``POL -> WPOL``
+    here would miscanonicalize Ethereum's real POL ERC-20. It never guesses by
+    adding a ``W`` prefix: 0G's ``A0GI -> W0G`` is the counterexample that made
+    the old hand-maintained table unsafe. ALM-3198.
+    """
+    result: dict[str, str] = {}
+    for descriptor in ChainRegistry.all():
+        native = descriptor.native
+        if native.wrapped_symbol is None:
+            continue
+        _add_unique_symbol_mapping(
+            result,
+            source=native.symbol,
+            target=native.wrapped_symbol,
+            projection="native_to_wrapped_symbol_map",
+        )
+    return MappingProxyType(result)
+
+
+def wrapped_to_native_symbol_map() -> Mapping[str, str]:
+    """Read-only wrapped-symbol -> native-symbol compatibility projection.
+
+    Includes descriptor-owned wrapper aliases such as ``WPOL -> POL``. This
+    direction is safe for the compiler's price-oracle expansion and preserves
+    its legacy compatibility behavior without widening the chain-agnostic
+    instrument canonicalizer. ALM-3198.
+    """
+    result: dict[str, str] = {}
+    for descriptor in ChainRegistry.all():
+        native = descriptor.native
+        if native.wrapped_symbol is None:
+            continue
+        _add_unique_symbol_mapping(
+            result,
+            source=native.wrapped_symbol,
+            target=native.symbol,
+            projection="wrapped_to_native_symbol_map",
+        )
+        for native_alias, wrapped_alias in native.wrapped_alias_pairs:
+            _add_unique_symbol_mapping(
+                result,
+                source=wrapped_alias,
+                target=native_alias,
+                projection="wrapped_to_native_symbol_map",
+            )
+    return MappingProxyType(result)
+
+
+def chain_wrapped_native_symbol_map() -> Mapping[str, str]:
+    """Read-only canonical ``chain -> wrapped native symbol`` projection."""
+    return MappingProxyType(
+        {
+            descriptor.name: descriptor.native.wrapped_symbol.upper()
+            for descriptor in ChainRegistry.all()
+            if descriptor.native.wrapped_symbol is not None
+        }
+    )
+
+
+def native_price_alias_map() -> Mapping[str, str]:
+    """Read-only native spelling -> canonical wrapped price-symbol projection.
+
+    Price fallback deliberately routes accepted native spellings to the
+    descriptor's canonical wrapper. Polygon therefore maps both ``MATIC`` and
+    ``POL`` to the exchange-supported ``WMATIC`` spelling, while compiler/data
+    equivalence still retains the explicit ``POL/WPOL`` compatibility pair.
+    ALM-3198.
+    """
+    result: dict[str, str] = {}
+    for descriptor in ChainRegistry.all():
+        native = descriptor.native
+        if native.wrapped_symbol is None:
+            continue
+        for symbol in (native.symbol, *native.accepted_symbols):
+            _add_unique_symbol_mapping(
+                result,
+                source=symbol,
+                target=native.wrapped_symbol,
+                projection="native_price_alias_map",
+            )
+    return MappingProxyType(result)
+
+
 def external_chain_id_for(chain: str, provider: ExternalIdProvider | str) -> str | None:
     """Return one chain-owned provider identifier, or ``None`` on a miss."""
     if not chain:

@@ -36,10 +36,12 @@ Example:
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
 
+from almanak.core.chains._helpers import native_to_wrapped_symbol_map
 from almanak.core.finality import DataFinality, parse_data_finality
 from almanak.integrations.chains import lazy_integration_market_symbol_map
 
@@ -158,30 +160,11 @@ class DataEnvelope[T]:
 # Native token -> wrapped token mapping for canonicalization
 # ---------------------------------------------------------------------------
 
-# Maps uppercase native symbol -> wrapped symbol for canonical resolution.
-#
-# Must cover every native symbol in
-# ``almanak.gateway.data.balance.web3_provider.NATIVE_TOKEN_SYMBOLS``.
-# Wrapping conventions are NOT mechanically derivable from the native symbol
-# (e.g. ``A0GI -> W0G`` strips the trailing ``GI``, not ``W{native}``), so
-# every chain must be listed explicitly. Callers should treat a missing entry
-# as a configuration bug, not paper over it with a string-prefix fallback
-# (VIB-3970).
-_NATIVE_TO_WRAPPED: dict[str, str] = {
-    "ETH": "WETH",
-    "MATIC": "WMATIC",
-    "AVAX": "WAVAX",
-    "BNB": "WBNB",
-    "MNT": "WMNT",
-    "S": "WS",
-    "XPL": "WXPL",
-    "BERA": "WBERA",
-    "MON": "WMON",
-    "OKB": "WOKB",
-    "A0GI": "W0G",
-    "HYPE": "WHYPE",
-    "SOL": "WSOL",
-}
+# Read-only compatibility view derived from ``ChainDescriptor.native``.
+# Wrapping conventions are never guessed (0G is ``A0GI -> W0G``). Accepted
+# native aliases are intentionally excluded because this canonicalizer has no
+# chain context (Ethereum's POL ERC-20 must remain POL). ALM-3198.
+_NATIVE_TO_WRAPPED: Mapping[str, str] = native_to_wrapped_symbol_map()
 
 
 # ---------------------------------------------------------------------------

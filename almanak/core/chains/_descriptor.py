@@ -149,6 +149,14 @@ class NativeToken:
             (``"WETH"``, ``"WMNT"``, ``"wS"``, ``"W0G"``). Stored verbatim,
             including case — NEVER derived as ``"W" + symbol`` (zerog wraps
             ``A0GI`` as ``W0G``; sonic's contract symbol is ``"wS"``).
+        wrapped_alias_pairs: Extra ``(native_symbol, wrapped_symbol)`` spellings
+            for the same canonical 1:1 pair. This is deliberately explicit:
+            ticker migrations do not imply a mechanically derivable wrapper
+            name. Polygon, for example, keeps the gas/price canonical pair
+            ``MATIC/WMATIC`` while also accepting ``POL/WPOL``. Each native
+            spelling must already be declared by :attr:`accepted_symbols` (or
+            be the canonical :attr:`symbol`), and a canonical
+            :attr:`wrapped_symbol` must exist. ALM-3198.
         wrapped_coingecko_id: CoinGecko coin id for the wrapped native asset.
             It may equal ``coingecko_id`` when the wrapper shares the native
             listing. ``None`` means unverified or unsupported.
@@ -171,6 +179,8 @@ class NativeToken:
     wrapped_symbol: str | None = None
     wrapped_coingecko_id: str | None = None
     slip44: int | None = None
+    # Appended to preserve the positional slots of every pre-existing field.
+    wrapped_alias_pairs: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         for field_name in ("coingecko_id", "wrapped_coingecko_id"):
@@ -182,6 +192,30 @@ class NativeToken:
         # sibling descriptor validations.
         if self.slip44 is not None and self.slip44 < 0:
             raise ValueError(f"NativeToken slip44 must be non-negative, got {self.slip44}")
+
+        if self.wrapped_alias_pairs and self.wrapped_symbol is None:
+            raise ValueError("NativeToken wrapped_alias_pairs require wrapped_symbol")
+        accepted_native_symbols = {self.symbol.upper(), *(symbol.upper() for symbol in self.accepted_symbols)}
+        seen_pairs: set[tuple[str, str]] = set()
+        for pair in self.wrapped_alias_pairs:
+            if not isinstance(pair, tuple) or len(pair) != 2 or not all(isinstance(symbol, str) for symbol in pair):
+                raise ValueError(
+                    "NativeToken wrapped_alias_pairs entries must be (native_symbol, wrapped_symbol) pairs"
+                )
+            native_symbol, wrapped_symbol = pair
+            if not native_symbol or native_symbol != native_symbol.strip():
+                raise ValueError("NativeToken wrapped_alias_pairs native symbols must be non-empty and trimmed")
+            if not wrapped_symbol or wrapped_symbol != wrapped_symbol.strip():
+                raise ValueError("NativeToken wrapped_alias_pairs wrapped symbols must be non-empty and trimmed")
+            if native_symbol.upper() not in accepted_native_symbols:
+                raise ValueError(
+                    "NativeToken wrapped_alias_pairs native symbol "
+                    f"{native_symbol!r} must be symbol or one of accepted_symbols"
+                )
+            normalized_pair = (native_symbol.upper(), wrapped_symbol.upper())
+            if normalized_pair in seen_pairs:
+                raise ValueError(f"NativeToken wrapped_alias_pairs contains duplicate pair {pair!r}")
+            seen_pairs.add(normalized_pair)
 
 
 # Recognised L1 fee-oracle mechanism kinds (Plan 026). Each string names the

@@ -21,6 +21,7 @@ Example:
 """
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -43,7 +44,7 @@ from almanak.connectors._strategy_base.base.swap_adapter import DefaultSwapAdapt
 from almanak.connectors._strategy_base.compiler_registry import get_compiler as get_connector_compiler
 from almanak.connectors._strategy_base.pool_validation_base import PoolValidationReason
 from almanak.core.chains import DEFAULT_CHAIN
-from almanak.core.chains._helpers import is_solana_chain
+from almanak.core.chains._helpers import is_solana_chain, wrapped_to_native_symbol_map
 
 from ..chain_family import ChainFamilyAdapter, all_families, family_for
 
@@ -2767,26 +2768,10 @@ class IntentCompiler:
     # Wrapped natives are 1:1 pegged by the WETH9 contract (deposit/withdraw at par),
     # so ETH price == WETH price. When the oracle only has "ETH", a lookup for
     # "WETH" should resolve to ETH's price rather than failing.
-    _WRAPPED_TO_NATIVE: ClassVar[dict[str, str]] = {
-        "WETH": "ETH",
-        "WMATIC": "MATIC",
-        "WAVAX": "AVAX",
-        "WBNB": "BNB",
-        "WMNT": "MNT",
-        "WS": "S",
-        "WXPL": "XPL",
-        "WPOL": "POL",
-        "WOKB": "OKB",
-        "WMON": "MON",
-        "WBERA": "BERA",
-        # Keep symmetric with ``_NATIVE_TO_WRAPPED`` in
-        # ``almanak/framework/data/models.py`` (VIB-3970): every native added
-        # there should have its inverse here so price-oracle alias expansion
-        # bridges both directions for new chains.
-        "W0G": "A0GI",
-        "WHYPE": "HYPE",
-        "WSOL": "SOL",
-    }
+    # Read-only registry projection. ``NativeToken.wrapped_alias_pairs`` owns
+    # ticker compatibility such as Polygon ``POL/WPOL``; adding a chain or
+    # wrapper no longer requires a compiler edit. ALM-3198.
+    _WRAPPED_TO_NATIVE: ClassVar[Mapping[str, str]] = wrapped_to_native_symbol_map()
 
     def _expand_native_aliases_in_price_oracle(self) -> None:
         """Fill missing wrapped/native counterparts in ``self.price_oracle``.

@@ -261,8 +261,8 @@ class TestDefaultSwapAdapterFeeSelection:
         missing = _BRIDGED_USDC_PROBE_CHAINS - set(_CHAIN_WRAPPED_NATIVE.keys())
         assert not missing, (
             f"Chains in _BRIDGED_USDC_PROBE_CHAINS not in _CHAIN_WRAPPED_NATIVE: {missing}. "
-            "Add the chain's wrapped-native symbol to _CHAIN_WRAPPED_NATIVE in "
-            "compiler_adapters.py so the fee-tier heuristic can resolve it."
+            "Declare the chain descriptor's wrapped-native symbol so the registry "
+            "projection used by compiler_adapters.py can resolve it."
         )
 
     def test_fixed_mode_raises_when_protocol_has_no_fee_tiers(self) -> None:

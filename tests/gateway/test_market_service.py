@@ -215,6 +215,45 @@ class TestMarketServiceGetBalance:
         aggregator.get_aggregated_price.assert_awaited_once_with("WETH", "USD", resolved_token=None)
 
     @pytest.mark.asyncio
+    async def test_ethereum_pol_balance_does_not_use_polygon_price_alias(self, market_service, mock_context):
+        """USD conversion for Ethereum POL must not fall back to Polygon WMATIC."""
+        from datetime import UTC, datetime
+
+        from almanak.framework.data.interfaces import BalanceResult
+
+        wallet = "0x1234567890123456789012345678901234567890"
+        balance = BalanceResult(
+            balance=Decimal("2"),
+            token="POL",
+            address="0x455e53CBB86018Ac2B8092FdCd39d8444Aff3F6",
+            decimals=18,
+            raw_balance=2 * 10**18,
+            timestamp=datetime.now(UTC),
+            stale=False,
+        )
+        provider = MagicMock()
+        provider.get_balance = AsyncMock(return_value=balance)
+        aggregator = MagicMock()
+        aggregator.get_aggregated_price = AsyncMock(side_effect=Exception("no POL price"))
+        market_service.settings.chains = ["ethereum"]
+        market_service._initialized = True
+
+        with (
+            patch.object(market_service, "_get_balance_provider", return_value=provider),
+            patch.object(market_service, "_aggregator_for", return_value=aggregator),
+            patch.object(market_service, "_resolve_token_for_pricing", new=AsyncMock(return_value=None)),
+        ):
+            response = await market_service.GetBalance(
+                gateway_pb2.BalanceRequest(token="POL", chain="ethereum", wallet_address=wallet),
+                mock_context,
+            )
+
+        assert response.balance == "2"
+        assert response.balance_usd == ""
+        provider.get_balance.assert_awaited_once_with("POL")
+        assert [call.args[0] for call in aggregator.get_aggregated_price.await_args_list] == ["POL"]
+
+    @pytest.mark.asyncio
     async def test_get_balance_unknown_address_dynamic_resolution(self, market_service, mock_context):
         """GetBalance resolves an unknown ERC20 address on-chain and returns the balance.
 
@@ -335,6 +374,47 @@ class TestMarketServiceBatchGetBalances:
         warning_msgs = [r for r in caplog.records if r.levelno == logging.WARNING and "BatchGetBalances" in r.message]
         assert len(debug_msgs) >= 1
         assert len(warning_msgs) == 0
+
+    @pytest.mark.asyncio
+    async def test_ethereum_pol_batch_balance_does_not_use_polygon_price_alias(self, market_service, mock_context):
+        """Batch USD conversion applies wrapped-native aliases only on their native chain."""
+        from datetime import UTC, datetime
+
+        from almanak.framework.data.interfaces import BalanceResult
+
+        wallet = "0x1234567890123456789012345678901234567890"
+        balance = BalanceResult(
+            balance=Decimal("3"),
+            token="POL",
+            address="0x455e53CBB86018Ac2B8092FdCd39d8444Aff3F6",
+            decimals=18,
+            raw_balance=3 * 10**18,
+            timestamp=datetime.now(UTC),
+            stale=False,
+        )
+        provider = MagicMock()
+        provider.get_balance = AsyncMock(return_value=balance)
+        aggregator = MagicMock()
+        aggregator.get_aggregated_price = AsyncMock(side_effect=Exception("no POL price"))
+        market_service.settings.chains = ["ethereum"]
+        market_service._initialized = True
+
+        with (
+            patch.object(market_service, "_get_balance_provider", return_value=provider),
+            patch.object(market_service, "_aggregator_for", return_value=aggregator),
+            patch.object(market_service, "_resolve_token_for_pricing", new=AsyncMock(return_value=None)),
+        ):
+            response = await market_service.BatchGetBalances(
+                gateway_pb2.BatchBalanceRequest(
+                    requests=[gateway_pb2.BalanceRequest(token="POL", chain="ethereum", wallet_address=wallet)]
+                ),
+                mock_context,
+            )
+
+        assert response.responses[0].balance == "3"
+        assert response.responses[0].balance_usd == ""
+        provider.get_balance.assert_awaited_once_with("POL")
+        assert [call.args[0] for call in aggregator.get_aggregated_price.await_args_list] == ["POL"]
 
 
 class TestMarketServiceInitialization:
@@ -501,6 +581,7 @@ class TestMarketServicePriceAlias:
                 raise AllDataSourcesFailed(errors={"all": "no sources"})
             return wmnt_result
 
+        market_service._primary_chain = "mantle"
         market_service._price_aggregator = MagicMock()
         market_service._price_aggregator.get_aggregated_price = AsyncMock(side_effect=mock_get_price)
         market_service._price_aggregator.get_last_details = MagicMock(return_value=None)
@@ -512,6 +593,64 @@ class TestMarketServicePriceAlias:
         assert response.price == "0.85"
         assert response.source == "binance"
         assert call_count == 2  # MNT failed, then WMNT succeeded
+
+    @pytest.mark.asyncio
+    async def test_plasma_xpl_falls_back_to_wxpl(self, market_service, mock_context):
+        """ALM-3198: Plasma native pricing retries the priceable WXPL wrapper."""
+        from datetime import UTC, datetime
+
+        from almanak.framework.data.interfaces import AllDataSourcesFailed, PriceResult
+
+        wxpl_result = PriceResult(
+            price=Decimal("0.23"),
+            source="coingecko",
+            timestamp=datetime.now(UTC),
+            confidence=0.90,
+            stale=False,
+        )
+
+        async def mock_get_price(token, quote, **kwargs):
+            if token == "XPL":
+                raise AllDataSourcesFailed(errors={"all": "no sources"})
+            assert token == "WXPL"
+            return wxpl_result
+
+        market_service._primary_chain = "plasma"
+        market_service._price_aggregator = MagicMock()
+        market_service._price_aggregator.get_aggregated_price = AsyncMock(side_effect=mock_get_price)
+        market_service._price_aggregator.get_last_details = MagicMock(return_value=None)
+        market_service._initialized = True
+
+        response = await market_service.GetPrice(gateway_pb2.PriceRequest(token="XPL", quote="USD"), mock_context)
+
+        assert response.price == "0.23"
+        assert response.source == "coingecko"
+        assert [call.args[0] for call in market_service._price_aggregator.get_aggregated_price.await_args_list] == [
+            "XPL",
+            "WXPL",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_ethereum_pol_does_not_use_polygon_wmatic_alias(self, market_service, mock_context):
+        """A failed Ethereum POL ERC-20 lookup must not return Polygon's WMATIC price."""
+        from almanak.framework.data.interfaces import AllDataSourcesFailed
+
+        aggregator = MagicMock()
+        aggregator.get_aggregated_price = AsyncMock(side_effect=AllDataSourcesFailed(errors={"all": "no sources"}))
+        aggregator.get_last_details = MagicMock(return_value=None)
+        market_service.settings.chains = ["ethereum"]
+        market_service._primary_chain = "ethereum"
+        market_service._price_aggregator = aggregator
+        market_service._initialized = True
+
+        with patch.object(market_service, "_resolve_token_for_pricing", new=AsyncMock(return_value=None)):
+            response = await market_service.GetPrice(
+                gateway_pb2.PriceRequest(token="POL", quote="USD", chain="ethereum"),
+                mock_context,
+            )
+
+        assert response.price == ""
+        assert [call.args[0] for call in aggregator.get_aggregated_price.await_args_list] == ["POL"]
 
     @pytest.mark.asyncio
     async def test_no_alias_for_known_token(self, market_service, mock_context):

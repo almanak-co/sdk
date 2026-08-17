@@ -42,6 +42,7 @@ DESCRIPTOR = register_chain(
             # POL id preferred over deprecated matic-network (VIB-3137)
             coingecko_id="polygon-ecosystem-token",
             wrapped_symbol="WMATIC",
+            wrapped_alias_pairs=(("POL", "WPOL"),),
             wrapped_coingecko_id="wmatic",
             slip44=966,  # SLIP-44 "Matic" — Polygon native (CAIP-19)
         ),

@@ -71,7 +71,7 @@ class TestGetFallbackTeardownPrices:
             assert "USDbC" not in result, chain
 
     def test_native_to_wrapped_covers_every_native_token_symbol(self):
-        """VIB-3970: the explicit ``_NATIVE_TO_WRAPPED`` map must cover every
+        """VIB-3970: the registry-derived ``_NATIVE_TO_WRAPPED`` view covers every
         native symbol the gateway will hand to ``get_fallback_teardown_prices``
         via ``NATIVE_TOKEN_SYMBOLS``. The previous ``f"W{native}"`` fallback
         silently produced phantom symbols (``WA0GI`` on 0G) on the first
@@ -87,25 +87,22 @@ class TestGetFallbackTeardownPrices:
         missing = native_symbols - set(_NATIVE_TO_WRAPPED.keys())
         assert not missing, (
             f"Native symbols in NATIVE_TOKEN_SYMBOLS but not in _NATIVE_TO_WRAPPED: "
-            f"{sorted(missing)}. Add explicit entries to "
-            "almanak/framework/data/models.py:_NATIVE_TO_WRAPPED so the "
-            "wrapped-price fallback isn't silently skipped on those chains."
+            f"{sorted(missing)}. Declare wrapped_symbol on the affected "
+            "ChainDescriptor so the wrapped-price fallback is projected."
         )
 
     def test_native_to_wrapped_inverse_symmetric_with_wrapped_to_native(self):
         """VIB-3970: every entry in ``_NATIVE_TO_WRAPPED`` should have an
         inverse in ``IntentCompiler._WRAPPED_TO_NATIVE`` so price-oracle
-        alias expansion bridges both directions. ``WPOL`` is the only
-        exception today — Polygon was renamed POL→MATIC and the inverse
-        map carries both wrappers; the forward map only carries the
-        canonical native (``MATIC``). All other chains must be symmetric.
+        alias expansion bridges both directions. Polygon's additional
+        ``POL/WPOL`` ticker pair is descriptor-owned and projected in both
+        directions alongside the canonical ``MATIC/WMATIC`` pair.
         """
         from almanak.framework.data.models import _NATIVE_TO_WRAPPED
         from almanak.framework.intents.compiler import IntentCompiler
 
         forward_wrapped = set(_NATIVE_TO_WRAPPED.values())
         inverse_wrapped = set(IntentCompiler._WRAPPED_TO_NATIVE.keys())
-        # WPOL is in inverse-only by design (POL is the post-rename Polygon native).
         unmapped_in_inverse = forward_wrapped - inverse_wrapped
         assert not unmapped_in_inverse, (
             f"Wrapped symbols in _NATIVE_TO_WRAPPED but missing from "
@@ -180,7 +177,7 @@ class TestGetFallbackTeardownPrices:
         called_symbols = [call.args[0] for call in market.price.call_args_list]
         assert "WZZZ" not in called_symbols
         assert "WZZZ" not in result
-        assert any("_NATIVE_TO_WRAPPED" in rec.getMessage() for rec in caplog.records)
+        assert any("NativeToken.wrapped_symbol" in rec.getMessage() for rec in caplog.records)
 
     def test_base_market_includes_usdbc(self):
         market = MagicMock(spec=["_chain"])

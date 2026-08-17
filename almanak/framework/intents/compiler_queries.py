@@ -46,6 +46,7 @@ from __future__ import annotations
 import logging
 import re
 import warnings
+from collections.abc import Mapping
 from decimal import Decimal
 from enum import StrEnum
 from types import MappingProxyType
@@ -356,7 +357,7 @@ class CompilerQueryHost(Protocol):
     _gateway_client: GatewayClient | None
     _token_resolver: TokenResolver
     _stablecoin_fallback_logged: set[str]
-    _WRAPPED_TO_NATIVE: ClassVar[dict[str, str]]  # ClassVar on IntentCompiler; stays there
+    _WRAPPED_TO_NATIVE: ClassVar[Mapping[str, str]]  # ClassVar on IntentCompiler; stays there
 
     def _resolve_token(self, token: str, chain: str | None = ...) -> TokenInfo | None: ...
 

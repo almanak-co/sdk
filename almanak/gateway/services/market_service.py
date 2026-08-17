@@ -11,6 +11,7 @@ import math
 import re
 import time
 import warnings
+from collections.abc import Mapping
 from decimal import Decimal
 from types import MappingProxyType
 from typing import Any
@@ -36,7 +37,7 @@ from almanak.connectors._base.gateway_capabilities import (
 )
 from almanak.connectors._gateway_registry import GATEWAY_REGISTRY
 from almanak.core.chains import ChainRegistry
-from almanak.core.chains._helpers import native_symbols_for
+from almanak.core.chains._helpers import native_price_alias_map, native_symbols_for
 from almanak.framework.data.timeframes import (
     COINGECKO_OHLCV_TIMEFRAMES,
     OHLCVTimeframe,
@@ -101,21 +102,12 @@ _ONCHAIN_LOOKUP_TIMEOUT_SECONDS: float = 10.0
 
 logger = logging.getLogger(__name__)
 
-# Native-to-wrapped token price aliases.
-# When a price lookup for the native token fails, retry with the wrapped equivalent.
-# This handles chains where the native token (e.g. MNT) has poor exchange coverage
-# but the wrapped version (e.g. WMNT) is listed on major exchanges.
-NATIVE_PRICE_ALIASES: dict[str, str] = {
-    "MNT": "WMNT",
-    "MATIC": "WMATIC",
-    # POL is the Sep-2024 rename of MATIC on Polygon (1:1). Route native-price
-    # failures through WMATIC (aka WPOL) — same asset, better exchange coverage.
-    "POL": "WMATIC",
-    "AVAX": "WAVAX",
-    "FTM": "WFTM",
-    "BNB": "WBNB",
-    "S": "WS",  # Sonic
-}
+# Read-only native-to-wrapped price fallback projection. Both the canonical
+# native symbol and accepted spellings (Polygon MATIC/POL) route to the
+# descriptor's canonical wrapped symbol. This closes the XPL/OKB/MON/BERA/HYPE/
+# A0GI drift that made native-price lookup fail on newly registered chains.
+# Unregistered Fantom is intentionally absent. ALM-3198.
+NATIVE_PRICE_ALIASES: Mapping[str, str] = native_price_alias_map()
 
 # Chain-scoped native gas tokens, derived from the chain registry (VIB-4851 A1).
 # A symbol routes through `provider.get_native_balance()` ONLY if it is native to
@@ -143,6 +135,19 @@ def _is_native_symbol(token: str, chain: str) -> bool:
     `ChainDescriptor.native`; adding a chain needs no edit here (VIB-4851 A1).
     """
     return token.upper() in native_symbols_for(chain)
+
+
+def _native_price_alias_for(token: str, chain: str) -> str | None:
+    """Return a wrapped-price fallback only when ``token`` is native to ``chain``.
+
+    The alias table is symbol-keyed for compatibility, but symbols are not
+    globally unique: ``POL`` is Polygon-native and also a real Ethereum ERC-20.
+    Requiring chain-native membership prevents a failed ERC-20 lookup from
+    silently returning another chain's wrapped-native price. ALM-3198.
+    """
+    if not _is_native_symbol(token, chain):
+        return None
+    return NATIVE_PRICE_ALIASES.get(token.upper())
 
 
 class _IntegrationPriceSources:
@@ -1209,7 +1214,8 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             # Try native->wrapped alias fallback (e.g., MNT->WMNT).
             # The alias is a symbol, so any address-based resolved_token no
             # longer applies — forward None so the alias is priced by symbol.
-            alias = NATIVE_PRICE_ALIASES.get(token.upper())
+            effective_chain = target_chain or self._primary_chain
+            alias = _native_price_alias_for(token, effective_chain)
             if alias:
                 try:
                     result = await aggregator.get_aggregated_price(alias, quote, resolved_token=None)
@@ -2050,7 +2056,7 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
                 # USD conversion optional. Try the native->wrapped alias (e.g.
                 # MATIC/POL -> WMATIC) so that a symbol with weak exchange
                 # coverage still gets a price via its wrapped equivalent.
-                alias = NATIVE_PRICE_ALIASES.get(token.upper())
+                alias = _native_price_alias_for(token, chain)
                 if alias:
                     try:
                         price_result = await price_aggregator.get_aggregated_price(alias, "USD")
@@ -2175,7 +2181,7 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
                     balance_usd = str(result.balance * price_result.price)
                 except Exception:
                     # Try native->wrapped alias (MATIC/POL -> WMATIC) before giving up.
-                    alias = NATIVE_PRICE_ALIASES.get(token.upper())
+                    alias = _native_price_alias_for(token, chain)
                     if alias:
                         try:
                             price_result = await price_aggregator.get_aggregated_price(alias, "USD")
