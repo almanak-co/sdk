@@ -516,6 +516,30 @@ def test_pool_state_series_forwards_exact_identity_and_encodes_archive_point(
     assert response.points[0].reserve1_raw == str(2 * 10**6)
 
 
+def test_pool_state_series_propagates_rpc_cancellation(
+    servicer: RateHistoryServiceServicer,
+) -> None:
+    class Provider:
+        def pool_state_supported_chains(self):
+            return frozenset({"bsc"})
+
+        async def fetch_pool_state_series(self, _servicer, **_kwargs):
+            raise asyncio.CancelledError
+
+    servicer._pool_state_providers["pancakeswap_v3"] = Provider()  # type: ignore[assignment]
+    request = gateway_pb2.GetDexPoolStateSeriesRequest(
+        dex="pancakeswap_v3",
+        chain="bsc",
+        pool_address="0x66faad27cf481f82d0089ec8156b3aa3636010c7",
+        start_ts=1_700_000_000,
+        end_ts=1_700_003_600,
+        interval_secs=3_600,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(servicer.GetDexPoolStateSeries(request, _MockContext()))  # type: ignore[arg-type]
+
+
 def test_volume_rejects_empty_pool_address(
     servicer: RateHistoryServiceServicer,
 ) -> None:

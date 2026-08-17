@@ -15,6 +15,7 @@ relocation of the Uniswap V3 gateway TWAP path into
 from __future__ import annotations
 
 import asyncio
+from bisect import bisect_right
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -127,6 +128,9 @@ def _make_historical_web3(*, latest_block: int = 10, genesis_timestamp: int = 1_
         number = latest_block if block_identifier == "latest" else int(block_identifier)
         return {"number": number, "timestamp": genesis_timestamp + number * 10}
 
+    async def _get_code(_address, block_identifier=None):
+        return b"\x01"
+
     async def _call(tx, block_identifier=None):
         to = tx["to"].lower()
         sel = tx["data"][2:10]
@@ -155,7 +159,7 @@ def _make_historical_web3(*, latest_block: int = 10, genesis_timestamp: int = 1_
         raise AssertionError(f"unexpected eth.call sel={sel} to={to}")
 
     web3 = SimpleNamespace(
-        eth=SimpleNamespace(call=_call, get_block=_get_block),
+        eth=SimpleNamespace(call=_call, get_block=_get_block, get_code=_get_code),
         to_checksum_address=lambda address: address,
     )
     return web3, calls
@@ -257,6 +261,185 @@ def test_historical_block_grid_resolves_latest_block_at_or_before_each_target() 
     )
 
     assert samples == [(2, 1_020), (4, 1_040)]
+
+
+def test_historical_block_grid_resolves_large_pages_with_bounded_parallel_work() -> None:
+    """A 512-point page must not serialize one archive search per sample."""
+    active = 0
+    max_active = 0
+    calls = 0
+
+    async def _get_block(block_identifier):
+        nonlocal active, calls, max_active
+        calls += 1
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0.001)
+        active -= 1
+        number = 2_000 if block_identifier == "latest" else int(block_identifier)
+        return {"number": number, "timestamp": 1_000 + number * 10}
+
+    web3 = SimpleNamespace(eth=SimpleNamespace(get_block=_get_block))
+    samples = asyncio.run(
+        _historical_blocks_for_grid(
+            web3,
+            start_ts=2_025,
+            end_ts=2_025 + 511 * 10,
+            interval_secs=10,
+            protocol="pancakeswap_v3",
+        )
+    )
+
+    assert len(samples) == 512
+    assert samples[0] == (102, 2_020)
+    assert samples[-1] == (613, 7_130)
+    # The genesis/head bounds lookup alone reaches two concurrent calls. More
+    # than two proves the midpoint fan-out itself remains parallel.
+    assert max_active > 2
+    assert calls < 650
+
+
+def test_historical_block_grid_rejects_future_end_instead_of_repeating_head() -> None:
+    """A future-dated grid must fail rather than duplicate the measured head."""
+    web3, _calls = _make_historical_web3()
+
+    with pytest.raises(RateHistoryUnavailable, match="ends after the measured chain head"):
+        asyncio.run(
+            _historical_blocks_for_grid(
+                web3,
+                start_ts=1_085,
+                end_ts=1_125,
+                interval_secs=20,
+                protocol="uniswap_v3",
+            )
+        )
+
+
+def test_historical_block_grid_stays_exact_on_irregular_block_times() -> None:
+    timestamps = [1_000]
+    cadence = (3, 7, 0, 11, 2, 5)
+    for block_number in range(1, 2_001):
+        timestamps.append(timestamps[-1] + cadence[block_number % len(cadence)])
+
+    async def _get_block(block_identifier):
+        number = 2_000 if block_identifier == "latest" else int(block_identifier)
+        return {"number": number, "timestamp": timestamps[number]}
+
+    start_ts = 1_025
+    interval_secs = 17
+    end_ts = start_ts + 127 * interval_secs
+    web3 = SimpleNamespace(eth=SimpleNamespace(get_block=_get_block))
+    samples = asyncio.run(
+        _historical_blocks_for_grid(
+            web3,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            interval_secs=interval_secs,
+            protocol="pancakeswap_v3",
+        )
+    )
+
+    targets = range(start_ts, end_ts + 1, interval_secs)
+    expected = [
+        (block, timestamps[block]) for target in targets if (block := bisect_right(timestamps, target) - 1) >= 0
+    ]
+    assert samples == expected
+
+
+def test_pool_state_series_reports_pool_deployment_boundary_before_state_reads() -> None:
+    web3, calls = _make_historical_web3()
+
+    async def _get_code(_address, block_identifier=None):
+        return b"\x01" if int(block_identifier) >= 7 else b""
+
+    web3.eth.get_code = _get_code
+
+    with pytest.raises(
+        RateHistoryUnavailable,
+        match=r"not deployed at requested start block 2 .* earliest pool deployment is block 7",
+    ):
+        asyncio.run(
+            fetch_v3_pool_state_series(
+                _make_servicer(web3),
+                chain="bsc",
+                pool_address=_POOL,
+                start_ts=1_025,
+                end_ts=1_085,
+                interval_secs=20,
+                protocol="pancakeswap_v3",
+                factory_address=_FACTORY,
+            )
+        )
+
+    assert calls == []
+
+
+def test_twap_series_reports_native_observation_history_boundary() -> None:
+    web3, _calls = _make_historical_web3()
+    original_call = web3.eth.call
+    observe_blocks: list[int] = []
+
+    async def _call(tx, block_identifier=None):
+        if tx["data"][2:10] == _OBSERVE:
+            observe_blocks.append(int(block_identifier))
+            if int(block_identifier) < 7:
+                raise ValueError("execution reverted: OLD")
+        return await original_call(tx, block_identifier=block_identifier)
+
+    web3.eth.call = _call
+
+    with pytest.raises(
+        RateHistoryUnavailable,
+        match=r"native 900-second TWAP .* unavailable at requested start block 2 .* choose a later start",
+    ):
+        asyncio.run(
+            fetch_v3_twap_series(
+                _make_servicer(web3),
+                chain="bsc",
+                pool_address=_POOL,
+                start_ts=1_025,
+                end_ts=1_085,
+                interval_secs=20,
+                window_secs=900,
+                protocol="pancakeswap_v3",
+            )
+        )
+
+    # Oracle capacity is circular and therefore not monotonic over historical
+    # blocks.  Diagnose only the verified start instead of probing later blocks
+    # and claiming an exact earliest boundary.
+    assert observe_blocks == [2]
+
+
+def test_twap_series_does_not_misclassify_provider_threshold_error_as_old_history() -> None:
+    web3, _calls = _make_historical_web3()
+    original_call = web3.eth.call
+    observe_blocks: list[int] = []
+
+    async def _call(tx, block_identifier=None):
+        if tx["data"][2:10] == _OBSERVE:
+            observe_blocks.append(int(block_identifier))
+            raise ValueError("RPC retention threshold exceeded")
+        return await original_call(tx, block_identifier=block_identifier)
+
+    web3.eth.call = _call
+
+    with pytest.raises(RateHistoryUnavailable, match="RPC retention threshold exceeded") as exc_info:
+        asyncio.run(
+            fetch_v3_twap_series(
+                _make_servicer(web3),
+                chain="bsc",
+                pool_address=_POOL,
+                start_ts=1_025,
+                end_ts=1_085,
+                interval_secs=20,
+                window_secs=900,
+                protocol="pancakeswap_v3",
+            )
+        )
+
+    assert "choose a later start" not in str(exc_info.value)
+    assert observe_blocks == [2]
 
 
 def test_historical_pool_state_uses_exact_archive_blocks_and_identity() -> None:

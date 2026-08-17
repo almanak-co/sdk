@@ -20,7 +20,10 @@ from __future__ import annotations
 
 import asyncio
 import math
+import re
 import time
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -415,6 +418,7 @@ async def _block_at_or_before(
     lower: tuple[int, int],
     upper: tuple[int, int],
     protocol: str,
+    sample_block: Callable[[int | str], Awaitable[tuple[int, int]]] | None = None,
 ) -> tuple[int, int]:
     """Resolve the latest block whose timestamp is no later than ``target``.
 
@@ -439,12 +443,170 @@ async def _block_at_or_before(
             numerator = (target_timestamp - lower_timestamp) * (upper_number - lower_number)
             candidate_number = lower_number + numerator // (upper_timestamp - lower_timestamp)
             candidate_number = max(lower_number + 1, min(upper_number - 1, candidate_number))
-        candidate = await _historical_block_sample(web3, candidate_number, protocol=protocol)
+        candidate = await (
+            sample_block(candidate_number)
+            if sample_block is not None
+            else _historical_block_sample(web3, candidate_number, protocol=protocol)
+        )
         if candidate[1] <= target_timestamp:
             lower_number, lower_timestamp = candidate
         else:
             upper_number, upper_timestamp = candidate
     return lower_number, lower_timestamp
+
+
+class _HistoricalBlockResolver:
+    """Request-scoped timestamp resolver with cached, tightly anchored searches.
+
+    Historical series arrive in pages of hundreds of ordered timestamps.  A
+    genesis/head search for every point is both needlessly expensive and, when
+    performed serially, slower than the gateway RPC deadline on fast chains.
+    Resolve the two page edges first, then recursively resolve midpoints inside
+    their already-measured neighbours.  Midpoints at each tree depth are safe
+    to resolve concurrently because their bounds are immutable and disjoint.
+    """
+
+    _CONCURRENCY = 32
+
+    def __init__(self, web3: Any, *, protocol: str) -> None:
+        self._web3 = web3
+        self._protocol = protocol
+        self._samples: dict[int | str, tuple[int, int]] = {}
+        self._bounds: tuple[tuple[int, int], tuple[int, int]] | None = None
+
+    async def sample(self, block_identifier: int | str) -> tuple[int, int]:
+        cached = self._samples.get(block_identifier)
+        if cached is not None:
+            return cached
+        measured = await _historical_block_sample(
+            self._web3,
+            block_identifier,
+            protocol=self._protocol,
+        )
+        self._samples[block_identifier] = measured
+        self._samples[measured[0]] = measured
+        return measured
+
+    async def bounds(self) -> tuple[tuple[int, int], tuple[int, int]]:
+        if self._bounds is None:
+            genesis, latest = await asyncio.gather(self.sample(0), self.sample("latest"))
+            self._bounds = (genesis, latest)
+        return self._bounds
+
+    async def at_or_before(
+        self,
+        target_timestamp: int,
+        *,
+        lower: tuple[int, int],
+        upper: tuple[int, int],
+    ) -> tuple[int, int]:
+        return await _block_at_or_before(
+            self._web3,
+            target_timestamp,
+            lower=lower,
+            upper=upper,
+            protocol=self._protocol,
+            sample_block=self.sample,
+        )
+
+    async def validate_window(
+        self,
+        *,
+        start_ts: int,
+        end_ts: int,
+        interval_secs: int,
+    ) -> tuple[tuple[int, int], tuple[int, int]]:
+        from almanak.gateway.services.rate_history_service import RateHistoryUnavailable
+
+        if start_ts > end_ts:
+            raise RateHistoryUnavailable(
+                self._protocol,
+                f"start_ts must be <= end_ts (got {start_ts} > {end_ts})",
+            )
+        if interval_secs <= 0:
+            raise RateHistoryUnavailable(
+                self._protocol,
+                f"interval_secs must be > 0 (got {interval_secs})",
+            )
+        genesis, latest = await self.bounds()
+        if start_ts < genesis[1]:
+            raise RateHistoryUnavailable(
+                self._protocol,
+                f"requested historical series starts before chain genesis ({start_ts} < {genesis[1]})",
+            )
+        if end_ts > latest[1]:
+            raise RateHistoryUnavailable(
+                self._protocol,
+                f"requested historical series ends after the measured chain head ({end_ts} > {latest[1]})",
+            )
+        return genesis, latest
+
+    async def grid(
+        self,
+        *,
+        start_ts: int,
+        end_ts: int,
+        interval_secs: int,
+        first_sample: tuple[int, int] | None = None,
+    ) -> list[tuple[int, int]]:
+        genesis, latest = await self.validate_window(
+            start_ts=start_ts,
+            end_ts=end_ts,
+            interval_secs=interval_secs,
+        )
+        targets = list(range(start_ts, end_ts + 1, interval_secs))
+        if not targets:
+            return []
+
+        resolved: dict[int, tuple[int, int]] = {}
+        resolved[0] = first_sample or await self.at_or_before(
+            targets[0],
+            lower=genesis,
+            upper=latest,
+        )
+        if len(targets) == 1:
+            return [resolved[0]]
+        resolved[len(targets) - 1] = await self.at_or_before(
+            targets[-1],
+            lower=resolved[0],
+            upper=latest,
+        )
+
+        intervals = [(0, len(targets) - 1)]
+        semaphore = asyncio.Semaphore(self._CONCURRENCY)
+        while intervals:
+            jobs: list[tuple[int, int, int]] = []
+            next_intervals: list[tuple[int, int]] = []
+            for lower_index, upper_index in intervals:
+                if upper_index - lower_index <= 1:
+                    continue
+                lower_sample = resolved[lower_index]
+                upper_sample = resolved[upper_index]
+                if lower_sample == upper_sample:
+                    for index in range(lower_index + 1, upper_index):
+                        resolved[index] = lower_sample
+                    continue
+                midpoint = (lower_index + upper_index) // 2
+                jobs.append((lower_index, midpoint, upper_index))
+
+            async def resolve_midpoint(job: tuple[int, int, int]) -> tuple[int, tuple[int, int]]:
+                lower_index, midpoint, upper_index = job
+                async with semaphore:
+                    sample = await self.at_or_before(
+                        targets[midpoint],
+                        lower=resolved[lower_index],
+                        upper=resolved[upper_index],
+                    )
+                return midpoint, sample
+
+            if jobs:
+                measured = await asyncio.gather(*(resolve_midpoint(job) for job in jobs))
+                for midpoint, sample in measured:
+                    resolved[midpoint] = sample
+                for lower_index, midpoint, upper_index in jobs:
+                    next_intervals.extend(((lower_index, midpoint), (midpoint, upper_index)))
+            intervals = next_intervals
+        return [resolved[index] for index in range(len(targets))]
 
 
 async def _historical_blocks_for_grid(
@@ -455,39 +617,128 @@ async def _historical_blocks_for_grid(
     interval_secs: int,
     protocol: str,
 ) -> list[tuple[int, int]]:
-    """Resolve the at-or-before archive block for every requested sample."""
+    """Resolve a complete archive grid with bounded, tightly anchored work."""
+    return await _HistoricalBlockResolver(web3, protocol=protocol).grid(
+        start_ts=start_ts,
+        end_ts=end_ts,
+        interval_secs=interval_secs,
+    )
+
+
+def _format_block_sample(sample: tuple[int, int]) -> str:
+    block_number, timestamp = sample
+    observed_at = datetime.fromtimestamp(timestamp, UTC).isoformat().replace("+00:00", "Z")
+    return f"block {block_number} ({observed_at})"
+
+
+def _has_contract_code(code: Any) -> bool:
+    if isinstance(code, str):
+        return bool(code.removeprefix("0x").strip("0"))
+    return bool(bytes(code))
+
+
+async def _pool_has_code(
+    web3: Any,
+    *,
+    pool_checksum: str,
+    block_number: int,
+    protocol: str,
+) -> bool:
     from almanak.gateway.services.rate_history_service import RateHistoryUnavailable
 
-    if start_ts > end_ts:
-        raise RateHistoryUnavailable(protocol, f"start_ts must be <= end_ts (got {start_ts} > {end_ts})")
-    if interval_secs <= 0:
-        raise RateHistoryUnavailable(protocol, f"interval_secs must be > 0 (got {interval_secs})")
-
-    genesis = await _historical_block_sample(web3, 0, protocol=protocol)
-    latest = await _historical_block_sample(web3, "latest", protocol=protocol)
-    if start_ts < genesis[1]:
+    try:
+        return _has_contract_code(await web3.eth.get_code(pool_checksum, block_identifier=block_number))
+    except Exception as exc:
         raise RateHistoryUnavailable(
             protocol,
-            f"requested TWAP series starts before chain genesis ({start_ts} < {genesis[1]})",
-        )
-    if end_ts > latest[1]:
-        raise RateHistoryUnavailable(
-            protocol,
-            f"requested TWAP series ends after the measured chain head ({end_ts} > {latest[1]})",
-        )
+            f"failed to read deployment code for pool {pool_checksum!r} at block {block_number}: {exc}",
+        ) from exc
 
-    samples: list[tuple[int, int]] = []
-    lower = genesis
-    for target in range(start_ts, end_ts + 1, interval_secs):
-        lower = await _block_at_or_before(
+
+async def _first_pool_code_block(
+    resolver: _HistoricalBlockResolver,
+    web3: Any,
+    *,
+    pool_checksum: str,
+    absent_block: int,
+    latest: tuple[int, int],
+    protocol: str,
+) -> tuple[int, int] | None:
+    """Find the first block with pool bytecode after a measured absence."""
+    if not await _pool_has_code(
+        web3,
+        pool_checksum=pool_checksum,
+        block_number=latest[0],
+        protocol=protocol,
+    ):
+        return None
+    lower_number = absent_block
+    upper_number = latest[0]
+    while upper_number - lower_number > 1:
+        candidate = (lower_number + upper_number) // 2
+        if await _pool_has_code(
             web3,
-            target,
-            lower=lower,
-            upper=latest,
+            pool_checksum=pool_checksum,
+            block_number=candidate,
             protocol=protocol,
-        )
-        samples.append(lower)
-    return samples
+        ):
+            upper_number = candidate
+        else:
+            lower_number = candidate
+    return await resolver.sample(upper_number)
+
+
+async def _require_pool_at_series_start(
+    resolver: _HistoricalBlockResolver,
+    web3: Any,
+    *,
+    pool_checksum: str,
+    start_sample: tuple[int, int],
+    latest: tuple[int, int],
+    protocol: str,
+) -> None:
+    """Fail before resolving a page when its first sample predates the pool."""
+    if await _pool_has_code(
+        web3,
+        pool_checksum=pool_checksum,
+        block_number=start_sample[0],
+        protocol=protocol,
+    ):
+        return
+    first_deployed = await _first_pool_code_block(
+        resolver,
+        web3,
+        pool_checksum=pool_checksum,
+        absent_block=start_sample[0],
+        latest=latest,
+        protocol=protocol,
+    )
+    if first_deployed is None:
+        boundary = f"no contract code exists at measured chain head {_format_block_sample(latest)}"
+    else:
+        boundary = f"earliest pool deployment is {_format_block_sample(first_deployed)}"
+    from almanak.gateway.services.rate_history_service import RateHistoryUnavailable
+
+    raise RateHistoryUnavailable(
+        protocol,
+        f"pool {pool_checksum.lower()} is not deployed at requested start "
+        f"{_format_block_sample(start_sample)}; {boundary}",
+    )
+
+
+def _is_twap_history_boundary(exc: BaseException) -> bool:
+    """Return whether an observe failure denotes insufficient oracle history."""
+    current: BaseException | None = exc
+    while current is not None:
+        message = str(current).upper()
+        if (
+            re.search(r"\bOLD\b", message)
+            or "INSUFFICIENT OBSERVATION" in message
+            or "OBSERVATION CARDINALITY" in message
+        ):
+            return True
+        current = current.__cause__
+    return False
 
 
 async def fetch_v3_twap_series(
@@ -526,12 +777,44 @@ async def fetch_v3_twap_series(
         pool_address,
         protocol=protocol,
     )
-    block_samples = await _historical_blocks_for_grid(
-        web3,
+    resolver = _HistoricalBlockResolver(web3, protocol=protocol)
+    genesis, latest = await resolver.validate_window(
         start_ts=start_ts,
         end_ts=end_ts,
         interval_secs=interval_secs,
+    )
+    start_sample = await resolver.at_or_before(start_ts, lower=genesis, upper=latest)
+    await _require_pool_at_series_start(
+        resolver,
+        web3,
+        pool_checksum=pool_checksum,
+        start_sample=start_sample,
+        latest=latest,
         protocol=protocol,
+    )
+    try:
+        start_cumulatives, _start_liquidity = await _twap_call_observe(
+            web3,
+            pool_checksum=pool_checksum,
+            seconds_agos=[window_secs, 0],
+            block_identifier=start_sample[0],
+            protocol=protocol,
+            pool_address=pool_address,
+        )
+    except RateHistoryUnavailable as exc:
+        if not _is_twap_history_boundary(exc):
+            raise
+        raise RateHistoryUnavailable(
+            protocol,
+            f"native {window_secs}-second TWAP for pool {pool_checksum.lower()} is unavailable at requested start "
+            f"{_format_block_sample(start_sample)}; the pool's native oracle does not contain the requested "
+            "history at that verified block — choose a later start",
+        ) from exc
+    block_samples = await resolver.grid(
+        start_ts=start_ts,
+        end_ts=end_ts,
+        interval_secs=interval_secs,
+        first_sample=start_sample,
     )
     # Multiple grid points may legitimately resolve to the same block on a
     # halted/low-cadence chain. Read it once; downstream staleness checks use
@@ -550,14 +833,17 @@ async def fetch_v3_twap_series(
 
     async def observe(block_sample: tuple[int, int]) -> DexTwapPoint:
         block_number, block_timestamp = block_sample
-        tick_cumulatives, _liquidity = await _twap_call_observe(
-            web3,
-            pool_checksum=pool_checksum,
-            seconds_agos=[window_secs, 0],
-            block_identifier=block_number,
-            protocol=protocol,
-            pool_address=pool_address,
-        )
+        if block_sample == start_sample:
+            tick_cumulatives = start_cumulatives
+        else:
+            tick_cumulatives, _liquidity = await _twap_call_observe(
+                web3,
+                pool_checksum=pool_checksum,
+                seconds_agos=[window_secs, 0],
+                block_identifier=block_number,
+                protocol=protocol,
+                pool_address=pool_address,
+            )
         tick_diff = tick_cumulatives[1] - tick_cumulatives[0]
         tick_twap = _twap_tick_from_cumulatives(tick_diff, window_secs)
         return DexTwapPoint(
@@ -626,12 +912,26 @@ async def fetch_v3_pool_state_series(
         pool_address,
         protocol=protocol,
     )
-    block_samples = await _historical_blocks_for_grid(
-        web3,
+    resolver = _HistoricalBlockResolver(web3, protocol=protocol)
+    genesis, latest = await resolver.validate_window(
         start_ts=start_ts,
         end_ts=end_ts,
         interval_secs=interval_secs,
+    )
+    start_sample = await resolver.at_or_before(start_ts, lower=genesis, upper=latest)
+    await _require_pool_at_series_start(
+        resolver,
+        web3,
+        pool_checksum=pool_checksum,
+        start_sample=start_sample,
+        latest=latest,
         protocol=protocol,
+    )
+    block_samples = await resolver.grid(
+        start_ts=start_ts,
+        end_ts=end_ts,
+        interval_secs=interval_secs,
+        first_sample=start_sample,
     )
     unique_blocks = list(dict.fromkeys(block_samples))
     if not unique_blocks:

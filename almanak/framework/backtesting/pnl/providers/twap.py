@@ -28,7 +28,11 @@ from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
 
 from almanak.core.chains import DEFAULT_CHAIN
-from almanak.framework.data.interfaces import DataSourceUnavailable, data_source_error_from_grpc
+from almanak.framework.data.interfaces import (
+    DataSourceTimeout,
+    DataSourceUnavailable,
+    data_source_error_from_grpc,
+)
 
 if TYPE_CHECKING:
     pass
@@ -61,6 +65,24 @@ def _twap_get_connected_gateway_client() -> tuple[Any, Any]:
                 reason=f"Gateway connect failed: {exc}",
             ) from exc
     return client, gateway_pb2
+
+
+def _gateway_client_deadline_error(exc: BaseException, *, timeout_seconds: float) -> DataSourceTimeout | None:
+    """Classify a client-owned gRPC deadline without typed server trailers.
+
+    When the caller's deadline expires, gRPC terminates the request locally and
+    there is no server response carrying our typed error-details trailer.  Keep
+    that path retryable instead of collapsing it into ``DataSourceUnavailable``.
+    """
+    try:
+        import grpc
+
+        code = exc.code()  # type: ignore[attr-defined]
+    except (AttributeError, TypeError):
+        return None
+    if code == grpc.StatusCode.DEADLINE_EXCEEDED:
+        return DataSourceTimeout(source="gateway", timeout_seconds=float(timeout_seconds))
+    return None
 
 
 _TWAP_STABLE_SYMBOLS: frozenset[str] = frozenset({"USDC", "USDT", "DAI", "FRAX", "LUSD", "BUSD", "USD"})
@@ -244,7 +266,11 @@ class CachedTWAP:
         return (datetime.now(UTC) - self.fetched_at).total_seconds()
 
 
-MAX_TWAP_SERIES_POINTS_PER_REQUEST = 512
+# Archive-state reads are intentionally paged below the 30-second client
+# deadline.  A point requires at least one historical ``eth_call`` even after
+# timestamp resolution is batched, so 128 leaves headroom on fast/high-latency
+# chains without weakening the deadline globally.
+MAX_TWAP_SERIES_POINTS_PER_REQUEST = 128
 
 
 def _decode_historical_twap_chunk(
@@ -364,6 +390,9 @@ def fetch_historical_twap_points(
             typed = data_source_error_from_grpc(exc, default_source="gateway")
             if typed is not None:
                 raise typed from exc
+            deadline = _gateway_client_deadline_error(exc, timeout_seconds=client.config.timeout)
+            if deadline is not None:
+                raise deadline from exc
             raise DataSourceUnavailable(
                 source="gateway",
                 reason=f"GetDexTwapSeries RPC failed: {exc}",

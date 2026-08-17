@@ -23,7 +23,10 @@ from almanak.framework.data.pools.descriptor import PoolDescriptor
 from almanak.framework.data.pools.reader import PoolPrice
 from almanak.framework.market.errors import PoolPriceUnavailableError, PoolReservesUnavailableError
 
-_MAX_POINTS_PER_REQUEST = 512
+# Each state point expands to slot0/liquidity/two balance archive calls. Keep a
+# page comfortably inside the fixed gateway deadline; long windows are served
+# through multiple independently bounded RPCs.
+_MAX_POINTS_PER_REQUEST = 128
 _ARCHIVE_LADDER = ("on_chain_archive",)
 
 
@@ -232,6 +235,11 @@ def _get_pool_state_series_response(client: Any, request: Any) -> Any:
         typed = data_source_error_from_grpc(exc, default_source="gateway")
         if typed is not None:
             raise typed from exc
+        from almanak.framework.backtesting.pnl.providers.twap import _gateway_client_deadline_error
+
+        deadline = _gateway_client_deadline_error(exc, timeout_seconds=client.config.timeout)
+        if deadline is not None:
+            raise deadline from exc
         raise DataSourceUnavailable(source="gateway", reason=f"GetDexPoolStateSeries RPC failed: {exc}") from exc
 
 
