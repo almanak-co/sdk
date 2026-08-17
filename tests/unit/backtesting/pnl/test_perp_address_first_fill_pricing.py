@@ -73,8 +73,10 @@ def _prime_catalog() -> None:
             index_token_decimals=18,
             long_token=WETH_ARBITRUM,
             long_token_symbol="WETH",
+            long_token_decimals=18,
             short_token=USDC_ARBITRUM,
             short_token_symbol="USDC",
+            short_token_decimals=6,
         ),
     )
 
@@ -90,8 +92,10 @@ def _prime_eth_variant_catalog() -> None:
             index_token_decimals=18,
             long_token=WETH_ARBITRUM,
             long_token_symbol="WETH",
+            long_token_decimals=18,
             short_token=WETH_ARBITRUM,
             short_token_symbol="WETH",
+            short_token_decimals=18,
         ),
     )
 
@@ -176,8 +180,10 @@ class TestAddressFirstIntentTokens:
                 index_token_decimals=8,
                 long_token=WETH_ARBITRUM,
                 long_token_symbol="WBTC",
+                long_token_decimals=8,
                 short_token=USDC_ARBITRUM,
                 short_token_symbol="USDC",
+                short_token_decimals=6,
             ),
         )
 

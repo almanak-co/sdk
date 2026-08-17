@@ -349,9 +349,12 @@ class GmxV2MarketRegistry:
                 continue
             try:
                 token_address = _address(raw.get("address"), "token address")
-                decimals = int(raw["decimals"])
-            except (KeyError, TypeError, ValueError):
+            except (TypeError, ValueError):
                 continue
+            raw_decimals = raw.get("decimals")
+            if isinstance(raw_decimals, bool) or not isinstance(raw_decimals, int):
+                continue
+            decimals = raw_decimals
             if decimals < 0 or decimals > 30:
                 continue
             symbol = str(raw.get("symbol") or "").strip()
@@ -362,8 +365,16 @@ class GmxV2MarketRegistry:
             raise PerpMarketCatalogueUnavailable(
                 f"GMX /tokens has no index metadata for {candidate.index_token} on {chain}"
             )
-        long_meta = tokens.get(candidate.long_token, ("", 0))
-        short_meta = tokens.get(candidate.short_token, ("", 0))
+        long_meta = tokens.get(candidate.long_token)
+        short_meta = tokens.get(candidate.short_token)
+        if long_meta is None or not long_meta[0]:
+            raise PerpMarketCatalogueUnavailable(
+                f"GMX /tokens has no long-token metadata for {candidate.long_token} on {chain}"
+            )
+        if short_meta is None or not short_meta[0]:
+            raise PerpMarketCatalogueUnavailable(
+                f"GMX /tokens has no short-token metadata for {candidate.short_token} on {chain}"
+            )
         return PerpMarketRecord(
             protocol="gmx_v2",
             chain=chain,
@@ -374,8 +385,10 @@ class GmxV2MarketRegistry:
             index_token_decimals=index_meta[1],
             long_token=candidate.long_token,
             long_token_symbol=long_meta[0],
+            long_token_decimals=long_meta[1],
             short_token=candidate.short_token,
             short_token_symbol=short_meta[0],
+            short_token_decimals=short_meta[1],
             verified=True,
         )
 

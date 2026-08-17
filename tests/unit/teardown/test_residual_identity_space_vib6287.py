@@ -32,7 +32,6 @@ import pytest
 
 from almanak.connectors._connector import CONNECTOR_REGISTRY
 from almanak.connectors._strategy_base.perp_identity import is_residual_marked
-from almanak.connectors.gmx_v2.addresses import GMX_V2_TOKENS
 from almanak.connectors.gmx_v2.perp_identity import gmx_v2_perp_identity
 from almanak.framework.teardown.models import PositionInfo, PositionType, TeardownPositionSummary
 from almanak.framework.teardown.perp_identity import venue_identity_tokens
@@ -44,6 +43,7 @@ from almanak.framework.teardown.registry_enumeration import (
     _position_info_from_pendle_registry_row,
     _union_residuals,
 )
+from tests.support.gmx_v2 import GMX_V2_TOKENS
 from tests.unit.connectors.gmx_v2.market_fixtures import market_address
 
 CHAIN = "arbitrum"

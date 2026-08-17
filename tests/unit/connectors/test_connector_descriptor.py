@@ -770,7 +770,7 @@ EXPECTED_ADDRESS_TABLE_PROTOCOLS = {
     "fluid": ("fluid",),
     "fluid_vault": ("fluid_vault",),
     "fluid_dex_lp": ("fluid_dex_lp",),
-    "gmx_v2": ("gmx_v2", "gmx_v2_tokens"),
+    "gmx_v2": ("gmx_v2",),
     "morpho_blue": ("morpho_blue",),
     "pancakeswap_perps": ("pancakeswap_perps",),
     "pancakeswap_v3": ("pancakeswap_v3",),

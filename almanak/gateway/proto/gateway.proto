@@ -420,8 +420,9 @@ message LendingMarketResponse {
   string error = 3;
 }
 
-// VIB-6561 — verified perpetual-market identity. Decimals are explicit venue
-// metadata: synthetic index-token addresses may have no ERC-20 contract.
+// VIB-6561 / ALM-3199 — verified perpetual-market identity. Decimals are
+// explicit venue metadata: synthetic index-token addresses may have no ERC-20
+// contract and newly listed collateral need not exist in a static token table.
 message PerpMarket {
   string protocol = 1;
   string chain = 2;
@@ -429,12 +430,14 @@ message PerpMarket {
   string market_token = 4;
   string index_token = 5;
   string index_symbol = 6;
-  int32 index_token_decimals = 7;
+  optional int32 index_token_decimals = 7;
   string long_token = 8;
   string long_token_symbol = 9;
   string short_token = 10;
   string short_token_symbol = 11;
   bool verified = 12;
+  optional int32 long_token_decimals = 13;
+  optional int32 short_token_decimals = 14;
 }
 
 message GetPerpMarketRequest {

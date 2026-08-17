@@ -48,16 +48,17 @@ def test_unsupported_chain_lists_supported_set(stub_gateway: MagicMock) -> None:
         GMXV2SDK(chain="ethereum", gateway_client=stub_gateway)
     msg = str(excinfo.value)
     assert "ethereum" in msg
-    # Error must guide the reader to the registry — that's the actual fix path.
-    assert "core/contracts.py" in msg
+    # Error must guide the reader to the core-contract registry — that's the
+    # actual fix path, while markets remain dynamic.
+    assert "gmx_v2/addresses.py" in msg
     for chain in GMX_V2_SDK_ADDRESSES:
         assert chain in msg, f"error should list supported chain {chain!r}"
 
 
-def test_avalanche_address_map_has_native_avax_market() -> None:
-    """Sanity-check that the AVAX/USD market only exists where we wired it."""
-    assert "AVAX_USD_MARKET" in GMX_V2_SDK_ADDRESSES["avalanche"]
-    assert "AVAX_USD_MARKET" not in GMX_V2_SDK_ADDRESSES["arbitrum"]
+def test_sdk_address_map_has_no_static_market_aliases() -> None:
+    """Market identity must never leak back into SDK deployment wiring."""
+    for addresses in GMX_V2_SDK_ADDRESSES.values():
+        assert all("MARKET" not in key for key in addresses)
 
 
 def test_avalanche_address_map_has_required_keys() -> None:
@@ -68,11 +69,7 @@ def test_avalanche_address_map_has_required_keys() -> None:
         "DATA_STORE",
         "ORDER_VAULT",
         "READER",
-        "ETH_USD_MARKET",
-        "BTC_USD_MARKET",
         "WETH",
-        "USDC",
-        "USDT",
     }
     for chain, addr_map in GMX_V2_SDK_ADDRESSES.items():
         missing = required - set(addr_map)
@@ -85,22 +82,16 @@ def test_construction_requires_rpc_url_or_gateway() -> None:
 
 
 def test_compiler_resolves_mixed_case_avalanche_collateral_keys() -> None:
-    """Drive the actual compile path: PerpOpenIntent with collateral 'WETH.e'
-    (the user-typed mixed case) must resolve to the registry address even
-    though the compiler upper-cases the symbol before looking it up.
-
-    Without case-insensitive lookup logic in compiler.py, this test fails:
-    'WETH.e'.upper() == 'WETH.E' which is NOT a literal key of GMX_V2_TOKENS.
+    """A mixed-case venue symbol resolves through the verified market tuple.
 
     Address-first: the market arrives as the fixture snapshot's verified
     avalanche ETH/USD address (catalog-primed, and served by the fake dynamic
     gateway because the risk-increasing OPEN leg demands CURRENT venue
-    listing) — the collateral symbol lookup under test is unchanged.
+    listing). No connector-owned token mirror participates.
     """
     from decimal import Decimal
     from unittest.mock import MagicMock
 
-    from almanak.connectors.gmx_v2.addresses import GMX_V2_TOKENS
     from almanak.framework.intents.compiler import IntentCompiler, IntentCompilerConfig
     from almanak.framework.intents.compiler_models import CompilationStatus
     from almanak.framework.intents.vocabulary import PerpOpenIntent
@@ -111,8 +102,9 @@ def test_compiler_resolves_mixed_case_avalanche_collateral_keys() -> None:
         prime_catalog,
     )
 
-    expected_addr = GMX_V2_TOKENS["avalanche"]["WETH.e"]
-    prime_catalog(market_record("avalanche", "ETH/USD"), chain="avalanche")
+    verified_market = market_record("avalanche", "ETH/USD")
+    expected_addr = verified_market.long_token
+    prime_catalog(verified_market, chain="avalanche")
 
     # Minimal compiler state — bypass __init__ so we don't pull in gateways or
     # token-resolver singletons; the lookup we exercise doesn't need them.
@@ -124,8 +116,8 @@ def test_compiler_resolves_mixed_case_avalanche_collateral_keys() -> None:
     # The OPEN leg demands CURRENT venue listing: the fake dynamic gateway is
     # what resolves the market so the compile reaches the collateral lookup.
     compiler._gateway_client = fake_dynamic_gateway("avalanche")
-    # Resolver-less compile path forces the static decimals fallback we just
-    # added, which is exactly the regression surface this test pins.
+    # Resolver-less compilation proves the market record owns this identity;
+    # neither collateral address nor decimals may come from generic fallback.
     compiler._token_resolver = None
     # VIB-6219: the compile path now derives a real acceptablePrice, so it needs
     # a price oracle. Without one the compile fails closed BEFORE reaching the
@@ -157,6 +149,7 @@ def test_compiler_resolves_mixed_case_avalanche_collateral_keys() -> None:
 
     mock_sdk = MagicMock()
     mock_sdk.ROUTER_ADDRESS = "0xrouter"
+    mock_sdk.WETH_ADDRESS = expected_addr
     mock_sdk.build_increase_order_multicall.return_value = MagicMock(
         to="0xrouter", value=0, data=b"0x", gas_estimate=300_000
     )
@@ -173,12 +166,8 @@ def test_compiler_resolves_mixed_case_avalanche_collateral_keys() -> None:
         mock_adapter_cls.return_value.open_position.return_value = mock_adapter_result
         result = compiler.compile(intent)
 
-    # Specific failure mode the test pins: an "Unknown collateral token: WETH.e"
-    # error indicates the case-insensitive lookup regressed. Anything else
-    # (success, or a different downstream error) means the lookup itself worked.
     assert result.status == CompilationStatus.SUCCESS, (
-        f"WETH.e collateral lookup must succeed via case-insensitive match against "
-        f"GMX_V2_TOKENS['avalanche']['WETH.e']={expected_addr}; got error: {result.error}"
+        f"WETH.e collateral lookup must derive {expected_addr} from the verified market; got error: {result.error}"
     )
     # Positively pin that the resolved ADDRESS reached the order, rather than
     # only asserting the absence of one error string — the weaker form passed
@@ -196,26 +185,23 @@ def test_compiler_resolves_mixed_case_avalanche_collateral_keys() -> None:
     )
     order_params = mock_sdk.build_increase_order_multicall.call_args.args[0]
     assert order_params.initial_collateral_token.lower() == expected_addr.lower(), (
-        f"the order must carry the RESOLVED WETH.e address {expected_addr}, "
-        f"got {order_params.initial_collateral_token}"
+        f"the order must carry the RESOLVED WETH.e address {expected_addr}, got {order_params.initial_collateral_token}"
     )
 
 
-def test_native_wrapped_decimals_documented_for_avalanche() -> None:
-    """WAVAX is 18-decimal (same as WETH/ETH); the perp compiler must not
-    fall back to the stable-default of 6 for it. Pin the invariant so a
-    future contributor doesn't reintroduce the WETH/ETH-only special case.
-    """
-    native_wrapped_18 = {"WETH", "ETH", "WAVAX", "AVAX"}
-    # The connector-owned perp compiler's native-wrapped set must include all
-    # of these; if someone removes WAVAX/AVAX, a real WAVAX long would
-    # underfund collateral by 1e12 and be picked up by this test.
-    from almanak.connectors.gmx_v2 import compiler as compiler_mod
+def test_native_wrapped_identity_is_derived_for_avalanche() -> None:
+    """SDK native handling and verified market metadata agree on WAVAX."""
+    from almanak.connectors.gmx_v2.permission_seed import permission_markets
+    from almanak.core.chains import ChainRegistry
+    from tests.unit.connectors.gmx_v2.market_fixtures import market_record
 
-    src = compiler_mod.__file__
-    with open(src) as f:
-        text = f.read()
-    for sym in native_wrapped_18:
-        assert (
-            f'"{sym}"' in text
-        ), f"perp compiler must reference {sym} as a native-wrapped 18-decimal token"
+    wrapped = ChainRegistry.resolve("avalanche").native.wrapped_address
+    avax_market = market_record("avalanche", "AVAX/USD")
+
+    assert wrapped is not None
+    assert GMX_V2_SDK_ADDRESSES["avalanche"]["WETH"].lower() == wrapped.lower()
+    assert avax_market.long_token.lower() == wrapped.lower()
+    assert avax_market.long_token_decimals == 18
+    # The permission seed is a different ETH market and must not leak into the
+    # runtime catalog merely because both paths share chain deployment wiring.
+    assert permission_markets()["avalanche"].market_token.lower() != avax_market.market_token.lower()

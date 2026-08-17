@@ -18,8 +18,12 @@ The GMX v2 connector is part of the Almanak Strategy Framework. No additional in
 ## Quick Start
 
 ```python
-from src.connectors.gmx_v2 import GMXv2Adapter, GMXv2Config
+from almanak.connectors.gmx_v2 import GMXv2Adapter, GMXv2Config
 from decimal import Decimal
+
+# Obtain this with:
+# almanak ax -c arbitrum perp-market gmx_v2 ETH/USD
+market_token = "<verified GMX market-token address>"
 
 # Initialize the adapter
 config = GMXv2Config(
@@ -30,7 +34,7 @@ adapter = GMXv2Adapter(config)
 
 # Open a long position
 result = adapter.open_position(
-    market="ETH/USD",
+    market=market_token,
     collateral_token="USDC",
     collateral_amount=Decimal("1000"),  # $1000 USDC collateral
     size_delta_usd=Decimal("5000"),      # $5000 position size (5x leverage)
@@ -42,7 +46,7 @@ if result.success:
 
 # Check position
 position = adapter.get_position(
-    market="ETH/USD",
+    market=market_token,
     collateral_token="USDC",
     is_long=True,
 )
@@ -53,7 +57,7 @@ if position:
 
 # Close the position
 close_result = adapter.close_position(
-    market="ETH/USD",
+    market=market_token,
     collateral_token="USDC",
     is_long=True,
     size_delta_usd=position.size_in_usd,
@@ -71,23 +75,23 @@ close_result = adapter.close_position(
 | `execution_fee` | int | Auto | Execution fee in native token wei |
 | `referral_code` | bytes | 0x00...00 | Referral code for fee discounts |
 
-## Supported Markets
+## Markets
 
-### Arbitrum
-- ETH/USD
-- BTC/USD
-- LINK/USD
-- ARB/USD
-- SOL/USD
-- UNI/USD
-- DOGE/USD
-- And more...
+The connector has no hand-maintained supported-market list. On Arbitrum and
+Avalanche, live compilation resolves a market-token address or exact venue
+label through GMX's current catalogue, then accepts it only when
+`Reader.getMarket` returns the same market/index/long/short address tuple.
+Collateral symbols and decimals come from that verified record as well.
 
-### Avalanche
-- AVAX/USD
-- ETH/USD
-- BTC/USD
-- SOL/USD
+Use `almanak ax -c <chain> perp-market gmx_v2 <market>` to inspect a live market.
+An unavailable gateway is inconclusive, not evidence that GMX does not support
+the market.
+
+The intent compiler accepts exact venue labels because it owns gateway
+discovery. A directly constructed adapter has no discovery transport: in a
+fresh process it requires the verified market-token address shown above. It may
+reuse a label only after the compiler has verified and remembered exactly one
+matching market in that process.
 
 ## API Reference
 
@@ -98,7 +102,7 @@ Open a new position or increase an existing one.
 
 ```python
 result = adapter.open_position(
-    market="ETH/USD",           # Market symbol or address
+    market=market_token,         # Verified market-token address
     collateral_token="USDC",    # Collateral token symbol or address
     collateral_amount=Decimal("1000"),
     size_delta_usd=Decimal("5000"),
@@ -113,7 +117,7 @@ Close a position or decrease its size.
 
 ```python
 result = adapter.close_position(
-    market="ETH/USD",
+    market=market_token,
     collateral_token="USDC",
     is_long=True,
     size_delta_usd=Decimal("5000"),  # None = close entire position
@@ -128,7 +132,7 @@ Add to an existing position.
 
 ```python
 result = adapter.increase_position(
-    market="ETH/USD",
+    market=market_token,
     collateral_token="USDC",
     is_long=True,
     collateral_delta=Decimal("500"),
@@ -141,7 +145,7 @@ Partially close a position.
 
 ```python
 result = adapter.decrease_position(
-    market="ETH/USD",
+    market=market_token,
     collateral_token="USDC",
     is_long=True,
     size_delta_usd=Decimal("2500"),

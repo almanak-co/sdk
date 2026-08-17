@@ -25,5 +25,10 @@ PERMISSION_HINTS = PermissionHints(
     # PERP_CANCEL_ORDER and the teardown cancel recovers collateral. gmx_v2 is the
     # ONLY perp connector that supports cancel; the builder gates on this
     # declaration so no other perp connector inherits a cancel it cannot compile.
+    # ALM-3199 gives open/close a bounded generated market record, and the SDK's
+    # discovery mode builds deterministic calldata without a transport. Opt out
+    # of IntentCompiler's implicit public-RPC fallback so manifest bytes cannot
+    # depend on RPC weather.
+    offline_discovery=True,
     synthetic_discovery_intents=frozenset({IntentType.PERP_OPEN, IntentType.PERP_CLOSE, IntentType.PERP_CANCEL_ORDER}),
 )

@@ -15,15 +15,14 @@ from almanak.connectors._base.gateway_capabilities import (
     PerpMarketVerificationError,
 )
 from almanak.connectors.gmx_v2 import market_catalog
-from almanak.connectors.gmx_v2.addresses import GMX_V2_TOKENS
 from almanak.connectors.gmx_v2.compiler import GMXV2Compiler
 from almanak.connectors.gmx_v2.gateway.market_registry import GmxV2MarketRegistry
 from almanak.connectors.gmx_v2.market_metadata import (
+    GmxMarketDiscoveryUnavailable,
     GmxMarketNotFound,
     ResolvedGmxMarket,
     resolve_market_via_gateway,
 )
-from almanak.connectors.gmx_v2.sdk import GMXV2SDK
 from almanak.framework.intents.compiler_models import CompilationResult, CompilationStatus
 from almanak.gateway.proto import gateway_pb2
 from almanak.gateway.services.market_service import MarketServiceServicer
@@ -80,8 +79,10 @@ def _record(*, verified: bool = True) -> PerpMarketRecord:
         index_token_decimals=8,
         long_token=WBTC.lower(),
         long_token_symbol="WBTC.b",
+        long_token_decimals=8,
         short_token=USDC.lower(),
         short_token_symbol="USDC",
+        short_token_decimals=6,
         verified=verified,
     )
 
@@ -108,7 +109,9 @@ async def test_hype_is_resolved_from_api_and_verified_onchain() -> None:
     assert record.index_symbol == "HYPE"
     assert record.index_token_decimals == 8
     assert record.long_token == WBTC.lower()
+    assert record.long_token_decimals == 8
     assert record.short_token == USDC.lower()
+    assert record.short_token_decimals == 6
     assert record.verified is True
 
 
@@ -130,6 +133,49 @@ async def test_missing_token_catalogue_is_retryable_unavailability() -> None:
     registry = GmxV2MarketRegistry()
     with patch.object(registry, "_get_json", AsyncMock(side_effect=[MARKETS, {}])):
         with pytest.raises(PerpMarketCatalogueUnavailable, match="tokens list"):
+            await registry.resolve(
+                chain="arbitrum",
+                market="HYPE/USD",
+                eth_call=AsyncMock(return_value=_reader_result()),
+            )
+
+
+@pytest.mark.asyncio
+async def test_missing_collateral_token_metadata_is_retryable_unavailability() -> None:
+    registry = GmxV2MarketRegistry()
+    tokens_without_long = {"tokens": [token for token in TOKENS["tokens"] if token["address"] != WBTC]}
+    with patch.object(registry, "_get_json", AsyncMock(side_effect=[MARKETS, tokens_without_long])):
+        with pytest.raises(PerpMarketCatalogueUnavailable, match="long-token metadata"):
+            await registry.resolve(
+                chain="arbitrum",
+                market="HYPE/USD",
+                eth_call=AsyncMock(return_value=_reader_result()),
+            )
+
+
+@pytest.mark.parametrize(
+    ("token_address", "bad_decimals", "missing_metadata"),
+    [
+        pytest.param(WBTC, True, "long-token metadata", id="long-true"),
+        pytest.param(USDC, False, "short-token metadata", id="short-false"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_boolean_collateral_decimals_are_rejected(
+    token_address: str,
+    bad_decimals: bool,
+    missing_metadata: str,
+) -> None:
+    tokens = {
+        "tokens": [
+            {**token, "decimals": bad_decimals} if token["address"] == token_address else token
+            for token in TOKENS["tokens"]
+        ]
+    }
+    registry = GmxV2MarketRegistry()
+
+    with patch.object(registry, "_get_json", AsyncMock(side_effect=[MARKETS, tokens])):
+        with pytest.raises(PerpMarketCatalogueUnavailable, match=missing_metadata):
             await registry.resolve(
                 chain="arbitrum",
                 market="HYPE/USD",
@@ -535,8 +581,10 @@ def test_compiler_uses_verified_dynamic_metadata_outside_static_catalog() -> Non
             index_token_decimals=8,
             long_token=WBTC,
             long_token_symbol="WBTC.b",
+            long_token_decimals=8,
             short_token=USDC,
             short_token_symbol="USDC",
+            short_token_decimals=6,
             verified=True,
         ),
     )
@@ -592,8 +640,10 @@ def test_compiler_forwards_market_input_verbatim_to_dynamic_resolution(market_in
                 index_token_decimals=record.index_token_decimals,
                 long_token=record.long_token,
                 long_token_symbol=record.long_token_symbol,
+                long_token_decimals=record.long_token_decimals,
                 short_token=record.short_token,
                 short_token_symbol=record.short_token_symbol,
+                short_token_decimals=record.short_token_decimals,
                 verified=True,
             ),
         )
@@ -638,8 +688,10 @@ def test_open_requires_listed_and_close_does_not() -> None:
                 index_token_decimals=record.index_token_decimals,
                 long_token=record.long_token,
                 long_token_symbol=record.long_token_symbol,
+                long_token_decimals=record.long_token_decimals,
                 short_token=record.short_token,
                 short_token_symbol=record.short_token_symbol,
+                short_token_decimals=record.short_token_decimals,
                 verified=True,
             ),
         )
@@ -736,8 +788,10 @@ def test_gateway_market_resolution_defaults_invalid_timeouts(configured_timeout:
             index_token_decimals=8,
             long_token=WBTC,
             long_token_symbol="WBTC.b",
+            long_token_decimals=8,
             short_token=USDC,
             short_token_symbol="USDC",
+            short_token_decimals=6,
             verified=True,
         ),
     )
@@ -749,6 +803,41 @@ def test_gateway_market_resolution_defaults_invalid_timeouts(configured_timeout:
     resolve_market_via_gateway(gateway, chain="arbitrum", market="HYPE/USD")
 
     assert stub.call_args.kwargs["timeout"] == 30.0
+
+
+@pytest.mark.parametrize(
+    "missing_field",
+    ["index_token_decimals", "long_token_decimals", "short_token_decimals"],
+)
+def test_old_gateway_without_token_decimals_fails_closed(missing_field: str) -> None:
+    market_fields = {
+        "protocol": "gmx_v2",
+        "chain": "arbitrum",
+        "label": "HYPE/USD",
+        "market_token": HYPE_MARKET,
+        "index_token": HYPE_INDEX,
+        "index_symbol": "HYPE",
+        "index_token_decimals": 8,
+        "long_token": WBTC,
+        "long_token_symbol": "WBTC.b",
+        "long_token_decimals": 8,
+        "short_token": USDC,
+        "short_token_symbol": "USDC",
+        "short_token_decimals": 6,
+        "verified": True,
+    }
+    del market_fields[missing_field]
+    response = gateway_pb2.PerpMarketResponse(
+        success=True,
+        market=gateway_pb2.PerpMarket(**market_fields),
+    )
+    gateway = SimpleNamespace(
+        config=SimpleNamespace(timeout=5),
+        market=SimpleNamespace(GetPerpMarket=lambda request, timeout: response),
+    )
+
+    with pytest.raises(GmxMarketDiscoveryUnavailable, match=missing_field):
+        resolve_market_via_gateway(gateway, chain="arbitrum", market="HYPE/USD")
 
 
 def _not_found_gateway() -> SimpleNamespace:
@@ -767,16 +856,6 @@ def _not_found_gateway() -> SimpleNamespace:
         config=SimpleNamespace(timeout=5),
         market=SimpleNamespace(GetPerpMarket=missing_market),
     )
-
-
-def _core_alias_sdk() -> GMXV2SDK:
-    """An offline SDK exposing only the core ETH/BTC market aliases."""
-    sdk = GMXV2SDK.__new__(GMXV2SDK)
-    sdk.addresses = {
-        "ETH_USD_MARKET": market_address("arbitrum", "ETH/USD"),
-        "BTC_USD_MARKET": market_address("arbitrum", "BTC/USD"),
-    }
-    return sdk
 
 
 def test_gateway_not_found_verified_address_resolves_from_catalog() -> None:
@@ -814,18 +893,16 @@ def test_gateway_not_found_unverified_address_fails_closed_non_transient() -> No
     assert "not verified" in (result.error or "")
 
 
-def test_gateway_not_found_core_label_still_resolves_via_sdk_alias() -> None:
-    """Successor of the NOT_FOUND curated-fallback test, label leg.
-
-    After a dynamic miss the only label resolution left is the SDK's core
-    ETH/BTC/AVAX alias surface — there is no curated symbol→address table to
-    consult behind it.
-    """
+def test_gateway_not_found_core_label_has_no_static_runtime_alias() -> None:
+    """Even a former core label fails closed after a venue NOT_FOUND."""
     ctx = SimpleNamespace(chain="arbitrum", gateway_client=_not_found_gateway(), permission_discovery=False)
 
-    resolved = GMXV2Compiler()._resolve_market(ctx, _core_alias_sdk(), "ETH/USD", "intent-1")
+    result = GMXV2Compiler()._resolve_market(ctx, SimpleNamespace(), "ETH/USD", "intent-1")
 
-    assert resolved == market_address("arbitrum", "ETH/USD")
+    assert isinstance(result, CompilationResult)
+    assert result.status is CompilationStatus.FAILED
+    assert result.is_transient is False
+    assert "No static runtime market aliases" in (result.error or "")
 
 
 def test_gateway_not_found_non_core_label_fails_with_address_first_guidance() -> None:
@@ -837,7 +914,7 @@ def test_gateway_not_found_non_core_label_fails_with_address_first_guidance() ->
     """
     ctx = SimpleNamespace(chain="arbitrum", gateway_client=_not_found_gateway(), permission_discovery=False)
 
-    result = GMXV2Compiler()._resolve_market(ctx, _core_alias_sdk(), "SOL/USD", "intent-1")
+    result = GMXV2Compiler()._resolve_market(ctx, SimpleNamespace(), "SOL/USD", "intent-1")
 
     assert isinstance(result, CompilationResult)
     assert result.status == CompilationStatus.FAILED
@@ -845,17 +922,25 @@ def test_gateway_not_found_non_core_label_fails_with_address_first_guidance() ->
     assert "address-first" in (result.error or "")
 
 
-def test_connector_collateral_alias_precedes_generic_symbol_resolution() -> None:
+def test_verified_market_collateral_precedes_generic_symbol_resolution() -> None:
+    record = market_record("arbitrum", "ETH/USD")
+    prime_catalog(record, chain="arbitrum")
     wrong_usdc = SimpleNamespace(address="0x" + "1" * 40)
     ctx = SimpleNamespace(
         chain="arbitrum",
+        permission_discovery=False,
         token_resolver=object(),
         services=SimpleNamespace(resolve_token=lambda token: wrong_usdc),
     )
 
-    resolved = GMXV2Compiler()._resolve_collateral(ctx, "USDC", "intent-1")
+    resolved = GMXV2Compiler()._resolve_collateral(
+        ctx,
+        "USDC",
+        "intent-1",
+        market_address=record.market_token,
+    )
 
-    assert resolved == GMX_V2_TOKENS["arbitrum"]["USDC"]
+    assert resolved == record.short_token
 
 
 def test_receipt_parser_override_is_only_emitted_for_valid_decimals() -> None:
@@ -880,8 +965,10 @@ def test_managed_anvil_keeper_seeds_unlisted_market_from_verified_metadata() -> 
         index_token_decimals=8,
         long_token=WBTC,
         long_token_symbol="WBTC.b",
+        long_token_decimals=8,
         short_token=USDC,
         short_token_symbol="USDC",
+        short_token_decimals=6,
     )
     with (
         patch.object(executor, "resolve_market_via_gateway", return_value=metadata),

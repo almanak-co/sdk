@@ -60,7 +60,6 @@ def _univ3_position(*, token_id: int, fee: int, liquidity: int) -> "pq.UniswapV3
     )
 
 
-
 class TestUniswapV3PositionQueries:
     @pytest.mark.asyncio
     async def test_async_no_positions(self, web3):
@@ -134,7 +133,9 @@ def _encode_book(props_list) -> bytes:
 
 _TWO_POSITION_BOOK = (
     _props(_ETH_MARKET, _USDC, size_usd=5000 * 10**30, size_tok=int(2.5 * 10**18), col_amt=1000 * 10**6, is_long=True),
-    _props(_BTC_MARKET, _USDC, size_usd=10000 * 10**30, size_tok=int(0.25 * 10**8), col_amt=2000 * 10**6, is_long=False),
+    _props(
+        _BTC_MARKET, _USDC, size_usd=10000 * 10**30, size_tok=int(0.25 * 10**8), col_amt=2000 * 10**6, is_long=False
+    ),
     # Inactive (size 0) — the production reducer must filter it out.
     _props(_ETH_MARKET, _USDC, size_usd=0, size_tok=0, col_amt=5 * 10**6, is_long=False),
 )
@@ -236,7 +237,10 @@ class TestGmxPositionQueries:
         assert [p.market for p in only_eth] == [_ETH_MARKET]
 
         both = pq.query_gmx_positions_sync(
-            _WALLET, _GmxWeb3(_GmxEth(blob=blob)), chain="arbitrum", collateral_tokens=[_USDC.upper().replace("0X", "0x")]
+            _WALLET,
+            _GmxWeb3(_GmxEth(blob=blob)),
+            chain="arbitrum",
+            collateral_tokens=[_USDC.upper().replace("0X", "0x")],
         )
         assert len(both) == 2
 
@@ -338,8 +342,10 @@ class TestGmxPositionQueries:
                 index_token_decimals=12,
                 long_token="0x" + "02" * 20,
                 long_token_symbol="WETH",
+                long_token_decimals=18,
                 short_token=_USDC,
                 short_token_symbol="USDC",
+                short_token_decimals=6,
             ),
         )
         primed = pq.query_gmx_positions_sync(_WALLET, _GmxWeb3(_GmxEth(blob=blob)), chain="arbitrum")

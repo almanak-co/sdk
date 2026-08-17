@@ -950,7 +950,7 @@ class IntentCompiler:
         # fallbacks are suppressed.
         #
         # Opt-IN per connector (``PermissionHints.offline_discovery``), NOT the
-        # default: gmx_v2, pendle, traderjoe_v2 and uniswap_v4 hooks currently
+        # default: pendle, traderjoe_v2 and uniswap_v4 hooks currently
         # discover nothing without the implicit fallback, so flipping the
         # default would convert their existing nondeterminism into a hard
         # failure. Same defect class, tracked separately.

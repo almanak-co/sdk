@@ -1445,8 +1445,9 @@ Global___LendingMarketResponse: _TypeAlias = LendingMarketResponse  # noqa: Y015
 
 @_typing.final
 class PerpMarket(_message.Message):
-    """VIB-6561 — verified perpetual-market identity. Decimals are explicit venue
-    metadata: synthetic index-token addresses may have no ERC-20 contract.
+    """VIB-6561 / ALM-3199 — verified perpetual-market identity. Decimals are
+    explicit venue metadata: synthetic index-token addresses may have no ERC-20
+    contract and newly listed collateral need not exist in a static token table.
     """
 
     DESCRIPTOR: _descriptor.Descriptor
@@ -1463,6 +1464,8 @@ class PerpMarket(_message.Message):
     SHORT_TOKEN_FIELD_NUMBER: _builtins.int
     SHORT_TOKEN_SYMBOL_FIELD_NUMBER: _builtins.int
     VERIFIED_FIELD_NUMBER: _builtins.int
+    LONG_TOKEN_DECIMALS_FIELD_NUMBER: _builtins.int
+    SHORT_TOKEN_DECIMALS_FIELD_NUMBER: _builtins.int
     protocol: _builtins.str
     chain: _builtins.str
     label: _builtins.str
@@ -1475,6 +1478,8 @@ class PerpMarket(_message.Message):
     short_token: _builtins.str
     short_token_symbol: _builtins.str
     verified: _builtins.bool
+    long_token_decimals: _builtins.int
+    short_token_decimals: _builtins.int
     def __init__(
         self,
         *,
@@ -1484,15 +1489,31 @@ class PerpMarket(_message.Message):
         market_token: _builtins.str = ...,
         index_token: _builtins.str = ...,
         index_symbol: _builtins.str = ...,
-        index_token_decimals: _builtins.int = ...,
+        index_token_decimals: _builtins.int | None = ...,
         long_token: _builtins.str = ...,
         long_token_symbol: _builtins.str = ...,
         short_token: _builtins.str = ...,
         short_token_symbol: _builtins.str = ...,
         verified: _builtins.bool = ...,
+        long_token_decimals: _builtins.int | None = ...,
+        short_token_decimals: _builtins.int | None = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "index_symbol", b"index_symbol", "index_token", b"index_token", "index_token_decimals", b"index_token_decimals", "label", b"label", "long_token", b"long_token", "long_token_symbol", b"long_token_symbol", "market_token", b"market_token", "protocol", b"protocol", "short_token", b"short_token", "short_token_symbol", b"short_token_symbol", "verified", b"verified"]  # noqa: Y015
+    _HasFieldArgType: _TypeAlias = _typing.Literal["_index_token_decimals", b"_index_token_decimals", "_long_token_decimals", b"_long_token_decimals", "_short_token_decimals", b"_short_token_decimals", "index_token_decimals", b"index_token_decimals", "long_token_decimals", b"long_token_decimals", "short_token_decimals", b"short_token_decimals"]  # noqa: Y015
+    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["_index_token_decimals", b"_index_token_decimals", "_long_token_decimals", b"_long_token_decimals", "_short_token_decimals", b"_short_token_decimals", "chain", b"chain", "index_symbol", b"index_symbol", "index_token", b"index_token", "index_token_decimals", b"index_token_decimals", "label", b"label", "long_token", b"long_token", "long_token_decimals", b"long_token_decimals", "long_token_symbol", b"long_token_symbol", "market_token", b"market_token", "protocol", b"protocol", "short_token", b"short_token", "short_token_decimals", b"short_token_decimals", "short_token_symbol", b"short_token_symbol", "verified", b"verified"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+    _WhichOneofReturnType__index_token_decimals: _TypeAlias = _typing.Literal["index_token_decimals"]  # noqa: Y015
+    _WhichOneofArgType__index_token_decimals: _TypeAlias = _typing.Literal["_index_token_decimals", b"_index_token_decimals"]  # noqa: Y015
+    _WhichOneofReturnType__long_token_decimals: _TypeAlias = _typing.Literal["long_token_decimals"]  # noqa: Y015
+    _WhichOneofArgType__long_token_decimals: _TypeAlias = _typing.Literal["_long_token_decimals", b"_long_token_decimals"]  # noqa: Y015
+    _WhichOneofReturnType__short_token_decimals: _TypeAlias = _typing.Literal["short_token_decimals"]  # noqa: Y015
+    _WhichOneofArgType__short_token_decimals: _TypeAlias = _typing.Literal["_short_token_decimals", b"_short_token_decimals"]  # noqa: Y015
+    @_typing.overload
+    def WhichOneof(self, oneof_group: _WhichOneofArgType__index_token_decimals) -> _WhichOneofReturnType__index_token_decimals | None: ...
+    @_typing.overload
+    def WhichOneof(self, oneof_group: _WhichOneofArgType__long_token_decimals) -> _WhichOneofReturnType__long_token_decimals | None: ...
+    @_typing.overload
+    def WhichOneof(self, oneof_group: _WhichOneofArgType__short_token_decimals) -> _WhichOneofReturnType__short_token_decimals | None: ...
 
 Global___PerpMarket: _TypeAlias = PerpMarket  # noqa: Y015
 

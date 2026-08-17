@@ -265,7 +265,7 @@ def _gmx_simulate_position(simulated: SimulatedPerpPosition) -> PerpsPositionOnC
     keeps that Empty≠Zero distinction: the framework serves an unmeasured
     read, never an invented one.
     """
-    from almanak.connectors.gmx_v2.market_rules import canonicalise_market
+    from almanak.connectors.gmx_v2.market_identity import canonicalise_market
 
     market_address: str | None
     if simulated.market.startswith("0x"):

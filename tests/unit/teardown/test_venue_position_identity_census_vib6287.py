@@ -22,8 +22,14 @@ from almanak.connectors._strategy_base.perp_identity import (
     has_perp_identity_hook,
     registered_perp_identity_protocols,
 )
-from almanak.connectors.gmx_v2.addresses import GMX_V2_TOKENS
-from almanak.connectors.gmx_v2.perp_identity import _address_only, gmx_v2_perp_identity
+from almanak.connectors.gmx_v2 import perp_identity as gmx_perp_identity
+from almanak.connectors.gmx_v2.perp_identity import (
+    _address_only,
+    _resolve_address,
+    _static_token_address,
+    gmx_v2_perp_identity,
+)
+from almanak.framework.data.tokens.models import Token
 from almanak.framework.teardown.completeness import (
     _covers,
     _perp_carries_identity,
@@ -38,6 +44,7 @@ from almanak.framework.teardown.registry_enumeration import (
     _dedupe_keys,
     reconcile_lp_with_registry,
 )
+from tests.support.gmx_v2 import GMX_V2_TOKENS
 from tests.unit.connectors.gmx_v2.market_fixtures import FIXTURE_MARKETS, market_address
 
 CHAIN = "arbitrum"
@@ -743,8 +750,7 @@ def test_every_address_spelling_resolves_and_no_symbol_spelling_does(chain):
         expected = address.lower()
         for spelling in (address, address.lower(), "0x" + address[2:].upper()):
             assert _address_only(spelling) == expected, (
-                f"{chain}: address spelling {spelling!r} does not resolve identically — "
-                "case must never affect identity"
+                f"{chain}: address spelling {spelling!r} does not resolve identically — case must never affect identity"
             )
 
     for chain_, record in FIXTURE_MARKETS:
@@ -762,6 +768,25 @@ def test_an_alias_that_names_no_market_still_yields_nothing():
     """Non-vacuity control kept from the alias era: junk never becomes a market."""
     for unknown in ("ZZZZ", "WZZZZ", "NOTAMARKET", "W", "/USD", ""):
         assert _address_only(unknown) is None, unknown
+
+
+def test_collateral_address_whitespace_is_normalized() -> None:
+    address = GMX_V2_TOKENS["arbitrum"]["USDC"]
+
+    assert _resolve_address("arbitrum", f"  {address}  ") == address.lower()
+
+
+def test_duplicate_static_collateral_symbols_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    duplicate_tokens = [
+        Token(symbol="DUP", name="First", decimals=18, addresses={"arbitrum": "0x" + "1" * 40}),
+        Token(symbol="DUP", name="Second", decimals=18, addresses={"arbitrum": "0x" + "2" * 40}),
+    ]
+    monkeypatch.setattr(gmx_perp_identity, "DEFAULT_TOKENS", duplicate_tokens)
+    _static_token_address.cache_clear()
+    try:
+        assert _static_token_address("arbitrum", "DUP") is None
+    finally:
+        _static_token_address.cache_clear()
 
 
 def test_a_row_whose_id_and_details_name_different_positions_names_nothing():
@@ -835,6 +860,7 @@ def test_a_consistent_row_is_still_named():
 # property — no symbol spelling ever names a market — is
 # ``test_every_address_spelling_resolves_and_no_symbol_spelling_does`` above.
 
+
 def test_an_unverifiable_keyed_row_emits_only_its_venue_key():
     """A row may emit at most one identity family (#3534 panel blocker).
 
@@ -899,8 +925,7 @@ def test_a_keyless_row_still_emits_its_semantic_token():
     tokens = gmx_v2_perp_identity(_keyless(MARKET), wallet_address=None)
     assert any(":sem:" in t for t in tokens), sorted(tokens)
     assert gmx_v2_perp_identity(_keyless("ETH/USD"), wallet_address=None) == frozenset(), (
-        "a symbol-shaped market must yield NO token — never a resolution through a "
-        "curated table"
+        "a symbol-shaped market must yield NO token — never a resolution through a curated table"
     )
 
 

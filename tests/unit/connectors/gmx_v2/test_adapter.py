@@ -8,11 +8,13 @@ This test suite covers:
 - Transaction building
 """
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
 
+from almanak.connectors.gmx_v2 import market_catalog
 from almanak.connectors.gmx_v2.adapter import (
     DEFAULT_EXECUTION_FEE,
     GMX_V2_ADDRESSES,
@@ -23,8 +25,8 @@ from almanak.connectors.gmx_v2.adapter import (
     GMXv2Position,
     GMXv2PositionSide,
 )
-from almanak.connectors.gmx_v2.addresses import GMX_V2_TOKENS
-from tests.unit.connectors.gmx_v2.market_fixtures import market_address, prime_catalog
+from tests.support.gmx_v2 import GMX_V2_TOKENS
+from tests.unit.connectors.gmx_v2.market_fixtures import market_address, market_record, prime_catalog
 
 # Address-first: the adapter no longer ships a symbol→address market table.
 # Labels resolve only through the process's venue-verified catalog, so these
@@ -42,6 +44,7 @@ def _verified_markets():
     test starts from the audited fixture rows and nothing leaks across tests.
     """
     prime_catalog()
+
 
 # =============================================================================
 # Configuration Tests
@@ -1155,6 +1158,46 @@ class TestGMXv2OnchainPositionParsing:
         """Test collateral decimal lookup for WBTC (8 decimals)."""
         decimals = adapter._get_collateral_decimals("0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f")
         assert decimals == 8
+
+    def test_position_parsing_uses_verified_decimals_for_unregistered_collateral(
+        self,
+        adapter: GMXv2Adapter,
+    ) -> None:
+        """A dynamically listed collateral must remain enumerable for teardown."""
+        new_collateral = "0x000000000000000000000000000000000000dEaD"
+        verified = replace(
+            market_record("arbitrum", "ETH/USD"),
+            long_token=new_collateral,
+            long_token_symbol="NEW",
+            long_token_decimals=7,
+        )
+        market_catalog.remember("arbitrum", verified)
+
+        result = adapter._parse_position_dicts(
+            [
+                {
+                    "account": adapter.wallet_address,
+                    "market": verified.market_token,
+                    "collateral_token": new_collateral,
+                    "size_in_usd": 200 * 10**30,
+                    "size_in_tokens": 10**17,
+                    "collateral_amount": 25 * 10**7,
+                    "borrowing_factor": 0,
+                    "funding_fee_amount_per_size": 0,
+                    "is_long": True,
+                }
+            ]
+        )
+
+        assert len(result) == 1
+        assert result[0].collateral_amount == Decimal("25")
+        assert (
+            adapter._get_collateral_decimals(
+                new_collateral,
+                market_address=verified.market_token,
+            )
+            == 7
+        )
 
     def test_get_index_token_decimals(self, adapter: GMXv2Adapter) -> None:
         """Index-token decimals come from the venue-verified catalog (address-first).

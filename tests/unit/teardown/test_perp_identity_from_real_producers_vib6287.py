@@ -37,13 +37,13 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 from almanak.connectors.gmx_v2.adapter import GMXv2Adapter, GMXv2Config, GMXv2Position
-from almanak.connectors.gmx_v2.addresses import GMX_V2_TOKENS
 from almanak.framework.teardown import TeardownPositionSummary
 from almanak.framework.teardown.models import PositionType
 from almanak.framework.teardown.registry_enumeration import (
     _position_info_from_perp_registry_row,
     reconcile_lp_with_registry,
 )
+from tests.support.gmx_v2 import GMX_V2_TOKENS
 from tests.unit.connectors.gmx_v2.market_fixtures import market_address
 
 CHAIN = "arbitrum"

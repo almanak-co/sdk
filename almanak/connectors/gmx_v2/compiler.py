@@ -16,7 +16,6 @@ from almanak.connectors._strategy_base.base.compiler import (
 )
 from almanak.connectors._strategy_base.slippage import SlippagePrecisionError, slippage_to_bps
 from almanak.framework.intents.compiler_models import CompilationResult, CompilationStatus, TransactionData
-from almanak.framework.intents.intent_errors import InvalidCollateralForMarketError
 from almanak.framework.intents.min_out_guard import UnprotectedTradeError
 from almanak.framework.intents.vocabulary import (
     IntentType,
@@ -29,14 +28,15 @@ from almanak.framework.models.reproduction_bundle import ActionBundle
 from . import market_catalog
 from .acceptable_price import bound_is_maximum, derive_acceptable_price_30dec, price_30dec_to_usd
 from .adapter import GMXv2Adapter, GMXv2Config
+from .market_identity import canonicalise_market
 from .market_metadata import (
     GmxMarketDiscoveryUnavailable,
     GmxMarketNotFound,
     ResolvedGmxMarket,
     resolve_market_via_gateway,
 )
-from .market_rules import canonicalise_market, validate_collateral
-from .sdk import GMX_V2_TOKENS, GMXV2SDK, GMXV2OrderParams, PositionQueryError
+from .permission_seed import permission_market
+from .sdk import GMXV2SDK, GMXV2OrderParams, PositionQueryError
 
 logger = logging.getLogger(__name__)
 
@@ -56,11 +56,29 @@ class GMXV2Compiler(BasePerpCompiler):
     def _remember_market(self, chain: str, market: ResolvedGmxMarket) -> None:
         market_catalog.remember(chain, market)
 
-    def _market_metadata(self, chain: str, market_address: str) -> ResolvedGmxMarket | None:
+    def _market_metadata(
+        self,
+        chain: str,
+        market_address: str,
+        *,
+        permission_discovery: bool = False,
+    ) -> ResolvedGmxMarket | None:
+        if permission_discovery:
+            return permission_market(chain, market_address)
         return market_catalog.by_address(chain, market_address)
 
-    def _index_token_decimals(self, chain: str, market_address: str) -> int | None:
-        metadata = self._market_metadata(chain, market_address)
+    def _index_token_decimals(
+        self,
+        chain: str,
+        market_address: str,
+        *,
+        permission_discovery: bool = False,
+    ) -> int | None:
+        metadata = self._market_metadata(
+            chain,
+            market_address,
+            permission_discovery=permission_discovery,
+        )
         return metadata.index_token_decimals if metadata is not None else None
 
     def preflight(self, ctx: PerpCompilerContext, intent: Any) -> PreflightVerdict:
@@ -76,6 +94,11 @@ class GMXV2Compiler(BasePerpCompiler):
         if getattr(intent, "intent_type", None) not in (IntentType.PERP_OPEN, IntentType.PERP_CLOSE):
             return PreflightVerdict.feasible()
         if ctx.chain not in self.chains:
+            return PreflightVerdict.feasible()
+        if getattr(ctx, "permission_discovery", False):
+            # Permission calldata is never submitted and the bounded seed makes
+            # discovery fully offline. A keeper-fee balance check has no meaning
+            # here and would reintroduce a network dependency.
             return PreflightVerdict.feasible()
 
         sdk_or_error = self._build_sdk(ctx, getattr(intent, "intent_id", ""))
@@ -147,10 +170,6 @@ class GMXV2Compiler(BasePerpCompiler):
                 return market_or_error
             market_address = market_or_error
 
-            collateral_error = self._validate_static_collateral(ctx, market_address, intent)
-            if collateral_error is not None:
-                return collateral_error
-
             # VIB-6219: the bound MUST be derived before any calldata is built.
             # Resolving the market first is what makes that possible — the price
             # scale and the price symbol both key off the resolved address.
@@ -161,7 +180,11 @@ class GMXV2Compiler(BasePerpCompiler):
 
             trigger_price_30dec = 0
             if intent.trigger_price is not None:
-                decimals = self._index_token_decimals(ctx.chain, market_address)
+                decimals = self._index_token_decimals(
+                    ctx.chain,
+                    market_address,
+                    permission_discovery=ctx.permission_discovery,
+                )
                 if decimals is None:
                     return CompilationResult(
                         status=CompilationStatus.FAILED,
@@ -186,18 +209,32 @@ class GMXV2Compiler(BasePerpCompiler):
                         is_safety_refusal=True,
                     )
 
-            collateral_or_error = self._resolve_collateral(ctx, intent.collateral_token, intent.intent_id)
+            collateral_or_error = self._resolve_collateral(
+                ctx,
+                intent.collateral_token,
+                intent.intent_id,
+                market_address=market_address,
+            )
             if isinstance(collateral_or_error, CompilationResult):
                 return collateral_or_error
             collateral_address = collateral_or_error
             collateral_error = self._validate_market_collateral(ctx, market_address, collateral_address, intent)
             if collateral_error is not None:
                 return collateral_error
+            collateral_decimals_or_error = self._market_collateral_decimals(
+                ctx,
+                market_address,
+                collateral_address,
+                intent.intent_id,
+            )
+            if isinstance(collateral_decimals_or_error, CompilationResult):
+                return collateral_decimals_or_error
+            collateral_decimals = collateral_decimals_or_error
 
             adapter = GMXv2Adapter(GMXv2Config(chain=ctx.chain, wallet_address=ctx.wallet_address))
             order_result = adapter.open_position(
                 market=market_address,
-                collateral_token=intent.collateral_token,
+                collateral_token=collateral_address,
                 # mypy cannot preserve the Decimal narrowing across attribute reads.
                 collateral_amount=intent.collateral_amount,  # type: ignore[arg-type]
                 size_delta_usd=intent.size_usd,
@@ -206,6 +243,7 @@ class GMXV2Compiler(BasePerpCompiler):
                 # The GMX-native integer below is what reaches calldata.
                 acceptable_price=acceptable_price_usd,
                 trigger_price=intent.trigger_price,
+                collateral_decimals=collateral_decimals,
             )
             if not order_result.success:
                 return CompilationResult(
@@ -214,10 +252,6 @@ class GMXV2Compiler(BasePerpCompiler):
                     intent_id=intent.intent_id,
                 )
 
-            collateral_token_upper = intent.collateral_token.upper()
-            collateral_decimals = self._resolve_collateral_decimals(
-                ctx, intent.collateral_token, collateral_token_upper
-            )
             collateral_amount_decimal: Decimal = intent.collateral_amount  # type: ignore[assignment]
             collateral_wei = int(collateral_amount_decimal * Decimal(10**collateral_decimals))
             size_delta_usd = int(intent.size_usd * Decimal(10**30))
@@ -236,7 +270,10 @@ class GMXV2Compiler(BasePerpCompiler):
             )
             tx_data = sdk.build_increase_order_multicall(order_params)
 
-            is_native_collateral = collateral_token_upper in ("WETH", "ETH", "WAVAX", "AVAX")
+            # Derive native-wrapper handling from the exact resolved address,
+            # not a hand-maintained symbol family. This also handles callers
+            # that supply WETH/WAVAX directly as an address.
+            is_native_collateral = collateral_address.lower() == sdk.WETH_ADDRESS.lower()
             if not is_native_collateral and collateral_wei > 0:
                 transactions.extend(
                     ctx.services.build_approve_tx(
@@ -267,8 +304,13 @@ class GMXV2Compiler(BasePerpCompiler):
                     "protocol": intent.protocol,
                     "market": canonical_market,
                     "market_address": market_address,
-                    "index_token_decimals": self._index_token_decimals(ctx.chain, market_address),
+                    "index_token_decimals": self._index_token_decimals(
+                        ctx.chain,
+                        market_address,
+                        permission_discovery=ctx.permission_discovery,
+                    ),
                     "collateral_token": intent.collateral_token,
+                    "collateral_token_decimals": collateral_decimals,
                     "collateral_amount": str(intent.collateral_amount),
                     "size_usd": str(intent.size_usd),
                     "is_long": intent.is_long,
@@ -319,17 +361,27 @@ class GMXV2Compiler(BasePerpCompiler):
                 return market_or_error
             market_address = market_or_error
 
-            collateral_error = self._validate_static_collateral(ctx, market_address, intent)
-            if collateral_error is not None:
-                return collateral_error
-
-            collateral_or_error = self._resolve_collateral(ctx, intent.collateral_token, intent.intent_id)
+            collateral_or_error = self._resolve_collateral(
+                ctx,
+                intent.collateral_token,
+                intent.intent_id,
+                market_address=market_address,
+            )
             if isinstance(collateral_or_error, CompilationResult):
                 return collateral_or_error
             collateral_address = collateral_or_error
             collateral_error = self._validate_market_collateral(ctx, market_address, collateral_address, intent)
             if collateral_error is not None:
                 return collateral_error
+            collateral_decimals_or_error = self._market_collateral_decimals(
+                ctx,
+                market_address,
+                collateral_address,
+                intent.intent_id,
+            )
+            if isinstance(collateral_decimals_or_error, CompilationResult):
+                return collateral_decimals_or_error
+            collateral_decimals = collateral_decimals_or_error
 
             resolved_size_usd = intent.size_usd
             if intent.size_usd:
@@ -362,7 +414,7 @@ class GMXV2Compiler(BasePerpCompiler):
             adapter = GMXv2Adapter(GMXv2Config(chain=ctx.chain, wallet_address=ctx.wallet_address))
             order_result = adapter.close_position(
                 market=market_address,
-                collateral_token=intent.collateral_token,
+                collateral_token=collateral_address,
                 is_long=intent.is_long,
                 size_delta_usd=resolved_size_usd,
                 # Plain USD, matching the adapter's documented parameter contract.
@@ -407,8 +459,13 @@ class GMXV2Compiler(BasePerpCompiler):
                     "protocol": intent.protocol,
                     "market": canonical_market,
                     "market_address": market_address,
-                    "index_token_decimals": self._index_token_decimals(ctx.chain, market_address),
+                    "index_token_decimals": self._index_token_decimals(
+                        ctx.chain,
+                        market_address,
+                        permission_discovery=ctx.permission_discovery,
+                    ),
                     "collateral_token": intent.collateral_token,
+                    "collateral_token_decimals": collateral_decimals,
                     "is_long": intent.is_long,
                     "size_usd": str(intent.size_usd) if intent.size_usd else None,
                     "close_full_position": intent.close_full_position,
@@ -485,17 +542,27 @@ class GMXV2Compiler(BasePerpCompiler):
 
         return result
 
-    def _index_symbol_for_market(self, chain: str, market_address: str) -> str | None:
+    def _index_symbol_for_market(
+        self,
+        chain: str,
+        market_address: str,
+        *,
+        permission_discovery: bool = False,
+    ) -> str | None:
         """Reverse-resolve a market ADDRESS to its index-token price symbol.
 
-        Keyed off the resolved address rather than ``intent.market`` so that every
-        alias the SDK accepts for the same market (``"ETH"``, ``"WETH"``,
-        ``"ETH/USD"``) yields one symbol, and so the symbol and the decimals used
-        for price scaling are always read for the *same* market. The only source
-        is the venue-verified catalog — a symbol this process never verified is
-        an absence, not a lookup to fall back on (address-first contract).
+        Keyed off the resolved address rather than ``intent.market`` so that an
+        exact venue label and its market-token address yield one symbol, and so
+        the symbol and decimals used for price scaling are always read for the
+        *same* market. The only runtime source is the venue-verified catalog — a
+        symbol this process never verified is an absence, not a lookup to fall
+        back on (address-first contract).
         """
-        metadata = self._market_metadata(chain, market_address)
+        metadata = self._market_metadata(
+            chain,
+            market_address,
+            permission_discovery=permission_discovery,
+        )
         return metadata.index_symbol if metadata is not None else None
 
     def _derive_acceptable_price(
@@ -523,15 +590,11 @@ class GMXV2Compiler(BasePerpCompiler):
         leg = "PERP_OPEN" if is_increase else "PERP_CLOSE"
         context = f"gmx_v2 {leg} {intent.market} on {ctx.chain}"
 
-        decimals = self._index_token_decimals(ctx.chain, market_address)
-        if decimals is None and ctx.permission_discovery:
-            # Discovery calldata is never signed or submitted — only its
-            # (target, selector) shape matters, so the price scale is inert.
-            # Without this, an offline discovery run (no gateway, no verified
-            # catalog by construction) would refuse and yield an EMPTY Zodiac
-            # manifest — every Safe GMX call would then revert (AGENTS.md
-            # §Connector additions names this exact trap).
-            decimals = 18  # decimal-policy-exempt: discovery-only calldata, never signed/submitted (Zodiac selector enumeration)
+        decimals = self._index_token_decimals(
+            ctx.chain,
+            market_address,
+            permission_discovery=ctx.permission_discovery,
+        )
         if decimals is None:
             return CompilationResult(
                 status=CompilationStatus.FAILED,
@@ -544,11 +607,11 @@ class GMXV2Compiler(BasePerpCompiler):
                 is_safety_refusal=True,
             )
 
-        symbol = self._index_symbol_for_market(ctx.chain, market_address)
-        if symbol is None and ctx.permission_discovery:
-            # Same discovery scope as the decimals default above; the oracle
-            # serves a placeholder price for any symbol in discovery mode.
-            symbol = "GMX_DISCOVERY_INDEX"
+        symbol = self._index_symbol_for_market(
+            ctx.chain,
+            market_address,
+            permission_discovery=ctx.permission_discovery,
+        )
         if symbol is None:
             return CompilationResult(
                 status=CompilationStatus.FAILED,
@@ -712,6 +775,8 @@ class GMXV2Compiler(BasePerpCompiler):
         return price_30dec, price_30dec_to_usd(price_30dec, decimals)
 
     def _build_sdk(self, ctx: PerpCompilerContext, intent_id: str) -> GMXV2SDK | CompilationResult:
+        if ctx.permission_discovery:
+            return GMXV2SDK(chain=ctx.chain, permission_discovery=True)
         gateway_client = ctx.gateway_client
         if gateway_client is not None and not getattr(gateway_client, "is_connected", False):
             gateway_client = None
@@ -747,16 +812,30 @@ class GMXV2Compiler(BasePerpCompiler):
         immutable, so a remembered verification stays valid — this is what
         keeps the close path off the venue API's uptime).
 
-        Labels are venue vocabulary, not SDK vocabulary: they resolve ONLY
-        through the dynamic registry (which pins ambiguous multi-collateral
-        labels by API `name` verification), with the SDK core aliases
-        (ETH/BTC/AVAX, ``sdk.get_market_address``) as the sole offline
-        remainder. There is no curated symbol→address table to consult — that
-        table read as a market universe and could not be kept true by hand
-        (VIB-6155, the 2026-08-07 XMR misread).
+        Labels are venue vocabulary and resolve only through the dynamic
+        registry, which pins ambiguous multi-collateral labels by API ``name``
+        verification. Offline permission discovery is the sole exception: it
+        resolves one generated, audited representative row per chain without
+        publishing that row to the runtime verified catalog.
         """
+        del sdk  # retained in the private signature for downstream test compatibility
         canonical_market = canonicalise_market(market)
         is_address_input = canonical_market[:2].lower() == "0x"
+
+        if ctx.permission_discovery:
+            seeded = permission_market(ctx.chain, canonical_market)
+            if seeded is not None:
+                return to_checksum_address(seeded.market_token)
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"GMX V2 permission discovery has no generated seed for {market} "
+                    f"on {ctx.chain}; regenerate permission_seed.json instead of adding "
+                    "a runtime market alias."
+                ),
+                intent_id=intent_id,
+                is_safety_refusal=True,
+            )
 
         gateway_client = ctx.gateway_client
         # A missing OR disconnected gateway is the same transient condition: the
@@ -765,7 +844,7 @@ class GMXV2Compiler(BasePerpCompiler):
         # retry ladder give up on a close it could complete after reconnect.
         gateway_usable = gateway_client is not None and getattr(gateway_client, "is_connected", False)
         dynamic_unavailable: Exception | None = None
-        if not ctx.permission_discovery and gateway_usable:
+        if gateway_usable:
             try:
                 metadata = resolve_market_via_gateway(
                     gateway_client, chain=ctx.chain, market=canonical_market, require_listed=require_listed
@@ -805,11 +884,6 @@ class GMXV2Compiler(BasePerpCompiler):
             # increase on a delisted market burns its keeper fee).
             if not require_listed and market_catalog.by_address(ctx.chain, canonical_market) is not None:
                 return to_checksum_address(canonical_market)
-            if ctx.permission_discovery:
-                # Discovery calldata enumerates (target, selector) pairs and is
-                # never signed or submitted — the address needs no verification
-                # to serve that purpose.
-                return to_checksum_address(canonical_market)
             return CompilationResult(
                 status=CompilationStatus.FAILED,
                 error=(
@@ -823,36 +897,50 @@ class GMXV2Compiler(BasePerpCompiler):
                 is_transient=dynamic_unavailable is not None or not gateway_usable,
             )
 
-        try:
-            return to_checksum_address(sdk.get_market_address(canonical_market))
-        except ValueError:
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error=(
-                    f"Unknown market: {market}. GMX markets are address-first — supply the "
-                    "market-token address (dynamic discovery verifies it); only the core "
-                    "ETH/BTC/AVAX aliases resolve without one."
-                ),
-                intent_id=intent_id,
-                # Same transiency rule as the address branch: a label the
-                # dynamic surface could resolve after reconnect/API recovery
-                # must not be classified permanent while that surface is down.
-                is_transient=dynamic_unavailable is not None or (not ctx.permission_discovery and not gateway_usable),
-            )
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=(
+                f"Unknown market: {market}. GMX markets are address-first — supply the "
+                "market-token address or an exact venue label for dynamic verification. "
+                "No static runtime market aliases are consulted."
+            ),
+            intent_id=intent_id,
+            # Same transiency rule as the address branch: a label the dynamic
+            # surface could resolve after reconnect/API recovery must not be
+            # classified permanent while that surface is down.
+            is_transient=dynamic_unavailable is not None or not gateway_usable,
+        )
 
     def _resolve_collateral(
-        self, ctx: PerpCompilerContext, collateral_token: str, intent_id: str
+        self,
+        ctx: PerpCompilerContext,
+        collateral_token: str,
+        intent_id: str,
+        *,
+        market_address: str | None = None,
     ) -> str | CompilationResult:
         collateral_upper = collateral_token.upper()
-        # Connector-owned aliases are authoritative when present. In particular,
-        # GMX uses native USDC rather than USDC.e on both supported chains; a
-        # generic resolver is not allowed to silently select another token from
-        # the same symbol family. Dynamic-only symbols still fall through to the
-        # resolver and are checked against Reader-verified collateral addresses.
-        chain_tokens = GMX_V2_TOKENS.get(ctx.chain, {})
-        collateral_address = next((addr for sym, addr in chain_tokens.items() if sym.upper() == collateral_upper), None)
-        if collateral_address:
-            return collateral_address
+        # The verified market tuple is the authoritative collateral vocabulary.
+        # Resolve its symbols directly to its exact long/short addresses before
+        # consulting the generic token registry. This makes every newly listed
+        # long token usable immediately and prevents a generic symbol collision
+        # (USDC vs USDC.e) from selecting a token the market does not accept.
+        metadata = (
+            self._market_metadata(
+                ctx.chain,
+                market_address,
+                permission_discovery=ctx.permission_discovery,
+            )
+            if market_address is not None
+            else None
+        )
+        if metadata is not None:
+            for symbol, address in (
+                (metadata.long_token_symbol, metadata.long_token),
+                (metadata.short_token_symbol, metadata.short_token),
+            ):
+                if symbol and symbol.upper() == collateral_upper:
+                    return address
         if ctx.token_resolver is not None:
             try:
                 resolved_token = ctx.services.resolve_token(collateral_token)
@@ -860,10 +948,8 @@ class GMXV2Compiler(BasePerpCompiler):
                     return resolved_token.address
             except Exception:  # noqa: BLE001 - connector-owned offline fallback follows
                 pass
-        # Accept both ``0x`` and ``0X`` prefixes — case-insensitive, matching
-        # ``market_rules.validate_collateral`` which already treats either form
-        # as a raw address. A lowercase-only check would reject valid ``0X...``
-        # inputs as "unknown collateral".
+        # Accept both ``0x`` and ``0X`` prefixes. A lowercase-only check would
+        # reject valid ``0X...`` inputs as "unknown collateral".
         if collateral_token[:2].lower() == "0x":
             return collateral_token
         return CompilationResult(
@@ -879,7 +965,11 @@ class GMXV2Compiler(BasePerpCompiler):
         collateral_address: str,
         intent: Any,
     ) -> CompilationResult | None:
-        metadata = self._market_metadata(ctx.chain, market_address)
+        metadata = self._market_metadata(
+            ctx.chain,
+            market_address,
+            permission_discovery=ctx.permission_discovery,
+        )
         if metadata is None:
             return None
         if collateral_address.lower() in {metadata.long_token.lower(), metadata.short_token.lower()}:
@@ -896,44 +986,34 @@ class GMXV2Compiler(BasePerpCompiler):
             is_safety_refusal=True,
         )
 
-    def _validate_static_collateral(
+    def _market_collateral_decimals(
         self,
         ctx: PerpCompilerContext,
         market_address: str,
-        intent: Any,
-    ) -> CompilationResult | None:
-        if self._market_metadata(ctx.chain, market_address) is not None:
-            return None
-        try:
-            validate_collateral(
-                chain=ctx.chain,
-                market=intent.market,
-                collateral_token=intent.collateral_token,
-            )
-        except InvalidCollateralForMarketError as exc:
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error=str(exc),
-                intent_id=intent.intent_id,
-            )
-        return None
-
-    def _resolve_collateral_decimals(
-        self, ctx: PerpCompilerContext, collateral_token: str, collateral_upper: str
-    ) -> int:
-        collateral_token_info = None
-        if ctx.token_resolver is not None:
-            try:
-                collateral_token_info = ctx.services.resolve_token(collateral_token)
-            except AttributeError:
-                collateral_token_info = None
-        if collateral_token_info is not None:
-            return collateral_token_info.decimals
-        if collateral_upper in ("WETH", "WETH.E", "ETH", "WAVAX", "AVAX"):
-            return 18
-        if collateral_upper in ("WBTC", "BTC.B", "WBTC.E"):
-            return 8
-        return 6
+        collateral_address: str,
+        intent_id: str,
+    ) -> int | CompilationResult:
+        """Return decimals from the same verified tuple used for collateral identity."""
+        metadata = self._market_metadata(
+            ctx.chain,
+            market_address,
+            permission_discovery=ctx.permission_discovery,
+        )
+        if metadata is not None:
+            collateral_lower = collateral_address.lower()
+            if collateral_lower == metadata.long_token.lower():
+                return metadata.long_token_decimals
+            if collateral_lower == metadata.short_token.lower():
+                return metadata.short_token_decimals
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=(
+                f"GMX V2 market {market_address} has no verified decimals for collateral "
+                f"{collateral_address} on {ctx.chain}; refusing to guess token units."
+            ),
+            intent_id=intent_id,
+            is_safety_refusal=True,
+        )
 
     def _get_position_size_onchain(
         self,

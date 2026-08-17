@@ -729,7 +729,7 @@ class TestExtractCollateralReturned:
 
     def test_production_event_utils_payload_returns_raw_collateral_delta(self):
         """The deployed GMX EventUtils tuple decodes exact token units."""
-        parser = GMXv2ReceiptParser()
+        parser = GMXv2ReceiptParser(chain="arbitrum")
         receipt = create_receipt([create_event_utils_position_decrease_log(collateral_delta_amount_raw=10_000_000)])
 
         assert parser.extract_collateral_returned(receipt) == 10_000_000

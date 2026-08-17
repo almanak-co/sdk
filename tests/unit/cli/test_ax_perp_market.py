@@ -38,8 +38,10 @@ def _verified_market_response() -> SimpleNamespace:
             index_token_decimals=12,
             long_token="0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
             long_token_symbol="WETH",
+            long_token_decimals=18,
             short_token="0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
             short_token_symbol="USDC",
+            short_token_decimals=6,
             verified=True,
         ),
     )
@@ -82,6 +84,8 @@ class TestAxPerpMarketFound:
         assert payload["label"] == "XMR/USD"
         assert payload["index_symbol"] == "XMR"
         assert payload["index_token_decimals"] == 12
+        assert payload["long_token_decimals"] == 18
+        assert payload["short_token_decimals"] == 6
         assert payload["verified"] is True
         channel.close.assert_called_once()
 
@@ -92,6 +96,33 @@ class TestAxPerpMarketFound:
         assert "XMR/USD on gmx_v2 (arbitrum)" in result.output
         assert "verified on-chain" in result.output
         assert "market_token" in result.output
+
+    def test_unreported_decimals_are_not_rendered_as_zero(
+        self,
+        runner: CliRunner,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        response = _verified_market_response()
+        response.market.HasField = lambda field: field not in {
+            "index_token_decimals",
+            "long_token_decimals",
+            "short_token_decimals",
+        }
+        _patch_stub(monkeypatch, lambda request, timeout: response)
+
+        json_result = runner.invoke(
+            ax_cli,
+            ["-c", "arbitrum", "--json", "perp-market", "gmx_v2", "XMR/USD"],
+        )
+        assert json_result.exit_code == 0, json_result.output
+        payload = json.loads(json_result.output)
+        assert payload["index_token_decimals"] is None
+        assert payload["long_token_decimals"] is None
+        assert payload["short_token_decimals"] is None
+
+        human_result = runner.invoke(ax_cli, ["-c", "arbitrum", "perp-market", "gmx_v2", "XMR/USD"])
+        assert human_result.exit_code == 0, human_result.output
+        assert human_result.output.count("decimals unreported") == 3
 
     def test_request_requires_current_listing(self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
         seen: dict = {}

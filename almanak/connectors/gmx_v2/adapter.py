@@ -102,33 +102,7 @@ GMX_V2_ADDRESSES: dict[str, dict[str, str]] = {
     },
 }
 
-# Known collateral token decimals (fallback when TokenResolver fails).
-# Covers Arbitrum and Avalanche GMX V2 collateral tokens.
-_KNOWN_COLLATERAL_DECIMALS: dict[str, int] = {
-    # Arbitrum
-    "0xaf88d065e77c8cC2239327C5EDb3A432268e5831".lower(): 6,  # USDC (Arbitrum)
-    "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9".lower(): 6,  # USDT (Arbitrum)
-    "0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f".lower(): 8,  # WBTC (Arbitrum)
-    # Avalanche
-    "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E".lower(): 6,  # USDC (Avalanche)
-    "0xA7D7079b0FEaD91F3e65f86E8915Cb59c1a4C664".lower(): 6,  # USDC.e (Avalanche)
-    "0x9702230A8Ea53601f5cD2dc00fDBc13d4dF4A8c7".lower(): 6,  # USDT (Avalanche)
-    "0xc7198437980c041c805A1EDcbA50c1Ce5db95118".lower(): 6,  # USDT.e (Avalanche)
-    "0x50b7545627a5162F82A992c33b87aDc75187B218".lower(): 8,  # WBTC.e (Avalanche)
-}
-
-# Known stablecoin addresses for collateral USD estimation (1:1 peg assumed).
-# Covers both Arbitrum and Avalanche chains.
-_KNOWN_STABLECOIN_ADDRESSES: set[str] = {
-    # Arbitrum
-    "0xaf88d065e77c8cC2239327C5EDb3A432268e5831".lower(),  # USDC
-    "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9".lower(),  # USDT
-    # Avalanche
-    "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E".lower(),  # USDC
-    "0xA7D7079b0FEaD91F3e65f86E8915Cb59c1a4C664".lower(),  # USDC.e
-    "0x9702230A8Ea53601f5cD2dc00fDBc13d4dF4A8c7".lower(),  # USDT
-    "0xc7198437980c041c805A1EDcbA50c1Ce5db95118".lower(),  # USDT.e
-}
+_STABLECOIN_SYMBOLS = frozenset({"USDC", "USDC.E", "USDT", "USDT.E"})
 
 # Default execution fee (in native token)
 DEFAULT_EXECUTION_FEE: dict[str, int] = {
@@ -618,6 +592,7 @@ class GMXv2Adapter:
         is_long: bool,
         acceptable_price: Decimal | None = None,
         trigger_price: Decimal | None = None,
+        collateral_decimals: int | None = None,
     ) -> OrderResult:
         """Open a new position or increase existing position.
 
@@ -629,6 +604,9 @@ class GMXv2Adapter:
             is_long: True for long, False for short
             acceptable_price: Maximum (long) or minimum (short) execution price
             trigger_price: Trigger price for limit orders
+            collateral_decimals: Verified market metadata override. Supplying it
+                avoids a second generic token-registry lookup after the compiler
+                has already resolved the exact market collateral tuple.
 
         Returns:
             OrderResult with order details
@@ -666,7 +644,10 @@ class GMXv2Adapter:
             size_delta_30 = size_delta_usd * Decimal(10**30)
 
             # Get collateral decimals
-            collateral_decimals = self._get_token_decimals(collateral_token)
+            if collateral_decimals is None:
+                collateral_decimals = self._get_token_decimals(collateral_token)
+            elif isinstance(collateral_decimals, bool) or not 0 <= collateral_decimals <= 30:
+                raise ValueError(f"Invalid collateral decimals: {collateral_decimals!r}")
             collateral_wei = int(collateral_amount * Decimal(10**collateral_decimals))
 
             # Calculate acceptable price if not provided
@@ -1099,7 +1080,10 @@ class GMXv2Adapter:
             size_in_tokens_decimal = Decimal(pos["size_in_tokens"]) / Decimal(10**index_token_decimals)
 
             # Collateral amount needs the collateral token's decimals
-            collateral_decimals = self._get_collateral_decimals(pos["collateral_token"])
+            collateral_decimals = self._get_collateral_decimals(
+                pos["collateral_token"],
+                market_address=pos["market"],
+            )
             collateral_decimal = Decimal(pos["collateral_amount"]) / Decimal(10**collateral_decimals)
 
             # Calculate entry price from size_in_usd / size_in_tokens
@@ -1167,25 +1151,30 @@ class GMXv2Adapter:
         position_dicts = GMXV2SDK._parse_raw_positions(raw_positions)
         return self._parse_position_dicts(position_dicts)
 
-    def _get_collateral_decimals(self, collateral_address: str) -> int:
-        """Get decimals for a collateral token address.
+    def _get_collateral_decimals(self, collateral_address: str, *, market_address: str | None = None) -> int:
+        """Get decimals for an exact collateral token address.
+
+        A venue-verified market tuple wins when available. This keeps position
+        enumeration and teardown usable for a newly listed collateral that has
+        not reached the framework's generic token registry yet.
 
         Args:
             collateral_address: Token address
+            market_address: Optional verified GMX market-token address owning
+                the collateral tuple.
 
         Returns:
             Token decimals
         """
-        try:
-            return resolve_token_decimals(collateral_address, self.chain, resolver=self._token_resolver)
-        except TokenResolutionError:
-            # Common GMX collateral tokens - fallback for known addresses
-            # Covers both Arbitrum and Avalanche chains
-            addr_lower = collateral_address.lower()
-            fallback = _KNOWN_COLLATERAL_DECIMALS.get(addr_lower)
-            if fallback is not None:
-                return fallback
-            raise
+        if market_address is not None:
+            metadata = market_catalog.by_address(self.chain, market_address)
+            if metadata is not None:
+                collateral_lower = collateral_address.lower()
+                if collateral_lower == metadata.long_token.lower():
+                    return metadata.long_token_decimals
+                if collateral_lower == metadata.short_token.lower():
+                    return metadata.short_token_decimals
+        return resolve_token_decimals(collateral_address, self.chain, resolver=self._token_resolver)
 
     def _get_index_token_decimals(self, market_address: str) -> int:
         """Get the decimals for a market's index token.
@@ -1239,9 +1228,11 @@ class GMXv2Adapter:
         Returns:
             Estimated collateral value in USD
         """
-        addr_lower = collateral_address.lower()
-
-        if addr_lower in _KNOWN_STABLECOIN_ADDRESSES:
+        try:
+            collateral = self._token_resolver.resolve(collateral_address, self.chain)
+        except TokenResolutionError:
+            collateral = None
+        if collateral is not None and collateral.symbol.upper() in _STABLECOIN_SYMBOLS:
             return collateral_decimal
 
         # For non-stablecoin collateral, approximate using entry_price.
@@ -1524,7 +1515,7 @@ class GMXv2Adapter:
         if market.startswith("0x") and len(market) == 42:
             return market
 
-        from .market_rules import canonicalise_market
+        from .market_identity import canonicalise_market
 
         return market_catalog.address_for_label(self.chain, canonicalise_market(market))
 

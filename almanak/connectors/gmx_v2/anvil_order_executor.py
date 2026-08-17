@@ -467,17 +467,18 @@ def _index_price_bounds(gateway_client: Any, chain: str, market: str) -> tuple[i
     Live managed-Anvil runs resolve the exact market address through the same
     gateway registry used by the compiler.  That registry sources symbol and
     decimals from GMX's official API and accepts them only after
-    ``Reader.getMarket`` confirms the market/index/collateral tuple.  The static
-    tables remain the offline/unavailable-gateway fallback.  A synthetic index
-    token therefore never has to answer ERC-20 ``decimals()`` for itself.
+    ``Reader.getMarket`` confirms the market/index/collateral tuple. If the
+    gateway becomes unavailable after compilation, this process may reuse only
+    the exact address record it already verified. A synthetic index token
+    therefore never has to answer ERC-20 ``decimals()`` for itself.
 
     Known limitation (ALM-3119): for a market whose index token *is* a real
     ERC-20, this trades a chain-sourced datum (the ``indexToken`` address
-    ``Reader.getMarket`` returned) for a table-sourced one (the market's label).
-    A mislabelled catalogue row — the VIB-6155 class — would therefore
-    seed the label's asset rather than the market's. Bounded to fork tests: this
-    module refuses any network but ``anvil``, and catalogue identity is asserted
-    by ``tests/audit/test_gmx_v2_market_identity.py``.
+    ``Reader.getMarket`` returned) for API-owned symbol metadata. A mislabelled
+    catalogue row could therefore seed the wrong symbol's price. This remains
+    bounded to fork tests: the module refuses any network but ``anvil``, while
+    the runtime registry still verifies the full address tuple before exposing
+    the symbol.
 
     Every failure raises. An index price that cannot be resolved is *unmeasured*
     (``Empty ≠ Zero``): seeding a guessed or zero price onto a fork's oracle
@@ -490,7 +491,8 @@ def _index_price_bounds(gateway_client: Any, chain: str, market: str) -> tuple[i
         metadata = resolve_market_via_gateway(gateway_client, chain=chain, market=market)
     except (GmxMarketDiscoveryUnavailable, GmxMarketNotFound) as exc:
         logger.warning(
-            "GMX dynamic market metadata unavailable while seeding %s on %s; using static fallback: %s",
+            "GMX dynamic market metadata unavailable while seeding %s on %s; "
+            "checking the previously verified address catalog: %s",
             market,
             chain,
             exc,

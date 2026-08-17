@@ -52,7 +52,7 @@ def _market_identity(label: str) -> str:
 
     Normalisation is delegated to :func:`perp_market_pair_key` — the same
     function the perp connectors resolve markets through
-    (``gmx_v2.market_rules.canonicalise_market`` wraps it). Hand-rolling it here
+    (``gmx_v2.market_identity.canonicalise_market`` wraps it). Hand-rolling it here
     normalised strictly less than the registry the request is resolved against:
     ``ETH_USD`` and ``ETH:USD`` are documented spellings of ``ETH/USD`` and were
     refused as a different market. A guard must not disagree with the resolver

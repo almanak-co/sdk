@@ -20,16 +20,18 @@ class ResolvedGmxMarket:
     index_token_decimals: int
     long_token: str
     long_token_symbol: str
+    long_token_decimals: int
     short_token: str
     short_token_symbol: str
+    short_token_decimals: int
 
 
 class GmxMarketDiscoveryUnavailable(Exception):
-    """The dynamic gateway surface is unavailable; static fallback is allowed."""
+    """The dynamic gateway surface is unavailable; callers may retry."""
 
 
 class GmxMarketNotFound(Exception):
-    """The venue catalogue has no row for this query; static fallback is allowed."""
+    """The venue catalogue has no row for this query."""
 
 
 def resolve_market_via_gateway(
@@ -54,7 +56,7 @@ def resolve_market_via_gateway(
     stub = getattr(getattr(gateway_client, "market", None), "GetPerpMarket", None)
     if stub is None:
         raise GmxMarketDiscoveryUnavailable(
-            "Connected gateway does not expose GetPerpMarket; static fallback is required"
+            "Connected gateway does not expose GetPerpMarket; deploy the current market-registry service"
         )
     try:
         response = stub(
@@ -78,10 +80,29 @@ def resolve_market_via_gateway(
     item = response.market
     if not item.verified:
         raise ValueError(f"Gateway returned unverified GMX market metadata for {market!r}")
-    if item.index_token_decimals < 0 or item.index_token_decimals > 30:
-        raise ValueError(
-            f"Gateway returned invalid index decimals {item.index_token_decimals} for GMX market {market!r}"
-        )
+    has_field = getattr(item, "HasField", None)
+    for field in ("index_token_decimals", "long_token_decimals", "short_token_decimals"):
+        if callable(has_field):
+            try:
+                field_present = has_field(field)
+            except ValueError:
+                # Compatibility with generated classes predating proto3
+                # optional on this field: a plain scalar has no presence API.
+                field_present = hasattr(item, field)
+        else:
+            field_present = hasattr(item, field)
+        if not field_present:
+            raise GmxMarketDiscoveryUnavailable(
+                f"Connected gateway omits {field}; deploy the current GMX market-registry schema"
+            )
+    decimal_fields = {
+        "index": item.index_token_decimals,
+        "long collateral": item.long_token_decimals,
+        "short collateral": item.short_token_decimals,
+    }
+    for role, decimals in decimal_fields.items():
+        if decimals < 0 or decimals > 30:
+            raise ValueError(f"Gateway returned invalid {role} decimals {decimals} for GMX market {market!r}")
     return ResolvedGmxMarket(
         label=item.label,
         market_token=item.market_token,
@@ -90,8 +111,10 @@ def resolve_market_via_gateway(
         index_token_decimals=item.index_token_decimals,
         long_token=item.long_token,
         long_token_symbol=item.long_token_symbol,
+        long_token_decimals=item.long_token_decimals,
         short_token=item.short_token,
         short_token_symbol=item.short_token_symbol,
+        short_token_decimals=item.short_token_decimals,
     )
 
 

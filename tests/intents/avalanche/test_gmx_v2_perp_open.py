@@ -32,7 +32,8 @@ import pytest
 from web3 import Web3
 
 from almanak.connectors.gmx_v2 import GMXv2ReceiptParser
-from almanak.connectors.gmx_v2.addresses import GMX_V2, GMX_V2_TOKENS
+from almanak.connectors.gmx_v2.addresses import GMX_V2
+from tests.support.gmx_v2 import GMX_V2_TOKENS
 from tests.unit.connectors.gmx_v2.market_fixtures import fake_dynamic_gateway, market_address
 
 # Address-first primary spelling: the strategy-declared market-token address
@@ -171,7 +172,7 @@ class TestGmxV2PerpOpenIntentAvalanche:
         )
 
         compiler = IntentCompiler(
-        gateway_client=fake_dynamic_gateway("avalanche", rpc_url=orchestrator.rpc_url),
+            gateway_client=fake_dynamic_gateway("avalanche", rpc_url=orchestrator.rpc_url),
             chain=CHAIN_NAME,
             wallet_address=funded_wallet,
             price_oracle=price_oracle_avalanche,

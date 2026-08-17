@@ -966,9 +966,10 @@ class PerpMarketCatalogueUnavailable(Exception):
 class PerpMarketRecord:
     """Verified, immutable identity metadata for one perpetual market.
 
-    ``index_token_decimals`` is metadata supplied by the venue API because
-    synthetic index-token addresses need not contain deployed ERC-20 code.
-    The remaining address tuple is accepted only after an exact on-chain
+    Token symbols and decimals are metadata supplied by the venue API because
+    synthetic index-token addresses need not contain deployed ERC-20 code and
+    newly listed collaterals need not exist in the framework token registry.
+    The address tuple is accepted only after an exact on-chain
     ``Reader.getMarket`` match.
     """
 
@@ -981,8 +982,10 @@ class PerpMarketRecord:
     index_token_decimals: int
     long_token: str
     long_token_symbol: str
+    long_token_decimals: int
     short_token: str
     short_token_symbol: str
+    short_token_decimals: int
     verified: bool
 
 

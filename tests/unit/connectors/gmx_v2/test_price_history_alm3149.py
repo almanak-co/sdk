@@ -1024,8 +1024,10 @@ def _verified_market_response(market_token: str = MARKET_TOKEN) -> SimpleNamespa
             index_token_decimals=8,
             long_token=LONG_TOKEN,
             long_token_symbol="LONG",
+            long_token_decimals=18,
             short_token=SHORT_TOKEN,
             short_token_symbol="SHORT",
+            short_token_decimals=6,
             verified=True,
         ),
     )

@@ -92,22 +92,26 @@ class TestPerpOpenApproval:
         approve_calls = []
 
         def mock_build_approve(token_address, spender, amount):
-            approve_calls.append({
-                "token_address": token_address,
-                "spender": spender,
-                "amount": amount,
-            })
+            approve_calls.append(
+                {
+                    "token_address": token_address,
+                    "spender": spender,
+                    "amount": amount,
+                }
+            )
             # Return a mock approve TX
             from almanak.framework.intents.compiler import TransactionData
 
-            return [TransactionData(
-                to=token_address,
-                value=0,
-                data="0x095ea7b3" + "0" * 128,  # approve selector
-                gas_estimate=46000,
-                description=f"Approve {token_address}",
-                tx_type="approve",
-            )]
+            return [
+                TransactionData(
+                    to=token_address,
+                    value=0,
+                    data="0x095ea7b3" + "0" * 128,  # approve selector
+                    gas_estimate=46000,
+                    description=f"Approve {token_address}",
+                    tx_type="approve",
+                )
+            ]
 
         compiler._build_approve_tx = mock_build_approve
 
@@ -146,9 +150,6 @@ class TestPerpOpenApproval:
             patch("almanak.connectors.gmx_v2.compiler.GMXv2Adapter") as mock_adapter_cls,
             patch("almanak.connectors.gmx_v2.compiler.GMXv2Config"),
             patch("almanak.connectors.gmx_v2.compiler.GMXV2SDK", return_value=mock_sdk),
-            patch("almanak.connectors.gmx_v2.compiler.GMX_V2_TOKENS", {
-                "arbitrum": {"USDC": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"},
-            }),
         ):
             mock_adapter_cls.return_value.open_position.return_value = mock_adapter_result
 
@@ -200,6 +201,7 @@ class TestPerpOpenApproval:
 
         mock_sdk = MagicMock()
         mock_sdk.EXCHANGE_ROUTER_ADDRESS = "0x1C3fa76e6E1088bCE750f23a5BFcffa1efEF6A41"
+        mock_sdk.WETH_ADDRESS = market_record("arbitrum", "ETH/USD").long_token
         mock_sdk.get_execution_fee.return_value = 100000000000000
         mock_tx_data = MagicMock()
         mock_tx_data.to = mock_sdk.EXCHANGE_ROUTER_ADDRESS
@@ -215,9 +217,6 @@ class TestPerpOpenApproval:
             patch("almanak.connectors.gmx_v2.compiler.GMXv2Adapter") as mock_adapter_cls,
             patch("almanak.connectors.gmx_v2.compiler.GMXv2Config"),
             patch("almanak.connectors.gmx_v2.compiler.GMXV2SDK", return_value=mock_sdk),
-            patch("almanak.connectors.gmx_v2.compiler.GMX_V2_TOKENS", {
-                "arbitrum": {"WETH": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"},
-            }),
         ):
             mock_adapter_cls.return_value.open_position.return_value = mock_adapter_result
 

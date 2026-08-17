@@ -895,6 +895,23 @@ _PERP_MARKET_INCONCLUSIVE_HINT = (
 )
 
 
+def _reported_proto_int(message: object, field: str) -> int | None:
+    """Read an optional protobuf scalar without turning absence into zero."""
+    has_field = getattr(message, "HasField", None)
+    if callable(has_field):
+        try:
+            if not has_field(field):
+                return None
+        except ValueError:
+            # Older generated classes expose these as plain scalars.
+            pass
+    return getattr(message, field, None)
+
+
+def _reported_decimals_text(value: int | None) -> str:
+    return f"{value} decimals" if value is not None else "decimals unreported"
+
+
 @ax.command(name="perp-market")
 @click.argument("protocol")
 @click.argument("market")
@@ -908,12 +925,10 @@ def perp_market(ctx, protocol, market):
     token tuple. This is the live market universe — the same resolution a
     deployed strategy performs at runtime.
 
-    Absence of a market from SDK docs or static fallback tables (e.g. the
-    GMX ``GMX_V2_MARKETS`` registry) is NOT evidence the venue lacks it —
-    static tables are offline fallbacks, not the market universe. Only
-    ``status: not_found`` from this command means "the venue does not list
-    this market". ``status: unavailable`` / ``unverified`` means the answer
-    is unknown: report it as "could not verify", never as "not supported".
+    Absence of a market from SDK docs is NOT evidence the venue lacks it. Only
+    ``status: not_found`` from this command means "the venue does not list this
+    market". ``status: unavailable`` / ``unverified`` means the answer is
+    unknown: report it as "could not verify", never as "not supported".
 
     Accepts a canonical label (``XMR/USD``), the full venue market name, or
     the exact market address.
@@ -1030,6 +1045,11 @@ def perp_market(ctx, protocol, market):
         _close_channel(channel)
 
     item = response.market
+
+    index_token_decimals = _reported_proto_int(item, "index_token_decimals")
+    long_token_decimals = _reported_proto_int(item, "long_token_decimals")
+    short_token_decimals = _reported_proto_int(item, "short_token_decimals")
+
     if json_output:
         click.echo(
             _json.dumps(
@@ -1041,11 +1061,13 @@ def perp_market(ctx, protocol, market):
                     "market_token": item.market_token,
                     "index_token": item.index_token,
                     "index_symbol": item.index_symbol,
-                    "index_token_decimals": item.index_token_decimals,
+                    "index_token_decimals": index_token_decimals,
                     "long_token": item.long_token,
                     "long_token_symbol": item.long_token_symbol,
+                    "long_token_decimals": long_token_decimals,
                     "short_token": item.short_token,
                     "short_token_symbol": item.short_token_symbol,
+                    "short_token_decimals": short_token_decimals,
                     "verified": item.verified,
                 },
                 indent=2,
@@ -1054,9 +1076,17 @@ def perp_market(ctx, protocol, market):
     else:
         click.echo(f"{item.label} on {item.protocol} ({item.chain}) — verified on-chain")
         click.echo(f"  market_token  {item.market_token}")
-        click.echo(f"  index         {item.index_symbol} ({item.index_token}, {item.index_token_decimals} decimals)")
-        click.echo(f"  long          {item.long_token_symbol} ({item.long_token})")
-        click.echo(f"  short         {item.short_token_symbol} ({item.short_token})")
+        click.echo(
+            f"  index         {item.index_symbol} ({item.index_token}, {_reported_decimals_text(index_token_decimals)})"
+        )
+        click.echo(
+            f"  long          {item.long_token_symbol} ({item.long_token}, "
+            f"{_reported_decimals_text(long_token_decimals)})"
+        )
+        click.echo(
+            f"  short         {item.short_token_symbol} ({item.short_token}, "
+            f"{_reported_decimals_text(short_token_decimals)})"
+        )
 
 
 def _open_channel_if_reachable(ctx: click.Context):

@@ -15,9 +15,10 @@ VIB-6561). There is deliberately no static seeding and no symbol axis:
   address identity — which is why the close path may trust this catalog when
   the venue API cannot re-serve the row.
 
-Consumers key strictly by ``(chain, market_token address)``. Strategy code
-supplies addresses (the address-first contract); labels are resolved only by
-the dynamic registry, never here.
+Consumers key strictly by ``(chain, market_token address)``. The catalog's
+unique-label helper only lets the adapter reuse a record already verified in
+this process; discovery of a new label belongs exclusively to the dynamic
+registry.
 """
 
 from __future__ import annotations

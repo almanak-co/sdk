@@ -61,7 +61,7 @@ class IntentCompilerConfig:
             public RPC and producing 7/3/7 targets across three consecutive
             runs (VIB-6046 D5).
 
-            Opt-IN rather than default-on: several connectors (gmx_v2, pendle,
+            Opt-IN rather than default-on: several connectors (pendle,
             traderjoe_v2, uniswap_v4 hooks) currently depend on that implicit
             fallback and discover nothing without it. Flipping the default
             would turn their flakiness into a hard failure. They have the same

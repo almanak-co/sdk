@@ -486,8 +486,10 @@ def _perp_market_to_proto(record: PerpMarketRecord) -> gateway_pb2.PerpMarket:
         index_token_decimals=record.index_token_decimals,
         long_token=record.long_token,
         long_token_symbol=record.long_token_symbol,
+        long_token_decimals=record.long_token_decimals,
         short_token=record.short_token,
         short_token_symbol=record.short_token_symbol,
+        short_token_decimals=record.short_token_decimals,
         verified=record.verified,
     )
 

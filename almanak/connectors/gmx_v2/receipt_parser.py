@@ -41,7 +41,8 @@ from eth_abi import decode as abi_decode
 
 from almanak.connectors._strategy_base.base import EventRegistry, HexDecoder
 from almanak.connectors.gmx_v2 import market_catalog
-from almanak.connectors.gmx_v2.addresses import GMX_V2, GMX_V2_TOKENS
+from almanak.connectors.gmx_v2.addresses import GMX_V2
+from almanak.framework.data.tokens import TokenResolutionError, resolve_token_decimals
 from almanak.framework.execution.extract_result import (
     ExtractError,
     ExtractMissing,
@@ -146,23 +147,6 @@ _EVENT_LOG_DATA_ABI_TYPE = (
     "((string,string)[],(string,string[])[])"
     ")"
 )
-
-_TOKEN_DECIMALS_BY_SYMBOL = {
-    "USDC": 6,
-    "USDT": 6,
-    "WBTC": 8,
-    "BTC.b": 8,
-    "WETH": 18,
-    "WETH.e": 18,
-    "WAVAX": 18,
-}
-_TOKEN_DECIMALS_BY_ADDRESS = {
-    address.lower(): _TOKEN_DECIMALS_BY_SYMBOL[symbol]
-    for tokens in GMX_V2_TOKENS.values()
-    for symbol, address in tokens.items()
-    if symbol in _TOKEN_DECIMALS_BY_SYMBOL
-}
-
 
 # =============================================================================
 # Enums
@@ -898,7 +882,21 @@ class GMXv2ReceiptParser:
         """
         chain = kwargs.get("chain")
         self.chain = str(chain).lower() if chain else None
+        self._token_resolver = kwargs.get("token_resolver")
+        self._token_decimals_cache: dict[tuple[str, str], int | None] = {}
         self.registry = EventRegistry(EVENT_TOPICS, EVENT_NAME_TO_TYPE)
+
+    def _collateral_decimals(self, token: str) -> int | None:
+        """Resolve exact-address decimals without a connector-owned mirror."""
+        if self.chain is None:
+            return None
+        kwargs: dict[str, Any] = {"cache": self._token_decimals_cache}
+        if self._token_resolver is not None:
+            kwargs["resolver"] = self._token_resolver
+        try:
+            return resolve_token_decimals(token, self.chain, **kwargs)
+        except (TokenResolutionError, AttributeError):
+            return None
 
     @staticmethod
     def build_extract_kwargs(*, field: str, bundle_metadata: dict[str, Any]) -> dict[str, Any]:
@@ -1483,12 +1481,13 @@ class GMXv2ReceiptParser:
             return None
 
         collateral_token = str(addresses["collateralToken"])
-        collateral_decimals = _TOKEN_DECIMALS_BY_ADDRESS.get(collateral_token.lower())
+        collateral_decimals = self._collateral_decimals(collateral_token)
         if collateral_decimals is None:
             logger.warning(
-                "GMX PositionDecrease collateral token %s has no declared decimals; "
+                "GMX PositionDecrease collateral token %s has no canonical decimals on chain %s; "
                 "collateral amount fields remain unmeasured",
                 collateral_token,
+                self.chain,
             )
             collateral_amount = None
             collateral_delta_amount = None

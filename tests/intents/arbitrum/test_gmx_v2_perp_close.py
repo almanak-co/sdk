@@ -27,7 +27,8 @@ from web3 import Web3
 from web3.eth import AsyncEth, Eth
 
 from almanak.connectors.gmx_v2 import GMXv2ReceiptParser
-from almanak.connectors.gmx_v2.addresses import GMX_V2, GMX_V2_TOKENS
+from almanak.connectors.gmx_v2.addresses import GMX_V2
+from tests.support.gmx_v2 import GMX_V2_TOKENS
 from tests.unit.connectors.gmx_v2.market_fixtures import fake_dynamic_gateway, market_address
 
 # Address-first primary spelling: the strategy-declared market-token address
@@ -129,7 +130,7 @@ def _build_compiler(
     prices: dict[str, Decimal],
 ) -> IntentCompiler:
     return IntentCompiler(
-            gateway_client=fake_dynamic_gateway("arbitrum", rpc_url=orchestrator.rpc_url),
+        gateway_client=fake_dynamic_gateway("arbitrum", rpc_url=orchestrator.rpc_url),
         chain=CHAIN_NAME,
         wallet_address=wallet,
         price_oracle=prices,

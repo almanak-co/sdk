@@ -349,8 +349,10 @@ class TestAddressFormMarketPricing:
                 index_token_decimals=18,
                 long_token=WETH_ARBITRUM,
                 long_token_symbol="WETH",
+                long_token_decimals=18,
                 short_token=USDC_ARBITRUM,
                 short_token_symbol="USDC",
+                short_token_decimals=6,
             ),
         )
 

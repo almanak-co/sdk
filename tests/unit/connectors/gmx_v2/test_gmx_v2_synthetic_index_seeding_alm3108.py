@@ -56,28 +56,37 @@ from eth_utils import to_checksum_address
 
 from almanak.connectors.gmx_v2 import anvil_order_executor as executor
 from almanak.connectors.gmx_v2 import market_catalog
-from almanak.connectors.gmx_v2.addresses import GMX_V2_TOKENS
 from almanak.connectors.gmx_v2.anvil_order_executor import (
     GmxAnvilOrderExecutionError,
     _GmxDependencies,
     _seed_oracle_prices,
 )
 from almanak.core.chainlink import CHAINLINK_PRICE_FEEDS, TOKEN_TO_PAIR
-
-# The index token every market reports on-chain, and the set whose index token
-# is a synthetic placeholder. Imported rather than re-pinned: these were
-# captured from ``Reader.getMarket()`` for the market-identity audit, and a
-# second hand-maintained copy would be free to drift away from the chain
-# without either copy noticing.
-from tests.audit.test_gmx_v2_market_identity import (
-    EXPECTED_INDEX_TOKENS,
-    SYNTHETIC_INDEX_MARKETS,
-)
+from tests.support.gmx_v2 import GMX_V2_TOKENS
 from tests.unit.connectors.gmx_v2.market_fixtures import (
     FIXTURE_MARKETS,
     market_address,
     market_record,
     prime_catalog,
+)
+
+# Unit-only fixture projections. The production permission audit no longer
+# owns the old twenty-row fixture snapshot (ALM-3199), so derive index identity
+# directly from the fixture records this test exercises.
+EXPECTED_INDEX_TOKENS = {
+    chain: {record.label: record.index_token for row_chain, record in FIXTURE_MARKETS if row_chain == chain}
+    for chain in {row_chain for row_chain, _ in FIXTURE_MARKETS}
+}
+SYNTHETIC_INDEX_MARKETS: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("arbitrum", "BTC/USD"),
+        ("arbitrum", "DOGE/USD"),
+        ("arbitrum", "LTC/USD"),
+        ("arbitrum", "XRP/USD"),
+        ("arbitrum", "ATOM/USD"),
+        ("arbitrum", "NEAR/USD"),
+        ("avalanche", "LTC/USD"),
+    }
 )
 
 ALL_MARKETS = [(chain, record.label) for chain, record in FIXTURE_MARKETS]

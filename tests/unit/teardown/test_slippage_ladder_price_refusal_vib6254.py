@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
+from almanak.connectors.gmx_v2 import market_catalog
 from almanak.connectors.gmx_v2.sdk import GMXV2SDK
 from almanak.framework.intents.compiler import IntentCompiler
 from almanak.framework.intents.vocabulary import PerpCloseIntent
@@ -19,6 +20,14 @@ from almanak.framework.teardown.models import (
 )
 from almanak.framework.teardown.slippage_manager import EscalatingSlippageManager, ExecutionAttempt
 from almanak.framework.teardown.teardown_manager import TeardownManager
+from tests.unit.connectors.gmx_v2.market_fixtures import market_record, prime_catalog
+
+
+@pytest.fixture(autouse=True)
+def _clean_gmx_market_catalog():
+    market_catalog.clear()
+    yield
+    market_catalog.clear()
 
 
 class _Intent:
@@ -80,6 +89,8 @@ async def test_retryable_negative_control_reproduces_escalation_and_approval() -
 @pytest.mark.asyncio
 async def test_real_gmx_compiler_price_refusal_reaches_ladder_as_non_retryable() -> None:
     """Pin compiler -> manager -> ladder wiring, not two disconnected unit claims."""
+    verified_market = market_record("arbitrum", "ETH/USD")
+    prime_catalog(verified_market, chain="arbitrum")
 
     class _MustNotExecute:
         async def execute(self, *_args, **_kwargs):
@@ -99,7 +110,7 @@ async def test_real_gmx_compiler_price_refusal_reaches_ladder_as_non_retryable()
         config=config,
     )
     intent = PerpCloseIntent(
-        market="ETH/USD",
+        market=verified_market.market_token,
         collateral_token="USDC",
         is_long=True,
         size_usd=Decimal("1000"),

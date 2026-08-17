@@ -48,12 +48,6 @@ if TYPE_CHECKING:
         GMXv2Position,
         GMXv2PositionSide,
     )
-    from .market_rules import (
-        get_allowed_collaterals,
-        is_market_registered,
-        registered_markets,
-        validate_collateral,
-    )
     from .receipt_parser import (
         GMXv2Event,
         GMXv2EventType,
@@ -90,11 +84,7 @@ __all__ = [
     "GMXv2ReceiptParser",
     "OrderType",
     "PerpFillData",
-    "get_allowed_collaterals",
     "get_gmx_v2_sdk",
-    "is_market_registered",
-    "registered_markets",
-    "validate_collateral",
 ]
 
 _LAZY: dict[str, tuple[str, str]] = {
@@ -117,11 +107,7 @@ _LAZY: dict[str, tuple[str, str]] = {
     "GMXv2ReceiptParser": (".receipt_parser", "GMXv2ReceiptParser"),
     "OrderType": (".sdk", "OrderType"),
     "PerpFillData": (".receipt_parser", "PerpFillData"),
-    "get_allowed_collaterals": (".market_rules", "get_allowed_collaterals"),
     "get_gmx_v2_sdk": (".sdk", "get_gmx_v2_sdk"),
-    "is_market_registered": (".market_rules", "is_market_registered"),
-    "registered_markets": (".market_rules", "registered_markets"),
-    "validate_collateral": (".market_rules", "validate_collateral"),
 }
 
 _registered = False

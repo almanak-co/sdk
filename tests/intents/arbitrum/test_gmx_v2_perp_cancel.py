@@ -9,7 +9,8 @@ from eth_utils import function_signature_to_4byte_selector
 from web3 import Web3
 
 from almanak.connectors.gmx_v2 import GMXv2ReceiptParser
-from almanak.connectors.gmx_v2.addresses import GMX_V2, GMX_V2_TOKENS
+from almanak.connectors.gmx_v2.addresses import GMX_V2
+from tests.support.gmx_v2 import GMX_V2_TOKENS
 from tests.unit.connectors.gmx_v2.market_fixtures import market_address
 
 # Address-first primary spelling: the strategy-declared market-token address
@@ -108,13 +109,16 @@ class TestGmxV2PerpCancelIntent:
         # Prove protocol eligibility from the Safe account before adding the
         # Zodiac wrapper. This separates GMX's age/account gate from Roles
         # authorization and execution semantics.
-        assert web3.eth.call(
-            {
-                "from": Web3.to_checksum_address(funded_wallet),
-                "to": Web3.to_checksum_address(cancel_tx["to"]),
-                "data": cancel_tx["data"],
-            }
-        ) == b""
+        assert (
+            web3.eth.call(
+                {
+                    "from": Web3.to_checksum_address(funded_wallet),
+                    "to": Web3.to_checksum_address(cancel_tx["to"]),
+                    "data": cancel_tx["data"],
+                }
+            )
+            == b""
+        )
 
         # Layer 2: default-on Zodiac executes the authored cancellation.
         cancel_execution = await orchestrator.execute(cancellation.action_bundle)

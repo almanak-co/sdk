@@ -494,9 +494,9 @@ class TestFailsClosedWhenItCannotBoundThePrice:
         result = _compile(compiler, _open_intent(is_long=True, market="ETH/USD"))
 
         assert result.status == CompilationStatus.FAILED
-        assert result.is_safety_refusal is True
+        assert result.is_transient is True
         assert result.transactions == []
-        assert "no verified index-token decimals" in (result.error or "")
+        assert "No static runtime market aliases" in (result.error or "")
 
 
 # =============================================================================
@@ -996,7 +996,12 @@ class TestPlaceholderPricesCannotProduceABound:
             config=IntentCompilerConfig(allow_placeholder_prices=True, permission_discovery=True),
         )
         assert compiler._using_placeholders is True
-        result = _compile(compiler, _open_intent(is_long=True, market=BTC_MARKET_ARB))
+        from almanak.connectors.gmx_v2.permission_seed import permission_markets
+
+        result = _compile(
+            compiler,
+            _open_intent(is_long=True, market=permission_markets()["arbitrum"].market_token),
+        )
         assert result.status == CompilationStatus.SUCCESS, (
             f"permission discovery must still compile; got {result.error}"
         )

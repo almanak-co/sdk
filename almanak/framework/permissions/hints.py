@@ -125,7 +125,7 @@ class PermissionHints:
             authorised (VIB-6046 D5).
 
             Opt-IN. ``False`` preserves today's behaviour exactly. Several
-            connectors (gmx_v2, pendle, traderjoe_v2, uniswap_v4 hooks) discover
+            connectors (pendle, traderjoe_v2, uniswap_v4 hooks) discover
             NOTHING without the implicit fallback, so this must not be flipped
             on globally without first giving each of them an offline path.
         synthetic_discovery_intents: The set of canonical intent types (e.g.

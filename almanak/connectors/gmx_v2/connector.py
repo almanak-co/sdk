@@ -169,11 +169,6 @@ CONNECTOR = Connector(
             module="almanak.connectors.gmx_v2.addresses",
             attribute="GMX_V2",
         ),
-        AddressTableSpec(
-            protocol="gmx_v2_tokens",
-            module="almanak.connectors.gmx_v2.addresses",
-            attribute="GMX_V2_TOKENS",
-        ),
     ),
     gateway_connector=ImportRef(
         module="almanak.connectors.gmx_v2.gateway.provider",

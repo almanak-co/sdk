@@ -11,10 +11,10 @@ from typing import Any
 
 from web3 import Web3
 
-from almanak.connectors.gmx_v2.addresses import GMX_V2_TOKENS
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents.compiler import IntentCompiler
 from almanak.gateway.proto import gateway_pb2
+from tests.support.gmx_v2 import GMX_V2_TOKENS
 
 # The wrapped / bridged spellings of one asset. The GMX market label names the
 # UNWRAPPED base symbol ("ETH/USD" -> "ETH") while the price fixture is keyed by

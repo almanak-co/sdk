@@ -29,12 +29,12 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from almanak.connectors.gmx_v2.addresses import GMX_V2_TOKENS
 from almanak.framework.intents import Intent
 from almanak.framework.teardown.completeness import check_intent_coverage
 from almanak.framework.teardown.full_close import full_close_intents
 from almanak.framework.teardown.models import PositionInfo, PositionType
 from almanak.framework.teardown.single_close_guard import collapse_duplicate_perp_closes
+from tests.support.gmx_v2 import GMX_V2_TOKENS
 from tests.unit.connectors.gmx_v2.market_fixtures import market_address
 
 

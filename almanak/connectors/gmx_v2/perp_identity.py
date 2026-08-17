@@ -32,7 +32,8 @@ The ``sem`` token is where the symbol-vs-address polysemy is resolved, on BOTH
 axes and chain-scoped. The MARKET axis is address-first: address-shaped values
 pass through and symbol-shaped market values yield NO token (there is no
 curated market table any more — see the VIB-6155 note below for why one could
-never be trusted). Collateral symbols still resolve through ``GMX_V2_TOKENS``.
+never be trusted). Collateral symbols resolve through the framework's canonical
+JSON-backed token registry, never a GMX-owned address mirror.
 Anything under-specified yields NO token — never a degraded one, because an
 under-specified token is the only way this design can over-collapse, and
 over-collapse strands funds silently.
@@ -81,10 +82,11 @@ never used ⇒ over-split ⇒ fail-safe.
 from __future__ import annotations
 
 import logging
+from functools import lru_cache
 from typing import Any
 
 from almanak.connectors._strategy_base.perp_identity import is_residual_marked
-from almanak.connectors.gmx_v2.addresses import GMX_V2_TOKENS
+from almanak.framework.data.tokens.defaults import DEFAULT_TOKENS, SYMBOL_ALIASES
 
 logger = logging.getLogger(__name__)
 
@@ -139,7 +141,26 @@ def _address_only(value: str | None) -> str | None:
     return None
 
 
-def _resolve_address(table: dict[str, dict[str, str]], chain: str, value: str | None) -> str | None:
+@lru_cache(maxsize=256)
+def _static_token_address(chain: str, symbol: str) -> str | None:
+    """Derive an unambiguous symbol address from canonical static token data."""
+    wanted = symbol.upper()
+    matches: set[str] = set()
+    for token in DEFAULT_TOKENS:
+        if token.symbol.upper() != wanted:
+            continue
+        address = token.get_address(chain)
+        if address:
+            matches.add(address.lower())
+    if len(matches) == 1:
+        return next(iter(matches))
+    if len(matches) > 1:
+        return None
+    alias = SYMBOL_ALIASES.get((chain, wanted))
+    return alias.lower() if alias else None
+
+
+def _resolve_address(chain: str, value: str | None) -> str | None:
     """Resolve a producer-written COLLATERAL reference to a lower-cased address.
 
     Returns ``None`` — never a guess — when the value is neither an address nor
@@ -151,18 +172,11 @@ def _resolve_address(table: dict[str, dict[str, str]], chain: str, value: str | 
     if not value:
         return None
     if _is_hex_of_length(value, _ADDRESS_LEN):
-        return value.lower()
-    entries = table.get(chain)
-    if not entries:
-        return None
-    # Catalogue symbols carry canonical case ("USDC", "BTC.b", "WETH.e") and
-    # producers do not reliably preserve it, so match case-insensitively. This
-    # folds a SYMBOL for lookup; it never folds an emitted token.
-    wanted = value.lower()
-    for symbol, address in entries.items():
-        if symbol.lower() == wanted:
-            return str(address).lower()
-    return None
+        return value.strip().lower()
+    # Symbols are display vocabulary only. The address is derived from the
+    # canonical token JSON only when exactly one chain address matches, while
+    # unknown or ambiguous inputs fail closed to no identity token.
+    return _static_token_address(chain, value)
 
 
 def _side(position: Any, details: dict[str, Any]) -> str | None:
@@ -242,10 +256,10 @@ def gmx_v2_perp_identity(position: Any, *, wallet_address: str | None) -> frozen
         # address. Symbol-shaped market values yield no token — never a guess —
         # which over-splits into a loud FAILED (fail-safe, see module docstring)
         # instead of resolving through a curated table that VIB-6155 proved can
-        # silently disagree with the chain. Collateral symbols still resolve
-        # through the token table (a different, token-registry-backed axis).
+        # silently disagree with the chain. Collateral symbols derive from the
+        # framework's canonical token registry (a separate identity axis).
         market = _address_only(_first_present(details, _MARKET_KEYS))
-        collateral = _resolve_address(GMX_V2_TOKENS, chain, _first_present(details, _COLLATERAL_KEYS))
+        collateral = _resolve_address(chain, _first_present(details, _COLLATERAL_KEYS))
         side = _side(position, details)
         if market and collateral and side:
             # DERIVE — recompute the venue key the way GMX does on-chain.

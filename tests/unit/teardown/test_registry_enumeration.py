@@ -20,7 +20,6 @@ from typing import Any
 
 import pytest
 
-from almanak.connectors.gmx_v2.addresses import GMX_V2_TOKENS
 from almanak.framework.migration import CutoverStorageNotSupported
 from almanak.framework.teardown import registry_enumeration as registry_enumeration_module
 from almanak.framework.teardown.models import (
@@ -35,6 +34,7 @@ from almanak.framework.teardown.registry_enumeration import (
     reconcile_lp_with_registry,
     resolve_open_positions_with_registry,
 )
+from tests.support.gmx_v2 import GMX_V2_TOKENS
 from tests.unit.connectors.gmx_v2.market_fixtures import market_address
 
 DEPLOYMENT_ID = "deployment:abc123def456"

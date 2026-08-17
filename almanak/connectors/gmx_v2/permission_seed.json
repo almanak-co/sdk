@@ -1,0 +1,31 @@
+{
+  "schema_version": 2,
+  "markets": {
+    "arbitrum": {
+      "label": "ETH/USD",
+      "market_token": "0x70d95587d40A2caf56bd97485aB3Eec10Bee6336",
+      "index_token": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+      "index_symbol": "ETH",
+      "index_token_decimals": 18,
+      "long_token": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+      "long_token_symbol": "WETH",
+      "long_token_decimals": 18,
+      "short_token": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+      "short_token_symbol": "USDC",
+      "short_token_decimals": 6
+    },
+    "avalanche": {
+      "label": "ETH/USD",
+      "market_token": "0xB7e69749E3d2EDd90ea59A4932EFEa2D41E245d7",
+      "index_token": "0x49D5c2BdFfac6CE2BFdB6640F4F80f226bc10bAB",
+      "index_symbol": "ETH",
+      "index_token_decimals": 18,
+      "long_token": "0x49D5c2BdFfac6CE2BFdB6640F4F80f226bc10bAB",
+      "long_token_symbol": "WETH.e",
+      "long_token_decimals": 18,
+      "short_token": "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E",
+      "short_token_symbol": "USDC",
+      "short_token_decimals": 6
+    }
+  }
+}

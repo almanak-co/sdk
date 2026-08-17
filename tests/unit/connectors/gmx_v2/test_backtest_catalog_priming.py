@@ -55,8 +55,10 @@ def _verified_market_response() -> SimpleNamespace:
             index_token_decimals=18,
             long_token=LONG_TOKEN,
             long_token_symbol="WETH",
+            long_token_decimals=18,
             short_token=SHORT_TOKEN,
             short_token_symbol="USDC",
+            short_token_decimals=6,
         ),
     )
 

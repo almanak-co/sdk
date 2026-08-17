@@ -1,32 +1,20 @@
-"""GMX V2 contract addresses per chain.
+"""GMX V2 core contract addresses per chain.
 
-Single source of truth for this connector's on-chain addresses. Replaces
-the entries previously held in ``almanak.core.contracts`` (W1 / VIB-4853
-/ epic VIB-4851). Surfaced to non-connector callers through
-:class:`GatewayAddressCapability` on ``GmxV2GatewayConnector``;
-strategy-side connector code reads the dicts directly.
+This module contains deployment configuration only: contracts whose identity is
+stable connector wiring. It deliberately contains no market or token catalogue.
+Live market identity comes from the gateway registry after an exact
+``Reader.getMarket`` verification; the one bounded offline permission vector
+lives in :mod:`almanak.connectors.gmx_v2.permission_seed` as a generated,
+audited artifact (ALM-3199).
 
-Two surfaces live here:
-
-* ``GMX_V2`` — per-chain core contract addresses (ExchangeRouter / Router /
-  DataStore / OrderVault / Reader / EventEmitter) plus the eth/btc/avax
-  market addresses backing the SDK's core label aliases
-  (``sdk.get_market_address``).
-* ``GMX_V2_TOKENS`` — the canonical underlying-token address catalogue
-  consumed by the strategy-side adapter (long/short tokens for each
-  market — WETH/WBTC/USDC/USDT on Arbitrum, WAVAX/BTC.b/WETH.e/USDC/USDT
-  on Avalanche).
-
-There is deliberately NO market symbol→address table. Markets are
-address-first: the strategy declares the market-token address, the dynamic
-registry (VIB-6561) verifies it against the venue catalogue and on-chain
-``Reader.getMarket``, and ``market_catalog`` remembers the verified record
-for every read plane. A curated table could not be kept true by hand
-(VIB-6155 found five wrong rows) and its absence rows read as "unsupported"
-(the 2026-08-07 XMR misread).
+The former market aliases and ``GMX_V2_TOKENS`` mirror were hand-maintained
+copies of venue/token-registry state. VIB-6155 found five wrong market rows and
+VIB-6401 found nine valid long collaterals missing from the token mirror. Their
+removal is intentional: runtime compilation derives collateral identity,
+symbols, and decimals from the same verified market record.
 
 The contract-kind vocabulary (``exchange_router`` / ``router`` /
-``data_store`` / ``order_vault`` / ``reader`` / ``<pair>_market``) is
+``data_store`` / ``order_vault`` / ``reader`` / ``event_emitter``) is
 connector-private — callers outside this folder should consume the
 gateway registry, not guess key names.
 """
@@ -44,8 +32,6 @@ GMX_V2: dict[str, dict[str, str]] = {
         # PositionIncrease / PositionDecrease / PositionFeesCollected). Canonical,
         # matches adapter.GMX_V2_ADDRESSES["arbitrum"]["event_emitter"].
         "event_emitter": "0xC8ee91A54287DB53897056e12D9819156D3822Fb",
-        "eth_usd_market": "0x70d95587d40A2caf56bd97485aB3Eec10Bee6336",
-        "btc_usd_market": "0x47c031236e19d024b42f8AE6780E44A573170703",
     },
     # Avalanche addresses verified against
     # https://github.com/gmx-io/gmx-synthetics/tree/main/deployments/avalanche
@@ -60,37 +46,7 @@ GMX_V2: dict[str, dict[str, str]] = {
         # Central EventEmitter (see arbitrum note). Matches
         # adapter.GMX_V2_ADDRESSES["avalanche"]["event_emitter"].
         "event_emitter": "0xDb17B211c34240B014ab6d61d4A31FA0C0e20c26",
-        # USDC-collateral perp markets (the AVAX-* and BTC-* native-collateral
-        # variants are not exposed yet — strategies that need them should be
-        # added with a separate market key).
-        "eth_usd_market": "0xB7e69749E3d2EDd90ea59A4932EFEa2D41E245d7",
-        "btc_usd_market": "0xFb02132333A79C8B5Bd0b64E3AbccA5f7fAf2937",
-        "avax_usd_market": "0x913C1F46b48b3eD35E7dc3Cf754d4ae8499F31CF",
     },
 }
 
-GMX_V2_TOKENS: dict[str, dict[str, str]] = {
-    "arbitrum": {
-        "WETH": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
-        "WBTC": "0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f",
-        "USDC": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
-        "USDT": "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9",
-    },
-    "avalanche": {
-        # Long/short tokens used by GMX V2 USDC-collateral markets on Avalanche.
-        # WAVAX is the native wrapper; BTC.b and WETH.e are the GMX-listed
-        # bridged variants (the Avalanche bridge uses these symbols on-chain).
-        "WAVAX": "0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7",
-        "BTC.b": "0x152b9d0FdC40C096757F570A51E494bd4b943E50",
-        "WETH.e": "0x49D5c2BdFfac6CE2BFdB6640F4F80f226bc10bAB",
-        # GMX-listed USDC on Avalanche is native Circle USDC (NOT bridged
-        # USDC.e). Verified via the markets endpoint short-token field.
-        "USDC": "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E",
-        "USDT": "0x9702230A8Ea53601f5cD2dc00fDBc13d4dF4A8c7",
-    },
-}
-
-__all__ = [
-    "GMX_V2",
-    "GMX_V2_TOKENS",
-]
+__all__ = ["GMX_V2"]
