@@ -272,7 +272,7 @@ The bundled skill covers:
 | Token Resolution | get_token_resolver(), resolve_for_swap() |
 | Backtesting | PnL simulation, paper trading, parameter sweeps |
 | CLI Commands | strat new/run/demo/backtest, gateway, agent |
-| Chains & Protocols | 19 chains, 27 protocols |
+| Chains & Protocols | 19 chains, 46 connectors |
 | Common Patterns | Rebalancing, alerting, teardown, IntentSequence |
 | Troubleshooting | Common errors and fixes |
 

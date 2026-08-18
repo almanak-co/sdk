@@ -272,7 +272,7 @@ La compétence fournie couvre :
 | Résolution de tokens | get_token_resolver(), resolve_for_swap() |
 | Backtesting | Simulation PnL, paper trading, balayage de paramètres |
 | Commandes CLI | strat new/run/demo/backtest, gateway, agent |
-| Chaînes et protocoles | 19 chaînes, 27 protocoles |
+| Chaînes et protocoles | 19 chaînes, 46 connecteurs |
 | Patterns courants | Rééquilibrage, alertes, teardown, IntentSequence |
 | Dépannage | Erreurs courantes et corrections |
 

@@ -270,7 +270,7 @@ from almanak.framework.intents import Intent
 
 ### Reserved fields on every intent
 
-`Intent.registry_handle` (added on `BaseIntent` by VIB-4192 / T06b; factory ergonomics
+`BaseIntent.registry_handle` (added by VIB-4192 / T06b; factory ergonomics
 lifted by VIB-4285) is an optional opaque field that disambiguates multiple positions on
 the same `(primitive, semantic_group)`.
 

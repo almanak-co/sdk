@@ -2,7 +2,7 @@
 
 Solana is the first non-EVM chain supported by the Almanak SDK. The same intent-based workflow applies -- `decide() -> Intent -> compile -> execute` -- but the execution substrate underneath is fundamentally different from Ethereum and its L2s.
 
-All three Solana demo strategies have been verified on mainnet with real funds.
+The bundled Solana demo catalog includes representative swap, lending, and LP strategies.
 
 ## Solana vs EVM -- What's Different
 
@@ -21,7 +21,6 @@ All three Solana demo strategies have been verified on mainnet with real funds.
 | Protocol | Intent Types | EVM Equivalent | Description |
 |----------|-------------|----------------|-------------|
 | **Jupiter** | `SwapIntent` | Enso | Swap aggregator routing across Solana DEXs |
-| **Jupiter Lend** | `SupplyIntent`, `BorrowIntent`, `RepayIntent`, `WithdrawIntent` | Aave V3 | Lending and borrowing via Jupiter Lend |
 | **Kamino** | `SupplyIntent`, `BorrowIntent`, `RepayIntent`, `WithdrawIntent` | Aave V3 | Lending and borrowing on Kamino |
 | **Drift** | `PerpOpenIntent`, `PerpCloseIntent` | GMX V2 | Perpetual futures on Drift |
 | **Raydium CLMM** | `LPOpenIntent`, `LPCloseIntent` | Uniswap V3 | Concentrated liquidity positions on Raydium |
@@ -48,13 +47,19 @@ JUPITER_API_KEY=your_jupiter_api_key
 
 ## Demo Strategies
 
-Three demo strategies are included to cover all supported intent types.
+Three reference demos cover representative swap, lending, and LP paths. Copy them from the bundled demo catalog before running them:
+
+```bash
+almanak strat demo --name solana_swap
+almanak strat demo --name solana_lend
+almanak strat demo --name solana_lp
+```
 
 ### solana_swap -- Token Swap via Jupiter
 
 Swaps a fixed amount of USDC to SOL on every iteration using the Jupiter aggregator. The simplest possible Solana strategy.
 
-**`almanak/demo_strategies/solana_swap/config.json`:**
+**Generated `solana_swap/config.json`:**
 
 ```json
 {
@@ -70,7 +75,7 @@ Swaps a fixed amount of USDC to SOL on every iteration using the Jupiter aggrega
 
 Supplies a fixed amount of USDC to Kamino Finance on every iteration. Demonstrates the lending intent path on Solana.
 
-**`almanak/demo_strategies/solana_lend/config.json`:**
+**Generated `solana_lend/config.json`:**
 
 ```json
 {
@@ -84,7 +89,7 @@ Supplies a fixed amount of USDC to Kamino Finance on every iteration. Demonstrat
 
 Opens a concentrated liquidity position on Raydium CLMM in the SOL/USDC pool with a specified price range.
 
-**`almanak/demo_strategies/solana_lp/config.json`:**
+**Generated `solana_lp/config.json`:**
 
 ```json
 {
@@ -102,14 +107,17 @@ Opens a concentrated liquidity position on Raydium CLMM in the SOL/USDC pool wit
 Solana strategies run through the gateway, just like EVM strategies. The gateway handles balance queries (via `SolanaBalanceProvider`), execution routing, and RPC access for Solana.
 
 ```bash
+# Copy the reference strategy
+almanak strat demo --name solana_swap
+
 # Real execution on mainnet (gateway auto-starts)
-almanak strat run -d almanak/demo_strategies/solana_swap --once
+uv run almanak strat run -d solana_swap --network mainnet
 
 # Dry run (compile intents, no submission)
-almanak strat run -d almanak/demo_strategies/solana_swap --once --dry-run
+uv run almanak strat run -d solana_swap --network mainnet --dry-run
 
-# Local fork testing with solana-test-validator
-almanak strat run -d almanak/demo_strategies/solana_swap --network anvil --once
+# Local testing with solana-test-validator
+uv run almanak strat run -d solana_swap --network anvil
 ```
 
 !!! warning
@@ -119,7 +127,7 @@ almanak strat run -d almanak/demo_strategies/solana_swap --network anvil --once
     Use `--dry-run` first to verify that intent compilation succeeds before executing with real funds:
 
     ```bash
-    almanak strat run -d almanak/demo_strategies/solana_swap --once --dry-run
+    uv run almanak strat run -d solana_swap --network mainnet --dry-run
     ```
 
 ## Local Testing
@@ -163,7 +171,7 @@ decide() -> Intent
                    -> LP_OPEN / LP_CLOSE -> _svm_dispatch.dispatch_lp_*
                               -> Raydium / Meteora / Orca connector compilers
                    -> LEND / PERP -> None (fall-through)
-              -> connector registry (Kamino, Jupiter Lend, Drift)
+              -> connector registry (Kamino, Drift)
          -> ActionBundle (contains serialized VersionedTransaction)
          -> Gateway (Execute)
          -> SolanaExecutionPlanner (blockhash, signing, RPC submission)
@@ -174,7 +182,7 @@ decide() -> Intent
 Key components:
 
 - **`ChainFamily.SOLANA`** -- enum kind that routes execution away from the EVM pipeline.
-- **`SvmFamily`** (`almanak/framework/chain_family/_family.py`) -- the `ChainFamilyAdapter` implementation for SVM chains. Its `compile_intent` intercepts only SWAP and LP intents and routes them through `_svm_dispatch` to connector-owned compilers in `almanak/connectors/{jupiter,raydium,orca,meteora}/` (SWAP -> Jupiter; LP -> Raydium / Meteora / Orca). Lending and Perp intents return `None` from `SvmFamily` and are dispatched via the connector registry (Kamino, Jupiter Lend, Drift).
+- **`SvmFamily`** (`almanak/framework/chain_family/_family.py`) -- the `ChainFamilyAdapter` implementation for SVM chains. Its `compile_intent` intercepts only SWAP and LP intents and routes them through `_svm_dispatch` to connector-owned compilers in `almanak/connectors/{jupiter,raydium,orca,meteora}/` (SWAP -> Jupiter; LP -> Raydium / Meteora / Orca). Lending and Perp intents return `None` from `SvmFamily` and are dispatched via the connector registry (Kamino, Drift).
 - **`SolanaExecutionPlanner`** -- handles recent blockhash fetching, transaction signing, and RPC submission.
 - **`SolanaSigner`** -- wraps Ed25519 keypair operations; auto-detects base58 vs hex seed format.
 - **`SolanaBalanceProvider`** -- queries native SOL and SPL token balances via Solana JSON-RPC (`getBalance`, `getTokenAccountsByOwner`).
@@ -218,7 +226,6 @@ Priority fee configuration is not yet exposed to strategy authors (tracked in VI
 
 | Limitation | Impact | Tracking |
 |-----------|--------|----------|
-| LP close doesn't query on-chain position state | Raydium LP positions with liquidity can't be closed yet | VIB-375 |
 | No Anvil-style local fork | `--network anvil` starts `solana-test-validator` but intent compilation still calls real APIs (Jupiter, Raydium) | By design |
 | No cross-chain bridging | Can't bridge assets between Solana and EVM chains | Not yet planned |
 | On-chain price source is EVM-only | Solana prices come from CoinGecko, not from on-chain oracles (Pyth/Switchboard) | Future work |
