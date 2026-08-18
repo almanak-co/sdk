@@ -1566,6 +1566,7 @@ class TestCompileLPOpenSlipstreamSlot0Recompute:
 
         with (
             patch.object(compiler, "_resolve_token", side_effect=lambda sym: {"USDC": _USDC, "WETH": _WETH}[sym]),
+            patch("almanak.connectors.aerodrome.compiler._verify_slipstream_binding", return_value=None),
             patch(
                 "almanak.framework.intents.lp_math.recompute_lp_amounts",
                 return_value=(100, 200),

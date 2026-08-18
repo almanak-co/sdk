@@ -9,6 +9,8 @@ strategy-side connector code reads the dicts directly.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 AERODROME: dict[str, dict[str, str]] = {
     "base": {
         "router": "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43",
@@ -17,6 +19,7 @@ AERODROME: dict[str, dict[str, str]] = {
         "cl_router": "0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5",
         "cl_factory": "0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A",
         "cl_nft": "0x827922686190790b37229fd06084350E74485b72",  # Slipstream NonfungiblePositionManager
+        "cl_nft_current": "0xe1f8cd9AC4e4A65F54f38a5CdAfCA44f6dD68b53",
         "cl_quoter": "0x254cF9E1E6e233aa1AC962CB9B05b2cfeAaE15b0",
     },
     # Velodrome V2 on Optimism — same Solidly fork interface as Aerodrome on Base.
@@ -27,6 +30,72 @@ AERODROME: dict[str, dict[str, str]] = {
         "voter": "0x41C914ee0c7E1A5edCD0295623e6dC557B5aBf3C",
     },
 }
+
+
+@dataclass(frozen=True, slots=True)
+class SlipstreamDeployment:
+    """One factory generation and the NPM that owns its physical positions.
+
+    Slipstream has multiple Base factory generations.  A pool's factory and
+    its paired position manager are operational facts, not interchangeable
+    aliases: an NFT minted by one NPM cannot be closed through another.
+    """
+
+    factory: str
+    position_manager: str
+    generation: str
+
+
+# Ordered newest first for discovery.  The current and legacy pairs are
+# published by Velodrome's official Sugar SDK.  The additional factory listed
+# by Sugar's aggregate deployment inventory is intentionally not admitted here
+# until its position-manager authority is published and verified: a factory
+# address alone is insufficient to build or close an NFT position safely.
+SLIPSTREAM_LP_DEPLOYMENTS: dict[str, tuple[SlipstreamDeployment, ...]] = {
+    "base": (
+        SlipstreamDeployment(
+            factory="0xf8f2eB4940CFE7d13603DDDD87f123820Fc061Ef",
+            position_manager="0xe1f8cd9AC4e4A65F54f38a5CdAfCA44f6dD68b53",
+            generation="current",
+        ),
+        SlipstreamDeployment(
+            factory="0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A",
+            position_manager="0x827922686190790b37229fd06084350E74485b72",
+            generation="legacy",
+        ),
+    ),
+}
+
+
+def slipstream_lp_deployments(chain: str) -> tuple[SlipstreamDeployment, ...]:
+    """Return the reviewed Slipstream LP deployments for ``chain``."""
+
+    return SLIPSTREAM_LP_DEPLOYMENTS.get(chain.strip().lower(), ())
+
+
+def slipstream_deployment_for_factory(chain: str, factory: str) -> SlipstreamDeployment | None:
+    """Resolve an exact factory to its paired position-manager authority."""
+
+    factory_key = factory.strip().lower()
+    return next(
+        (deployment for deployment in slipstream_lp_deployments(chain) if deployment.factory.lower() == factory_key),
+        None,
+    )
+
+
+def slipstream_deployment_for_position_manager(chain: str, position_manager: str) -> SlipstreamDeployment | None:
+    """Resolve an exact NPM to the factory generation that created its NFTs."""
+
+    manager_key = position_manager.strip().lower()
+    return next(
+        (
+            deployment
+            for deployment in slipstream_lp_deployments(chain)
+            if deployment.position_manager.lower() == manager_key
+        ),
+        None,
+    )
+
 
 AERODROME_TOKENS: dict[str, dict[str, str]] = {
     "base": {
@@ -51,4 +120,13 @@ AERODROME_TOKENS: dict[str, dict[str, str]] = {
 AERODROME_STABLE_SYMBOLS: frozenset[str] = frozenset(
     {"USDC", "USDBC", "USDC.E", "DAI", "USDT", "USD+", "DOLA", "EURC", "GHO"}
 )
-__all__ = ["AERODROME", "AERODROME_STABLE_SYMBOLS", "AERODROME_TOKENS"]
+__all__ = [
+    "AERODROME",
+    "AERODROME_STABLE_SYMBOLS",
+    "AERODROME_TOKENS",
+    "SLIPSTREAM_LP_DEPLOYMENTS",
+    "SlipstreamDeployment",
+    "slipstream_deployment_for_factory",
+    "slipstream_deployment_for_position_manager",
+    "slipstream_lp_deployments",
+]

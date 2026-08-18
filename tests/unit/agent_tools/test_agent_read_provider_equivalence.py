@@ -103,6 +103,26 @@ def test_sushiswap_v3_provider_matches_address_tables() -> None:
     assert cap.lending_pool_address("arbitrum") is None
 
 
+def test_slipstream_provider_requires_exact_manager_generation() -> None:
+    from almanak.connectors.aerodrome.addresses import AERODROME, slipstream_lp_deployments
+
+    cap = STRATEGY_AGENT_READ_REGISTRY.lookup("aerodrome_slipstream")
+    assert cap is not None
+    deployments = slipstream_lp_deployments("base")
+    assert len(deployments) == 2
+    assert cap.position_manager_address("base") is None
+    assert cap.factory_address("base") == AERODROME["base"]["cl_factory"]
+    assert cap.reviewed_position_manager_addresses("base") == tuple(
+        deployment.position_manager for deployment in deployments
+    )
+    for deployment in deployments:
+        assert (
+            cap.factory_address_for_position_manager("base", deployment.position_manager.upper())
+            == deployment.factory
+        )
+    assert cap.factory_address_for_position_manager("base", "0x" + "11" * 20) is None
+
+
 def test_aave_v3_provider_matches_pool_table() -> None:
     from almanak.connectors.aave_v3.adapter import AAVE_V3_POOL_ADDRESSES
 

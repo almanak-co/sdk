@@ -273,6 +273,12 @@ def _is_zero_address(address: Any) -> bool:
         return False
 
 
+def _position_manager_from_details(position: Any) -> str | None:
+    details = getattr(position, "details", None) or {}
+    position_manager = details.get("nft_manager_addr") or details.get("position_manager")
+    return str(position_manager) if position_manager else None
+
+
 def reprice_lp_position(
     lp_reader: Any,
     position: Any,
@@ -319,7 +325,12 @@ def reprice_lp_position(
             )
             return None
 
-        on_chain = lp_reader.read_position(chain=chain, token_id=token_id, protocol=position.protocol)
+        on_chain = lp_reader.read_position(
+            chain=chain,
+            token_id=token_id,
+            protocol=position.protocol,
+            position_manager=_position_manager_from_details(position),
+        )
         if on_chain is None:
             logger.warning(
                 "LP reprice miss for %s on %s: lp_reader.read_position(token_id=%s) returned None",

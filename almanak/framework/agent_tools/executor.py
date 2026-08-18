@@ -2645,12 +2645,27 @@ class ToolExecutor:
                 ),
             )
 
-        nft_manager = cap.position_manager_address(chain)
+        requested_manager = str(args.get("position_manager") or "").strip()
+        reviewed_managers = {address.lower(): address for address in cap.reviewed_position_manager_addresses(chain)}
+        if requested_manager:
+            nft_manager = reviewed_managers.get(requested_manager.lower())
+            if nft_manager is None:
+                return ToolResponse(
+                    status=ToolResponseStatus.ERROR,
+                    error=_error_payload(
+                        AgentErrorCode.VALIDATION_ERROR,
+                        f"Unreviewed position manager for {lp_protocol} on {chain}",
+                    ),
+                )
+        else:
+            nft_manager = cap.position_manager_address(chain)
         if not nft_manager:
             return ToolResponse(
                 status=ToolResponseStatus.ERROR,
                 error=_error_payload(
-                    AgentErrorCode.UNSUPPORTED_CHAIN, f"No position manager on {chain} for {lp_protocol}"
+                    AgentErrorCode.VALIDATION_ERROR,
+                    f"No unambiguous position manager on {chain} for {lp_protocol}; provide position_manager",
+                    recoverable=True,
                 ),
             )
 
@@ -2694,7 +2709,7 @@ class ToolExecutor:
         # CREATE2 derivation which breaks on forks with different init_code_hash (e.g., Agni on Mantle).
         # The connector publishes its factory address + getPool selector (uint24
         # fee for the v3 family, int24 tick-spacing for Slipstream).
-        lp_factory_address = cap.factory_address(chain)
+        lp_factory_address = cap.factory_address_for_position_manager(chain, nft_manager)
 
         in_range: bool | None = None
         pool_current_tick = None
@@ -2739,6 +2754,7 @@ class ToolExecutor:
 
         data: dict = {
             "position_id": str(position_id),
+            "position_manager": nft_manager,
             "token_a": token0,
             "token_b": token1,
             "fee_tier": fee,

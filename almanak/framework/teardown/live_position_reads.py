@@ -57,6 +57,64 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _reviewed_npm_for_position(*, position: PositionInfo, protocol: str, chain: str) -> str | None:
+    """Resolve the exact connector-reviewed manager authority for ``position``.
+
+    Classic V3 connectors publish one NPM through ``AbiFamily.V3_NPM``.  A
+    multi-generation CL connector instead declares every reviewed manager as
+    ordered ``CL_POSITION_MANAGER`` contract kinds.  In that shape the durable
+    position identity MUST name its manager; choosing the first declaration
+    would query the same numeric token id on the wrong ERC-721 contract.
+
+    An explicit manager is always checked against connector-owned metadata.
+    Unknown or ambiguous identity returns ``None`` (unmeasured) and never falls
+    back to another manager, preserving teardown continuity without certifying
+    the wrong position.
+    """
+    details = position.details if isinstance(position.details, dict) else {}
+    raw_manager = details.get("nft_manager_addr") or details.get("position_manager") or details.get("nft_manager")
+    explicit_manager = str(raw_manager).strip() if raw_manager else ""
+    slug = protocol.lower()
+
+    try:
+        # Bootstraps connector-owned role declarations without importing any
+        # concrete connector into the framework.
+        import almanak.connectors._strategy_contract_role_registry  # noqa: F401
+        from almanak.connectors._strategy_base.address_registry import AddressRegistry
+        from almanak.connectors._strategy_base.contract_role_registry import (
+            CONTRACT_ROLE_REGISTRY,
+            ContractRole,
+        )
+
+        kinds = CONTRACT_ROLE_REGISTRY.kinds_for(slug, ContractRole.CL_POSITION_MANAGER)
+        if kinds is not None:
+            address_protocol = CONTRACT_ROLE_REGISTRY.address_protocol(slug)
+            contracts = AddressRegistry.addresses_for(address_protocol, chain)
+            reviewed = tuple(address for kind in kinds if isinstance((address := contracts.get(kind)), str) and address)
+            if explicit_manager:
+                matches = [address for address in reviewed if address.lower() == explicit_manager.lower()]
+                return matches[0] if len(matches) == 1 else None
+            return reviewed[0] if len(reviewed) == 1 else None
+
+        from almanak.framework.teardown.discovery import npm_for_protocol
+
+        npm = npm_for_protocol(slug, chain)
+    except Exception:  # noqa: BLE001 — verification must never raise into teardown
+        logger.debug(
+            "chain_verify_lp_open: connector manager resolution failed for protocol %s on chain %s",
+            protocol,
+            chain,
+            exc_info=True,
+        )
+        return None
+
+    if not npm:
+        return None
+    if explicit_manager and explicit_manager.lower() != npm.lower():
+        return None
+    return npm
+
+
 @dataclass(frozen=True)
 class LiveLendingPosition:
     """Live on-chain state of a single KNOWN lending market (VIB-5463).
@@ -358,27 +416,12 @@ async def chain_verify_lp_open(
             network,
         )
 
-    # The import + NPM-registry resolution can raise (ImportError / registry
-    # lookup faults); the docstring promises this never faults the teardown lane,
-    # so guard them.
     protocol = str(getattr(position, "protocol", "") or "")
-    try:
-        from almanak.framework.teardown.discovery import npm_for_protocol
-
-        npm = npm_for_protocol(protocol, chain)
-    except Exception:  # noqa: BLE001 — verification must never raise into teardown
-        logger.debug(
-            "chain_verify_lp_open: NPM resolution failed for protocol %s on chain %s",
-            protocol,
-            chain,
-            exc_info=True,
-        )
-        return None
+    npm = _reviewed_npm_for_position(position=position, protocol=protocol, chain=chain)
     if not npm:
-        # Not an NFT-based V3-family protocol, or no NPM deployment on this
-        # chain. This read cannot answer — and MUST NOT guess by probing other
-        # protocols' NPMs (VIB-5631: a foreign NPM's identically-numbered token
-        # is a different position).
+        # Not an NFT-based protocol, no reviewed manager on this chain, or a
+        # multi-generation position omitted its exact manager identity. This
+        # read cannot answer and MUST NOT guess by probing another manager.
         return None
 
     # Gateway-routed, protocol-scoped, tri-state read. query_position_liquidity

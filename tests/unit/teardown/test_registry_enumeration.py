@@ -29,6 +29,7 @@ from almanak.framework.teardown.models import (
 )
 from almanak.framework.teardown.registry_enumeration import (
     RegistryReadResult,
+    _position_info_from_registry_row,
     read_open_lp_positions_detailed,
     read_open_lp_positions_from_registry,
     reconcile_lp_with_registry,
@@ -64,6 +65,16 @@ def _v4_row(token_id: str = "777", pool_id: str = "0xPOOLIDHASH") -> dict[str, A
         "status": "open",
         "payload": {"token_id": token_id, "pool_id": pool_id, "liquidity": "9999"},
     }
+
+
+def test_registry_row_preserves_exact_nft_manager_authority() -> None:
+    row = _v3_row()
+    row["payload"]["nft_manager_addr"] = "0x" + "ab" * 20
+
+    position = _position_info_from_registry_row(row, primitive="lp")
+
+    assert position is not None
+    assert position.details["nft_manager_addr"] == "0x" + "ab" * 20
 
 
 class _FakeRegistrySM:
@@ -182,13 +193,22 @@ async def test_read_empty_deployment_id_is_unavailable() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _lp(position_id: str, protocol: str = "uniswap_v3", value: str = "0", chain: str = "arbitrum") -> PositionInfo:
+def _lp(
+    position_id: str,
+    protocol: str = "uniswap_v3",
+    value: str = "0",
+    chain: str = "arbitrum",
+    *,
+    nft_manager_addr: str | None = None,
+) -> PositionInfo:
+    details = {"nft_manager_addr": nft_manager_addr} if nft_manager_addr else {}
     return PositionInfo(
         position_type=PositionType.LP,
         position_id=position_id,
         chain=chain,
         protocol=protocol,
         value_usd=Decimal(value),
+        details=details,
     )
 
 
@@ -233,6 +253,55 @@ def test_reconcile_dedupes_by_position_id() -> None:
     # The strategy's richer (valued) copy is the one retained.
     kept_42 = next(p for p in out.positions if p.position_id == "42")
     assert kept_42.value_usd == Decimal("100")
+
+
+def test_reconcile_keeps_same_token_id_on_different_nft_managers() -> None:
+    """An ERC-721 token ID is unique only within its manager contract."""
+    current_manager = "0x" + "11" * 20
+    legacy_manager = "0x" + "22" * 20
+    strat = TeardownPositionSummary(
+        deployment_id=DEPLOYMENT_ID,
+        timestamp=datetime.now(UTC),
+        positions=[_lp("42", protocol="aerodrome_slipstream", nft_manager_addr=current_manager)],
+    )
+
+    out = reconcile_lp_with_registry(
+        strategy_summary=strat,
+        registry_positions=[_lp("42", protocol="lp", nft_manager_addr=legacy_manager)],
+        registry_available=True,
+    )
+
+    assert len(out.positions) == 2
+    assert {position.details["nft_manager_addr"] for position in out.positions} == {
+        current_manager,
+        legacy_manager,
+    }
+
+
+def test_reconcile_dedupes_same_token_id_on_same_nft_manager_case_insensitively() -> None:
+    """The richer strategy copy still wins for one manager-qualified NFT."""
+    manager = "0x" + "aB" * 20
+    strat = TeardownPositionSummary(
+        deployment_id=DEPLOYMENT_ID,
+        timestamp=datetime.now(UTC),
+        positions=[
+            _lp(
+                "42",
+                protocol="aerodrome_slipstream",
+                value="100",
+                nft_manager_addr=manager,
+            )
+        ],
+    )
+
+    out = reconcile_lp_with_registry(
+        strategy_summary=strat,
+        registry_positions=[_lp("42", protocol="lp", nft_manager_addr=manager.lower())],
+        registry_available=True,
+    )
+
+    assert len(out.positions) == 1
+    assert out.positions[0].value_usd == Decimal("100")
 
 
 def test_reconcile_never_drops_strategy_positions() -> None:

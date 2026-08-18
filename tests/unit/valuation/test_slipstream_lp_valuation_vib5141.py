@@ -6,11 +6,12 @@ and a ``positions(uint256)`` return struct that diverges from V3 at exactly one
 word: V3 word [4] is ``fee`` (uint24 bps), Slipstream word [4] is
 ``tickSpacing`` (int24). The CL NPM has no per-position ``fee`` field.
 
-Two gaps stacked before this fix:
-1. ``_resolve_position_manager`` only tried kinds ``("position_manager","nft")``
-   and fell back to the Uniswap-V3 NPM, so the ``aerodrome_slipstream``
-   pseudo-slug (which records its NPM under ``cl_nft`` on the ``aerodrome``
-   table) never resolved its real CL NPM.
+Two identity/layout gaps stacked before the original fix, followed by one
+multi-generation safety gap:
+1. ``_resolve_position_manager`` originally missed the connector-owned
+   ``cl_nft`` authority. Once current and legacy managers both became reviewed,
+   the inverse mistake became possible: guessing one manager for a bare token
+   ID could return a real but unrelated NFT from the other generation.
 2. ``_parse_position_hex`` parsed the V3 12-word layout only, mis-reading
    ``tickSpacing`` as ``fee``.
 
@@ -37,6 +38,7 @@ from almanak.framework.valuation.lp_position_reader import (
 
 # Aerodrome Slipstream NonfungiblePositionManager on Base (addresses.py:cl_nft).
 SLIPSTREAM_NPM_BASE = "0x827922686190790b37229fd06084350E74485b72"
+SLIPSTREAM_CURRENT_NPM_BASE = "0xe1f8cd9ac4e4a65f54f38a5cdafca44f6dd68b53"
 # Uniswap V3 NPM (the wrong address the legacy fallback used to return).
 UNISWAP_V3_NPM = "0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1"
 
@@ -89,16 +91,12 @@ class TestSlipstreamProtocolDetection:
 
 
 class TestSlipstreamNpmResolution:
-    """Gap #1: the resolver must find the Slipstream cl_nft NPM, not fall back
-    to the Uniswap-V3 manager."""
+    """Gap #1: ambiguous manager generations must never be guessed."""
 
-    def test_resolves_cl_nft_npm_on_base(self):
+    def test_multiple_reviewed_managers_are_unavailable_without_authority(self):
         reader = LPPositionReader()
         addr = reader._resolve_position_manager("base", "aerodrome_slipstream")
-        assert addr is not None
-        assert addr.lower() == SLIPSTREAM_NPM_BASE.lower()
-        # Critically: NOT the Uniswap-V3 fallback NPM.
-        assert addr.lower() != UNISWAP_V3_NPM.lower()
+        assert addr is None
 
     def test_v3_resolution_unchanged(self):
         """Regression: V3-family slugs still resolve their canonical NPM."""
@@ -109,7 +107,10 @@ class TestSlipstreamNpmResolution:
 
     def test_miss_is_fail_closed(self):
         reader = LPPositionReader()
-        assert reader._resolve_position_manager("base", "aerodrome_slipstream") is not None
+        assert reader._resolve_position_manager("base", "aerodrome_slipstream") is None
+        # A declared CL protocol with no reviewed manager on this chain must
+        # not fall through to the chain's unrelated Uniswap V3 NPM.
+        assert reader._resolve_position_manager("optimism", "aerodrome_slipstream") is None
         # An entirely unknown protocol on an unknown chain stays None (the
         # uniswap_v3 fallback has no table for "notachain").
         assert reader._resolve_position_manager("notachain", "uniswap_v3") is None
@@ -170,11 +171,71 @@ class TestSlipstreamReadPositionRoutesLayout:
             tick_spacing=100, tick_lower=-50, tick_upper=50, liquidity=999
         )
         reader = self._reader_with_eth_call(hex_data)
-        pos = reader.read_position(chain="base", token_id=7, protocol="aerodrome_slipstream")
+        pos = reader.read_position(
+            chain="base",
+            token_id=7,
+            protocol="aerodrome_slipstream",
+            position_manager=SLIPSTREAM_NPM_BASE,
+        )
         assert pos is not None
         assert pos.fee is None
         assert pos.tick_spacing == 100
         assert pos.liquidity == 999
+
+    def test_same_token_id_is_scoped_to_the_exact_manager(self):
+        legacy_hex = _encode_slipstream_positions(
+            tick_spacing=100, tick_lower=-50, tick_upper=50, liquidity=111
+        )
+        current_hex = _encode_slipstream_positions(
+            tick_spacing=100, tick_lower=-50, tick_upper=50, liquidity=222
+        )
+        reader = LPPositionReader(gateway_client=MagicMock())
+        reader._eth_call = MagicMock(  # type: ignore[method-assign]
+            side_effect=lambda _chain, manager, _data: (
+                current_hex if manager.lower() == SLIPSTREAM_CURRENT_NPM_BASE.lower() else legacy_hex
+            )
+        )
+
+        current = reader.read_position(
+            chain="base",
+            token_id=7,
+            protocol="aerodrome_slipstream",
+            position_manager=SLIPSTREAM_CURRENT_NPM_BASE,
+        )
+        legacy = reader.read_position(
+            chain="base",
+            token_id=7,
+            protocol="aerodrome_slipstream",
+            position_manager=SLIPSTREAM_NPM_BASE,
+        )
+
+        assert current is not None and current.liquidity == 222
+        assert legacy is not None and legacy.liquidity == 111
+
+    def test_ambiguous_or_unreviewed_manager_never_calls_rpc(self):
+        reader = LPPositionReader(gateway_client=MagicMock())
+        reader._eth_call = MagicMock()  # type: ignore[method-assign]
+
+        assert reader.read_position(chain="base", token_id=7, protocol="aerodrome_slipstream") is None
+        assert (
+            reader.read_position(
+                chain="base",
+                token_id=7,
+                protocol="aerodrome_slipstream",
+                position_manager="0x" + "11" * 20,
+            )
+            is None
+        )
+        assert (
+            reader.read_position(
+                chain="optimism",
+                token_id=7,
+                protocol="aerodrome_slipstream",
+                position_manager="0x" + "22" * 20,
+            )
+            is None
+        )
+        reader._eth_call.assert_not_called()
 
     def test_v3_protocol_decodes_v3_layout(self):
         hex_data = _encode_v3_positions(fee=3000, tick_lower=-50, tick_upper=50, liquidity=777)
@@ -212,7 +273,11 @@ class TestSlipstreamEndToEndValuation:
             chain="base",
             protocol="aerodrome_slipstream",
             value_usd=Decimal("0"),
-            details={"token0": "WETH", "token1": "USDC"},
+            details={
+                "token0": "WETH",
+                "token1": "USDC",
+                "nft_manager_addr": SLIPSTREAM_NPM_BASE,
+            },
         )
 
         market = MagicMock()
@@ -227,3 +292,29 @@ class TestSlipstreamEndToEndValuation:
         assert enriched.get("valuation_source") == "on_chain"
         # Did NOT degrade to the no_path / UNAVAILABLE outcome.
         assert enriched.get("valuation_status") != "no_path"
+        valuer._lp_reader._eth_call.assert_called_once()  # type: ignore[attr-defined]
+        assert valuer._lp_reader._eth_call.call_args.args[1].lower() == SLIPSTREAM_NPM_BASE.lower()  # type: ignore[attr-defined]
+
+    def test_slipstream_position_without_manager_is_unavailable_without_rpc(self):
+        from almanak.framework.teardown.models import PositionInfo, PositionType
+        from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
+
+        valuer = PortfolioValuer()
+        valuer._lp_reader = LPPositionReader(gateway_client=MagicMock())
+        valuer._lp_reader._eth_call = MagicMock()  # type: ignore[method-assign]
+        position = PositionInfo(
+            position_type=PositionType.LP,
+            position_id="7",
+            chain="base",
+            protocol="aerodrome_slipstream",
+            value_usd=Decimal("0"),
+            details={"token0": "WETH", "token1": "USDC"},
+        )
+        market = MagicMock()
+
+        value_usd, enriched, repriced = valuer._reprice_position_enriched(position, "base", market)
+
+        assert repriced is False
+        assert value_usd == Decimal("0")
+        assert "valuation_source" not in enriched
+        valuer._lp_reader._eth_call.assert_not_called()  # type: ignore[attr-defined]

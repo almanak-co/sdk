@@ -32,6 +32,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from almanak.connectors._strategy_base.pool_validation_base import PoolValidationReason, PoolValidationResult
 from almanak.connectors.aerodrome import compiler as aerodrome_compiler
 from almanak.framework.intents.compiler_models import CompilationStatus
 from almanak.framework.intents.min_out_guard import UnprotectedTradeError
@@ -44,6 +45,12 @@ _TOKENS = {
     "WETH": ("0x4200000000000000000000000000000000000006", 18),
     "USDC": ("0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", 6),
 }
+
+_CONFIRMED_POOL = PoolValidationResult(
+    exists=True,
+    reason=PoolValidationReason.CONFIRMED,
+    pool_address="0x1111111111111111111111111111111111111111",
+)
 
 
 def _intent(**overrides) -> LPOpenIntent:
@@ -70,19 +77,117 @@ def _compiler() -> MagicMock:
 
 
 class TestSlipstreamLpOpenSafetyRefusal:
+    @pytest.mark.parametrize("risk_reduction, allowed", [(False, False), (True, True)])
+    def test_verifier_unavailability_preserves_only_risk_reduction(
+        self,
+        risk_reduction: bool,
+        allowed: bool,
+    ) -> None:
+        compiler = SimpleNamespace(
+            chain="base",
+            _ctx=SimpleNamespace(venue_verification_gateway_factory=None),
+        )
+
+        result = aerodrome_compiler._verify_slipstream_binding(
+            compiler=compiler,
+            pool_address=_CONFIRMED_POOL.pool_address,
+            token0_address=_TOKENS["WETH"][0],
+            token1_address=_TOKENS["USDC"][0],
+            tick_spacing=100,
+            expected_position_manager="0x" + "44" * 20,
+            intent_id="intent-1",
+            allow_unavailable_for_risk_reduction=risk_reduction,
+        )
+
+        if allowed:
+            assert result is None
+        else:
+            assert isinstance(result, aerodrome_compiler.CompilationResult)
+            assert result.is_safety_refusal is True
+
+    def test_verifier_registry_failure_preserves_only_risk_reduction(self) -> None:
+        compiler = SimpleNamespace(
+            chain="base",
+            _ctx=SimpleNamespace(venue_verification_gateway_factory=lambda: MagicMock()),
+        )
+
+        with patch(
+            "almanak.connectors._strategy_base.venue_verifier_registry.VenueVerifierRegistry",
+            side_effect=ImportError("broken provider"),
+        ):
+            result = aerodrome_compiler._verify_slipstream_binding(
+                compiler=compiler,
+                pool_address=_CONFIRMED_POOL.pool_address,
+                token0_address=_TOKENS["WETH"][0],
+                token1_address=_TOKENS["USDC"][0],
+                tick_spacing=100,
+                expected_position_manager="0x" + "44" * 20,
+                intent_id="intent-1",
+                allow_unavailable_for_risk_reduction=True,
+            )
+
+        assert result is None
+
+    def test_exact_venue_refusal_precedes_adapter_approval_and_mint(self) -> None:
+        """A named pool must be admitted before the money path is constructed."""
+
+        compiler = _compiler()
+        compiler._gateway_client = None
+        compiler._get_chain_rpc_url.return_value = "http://localhost:8545"
+        compiler._fetch_lp_pool_slot0.return_value = (2**96, 50)
+        compiler.default_lp_slippage = Decimal("0.99")
+        compiler.wallet_address = "0x" + "33" * 20
+        compiler.price_oracle = {}
+        refusal = aerodrome_compiler.CompilationResult(
+            status=CompilationStatus.FAILED,
+            error="factory mismatch",
+            is_safety_refusal=True,
+            intent_id="refusal",
+        )
+
+        with (
+            patch(
+                "almanak.connectors.aerodrome.pool_validation.validate_aerodrome_cl_pool",
+                return_value=_CONFIRMED_POOL,
+            ),
+            patch.object(aerodrome_compiler, "_resolve_slipstream_ticks", return_value=(0, 100)),
+            patch.object(
+                aerodrome_compiler,
+                "maybe_recompute_lp_amounts_from_slot0",
+                return_value=(10**16, 10_000_000),
+            ),
+            patch.object(aerodrome_compiler, "compute_lp_slippage_mins", return_value=(1, 1)),
+            patch.object(aerodrome_compiler, "_verify_slipstream_binding", return_value=refusal) as verify,
+            patch("almanak.connectors.aerodrome.AerodromeAdapter") as adapter_cls,
+        ):
+            result = aerodrome_compiler.compile_lp_open_aerodrome_slipstream(
+                compiler,
+                _intent(),
+            )
+
+        assert verify.called
+        assert result is refusal
+        adapter_cls.assert_not_called()
+
     def test_unprotected_trade_error_is_classified_as_a_safety_refusal(self) -> None:
         """FAILED alone is not enough — the classification is the thing under test.
 
         Asserting only ``status is FAILED`` would pass against the generic
         handler too, which is exactly the defect this test exists to catch.
         """
-        with patch.object(
-            aerodrome_compiler,
-            "_resolve_slipstream_ticks",
-            side_effect=UnprotectedTradeError(
-                "lp mint", "lp_slippage must be in [0, 1) (got 5)"
+        with (
+            patch(
+                "almanak.connectors.aerodrome.pool_validation.validate_aerodrome_cl_pool",
+                return_value=_CONFIRMED_POOL,
             ),
-        ) as injected:
+            patch.object(
+                aerodrome_compiler,
+                "_resolve_slipstream_ticks",
+                side_effect=UnprotectedTradeError(
+                    "lp mint", "lp_slippage must be in [0, 1) (got 5)"
+                ),
+            ) as injected,
+        ):
             result = aerodrome_compiler.compile_lp_open_aerodrome_slipstream(
                 _compiler(), _intent()
             )
@@ -103,10 +208,16 @@ class TestSlipstreamLpOpenSafetyRefusal:
         Marking every failure a safety refusal would be the mirror-image defect:
         real faults would stop counting toward the circuit breaker.
         """
-        with patch.object(
-            aerodrome_compiler,
-            "_resolve_slipstream_ticks",
-            side_effect=RuntimeError("pool read failed"),
+        with (
+            patch(
+                "almanak.connectors.aerodrome.pool_validation.validate_aerodrome_cl_pool",
+                return_value=_CONFIRMED_POOL,
+            ),
+            patch.object(
+                aerodrome_compiler,
+                "_resolve_slipstream_ticks",
+                side_effect=RuntimeError("pool read failed"),
+            ),
         ):
             result = aerodrome_compiler.compile_lp_open_aerodrome_slipstream(
                 _compiler(), _intent()
@@ -124,6 +235,10 @@ class TestSlipstreamLpOpenSafetyRefusal:
         """
         with (
             caplog.at_level(logging.ERROR, logger=aerodrome_compiler.logger.name),
+            patch(
+                "almanak.connectors.aerodrome.pool_validation.validate_aerodrome_cl_pool",
+                return_value=_CONFIRMED_POOL,
+            ),
             patch.object(
                 aerodrome_compiler,
                 "_resolve_slipstream_ticks",

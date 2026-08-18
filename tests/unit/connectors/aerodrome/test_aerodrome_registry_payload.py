@@ -26,8 +26,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import pytest
-
 from almanak.connectors.aerodrome.receipt_parser import (
     EVENT_TOPICS,
     AerodromeSlipstreamReceiptParser,
@@ -38,6 +36,7 @@ from almanak.framework.execution.extract_result import ExtractOk
 # ``AERODROME["base"]["cl_nft"]`` in ``almanak/core/contracts.py``). Mirrors
 # the constant used in ``test_aerodrome_receipt_parser_branches.py``.
 _SLIPSTREAM_NPM_BASE = "0x827922686190790b37229fd06084350e74485b72"
+_SLIPSTREAM_NPM_CURRENT = "0xe1f8cd9ac4e4a65f54f38a5cdafca44f6dd68b53"
 _SLIPSTREAM_POOL_MINT_TOPIC = (
     "0x7a53080ba414158be7ec69b987b5fb7d07dee101fe85488f0853ae16239d0bde"
 )
@@ -192,10 +191,9 @@ def _receipt(logs: list[dict[str, Any]], status: int = 1) -> dict[str, Any]:
 
 
 class TestNftManagerAddress:
-    def test_base_chain_returns_slipstream_npm(self) -> None:
+    def test_base_chain_with_multiple_managers_has_no_static_default(self) -> None:
         parser = AerodromeSlipstreamReceiptParser(chain="base")
-        # Lowercased — matches the parser-side normalization rule.
-        assert parser._nft_manager_address() == _SLIPSTREAM_NPM_BASE
+        assert parser._nft_manager_address() == ""
 
     def test_unsupported_chain_returns_empty_string(self) -> None:
         # "Empty != zero" — parser refuses to fabricate an NPM address.
@@ -205,6 +203,24 @@ class TestNftManagerAddress:
     def test_empty_chain_returns_empty_string(self) -> None:
         parser = AerodromeSlipstreamReceiptParser(chain="")
         assert parser._nft_manager_address() == ""
+
+    def test_receipt_selects_current_generation_without_guessing_a_default(self) -> None:
+        parser = AerodromeSlipstreamReceiptParser(chain="base")
+        receipt = _receipt([_increase_liquidity_log(npm=_SLIPSTREAM_NPM_CURRENT)])
+
+        assert parser._nft_manager_address(receipt) == _SLIPSTREAM_NPM_CURRENT
+        assert parser._nft_manager_address() == ""
+
+    def test_receipt_with_two_manager_generations_is_ambiguous(self) -> None:
+        parser = AerodromeSlipstreamReceiptParser(chain="base")
+        receipt = _receipt(
+            [
+                _increase_liquidity_log(npm=_SLIPSTREAM_NPM_BASE),
+                _increase_liquidity_log(npm=_SLIPSTREAM_NPM_CURRENT),
+            ]
+        )
+
+        assert parser._nft_manager_address(receipt) == ""
 
 
 # ---------------------------------------------------------------------------
@@ -674,12 +690,12 @@ class TestUv3HelperReuse:
         )
 
     def test_build_close_receipt_payload_with_slipstream_npm(self) -> None:
+        # Stand-in for LPCloseData — only the attributes the helper reads.
+        from types import SimpleNamespace
+
         from almanak.connectors.uniswap_v3.receipt_parser import (
             UniswapV3ReceiptParser,
         )
-
-        # Stand-in for LPCloseData — only the attributes the helper reads.
-        from types import SimpleNamespace
 
         lp_close = SimpleNamespace(
             amount0_collected=1_000_500,
@@ -712,7 +728,7 @@ class TestRunnerIntegrationShape:
         parser = AerodromeSlipstreamReceiptParser(chain="base")
         # Method must exist (not e.g. a typo on the parser); runner relies
         # on this exact name across all UV3-family parsers.
-        assert callable(getattr(parser, "_decreaseliquidity_token_id"))
+        assert callable(parser._decreaseliquidity_token_id)
 
     def test_extract_registry_payload_open_signature_matches_runner(self) -> None:
         parser = AerodromeSlipstreamReceiptParser(chain="base")

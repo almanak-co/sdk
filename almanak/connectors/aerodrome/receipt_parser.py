@@ -279,6 +279,16 @@ class TransferEventData:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class _SlipstreamIncrease:
+    """Decoded money fields from one NPM ``IncreaseLiquidity`` log."""
+
+    token_id: int
+    liquidity: int
+    amount0: int
+    amount1: int
+
+
 @dataclass
 class ParsedSwapResult:
     """High-level swap result extracted from receipt."""
@@ -1913,23 +1923,22 @@ _SLIPSTREAM_POOL_BURN_TOPIC = "0x0c396cd989a39f4459b5fa1aed6a9a8dcdbc45908acfd67
 _SLIPSTREAM_SWAP_CL_TOPIC = EVENT_TOPICS["SwapCL"].lower()
 
 
-# Aerodrome Slipstream NonfungiblePositionManager addresses, sourced from the
-# canonical contracts registry (single source of truth — `AERODROME` in
-# ``almanak/core/contracts.py``). Slipstream is a Base-only deployment today;
-# adding a new chain is a one-line change in ``contracts.py`` and this dict
-# rebuilds automatically.
-def _build_slipstream_npm_addresses() -> dict[str, str]:
-    from .addresses import AERODROME
+# Reviewed Aerodrome Slipstream NonfungiblePositionManager generations,
+# sourced from the connector-owned deployment registry. Slipstream is a
+# Base-only deployment today; adding another chain or manager is an explicit
+# reviewed registry change rather than implicit address discovery.
+def _build_slipstream_npm_addresses() -> dict[str, tuple[str, ...]]:
+    from .addresses import SLIPSTREAM_LP_DEPLOYMENTS, slipstream_lp_deployments
 
-    out: dict[str, str] = {}
-    for chain, entry in AERODROME.items():
-        cl_nft = entry.get("cl_nft")
-        if cl_nft:
-            out[chain.lower()] = cl_nft.lower()
+    out: dict[str, tuple[str, ...]] = {}
+    for chain in SLIPSTREAM_LP_DEPLOYMENTS:
+        managers = tuple(deployment.position_manager.lower() for deployment in slipstream_lp_deployments(chain))
+        if managers:
+            out[chain] = managers
     return out
 
 
-_SLIPSTREAM_NPM_ADDRESSES: dict[str, str] = _build_slipstream_npm_addresses()
+_SLIPSTREAM_NPM_ADDRESSES: dict[str, tuple[str, ...]] = _build_slipstream_npm_addresses()
 
 SLIPSTREAM_RECEIPT_SPEC = V3ForkSpec(
     protocol_name="Aerodrome Slipstream",
@@ -1946,7 +1955,13 @@ SLIPSTREAM_RECEIPT_SPEC = V3ForkSpec(
         "DecreaseLiquidity": AerodromeEventType.UNKNOWN,
         "CollectCL": AerodromeEventType.UNKNOWN,
     },
-    position_manager_addresses=_SLIPSTREAM_NPM_ADDRESSES,
+    # The shared V3 spec owns one canonical manager per chain. Slipstream's
+    # receipt override below resolves the exact observed manager across every
+    # reviewed generation, while the canonical entry keeps the shared facade's
+    # single-manager contract intact.
+    position_manager_addresses={
+        chain: managers[0] for chain, managers in _SLIPSTREAM_NPM_ADDRESSES.items() if managers
+    },
     strict_decode_fields={
         "Swap": frozenset(
             {
@@ -2075,6 +2090,9 @@ class AerodromeSlipstreamReceiptParser(V3ForkReceiptParser, AerodromeReceiptPars
             NFT tokenId as string (e.g. "12345"), or None if not found
         """
         try:
+            npm_address = self._nft_manager_address(receipt)
+            if not npm_address:
+                return None
             logs = receipt.get("logs", [])
             for log in logs:
                 topics = log.get("topics", [])
@@ -2090,6 +2108,11 @@ class AerodromeSlipstreamReceiptParser(V3ForkReceiptParser, AerodromeReceiptPars
                 if not topic0.startswith("0x"):
                     topic0 = "0x" + topic0
                 if topic0.lower() != _ERC721_TRANSFER_TOPIC:
+                    continue
+                address = log.get("address", "")
+                if isinstance(address, bytes):
+                    address = "0x" + address.hex()
+                if str(address).lower() != npm_address:
                     continue
 
                 # Check if from == zero_address (mint)
@@ -2148,7 +2171,67 @@ class AerodromeSlipstreamReceiptParser(V3ForkReceiptParser, AerodromeReceiptPars
             logger.warning(f"Failed to extract Slipstream CL liquidity: {e}")
             return None
 
-    def extract_lp_open_data(self, receipt: dict[str, Any]) -> "LPOpenData | None":  # noqa: C901
+    @classmethod
+    def _slipstream_log_fields(cls, log: Any) -> tuple[list[Any], str, Any]:
+        """Return topics, normalized emitter, and data for mapping/object logs."""
+        if hasattr(log, "get"):
+            topics = log.get("topics", [])
+            address = log.get("address", "")
+            data = log.get("data", "")
+        else:
+            topics = getattr(log, "topics", [])
+            address = getattr(log, "address", "")
+            data = getattr(log, "data", "")
+        return topics, cls._normalize_address(address), data
+
+    @staticmethod
+    def _decode_slipstream_increase(topics: list[Any], data: Any) -> _SlipstreamIncrease | None:
+        """Decode one candidate NPM increase, preserving missing/error semantics."""
+        if len(topics) < 2:
+            return None
+        token_id_topic = V3ForkReceiptParser._normalize_topic(topics[1])
+        try:
+            token_id = int(token_id_topic, 16)
+        except (ValueError, TypeError):
+            return None
+
+        normalized = HexDecoder.normalize_hex(data)
+        if not normalized or normalized == "0x":
+            return None
+        try:
+            return _SlipstreamIncrease(
+                token_id=token_id,
+                liquidity=HexDecoder.decode_uint256(normalized, 0),
+                amount0=HexDecoder.decode_uint256(normalized, 32),
+                amount1=HexDecoder.decode_uint256(normalized, 64),
+            )
+        except Exception as exc:
+            raise ValueError(f"Malformed IncreaseLiquidity payload at offset 0-96: {exc}") from exc
+
+    def _find_slipstream_open(
+        self,
+        logs: list[Any],
+        npm_address: str,
+    ) -> tuple[_SlipstreamIncrease, Any | None] | None:
+        """Pair the first valid NPM increase with its latest NPM-owned Pool Mint."""
+        last_npm_mint: Any | None = None
+        for log in logs:
+            topics, address, data = self._slipstream_log_fields(log)
+            if not topics:
+                continue
+            first_topic = self._normalize_topic(topics[0])
+            if first_topic == _SLIPSTREAM_POOL_MINT_TOPIC:
+                if len(topics) >= 4 and self._mint_owner_matches_npm(topics, npm_address):
+                    last_npm_mint = log
+                continue
+            if address != npm_address or first_topic != _INCREASE_LIQUIDITY_TOPIC:
+                continue
+            increase = self._decode_slipstream_increase(topics, data)
+            if increase is not None:
+                return increase, last_npm_mint
+        return None
+
+    def extract_lp_open_data(self, receipt: dict[str, Any]) -> "LPOpenData | None":
         """Extract LP open data from a Slipstream CL mint receipt.
 
         Looks for ``IncreaseLiquidity`` events emitted by the Aerodrome
@@ -2191,138 +2274,58 @@ class AerodromeSlipstreamReceiptParser(V3ForkReceiptParser, AerodromeReceiptPars
             return None
 
         chain_key = (self.chain or "").lower()
-        npm_address = _SLIPSTREAM_NPM_ADDRESSES.get(chain_key)
+        npm_address = self._nft_manager_address(receipt)
         if not npm_address:
-            # Fail loud on unsupported chains rather than defaulting to Base.
-            # A silent fallback would mis-attribute logs once Slipstream ships
-            # on a second chain — the parser's address-filter would reject
-            # every IncreaseLiquidity from the real NPM, silently returning
-            # ``LPOpenData = None`` and breaking LP accounting.
-            logger.warning(
-                "Slipstream NPM not registered for chain %r — extend "
-                "almanak.core.contracts.AERODROME[<chain>]['cl_nft']",
-                chain_key,
-            )
+            if chain_key not in _SLIPSTREAM_NPM_ADDRESSES:
+                # Fail loud on unsupported chains rather than defaulting to
+                # Base. An ordinary approval receipt on a supported chain has
+                # no NPM emitter and is simply not an LP-open receipt.
+                logger.warning(
+                    "Slipstream NPM not registered for chain %r; no reviewed deployment is available",
+                    chain_key,
+                )
+            else:
+                logger.debug(
+                    "No unique reviewed Slipstream NPM emitted this receipt on chain %r; "
+                    "not an LP-open receipt, or manager identity is ambiguous",
+                    chain_key,
+                )
             return None
 
-        last_npm_mint: dict[str, Any] | None = None
+        match = self._find_slipstream_open(logs, npm_address)
+        if match is None:
+            return None
+        increase, pool_mint = match
+        tick_lower, tick_upper = self._ticks_from_pool_mint(pool_mint)
+        pool_address = self._slipstream_log_fields(pool_mint)[1] if pool_mint is not None else ""
+        current_tick = self._current_tick_from_swap_cl(logs, pool_address)
 
-        for log in logs:
-            if hasattr(log, "get"):
-                topics = log.get("topics", [])
-                address = log.get("address", "")
-                data = log.get("data", "")
-            else:
-                topics = getattr(log, "topics", [])
-                address = getattr(log, "address", "")
-                data = getattr(log, "data", "")
+        logger.info(
+            f"Extracted Slipstream LP open data: tokenId={increase.token_id} "
+            f"liquidity={increase.liquidity} amount0={increase.amount0} amount1={increase.amount1} "
+            f"ticks=[{tick_lower}, {tick_upper}] current_tick={current_tick}"
+        )
+        # VIB-6053 — bind leg IDENTITY to the amounts just decoded (CL pool slot
+        # order, which may be the OPPOSITE of the user's pool label). See the
+        # uniswap_v3 twin for the full rationale.
+        currency0, currency1 = currencies_for_amounts(
+            transfers_by_token(logs, chain=self.chain, to_address=pool_address) if pool_address else {},
+            increase.amount0,
+            increase.amount1,
+        )
 
-            if isinstance(address, bytes):
-                address = "0x" + address.hex()
-            address = str(address).lower()
-
-            if not topics:
-                continue
-
-            first_topic = topics[0]
-            if isinstance(first_topic, bytes):
-                first_topic = "0x" + first_topic.hex()
-            first_topic = str(first_topic).lower()
-            if not first_topic.startswith("0x"):
-                first_topic = "0x" + first_topic
-
-            # Track the most recent Pool Mint emitted with owner == NPM. The
-            # next matching IncreaseLiquidity claims ITS ticks (and pool
-            # address) — a multi-position bundle won't cross-contaminate.
-            if first_topic == _SLIPSTREAM_POOL_MINT_TOPIC and len(topics) >= 4:
-                if self._mint_owner_matches_npm(topics, npm_address):
-                    last_npm_mint = log
-                continue
-
-            if address != npm_address:
-                continue
-
-            if len(topics) < 2:
-                continue
-
-            if first_topic != _INCREASE_LIQUIDITY_TOPIC:
-                continue
-
-            token_id_topic = topics[1]
-            if isinstance(token_id_topic, bytes):
-                token_id_topic = "0x" + token_id_topic.hex()
-            token_id_topic = str(token_id_topic)
-            if not token_id_topic.startswith("0x"):
-                token_id_topic = "0x" + token_id_topic
-
-            try:
-                token_id = int(token_id_topic, 16)
-            except (ValueError, TypeError):
-                continue
-
-            normalized = HexDecoder.normalize_hex(data)
-            if not normalized or normalized == "0x":
-                continue
-
-            # IncreaseLiquidity data layout: liquidity (uint128, left-padded
-            # to 32 bytes), amount0 (uint256), amount1 (uint256). Reading the
-            # first slot as uint256 is equivalent to uint128 because the high
-            # 16 bytes are zero — matches the Uniswap V3 baseline behaviour.
-            # Decode failures here represent a malformed receipt (NPM emitted
-            # a structurally-invalid IncreaseLiquidity log), NOT a missing
-            # event. Propagate so ``extract_lp_open_data_result`` wraps as
-            # ``ExtractError`` rather than ``ExtractMissing`` (VIB-3159 /
-            # Blueprint 19 fail-closed disambiguation).
-            try:
-                liquidity = HexDecoder.decode_uint256(normalized, 0)
-                amount0 = HexDecoder.decode_uint256(normalized, 32)
-                amount1 = HexDecoder.decode_uint256(normalized, 64)
-            except Exception as exc:
-                raise ValueError(f"Malformed IncreaseLiquidity payload at offset 0-96: {exc}") from exc
-
-            tick_lower, tick_upper = self._ticks_from_pool_mint(last_npm_mint)
-
-            pool_address = ""
-            if last_npm_mint is not None:
-                addr_attr = (
-                    last_npm_mint.get("address")
-                    if hasattr(last_npm_mint, "get")
-                    else getattr(last_npm_mint, "address", "")
-                )
-                if isinstance(addr_attr, bytes):
-                    addr_attr = "0x" + addr_attr.hex()
-                pool_address = str(addr_attr).lower()
-
-            current_tick = self._current_tick_from_swap_cl(logs, pool_address)
-
-            logger.info(
-                f"Extracted Slipstream LP open data: tokenId={token_id} "
-                f"liquidity={liquidity} amount0={amount0} amount1={amount1} "
-                f"ticks=[{tick_lower}, {tick_upper}] current_tick={current_tick}"
-            )
-            # VIB-6053 — bind leg IDENTITY to the amounts just decoded (CL pool slot
-            # order, which may be the OPPOSITE of the user's pool label). See the
-            # uniswap_v3 twin for the full rationale.
-            currency0, currency1 = currencies_for_amounts(
-                transfers_by_token(logs, chain=self.chain, to_address=pool_address) if pool_address else {},
-                amount0,
-                amount1,
-            )
-
-            return LPOpenData(
-                position_id=token_id,
-                tick_lower=tick_lower,
-                tick_upper=tick_upper,
-                liquidity=liquidity,
-                amount0=amount0,
-                amount1=amount1,
-                current_tick=current_tick,
-                pool_address=pool_address,
-                currency0=currency0,  # VIB-6053 — index-aligned with amount0
-                currency1=currency1,  # VIB-6053 — index-aligned with amount1
-            )
-
-        return None
+        return LPOpenData(
+            position_id=increase.token_id,
+            tick_lower=tick_lower,
+            tick_upper=tick_upper,
+            liquidity=increase.liquidity,
+            amount0=increase.amount0,
+            amount1=increase.amount1,
+            current_tick=current_tick,
+            pool_address=pool_address,
+            currency0=currency0,  # VIB-6053 — index-aligned with amount0
+            currency1=currency1,  # VIB-6053 — index-aligned with amount1
+        )
 
     @staticmethod
     def _mint_owner_matches_npm(topics: list[Any], npm_address: str) -> bool:
@@ -2695,6 +2698,44 @@ class AerodromeSlipstreamReceiptParser(V3ForkReceiptParser, AerodromeReceiptPars
     # is Slipstream-specific because the emitter addresses and event
     # signatures differ from canonical UniV3.
 
+    def _nft_manager_address(self, receipt: dict[str, Any] | None = None) -> str:
+        """Return the unique reviewed Slipstream NPM observed in ``receipt``.
+
+        Sourced from ``_SLIPSTREAM_NPM_ADDRESSES`` (built at import time from
+        the connector-owned reviewed deployment registry). The observed
+        address is part of the ``physical_identity_hash`` input tuple and is
+        derived from receipt emitters without an off-chain RPC call.
+
+        Returns an empty string when no NPM is registered for the chain,
+        matching the "Empty ≠ zero" contract: the caller (registry-payload
+        builder) refuses to compose a payload on empty.
+        """
+        managers = _SLIPSTREAM_NPM_ADDRESSES.get((self.chain or "").lower(), ())
+        if not managers:
+            return ""
+        if receipt is None:
+            # Compatibility-only inspection path. Production payload builders
+            # always supply the receipt and derive the physical authority from
+            # its emitter rather than assuming one generation.
+            return managers[0] if len(managers) == 1 else ""
+
+        observed: set[str] = set()
+        for log in receipt.get("logs") or []:
+            address = log.get("address", "") if hasattr(log, "get") else getattr(log, "address", "")
+            if isinstance(address, bytes):
+                address = "0x" + address.hex()
+            normalized = str(address).lower()
+            if normalized in managers:
+                observed.add(normalized)
+        if len(observed) != 1:
+            return ""
+        return next(iter(observed))
+
+    def _nft_manager_address_from_receipt(self, receipt: dict[str, Any]) -> str:
+        """Return the unique reviewed manager that emitted this receipt."""
+
+        return self._nft_manager_address(receipt)
+
     def _decreaseliquidity_token_id(self, receipt: dict[str, Any]) -> int | None:
         """Recover ``tokenId`` from a ``DecreaseLiquidity`` log on the close
         receipt.
@@ -2718,7 +2759,7 @@ class AerodromeSlipstreamReceiptParser(V3ForkReceiptParser, AerodromeReceiptPars
         logs = receipt.get("logs") or []
         if not logs:
             return None
-        npm_address = self._nft_manager_address()
+        npm_address = self._nft_manager_address(receipt)
         if not npm_address:
             return None
 
@@ -2854,12 +2895,10 @@ class AerodromeSlipstreamReceiptParser(V3ForkReceiptParser, AerodromeReceiptPars
             return None
         if lp_data.liquidity is None:
             return None
-        nft_manager_addr = self._nft_manager_address()
+        nft_manager_addr = self._nft_manager_address(receipt)
         if not nft_manager_addr:
-            # No NPM registered for this chain → refuse to emit a payload
-            # with an empty identity component. ``_SLIPSTREAM_NPM_ADDRESSES``
-            # is the single source of truth; extending Slipstream to a new
-            # chain is a one-line ``AERODROME[<chain>]['cl_nft']`` change.
+            # No unique reviewed NPM emitted the receipt: refuse to emit a
+            # payload with an empty or ambiguous physical authority.
             return None
 
         payload: dict[str, Any] = {
@@ -2952,7 +2991,7 @@ class AerodromeSlipstreamReceiptParser(V3ForkReceiptParser, AerodromeReceiptPars
         ):
             return None
 
-        nft_manager_addr = self._nft_manager_address()
+        nft_manager_addr = self._nft_manager_address(receipt)
         if not nft_manager_addr:
             return None
 

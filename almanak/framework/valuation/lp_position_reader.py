@@ -153,7 +153,9 @@ class LPPositionReader:
             chain: Chain identifier (e.g., "arbitrum", "base")
             token_id: Position NFT token ID
             protocol: Protocol name for address lookup
-            position_manager: Override position manager address
+            position_manager: Exact position-manager authority. Slipstream
+                overrides must name a reviewed deployment on the requested
+                chain; an arbitrary address is unavailable, never queried.
 
         Returns:
             LPPositionOnChain with full position data, or None on failure
@@ -165,6 +167,12 @@ class LPPositionReader:
         if not pm_address:
             logger.debug("No position manager address for %s on %s", protocol, chain)
             return None
+        reviewed_managers = self._reviewed_cl_position_managers(chain, protocol)
+        if _is_slipstream_protocol(protocol) and pm_address.lower() not in {
+            manager.lower() for manager in reviewed_managers
+        }:
+            logger.warning("Unreviewed CL position manager for %s on %s: %s", protocol, chain, pm_address)
+            return None
 
         # Build eth_call: positions(uint256 tokenId)
         token_id_hex = hex(token_id)[2:].zfill(64)
@@ -175,6 +183,21 @@ class LPPositionReader:
             return None
 
         return _parse_position_hex(result_hex, token_id, slipstream=_is_slipstream_protocol(protocol))
+
+    @staticmethod
+    def _reviewed_cl_position_managers(chain: str, protocol: str) -> tuple[str, ...]:
+        """Return every connector-declared CL manager authority for the chain."""
+        descriptor = ChainRegistry.try_resolve(chain)
+        canonical = descriptor.name if descriptor is not None else chain.lower()
+        kinds = CONTRACT_ROLE_REGISTRY.kinds_for(protocol, ContractRole.CL_POSITION_MANAGER)
+        if not kinds:
+            return ()
+        address_protocol = CONTRACT_ROLE_REGISTRY.address_protocol(protocol)
+        return tuple(
+            address
+            for kind in kinds
+            if (address := AddressRegistry.resolve_contract_address(address_protocol, canonical, (kind,))) is not None
+        )
 
     def read_pool_slot0(
         self,
@@ -287,7 +310,10 @@ class LPPositionReader:
         Resolution order (connector-owned throughout — never a hardcoded
         address):
 
-        1. **Contract-role ``CL_POSITION_MANAGER``** (VIB-5141). The
+        1. **Connector-declared CL manager inventory.** A manager is inferred only
+           when the requested chain has exactly one reviewed authority.
+           Multi-generation chains require the physical manager authority.
+        2. **Contract-role ``CL_POSITION_MANAGER``** (VIB-5141). The
            ``CONTRACT_ROLE_REGISTRY`` knows each connector's semantic-role →
            private-kind map *and* its ``address_protocol`` alias, so it
            resolves slugs that ``AddressRegistry`` cannot see directly — the
@@ -299,10 +325,10 @@ class LPPositionReader:
            the *fungible*-LP router (a swap router / LBRouter), which is not a
            ``positions(uint256)`` NFT manager and must not be fed to this
            V3-shaped reader.
-        2. **Legacy AddressRegistry kinds** (``position_manager`` / ``nft`` —
+        3. **Legacy AddressRegistry kinds** (``position_manager`` / ``nft`` —
            PancakeSwap records its NPM under ``nft``) for V3-family slugs that
            predate the role registry.
-        3. **Uniswap V3 fallback** — unknown protocols share the V3 interface.
+        4. **Uniswap V3 fallback** — unknown protocols share the V3 interface.
 
         The chain is alias-normalized first (legacy dicts were keyed ``"bnb"``
         while callers / connector tables use canonical ``"bsc"``). Misses stay
@@ -311,6 +337,15 @@ class LPPositionReader:
         """
         descriptor = ChainRegistry.try_resolve(chain)
         canonical = descriptor.name if descriptor is not None else chain.lower()
+
+        if _is_slipstream_protocol(protocol):
+            reviewed_managers = self._reviewed_cl_position_managers(canonical, protocol)
+            if len(reviewed_managers) != 1:
+                # Token IDs are scoped to their ERC-721 manager. Once multiple
+                # reviewed generations exist, guessing either one can return a
+                # real but unrelated NFT and fabricate a confident valuation.
+                return None
+            return reviewed_managers[0]
 
         role_addr = self._resolve_npm_by_role(protocol, canonical)
         if role_addr:

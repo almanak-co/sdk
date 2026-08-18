@@ -20,11 +20,13 @@ from almanak.connectors._strategy_base.pool_validation_base import (
     decode_address,
     eth_call,
 )
+from almanak.connectors.aerodrome.addresses import SlipstreamDeployment, slipstream_lp_deployments
 
 if TYPE_CHECKING:
     from almanak.framework.gateway_client import GatewayClient
 
 __all__ = [
+    "encode_aerodrome_cl_get_pool",
     "validate_aerodrome_cl_pool",
     "validate_aerodrome_pool",
 ]
@@ -45,7 +47,7 @@ def _encode_get_pool_aerodrome(token_a: str, token_b: str, stable: bool) -> str:
     return _AERODROME_GET_POOL_SELECTOR + a + b + s
 
 
-def _encode_get_pool_aerodrome_cl(token_a: str, token_b: str, tick_spacing: int) -> str:
+def encode_aerodrome_cl_get_pool(token_a: str, token_b: str, tick_spacing: int) -> str:
     """Encode getPool(address,address,int24) calldata for Aerodrome CL factory."""
     a = token_a.lower().replace("0x", "").zfill(64)
     b = token_b.lower().replace("0x", "").zfill(64)
@@ -125,6 +127,7 @@ def validate_aerodrome_cl_pool(
     tick_spacing: int,
     rpc_url: str | None,
     gateway_client: GatewayClient | None = None,
+    deployment: SlipstreamDeployment | None = None,
 ) -> PoolValidationResult:
     """Validate that an Aerodrome Slipstream (CL) pool exists on-chain.
 
@@ -135,6 +138,7 @@ def validate_aerodrome_cl_pool(
         tick_spacing: CL pool tick spacing (e.g. 100).
         rpc_url: RPC URL for on-chain query. If None, returns unknown unless gateway_client is available.
         gateway_client: Optional connected gateway client for gateway-routed eth_call.
+        deployment: Optional exact connector-reviewed factory/NPM generation.
 
     Returns:
         PoolValidationResult with exists=True/False/None.
@@ -146,7 +150,13 @@ def validate_aerodrome_cl_pool(
             warning=f"No RPC URL available — cannot verify Aerodrome CL pool existence on {chain}",
         )
 
-    cl_factory = AddressRegistry.resolve_contract_address("aerodrome", chain, "cl_factory")
+    cl_factory: str | None
+    if deployment is not None:
+        if type(deployment) is not SlipstreamDeployment or deployment not in slipstream_lp_deployments(chain):
+            raise ValueError(f"unreviewed Slipstream deployment for chain {chain}")
+        cl_factory = deployment.factory
+    else:
+        cl_factory = AddressRegistry.resolve_contract_address("aerodrome", chain, "cl_factory")
     if not cl_factory:
         return PoolValidationResult(
             exists=None,
@@ -154,7 +164,7 @@ def validate_aerodrome_cl_pool(
             warning=f"No Aerodrome CL factory address for chain '{chain}' — cannot verify pool existence",
         )
 
-    calldata = _encode_get_pool_aerodrome_cl(token_a, token_b, tick_spacing)
+    calldata = encode_aerodrome_cl_get_pool(token_a, token_b, tick_spacing)
     raw = eth_call(rpc_url or "", cl_factory, calldata, chain=chain, gateway_client=gateway_client)
 
     if raw is None:

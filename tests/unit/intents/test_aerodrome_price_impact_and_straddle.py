@@ -302,6 +302,7 @@ def _patches():
             "almanak.connectors.aerodrome.pool_validation.validate_aerodrome_cl_pool", return_value=_confirmed_cl_pool()
         ),
         patch("almanak.framework.intents.lp_math.recompute_lp_amounts", return_value=(100, 200)),
+        patch("almanak.connectors.aerodrome.compiler._verify_slipstream_binding", return_value=None),
         patch("almanak.connectors.aerodrome.AerodromeConfig"),
         patch("almanak.connectors.aerodrome.AerodromeAdapter"),
     )
@@ -311,8 +312,8 @@ def test_slipstream_lp_open_rejects_out_of_range_below_current_tick() -> None:
     """Range entirely below the current tick must FAIL with a straddle error."""
     compiler = _FakeLpCompiler(current_tick=0)
     intent = _make_lp_open_intent(-5000, -2000)  # both < 0
-    p1, p2, p3, p4 = _patches()
-    with p1, p2, p3, p4 as adapter_cls:
+    p1, p2, p3, p4, p5 = _patches()
+    with p1, p2, p3, p4, p5 as adapter_cls:
         adapter_cls.return_value.add_cl_liquidity.return_value = _cl_adapter_result()
         result = compile_lp_open_aerodrome_slipstream(compiler, intent)
 
@@ -324,8 +325,8 @@ def test_slipstream_lp_open_rejects_out_of_range_above_current_tick() -> None:
     """Range entirely above the current tick must also FAIL."""
     compiler = _FakeLpCompiler(current_tick=0)
     intent = _make_lp_open_intent(2000, 5000)  # both > 0
-    p1, p2, p3, p4 = _patches()
-    with p1, p2, p3, p4 as adapter_cls:
+    p1, p2, p3, p4, p5 = _patches()
+    with p1, p2, p3, p4, p5 as adapter_cls:
         adapter_cls.return_value.add_cl_liquidity.return_value = _cl_adapter_result()
         result = compile_lp_open_aerodrome_slipstream(compiler, intent)
 
@@ -337,8 +338,8 @@ def test_slipstream_lp_open_allows_in_range_straddling_position() -> None:
     """A range straddling the current tick must compile."""
     compiler = _FakeLpCompiler(current_tick=0)
     intent = _make_lp_open_intent(-2000, 2000)  # straddles 0
-    p1, p2, p3, p4 = _patches()
-    with p1, p2, p3, p4 as adapter_cls:
+    p1, p2, p3, p4, p5 = _patches()
+    with p1, p2, p3, p4, p5 as adapter_cls:
         adapter_cls.return_value.add_cl_liquidity.return_value = _cl_adapter_result()
         result = compile_lp_open_aerodrome_slipstream(compiler, intent)
 
@@ -349,8 +350,8 @@ def test_slipstream_lp_open_out_of_range_opt_in_compiles() -> None:
     """allow_out_of_range=True must permit a deliberate one-sided range."""
     compiler = _FakeLpCompiler(current_tick=0)
     intent = _make_lp_open_intent(-5000, -2000, allow_oor=True)
-    p1, p2, p3, p4 = _patches()
-    with p1, p2, p3, p4 as adapter_cls:
+    p1, p2, p3, p4, p5 = _patches()
+    with p1, p2, p3, p4, p5 as adapter_cls:
         adapter_cls.return_value.add_cl_liquidity.return_value = _cl_adapter_result()
         result = compile_lp_open_aerodrome_slipstream(compiler, intent)
 
@@ -365,8 +366,8 @@ def test_slipstream_lp_open_out_of_range_opt_in_still_warns() -> None:
     """
     compiler = _FakeLpCompiler(current_tick=0)
     intent = _make_lp_open_intent(-5000, -2000, allow_oor=True)
-    p1, p2, p3, p4 = _patches()
-    with p1, p2, p3, p4 as adapter_cls:
+    p1, p2, p3, p4, p5 = _patches()
+    with p1, p2, p3, p4, p5 as adapter_cls:
         adapter_cls.return_value.add_cl_liquidity.return_value = _cl_adapter_result()
         result = compile_lp_open_aerodrome_slipstream(compiler, intent)
 
@@ -378,8 +379,8 @@ def test_slipstream_lp_open_in_range_has_no_spot_warning() -> None:
     """Straddling range: no straddle failure AND no spot-exclusion warning."""
     compiler = _FakeLpCompiler(current_tick=0)
     intent = _make_lp_open_intent(-2000, 2000)
-    p1, p2, p3, p4 = _patches()
-    with p1, p2, p3, p4 as adapter_cls:
+    p1, p2, p3, p4, p5 = _patches()
+    with p1, p2, p3, p4, p5 as adapter_cls:
         adapter_cls.return_value.add_cl_liquidity.return_value = _cl_adapter_result()
         result = compile_lp_open_aerodrome_slipstream(compiler, intent)
 

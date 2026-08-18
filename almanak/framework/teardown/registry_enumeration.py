@@ -74,20 +74,28 @@ def _lp_identity(position: PositionInfo) -> str:
     Resolution is delegated to :func:`resolve_nft_token_id` — THE single
     id-resolution rule shared with the TD-14 post-condition hooks and the
     Plan-A chain-verify — so the union agrees with the verifying lanes about
-    which position is which. When a numeric NFT id resolves, it IS the identity
-    (prefixed to keep it disjoint from raw-string keys); otherwise the raw
-    ``position_id`` remains the key (non-NFT LP venues, e.g. Liquidity Book).
+    which position is which. When a numeric NFT id resolves, its ERC-721 manager
+    authority is part of the identity whenever the producer supplied it. This
+    matters for multi-generation venues such as Slipstream: token IDs are local
+    counters on each NPM, so ``(manager A, 42)`` and ``(manager B, 42)`` are two
+    physical positions. Otherwise the raw ``position_id`` remains the key
+    (non-NFT LP venues, e.g. Liquidity Book).
 
     The protocol label is deliberately NOT part of the key: registry rows are
     labelled with the registry primitive (``lp`` / ``lp_v4``), never a real
     connector slug, so including it would re-split the pair this key exists to
-    collapse. A cross-protocol numeric collision (two NFT venues minting the
-    same token id to the same deployment on the same chain) would at worst
-    suppress a registry-derived row — a visibility/count entry that never
-    builds closing intents (see :func:`_position_info_from_registry_row`).
+    collapse. Older/single-manager rows without authority metadata retain the
+    historical token-only key. A manager-qualified row never aliases that
+    unqualified fallback, so missing authority degrades toward a loud duplicate
+    rather than suppressing a distinct physical NFT.
     """
     token_id = resolve_nft_token_id(position)
     if token_id is not None:
+        details = position.details if isinstance(position.details, dict) else {}
+        raw_manager = details.get("nft_manager_addr") or details.get("position_manager") or details.get("nft_manager")
+        manager = str(raw_manager).strip().lower() if raw_manager else ""
+        if manager:
+            return f"nft:{manager}:{token_id}"
         return f"nft:{token_id}"
     return str(position.position_id)
 
@@ -419,6 +427,9 @@ def _position_info_from_registry_row(row: Any, *, primitive: str) -> PositionInf
     details: dict[str, Any] = {"source": "position_registry"}
     if pool:
         details["pool"] = str(pool)
+    nft_manager_addr = payload.get("nft_manager_addr") or payload.get("position_manager")
+    if nft_manager_addr:
+        details["nft_manager_addr"] = str(nft_manager_addr)
     for key in ("tick_lower", "tick_upper", "liquidity", "fee_tier"):
         value = payload.get(key)
         if value is not None:

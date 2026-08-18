@@ -519,6 +519,30 @@ class TestLookupOpenRegistryPayload:
         assert out["opened_tx"] == "0xdeadbeef"
 
     @pytest.mark.asyncio
+    async def test_same_token_id_is_disambiguated_by_position_manager(self) -> None:
+        current = "0xe1f8cd9ac4e4a65f54f38a5cdafca44f6dd68b53"
+        legacy = "0x827922686190790b37229fd06084350e74485b72"
+        rows = [
+            {"payload": {"token_id": "42", "nft_manager_addr": legacy, "pool_address": "0xlegacy"}},
+            {"payload": {"token_id": "42", "nft_manager_addr": current, "pool_address": "0xcurrent"}},
+        ]
+        runner = self._runner(rows=rows)
+
+        out = await StrategyRunner._lookup_open_registry_payload(
+            runner,
+            deployment_id="dep-1",
+            chain="base",
+            token_id=42,
+            receipt={"logs": []},
+            parser=SimpleNamespace(),
+            nft_manager_addr=current.upper(),
+        )
+
+        assert out is not None
+        assert out["pool_address"] == "0xcurrent"
+        assert out["nft_manager_addr"] == current
+
+    @pytest.mark.asyncio
     async def test_non_matching_token_id_returns_none(self) -> None:
         rows = [{"payload": {"token_id": "999", "pool_address": "0xabc"}}]
         runner = self._runner(rows=rows)
@@ -763,6 +787,58 @@ class TestUpdateLpRegistryIdCache:
         assert hasattr(runner, "_lp_registry_id_cache")
         for slug in _UNIV3_LP_PROTOCOLS:
             assert runner._lp_registry_id_cache[(slug, self.CHAIN, self.POOL)] == {"42"}
+
+
+# ---------------------------------------------------------------------------
+# _build_lp_open_registry_row
+# ---------------------------------------------------------------------------
+
+
+class TestBuildLpOpenRegistryRow:
+    """LP_OPEN rows retain the receipt-observed physical manager identity."""
+
+    def test_receipt_manager_overrides_static_manager_for_physical_identity(self) -> None:
+        payload = {
+            "token_id": "42",
+            "pool_address": "0xpool",
+            "nft_manager_addr": "0xCurrentManager",
+        }
+        parser = SimpleNamespace(extract_registry_payload_open=MagicMock(return_value=payload))
+        registry_row = SimpleNamespace(physical_identity_hash="0xpih")
+        runner = SimpleNamespace(
+            _extract_block_number_from_result=MagicMock(return_value=123),
+            _build_registry_row=MagicMock(return_value=registry_row),
+        )
+
+        with (
+            patch(
+                "almanak.framework.migration.backfill.physical_identity_hash_univ3",
+                return_value="0xpih",
+            ) as physical_hash,
+            patch(
+                "almanak.framework.migration.backfill.semantic_grouping_key_univ3",
+                return_value="0xsgk",
+            ),
+        ):
+            result = StrategyRunner._build_lp_open_registry_row(
+                runner,
+                strategy=SimpleNamespace(),
+                intent=SimpleNamespace(registry_handle="lp-1"),
+                result=SimpleNamespace(),
+                entry=SimpleNamespace(tx_hash="0xtx"),
+                chain="base",
+                nft_manager="0xLegacyManager",
+                receipt={"logs": []},
+                parser=parser,
+                fee_tier=50,
+            )
+
+        assert result == (registry_row, payload, 42)
+        physical_hash.assert_called_once_with(
+            chain="base",
+            nft_manager_addr="0xcurrentmanager",
+            token_id=42,
+        )
 
 
 # ---------------------------------------------------------------------------

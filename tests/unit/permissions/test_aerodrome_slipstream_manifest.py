@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import pytest
 
-from almanak.connectors.aerodrome.addresses import AERODROME
+from almanak.connectors.aerodrome.addresses import AERODROME, slipstream_lp_deployments
 from almanak.framework.permissions.discovery import discover_permissions
 from almanak.framework.permissions.hints import (
     PermissionHints,
@@ -57,12 +57,21 @@ _CL_EXACT_INPUT_SINGLE_SELECTOR = "0xa026383e"
 _CLASSIC_SWAP_SELECTOR = "0xcac88ea9"
 _ERC20_APPROVE_SELECTOR = "0x095ea7b3"
 
-_NPM_BASE = AERODROME["base"]["cl_nft"].lower()
+_DEPLOYMENTS_BASE = slipstream_lp_deployments("base")
+_NPM_CURRENT = _DEPLOYMENTS_BASE[0].position_manager.lower()
+_NPM_LEGACY = _DEPLOYMENTS_BASE[1].position_manager.lower()
+_NPM_BASE = _NPM_LEGACY
+_NPM_TARGETS = {_NPM_CURRENT, _NPM_LEGACY}
 _ROUTER_BASE = AERODROME["base"]["router"].lower()
 _CL_ROUTER_BASE = AERODROME["base"]["cl_router"].lower()
 
 
-def _npm_selectors_for_intents(intent_types: list[str], chain: str = "base") -> set[str]:
+def _npm_selectors_for_intents(
+    intent_types: list[str],
+    chain: str = "base",
+    *,
+    target: str = _NPM_CURRENT,
+) -> set[str]:
     """Selectors authorised on the Slipstream NPM target for an exact
     intent_types list (no teardown-complement expansion).
     """
@@ -74,7 +83,7 @@ def _npm_selectors_for_intents(intent_types: list[str], chain: str = "base") -> 
     return {
         sel.selector.lower()
         for perm in permissions
-        if perm.target.lower() == _NPM_BASE
+        if perm.target.lower() == target
         for sel in perm.function_selectors
     }
 
@@ -88,8 +97,8 @@ class TestSlipstreamHintsLoader:
         assert hints.supports_standalone_fee_collection is True
         chain_static = hints.static_permissions.get("base", [])
         assert chain_static, "Slipstream hints must expose base static_permissions"
-        assert all(entry.target.lower() == _NPM_BASE for entry in chain_static), (
-            "All Slipstream static entries must target the NPM"
+        assert {entry.target.lower() for entry in chain_static} == _NPM_TARGETS, (
+            "Slipstream static entries must target exactly the reviewed current and legacy NPMs"
         )
         assert all(entry.intent_types is not None for entry in chain_static), (
             "All Slipstream static entries must be per-intent scoped — a "
@@ -111,8 +120,8 @@ class TestSlipstreamHintsLoader:
         assert _ROUTER_BASE in targets, (
             "Classic Aerodrome hints must still authorise the Router"
         )
-        assert _NPM_BASE not in targets, (
-            "Classic Aerodrome hints must NOT include the Slipstream NPM target"
+        assert targets.isdisjoint(_NPM_TARGETS), (
+            "Classic Aerodrome hints must NOT include any Slipstream NPM target"
         )
 
     def test_slipstream_static_entries_are_per_intent_disjoint(self) -> None:
@@ -122,10 +131,10 @@ class TestSlipstreamHintsLoader:
         """
         hints = get_permission_hints("aerodrome_slipstream")
         entries: list[StaticPermissionEntry] = hints.static_permissions.get("base", [])
-        intent_scopes = [entry.intent_types for entry in entries]
-        assert len(intent_scopes) == len(set(intent_scopes)), (
-            "Each Slipstream static entry must scope to a unique intent_types "
-            f"frozenset; got {intent_scopes}"
+        target_scopes = [(entry.target.lower(), entry.intent_types) for entry in entries]
+        assert len(target_scopes) == len(set(target_scopes)), (
+            "Each Slipstream static entry must have a unique target/intent scope; "
+            f"got {target_scopes}"
         )
 
 
@@ -172,37 +181,45 @@ class TestSlipstreamManifestLeastPrivilege:
             f"LP_OPEN-only NPM selectors must be exactly mint "
             f"({_SLIPSTREAM_MINT_SELECTOR}); got {sorted(selectors)}"
         )
+        assert _npm_selectors_for_intents(["LP_OPEN"], target=_NPM_LEGACY) == set(), (
+            "New LP positions must not be minted through the legacy manager"
+        )
 
     def test_lp_close_only_npm_selectors_are_decrease_and_collect(self) -> None:
-        selectors = _npm_selectors_for_intents(["LP_CLOSE"])
-        assert selectors == {
-            _SLIPSTREAM_DECREASE_SELECTOR,
-            _SLIPSTREAM_COLLECT_SELECTOR,
-        }, (
-            f"LP_CLOSE-only NPM selectors must be exactly "
-            f"{{decreaseLiquidity, collect}}; got {sorted(selectors)}"
-        )
+        for target in _NPM_TARGETS:
+            selectors = _npm_selectors_for_intents(["LP_CLOSE"], target=target)
+            assert selectors == {
+                _SLIPSTREAM_DECREASE_SELECTOR,
+                _SLIPSTREAM_COLLECT_SELECTOR,
+            }, (
+                f"LP_CLOSE-only selectors on {target} must be exactly "
+                f"{{decreaseLiquidity, collect}}; got {sorted(selectors)}"
+            )
 
     def test_lp_collect_fees_only_npm_selectors_are_collect_only(self) -> None:
-        selectors = _npm_selectors_for_intents(["LP_COLLECT_FEES"])
-        assert selectors == {_SLIPSTREAM_COLLECT_SELECTOR}, (
-            f"LP_COLLECT_FEES-only NPM selectors must be exactly collect "
-            f"({_SLIPSTREAM_COLLECT_SELECTOR}); got {sorted(selectors)}"
-        )
+        for target in _NPM_TARGETS:
+            selectors = _npm_selectors_for_intents(["LP_COLLECT_FEES"], target=target)
+            assert selectors == {_SLIPSTREAM_COLLECT_SELECTOR}, (
+                f"LP_COLLECT_FEES-only selectors on {target} must be exactly collect "
+                f"({_SLIPSTREAM_COLLECT_SELECTOR}); got {sorted(selectors)}"
+            )
 
     def test_combined_discovery_is_union_of_intent_sets(self) -> None:
         """Sanity: union of per-intent sets matches the combined discovery."""
-        combined = _npm_selectors_for_intents(
-            ["LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"]
-        )
-        assert combined == {
+        current = _npm_selectors_for_intents(["LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"])
+        assert current == {
             _SLIPSTREAM_MINT_SELECTOR,
             _SLIPSTREAM_DECREASE_SELECTOR,
             _SLIPSTREAM_COLLECT_SELECTOR,
         }, (
-            f"Combined LP discovery NPM selectors must be the three-element "
-            f"union; got {sorted(combined)}"
+            "Current NPM combined discovery must include mint/decrease/collect; "
+            f"got {sorted(current)}"
         )
+        legacy = _npm_selectors_for_intents(
+            ["LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"],
+            target=_NPM_LEGACY,
+        )
+        assert legacy == {_SLIPSTREAM_DECREASE_SELECTOR, _SLIPSTREAM_COLLECT_SELECTOR}
 
 
 def _discover(intent_types: list[str], chain: str = "base"):

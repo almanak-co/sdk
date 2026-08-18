@@ -832,6 +832,7 @@ async def test_get_lp_position_uniswap_v3_arbitrum_golden() -> None:
     assert result.status == "success", result.error
     d = result.data
     assert d["position_id"] == str(position_id)
+    assert d["position_manager"].lower() == "0xc36442b4a4522e871399cd717abdd847ab11fe88"
     assert d["token_a"].lower() == _USDC_ARB
     assert d["token_b"].lower() == _WETH_ARB
     assert d["fee_tier"] == fee
@@ -842,6 +843,97 @@ async def test_get_lp_position_uniswap_v3_arbitrum_golden() -> None:
     assert d["tokens_owed_b"] == str(owed1)
     # Factory returned zero pool -> in_range stays None (no slot0 read).
     assert d["in_range"] is None
+
+
+@pytest.mark.asyncio
+async def test_get_lp_position_slipstream_refuses_ambiguous_manager_before_rpc() -> None:
+    gateway = MagicMock()
+    executor = _make_executor(gateway)
+
+    result = await executor.execute(
+        "get_lp_position",
+        {
+            "position_id": "7",
+            "chain": "base",
+            "protocol": "aerodrome_slipstream",
+        },
+    )
+
+    assert result.status == "error"
+    assert "provide position_manager" in (result.error or {}).get("message", "")
+    gateway.rpc.Call.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_get_lp_position_slipstream_refuses_unreviewed_manager_before_rpc() -> None:
+    gateway = MagicMock()
+    executor = _make_executor(gateway)
+
+    result = await executor.execute(
+        "get_lp_position",
+        {
+            "position_id": "7",
+            "chain": "base",
+            "protocol": "aerodrome_slipstream",
+            "position_manager": "0x" + "11" * 20,
+        },
+    )
+
+    assert result.status == "error"
+    assert "Unreviewed position manager" in (result.error or {}).get("message", "")
+    gateway.rpc.Call.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("deployment_index", [0, 1])
+async def test_get_lp_position_slipstream_pairs_exact_manager_with_its_factory(
+    deployment_index: int,
+) -> None:
+    from almanak.connectors.aerodrome.addresses import slipstream_lp_deployments
+
+    deployment = slipstream_lp_deployments("base")[deployment_index]
+    words = [
+        _hex_word(0),
+        _hex_word(0),
+        _addr_word("0x4200000000000000000000000000000000000006"),
+        _addr_word("0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"),
+        _hex_word(100),
+        _hex_word(-100),
+        _hex_word(100),
+        _hex_word(123),
+        _hex_word(0),
+        _hex_word(0),
+        _hex_word(0),
+        _hex_word(0),
+    ]
+    gateway = MagicMock()
+
+    def _call(req: Any, **_kwargs: Any) -> Any:
+        call = json.loads(req.params)[0]
+        if req.id == "lp_position":
+            assert call["to"].lower() == deployment.position_manager.lower()
+            return _rpc_ok("".join(words))
+        if req.id == "lp_factory_get_pool":
+            assert call["to"].lower() == deployment.factory.lower()
+            return _rpc_ok(_hex_word(0))
+        raise AssertionError(f"unexpected rpc id {req.id}")
+
+    gateway.rpc.Call.side_effect = _call
+    executor = _make_executor(gateway)
+    result = await executor.execute(
+        "get_lp_position",
+        {
+            "position_id": "7",
+            "chain": "base",
+            "protocol": "aerodrome_slipstream",
+            "position_manager": deployment.position_manager,
+        },
+    )
+
+    assert result.status == "success", result.error
+    assert result.data["position_manager"].lower() == deployment.position_manager.lower()
+    assert result.data["liquidity"] == "123"
+    assert gateway.rpc.Call.call_count == 2
 
 
 # ---------------------------------------------------------------------------

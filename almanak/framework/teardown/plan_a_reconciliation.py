@@ -488,7 +488,29 @@ def _is_nft_lp_protocol(protocol: str) -> bool:
     """
     from almanak.connectors._strategy_base.address_registry import AbiFamily, AddressRegistry
 
-    return protocol.lower() in AddressRegistry.protocols_with_abi(AbiFamily.V3_NPM)
+    slug = protocol.lower()
+    if slug in AddressRegistry.protocols_with_abi(AbiFamily.V3_NPM):
+        return True
+
+    # Multi-generation concentrated-liquidity connectors cannot expose a
+    # single AbiFamily.V3_NPM address without losing manager identity. Their
+    # connector-owned CL_POSITION_MANAGER role is the applicability authority;
+    # ``chain_verify_lp_open`` then requires the durable position to select one
+    # exact reviewed generation.
+    try:
+        import almanak.connectors._strategy_contract_role_registry  # noqa: F401
+        from almanak.connectors._strategy_base.contract_role_registry import (
+            CONTRACT_ROLE_REGISTRY,
+            ContractRole,
+        )
+
+        return CONTRACT_ROLE_REGISTRY.kinds_for(slug, ContractRole.CL_POSITION_MANAGER) is not None
+    except Exception:  # noqa: BLE001 — applicability must fail closed
+        logger.debug("NFT LP contract-role lookup failed for protocol %s", protocol, exc_info=True)
+        # A metadata fault cannot prove that the position is structurally
+        # non-NFT. Force the verification lane; its manager lookup will return
+        # None and classify the position UNVERIFIABLE, lowering confidence.
+        return True
 
 
 async def _reconcile_lp(

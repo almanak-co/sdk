@@ -6,8 +6,8 @@ Publishes the on-chain *read descriptors* the agent-tool LP read handler
 
 * ``factory_address(chain)`` — the Slipstream CL factory (``cl_factory``)
   used by ``factory.getPool(token0, token1, tickSpacing)``.
-* ``position_manager_address(chain)`` — the Slipstream NonfungiblePositionManager
-  (``cl_nft``) used by ``positions(uint256)``.
+* manager descriptors — a singleton default when unambiguous, otherwise the
+  reviewed manager set and its exact generation/factory pairing.
 * ``get_pool_selector()`` — ``0x28af8d0b``, the **int24 tick-spacing**
   ``getPool`` selector. This is the one place Slipstream genuinely differs
   from the uint24-fee Uniswap V3 family (selector ``0x1698ee82``) — the
@@ -22,8 +22,9 @@ before W8 for ``lp_protocol == "aerodrome_slipstream"``:
 * ``factory_address`` ← ``AERODROME[chain]["cl_factory"]`` (the pre-W8 handler
   used the ``cl_factory`` key for the ``aerodrome_slipstream`` entry of
   ``_LP_PROTOCOL_REGISTRIES``, via ``_LP_FACTORY_KEY["aerodrome_slipstream"]``).
-* ``position_manager_address`` ← ``AERODROME[chain]["cl_nft"]`` (the pre-W8
-  ``nft_manager = AERODROME.get(chain, {}).get("cl_nft")`` branch).
+* ``position_manager_address`` preserves singleton behavior but returns
+  ``None`` on multi-generation Base; exact manager/factory lookup replaces the
+  unsafe legacy default for token-ID-scoped reads.
 * ``get_pool_selector`` ← ``"0x28af8d0b"`` (the Slipstream branch of the
   inline ``get_pool_selector = "0x28af8d0b" if ... == "aerodrome_slipstream"``).
 
@@ -68,15 +69,27 @@ class AerodromeSlipstreamAgentReadConnector(AgentReadConnector, AgentReadCapabil
         from almanak.connectors.aerodrome.addresses import AERODROME
 
         chain_contracts = AERODROME.get(chain)
-        # Defensive: a chain explicitly mapped to ``None`` (documented as
-        # disabled) must not raise on ``.get("cl_factory")``.
+        # Pool discovery is not token-ID scoped: it intentionally uses the
+        # connector's current factory. LP-position reads pair an exact manager
+        # to its generation through factory_address_for_position_manager().
         return chain_contracts.get("cl_factory") if isinstance(chain_contracts, dict) else None
 
     def position_manager_address(self, chain: str) -> str | None:
-        from almanak.connectors.aerodrome.addresses import AERODROME
+        from almanak.connectors.aerodrome.addresses import slipstream_lp_deployments
 
-        chain_contracts = AERODROME.get(chain)
-        return chain_contracts.get("cl_nft") if isinstance(chain_contracts, dict) else None
+        deployments = slipstream_lp_deployments(chain)
+        return deployments[0].position_manager if len(deployments) == 1 else None
+
+    def reviewed_position_manager_addresses(self, chain: str) -> tuple[str, ...]:
+        from almanak.connectors.aerodrome.addresses import slipstream_lp_deployments
+
+        return tuple(deployment.position_manager for deployment in slipstream_lp_deployments(chain))
+
+    def factory_address_for_position_manager(self, chain: str, position_manager: str) -> str | None:
+        from almanak.connectors.aerodrome.addresses import slipstream_deployment_for_position_manager
+
+        deployment = slipstream_deployment_for_position_manager(chain, position_manager)
+        return deployment.factory if deployment is not None else None
 
     def get_pool_selector(self) -> str:
         return _GET_POOL_SELECTOR_SLIPSTREAM

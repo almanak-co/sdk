@@ -4158,6 +4158,7 @@ class MarketSnapshot:
         protocol: str,
         pool_address: str | None = None,
         *,
+        position_manager: str | None = None,
         token0_symbol: str | None = None,
         token1_symbol: str | None = None,
     ) -> Any:
@@ -4187,6 +4188,8 @@ class MarketSnapshot:
                 ``slot0`` read. When omitted, valuation falls back to the
                 oracle-price-ratio tick (less precise ``in_range`` near the
                 boundary), so callers that have it should pass it.
+            position_manager: Exact NFT-manager authority. Required for
+                protocols with multiple reviewed manager generations.
             token0_symbol / token1_symbol: Optional symbol hints threaded into
                 ``position.details`` so symbol resolution has a fallback when
                 the on-chain token address is not in the token registry.
@@ -4233,6 +4236,8 @@ class MarketSnapshot:
             return None
 
         details: dict[str, Any] = {}
+        if position_manager:
+            details["nft_manager_addr"] = position_manager
         if pool_address:
             details["pool_address"] = pool_address
         if token0_symbol:

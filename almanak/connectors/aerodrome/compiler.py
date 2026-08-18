@@ -25,6 +25,11 @@ from almanak.connectors._strategy_base.base.compiler import (
 )
 from almanak.connectors._strategy_base.cl_range import PriceBandToTicksError, price_band_to_ticks
 from almanak.connectors._strategy_base.slippage import SlippagePrecisionError, slippage_to_bps
+from almanak.connectors.aerodrome.addresses import (
+    SLIPSTREAM_LP_DEPLOYMENTS,
+    SlipstreamDeployment,
+    slipstream_lp_deployments,
+)
 from almanak.framework.data.tokens import build_swap_token_meta
 from almanak.framework.intents import compiler_constants
 from almanak.framework.intents.compiler_models import CompilationResult, CompilationStatus
@@ -32,8 +37,10 @@ from almanak.framework.intents.min_out_guard import UnprotectedTradeError
 from almanak.framework.intents.vocabulary import IntentType, lp_range_bounds, lp_range_is_ticks
 from almanak.framework.models.reproduction_bundle import ActionBundle
 from almanak.framework.teardown.lp_clamp import LpClampUnresolved, bound_close_amount
+from almanak.framework.venues import VerifiedVenueBinding
 
 if TYPE_CHECKING:
+    from almanak.connectors.aerodrome.adapter import AerodromeAdapter
     from almanak.framework.intents.compiler_models import TokenInfo
     from almanak.framework.intents.vocabulary import CollectFeesIntent, LPCloseIntent, LPOpenIntent, SwapIntent
 
@@ -156,6 +163,191 @@ def _require_resolved_token_price(compiler: Any, token: TokenInfo) -> Decimal:
     if callable(exact_lookup):
         return exact_lookup(token)
     return compiler._require_token_price(token.symbol)
+
+
+def _verify_slipstream_binding(
+    *,
+    compiler: _AerodromeCompileImpl,
+    pool_address: str,
+    token0_address: str,
+    token1_address: str,
+    tick_spacing: int,
+    expected_position_manager: str,
+    intent_id: str,
+    allow_unavailable_for_risk_reduction: bool = False,
+) -> VerifiedVenueBinding | CompilationResult | None:
+    """Verify one exact Slipstream pool through its manifest-owned provider."""
+
+    factory = compiler._ctx.venue_verification_gateway_factory
+    if not callable(factory):
+        if allow_unavailable_for_risk_reduction:
+            return None
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error="Exact Slipstream venue verification is unavailable on base",
+            is_safety_refusal=True,
+            intent_id=intent_id,
+        )
+
+    from almanak.core.asset_identity import AssetIdentity, AssetNamespace
+    from almanak.framework.primitives.types import Primitive
+    from almanak.framework.venues import (
+        VenueBindingComponent,
+        VenueBindingFailure,
+        VenueBindingFailureState,
+        VenueReferenceNamespace,
+        VenueTargetRef,
+        VenueTargetRole,
+        VenueVerificationRequest,
+    )
+
+    request = VenueVerificationRequest(
+        chain=compiler.chain,
+        protocol="aerodrome_slipstream",
+        primitive=Primitive.LP,
+        requested_refs=(
+            VenueTargetRef(
+                role=VenueTargetRole.POOL,
+                reference_namespace=VenueReferenceNamespace.EVM_ADDRESS,
+                reference=pool_address.lower(),
+            ),
+        ),
+        ordered_assets=(
+            AssetIdentity(compiler.chain, AssetNamespace.ERC20, token0_address),
+            AssetIdentity(compiler.chain, AssetNamespace.ERC20, token1_address),
+        ),
+        binding_components=(VenueBindingComponent("tick_spacing", str(tick_spacing)),),
+        binding_policy_version=1,
+    )
+    try:
+        from almanak.connectors._strategy_base.venue_verifier_registry import VenueVerifierRegistry
+
+        registry = VenueVerifierRegistry()
+        verifier = registry.load_class(request.protocol)()
+        gateway = factory()
+    except (ConnectionError, ImportError, OSError, RuntimeError, TimeoutError, TypeError, ValueError) as exc:
+        if allow_unavailable_for_risk_reduction:
+            return None
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Exact Slipstream venue transport is unavailable: {exc}",
+            is_safety_refusal=True,
+            intent_id=intent_id,
+        )
+    verified = registry.validate_result(request, verifier.verify_venue(request, gateway))
+    if isinstance(verified, VenueBindingFailure):
+        if allow_unavailable_for_risk_reduction and verified.state is VenueBindingFailureState.UNAVAILABLE:
+            return None
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Exact Slipstream venue refused: {verified.reason_code.value}: {verified.detail}",
+            is_safety_refusal=True,
+            intent_id=intent_id,
+        )
+    operational = {ref.role: ref.reference for ref in verified.operational_refs}
+    if operational.get(VenueTargetRole.POSITION_MANAGER) != expected_position_manager.lower():
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=(
+                f"Exact Slipstream verifier did not authorize the position manager {expected_position_manager.lower()}"
+            ),
+            is_safety_refusal=True,
+            intent_id=intent_id,
+        )
+    return verified
+
+
+def _slipstream_venue_metadata(verified: VerifiedVenueBinding | None) -> dict[str, Any]:
+    if verified is None:
+        return {}
+    return {
+        "venue_binding_hash": verified.binding.binding_hash,
+        "venue_binding": verified.binding.to_preimage_wire(),
+        "venue_operational_refs": [ref.to_wire() for ref in verified.operational_refs],
+        "venue_verification": verified.evidence.to_wire(),
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class _ResolvedSlipstreamPosition:
+    """Physical position authority plus any currently certified venue."""
+
+    deployment: SlipstreamDeployment
+    verified_venue: VerifiedVenueBinding | None
+
+
+def _resolve_slipstream_position(
+    *,
+    compiler: _AerodromeCompileImpl,
+    adapter: AerodromeAdapter,
+    token_id: int,
+    intent_id: str,
+    permission_discovery: bool,
+    reviewed_deployments: tuple[SlipstreamDeployment, ...],
+) -> _ResolvedSlipstreamPosition | CompilationResult:
+    """Resolve a position's manager generation and paired factory binding.
+
+    Close and standalone collection share this boundary. A measured mismatch
+    refuses both; typed verifier unavailability preserves the independently
+    executable risk-reduction path without attaching certified metadata.
+    """
+
+    if permission_discovery:
+        return _ResolvedSlipstreamPosition(reviewed_deployments[0], None)
+
+    try:
+        deployment = adapter.resolve_owned_cl_deployment(token_id)
+    except (ConnectionError, OSError, TimeoutError, ValueError) as exc:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Cannot resolve physical Slipstream position authority: {exc}",
+            is_safety_refusal=True,
+            intent_id=intent_id,
+        )
+    position = adapter.get_cl_position(token_id, deployment)
+    if position is None:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=(
+                f"Could not read Slipstream tokenId={token_id} through reviewed manager {deployment.position_manager}"
+            ),
+            intent_id=intent_id,
+        )
+
+    from almanak.connectors.aerodrome.pool_validation import validate_aerodrome_cl_pool
+
+    pool_check = validate_aerodrome_cl_pool(
+        compiler.chain,
+        position.token0,
+        position.token1,
+        position.tick_spacing,
+        compiler._get_chain_rpc_url(),
+        gateway_client=compiler._gateway_client,
+        deployment=deployment,
+    )
+    failed = compiler._validate_pool(pool_check, intent_id)
+    if failed is not None:
+        return failed
+    if not pool_check.pool_address:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error="Slipstream factory confirmed a position pool without returning its address",
+            is_safety_refusal=True,
+            intent_id=intent_id,
+        )
+    verified_venue = _verify_slipstream_binding(
+        compiler=compiler,
+        pool_address=pool_check.pool_address,
+        token0_address=position.token0,
+        token1_address=position.token1,
+        tick_spacing=position.tick_spacing,
+        expected_position_manager=deployment.position_manager,
+        intent_id=intent_id,
+        allow_unavailable_for_risk_reduction=True,
+    )
+    if isinstance(verified_venue, CompilationResult):
+        return verified_venue
+    return _ResolvedSlipstreamPosition(deployment, verified_venue)
 
 
 def _aerodrome_swap_price_impact_guard(
@@ -1499,6 +1691,7 @@ def compile_lp_open_aerodrome_slipstream(compiler, intent: LPOpenIntent) -> Comp
 
     try:
         from almanak.connectors.aerodrome import AerodromeAdapter, AerodromeConfig
+        from almanak.connectors.aerodrome.pool_validation import validate_aerodrome_cl_pool
 
         # Parse pool: "TOKEN0/TOKEN1/tick_spacing"
         pool_parts = intent.pool.split("/")
@@ -1520,14 +1713,16 @@ def compile_lp_open_aerodrome_slipstream(compiler, intent: LPOpenIntent) -> Comp
                 intent_id=intent.intent_id,
             )
 
-        # Validate CL support (only Base has cl_nft)
-        cl_nft = LP_POSITION_MANAGERS.get(compiler.chain, {}).get("aerodrome_slipstream")
-        if not cl_nft:
+        deployments = slipstream_lp_deployments(compiler.chain)
+        if not deployments:
             return CompilationResult(
                 status=CompilationStatus.FAILED,
                 error=f"Aerodrome Slipstream CL not supported on chain '{compiler.chain}'. Only 'base' is supported.",
                 intent_id=intent.intent_id,
             )
+        # New positions always use the newest reviewed factory/NPM pair.
+        # Historical pairs remain available only to close positions they own.
+        deployment = deployments[0]
 
         range_form = "ticks" if lp_range_is_ticks(intent) else "prices"
         logger.info(
@@ -1570,8 +1765,6 @@ def compile_lp_open_aerodrome_slipstream(compiler, intent: LPOpenIntent) -> Comp
             )
 
         # Validate pool existence
-        from almanak.connectors.aerodrome.pool_validation import validate_aerodrome_cl_pool
-
         pool_check = validate_aerodrome_cl_pool(
             compiler.chain,
             token0_info.address,
@@ -1579,11 +1772,19 @@ def compile_lp_open_aerodrome_slipstream(compiler, intent: LPOpenIntent) -> Comp
             tick_spacing,
             compiler._get_chain_rpc_url(),
             gateway_client=compiler._gateway_client,
+            deployment=deployment,
         )
         failed = compiler._validate_pool(pool_check, intent.intent_id)
         if failed is not None:
             return failed
 
+        if not pool_check.pool_address:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error="Slipstream factory confirmed a pool without returning its address",
+                is_safety_refusal=True,
+                intent_id=intent.intent_id,
+            )
         # Resolve the range to ticks. A price band (the canonical UX) is converted
         # via the shared decimals-correct cl_range seam; an explicit TickBand is
         # validated as raw ticks (integer, ordered, aligned to tick_spacing).
@@ -1656,6 +1857,20 @@ def compile_lp_open_aerodrome_slipstream(compiler, intent: LPOpenIntent) -> Comp
             tick_upper=tick_upper,
         )
 
+        # Admission is deliberately after read-only range/amount computation,
+        # but before the adapter can build approvals or protocol calldata.
+        verified_venue = _verify_slipstream_binding(
+            compiler=compiler,
+            pool_address=pool_check.pool_address,
+            token0_address=token0_info.address,
+            token1_address=token1_info.address,
+            tick_spacing=tick_spacing,
+            expected_position_manager=deployment.position_manager,
+            intent_id=intent.intent_id,
+        )
+        if isinstance(verified_venue, CompilationResult):
+            return verified_venue
+
         # Create Aerodrome adapter
         config = AerodromeConfig(
             chain=compiler.chain,
@@ -1683,6 +1898,7 @@ def compile_lp_open_aerodrome_slipstream(compiler, intent: LPOpenIntent) -> Comp
             amount_b_wei=amount1_desired,
             amount_a_min_wei=amount0_min,
             amount_b_min_wei=amount1_min,
+            deployment=deployment,
         )
 
         if not cl_result.success:
@@ -1719,7 +1935,9 @@ def compile_lp_open_aerodrome_slipstream(compiler, intent: LPOpenIntent) -> Comp
                 "amount1_min": str(amount1_min),
                 "protocol": "aerodrome_slipstream",
                 "token_id": None,
-                "nft_manager": cl_nft,
+                "nft_manager": deployment.position_manager,
+                "slipstream_deployment": deployment.generation,
+                **_slipstream_venue_metadata(verified_venue),
             },
         )
 
@@ -1799,9 +2017,8 @@ def compile_lp_close_aerodrome_slipstream(compiler, intent: LPCloseIntent) -> Co
                 intent_id=intent.intent_id,
             )
 
-        # Validate CL support
-        cl_nft = LP_POSITION_MANAGERS.get(compiler.chain, {}).get("aerodrome_slipstream")
-        if not cl_nft:
+        reviewed_deployments = slipstream_lp_deployments(compiler.chain)
+        if not reviewed_deployments:
             return CompilationResult(
                 status=CompilationStatus.FAILED,
                 error=f"Aerodrome Slipstream CL not supported on chain '{compiler.chain}'. Only 'base' is supported.",
@@ -1829,10 +2046,24 @@ def compile_lp_close_aerodrome_slipstream(compiler, intent: LPCloseIntent) -> Co
         )
         adapter = AerodromeAdapter(config)
 
+        resolved = _resolve_slipstream_position(
+            compiler=compiler,
+            adapter=adapter,
+            token_id=token_id,
+            intent_id=intent.intent_id,
+            permission_discovery=bool(permission_discovery),
+            reviewed_deployments=reviewed_deployments,
+        )
+        if isinstance(resolved, CompilationResult):
+            return resolved
+        deployment = resolved.deployment
+        verified_venue = resolved.verified_venue
+
         # Build remove liquidity transactions
         cl_result = adapter.remove_cl_liquidity(
             token_id=token_id,
             recipient=compiler.wallet_address,
+            deployment=deployment,
         )
 
         if not cl_result.success:
@@ -1858,6 +2089,9 @@ def compile_lp_close_aerodrome_slipstream(compiler, intent: LPCloseIntent) -> Co
                     "collect_fees": intent.collect_fees,
                     "no_op": True,
                     "reason": "Zero liquidity; LP_CLOSE no-op",
+                    "nft_manager": deployment.position_manager,
+                    "slipstream_deployment": deployment.generation,
+                    **_slipstream_venue_metadata(verified_venue),
                 },
             )
             result.transactions = []
@@ -1878,7 +2112,9 @@ def compile_lp_close_aerodrome_slipstream(compiler, intent: LPCloseIntent) -> Co
                 "token_id": token_id,
                 "protocol": "aerodrome_slipstream",
                 "collect_fees": intent.collect_fees,
-                "nft_manager": cl_nft,
+                "nft_manager": deployment.position_manager,
+                "slipstream_deployment": deployment.generation,
+                **_slipstream_venue_metadata(verified_venue),
             },
         )
 
@@ -1957,13 +2193,13 @@ def compile_collect_fees_aerodrome_slipstream(compiler, intent: CollectFeesInten
                 intent_id=intent.intent_id,
             )
 
-        cl_nft = LP_POSITION_MANAGERS.get(compiler.chain, {}).get("aerodrome_slipstream")
-        if not cl_nft:
+        reviewed_deployments = slipstream_lp_deployments(compiler.chain)
+        if not reviewed_deployments:
             return CompilationResult(
                 status=CompilationStatus.FAILED,
                 error=(
                     f"Aerodrome Slipstream CL not supported on chain '{compiler.chain}'. "
-                    f"Supported chains: {sorted(c for c, m in LP_POSITION_MANAGERS.items() if 'aerodrome_slipstream' in m)}."
+                    f"Supported chains: {sorted(SLIPSTREAM_LP_DEPLOYMENTS)}."
                 ),
                 intent_id=intent.intent_id,
             )
@@ -1999,9 +2235,23 @@ def compile_collect_fees_aerodrome_slipstream(compiler, intent: CollectFeesInten
         )
         adapter = AerodromeAdapter(config)
 
+        resolved = _resolve_slipstream_position(
+            compiler=compiler,
+            adapter=adapter,
+            token_id=token_id,
+            intent_id=intent.intent_id,
+            permission_discovery=permission_discovery,
+            reviewed_deployments=reviewed_deployments,
+        )
+        if isinstance(resolved, CompilationResult):
+            return resolved
+        deployment = resolved.deployment
+        verified_venue = resolved.verified_venue
+
         collect_result = adapter.collect_cl_fees(
             token_id=token_id,
             recipient=compiler.wallet_address,
+            deployment=deployment,
         )
 
         if not collect_result.success:
@@ -2033,7 +2283,9 @@ def compile_collect_fees_aerodrome_slipstream(compiler, intent: CollectFeesInten
                 "token_id": token_id,
                 "protocol": "aerodrome_slipstream",
                 "chain": compiler.chain,
-                "nft_manager": cl_nft,
+                "nft_manager": deployment.position_manager,
+                "slipstream_deployment": deployment.generation,
+                **_slipstream_venue_metadata(verified_venue),
             },
         )
 

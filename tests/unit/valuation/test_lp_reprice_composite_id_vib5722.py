@@ -61,7 +61,7 @@ class _Reader:
         self._on_chain = on_chain
         self.seen_token_id = None
 
-    def read_position(self, chain, token_id, protocol):
+    def read_position(self, chain, token_id, protocol, position_manager=None):
         self.seen_token_id = token_id
         return self._on_chain
 

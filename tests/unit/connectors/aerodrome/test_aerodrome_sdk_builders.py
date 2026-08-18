@@ -12,7 +12,9 @@ Targets uncovered branches in:
 from unittest.mock import MagicMock
 
 import pytest
+from web3.exceptions import ContractLogicError
 
+from almanak.connectors.aerodrome.addresses import SlipstreamDeployment, slipstream_lp_deployments
 from almanak.connectors.aerodrome.sdk import (
     MAX_UINT256,
     AerodromeSDK,
@@ -365,6 +367,133 @@ class TestCLPoolQueries:
 
 
 class TestCLPositionQueries:
+    def test_find_owned_deployment_scans_current_and_legacy_managers(self, sdk: AerodromeSDK) -> None:
+        deployments = slipstream_lp_deployments("base")
+        web3 = MagicMock()
+        web3.to_checksum_address.side_effect = lambda value: value
+
+        def _contract(*, address: str, abi: object) -> MagicMock:
+            contract = MagicMock()
+            owner = TEST_WALLET if address.lower() == deployments[1].position_manager.lower() else "0x" + "99" * 20
+            contract.functions.ownerOf.return_value.call.return_value = owner
+            return contract
+
+        web3.eth.contract.side_effect = _contract
+
+        assert sdk.find_owned_slipstream_deployments(42, TEST_WALLET, web3) == (deployments[1],)
+
+    def test_find_owned_deployment_preserves_ambiguous_same_id(self, sdk: AerodromeSDK) -> None:
+        deployments = slipstream_lp_deployments("base")
+        web3 = MagicMock()
+        web3.to_checksum_address.side_effect = lambda value: value
+        contract = MagicMock()
+        contract.functions.ownerOf.return_value.call.return_value = TEST_WALLET
+        web3.eth.contract.return_value = contract
+
+        assert sdk.find_owned_slipstream_deployments(42, TEST_WALLET, web3) == deployments
+
+    def test_find_owned_deployment_treats_ownerof_revert_as_absent(self, sdk: AerodromeSDK) -> None:
+        web3 = MagicMock()
+        web3.to_checksum_address.side_effect = lambda value: value
+        contract = MagicMock()
+        contract.functions.ownerOf.return_value.call.side_effect = ValueError("execution reverted: invalid token ID")
+        web3.eth.contract.return_value = contract
+
+        assert sdk.find_owned_slipstream_deployments(42, TEST_WALLET, web3) == ()
+
+    def test_find_owned_deployment_continues_after_custom_error_to_legacy_manager(
+        self,
+        sdk: AerodromeSDK,
+    ) -> None:
+        """A selector-only ERC-721 absence on current must not strand legacy NFTs."""
+
+        deployments = slipstream_lp_deployments("base")
+        web3 = MagicMock()
+        web3.to_checksum_address.side_effect = lambda value: value
+
+        def _contract(*, address: str, abi: object) -> MagicMock:
+            del abi
+            contract = MagicMock()
+            if address.lower() == deployments[0].position_manager.lower():
+                contract.functions.ownerOf.return_value.call.side_effect = ContractLogicError(
+                    "execution reverted",
+                    data="0x7e273289" + f"{42:064x}",
+                )
+            else:
+                contract.functions.ownerOf.return_value.call.return_value = TEST_WALLET
+            return contract
+
+        web3.eth.contract.side_effect = _contract
+
+        assert sdk.find_owned_slipstream_deployments(42, TEST_WALLET, web3) == (deployments[1],)
+
+    def test_find_owned_deployment_continues_after_bytes_custom_error_data(
+        self,
+        sdk: AerodromeSDK,
+    ) -> None:
+        """Providers may return custom-error revert data as bytes, not hex text."""
+
+        deployments = slipstream_lp_deployments("base")
+        web3 = MagicMock()
+        web3.to_checksum_address.side_effect = lambda value: value
+
+        def _contract(*, address: str, abi: object) -> MagicMock:
+            del abi
+            contract = MagicMock()
+            if address.lower() == deployments[0].position_manager.lower():
+                contract.functions.ownerOf.return_value.call.side_effect = ContractLogicError(
+                    "execution reverted",
+                    data=bytes.fromhex("7e273289") + (42).to_bytes(32, "big"),
+                )
+            else:
+                contract.functions.ownerOf.return_value.call.return_value = TEST_WALLET
+            return contract
+
+        web3.eth.contract.side_effect = _contract
+
+        assert sdk.find_owned_slipstream_deployments(42, TEST_WALLET, web3) == (deployments[1],)
+
+    def test_find_owned_deployment_does_not_treat_generic_revert_as_absent(self, sdk: AerodromeSDK) -> None:
+        web3 = MagicMock()
+        web3.to_checksum_address.side_effect = lambda value: value
+        contract = MagicMock()
+        contract.functions.ownerOf.return_value.call.side_effect = ValueError("execution reverted")
+        web3.eth.contract.return_value = contract
+
+        with pytest.raises(ValueError, match="execution reverted"):
+            sdk.find_owned_slipstream_deployments(42, TEST_WALLET, web3)
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            PermissionError("invalid token for RPC authentication"),
+            ValueError("execution reverted", {"data": "0xdeadbeef7e273289"}),
+        ],
+    )
+    def test_find_owned_deployment_does_not_treat_error_collisions_as_absent(
+        self,
+        sdk: AerodromeSDK,
+        exc: Exception,
+    ) -> None:
+        web3 = MagicMock()
+        web3.to_checksum_address.side_effect = lambda value: value
+        contract = MagicMock()
+        contract.functions.ownerOf.return_value.call.side_effect = exc
+        web3.eth.contract.return_value = contract
+
+        with pytest.raises(type(exc)):
+            sdk.find_owned_slipstream_deployments(42, TEST_WALLET, web3)
+
+    def test_find_owned_deployment_fails_closed_on_unknown_provider_error(self, sdk: AerodromeSDK) -> None:
+        web3 = MagicMock()
+        web3.to_checksum_address.side_effect = lambda value: value
+        contract = MagicMock()
+        contract.functions.ownerOf.return_value.call.side_effect = RuntimeError("malformed owner response")
+        web3.eth.contract.return_value = contract
+
+        with pytest.raises(RuntimeError, match="malformed owner response"):
+            sdk.find_owned_slipstream_deployments(42, TEST_WALLET, web3)
+
     def test_get_cl_position_no_nft_returns_none(self) -> None:
         sdk = AerodromeSDK(chain="optimism", token_resolver=_make_resolver())
         web3 = MagicMock()
@@ -565,6 +694,30 @@ class TestCLBuilders:
                 deadline=1,
                 sender=TEST_WALLET,
                 web3=web3,
+            )
+
+    def test_build_cl_mint_rejects_unreviewed_deployment(self, sdk: AerodromeSDK) -> None:
+        unreviewed = SlipstreamDeployment(
+            factory="0x" + "aa" * 20,
+            position_manager="0x" + "bb" * 20,
+            generation="injected",
+        )
+        with pytest.raises(ValueError, match="unreviewed Slipstream deployment"):
+            sdk.build_cl_mint_tx(
+                token0=USDC_ADDRESS,
+                token1=WETH_ADDRESS,
+                tick_spacing=100,
+                tick_lower=-100,
+                tick_upper=100,
+                amount0_desired=1,
+                amount1_desired=1,
+                amount0_min=0,
+                amount1_min=0,
+                recipient=TEST_WALLET,
+                deadline=1,
+                sender=TEST_WALLET,
+                web3=MagicMock(),
+                deployment=unreviewed,
             )
 
     def test_build_cl_decrease_liquidity_tx(self, sdk: AerodromeSDK) -> None:

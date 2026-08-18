@@ -4067,6 +4067,9 @@ class StrategyRunner:
                 "Registry-mode skip: parser payload missing valid token_id; falling back",
             )
             return None
+        payload_manager = str(payload.get("nft_manager_addr") or "").lower()
+        if payload_manager:
+            nft_manager = payload_manager
         pih = physical_identity_hash_univ3(
             chain=chain,
             nft_manager_addr=nft_manager,
@@ -4118,12 +4121,21 @@ class StrategyRunner:
         )
         from almanak.framework.primitives.types import Primitive
 
+        manager_from_receipt = getattr(parser, "_nft_manager_address_from_receipt", None)
+        receipt_manager = manager_from_receipt(receipt) if callable(manager_from_receipt) else ""
+        if callable(manager_from_receipt) and not receipt_manager:
+            logger.error(
+                "Registry-mode skip: close receipt has no unique NFT-manager authority; "
+                "refusing token-id-only OPEN lookup",
+            )
+            return None
         open_payload = await self._lookup_open_registry_payload(
             deployment_id=strategy.deployment_id,
             chain=chain,
             token_id=None,
             receipt=receipt,
             parser=parser,
+            nft_manager_addr=receipt_manager or None,
         )
         payload = parser.extract_registry_payload_close(
             receipt,
@@ -4140,6 +4152,15 @@ class StrategyRunner:
             token_id = int(payload["token_id"])
         except (KeyError, TypeError, ValueError):
             return None
+        payload_manager = str(payload.get("nft_manager_addr") or "").lower()
+        if receipt_manager and payload_manager and receipt_manager.lower() != payload_manager:
+            logger.error(
+                "Registry-mode skip: receipt authority %s disagrees with parsed payload manager %s",
+                receipt_manager,
+                payload_manager,
+            )
+            return None
+        nft_manager = payload_manager or receipt_manager or nft_manager
         pih = physical_identity_hash_univ3(
             chain=chain,
             nft_manager_addr=nft_manager,
@@ -6081,6 +6102,7 @@ class StrategyRunner:
         token_id: int | None,
         receipt: dict,
         parser: Any,
+        nft_manager_addr: str | None = None,
     ) -> dict | None:
         """Find the OPEN-side registry payload for a close-side write.
 
@@ -6113,7 +6135,11 @@ class StrategyRunner:
             if not isinstance(payload, dict):
                 continue
             try:
-                if int(payload.get("token_id", 0)) == int(token_id):
+                token_matches = int(payload.get("token_id", 0)) == int(token_id)
+                manager_matches = nft_manager_addr is None or (
+                    str(payload.get("nft_manager_addr") or "").lower() == nft_manager_addr.lower()
+                )
+                if token_matches and manager_matches:
                     enriched = dict(payload)
                     if row.get("opened_at_block") is not None:
                         enriched["opened_at_block"] = row["opened_at_block"]

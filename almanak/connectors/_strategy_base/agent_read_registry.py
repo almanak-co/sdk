@@ -52,9 +52,8 @@ What lives here
     - ``factory_address(chain) -> str | None`` — CL-DEX factory used by
       ``factory.getPool()``. ``None`` when the connector has no deployment
       on ``chain`` or does not back ``pool_state``.
-    - ``position_manager_address(chain) -> str | None`` — CL-DEX NFT
-      position manager used by ``positions(uint256)``. ``None`` when the
-      connector does not back ``lp_position``.
+    - manager descriptors — an unambiguous default or a reviewed explicit
+      manager plus its exact generation/factory pairing.
     - ``get_pool_selector() -> str`` — the 4-byte ``getPool`` selector this
       fork uses (``0x1698ee82`` for the uint24-fee v3 family,
       ``0x28af8d0b`` for the int24-tick-spacing Slipstream family).
@@ -178,6 +177,10 @@ class AgentReadCapability(Protocol):
 
     def position_manager_address(self, chain: str) -> str | None: ...
 
+    def reviewed_position_manager_addresses(self, chain: str) -> tuple[str, ...]: ...
+
+    def factory_address_for_position_manager(self, chain: str, position_manager: str) -> str | None: ...
+
     def get_pool_selector(self) -> str: ...
 
     def lending_pool_address(self, chain: str) -> str | None: ...
@@ -202,6 +205,18 @@ class AgentReadConnector:
 
     protocol: ClassVar[ProtocolName]
     kind: ClassVar[ProtocolKind]
+
+    def reviewed_position_manager_addresses(self, chain: str) -> tuple[str, ...]:
+        """Return manager authorities accepted by the connector's read path."""
+
+        manager = cast(AgentReadCapability, self).position_manager_address(chain)
+        return (manager,) if manager else ()
+
+    def factory_address_for_position_manager(self, chain: str, position_manager: str) -> str | None:
+        """Return the factory paired with a reviewed manager authority."""
+
+        reviewed = {address.lower() for address in self.reviewed_position_manager_addresses(chain)}
+        return cast(AgentReadCapability, self).factory_address(chain) if position_manager.lower() in reviewed else None
 
     def lending_reserve_discovery_plan(self, chain: str) -> LendingReserveDiscoveryPlan | None:  # noqa: ARG002
         """Default: connector does not back the ``"lending_reserves"`` read

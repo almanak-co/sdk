@@ -32,6 +32,7 @@ import logging
 import os
 import re
 import time
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -42,7 +43,13 @@ if TYPE_CHECKING:
     from almanak.framework.data.tokens.resolver import TokenResolver as TokenResolverType
     from almanak.framework.gateway_client import GatewayClient
 
-from .addresses import AERODROME as AERODROME_ADDRESSES
+from .addresses import (
+    AERODROME as AERODROME_ADDRESSES,
+)
+from .addresses import (
+    SlipstreamDeployment,
+    slipstream_lp_deployments,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +96,21 @@ _TRANSIENT_RPC_MESSAGE_RE = re.compile(
     r"|name or service not known|bad gateway|gateway timeout",
     re.IGNORECASE,
 )
+
+_ERC721_OWNER_OF_ABI = (
+    {
+        "inputs": ({"internalType": "uint256", "name": "tokenId", "type": "uint256"},),
+        "name": "ownerOf",
+        "outputs": ({"internalType": "address", "name": "owner", "type": "address"},),
+        "stateMutability": "view",
+        "type": "function",
+    },
+)
+# ``ERC721NonexistentToken(uint256)``.  Modern ERC-721 implementations often
+# return only this custom-error selector, without a human-readable revert
+# reason.  The multi-generation owner scan must recognize that precise absence
+# signal so it can continue from the current manager to a legacy manager.
+_ERC721_NONEXISTENT_TOKEN_SELECTOR = "0x7e273289"
 _RETRY_AFTER_MESSAGE_RE = re.compile(r"retry after\s+([0-9]+(?:\.[0-9]+)?)", re.IGNORECASE)
 
 
@@ -110,6 +132,43 @@ def _is_transient_rpc_error(exc: Exception) -> bool:
     except Exception:  # noqa: BLE001 — grpc import/classification must never mask the original error
         pass
     return bool(_TRANSIENT_RPC_MESSAGE_RE.search(str(exc)))
+
+
+def _has_erc721_nonexistent_token_data(value: object) -> bool:
+    """Find the exact custom-error selector in structured RPC error data."""
+
+    if isinstance(value, str):
+        return value.lower().startswith(_ERC721_NONEXISTENT_TOKEN_SELECTOR)
+    if isinstance(value, bytes | bytearray):
+        selector = bytes.fromhex(_ERC721_NONEXISTENT_TOKEN_SELECTOR.removeprefix("0x"))
+        return bytes(value).startswith(selector)
+    if isinstance(value, Mapping):
+        return any(
+            _has_erc721_nonexistent_token_data(value.get(key))
+            for key in ("data", "result", "originalError")
+            if key in value
+        )
+    if isinstance(value, Sequence):
+        return any(_has_erc721_nonexistent_token_data(item) for item in value)
+    return False
+
+
+def _is_missing_erc721_token(exc: Exception) -> bool:
+    """Recognize only an ``ownerOf`` revert that means the token is absent."""
+
+    if _has_erc721_nonexistent_token_data(getattr(exc, "data", None)) or _has_erc721_nonexistent_token_data(exc.args):
+        return True
+    message = str(exc).lower()
+    return "execution reverted" in message and any(
+        marker in message
+        for marker in (
+            "invalid token",
+            "nonexistent token",
+            "non-existent token",
+            "erc721nonexistenttoken",
+            "owner query for nonexistent token",
+        )
+    )
 
 
 def _cl_position_backoff_seconds(attempt: int, exc: Exception) -> float:
@@ -444,6 +503,59 @@ class AerodromeSDK:
             self._cl_pool_abi = self._load_abi("cl_pool")
 
         logger.info(f"AerodromeSDK initialized for chain={chain}")
+
+    def resolve_slipstream_position_manager(self, deployment: SlipstreamDeployment | None) -> str:
+        """Return only a connector-reviewed manager for this chain.
+
+        ``None`` preserves the legacy SDK default for callers outside the staged
+        exact-venue compiler.  A supplied deployment must be the exact frozen
+        value published by this connector; arbitrary transaction targets are
+        never accepted at this boundary.
+        """
+
+        if deployment is None:
+            manager = self.addresses.get("cl_nft")
+            if not manager:
+                raise ValueError(f"cl_nft not configured for chain {self.chain}")
+            return manager
+        if type(deployment) is not SlipstreamDeployment:
+            raise TypeError("deployment must be an exact SlipstreamDeployment")
+        if deployment not in slipstream_lp_deployments(self.chain):
+            raise ValueError(f"unreviewed Slipstream deployment for chain {self.chain}")
+        return deployment.position_manager
+
+    def find_owned_slipstream_deployments(
+        self,
+        token_id: int,
+        owner: str,
+        web3: Any,
+    ) -> tuple[SlipstreamDeployment, ...]:
+        """Return reviewed generations where ``owner`` owns ``token_id``.
+
+        Token IDs are scoped to an ERC-721 contract.  Scanning the reviewed
+        managers preserves legacy-close continuity without guessing that the
+        same numeric ID belongs to the current deployment.  Any transport
+        failure is surfaced because an incomplete scan cannot prove uniqueness.
+        """
+
+        owner_key = web3.to_checksum_address(owner).lower()
+        matches: list[SlipstreamDeployment] = []
+        for deployment in slipstream_lp_deployments(self.chain):
+            manager = web3.eth.contract(
+                address=web3.to_checksum_address(deployment.position_manager),
+                abi=list(_ERC721_OWNER_OF_ABI),
+            )
+            try:
+                observed_owner = str(manager.functions.ownerOf(token_id).call()).lower()
+            except Exception as exc:  # noqa: BLE001 - provider exceptions are not type-stable
+                if _is_missing_erc721_token(exc):
+                    continue
+                # Transport, decode, programming, and unknown failures make
+                # the cross-manager scan incomplete and must fail closed.
+                raise
+            if observed_owner == owner_key:
+                matches.append(deployment)
+        return tuple(matches)
 
     def _load_abi(self, name: str) -> list[dict]:
         """Load ABI from file."""
@@ -1020,6 +1132,8 @@ class AerodromeSDK:
         self,
         token_id: int,
         web3: Any,
+        *,
+        deployment: SlipstreamDeployment | None = None,
     ) -> "CLPositionInfo | None":
         """Get Slipstream CL position info by NFT token ID.
 
@@ -1040,15 +1154,17 @@ class AerodromeSDK:
                 (ALM-2892). The caller (``AerodromeAdapter.remove_cl_liquidity``)
                 converts this into a clear ``LiquidityResult`` failure.
         """
-        if "cl_nft" not in self.addresses:
-            logger.warning(f"No cl_nft address for chain {self.chain}")
+        try:
+            manager = self.resolve_slipstream_position_manager(deployment)
+        except ValueError as exc:
+            logger.warning("Cannot select Slipstream position manager: %s", exc)
             return None
 
         last_transient: Exception | None = None
         for attempt in range(1, _CL_POSITION_MAX_ATTEMPTS + 1):
             try:
                 nft = web3.eth.contract(
-                    address=web3.to_checksum_address(self.addresses["cl_nft"]),
+                    address=web3.to_checksum_address(manager),
                     abi=self._cl_nft_abi,
                 )
                 pos = nft.functions.positions(token_id).call()
@@ -1118,6 +1234,7 @@ class AerodromeSDK:
         sender: str,
         web3: Any,
         sqrt_price_x96: int = 0,
+        deployment: SlipstreamDeployment | None = None,
     ) -> dict[str, Any]:
         """Build Slipstream CL NonfungiblePositionManager mint transaction.
 
@@ -1136,15 +1253,18 @@ class AerodromeSDK:
             sender: Transaction sender
             web3: Web3 instance
             sqrt_price_x96: Initial sqrt price (0 for existing pool)
+            deployment: Reviewed factory/position-manager generation. New
+                mints should pass the current deployment explicitly. ``None``
+                retains the legacy direct-SDK default for compatibility; the
+                exact-venue compiler never relies on that default.
 
         Returns:
             Transaction dictionary
         """
-        if "cl_nft" not in self.addresses:
-            raise ValueError(f"cl_nft not configured for chain {self.chain}")
+        manager = self.resolve_slipstream_position_manager(deployment)
 
         nft = web3.eth.contract(
-            address=web3.to_checksum_address(self.addresses["cl_nft"]),
+            address=web3.to_checksum_address(manager),
             abi=self._cl_nft_abi,
         )
 
@@ -1181,6 +1301,8 @@ class AerodromeSDK:
         deadline: int,
         sender: str,
         web3: Any,
+        *,
+        deployment: SlipstreamDeployment | None = None,
     ) -> dict[str, Any]:
         """Build Slipstream CL decreaseLiquidity transaction.
 
@@ -1192,15 +1314,16 @@ class AerodromeSDK:
             deadline: Transaction deadline
             sender: Transaction sender
             web3: Web3 instance
+            deployment: Reviewed generation that owns the physical position.
+                ``None`` retains the legacy direct-SDK manager default.
 
         Returns:
             Transaction dictionary
         """
-        if "cl_nft" not in self.addresses:
-            raise ValueError(f"cl_nft not configured for chain {self.chain}")
+        manager = self.resolve_slipstream_position_manager(deployment)
 
         nft = web3.eth.contract(
-            address=web3.to_checksum_address(self.addresses["cl_nft"]),
+            address=web3.to_checksum_address(manager),
             abi=self._cl_nft_abi,
         )
 
@@ -1223,6 +1346,8 @@ class AerodromeSDK:
         amount1_max: int,
         sender: str,
         web3: Any,
+        *,
+        deployment: SlipstreamDeployment | None = None,
     ) -> dict[str, Any]:
         """Build Slipstream CL collect transaction.
 
@@ -1233,15 +1358,16 @@ class AerodromeSDK:
             amount1_max: Maximum token1 to collect (use MAX_UINT128 for all)
             sender: Transaction sender
             web3: Web3 instance
+            deployment: Reviewed generation that owns the physical position.
+                ``None`` retains the legacy direct-SDK manager default.
 
         Returns:
             Transaction dictionary
         """
-        if "cl_nft" not in self.addresses:
-            raise ValueError(f"cl_nft not configured for chain {self.chain}")
+        manager = self.resolve_slipstream_position_manager(deployment)
 
         nft = web3.eth.contract(
-            address=web3.to_checksum_address(self.addresses["cl_nft"]),
+            address=web3.to_checksum_address(manager),
             abi=self._cl_nft_abi,
         )
 

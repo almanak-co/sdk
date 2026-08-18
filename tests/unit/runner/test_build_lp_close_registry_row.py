@@ -438,6 +438,7 @@ class TestBuildLpCloseRegistryRow:
             token_id=None,
             receipt=receipt,
             parser=parser,
+            nft_manager_addr=None,
         )
 
     @pytest.mark.asyncio
@@ -517,3 +518,93 @@ class TestBuildLpCloseRegistryRow:
         assert result is not None
         registry_row, _, _ = result
         assert registry_row.physical_identity_hash == expected_pih
+
+    @pytest.mark.asyncio
+    async def test_receipt_payload_manager_overrides_static_connector_default(self) -> None:
+        """Equal token IDs on two Slipstream managers remain different positions."""
+
+        from almanak.framework.migration.backfill import physical_identity_hash_univ3
+
+        current_manager = "0xe1f8cd9ac4e4a65f54f38a5cdafca44f6dd68b53"
+        legacy_default = "0x827922686190790b37229fd06084350e74485b72"
+        expected = physical_identity_hash_univ3(
+            chain="base",
+            nft_manager_addr=current_manager,
+            token_id=self.TOKEN_ID_INT,
+        )
+        runner = _make_runner(open_payload_for_close=None)
+        parser = _make_parser(
+            close_payload=self._close_payload(nft_manager_addr=current_manager),
+        )
+        parser._nft_manager_address_from_receipt = MagicMock(return_value=current_manager)
+
+        result = await _build_lp_close_registry_row(
+            runner,
+            strategy=_make_strategy(chain="base"),
+            intent=_make_intent(),
+            result=SimpleNamespace(),
+            entry=_make_entry(),
+            chain="base",
+            nft_manager=legacy_default,
+            receipt={"logs": []},
+            parser=parser,
+            fee_tier=500,
+        )
+
+        assert result is not None
+        registry_row, _, _ = result
+        assert registry_row.physical_identity_hash == expected
+        parser._nft_manager_address_from_receipt.assert_called_once_with({"logs": []})
+        runner._lookup_open_registry_payload.assert_awaited_once_with(
+            deployment_id=_make_strategy(chain="base").deployment_id,
+            chain="base",
+            token_id=None,
+            receipt={"logs": []},
+            parser=parser,
+            nft_manager_addr=current_manager,
+        )
+
+    @pytest.mark.asyncio
+    async def test_receipt_and_payload_manager_disagreement_refuses_registry_row(self) -> None:
+        receipt_manager = "0xe1f8cd9ac4e4a65f54f38a5cdafca44f6dd68b53"
+        payload_manager = "0x1111111111111111111111111111111111111111"
+        parser = _make_parser(close_payload=self._close_payload(nft_manager_addr=payload_manager))
+        parser._nft_manager_address_from_receipt = MagicMock(return_value=receipt_manager)
+
+        result = await _build_lp_close_registry_row(
+            _make_runner(open_payload_for_close=None),
+            strategy=_make_strategy(chain="base"),
+            intent=_make_intent(),
+            result=SimpleNamespace(),
+            entry=_make_entry(),
+            chain="base",
+            nft_manager="0x827922686190790b37229fd06084350e74485b72",
+            receipt={"logs": []},
+            parser=parser,
+            fee_tier=500,
+        )
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_empty_receipt_manager_never_widens_lookup_to_token_id_only(self) -> None:
+        runner = _make_runner(open_payload_for_close=self._close_payload())
+        parser = _make_parser(close_payload=self._close_payload())
+        parser._nft_manager_address_from_receipt = MagicMock(return_value="")
+
+        result = await _build_lp_close_registry_row(
+            runner,
+            strategy=_make_strategy(chain="base"),
+            intent=_make_intent(),
+            result=SimpleNamespace(),
+            entry=_make_entry(),
+            chain="base",
+            nft_manager="0x827922686190790b37229fd06084350e74485b72",
+            receipt={"logs": []},
+            parser=parser,
+            fee_tier=500,
+        )
+
+        assert result is None
+        runner._lookup_open_registry_payload.assert_not_awaited()
+        parser.extract_registry_payload_close.assert_not_called()

@@ -261,10 +261,15 @@ class GetLPPositionRequest(BaseModel):
     position_id: str = Field(description="NFT token ID of the LP position")
     chain: str = Field(default=DEFAULT_CHAIN)
     protocol: str = Field(default="uniswap_v3")
+    position_manager: str = Field(
+        default="",
+        description="Exact reviewed NFT-manager address; required when a protocol has multiple manager generations.",
+    )
 
 
 class GetLPPositionResponse(BaseModel):
     position_id: str
+    position_manager: str = ""
     token_a: str = ""
     token_b: str = ""
     fee_tier: int = 0

@@ -16,12 +16,14 @@ from almanak.connectors._connector import (
     ImportRef,
     MetadataAmountEncoding,
     SupportedChainsSpec,
+    VenueVerifierDecl,
 )
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
 from almanak.core.capability_obligations import ObligationId
 from almanak.core.chains.base import DESCRIPTOR as BASE
 from almanak.core.chains.optimism import DESCRIPTOR as OPTIMISM
 from almanak.core.intent_types import IntentType
+from almanak.framework.primitives.types import Primitive
 
 _PROVIDER_REFS = {
     ObligationId.ASSET_RESOLUTION: "almanak.connectors.aerodrome.compiler:AerodromeCompiler",
@@ -220,6 +222,20 @@ CONNECTOR = Connector(
     primitive=ImportRef(
         module="almanak.connectors.aerodrome.primitive",
         attribute="PRIMITIVE",
+    ),
+    venue_verifiers=(
+        VenueVerifierDecl(
+            protocol="aerodrome_slipstream",
+            verifier=ImportRef(
+                module="almanak.connectors.aerodrome.venue_verifier",
+                attribute="SlipstreamVenueVerifier",
+            ),
+            contract_version="aerodrome_slipstream_exact_pool.v1",
+            binding_policy_version=1,
+            chains=(BASE,),
+            primitives=(Primitive.LP,),
+            component_names=("tick_spacing",),
+        ),
     ),
     # Aerodrome's SWAP compiler ships amount_in as a human-readable Decimal (VIB-3747).
     metadata_amount_encoding=MetadataAmountEncoding(swap="human"),

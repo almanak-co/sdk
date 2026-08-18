@@ -756,7 +756,7 @@ class TestExtractResultVariants:
 def _erc721_transfer_mint_log(token_id: int, to: str = WALLET, log_index: int = 0) -> dict:
     """ERC-721 Transfer (mint) — 4 topics, from = zero address."""
     return {
-        "address": "0x" + "ee" * 20,
+        "address": "0x827922686190790b37229fd06084350e74485b72",
         "topics": [
             EVENT_TOPICS["Transfer"],
             _addr_topic(ZERO),  # from = mint
@@ -851,7 +851,7 @@ class TestSlipstreamReceiptParser:
         parser = AerodromeSlipstreamReceiptParser(chain="base")
         # 4 topics ERC-721 transfer but from is not zero
         receipt = _receipt([{
-            "address": "0x" + "ee" * 20,
+            "address": "0x827922686190790b37229fd06084350e74485b72",
             "topics": [
                 EVENT_TOPICS["Transfer"],
                 _addr_topic(WALLET),  # NOT zero — not a mint
@@ -874,7 +874,7 @@ class TestSlipstreamReceiptParser:
     def test_extract_position_id_bytes_topic(self) -> None:
         parser = AerodromeSlipstreamReceiptParser(chain="base")
         receipt = _receipt([{
-            "address": "0x" + "ee" * 20,
+            "address": "0x827922686190790b37229fd06084350e74485b72",
             "topics": [
                 bytes.fromhex(EVENT_TOPICS["Transfer"][2:]),
                 _addr_topic(ZERO),
@@ -1140,6 +1140,43 @@ class TestSlipstreamExtractLpOpenData:
         assert out.tick_lower == -887220
         assert out.tick_upper == -100
 
+    def test_latest_npm_owned_mint_is_paired_with_increase(self) -> None:
+        """A bundled open binds the latest eligible Mint, never an older pool."""
+        parser = AerodromeSlipstreamReceiptParser(chain="base")
+        latest_pool = "0x" + "ab" * 20
+        logs = [
+            _slipstream_pool_mint_log(tick_lower=-300, tick_upper=300, pool=POOL),
+            _slipstream_pool_mint_log(tick_lower=-120, tick_upper=180, pool=latest_pool),
+            _npm_increase_liquidity_log(token_id=77, liquidity=10, amount0=2, amount1=3),
+        ]
+
+        out = parser.extract_lp_open_data(_receipt(logs))
+
+        assert out is not None
+        assert out.position_id == 77
+        assert out.pool_address == latest_pool
+        assert out.tick_lower == -120
+        assert out.tick_upper == 180
+
+    def test_malformed_token_id_does_not_consume_mint_context(self) -> None:
+        """A skipped malformed increase leaves the Mint for a later valid event."""
+        parser = AerodromeSlipstreamReceiptParser(chain="base")
+        malformed = _npm_increase_liquidity_log(token_id=1, liquidity=1, amount0=1, amount1=1)
+        malformed["topics"][1] = "0xNOTHEX"
+        logs = [
+            _slipstream_pool_mint_log(tick_lower=-90, tick_upper=150),
+            malformed,
+            _npm_increase_liquidity_log(token_id=88, liquidity=11, amount0=4, amount1=5),
+        ]
+
+        out = parser.extract_lp_open_data(_receipt(logs))
+
+        assert out is not None
+        assert out.position_id == 88
+        assert out.pool_address == POOL.lower()
+        assert out.tick_lower == -90
+        assert out.tick_upper == 150
+
     def test_no_increase_liquidity_returns_none(self) -> None:
         parser = AerodromeSlipstreamReceiptParser(chain="base")
         assert parser.extract_lp_open_data(_receipt([])) is None
@@ -1324,6 +1361,25 @@ class TestSlipstreamExtractLpOpenData:
         }
         result = parser.extract_lp_open_data_result(_receipt([bad]))
         # Malformed payload → ExtractError, NOT ExtractMissing
+        assert isinstance(result, ExtractError)
+
+    def test_malformed_increase_before_valid_still_fails_closed(self) -> None:
+        """A malformed NPM event cannot be bypassed by a later valid event."""
+        parser = AerodromeSlipstreamReceiptParser(chain="base")
+        bad = {
+            "address": _SLIPSTREAM_NPM_BASE,
+            "topics": [
+                EVENT_TOPICS["IncreaseLiquidity"],
+                _addr_topic("0x" + format(1, "040x")),
+            ],
+            "data": "0xZZ",
+        }
+        logs = [
+            _slipstream_pool_mint_log(tick_lower=-100, tick_upper=100),
+            bad,
+            _npm_increase_liquidity_log(token_id=2, liquidity=1, amount0=1, amount1=1),
+        ]
+        result = parser.extract_lp_open_data_result(_receipt(logs))
         assert isinstance(result, ExtractError)
 
     def test_result_wrapper_ok(self) -> None:

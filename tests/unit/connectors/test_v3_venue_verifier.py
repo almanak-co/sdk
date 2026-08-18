@@ -207,14 +207,14 @@ def test_block_reorg_during_observation_is_closed_stale_evidence() -> None:
     assert result.reason_code is VenueBindingFailureReason.STALE_EVIDENCE
 
 
-def test_manifests_declare_only_the_nominated_v3_protocols() -> None:
+def test_manifests_declare_only_the_reviewed_exact_venue_protocols() -> None:
     declared = {
         declaration.protocol: declaration
         for connector in CONNECTOR_REGISTRY.with_venue_verifiers()
         for declaration in connector.venue_verifiers
     }
 
-    assert set(declared) == {"pancakeswap_v3", "uniswap_v3"}
+    assert set(declared) == {"aerodrome_slipstream", "pancakeswap_v3", "uniswap_v3"}
     assert declared["uniswap_v3"].chains == (
         "arbitrum",
         "avalanche",
@@ -225,5 +225,11 @@ def test_manifests_declare_only_the_nominated_v3_protocols() -> None:
         "polygon",
     )
     assert declared["pancakeswap_v3"].chains == ("arbitrum", "base", "bsc", "ethereum")
-    assert all(declaration.component_names == ("fee",) for declaration in declared.values())
+    assert declared["aerodrome_slipstream"].chains == ("base",)
+    assert declared["aerodrome_slipstream"].primitives == (Primitive.LP,)
+    assert declared["aerodrome_slipstream"].component_names == ("tick_spacing",)
+    assert all(
+        declared[protocol].component_names == ("fee",)
+        for protocol in ("pancakeswap_v3", "uniswap_v3")
+    )
     assert AddressRegistry.resolve_contract_address("uniswap_v3", "arbitrum", "factory")

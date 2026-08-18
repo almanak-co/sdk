@@ -2,7 +2,7 @@
 
 Tests the full Intent -> Compile -> Execute -> Parse -> Verify flow for the
 Slipstream concentrated-liquidity surface (Uniswap V3-style NFT positions via
-the Slipstream NonfungiblePositionManager at ``AERODROME["base"]["cl_nft"]``):
+the connector's reviewed current NonfungiblePositionManager):
 
 - LPOpenIntent (``protocol="aerodrome_slipstream"``)            — single LP_OPEN
 - LPCloseIntent (``protocol="aerodrome_slipstream"``)           — three position-state cases
@@ -24,15 +24,18 @@ To run:
 """
 
 import json
+import os
 from decimal import Decimal
 
 import pytest
 from web3 import Web3
 
-from almanak.connectors.aerodrome.addresses import AERODROME
+from almanak.connectors.aerodrome.addresses import slipstream_lp_deployments
 from almanak.connectors.aerodrome.receipt_parser import (
     AerodromeSlipstreamReceiptParser,
 )
+from almanak.connectors.aerodrome.venue_verifier import SlipstreamVenueVerifier
+from almanak.core.asset_identity import AssetIdentity, AssetNamespace
 from almanak.framework.execution.orchestrator import (
     ExecutionContext,
     ExecutionOrchestrator,
@@ -49,6 +52,15 @@ from almanak.framework.intents.vocabulary import (
     IntentType,
     PriceBand,
     lp_range_is_ticks,
+)
+from almanak.framework.primitives.types import Primitive
+from almanak.framework.venues import (
+    VenueBindingComponent,
+    VenueReferenceNamespace,
+    VenueTargetRef,
+    VenueTargetRole,
+    VenueVerificationRequest,
+    VerifiedVenueBinding,
 )
 from tests.intents._lp_setup_helpers import (
     collect_all_tokens,
@@ -70,24 +82,30 @@ from tests.intents.conftest import (
 CHAIN_NAME = "base"
 PROTOCOL = "aerodrome_slipstream"
 
-# Slipstream NonfungiblePositionManager (cl_nft) on Base.
-POSITION_MANAGER = AERODROME["base"]["cl_nft"]
+# New positions use the newest reviewed factory/manager pair. Legacy positions
+# remain closeable through their receipt- and ownership-derived manager.
+SLIPSTREAM_DEPLOYMENT = slipstream_lp_deployments("base")[0]
+POSITION_MANAGER = SLIPSTREAM_DEPLOYMENT.position_manager
+FIXED_PRICE_ORACLE = {"USDC": Decimal("1"), "WETH": Decimal("3000")}
+ALM_3074_O_TOKEN = "0x182fa643e5f29d5eca75e7b9cf9336a3fe4620b2"
+ALM_3074_O_USDC_POOL = "0x8d479a4c680a76d4ae03f10203569558405ddfff"
 
-# Pool: WETH/USDC, tick_spacing=200 (the canonical Slipstream WETH/USDC volatile
-# pool on Base — same tick_spacing the ``demo_aerodrome_slipstream_lp`` demo
-# strategy uses by default; verified on-chain via the cl_factory).
+# Pool: WETH/USDC, tick_spacing=50 on the reviewed current Slipstream factory
+# (the same generation and spacing used by the demo strategy). The prior
+# deployment's WETH/USDC pool used spacing 200; crossing those generations is
+# exactly the authority mismatch this suite now prevents.
 #
 # Token order: Base WETH (0x4200…) < USDC (0x8335…) by address, so
 # token0=WETH, token1=USDC. Ticks therefore measure log(USDC_raw/WETH_raw),
 # which is negative for any realistic ETH price (USDC has 6 decimals vs WETH's
 # 18, so the raw ratio is ~1e-9 even at ETH=$3000).
-POOL = "WETH/USDC/200"
+POOL = "WETH/USDC/50"
 LP_AMOUNT_WETH = Decimal("0.1")  # amount0 (WETH, token0 on Base)
 LP_AMOUNT_USDC = Decimal("250")  # amount1 (USDC, token1 on Base)
 
 # Wide tick range that covers any realistic ETH price across forks.
-# Slipstream V3 ticks max out at ±887272; snapped to tick_spacing=200 these
-# round to ±887200. -300000 → +200000 covers an ETH price range from below $1
+# Slipstream V3 ticks max out at ±887272. -300000 → +200000 is aligned to
+# tick_spacing=50 and covers an ETH price range from below $1
 # to far above any historical high, so the position deposits both tokens
 # regardless of the fork-block ETH price.
 RANGE_LOWER = Decimal("-300000")  # must be tick-integer-valued
@@ -117,6 +135,41 @@ PRICE_BAND_UPPER = Decimal("12000")
 # same ``lp_handler.py`` path, and ``AerodromeSlipstreamReceiptParser`` extracts
 # the V3-style ``lp_open_data`` (with ticks). The Layer-5 contract is therefore
 # the V3 directional null-contract — identical to PancakeSwap V3 / SushiSwap V3.
+
+
+def _assert_alm_3074_exact_pool_binding(anvil_eth_call_adapter) -> None:
+    """Prove the reported O/USDC address from live current-factory facts."""
+
+    request = VenueVerificationRequest(
+        chain=CHAIN_NAME,
+        protocol=PROTOCOL,
+        primitive=Primitive.LP,
+        requested_refs=(
+            VenueTargetRef(
+                VenueTargetRole.POOL,
+                VenueReferenceNamespace.EVM_ADDRESS,
+                ALM_3074_O_USDC_POOL,
+            ),
+        ),
+        ordered_assets=(
+            AssetIdentity(CHAIN_NAME, AssetNamespace.ERC20, ALM_3074_O_TOKEN),
+            AssetIdentity(
+                CHAIN_NAME,
+                AssetNamespace.ERC20,
+                CHAIN_CONFIGS[CHAIN_NAME]["tokens"]["USDC"].lower(),
+            ),
+        ),
+        binding_components=(VenueBindingComponent("tick_spacing", "200"),),
+        binding_policy_version=1,
+    )
+    result = SlipstreamVenueVerifier().verify_venue(request, anvil_eth_call_adapter)
+    assert type(result) is VerifiedVenueBinding
+    assert result.binding.identity_refs[0].reference == ALM_3074_O_USDC_POOL
+    assert result.binding.ordered_assets == request.ordered_assets
+    assert result.binding.binding_components == request.binding_components
+    operational = {ref.role: ref.reference for ref in result.operational_refs}
+    assert operational[VenueTargetRole.FACTORY] == SLIPSTREAM_DEPLOYMENT.factory.lower()
+    assert operational[VenueTargetRole.POSITION_MANAGER] == POSITION_MANAGER.lower()
 
 
 def _execution_context(wallet: str) -> ExecutionContext:
@@ -209,8 +262,10 @@ async def _open_position_for_accounting(
     orchestrator: ExecutionOrchestrator,
     price_oracle: dict[str, Decimal],
     anvil_rpc_url: str,
+    anvil_eth_call_adapter,
 ):
     """Open a Slipstream LP position; return (position_id, intent, enriched_result)."""
+    _assert_alm_3074_exact_pool_binding(anvil_eth_call_adapter)
     intent = LPOpenIntent(
         pool=POOL,
         amount0=LP_AMOUNT_WETH,
@@ -226,18 +281,33 @@ async def _open_position_for_accounting(
         wallet_address=funded_wallet,
         price_oracle=price_oracle,
         rpc_url=anvil_rpc_url,
+        venue_verification_gateway_factory=lambda: anvil_eth_call_adapter,
     )
     compilation_result = compiler.compile(intent)
     assert compilation_result.status.value == "SUCCESS", f"LP Open compilation failed: {compilation_result.error}"
     assert compilation_result.action_bundle is not None
+    open_metadata = compilation_result.action_bundle.metadata
+    assert open_metadata["nft_manager"].lower() == POSITION_MANAGER.lower()
+    assert open_metadata["slipstream_deployment"] == "current"
+    assert open_metadata["venue_binding_hash"]
+    mint_tx = compilation_result.action_bundle.transactions[-1]
+    mint_target = mint_tx["to"] if isinstance(mint_tx, dict) else mint_tx.to
+    assert mint_target.lower() == POSITION_MANAGER.lower()
 
     execution_result = await orchestrator.execute(compilation_result.action_bundle)
     assert execution_result.success, f"LP Open execution failed: {execution_result.error}"
+    fork_block = int(os.environ["ANVIL_FORK_BLOCK_BASE"])
+    assert execution_result.transaction_results
+    for tx_result in execution_result.transaction_results:
+        assert tx_result.tx_hash.startswith("0x") and len(tx_result.tx_hash) == 66
+        assert tx_result.receipt is not None
+        assert tx_result.receipt.status == 1
+        assert tx_result.receipt.block_number >= fork_block
     enriched = _enrich_for_accounting(
         execution_result,
         intent,
         funded_wallet,
-        compilation_result.action_bundle.metadata,
+        open_metadata,
     )
 
     parser = AerodromeSlipstreamReceiptParser(chain=CHAIN_NAME)
@@ -248,7 +318,7 @@ async def _open_position_for_accounting(
             if pos_id is not None:
                 position_id = int(pos_id)
     assert position_id is not None, "Failed to extract Slipstream position ID from LP Open receipt"
-    return position_id, intent, enriched
+    return position_id, intent, enriched, open_metadata
 
 
 # =============================================================================
@@ -269,13 +339,15 @@ async def _open_position_via_intent(
     orchestrator: ExecutionOrchestrator,
     price_oracle: dict[str, Decimal],
     anvil_rpc_url: str,
+    anvil_eth_call_adapter,
 ) -> int:
     """Open a Slipstream LP position via LPOpenIntent and return the NFT tokenId."""
-    position_id, _, _ = await _open_position_for_accounting(
+    position_id, _, _, _ = await _open_position_for_accounting(
         funded_wallet,
         orchestrator,
         price_oracle,
         anvil_rpc_url,
+        anvil_eth_call_adapter,
     )
     return position_id
 
@@ -323,7 +395,7 @@ def _query_pool_current_tick(web3: Web3, token0: str, token1: str, tick_spacing:
     signature differs from Uniswap V3's fee-keyed one), then reads ``slot0()``
     (0x3850c7bd), whose second word is the current ``int24`` tick.
     """
-    factory = AERODROME[CHAIN_NAME]["cl_factory"]
+    factory = SLIPSTREAM_DEPLOYMENT.factory
     get_pool = (
         "0x28af8d0b"
         + Web3.to_checksum_address(token0)[2:].lower().zfill(64)
@@ -359,7 +431,6 @@ class TestAerodromeSlipstreamLPOpenIntent:
         web3: Web3,
         funded_wallet: str,
         orchestrator: ExecutionOrchestrator,
-        price_oracle: dict[str, Decimal],
         anvil_rpc_url: str,
         layer5_accounting_harness,
         anvil_eth_call_adapter,
@@ -372,6 +443,8 @@ class TestAerodromeSlipstreamLPOpenIntent:
         3. Parse       — AerodromeSlipstreamReceiptParser.extract_position_id.
         4. Balance     — token0/token1 wallet deltas match LP_OPEN amounts.
         """
+        _assert_alm_3074_exact_pool_binding(anvil_eth_call_adapter)
+        price_oracle = FIXED_PRICE_ORACLE
         tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
         usdc_addr = tokens["USDC"]
         weth_addr = tokens["WETH"]
@@ -410,12 +483,18 @@ class TestAerodromeSlipstreamLPOpenIntent:
             wallet_address=funded_wallet,
             price_oracle=price_oracle,
             rpc_url=anvil_rpc_url,
+            venue_verification_gateway_factory=lambda: anvil_eth_call_adapter,
         )
         compilation_result = compiler.compile(intent)
         assert compilation_result.status.value == "SUCCESS", (
             f"Compilation failed: {compilation_result.error}"
         )
         assert compilation_result.action_bundle is not None
+        metadata = compilation_result.action_bundle.metadata
+        assert metadata["nft_manager"].lower() == POSITION_MANAGER.lower()
+        assert metadata["slipstream_deployment"] == "current"
+        assert metadata["venue_binding_hash"]
+        assert metadata["venue_verification"]["blockNumber"] > 0
         # Slipstream LP_OPEN compiles to N ERC20 approves + one mint tx; the
         # canonical case is at least one tx (mint itself), with optional
         # approves preceding.
@@ -509,8 +588,8 @@ class TestAerodromeSlipstreamLPOpenIntent:
         web3: Web3,
         funded_wallet: str,
         orchestrator: ExecutionOrchestrator,
-        price_oracle: dict[str, Decimal],
         anvil_rpc_url: str,
+        anvil_eth_call_adapter,
     ):
         """Open the same position from a PRICE band instead of raw ticks (VIB-5867).
 
@@ -526,6 +605,7 @@ class TestAerodromeSlipstreamLPOpenIntent:
                      straddling range. A one-sided (ALM-2901) range would deposit
                      one token and strand the other.
         """
+        price_oracle = FIXED_PRICE_ORACLE
         tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
         usdc_addr = tokens["USDC"]
         weth_addr = tokens["WETH"]
@@ -562,6 +642,7 @@ class TestAerodromeSlipstreamLPOpenIntent:
             wallet_address=funded_wallet,
             price_oracle=price_oracle,
             rpc_url=anvil_rpc_url,
+            venue_verification_gateway_factory=lambda: anvil_eth_call_adapter,
         )
         compilation_result = compiler.compile(intent)
         assert compilation_result.status.value == "SUCCESS", f"Compilation failed: {compilation_result.error}"
@@ -596,18 +677,18 @@ class TestAerodromeSlipstreamLPOpenIntent:
         # must bracket the pool's live tick. This is the assertion ALM-2901's
         # position would have failed.
         tick_lower, tick_upper = _query_position_ticks(web3, POSITION_MANAGER, position_id)
-        current_tick = _query_pool_current_tick(web3, weth_addr, usdc_addr, 200)
+        current_tick = _query_pool_current_tick(web3, weth_addr, usdc_addr, 50)
         print(f"Minted ticks: [{tick_lower}, {tick_upper}) | live pool tick: {current_tick}")
         assert tick_lower < 0 and tick_upper < 0, (
             f"WETH/USDC Slipstream ticks must be negative (USDC has 6dp vs WETH 18dp); "
             f"got [{tick_lower}, {tick_upper}] — the decimals term was dropped"
         )
-        assert tick_lower % 200 == 0 and tick_upper % 200 == 0, "ticks must align to tick_spacing=200"
-        if current_tick is not None:
-            assert tick_lower <= current_tick < tick_upper, (
-                f"minted range [{tick_lower}, {tick_upper}) must straddle the live tick "
-                f"{current_tick} — a non-straddling range is the ALM-2901 one-sided mint"
-            )
+        assert tick_lower % 50 == 0 and tick_upper % 50 == 0, "ticks must align to tick_spacing=50"
+        assert current_tick is not None, "current WETH/USDC/50 pool tick must be readable"
+        assert tick_lower <= current_tick < tick_upper, (
+            f"minted range [{tick_lower}, {tick_upper}) must straddle the live tick "
+            f"{current_tick} — a non-straddling range is the ALM-2901 one-sided mint"
+        )
 
         # Layer 4 — Balance deltas. BOTH tokens must move: a straddling range
         # consumes both sides. This is the strongest available proof that the
@@ -649,7 +730,6 @@ class TestAerodromeSlipstreamLPCloseIntent:
         web3: Web3,
         funded_wallet: str,
         orchestrator: ExecutionOrchestrator,
-        price_oracle: dict[str, Decimal],
         anvil_rpc_url: str,
         layer5_accounting_harness,
         anvil_eth_call_adapter,
@@ -662,6 +742,7 @@ class TestAerodromeSlipstreamLPCloseIntent:
         3. Parse       — extract_lp_close_data reports collected amounts > 0.
         4. Balance     — token0/token1 wallet deltas positive (principal returned).
         """
+        price_oracle = FIXED_PRICE_ORACLE
         tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
         usdc_addr = tokens["USDC"]
         weth_addr = tokens["WETH"]
@@ -670,8 +751,8 @@ class TestAerodromeSlipstreamLPCloseIntent:
 
         # Open via the accounting helper so Layer 5 has the prior LP_OPEN row
         # for linkage + cost basis.
-        position_id, open_intent, open_result = await _open_position_for_accounting(
-            funded_wallet, orchestrator, price_oracle, anvil_rpc_url,
+        position_id, open_intent, open_result, open_metadata = await _open_position_for_accounting(
+            funded_wallet, orchestrator, price_oracle, anvil_rpc_url, anvil_eth_call_adapter,
         )
         open_accounting_row = await assert_accounting_persisted(
             layer5_accounting_harness,
@@ -702,12 +783,16 @@ class TestAerodromeSlipstreamLPCloseIntent:
             wallet_address=funded_wallet,
             price_oracle=price_oracle,
             rpc_url=anvil_rpc_url,
+            venue_verification_gateway_factory=lambda: anvil_eth_call_adapter,
         )
         compilation_result = compiler.compile(close_intent)
         assert compilation_result.status.value == "SUCCESS", (
             f"LP Close compilation failed: {compilation_result.error}"
         )
         assert compilation_result.action_bundle is not None
+        assert compilation_result.action_bundle.metadata["nft_manager"].lower() == POSITION_MANAGER.lower()
+        assert compilation_result.action_bundle.metadata["slipstream_deployment"] == "current"
+        assert compilation_result.action_bundle.metadata["venue_binding_hash"] == open_metadata["venue_binding_hash"]
         # Slipstream LP_CLOSE = decreaseLiquidity + collect = 2 txs.
         assert len(compilation_result.action_bundle.transactions) == 2, (
             "Slipstream LP_CLOSE must compile to exactly two transactions "
@@ -747,7 +832,7 @@ class TestAerodromeSlipstreamLPCloseIntent:
         ), "At least one collected amount must be positive"
 
         # Layer 4 strict: wallet deltas EXACTLY equal parsed Collect amounts.
-        # POOL = "WETH/USDC/200" on Base → token0=WETH (0x4200…), token1=USDC
+        # POOL = "WETH/USDC/50" on Base → token0=WETH (0x4200…), token1=USDC
         # (0x8335…) by address ordering. The Slipstream NPM collect() routes
         # tokens directly to ``recipient=wallet`` (no unwrap), so the parsed
         # amount0_collected/amount1_collected MUST equal the wallet deltas
@@ -833,8 +918,8 @@ class TestAerodromeSlipstreamLPCloseIntent:
 
         # Open via the accounting helper so Layer 5 persists the OPEN — the
         # no-op close assertion is then not vacuous against a fresh harness.
-        position_id, open_intent, open_result = await _open_position_for_accounting(
-            funded_wallet, orchestrator, price_oracle, anvil_rpc_url,
+        position_id, open_intent, open_result, _ = await _open_position_for_accounting(
+            funded_wallet, orchestrator, price_oracle, anvil_rpc_url, anvil_eth_call_adapter,
         )
         await assert_accounting_persisted(
             layer5_accounting_harness,
@@ -882,6 +967,7 @@ class TestAerodromeSlipstreamLPCloseIntent:
             wallet_address=funded_wallet,
             price_oracle=price_oracle,
             rpc_url=anvil_rpc_url,
+            venue_verification_gateway_factory=lambda: anvil_eth_call_adapter,
         )
         compilation_result = compiler.compile(close_intent)
         assert compilation_result.status.value == "SUCCESS", (
@@ -961,8 +1047,8 @@ class TestAerodromeSlipstreamLPCloseIntent:
         weth_decimals = get_token_decimals(web3, weth_addr)
 
         # Open via the accounting helper for the prior LP_OPEN (linkage + basis).
-        position_id, open_intent, open_result = await _open_position_for_accounting(
-            funded_wallet, orchestrator, price_oracle, anvil_rpc_url,
+        position_id, open_intent, open_result, _ = await _open_position_for_accounting(
+            funded_wallet, orchestrator, price_oracle, anvil_rpc_url, anvil_eth_call_adapter,
         )
         open_accounting_row = await assert_accounting_persisted(
             layer5_accounting_harness,
@@ -980,6 +1066,7 @@ class TestAerodromeSlipstreamLPCloseIntent:
             wallet_address=funded_wallet,
             price_oracle=price_oracle,
             rpc_url=anvil_rpc_url,
+            venue_verification_gateway_factory=lambda: anvil_eth_call_adapter,
         )
 
         await decrease_all_liquidity(
@@ -1115,6 +1202,77 @@ class TestAerodromeSlipstreamCollectFeesIntent:
     a deterministic outcome.
     """
 
+    @pytest.mark.intent(IntentType.LP_OPEN, IntentType.LP_COLLECT_FEES)
+    @pytest.mark.asyncio
+    async def test_collect_fees_preserves_current_exact_venue_binding(
+        self,
+        web3: Web3,
+        funded_wallet: str,
+        orchestrator: ExecutionOrchestrator,
+        anvil_rpc_url: str,
+        anvil_eth_call_adapter,
+    ) -> None:
+        """A confirmed collect uses the mint's exact pool and manager authority."""
+
+        position_id, _, _, open_metadata = await _open_position_for_accounting(
+            funded_wallet,
+            orchestrator,
+            FIXED_PRICE_ORACLE,
+            anvil_rpc_url,
+            anvil_eth_call_adapter,
+        )
+        tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
+        balances_before = {
+            symbol: get_token_balance(web3, tokens[symbol], funded_wallet)
+            for symbol in ("WETH", "USDC")
+        }
+        liquidity_before = query_position_liquidity(web3, POSITION_MANAGER, position_id)
+
+        intent = CollectFeesIntent(
+            pool=POOL,
+            protocol=PROTOCOL,
+            chain=CHAIN_NAME,
+            protocol_params={"position_id": position_id},
+        )
+        compiler = IntentCompiler(
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            price_oracle=FIXED_PRICE_ORACLE,
+            rpc_url=anvil_rpc_url,
+            venue_verification_gateway_factory=lambda: anvil_eth_call_adapter,
+        )
+        compiled = compiler.compile(intent)
+        assert compiled.status.value == "SUCCESS", compiled.error
+        assert compiled.action_bundle is not None
+        metadata = compiled.action_bundle.metadata
+        assert metadata["venue_binding_hash"] == open_metadata["venue_binding_hash"]
+        assert metadata["nft_manager"].lower() == POSITION_MANAGER.lower()
+        assert len(compiled.action_bundle.transactions) == 1
+        collect_tx = compiled.action_bundle.transactions[0]
+        collect_target = collect_tx["to"] if isinstance(collect_tx, dict) else collect_tx.to
+        assert collect_target.lower() == POSITION_MANAGER.lower()
+
+        executed = await orchestrator.execute(compiled.action_bundle)
+        assert executed.success, executed.error
+        fork_block = int(os.environ["ANVIL_FORK_BLOCK_BASE"])
+        assert executed.transaction_results
+        parser = AerodromeSlipstreamReceiptParser(chain=CHAIN_NAME)
+        saw_collect = False
+        for tx_result in executed.transaction_results:
+            assert tx_result.tx_hash.startswith("0x") and len(tx_result.tx_hash) == 66
+            assert tx_result.receipt is not None
+            assert tx_result.receipt.status == 1
+            assert tx_result.receipt.block_number >= fork_block
+            receipt = tx_result.receipt.to_dict()
+            assert parser.parse_receipt(receipt).success
+            saw_collect = saw_collect or parser.extract_lp_close_data(receipt) is not None
+        assert saw_collect, "confirmed collect receipt must be parsed from the reviewed NPM"
+        assert query_position_liquidity(web3, POSITION_MANAGER, position_id) == liquidity_before
+        assert {
+            symbol: get_token_balance(web3, tokens[symbol], funded_wallet)
+            for symbol in ("WETH", "USDC")
+        } == balances_before
+
     @pytest.mark.intent(IntentType.LP_OPEN, IntentType.SWAP, IntentType.LP_COLLECT_FEES)
     @pytest.mark.asyncio
     @pytest.mark.xfail(
@@ -1138,7 +1296,6 @@ class TestAerodromeSlipstreamCollectFeesIntent:
         web3: Web3,
         funded_wallet: str,
         orchestrator: ExecutionOrchestrator,
-        price_oracle: dict[str, Decimal],
         anvil_rpc_url: str,
         layer5_accounting_harness,
         anvil_eth_call_adapter,
@@ -1149,7 +1306,7 @@ class TestAerodromeSlipstreamCollectFeesIntent:
         Background: a same-pool fee-accrual fixture for Slipstream is not yet
         wired — the ``SwapIntent(protocol="aerodrome")`` auto-router may
         route through a different pool than the LP position's
-        ``WETH/USDC/200`` Slipstream pool, so no fees accrue on the position
+        ``WETH/USDC/50`` Slipstream pool, so no fees accrue on the position
         at this fork block. Until a same-pool fixture lands (VIB-5968,
         same fee-accrual class as pancakeswap_v3), this test
         verifies the *no-fee* path is a structurally clean no-op:
@@ -1172,14 +1329,15 @@ class TestAerodromeSlipstreamCollectFeesIntent:
         positive-delta assertions, and pair with the parsed-equals-wallet-
         delta checks the LP_CLOSE cases already use).
         """
+        price_oracle = FIXED_PRICE_ORACLE
         tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
         usdc_addr = tokens["USDC"]
         weth_addr = tokens["WETH"]
 
         # Open via the accounting helper so Layer 5 covers the LP_OPEN even
         # though the downstream fee-accrual swap is the xfail-prone step.
-        position_id, open_intent, open_result = await _open_position_for_accounting(
-            funded_wallet, orchestrator, price_oracle, anvil_rpc_url,
+        position_id, open_intent, open_result, open_metadata = await _open_position_for_accounting(
+            funded_wallet, orchestrator, price_oracle, anvil_rpc_url, anvil_eth_call_adapter,
         )
         open_accounting_row = await assert_accounting_persisted(
             layer5_accounting_harness,
@@ -1216,6 +1374,7 @@ class TestAerodromeSlipstreamCollectFeesIntent:
             wallet_address=funded_wallet,
             price_oracle=price_oracle,
             rpc_url=anvil_rpc_url,
+            venue_verification_gateway_factory=lambda: anvil_eth_call_adapter,
         )
         swap_compilation = compiler.compile(swap_intent)
         assert swap_compilation.status.value == "SUCCESS", (
@@ -1244,6 +1403,8 @@ class TestAerodromeSlipstreamCollectFeesIntent:
             f"CollectFees compilation must succeed. Error: {compilation_result.error}"
         )
         assert compilation_result.action_bundle is not None
+        assert compilation_result.action_bundle.metadata["nft_manager"].lower() == POSITION_MANAGER.lower()
+        assert compilation_result.action_bundle.metadata["venue_binding_hash"] == open_metadata["venue_binding_hash"]
         execution_result = await orchestrator.execute(compilation_result.action_bundle)
         assert execution_result.success, (
             f"CollectFees execution failed: {execution_result.error}"

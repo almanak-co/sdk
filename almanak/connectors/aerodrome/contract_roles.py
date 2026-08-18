@@ -29,7 +29,10 @@ CONTRACT_ROLES: tuple[ContractRoleSpec, ...] = (
     ),
     ContractRoleSpec(
         protocol="aerodrome_slipstream",
-        roles={ContractRole.CL_POSITION_MANAGER: ("cl_nft",)},
+        # Keep the historical manager first so legacy single-address tables
+        # retain their byte-for-byte value. Consumers that need physical NFT
+        # authority enumerate both reviewed generations instead of guessing.
+        roles={ContractRole.CL_POSITION_MANAGER: ("cl_nft", "cl_nft_current")},
         address_protocol="aerodrome",
         # Slipstream's cl_nft is its own backfill NPM view-map (Base today).
         npm_view=NpmView.SLIPSTREAM,

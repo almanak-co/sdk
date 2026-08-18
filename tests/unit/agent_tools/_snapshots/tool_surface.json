@@ -194,6 +194,12 @@
             "title": "Position Id",
             "type": "string"
           },
+          "position_manager": {
+            "default": "",
+            "description": "Exact reviewed NFT-manager address; required when a protocol has multiple manager generations.",
+            "title": "Position Manager",
+            "type": "string"
+          },
           "protocol": {
             "default": "uniswap_v3",
             "title": "Protocol",
@@ -1965,6 +1971,12 @@
             "position_id": {
               "description": "NFT token ID of the LP position",
               "title": "Position Id",
+              "type": "string"
+            },
+            "position_manager": {
+              "default": "",
+              "description": "Exact reviewed NFT-manager address; required when a protocol has multiple manager generations.",
+              "title": "Position Manager",
               "type": "string"
             },
             "protocol": {

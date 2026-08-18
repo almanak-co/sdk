@@ -44,7 +44,7 @@ class _Reader:
         self._slot0 = slot0
         self.calls = 0
 
-    def read_position(self, *, chain, token_id, protocol):
+    def read_position(self, *, chain, token_id, protocol, position_manager=None):
         self.calls += 1
         return self._struct
 

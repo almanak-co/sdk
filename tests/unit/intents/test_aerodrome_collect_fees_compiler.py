@@ -9,11 +9,16 @@ Covers two protocol surfaces:
   ``NonfungiblePositionManager.collect()`` for in-position fee harvest.
 """
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from almanak.connectors._strategy_base.pool_validation_base import PoolValidationReason, PoolValidationResult
+from almanak.connectors.aerodrome.addresses import slipstream_lp_deployments
 from almanak.framework.intents.compiler import (
     CompilationStatus,
     IntentCompiler,
@@ -31,6 +36,7 @@ def _make_compiler(chain: str = "base") -> IntentCompiler:
     compiler.rpc_url = None
     compiler.default_deadline_seconds = 300
     compiler.default_lp_slippage = Decimal("0.99")
+    compiler._using_placeholders = False
     # ALM-3183: a __new__-built compiler must declare its config explicitly. This
     # used to be defaulted for it -- to allow_placeholder_prices=True, silently,
     # by a getattr fallback in the context builders. Stating it here preserves
@@ -100,6 +106,37 @@ def _make_collect_tx_mock(*, gas_estimate: int = 120_000):
     return tx
 
 
+@contextmanager
+def _runtime_collect_adapter(compiler: IntentCompiler) -> Iterator[MagicMock]:
+    """Provide one exact reviewed physical position for compiler-unit tests."""
+
+    deployment = slipstream_lp_deployments("base")[0]
+    pool_address = "0x" + "aa" * 20
+    position = SimpleNamespace(
+        token0="0x" + "11" * 20,
+        token1="0x" + "22" * 20,
+        tick_spacing=200,
+    )
+    confirmed = PoolValidationResult(
+        exists=True,
+        reason=PoolValidationReason.CONFIRMED,
+        pool_address=pool_address,
+    )
+    with (
+        patch.object(compiler, "_get_chain_rpc_url", return_value="http://localhost:8545"),
+        patch("almanak.connectors.aerodrome.AerodromeAdapter") as adapter_cls,
+        patch(
+            "almanak.connectors.aerodrome.pool_validation.validate_aerodrome_cl_pool",
+            return_value=confirmed,
+        ),
+        patch("almanak.connectors.aerodrome.compiler._verify_slipstream_binding", return_value=None),
+    ):
+        adapter = adapter_cls.return_value
+        adapter.resolve_owned_cl_deployment.return_value = deployment
+        adapter.get_cl_position.return_value = position
+        yield adapter
+
+
 def test_aerodrome_slipstream_collect_fees_compiles_success() -> None:
     """Slipstream collect_fees should produce a single ``collect`` transaction
     bundle when given a valid NFT tokenId via protocol_params."""
@@ -113,11 +150,7 @@ def test_aerodrome_slipstream_collect_fees_compiles_success() -> None:
     collect_tx = _make_collect_tx_mock(gas_estimate=120_000)
     collect_result = MagicMock(success=True, transactions=[collect_tx], error=None)
 
-    with (
-        patch.object(compiler, "_get_chain_rpc_url", return_value="http://localhost:8545"),
-        patch("almanak.connectors.aerodrome.AerodromeAdapter") as mock_adapter_cls,
-    ):
-        mock_adapter = mock_adapter_cls.return_value
+    with _runtime_collect_adapter(compiler) as mock_adapter:
         mock_adapter.collect_cl_fees.return_value = collect_result
 
         result = compiler._compile_collect_fees(intent)
@@ -137,6 +170,7 @@ def test_aerodrome_slipstream_collect_fees_compiles_success() -> None:
     mock_adapter.collect_cl_fees.assert_called_once_with(
         token_id=12345,
         recipient=compiler.wallet_address,
+        deployment=slipstream_lp_deployments("base")[0],
     )
 
 
@@ -160,11 +194,7 @@ def test_aerodrome_slipstream_collect_fees_dispatch_is_case_and_separator_insens
     collect_tx = _make_collect_tx_mock()
     collect_result = MagicMock(success=True, transactions=[collect_tx], error=None)
 
-    with (
-        patch.object(compiler, "_get_chain_rpc_url", return_value="http://localhost:8545"),
-        patch("almanak.connectors.aerodrome.AerodromeAdapter") as mock_adapter_cls,
-    ):
-        mock_adapter = mock_adapter_cls.return_value
+    with _runtime_collect_adapter(compiler) as mock_adapter:
         mock_adapter.collect_cl_fees.return_value = collect_result
         result = compiler._compile_collect_fees(intent)
 
@@ -248,11 +278,7 @@ def test_aerodrome_slipstream_collect_fees_accepts_clean_integer_inputs(
     collect_tx = _make_collect_tx_mock()
     collect_result = MagicMock(success=True, transactions=[collect_tx], error=None)
 
-    with (
-        patch.object(compiler, "_get_chain_rpc_url", return_value="http://localhost:8545"),
-        patch("almanak.connectors.aerodrome.AerodromeAdapter") as mock_adapter_cls,
-    ):
-        mock_adapter = mock_adapter_cls.return_value
+    with _runtime_collect_adapter(compiler) as mock_adapter:
         mock_adapter.collect_cl_fees.return_value = collect_result
         result = compiler._compile_collect_fees(intent)
 
@@ -318,11 +344,7 @@ def test_aerodrome_slipstream_collect_fees_propagates_adapter_error() -> None:
         protocol_params={"position_id": "12345"},
     )
 
-    with (
-        patch.object(compiler, "_get_chain_rpc_url", return_value="http://localhost:8545"),
-        patch("almanak.connectors.aerodrome.AerodromeAdapter") as mock_adapter_cls,
-    ):
-        mock_adapter = mock_adapter_cls.return_value
+    with _runtime_collect_adapter(compiler) as mock_adapter:
         mock_adapter.collect_cl_fees.return_value = MagicMock(
             success=False,
             transactions=[],

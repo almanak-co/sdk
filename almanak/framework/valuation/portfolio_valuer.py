@@ -5969,10 +5969,12 @@ class PortfolioValuer:
             if token_id is None:
                 return None
 
+            position_manager = position.details.get("nft_manager_addr") or position.details.get("position_manager")
             on_chain = self._lp_reader.read_position(
                 chain=chain,
                 token_id=token_id,
                 protocol=position.protocol,
+                position_manager=str(position_manager) if position_manager else None,
             )
             if on_chain is None:
                 return None

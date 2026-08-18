@@ -30,6 +30,7 @@ from almanak.framework.teardown.plan_a_reconciliation import (
     PositionReconciliation,
     ReconciliationReport,
     ReconciliationVerdict,
+    _is_nft_lp_protocol,
     _lending_market_id,
     reconcile_known_positions_against_chain,
 )
@@ -358,6 +359,36 @@ async def test_lp_mixed_case_nft_protocol_is_not_not_applicable(monkeypatch):
     assert called["n"] == 1  # the real NFT read WAS attempted (not short-circuited)
     assert report.entries[0].verdict is ReconciliationVerdict.DIVERGED_CLOSED
     assert report.entries[0].verdict is not ReconciliationVerdict.NOT_APPLICABLE
+
+
+@pytest.mark.asyncio
+async def test_slipstream_cl_manager_role_is_plan_a_applicable(monkeypatch) -> None:
+    """Connector-owned CL manager roles opt Slipstream into the NFT read."""
+    called = {"n": 0}
+
+    async def _verify(*, gateway_client, position, network=""):
+        called["n"] += 1
+        return True
+
+    monkeypatch.setattr(live_position_reads, "chain_verify_lp_open", _verify)
+    position = _lp(position_id="555", chain="base", protocol="aerodrome_slipstream")
+    report = await reconcile_known_positions_against_chain(
+        summary=_summary(position), gateway_client=object(), market=None
+    )
+
+    assert called["n"] == 1
+    assert report.entries[0].verdict is ReconciliationVerdict.CONFIRMED_OPEN
+
+
+def test_nft_role_lookup_fault_fails_closed_to_verification(monkeypatch) -> None:
+    """Metadata faults must lower confidence, never assert NOT_APPLICABLE."""
+    from almanak.connectors._strategy_base.contract_role_registry import CONTRACT_ROLE_REGISTRY
+
+    def _raise(cls, protocol, role):
+        raise RuntimeError("role registry unavailable")
+
+    monkeypatch.setattr(CONTRACT_ROLE_REGISTRY, "kinds_for", classmethod(_raise))
+    assert _is_nft_lp_protocol("aerodrome_slipstream") is True
 
 
 # ---------------------------------------------------------------------------

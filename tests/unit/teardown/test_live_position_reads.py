@@ -301,6 +301,68 @@ async def test_chain_verify_scopes_to_own_npm_never_foreign_vib5631() -> None:
     assert client.queried_npms == [sushi_npm.lower()]
 
 
+@pytest.mark.asyncio
+async def test_chain_verify_slipstream_manager_identity_selects_exact_generation() -> None:
+    """Changing only durable manager identity changes the queried ERC-721.
+
+    Current and legacy Slipstream managers can both own token id 555.  The
+    verifier must query the manager stamped on this position, never a default.
+    """
+    from almanak.connectors.aerodrome.addresses import slipstream_lp_deployments
+
+    current, legacy = slipstream_lp_deployments("base")
+    client = _FakeGatewayClient(
+        {
+            current.position_manager: 12,
+            legacy.position_manager: 0,
+        }
+    )
+
+    current_position = _lp(
+        "555",
+        chain="base",
+        protocol="aerodrome_slipstream",
+        details={"nft_manager_addr": current.position_manager},
+    )
+    legacy_position = _lp(
+        "555",
+        chain="base",
+        protocol="aerodrome_slipstream",
+        details={"nft_manager_addr": legacy.position_manager},
+    )
+
+    assert await chain_verify_lp_open(gateway_client=client, position=current_position) is True
+    assert await chain_verify_lp_open(gateway_client=client, position=legacy_position) is False
+    assert client.queried_npms == [current.position_manager.lower(), legacy.position_manager.lower()]
+
+
+@pytest.mark.asyncio
+async def test_chain_verify_slipstream_without_exact_manager_stays_unverified() -> None:
+    """Two reviewed generations make a manager-less token id ambiguous."""
+    from almanak.connectors.aerodrome.addresses import slipstream_lp_deployments
+
+    client = _FakeGatewayClient({deployment.position_manager: 1 for deployment in slipstream_lp_deployments("base")})
+    position = _lp("555", chain="base", protocol="aerodrome_slipstream")
+
+    assert await chain_verify_lp_open(gateway_client=client, position=position) is None
+    assert client.queried_npms == []
+
+
+@pytest.mark.asyncio
+async def test_chain_verify_slipstream_rejects_unreviewed_manager_without_fallback() -> None:
+    """Corrupt/foreign manager metadata never falls back to a reviewed default."""
+    client = _FakeGatewayClient({})
+    position = _lp(
+        "555",
+        chain="base",
+        protocol="aerodrome_slipstream",
+        details={"nft_manager_addr": "0x" + "99" * 20},
+    )
+
+    assert await chain_verify_lp_open(gateway_client=client, position=position) is None
+    assert client.queried_npms == []
+
+
 # ---------------------------------------------------------------------------
 # Plan-A / TD-14 NFT-id resolution PARITY (VIB-5631 follow-up).
 #

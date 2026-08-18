@@ -56,6 +56,7 @@ from almanak.framework.intents._compiler_helpers import deadline_from_now
 from almanak.framework.intents.vocabulary import IntentType, SwapIntent
 from almanak.framework.models.reproduction_bundle import ActionBundle
 
+from .addresses import SlipstreamDeployment
 from .sdk import (
     AERODROME_ADDRESSES,
     AERODROME_GAS_ESTIMATES,
@@ -856,6 +857,26 @@ class AerodromeAdapter:
             )  # vib-2986-exempt: gateway-internal fallback
         raise ValueError("No gateway_client or rpc_url configured for CL LP operations")
 
+    def resolve_owned_cl_deployment(self, token_id: int) -> SlipstreamDeployment:
+        """Resolve one NFT token ID to its unique reviewed manager generation."""
+
+        matches = self.sdk.find_owned_slipstream_deployments(
+            token_id,
+            self.wallet_address,
+            self._get_web3(),
+        )
+        if not matches:
+            raise ValueError(f"No reviewed Slipstream position manager reports wallet ownership of tokenId={token_id}")
+        if len(matches) != 1:
+            managers = [deployment.position_manager for deployment in matches]
+            raise ValueError(f"Slipstream tokenId={token_id} is ambiguous across reviewed managers {managers!r}")
+        return matches[0]
+
+    def get_cl_position(self, token_id: int, deployment: SlipstreamDeployment):
+        """Read one position through its already-resolved physical authority."""
+
+        return self.sdk.get_cl_position(token_id, self._get_web3(), deployment=deployment)
+
     def add_cl_liquidity(
         self,
         token_a: str,
@@ -872,6 +893,7 @@ class AerodromeAdapter:
         amount_b_wei: int | None = None,
         amount_a_min_wei: int | None = None,
         amount_b_min_wei: int | None = None,
+        deployment: SlipstreamDeployment | None = None,
     ) -> CLLiquidityResult:
         """Build Slipstream CL add liquidity transactions.
 
@@ -904,13 +926,17 @@ class AerodromeAdapter:
                 are derived from pool-aligned amounts, not the oracle inputs.
                 Must be paired with the other three wei overload kwargs.
             amount_b_min_wei: See ``amount_a_min_wei``.
+            deployment: Reviewed Slipstream factory/position-manager pair.
+                New positions should pass the current deployment explicitly;
+                ``None`` retains the legacy direct-adapter default only. The
+                exact-venue compiler always supplies the reviewed current pair.
 
         Returns:
             CLLiquidityResult with transaction data
         """
         self.clear_planned_allowance_cache()
         try:
-            if "cl_nft" not in self.addresses:
+            if deployment is None and "cl_nft" not in self.addresses:
                 return CLLiquidityResult(
                     success=False,
                     error=f"Aerodrome Slipstream CL not supported on chain '{self.chain}' (no cl_nft address)",
@@ -1021,7 +1047,7 @@ class AerodromeAdapter:
                 amount0_min_override = b_min_override
                 amount1_min_override = a_min_override
 
-            cl_nft_address = self.addresses["cl_nft"]
+            cl_nft_address = self.sdk.resolve_slipstream_position_manager(deployment)
 
             web3 = self._get_web3()
 
@@ -1066,6 +1092,7 @@ class AerodromeAdapter:
                 deadline=deadline,
                 sender=self.wallet_address,
                 web3=web3,
+                deployment=deployment,
             )
 
             token0_symbol = self._get_token_symbol(token0_address)
@@ -1111,6 +1138,8 @@ class AerodromeAdapter:
         token_id: int,
         slippage_bps: int | None = None,
         recipient: str | None = None,
+        *,
+        deployment: SlipstreamDeployment | None = None,
     ) -> LiquidityResult:
         """Build Slipstream CL remove liquidity transactions (decreaseLiquidity + collect).
 
@@ -1118,6 +1147,8 @@ class AerodromeAdapter:
             token_id: NFT tokenId for the CL position
             slippage_bps: Slippage tolerance (unused, mins set to 0)
             recipient: Address to receive tokens (default: wallet_address)
+            deployment: Reviewed generation that owns the physical position.
+                ``None`` retains the legacy direct-adapter manager default.
 
         Returns:
             LiquidityResult with transaction data
@@ -1138,7 +1169,7 @@ class AerodromeAdapter:
             web3 = self._get_web3()
 
             # Query current position
-            position = self.sdk.get_cl_position(token_id, web3)
+            position = self.sdk.get_cl_position(token_id, web3, deployment=deployment)
             if position is None:
                 return LiquidityResult(
                     success=False,
@@ -1172,6 +1203,7 @@ class AerodromeAdapter:
                     deadline=deadline,
                     sender=self.wallet_address,
                     web3=web3,
+                    deployment=deployment,
                 )
                 dec_tx = TransactionData(
                     to=dec_tx_dict["to"],
@@ -1192,6 +1224,7 @@ class AerodromeAdapter:
                 amount1_max=MAX_UINT128,
                 sender=self.wallet_address,
                 web3=web3,
+                deployment=deployment,
             )
             collect_tx = TransactionData(
                 to=collect_tx_dict["to"],
@@ -1229,6 +1262,8 @@ class AerodromeAdapter:
         self,
         token_id: int,
         recipient: str | None = None,
+        *,
+        deployment: SlipstreamDeployment | None = None,
     ) -> LiquidityResult:
         """Build a Slipstream CL ``collect()`` transaction without burning the position.
 
@@ -1246,6 +1281,8 @@ class AerodromeAdapter:
         Args:
             token_id: NFT tokenId for the CL position
             recipient: Address to receive collected tokens (default: wallet)
+            deployment: Reviewed generation that owns the physical position.
+                ``None`` retains the legacy direct-adapter manager default.
 
         Returns:
             LiquidityResult with a single ``collect`` transaction
@@ -1262,6 +1299,7 @@ class AerodromeAdapter:
                 amount1_max=MAX_UINT128,
                 sender=self.wallet_address,
                 web3=web3,
+                deployment=deployment,
             )
             collect_tx = TransactionData(
                 to=collect_tx_dict["to"],

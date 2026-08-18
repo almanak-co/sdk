@@ -44,7 +44,7 @@ from almanak.framework.permissions.hints import (
 )
 
 from .adapter import CL_EXACT_INPUT_SINGLE_SELECTOR, SWAP_EXACT_TOKENS_SELECTOR
-from .addresses import AERODROME
+from .addresses import AERODROME, slipstream_lp_deployments
 
 if TYPE_CHECKING:
     from almanak.framework.intents.vocabulary import AnyIntent
@@ -129,10 +129,11 @@ _SLIPSTREAM_COLLECT_SIG = "collect(CollectParams)"
 def _build_slipstream_static_permissions() -> dict[str, list[StaticPermissionEntry]]:
     """Per-intent static permissions for Aerodrome Slipstream CL.
 
-    Three entries per deployed chain, each scoped to the single intent type
-    that emits the selector at compile time:
+    Per reviewed chain, emit one LP_OPEN entry for the current deployment plus
+    close and collect entries for every reviewed deployment generation. Each
+    entry is scoped to the single intent type that emits the selector:
 
-    - ``LP_OPEN`` → ``mint``.
+    - ``LP_OPEN`` → ``mint`` on the current position manager only.
     - ``LP_CLOSE`` → ``decreaseLiquidity`` + ``collect`` (two-tx teardown
       per audit B6 / compiler ``adapter.remove_cl_liquidity``).
     - ``LP_COLLECT_FEES`` → ``collect`` (standalone, no decreaseLiquidity).
@@ -143,39 +144,46 @@ def _build_slipstream_static_permissions() -> dict[str, list[StaticPermissionEnt
     ``discovery.py`` intersects ``entry.intent_types`` with the requested
     ``intent_types``, so the right selector set ships per manifest scope.
 
-    Only Base has Slipstream deployed today (``cl_nft`` key in
-    :data:`AERODROME`).
+    Chains without a reviewed ``slipstream_lp_deployments`` entry are skipped.
+    Only Base has a reviewed Slipstream deployment today.
     """
     result: dict[str, list[StaticPermissionEntry]] = {}
-    for chain, addrs in AERODROME.items():
-        cl_nft = addrs.get("cl_nft")
-        if not cl_nft:
+    for chain in AERODROME:
+        deployments = slipstream_lp_deployments(chain)
+        if not deployments:
             continue
-        target = cl_nft.lower()
-        label = "Aerodrome Slipstream NonfungiblePositionManager"
-        result[chain] = [
+        current = deployments[0]
+        entries = [
             StaticPermissionEntry(
-                target=target,
-                label=label,
+                target=current.position_manager.lower(),
+                label=f"Aerodrome Slipstream NonfungiblePositionManager ({current.generation})",
                 selectors={_SLIPSTREAM_MINT_SELECTOR: _SLIPSTREAM_MINT_SIG},
                 intent_types=frozenset({IntentType.LP_OPEN}),
-            ),
-            StaticPermissionEntry(
-                target=target,
-                label=label,
-                selectors={
-                    _SLIPSTREAM_DECREASE_SELECTOR: _SLIPSTREAM_DECREASE_SIG,
-                    _SLIPSTREAM_COLLECT_SELECTOR: _SLIPSTREAM_COLLECT_SIG,
-                },
-                intent_types=frozenset({IntentType.LP_CLOSE}),
-            ),
-            StaticPermissionEntry(
-                target=target,
-                label=label,
-                selectors={_SLIPSTREAM_COLLECT_SELECTOR: _SLIPSTREAM_COLLECT_SIG},
-                intent_types=frozenset({IntentType.LP_COLLECT_FEES}),
-            ),
+            )
         ]
+        for deployment in deployments:
+            label = f"Aerodrome Slipstream NonfungiblePositionManager ({deployment.generation})"
+            target = deployment.position_manager.lower()
+            entries.extend(
+                [
+                    StaticPermissionEntry(
+                        target=target,
+                        label=label,
+                        selectors={
+                            _SLIPSTREAM_DECREASE_SELECTOR: _SLIPSTREAM_DECREASE_SIG,
+                            _SLIPSTREAM_COLLECT_SELECTOR: _SLIPSTREAM_COLLECT_SIG,
+                        },
+                        intent_types=frozenset({IntentType.LP_CLOSE}),
+                    ),
+                    StaticPermissionEntry(
+                        target=target,
+                        label=label,
+                        selectors={_SLIPSTREAM_COLLECT_SELECTOR: _SLIPSTREAM_COLLECT_SIG},
+                        intent_types=frozenset({IntentType.LP_COLLECT_FEES}),
+                    ),
+                ]
+            )
+        result[chain] = entries
     return result
 
 
@@ -189,10 +197,10 @@ PERMISSION_HINTS_SLIPSTREAM = PermissionHints(
     needs_rpc_discovery=True,
     # Surrogates the Slipstream ``tick_spacing`` (not a Uniswap V3 fee tier)
     # so that ``synthetic_intents._build_lp_open_intents`` emits the
-    # compiler-required 3-part pool string ``WETH/USDC/200`` instead of
+    # compiler-required 3-part pool string ``WETH/USDC/50`` instead of
     # the bare 2-part ``WETH/USDC`` that the compile path rejects with
     # ``Invalid pool format for aerodrome_slipstream`` (audit pr-auditor
-    # finding #2). 200 matches the canonical Base WETH/USDC Slipstream
+    # finding #2). 50 matches the canonical current Base WETH/USDC Slipstream
     # pool used by the lp_aerodrome / aerodrome_slipstream_lp demos.
     #
     # NOTE — residual offline-discovery noise. With this surrogate the
@@ -208,7 +216,7 @@ PERMISSION_HINTS_SLIPSTREAM = PermissionHints(
     # warnings when ``needs_rpc_discovery=True`` + ``rpc_url=None`` AND
     # static_permissions cover the intent) is the clean answer and is
     # filed as follow-up scope per VIB-4434 audit report §"Pushback".
-    synthetic_fee_tier={"base": 200},
+    synthetic_fee_tier={"base": 50},
     static_permissions=_build_slipstream_static_permissions(),
     selector_labels={
         _SLIPSTREAM_MINT_SELECTOR: _SLIPSTREAM_MINT_SIG,

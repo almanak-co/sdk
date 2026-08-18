@@ -28,6 +28,7 @@ def _snap() -> MarketSnapshot:
 _WETH = "0x4200000000000000000000000000000000000006"
 _USDC = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
 _POOL = "0x1111111111111111111111111111111111111111"
+_NPM = "0xe1f8cd9ac4e4a65f54f38a5cdafca44f6dd68b53"
 
 
 def _install_reader(monkeypatch, *, position, slot0=PoolSlot0(sqrt_price_x96=2**96, tick=0)):
@@ -62,13 +63,21 @@ class TestLpPositionValue:
         reader = _install_reader(monkeypatch, position=_slipstream_position(owed0=1_000_000_000_000_000, owed1=2_000_000))
         snap = _snap()
 
-        result = snap.lp_position_value("12345", "aerodrome_slipstream", pool_address=_POOL)
+        result = snap.lp_position_value(
+            "12345", "aerodrome_slipstream", pool_address=_POOL, position_manager=_NPM
+        )
 
         assert result is not None
         assert result.value_usd > 0
         assert result.fees_usd > 0  # tokens_owed0/1 > 0 folded into fees
         assert result.total_usd == result.value_usd + result.fees_usd
         assert result.in_range is True  # tick 0 within [-100, 100]
+        reader.read_position.assert_called_once_with(
+            chain="base",
+            token_id=12345,
+            protocol="aerodrome_slipstream",
+            position_manager=_NPM,
+        )
         # slot0 read happened (pool_address supplied) — exact tick, not the fallback.
         reader.read_pool_slot0.assert_called_once()
 
@@ -76,26 +85,34 @@ class TestLpPositionValue:
         """fee=None (Slipstream CL) is not consumed by the math — still values."""
         _install_reader(monkeypatch, position=_slipstream_position())
         snap = _snap()
-        result = snap.lp_position_value("12345", "aerodrome_slipstream", pool_address=_POOL)
+        result = snap.lp_position_value(
+            "12345", "aerodrome_slipstream", pool_address=_POOL, position_manager=_NPM
+        )
         assert result is not None
         assert result.fees_usd == Decimal("0")  # no uncollected fees
 
     def test_reader_miss_returns_none(self, monkeypatch):
         _install_reader(monkeypatch, position=None)
         snap = _snap()
-        result = snap.lp_position_value("12345", "aerodrome_slipstream", pool_address=_POOL)
+        result = snap.lp_position_value(
+            "12345", "aerodrome_slipstream", pool_address=_POOL, position_manager=_NPM
+        )
         assert result is None  # Empty ≠ Zero
 
     def test_no_gateway_returns_none(self, monkeypatch):
         snap = _snap()
         snap._gateway_client = None
-        result = snap.lp_position_value("12345", "aerodrome_slipstream", pool_address=_POOL)
+        result = snap.lp_position_value(
+            "12345", "aerodrome_slipstream", pool_address=_POOL, position_manager=_NPM
+        )
         assert result is None
 
     def test_zero_liquidity_measured_zero(self, monkeypatch):
         _install_reader(monkeypatch, position=_slipstream_position(liquidity=0, owed0=0, owed1=0))
         snap = _snap()
-        result = snap.lp_position_value("12345", "aerodrome_slipstream", pool_address=_POOL)
+        result = snap.lp_position_value(
+            "12345", "aerodrome_slipstream", pool_address=_POOL, position_manager=_NPM
+        )
         assert result is not None
         assert result.total_usd == Decimal("0")
         assert result.liquidity == 0
