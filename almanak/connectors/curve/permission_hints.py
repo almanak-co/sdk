@@ -256,7 +256,10 @@ def _build_lp_open_vectors(chain: str, ctx: DiscoveryContext) -> list[AnyIntent]
         for coin_amounts in [[_SYNTHETIC_COIN_AMOUNT] * n_coins]:
             intents.append(
                 LPOpenIntent(
-                    pool=pool_name,
+                    # The admitted binding's address is authoritative.  A
+                    # deployment-local label is presentation only and must not
+                    # become the target carried into compiler discovery.
+                    pool=binding.pool_address if binding is not None else pool_name,
                     # ``coin_amounts`` is the full allocation vector; the
                     # two-slot ``amount0``/``amount1`` fields are required but
                     # must be zero alongside it (LPOpenIntent validator).
@@ -317,7 +320,7 @@ def _build_lp_close_vectors(chain: str, ctx: DiscoveryContext) -> list[AnyIntent
         for shape in shapes:
             intents.append(
                 LPCloseIntent(
-                    pool=pool_name,
+                    pool=binding.pool_address if binding is not None else pool_name,
                     position_id=_SYNTHETIC_LP_AMOUNT,
                     protocol="curve",
                     chain=chain,

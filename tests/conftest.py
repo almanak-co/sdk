@@ -34,6 +34,7 @@ def _explicit_curve_pool_fixtures():
     from almanak.connectors.curve import permission_hints as curve_permission_hints
     from almanak.connectors.curve import pool_resolver as curve_pool_resolver
     from almanak.connectors.curve.adapter import CurveAdapter
+    from almanak.connectors.curve.pool_binding import CurvePoolPermissionBinding
     from almanak.connectors.curve.receipt_parser import CurveReceiptParser
     from tests.support.curve_pool_catalog import CURVE_TEST_POOLS, curve_test_meta_lookup, curve_test_metadata
 
@@ -81,7 +82,13 @@ def _explicit_curve_pool_fixtures():
     def discovery_pools(chain, ctx):
         if ctx.strategy_config:
             return original_discovery_pools(chain, ctx)
-        return [(name, data, None) for name, data in CURVE_TEST_POOLS.get(chain, {}).items()]
+        pools = []
+        for name, data in CURVE_TEST_POOLS.get(chain, {}).items():
+            metadata = curve_test_metadata(chain, str(data["address"]))
+            assert metadata is not None
+            binding = CurvePoolPermissionBinding.from_metadata(chain, metadata)
+            pools.append((name, binding.pool_data(), binding))
+        return pools
 
     monkeypatch.setattr(curve_permission_hints, "_discovery_pools", discovery_pools)
 

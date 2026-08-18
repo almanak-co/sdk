@@ -15,6 +15,7 @@ from almanak.framework.intents.compiler import (
     IntentCompiler,
     IntentCompilerConfig,
 )
+from almanak.framework.intents.compiler_models import CompilationResult
 
 # Patch targets — lazy-imported from the source module inside compile methods.
 # When compiler does `from almanak.connectors.curve.adapter import CurveAdapter`,
@@ -37,6 +38,7 @@ MOCK_CURVE_POOLS = {
                 "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
                 "0xdAC17F958D2ee523a2206206994597C13D831ec7",
             ],
+            "coin_decimals": [6, 6],
             "pool_type": "stableswap",
             "n_coins": 2,
         },
@@ -49,6 +51,7 @@ MOCK_CURVE_POOLS = {
                 "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
                 "0xdAC17F958D2ee523a2206206994597C13D831ec7",
             ],
+            "coin_decimals": [18, 6, 6],
             "pool_type": "stableswap",
             "n_coins": 3,
         },
@@ -63,6 +66,7 @@ MOCK_CURVE_POOLS = {
                 "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE",
                 "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84",
             ],
+            "coin_decimals": [18, 18],
             "pool_type": "stableswap",
             "n_coins": 2,
         },
@@ -226,6 +230,44 @@ class TestCurveSwap:
         call_kwargs = mock_adapter.swap.call_args
         # amount_in should be 500 (the direct token amount)
         assert call_kwargs.kwargs["amount_in"] == Decimal("500")
+
+    @patch(CURVE_POOLS_PATH, new=lambda: MOCK_CURVE_POOLS)
+    @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
+    @patch(CURVE_ADAPTER_CLS)
+    @patch(CURVE_CONFIG_CLS)
+    @patch("almanak.connectors.curve.compiler._verify_exact_curve_swap_binding")
+    def test_exact_pool_mismatch_refuses_before_swap_calldata(
+        self,
+        mock_verify,
+        mock_config_cls,
+        mock_adapter_cls,
+        compiler,
+    ):
+        """Measured exact-venue disagreement is ordered before the money path."""
+        refused = CompilationResult(
+            status=CompilationStatus.FAILED,
+            error="measured venue mismatch",
+            is_safety_refusal=True,
+        )
+        mock_verify.return_value = refused
+        mock_adapter = MagicMock()
+        mock_adapter.get_pool_info.return_value.to_dict.return_value = MOCK_CURVE_POOLS["ethereum"]["usdc_usdt"]
+        mock_adapter_cls.return_value = mock_adapter
+
+        result = compiler.compile(
+            SwapIntent(
+                from_token="USDC",
+                to_token="USDT",
+                amount=Decimal("500"),
+                protocol="curve",
+                swap_params={"pool": USDC_USDT_POOL},
+            )
+        )
+
+        assert result is refused
+        mock_verify.assert_called_once()
+        mock_adapter.swap.assert_not_called()
+        mock_adapter.swap_underlying.assert_not_called()
 
     @patch(CURVE_POOLS_PATH, new=lambda: MOCK_CURVE_POOLS)
     @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)

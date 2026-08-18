@@ -17,6 +17,7 @@ from almanak.connectors._connector import (
     MetadataAmountEncoding,
     PositionReadDecl,
     SupportedChainsSpec,
+    VenueVerifierDecl,
 )
 from almanak.connectors._strategy_base.position_read_base import CURVE_LP
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
@@ -27,6 +28,7 @@ from almanak.core.chains.ethereum import DESCRIPTOR as ETHEREUM
 from almanak.core.chains.optimism import DESCRIPTOR as OPTIMISM
 from almanak.core.chains.polygon import DESCRIPTOR as POLYGON
 from almanak.core.intent_types import IntentType
+from almanak.framework.primitives.types import Primitive
 
 _PROVIDER_REFS = {
     ObligationId.ASSET_RESOLUTION: "almanak.connectors.curve.compiler:CurveCompiler",
@@ -140,6 +142,30 @@ CONNECTOR = Connector(
     compiler=ImportRef(
         module="almanak.connectors.curve.compiler",
         attribute="CurveCompiler",
+    ),
+    venue_verifiers=(
+        VenueVerifierDecl(
+            protocol="curve",
+            verifier=ImportRef(
+                module="almanak.connectors.curve.venue_verifier",
+                attribute="CurveVenueVerifier",
+            ),
+            contract_version="curve_exact_pool.v1",
+            binding_policy_version=1,
+            chains=(ARBITRUM, BASE, ETHEREUM, OPTIMISM, POLYGON),
+            primitives=(Primitive.SWAP,),
+            component_names=(
+                "base_pool",
+                "base_pool_coin_references",
+                "coin_decimals",
+                "coin_indices",
+                "coin_references",
+                "is_metapool",
+                "lp_token",
+                "n_coins",
+                "pool_type",
+            ),
+        ),
     ),
     # Protocol-neutral pool-data declaration with a connector-selected
     # get_dy/coins reader. It never dispatches through the slot0 family.

@@ -76,6 +76,7 @@ class TestCurveUSDTApproval:
         orchestrator: ExecutionOrchestrator,
         price_oracle: dict[str, Decimal],
         anvil_rpc_url: str,
+        anvil_eth_call_adapter,
     ):
         usdc_addr = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]["USDC"]
         fund_erc20_token(funded_wallet, USDT, int(Decimal("1000") * Decimal(10**6)), 2, anvil_rpc_url)
@@ -89,7 +90,11 @@ class TestCurveUSDTApproval:
         usdc_before = get_token_balance(web3, usdc_addr, funded_wallet)
 
         compiler = IntentCompiler(
-            chain=CHAIN_NAME, wallet_address=funded_wallet, price_oracle=price_oracle, rpc_url=anvil_rpc_url
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            price_oracle=price_oracle,
+            rpc_url=anvil_rpc_url,
+            venue_verification_gateway_factory=lambda: anvil_eth_call_adapter,
         )
         intent = SwapIntent(
             from_token="USDT",

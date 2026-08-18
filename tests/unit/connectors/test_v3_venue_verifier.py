@@ -214,7 +214,7 @@ def test_manifests_declare_only_the_reviewed_exact_venue_protocols() -> None:
         for declaration in connector.venue_verifiers
     }
 
-    assert set(declared) == {"aerodrome_slipstream", "pancakeswap_v3", "uniswap_v3"}
+    assert set(declared) == {"aerodrome_slipstream", "curve", "pancakeswap_v3", "uniswap_v3"}
     assert declared["uniswap_v3"].chains == (
         "arbitrum",
         "avalanche",
@@ -225,6 +225,19 @@ def test_manifests_declare_only_the_reviewed_exact_venue_protocols() -> None:
         "polygon",
     )
     assert declared["pancakeswap_v3"].chains == ("arbitrum", "base", "bsc", "ethereum")
+    assert all(declared[protocol].component_names == ("fee",) for protocol in ("pancakeswap_v3", "uniswap_v3"))
+    assert declared["curve"].chains == ("arbitrum", "base", "ethereum", "optimism", "polygon")
+    assert declared["curve"].component_names == (
+        "base_pool",
+        "base_pool_coin_references",
+        "coin_decimals",
+        "coin_indices",
+        "coin_references",
+        "is_metapool",
+        "lp_token",
+        "n_coins",
+        "pool_type",
+    )
     assert declared["aerodrome_slipstream"].chains == ("base",)
     assert declared["aerodrome_slipstream"].primitives == (Primitive.LP,)
     assert declared["aerodrome_slipstream"].component_names == ("tick_spacing",)

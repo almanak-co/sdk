@@ -40,7 +40,14 @@ from typing import Any
 import pytest
 
 from almanak.connectors.curve import permission_hints as curve_hints
+from almanak.connectors.curve.connector import CONNECTOR
 from almanak.connectors.curve.receipt_parser import CURVE_NATIVE_ETH_PLACEHOLDER
+from almanak.connectors.curve.venue_verifier import (
+    BINDING_POLICY_VERSION,
+    COMPONENT_NAMES,
+    VERIFIER_CONTRACT_VERSION,
+    VERIFIER_REF,
+)
 from almanak.core.intent_types import IntentType
 from almanak.framework.intents.compiler import ERC20_APPROVE_SELECTOR
 from almanak.framework.permissions.discovery import discover_permissions
@@ -57,6 +64,15 @@ _CTX = DiscoveryContext(usdc="USDC", weth="WETH")
 # to start with those four bytes, silently dropping it from the approve
 # coverage assertions below (CodeRabbit).
 _NATIVE_COIN = CURVE_NATIVE_ETH_PLACEHOLDER.lower()
+
+
+def test_curve_manifest_owns_the_exact_venue_verifier_contract() -> None:
+    assert len(CONNECTOR.venue_verifiers) == 1
+    declaration = CONNECTOR.venue_verifiers[0]
+    assert declaration.contract_version == VERIFIER_CONTRACT_VERSION
+    assert declaration.binding_policy_version == BINDING_POLICY_VERSION
+    assert f"{declaration.verifier.module}:{declaration.verifier.attribute}" == VERIFIER_REF
+    assert declaration.component_names == COMPONENT_NAMES
 
 
 def _targets(permissions: list[Any]) -> dict[str, Any]:
@@ -195,8 +211,11 @@ class TestCurveLpDiscoveryVectors:
         vectors = curve_hints.build_discovery_vectors("curve", IntentType.LP_OPEN, chain, _CTX)
         assert vectors, f"no LP_OPEN discovery vectors for curve on {chain}"
         pools = CURVE_TEST_POOLS[chain]
-        covered = {v.pool for v in vectors}
-        assert covered == set(pools), f"LP_OPEN vectors on {chain} cover {sorted(covered)}, expected {sorted(pools)}"
+        covered = {v.pool.lower() for v in vectors}
+        expected = {str(pool["address"]).lower() for pool in pools.values()}
+        assert covered == expected, (
+            f"LP_OPEN vectors on {chain} cover {sorted(covered)}, expected exact addresses {sorted(expected)}"
+        )
         # Deployment pool bindings authorize the pool itself, never a separate
         # metapool zap. Every pool therefore contributes exactly one native
         # deposit vector.
@@ -209,8 +228,9 @@ class TestCurveLpDiscoveryVectors:
         ``approve`` on the manifest. Discovery must use the full
         ``coin_amounts`` allocation vector."""
         vectors = curve_hints.build_discovery_vectors("curve", IntentType.LP_OPEN, chain, _CTX)
+        pools_by_address = {str(pool["address"]).lower(): pool for pool in CURVE_TEST_POOLS[chain].values()}
         for vector in vectors:
-            pool_data = CURVE_TEST_POOLS[chain][vector.pool]
+            pool_data = pools_by_address[vector.pool.lower()]
             native_len = int(pool_data["n_coins"])
             assert vector.coin_amounts is not None, f"{chain}/{vector.pool}: LP_OPEN vector must set coin_amounts"
             assert len(vector.coin_amounts) == native_len, (
@@ -229,8 +249,12 @@ class TestCurveLpDiscoveryVectors:
         compilation-failure warning to every manifest."""
         vectors = curve_hints.build_discovery_vectors("curve", IntentType.LP_CLOSE, chain, _CTX)
         assert vectors, f"no LP_CLOSE discovery vectors for curve on {chain}"
+        covered = {vector.pool.lower() for vector in vectors}
+        expected = {str(pool["address"]).lower() for pool in CURVE_TEST_POOLS[chain].values()}
+        assert covered == expected
         for pool_name, pool_data in CURVE_TEST_POOLS[chain].items():
-            shapes = [v for v in vectors if v.pool == pool_name]
+            pool_address = str(pool_data["address"]).lower()
+            shapes = [v for v in vectors if v.pool.lower() == pool_address]
             assert any(v.coin_index is None and v.imbalanced_amounts is None for v in shapes), (
                 f"{chain}/{pool_name}: missing proportional remove_liquidity vector"
             )

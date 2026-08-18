@@ -80,6 +80,44 @@ class CurvePoolPermissionBinding:
         return binding
 
     @classmethod
+    def from_pool_data(cls, chain: str, pool_data: Mapping[str, Any]) -> CurvePoolPermissionBinding:
+        """Freeze the compiler's canonical resolved pool shape as a candidate."""
+        pool_type = str(pool_data.get("pool_type", "")).lower()
+        if pool_type not in {"stableswap", "cryptoswap", "tricrypto"}:
+            raise ValueError(f"unsupported pool_type={pool_type!r}")
+        coin_addresses = tuple(str(value) for value in (pool_data.get("coin_addresses") or ()))
+        symbols = tuple(str(value) for value in (pool_data.get("coins") or coin_addresses))
+        binding = cls(
+            chain=chain,
+            pool_address=_normalise_address(str(pool_data.get("address", "")), field="pool address"),
+            coin_symbols=symbols,
+            coin_addresses=tuple(
+                _normalise_address(value, field=f"pool coin {index}") for index, value in enumerate(coin_addresses)
+            ),
+            coin_decimals=tuple(int(value) for value in (pool_data.get("coin_decimals") or ())),
+            lp_token=_normalise_address(str(pool_data.get("lp_token", "")), field="LP token"),
+            n_coins=int(pool_data.get("n_coins") or 0),
+            pool_type=cast(PoolTypeName, pool_type),
+            abi_families=("stableswap_legacy", "stableswap_ng") if pool_type == "stableswap" else (pool_type,),
+            is_metapool=bool(pool_data.get("is_metapool", False)),
+            base_pool=(
+                _normalise_address(str(pool_data["base_pool"]), field="base pool")
+                if pool_data.get("base_pool") is not None
+                else None
+            ),
+            base_pool_coin_addresses=(
+                tuple(
+                    _normalise_address(str(value), field=f"base-pool coin {index}")
+                    for index, value in enumerate(pool_data["base_pool_coin_addresses"])
+                )
+                if pool_data.get("base_pool_coin_addresses") is not None
+                else None
+            ),
+        )
+        binding._validate_shape()
+        return binding
+
+    @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> CurvePoolPermissionBinding:
         """Parse the serialised intent marker, rejecting partial identities."""
         if value.get("resource_type") != _RESOURCE_TYPE:

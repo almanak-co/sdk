@@ -98,6 +98,7 @@ class TestCurveStethNativeSwap:
         orchestrator: ExecutionOrchestrator,
         price_oracle: dict[str, Decimal],
         anvil_rpc_url: str,
+        anvil_eth_call_adapter,
     ) -> None:
         compiler = IntentCompiler(
             chain=CHAIN_NAME,
@@ -105,6 +106,7 @@ class TestCurveStethNativeSwap:
             price_oracle=price_oracle,
             rpc_url=anvil_rpc_url,
             config=IntentCompilerConfig(allow_placeholder_prices=True),
+            venue_verification_gateway_factory=lambda: anvil_eth_call_adapter,
         )
 
         # Layer 4 setup for the entry. Under the default Zodiac harness the Safe

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from decimal import Decimal, InvalidOperation
-from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple
+from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, cast
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -445,6 +445,119 @@ def _resolve_lp_open_amounts(
 def _is_pool_address(value: str | None) -> bool:
     """True when ``value`` is a 0x-prefixed 20-byte address literal."""
     return value is not None and value.startswith("0x") and len(value) == 42
+
+
+def _verify_exact_curve_swap_binding(
+    *,
+    ctx: BaseCompilerContext,
+    intent: Any,
+    pool_data: dict[str, Any],
+) -> Any | CompilationResult:
+    """Verify one already-resolved exact SWAP pool before approvals or calldata."""
+    from almanak.connectors._strategy_base.venue_verifier_registry import VenueVerifierRegistry
+    from almanak.connectors.curve.pool_binding import (
+        CurvePoolPermissionBinding,
+        permission_binding_from_intent,
+    )
+    from almanak.connectors.curve.venue_verifier import curve_verification_request
+    from almanak.framework.primitives.types import Primitive
+    from almanak.framework.venues import (
+        VenueBindingFailure,
+        VenueVerificationGateway,
+        VerifiedVenueBinding,
+    )
+
+    try:
+        marker = permission_binding_from_intent(intent)
+        if marker is not None:
+            marker.assert_matches_pool_data(chain=ctx.chain, pool_data=pool_data)
+
+        candidate = CurvePoolPermissionBinding.from_pool_data(ctx.chain, pool_data)
+        request = curve_verification_request(candidate, Primitive.SWAP)
+    except (TypeError, ValueError) as exc:
+        logger.error("Exact Curve venue identity is invalid before verification: %s", exc)
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Exact Curve venue identity is invalid before verification: {exc}",
+            is_safety_refusal=True,
+            intent_id=intent.intent_id,
+        )
+
+    # Permission discovery is an offline, non-executing compile over the
+    # immutable deployment binding admitted by ``permission_hints``.  It must
+    # not manufacture a second live/network dependency after admission: the
+    # marker fixes the exact target, ordered coins, decimals, LP token, pool
+    # family and optional base-pool identity, and the compiler revalidates all
+    # of those fields above before producing selectors.  Runtime money paths do
+    # not set ``permission_discovery`` and always continue through the fresh,
+    # block-anchored verifier below.
+    if _discovery_mode(ctx) and marker is not None:
+        return None
+
+    factory = getattr(ctx, "venue_verification_gateway_factory", None)
+    if not callable(factory):
+        logger.error("Exact Curve venue verification is unavailable on %s", ctx.chain)
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Exact Curve venue verification is unavailable on {ctx.chain}",
+            is_safety_refusal=True,
+            intent_id=intent.intent_id,
+        )
+
+    try:
+        registry = VenueVerifierRegistry()
+        verifier = registry.load_class("curve")()
+        gateway = factory()
+    except (ConnectionError, ImportError, OSError, TimeoutError, ValueError) as exc:
+        logger.error("Exact Curve venue verification transport is unavailable: %s", exc)
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Exact Curve venue verification transport is unavailable: {exc}",
+            is_safety_refusal=True,
+            intent_id=intent.intent_id,
+        )
+    try:
+        result = registry.validate_result(
+            request,
+            verifier.verify_venue(request, cast(VenueVerificationGateway, gateway)),
+        )
+    except Exception as exc:  # noqa: BLE001 - a verifier contract defect must fail closed
+        logger.error("Exact Curve venue verifier contract failed: %s", exc)
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Exact Curve venue verifier contract failed: {exc}",
+            is_safety_refusal=True,
+            intent_id=intent.intent_id,
+        )
+    if type(result) is VenueBindingFailure:
+        logger.error("Exact Curve venue refused: %s: %s", result.reason_code.value, result.detail)
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Exact Curve venue refused: {result.reason_code.value}: {result.detail}",
+            is_safety_refusal=True,
+            intent_id=intent.intent_id,
+        )
+    if type(result) is not VerifiedVenueBinding:  # pragma: no cover - registry contract guard
+        logger.error("Exact Curve venue verifier returned an invalid success type")
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error="Exact Curve venue verifier returned an invalid success type",
+            is_safety_refusal=True,
+            intent_id=intent.intent_id,
+        )
+    return result
+
+
+def _verified_venue_metadata(verified: Any | None) -> dict[str, Any]:
+    if verified is None:
+        return {}
+    binding = verified.binding
+    return {
+        "venue_binding_hash": binding.binding_hash,
+        "venue_binding": binding.to_preimage_wire(),
+        "venue_operational_refs": [ref.to_wire() for ref in verified.operational_refs],
+        "venue_verification": verified.evidence.to_wire(),
+    }
 
 
 def _validate_permission_pool_binding(intent: Any, *, chain: str, pool_data: dict[str, Any]) -> None:
@@ -950,6 +1063,251 @@ def _resolve_bound_close_pool(ctx: BaseCompilerContext, intent: LPCloseIntent) -
     )
 
 
+class _ResolvedCurveSwap(NamedTuple):
+    """Validated inputs and resolved route for one Curve SWAP compile."""
+
+    from_token: Any
+    to_token: Any
+    amount_decimal: Decimal
+    swap_params: dict[str, Any]
+    pool_address: str
+    pool_name: str
+    use_metapool_underlying: bool
+    slippage_bps: int
+
+
+class _PreparedCurveSwap(NamedTuple):
+    """Adapter plus optional exact-venue proof, before money-path construction."""
+
+    adapter: CurveAdapter
+    verified_venue: Any | None
+
+
+def _resolve_curve_swap_request(
+    ctx: BaseCompilerContext,
+    intent: SwapIntent,
+) -> _ResolvedCurveSwap | CompilationResult:
+    """Validate one SWAP request and resolve its Curve pool and route."""
+    from almanak.connectors.curve.adapter import CURVE_ADDRESSES
+
+    if ctx.chain not in CURVE_ADDRESSES:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Curve is not supported on {ctx.chain}. Supported chains: {list(CURVE_ADDRESSES.keys())}",
+            intent_id=intent.intent_id,
+        )
+
+    from_token = ctx.services.resolve_token(intent.from_token)
+    to_token = ctx.services.resolve_token(intent.to_token)
+    if from_token is None:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Unknown from_token: {intent.from_token}",
+            intent_id=intent.intent_id,
+        )
+    if to_token is None:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Unknown to_token: {intent.to_token}",
+            intent_id=intent.intent_id,
+        )
+
+    if intent.amount_usd is not None:
+        price = ctx.services.require_token_price_for(from_token)
+        amount_decimal = intent.amount_usd / price
+    elif intent.amount is not None:
+        if intent.amount == "all":
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    "amount='all' must be resolved before compilation. "
+                    "Use Intent.set_resolved_amount() to resolve chained amounts."
+                ),
+                intent_id=intent.intent_id,
+            )
+        amount_decimal = Decimal(str(intent.amount))
+    else:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error="Either amount_usd or amount must be provided",
+            intent_id=intent.intent_id,
+        )
+
+    swap_params = intent.swap_params if hasattr(intent, "swap_params") and intent.swap_params else {}
+    # Pool identity is deployment input. The SDK deliberately carries no
+    # process-global catalog; exact addresses resolve live in the adapter.
+    chain_pools = _deployment_pools_for_chain(ctx.chain)
+    pool_address, pool_name, use_metapool_underlying = _resolve_swap_pool_and_route(
+        from_token.symbol, to_token.symbol, swap_params, chain_pools
+    )
+    if not pool_address:
+        available = {name: data["coins"] for name, data in chain_pools.items()}
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=(
+                f"No Curve pool found for {from_token.symbol}/{to_token.symbol} on {ctx.chain}. "
+                f"Available pools: {available}. "
+                f'You can specify a pool explicitly via swap_params={{"pool": "0x..."}}.'
+            ),
+            intent_id=intent.intent_id,
+        )
+
+    return _ResolvedCurveSwap(
+        from_token=from_token,
+        to_token=to_token,
+        amount_decimal=amount_decimal,
+        swap_params=swap_params,
+        pool_address=pool_address,
+        pool_name=pool_name,
+        use_metapool_underlying=use_metapool_underlying,
+        slippage_bps=_convert_slippage_to_bps(intent.max_slippage),
+    )
+
+
+def _prepare_curve_swap_venue(
+    ctx: BaseCompilerContext,
+    intent: SwapIntent,
+    resolved: _ResolvedCurveSwap,
+) -> _PreparedCurveSwap | CompilationResult:
+    """Build the adapter and admit an explicit exact pool before its money path."""
+    adapter = _swap_adapter_for_pool(
+        ctx,
+        intent,
+        pool_address=resolved.pool_address,
+        slippage_bps=resolved.slippage_bps,
+    )
+    if not _is_pool_address(str(resolved.swap_params.get("pool") or "")):
+        return _PreparedCurveSwap(adapter=adapter, verified_venue=None)
+
+    exact_pool = adapter.get_pool_info(resolved.pool_address)
+    if exact_pool is None:
+        logger.error(
+            "Exact Curve pool %s could not be resolved before approval construction",
+            resolved.pool_address,
+        )
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Exact Curve pool {resolved.pool_address} could not be resolved before approval construction",
+            is_safety_refusal=True,
+            intent_id=intent.intent_id,
+        )
+
+    verified_venue = _verify_exact_curve_swap_binding(
+        ctx=ctx,
+        intent=intent,
+        pool_data=exact_pool.to_dict(),
+    )
+    if isinstance(verified_venue, CompilationResult):
+        return verified_venue
+    return _PreparedCurveSwap(adapter=adapter, verified_venue=verified_venue)
+
+
+def _execute_curve_swap(
+    ctx: BaseCompilerContext,
+    resolved: _ResolvedCurveSwap,
+    adapter: CurveAdapter,
+) -> Any:
+    """Apply the oracle guards and construct the selected Curve swap path."""
+    price_ratio: Decimal | None = None
+    try:
+        price_in = ctx.services.require_token_price_for(resolved.from_token)
+        price_out = ctx.services.require_token_price_for(resolved.to_token)
+        if price_out > 0:
+            price_ratio = price_in / price_out
+    except (ValueError, ZeroDivisionError):
+        logger.warning(
+            "Could not compute price_ratio for Curve swap %s -> %s; "
+            "CryptoSwap pools will fail, StableSwap pools will proceed safely.",
+            resolved.from_token.symbol,
+            resolved.to_token.symbol,
+        )
+
+    oracle_guard_bps = _resolve_oracle_guard_bps(resolved.swap_params)
+    strict_oracle_guard = bool(resolved.swap_params.get("strict_oracle_guard", False))
+    oracle_prices_real = not getattr(ctx, "using_placeholders", False)
+    if resolved.use_metapool_underlying:
+        return adapter.swap_underlying(
+            pool_address=resolved.pool_address,
+            token_in=resolved.from_token.symbol,
+            token_out=resolved.to_token.symbol,
+            amount_in=resolved.amount_decimal,
+            slippage_bps=resolved.slippage_bps,
+            price_ratio=price_ratio,
+            oracle_guard_bps=oracle_guard_bps,
+            strict_oracle_guard=strict_oracle_guard,
+            oracle_prices_real=oracle_prices_real,
+        )
+    return adapter.swap(
+        pool_address=resolved.pool_address,
+        token_in=resolved.from_token.symbol,
+        token_out=resolved.to_token.symbol,
+        amount_in=resolved.amount_decimal,
+        slippage_bps=resolved.slippage_bps,
+        price_ratio=price_ratio,
+        oracle_guard_bps=oracle_guard_bps,
+        strict_oracle_guard=strict_oracle_guard,
+        oracle_prices_real=oracle_prices_real,
+    )
+
+
+def _finalize_curve_swap_result(
+    result: CompilationResult,
+    intent: SwapIntent,
+    resolved: _ResolvedCurveSwap,
+    swap_result: Any,
+    verified_venue: Any | None,
+) -> CompilationResult:
+    """Validate the quote and assemble the Curve SWAP action bundle."""
+    if not swap_result.success:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=swap_result.error or "Curve swap failed",
+            intent_id=intent.intent_id,
+        )
+    if swap_result.amount_out_estimate <= 0 or swap_result.token_out_decimals < 0:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=(
+                f"Curve quote returned non-positive amount_out_estimate "
+                f"({swap_result.amount_out_estimate}, decimals={swap_result.token_out_decimals}) "
+                f"for {resolved.from_token.symbol} -> {resolved.to_token.symbol} "
+                f"on pool {resolved.pool_name or resolved.pool_address}; "
+                f"refusing to build swap with no real slippage floor"
+            ),
+            intent_id=intent.intent_id,
+        )
+
+    transactions = swap_result.transactions
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+    expected_out_human = Decimal(swap_result.amount_out_estimate) / Decimal(10**swap_result.token_out_decimals)
+    metadata: dict[str, Any] = {
+        "from_token": resolved.from_token.to_dict(),
+        "to_token": resolved.to_token.to_dict(),
+        "amount_in": str(resolved.amount_decimal),
+        "pool_address": resolved.pool_address,
+        "pool_name": resolved.pool_name,
+        "protocol": "curve",
+        "expected_output_human": str(expected_out_human),
+        **_verified_venue_metadata(verified_venue),
+    }
+    result.action_bundle = ActionBundle(
+        intent_type=IntentType.SWAP.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata=metadata,
+    )
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+
+    logger.info(
+        "Compiled Curve SWAP intent: %s -> %s, %d txs, %d gas",
+        resolved.from_token.symbol,
+        resolved.to_token.symbol,
+        len(transactions),
+        total_gas,
+    )
+    return result
+
+
 class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
     """Compiler for Curve pool-based swaps and fungible LP positions."""
 
@@ -981,216 +1339,37 @@ class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
             return self.compile_collect_fees(ctx, intent)
         return self._unsupported(intent)
 
-    def compile_swap(self, ctx: BaseCompilerContext, intent: SwapIntent) -> CompilationResult:  # noqa: C901
+    def compile_swap(self, ctx: BaseCompilerContext, intent: SwapIntent) -> CompilationResult:
         """Compile SWAP intent for Curve Finance."""
-        from almanak.connectors.curve.adapter import CURVE_ADDRESSES
-
         result = CompilationResult(
             status=CompilationStatus.SUCCESS,
             intent_id=intent.intent_id,
         )
-        transactions: list[Any] = []
 
         try:
-            if ctx.chain not in CURVE_ADDRESSES:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Curve is not supported on {ctx.chain}. Supported chains: {list(CURVE_ADDRESSES.keys())}",
-                    intent_id=intent.intent_id,
-                )
-
-            from_token = ctx.services.resolve_token(intent.from_token)
-            to_token = ctx.services.resolve_token(intent.to_token)
-
-            if from_token is None:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Unknown from_token: {intent.from_token}",
-                    intent_id=intent.intent_id,
-                )
-            if to_token is None:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Unknown to_token: {intent.to_token}",
-                    intent_id=intent.intent_id,
-                )
-
-            if intent.amount_usd is not None:
-                price = ctx.services.require_token_price_for(from_token)
-                amount_decimal = intent.amount_usd / price
-            elif intent.amount is not None:
-                if intent.amount == "all":
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=(
-                            "amount='all' must be resolved before compilation. "
-                            "Use Intent.set_resolved_amount() to resolve chained amounts."
-                        ),
-                        intent_id=intent.intent_id,
-                    )
-                amount_decimal = Decimal(str(intent.amount))
-            else:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error="Either amount_usd or amount must be provided",
-                    intent_id=intent.intent_id,
-                )
-
-            swap_params = intent.swap_params if hasattr(intent, "swap_params") and intent.swap_params else {}
-            # Pool identity is deployment input. The SDK deliberately carries
-            # no process-global catalog; exact addresses resolve live below.
-            chain_pools = _deployment_pools_for_chain(ctx.chain)
-
-            # VIB-5628: an explicit ``swap_params["pool"]`` ADDRESS is returned by
-            # ``_resolve_swap_pool_and_route``, and ``adapter.swap`` resolves the
-            # pool's shape (coins / decimals / gamma-discriminated pool_type) live
-            # from the on-chain MetaRegistry via ``get_pool_info``. Native-coin
-            # routing only; metapool-underlying routing for uncurated pools is P1-4.
-
-            # Pool selection + route detection (native vs metapool-underlying).
-            # `use_metapool_underlying` is True when the resolved Curve pool is a
-            # metapool whose combined (underlying) coin space — not its native
-            # 2-coin space — carries the requested pair (e.g. FRAX -> USDC on a
-            # FRAX/3CRV metapool). Ambiguity raises ValueError, caught below.
-            pool_address, pool_name, use_metapool_underlying = _resolve_swap_pool_and_route(
-                from_token.symbol, to_token.symbol, swap_params, chain_pools
-            )
-
-            if not pool_address:
-                available = {name: d["coins"] for name, d in chain_pools.items()}
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=(
-                        f"No Curve pool found for {from_token.symbol}/{to_token.symbol} on {ctx.chain}. "
-                        f"Available pools: {available}. "
-                        f'You can specify a pool explicitly via swap_params={{"pool": "0x..."}}.'
-                    ),
-                    intent_id=intent.intent_id,
-                )
-
-            slippage_bps = _convert_slippage_to_bps(intent.max_slippage)
+            resolved = _resolve_curve_swap_request(ctx, intent)
+            if isinstance(resolved, CompilationResult):
+                return resolved
 
             logger.info(
                 "Compiling Curve SWAP: %s -> %s, pool=%s (%s), amount=%s",
-                from_token.symbol,
-                to_token.symbol,
-                pool_name or pool_address,
+                resolved.from_token.symbol,
+                resolved.to_token.symbol,
+                resolved.pool_name or resolved.pool_address,
                 ctx.chain,
-                amount_decimal,
+                resolved.amount_decimal,
             )
 
-            adapter = _swap_adapter_for_pool(
-                ctx,
+            prepared = _prepare_curve_swap_venue(ctx, intent, resolved)
+            if isinstance(prepared, CompilationResult):
+                return prepared
+            swap_result = _execute_curve_swap(ctx, resolved, prepared.adapter)
+            return _finalize_curve_swap_result(
+                result,
                 intent,
-                pool_address=pool_address,
-                slippage_bps=slippage_bps,
-            )
-
-            price_ratio: Decimal | None = None
-            try:
-                price_in = ctx.services.require_token_price_for(from_token)
-                price_out = ctx.services.require_token_price_for(to_token)
-                if price_out > 0:
-                    price_ratio = price_in / price_out
-            except (ValueError, ZeroDivisionError):
-                logger.warning(
-                    "Could not compute price_ratio for Curve swap %s -> %s; "
-                    "CryptoSwap pools will fail, StableSwap pools will proceed safely.",
-                    from_token.symbol,
-                    to_token.symbol,
-                )
-
-            # P0-8 min-out guard knobs (VIB-5439): per-intent overrides for the
-            # oracle-vs-pool divergence threshold and the unmeasured-oracle policy.
-            # ``oracle_prices_real`` gates the guard off placeholder / offline
-            # prices: those are known-fake (the compiler logs a PLACEHOLDER PRICES
-            # warning), so they must not be trusted as an independent oracle —
-            # otherwise the guard would block every real swap in test / discovery
-            # mode. price_ratio still feeds the CryptoSwap slippage estimate.
-            oracle_guard_bps = _resolve_oracle_guard_bps(swap_params)
-            strict_oracle_guard = bool(swap_params.get("strict_oracle_guard", False))
-            oracle_prices_real = not getattr(ctx, "using_placeholders", False)
-
-            if use_metapool_underlying:
-                # Metapool combined-space swap via exchange_underlying. The
-                # combined coins are all USD stables, so price_ratio is not needed
-                # for the slippage estimate (the adapter uses the on-chain
-                # get_dy_underlying quote or a 1:1 decimal-adjusted estimate) — but
-                # it IS the independent oracle reference for the min-out guard, so
-                # thread it through to flag a depegged underlying.
-                swap_result = adapter.swap_underlying(
-                    pool_address=pool_address,
-                    token_in=from_token.symbol,
-                    token_out=to_token.symbol,
-                    amount_in=amount_decimal,
-                    slippage_bps=slippage_bps,
-                    price_ratio=price_ratio,
-                    oracle_guard_bps=oracle_guard_bps,
-                    strict_oracle_guard=strict_oracle_guard,
-                    oracle_prices_real=oracle_prices_real,
-                )
-            else:
-                swap_result = adapter.swap(
-                    pool_address=pool_address,
-                    token_in=from_token.symbol,
-                    token_out=to_token.symbol,
-                    amount_in=amount_decimal,
-                    slippage_bps=slippage_bps,
-                    price_ratio=price_ratio,
-                    oracle_guard_bps=oracle_guard_bps,
-                    strict_oracle_guard=strict_oracle_guard,
-                    oracle_prices_real=oracle_prices_real,
-                )
-
-            if not swap_result.success:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=swap_result.error or "Curve swap failed",
-                    intent_id=intent.intent_id,
-                )
-
-            if swap_result.amount_out_estimate <= 0 or swap_result.token_out_decimals < 0:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=(
-                        f"Curve quote returned non-positive amount_out_estimate "
-                        f"({swap_result.amount_out_estimate}, decimals={swap_result.token_out_decimals}) "
-                        f"for {from_token.symbol} -> {to_token.symbol} on pool {pool_name or pool_address}; "
-                        f"refusing to build swap with no real slippage floor"
-                    ),
-                    intent_id=intent.intent_id,
-                )
-
-            transactions = swap_result.transactions
-            total_gas = sum(tx.gas_estimate for tx in transactions)
-
-            expected_out_human = Decimal(swap_result.amount_out_estimate) / Decimal(10**swap_result.token_out_decimals)
-            metadata: dict[str, Any] = {
-                "from_token": from_token.to_dict(),
-                "to_token": to_token.to_dict(),
-                "amount_in": str(amount_decimal),
-                "pool_address": pool_address,
-                "pool_name": pool_name,
-                "protocol": "curve",
-                "expected_output_human": str(expected_out_human),
-            }
-
-            action_bundle = ActionBundle(
-                intent_type=IntentType.SWAP.value,
-                transactions=[tx.to_dict() for tx in transactions],
-                metadata=metadata,
-            )
-
-            result.action_bundle = action_bundle
-            result.transactions = transactions  # type: ignore[assignment]
-            result.total_gas_estimate = total_gas
-
-            logger.info(
-                "Compiled Curve SWAP intent: %s -> %s, %d txs, %d gas",
-                from_token.symbol,
-                to_token.symbol,
-                len(transactions),
-                total_gas,
+                resolved,
+                swap_result,
+                prepared.verified_venue,
             )
 
         except _CurveSlippageConversionError as e:
