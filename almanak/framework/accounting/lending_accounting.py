@@ -396,7 +396,8 @@ def _derive_position_key(protocol: str, chain: str, wallet: str, market_id: str 
     canonical_protocol = LendingReadRegistry.normalize_protocol(protocol) or str(protocol).lower()
     parts = ["lending", chain.lower(), canonical_protocol, wallet.lower()]
     if market_id:
-        parts.append(market_id.lower())
+        catalogue_key = LendingReadRegistry.canonical_market_id(canonical_protocol, chain, market_id)
+        parts.append((catalogue_key or market_id).lower())
     parts.append(asset.lower())
     return ":".join(parts)
 

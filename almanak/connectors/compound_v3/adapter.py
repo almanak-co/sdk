@@ -76,6 +76,7 @@ from almanak.connectors.compound_v3.addresses import (  # noqa: E402,F401  (re-e
     COMPOUND_V3_COMET_ADDRESSES,
     COMPOUND_V3_MARKETS,
     default_compound_v3_market_for_chain,
+    resolve_compound_v3_market_key,
 )
 
 # Compound V3 function selectors
@@ -120,7 +121,8 @@ class CompoundV3Config:
     Attributes:
         chain: Blockchain network (ethereum, arbitrum)
         wallet_address: User wallet address
-        market: Market identifier (usdc, weth, usdt, etc.)
+        market: Catalogue key (usdc, weth, usdt, …) or the Comet address.
+            Address form is resolved against the connector catalogue.
         default_slippage_bps: Default slippage tolerance in basis points
         rpc_url: DEPRECATED — direct RPC URL kept for backwards compatibility.
             Ignored in production gateway-only containers. Prefer ``gateway_client``.
@@ -144,9 +146,11 @@ class CompoundV3Config:
             raise ValueError(f"Invalid chain: {self.chain}. Valid chains: {valid_chains}")
         if not self.wallet_address.startswith("0x") or len(self.wallet_address) != 42:
             raise ValueError(f"Invalid wallet address: {self.wallet_address}. Must be 0x-prefixed 40 hex chars.")
-        valid_markets = set(COMPOUND_V3_COMET_ADDRESSES.get(self.chain, {}).keys())
-        if self.market not in valid_markets:
+        resolved_market = resolve_compound_v3_market_key(self.chain, self.market)
+        if resolved_market is None:
+            valid_markets = set(COMPOUND_V3_COMET_ADDRESSES.get(self.chain, {}).keys())
             raise ValueError(f"Invalid market: {self.market}. Valid markets for {self.chain}: {valid_markets}")
+        self.market = resolved_market
         if self.default_slippage_bps < 0 or self.default_slippage_bps > 10000:
             raise ValueError(f"Invalid slippage: {self.default_slippage_bps}. Must be 0-10000 bps.")
 

@@ -64,14 +64,18 @@ Factory class for creating intents.
     options:
       show_root_heading: true
 
-### Aave V3 exact Pool binding
+### Exact Pool / Comet binding
 
-For Aave V3 supply and withdraw operations, pass `expected_pool="0x..."` to
-assert the exact Pool address supplied by an upstream verifier. The SDK still
-routes through its connector-owned canonical registry; compilation fails before
-approval or protocol calldata construction if the registry-selected Pool does
-not match. The assertion is validated as a 20-byte EVM address and normalized
-to checksum form. It is never used as a routing override.
+For Aave V3 and Compound V3 supply and withdraw operations, pass
+`expected_pool="0x..."` to assert the exact Pool (Aave) or Comet (Compound)
+address supplied by an upstream verifier. The SDK still routes through its
+connector-owned canonical registry; compilation fails before approval or
+protocol calldata construction if the registry-selected venue does not match.
+The assertion is validated as a 20-byte EVM address and normalized to checksum
+form. It is never used as a routing override.
+
+Compound V3 also accepts the Comet address as `market_id`. That form resolves
+to the catalogue key (`"weth"`, `"usdc"`, …); an unknown address fails closed.
 
 ```python
 from decimal import Decimal

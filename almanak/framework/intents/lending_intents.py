@@ -367,9 +367,10 @@ class SupplyIntent(BaseIntent):
         use_as_collateral: Whether to enable the asset as collateral (default True).
             Also known as 'enable_as_collateral' - this is an Aave-specific parameter
             that controls whether the supplied asset can be used as collateral for borrowing.
-        expected_pool: Optional exact Aave V3 Pool-address assertion. The compiler
-            compares it with the canonical registry-selected Pool and fails closed
-            on a mismatch; it never uses this value as a transaction destination.
+        expected_pool: Optional exact pool/comet-address assertion for connectors
+            that declare ``supports_expected_pool_binding``. The compiler compares
+            it with the canonical registry-selected venue and fails closed on a
+            mismatch; it never uses this value as a transaction destination.
         chain: Optional target chain for execution (defaults to strategy's primary chain)
         intent_id: Unique identifier for this intent
         created_at: Timestamp when the intent was created
@@ -479,9 +480,10 @@ class WithdrawIntent(BaseIntent):
         token: Token to withdraw
         amount: Amount to withdraw, or "all" to use output from previous step
         withdraw_all: If True, withdraw all available balance
-        expected_pool: Optional exact Aave V3 Pool-address assertion. The compiler
-            compares it with the canonical registry-selected Pool and fails closed
-            on a mismatch; it never uses this value as a transaction destination.
+        expected_pool: Optional exact pool/comet-address assertion for connectors
+            that declare ``supports_expected_pool_binding``. The compiler compares
+            it with the canonical registry-selected venue and fails closed on a
+            mismatch; it never uses this value as a transaction destination.
         chain: Optional target chain for execution (defaults to strategy's primary chain)
         intent_id: Unique identifier for this intent
         created_at: Timestamp when the intent was created

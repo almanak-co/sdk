@@ -634,11 +634,10 @@ class TestCompoundV3Borrow:
         mock_adapter.borrow.assert_not_called()
         mock_adapter.supply_collateral.assert_not_called()
 
-    @patch(COMET_ADDRESSES, {"ethereum": {"usdc": {"comet_address": TEST_COMET}}})
     def test_borrow_unsupported_chain(self):
-        """Borrow on unsupported chain fails (token resolution or chain check)."""
+        """Borrow on a chain with no Compound V3 catalogue fails closed."""
         config = IntentCompilerConfig(allow_placeholder_prices=True)
-        polygon_compiler = IntentCompiler(chain="polygon", config=config)
+        bsc_compiler = IntentCompiler(chain="bsc", config=config)
 
         # Bundled (nonzero-collateral) borrow fed to the COMPILER, which still
         # decomposes supply + borrow. The model validator now rejects bundled
@@ -652,7 +651,7 @@ class TestCompoundV3Borrow:
             protocol="compound_v3",
         )
 
-        result = polygon_compiler.compile(intent)
+        result = bsc_compiler.compile(intent)
 
         assert result.status == CompilationStatus.FAILED
         assert "not available on chain" in result.error
@@ -1188,3 +1187,210 @@ class TestCompoundV3Polygon:
         mock_adapter.repay.assert_called_once()
         call_kwargs = mock_adapter.repay.call_args.kwargs
         assert call_kwargs.get("repay_all") is True
+
+
+# =============================================================================
+# ADDRESS-FORM market_id + expected_pool
+# =============================================================================
+
+class TestCompoundV3ExactVenueBinding:
+    """Comet address is a valid market_id; expected_pool asserts the resolved Comet."""
+
+    @patch(CONFIG_CLS)
+    @patch(ADAPTER_CLS)
+    def test_supply_accepts_comet_address_as_market_id(self, mock_adapter_cls, mock_config_cls, compiler):
+        from almanak.connectors.compound_v3.addresses import COMPOUND_V3_COMET_ADDRESSES
+
+        mock_adapter = MagicMock()
+        mock_adapter.comet_address = TEST_COMET
+        mock_adapter.market_config = MOCK_CHAIN_ADDRESSES["ethereum"]["usdc"]
+        mock_adapter.supply.return_value = _mock_tx_result("Supply 100 USDC to Compound V3")
+        mock_adapter_cls.return_value = mock_adapter
+
+        intent = SupplyIntent(
+            token="USDC",
+            amount=Decimal("100"),
+            protocol="compound_v3",
+            market_id=COMPOUND_V3_COMET_ADDRESSES["ethereum"]["usdc"].lower(),
+        )
+
+        result = compiler.compile(intent)
+
+        assert result.status == CompilationStatus.SUCCESS
+        assert result.action_bundle.metadata["market"] == "usdc"
+        mock_config_cls.assert_called_once_with(
+            chain="ethereum",
+            wallet_address=compiler.wallet_address,
+            market="usdc",
+            gateway_client=None,
+        )
+
+    @patch(CONFIG_CLS)
+    @patch(ADAPTER_CLS)
+    def test_supply_arbitrum_weth_comet_address(self, mock_adapter_cls, mock_config_cls, arbitrum_compiler):
+        from almanak.connectors.compound_v3.addresses import COMPOUND_V3_COMET_ADDRESSES
+
+        weth_comet = COMPOUND_V3_COMET_ADDRESSES["arbitrum"]["weth"]
+        mock_adapter = MagicMock()
+        mock_adapter.comet_address = weth_comet
+        mock_adapter.market_config = {
+            "base_token": "WETH",
+            "base_token_address": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+        }
+        mock_adapter.supply.return_value = _mock_tx_result("Supply WETH to Compound V3")
+        mock_adapter_cls.return_value = mock_adapter
+
+        intent = SupplyIntent(
+            token="WETH",
+            amount=Decimal("1"),
+            protocol="compound_v3",
+            market_id=weth_comet,
+            chain="arbitrum",
+        )
+
+        result = arbitrum_compiler.compile(intent)
+
+        assert result.status == CompilationStatus.SUCCESS
+        assert result.action_bundle.metadata["market"] == "weth"
+        mock_config_cls.assert_called_once_with(
+            chain="arbitrum",
+            wallet_address=arbitrum_compiler.wallet_address,
+            market="weth",
+            gateway_client=None,
+        )
+
+    def test_empty_market_id_fails_closed(self, compiler):
+        intent = SupplyIntent(
+            token="USDC",
+            amount=Decimal("100"),
+            protocol="compound_v3",
+            market_id="",
+        )
+
+        result = compiler.compile(intent)
+
+        assert result.status == CompilationStatus.FAILED
+        assert "not available" in (result.error or "")
+
+    def test_unknown_comet_address_fails_closed(self, compiler):
+        intent = SupplyIntent(
+            token="USDC",
+            amount=Decimal("100"),
+            protocol="compound_v3",
+            market_id="0x1111111111111111111111111111111111111111",
+        )
+
+        result = compiler.compile(intent)
+
+        assert result.status == CompilationStatus.FAILED
+        assert "0x1111111111111111111111111111111111111111" in (result.error or "")
+        assert "not available" in (result.error or "")
+
+    @patch(CONFIG_CLS)
+    @patch(ADAPTER_CLS)
+    def test_expected_pool_match_compiles(self, mock_adapter_cls, mock_config_cls, compiler):
+        mock_adapter = MagicMock()
+        mock_adapter.comet_address = TEST_COMET
+        mock_adapter.market_config = MOCK_CHAIN_ADDRESSES["ethereum"]["usdc"]
+        mock_adapter.supply.return_value = _mock_tx_result("Supply 100 USDC to Compound V3")
+        mock_adapter_cls.return_value = mock_adapter
+
+        intent = SupplyIntent(
+            token="USDC",
+            amount=Decimal("100"),
+            protocol="compound_v3",
+            market_id="usdc",
+            expected_pool=TEST_COMET.lower(),
+        )
+
+        result = compiler.compile(intent)
+
+        assert result.status == CompilationStatus.SUCCESS
+        assert result.action_bundle.metadata["expected_pool"] == TEST_COMET
+        mock_adapter.supply.assert_called_once()
+
+    @patch(CONFIG_CLS)
+    @patch(ADAPTER_CLS)
+    def test_expected_pool_mismatch_fails_before_approve(self, mock_adapter_cls, mock_config_cls, compiler):
+        mock_adapter = MagicMock()
+        mock_adapter.comet_address = TEST_COMET
+        mock_adapter.market_config = MOCK_CHAIN_ADDRESSES["ethereum"]["usdc"]
+        mock_adapter_cls.return_value = mock_adapter
+        other = "0x1111111111111111111111111111111111111111"
+
+        intent = SupplyIntent(
+            token="USDC",
+            amount=Decimal("100"),
+            protocol="compound_v3",
+            market_id="usdc",
+            expected_pool=other,
+        )
+
+        result = compiler.compile(intent)
+
+        assert result.status == CompilationStatus.FAILED
+        assert result.is_safety_refusal is True
+        assert "Pool binding mismatch" in (result.error or "")
+        assert TEST_COMET in (result.error or "")
+        assert other in (result.error or "")
+        mock_adapter.supply.assert_not_called()
+
+    @patch(CONFIG_CLS)
+    @patch(ADAPTER_CLS)
+    def test_withdraw_expected_pool_mismatch_fails_before_calldata(
+        self, mock_adapter_cls, mock_config_cls, compiler
+    ):
+        mock_adapter = MagicMock()
+        mock_adapter.comet_address = TEST_COMET
+        mock_adapter.market_config = MOCK_CHAIN_ADDRESSES["ethereum"]["usdc"]
+        mock_adapter_cls.return_value = mock_adapter
+        other = "0x1111111111111111111111111111111111111111"
+
+        intent = WithdrawIntent(
+            token="USDC",
+            amount=Decimal("100"),
+            protocol="compound_v3",
+            market_id="usdc",
+            expected_pool=other,
+        )
+
+        result = compiler.compile(intent)
+
+        assert result.status == CompilationStatus.FAILED
+        assert result.is_safety_refusal is True
+        assert "Pool binding mismatch" in (result.error or "")
+        mock_adapter.withdraw.assert_not_called()
+
+    @patch(CONFIG_CLS)
+    @patch(ADAPTER_CLS)
+    def test_address_form_market_id_with_matching_expected_pool(
+        self, mock_adapter_cls, mock_config_cls, compiler
+    ):
+        from almanak.connectors.compound_v3.addresses import COMPOUND_V3_COMET_ADDRESSES
+
+        comet = COMPOUND_V3_COMET_ADDRESSES["ethereum"]["usdc"]
+        mock_adapter = MagicMock()
+        mock_adapter.comet_address = comet
+        mock_adapter.market_config = MOCK_CHAIN_ADDRESSES["ethereum"]["usdc"]
+        mock_adapter.supply.return_value = _mock_tx_result("Supply 100 USDC to Compound V3")
+        mock_adapter_cls.return_value = mock_adapter
+
+        intent = SupplyIntent(
+            token="USDC",
+            amount=Decimal("100"),
+            protocol="compound_v3",
+            market_id=comet.lower(),
+            expected_pool=comet,
+        )
+
+        result = compiler.compile(intent)
+
+        assert result.status == CompilationStatus.SUCCESS
+        assert result.action_bundle.metadata["market"] == "usdc"
+        assert result.action_bundle.metadata["expected_pool"] == comet
+        mock_config_cls.assert_called_once_with(
+            chain="ethereum",
+            wallet_address=compiler.wallet_address,
+            market="usdc",
+            gateway_client=None,
+        )

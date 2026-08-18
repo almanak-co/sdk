@@ -407,6 +407,32 @@ def test_market_params_compound_symbol_normalization() -> None:
     # A Comet-only market (no COMPOUND_V3_MARKETS entry, e.g. ethereum wstETH) has no
     # account-state entry → None (fails closed; byte-equivalent to the legacy reader).
     assert LendingReadRegistry.market_params("compound_v3", "ethereum", "wsteth") is None
+    # Address form of a listed Comet resolves to the same row as the catalogue key.
+    by_key = LendingReadRegistry.market_params("compound_v3", "arbitrum", "weth")
+    assert by_key is not None
+    comet = str(by_key["comet_address"])
+    by_address = LendingReadRegistry.market_params("compound_v3", "arbitrum", comet.lower())
+    assert by_address is by_key
+    assert LendingReadRegistry.canonical_market_id("compound_v3", "arbitrum", comet) == "weth"
+    assert LendingReadRegistry.market_params("compound_v3", "ethereum", comet) is None
+
+
+def test_compound_v3_address_form_position_keys_match_catalogue_key() -> None:
+    """Address-form and key-form market_id must share one position key."""
+    from almanak.framework.accounting.lending_accounting import _derive_position_key
+    from almanak.framework.observability.position_events import lending_position_id
+
+    weth_params = LendingReadRegistry.market_params("compound_v3", "arbitrum", "weth")
+    assert weth_params is not None
+    comet = str(weth_params["comet_address"])
+    wallet, asset = "0xABCDef0123456789abcdef0123456789abcdef01", "WETH"
+    by_key = _derive_position_key("compound_v3", "arbitrum", wallet, "weth", asset)
+    by_address = _derive_position_key("compound_v3", "arbitrum", wallet, comet, asset)
+    assert by_key == by_address
+    assert ":weth:" in by_key
+    assert lending_position_id(
+        chain="arbitrum", protocol="compound_v3", wallet=wallet, asset=asset, market_id=comet
+    ) == by_key
 
 
 def test_resolve_account_state_plan_compound_binds_per_market_comet() -> None:

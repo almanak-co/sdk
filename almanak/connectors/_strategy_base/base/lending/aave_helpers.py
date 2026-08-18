@@ -49,7 +49,7 @@ MAX_DECODABLE_RESERVES = 4096
 def _expected_pool_binding_failure(
     *, intent: SupplyIntent | WithdrawIntent, canonical_pool: str, chain: str
 ) -> CompilationResult | None:
-    """Fail when a caller assertion disagrees with canonical Aave routing."""
+    """Fail when a caller assertion disagrees with canonical registry routing."""
     expected_pool = intent.expected_pool
     if expected_pool is None or expected_pool.lower() == canonical_pool.lower():
         return None
@@ -57,12 +57,45 @@ def _expected_pool_binding_failure(
         status=CompilationStatus.FAILED,
         is_safety_refusal=True,
         error=(
-            f"Aave V3 Pool binding mismatch on {chain}: "
+            f"{intent.protocol} Pool binding mismatch on {chain}: "
             f"expected {expected_pool}, canonical registry selected {canonical_pool}. "
             "Refusing to compile; expected_pool is an assertion and never overrides canonical routing."
         ),
         intent_id=intent.intent_id,
     )
+
+
+def _resolve_compound_v3_compile_market(
+    *, chain: str, market_id: str | None, intent_id: str
+) -> tuple[str, None] | tuple[None, CompilationResult]:
+    """Resolve a Compound V3 catalogue key or Comet address, or fail closed."""
+    from almanak.connectors.compound_v3.addresses import (
+        COMPOUND_V3_COMET_ADDRESSES,
+        default_compound_v3_market_for_chain,
+        resolve_compound_v3_market_key,
+    )
+
+    if chain not in COMPOUND_V3_COMET_ADDRESSES:
+        return None, CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=(
+                f"Compound V3 not available on chain: {chain}. Supported: {list(COMPOUND_V3_COMET_ADDRESSES.keys())}"
+            ),
+            intent_id=intent_id,
+        )
+
+    raw = default_compound_v3_market_for_chain(chain) if market_id is None else market_id
+    resolved = resolve_compound_v3_market_key(chain, raw)
+    if resolved is None:
+        return None, CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=(
+                f"Compound V3 market '{raw}' not available on {chain}. "
+                f"Available: {list(COMPOUND_V3_COMET_ADDRESSES[chain].keys())}"
+            ),
+            intent_id=intent_id,
+        )
+    return resolved, None
 
 
 class AssetNotCollateralEligibleError(ValueError):
@@ -2552,10 +2585,8 @@ def _compile_borrow_compound_v3(
 ) -> CompilationResult:
     """Compile BORROW for Compound V3."""
     from almanak.connectors.compound_v3.adapter import (
-        COMPOUND_V3_COMET_ADDRESSES,
         CompoundV3Adapter,
         CompoundV3Config,
-        default_compound_v3_market_for_chain,
     )
 
     result = CompilationResult(
@@ -2565,22 +2596,12 @@ def _compile_borrow_compound_v3(
     transactions: list[TransactionData] = []
     warnings: list[str] = []
 
-    market = intent.market_id or default_compound_v3_market_for_chain(compiler.chain)
-
-    if compiler.chain not in COMPOUND_V3_COMET_ADDRESSES:
-        return CompilationResult(
-            status=CompilationStatus.FAILED,
-            error=f"Compound V3 not available on chain: {compiler.chain}. Supported: {list(COMPOUND_V3_COMET_ADDRESSES.keys())}",
-            intent_id=intent.intent_id,
-        )
-
-    available_markets = COMPOUND_V3_COMET_ADDRESSES.get(compiler.chain, {})
-    if market not in available_markets:
-        return CompilationResult(
-            status=CompilationStatus.FAILED,
-            error=f"Compound V3 market '{market}' not available on {compiler.chain}. Available: {list(available_markets.keys())}",
-            intent_id=intent.intent_id,
-        )
+    market, market_error = _resolve_compound_v3_compile_market(
+        chain=compiler.chain, market_id=intent.market_id, intent_id=intent.intent_id
+    )
+    if market_error is not None:
+        return market_error
+    assert market is not None
 
     compound_config = CompoundV3Config(
         chain=compiler.chain,
@@ -3794,10 +3815,8 @@ def _compile_repay_compound_v3(
 ) -> CompilationResult:
     """Compile REPAY for Compound V3."""
     from almanak.connectors.compound_v3.adapter import (
-        COMPOUND_V3_COMET_ADDRESSES,
         CompoundV3Adapter,
         CompoundV3Config,
-        default_compound_v3_market_for_chain,
     )
 
     result = CompilationResult(
@@ -3807,22 +3826,12 @@ def _compile_repay_compound_v3(
     transactions: list[TransactionData] = []
     warnings: list[str] = list(initial_warnings)
 
-    market = intent.market_id or default_compound_v3_market_for_chain(compiler.chain)
-
-    if compiler.chain not in COMPOUND_V3_COMET_ADDRESSES:
-        return CompilationResult(
-            status=CompilationStatus.FAILED,
-            error=f"Compound V3 not available on chain: {compiler.chain}. Supported: {list(COMPOUND_V3_COMET_ADDRESSES.keys())}",
-            intent_id=intent.intent_id,
-        )
-
-    available_markets = COMPOUND_V3_COMET_ADDRESSES.get(compiler.chain, {})
-    if market not in available_markets:
-        return CompilationResult(
-            status=CompilationStatus.FAILED,
-            error=f"Compound V3 market '{market}' not available on {compiler.chain}. Available: {list(available_markets.keys())}",
-            intent_id=intent.intent_id,
-        )
+    market, market_error = _resolve_compound_v3_compile_market(
+        chain=compiler.chain, market_id=intent.market_id, intent_id=intent.intent_id
+    )
+    if market_error is not None:
+        return market_error
+    assert market is not None
 
     compound_config = CompoundV3Config(
         chain=compiler.chain,
@@ -4898,28 +4907,16 @@ def _compile_supply_compound_v3(
     warnings: list[str] = []
 
     from almanak.connectors.compound_v3.adapter import (
-        COMPOUND_V3_COMET_ADDRESSES,
         CompoundV3Adapter,
         CompoundV3Config,
-        default_compound_v3_market_for_chain,
     )
 
-    market = intent.market_id or default_compound_v3_market_for_chain(compiler.chain)
-
-    if compiler.chain not in COMPOUND_V3_COMET_ADDRESSES:
-        return CompilationResult(
-            status=CompilationStatus.FAILED,
-            error=f"Compound V3 not available on chain: {compiler.chain}. Supported: {list(COMPOUND_V3_COMET_ADDRESSES.keys())}",
-            intent_id=intent.intent_id,
-        )
-
-    available_markets = COMPOUND_V3_COMET_ADDRESSES.get(compiler.chain, {})
-    if market not in available_markets:
-        return CompilationResult(
-            status=CompilationStatus.FAILED,
-            error=f"Compound V3 market '{market}' not available on {compiler.chain}. Available: {list(available_markets.keys())}",
-            intent_id=intent.intent_id,
-        )
+    market, market_error = _resolve_compound_v3_compile_market(
+        chain=compiler.chain, market_id=intent.market_id, intent_id=intent.intent_id
+    )
+    if market_error is not None:
+        return market_error
+    assert market is not None
 
     compound_config = CompoundV3Config(
         chain=compiler.chain,
@@ -4928,6 +4925,11 @@ def _compile_supply_compound_v3(
         gateway_client=compiler._gateway_client,
     )
     compound_adapter = CompoundV3Adapter(compound_config)
+
+    if binding_failure := _expected_pool_binding_failure(
+        intent=intent, canonical_pool=compound_adapter.comet_address, chain=compiler.chain
+    ):
+        return binding_failure
 
     supply_amount_wei = int(amount_decimal * Decimal(10**supply_token.decimals))
 
@@ -5008,6 +5010,7 @@ def _compile_supply_compound_v3(
             "supply_amount": str(amount_decimal),
             "supply_type": "base" if is_base_token else "collateral",
             "chain": compiler.chain,
+            **({"expected_pool": intent.expected_pool} if intent.expected_pool is not None else {}),
         },
     )
 
@@ -5818,10 +5821,8 @@ def _compile_withdraw_compound_v3(
 ) -> CompilationResult:
     """Compile WITHDRAW for Compound V3 (base asset or collateral)."""
     from almanak.connectors.compound_v3.adapter import (
-        COMPOUND_V3_COMET_ADDRESSES,
         CompoundV3Adapter,
         CompoundV3Config,
-        default_compound_v3_market_for_chain,
     )
 
     result = CompilationResult(
@@ -5831,22 +5832,12 @@ def _compile_withdraw_compound_v3(
     transactions: list[TransactionData] = []
     warnings: list[str] = list(initial_warnings)
 
-    market = intent.market_id or default_compound_v3_market_for_chain(compiler.chain)
-
-    if compiler.chain not in COMPOUND_V3_COMET_ADDRESSES:
-        return CompilationResult(
-            status=CompilationStatus.FAILED,
-            error=f"Compound V3 not available on chain: {compiler.chain}. Supported: {list(COMPOUND_V3_COMET_ADDRESSES.keys())}",
-            intent_id=intent.intent_id,
-        )
-
-    available_markets = COMPOUND_V3_COMET_ADDRESSES.get(compiler.chain, {})
-    if market not in available_markets:
-        return CompilationResult(
-            status=CompilationStatus.FAILED,
-            error=f"Compound V3 market '{market}' not available on {compiler.chain}. Available: {list(available_markets.keys())}",
-            intent_id=intent.intent_id,
-        )
+    market, market_error = _resolve_compound_v3_compile_market(
+        chain=compiler.chain, market_id=intent.market_id, intent_id=intent.intent_id
+    )
+    if market_error is not None:
+        return market_error
+    assert market is not None
 
     compound_config = CompoundV3Config(
         chain=compiler.chain,
@@ -5855,6 +5846,11 @@ def _compile_withdraw_compound_v3(
         gateway_client=compiler._gateway_client,
     )
     compound_adapter = CompoundV3Adapter(compound_config)
+
+    if binding_failure := _expected_pool_binding_failure(
+        intent=intent, canonical_pool=compound_adapter.comet_address, chain=compiler.chain
+    ):
+        return binding_failure
 
     # Detect if the token is the base token or a collateral token.
     # Compound V3 uses withdraw() for the base asset and withdraw_collateral()
@@ -5923,6 +5919,7 @@ def _compile_withdraw_compound_v3(
                     "chain": compiler.chain,
                     "no_op": True,
                     "reason": withdraw_result.description or "Nothing to withdraw (balance is 0)",
+                    **({"expected_pool": intent.expected_pool} if intent.expected_pool is not None else {}),
                 },
             ),
             intent_id=intent.intent_id,
@@ -5959,6 +5956,7 @@ def _compile_withdraw_compound_v3(
             "withdraw_all": intent.withdraw_all,
             "withdraw_type": "base" if is_base_token else "collateral",
             "chain": compiler.chain,
+            **({"expected_pool": intent.expected_pool} if intent.expected_pool is not None else {}),
         },
     )
 

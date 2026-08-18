@@ -2100,8 +2100,9 @@ class Intent:
             use_as_collateral: Whether to enable as collateral (default True)
             market_id: Market identifier for isolated lending protocols (e.g., Morpho Blue).
                 Required for morpho/morpho_blue, ignored for aave_v3.
-            expected_pool: Optional exact Aave V3 Pool-address assertion. Compilation
-                fails if it differs from the canonical registry-selected Pool.
+            expected_pool: Optional exact pool/comet-address assertion for
+                connectors that declare ``supports_expected_pool_binding``.
+                Compilation fails if it differs from the registry-selected venue.
             chain: Target chain for execution (defaults to strategy's primary chain)
 
         Returns:
@@ -2161,8 +2162,9 @@ class Intent:
                 Other protocols ignore this field.
             market_id: Market identifier for isolated lending protocols (e.g., Morpho Blue).
                 Required for morpho/morpho_blue, ignored for aave_v3.
-            expected_pool: Optional exact Aave V3 Pool-address assertion. Compilation
-                fails if it differs from the canonical registry-selected Pool.
+            expected_pool: Optional exact pool/comet-address assertion for
+                connectors that declare ``supports_expected_pool_binding``.
+                Compilation fails if it differs from the registry-selected venue.
             chain: Target chain for execution (defaults to strategy's primary chain)
 
         Returns:

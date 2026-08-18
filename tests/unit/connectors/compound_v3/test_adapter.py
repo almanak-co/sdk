@@ -144,6 +144,24 @@ class TestCompoundV3Config:
                 market="invalid",
             )
 
+    def test_comet_address_canonicalizes_to_catalogue_key(self):
+        """A listed Comet address is accepted and stored as the catalogue key."""
+        comet = COMPOUND_V3_COMET_ADDRESSES["arbitrum"]["weth"]
+        config = CompoundV3Config(
+            chain="arbitrum",
+            wallet_address="0x1234567890123456789012345678901234567890",
+            market=comet.lower(),
+        )
+        assert config.market == "weth"
+
+    def test_unknown_comet_address_rejected(self):
+        with pytest.raises(ValueError, match="Invalid market"):
+            CompoundV3Config(
+                chain="arbitrum",
+                wallet_address="0x1234567890123456789012345678901234567890",
+                market="0x1111111111111111111111111111111111111111",
+            )
+
     def test_invalid_slippage_negative(self):
         """Test negative slippage raises error."""
         with pytest.raises(ValueError, match="Invalid slippage"):

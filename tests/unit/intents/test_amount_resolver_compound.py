@@ -15,6 +15,9 @@ def test_compound_v3_amount_resolver_uses_manifest_address_table() -> None:
     assert reader._get_comet_address("base", "usdc") == COMPOUND_V3_COMET_ADDRESSES["base"]["usdc"]
     assert reader._get_comet_address("optimism", None) == COMPOUND_V3_COMET_ADDRESSES["optimism"]["usdc"]
     assert reader._get_comet_address("base", None) is None
+    weth_comet = COMPOUND_V3_COMET_ADDRESSES["arbitrum"]["weth"]
+    assert reader._get_comet_address("arbitrum", weth_comet.lower()) == weth_comet
+    assert reader._get_comet_address("arbitrum", "0x1111111111111111111111111111111111111111") is None
 
 
 def test_compound_v3_amount_resolver_returns_none_for_unsupported_chain() -> None:

@@ -376,6 +376,15 @@ class TestCompoundV3CometAddress:
         with patch.dict(_COMET_ADDRESSES_PATCH_TARGET, {}, clear=True):
             assert reader._get_comet_address("doesnt_exist", market_id=None) is None
 
+    def test_empty_market_id_returns_none_even_on_single_market_chain(self):
+        reader = CompoundV3BalanceReader()
+        with patch.dict(
+            _COMET_ADDRESSES_PATCH_TARGET,
+            {"testchain": {"usdc": _SINGLE}},
+            clear=True,
+        ):
+            assert reader._get_comet_address("testchain", market_id="") is None
+
     def test_known_chain_with_known_market_id_returns_address(self):
         reader = CompoundV3BalanceReader()
         with patch.dict(

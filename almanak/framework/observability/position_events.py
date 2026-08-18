@@ -1562,7 +1562,11 @@ def lending_position_id(*, chain: str, protocol: str, wallet: str, asset: str, m
     wallet_n = (wallet or "unknown").strip().lower() or "unknown"
     asset_n = (asset or "unknown").strip().lower() or "unknown"
     if market_id:
-        return f"lending:{chain_n}:{proto_n}:{wallet_n}:{str(market_id).lower()}:{asset_n}"
+        from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
+
+        catalogue_key = LendingReadRegistry.canonical_market_id(proto_n, chain_n, str(market_id))
+        market_n = (catalogue_key or str(market_id)).lower()
+        return f"lending:{chain_n}:{proto_n}:{wallet_n}:{market_n}:{asset_n}"
     return f"lending:{chain_n}:{proto_n}:{wallet_n}:{asset_n}"
 
 

@@ -254,7 +254,7 @@ class CompoundV3BalanceReader(ProtocolBalanceReader):
             # table for it. Return None so the caller falls back to withdraw_all
             # rather than guessing an address.
             return None
-        if not market_id:
+        if market_id is None:
             # Don't silently default to USDC — wrong market means wrong balance.
             # Return None to trigger withdraw_all fallback.
             if len(markets) == 1:
@@ -267,7 +267,14 @@ class CompoundV3BalanceReader(ProtocolBalanceReader):
                 chain,
             )
             return None
-        return markets.get(market_id)
+        if market_id in markets:
+            return markets[market_id]
+        from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
+
+        resolved = LendingReadRegistry.canonical_market_id("compound_v3", chain, market_id)
+        if resolved is None:
+            return None
+        return markets.get(resolved)
 
     def _eth_call(self, gateway_client: Any, chain: str, to: str, data: str) -> str | None:
         """Make an eth_call via gateway RPC (shared gateway-routed helper)."""

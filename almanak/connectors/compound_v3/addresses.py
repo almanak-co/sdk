@@ -15,6 +15,8 @@ Surfaces:
   collaterals: {SYMBOL: {liquidation_collateral_factor, ...}}}}`` catalogue.
 * ``_DEFAULT_MARKET_BY_CHAIN`` / ``default_compound_v3_market_for_chain`` — the
   canonical Comet ``market_id`` per chain when the intent omits ``market_id``.
+* ``resolve_compound_v3_market_key`` — catalogue-key or Comet-address → key.
+  Address form is an assertion against this table, never a routing override.
 * ``COMPOUND_V3_ACCOUNT_STATE_MARKETS`` — the derived per-market table the
   strategy-side account-state read consumes (VIB-4929 PR-3b): each
   ``COMPOUND_V3_MARKETS`` entry with its ``comet_address`` folded in, so the
@@ -97,6 +99,35 @@ def default_compound_v3_market_for_chain(chain: str) -> str:
     so out-of-tree callers see a stable default.
     """
     return _DEFAULT_MARKET_BY_CHAIN.get(chain, "usdc")
+
+
+def resolve_compound_v3_market_key(chain: str, market_id: str) -> str | None:
+    """Return the canonical catalogue key for ``market_id`` on ``chain``.
+
+    Accepts a catalogue key (``"weth"``) or a Comet contract address (any
+    casing). Address form is a catalogue assertion: a hit binds the key and
+    the registry address is the transaction destination. Unknown chain,
+    empty id, unknown key, or an address that is not a listed Comet
+    returns ``None``.
+
+    When two keys share a Comet (Polygon ``usdc_e`` / ``usdc_bridged``),
+    prefer the chain default if it is one of the matches.
+    """
+    if not market_id:
+        return None
+    markets = COMPOUND_V3_COMET_ADDRESSES.get(chain)
+    if not markets:
+        return None
+    if market_id in markets:
+        return market_id
+    needle = market_id.lower()
+    matches = [key for key, address in markets.items() if address.lower() == needle]
+    if not matches:
+        return None
+    default = _DEFAULT_MARKET_BY_CHAIN.get(chain)
+    if default in matches:
+        return default
+    return matches[0]
 
 
 COMPOUND_V3_MARKETS: dict[str, dict[str, dict[str, Any]]] = {
@@ -445,4 +476,5 @@ __all__ = [
     "COMPOUND_V3_COMET_ADDRESSES",
     "COMPOUND_V3_MARKETS",
     "default_compound_v3_market_for_chain",
+    "resolve_compound_v3_market_key",
 ]

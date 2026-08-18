@@ -561,16 +561,58 @@ class LendingReadRegistry:
         markets_for_chain = table.get(chain.lower())
         if not markets_for_chain:
             return None
-        # Market-id normalisation is connector-declared (VIB-4929 PR-3b): a spec may
-        # publish ``normalize_market_id`` (Compound V3 → ``str.lower`` for symbol ids
-        # like "usdc"/"weth"). Default (``None``) keeps the Morpho-style 0x-prefixed,
-        # lowercase, 32-byte ``zfill(64)`` shape.
-        spec = cls._load_account_state_spec(key)
+        entry = cls._lookup_market_entry(key, market_id, markets_for_chain)
+        return None if entry is None else entry[1]
+
+    @classmethod
+    def canonical_market_id(cls, protocol: str, chain: str, market_id: str) -> str | None:
+        """Return the catalogue key for ``market_id``, or ``None`` if unknown.
+
+        Accepts the published key (after the connector's ``normalize_market_id``)
+        or a ``comet_address`` stored on a catalogue row. Address form is an
+        assertion against that row, never a new market.
+        """
+        key = cls._normalize(protocol)
+        table = cls._load_market_table(key)
+        if table is None:
+            return None
+        markets_for_chain = table.get(chain.lower())
+        if not markets_for_chain:
+            return None
+        entry = cls._lookup_market_entry(key, market_id, markets_for_chain)
+        return None if entry is None else entry[0]
+
+    @classmethod
+    def _lookup_market_entry(
+        cls,
+        protocol_key: str,
+        market_id: str,
+        markets_for_chain: dict[str, Any],
+    ) -> tuple[str, dict[str, object]] | None:
+        """Resolve ``(canonical_key, params)`` from a key or listed Comet address."""
+        spec = cls._load_account_state_spec(protocol_key)
         normalizer = spec.normalize_market_id if spec is not None else None
         normalized = (
             normalizer(market_id) if normalizer is not None else "0x" + market_id.lower().replace("0x", "").zfill(64)
         )
-        return markets_for_chain.get(normalized)
+        params = markets_for_chain.get(normalized)
+        if isinstance(params, dict):
+            return normalized, params
+
+        needle = market_id.lower()
+        if not needle.startswith("0x") or len(needle) != 42:
+            return None
+        matches = [
+            (row_key, row)
+            for row_key, row in markets_for_chain.items()
+            if isinstance(row, dict) and str(row.get("comet_address", "")).lower() == needle
+        ]
+        if not matches:
+            return None
+        # Insertion order is catalogue order. Compound V3 may publish alias keys
+        # for one Comet (Polygon ``usdc_e`` / ``usdc_bridged``); first match is
+        # that canonical row, not an arbitrary guess.
+        return matches[0]
 
     @classmethod
     def market_health_reader(cls, protocol: str) -> Callable[..., LendingAccountState | None] | None:
