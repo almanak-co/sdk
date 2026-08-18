@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import TYPE_CHECKING, Any
 
 from almanak.gateway.proto import gateway_pb2
 
+from .provider import GatewayBlockIdentity
 from .types import VenueReferenceNamespace, VenueTargetRef
 
 if TYPE_CHECKING:
@@ -82,4 +84,70 @@ class GatewayClientVenueVerificationGateway:
         return block_hash.lower()
 
 
-__all__ = ["GatewayClientVenueVerificationGateway"]
+class GatewayClientExactVenueDataGateway:
+    """Route exact-data reads through deployed gateway gRPC services."""
+
+    def __init__(self, client: GatewayClient) -> None:
+        if not getattr(client, "is_connected", False):
+            raise ValueError("exact venue data requires a connected gateway client")
+        self._client = client
+
+    def read(
+        self,
+        *,
+        chain: str,
+        target_address: str,
+        payload: bytes,
+        block_number: int,
+    ) -> bytes:
+        if re.fullmatch(r"0x[0-9a-f]{40}", target_address) is None:
+            raise ValueError("exact venue data target must be a canonical lowercase EVM address")
+        result = self._client.eth_call(
+            chain=chain,
+            to=target_address,
+            data="0x" + payload.hex(),
+            block=block_number,
+            raise_on_error=True,
+        )
+        if not isinstance(result, str) or not result.startswith("0x"):
+            raise ValueError(f"exact venue read returned no data for {target_address} on {chain}")
+        return bytes.fromhex(result[2:])
+
+    def block_identity(self, *, chain: str, block_number: int) -> GatewayBlockIdentity:
+        response = self._client.rpc.Call(
+            gateway_pb2.RpcRequest(
+                chain=chain,
+                method="eth_getBlockByNumber",
+                params=json.dumps([hex(block_number), False]),
+            ),
+            timeout=self._client.config.timeout,
+        )
+        if not response.success or not response.result:
+            raise ValueError(f"gateway eth_getBlockByNumber failed on {chain}: {response.error or 'empty result'}")
+        block = json.loads(response.result)
+        if not isinstance(block, dict):
+            raise ValueError(f"gateway returned malformed block {block_number} on {chain}")
+
+        def quantity(name: str) -> int:
+            raw = block.get(name)
+            if not isinstance(raw, str) or re.fullmatch(r"0x[0-9a-fA-F]+", raw) is None:
+                raise ValueError(f"gateway block {block_number} has malformed {name}")
+            return int(raw, 16)
+
+        observed_number = quantity("number")
+        timestamp = quantity("timestamp")
+        block_hash = block.get("hash")
+        if observed_number != block_number:
+            raise ValueError(f"gateway returned block {observed_number} for requested block {block_number}")
+        if timestamp <= 0:
+            raise ValueError(f"gateway block {block_number} has no positive timestamp")
+        if not isinstance(block_hash, str) or re.fullmatch(r"0x[0-9a-fA-F]{64}", block_hash) is None:
+            raise ValueError(f"gateway block {block_number} has malformed hash")
+        return GatewayBlockIdentity(
+            number=observed_number,
+            block_hash=block_hash.lower(),
+            timestamp=timestamp,
+        )
+
+
+__all__ = ["GatewayClientExactVenueDataGateway", "GatewayClientVenueVerificationGateway"]

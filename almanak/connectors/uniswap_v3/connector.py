@@ -11,6 +11,7 @@ from almanak.connectors._connector import (
     BacktestStrategyTypeDecl,
     Connector,
     DexVolumeDecl,
+    ExactVenueDataProviderDecl,
     FeeModelDecl,
     ImportRef,
     SupportedChainsSpec,
@@ -18,7 +19,7 @@ from almanak.connectors._connector import (
 )
 from almanak.connectors._strategy_base.address_table import AbiFamily, AddressTableSpec
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
-from almanak.core.capability_obligations import ObligationId
+from almanak.core.capability_obligations import ExactTargetFeature, ObligationId
 from almanak.core.chains.arbitrum import DESCRIPTOR as ARBITRUM
 from almanak.core.chains.avalanche import DESCRIPTOR as AVALANCHE
 from almanak.core.chains.base import DESCRIPTOR as BASE
@@ -282,6 +283,18 @@ CONNECTOR = Connector(
             chains=(ARBITRUM, AVALANCHE, BASE, BSC, ETHEREUM, OPTIMISM, POLYGON),
             primitives=(Primitive.LP, Primitive.SWAP),
             component_names=("fee",),
+        ),
+    ),
+    exact_venue_data_providers=(
+        ExactVenueDataProviderDecl(
+            protocol="uniswap_v3",
+            provider=ImportRef(
+                module="almanak.connectors._strategy_base.v3_exact_data_provider",
+                attribute="V3ExactVenueDataProvider",
+            ),
+            contract_version="v3_exact_data.v1",
+            chains=(ARBITRUM, AVALANCHE, BASE, BSC, ETHEREUM, OPTIMISM, POLYGON),
+            features=(ExactTargetFeature.TWAP,),
         ),
     ),
     strategy_intents=(IntentType.SWAP, IntentType.LP_OPEN, IntentType.LP_CLOSE, IntentType.LP_COLLECT_FEES),

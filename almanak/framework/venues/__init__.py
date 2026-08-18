@@ -1,5 +1,6 @@
 """Writer-safe exact-venue contracts."""
 
+from .client import observe_exact_venue_data
 from .data import (
     EXACT_VENUE_DATA_SCHEMA_VERSION,
     DepthParameters,
@@ -19,7 +20,8 @@ from .data import (
     VenueDataProvenance,
     VenueObservationAnchor,
 )
-from .gateway import GatewayClientVenueVerificationGateway
+from .gateway import GatewayClientExactVenueDataGateway, GatewayClientVenueVerificationGateway
+from .provider import BaseExactVenueDataProvider, ExactVenueDataGateway, GatewayBlockIdentity
 from .receipt import VenueReceiptCorrelationError, correlate_verified_venue_receipts
 from .types import (
     VENUE_BINDING_SCHEMA_VERSION,
@@ -44,6 +46,7 @@ __all__ = [
     "EXACT_VENUE_DATA_SCHEMA_VERSION",
     "VENUE_BINDING_SCHEMA_VERSION",
     "BaseVenueVerifier",
+    "BaseExactVenueDataProvider",
     "DepthParameters",
     "ExactVenueBinding",
     "ExactVenueDataResult",
@@ -72,6 +75,9 @@ __all__ = [
     "VenueVerificationEvidence",
     "VenueVerificationGateway",
     "GatewayClientVenueVerificationGateway",
+    "GatewayClientExactVenueDataGateway",
+    "ExactVenueDataGateway",
+    "GatewayBlockIdentity",
     "VenueVerificationRequest",
     "VenueVerificationResult",
     "VerifiedVenueBinding",
@@ -79,4 +85,5 @@ __all__ = [
     "build_verified_venue_binding",
     "canonical_venue_binding_preimage_bytes",
     "correlate_verified_venue_receipts",
+    "observe_exact_venue_data",
 ]

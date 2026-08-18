@@ -242,7 +242,7 @@ class ImportRef:
         return target(*args, **kwargs)
 
 
-def _validate_venue_verifier_protocol(protocol: object) -> None:
+def _validate_venue_protocol(protocol: object, owner: str) -> None:
     if (
         type(protocol) is not str
         or not protocol
@@ -252,23 +252,23 @@ def _validate_venue_verifier_protocol(protocol: object) -> None:
         or not protocol.replace("_", "").isalnum()
         or not protocol[0].isalpha()
     ):
-        raise ValueError("VenueVerifierDecl.protocol must be a canonical lowercase underscore key")
+        raise ValueError(f"{owner}.protocol must be a canonical lowercase underscore key")
 
 
-def _validate_venue_verifier_ref(verifier: object) -> None:
-    if type(verifier) is not ImportRef:
-        raise TypeError("VenueVerifierDecl.verifier must be an exact ImportRef")
-    module_parts = verifier.module.split(".")
+def _validate_venue_provider_ref(provider: object, owner: str, field_name: str) -> None:
+    if type(provider) is not ImportRef:
+        raise TypeError(f"{owner}.{field_name} must be an exact ImportRef")
+    module_parts = provider.module.split(".")
     if (
-        not verifier.module.isascii()
+        not provider.module.isascii()
         or any(not part.isidentifier() for part in module_parts)
-        or not verifier.attribute.isascii()
-        or not verifier.attribute.isidentifier()
+        or not provider.attribute.isascii()
+        or not provider.attribute.isidentifier()
     ):
-        raise ValueError("VenueVerifierDecl.verifier must name a canonical Python module and attribute")
+        raise ValueError(f"{owner}.{field_name} must name a canonical Python module and attribute")
 
 
-def _validate_venue_verifier_contract_version(contract_version: object) -> None:
+def _validate_venue_contract_version(contract_version: object, owner: str) -> None:
     if (
         type(contract_version) is not str
         or not contract_version
@@ -277,9 +277,7 @@ def _validate_venue_verifier_contract_version(contract_version: object) -> None:
         or not contract_version[0].isalnum()
         or any(not (character.islower() or character.isdigit() or character in "._-") for character in contract_version)
     ):
-        raise ValueError(
-            "VenueVerifierDecl.contract_version must use lowercase ASCII letters, digits, dot, dash, or underscore"
-        )
+        raise ValueError(f"{owner}.contract_version must use lowercase ASCII letters, digits, dot, dash, or underscore")
 
 
 def _validate_venue_verifier_primitives(primitives: object) -> None:
@@ -334,9 +332,9 @@ class VenueVerifierDecl:
         primitives: tuple[Primitive, ...],
         component_names: tuple[str, ...] = (),
     ) -> None:
-        _validate_venue_verifier_protocol(protocol)
-        _validate_venue_verifier_ref(verifier)
-        _validate_venue_verifier_contract_version(contract_version)
+        _validate_venue_protocol(protocol, "VenueVerifierDecl")
+        _validate_venue_provider_ref(verifier, "VenueVerifierDecl", "verifier")
+        _validate_venue_contract_version(contract_version, "VenueVerifierDecl")
         if type(binding_policy_version) is not int or binding_policy_version <= 0:
             raise ValueError("VenueVerifierDecl.binding_policy_version must be a positive integer")
         chain_names = canonical_chain_names_from_refs(
@@ -364,6 +362,51 @@ class VenueVerifierDecl:
     def verifier_ref(self) -> str:
         """Return the stable symbolic provider identity stamped into evidence."""
         return f"{self.verifier.module}:{self.verifier.attribute}"
+
+
+@dataclass(frozen=True, init=False)
+class ExactVenueDataProviderDecl:
+    """Exact protocol-key declaration for one no-fallback data provider."""
+
+    protocol: str
+    provider: ImportRef
+    contract_version: str
+    chains: tuple[str, ...]
+    features: tuple[ExactTargetFeature, ...]
+
+    def __init__(
+        self,
+        *,
+        protocol: str,
+        provider: ImportRef,
+        contract_version: str,
+        chains: tuple[ChainDescriptor, ...],
+        features: tuple[ExactTargetFeature, ...],
+    ) -> None:
+        _validate_venue_protocol(protocol, "ExactVenueDataProviderDecl")
+        _validate_venue_provider_ref(provider, "ExactVenueDataProviderDecl", "provider")
+        _validate_venue_contract_version(contract_version, "ExactVenueDataProviderDecl")
+        chain_names = canonical_chain_names_from_refs("ExactVenueDataProviderDecl", "chains", chains, allow_none=False)
+        assert chain_names is not None
+        if not chain_names or chain_names != tuple(sorted(chain_names)) or len(set(chain_names)) != len(chain_names):
+            raise ValueError("ExactVenueDataProviderDecl.chains must be non-empty, unique, and canonically ordered")
+        if type(features) is not tuple or not features:
+            raise ValueError("ExactVenueDataProviderDecl.features must be a non-empty tuple")
+        if any(type(feature) is not ExactTargetFeature for feature in features):
+            raise TypeError("ExactVenueDataProviderDecl.features must contain exact ExactTargetFeature values")
+        if features != tuple(sorted(features, key=lambda feature: feature.value)) or len(set(features)) != len(
+            features
+        ):
+            raise ValueError("ExactVenueDataProviderDecl.features must be unique and canonically ordered")
+        object.__setattr__(self, "protocol", protocol)
+        object.__setattr__(self, "provider", provider)
+        object.__setattr__(self, "contract_version", contract_version)
+        object.__setattr__(self, "chains", chain_names)
+        object.__setattr__(self, "features", features)
+
+    @property
+    def provider_ref(self) -> str:
+        return f"{self.provider.module}:{self.provider.attribute}"
 
 
 @dataclass(frozen=True)
@@ -1421,6 +1464,7 @@ class Connector:
     permission_infrastructure: ImportRef | None = None
     bridge_adapter: ImportRef | None = None
     venue_verifiers: tuple[VenueVerifierDecl, ...] = field(default_factory=tuple)
+    exact_venue_data_providers: tuple[ExactVenueDataProviderDecl, ...] = field(default_factory=tuple)
     compiler: ImportRef | None = None
     compiler_protocols: tuple[str, ...] | None = None
     compiler_default_keys: tuple[str, ...] = field(default_factory=tuple)
@@ -1500,6 +1544,7 @@ class Connector:
         self._validate_permission_infrastructure()
         self._validate_bridge_adapter()
         self._validate_venue_verifiers()
+        self._validate_exact_venue_data_providers()
         self._validate_compiler()
         self._validate_flash_loan()
         self._validate_strategy_support()
@@ -1944,6 +1989,24 @@ class Connector:
         if unowned:
             raise ValueError(
                 f"Connector.venue_verifiers contains protocol keys not owned by this connector: {unowned!r}"
+            )
+
+    def _validate_exact_venue_data_providers(self) -> None:
+        """Validate exact-data declarations owned by this connector."""
+        declarations = self.exact_venue_data_providers
+        if type(declarations) is not tuple:
+            raise TypeError("Connector.exact_venue_data_providers must be a tuple")
+        if any(type(declaration) is not ExactVenueDataProviderDecl for declaration in declarations):
+            raise TypeError(
+                "Connector.exact_venue_data_providers must contain only exact ExactVenueDataProviderDecl values"
+            )
+        protocols = tuple(declaration.protocol for declaration in declarations)
+        if protocols != tuple(sorted(protocols)) or len(set(protocols)) != len(protocols):
+            raise ValueError("Connector.exact_venue_data_providers must be unique and canonically ordered")
+        unowned = sorted(set(protocols) - set(self.protocol_keys))
+        if unowned:
+            raise ValueError(
+                f"Connector.exact_venue_data_providers contains protocol keys not owned by this connector: {unowned!r}"
             )
 
     def _validate_compiler(self) -> None:
@@ -2533,6 +2596,10 @@ class ConnectorRegistry:
     def with_venue_verifiers(self) -> tuple[Connector, ...]:
         """Return connectors that publish exact venue-verifier declarations."""
         return tuple(d for d in self.all() if d.venue_verifiers)
+
+    def with_exact_venue_data_providers(self) -> tuple[Connector, ...]:
+        """Return connectors that publish exact venue data providers."""
+        return tuple(d for d in self.all() if d.exact_venue_data_providers)
 
     def with_compiler(self) -> tuple[Connector, ...]:
         """Return connectors that publish intent compilers."""
