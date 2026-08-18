@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from almanak.framework.venues.types import canonical_venue_binding_preimage_bytes
@@ -11,6 +12,14 @@ from almanak.framework.venues.types import canonical_venue_binding_preimage_byte
 
 class VenueReceiptCorrelationError(ValueError):
     """Receipt facts do not match the compiler's verified venue binding."""
+
+
+@dataclass(frozen=True, slots=True)
+class VenueReceiptEvidence:
+    """Typed result of joining compiler identity with confirmed receipt facts."""
+
+    binding_hash: str
+    pool_address: str
 
 
 def _canonical_sha256(value: object, *, field: str) -> str:
@@ -69,6 +78,26 @@ def correlate_verified_venue_receipts(
     log emitted by its physical pool. This prevents receipt enrichment from
     silently describing a different venue than compilation.
     """
+    evidence = reconcile_verified_venue_receipts(
+        bundle_metadata=bundle_metadata,
+        expected_binding_hash=expected_binding_hash,
+        receipts=receipts,
+    )
+    return evidence.binding_hash if evidence is not None else None
+
+
+def reconcile_verified_venue_receipts(
+    *,
+    bundle_metadata: Mapping[str, Any] | None,
+    expected_binding_hash: str | None,
+    receipts: Sequence[Mapping[str, Any]],
+) -> VenueReceiptEvidence | None:
+    """Join a compiled binding with confirmed receipts without mutating them.
+
+    Legacy bundles return ``None``. Exact bundles fail closed on a missing
+    independently captured hash, invalid preimage, non-success receipt, or an
+    emitter other than the verified pool.
+    """
     if not bundle_metadata or "venue_binding_hash" not in bundle_metadata:
         if expected_binding_hash is not None:
             raise VenueReceiptCorrelationError("expected binding hash has no verified bundle metadata")
@@ -77,7 +106,6 @@ def correlate_verified_venue_receipts(
         bundle_metadata,
         expected_binding_hash=expected_binding_hash,
     )
-
     emitters: set[str] = set()
     for receipt in receipts:
         if type(receipt.get("status")) is not int or receipt["status"] != 1:
@@ -91,7 +119,12 @@ def correlate_verified_venue_receipts(
                 emitters.add(address.lower())
     if pool not in emitters:
         raise VenueReceiptCorrelationError(f"confirmed receipts contain no event emitted by verified venue pool {pool}")
-    return binding_hash
+    return VenueReceiptEvidence(binding_hash=binding_hash, pool_address=pool)
 
 
-__all__ = ["VenueReceiptCorrelationError", "correlate_verified_venue_receipts"]
+__all__ = [
+    "VenueReceiptCorrelationError",
+    "VenueReceiptEvidence",
+    "correlate_verified_venue_receipts",
+    "reconcile_verified_venue_receipts",
+]

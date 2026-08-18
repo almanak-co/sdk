@@ -21,8 +21,14 @@ from .data import (
     VenueObservationAnchor,
 )
 from .gateway import GatewayClientExactVenueDataGateway, GatewayClientVenueVerificationGateway
+from .permissions import VenuePermissionEvidence, reconcile_venue_permissions
 from .provider import BaseExactVenueDataProvider, ExactVenueDataGateway, GatewayBlockIdentity
-from .receipt import VenueReceiptCorrelationError, correlate_verified_venue_receipts
+from .receipt import (
+    VenueReceiptCorrelationError,
+    VenueReceiptEvidence,
+    correlate_verified_venue_receipts,
+    reconcile_verified_venue_receipts,
+)
 from .types import (
     VENUE_BINDING_SCHEMA_VERSION,
     ExactVenueBinding,
@@ -70,6 +76,7 @@ __all__ = [
     "VenueObservedFact",
     "VenueReferenceNamespace",
     "VenueReceiptCorrelationError",
+    "VenueReceiptEvidence",
     "VenueTargetRef",
     "VenueTargetRole",
     "VenueVerificationEvidence",
@@ -82,8 +89,11 @@ __all__ = [
     "VenueVerificationResult",
     "VerifiedVenueBinding",
     "VenueObservationAnchor",
+    "VenuePermissionEvidence",
     "build_verified_venue_binding",
     "canonical_venue_binding_preimage_bytes",
     "correlate_verified_venue_receipts",
+    "reconcile_verified_venue_receipts",
+    "reconcile_venue_permissions",
     "observe_exact_venue_data",
 ]
