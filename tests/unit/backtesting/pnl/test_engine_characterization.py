@@ -888,6 +888,27 @@ class TestCalculateTokenFlows:
         assert tokens_in == {}
         assert tokens_out == {}
 
+    def test_perp_open_preserves_explicit_collateral_units(self):
+        """PERP_OPEN moves its declared collateral token out of the wallet."""
+        engine = _backtester_for_flows()
+        intent = MagicMock(spec=["collateral_token", "collateral_amount", "chain"])
+        intent.collateral_token = "WETH"
+        intent.collateral_amount = Decimal("0.25")
+        intent.chain = "arbitrum"
+
+        tokens_in, tokens_out = engine._calculate_token_flows(
+            intent=intent,
+            intent_type=IntentType.PERP_OPEN,
+            amount_usd=Decimal("5000"),
+            executed_price=Decimal("3000"),
+            fee_usd=Decimal("0"),
+            slippage_usd=Decimal("0"),
+            market_state=_market_state(),
+        )
+
+        assert tokens_in == {}
+        assert tokens_out == {"WETH": Decimal("0.25")}
+
 
 # =============================================================================
 # Gas / MEV / position-delta characterization (VIB-5095 / VIB-5079)

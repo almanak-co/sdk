@@ -49,6 +49,13 @@ def test_descriptor_normalizes_complete_identity_and_provenance() -> None:
     assert descriptor.fee_rate == Decimal("0.0005")
 
 
+def test_descriptor_allows_non_factory_fee_to_remain_unmeasured() -> None:
+    descriptor = _descriptor(protocol="curve", fee_tier_units=None, factory=None)
+
+    assert descriptor.fee_tier_units is None
+    assert descriptor.fee_rate is None
+
+
 @pytest.mark.parametrize("field", ["chain", "protocol", "provenance"])
 def test_descriptor_rejects_blank_required_text(field: str) -> None:
     with pytest.raises(ValueError, match="requires chain, protocol, and provenance"):

@@ -1,9 +1,9 @@
 """market.pool_analytics() served from exact state plus pool history.
 
-Serve shape pinned per the PoolAnalytics contract: TVL and 24h volume from
-the newest COMPLETED pool-day, 7d volume only when all seven days measured,
-fee_apr/fee_apy honestly unmeasured (placeholder zeros declared in
-``unmeasured_fields``, confidence decayed), and best_pool keeps refusing —
+Serve shape pinned per the PoolAnalytics contract: TVL, 24h volume, and base
+fee APY from the newest COMPLETED pool-day, 7d volume only when all seven days
+measured, unavailable fee fields honestly declared in ``unmeasured_fields``,
+and best_pool keeps refusing —
 live best_pool is itself deferred to a gateway RPC, so refusal IS parity.
 """
 
@@ -53,12 +53,14 @@ class _FakeProvider:
         return self.rows.get(day)
 
 
-def _row(tvl: str | None, volume: str | None):
+def _row(tvl: str | None, volume: str | None, fee_apy: str | None = None):
     return DailyPoolHistory(
         tvl=Decimal(tvl) if tvl is not None else None,
         tvl_source="defillama" if tvl is not None else "",
         volume_24h=Decimal(volume) if volume is not None else None,
         volume_source="coingecko_onchain" if volume is not None else "",
+        fee_apy=Decimal(fee_apy) if fee_apy is not None else None,
+        fee_apy_source="defillama" if fee_apy is not None else "",
     )
 
 
@@ -136,6 +138,28 @@ class TestServeContract:
         assert analytics.fee_apr == 0.0  # placeholder per the model contract
         # Baseline 0.85 minus 0.15 per unmeasured money field (2 here).
         assert envelope.meta.confidence == pytest.approx(0.55)
+
+    def test_measured_base_fee_apy_is_served_without_incentive_inference(self):
+        rows = _full_week()
+        rows[NEWEST_COMPLETE] = _row("1000000", "50000", "1.92")
+
+        envelope = _reader(rows).get_pool_analytics(POOL, "ethereum", protocol="curve")
+
+        assert envelope.value.fee_apy == pytest.approx(1.92)
+        assert "fee_apy" not in envelope.value.unmeasured_fields
+        assert "fee_apr" in envelope.value.unmeasured_fields
+        assert envelope.meta.source == "backtest_pool_analytics:coingecko_onchain+defillama"
+        assert envelope.meta.confidence == pytest.approx(0.7)
+
+    def test_fee_apy_only_row_counts_as_measured_pool_data(self):
+        envelope = _reader({NEWEST_COMPLETE: _row(None, None, "0")}).get_pool_analytics(
+            POOL,
+            "ethereum",
+            protocol="curve",
+        )
+
+        assert envelope.value.fee_apy == 0.0
+        assert "fee_apy" not in envelope.value.unmeasured_fields
 
     def test_incomplete_week_makes_7d_volume_unmeasured(self):
         rows = _full_week()
@@ -286,6 +310,17 @@ class TestHistoricalAnalyticsDeclarations:
 
         with pytest.raises(ValueError, match="freshness is unmeasured"):
             validate_historical_pool_analytics(reader, (target,), TICK)
+
+    def test_required_measured_fee_apy_succeeds_without_exact_state(self):
+        reader = _reader({NEWEST_COMPLETE: _row(None, None, "1.37")})
+        target = HistoricalPoolAnalyticsTarget(
+            "ethereum",
+            "curve",
+            POOL,
+            frozenset({"fee_apy"}),
+        )
+
+        assert validate_historical_pool_analytics(reader, (target,), TICK) == 1
 
     @pytest.mark.parametrize(
         ("field_name", "value"),

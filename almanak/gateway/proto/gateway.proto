@@ -2583,6 +2583,11 @@ message PoolSnapshot {
   // boundary maps each name in this set to a Python `None` field on its
   // PoolSnapshot dataclass.
   repeated string unmeasured_fields = 7;
+
+  // Base fee APY as a percentage (for example "1.92" means 1.92%).
+  // Kept distinct from incentive/reward APY so fee-gated strategies do not
+  // enter on emissions. Empty string means unmeasured, like the money fields.
+  string fee_apy = 8;
 }
 
 service PoolHistoryService {

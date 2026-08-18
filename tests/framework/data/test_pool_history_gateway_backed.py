@@ -35,6 +35,7 @@ def _make_snapshot_row(
     fee_revenue_24h: str = "1200.0",
     token0_reserve: str = "500.0",
     token1_reserve: str = "2500000.0",
+    fee_apy: str = "1.92",
     unmeasured_fields: tuple[str, ...] = (),
 ) -> gateway_pb2.PoolSnapshot:
     return gateway_pb2.PoolSnapshot(
@@ -44,6 +45,7 @@ def _make_snapshot_row(
         fee_revenue_24h=fee_revenue_24h,
         token0_reserve=token0_reserve,
         token1_reserve=token1_reserve,
+        fee_apy=fee_apy,
         unmeasured_fields=list(unmeasured_fields),
     )
 
@@ -59,10 +61,7 @@ def _make_response(
     finalized_only: bool = True,
 ) -> gateway_pb2.PoolHistoryResponse:
     if snapshots is None:
-        snapshots = [
-            _make_snapshot_row(timestamp=_T0 + 3600 * i)
-            for i in range(3)
-        ]
+        snapshots = [_make_snapshot_row(timestamp=_T0 + 3600 * i) for i in range(3)]
     return gateway_pb2.PoolHistoryResponse(
         snapshots=snapshots,
         truncation_reason=truncation_reason,
@@ -131,6 +130,7 @@ def test_get_pool_history_routes_through_gateway():
     assert all(isinstance(s, PoolSnapshot) for s in envelope.value)
     assert envelope.value[0].timestamp.tzinfo is UTC
     assert envelope.value[0].tvl == Decimal("1210000.0")
+    assert envelope.value[0].fee_apy == Decimal("1.92")
     assert envelope.value[0].unmeasured_fields == frozenset()
     assert envelope.meta.source == "the_graph"
 
@@ -140,7 +140,7 @@ def test_empty_string_decimals_map_to_none_not_zero():
     snap.fee_revenue_24h is None (NOT Decimal('0')). The unmeasured_fields
     set on the row contains exactly the names of fields whose value is None."""
     stub = MagicMock()
-    # One row with fee_revenue_24h and token1_reserve unmeasured.
+    # One row with fee revenue, token1 reserve, and fee APY unmeasured.
     stub.GetPoolHistory.return_value = _make_response(
         snapshots=[
             _make_snapshot_row(
@@ -150,6 +150,7 @@ def test_empty_string_decimals_map_to_none_not_zero():
                 fee_revenue_24h="",  # unmeasured
                 token0_reserve="100.0",
                 token1_reserve="",  # unmeasured
+                fee_apy="",  # unmeasured
                 unmeasured_fields=("fee_revenue_24h", "token1_reserve"),
             ),
         ],
@@ -169,16 +170,17 @@ def test_empty_string_decimals_map_to_none_not_zero():
     # Anti-coercion: NOT Decimal("0")
     assert row.fee_revenue_24h is None
     assert row.token1_reserve is None
+    assert row.fee_apy is None
     # Measured rows survive as Decimal
     assert row.tvl == Decimal("1000000.0")
     assert row.token0_reserve == Decimal("100.0")
     # unmeasured_fields invariant — equals the names of fields that are None.
     expected_unmeasured = frozenset(
         name
-        for name in ("tvl", "volume_24h", "fee_revenue_24h", "token0_reserve", "token1_reserve")
+        for name in ("tvl", "volume_24h", "fee_revenue_24h", "token0_reserve", "token1_reserve", "fee_apy")
         if getattr(row, name) is None
     )
-    assert row.unmeasured_fields == expected_unmeasured == frozenset({"fee_revenue_24h", "token1_reserve"})
+    assert row.unmeasured_fields == expected_unmeasured == frozenset({"fee_revenue_24h", "token1_reserve", "fee_apy"})
 
 
 def test_belt_and_braces_empty_wire_value_without_unmeasured_field_name():

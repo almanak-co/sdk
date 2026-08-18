@@ -2050,7 +2050,7 @@ class BacktestPoolHistoryReader:
                 protocol=protocol,
                 day=day,
             )
-            if row is None or (row.tvl is None and row.volume_24h is None):
+            if row is None or (row.tvl is None and row.volume_24h is None and row.fee_apy is None):
                 missed += 1
             else:
                 unmeasured = frozenset(
@@ -2061,6 +2061,7 @@ class BacktestPoolHistoryReader:
                         ("fee_revenue_24h", None),
                         ("token0_reserve", None),
                         ("token1_reserve", None),
+                        ("fee_apy", row.fee_apy),
                     )
                     if value is None
                 )
@@ -2072,10 +2073,11 @@ class BacktestPoolHistoryReader:
                         fee_revenue_24h=None,
                         token0_reserve=None,
                         token1_reserve=None,
+                        fee_apy=row.fee_apy,
                         unmeasured_fields=unmeasured,
                     )
                 )
-                for source in (row.tvl_source, row.volume_source):
+                for source in (row.tvl_source, row.volume_source, row.fee_apy_source):
                     if source:
                         sources.add(source)
             day += _timedelta(days=1)
@@ -2127,10 +2129,10 @@ class BacktestPoolAnalyticsReader:
       day-bar would include the tick's future).
     - ``volume_7d_usd`` summed over the last 7 completed days when every
       day measured; otherwise unmeasured.
-    - ``fee_apr`` / ``fee_apy`` UNMEASURED in this plane (declared in
-      ``unmeasured_fields``; the 0 values are placeholders per the model's
-      documented backwards-compat contract, and ``meta.confidence`` decays
-      accordingly). ``utilization_rate`` stays None (DEX pools).
+    - ``fee_apy`` from the newest COMPLETED pool-day when its provider measured
+      base fee yield. ``fee_apr`` remains unmeasured; placeholder zeros retain
+      the model's backwards-compat contract. ``utilization_rate`` stays None
+      (DEX pools).
     - ``best_pool`` keeps refusing — LIVE ``best_pool`` is itself deferred
       to a gateway RPC (VIB-4729), so a refusal IS live parity.
 
@@ -2217,7 +2219,9 @@ class BacktestPoolAnalyticsReader:
         newest: Any | None,
         state_tvl: Any | None,
     ) -> None:
-        history_measured = newest is not None and (newest.tvl is not None or newest.volume_24h is not None)
+        history_measured = newest is not None and (
+            newest.tvl is not None or newest.volume_24h is not None or newest.fee_apy is not None
+        )
         if state_tvl is None and not history_measured:
             raise ValueError(
                 f"pool-history plane measured no data for pool {pool_address} on {target_chain} "
@@ -2262,14 +2266,16 @@ class BacktestPoolAnalyticsReader:
         tvl = cls._analytics_tvl(newest, state_tvl)
         volume_24h = getattr(newest, "volume_24h", None)
         volume_7d = cls._seven_day_volume(rows)
+        fee_apy = getattr(newest, "fee_apy", None)
         token0_weight, token1_weight = cls._token_weights(state_tvl)
-        unmeasured = {"fee_apr", "fee_apy"}
+        unmeasured = {"fee_apr"}
         unmeasured.update(
             field_name
             for field_name, value in (
                 ("tvl_usd", tvl),
                 ("volume_24h_usd", volume_24h),
                 ("volume_7d_usd", volume_7d),
+                ("fee_apy", fee_apy),
             )
             if value is None
         )
@@ -2281,7 +2287,7 @@ class BacktestPoolAnalyticsReader:
             volume_24h_usd=cls._measured_or_zero(volume_24h),
             volume_7d_usd=cls._measured_or_zero(volume_7d),
             fee_apr=0.0,
-            fee_apy=0.0,
+            fee_apy=float(fee_apy) if fee_apy is not None else 0.0,
             utilization_rate=None,
             token0_weight=token0_weight,
             token1_weight=token1_weight,
@@ -2291,7 +2297,13 @@ class BacktestPoolAnalyticsReader:
 
     @staticmethod
     def _history_sources(rows: list[Any | None]) -> set[str]:
-        return {source for row in rows if row is not None for source in (row.tvl_source, row.volume_source) if source}
+        return {
+            source
+            for row in rows
+            if row is not None
+            for source in (row.tvl_source, row.volume_source, row.fee_apy_source)
+            if source
+        }
 
     @staticmethod
     def _analytics_sources(rows: list[Any | None], state_tvl: Any | None) -> set[str]:
@@ -6650,9 +6662,10 @@ class PnLBacktester:
 
         Dispatches to per-intent-type helpers in
         :mod:`almanak.framework.backtesting.pnl._engine_helpers` (Phase 6C.3).
-        Unmatched intent types (HOLD, PERP, ...) return empty flow dicts --
-        their balances are tracked via collateral rather than explicit token
-        flows.
+        Unmatched intent types (HOLD, PERP_CLOSE, ...) return empty flow
+        dicts.  PERP_OPEN emits its explicitly declared collateral token as a
+        wallet outflow; legacy perp intents without collateral fields remain
+        cash-backed through the position lifecycle.
 
         Args:
             intent: Intent object

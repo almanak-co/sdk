@@ -6901,6 +6901,7 @@ class PoolSnapshot(_message.Message):
     TOKEN0_RESERVE_FIELD_NUMBER: _builtins.int
     TOKEN1_RESERVE_FIELD_NUMBER: _builtins.int
     UNMEASURED_FIELDS_FIELD_NUMBER: _builtins.int
+    FEE_APY_FIELD_NUMBER: _builtins.int
     timestamp: _builtins.int
     """Unix seconds, UTC, aligned to the requested resolution
     (timestamp % resolution_seconds == 0).
@@ -6920,6 +6921,11 @@ class PoolSnapshot(_message.Message):
     """token0 reserve in human-readable units"""
     token1_reserve: _builtins.str
     """token1 reserve in human-readable units"""
+    fee_apy: _builtins.str
+    """Base fee APY as a percentage (for example "1.92" means 1.92%).
+    Kept distinct from incentive/reward APY so fee-gated strategies do not
+    enter on emissions. Empty string means unmeasured, like the money fields.
+    """
     @_builtins.property
     def unmeasured_fields(self) -> _containers.RepeatedScalarFieldContainer[_builtins.str]:
         """Per-row Empty != Zero metadata (inherited audit row #11). The framework
@@ -6937,8 +6943,9 @@ class PoolSnapshot(_message.Message):
         token0_reserve: _builtins.str = ...,
         token1_reserve: _builtins.str = ...,
         unmeasured_fields: _abc.Iterable[_builtins.str] | None = ...,
+        fee_apy: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["fee_revenue_24h", b"fee_revenue_24h", "timestamp", b"timestamp", "token0_reserve", b"token0_reserve", "token1_reserve", b"token1_reserve", "tvl", b"tvl", "unmeasured_fields", b"unmeasured_fields", "volume_24h", b"volume_24h"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["fee_apy", b"fee_apy", "fee_revenue_24h", b"fee_revenue_24h", "timestamp", b"timestamp", "token0_reserve", b"token0_reserve", "token1_reserve", b"token1_reserve", "tvl", b"tvl", "unmeasured_fields", b"unmeasured_fields", "volume_24h", b"volume_24h"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___PoolSnapshot: _TypeAlias = PoolSnapshot  # noqa: Y015

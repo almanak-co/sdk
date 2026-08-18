@@ -30,7 +30,13 @@ _DAY_START = datetime(2026, 7, 1, tzinfo=UTC)
 _POOL = "0xcdac0d6c6c59727a65f871236188350531885c43"
 
 
-def _snap(ts: datetime, *, tvl: Decimal | None = None, volume: Decimal | None = None) -> PoolSnapshot:
+def _snap(
+    ts: datetime,
+    *,
+    tvl: Decimal | None = None,
+    volume: Decimal | None = None,
+    fee_apy: Decimal | None = None,
+) -> PoolSnapshot:
     unmeasured = frozenset(
         name
         for name, value in (
@@ -39,6 +45,7 @@ def _snap(ts: datetime, *, tvl: Decimal | None = None, volume: Decimal | None = 
             ("fee_revenue_24h", None),
             ("token0_reserve", None),
             ("token1_reserve", None),
+            ("fee_apy", fee_apy),
         )
         if value is None
     )
@@ -49,6 +56,7 @@ def _snap(ts: datetime, *, tvl: Decimal | None = None, volume: Decimal | None = 
         fee_revenue_24h=None,
         token0_reserve=None,
         token1_reserve=None,
+        fee_apy=fee_apy,
         unmeasured_fields=unmeasured,
     )
 
@@ -78,6 +86,24 @@ def test_daily_row_serves_both_fields_without_hourly_call():
     assert history == DailyPoolHistory(
         tvl=Decimal("100"), tvl_source="the_graph", volume_24h=Decimal("42"), volume_source="the_graph"
     )
+    assert fallback._calls == ["1d"]  # type: ignore[attr-defined]
+
+
+def test_daily_row_preserves_measured_base_fee_apy_and_source():
+    fallback = _fallback_with_history(
+        {
+            "1d": (
+                [_snap(_DAY_START, tvl=Decimal("100"), volume=Decimal("42"), fee_apy=Decimal("1.37"))],
+                "defillama",
+            )
+        }
+    )
+
+    history = fallback.daily_history(pool_address=_POOL, chain="arbitrum", protocol="curve", day=_DAY)
+
+    assert history is not None
+    assert history.fee_apy == Decimal("1.37")
+    assert history.fee_apy_source == "defillama"
     assert fallback._calls == ["1d"]  # type: ignore[attr-defined]
 
 
@@ -456,7 +482,9 @@ def _volume_row(value: str, confidence: DataConfidence, *, day: date = _DAY):
     )
 
 
-_LADDER_HISTORY = DailyPoolHistory(tvl=None, tvl_source="", volume_24h=Decimal("777"), volume_source="coingecko_onchain")
+_LADDER_HISTORY = DailyPoolHistory(
+    tvl=None, tvl_source="", volume_24h=Decimal("777"), volume_source="coingecko_onchain"
+)
 
 
 def test_fetch_and_cache_volume_routes_empty_low_and_exception_to_ladder():

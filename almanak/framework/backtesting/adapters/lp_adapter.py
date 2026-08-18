@@ -41,6 +41,7 @@ Example:
     fill = adapter.execute_intent(intent, portfolio, market_state)
 """
 
+import asyncio
 import logging
 import math
 import re
@@ -115,6 +116,18 @@ _RAISE_PLAIN: Final = object()
 # path, so this bound affects healthy-path scalability without weakening the
 # two-consecutive-error policy.
 _VOLUME_PREWARM_CHUNK_DAYS = 30
+
+# The gateway's DefiLlama pool-history fallback is budgeted at 10 requests/s.
+# A local gateway can otherwise answer cached catalog lookups quickly enough
+# for per-day prewarm loops to exhaust that bucket, after which two adjacent
+# local skips abort the lane and can also trip analytics readiness. Pace only
+# fallback traffic; native providers retain their existing throughput.
+_POOL_HISTORY_PREWARM_INTERVAL_SECONDS = 0.11
+
+# A volume fallback can issue both a daily request and an hourly request when
+# the daily row has no measured volume. Reserve two request slots per day, and
+# keep the final pause so the following liquidity lane shares the same budget.
+_POOL_HISTORY_VOLUME_PREWARM_INTERVAL_SECONDS = 2 * _POOL_HISTORY_PREWARM_INTERVAL_SECONDS
 
 
 class RangeStatus(StrEnum):
@@ -723,7 +736,8 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
             if not isinstance(descriptor, PoolDescriptor):
                 raise TypeError("bind_pool_descriptors requires PoolDescriptor values")
             self._pool_descriptors[descriptor.key] = descriptor
-            self._resolved_fee_tiers[descriptor.key] = descriptor.fee_rate
+            if descriptor.fee_rate is not None:
+                self._resolved_fee_tiers[descriptor.key] = descriptor.fee_rate
 
     @staticmethod
     def _pool_identity_key(chain: str, protocol: str, address: str) -> tuple[str, str, str]:
@@ -1421,6 +1435,7 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
                     warmed += 1
                 elif outcome == "ladder":
                     ladder_warmed += 1
+                await self._pace_pool_history_volume_fallback(row)
         missing = attempted - warmed - ladder_warmed
         if missing > 0:
             logger.warning(
@@ -1476,6 +1491,17 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
                 rows[result_day] = result
         return rows
 
+    @staticmethod
+    def _volume_row_requires_ladder(row: "VolumeResult | None") -> bool:
+        """Whether a primary row will invoke the pool-history fallback."""
+        return row is None or row.source_info.confidence == DataConfidence.LOW
+
+    @staticmethod
+    async def _pace_pool_history_volume_fallback(row: "VolumeResult | None") -> None:
+        """Reserve the gateway budget after a daily/hourly fallback attempt."""
+        if LPBacktestAdapter._volume_row_requires_ladder(row):
+            await asyncio.sleep(_POOL_HISTORY_VOLUME_PREWARM_INTERVAL_SECONDS)
+
     async def _prewarm_volume_day(
         self,
         *,
@@ -1507,7 +1533,7 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
             return
         warmed = 0
         failed_days = 0
-        for day in days:
+        for day_index, day in enumerate(days):
             cache_key = (pool_lower, day)
             if cache_key in self._liquidity_cache:
                 continue
@@ -1541,6 +1567,8 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
             failed_days = 0
             self._cache_liquidity_success(cache_key, result)
             warmed += 1
+            if day_index < len(days) - 1 and result.source_info.source.startswith("gateway_pool_history:"):
+                await asyncio.sleep(_POOL_HISTORY_PREWARM_INTERVAL_SECONDS)
         logger.info(
             "Prewarmed %d/%d days of liquidity history for pool %s (%s/%s)",
             warmed,
@@ -2768,9 +2796,11 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
                 intent_id=getattr(intent, "intent_id", None),
             )
         if plan.amount_usd <= 0 and has_coin_vector:
-            # Multi-coin allocation vectors are not modeled: proceeding would
-            # record a phantom success ($0 notional, zero flows, missing
-            # legs) indistinguishable from a real position in the result.
+            # Three-or-more-coin allocation vectors are not modeled: proceeding
+            # would record a phantom success ($0 notional, zero flows, missing
+            # legs) indistinguishable from a real position in the result. An
+            # authenticated two-coin vector is mapped into amount0/amount1 by
+            # ``_build_lp_open_plan`` and therefore has a positive notional.
             # Fail closed with a machine-visible reason (ALM-2943 tracks the
             # stable-swap position family that values these).
             return self._failed_lp_open_fill(
@@ -2830,8 +2860,16 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
     def _build_lp_open_plan(self, intent: "LPOpenIntent", market_state: "MarketState") -> _LPOpenPlan:
         token0, token1 = self._lp_open_tokens(intent)
         chain = str(getattr(intent, "chain", None) or self._config.chain).strip().lower()
-        amount0 = Decimal(str(intent.amount0))
-        amount1 = Decimal(str(intent.amount1))
+        coin_amounts = tuple(getattr(intent, "coin_amounts", None) or ())
+        if coin_amounts and len(coin_amounts) == 2:
+            # Curve's vector is ordered exactly like the pool's ``coins``. For
+            # an address-form intent that order has already been authenticated
+            # by the bound descriptor used above, so the two-coin case is
+            # losslessly representable by the adapter's amount0/amount1 model.
+            amount0, amount1 = (Decimal(str(value)) for value in coin_amounts)
+        else:
+            amount0 = Decimal(str(intent.amount0))
+            amount1 = Decimal(str(intent.amount1))
         token0_price, token1_price = self._lp_open_prices(token0, token1, market_state)
         amount_usd = amount0 * token0_price + amount1 * token1_price
         entry_price = token0_price / token1_price if token1_price > 0 else token0_price

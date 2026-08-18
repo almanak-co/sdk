@@ -23,6 +23,10 @@ W7-followup (VIB-4870) adds:
   than a unix-second ``date``; the shared helper's ``time_unit="days"``
   handles the conversion. Curve StableSwap has no Uniswap-style
   ``observe()`` TWAP primitive, so it implements volume only.
+
+ALM-3328 adds exact Curve pool history on Arbitrum and maps the connector
+to DefiLlama's ``curve-dex`` project. The pool-history lane preserves
+DefiLlama ``apyBase`` as measured base fee APY for historical strategies.
 """
 
 from __future__ import annotations
@@ -30,8 +34,10 @@ from __future__ import annotations
 from typing import Any, ClassVar
 
 from almanak.connectors._base.gateway_capabilities import (
+    GatewayDefillamaSlugCapability,
     GatewayDexQuoteCapability,
     GatewayDexVolumeCapability,
+    GatewayPoolHistoryCapability,
 )
 from almanak.connectors._base.gateway_connector import GatewayConnector
 from almanak.connectors._base.types import ProtocolKind, ProtocolName
@@ -55,6 +61,8 @@ _CURVE_VOLUME_SUBGRAPH_IDS: dict[str, str] = {
 
 class CurveGatewayConnector(
     GatewayConnector,
+    GatewayPoolHistoryCapability,
+    GatewayDefillamaSlugCapability,
     GatewayDexQuoteCapability,
     GatewayDexVolumeCapability,
 ):
@@ -74,6 +82,18 @@ class CurveGatewayConnector(
         ``"curve"`` (Ethereum, Arbitrum).
         """
         return frozenset({"ethereum", "arbitrum"})
+
+    def pool_history_supported_chains(self) -> frozenset[str]:
+        """Chains with verified exact-pool daily history coverage."""
+        return frozenset({"arbitrum"})
+
+    def defillama_slug(self) -> str | None:
+        """DefiLlama project containing Curve pool fee history."""
+        return "curve-dex"
+
+    def defillama_slug_aliases(self) -> dict[str, str]:
+        """Curve has no protocol variants on this connector."""
+        return {}
 
     async def quote(
         self,

@@ -39,7 +39,6 @@ from almanak.gateway.services.pool_history_service import (
     is_supported_pool_pair,
 )
 
-
 # Known-good EVM pool (Arbitrum USDC/WETH 0.05% UniV3).
 _VALID_EVM_POOL = "0xc6962004f452be9203591991d15f6b388e09e8d0"
 # Known-good Solana pool (Raydium USDC/SOL) — case preserved.
@@ -220,8 +219,9 @@ def test_supported_pool_pairs_set_includes_base_aerodrome():
 def test_pool_protocol_allowlist_locked():
     """Anti-regression: extending the allowlist requires a CODE change
     here, not a silent table edit. POOL-5 adds providers, not protocols.
-    ALM-2940 adds ``traderjoe_v2`` (backtest data-ladder fallback)."""
-    assert POOL_PROTOCOL_ALLOWLIST == frozenset({"uniswap_v3", "aerodrome", "traderjoe_v2"})
+    ALM-2940 adds ``traderjoe_v2`` (backtest data-ladder fallback), and
+    ALM-3328 adds Curve historical analytics."""
+    assert POOL_PROTOCOL_ALLOWLIST == frozenset({"uniswap_v3", "aerodrome", "traderjoe_v2", "curve"})
 
 
 # ============================================================================
@@ -236,9 +236,7 @@ def test_normalize_evm_strips_and_lowercases():
     canonical form."""
     canonical = normalize_pool_address("0xC6962004F452BE9203591991D15F6B388E09E8D0", "arbitrum")
     assert canonical == _VALID_EVM_POOL
-    canonical_padded = normalize_pool_address(
-        "  0xC6962004F452BE9203591991D15F6B388E09E8D0  ", "arbitrum"
-    )
+    canonical_padded = normalize_pool_address("  0xC6962004F452BE9203591991D15F6B388E09E8D0  ", "arbitrum")
     assert canonical_padded == _VALID_EVM_POOL
 
 
@@ -273,9 +271,7 @@ def test_validate_address_syntax_evm_regex():
     # Path-traversal would fail the regex anchors / charset.
     assert validate_pool_address_syntax("0x../etc/passwd", "arbitrum") is False
     # No URL component allowed.
-    assert validate_pool_address_syntax(
-        "0xc6962004f452be9203591991d15f6b388e09e8d0?q=1", "arbitrum"
-    ) is False
+    assert validate_pool_address_syntax("0xc6962004f452be9203591991d15f6b388e09e8d0?q=1", "arbitrum") is False
 
 
 def test_validate_address_syntax_solana_regex():
@@ -337,10 +333,7 @@ def test_soft_cap_env_override(monkeypatch):
     typed (config-boundary rule)."""
     monkeypatch.setenv("ALMANAK_GATEWAY_POOL_HISTORY_MAX_DAYS_1H", "30")
     settings = GatewaySettings()
-    assert (
-        get_soft_cap_seconds(settings, gateway_pb2.Resolution.RESOLUTION_1H)
-        == 30 * 86400
-    )
+    assert get_soft_cap_seconds(settings, gateway_pb2.Resolution.RESOLUTION_1H) == 30 * 86400
 
 
 @pytest.mark.parametrize("bad", ["", "   ", "not-a-number", "0", "-5"])
@@ -350,10 +343,7 @@ def test_soft_cap_invalid_env_falls_back_to_default(monkeypatch, bad: str):
     soft cap silently."""
     monkeypatch.setenv("ALMANAK_GATEWAY_POOL_HISTORY_MAX_DAYS_1H", bad)
     settings = GatewaySettings()
-    assert (
-        get_soft_cap_seconds(settings, gateway_pb2.Resolution.RESOLUTION_1H)
-        == 90 * 86400
-    )
+    assert get_soft_cap_seconds(settings, gateway_pb2.Resolution.RESOLUTION_1H) == 90 * 86400
 
 
 def test_get_soft_cap_seconds_rejects_invalid_resolution():
@@ -409,9 +399,7 @@ class _CodeContext:
 
 
 def _enabled_servicer() -> PoolHistoryServiceServicer:
-    return PoolHistoryServiceServicer(
-        GatewaySettings(pool_history_enabled=True, thegraph_api_key="test-key")
-    )
+    return PoolHistoryServiceServicer(GatewaySettings(pool_history_enabled=True, thegraph_api_key="test-key"))
 
 
 def test_handler_returns_invalid_argument_for_empty_pool_address():

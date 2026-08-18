@@ -77,6 +77,7 @@ _MONEY_FIELD_NAMES: tuple[str, ...] = (
     "fee_revenue_24h",
     "token0_reserve",
     "token1_reserve",
+    "fee_apy",
 )
 
 # Resolution string -> proto enum value. Mirrored from the legacy
@@ -145,6 +146,8 @@ class PoolSnapshot:
             if unmeasured (CoinGecko Onchain does not report reserves).
         token1_reserve: token1 reserve in human-readable units. ``None``
             if unmeasured.
+        fee_apy: Base fee APY as a percentage. ``None`` if unmeasured.
+            Incentive / reward APY is deliberately excluded.
         unmeasured_fields: Names of fields that are ``None`` on this
             row. Invariant: ``unmeasured_fields == frozenset(name for
             name in <money fields> if getattr(self, name) is None)``.
@@ -156,6 +159,7 @@ class PoolSnapshot:
     fee_revenue_24h: Decimal | None
     token0_reserve: Decimal | None
     token1_reserve: Decimal | None
+    fee_apy: Decimal | None
     unmeasured_fields: frozenset[str] = field(default_factory=frozenset)
 
 
@@ -418,7 +422,7 @@ class PoolHistoryReader:
             # seeding from the wire would let a stale or buggy gateway
             # response mark a field as unmeasured even when the decoded
             # value is present, violating the PoolSnapshot invariant
-            # ``unmeasured_fields == frozenset(name for name in (5)
+            # ``unmeasured_fields == frozenset(name for name in (6)
             # if getattr(self, name) is None)``. The decoded value is
             # authoritative; the wire's list is informational only.
             for row in response.snapshots:
@@ -434,6 +438,7 @@ class PoolHistoryReader:
                         fee_revenue_24h=decoded["fee_revenue_24h"],
                         token0_reserve=decoded["token0_reserve"],
                         token1_reserve=decoded["token1_reserve"],
+                        fee_apy=decoded["fee_apy"],
                         unmeasured_fields=unmeasured,
                     ),
                 )

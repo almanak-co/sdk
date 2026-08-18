@@ -439,7 +439,9 @@ def _chart_to_snapshots(
     """Translate the DefiLlama ``/chart`` daily series to ``PoolSnapshot`` rows.
 
     Each chart point has a ``timestamp`` (ISO-8601 or unix) + ``tvlUsd`` +
-    ``volumeUsd1d`` (when present). Rows are aligned to the 1d grid
+    ``volumeUsd1d`` / ``apyBase`` (when present). ``apyBase`` is the pool's
+    base fee APY in percentage units; reward APY is deliberately excluded.
+    Rows are aligned to the 1d grid
     (``timestamp - timestamp % 86400``), filtered to the half-open
     ``[start_ts, end_ts)`` window, and ordered ascending. Reserves + fee
     revenue are unmeasured on this series.
@@ -458,12 +460,14 @@ def _chart_to_snapshots(
         fee_revenue_24h = ""  # DefiLlama chart carries no daily fee revenue.
         token0_reserve = ""
         token1_reserve = ""
+        fee_apy = _safe_decimal_str(point.get("apyBase"))
         unmeasured = build_unmeasured_fields(
             tvl=tvl,
             volume_24h=volume_24h,
             fee_revenue_24h=fee_revenue_24h,
             token0_reserve=token0_reserve,
             token1_reserve=token1_reserve,
+            fee_apy=fee_apy,
         )
         snapshots.append(
             gateway_pb2.PoolSnapshot(
@@ -474,6 +478,7 @@ def _chart_to_snapshots(
                 token0_reserve=token0_reserve,
                 token1_reserve=token1_reserve,
                 unmeasured_fields=unmeasured,
+                fee_apy=fee_apy,
             )
         )
     snapshots.sort(key=lambda s: s.timestamp)

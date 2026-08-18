@@ -15,6 +15,8 @@ Field routing (one daily snapshot per pool per day):
 * ``tvl`` comes from the 1d series (DefiLlama daily TVL when the pool's
   TheGraph deployment is dead — same ``tvlUSD`` semantics as the measured
   liquidity lane's subgraph queries).
+* ``fee_apy`` comes from the 1d series when the provider measured base fee
+  yield (DefiLlama ``apyBase``). Reward / incentive APY is never substituted.
 * ``volume_24h`` comes from the 1d row when the serving provider measured
   it; otherwise from the 1h series summed over the UTC day (the 1d
   dispatch order serves DefiLlama first, which carries TVL but no
@@ -79,8 +81,8 @@ POOL_HISTORY_SOURCE_PREFIX = "gateway_pool_history"
 class DailyPoolHistory:
     """One pool-day of measured ladder data with per-field provenance.
 
-    ``None`` fields are unmeasured (Empty != Zero). ``tvl_source`` /
-    ``volume_source`` name the serving gateway provider (e.g.
+    ``None`` fields are unmeasured (Empty != Zero). Per-field source values
+    name the serving gateway provider (e.g.
     ``"defillama"``, ``"coingecko_onchain"``) and are ``""`` when the field is
     unmeasured.
     """
@@ -89,6 +91,8 @@ class DailyPoolHistory:
     tvl_source: str
     volume_24h: Decimal | None
     volume_source: str
+    fee_apy: Decimal | None = None
+    fee_apy_source: str = ""
 
 
 @dataclass(frozen=True)
@@ -145,7 +149,7 @@ class PoolHistoryFallback:
         """Fetch one pool-day of measured ladder data (blocking).
 
         Returns ``None`` on any miss — service disabled, unsupported pair,
-        gateway unreachable, or no provider measured either field for the
+        gateway unreachable, or no provider measured any tracked field for the
         day. Never raises: the fallback rescues a lane that has ALREADY
         failed, so its own failures must degrade to the caller's existing
         (heuristic / zero-depth) path, not replace one error with another.
@@ -311,6 +315,8 @@ class PoolHistoryFallback:
         tvl_source = ""
         volume: Decimal | None = None
         volume_source = ""
+        fee_apy: Decimal | None = None
+        fee_apy_source = ""
         for snap in daily_rows:
             # Date comparison rather than exact epoch equality: the reader
             # yields tz-aware UTC rows aligned to the 1d grid, and matching
@@ -324,6 +330,9 @@ class PoolHistoryFallback:
             if snap.volume_24h is not None:
                 volume = snap.volume_24h
                 volume_source = daily_source
+            if snap.fee_apy is not None:
+                fee_apy = snap.fee_apy
+                fee_apy_source = daily_source
             break
 
         volume_definitive = volume is not None
@@ -347,7 +356,7 @@ class PoolHistoryFallback:
         if not day_fully_elapsed:
             volume, volume_source, volume_definitive = None, "", False
 
-        if tvl is None and volume is None:
+        if tvl is None and volume is None and fee_apy is None:
             return None, daily_definitive and volume_definitive and day_fully_elapsed
         return (
             DailyPoolHistory(
@@ -355,6 +364,8 @@ class PoolHistoryFallback:
                 tvl_source=tvl_source,
                 volume_24h=volume,
                 volume_source=volume_source,
+                fee_apy=fee_apy,
+                fee_apy_source=fee_apy_source,
             ),
             daily_definitive and (volume is not None or volume_definitive) and day_fully_elapsed,
         )

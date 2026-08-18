@@ -284,7 +284,10 @@ class TestPerpOpenExecution:
     async def test_open_collateral_priced_in_collateral_token(self):
         """2 WETH collateral at $3000 -> $6000 collateral, leverage derived 2x."""
         backtester = make_backtester()
-        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("100000"))
+        portfolio = SimulatedPortfolio(
+            initial_capital_usd=Decimal("100000"),
+            tokens={"WETH": Decimal("2")},
+        )
         intent = make_open_intent(
             collateral_token="WETH",
             collateral_amount=Decimal("2"),
@@ -346,6 +349,30 @@ class TestPerpOpenExecution:
         assert portfolio.positions[0].collateral_usd == Decimal("99995")
         assert portfolio.positions[0].notional_usd == Decimal("5000")
         assert portfolio.cash_usd == Decimal("0")
+
+    @pytest.mark.asyncio
+    async def test_token_collateral_at_venue_floor_rejects_after_fee_absorption(self):
+        """The adapter validates gross margin, but the committed position must
+        still meet the venue floor after its open fee is taken from margin."""
+        backtester = make_backtester(fee_pct=Decimal("0.001"))
+        backtester._adapter = _make_perp_adapter()
+        portfolio = SimulatedPortfolio(
+            initial_capital_usd=Decimal("0"),
+            tokens={"WETH": Decimal("0.2")},
+        )
+        intent = make_open_intent(
+            collateral_token="WETH",
+            collateral_amount=Decimal("0.1"),
+            size_usd=Decimal("30000"),
+            leverage=Decimal("100"),
+        )
+
+        trade = await execute(backtester, intent, portfolio)
+
+        assert trade.success is False
+        assert "after venue costs reduced posted collateral" in (trade.error or "")
+        assert portfolio.tokens == {"WETH": Decimal("0.2")}
+        assert portfolio.positions == []
 
     @pytest.mark.asyncio
     async def test_open_collateral_all_overextended_still_rejects_on_margin(self):

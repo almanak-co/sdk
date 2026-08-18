@@ -8,9 +8,8 @@ same intent as $1,000 and $50).
 
 Wallet-balance-sized intent types (SWAP, SUPPLY, VAULT_DEPOSIT) resolve to
 the portfolio's held units of the spent token; PERP_OPEN collateral "all"
-resolves to the spendable collateral balance (phase-5 replay — safe once
-sizing has one owner). Everything else stays fail-closed with a typed
-rejection code.
+resolves to the spendable collateral balance. Everything else stays
+fail-closed with a typed rejection code.
 """
 
 from __future__ import annotations
@@ -101,18 +100,6 @@ def resolve_all_sizing(
         return SizingRejection(
             code=RejectionCode.UNSUPPORTED_ALL_SIZING,
             detail=f'{intent_type.value} intent carries amount="all" but no spend token to size from',
-        )
-
-    if intent_type is IntentType.PERP_OPEN and not portfolio.is_cash_equivalent(token):
-        # The simulated portfolio funds perp margin from cash-like balances,
-        # so sizing "all" from a held non-cash token would debit a DIFFERENT
-        # balance than the one measured (sized-from-WETH, debited-from-cash).
-        return SizingRejection(
-            code=RejectionCode.UNSUPPORTED_ALL_SIZING,
-            detail=(
-                f'perp collateral="all" requires a cash-equivalent collateral token '
-                f"(simulated perps fund margin from cash); swap {token} to cash first"
-            ),
         )
 
     units = _spendable_units(portfolio, token)

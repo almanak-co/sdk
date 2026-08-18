@@ -30,6 +30,7 @@ __all__ = [
     "RunnerHookRegistryError",
     "RunnerCurvePoolMetaLookupCapability",
     "RunnerLPReceiptTopicCapability",
+    "RunnerPoolDescriptorCapability",
     "RunnerPerpSettlementCapability",
     "RunnerPoolKeyLookupCapability",
     "RunnerResultEnrichmentCapability",
@@ -408,6 +409,28 @@ class RunnerPoolKeyLookupCapability(Protocol):
 
 
 @runtime_checkable
+class RunnerPoolDescriptorCapability(Protocol):
+    """Connector resolves configured exact pools into neutral descriptors.
+
+    The declaration probe is intentionally separate from resolution so callers
+    can avoid opening a gateway transport for strategies without exact-pool
+    resources.  Returned values use the framework-owned ``PoolDescriptor``
+    contract; connector-specific metadata and live verification stay behind
+    this capability boundary.
+    """
+
+    def has_pool_descriptor_declarations(self, *, chain: str, config: Any) -> bool: ...
+
+    def resolve_pool_descriptors(
+        self,
+        *,
+        gateway_client: Any,
+        chain: str,
+        config: Any,
+    ) -> tuple[Any, ...]: ...
+
+
+@runtime_checkable
 class RunnerCurvePoolMetaLookupCapability(Protocol):
     """Connector builds a sync uncurated-pool metadata lookup for receipt parsing (VIB-5628).
 
@@ -465,6 +488,7 @@ class RunnerHookRegistry:
             or isinstance(connector, RunnerResultEnrichmentCapability)
             or isinstance(connector, RunnerFillReconciliationCapability)
             or isinstance(connector, RunnerPoolKeyLookupCapability)
+            or isinstance(connector, RunnerPoolDescriptorCapability)
             or isinstance(connector, RunnerCurvePoolMetaLookupCapability)
             or isinstance(connector, RunnerV4PositionStateCapability)
             or isinstance(connector, RunnerAsyncSettlementCapability)
@@ -659,6 +683,35 @@ class RunnerHookRegistry:
                 return lookup
         return None
 
+    def has_pool_descriptor_declarations(self, *, chain: str, config: Any) -> bool:
+        """Whether any connector recognizes an exact-pool declaration."""
+        return any(
+            connector.has_pool_descriptor_declarations(chain=chain, config=config)
+            for connector in self._connectors.values()
+            if isinstance(connector, RunnerPoolDescriptorCapability)
+        )
+
+    def resolve_pool_descriptors(
+        self,
+        *,
+        gateway_client: Any,
+        chain: str,
+        config: Any,
+    ) -> tuple[Any, ...]:
+        """Resolve all connector-owned exact-pool declarations."""
+        descriptors: list[Any] = []
+        for connector in self._connectors.values():
+            if not isinstance(connector, RunnerPoolDescriptorCapability):
+                continue
+            descriptors.extend(
+                connector.resolve_pool_descriptors(
+                    gateway_client=gateway_client,
+                    chain=chain,
+                    config=config,
+                )
+            )
+        return tuple(descriptors)
+
     def build_curve_pool_meta_lookup(self, gateway_client: Any) -> Any | None:
         """Build the first connector-provided Curve uncurated-pool metadata lookup (VIB-5628).
 
@@ -822,6 +875,19 @@ class RunnerHookRegistry:
             )
         if isinstance(connector, RunnerPoolKeyLookupCapability):
             cls._validate_method_signature(connector, "build_pool_key_lookup", positional_count=1)
+        if isinstance(connector, RunnerPoolDescriptorCapability):
+            cls._validate_method_signature(
+                connector,
+                "has_pool_descriptor_declarations",
+                positional_count=0,
+                keyword_names=("chain", "config"),
+            )
+            cls._validate_method_signature(
+                connector,
+                "resolve_pool_descriptors",
+                positional_count=0,
+                keyword_names=("gateway_client", "chain", "config"),
+            )
         if isinstance(connector, RunnerCurvePoolMetaLookupCapability):
             cls._validate_method_signature(connector, "build_curve_pool_meta_lookup", positional_count=1)
         if isinstance(connector, RunnerV4PositionStateCapability):

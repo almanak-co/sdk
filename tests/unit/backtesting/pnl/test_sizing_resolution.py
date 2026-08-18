@@ -84,9 +84,9 @@ class TestResolveAllSizing:
         assert isinstance(resolution, SizingRejection)
         assert resolution.code is RejectionCode.UNSUPPORTED_ALL_SIZING
 
-    def test_perp_non_cash_collateral_all_rejects_typed(self) -> None:
-        # Sizing from held WETH while the portfolio debits cash for margin
-        # would measure one balance and spend another — refused, typed.
+    def test_perp_non_cash_collateral_all_resolves_held_units(self) -> None:
+        # Explicit perp collateral now follows the wallet token-flow lane, so
+        # the balance measured here is the same balance the fill debits.
         portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("0"))
         portfolio.tokens["WETH"] = Decimal("2")
         intent = SimpleNamespace(
@@ -99,9 +99,10 @@ class TestResolveAllSizing:
 
         resolution = resolve_all_sizing(intent, IntentType.PERP_OPEN, portfolio, _market({"WETH": "2000"}))
 
-        assert isinstance(resolution, SizingRejection)
-        assert resolution.code is RejectionCode.UNSUPPORTED_ALL_SIZING
-        assert "cash-equivalent" in resolution.detail
+        assert isinstance(resolution, ResolvedAllSizing)
+        assert resolution.token == "WETH"
+        assert resolution.units == Decimal("2")
+        assert resolution.amount_usd == Decimal("4000")
 
     def test_close_shaped_intents_are_not_resolved_here(self) -> None:
         # LP_CLOSE "all" is the close-in-full sentinel, owned by
@@ -139,9 +140,7 @@ class TestOffParStablecoinInput:
         portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("500"))
         intent = SwapIntent(from_token="USDC", to_token="WETH", amount="all")
 
-        resolution = resolve_all_sizing(
-            intent, IntentType.SWAP, portfolio, _market({"WETH": "2000", "USDC": "0.98"})
-        )
+        resolution = resolve_all_sizing(intent, IntentType.SWAP, portfolio, _market({"WETH": "2000", "USDC": "0.98"}))
 
         assert isinstance(resolution, ResolvedAllSizing)
         # Units == the spendable dollars; re-pricing at 0.98 would claim

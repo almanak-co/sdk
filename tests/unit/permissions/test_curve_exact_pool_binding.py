@@ -11,6 +11,8 @@ from almanak.connectors.curve import pair_resolver, pool_resolver
 from almanak.connectors.curve import permission_hints as curve_hints
 from almanak.connectors.curve.pool_binding import (
     CurvePoolPermissionBinding,
+    binding_pool_descriptor,
+    configured_pool_binding_declarations,
     permission_binding_from_intent,
     resolve_configured_pool_bindings,
 )
@@ -175,6 +177,28 @@ def test_binding_preserves_symbols_for_adapter_coin_indexing() -> None:
         ).get_coin_index("TOKEN1")
         == 1
     )
+
+
+def test_live_binding_builds_two_coin_backtest_descriptor_without_fake_fee() -> None:
+    descriptor = binding_pool_descriptor(CurvePoolPermissionBinding.from_metadata("ethereum", _metadata()))
+
+    assert descriptor.key == ("ethereum", "curve", POOL)
+    assert (descriptor.token0, descriptor.token1) == (TOKEN0, TOKEN1)
+    assert (descriptor.token0_decimals, descriptor.token1_decimals) == (18, 18)
+    assert descriptor.fee_tier_units is None
+    assert descriptor.fee_rate is None
+    assert descriptor.provenance == "live:curve_permission_binding"
+
+
+def test_backtest_descriptor_rejects_unmodeled_three_coin_binding() -> None:
+    binding = CurvePoolPermissionBinding.from_metadata("ethereum", _metadata(coins=(TOKEN0, TOKEN1, USDC)))
+
+    with pytest.raises(ValueError, match="requires exactly two pool coins"):
+        binding_pool_descriptor(binding)
+
+
+def test_binding_declarations_can_be_inspected_without_transport() -> None:
+    assert configured_pool_binding_declarations(chain="ethereum", config=_config()) == ((POOL, (TOKEN0, TOKEN1)),)
 
 
 def test_binding_is_found_in_swap_params_when_protocol_params_are_nonempty() -> None:

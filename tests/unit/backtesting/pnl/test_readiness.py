@@ -5,6 +5,7 @@ import gc
 import weakref
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -27,6 +28,9 @@ from tests.backtesting_funding import pnl_token_funding
 _ARBITRUM_USDC = "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
 _ARBITRUM_WETH = "0x82af49447d8a07e3bd95bd0d56f35241523fbab1"
 _ARBITRUM_POOL = "0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640"
+_CURVE_POOL = "0x186cf879186986a20aadfb7ead50e3c20cb26cec"
+_ARBITRUM_WBTC = "0x2f2a2543b76a4166549f7aab2e75bef0aefc5b0f"
+_ARBITRUM_TBTC = "0x6c84a8f1c29108f47a79964b5fe888d4f4d0de40"
 
 
 class _Provider:
@@ -86,6 +90,63 @@ class _Strategy:
     def decide(self, market: Any) -> None:
         self.decide_calls += 1
         return None
+
+
+def test_curve_permission_binding_builds_execution_descriptor_without_archive_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from almanak.connectors.curve import pool_binding
+    from almanak.connectors.curve.pool_binding import CurvePoolPermissionBinding
+    from almanak.framework.backtesting.pnl.providers.perp import _gateway_history
+
+    binding = CurvePoolPermissionBinding(
+        chain="arbitrum",
+        pool_address=_CURVE_POOL,
+        coin_symbols=("WBTC", "TBTC"),
+        coin_addresses=(_ARBITRUM_WBTC, _ARBITRUM_TBTC),
+        coin_decimals=(8, 18),
+        lp_token=_CURVE_POOL,
+        n_coins=2,
+        pool_type="stableswap",
+        abi_families=("stableswap_legacy", "stableswap_ng"),
+        is_metapool=False,
+    )
+    client = SimpleNamespace(is_connected=True)
+    monkeypatch.setattr(_gateway_history, "get_connected_gateway_client", lambda: (client, object()))
+    monkeypatch.setattr(
+        pool_binding,
+        "resolve_configured_pool_bindings",
+        lambda **kwargs: (binding,) if kwargs["gateway_client"] is client else (),
+    )
+    strategy_config = {
+        "permission_bindings": [
+            {
+                "protocol": "curve",
+                "resource_type": "pool",
+                "chain": "arbitrum",
+                "address": _CURVE_POOL,
+                "coin_addresses": [_ARBITRUM_WBTC, _ARBITRUM_TBTC],
+            }
+        ]
+    }
+
+    descriptors = _engine_helpers._configured_pool_descriptors(strategy_config, chain="arbitrum")
+
+    assert len(descriptors) == 1
+    assert descriptors[0].key == ("arbitrum", "curve", _CURVE_POOL)
+    assert descriptors[0].fee_rate is None
+
+
+def test_strategy_without_curve_binding_does_not_open_descriptor_transport(monkeypatch: pytest.MonkeyPatch) -> None:
+    from almanak.framework.backtesting.pnl.providers.perp import _gateway_history
+
+    monkeypatch.setattr(
+        _gateway_history,
+        "get_connected_gateway_client",
+        lambda: pytest.fail("non-Curve strategy must not connect descriptor transport"),
+    )
+
+    assert _engine_helpers._configured_pool_descriptors({"protocol": "gmx_v2"}, chain="arbitrum") == ()
 
 
 def _config(*, tokens: list[str] | None = None) -> PnLBacktestConfig:
@@ -325,6 +386,43 @@ async def test_readiness_accepts_volume_only_analytics_without_pool_state(
 
 
 @pytest.mark.asyncio
+async def test_readiness_accepts_required_curve_fee_apy_without_archive_pool_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    strategy = _Strategy()
+    strategy.backtest_pool_analytics_targets = (
+        HistoricalPoolAnalyticsTarget(
+            "arbitrum",
+            "curve",
+            _ARBITRUM_POOL,
+            frozenset({"fee_apy"}),
+        ),
+    )
+
+    class _FeeApyHistory:
+        def daily_history(self, **_kwargs: Any) -> DailyPoolHistory:
+            return DailyPoolHistory(
+                tvl=None,
+                tvl_source="",
+                volume_24h=None,
+                volume_source="",
+                fee_apy=Decimal("1.37"),
+                fee_apy_source="defillama",
+            )
+
+    monkeypatch.setattr(
+        "almanak.framework.backtesting.pnl.data_broker.pool_history_provider",
+        lambda: _FeeApyHistory(),
+    )
+
+    result = await _backtester(_Provider()).check_readiness(strategy, _config())
+
+    assert result.ready
+    assert result.observations_checked >= 2
+    assert strategy.decide_calls == 0
+
+
+@pytest.mark.asyncio
 async def test_runner_validates_full_pool_analytics_grid_before_decide(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -517,6 +615,37 @@ def test_spooled_market_state_scope_closes_for_every_exit(exit_error: type[BaseE
             raise exit_error
 
     assert spool.closed
+
+
+@pytest.mark.asyncio
+async def test_readiness_rejects_curve_when_required_fee_apy_coverage_disappears(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    strategy = _Strategy()
+    strategy.backtest_pool_analytics_targets = (
+        HistoricalPoolAnalyticsTarget(
+            "arbitrum",
+            "curve",
+            _ARBITRUM_POOL,
+            frozenset({"fee_apy"}),
+        ),
+    )
+
+    class _MissingHistory:
+        def daily_history(self, **_kwargs: Any) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "almanak.framework.backtesting.pnl.data_broker.pool_history_provider",
+        lambda: _MissingHistory(),
+    )
+
+    result = await _backtester(_Provider()).check_readiness(strategy, _config())
+
+    assert result.status == "not_ready"
+    assert result.blockers[0]["failed_checks"] == ["historical_pool_analytics"]
+    assert "measured no data" in result.blockers[0]["message"]
+    assert strategy.decide_calls == 0
 
 
 @pytest.mark.asyncio

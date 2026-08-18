@@ -243,12 +243,14 @@ def _ohlcv_to_snapshots(
         fee_revenue_24h = ""
         token0_reserve = ""
         token1_reserve = ""
+        fee_apy = ""
         unmeasured = build_unmeasured_fields(
             tvl=tvl,
             volume_24h=volume_24h,
             fee_revenue_24h=fee_revenue_24h,
             token0_reserve=token0_reserve,
             token1_reserve=token1_reserve,
+            fee_apy=fee_apy,
         )
         by_ts[aligned] = gateway_pb2.PoolSnapshot(
             timestamp=aligned,
@@ -258,6 +260,7 @@ def _ohlcv_to_snapshots(
             token0_reserve=token0_reserve,
             token1_reserve=token1_reserve,
             unmeasured_fields=unmeasured,
+            fee_apy=fee_apy,
         )
     return [by_ts[ts] for ts in sorted(by_ts)]
 

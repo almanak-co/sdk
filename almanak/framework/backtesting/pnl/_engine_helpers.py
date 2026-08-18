@@ -880,10 +880,16 @@ async def _prepare_declared_historical_pool_state(
             warning_count=0,
         ) from exc
 
+    # Only analytics fields backed by exact archive state should promote an
+    # analytics declaration into ``HistoricalPoolStateTarget`` work. Volume
+    # and base fee APY are served by completed pool-history rows; forcing an
+    # APY-only Curve target through the V3 state reader rejects it before the
+    # measured DefiLlama history can be consulted (ALM-3328).
+    state_backed_analytics_fields = frozenset({"tvl_usd"})
     state_target_keys = {target.key for target in state_targets}
     targets_by_key = {target.key: target for target in state_targets}
     for analytics_target in analytics_targets:
-        if "tvl_usd" not in analytics_target.required_fields:
+        if not analytics_target.required_fields & state_backed_analytics_fields:
             continue
         targets_by_key.setdefault(
             analytics_target.key,
@@ -974,8 +980,8 @@ def _validate_declared_historical_pool_analytics(
             message=f"Historical pool-analytics preflight failed: {exc}",
             failed_checks=["historical_pool_analytics"],
             recommendations=[
-                "Ensure the exact pool has archive state and at least one pool token has historical USD prices "
-                "throughout the requested range, or remove fields the strategy does not require."
+                "Ensure pool history measures every required field throughout the requested range. "
+                "TVL additionally requires exact archive state and historical USD prices for a pool token."
             ],
             error_count=1,
             warning_count=0,
@@ -1579,13 +1585,42 @@ def _requires_complete_funding_history(backtester: PnLBacktester) -> bool:
     return bool(data_config is not None and data_config.use_historical_funding and data_config.strict_historical_mode)
 
 
+def _configured_pool_descriptors(
+    strategy_config: Mapping[str, Any],
+    *,
+    chain: str,
+) -> tuple[Any, ...]:
+    """Resolve connector-owned exact pools into run-scoped LP descriptors."""
+    from almanak.connectors._strategy_runner_hook_registry import STRATEGY_RUNNER_HOOK_REGISTRY
+
+    if not STRATEGY_RUNNER_HOOK_REGISTRY.has_pool_descriptor_declarations(
+        chain=chain,
+        config=strategy_config,
+    ):
+        return ()
+
+    from almanak.framework.backtesting.pnl.providers.perp._gateway_history import get_connected_gateway_client
+
+    client, _ = get_connected_gateway_client()
+    return STRATEGY_RUNNER_HOOK_REGISTRY.resolve_pool_descriptors(
+        gateway_client=client,
+        chain=chain,
+        config=strategy_config,
+    )
+
+
 def _bind_historical_pool_descriptors(
     backtester: PnLBacktester,
     source: SnapshotPoolStateSource | None,
+    strategy_config: Mapping[str, Any],
+    *,
+    chain: str,
 ) -> None:
     """Bind materialized exact-pool identities without growing loop branching."""
-    if source is not None:
-        backtester._bind_pool_descriptors(source.descriptors())
+    descriptors = list(source.descriptors()) if source is not None else []
+    descriptors.extend(_configured_pool_descriptors(strategy_config, chain=chain))
+    if descriptors:
+        backtester._bind_pool_descriptors(descriptors)
 
 
 async def execute_iteration_loop(
@@ -1643,7 +1678,12 @@ async def execute_iteration_loop(
         config,
         state.data_broker.manifest if state.data_broker is not None else None,
     )
-    _bind_historical_pool_descriptors(backtester, pool_state_source)
+    _bind_historical_pool_descriptors(
+        backtester,
+        pool_state_source,
+        state.strategy_config,
+        chain=config.chain,
+    )
     pool_analytics_targets = _declared_historical_pool_analytics(strategy, state.strategy_config, config)
 
     # Stable for the whole run: provider registrations happen during
@@ -3340,6 +3380,37 @@ def _calculate_vault_redeem_flows(
     return {token: amount}, {}
 
 
+def _calculate_perp_open_flows(
+    intent: Any,
+    amount_usd: Decimal,
+    market_state: MarketState,
+    token_addresses: Mapping[str, tuple[str, str]] | None = None,
+) -> tuple[dict[TokenRef, Decimal], dict[TokenRef, Decimal]]:
+    """PERP_OPEN: the declared collateral token leaves the wallet.
+
+    ``amount_usd`` is the position notional, not the collateral leg.  The
+    authoring surface declares collateral in token units, so preserve those
+    units exactly instead of deriving them from the notional.  The shared
+    sizing owner resolves ``"all"`` before this helper is reached.
+
+    Legacy duck-typed perp intents without explicit collateral fields keep
+    their historical cash-backed accounting and therefore emit no flow.
+    """
+    del amount_usd
+    token = getattr(intent, "collateral_token", None)
+    raw_amount = getattr(intent, "collateral_amount", None)
+    if not token or raw_amount is None or str(raw_amount).lower() == "all":
+        return {}, {}
+    try:
+        amount = Decimal(str(raw_amount))
+    except (ArithmeticError, TypeError, ValueError):
+        return {}, {}
+    if not amount.is_finite() or amount <= Decimal("0"):
+        return {}, {}
+    chain = str(getattr(intent, "chain", None) or _market_state_chain(market_state))
+    return {}, {_normalize_token(token, chain, token_addresses): amount}
+
+
 # Dispatch table used by :func:`calculate_token_flows`. The SWAP handler has
 # a distinct signature (it consumes fee/slippage); every other handler takes
 # the same ``(intent, amount_usd, market_state)`` shape and is invoked
@@ -3365,6 +3436,7 @@ _SIMPLE_FLOW_HANDLERS: dict[IntentType, object] = {
     IntentType.UNWRAP_NATIVE: _calculate_unwrap_native_flows,
     IntentType.VAULT_DEPOSIT: _calculate_vault_deposit_flows,
     IntentType.VAULT_REDEEM: _calculate_vault_redeem_flows,
+    IntentType.PERP_OPEN: _calculate_perp_open_flows,
 }
 
 
@@ -3380,9 +3452,9 @@ def calculate_token_flows(
     """Dispatch ``intent_type`` to the matching per-intent-type flow helper.
 
     Returns ``({}, {})`` for any intent type not covered by a dedicated
-    helper (HOLD, PERP, and any future types handled via collateral rather
-    than explicit token flows) — matching the pre-extraction fall-through
-    semantics.
+    helper (HOLD, PERP_CLOSE, and future non-flow types).  Explicit
+    PERP_OPEN collateral is a wallet outflow; legacy perp intents without a
+    declared collateral token/amount retain their cash-backed fallback.
     """
     # SWAP is the only branch that consumes fee / slippage.
     if intent_type == IntentType.SWAP:
@@ -3392,5 +3464,5 @@ def calculate_token_flows(
     if handler is not None:
         return handler(intent, amount_usd, market_state, token_addresses)  # type: ignore[operator]
 
-    # For PERP, HOLD, and other types, token flows are handled via collateral
+    # HOLD, PERP_CLOSE, and other non-flow intent types reach this fallback.
     return {}, {}

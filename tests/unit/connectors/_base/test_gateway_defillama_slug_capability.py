@@ -82,6 +82,7 @@ def test_defillama_slug_table_matches_legacy_dict() -> None:
         "aave_v3": "aave-v3",
         "morpho": "morpho-blue",
         "compound_v3": "compound-v3",
+        "curve": "curve-dex",
     }
     assert _defillama_slug_table() == expected
 
@@ -101,6 +102,7 @@ def test_registered_connectors_advertise_defillama_slug() -> None:
         "compound_v3",
         "pancakeswap_v3",
         "morpho_vault",
+        "curve",
     }.issubset(protocols)
 
 

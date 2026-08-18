@@ -979,6 +979,54 @@ class TestPositionValuation:
         expected_value = Decimal("10000") + Decimal("12")
         assert value == pytest.approx(expected_value, rel=Decimal("0.01"))
 
+    def test_position_value_marks_independent_token_collateral_price(self) -> None:
+        adapter = PerpBacktestAdapter()
+        position = create_perp_short_position(
+            token="ETH",
+            collateral_usd=Decimal("1500"),
+            leverage=Decimal("2"),
+            entry_price=Decimal("2000"),
+        )
+        position.metadata.update(
+            {
+                "perp_collateral_funding": "token",
+                "perp_collateral_token": "TBTC",
+                "perp_collateral_amount": "0.5",
+                "perp_collateral_units": "0.5",
+                "perp_collateral_entry_usd": "1500",
+            }
+        )
+        market = MockMarketState(prices={"ETH": Decimal("2000"), "TBTC": Decimal("3300")})
+
+        assert adapter.value_position(position, market) == Decimal("1650")
+
+        adapter.update_position(position, market, elapsed_seconds=3600)
+        assert position.collateral_usd == Decimal("1650")
+        assert position.leverage == Decimal("3000") / Decimal("1650")
+
+    def test_liquidated_token_collateral_uses_written_down_remainder(self) -> None:
+        adapter = PerpBacktestAdapter()
+        position = create_perp_short_position(
+            token="ETH",
+            collateral_usd=Decimal("1500"),
+            leverage=Decimal("2"),
+            entry_price=Decimal("2000"),
+        )
+        position.metadata.update(
+            {
+                "perp_collateral_funding": "token",
+                "perp_collateral_token": "TBTC",
+                "perp_collateral_amount": "0.5",
+                "perp_collateral_units": "0.5",
+                "perp_collateral_entry_usd": "1500",
+            }
+        )
+        position.is_liquidated = True
+        position.collateral_usd = Decimal("100")
+        market = MockMarketState(prices={"ETH": Decimal("2500"), "TBTC": Decimal("4000")})
+
+        assert adapter.value_position(position, market) == Decimal("100")
+
     def test_strict_value_missing_token_price_raises(self) -> None:
         """Strict valuation must not reuse entry price when market price is missing."""
         from almanak.framework.backtesting.exceptions import HistoricalDataUnavailableError
@@ -1706,6 +1754,39 @@ class TestExecuteIntentUsesRealPortfolioCash:
         assert fill.tokens_out == {}
         assert fill.metadata["attempted_collateral_amount"] == "1000"
         assert fill.metadata["attempted_collateral_token"] == "USDC"
+
+    def test_open_with_held_non_cash_collateral_passes_validation(self) -> None:
+        """GMX markets may require the index asset itself as collateral."""
+        from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
+
+        adapter = PerpBacktestAdapter(PerpBacktestConfig(strategy_type="perp"))
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("0"))
+        portfolio.tokens["WETH"] = Decimal("1")
+
+        fill = adapter.execute_intent(
+            self._open_intent(Decimal("1"), collateral_token="WETH"),
+            portfolio,
+            self._market_state(),
+        )
+
+        assert fill is None
+
+    def test_open_with_insufficient_non_cash_collateral_returns_failed_fill(self) -> None:
+        from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
+
+        adapter = PerpBacktestAdapter(PerpBacktestConfig(strategy_type="perp"))
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("10000"))
+        portfolio.tokens["WETH"] = Decimal("0.5")
+
+        fill = adapter.execute_intent(
+            self._open_intent(Decimal("1"), collateral_token="WETH"),
+            portfolio,
+            self._market_state(),
+        )
+
+        assert fill is not None
+        assert fill.success is False
+        assert "only $1500.000000 available" in fill.metadata["failure_reason"]
 
     def test_strict_open_missing_collateral_price_raises(self) -> None:
         """Strict perp open must not assume $1 for a missing collateral price."""

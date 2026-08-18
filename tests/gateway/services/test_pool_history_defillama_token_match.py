@@ -11,6 +11,7 @@ ambiguity. Plus the dispatcher-side pool-token resolver that feeds it.
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock
@@ -33,6 +34,11 @@ _TOKEN_SET = frozenset({_WETH, _USDC_CHECKSUMMED.lower()})
 _LB_ADDRESS = "0x864d4e5ee7318e97483db7eb0912e09f161516ea"
 _WAVAX = "0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7"
 _USDC_AVAX = "0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e"
+
+_CURVE_2BTC_NG = "0x186cf879186986a20aadfb7ead50e3c20cb26cec"
+_CURVE_2BTC_NG_LLAMA_ID = "9beef608-8e7b-455b-97a1-84247be6631d"
+_ARBITRUM_WBTC = "0x2f2a2543b76a4166549f7aab2e75bef0aefc5b0f"
+_ARBITRUM_TBTC = "0x6c84a8f1c29108f47a79964b5fe888d4f4d0de40"
 
 
 def _entry(pool_id: str, project: str, chain: str, tokens: list[str], tvl: float) -> dict[str, Any]:
@@ -273,6 +279,96 @@ def test_fetch_uuid_catalog_end_to_end():
     assert result[0].timestamp == 86400
     assert Decimal(result[0].tvl) == Decimal("384976")
     assert any("/chart/uuid-joe" in url for url in session.urls)
+
+
+def test_curve_2btc_ng_reported_window_preserves_base_fee_apy():
+    """ALM-3328: the exact Arbitrum pool serves measured base APY.
+
+    The window matches the reported backtest. Boundary rows prove half-open
+    filtering. The sampled rows mirror DefiLlama's exact-pool chart and have
+    non-zero reward APY, proving the gateway keeps ``apyBase`` (pool fees)
+    rather than total/incentive yield.
+    """
+    catalog = [
+        _entry(
+            _CURVE_2BTC_NG_LLAMA_ID,
+            "curve-dex",
+            "Arbitrum",
+            [_ARBITRUM_WBTC, _ARBITRUM_TBTC],
+            1_095_000,
+        )
+    ]
+    session = _UrlRoutedSession(
+        {
+            "/pools": _FakeResp(200, {"data": catalog}),
+            f"/chart/{_CURVE_2BTC_NG_LLAMA_ID}": _FakeResp(
+                200,
+                {
+                    "data": [
+                        {
+                            "timestamp": "2026-05-18T23:01:15.460Z",
+                            "tvlUsd": 1_344_825,
+                            "apyBase": 1.37,
+                            "apyReward": 0.00029,
+                            "apy": 1.37029,
+                        },
+                        {
+                            "timestamp": "2026-05-19T23:02:09.238Z",
+                            "tvlUsd": 1_344_588,
+                            "apyBase": 0.2,
+                            "apyReward": 0.00028,
+                            "apy": 0.20028,
+                        },
+                        {
+                            "timestamp": "2026-08-16T23:01:09.973Z",
+                            "tvlUsd": 1_092_035,
+                            "apyBase": 0,
+                            "apyReward": 0.00039,
+                            "apy": 0.00039,
+                        },
+                        {
+                            "timestamp": "2026-08-17T09:01:17.405Z",
+                            "tvlUsd": 1_100_279,
+                            "apyBase": 0,
+                            "apyReward": 0.00038,
+                            "apy": 0.00038,
+                        },
+                    ]
+                },
+            ),
+        }
+    )
+
+    async def resolver(_chain: str, _address: str) -> ResolvedPoolIdentity:
+        return ResolvedPoolIdentity(
+            tokens=frozenset({_ARBITRUM_WBTC, _ARBITRUM_TBTC}),
+            reserve_usd=Decimal("1095000"),
+        )
+
+    provider = DefiLlamaPoolHistoryProvider(
+        session_getter=AsyncMock(return_value=session),
+        slug_resolver=lambda protocol: "curve-dex" if protocol == "curve" else None,
+        rate_limiter=_TokenBucket(rate=100, period=1.0),
+        pool_token_resolver=resolver,
+    )
+    start_ts = int(datetime(2026, 5, 19, tzinfo=UTC).timestamp())
+    end_ts = int(datetime(2026, 8, 17, tzinfo=UTC).timestamp())
+    result = asyncio.run(
+        provider.fetch(
+            chain="arbitrum",
+            pool_address=_CURVE_2BTC_NG,
+            protocol="curve",
+            start_ts=start_ts,
+            end_ts=end_ts,
+            resolution=gateway_pb2.Resolution.RESOLUTION_1D,
+        )
+    )
+
+    assert result is not None
+    assert [row.timestamp for row in result] == [start_ts, end_ts - 86400]
+    assert [Decimal(row.fee_apy) for row in result] == [Decimal("0.2"), Decimal("0")]
+    assert all("fee_apy" not in row.unmeasured_fields for row in result)
+    assert any(f"/chart/{_CURVE_2BTC_NG_LLAMA_ID}" in url for url in session.urls)
 
 
 # ===========================================================================

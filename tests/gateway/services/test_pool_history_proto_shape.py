@@ -46,6 +46,7 @@ def test_pool_snapshot_has_locked_fields_and_no_speculative_fields() -> None:
         "token0_reserve",
         "token1_reserve",
         "unmeasured_fields",
+        "fee_apy",
     ):
         assert name in snap_fields, name
     # Deferred to follow-ups (PoolX.md POOL-1 C2):
@@ -64,8 +65,9 @@ def test_pool_snapshot_has_locked_fields_and_no_speculative_fields() -> None:
 def test_pool_snapshot_field_types() -> None:
     snap_fields = {d.name: d for d in gateway_pb2.PoolSnapshot.DESCRIPTOR.fields}
     assert snap_fields["timestamp"].type == FieldDescriptor.TYPE_INT64
-    for name in ("tvl", "volume_24h", "fee_revenue_24h", "token0_reserve", "token1_reserve"):
+    for name in ("tvl", "volume_24h", "fee_revenue_24h", "token0_reserve", "token1_reserve", "fee_apy"):
         assert snap_fields[name].type == FieldDescriptor.TYPE_STRING, name
+    assert snap_fields["fee_apy"].number == 8
     unmeasured = snap_fields["unmeasured_fields"]
     assert unmeasured.is_repeated
     assert unmeasured.type == FieldDescriptor.TYPE_STRING

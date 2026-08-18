@@ -353,6 +353,46 @@ def resolve_configured_pool_bindings(
     return tuple(resolved[address] for address in sorted(resolved))
 
 
+def configured_pool_binding_declarations(
+    *, chain: str, config: Mapping[str, Any], include_legacy: bool = True
+) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """Return normalized exact-pool declarations without performing RPC reads.
+
+    Backtest setup uses this cheap inspection to avoid opening a gateway
+    connection for strategies that do not declare Curve resources. Any
+    declaration found here must still pass :func:`resolve_configured_pool_bindings`
+    before it is admitted as an execution descriptor.
+    """
+    return _binding_declarations(chain=chain, config=config, include_legacy=include_legacy)
+
+
+def binding_pool_descriptor(binding: CurvePoolPermissionBinding) -> Any:
+    """Convert one live-verified two-coin binding into a backtest descriptor.
+
+    Curve fees are dynamic/non-factory identity, so the descriptor deliberately
+    leaves ``fee_tier_units`` unmeasured. The LP adapter retains its existing
+    venue fee fallback while consuming the authenticated ordered coin identity.
+    """
+    if binding.n_coins != 2:
+        raise ValueError(
+            f"Curve backtest LP execution currently requires exactly two pool coins; "
+            f"{binding.pool_address} resolved {binding.n_coins}"
+        )
+    from almanak.framework.data.pools.descriptor import PoolDescriptor
+
+    return PoolDescriptor(
+        chain=binding.chain,
+        protocol="curve",
+        address=binding.pool_address,
+        token0=binding.coin_addresses[0],
+        token1=binding.coin_addresses[1],
+        token0_decimals=binding.coin_decimals[0],
+        token1_decimals=binding.coin_decimals[1],
+        fee_tier_units=None,
+        provenance="live:curve_permission_binding",
+    )
+
+
 def resolve_pool_binding(
     *,
     chain: str,
@@ -509,6 +549,8 @@ def _same_chain(left: str, right: str) -> bool:
 
 __all__ = [
     "CurvePoolPermissionBinding",
+    "binding_pool_descriptor",
+    "configured_pool_binding_declarations",
     "permission_binding_from_intent",
     "resolve_configured_pool_bindings",
     "resolve_pool_binding",

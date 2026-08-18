@@ -72,7 +72,7 @@ def test_pool_history_tables_match_legacy_set() -> None:
         SUPPORTED_POOL_PAIRS,
     )
 
-    assert POOL_PROTOCOL_ALLOWLIST == frozenset({"uniswap_v3", "aerodrome", "traderjoe_v2"})
+    assert POOL_PROTOCOL_ALLOWLIST == frozenset({"uniswap_v3", "aerodrome", "traderjoe_v2", "curve"})
     assert SUPPORTED_POOL_PAIRS == frozenset(
         {
             ("ethereum", "uniswap_v3"),
@@ -82,6 +82,7 @@ def test_pool_history_tables_match_legacy_set() -> None:
             ("polygon", "uniswap_v3"),
             ("base", "aerodrome"),
             ("avalanche", "traderjoe_v2"),
+            ("arbitrum", "curve"),
         }
     )
 
@@ -94,3 +95,4 @@ def test_registered_uniswap_v3_and_aerodrome_advertise_capability() -> None:
     protocols = {str(p.protocol) for p in providers}
     assert "uniswap_v3" in protocols
     assert "aerodrome" in protocols
+    assert "curve" in protocols

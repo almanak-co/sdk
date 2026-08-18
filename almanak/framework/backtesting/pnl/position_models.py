@@ -218,6 +218,36 @@ class SimulatedPosition:
         return self.position_type in (PositionType.PERP_SHORT, PositionType.BORROW)
 
     @property
+    def perp_collateral_token_units(self) -> tuple[TokenRef, Decimal] | None:
+        """Return the remaining explicit token collateral, when measured.
+
+        ``perp_collateral_amount`` is the submitted deposit. Venue fees may
+        reduce that deposit on open, so new positions persist the remaining
+        units separately. Falling back to the submitted amount preserves
+        compatibility with positions serialized before that field existed.
+        """
+        if not self.is_perp or self.metadata.get("perp_collateral_funding") != "token":
+            return None
+        # New positions persist the authenticated wallet debit identity. It
+        # must win over a resolver-derived descriptor address so a
+        # symbol-funded open settles back into the same balance plane.
+        raw_token = (
+            self.metadata.get("perp_collateral_wallet_key")
+            or self.metadata.get("perp_collateral_address")
+            or self.metadata.get("perp_collateral_token")
+        )
+        raw_units = self.metadata.get("perp_collateral_units", self.metadata.get("perp_collateral_amount"))
+        if raw_token is None or raw_units is None:
+            return None
+        try:
+            units = Decimal(str(raw_units))
+        except (ArithmeticError, TypeError, ValueError):
+            return None
+        if not units.is_finite() or units <= Decimal("0"):
+            return None
+        return normalize_token_ref(raw_token), units
+
+    @property
     def primary_token(self) -> TokenRef:
         """Get the primary token for this position."""
         return self.tokens[0] if self.tokens else ""

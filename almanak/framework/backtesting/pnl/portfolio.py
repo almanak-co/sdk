@@ -91,10 +91,11 @@ _FEE_EMBEDDED_IN_FLOWS: frozenset[IntentType] = frozenset({IntentType.SWAP})
 #: only — never via the implicit cash-conversion fallback. SWAP because
 #: funding a sell from cash is short-from-nothing; WRAP/UNWRAP because
 #: ``weth.deposit()``/``withdraw()`` revert on-chain when the wallet lacks
-#: the native/wrapped amount, so silently converting cash would overstate
-#: capital efficiency vs live.
+#: the native/wrapped amount; and token-collateralized PERP_OPEN because the
+#: venue deposit must come from the declared wallet asset. Silently converting
+#: cash would overstate capital efficiency vs live.
 _STRICT_BALANCE_FUNDED_INTENTS: frozenset[IntentType] = frozenset(
-    {IntentType.SWAP, IntentType.WRAP_NATIVE, IntentType.UNWRAP_NATIVE}
+    {IntentType.SWAP, IntentType.WRAP_NATIVE, IntentType.UNWRAP_NATIVE, IntentType.PERP_OPEN}
 )
 
 #: Intent types whose slippage is already embodied in portfolio value:
@@ -435,13 +436,11 @@ class SimulatedPortfolio:
         perps embody slippage in ``executed_price`` but pay fees in cash,
         and every other intent type pays both from cash.
 
-        Perp positions have no token flows; their cash movement follows the
-        position lifecycle instead: opening debits the collateral from
-        ``cash_usd`` (an open the portfolio cannot fund is recorded as a
-        failed trade with no state mutation) and closing credits collateral
-        plus realized PnL (price PnL + accumulated funding) back to
-        ``cash_usd``, keeping total portfolio value conserved across both
-        transitions.
+        Perp positions with explicit collateral fields debit that exact token
+        from the wallet. Legacy duck-typed perps without a collateral token
+        keep the cash-backed lifecycle: opening debits ``cash_usd``. Closing
+        returns collateral plus realized PnL to the original non-cash token
+        when it was token-funded, or to ``cash_usd`` otherwise.
 
         For LP_CLOSE intents, also calculates and records:
         - il_loss_usd: Impermanent loss in USD
@@ -485,7 +484,7 @@ class SimulatedPortfolio:
         self._annotate_implicit_conversions(fill, debit_plan.conversions)
         self._apply_token_flows(fill, debit_plan.token_debits, debit_plan.cash_debit, market_state)
         position_effects = self._apply_position_effects(fill, market_state, adapter)
-        components = self._trade_pnl_components(fill, position_effects.closed_position)
+        components = self._trade_pnl_components(fill, position_effects.closed_position, market_state)
         self._record_successful_fill(fill, components)
 
         return True
@@ -505,11 +504,16 @@ class SimulatedPortfolio:
         if failure_reason is not None:
             return None, failure_reason
 
+        self._embed_perp_close_venue_costs(fill)
+
         # Aggregate cash check: planned stablecoin/conversion debits and
         # perp-open collateral draw from the same cash_usd, so they must be
         # validated as one sum (each passing individually could still
         # overdraw) before any state mutation.
         self._absorb_perp_open_venue_costs(fill, cash_debit, token_debits)
+        margin_failure = self._perp_open_post_fee_margin_failure(fill)
+        if margin_failure is not None:
+            return None, margin_failure
         funding_failure = self._cash_funding_failure(fill, cash_debit, token_debits)
         if funding_failure is not None:
             return None, funding_failure
@@ -572,12 +576,20 @@ class SimulatedPortfolio:
             self._realize_reduce_interest(fill)
 
         if fill.position_delta:
-            # Open a new position. Perp collateral moves from cash into the
-            # position (which every valuation path prices as collateral +
-            # unrealized PnL + funding); without this debit the open would
-            # mint the collateral amount.
+            # Explicit perp collateral already left through ``tokens_out``.
+            # Legacy perp intents have no flow and retain their cash-backed
+            # lifecycle; without one of these debits the open would mint its
+            # collateral value.
             if fill.position_delta.is_perp and fill.success:
-                self._debit_cash_like(fill.position_delta.collateral_usd)
+                collateral_flow = self._perp_open_collateral_flow(fill)
+                if collateral_flow is None:
+                    self._debit_cash_like(fill.position_delta.collateral_usd)
+                elif not self._is_cash_equivalent(collateral_flow[0]):
+                    self._record_perp_token_collateral(
+                        fill.position_delta,
+                        collateral_flow,
+                        fill.metadata.get("venue_costs_funded_from_token_collateral_usd", "0"),
+                    )
             self.positions.append(fill.position_delta)
 
         return _PositionEffects(closed_position=closed_position)
@@ -586,6 +598,7 @@ class SimulatedPortfolio:
         self,
         fill: SimulatedFill,
         closed_position: SimulatedPosition | None,
+        market_state: MarketState | None,
     ) -> _TradePnlComponents:
         # ``None`` means "no realized PnL yet" (an opening /
         # inventory-building trade) -- distinct from a measured zero.
@@ -608,7 +621,12 @@ class SimulatedPortfolio:
         # Perp close: return collateral + realized PnL to cash, so the
         # close is value-neutral at the close instant.
         if closed_position is not None and closed_position.is_perp and fill.success:
-            pnl_usd = self._apply_perp_close_credit(closed_position, fill, pnl_usd or Decimal("0"))
+            pnl_usd = self._apply_perp_close_credit(
+                closed_position,
+                fill,
+                pnl_usd or Decimal("0"),
+                market_state,
+            )
 
         return _TradePnlComponents(pnl_usd, il_loss_usd, fees_earned_usd, net_lp_pnl_usd)
 
@@ -657,6 +675,11 @@ class SimulatedPortfolio:
         if fill.intent_type == IntentType.SWAP:
             self._record_swap_cost_basis(fill, token_debits, market_state)
 
+        # Non-cash perp collateral leaves the spot wallet here. Preserve its
+        # per-unit basis on the position before a full debit removes the
+        # wallet-level basis entry.
+        self._preserve_perp_collateral_cost_basis(fill)
+
         # Update token balances - subtract tokens_out
         for token, debit in token_debits.items():
             new_amount = self.tokens.get(token, Decimal("0")) - debit
@@ -688,7 +711,7 @@ class SimulatedPortfolio:
         # Gas draws from the operational tank; venue costs (fee/slippage)
         # are strategy capital and debit cash-like assets.
         self._draw_gas_tank(fill.gas_cost_usd)
-        self._debit_cash_like(self._venue_cash_costs(fill))
+        self._debit_cash_like(self._venue_cash_costs_payable(fill))
 
     def _swap_disposed_tokens(
         self,
@@ -1117,6 +1140,131 @@ class SimulatedPortfolio:
             costs += fill.slippage_usd
         return costs
 
+    def _venue_cash_costs_payable(self, fill: SimulatedFill) -> Decimal:
+        """Venue costs still payable from cash after token-margin absorption."""
+        absorbed_raw = fill.metadata.get("venue_costs_funded_from_token_collateral_usd", "0")
+        try:
+            absorbed = Decimal(str(absorbed_raw))
+        except (ArithmeticError, TypeError, ValueError):
+            absorbed = Decimal("0")
+        return max(self._venue_cash_costs(fill) - absorbed, Decimal("0"))
+
+    def _embed_perp_close_venue_costs(self, fill: SimulatedFill) -> None:
+        """Charge a token-backed perp close against its token settlement."""
+        if fill.intent_type != IntentType.PERP_CLOSE or fill.position_close_id is None:
+            return
+        position = self.get_position(fill.position_close_id)
+        if position is None or position.perp_collateral_token_units is None:
+            return
+        costs = self._venue_cash_costs(fill)
+        if costs > Decimal("0"):
+            fill.metadata["venue_costs_funded_from_token_collateral_usd"] = str(costs)
+
+    def _preserve_perp_collateral_cost_basis(self, fill: SimulatedFill) -> None:
+        """Lock a non-cash collateral token's spot basis on the position."""
+        position = fill.position_delta
+        if position is None or not position.is_perp or fill.intent_type != IntentType.PERP_OPEN:
+            return
+        collateral_flow = self._perp_open_collateral_flow(fill)
+        if collateral_flow is None or self._is_cash_equivalent(collateral_flow[0]):
+            return
+        token, _ = collateral_flow
+        basis = self._cost_basis.get(token)
+        if basis is not None:
+            position.metadata["perp_collateral_cost_basis_usd_per_unit"] = str(basis)
+
+    @staticmethod
+    def _record_perp_token_collateral(
+        position: SimulatedPosition,
+        collateral_flow: tuple[TokenRef, Decimal],
+        absorbed_venue_costs_usd: Any,
+    ) -> None:
+        """Persist token units remaining after any open-fee absorption."""
+        wallet_key, deposited_units = collateral_flow
+        try:
+            absorbed = Decimal(str(absorbed_venue_costs_usd))
+        except (ArithmeticError, TypeError, ValueError):
+            absorbed = Decimal("0")
+        gross_collateral_usd = position.collateral_usd + max(absorbed, Decimal("0"))
+        remaining_units = deposited_units
+        if gross_collateral_usd > Decimal("0"):
+            remaining_units *= position.collateral_usd / gross_collateral_usd
+        position.metadata["perp_collateral_funding"] = "token"
+        # The descriptor can carry an address even when the authenticated
+        # wallet debit used a held symbol key (legacy fixtures and partially
+        # symbol-funded portfolios). Settlement must return to that exact
+        # debit identity or one asset splits across two balance planes.
+        position.metadata["perp_collateral_wallet_key"] = token_ref_display(wallet_key)
+        position.metadata["perp_collateral_units"] = str(remaining_units)
+        position.metadata["perp_collateral_entry_usd"] = str(position.collateral_usd)
+
+    def _perp_collateral_value(
+        self,
+        position: SimulatedPosition,
+        market_state: MarketState | None,
+    ) -> Decimal:
+        """Mark explicit token collateral at its own current price."""
+        if position.is_liquidated:
+            return position.collateral_usd
+        collateral = position.perp_collateral_token_units
+        if collateral is None:
+            return position.collateral_usd
+        token, units = collateral
+        price = self._token_price(self._resolve_key(token), market_state)
+        return units * price if price is not None else position.collateral_usd
+
+    def _mark_perp_collateral(
+        self,
+        position: SimulatedPosition,
+        market_state: MarketState,
+    ) -> Decimal:
+        """Revalue token margin and keep leverage/liquidation inputs aligned."""
+        collateral_usd = self._perp_collateral_value(position, market_state)
+        if position.perp_collateral_token_units is not None and collateral_usd > Decimal("0"):
+            position.collateral_usd = collateral_usd
+            position.leverage = position.notional_usd / collateral_usd
+            position.liquidation_price = None
+        return collateral_usd
+
+    def _perp_open_collateral_flow(self, fill: SimulatedFill) -> tuple[TokenRef, Decimal] | None:
+        """Return the authenticated explicit collateral outflow, if present."""
+        delta = fill.position_delta
+        if delta is None or not delta.is_perp or fill.intent_type != IntentType.PERP_OPEN:
+            return None
+        metadata = delta.metadata
+        raw_tokens = tuple(
+            token
+            for token in (
+                metadata.get("perp_collateral_token"),
+                metadata.get("perp_collateral_address"),
+            )
+            if token is not None
+        )
+        raw_amount = metadata.get("perp_collateral_amount")
+        if not raw_tokens or raw_amount is None:
+            return None
+        try:
+            amount = Decimal(str(raw_amount))
+        except (ArithmeticError, TypeError, ValueError):
+            return None
+        if not amount.is_finite() or amount <= Decimal("0"):
+            return None
+        candidate_keys = {self._resolve_key(token) for token in raw_tokens}
+        matched_flows = [
+            (self._resolve_key(flow_token), units)
+            for flow_token, units in fill.tokens_out.items()
+            if self._resolve_key(flow_token) in candidate_keys
+        ]
+        flowed = sum((units for _, units in matched_flows), Decimal("0"))
+        if flowed < amount and amount - flowed > amount * _DEBIT_DUST_RELATIVE_TOLERANCE:
+            return None
+        # Return the flow's actual wallet key. The observation metadata may
+        # also carry a resolver-derived contract address while a direct unit
+        # test or legacy symbol-funded portfolio emits the equivalent symbol
+        # key. Returning the metadata address in that case makes the explicit
+        # outflow look absent and charges collateral a second time from cash.
+        return matched_flows[0][0], amount
+
     def _absorb_perp_open_venue_costs(
         self,
         fill: SimulatedFill,
@@ -1143,7 +1291,22 @@ class SimulatedPortfolio:
         delta = fill.position_delta
         if delta is None or not delta.is_perp or fill.intent_type != IntentType.PERP_OPEN:
             return
-        required_cash = cash_debit + delta.collateral_usd
+        collateral_flow = self._perp_open_collateral_flow(fill)
+        if collateral_flow is not None:
+            venue_costs = self._venue_cash_costs(fill)
+            cash_headroom = max(self._cash_like_available(token_debits) - cash_debit, Decimal("0"))
+            shortfall = venue_costs - cash_headroom
+            if shortfall <= Decimal("0"):
+                return
+            if shortfall >= delta.collateral_usd:
+                return
+            delta.collateral_usd -= shortfall
+            if delta.collateral_usd > Decimal("0") and delta.notional_usd > Decimal("0"):
+                delta.leverage = delta.notional_usd / delta.collateral_usd
+            fill.metadata["venue_costs_funded_from_token_collateral_usd"] = str(shortfall)
+            return
+
+        required_cash = cash_debit + (Decimal("0") if collateral_flow is not None else delta.collateral_usd)
         if required_cash <= Decimal("0"):
             return
         venue_costs = self._venue_cash_costs(fill)
@@ -1156,6 +1319,39 @@ class SimulatedPortfolio:
         if delta.collateral_usd > Decimal("0") and delta.notional_usd > Decimal("0"):
             delta.leverage = delta.notional_usd / delta.collateral_usd
         fill.metadata["venue_costs_absorbed_into_collateral_usd"] = str(shortfall)
+
+    def _perp_open_post_fee_margin_failure(self, fill: SimulatedFill) -> str | None:
+        """Reject a perp open whose embedded fee pushes margin below venue minimum.
+
+        The adapter validates the submitted collateral before the generic
+        portfolio lane embeds an unfunded venue fee into that collateral.
+        Re-check only fills whose collateral was actually reduced, preserving
+        the adapter's existing utilization gate while making validate-then-
+        commit hold at the fee-adjusted boundary.
+        """
+        delta = fill.position_delta
+        if delta is None or not delta.is_perp or fill.intent_type != IntentType.PERP_OPEN:
+            return None
+        if not (
+            "venue_costs_funded_from_token_collateral_usd" in fill.metadata
+            or "venue_costs_absorbed_into_collateral_usd" in fill.metadata
+        ):
+            return None
+
+        # Lazy import avoids coupling the portfolio model's import surface to
+        # the calculator package (matching validate_margin_for_perp below).
+        from almanak.framework.backtesting.pnl.calculators.margin import MarginValidator
+
+        validator = MarginValidator(
+            default_initial_margin_ratio=self.initial_margin_ratio,
+            default_maintenance_margin_ratio=self.maintenance_margin_ratio,
+        )
+        protocol = delta.protocol or fill.protocol
+        required_ratio = validator.get_margin_for_protocol(protocol)["initial"]
+        result = validator.validate_margin(delta.notional_usd, delta.collateral_usd, required_ratio)
+        if result.is_valid:
+            return None
+        return f"{result.message} after venue costs reduced posted collateral"
 
     def _cash_funding_failure(
         self,
@@ -1181,11 +1377,15 @@ class SimulatedPortfolio:
         and may transiently drive ``cash_usd`` negative.
         """
         required_cash = cash_debit
-        if fill.position_delta is not None and fill.position_delta.is_perp:
+        if (
+            fill.position_delta is not None
+            and fill.position_delta.is_perp
+            and self._perp_open_collateral_flow(fill) is None
+        ):
             required_cash += fill.position_delta.collateral_usd
-        if required_cash <= Decimal("0"):
+        venue_costs = self._venue_cash_costs_payable(fill)
+        if required_cash <= Decimal("0") and not (fill.intent_type == IntentType.PERP_OPEN and venue_costs > 0):
             return None
-        venue_costs = self._venue_cash_costs(fill)
         required_with_costs = required_cash + venue_costs
         cash_like_available = self._cash_like_available(token_debits)
         if required_with_costs > cash_like_available:
@@ -1225,19 +1425,94 @@ class SimulatedPortfolio:
         position: SimulatedPosition,
         fill: SimulatedFill,
         pnl_usd: Decimal,
+        market_state: MarketState | None,
     ) -> Decimal:
-        """Credit cash for a closed perp position and return the trade's PnL.
+        """Settle a closed perp position and return the trade's PnL.
 
         Liquidated positions already carry their loss and penalty in
         ``collateral_usd`` (see the liquidation simulators), so only that
-        remainder comes back and ``pnl_usd`` passes through unchanged.
+        remainder comes back and ``pnl_usd`` passes through unchanged. A
+        position opened with explicit non-cash collateral settles back into
+        that token at the current measured price; legacy/cash-backed positions
+        settle to cash.
         """
-        if position.is_liquidated:
-            self.cash_usd += position.collateral_usd
-            return pnl_usd
-        realized = self._perp_realized_pnl(position, fill)
-        self.cash_usd += position.collateral_usd + realized
-        return realized
+        perp_realized = pnl_usd if position.is_liquidated else self._perp_realized_pnl(position, fill)
+        settlement_usd = position.collateral_usd if position.is_liquidated else position.collateral_usd + perp_realized
+        token_collateral = position.perp_collateral_token_units
+        if token_collateral is not None:
+            raw_token, collateral_units = token_collateral
+            token = self._resolve_key(raw_token)
+            price = self._token_price(token, market_state)
+            try:
+                venue_costs = Decimal(str(fill.metadata.get("venue_costs_funded_from_token_collateral_usd", "0")))
+            except (ArithmeticError, TypeError, ValueError):
+                venue_costs = Decimal("0")
+            if price is not None:
+                if position.is_liquidated:
+                    amount = max(position.collateral_usd - venue_costs, Decimal("0")) / price
+                else:
+                    amount = max(collateral_units + (perp_realized - venue_costs) / price, Decimal("0"))
+                collateral_disposal_pnl = self._restore_perp_collateral_cost_basis(
+                    position,
+                    token,
+                    collateral_units,
+                    amount,
+                    price,
+                )
+                if amount > Decimal("0"):
+                    self.tokens[token] = self.tokens.get(token, Decimal("0")) + amount
+                    fill.tokens_in[token] = fill.tokens_in.get(token, Decimal("0")) + amount
+                fill.metadata["perp_collateral_return_amount"] = str(amount)
+                fill.metadata["perp_collateral_return_token"] = token_ref_display(token)
+                if collateral_disposal_pnl is not None and collateral_disposal_pnl != Decimal("0"):
+                    fill.metadata["perp_collateral_disposal_pnl_usd"] = str(collateral_disposal_pnl)
+                    return perp_realized + collateral_disposal_pnl
+                return perp_realized
+            settlement_usd = max(settlement_usd - venue_costs, Decimal("0"))
+        self.cash_usd += settlement_usd
+        return perp_realized
+
+    def _restore_perp_collateral_cost_basis(
+        self,
+        position: SimulatedPosition,
+        token: TokenRef,
+        collateral_units: Decimal,
+        returned_units: Decimal,
+        close_price: Decimal,
+    ) -> Decimal | None:
+        """Restore returned basis and realize basis for consumed collateral.
+
+        Returns the measured spot PnL on principal units consumed by a perp
+        loss or token-funded close cost. ``None`` means those disposed units
+        had no measured entry basis.
+        """
+        principal_units = min(collateral_units, returned_units)
+        payout_units = max(returned_units - principal_units, Decimal("0"))
+        consumed_units = max(collateral_units - principal_units, Decimal("0"))
+        raw_basis = position.metadata.get("perp_collateral_cost_basis_usd_per_unit")
+        try:
+            principal_basis = Decimal(str(raw_basis)) if raw_basis is not None else None
+        except (ArithmeticError, TypeError, ValueError):
+            principal_basis = None
+        if principal_basis is not None and (not principal_basis.is_finite() or principal_basis < Decimal("0")):
+            principal_basis = None
+        disposal_pnl = (
+            consumed_units * (close_price - principal_basis)
+            if consumed_units > Decimal("0") and principal_basis is not None
+            else (Decimal("0") if consumed_units == Decimal("0") else None)
+        )
+
+        held_units = self.tokens.get(token, Decimal("0"))
+        existing_basis_known = held_units <= Decimal("0") or token in self._cost_basis
+        principal_basis_known = principal_units <= Decimal("0") or principal_basis is not None
+        if not existing_basis_known or not principal_basis_known:
+            self._cost_basis.pop(token, None)
+            return disposal_pnl
+
+        principal_cost = principal_units * (principal_basis or Decimal("0"))
+        payout_cost = payout_units * close_price
+        self._add_to_cost_basis(token, returned_units, principal_cost + payout_cost)
+        return disposal_pnl
 
     def _record_failed_fill(self, fill: SimulatedFill, reason: str) -> None:
         """Record ``fill`` as a failed trade without touching balances.
@@ -1843,6 +2118,8 @@ class SimulatedPortfolio:
         Returns:
             Unrealized PnL in USD
         """
+        if position.is_liquidated:
+            return Decimal("0")
         if not position.tokens:
             return Decimal("0")
 
@@ -1870,7 +2147,15 @@ class SimulatedPortfolio:
         # Net funding = received - paid
         net_funding = position.cumulative_funding_received - position.cumulative_funding_paid
 
-        return price_pnl + net_funding
+        collateral_pnl = Decimal("0")
+        if position.perp_collateral_token_units is not None:
+            try:
+                entry_collateral = Decimal(str(position.metadata.get("perp_collateral_entry_usd", "0")))
+            except (ArithmeticError, TypeError, ValueError):
+                entry_collateral = Decimal("0")
+            collateral_pnl = self._perp_collateral_value(position, market_state) - entry_collateral
+
+        return price_pnl + net_funding + collateral_pnl
 
     def _calculate_lending_unrealized_pnl(self, position: SimulatedPosition) -> Decimal:
         """Calculate unrealized PnL for a lending position.
@@ -2408,6 +2693,8 @@ class SimulatedPortfolio:
 
         elif position.is_perp:
             # Perp position: collateral + unrealized PnL
+            if position.is_liquidated:
+                return position.collateral_usd
             token = position.primary_token
             resolved_token = self._resolve_token_symbol(token, chain_id, require_symbol_mapping, data_tracker)
             try:
@@ -2431,7 +2718,8 @@ class SimulatedPortfolio:
 
             unrealized_pnl = (price_change / position.entry_price) * position.notional_usd
 
-            return position.collateral_usd + unrealized_pnl + position.accumulated_funding
+            collateral_usd = self._perp_collateral_value(position, market_state)
+            return collateral_usd + unrealized_pnl + position.accumulated_funding
 
         elif position.is_lending:
             # Lending position: principal + interest
@@ -3424,6 +3712,9 @@ class SimulatedPortfolio:
         Returns:
             Total perpetual position value in USD (collateral + unrealized PnL + funding)
         """
+        if position.is_liquidated:
+            return position.collateral_usd
+
         # Lazy imports to avoid circular dependency
         from almanak.framework.backtesting.pnl.calculators.funding import FundingCalculator
         from almanak.framework.backtesting.pnl.calculators.liquidation import (
@@ -3431,6 +3722,7 @@ class SimulatedPortfolio:
         )
 
         token = position.primary_token
+        collateral_usd = self._mark_perp_collateral(position, market_state)
 
         # Get current price
         try:
@@ -3503,7 +3795,7 @@ class SimulatedPortfolio:
         # Total position value = collateral + unrealized PnL + accumulated funding
         # Note: accumulated_funding is already signed correctly
         # (negative if long pays, positive if short receives)
-        total_value = position.collateral_usd + unrealized_pnl + position.accumulated_funding
+        total_value = collateral_usd + unrealized_pnl + position.accumulated_funding
 
         # Ensure position value doesn't go below zero (liquidation would occur)
         # For simulation purposes, we still return the calculated value

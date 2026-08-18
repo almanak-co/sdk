@@ -1,14 +1,15 @@
 """Conservation-of-value invariants for the perp lane of the PnL backtester.
 
-The perp lane bypasses token flows entirely (``calculate_token_flows``
-returns empty flows for PERP_OPEN/PERP_CLOSE), so cash movement must be
-wired through the position lifecycle instead:
+Legacy perp intents without explicit collateral token amounts use the cash
+lane. Connector-authenticated perp intents debit their declared collateral
+token on open and return it on close:
 
-- PERP_OPEN moves the position's collateral from ``cash_usd`` into the
-  position. Opening a perp must not change total portfolio value.
+- PERP_OPEN moves collateral from cash or token holdings into the position.
+  Opening a perp must not change total portfolio value apart from modeled
+  venue costs.
 - PERP_CLOSE moves collateral + realized PnL (price PnL + accumulated
-  funding) back into ``cash_usd``. Closing must not change total portfolio
-  value at the close instant.
+  funding) back into the funding asset. Closing must not change total
+  portfolio value at the close instant.
 - A round trip therefore moves total portfolio value by exactly the
   realized PnL (plus modeled execution costs).
 
@@ -19,13 +20,11 @@ nothing credits cash) -- a profitable round trip ends exactly at initial
 capital.
 
 Companion to ``test_portfolio_conservation.py`` (VIB-5082), which covers
-the token-flow lanes (SWAP / LP / lending); this file covers the
-collateral lane.
+the other token-flow lanes (SWAP / LP / lending); this file covers the
+perp collateral lane.
 """
 
-from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
-
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -44,6 +43,7 @@ from almanak.framework.backtesting.pnl.portfolio import (
     SimulatedPortfolio,
     SimulatedPosition,
 )
+from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 from tests.unit.backtesting.pnl._mocks import MockDataProvider
 
 TS = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
@@ -59,6 +59,14 @@ def market(price: Decimal) -> MarketState:
     return MarketState(
         timestamp=TS,
         prices={"WETH": price, "USDC": Decimal("1")},
+        chain="arbitrum",
+    )
+
+
+def collateral_market(base_price: Decimal, collateral_price: Decimal) -> MarketState:
+    return MarketState(
+        timestamp=TS,
+        prices={"WETH": base_price, "TBTC": collateral_price, "USDC": Decimal("1")},
         chain="arbitrum",
     )
 
@@ -196,6 +204,71 @@ class TestPerpOpenConservation:
         assert portfolio.cash_usd == COLLATERAL - Decimal("1")
         assert portfolio.positions == []
 
+    def test_explicit_non_cash_collateral_moves_into_position(self) -> None:
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("0"))
+        portfolio.tokens["WETH"] = Decimal("0.5")
+        position = perp_long(collateral=Decimal("1500"))
+        position.metadata.update(
+            {
+                "perp_collateral_token": "WETH",
+                "perp_collateral_amount": "0.5",
+            }
+        )
+        fill = open_fill(position)
+        fill.tokens_out = {"WETH": Decimal("0.5")}
+
+        applied = portfolio.apply_fill(fill, market_state=market(ENTRY_PRICE))
+
+        assert applied is True
+        assert portfolio.tokens == {}
+        assert portfolio.cash_usd == Decimal("0")
+        assert position.metadata["perp_collateral_funding"] == "token"
+        assert portfolio.get_total_value_usd(market(ENTRY_PRICE)) == Decimal("1500")
+
+    def test_non_cash_collateral_funds_open_fee_without_negative_cash(self) -> None:
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("0"))
+        portfolio.tokens["WETH"] = Decimal("0.5")
+        position = perp_long(collateral=Decimal("1500"))
+        position.metadata.update(
+            {
+                "perp_collateral_token": "WETH",
+                "perp_collateral_amount": "0.5",
+            }
+        )
+        fill = open_fill(position)
+        fill.tokens_out = {"WETH": Decimal("0.5")}
+        fill.fee_usd = Decimal("15")
+
+        applied = portfolio.apply_fill(fill, market_state=market(ENTRY_PRICE))
+
+        assert applied is True
+        assert portfolio.cash_usd == Decimal("0")
+        assert position.collateral_usd == Decimal("1485")
+        assert position.metadata["perp_collateral_units"] == "0.495"
+        assert fill.metadata["venue_costs_funded_from_token_collateral_usd"] == "15"
+        assert portfolio.get_total_value_usd(market(ENTRY_PRICE)) == Decimal("1485")
+
+    def test_explicit_stable_collateral_can_fund_fee_from_deposit(self) -> None:
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("1000"))
+        position = perp_long(collateral=Decimal("1000"))
+        position.metadata.update(
+            {
+                "perp_collateral_token": "USDC",
+                "perp_collateral_amount": "1000",
+            }
+        )
+        fill = open_fill(position)
+        fill.tokens_out = {"USDC": Decimal("1000")}
+        fill.fee_usd = Decimal("15")
+
+        applied = portfolio.apply_fill(fill, market_state=market(ENTRY_PRICE))
+
+        assert applied is True
+        assert portfolio.cash_usd == Decimal("0")
+        assert position.collateral_usd == Decimal("985")
+        assert fill.metadata["venue_costs_funded_from_token_collateral_usd"] == "15"
+        assert portfolio.get_total_value_usd(market(ENTRY_PRICE)) == Decimal("985")
+
 
 class TestPerpCloseConservation:
     """PERP_CLOSE must credit collateral + realized PnL back to cash."""
@@ -295,6 +368,238 @@ class TestPerpCloseConservation:
 
         assert portfolio.cash_usd == INITIAL_CASH - COLLATERAL + Decimal("100")
         assert portfolio.positions == []
+
+    def test_token_funded_close_returns_collateral_and_pnl_in_token(self) -> None:
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("0"))
+        portfolio.tokens["WETH"] = Decimal("0.5")
+        position = perp_long(collateral=Decimal("1500"))
+        position.metadata.update(
+            {
+                "perp_collateral_token": "WETH",
+                "perp_collateral_amount": "0.5",
+            }
+        )
+        opened = open_fill(position)
+        opened.tokens_out = {"WETH": Decimal("0.5")}
+        assert portfolio.apply_fill(opened, market_state=market(ENTRY_PRICE)) is True
+
+        exit_price = ENTRY_PRICE * Decimal("1.1")
+        closing = close_fill(position, exit_price)
+        assert portfolio.apply_fill(closing, market_state=market(exit_price)) is True
+
+        realized = Decimal("750")
+        expected_units = Decimal("0.5") + realized / exit_price
+        assert portfolio.cash_usd == Decimal("0")
+        assert portfolio.tokens["WETH"] == expected_units
+        assert closing.tokens_in["WETH"] == expected_units
+        assert portfolio.get_total_value_usd(market(exit_price)) == Decimal("2400")
+
+    def test_partial_symbol_funded_collateral_settles_to_same_wallet_key(self) -> None:
+        """A resolver address in the descriptor must not split a symbol-held
+        balance when the authenticated open debit used the symbol key."""
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("0"))
+        portfolio.tokens["WETH"] = Decimal("1")
+        position = perp_long(collateral=Decimal("1500"))
+        position.metadata.update(
+            {
+                "perp_collateral_token": "WETH",
+                "perp_collateral_address": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
+                "perp_collateral_amount": "0.5",
+            }
+        )
+        opened = open_fill(position)
+        opened.tokens_out = {"WETH": Decimal("0.5")}
+
+        assert portfolio.apply_fill(opened, market_state=market(ENTRY_PRICE)) is True
+        assert portfolio.tokens == {"WETH": Decimal("0.5")}
+        assert position.metadata["perp_collateral_wallet_key"] == "WETH"
+        assert position.perp_collateral_token_units == ("WETH", Decimal("0.5"))
+
+        closing = close_fill(position, ENTRY_PRICE)
+        assert portfolio.apply_fill(closing, market_state=market(ENTRY_PRICE)) is True
+        assert portfolio.tokens == {"WETH": Decimal("1.0")}
+        assert closing.tokens_in == {"WETH": Decimal("0.5")}
+
+    def test_token_collateral_keeps_units_and_independent_price_exposure(self) -> None:
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("0"))
+        portfolio.tokens["TBTC"] = Decimal("0.5")
+        position = perp_short(collateral=Decimal("1500"))
+        position.metadata.update(
+            {
+                "perp_collateral_token": "TBTC",
+                "perp_collateral_amount": "0.5",
+            }
+        )
+        opened = open_fill(position)
+        opened.tokens_out = {"TBTC": Decimal("0.5")}
+        entry_state = collateral_market(ENTRY_PRICE, Decimal("3000"))
+        assert portfolio.apply_fill(opened, market_state=entry_state) is True
+
+        appreciated = collateral_market(ENTRY_PRICE, Decimal("3300"))
+        assert portfolio.get_total_value_usd(appreciated) == Decimal("1650")
+        assert portfolio.calculate_unrealized_pnl(appreciated) == Decimal("150")
+
+        closing = close_fill(position, ENTRY_PRICE)
+        assert portfolio.apply_fill(closing, market_state=appreciated) is True
+        assert portfolio.cash_usd == Decimal("0")
+        assert portfolio.tokens["TBTC"] == Decimal("0.5")
+        assert closing.tokens_in["TBTC"] == Decimal("0.5")
+
+    def test_liquidated_token_collateral_keeps_written_down_value(self) -> None:
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("0"))
+        portfolio.tokens["TBTC"] = Decimal("0.5")
+        position = perp_short(collateral=Decimal("1500"))
+        position.metadata.update(
+            {
+                "perp_collateral_token": "TBTC",
+                "perp_collateral_amount": "0.5",
+            }
+        )
+        opened = open_fill(position)
+        opened.tokens_out = {"TBTC": Decimal("0.5")}
+        assert (
+            portfolio.apply_fill(
+                opened,
+                market_state=collateral_market(ENTRY_PRICE, Decimal("3000")),
+            )
+            is True
+        )
+
+        position.is_liquidated = True
+        position.collateral_usd = Decimal("100")
+        repriced = collateral_market(Decimal("4000"), Decimal("4000"))
+
+        assert portfolio.get_total_value_usd(repriced) == Decimal("100")
+        assert portfolio.calculate_unrealized_pnl(repriced) == Decimal("0")
+
+    def test_token_collateral_basis_survives_close_and_prices_payout_at_exit(self) -> None:
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("0"))
+        portfolio.tokens["TBTC"] = Decimal("0.5")
+        portfolio._cost_basis["TBTC"] = Decimal("2400")
+        position = perp_short(collateral=Decimal("1500"))
+        position.metadata.update(
+            {
+                "perp_collateral_token": "TBTC",
+                "perp_collateral_amount": "0.5",
+            }
+        )
+        opened = open_fill(position)
+        opened.tokens_out = {"TBTC": Decimal("0.5")}
+        assert (
+            portfolio.apply_fill(
+                opened,
+                market_state=collateral_market(ENTRY_PRICE, Decimal("3000")),
+            )
+            is True
+        )
+        assert portfolio.tokens == {}
+        assert portfolio._cost_basis == {}
+
+        exit_base_price = Decimal("2700")
+        exit_collateral_price = Decimal("3300")
+        exit_state = collateral_market(exit_base_price, exit_collateral_price)
+        closing = close_fill(position, exit_base_price)
+        assert portfolio.apply_fill(closing, market_state=exit_state) is True
+
+        realized_perp = Decimal("750")
+        payout_units = realized_perp / exit_collateral_price
+        returned_units = Decimal("0.5") + payout_units
+        expected_basis = (Decimal("0.5") * Decimal("2400") + payout_units * exit_collateral_price) / returned_units
+        assert portfolio.tokens["TBTC"] == returned_units
+        assert portfolio._cost_basis["TBTC"] == expected_basis
+
+        proceeds = returned_units * exit_collateral_price
+        swap = SimulatedFill(
+            timestamp=TS,
+            intent_type=IntentType.SWAP,
+            protocol="curve",
+            tokens=["TBTC", "USDC"],
+            executed_price=exit_collateral_price,
+            amount_usd=proceeds,
+            fee_usd=Decimal("0"),
+            slippage_usd=Decimal("0"),
+            gas_cost_usd=Decimal("0"),
+            tokens_in={"USDC": proceeds},
+            tokens_out={"TBTC": returned_units},
+            success=True,
+        )
+        assert portfolio.apply_fill(swap, market_state=exit_state) is True
+        assert portfolio.trades[-1].pnl_usd == Decimal("450")
+
+    def test_loss_consumed_collateral_realizes_basis_before_remaining_swap(self) -> None:
+        """Collateral units consumed by perp loss are disposed at the close
+        price; a later swap can realize only the returned units' spot PnL."""
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("0"))
+        portfolio.tokens["TBTC"] = Decimal("0.5")
+        portfolio._cost_basis["TBTC"] = Decimal("2400")
+        position = perp_long(collateral=Decimal("1500"))
+        position.metadata.update(
+            {
+                "perp_collateral_token": "TBTC",
+                "perp_collateral_amount": "0.5",
+            }
+        )
+        opened = open_fill(position)
+        opened.tokens_out = {"TBTC": Decimal("0.5")}
+        entry_state = collateral_market(ENTRY_PRICE, Decimal("3000"))
+        assert portfolio.apply_fill(opened, market_state=entry_state) is True
+
+        exit_base_price = Decimal("2800")
+        exit_collateral_price = Decimal("3300")
+        exit_state = collateral_market(exit_base_price, exit_collateral_price)
+        closing = close_fill(position, exit_base_price)
+        assert portfolio.apply_fill(closing, market_state=exit_state) is True
+
+        perp_loss = Decimal("-500")
+        consumed_units = -perp_loss / exit_collateral_price
+        disposal_pnl = consumed_units * (exit_collateral_price - Decimal("2400"))
+        returned_units = Decimal("0.5") - consumed_units
+        assert closing.metadata["perp_collateral_disposal_pnl_usd"] == str(disposal_pnl)
+        assert portfolio.trades[-1].pnl_usd == perp_loss + disposal_pnl
+
+        proceeds = returned_units * exit_collateral_price
+        swap = SimulatedFill(
+            timestamp=TS,
+            intent_type=IntentType.SWAP,
+            protocol="curve",
+            tokens=["TBTC", "USDC"],
+            executed_price=exit_collateral_price,
+            amount_usd=proceeds,
+            fee_usd=Decimal("0"),
+            slippage_usd=Decimal("0"),
+            gas_cost_usd=Decimal("0"),
+            tokens_in={"USDC": proceeds},
+            tokens_out={"TBTC": returned_units},
+            success=True,
+        )
+        assert portfolio.apply_fill(swap, market_state=exit_state) is True
+        remaining_spot_pnl = returned_units * (exit_collateral_price - Decimal("2400"))
+        assert portfolio.trades[-1].pnl_usd == remaining_spot_pnl
+        assert portfolio._realized_pnl == Decimal("-50")
+
+    def test_token_funded_close_embeds_fee_without_negative_cash(self) -> None:
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("0"))
+        portfolio.tokens["TBTC"] = Decimal("0.5")
+        position = perp_short(collateral=Decimal("1500"))
+        position.metadata.update(
+            {
+                "perp_collateral_token": "TBTC",
+                "perp_collateral_amount": "0.5",
+            }
+        )
+        state = collateral_market(ENTRY_PRICE, Decimal("3000"))
+        opened = open_fill(position)
+        opened.tokens_out = {"TBTC": Decimal("0.5")}
+        assert portfolio.apply_fill(opened, market_state=state) is True
+
+        closing = close_fill(position, ENTRY_PRICE)
+        closing.fee_usd = Decimal("15")
+        assert portfolio.apply_fill(closing, market_state=state) is True
+
+        assert portfolio.cash_usd == Decimal("0")
+        assert portfolio.tokens["TBTC"] == Decimal("0.495")
+        assert closing.tokens_in["TBTC"] == Decimal("0.495")
+        assert closing.metadata["venue_costs_funded_from_token_collateral_usd"] == "15"
 
 
 class TestEngineGenericPerpLane:

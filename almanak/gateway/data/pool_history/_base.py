@@ -326,6 +326,7 @@ def build_unmeasured_fields(
     fee_revenue_24h: str,
     token0_reserve: str,
     token1_reserve: str,
+    fee_apy: str,
 ) -> list[str]:
     """Return the names of the snapshot fields that are ``""`` (unmeasured).
 
@@ -340,6 +341,7 @@ def build_unmeasured_fields(
         "fee_revenue_24h": fee_revenue_24h,
         "token0_reserve": token0_reserve,
         "token1_reserve": token1_reserve,
+        "fee_apy": fee_apy,
     }
     return [name for name, value in candidates.items() if value == ""]
 

@@ -3638,6 +3638,71 @@ class TestPrewarmHistory:
         assert volume_provider.get_volume.await_count == 4  # range + day0/day1/day2; never dialed day3
 
     @pytest.mark.asyncio
+    async def test_prewarm_volume_paces_only_pool_history_fallback(self, monkeypatch):
+        """Fallback days reserve daily + hourly request slots without throttling native rows."""
+        from datetime import UTC, date, datetime
+        from decimal import Decimal
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        import almanak.framework.backtesting.adapters.lp_adapter as lp_adapter_module
+        from almanak.framework.backtesting.adapters.lp_adapter import (
+            _POOL_HISTORY_PREWARM_INTERVAL_SECONDS,
+            _POOL_HISTORY_VOLUME_PREWARM_INTERVAL_SECONDS,
+            LPBacktestAdapter,
+        )
+        from almanak.framework.backtesting.pnl.types import (
+            DataConfidence,
+            DataSourceInfo,
+            VolumeResult,
+        )
+
+        days = [date(2026, 6, 20), date(2026, 6, 21)]
+        sleep = AsyncMock()
+        monkeypatch.setattr(lp_adapter_module.asyncio, "sleep", sleep)
+
+        fallback_adapter = LPBacktestAdapter()
+        fallback_adapter._volume_provider = None
+        fallback_adapter._volume_provider_initialized = True
+        fallback = AsyncMock(return_value=SimpleNamespace(value=None, cacheable=False))
+        monkeypatch.setattr(fallback_adapter, "_pool_history_ladder_volume_outcome_async", fallback)
+
+        await fallback_adapter._prewarm_volume_lane("0xpool", "curve", "arbitrum", days)
+
+        assert fallback.await_count == len(days)
+        assert sleep.await_count == len(days)
+        assert all(
+            await_call.args == (_POOL_HISTORY_VOLUME_PREWARM_INTERVAL_SECONDS,) for await_call in sleep.await_args_list
+        )
+        assert _POOL_HISTORY_VOLUME_PREWARM_INTERVAL_SECONDS == 2 * _POOL_HISTORY_PREWARM_INTERVAL_SECONDS
+
+        sleep.reset_mock()
+        native_adapter = LPBacktestAdapter()
+        native_adapter._volume_provider = SimpleNamespace(
+            get_volume=AsyncMock(
+                return_value=[
+                    VolumeResult(
+                        value=Decimal("1000000"),
+                        source_info=DataSourceInfo(
+                            source="test",
+                            confidence=DataConfidence.HIGH,
+                            timestamp=datetime.combine(day, datetime.min.time(), tzinfo=UTC),
+                        ),
+                    )
+                    for day in days
+                ]
+            )
+        )
+        native_adapter._volume_provider_initialized = True
+        native_fallback = AsyncMock()
+        monkeypatch.setattr(native_adapter, "_pool_history_ladder_volume_outcome_async", native_fallback)
+
+        await native_adapter._prewarm_volume_lane("0xpool", "curve", "arbitrum", days)
+
+        native_fallback.assert_not_awaited()
+        sleep.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_prewarm_liquidity_survives_a_transient_mid_window_error(self):
         # Regression (CodeRabbit #3271): the liquidity prewarm lane must handle
         # a transient per-day error like the volume lane — one exception must
@@ -3681,6 +3746,52 @@ class TestPrewarmHistory:
         assert (pool, date(2026, 6, 20)) in adapter._liquidity_cache
         assert (pool, date(2026, 6, 22)) in adapter._liquidity_cache  # day AFTER the error still warmed
         assert (pool, date(2026, 6, 21)) not in adapter._liquidity_cache  # the erroring day is skipped
+
+    @pytest.mark.asyncio
+    async def test_prewarm_liquidity_paces_pool_history_fallback(self, monkeypatch):
+        """Daily fallback reads must not outrun the gateway provider budget."""
+        from datetime import UTC, datetime
+        from decimal import Decimal
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        import almanak.framework.backtesting.adapters.lp_adapter as lp_adapter_module
+        from almanak.framework.backtesting.adapters.lp_adapter import (
+            _POOL_HISTORY_PREWARM_INTERVAL_SECONDS,
+            LPBacktestAdapter,
+        )
+        from almanak.framework.backtesting.pnl.types import (
+            DataConfidence,
+            DataSourceInfo,
+            LiquidityResult,
+        )
+
+        adapter = LPBacktestAdapter()
+        source = DataSourceInfo(
+            source="gateway_pool_history:defillama",
+            confidence=DataConfidence.MEDIUM,
+            timestamp=datetime(2026, 6, 20, tzinfo=UTC),
+        )
+        liquidity_provider = SimpleNamespace(
+            get_liquidity_depth=AsyncMock(return_value=LiquidityResult(depth=Decimal("5000000"), source_info=source))
+        )
+        adapter._volume_provider = None
+        adapter._volume_provider_initialized = True
+        adapter._liquidity_provider = liquidity_provider
+        adapter._liquidity_provider_initialized = True
+        sleep = AsyncMock()
+        monkeypatch.setattr(lp_adapter_module.asyncio, "sleep", sleep)
+        monkeypatch.setattr(adapter, "_prewarm_volume_lane", AsyncMock())
+
+        intent = SimpleNamespace(pool="0xAbCd000000000000000000000000000000000001", protocol="curve")
+        await adapter.prewarm_history(
+            intent,
+            chain="arbitrum",
+            start_time=datetime(2026, 6, 20, tzinfo=UTC),
+            end_time=datetime(2026, 6, 21, tzinfo=UTC),
+        )
+
+        sleep.assert_awaited_once_with(_POOL_HISTORY_PREWARM_INTERVAL_SECONDS)
 
     @pytest.mark.asyncio
     async def test_prewarm_liquidity_aborts_after_two_consecutive_errors(self):
@@ -3963,13 +4074,49 @@ class TestRangeGatingScope:
         assert result.data_source == "subgraph:test"
 
 
-class TestCoinAmountsOpenFailsClosed:
-    """A multi-coin allocation vector is not modeled: the result must say so.
+class TestCoinAmountsOpen:
+    """Two-coin Curve vectors are exact; larger vectors remain fail-closed.
 
-    Invariant (result honesty): an unmodeled deposit shape must never
+    Invariant (result honesty): a genuinely unmodeled deposit shape must never
     produce a success — a $0-notional, zero-flow "position" is
     machine-indistinguishable from a real one in the result doc.
     """
+
+    def test_authenticated_two_coin_vector_maps_to_position_legs(self) -> None:
+        from almanak.framework.data.pools.descriptor import PoolDescriptor
+        from almanak.framework.intents import Intent
+
+        pool = "0x186cf879186986a20aadfb7ead50e3c20cb26cec"
+        wbtc = "0x2f2a2543b76a4166549f7aab2e75bef0aefc5b0f"
+        tbtc = "0x6c84a8f1c29108f47a79964b5fe888d4f4d0de40"
+        adapter = LPBacktestAdapter()
+        adapter.bind_pool_descriptors(
+            [PoolDescriptor("arbitrum", "curve", pool, wbtc, tbtc, 8, 18, None, "live:curve_permission_binding")]
+        )
+        intent = Intent.lp_open(
+            pool=pool,
+            coin_amounts=[Decimal("0.08"), Decimal("0.07")],
+            protocol="curve",
+            chain="arbitrum",
+        )
+        market = MockMarketStateWithTimestamp(
+            prices={
+                ("arbitrum", wbtc): Decimal("100000"),
+                ("arbitrum", tbtc): Decimal("101000"),
+            },
+            timestamp=datetime.now(),
+        )
+
+        fill = adapter.execute_intent(intent, MockPortfolio(), market)
+
+        assert fill is not None and fill.success is True
+        assert fill.tokens_out == {
+            ("arbitrum", wbtc): Decimal("0.08"),
+            ("arbitrum", tbtc): Decimal("0.07"),
+        }
+        assert fill.amount_usd == Decimal("15070.00")
+        assert fill.position_delta is not None
+        assert fill.position_delta.amounts == fill.tokens_out
 
     def test_coin_amounts_open_rejects_with_machine_visible_reason(self) -> None:
         from almanak.framework.intents import Intent

@@ -16,6 +16,7 @@ from almanak.connectors._strategy_base.runner_hook_registry import (
     RunnerHookRegistry,
     RunnerHookRegistryError,
     RunnerLPReceiptTopicCapability,
+    RunnerPoolDescriptorCapability,
     RunnerPoolKeyLookupCapability,
     RunnerResultEnrichmentCapability,
 )
@@ -89,6 +90,29 @@ class _PoolKeyLookupConnector(RunnerHookConnector, RunnerPoolKeyLookupCapability
 
 class _SecondPoolKeyLookupConnector(_PoolKeyLookupConnector):
     protocol: ClassVar[ProtocolName] = ProtocolName("pool_key_found")
+
+
+class _PoolDescriptorConnector(RunnerHookConnector, RunnerPoolDescriptorCapability):
+    protocol: ClassVar[ProtocolName] = ProtocolName("pool_descriptor")
+    kind: ClassVar[ProtocolKind] = ProtocolKind.LP
+
+    def __init__(self, descriptor: Any) -> None:
+        self.descriptor = descriptor
+        self.calls: list[tuple[str, Any, Any | None]] = []
+
+    def has_pool_descriptor_declarations(self, *, chain: str, config: Any) -> bool:
+        self.calls.append((chain, config, None))
+        return bool(config.get("exact_pool"))
+
+    def resolve_pool_descriptors(
+        self,
+        *,
+        gateway_client: Any,
+        chain: str,
+        config: Any,
+    ) -> tuple[Any, ...]:
+        self.calls.append((chain, config, gateway_client))
+        return (self.descriptor,)
 
 
 class _NoCapabilityConnector(RunnerHookConnector):
@@ -306,6 +330,27 @@ def test_build_pool_key_lookup_returns_first_callback() -> None:
     assert registry.build_pool_key_lookup(gateway_client) is found.lookup
     assert skipped.calls == [gateway_client]
     assert found.calls == [gateway_client]
+
+
+def test_pool_descriptor_capability_probes_before_resolving() -> None:
+    """Exact-pool connectors expose a transport-free declaration probe."""
+    registry = RunnerHookRegistry()
+    descriptor = object()
+    connector = _PoolDescriptorConnector(descriptor)
+    config = {"exact_pool": True}
+    gateway_client = object()
+    registry.register(connector)
+
+    assert registry.has_pool_descriptor_declarations(chain="arbitrum", config=config) is True
+    assert registry.resolve_pool_descriptors(
+        gateway_client=gateway_client,
+        chain="arbitrum",
+        config=config,
+    ) == (descriptor,)
+    assert connector.calls == [
+        ("arbitrum", config, None),
+        ("arbitrum", config, gateway_client),
+    ]
 
 
 def test_async_settlement_capability_dispatches_without_protocol_branching() -> None:

@@ -285,12 +285,14 @@ def _row_to_snapshot(row: dict, timestamp: int) -> gateway_pb2.PoolSnapshot:
     fee_revenue_24h = _safe_decimal_str(row.get("feesUSD"))
     token0_reserve = ""  # not on the V3 hour/day schema (price-only)
     token1_reserve = ""
+    fee_apy = ""
     unmeasured = build_unmeasured_fields(
         tvl=tvl,
         volume_24h=volume_24h,
         fee_revenue_24h=fee_revenue_24h,
         token0_reserve=token0_reserve,
         token1_reserve=token1_reserve,
+        fee_apy=fee_apy,
     )
     return gateway_pb2.PoolSnapshot(
         timestamp=timestamp,
@@ -300,6 +302,7 @@ def _row_to_snapshot(row: dict, timestamp: int) -> gateway_pb2.PoolSnapshot:
         token0_reserve=token0_reserve,
         token1_reserve=token1_reserve,
         unmeasured_fields=unmeasured,
+        fee_apy=fee_apy,
     )
 
 
@@ -359,12 +362,14 @@ def _aggregate_4h(parsed: list[tuple[int, dict]]) -> list[gateway_pb2.PoolSnapsh
         fee_revenue_24h = _sum_flow(bucket_rows, "feesUSD")
         token0_reserve = ""
         token1_reserve = ""
+        fee_apy = ""
         unmeasured = build_unmeasured_fields(
             tvl=tvl,
             volume_24h=volume_24h,
             fee_revenue_24h=fee_revenue_24h,
             token0_reserve=token0_reserve,
             token1_reserve=token1_reserve,
+            fee_apy=fee_apy,
         )
         snapshots.append(
             gateway_pb2.PoolSnapshot(
@@ -375,6 +380,7 @@ def _aggregate_4h(parsed: list[tuple[int, dict]]) -> list[gateway_pb2.PoolSnapsh
                 token0_reserve=token0_reserve,
                 token1_reserve=token1_reserve,
                 unmeasured_fields=unmeasured,
+                fee_apy=fee_apy,
             )
         )
     return snapshots

@@ -20,8 +20,10 @@ def _is_evm_address(value: str) -> bool:
 class PoolDescriptor:
     """Address-bound pool identity shared across execution and data planes.
 
-    Fee identity stays in raw factory units. Economic code must consume
-    :attr:`fee_rate`, which performs the one canonical normalization.
+    Fee identity stays in raw factory units when the venue exposes an immutable
+    factory discriminator.  Fungible/dynamic-fee venues may leave it
+    unmeasured; economic code must then use its existing venue-specific fee
+    fallback rather than fabricating a V3 tier.
     """
 
     chain: str
@@ -31,7 +33,7 @@ class PoolDescriptor:
     token1: str
     token0_decimals: int
     token1_decimals: int
-    fee_tier_units: int
+    fee_tier_units: int | None
     provenance: str
     factory: str | None = None
 
@@ -56,7 +58,8 @@ class PoolDescriptor:
             raise ValueError("pool descriptor factory must be a valid address when provided")
         if not 0 <= self.token0_decimals <= 36 or not 0 <= self.token1_decimals <= 36:
             raise ValueError("pool descriptor token decimals must be in the interval [0, 36]")
-        fee_rate_from_units(self.fee_tier_units)
+        if self.fee_tier_units is not None:
+            fee_rate_from_units(self.fee_tier_units)
         object.__setattr__(self, "chain", chain)
         object.__setattr__(self, "protocol", protocol)
         object.__setattr__(self, "address", address)
@@ -66,8 +69,9 @@ class PoolDescriptor:
         object.__setattr__(self, "factory", factory)
 
     @property
-    def fee_rate(self) -> Decimal:
-        return fee_rate_from_units(self.fee_tier_units)
+    def fee_rate(self) -> Decimal | None:
+        """Return the normalized immutable fee, or ``None`` when unmeasured."""
+        return fee_rate_from_units(self.fee_tier_units) if self.fee_tier_units is not None else None
 
     @property
     def key(self) -> tuple[str, str, str]:

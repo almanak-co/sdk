@@ -866,14 +866,12 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
 
         collateral_usd = self._perp_collateral_usd(params, market_state)
         required_margin_ratio = self._perp_required_margin_ratio(params.leverage, params.protocol)
+        available_collateral = self._perp_available_collateral(params, portfolio, market_state)
 
         can_open, reason = self._margin_validator.can_open_position(
             position_size=params.size_usd,
             collateral=collateral_usd,
-            # cash_usd alone is 0 for token-funded portfolios (platform
-            # token_funding path) — stables held as tokens ARE the margin
-            # capital, exactly as apply_fill debits them.
-            available_capital=portfolio.cash_like_available(),
+            available_capital=available_collateral,
             current_margin_used=self._get_current_margin_used(portfolio),
             margin_ratio=required_margin_ratio,
         )
@@ -908,6 +906,24 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
     ) -> Decimal:
         collateral_price = self._perp_collateral_price(params, market_state)
         return Decimal(str(params.collateral_amount)) * collateral_price
+
+    def _perp_available_collateral(
+        self,
+        params: _PerpOpenParams,
+        portfolio: "SimulatedPortfolio",
+        market_state: "MarketState",
+    ) -> Decimal:
+        """Value the wallet balance that can fund this collateral asset.
+
+        Stablecoin collateral shares the simulator's cash-like balance plane.
+        Non-cash collateral (for example tBTC in GMX's BTC/USD [tBTC-tBTC]
+        market) must be funded by the held token itself; unrelated cash must
+        not make an unavailable collateral token appear spendable.
+        """
+        if portfolio.is_cash_equivalent(params.collateral_token):
+            return portfolio.cash_like_available()
+        units = portfolio.get_token_balance(params.collateral_token)
+        return units * self._perp_collateral_price(params, market_state)
 
     def _perp_collateral_price(
         self,
@@ -1135,6 +1151,7 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
             funding_timestamp,
             "perp position update",
         )
+        self._mark_token_collateral(position, market_state, funding_timestamp)
         funding_chain = str(getattr(market_state, "chain", self._config.chain))
         self._apply_funding_if_due(position, elapsed_seconds, funding_timestamp, funding_chain)
 
@@ -1226,6 +1243,52 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
             critical_threshold=self._config.liquidation_critical_threshold,
             emit_warning=True,
         )
+
+    def _token_collateral_value(
+        self,
+        position: "SimulatedPosition",
+        market_state: "MarketState",
+        timestamp: datetime,
+    ) -> Decimal:
+        """Mark explicit perp collateral in its own token units."""
+        if position.is_liquidated:
+            return position.collateral_usd
+        collateral = position.perp_collateral_token_units
+        if collateral is None:
+            return position.collateral_usd
+        token, units = collateral
+        try:
+            price = market_state.get_price(token)
+        except KeyError:
+            price = None
+        if price is not None and price > Decimal("0"):
+            return units * price
+        if self._config.strict_reproducibility:
+            label = token_ref_display(token)
+            raise HistoricalDataUnavailableError(
+                data_type="price",
+                identifier=label,
+                timestamp=timestamp,
+                message=f"Price unavailable for perp collateral token {label}",
+                chain=self._config.chain,
+                protocol=position.protocol,
+            )
+        return position.collateral_usd
+
+    def _mark_token_collateral(
+        self,
+        position: "SimulatedPosition",
+        market_state: "MarketState",
+        timestamp: datetime,
+    ) -> None:
+        """Update margin inputs when explicit token collateral reprices."""
+        if position.perp_collateral_token_units is None:
+            return
+        collateral_usd = self._token_collateral_value(position, market_state, timestamp)
+        if collateral_usd <= Decimal("0"):
+            return
+        position.collateral_usd = collateral_usd
+        position.leverage = position.notional_usd / collateral_usd
 
     @staticmethod
     def _log_perp_position_update(position: "SimulatedPosition", current_price: Decimal) -> None:
@@ -2089,6 +2152,9 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
         Returns:
             Total position value in USD as a Decimal (collateral + PnL + funding)
         """
+        if position.is_liquidated:
+            return position.collateral_usd
+
         # Note: timestamp parameter accepted for interface consistency
         # Perp valuation is based on current market prices, not time-dependent
         price_timestamp = self._perp_price_timestamp(position, market_state, timestamp)
@@ -2101,8 +2167,9 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
             "perp position valuation",
         )
 
-        # Get collateral (initial margin)
-        collateral = position.collateral_usd
+        # Explicit margin may be a different asset from the perp base (for
+        # example tBTC collateral for a WBTC market), so mark its own units.
+        collateral = self._token_collateral_value(position, market_state, price_timestamp)
 
         # Calculate unrealized PnL
         unrealized_pnl = self._calculate_unrealized_pnl(position, current_price)
