@@ -6,6 +6,68 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.26.0] - 2026-08-18
+
+### Added
+
+- **Exact-pool market data and history.** Pool snapshots and historical reads now
+  preserve the exact venue and pool identity requested by strategies. (#3721)
+- **Typed asset identity and token decimals.** `AssetIdentity` carries canonical
+  chain/address identity through market-data paths, with decimals resolved from
+  token metadata instead of symbol assumptions. (#3730, #3743)
+- **Fail-closed venue verification contracts.** Exact venue, pool, and data-plane
+  assertions reject mismatches instead of silently falling back. (#3744, #3745,
+  #3748)
+- **Historical exact-pool backtesting.** Backtests can consume exact-pool history,
+  including Curve APY inputs, without substituting aggregate venue data. (#3760,
+  #3763)
+- **Basis-point-native slippage.** Intent and compiler boundaries preserve exact
+  slippage in basis points. (#3766)
+- **Price provenance.** Price observations retain provider and measurement
+  provenance for downstream validation and accounting. (#3727)
+- **Dynamic GMX market discovery.** GMX markets are verified from the live venue
+  registry rather than a hand-maintained symbol catalogue. (#3756)
+- **Typed package and DTO documentation.** Added PEP 561 metadata and expanded
+  documentation for 21 public data-transfer objects. (#3767)
+
+### Changed
+
+- **Stablecoin depeg checks use exact addresses.** Depeg protection no longer
+  conflates assets that share a display symbol. (#3729)
+- **Slippage and minimum-output handling is canonical.** Compilers consume one
+  normalized slippage/min-out contract across venues. (#3728)
+- **Receipt extraction fails closed.** Missing or contradictory execution evidence
+  remains unmeasured instead of being inferred as success. (#3751)
+- **Token normalization is chain-aware.** Address and native-token normalization
+  now respects the target chain family. (#3752)
+- **ERC-20 metadata reads are cached.** ABI and allowance lookup reuse reduces
+  repeated RPC work without weakening validation. (#3753)
+- **Wrapped/native identity lives on chain descriptors.** Callers use canonical
+  descriptor metadata instead of local symbol heuristics. (#3754)
+- **Almanak Code updated to v1.0.48.** Agent guidance, templates, and strategy
+  generation behavior were synchronized with the SDK contract. (#3719, #3722,
+  #3758, #3767, #3769, #3770)
+
+### Fixed
+
+- **Managed Anvil funding.** Zero native balances, ERC-7201 storage layouts, and
+  `anvil_dealERC20` edge cases now fund or fail explicitly. (#3714, #3720, #3723)
+- **Backtest identity and cadence.** Chain identity, historical series selection,
+  and strategy data cadence now remain consistent through simulation. (#3715,
+  #3717)
+- **LP pool and fee correctness.** Exact pool identity and fee semantics are
+  preserved through LP compilation and accounting. (#3716)
+- **Perp teardown uses the actual market address.** Teardown no longer closes a
+  symbol-derived or stale market. (#3685)
+- **Curve permissions are exact.** Safe permission generation targets the verified
+  Curve pool path. (#3724)
+- **Historical V3 reads support PoA chains and bounded ranges.** Historical pool
+  reads handle proof-of-authority headers and enforce query bounds. (#3757, #3759)
+- **Uniswap V3 ABI selection is strict.** Pool calls no longer proceed with an
+  incompatible ABI shape. (#3746)
+- **Pendle sUSDe resolves the correct market.** The connector selects the intended
+  sUSDe market rather than a symbol-adjacent alternative. (#3750)
+
 ## [2.25.1] - 2026-08-13
 
 ### Added
