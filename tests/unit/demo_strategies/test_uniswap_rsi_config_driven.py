@@ -79,6 +79,7 @@ def test_traderjoe_avalanche_config_controls_swap_protocol() -> None:
     assert intent.protocol == "traderjoe_v2"
     assert intent.from_token == "USDC"
     assert intent.to_token == "WAVAX"
+    assert intent.max_slippage == Decimal("0.01")
 
 
 def test_rsi_strategy_buys_only_on_fresh_oversold_transition() -> None:

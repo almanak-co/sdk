@@ -85,6 +85,33 @@ ChainedAmount = Decimal | Literal["all"]
 # Note: 'stable' rate was deprecated on Aave V3 and Spark (most assets disabled)
 InterestRateMode = Literal["variable"]
 
+_BPS_PER_UNIT = 10_000
+
+
+class _Omitted:
+    """Sentinel used when omission must differ from an explicit ``None``."""
+
+
+_OMITTED = _Omitted()
+
+
+def _basis_points_to_fraction(
+    value: int,
+    *,
+    field_name: str,
+    minimum: int,
+    maximum: int,
+    maximum_inclusive: bool,
+) -> Decimal:
+    """Validate an integer bps limit and convert it to a Decimal fraction."""
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise TypeError(f"{field_name} must be an int (got {type(value).__name__})")
+    valid = minimum <= value <= maximum if maximum_inclusive else minimum <= value < maximum
+    if not valid:
+        closing = "]" if maximum_inclusive else ")"
+        raise ValueError(f"{field_name} must be in [{minimum}, {maximum}{closing} (got {value})")
+    return Decimal(value) / Decimal(_BPS_PER_UNIT)
+
 
 def _supports_lp_close_exit_selectors(protocol: str | None) -> bool:
     """Return True when ``protocol`` declares the LP_CLOSE exit-selector capability.
@@ -1464,13 +1491,16 @@ class Intent:
         to_token: str,
         amount_usd: Decimal | None = None,
         amount: ChainedAmount | None = None,
-        max_slippage: Decimal = Decimal("0.005"),
+        max_slippage: Decimal | _Omitted = _OMITTED,
         max_price_impact: Decimal | None = None,
         protocol: str | None = None,
         chain: str | None = None,
         destination_chain: str | None = None,
         registry_handle: str | None = None,
         swap_params: dict[str, Any] | None = None,
+        *,
+        max_slippage_bps: int | None = None,
+        max_price_impact_bps: int | None = None,
     ) -> SwapIntent:
         """Create a swap intent.
 
@@ -1479,16 +1509,22 @@ class Intent:
             to_token: Symbol or address of the token to swap to
             amount_usd: Amount to swap in USD terms
             amount: Amount to swap in token terms, or "all" to use previous step output
-            max_slippage: Maximum acceptable slippage (default 0.5%)
+            max_slippage: Maximum acceptable slippage as a fraction (default 0.5%).
+                Mutually exclusive with ``max_slippage_bps``.
             max_price_impact: Maximum acceptable price impact vs oracle price (e.g., 0.50 = 50%).
                 Compilation fails if quoter/oracle deviation exceeds this.
-                Defaults to None (uses compiler config default of 10%).
+                Defaults to None (uses compiler config default of 10%). Mutually
+                exclusive with ``max_price_impact_bps``.
             protocol: Preferred protocol for the swap
             chain: Source chain for execution (defaults to strategy's primary chain)
             destination_chain: Destination chain for cross-chain swaps (None for same-chain)
             swap_params: Optional connector-specific routing/escape-hatch params
                 (e.g. Aerodrome ``{"classic": True}`` / ``{"tick_spacing": 200}``;
                 Curve ``{"pool": "0x..."}``). See :class:`SwapIntent.swap_params`.
+            max_slippage_bps: Maximum acceptable slippage in basis points.
+                Mutually exclusive with ``max_slippage``; ``50`` means 0.5%.
+            max_price_impact_bps: Maximum acceptable price impact in basis points.
+                Mutually exclusive with ``max_price_impact``; ``100`` means 1%.
 
         Returns:
             SwapIntent: The created swap intent
@@ -1507,13 +1543,37 @@ class Intent:
             intent = Intent.swap("USDC", "WETH", amount_usd=Decimal("1000"),
                                  chain="base", destination_chain="arbitrum", protocol="enso")
         """
+        if not isinstance(max_slippage, _Omitted) and max_slippage_bps is not None:
+            raise ValueError("max_slippage and max_slippage_bps are mutually exclusive")
+        if max_price_impact is not None and max_price_impact_bps is not None:
+            raise ValueError("max_price_impact and max_price_impact_bps are mutually exclusive")
+
+        resolved_max_slippage = Decimal("0.005") if isinstance(max_slippage, _Omitted) else max_slippage
+        if max_slippage_bps is not None:
+            resolved_max_slippage = _basis_points_to_fraction(
+                max_slippage_bps,
+                field_name="max_slippage_bps",
+                minimum=0,
+                maximum=_BPS_PER_UNIT,
+                maximum_inclusive=False,
+            )
+        resolved_max_price_impact = max_price_impact
+        if max_price_impact_bps is not None:
+            resolved_max_price_impact = _basis_points_to_fraction(
+                max_price_impact_bps,
+                field_name="max_price_impact_bps",
+                minimum=1,
+                maximum=_BPS_PER_UNIT,
+                maximum_inclusive=True,
+            )
+
         return SwapIntent(
             from_token=from_token,
             to_token=to_token,
             amount_usd=amount_usd,
             amount=amount,
-            max_slippage=max_slippage,
-            max_price_impact=max_price_impact,
+            max_slippage=resolved_max_slippage,
+            max_price_impact=resolved_max_price_impact,
             protocol=protocol,
             chain=chain,
             destination_chain=destination_chain,

@@ -20,11 +20,13 @@ from typing import Any
 import pytest
 from click.testing import CliRunner
 
+from almanak.core.intent_types import IntentType
 from almanak.framework.cli.check import (
     CheckReport,
     Finding,
     Layer,
     Severity,
+    _detect_template,
     check,
     run_checks,
 )
@@ -32,6 +34,7 @@ from almanak.framework.cli.new_strategy import (
     StrategyTemplate,
     new_strategy,
 )
+from almanak.framework.strategies.metadata import StrategyMetadata
 
 # ---------------------------------------------------------------------------
 # Scaffolding helper
@@ -157,6 +160,27 @@ def test_check_flags_placeholder_address_in_source(tmp_path: Path) -> None:
     assert report.has_errors()
 
 
+def test_check_flags_placeholder_after_class_body_raise(tmp_path: Path) -> None:
+    strategy_dir = _scaffold(tmp_path, StrategyTemplate.TA_SWAP, name="unreachable_class_placeholder")
+    _clean_scaffolded_config(strategy_dir)
+    strategy_file = strategy_dir / "strategy.py"
+    strategy_file.write_text(
+        strategy_file.read_text()
+        + """
+
+class GuardedConfiguration:
+    raise RuntimeError("unsupported")
+    vault = "0x_SET_VAULT_ADDRESS"
+"""
+    )
+
+    report = run_checks(strategy_dir)
+
+    findings = [f for f in report.findings if f.code == "placeholder_address" and f.line is not None]
+    assert len(findings) == 1
+    assert findings[0].file == str(strategy_file)
+
+
 def test_check_cli_exit_2_on_placeholder(tmp_path: Path) -> None:
     """CLI exit code is 2 when a placeholder address is present."""
     strategy_dir = _scaffold(tmp_path, StrategyTemplate.BLANK, name="corrupted_cli")
@@ -249,6 +273,35 @@ def test_check_warns_lending_missing_health_factor(tmp_path: Path) -> None:
     assert findings, f"expected lending heuristic warning, got: {[f.code for f in report.findings]}"
 
 
+def test_explicit_swap_intents_prevent_exact_pool_lp_misclassification(tmp_path: Path) -> None:
+    """A pool pin does not make a declared SWAP/HOLD strategy an LP strategy."""
+    strategy_dir = _scaffold(tmp_path, StrategyTemplate.TA_SWAP, name="exact_pool_swap")
+    _clean_scaffolded_config(strategy_dir)
+    config_path = strategy_dir / "config.json"
+    config = json.loads(config_path.read_text())
+    config["pool"] = "0x1111111111111111111111111111111111111111"
+    config_path.write_text(json.dumps(config, indent=4) + "\n")
+
+    report = run_checks(strategy_dir)
+
+    load_errors = [f.code for f in report.findings if f.code in {"import_error", "missing_strategy_py"}]
+    assert not load_errors, f"strategy failed to load; template assertion would be vacuous: {load_errors}"
+    assert report.template is None
+    assert not any(f.code == "template_lp_missing_fee_tier" for f in report.findings)
+
+
+def test_explicit_lp_collect_fees_intent_selects_lp_template() -> None:
+    """The canonical LP_COLLECT_FEES value is recognized as an LP intent."""
+
+    class FeeCollector:
+        STRATEGY_METADATA = StrategyMetadata(
+            name="fee_collector",
+            intent_types=[IntentType.LP_COLLECT_FEES],
+        )
+
+    assert _detect_template(FeeCollector, {}, {}) == "lp"
+
+
 # ---------------------------------------------------------------------------
 # AST-only behaviour: empty teardown, missing strategy.py, etc.
 # ---------------------------------------------------------------------------
@@ -314,6 +367,507 @@ def test_check_flags_empty_teardown(tmp_path: Path) -> None:
     report = run_checks(strategy_dir)
     codes = [f.code for f in report.findings]
     assert "empty_teardown_intents" in codes, f"BLANK scaffold should warn about empty teardown, got: {codes}"
+
+
+def _append_slippage_probe(strategy_dir: Path, body: str) -> Path:
+    """Append a module-level probe; the AST layer intentionally scans helpers too."""
+    strategy_file = strategy_dir / "strategy.py"
+    strategy_file.write_text(strategy_file.read_text() + "\n\n" + body + "\n")
+    return strategy_file
+
+
+def _assert_ast_scan_ran(report: CheckReport) -> None:
+    """Fail loudly when a generated probe never reached AST analysis."""
+    blockers = [f.code for f in report.findings if f.code in {"syntax_error", "read_failed", "missing_strategy_py"}]
+    assert not blockers, f"AST scan did not run; negative assertions would be vacuous: {blockers}"
+
+
+def test_check_flags_exact_alm3329_nested_getattr_fields(tmp_path: Path) -> None:
+    strategy_dir = _scaffold(tmp_path, StrategyTemplate.TA_SWAP, name="bad_slippage_fields")
+    _clean_scaffolded_config(strategy_dir)
+    strategy_file = _append_slippage_probe(
+        strategy_dir,
+        """def execution_check(market, token_in, token_out, amount):
+    estimate = market.estimate_slippage(token_in, token_out, amount).value
+    slippage = getattr(estimate, \"slippage\", getattr(estimate, \"slippage_pct\", \"Infinity\"))
+    impact = getattr(estimate, \"price_impact\", getattr(estimate, \"price_impact_pct\", \"Infinity\"))
+    return slippage, impact""",
+    )
+
+    report = run_checks(strategy_dir)
+    findings = [f for f in report.findings if f.code == "invalid_slippage_estimate_field"]
+
+    assert {f.field for f in findings} == {
+        "slippage",
+        "slippage_pct",
+        "price_impact",
+        "price_impact_pct",
+    }
+    assert all(f.severity == Severity.ERROR and f.file == str(strategy_file) for f in findings)
+
+
+def test_check_flags_direct_invalid_field_on_envelope_alias(tmp_path: Path) -> None:
+    strategy_dir = _scaffold(tmp_path, StrategyTemplate.TA_SWAP, name="bad_direct_slippage_field")
+    _clean_scaffolded_config(strategy_dir)
+    _append_slippage_probe(
+        strategy_dir,
+        """def execution_check(market):
+    envelope = market.estimate_slippage(\"WETH\", \"USDC\", 1)
+    alias = envelope
+    return alias.slippage""",
+    )
+
+    report = run_checks(strategy_dir)
+
+    findings = [f for f in report.findings if f.code == "invalid_slippage_estimate_field"]
+    assert len(findings) == 1
+    assert findings[0].field == "slippage"
+
+
+def test_check_accepts_canonical_slippage_fields_and_unrelated_models(tmp_path: Path) -> None:
+    strategy_dir = _scaffold(tmp_path, StrategyTemplate.TA_SWAP, name="good_slippage_fields")
+    _clean_scaffolded_config(strategy_dir)
+    _append_slippage_probe(
+        strategy_dir,
+        """def execution_check(market, unrelated):
+    estimate = market.estimate_slippage(\"WETH\", \"USDC\", 1).value
+    canonical = estimate.within_limits(max_slippage_bps=50, max_price_impact_bps=100)
+    details = estimate.effective_slippage_bps, estimate.price_impact_bps
+    legacy_other_api = getattr(unrelated, \"slippage_pct\", None)
+    return canonical, details, legacy_other_api""",
+    )
+
+    report = run_checks(strategy_dir)
+
+    _assert_ast_scan_ran(report)
+    assert not any(f.code == "invalid_slippage_estimate_field" for f in report.findings)
+
+
+def test_check_ignores_unrelated_estimate_slippage_methods(tmp_path: Path) -> None:
+    strategy_dir = _scaffold(tmp_path, StrategyTemplate.TA_SWAP, name="unrelated_slippage_api")
+    _clean_scaffolded_config(strategy_dir)
+    _append_slippage_probe(
+        strategy_dir,
+        """def execution_check(custom_model):
+    estimate = custom_model.estimate_slippage("WETH", "USDC", 1)
+    return estimate.price_impact""",
+    )
+
+    report = run_checks(strategy_dir)
+
+    _assert_ast_scan_ran(report)
+    assert not any(f.code == "invalid_slippage_estimate_field" for f in report.findings)
+
+
+def test_check_scopes_slippage_aliases_to_their_function(tmp_path: Path) -> None:
+    strategy_dir = _scaffold(tmp_path, StrategyTemplate.TA_SWAP, name="scoped_slippage_alias")
+    _clean_scaffolded_config(strategy_dir)
+    _append_slippage_probe(
+        strategy_dir,
+        """def quote(market):
+    estimate = market.estimate_slippage(\"WETH\", \"USDC\", 1).value
+    return estimate.effective_slippage_bps
+
+def unrelated(estimate):
+    return estimate.price_impact""",
+    )
+
+    report = run_checks(strategy_dir)
+
+    _assert_ast_scan_ran(report)
+    assert not any(f.code == "invalid_slippage_estimate_field" for f in report.findings)
+
+
+def test_check_kills_slippage_alias_on_reassignment(tmp_path: Path) -> None:
+    strategy_dir = _scaffold(tmp_path, StrategyTemplate.TA_SWAP, name="reassigned_slippage_alias")
+    _clean_scaffolded_config(strategy_dir)
+    _append_slippage_probe(
+        strategy_dir,
+        """def execution_check(market, unrelated):
+    estimate = market.estimate_slippage(\"WETH\", \"USDC\", 1).value
+    estimate = unrelated
+    return estimate.slippage""",
+    )
+
+    report = run_checks(strategy_dir)
+
+    _assert_ast_scan_ran(report)
+    assert not any(f.code == "invalid_slippage_estimate_field" for f in report.findings)
+
+
+def test_check_tracks_slippage_results_stored_on_attributes(tmp_path: Path) -> None:
+    strategy_dir = _scaffold(tmp_path, StrategyTemplate.TA_SWAP, name="attribute_slippage_alias")
+    _clean_scaffolded_config(strategy_dir)
+    _append_slippage_probe(
+        strategy_dir,
+        """def execution_check(self, market):
+    self.estimate = market.estimate_slippage(\"WETH\", \"USDC\", 1).value
+    return getattr(self.estimate, \"slippage\", None)""",
+    )
+
+    report = run_checks(strategy_dir)
+
+    findings = [f for f in report.findings if f.code == "invalid_slippage_estimate_field"]
+    assert len(findings) == 1
+    assert findings[0].field == "slippage"
+
+
+@pytest.mark.parametrize(
+    "branches",
+    [
+        """if condition:
+        estimate = market.estimate_slippage(\"WETH\", \"USDC\", 1).value
+    else:
+        estimate = unrelated""",
+        """if condition:
+        estimate = unrelated
+    else:
+        estimate = market.estimate_slippage(\"WETH\", \"USDC\", 1).value""",
+    ],
+)
+def test_check_merges_slippage_aliases_from_either_if_branch(tmp_path: Path, branches: str) -> None:
+    strategy_dir = _scaffold(tmp_path, StrategyTemplate.TA_SWAP, name="branched_slippage_alias")
+    _clean_scaffolded_config(strategy_dir)
+    _append_slippage_probe(
+        strategy_dir,
+        f"""def execution_check(market, unrelated, condition):
+    {branches}
+    return estimate.slippage""",
+    )
+
+    report = run_checks(strategy_dir)
+
+    findings = [f for f in report.findings if f.code == "invalid_slippage_estimate_field"]
+    assert len(findings) == 1
+    assert findings[0].field == "slippage"
+
+
+@pytest.mark.parametrize(
+    "control_flow",
+    [
+        """try:
+        estimate = market.estimate_slippage(\"WETH\", \"USDC\", 1).value
+    except RuntimeError:
+        estimate = unrelated""",
+        """match condition:
+        case True:
+            estimate = market.estimate_slippage(\"WETH\", \"USDC\", 1).value
+        case _:
+            estimate = unrelated""",
+    ],
+)
+def test_check_merges_slippage_aliases_from_try_and_match(tmp_path: Path, control_flow: str) -> None:
+    strategy_dir = _scaffold(tmp_path, StrategyTemplate.TA_SWAP, name="merged_slippage_alias")
+    _clean_scaffolded_config(strategy_dir)
+    _append_slippage_probe(
+        strategy_dir,
+        f"""def execution_check(market, unrelated, condition):
+    {control_flow}
+    return estimate.price_impact""",
+    )
+
+    report = run_checks(strategy_dir)
+
+    findings = [f for f in report.findings if f.code == "invalid_slippage_estimate_field"]
+    assert len(findings) == 1
+    assert findings[0].field == "price_impact"
+
+
+def test_check_treats_loop_and_comprehension_targets_as_rebindings(tmp_path: Path) -> None:
+    strategy_dir = _scaffold(tmp_path, StrategyTemplate.TA_SWAP, name="loop_slippage_rebinding")
+    _clean_scaffolded_config(strategy_dir)
+    _append_slippage_probe(
+        strategy_dir,
+        """def execution_check(market, unrelated_values):
+    estimate = market.estimate_slippage(\"WETH\", \"USDC\", 1).value
+    for estimate in unrelated_values:
+        _ = estimate.price_impact
+    values = [estimate.price_impact for estimate in unrelated_values]
+    return values""",
+    )
+
+    report = run_checks(strategy_dir)
+
+    _assert_ast_scan_ran(report)
+    assert not any(f.code == "invalid_slippage_estimate_field" for f in report.findings)
+
+
+@pytest.mark.parametrize(
+    "rebinding",
+    [
+        """head, *estimate = unrelated_values
+    return estimate.price_impact""",
+        """for head, *estimate in unrelated_values:
+        _ = estimate.price_impact
+    return head""",
+    ],
+)
+def test_check_treats_starred_targets_as_rebindings(tmp_path: Path, rebinding: str) -> None:
+    strategy_dir = _scaffold(tmp_path, StrategyTemplate.TA_SWAP, name="starred_slippage_rebinding")
+    _clean_scaffolded_config(strategy_dir)
+    _append_slippage_probe(
+        strategy_dir,
+        f"""def execution_check(market, unrelated_values):
+    estimate = market.estimate_slippage("WETH", "USDC", 1).value
+    {rebinding}""",
+    )
+
+    report = run_checks(strategy_dir)
+
+    _assert_ast_scan_ran(report)
+    assert not any(f.code == "invalid_slippage_estimate_field" for f in report.findings)
+
+
+def test_check_tracks_loop_carried_slippage_aliases(tmp_path: Path) -> None:
+    strategy_dir = _scaffold(tmp_path, StrategyTemplate.TA_SWAP, name="loop_carried_slippage_alias")
+    _clean_scaffolded_config(strategy_dir)
+    _append_slippage_probe(
+        strategy_dir,
+        """def execution_check(market, tokens):
+    cached = None
+    for token in tokens:
+        if cached is None:
+            cached = market.estimate_slippage(token, "USDC", 1).value
+        else:
+            _ = cached.slippage
+    return cached""",
+    )
+
+    report = run_checks(strategy_dir)
+
+    findings = [f for f in report.findings if f.code == "invalid_slippage_estimate_field"]
+    assert len(findings) == 1
+    assert findings[0].field == "slippage"
+
+
+def test_check_preserves_captured_slippage_aliases_in_closures(tmp_path: Path) -> None:
+    strategy_dir = _scaffold(tmp_path, StrategyTemplate.TA_SWAP, name="captured_slippage_alias")
+    _clean_scaffolded_config(strategy_dir)
+    _append_slippage_probe(
+        strategy_dir,
+        """def execution_check(market):
+    estimate = market.estimate_slippage(\"WETH\", \"USDC\", 1).value
+
+    def nested():
+        return estimate.slippage
+
+    return nested""",
+    )
+
+    report = run_checks(strategy_dir)
+
+    findings = [f for f in report.findings if f.code == "invalid_slippage_estimate_field"]
+    assert len(findings) == 1
+    assert findings[0].field == "slippage"
+
+
+def test_check_respects_nested_parameter_shadowing_and_checks_defaults(tmp_path: Path) -> None:
+    strategy_dir = _scaffold(tmp_path, StrategyTemplate.TA_SWAP, name="nested_slippage_shadow")
+    _clean_scaffolded_config(strategy_dir)
+    _append_slippage_probe(
+        strategy_dir,
+        """def execution_check(market):
+    estimate = market.estimate_slippage(\"WETH\", \"USDC\", 1).value
+
+    def shadowed(estimate):
+        return estimate.slippage
+
+    def bad_default(value=estimate.price_impact):
+        return value
+
+    return shadowed, bad_default""",
+    )
+
+    report = run_checks(strategy_dir)
+
+    findings = [f for f in report.findings if f.code == "invalid_slippage_estimate_field"]
+    assert len(findings) == 1
+    assert findings[0].field == "price_impact"
+
+
+@pytest.mark.parametrize(
+    "conditional_reassignment",
+    [
+        """while condition:
+        estimate = unrelated""",
+        "condition and (estimate := unrelated)",
+    ],
+)
+def test_check_preserves_zero_execution_and_short_circuit_paths(
+    tmp_path: Path,
+    conditional_reassignment: str,
+) -> None:
+    strategy_dir = _scaffold(tmp_path, StrategyTemplate.TA_SWAP, name="conditional_slippage_rebinding")
+    _clean_scaffolded_config(strategy_dir)
+    _append_slippage_probe(
+        strategy_dir,
+        f"""def execution_check(market, unrelated, condition):
+    estimate = market.estimate_slippage(\"WETH\", \"USDC\", 1).value
+    {conditional_reassignment}
+    return estimate.slippage""",
+    )
+
+    report = run_checks(strategy_dir)
+
+    findings = [f for f in report.findings if f.code == "invalid_slippage_estimate_field"]
+    assert len(findings) == 1
+    assert findings[0].field == "slippage"
+
+
+def test_check_drops_pre_match_state_for_exhaustive_match(tmp_path: Path) -> None:
+    strategy_dir = _scaffold(tmp_path, StrategyTemplate.TA_SWAP, name="exhaustive_match_rebinding")
+    _clean_scaffolded_config(strategy_dir)
+    _append_slippage_probe(
+        strategy_dir,
+        """def execution_check(market, unrelated, condition):
+    estimate = market.estimate_slippage(\"WETH\", \"USDC\", 1).value
+    match condition:
+        case True:
+            estimate = unrelated
+        case _:
+            estimate = unrelated
+    return estimate.slippage""",
+    )
+
+    report = run_checks(strategy_dir)
+
+    _assert_ast_scan_ran(report)
+    assert not any(f.code == "invalid_slippage_estimate_field" for f in report.findings)
+
+
+def test_check_tracks_instance_slippage_results_across_methods(tmp_path: Path) -> None:
+    strategy_dir = _scaffold(tmp_path, StrategyTemplate.TA_SWAP, name="cached_slippage_attribute")
+    _clean_scaffolded_config(strategy_dir)
+    _append_slippage_probe(
+        strategy_dir,
+        """class SlippageCache:
+    def populate(self, market, unrelated, stop):
+        self.estimate = market.estimate_slippage(\"WETH\", \"USDC\", 1).value
+        if stop:
+            return
+        self.estimate = unrelated
+
+    def validate(self):
+        return self.estimate.price_impact""",
+    )
+
+    report = run_checks(strategy_dir)
+
+    findings = [f for f in report.findings if f.code == "invalid_slippage_estimate_field"]
+    assert len(findings) == 1
+    assert findings[0].field == "price_impact"
+
+
+def test_check_tracks_cross_method_instance_aliases_to_fixed_point(tmp_path: Path) -> None:
+    strategy_dir = _scaffold(tmp_path, StrategyTemplate.TA_SWAP, name="aliased_slippage_attribute")
+    _clean_scaffolded_config(strategy_dir)
+    _append_slippage_probe(
+        strategy_dir,
+        """class SlippageCache:
+    def populate(self, market):
+        self.estimate = market.estimate_slippage("WETH", "USDC", 1).value
+
+    def alias(self):
+        self.other = self.estimate
+
+    def validate(self):
+        return self.other.slippage""",
+    )
+
+    report = run_checks(strategy_dir)
+
+    findings = [f for f in report.findings if f.code == "invalid_slippage_estimate_field"]
+    assert len(findings) == 1
+    assert findings[0].field == "slippage"
+
+
+def test_check_exports_only_ordered_instance_attribute_exit_state(tmp_path: Path) -> None:
+    strategy_dir = _scaffold(tmp_path, StrategyTemplate.TA_SWAP, name="overwritten_slippage_attribute")
+    _clean_scaffolded_config(strategy_dir)
+    _append_slippage_probe(
+        strategy_dir,
+        """class SlippageCache:
+    def populate(self, market, unrelated):
+        self.estimate = market.estimate_slippage(\"WETH\", \"USDC\", 1).value
+        self.estimate = unrelated
+        self.first = self.second
+        self.second = market.estimate_slippage(\"WETH\", \"USDC\", 1).value
+
+    def validate_unrelated_fields(self):
+        return self.estimate.slippage, self.first.price_impact""",
+    )
+
+    report = run_checks(strategy_dir)
+
+    _assert_ast_scan_ran(report)
+    assert not any(f.code == "invalid_slippage_estimate_field" for f in report.findings)
+
+
+def test_check_applies_finally_overwrites_to_recorded_exit_states(tmp_path: Path) -> None:
+    strategy_dir = _scaffold(tmp_path, StrategyTemplate.TA_SWAP, name="finally_overwritten_slippage_attribute")
+    _clean_scaffolded_config(strategy_dir)
+    _append_slippage_probe(
+        strategy_dir,
+        """class SlippageCache:
+    def populate(self, market, unrelated):
+        try:
+            self.estimate = market.estimate_slippage("WETH", "USDC", 1).value
+            return
+        finally:
+            self.estimate = unrelated
+
+    def validate_unrelated_field(self):
+        return self.estimate.slippage""",
+    )
+
+    report = run_checks(strategy_dir)
+
+    _assert_ast_scan_ran(report)
+    assert not any(f.code == "invalid_slippage_estimate_field" for f in report.findings)
+
+
+def test_check_reports_finally_field_once_on_normal_scanner_path(tmp_path: Path) -> None:
+    strategy_dir = _scaffold(tmp_path, StrategyTemplate.TA_SWAP, name="invalid_field_in_finally")
+    _clean_scaffolded_config(strategy_dir)
+    _append_slippage_probe(
+        strategy_dir,
+        """def execution_check(market):
+    try:
+        return None
+    finally:
+        estimate = market.estimate_slippage("WETH", "USDC", 1).value
+        _ = estimate.slippage""",
+    )
+
+    report = run_checks(strategy_dir)
+
+    findings = [f for f in report.findings if f.code == "invalid_slippage_estimate_field"]
+    assert len(findings) == 1
+    assert findings[0].field == "slippage"
+
+
+def test_check_does_not_leak_terminated_branch_state_into_fallthrough(tmp_path: Path) -> None:
+    strategy_dir = _scaffold(tmp_path, StrategyTemplate.TA_SWAP, name="terminated_slippage_branch")
+    _clean_scaffolded_config(strategy_dir)
+    _append_slippage_probe(
+        strategy_dir,
+        """class SlippageCache:
+    def populate(self, market, unrelated, stop):
+        if stop:
+            self.estimate = market.estimate_slippage(\"WETH\", \"USDC\", 1).value
+            return
+        else:
+            self.estimate = unrelated
+        self.other = self.estimate
+
+    def validate_fallthrough_value(self):
+        return self.other.slippage""",
+    )
+
+    report = run_checks(strategy_dir)
+
+    _assert_ast_scan_ran(report)
+    assert not any(f.code == "invalid_slippage_estimate_field" for f in report.findings)
 
 
 # ---------------------------------------------------------------------------
@@ -433,9 +987,7 @@ def test_check_reports_config_validation_error(tmp_path: Path) -> None:
     assert report.to_dict()["summary"]["errors"] >= 1
 
 
-def test_check_handles_missing_validate_config_hook(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_check_handles_missing_validate_config_hook(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """When the installed SDK lacks ``validate_config``, ``check`` must log
     an info-level ``validate_config_unavailable`` finding and keep going.
 
@@ -449,9 +1001,7 @@ def test_check_handles_missing_validate_config_hook(
     original_init = IntentStrategy.__init__
 
     def _fake_init(self: Any, *args: Any, **kwargs: Any) -> None:
-        raise AttributeError(
-            "'IntentStrategy' object has no attribute 'validate_config'"
-        )
+        raise AttributeError("'IntentStrategy' object has no attribute 'validate_config'")
 
     monkeypatch.setattr(IntentStrategy, "__init__", _fake_init)
 
@@ -480,8 +1030,7 @@ def test_check_handles_missing_validate_config_hook(
 
     infos = [f for f in report.findings if f.code == "validate_config_unavailable"]
     assert infos, (
-        f"expected validate_config_unavailable info, got: "
-        f"{[(f.code, f.severity.value) for f in report.findings]}"
+        f"expected validate_config_unavailable info, got: {[(f.code, f.severity.value) for f in report.findings]}"
     )
     assert infos[0].severity == Severity.INFO
     # The scaffolded strategy is otherwise clean: the missing hook must not

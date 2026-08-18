@@ -1017,6 +1017,9 @@ twap = market.twap(
 lwap = market.lwap("WETH/USDC")                           # DataEnvelope[AggregatedPrice]
 depth = market.liquidity_depth("0x...")                    # DataEnvelope[LiquidityDepth]
 slip = market.estimate_slippage("WETH", "USDC", Decimal("10000"))  # DataEnvelope[SlippageEstimate]
+# Canonical fields live on slip.value and are integer basis points:
+if not slip.value.within_limits(max_slippage_bps=75, max_price_impact_bps=100):
+    return Intent.hold(reason="pre-trade slippage or price impact exceeds limit")
 prices = market.price_across_dexs("WETH", "USDC", Decimal("1"))   # list[DexQuote]
 best_dex = market.best_dex_price("WETH", "USDC", Decimal("1"))    # BestDexResult
 ```
@@ -1029,11 +1032,12 @@ possible; convert the base-side USD amount with the already-validated reference 
 ```python
 pool = market.pool_price(APPROVED_POOL, chain="bsc")
 depth = market.liquidity_depth(APPROVED_POOL, chain="bsc")
+trade_amount = Decimal("27000")  # Quote-token units; the quote token is a USD stablecoin.
 
 quote_side = market.estimate_slippage(
     self.quote_token_address,
     self.base_token_address,
-    Decimal("27000"),
+    trade_amount,
     chain="bsc",
     protocol="pancakeswap_v3",
     pool_address=APPROVED_POOL,
@@ -1041,19 +1045,36 @@ quote_side = market.estimate_slippage(
 base_side = market.estimate_slippage(
     self.base_token_address,
     self.quote_token_address,
-    Decimal("27000") / reference.price,
+    trade_amount / reference.price,
     chain="bsc",
     protocol="pancakeswap_v3",
     pool_address=APPROVED_POOL,
 )
-if max(quote_side.value.effective_slippage_bps, base_side.value.effective_slippage_bps) > 75:
+if not all(
+    estimate.value.within_limits(max_slippage_bps=75, max_price_impact_bps=100)
+    for estimate in (quote_side, base_side)
+):
     return Intent.hold(reason="approved pool fails the $27k / 75 bps depth contract")
+
+return Intent.swap(
+    self.quote_token_address,
+    self.base_token_address,
+    amount=trade_amount,
+    protocol="pancakeswap_v3",
+    swap_params={"pool": APPROVED_POOL},
+    max_slippage_bps=75,
+    max_price_impact_bps=100,
+)
 ```
 
 `pool_price` includes the exact pool address, fee, block number, and timestamp. `liquidity_depth`
 contains current tick/liquidity plus initialized ticks. `estimate_slippage(pool_address=...)`
 simulates those ticks and is the execution-grade pre-trade quote/impact check. If any read is
 unavailable, propagate the typed data error or return `HOLD`; do not retry against another pool.
+The result fields are `effective_slippage_bps` and `price_impact_bps`; there are no generic
+`slippage`, `slippage_pct`, `price_impact`, or `price_impact_pct` compatibility aliases. Do not
+probe guessed field names with `getattr` fallbacks—use `within_limits()` when comparing configured
+bps limits, and pass those same limits to `Intent.swap` with the bps-native keywords.
 
 > **Explicit-pool decimals contract (`twap`):** any call that supplies
 > `pool_address` directly must either pass

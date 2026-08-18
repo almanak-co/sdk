@@ -559,7 +559,7 @@ class UniswapRSIStrategy(IntentStrategy):
                 from_token=self.quote_token,
                 to_token=self.base_token,
                 amount_usd=self.trade_size_usd,
-                max_slippage=Decimal(str(self.max_slippage_bps)) / Decimal("10000"),  # Convert bps to decimal
+                max_slippage_bps=self.max_slippage_bps,
                 protocol=self.protocol,
                 swap_params=self._pin_params(),
             )
@@ -612,7 +612,7 @@ class UniswapRSIStrategy(IntentStrategy):
                 from_token=self.base_token,
                 to_token=self.quote_token,
                 amount_usd=self.trade_size_usd,
-                max_slippage=Decimal(str(self.max_slippage_bps)) / Decimal("10000"),  # Convert bps to decimal
+                max_slippage_bps=self.max_slippage_bps,
                 protocol=self.protocol,
                 swap_params=self._pin_params(),
             )
@@ -885,17 +885,18 @@ class UniswapRSIStrategy(IntentStrategy):
 
         intents: list[AnyIntent] = []
 
-        # Determine slippage based on mode
+        # Determine slippage based on mode, preserving the same bps unit used
+        # by strategy configuration and Intent.swap's public boundary.
         if mode == TeardownMode.HARD:
             # Emergency: higher slippage tolerance for faster exit
-            max_slippage = Decimal("0.03")  # 3%
+            max_slippage_bps = 300  # 3%
         else:
             # Graceful: use configured slippage
-            max_slippage = Decimal(str(self.max_slippage_bps)) / Decimal("10000")
+            max_slippage_bps = self.max_slippage_bps
 
         logger.info(
             f"Generating teardown intent: swap {self.base_token} -> "
-            f"{self.quote_token} (mode={mode.value}, slippage={max_slippage})"
+            f"{self.quote_token} (mode={mode.value}, slippage_bps={max_slippage_bps})"
         )
 
         # Swap all base token back to quote token
@@ -904,7 +905,7 @@ class UniswapRSIStrategy(IntentStrategy):
                 from_token=self.base_token,
                 to_token=self.quote_token,
                 amount="all",  # Swap entire balance
-                max_slippage=max_slippage,
+                max_slippage_bps=max_slippage_bps,
                 protocol=self.protocol,
             )
         )

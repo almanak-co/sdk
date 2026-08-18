@@ -17,7 +17,7 @@ Example:
 
     estimator = SlippageEstimator(reader, pool_reader_registry=registry)
     slip = estimator.estimate_slippage("WETH", "USDC", Decimal("10"), "arbitrum")
-    print(slip.price_impact_bps)
+    print(slip.value.price_impact_bps)
 """
 
 from __future__ import annotations
@@ -131,6 +131,68 @@ class SlippageEstimate:
     price_impact_bps: int
     effective_slippage_bps: int
     recommended_max_size: Decimal
+
+    def within_limits(
+        self,
+        *,
+        max_slippage_bps: int,
+        max_price_impact_bps: int | None = None,
+    ) -> bool:
+        """Return whether this estimate is inside the supplied bps limits.
+
+        This keeps strategy risk configuration and estimator output in the
+        same unit.  Strategies should not convert these integer basis-point
+        fields to percentages or fractional ``Decimal`` values just to compare
+        them.
+
+        Args:
+            max_slippage_bps: Maximum effective slippage in ``[0, 10_000)``.
+            max_price_impact_bps: Optional maximum price impact in
+                ``(0, 10_000]``. ``None`` disables this second comparison.
+
+        Returns:
+            ``True`` when both enabled limits are met. Equality is accepted.
+
+        Raises:
+            TypeError: If a limit is not an integer (booleans are rejected).
+            ValueError: If a limit is outside its documented domain.
+        """
+        self._validate_limit(
+            max_slippage_bps,
+            field_name="max_slippage_bps",
+            minimum=0,
+            maximum=10_000,
+            maximum_inclusive=False,
+        )
+        if max_price_impact_bps is not None:
+            self._validate_limit(
+                max_price_impact_bps,
+                field_name="max_price_impact_bps",
+                minimum=1,
+                maximum=10_000,
+                maximum_inclusive=True,
+            )
+
+        return self.effective_slippage_bps <= max_slippage_bps and (
+            max_price_impact_bps is None or self.price_impact_bps <= max_price_impact_bps
+        )
+
+    @staticmethod
+    def _validate_limit(
+        value: int,
+        *,
+        field_name: str,
+        minimum: int,
+        maximum: int,
+        maximum_inclusive: bool,
+    ) -> None:
+        """Validate one integer bps limit without coupling data to intents."""
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise TypeError(f"{field_name} must be an int (got {type(value).__name__})")
+        valid = minimum <= value <= maximum if maximum_inclusive else minimum <= value < maximum
+        if not valid:
+            closing = "]" if maximum_inclusive else ")"
+            raise ValueError(f"{field_name} must be in [{minimum}, {maximum}{closing} (got {value})")
 
 
 # Plausible band for a *stable* 2-coin realized rate (token_out per token_in).

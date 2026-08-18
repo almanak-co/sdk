@@ -150,6 +150,38 @@ class TestSlippageEstimate:
         assert est.effective_slippage_bps == 30
         assert est.recommended_max_size == Decimal("100000")
 
+    @pytest.fixture
+    def estimate(self) -> SlippageEstimate:
+        return SlippageEstimate(
+            expected_price=Decimal("0.99"),
+            price_impact_bps=25,
+            effective_slippage_bps=30,
+            recommended_max_size=Decimal("1000"),
+        )
+
+    def test_within_limits_accepts_equal_boundaries(self, estimate: SlippageEstimate):
+        assert estimate.within_limits(max_slippage_bps=30, max_price_impact_bps=25)
+
+    def test_within_limits_checks_each_enabled_limit(self, estimate: SlippageEstimate):
+        assert not estimate.within_limits(max_slippage_bps=29)
+        assert not estimate.within_limits(max_slippage_bps=30, max_price_impact_bps=24)
+        assert estimate.within_limits(max_slippage_bps=30)
+
+    @pytest.mark.parametrize(
+        ("kwargs", "error_type"),
+        [
+            ({"max_slippage_bps": True}, TypeError),
+            ({"max_slippage_bps": Decimal("30")}, TypeError),
+            ({"max_slippage_bps": -1}, ValueError),
+            ({"max_slippage_bps": 10_000}, ValueError),
+            ({"max_slippage_bps": 30, "max_price_impact_bps": 0}, ValueError),
+            ({"max_slippage_bps": 30, "max_price_impact_bps": 10_001}, ValueError),
+        ],
+    )
+    def test_within_limits_rejects_invalid_limits(self, estimate: SlippageEstimate, kwargs, error_type):
+        with pytest.raises(error_type):
+            estimate.within_limits(**kwargs)
+
 
 # ---------------------------------------------------------------------------
 # Test encoding helpers

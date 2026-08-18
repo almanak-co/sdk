@@ -18,6 +18,7 @@ from almanak.framework.market.testing import seeded
 
 T0 = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
 COOLDOWN_S = 3600
+WETH_ADDRESS = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
 
 
 @pytest.fixture
@@ -45,7 +46,7 @@ def snap(ts: datetime, *, rsi: Decimal = Decimal("50")):
             "USDC": TokenBalance(symbol="USDC", balance=Decimal("1000"), balance_usd=Decimal("1000")),
             "WETH": TokenBalance(symbol="WETH", balance=Decimal("1"), balance_usd=Decimal("2000")),
         },
-        indicators={"WETH:rsi:14": RSIData(value=rsi)},
+        indicators={f"{WETH_ADDRESS}:rsi:14": RSIData(value=rsi)},
         timestamp=ts,
     )
 
@@ -102,6 +103,7 @@ class TestPoolPinning:
         buy = strategy.decide(snap(T0, rsi=Decimal("25")))
         assert buy.intent_type.value == "SWAP"
         assert buy.swap_params == {"pool": self.POOL}
+        assert buy.max_slippage == Decimal(config["max_slippage_bps"]) / Decimal("10000")
 
     def test_unset_pool_keeps_auto_routing(self, strategy: UniswapRSIStrategy) -> None:
         buy = strategy.decide(snap(T0, rsi=Decimal("25")))
@@ -117,6 +119,7 @@ class TestPoolPinning:
         swaps = [i for i in intents if i.intent_type.value == "SWAP"]
         assert swaps, "teardown should sweep the base token"
         assert all(i.swap_params is None for i in swaps)
+        assert all(i.max_slippage == Decimal(config["max_slippage_bps"]) / Decimal("10000") for i in swaps)
 
     def test_malformed_pool_rejected_at_preflight(self, config: dict) -> None:
         from almanak.framework.strategies import ConfigValidationError
@@ -140,6 +143,7 @@ class TestPoolPinning:
         sell = strategy.decide(snap(T0, rsi=Decimal("75")))
         assert sell.intent_type.value == "SWAP"
         assert sell.swap_params == {"pool": self.POOL}
+        assert sell.max_slippage == Decimal(config["max_slippage_bps"]) / Decimal("10000")
 
     def test_non_hex_pool_of_correct_length_rejected_at_preflight(self, config: dict) -> None:
         from almanak.framework.strategies import ConfigValidationError

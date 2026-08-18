@@ -257,6 +257,64 @@ class TestIntentSwapFactory:
         )
         assert intent.max_price_impact == Decimal("0.5")
 
+    def test_swap_factory_accepts_bps_limits_without_changing_wire_shape(self):
+        intent = Intent.swap(
+            "USDC",
+            "ETH",
+            amount_usd=Decimal("500"),
+            max_slippage_bps=75,
+            max_price_impact_bps=125,
+        )
+
+        assert intent.max_slippage == Decimal("0.0075")
+        assert intent.max_price_impact == Decimal("0.0125")
+        serialized = intent.serialize()
+        assert serialized["max_slippage"] == "0.0075"
+        assert serialized["max_price_impact"] == "0.0125"
+        assert "max_slippage_bps" not in serialized
+        assert "max_price_impact_bps" not in serialized
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"max_slippage": Decimal("0.005"), "max_slippage_bps": 50},
+            {"max_price_impact": Decimal("0.01"), "max_price_impact_bps": 100},
+        ],
+    )
+    def test_swap_factory_rejects_duplicate_limit_units(self, kwargs):
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            Intent.swap("USDC", "ETH", amount_usd=Decimal("500"), **kwargs)
+
+    @pytest.mark.parametrize(
+        ("kwargs", "error_type"),
+        [
+            ({"max_slippage_bps": True}, TypeError),
+            ({"max_slippage_bps": Decimal("50")}, TypeError),
+            ({"max_slippage_bps": -1}, ValueError),
+            ({"max_slippage_bps": 10_000}, ValueError),
+            ({"max_price_impact_bps": 0}, ValueError),
+            ({"max_price_impact_bps": 10_001}, ValueError),
+        ],
+    )
+    def test_swap_factory_rejects_invalid_bps_limits(self, kwargs, error_type):
+        with pytest.raises(error_type):
+            Intent.swap("USDC", "ETH", amount_usd=Decimal("500"), **kwargs)
+
+    def test_swap_factory_bps_limit_boundaries(self):
+        intent = Intent.swap(
+            "USDC",
+            "ETH",
+            amount_usd=Decimal("500"),
+            max_slippage_bps=0,
+            max_price_impact_bps=10_000,
+        )
+        assert intent.max_slippage == Decimal("0")
+        assert intent.max_price_impact == Decimal("1")
+
+    def test_swap_factory_preserves_explicit_none_rejection(self):
+        with pytest.raises(ValidationError):
+            Intent.swap("USDC", "ETH", amount_usd=Decimal("500"), max_slippage=None)
+
 
 # =============================================================================
 # LPOpenIntent / LPCloseIntent

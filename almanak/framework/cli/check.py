@@ -62,6 +62,7 @@ import importlib.util
 import json
 import logging
 import sys
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -492,6 +493,222 @@ _STRATEGY_BASE_NAMES: tuple[str, ...] = (
     "StrategyBase",
 )
 
+_INVALID_SLIPPAGE_ESTIMATE_FIELDS: frozenset[str] = frozenset(
+    {
+        "slippage",
+        "slippage_pct",
+        "price_impact",
+        "price_impact_pct",
+    }
+)
+
+_SLIPPAGE_ESTIMATE_RECEIVER_NAMES: frozenset[str] = frozenset(
+    {
+        "market",
+        "market_snapshot",
+        "snap",
+        "snapshot",
+    }
+)
+
+
+def _is_estimate_slippage_call(node: ast.AST) -> bool:
+    """Return whether ``node`` calls the SDK market slippage API.
+
+    Method name alone is insufficient: strategies can define unrelated risk
+    models with their own ``estimate_slippage`` result contracts.
+    """
+    if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+        return False
+    if node.func.attr != "estimate_slippage":
+        return False
+    receiver = _binding_key(node.func.value)
+    return receiver is not None and receiver[-1] in _SLIPPAGE_ESTIMATE_RECEIVER_NAMES
+
+
+def _binding_key(node: ast.AST) -> tuple[str, ...] | None:
+    """Return a stable key for a simple name or attribute chain."""
+    if isinstance(node, ast.Name):
+        return (node.id,)
+    if isinstance(node, ast.Attribute):
+        parent = _binding_key(node.value)
+        if parent is not None:
+            return (*parent, node.attr)
+    return None
+
+
+def _assignment_binding_keys(node: ast.AST) -> set[tuple[str, ...]]:
+    """Return trackable bindings written by an assignment target."""
+    key = _binding_key(node)
+    if key is not None:
+        return {key}
+    if isinstance(node, ast.Starred):
+        return _assignment_binding_keys(node.value)
+    if isinstance(node, ast.Tuple | ast.List):
+        return {key for element in node.elts for key in _assignment_binding_keys(element)}
+    return set()
+
+
+def _pattern_binding_names(pattern: ast.pattern) -> set[str]:
+    """Return names introduced by one structural-pattern match."""
+    names: set[str] = set()
+    for node in ast.walk(pattern):
+        if isinstance(node, ast.MatchAs | ast.MatchStar) and node.name is not None:
+            names.add(node.name)
+        elif isinstance(node, ast.MatchMapping) and node.rest is not None:
+            names.add(node.rest)
+    return names
+
+
+def _is_irrefutable_pattern(pattern: ast.pattern) -> bool:
+    """Return whether a pattern matches every subject when unguarded."""
+    if isinstance(pattern, ast.MatchAs):
+        return pattern.pattern is None or _is_irrefutable_pattern(pattern.pattern)
+    if isinstance(pattern, ast.MatchOr):
+        return any(_is_irrefutable_pattern(option) for option in pattern.patterns)
+    return False
+
+
+def _method_receiver_name(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str | None:
+    """Return a method's receiver name, excluding static methods."""
+    if any(isinstance(decorator, ast.Name) and decorator.id == "staticmethod" for decorator in node.decorator_list):
+        return None
+    positional = (*node.args.posonlyargs, *node.args.args)
+    return positional[0].arg if positional else None
+
+
+def _method_instance_slippage_suffixes(
+    member: ast.FunctionDef | ast.AsyncFunctionDef,
+    inherited_suffixes: set[tuple[str, ...]],
+) -> set[tuple[str, ...]]:
+    """Return receiver attributes that can hold estimates when a method exits."""
+    receiver = _method_receiver_name(member)
+    if receiver is None:
+        return set()
+
+    flow = _StrategyASTVisitor.for_instance_flow(receiver, inherited_suffixes)
+    flow._visit_statements(member.body)
+    assert flow._recorded_slippage_exit_states is not None
+    exit_states = list(flow._recorded_slippage_exit_states)
+    if flow._flow_reachable:
+        exit_states.append(flow._current_slippage_bindings())
+    possible_at_exit = set().union(*exit_states)
+    return {
+        key[1:]
+        for key in possible_at_exit
+        if len(key) > 1 and key[0] == receiver and key in flow._written_slippage_binding_keys
+    }
+
+
+def _collect_class_instance_slippage_suffixes(node: ast.ClassDef) -> set[tuple[str, ...]]:
+    """Collect cross-method receiver provenance to a fixed point.
+
+    A method can copy an estimate cached by another method. Each method is
+    seeded only with suffixes exported by *other* methods, which permits those
+    aliases without feeding a method's own later assignments back into its
+    entry state and losing statement-order precision.
+    """
+    methods = [member for member in node.body if isinstance(member, ast.FunctionDef | ast.AsyncFunctionDef)]
+    method_suffixes: list[set[tuple[str, ...]]] = [set() for _ in methods]
+
+    while True:
+        next_suffixes: list[set[tuple[str, ...]]] = []
+        for index, member in enumerate(methods):
+            inherited = set().union(
+                *(suffixes for other_index, suffixes in enumerate(method_suffixes) if other_index != index)
+            )
+            discovered = _method_instance_slippage_suffixes(member, inherited)
+            next_suffixes.append(method_suffixes[index] | discovered)
+        if next_suffixes == method_suffixes:
+            return set().union(*method_suffixes)
+        method_suffixes = next_suffixes
+
+
+class _FunctionLocalBindingCollector(ast.NodeVisitor):
+    """Collect function-local root names without entering nested scopes."""
+
+    def __init__(self) -> None:
+        self.names: set[str] = set()
+        self.nonlocal_names: set[str] = set()
+
+    def visit_Name(self, node: ast.Name) -> None:
+        if isinstance(node.ctx, ast.Store | ast.Del):
+            self.names.add(node.id)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self.names.add(node.name)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self.names.add(node.name)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self.names.add(node.name)
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        return
+
+    def visit_ListComp(self, node: ast.ListComp) -> None:
+        return
+
+    def visit_SetComp(self, node: ast.SetComp) -> None:
+        return
+
+    def visit_DictComp(self, node: ast.DictComp) -> None:
+        return
+
+    def visit_GeneratorExp(self, node: ast.GeneratorExp) -> None:
+        return
+
+    def visit_Import(self, node: ast.Import) -> None:
+        for alias in node.names:
+            self.names.add(alias.asname or alias.name.split(".", maxsplit=1)[0])
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        for alias in node.names:
+            if alias.name != "*":
+                self.names.add(alias.asname or alias.name)
+
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
+        if node.name is not None:
+            self.names.add(node.name)
+        self.generic_visit(node)
+
+    def visit_Match(self, node: ast.Match) -> None:
+        for case in node.cases:
+            self.names.update(_pattern_binding_names(case.pattern))
+        self.generic_visit(node)
+
+    def visit_Global(self, node: ast.Global) -> None:
+        self.nonlocal_names.update(node.names)
+
+    def visit_Nonlocal(self, node: ast.Nonlocal) -> None:
+        self.nonlocal_names.update(node.names)
+
+
+def _function_local_binding_names(node: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda) -> set[str]:
+    """Return roots that shadow captured bindings inside a function body."""
+    arguments = node.args
+    names = {
+        argument.arg
+        for argument in (
+            *arguments.posonlyargs,
+            *arguments.args,
+            *arguments.kwonlyargs,
+        )
+    }
+    if arguments.vararg is not None:
+        names.add(arguments.vararg.arg)
+    if arguments.kwarg is not None:
+        names.add(arguments.kwarg.arg)
+
+    collector = _FunctionLocalBindingCollector()
+    if isinstance(node, ast.Lambda):
+        collector.visit(node.body)
+    else:
+        for statement in node.body:
+            collector.visit(statement)
+    return (names | collector.names) - collector.nonlocal_names
+
 
 def _default_ast_facts() -> dict[str, Any]:
     """Return the fact dict populated when the AST walk can't run.
@@ -539,9 +756,36 @@ class _StrategyASTVisitor(ast.NodeVisitor):
         self.facts: dict[str, Any] = _default_ast_facts()
         self.strategy_class_node: ast.ClassDef | None = None
         self.fallback_class_node: ast.ClassDef | None = None
+        # Bindings are statement-ordered and lexical. A module-wide set keyed
+        # only by variable name would leak aliases between unrelated methods
+        # and keep them alive after reassignment.
+        self._slippage_result_scopes: list[set[tuple[str, ...]]] = [set()]
+        self._slippage_scope_kinds: list[str] = ["module"]
+        self._class_instance_slippage_suffixes: list[set[tuple[str, ...]]] = []
+        self._recorded_slippage_exit_states: list[set[tuple[str, ...]]] | None = None
+        self._written_slippage_binding_keys: set[tuple[str, ...]] = set()
+        self._flow_nested_scope_depth = 0
+        self._flow_reachable = True
         # Depth of currently-open ``ClassDef`` nodes. Fallback resolution only
         # fires when this is 0 (i.e. the class being visited is top-level).
         self._class_depth = 0
+
+    @classmethod
+    def for_instance_flow(
+        cls,
+        receiver: str,
+        inherited_suffixes: set[tuple[str, ...]],
+    ) -> _StrategyASTVisitor:
+        """Create the isolated visitor used for class-instance provenance."""
+        flow = cls(
+            strategy_file=Path("<class-instance-slippage-flow>"),
+            report=CheckReport(strategy_dir=""),
+            target_class_name=None,
+        )
+        flow._recorded_slippage_exit_states = []
+        flow._slippage_scope_kinds[-1] = "function"
+        flow._replace_current_slippage_bindings({(receiver, *suffix) for suffix in inherited_suffixes})
+        return flow
 
     # -- Public entry point ------------------------------------------------
 
@@ -561,19 +805,19 @@ class _StrategyASTVisitor(ast.NodeVisitor):
         if isinstance(node.value, str):
             hit = _is_placeholder_value(node.value)
             if hit:
-                self.report.add(
-                    Finding(
-                        severity=Severity.ERROR,
-                        layer=Layer.AST,
-                        code="placeholder_address",
-                        message=(
-                            f"Placeholder address literal {node.value!r} found in source "
-                            f"(matched on: {hit}). Replace with the real value before running."
-                        ),
-                        file=str(self.strategy_file),
-                        line=node.lineno,
-                    )
+                finding = Finding(
+                    severity=Severity.ERROR,
+                    layer=Layer.AST,
+                    code="placeholder_address",
+                    message=(
+                        f"Placeholder address literal {node.value!r} found in source "
+                        f"(matched on: {hit}). Replace with the real value before running."
+                    ),
+                    file=str(self.strategy_file),
+                    line=node.lineno,
                 )
+                if finding not in self.report.findings:
+                    self.report.add(finding)
         # Constant nodes have no meaningful children for our purposes, but
         # we still call ``generic_visit`` to stay consistent with the API.
         self.generic_visit(node)
@@ -583,6 +827,8 @@ class _StrategyASTVisitor(ast.NodeVisitor):
         for alias in node.names:
             if alias.name == "PositionInfo":
                 self.facts["imports_position_info"] = True
+            if alias.name != "*":
+                self._kill_slippage_root(alias.asname or alias.name)
         self.generic_visit(node)
 
     def visit_Import(self, node: ast.Import) -> None:
@@ -590,7 +836,453 @@ class _StrategyASTVisitor(ast.NodeVisitor):
         for alias in node.names:
             if alias.name.endswith("PositionInfo"):
                 self.facts["imports_position_info"] = True
+            self._kill_slippage_root(alias.asname or alias.name.split(".", maxsplit=1)[0])
         self.generic_visit(node)
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        """Update tracked aliases after evaluating an assignment value."""
+        self.visit(node.value)
+        is_slippage_result = self._is_slippage_result_expression(node.value)
+        for target in node.targets:
+            self._set_slippage_bindings(target, is_slippage_result=is_slippage_result)
+            self.visit(target)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        """Track or kill an annotated assignment binding."""
+        self.visit(node.annotation)
+        if node.value is not None:
+            self.visit(node.value)
+        self._set_slippage_bindings(
+            node.target,
+            is_slippage_result=node.value is not None and self._is_slippage_result_expression(node.value),
+        )
+        self.visit(node.target)
+
+    def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
+        """Track aliases introduced by assignment expressions."""
+        self.visit(node.value)
+        self._set_slippage_bindings(
+            node.target,
+            is_slippage_result=self._is_slippage_result_expression(node.value),
+        )
+        self.visit(node.target)
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> None:
+        """An augmented assignment always invalidates a tracked result."""
+        self.visit(node.target)
+        self.visit(node.value)
+        self._set_slippage_bindings(node.target, is_slippage_result=False)
+
+    def visit_Delete(self, node: ast.Delete) -> None:
+        """Deleting a name or attribute invalidates its tracked binding."""
+        for target in node.targets:
+            self.visit(target)
+            self._set_slippage_bindings(target, is_slippage_result=False)
+
+    def visit_Return(self, node: ast.Return) -> None:
+        """Visit the return value and optionally record a method-exit state."""
+        if node.value is not None:
+            self.visit(node.value)
+        if self._recorded_slippage_exit_states is not None and self._flow_nested_scope_depth == 0:
+            self._recorded_slippage_exit_states.append(self._current_slippage_bindings())
+        self._flow_reachable = False
+
+    def visit_Raise(self, node: ast.Raise) -> None:
+        """Visit raise expressions and retain state from exceptional exits."""
+        if node.exc is not None:
+            self.visit(node.exc)
+        if node.cause is not None:
+            self.visit(node.cause)
+        if self._recorded_slippage_exit_states is not None and self._flow_nested_scope_depth == 0:
+            self._recorded_slippage_exit_states.append(self._current_slippage_bindings())
+        self._flow_reachable = False
+
+    def visit_If(self, node: ast.If) -> None:
+        """Merge aliases that may survive either conditional branch."""
+        self.visit(node.test)
+        initial = self._current_slippage_bindings()
+        body_state = self._visit_statement_branch(node.body, initial)
+        else_state = self._visit_statement_branch(node.orelse, initial) if node.orelse else initial
+        self._merge_flow_states([body_state, else_state])
+
+    def visit_IfExp(self, node: ast.IfExp) -> None:
+        """Merge assignment-expression effects from either expression arm."""
+        self.visit(node.test)
+        initial = self._current_slippage_bindings()
+        body_state = self._visit_expression_branch(node.body, initial)
+        else_state = self._visit_expression_branch(node.orelse, initial)
+        self._merge_flow_states([body_state, else_state])
+
+    def visit_BoolOp(self, node: ast.BoolOp) -> None:
+        """Preserve paths where boolean evaluation short-circuits."""
+        if not node.values:
+            return
+        self.visit(node.values[0])
+        possible = self._current_slippage_bindings()
+        for value in node.values[1:]:
+            evaluated = self._visit_expression_branch(value, possible)
+            possible |= evaluated or set()
+            self._replace_current_slippage_bindings(possible)
+
+    def visit_For(self, node: ast.For) -> None:
+        """Treat loop targets as rebindings and merge zero/one-plus iterations."""
+        self._visit_loop(node)
+
+    def visit_AsyncFor(self, node: ast.AsyncFor) -> None:
+        """Apply the same conservative flow rules to async loops."""
+        self._visit_loop(node)
+
+    def visit_While(self, node: ast.While) -> None:
+        """Merge zero-iteration and one-or-more-iteration loop states."""
+        self.visit(node.test)
+        initial = self._current_slippage_bindings()
+        body_state = self._visit_statement_branch(node.body, initial)
+        possible_completion = initial | (body_state or set())
+        else_state = (
+            self._visit_statement_branch(node.orelse, possible_completion) if node.orelse else possible_completion
+        )
+        self._merge_flow_states([initial, body_state, else_state])
+
+    def visit_With(self, node: ast.With) -> None:
+        """Track context-manager target rebindings in execution order."""
+        self._visit_with(node)
+
+    def visit_AsyncWith(self, node: ast.AsyncWith) -> None:
+        """Track async context-manager target rebindings too."""
+        self._visit_with(node)
+
+    def visit_Try(self, node: ast.Try) -> None:
+        """Conservatively merge normal and handled-exception flows."""
+        self._visit_try(node)
+
+    def visit_TryStar(self, node: ast.TryStar) -> None:
+        """Apply the same alias merge to exception-group handlers."""
+        self._visit_try(node)
+
+    def visit_Match(self, node: ast.Match) -> None:
+        """Merge aliases from every structural-pattern branch."""
+        self.visit(node.subject)
+        initial = self._current_slippage_bindings()
+        exhaustive = any(case.guard is None and _is_irrefutable_pattern(case.pattern) for case in node.cases)
+        states: list[set[tuple[str, ...]] | None] = [] if exhaustive else [initial]
+        for case in node.cases:
+            self._replace_current_slippage_bindings(initial)
+            self._flow_reachable = True
+            self.visit(case.pattern)
+            for name in _pattern_binding_names(case.pattern):
+                self._kill_slippage_root(name)
+            if case.guard is not None:
+                self.visit(case.guard)
+            self._visit_statements(case.body)
+            states.append(self._current_slippage_bindings() if self._flow_reachable else None)
+        self._merge_flow_states(states)
+
+    def visit_ListComp(self, node: ast.ListComp) -> None:
+        self._visit_comprehension(node.generators, [node.elt])
+
+    def visit_SetComp(self, node: ast.SetComp) -> None:
+        self._visit_comprehension(node.generators, [node.elt])
+
+    def visit_GeneratorExp(self, node: ast.GeneratorExp) -> None:
+        self._visit_comprehension(node.generators, [node.elt])
+
+    def visit_DictComp(self, node: ast.DictComp) -> None:
+        self._visit_comprehension(node.generators, [node.key, node.value])
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        """Keep local aliases from leaking into other functions or methods."""
+        self._visit_lexical_scope(node)
+        self._kill_slippage_root(node.name)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        """Keep async-function aliases lexically scoped too."""
+        self._visit_lexical_scope(node)
+        self._kill_slippage_root(node.name)
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        """Keep lambda bindings isolated from their containing scope."""
+        self._visit_lexical_scope(node)
+
+    def visit_Attribute(self, node: ast.Attribute) -> None:
+        """Flag invalid direct fields on a known slippage result."""
+        if node.attr in _INVALID_SLIPPAGE_ESTIMATE_FIELDS and self._is_slippage_result_expression(node.value):
+            self._report_invalid_slippage_field(node.attr, node.lineno)
+        self.generic_visit(node)
+
+    def visit_Call(self, node: ast.Call) -> None:
+        """Flag invalid ``getattr(result, field, ...)`` compatibility probes."""
+        if (
+            isinstance(node.func, ast.Name)
+            and node.func.id == "getattr"
+            and len(node.args) >= 2
+            and self._is_slippage_result_expression(node.args[0])
+            and isinstance(node.args[1], ast.Constant)
+            and isinstance(node.args[1].value, str)
+            and node.args[1].value in _INVALID_SLIPPAGE_ESTIMATE_FIELDS
+        ):
+            self._report_invalid_slippage_field(node.args[1].value, node.lineno)
+        self.generic_visit(node)
+
+    def _is_slippage_result_expression(self, node: ast.AST) -> bool:
+        """Recognize known aliases and inline ``estimate_slippage`` results."""
+        if _is_estimate_slippage_call(node):
+            return True
+        key = _binding_key(node)
+        if key is not None and key in self._slippage_result_scopes[-1]:
+            return True
+        return (
+            isinstance(node, ast.Attribute) and node.attr == "value" and self._is_slippage_result_expression(node.value)
+        )
+
+    def _set_slippage_bindings(self, target: ast.AST, *, is_slippage_result: bool) -> None:
+        """Set or kill simple bindings written in the current lexical scope."""
+        bindings = self._slippage_result_scopes[-1]
+        target_keys = _assignment_binding_keys(target)
+        if self._recorded_slippage_exit_states is not None and self._flow_nested_scope_depth == 0:
+            self._written_slippage_binding_keys.update(target_keys)
+        for key in target_keys:
+            bindings.difference_update({binding for binding in bindings if binding[: len(key)] == key})
+            if is_slippage_result:
+                bindings.add(key)
+
+    def _kill_slippage_root(self, name: str) -> None:
+        """Invalidate a root name and every attribute binding below it."""
+        bindings = self._slippage_result_scopes[-1]
+        bindings.difference_update({binding for binding in bindings if binding and binding[0] == name})
+
+    def _current_slippage_bindings(self) -> set[tuple[str, ...]]:
+        return set(self._slippage_result_scopes[-1])
+
+    def _replace_current_slippage_bindings(self, bindings: set[tuple[str, ...]]) -> None:
+        self._slippage_result_scopes[-1] = set(bindings)
+
+    def _capture_source_bindings(self) -> set[tuple[str, ...]]:
+        """Return bindings visible to a nested code object.
+
+        Function and comprehension bodies do not close over a class namespace,
+        so skip class scopes while looking for the nearest capture source.
+        """
+        for bindings, kind in zip(
+            reversed(self._slippage_result_scopes),
+            reversed(self._slippage_scope_kinds),
+            strict=True,
+        ):
+            if kind != "class":
+                return set(bindings)
+        return set()
+
+    def _visit_lexical_scope(self, node: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda) -> None:
+        """Visit outer expressions, then a body with captured non-local aliases."""
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            for decorator in node.decorator_list:
+                self.visit(decorator)
+            for type_parameter in getattr(node, "type_params", []):
+                self.visit(type_parameter)
+        for argument in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs):
+            if argument.annotation is not None:
+                self.visit(argument.annotation)
+        if node.args.vararg is not None and node.args.vararg.annotation is not None:
+            self.visit(node.args.vararg.annotation)
+        if node.args.kwarg is not None and node.args.kwarg.annotation is not None:
+            self.visit(node.args.kwarg.annotation)
+        for default in (*node.args.defaults, *(value for value in node.args.kw_defaults if value is not None)):
+            self.visit(default)
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.returns is not None:
+            self.visit(node.returns)
+
+        local_names = _function_local_binding_names(node)
+        captured = {binding for binding in self._capture_source_bindings() if binding and binding[0] not in local_names}
+        if (
+            isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+            and self._slippage_scope_kinds[-1] == "class"
+            and self._class_instance_slippage_suffixes
+        ):
+            receiver = _method_receiver_name(node)
+            if receiver is not None:
+                captured.update((receiver, *suffix) for suffix in self._class_instance_slippage_suffixes[-1])
+        self._slippage_result_scopes.append(captured)
+        self._slippage_scope_kinds.append("function")
+        self._flow_nested_scope_depth += 1
+        parent_reachable = self._flow_reachable
+        self._flow_reachable = True
+        try:
+            if isinstance(node, ast.Lambda):
+                self.visit(node.body)
+            else:
+                self._visit_statements(node.body)
+        finally:
+            self._flow_nested_scope_depth -= 1
+            self._slippage_result_scopes.pop()
+            self._slippage_scope_kinds.pop()
+            self._flow_reachable = parent_reachable
+
+    def _visit_statements(self, statements: list[ast.stmt]) -> None:
+        for statement in statements:
+            if not self._flow_reachable:
+                break
+            self.visit(statement)
+
+    def _visit_statement_branch(
+        self,
+        statements: list[ast.stmt],
+        initial: set[tuple[str, ...]],
+    ) -> set[tuple[str, ...]] | None:
+        self._replace_current_slippage_bindings(initial)
+        self._flow_reachable = True
+        self._visit_statements(statements)
+        return self._current_slippage_bindings() if self._flow_reachable else None
+
+    def _visit_expression_branch(
+        self,
+        expression: ast.expr,
+        initial: set[tuple[str, ...]],
+    ) -> set[tuple[str, ...]] | None:
+        self._replace_current_slippage_bindings(initial)
+        self._flow_reachable = True
+        self.visit(expression)
+        return self._current_slippage_bindings() if self._flow_reachable else None
+
+    def _merge_flow_states(self, states: Sequence[set[tuple[str, ...]] | None]) -> None:
+        """Merge fallthrough states and mark all-terminated flows unreachable."""
+        fallthrough = [state for state in states if state is not None]
+        self._flow_reachable = bool(fallthrough)
+        if fallthrough:
+            self._replace_current_slippage_bindings(set().union(*fallthrough))
+
+    def _visit_loop(self, node: ast.For | ast.AsyncFor) -> None:
+        self.visit(node.iter)
+        initial = self._current_slippage_bindings()
+        possible_completion = set(initial)
+        loop_entry = set(initial)
+        while True:
+            self._replace_current_slippage_bindings(loop_entry)
+            self._flow_reachable = True
+            self._set_slippage_bindings(node.target, is_slippage_result=False)
+            self.visit(node.target)
+            self._visit_statements(node.body)
+            body_state = self._current_slippage_bindings() if self._flow_reachable else None
+            expanded = possible_completion | (body_state or set())
+            if expanded == possible_completion:
+                break
+            possible_completion = expanded
+            loop_entry = expanded
+        else_state = (
+            self._visit_statement_branch(node.orelse, possible_completion) if node.orelse else possible_completion
+        )
+        self._merge_flow_states([initial, possible_completion, else_state])
+
+    def _visit_with(self, node: ast.With | ast.AsyncWith) -> None:
+        for item in node.items:
+            self.visit(item.context_expr)
+            if item.optional_vars is not None:
+                self._set_slippage_bindings(item.optional_vars, is_slippage_result=False)
+                self.visit(item.optional_vars)
+        self._visit_statements(node.body)
+
+    def _visit_try(self, node: ast.Try | ast.TryStar) -> None:
+        initial = self._current_slippage_bindings()
+        recorded_exit_start = (
+            len(self._recorded_slippage_exit_states)
+            if self._recorded_slippage_exit_states is not None and self._flow_nested_scope_depth == 0
+            else None
+        )
+        body_state = self._visit_statement_branch(node.body, initial)
+        handler_initial = initial | (body_state or set())
+        handler_states: list[set[tuple[str, ...]] | None] = []
+        for handler in node.handlers:
+            self._replace_current_slippage_bindings(handler_initial)
+            self._flow_reachable = True
+            if handler.type is not None:
+                self.visit(handler.type)
+            if handler.name is not None:
+                self._kill_slippage_root(handler.name)
+            self._visit_statements(handler.body)
+            if handler.name is not None and self._flow_reachable:
+                self._kill_slippage_root(handler.name)
+            handler_states.append(self._current_slippage_bindings() if self._flow_reachable else None)
+        else_state = (
+            self._visit_statement_branch(node.orelse, body_state)
+            if node.orelse and body_state is not None
+            else body_state
+        )
+        fallthrough = [state for state in [body_state, else_state, *handler_states] if state is not None]
+        if node.finalbody:
+            pending_exit_states: list[set[tuple[str, ...]]] = []
+            if recorded_exit_start is not None and self._recorded_slippage_exit_states is not None:
+                pending_exit_states = self._recorded_slippage_exit_states[recorded_exit_start:]
+                del self._recorded_slippage_exit_states[recorded_exit_start:]
+
+            final_state: set[tuple[str, ...]] | None = None
+            if fallthrough:
+                possible = initial | set().union(*fallthrough)
+                final_state = self._visit_statement_branch(node.finalbody, possible)
+            elif not pending_exit_states:
+                # The normal scanner does not record terminal states, but it
+                # still needs to inspect a finally-only path for bad fields.
+                self._visit_statement_branch(node.finalbody, initial)
+
+            if self._recorded_slippage_exit_states is not None:
+                for exit_state in pending_exit_states:
+                    transformed_exit = self._visit_statement_branch(node.finalbody, exit_state)
+                    if transformed_exit is not None:
+                        # The original return/raise resumes after ``finally``.
+                        self._recorded_slippage_exit_states.append(transformed_exit)
+            self._merge_flow_states([final_state])
+        else:
+            self._merge_flow_states(fallthrough)
+
+    def _visit_comprehension(self, generators: list[ast.comprehension], values: list[ast.expr]) -> None:
+        if not generators:
+            for value in values:
+                self.visit(value)
+            return
+
+        # Python evaluates the first iterable outside the comprehension's
+        # implicit function scope. The targets and all remaining expressions
+        # are evaluated inside it.
+        self.visit(generators[0].iter)
+        outer_state = self._current_slippage_bindings()
+        outer_reachable = self._flow_reachable
+        captured = self._capture_source_bindings()
+        self._slippage_result_scopes.append(captured)
+        self._slippage_scope_kinds.append("comprehension")
+        try:
+            first = generators[0]
+            self._set_slippage_bindings(first.target, is_slippage_result=False)
+            self.visit(first.target)
+            for condition in first.ifs:
+                self.visit(condition)
+            for generator in generators[1:]:
+                self.visit(generator.iter)
+                self._set_slippage_bindings(generator.target, is_slippage_result=False)
+                self.visit(generator.target)
+                for condition in generator.ifs:
+                    self.visit(condition)
+            for value in values:
+                self.visit(value)
+        finally:
+            self._slippage_result_scopes.pop()
+            self._slippage_scope_kinds.pop()
+            self._replace_current_slippage_bindings(outer_state)
+            self._flow_reachable = outer_reachable
+
+    def _report_invalid_slippage_field(self, field_name: str, line: int) -> None:
+        """Emit the actionable ALM-3329 contract finding."""
+        finding = Finding(
+            severity=Severity.ERROR,
+            layer=Layer.AST,
+            code="invalid_slippage_estimate_field",
+            message=(
+                f"SlippageEstimate has no {field_name!r} field. Use "
+                "effective_slippage_bps / price_impact_bps directly, or "
+                "within_limits(); do not hide SDK contract mismatches behind getattr fallbacks."
+            ),
+            file=str(self.strategy_file),
+            line=line,
+            field=field_name,
+        )
+        if finding not in self.report.findings:
+            self.report.add(finding)
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         """Resolve the concrete strategy class by name or by base.
@@ -607,11 +1299,38 @@ class _StrategyASTVisitor(ast.NodeVisitor):
             self.strategy_class_node = node
         elif self._class_depth == 0 and self.fallback_class_node is None and self._has_strategy_base(node):
             self.fallback_class_node = node
+
+        # Bases, keywords, decorators, and type parameters are evaluated in
+        # the enclosing scope, before the class namespace exists.
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        for base in node.bases:
+            self.visit(base)
+        for keyword in node.keywords:
+            self.visit(keyword)
+        for type_parameter in getattr(node, "type_params", []):
+            self.visit(type_parameter)
+
+        # Placeholder detection is source-wide rather than reachability-based.
+        # Pre-scan the class body so a class-level raise cannot hide literals
+        # in later statements; normal traversal remains flow-sensitive.
+        for statement in node.body:
+            for descendant in ast.walk(statement):
+                if isinstance(descendant, ast.Constant):
+                    self.visit_Constant(descendant)
+
         self._class_depth += 1
+        self._slippage_result_scopes.append(self._current_slippage_bindings())
+        self._slippage_scope_kinds.append("class")
+        self._class_instance_slippage_suffixes.append(_collect_class_instance_slippage_suffixes(node))
         try:
-            self.generic_visit(node)
+            self._visit_statements(node.body)
         finally:
+            self._class_instance_slippage_suffixes.pop()
+            self._slippage_result_scopes.pop()
+            self._slippage_scope_kinds.pop()
             self._class_depth -= 1
+        self._kill_slippage_root(node.name)
 
     # -- Class resolution helpers -----------------------------------------
 
@@ -861,7 +1580,18 @@ def _detect_template(strategy_class: type | None, config: dict[str, Any] | None,
             tags = getattr(meta, "tags", []) or []
             signals.extend(str(t).lower() for t in tags)
             intent_types = getattr(meta, "intent_types", []) or []
-            signals.extend(str(t).lower() for t in intent_types)
+            if intent_types:
+                declared = {str(getattr(intent_type, "value", intent_type)).lower() for intent_type in intent_types}
+                if any(value.startswith("perp_") for value in declared):
+                    return "perps"
+                if declared & {"supply", "withdraw", "borrow", "repay", "deleverage"}:
+                    return "lending"
+                if declared & {"lp_open", "lp_close", "lp_collect_fees"}:
+                    return "lp"
+                # Explicit intent metadata is authoritative. In particular, a
+                # SWAP/HOLD strategy with an exact-pool config must not become
+                # an LP strategy merely because its config contains ``pool``.
+                return None
             protocols = getattr(meta, "supported_protocols", []) or []
             signals.extend(str(p).lower() for p in protocols)
 
