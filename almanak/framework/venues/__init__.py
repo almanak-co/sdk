@@ -1,6 +1,7 @@
 """Writer-safe exact-venue contracts."""
 
 from .client import observe_exact_venue_data
+from .consumer import ExactVenueDataConsumer, ExactVenueDataProvider, ExactVenueDataRegistryAdapter
 from .data import (
     EXACT_VENUE_DATA_SCHEMA_VERSION,
     DepthParameters,
@@ -56,6 +57,8 @@ __all__ = [
     "DepthParameters",
     "ExactVenueBinding",
     "ExactVenueDataResult",
+    "ExactVenueDataConsumer",
+    "ExactVenueDataProvider",
     "ExactVenueFeatureParameters",
     "ExactVenueFeatureRequest",
     "ExactVenueObservation",

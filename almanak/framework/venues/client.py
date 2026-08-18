@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from .consumer import ExactVenueDataConsumer, ExactVenueDataRegistryAdapter
 from .data import (
     ExactVenueDataResult,
     ExactVenueFeatureRequest,
@@ -44,7 +45,9 @@ def observe_exact_venue_data(
     try:
         from almanak.connectors._strategy_base.exact_venue_data_registry import ExactVenueDataProviderRegistry
 
-        return ExactVenueDataProviderRegistry().observe(request, gateway)
+        registry = ExactVenueDataProviderRegistry()
+        consumer = ExactVenueDataConsumer(ExactVenueDataRegistryAdapter(registry.observe, gateway))
+        return consumer.read(request)
     except Exception as exc:
         # This is the public fail-closed boundary. Lazy connector discovery,
         # ImportRef loading, provider construction, and provider contract

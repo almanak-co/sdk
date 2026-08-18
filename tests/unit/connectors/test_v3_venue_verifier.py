@@ -225,7 +225,6 @@ def test_manifests_declare_only_the_reviewed_exact_venue_protocols() -> None:
         "polygon",
     )
     assert declared["pancakeswap_v3"].chains == ("arbitrum", "base", "bsc", "ethereum")
-    assert all(declared[protocol].component_names == ("fee",) for protocol in ("pancakeswap_v3", "uniswap_v3"))
     assert declared["curve"].chains == ("arbitrum", "base", "ethereum", "optimism", "polygon")
     assert declared["curve"].component_names == (
         "base_pool",

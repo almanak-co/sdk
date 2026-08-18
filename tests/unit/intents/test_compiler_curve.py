@@ -16,6 +16,7 @@ from almanak.framework.intents.compiler import (
     IntentCompilerConfig,
 )
 from almanak.framework.intents.compiler_models import CompilationResult
+from almanak.connectors.curve.pool_binding import CurvePoolPermissionBinding
 
 # Patch targets — lazy-imported from the source module inside compile methods.
 # When compiler does `from almanak.connectors.curve.adapter import CurveAdapter`,
@@ -168,6 +169,32 @@ def compiler():
 
 class TestCurveSwap:
     """Tests for connector-owned Curve swap compilation."""
+
+    def test_permission_marker_without_exact_pool_refuses_before_resolution(
+        self, compiler, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A permission marker must never fall through catalog discovery."""
+        binding = CurvePoolPermissionBinding.from_pool_data(
+            "ethereum", MOCK_CURVE_POOLS["ethereum"]["usdc_usdt"]
+        )
+        monkeypatch.setattr(
+            "almanak.connectors.curve.compiler._resolve_curve_swap_request",
+            lambda *_args, **_kwargs: pytest.fail("marker-only request reached pool resolution"),
+        )
+
+        result = compiler.compile(
+            SwapIntent(
+                from_token="USDC",
+                to_token="USDT",
+                amount=Decimal("500"),
+                protocol="curve",
+                swap_params=binding.marker_params(),
+            )
+        )
+
+        assert result.status == CompilationStatus.FAILED
+        assert result.is_safety_refusal is True
+        assert result.transactions == []
 
     @patch(CURVE_POOLS_PATH, new=lambda: MOCK_CURVE_POOLS)
     @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, cast
 
@@ -1170,13 +1170,24 @@ def _prepare_curve_swap_venue(
     resolved: _ResolvedCurveSwap,
 ) -> _PreparedCurveSwap | CompilationResult:
     """Build the adapter and admit an explicit exact pool before its money path."""
+    from almanak.connectors.curve.pool_binding import permission_binding_from_intent
+
     adapter = _swap_adapter_for_pool(
         ctx,
         intent,
         pool_address=resolved.pool_address,
         slippage_bps=resolved.slippage_bps,
     )
-    if not _is_pool_address(str(resolved.swap_params.get("pool") or "")):
+    has_explicit_pool = _is_pool_address(str(resolved.swap_params.get("pool") or ""))
+    if permission_binding_from_intent(intent) is not None and not has_explicit_pool:
+        logger.error("Curve permission binding cannot be used without an exact pool target")
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error="Curve permission binding requires an exact pool target before approval construction",
+            is_safety_refusal=True,
+            intent_id=intent.intent_id,
+        )
+    if not has_explicit_pool:
         return _PreparedCurveSwap(adapter=adapter, verified_venue=None)
 
     exact_pool = adapter.get_pool_info(resolved.pool_address)
@@ -1347,6 +1358,25 @@ class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
         )
 
         try:
+            from almanak.connectors.curve.pool_binding import permission_binding_from_intent
+
+            marker = permission_binding_from_intent(intent)
+            carriers = (
+                getattr(intent, "protocol_params", None),
+                getattr(intent, "swap_params", None),
+            )
+            has_exact_pool = any(
+                isinstance(params, Mapping) and _is_pool_address(str(params.get("pool") or "")) for params in carriers
+            )
+            if marker is not None and not has_exact_pool:
+                logger.error("Curve permission binding cannot be used without an exact pool target")
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error="Curve permission binding requires an exact pool target before pool resolution",
+                    is_safety_refusal=True,
+                    intent_id=intent.intent_id,
+                )
+
             resolved = _resolve_curve_swap_request(ctx, intent)
             if isinstance(resolved, CompilationResult):
                 return resolved
