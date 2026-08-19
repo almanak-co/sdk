@@ -2407,6 +2407,197 @@ def _fetch_prices_sync(chain_name: str) -> dict[str, Decimal]:
     return prices
 
 
+_CHAINLINK_ROUND_ABI = [
+    {
+        "inputs": [],
+        "name": "latestRoundData",
+        "outputs": [
+            {"type": "uint80"},
+            {"type": "int256"},
+            {"type": "uint256"},
+            {"type": "uint256"},
+            {"type": "uint80"},
+        ],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [],
+        "name": "decimals",
+        "outputs": [{"type": "uint8"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+]
+
+
+def _fetch_prices_from_fork(chain_name: str) -> dict[str, Decimal]:
+    """Read USD prices from Chainlink **at the pinned fork block** (VIB-6733).
+
+    THE INVARIANT: both inputs to the compiler's guard
+    (``1 - quoter_amount / oracle_estimate``) must be observed at the SAME
+    block. ``quoter_amount`` comes from the on-chain quoter at the pinned fork
+    block; a live-spot ``oracle_estimate`` makes their difference time skew
+    rather than price impact, and the skew grows as the pin ages. That is what
+    broke ``test_swap_weth_to_usdc_using_intent`` on Optimism — live $2086.90
+    against a pool priced at $1825.69 read as "12.5% impact" on a ~$100 trade.
+
+    WHY CHAINLINK AND NOT AN AMM: production semantics, not arithmetic. This
+    guard is quote-vs-fair-value, so the reference must be able to catch a pool
+    that is correctly curved but MISPRICED against the world — stale,
+    manipulated, or depegged. Only an independently aggregated feed can do
+    that. Re-using the quoted pool's own executed quote is circular
+    (identically 0); that is VIB-5926, and the aerodrome compiler says the same
+    at ``compiler.py:401``.
+
+    A DIFFERENT pool's mid-price would also be independent and non-zero, so do
+    not read the number below as proof that Chainlink specifically is required:
+    measured at Optimism block 155664597, Chainlink gives 2.62% and the quoted
+    pool's own SPOT (reserve ratio) gives 2.63% — they agree to a hundredth of
+    a point. That ~2.6% is ordinary constant-product curve impact from pushing
+    0.05 WETH into a 2.09 WETH reserve (a ~$7.8k pool), NOT evidence of
+    independence. Chainlink is chosen because it is the analog of the
+    production oracle, and because a reference pool would shrink the CEX-DEX
+    basis and miss a displacement that moved both AMMs together.
+
+    Returns prices only for tokens the Chainlink catalogue can name on this
+    chain; the caller fills the remainder and reports what it fell back on.
+    """
+    from web3 import Web3
+
+    from almanak.integrations.chainlink.catalog import CATALOG
+
+    config = CHAIN_CONFIGS.get(chain_name, {})
+    symbols = list(config.get("tokens", {}).keys())
+
+    # Resolve WHICH BLOCK to read before touching the network. Whether this
+    # configuration is sound is a question about intent, not about reachability,
+    # and checking reachability first would let an unreachable-but-wrong setup
+    # degrade quietly instead of being refused.
+    #
+    # Pin the read EXPLICITLY rather than trusting that this RPC's "latest" is
+    # the fork block. On the Anvil fork the two coincide, so this is a no-op
+    # there — but relying on that coincidence is the same class of mistake this
+    # function exists to fix. Honour the generic ANVIL_FORK_BLOCK fallback too,
+    # matching gateway_runtime.py:116 semantics.
+    pin = os.environ.get(f"ANVIL_FORK_BLOCK_{chain_name.upper()}") or os.environ.get("ANVIL_FORK_BLOCK")
+    if pin and pin.isdigit():
+        block: int | str = int(pin)
+    else:
+        # Reviewer (CodeRabbit) asked for a hard failure here. Declined, with a
+        # narrower control instead, because on the intended target `latest` is
+        # not "mutable node state" -- it is the fork's own head:
+        #   * `get_anvil_rpc_url` always returns http://127.0.0.1:<port>;
+        #   * nobody pushes new Chainlink rounds to a local fork, so
+        #     `latestRoundData()` at fork-head == at the fork block even after
+        #     tests mine blocks;
+        #   * the QUOTER also reads the fork's current state, so oracle and
+        #     quoter stay time-aligned, which is the invariant this whole
+        #     function exists to protect.
+        # Failing hard would break local runs in a configuration that is
+        # actually correct. What IS unsafe is reading `latest` off a NON-local
+        # node -- a remote archive or a live RPC returns today's spot and
+        # silently restores the original bug. That is not hypothetical: it is
+        # exactly how the first verification of this change fooled itself.
+        rpc = get_anvil_rpc_url(chain_name)
+        if not (rpc.startswith("http://127.0.0.1") or rpc.startswith("http://localhost")):
+            raise RuntimeError(
+                f"Refusing to price {chain_name} at 'latest' against a non-local RPC ({rpc}). "
+                f"Set ANVIL_FORK_BLOCK_{chain_name.upper()} to a block number, or point this "
+                f"fixture at the local Anvil fork. Reading 'latest' off a remote node returns "
+                f"live spot and re-creates the time skew this exists to remove (VIB-6733)."
+            )
+        block = "latest"
+        why = f"is set to a non-numeric value ({pin!r})" if pin else "is not set"
+        print(
+            f"  Chainlink: ANVIL_FORK_BLOCK_{chain_name.upper()} {why}; reading at the local "
+            f"fork's head ({rpc}). Time-aligned with the quoter, which reads the same state."
+        )
+
+    # 5s timeout: a wedged local RPC must not hang the whole session on a
+    # session-scoped fixture.
+    w3 = Web3(Web3.HTTPProvider(get_anvil_rpc_url(chain_name), request_kwargs={"timeout": 5}))
+    if not w3.is_connected():
+        # Distinct from "no feed". Reporting an RPC failure as a missing feed is
+        # exactly the misattribution this change exists to remove.
+        print(f"  Chainlink: no RPC at {get_anvil_rpc_url(chain_name)} for {chain_name}; cannot price at the fork")
+        return {}
+
+    prices: dict[str, Decimal] = {}
+    for symbol in symbols:
+        # Symbol -> pair aliasing is the CATALOGUE's job (WETH->ETH/USD,
+        # WBNB->BNB/USD, WAVAX->AVAX/USD, WSTETH->WSTETH/USD, ...). A hand-rolled
+        # prefix strip here silently missed WBNB and WAVAX and sent them back to
+        # the live-price path this change exists to close.
+        spec = CATALOG.feed_for_token(chain_name, symbol)
+        if spec is None and symbol.upper() in {"USDC.E", "USDBC"}:
+            # Bridged/variant USDC the catalogue does not name; it tracks USDC.
+            spec = CATALOG.feed_for_token(chain_name, "USDC")
+        if spec is None and symbol.upper() in {"USDT.E"}:
+            # Same for bridged USDT on Avalanche; without this the chain reports a
+            # mixed-source warning on every session for a token no swap test uses.
+            spec = CATALOG.feed_for_token(chain_name, "USDT")
+
+        if spec is not None:
+            usd = _read_chainlink(w3, spec.address, block, symbol)
+            if usd is not None:
+                prices[symbol] = usd
+                continue
+
+        # No USD feed (or it failed): try the ETH-denominated feed and convert.
+        # This is not a nicety — leaving ONE token of a pair on a live price
+        # while its counterpart is priced at the pinned block puts the full pin
+        # age INSIDE the ratio the guard divides, which is worse than the
+        # all-live behaviour this change replaced (all-live is at least
+        # self-consistent). base/wstETH is exactly that case: no WSTETH/USD
+        # feed, but WSTETH/ETH exists.
+        eth_spec = CATALOG.derived_feed_for_token(chain_name, symbol)
+        eth_usd_spec = CATALOG.feed_for_token(chain_name, "WETH")
+        if eth_spec is not None and eth_usd_spec is not None:
+            in_eth = _read_chainlink(w3, eth_spec.address, block, f"{symbol} (in ETH)")
+            eth_usd = _read_chainlink(w3, eth_usd_spec.address, block, "ETH/USD")
+            if in_eth is not None and eth_usd is not None:
+                prices[symbol] = in_eth * eth_usd
+                print(f"    {symbol}: derived from {symbol}/ETH x ETH/USD at the pinned block")
+                continue
+
+        if spec is None and eth_spec is None:
+            # Say so per-token. The summary below tells the reader "the lines
+            # above say which", and without this line that claim is false for
+            # the commonest case.
+            print(f"    {symbol}: no catalogued Chainlink feed on {chain_name}; will use the live price")
+
+    return prices
+
+
+def _fork_block_label(chain_name: str) -> str:
+    """What block the fork reads resolve to, for honest logging.
+
+    The success banner used to assert "at the pinned fork block" even when the
+    read had just degraded to ``latest`` — a claim contradicted by a warning
+    three lines above it.
+    """
+    pin = os.environ.get(f"ANVIL_FORK_BLOCK_{chain_name.upper()}") or os.environ.get("ANVIL_FORK_BLOCK")
+    return pin if pin and pin.isdigit() else "latest (NOT pinned)"
+
+
+def _read_chainlink(w3, address: str, block: int | str, label: str) -> Decimal | None:
+    """One Chainlink read, or None with a NAMED reason. Never raises."""
+    from web3 import Web3
+
+    try:
+        contract = w3.eth.contract(address=Web3.to_checksum_address(address), abi=_CHAINLINK_ROUND_ABI)
+        decimals = contract.functions.decimals().call(block_identifier=block)
+        answer = contract.functions.latestRoundData().call(block_identifier=block)[1]
+    except Exception as exc:  # noqa: BLE001 - one bad feed must not fail the run
+        print(f"    {label}: Chainlink read FAILED at {address} ({exc})")
+        return None
+    if answer <= 0:
+        print(f"    {label}: Chainlink returned a non-positive answer ({answer}) at {address}")
+        return None
+    return Decimal(answer) / Decimal(10**decimals)
+
+
 def _create_price_oracle_fixture(chain_name: str):
     """Factory function to create session-scoped price oracle per chain.
 
@@ -2421,15 +2612,91 @@ def _create_price_oracle_fixture(chain_name: str):
     """
 
     @pytest.fixture(scope="session")
-    def price_oracle_fixture() -> dict[str, Decimal]:
-        """Fetch prices once per session for all tokens in this chain.
+    def price_oracle_fixture(request) -> dict[str, Decimal]:
+        """Prices for this chain, read at the PINNED FORK BLOCK where possible.
 
-        Uses direct CoinGecko HTTP call to avoid gateway dependency.
-
-        Returns:
-            Dict mapping token symbols to USD prices
+        Chainlink on the fork is preferred because it is deterministic at a
+        pinned block and independent of the pool being quoted (VIB-6733).
+        Tokens without a Chainlink feed fall back to a live CoinGecko call,
+        which is the old behaviour and carries the old time-skew hazard — so
+        the fallback is NAMED in the output rather than applied silently.
         """
-        return _fetch_prices_sync(chain_name)
+        # Declare the Anvil dependency EXPLICITLY. `get_anvil_rpc_url` reads
+        # ANVIL_<CHAIN>_PORT, which the Anvil fixture sets — so without this the
+        # correct behaviour depends on consumers happening to list the Anvil/web3
+        # fixtures before `price_oracle` in their signatures, and the first test
+        # that reorders its arguments silently prices against a default port.
+        # `bnb` is an alias for the bsc Anvil fixture; asking for `anvil_bnb`
+        # would raise and disable fork pricing for it.
+        anvil_fixture = "anvil_bsc" if chain_name == "bnb" else f"anvil_{chain_name}"
+        try:
+            request.getfixturevalue(anvil_fixture)
+        except Exception as exc:  # noqa: BLE001 - chains without an Anvil fixture still price live
+            print(f"  No {anvil_fixture} fixture ({exc}); fork pricing will be skipped for {chain_name}")
+
+        on_chain = _fetch_prices_from_fork(chain_name)
+        config = CHAIN_CONFIGS.get(chain_name, {})
+        symbols = list(config.get("tokens", {}).keys())
+        missing = [s for s in symbols if s not in on_chain]
+
+        if on_chain:
+            print(f"\n  Prices from Chainlink on the fork ({chain_name}, block={_fork_block_label(chain_name)}):")
+            for symbol, price in sorted(on_chain.items()):
+                print(f"    {symbol}: ${price}")
+
+        if not missing:
+            return on_chain
+
+        print(
+            f"  Not priced from the fork on {chain_name}: {', '.join(sorted(missing))} "
+            f"-> falling back to LIVE CoinGecko for these (no catalogued feed, a failed "
+            f"read, or no RPC - the per-token lines above say which)."
+        )
+        live = _fetch_prices_sync(chain_name)
+
+        if on_chain:
+            # The dangerous shape, and the one that actually bit on base/wstETH:
+            # a pair with one leg pinned and the other live carries the FULL pin
+            # age inside the ratio the guard divides. All-live is at least
+            # self-consistent; mixed is not.
+            #
+            # For an ETH-CORRELATED token this is not a warning-worthy nuisance,
+            # it is the exact failure: its price moves with ETH, so pairing a
+            # live quote for it against a pinned ETH puts the whole pin age in
+            # the ratio. A print is not a control, so drop the CHAIN to all-live
+            # rather than hand back a mixed dict that reads as an improvement.
+            from almanak.integrations.chainlink.catalog import TOKEN_TO_ETH_PAIR
+
+            # TOKEN_TO_ETH_PAIR holds only the LSTs (RETH, STETH, WSTETH) — it
+            # maps a token to its <TOKEN>/ETH feed, and ETH has no such feed
+            # because the ratio is 1. So ETH and WETH must be added by hand:
+            # they are the most ETH-correlated symbols there are, and they are
+            # the volatile leg of nearly every pair here. Without them, a run
+            # where WETH failed to pin while the stables succeeded would hand
+            # back the worst possible mix — volatile live, stables pinned —
+            # and the refusal below would not fire.
+            eth_correlated = set(TOKEN_TO_ETH_PAIR) | {"ETH", "WETH", "NATIVE_ETH"}
+            correlated = sorted(s for s in missing if s.strip().upper() in eth_correlated)
+            if correlated:
+                print(
+                    f"  REFUSING mixed price sources on {chain_name}: "
+                    f"{', '.join(correlated)} is ETH-correlated and could not be priced at "
+                    f"the pinned block, while {', '.join(sorted(on_chain))} could. A swap "
+                    f"between them would carry the pin age inside its price ratio. Falling "
+                    f"back to ALL-LIVE for this chain, which is at least self-consistent "
+                    f"(VIB-6733)."
+                )
+                return live
+
+            print(
+                f"  Mixed price sources on {chain_name}: "
+                f"{', '.join(sorted(on_chain))} at the pinned block, "
+                f"{', '.join(sorted(missing))} live. None of the live ones is ETH-correlated, "
+                f"so a pair spanning the two groups is stable-vs-stable and the skew is "
+                f"bounded; kept rather than dropping the chain to all-live (VIB-6733)."
+            )
+        # On-chain values win; live only fills the gaps.
+        return {**live, **on_chain}
 
     return price_oracle_fixture
 
