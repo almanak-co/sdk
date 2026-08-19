@@ -86,6 +86,7 @@ from almanak.framework.backtesting.pnl.error_handling import (
     BacktestErrorHandler,
     PreflightValidationError,
 )
+from almanak.framework.backtesting.pnl.feasibility import enforce_window_feasibility
 from almanak.framework.backtesting.pnl.initial_portfolio import (
     TokenFundingInitializationError,
     active_token_funding_entries,
@@ -912,6 +913,10 @@ async def _prepare_declared_historical_pool_state(
             error_count=1,
             warning_count=0,
         )
+    # Fail fast on windows that cannot finish inside the job budget: the
+    # estimate is pure arithmetic, so it lands before the first serial
+    # gateway page instead of after ~600s of loading (ALM-3385).
+    enforce_window_feasibility(config, target_count=len(targets))
     source = SnapshotPoolStateSource(
         start_time=config.start_time,
         end_time=config.end_time,

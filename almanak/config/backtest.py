@@ -47,7 +47,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from almanak.config.env import _load_dotenv_once
+from almanak.config.env import _load_dotenv_once, _parse_float_with_default
 
 # =============================================================================
 # Constants — chains and env-var name maps used by the env factory.
@@ -485,6 +485,25 @@ def backtest_service_config_from_env() -> BacktestServiceConfig:
     return _backtest_service_config_from_env_values()
 
 
+def backtest_feasibility_knob(env_var: str, default: float) -> float:
+    """Config-boundary reader for the ALM-3385 feasibility-gate knobs.
+
+    The feasibility gate in ``almanak/framework/backtesting/pnl/feasibility.py``
+    sizes backtest windows against a handful of ``ALMANAK_BACKTEST_*`` floats
+    (job budget, page latency, tick throughput, safety margin). Ownership of
+    the knob names and defaults stays with the gate; this helper owns only the
+    ``os.environ`` read so the framework module stays outside the config
+    boundary (scripts/ci/check_config_boundary.py). The prefix guard keeps it
+    from becoming a generic env escape hatch.
+
+    Semantics match the gate's validators: unset/empty, unparseable,
+    non-finite, and non-positive values all warn and fall back to ``default``.
+    """
+    if not env_var.startswith("ALMANAK_BACKTEST_"):
+        raise ValueError(f"backtest_feasibility_knob only reads ALMANAK_BACKTEST_* env vars, got {env_var!r}")
+    return _parse_float_with_default(env_var, default, min_value=0.0, min_inclusive=False)
+
+
 # =============================================================================
 # Boundary helper — controlled SSL_CERT_FILE env mutation
 # =============================================================================
@@ -543,5 +562,6 @@ __all__ = [
     "GasApiConfig",
     "apply_ssl_cert_file",
     "backtest_config_from_env",
+    "backtest_feasibility_knob",
     "backtest_service_config_from_env",
 ]
