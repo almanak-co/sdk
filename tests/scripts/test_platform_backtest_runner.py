@@ -16,6 +16,7 @@ import pytest
 from almanak._version import __version__
 from almanak.core.models.quote_asset import QuoteAsset
 from almanak.framework.backtesting.pnl.data_provider import HistoricalDataConfig, MarketState
+from almanak.framework.backtesting.pnl.error_handling import PreflightValidationError
 from almanak.framework.data.tokens.defaults import NATIVE_SENTINEL
 from almanak.framework.intents.vocabulary import SwapIntent
 from almanak.services.backtest.platform_artifacts import (
@@ -900,6 +901,7 @@ def test_main_posts_failed_callback_for_env_validation_error(monkeypatch: pytest
     monkeypatch.setattr(runner, "post_callback_values", fake_post_callback_values)
 
     assert runner.main() == 1
+    error_message = "PlatformRunnerError: COMMIT_SHA must be a 40-character git SHA"
     assert calls == [
         {
             "platform_callback_url": "https://api.example",
@@ -907,7 +909,19 @@ def test_main_posts_failed_callback_for_env_validation_error(monkeypatch: pytest
             "platform_callback_secret": "secret",
             "payload": {
                 "status": "FAILED",
-                "error_message": "PlatformRunnerError: COMMIT_SHA must be a 40-character git SHA",
+                "error_message": error_message,
+                "result_summary": {
+                    "failure_stage": "infra",
+                    "code": "INFRA_ERROR",
+                    "blockers": [
+                        {
+                            "code": "INFRA_ERROR",
+                            "message": error_message,
+                            "failed_checks": [],
+                            "recommendations": [],
+                        }
+                    ],
+                },
             },
         }
     ]
@@ -940,6 +954,18 @@ def test_main_posts_failed_callback_for_runtime_error(monkeypatch: pytest.Monkey
     assert calls[0]["payload"] == {
         "status": "FAILED",
         "error_message": "PlatformRunnerError: strategy not found",
+        "result_summary": {
+            "failure_stage": "infra",
+            "code": "INFRA_ERROR",
+            "blockers": [
+                {
+                    "code": "INFRA_ERROR",
+                    "message": "PlatformRunnerError: strategy not found",
+                    "failed_checks": [],
+                    "recommendations": [],
+                }
+            ],
+        },
     }
 
 
@@ -1101,7 +1127,22 @@ def test_run_platform_backtest_certifies_failed_engine_result(monkeypatch: pytes
         "artifact_contract_version": 1,
         "gcs_result_path": "gs://bucket/backtests/test-123/result.json",
         "error_message": result_artifact["result"]["error"],
+        "result_summary": {
+            "failure_stage": "run",
+            "code": "STRATEGY_ERROR",
+            "blockers": [
+                {
+                    "code": "STRATEGY_ERROR",
+                    "message": result_artifact["result"]["error"],
+                    "failed_checks": [],
+                    "recommendations": [],
+                }
+            ],
+        },
     }
+    # The engine still produced metrics for the failed run; result.json keeps
+    # them while the callback carries the structured failure taxonomy.
+    assert result_artifact["result_summary"]["total_trades"] == 0
 
 
 def test_run_platform_backtest_uses_fallback_for_whitespace_engine_error(
@@ -1141,6 +1182,335 @@ def test_run_platform_backtest_uses_fallback_for_whitespace_engine_error(
 
     assert uploads[1][1]["error_message"] == "Backtest engine returned a failed result."
     assert payload["error_message"] == "Backtest engine returned a failed result."
+
+
+# ---------------------------------------------------------------------------
+# Structured preflight failures (ALM-3384 / ALM-3386)
+# ---------------------------------------------------------------------------
+
+
+class _FeasibilityGateError(RuntimeError):
+    """Stand-in for a gate that raises before data materialization.
+
+    The runner must recognise it through the duck-typed attribute contract
+    only — never by importing the raiser's class.
+    """
+
+    def __init__(self, message: str, *, code: str, blockers: list[dict[str, Any]]) -> None:
+        super().__init__(message)
+        self.preflight_code = code
+        self.preflight_blockers = blockers
+
+
+def _patch_preflight_failure_run(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    exc: BaseException,
+) -> tuple[list[tuple[str, dict[str, Any]]], list[dict[str, Any]], list[str]]:
+    """Wire a run whose engine raises ``exc`` out of ``backtester.backtest``."""
+    _patch_successful_run(monkeypatch, tmp_path)
+    closed: list[str] = []
+
+    class Backtester:
+        async def backtest(self, strategy: object, config: object) -> object:
+            raise exc
+
+        async def close(self) -> None:
+            closed.append("close")
+
+    uploads: list[tuple[str, dict[str, Any]]] = []
+    callbacks: list[dict[str, Any]] = []
+
+    def record_upload(bucket: str, object_path: str, payload: dict[str, Any]) -> str:
+        uploads.append((object_path, payload))
+        return "42" if object_path.endswith("result.json") else "43"
+
+    monkeypatch.setattr(runner, "create_backtester", lambda **kwargs: Backtester())
+    monkeypatch.setattr(runner, "serialize_result", lambda result: pytest.fail("no result exists for preflight"))
+    monkeypatch.setattr(
+        runner, "upload_decisions_to_gcs", lambda *args: pytest.fail("preflight has no decision telemetry")
+    )
+    monkeypatch.setattr(runner, "upload_result_to_gcs", record_upload)
+    monkeypatch.setattr(runner, "post_callback", lambda current_env, payload: callbacks.append(payload))
+    return uploads, callbacks, closed
+
+
+def test_run_platform_backtest_certifies_structured_preflight_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    env = _env(
+        STRATEGY_WORKDIR=str(tmp_path / "strategy"),
+        GCS_RESULT_PATH="gs://bucket/backtests/test-123/result.json",
+    )
+    exc = _FeasibilityGateError(
+        "Requested window needs 8h of engine time; the job budget is 15m",
+        code="WINDOW_TOO_LONG",
+        blockers=[
+            {
+                "code": "WINDOW_TOO_LONG",
+                "message": "Requested 6-month window cannot complete inside the job budget",
+                "failed_checks": ["window_feasibility"],
+                "recommendations": ["Shorten the window to 60 days", "Increase interval_seconds"],
+            }
+        ],
+    )
+    uploads, callbacks, closed = _patch_preflight_failure_run(monkeypatch, tmp_path, exc)
+
+    payload = asyncio.run(runner.run_platform_backtest(env))
+
+    assert closed == ["close"]
+    assert [path for path, _ in uploads] == [
+        "backtests/test-123/result.json",
+        "backtests/test-123/terminal.json",
+    ]
+
+    result_artifact = uploads[0][1]
+    assert result_artifact["backtest_id"] == "test-123"
+    assert result_artifact["commit_sha"] == "a" * 40
+    assert result_artifact["strategy"]["class_name"] == "Strategy"
+    assert result_artifact["backtest_config"] == {"chain": "base"}
+    assert "result" not in result_artifact
+    assert result_artifact["failure"] == {
+        "failure_stage": "preflight",
+        "code": "WINDOW_TOO_LONG",
+        "blockers": [
+            {
+                "code": "WINDOW_TOO_LONG",
+                "message": "Requested 6-month window cannot complete inside the job budget",
+                "failed_checks": ["window_feasibility"],
+                "recommendations": ["Shorten the window to 60 days", "Increase interval_seconds"],
+            }
+        ],
+        "error_message": "Requested window needs 8h of engine time; the job budget is 15m",
+    }
+
+    terminal = uploads[1][1]
+    assert terminal["backtest_outcome"] == "FAILED"
+    assert terminal["result_generation"] == "42"
+    assert terminal["error_message"] == result_artifact["failure"]["error_message"]
+
+    assert callbacks == [payload]
+    assert payload == {
+        "status": "FAILED",
+        "artifact_contract_version": 1,
+        "gcs_result_path": "gs://bucket/backtests/test-123/result.json",
+        "error_message": "Requested window needs 8h of engine time; the job budget is 15m",
+        "result_summary": {
+            "failure_stage": "preflight",
+            "code": "WINDOW_TOO_LONG",
+            "blockers": result_artifact["failure"]["blockers"],
+        },
+    }
+
+
+def test_run_platform_backtest_maps_bare_preflight_error_to_not_ready(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    env = _env(
+        STRATEGY_WORKDIR=str(tmp_path / "strategy"),
+        GCS_RESULT_PATH="gs://bucket/backtests/test-123/result.json",
+    )
+    exc = PreflightValidationError(
+        "Preflight validation failed with 1 error(s)",
+        failed_checks=["price_coverage: no USD price for WETH on 2024-01-05"],
+        recommendations=["Shorten the backtest window", "Pick a token with historical coverage"],
+        error_count=1,
+    )
+    uploads, callbacks, _ = _patch_preflight_failure_run(monkeypatch, tmp_path, exc)
+
+    payload = asyncio.run(runner.run_platform_backtest(env))
+
+    summary = payload["result_summary"]
+    assert summary["failure_stage"] == "preflight"
+    assert summary["code"] == "BACKTEST_NOT_READY"
+    assert summary["blockers"] == [
+        {
+            "code": "BACKTEST_NOT_READY",
+            "message": str(exc),
+            "failed_checks": ["price_coverage: no USD price for WETH on 2024-01-05"],
+            "recommendations": ["Shorten the backtest window", "Pick a token with historical coverage"],
+        }
+    ]
+    assert payload["error_message"] == str(exc)
+    assert uploads[0][1]["failure"]["code"] == "BACKTEST_NOT_READY"
+    assert uploads[1][1]["error_message"] == str(exc)
+    assert callbacks == [payload]
+
+
+def test_run_platform_backtest_keeps_engine_code_on_bare_preflight_blocker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    env = _env(STRATEGY_WORKDIR=str(tmp_path / "strategy"))
+    exc = PreflightValidationError("Protocol is unsupported on base", code="UNSUPPORTED_PROTOCOL")
+    _, callbacks, _ = _patch_preflight_failure_run(monkeypatch, tmp_path, exc)
+
+    payload = asyncio.run(runner.run_platform_backtest(env))
+
+    # The stage headline stays the contract default; the engine's own stable
+    # code rides along on the blocker so the platform can still branch on it.
+    assert payload["result_summary"]["code"] == "BACKTEST_NOT_READY"
+    assert payload["result_summary"]["blockers"][0]["code"] == "UNSUPPORTED_PROTOCOL"
+    assert callbacks == [payload]
+
+
+def test_run_platform_backtest_redacts_preflight_artifacts_and_callback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    env = _env(STRATEGY_WORKDIR=str(tmp_path / "strategy"))
+    exc = _FeasibilityGateError(
+        "clone https://x-access-token:token@example/repo.git failed with secret",
+        code="BACKTEST_NOT_READY",
+        blockers=[
+            {
+                "code": "BACKTEST_NOT_READY",
+                "message": "provider https://user:password@data.example rejected the request",
+                "recommendations": ["retry against https://x-access-token:token@example/repo.git"],
+            }
+        ],
+    )
+    uploads, callbacks, _ = _patch_preflight_failure_run(monkeypatch, tmp_path, exc)
+
+    payload = asyncio.run(runner.run_platform_backtest(env))
+
+    rendered = json.dumps([uploads[0][1], uploads[1][1], payload])
+    assert "x-access-token:token@example" not in rendered
+    assert "user:password" not in rendered
+    assert "GITHUB_CLONE_URL" in payload["error_message"]
+    assert "PLATFORM_CALLBACK_SECRET" in payload["error_message"]
+    blocker = payload["result_summary"]["blockers"][0]
+    assert blocker["message"] == "provider https://***@data.example rejected the request"
+    assert blocker["recommendations"] == ["retry against GITHUB_CLONE_URL"]
+    assert callbacks == [payload]
+
+
+def test_run_platform_backtest_does_not_post_callback_when_preflight_terminal_upload_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    env = _env(STRATEGY_WORKDIR=str(tmp_path / "strategy"))
+    exc = PreflightValidationError("Preflight validation failed with 1 error(s)")
+    _patch_preflight_failure_run(monkeypatch, tmp_path, exc)
+    original = ConnectionError("terminal upload unavailable")
+
+    def fail_terminal_upload(bucket: str, object_path: str, payload: dict[str, Any]) -> str:
+        if object_path == env.gcs_terminal_path:
+            raise original
+        return "42"
+
+    monkeypatch.setattr(runner, "upload_result_to_gcs", fail_terminal_upload)
+    monkeypatch.setattr(runner, "post_callback", lambda *args: pytest.fail("must not post a terminal callback"))
+
+    with pytest.raises(runner.TerminalArtifactPublicationError) as exc_info:
+        asyncio.run(runner.run_platform_backtest(env))
+
+    assert exc_info.value.outcome is runner.PlatformBacktestOutcome.FAILED
+    assert exc_info.value.__cause__ is original
+    assert not isinstance(exc_info.value, runner.PlatformRunnerError)
+
+
+def test_run_platform_backtest_raises_delivery_error_when_preflight_callback_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    env = _env(STRATEGY_WORKDIR=str(tmp_path / "strategy"))
+    exc = PreflightValidationError("Preflight validation failed with 1 error(s)")
+    _patch_preflight_failure_run(monkeypatch, tmp_path, exc)
+    original = runner.requests.ConnectionError("callback unreachable")
+
+    def fail_callback(current_env: runner.PlatformRunnerEnv, payload: dict[str, Any]) -> None:
+        raise original
+
+    monkeypatch.setattr(runner, "post_callback", fail_callback)
+
+    with pytest.raises(runner.TerminalCallbackDeliveryError) as exc_info:
+        asyncio.run(runner.run_platform_backtest(env))
+
+    assert exc_info.value.outcome is runner.PlatformBacktestOutcome.FAILED
+    assert exc_info.value.gcs_result_path == env.gcs_result_uri
+    assert exc_info.value.__cause__ is original
+
+
+def test_main_certifies_preflight_failure_without_a_second_verdict(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("BACKTEST_ID", "test-123")
+    monkeypatch.setenv("COMMIT_SHA", "a" * 40)
+    monkeypatch.setenv("GITHUB_CLONE_URL", "https://x-access-token:token@example/repo.git")
+    monkeypatch.setenv("STRATEGY_CONFIG", json.dumps({"token_funding": _TOKEN_FUNDING}))
+    monkeypatch.setenv("BACKTEST_CONFIG", '{"start_time":"2024-01-01","end_time":"2024-03-01"}')
+    monkeypatch.setenv("GCS_BUCKET", "bucket")
+    monkeypatch.setenv("GCS_RESULT_PATH", "gs://bucket/backtests/test-123/result.json")
+    monkeypatch.setenv("PLATFORM_CALLBACK_URL", "https://api.example")
+    monkeypatch.setenv("PLATFORM_CALLBACK_SECRET", "secret")
+    monkeypatch.setenv("STRATEGY_WORKDIR", str(tmp_path / "strategy"))
+
+    exc = _FeasibilityGateError("window is infeasible", code="WINDOW_TOO_LONG", blockers=[])
+    _, callbacks, _ = _patch_preflight_failure_run(monkeypatch, tmp_path, exc)
+    monkeypatch.setattr(runner, "post_callback_values", lambda **kwargs: pytest.fail("must not post a second verdict"))
+
+    # A certified terminal outcome is a successful runner task: Cloud Run must
+    # not retry a run whose verdict is already durable.
+    assert runner.main() == 0
+    assert [payload["status"] for payload in callbacks] == ["FAILED"]
+    assert callbacks[0]["result_summary"]["code"] == "WINDOW_TOO_LONG"
+    assert callbacks[0]["result_summary"]["blockers"] == [
+        {
+            "code": "WINDOW_TOO_LONG",
+            "message": "window is infeasible",
+            "failed_checks": [],
+            "recommendations": [],
+        }
+    ]
+
+
+def test_main_maps_escaped_preflight_failure_without_artifacts(monkeypatch: pytest.MonkeyPatch) -> None:
+    posted: list[dict[str, Any]] = []
+
+    monkeypatch.setenv("BACKTEST_ID", "test-123")
+    monkeypatch.setenv("COMMIT_SHA", "a" * 40)
+    monkeypatch.setenv("GITHUB_CLONE_URL", "https://x-access-token:token@example/repo.git")
+    monkeypatch.setenv("STRATEGY_CONFIG", "{}")
+    monkeypatch.setenv("BACKTEST_CONFIG", "{}")
+    monkeypatch.setenv("GCS_BUCKET", "bucket")
+    monkeypatch.setenv("PLATFORM_CALLBACK_URL", "https://api.example")
+    monkeypatch.setenv("PLATFORM_CALLBACK_SECRET", "secret")
+
+    async def fake_run_platform_backtest(env: runner.PlatformRunnerEnv) -> dict[str, Any]:
+        raise PreflightValidationError(
+            "Preflight validation failed with 1 error(s)",
+            failed_checks=["support_matrix: unsupported venue"],
+        )
+
+    monkeypatch.setattr(runner, "run_platform_backtest", fake_run_platform_backtest)
+    monkeypatch.setattr(runner, "post_callback", lambda env, payload: posted.append(payload))
+
+    assert runner.main() == 1
+    assert posted[0]["result_summary"] == {
+        "failure_stage": "preflight",
+        "code": "BACKTEST_NOT_READY",
+        "blockers": [
+            {
+                "code": "BACKTEST_NOT_READY",
+                "message": posted[0]["error_message"],
+                "failed_checks": ["support_matrix: unsupported venue"],
+                "recommendations": [],
+            }
+        ],
+    }
+
+
+def test_failure_summaries_truncate_oversized_messages() -> None:
+    exc = PreflightValidationError("x" * 6000)
+
+    summary = runner.build_preflight_failure_summary(exc)
+
+    assert len(summary["blockers"][0]["message"]) == 5000
+    assert len(runner.build_run_failure_summary("y" * 6000)["blockers"][0]["message"]) == 5000
 
 
 def _patch_terminal_blob(monkeypatch: pytest.MonkeyPatch, download: bytes | Exception) -> None:
@@ -1224,6 +1594,11 @@ def test_cloud_run_retry_redelivers_existing_certificate_without_rerunning(monke
     monkeypatch.setattr(runner, "load_terminal_manifest_from_gcs", lambda current_env: existing_terminal)
     monkeypatch.setattr(runner, "clone_strategy_repo", lambda current_env: pytest.fail("strategy must not rerun"))
     monkeypatch.setattr(runner, "upload_result_to_gcs", lambda *args: pytest.fail("evidence must not be overwritten"))
+    monkeypatch.setattr(
+        runner,
+        "load_result_artifact_from_gcs",
+        lambda *args: pytest.fail("a COMPLETED redelivery must not read result.json"),
+    )
     monkeypatch.setattr(runner, "post_callback", lambda current_env, payload: order.append(payload["status"]))
 
     payload = asyncio.run(runner.run_platform_backtest(env))
@@ -1271,6 +1646,9 @@ def test_cloud_run_retry_redelivers_failed_certificate_with_its_error_message(
     callbacks: list[dict[str, Any]] = []
 
     monkeypatch.setattr(runner, "load_terminal_manifest_from_gcs", lambda current_env: existing_terminal)
+    # A certificate whose result.json cannot be read carries no recoverable
+    # summary: the redelivered payload must stay exactly what it was pre-ALM-3384.
+    monkeypatch.setattr(runner, "load_result_artifact_from_gcs", lambda *args: None)
     monkeypatch.setattr(runner, "post_start_callback", lambda current_env: pytest.fail("must not post STARTED"))
     monkeypatch.setattr(runner, "clone_strategy_repo", lambda current_env: pytest.fail("strategy must not rerun"))
     monkeypatch.setattr(runner, "upload_result_to_gcs", lambda *args: pytest.fail("evidence must not be overwritten"))
@@ -1285,6 +1663,167 @@ def test_cloud_run_retry_redelivers_failed_certificate_with_its_error_message(
         "error_message": "historical price provider failed",
     }
     assert callbacks == [payload]
+
+
+def _patch_result_blob(
+    monkeypatch: pytest.MonkeyPatch,
+    download: bytes | Exception,
+    requested: list[tuple[str, Any]] | None = None,
+) -> None:
+    class Blob:
+        def download_as_bytes(self) -> bytes:
+            if isinstance(download, Exception):
+                raise download
+            return download
+
+    class Bucket:
+        def blob(self, object_path: str, generation: Any = None) -> Blob:
+            if requested is not None:
+                requested.append((object_path, generation))
+            return Blob()
+
+    class Client:
+        def bucket(self, bucket_name: str) -> Bucket:
+            return Bucket()
+
+    storage_module = ModuleType("google.cloud.storage")
+    storage_module.Client = Client
+    cloud_module = importlib.import_module("google.cloud")
+    monkeypatch.setitem(sys.modules, "google.cloud.storage", storage_module)
+    monkeypatch.setattr(cloud_module, "storage", storage_module, raising=False)
+
+
+def _preflight_result_artifact(env: runner.PlatformRunnerEnv, error_message: str) -> dict[str, Any]:
+    """The result.json shape the preflight terminal path uploads."""
+    return {
+        "backtest_id": env.backtest_id,
+        "commit_sha": env.commit_sha,
+        "failure": {
+            "failure_stage": "preflight",
+            "code": "WINDOW_TOO_LONG",
+            "blockers": [
+                {
+                    "code": "WINDOW_TOO_LONG",
+                    "message": error_message,
+                    "failed_checks": ["window: 6 months exceeds the tick budget"],
+                    "recommendations": ["Shorten the backtest window"],
+                }
+            ],
+            "error_message": error_message,
+        },
+    }
+
+
+def _redelivered_failed_payload(monkeypatch: pytest.MonkeyPatch, env: runner.PlatformRunnerEnv, **kwargs: Any) -> Any:
+    existing_terminal = _existing_terminal(env, runner.PlatformBacktestOutcome.FAILED, **kwargs)
+    monkeypatch.setattr(runner, "load_terminal_manifest_from_gcs", lambda current_env: existing_terminal)
+    monkeypatch.setattr(runner, "post_start_callback", lambda current_env: pytest.fail("must not post STARTED"))
+    monkeypatch.setattr(runner, "clone_strategy_repo", lambda current_env: pytest.fail("strategy must not rerun"))
+    monkeypatch.setattr(runner, "upload_result_to_gcs", lambda *args: pytest.fail("evidence must not be overwritten"))
+    monkeypatch.setattr(runner, "post_callback", lambda current_env, payload: None)
+    return asyncio.run(runner.run_platform_backtest(env))
+
+
+def test_cloud_run_retry_redelivers_structured_summary_from_certified_artifact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env = _env(GCS_RESULT_PATH="gs://bucket/backtests/test-123/result.json")
+    error_message = "Backtest window is longer than the runner budget"
+    requested: list[tuple[str, Any]] = []
+    _patch_result_blob(monkeypatch, json.dumps(_preflight_result_artifact(env, error_message)).encode(), requested)
+
+    payload = _redelivered_failed_payload(monkeypatch, env, error_message=error_message)
+
+    assert payload["error_message"] == error_message
+    # Same structured summary the first attempt sent — blockers, not a flat string.
+    assert payload["result_summary"] == {
+        "failure_stage": "preflight",
+        "code": "WINDOW_TOO_LONG",
+        "blockers": [
+            {
+                "code": "WINDOW_TOO_LONG",
+                "message": error_message,
+                "failed_checks": ["window: 6 months exceeds the tick budget"],
+                "recommendations": ["Shorten the backtest window"],
+            }
+        ],
+    }
+    # Read is pinned to the certified generation, never to "current" bytes.
+    assert requested == [("backtests/test-123/result.json", 42)]
+
+
+def test_cloud_run_retry_rebuilds_run_stage_summary_for_engine_failure_artifact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env = _env(GCS_RESULT_PATH="gs://bucket/backtests/test-123/result.json")
+    # An engine-produced failed result (and every certificate written by an
+    # already-deployed image) has no "failure" section; its summary is a pure
+    # function of the certified error message.
+    legacy_artifact = {
+        "backtest_id": env.backtest_id,
+        "commit_sha": env.commit_sha,
+        "result_summary": {"total_trades": 0},
+        "result": {"success": False},
+    }
+    _patch_result_blob(monkeypatch, json.dumps(legacy_artifact).encode())
+
+    payload = _redelivered_failed_payload(monkeypatch, env, error_message="historical price provider failed")
+
+    assert payload["result_summary"] == runner.build_run_failure_summary("historical price provider failed")
+    assert payload["result_summary"]["failure_stage"] == "run"
+    assert payload["result_summary"]["code"] == "STRATEGY_ERROR"
+
+
+@pytest.mark.parametrize(
+    "download",
+    [TimeoutError("GCS read timed out"), b"{truncated", b'"not an object"'],
+)
+def test_recover_failure_summary_degrades_when_certified_artifact_is_unreadable(
+    monkeypatch: pytest.MonkeyPatch,
+    download: bytes | Exception,
+) -> None:
+    env = _env(GCS_RESULT_PATH="gs://bucket/backtests/test-123/result.json")
+    _patch_result_blob(monkeypatch, download)
+    terminal = _existing_terminal(env, runner.PlatformBacktestOutcome.FAILED, error_message="engine exploded")
+
+    # Redelivery must never become more fragile than the payload it replaces.
+    assert runner.recover_failure_summary(env, terminal) is None
+
+
+def test_recover_failure_summary_redacts_recovered_blockers(monkeypatch: pytest.MonkeyPatch) -> None:
+    env = _env(GCS_RESULT_PATH="gs://bucket/backtests/test-123/result.json")
+    artifact = _preflight_result_artifact(env, "boom")
+    artifact["failure"]["blockers"][0]["recommendations"] = ["retry with secret"]
+    artifact["failure"]["blockers"][0]["message"] = "clone https://user:pw@example/repo.git failed"
+    _patch_result_blob(monkeypatch, json.dumps(artifact).encode())
+    terminal = _existing_terminal(env, runner.PlatformBacktestOutcome.FAILED, error_message="boom")
+
+    summary = runner.recover_failure_summary(env, terminal)
+
+    assert summary is not None
+    assert summary["blockers"][0]["message"] == "clone https://***@example/repo.git failed"
+    assert summary["blockers"][0]["recommendations"] == ["retry with PLATFORM_CALLBACK_SECRET"]
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "not-a-mapping",
+        {"failure_stage": "preflight", "code": "X"},
+        {"failure_stage": "", "code": "X", "blockers": [{}]},
+    ],
+)
+def test_recover_failure_summary_ignores_malformed_failure_sections(
+    monkeypatch: pytest.MonkeyPatch,
+    failure: Any,
+) -> None:
+    env = _env(GCS_RESULT_PATH="gs://bucket/backtests/test-123/result.json")
+    _patch_result_blob(monkeypatch, json.dumps({"failure": failure}).encode())
+    terminal = _existing_terminal(env, runner.PlatformBacktestOutcome.FAILED, error_message="engine exploded")
+
+    # A half-written section is not evidence: fall through to the run-stage
+    # rebuild rather than shipping a summary with missing blockers.
+    assert runner.recover_failure_summary(env, terminal) == runner.build_run_failure_summary("engine exploded")
 
 
 def test_main_does_not_post_failed_when_only_completed_callback_fails(
@@ -1388,12 +1927,23 @@ def test_main_posts_failed_for_permanent_terminal_certificate_contract_error(
     monkeypatch.setattr(runner, "post_callback", lambda env, payload: posted.append(payload))
 
     assert runner.main() == 1
+    error_message = "TerminalArtifactContractError: Existing terminal certificate is invalid: wrong result URI"
     assert posted == [
         {
             "status": "FAILED",
-            "error_message": (
-                "TerminalArtifactContractError: Existing terminal certificate is invalid: wrong result URI"
-            ),
+            "error_message": error_message,
+            "result_summary": {
+                "failure_stage": "infra",
+                "code": "INFRA_ERROR",
+                "blockers": [
+                    {
+                        "code": "INFRA_ERROR",
+                        "message": error_message,
+                        "failed_checks": [],
+                        "recommendations": [],
+                    }
+                ],
+            },
         }
     ]
 
