@@ -8,7 +8,9 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from decimal import Decimal
+from unittest.mock import patch
 
+from almanak.core.asset_identity import AssetIdentity, AssetNamespace
 from almanak.framework.intents import Intent
 from almanak.framework.teardown.completeness import (
     check_intent_coverage,
@@ -779,6 +781,237 @@ def test_non_pt_token_not_false_matched_by_pt_swap_VIB_5590():
 
 
 # ---------------------------------------------------------------------------
+# VIB-6677 / ALM-3105 — completeness joins on canonical AssetIdentity.
+# ---------------------------------------------------------------------------
+
+
+_BASE_USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+_BASE_WETH = "0x4200000000000000000000000000000000000006"
+
+
+def test_versioned_asset_identity_matches_historical_symbol_intent_VIB_6677():
+    position = _held_token(
+        "ignored-display",
+        details={
+            "asset_identity": {
+                "schemaVersion": 1,
+                "chain": "base",
+                "assetNamespace": "erc20",
+                "assetReference": _BASE_USDC,
+            },
+            "asset": "WETH",
+        },
+    )
+    close = {"intent_type": "SWAP", "from_token": "USDC", "chain": "base"}
+
+    assert check_intent_coverage(_summary([position]), [close]).complete
+
+
+def test_versioned_asset_identity_is_authoritative_over_conflicting_display_symbol_VIB_6677():
+    position = _held_token(
+        "ignored-display",
+        details={
+            "asset_identity": {
+                "schemaVersion": 1,
+                "chain": "base",
+                "assetNamespace": "erc20",
+                "assetReference": _BASE_WETH,
+            },
+            "asset": "USDC",
+        },
+    )
+    wrong_close = {"intent_type": "SWAP", "from_token": "USDC", "chain": "base"}
+
+    assert not check_intent_coverage(_summary([position]), [wrong_close]).complete
+
+
+def test_evm_checksum_and_lowercase_address_forms_converge_VIB_6677():
+    position = _held_token(_BASE_USDC.lower(), details={"token_address": _BASE_USDC.lower()})
+    close = {"intent_type": "SWAP", "from_token": _BASE_USDC, "chain": "base"}
+
+    assert check_intent_coverage(_summary([position]), [close]).complete
+
+
+def test_caip19_intent_matches_versioned_position_identity_VIB_6677():
+    position = _held_token(
+        "ignored-display",
+        details={
+            "asset_identity": {
+                "schemaVersion": 1,
+                "chain": "base",
+                "assetNamespace": "erc20",
+                "assetReference": _BASE_USDC,
+            }
+        },
+    )
+    close = {
+        "intent_type": "SWAP",
+        "from_token": f"eip155:8453/erc20:{_BASE_USDC}",
+        "chain": "base",
+    }
+
+    assert check_intent_coverage(_summary([position]), [close]).complete
+
+
+def test_solana_mint_identity_remains_case_sensitive_VIB_6677():
+    mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+    position = _held_token(mint, chain="solana", details={"token_address": mint})
+    exact_close = {"intent_type": "SWAP", "from_token": mint, "chain": "solana"}
+    different_case = {"intent_type": "SWAP", "from_token": f"e{mint[1:]}", "chain": "solana"}
+
+    assert check_intent_coverage(_summary([position]), [exact_close]).complete
+    assert not check_intent_coverage(_summary([position]), [different_case]).complete
+
+
+def test_versioned_native_identity_is_authoritative_over_stale_display_symbol_VIB_6677():
+    position = _held_token(
+        "ignored-display",
+        chain="arbitrum",
+        details={
+            "asset_identity": {
+                "schemaVersion": 1,
+                "chain": "arbitrum",
+                "assetNamespace": "slip44",
+                "assetReference": "60",
+            },
+            "asset": "USDC",
+        },
+    )
+    exact_close = {
+        "intent_type": "SWAP",
+        "from_token": "eip155:42161/slip44:60",
+        "chain": "arbitrum",
+    }
+    wrong_close = {"intent_type": "SWAP", "from_token": "USDC", "chain": "arbitrum"}
+
+    assert check_intent_coverage(_summary([position]), [exact_close]).complete
+    assert not check_intent_coverage(_summary([position]), [wrong_close]).complete
+    assert not check_intent_coverage(_summary([position]), [], consolidation_target_token="USDC").complete
+
+
+def test_exact_identity_on_another_chain_cannot_cover_position_VIB_6677():
+    position = _held_token(_BASE_USDC, details={"token_address": _BASE_USDC})
+    wrong_chain = {"intent_type": "SWAP", "from_token": _BASE_USDC, "chain": "arbitrum"}
+
+    assert not check_intent_coverage(_summary([position]), [wrong_chain]).complete
+
+
+def test_completeness_identity_resolution_is_static_and_quiet_VIB_6677():
+    position = _held_token("USDC", details={"asset": "USDC"})
+    close = {"intent_type": "SWAP", "from_token": "USDC", "chain": "base"}
+
+    with patch("almanak.framework.teardown.completeness.get_token_resolver") as resolver_factory:
+        resolver = resolver_factory.return_value
+        resolver.resolve.return_value.resolve_asset_identity.return_value = AssetIdentity(
+            "base", AssetNamespace.ERC20, _BASE_USDC
+        )
+
+        assert check_intent_coverage(_summary([position]), [close]).complete
+
+    assert resolver.resolve.call_count >= 2
+    for call in resolver.resolve.call_args_list:
+        assert call.kwargs == {"log_errors": False, "skip_gateway": True}
+
+
+def test_malformed_versioned_identity_does_not_fall_back_to_display_symbol_VIB_6677():
+    position = _held_token(
+        "ignored-display",
+        details={
+            "asset_identity": {
+                "schemaVersion": 1,
+                "chain": "base",
+                "assetNamespace": "erc20",
+                "assetReference": "0x1234",
+            },
+            "asset": "USDC",
+        },
+    )
+    close = {"intent_type": "SWAP", "from_token": "USDC", "chain": "base"}
+
+    assert not check_intent_coverage(_summary([position]), [close]).complete
+    assert not check_intent_coverage(_summary([position]), [], consolidation_target_token="USDC").complete
+
+
+def test_authoritative_identity_cannot_be_bypassed_by_target_noop_VIB_6677():
+    position = _held_token(
+        "ignored-display",
+        details={
+            "asset_identity": {
+                "schemaVersion": 1,
+                "chain": "base",
+                "assetNamespace": "erc20",
+                "assetReference": _BASE_WETH,
+            },
+            "asset": "USDC",
+        },
+    )
+
+    assert not check_intent_coverage(_summary([position]), [], consolidation_target_token="USDC").complete
+
+
+def test_historical_exact_address_cannot_be_bypassed_by_stale_display_symbol_VIB_6677():
+    position = _held_token(
+        "ignored-display",
+        details={"token_address": _BASE_WETH, "asset": "USDC"},
+    )
+    wrong_close = {"intent_type": "SWAP", "from_token": "USDC", "chain": "base"}
+    exact_close = {"intent_type": "SWAP", "from_token": _BASE_WETH.lower(), "chain": "base"}
+
+    assert not check_intent_coverage(_summary([position]), [wrong_close]).complete
+    assert check_intent_coverage(_summary([position]), [exact_close]).complete
+
+
+def test_historical_exact_address_cannot_be_bypassed_by_target_noop_VIB_6677():
+    position = _held_token(
+        "ignored-display",
+        details={"token_address": _BASE_WETH, "asset": "USDC"},
+    )
+
+    assert not check_intent_coverage(_summary([position]), [], consolidation_target_token="USDC").complete
+
+
+def test_malformed_historical_exact_address_cannot_fall_back_to_stale_symbol_VIB_6677():
+    position = _held_token(
+        "ignored-display",
+        details={"token_address": "0x1234", "asset": "USDC"},
+    )
+    wrong_close = {"intent_type": "SWAP", "from_token": "USDC", "chain": "base"}
+
+    assert not check_intent_coverage(_summary([position]), [wrong_close]).complete
+
+
+def test_malformed_historical_exact_address_cannot_create_target_noop_VIB_6677():
+    position = _held_token(
+        "ignored-display",
+        details={"token_address": "0x1234", "asset": "USDC"},
+    )
+
+    assert not check_intent_coverage(_summary([position]), [], consolidation_target_token="USDC").complete
+
+
+def test_malformed_historical_mint_and_caip_cannot_fall_back_to_symbols_VIB_6677():
+    positions = (
+        _held_token("ignored", chain="solana", details={"mint": "not-a-mint", "asset": "USDC"}),
+        _held_token(
+            "ignored",
+            details={"asset": "eip155:8453/erc20:0x1234", "asset_symbol": "USDC"},
+        ),
+    )
+
+    for position in positions:
+        wrong_close = {"intent_type": "SWAP", "from_token": "USDC", "chain": position.chain}
+        assert not check_intent_coverage(_summary([position]), [wrong_close]).complete
+        assert not check_intent_coverage(_summary([position]), [], consolidation_target_token="USDC").complete
+
+
+def test_chain_aliases_converge_before_coverage_VIB_6677():
+    position = _held_token("USDC", chain="eth")
+    close = {"intent_type": "SWAP", "from_token": "USDC", "chain": "ethereum"}
+
+    assert check_intent_coverage(_summary([position]), [close]).complete
+
+
+# ---------------------------------------------------------------------------
 # VIB-5494 Item 1 — target-token no-op: full_close emits NO intent for a held
 # TOKEN/STAKE position whose token already equals the consolidation target
 # (nothing to swap). The coverage gate must credit that no-op close when the
@@ -817,7 +1050,7 @@ def test_token_address_and_matching_target_symbol_is_covered_no_op_VIB_5494():
     pos = _held_token(
         "USDC",
         details={
-            "token_address": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+            "token_address": _BASE_USDC,
             "asset": "USDC",
         },
     )

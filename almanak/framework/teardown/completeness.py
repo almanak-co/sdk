@@ -42,11 +42,15 @@ position it cannot evaluate — Empty ≠ Zero applied to *enforceability*.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
+from almanak.core.asset_identity import AssetIdentity, AssetNamespace, NativeIdentityUnavailable
+from almanak.core.chains import ChainRegistry
+from almanak.core.enums import ChainFamily
+from almanak.framework.data.tokens import TokenResolutionError, get_token_resolver
 from almanak.framework.teardown.models import (
     PositionInfo,
     PositionType,
@@ -93,9 +97,10 @@ _ENFORCEABLE_TYPES: frozenset[PositionType] = frozenset(
 # these legs as wallet tokens is preserved.
 _TOKEN_DETAIL_KEYS: tuple[str, ...] = (
     # Canonical address wins in full_close when both it and a display symbol
-    # are present. Keep it in the wider match set too so an address-based close
-    # covers the same position without unsafe symbol->address inference.
+    # are present. Keep it first here too: the first successfully parsed exact
+    # identity is authoritative over later display fields.
     "token_address",
+    "mint",
     "asset",
     "asset_symbol",
     "token",
@@ -120,10 +125,24 @@ _TOKEN_DETAIL_KEYS: tuple[str, ...] = (
     "pt_symbol",
 )
 
+# Historical fields whose schema declares an exact physical identity rather
+# than display metadata. Presence is authoritative even when malformed: a bad
+# address/mint must make matching fail closed, never expose a later stale symbol
+# as a compatibility fallback.
+_HISTORICAL_EXACT_DETAIL_KEYS: tuple[str, ...] = ("token_address", "mint", "address")
+
+# A writer that has crossed the AssetIdentity boundary stores this exact
+# versioned value.  When present it is authoritative: a contradictory legacy
+# display symbol/address must never override it during the compatibility
+# window.  Historical rows without this key continue through the legacy-token
+# adapter below (VIB-6677 / ALM-3105).
+_ASSET_IDENTITY_DETAIL_KEY = "asset_identity"
+
 # Identity keys ``full_close._close_intent_for_position`` accepts for a STAKE /
 # TOKEN position. Routing uses the first truthy value in this order, while no-op
-# detection checks every supplied equivalent identity so a canonical address
-# does not hide a matching consolidation-target symbol (VIB-5494 / ALM-3223).
+# detection reconciles the routed exact identity with the consolidation target
+# instead of allowing a later stale display symbol to create a false no-op
+# (VIB-5494 / ALM-3223).
 _SWAP_CLOSE_TOKEN_KEYS: tuple[str, ...] = (
     "token_address",
     "asset",
@@ -186,11 +205,10 @@ def _is_noop_target_close(position: PositionInfo, consolidation_target_token: st
     leg = str(details.get("leg") or "").lower()
     if leg in ("collateral", "debt"):
         return False
-    target = consolidation_target_token.upper()
-    # full_close routes from the first identity (canonical address preferred),
-    # but no-op detection considers every equivalent producer identity so an
-    # address + matching target symbol does not become a self-swap.
-    return any(str(details.get(key)).upper() == target for key in _SWAP_CLOSE_TOKEN_KEYS if details.get(key))
+    # Use the same authoritative identity reconciliation as closing-intent
+    # coverage.  In particular, a versioned ``asset_identity`` must not be
+    # bypassed by a stale display symbol that happens to equal the target.
+    return _position_token_matches_value(position, consolidation_target_token, position.chain)
 
 
 def resolve_consolidation_noop_target(
@@ -309,15 +327,172 @@ def _as_position_list(positions: Any) -> list[PositionInfo]:
     return []
 
 
-def _position_tokens(position: PositionInfo) -> set[str]:
-    """Upper-cased token symbols/addresses a position may be denominated in."""
-    tokens: set[str] = set()
+def _position_token_values(position: PositionInfo) -> tuple[Any, ...]:
+    """Return authoritative identity or historical token values for one row."""
     details = position.details or {}
+    if _ASSET_IDENTITY_DETAIL_KEY in details:
+        return (details[_ASSET_IDENTITY_DETAIL_KEY],)
+
+    tokens: list[Any] = []
     for key in _TOKEN_DETAIL_KEYS:
         value = details.get(key)
-        if value:
-            tokens.add(str(value).upper())
-    return tokens
+        if value is not None and value != "":
+            tokens.append(value)
+    return tuple(tokens)
+
+
+def _unregistered_address_identity(token: str, chain: str) -> AssetIdentity | None:
+    """Construct identity for a validated address/mint with no metadata row."""
+    descriptor = ChainRegistry.resolve(chain)
+    if descriptor.family is ChainFamily.EVM:
+        if len(token) != 42 or not token.lower().startswith("0x"):
+            return None
+        namespace = AssetNamespace.ERC20
+    elif descriptor.family is ChainFamily.SOLANA:
+        if not 32 <= len(token) <= 44:
+            return None
+        namespace = AssetNamespace.TOKEN
+    else:
+        return None
+    return AssetIdentity(descriptor.name, namespace, token)
+
+
+def _historical_string_identity(token: str, chain: str | None) -> AssetIdentity | None:
+    """Adapt a CAIP-19, address, mint, or resolvable 2.x display symbol."""
+    normalized = token.strip()
+    if not normalized:
+        return None
+    if "/" in normalized:
+        return AssetIdentity.from_caip19(normalized)
+    if not chain:
+        return None
+    try:
+        resolved = get_token_resolver().resolve(normalized, chain, log_errors=False, skip_gateway=True)
+    except TokenResolutionError:
+        # Identity does not require metadata.  An unknown but syntactically
+        # valid address/mint is still canonical; an unresolved symbol is not.
+        return _unregistered_address_identity(normalized, chain)
+    result = resolved.resolve_asset_identity()
+    return None if isinstance(result, NativeIdentityUnavailable) else result
+
+
+def _asset_identity(value: Any, chain: str | None) -> AssetIdentity | None:
+    """Adapt one versioned or historical token value to ``AssetIdentity``.
+
+    Resolution is static/cache-only.  Completeness is a local structural gate;
+    it must not introduce a gateway read or guess when identity is unavailable.
+    A versioned identity whose chain contradicts its containing row is rejected
+    rather than silently relabelled.
+    """
+    try:
+        if type(value) is AssetIdentity:
+            identity = value
+        elif isinstance(value, Mapping):
+            identity = AssetIdentity.from_wire(value)
+        elif type(value) is str:
+            historical_identity = _historical_string_identity(value, chain)
+            if historical_identity is None:
+                return None
+            identity = historical_identity
+        else:
+            return None
+
+        if chain and identity.chain != ChainRegistry.resolve(chain).name:
+            return None
+        return identity
+    except (KeyError, TypeError, ValueError, TokenResolutionError):
+        return None
+
+
+def _legacy_symbol(value: Any) -> str | None:
+    """Return a compatibility-only display symbol, never an address/mint."""
+    if type(value) is not str:
+        return None
+    token = value.strip()
+    if not token or token.lower().startswith("0x") or "/" in token or len(token) >= 32:
+        return None
+    return token.upper()
+
+
+def _historical_exact_identity(value: Any, chain: str | None) -> AssetIdentity | None:
+    """Return an explicitly encoded historical identity, never a symbol.
+
+    Old position rows can carry an exact address/mint or CAIP-19 alongside a
+    display symbol.  Once the exact value parses, it is authoritative just as
+    the versioned ``asset_identity`` is; allowing a stale display field to win
+    would let completeness certify the wrong close (or a false consolidation
+    no-op).  Bare symbols are deliberately excluded even when the static
+    resolver can resolve them.
+    """
+    if isinstance(value, AssetIdentity | Mapping):
+        return _asset_identity(value, chain)
+    if type(value) is not str:
+        return None
+
+    token = value.strip()
+    if not token or not chain:
+        return None
+    if "/" in token:
+        return _asset_identity(token, chain)
+
+    try:
+        descriptor = ChainRegistry.resolve(chain)
+    except (TypeError, ValueError):
+        return None
+    if descriptor.family is ChainFamily.EVM and not token.lower().startswith("0x"):
+        return None
+    if descriptor.family is ChainFamily.SOLANA and not 32 <= len(token) <= 44:
+        return None
+    return _asset_identity(token, chain)
+
+
+def _position_authoritative_identity(position: PositionInfo) -> tuple[bool, AssetIdentity | None]:
+    """Return whether the row declares an exact identity and its parsed value.
+
+    The boolean distinguishes "no exact identity" from "an authoritative
+    versioned identity is present but malformed".  The latter must fail closed
+    and must never fall back to a display symbol.
+    """
+    details = position.details or {}
+    if _ASSET_IDENTITY_DETAIL_KEY in details:
+        return True, _asset_identity(details[_ASSET_IDENTITY_DETAIL_KEY], position.chain)
+
+    for key in _HISTORICAL_EXACT_DETAIL_KEYS:
+        value = details.get(key)
+        if value is not None and value != "":
+            return True, _asset_identity(value, position.chain)
+
+    for value in _position_token_values(position):
+        # CAIP-19 and EVM-address-shaped values explicitly claim exact identity
+        # even when malformed. Preserve that declaration as authoritative-
+        # invalid so a stale symbol cannot turn corruption into false coverage.
+        if type(value) is str:
+            token = value.strip()
+            if "/" in token or token.lower().startswith("0x"):
+                return True, _asset_identity(value, position.chain)
+        identity = _historical_exact_identity(value, position.chain)
+        if identity is not None:
+            return True, identity
+    return False, None
+
+
+def _position_token_matches_value(position: PositionInfo, token: Any, token_chain: str | None) -> bool:
+    """Match one token value against a position's authoritative identity."""
+    if token is None or token == "":
+        return False
+
+    token_identity = _asset_identity(token, token_chain)
+    position_values = _position_token_values(position)
+    has_authoritative_identity, authoritative_identity = _position_authoritative_identity(position)
+    if has_authoritative_identity:
+        return token_identity is not None and token_identity == authoritative_identity
+    if token_identity is not None:
+        return any(_asset_identity(value, position.chain) == token_identity for value in position_values)
+
+    token_symbol = _legacy_symbol(token)
+    if token_symbol is None:
+        return False
+    return any(_legacy_symbol(value) == token_symbol for value in position_values)
 
 
 def _field(intent: Any, name: str) -> Any:
@@ -368,11 +543,15 @@ def _chain_compatible(position: PositionInfo, intent: Any) -> bool:
     both are explicitly set, a same-symbol token on a different chain is a real
     distinct position, so a mismatch is NOT coverage.
     """
-    pos_chain = str(position.chain or "").lower()
-    intent_chain = str(_field(intent, "chain") or "").lower()
+    pos_chain = str(position.chain or "").strip()
+    intent_chain = str(_field(intent, "chain") or "").strip()
     if not pos_chain or not intent_chain:
         return True
-    return pos_chain == intent_chain
+    pos_descriptor = ChainRegistry.try_resolve(pos_chain)
+    intent_descriptor = ChainRegistry.try_resolve(intent_chain)
+    if pos_descriptor is not None and intent_descriptor is not None:
+        return pos_descriptor.name == intent_descriptor.name
+    return pos_chain.lower() == intent_chain.lower()
 
 
 def _protocol_compatible(position: PositionInfo, intent: Any) -> bool:
@@ -411,11 +590,14 @@ def _market_compatible(position: PositionInfo, intent: Any) -> bool:
 
 
 def _intent_token_matches(intent: Any, position: PositionInfo, attr: str) -> bool:
-    """True when ``intent.<attr>`` matches one of the position's token symbols."""
-    token = _attr_str(intent, attr)
-    if token is None:
-        return False
-    return token in _position_tokens(position)
+    """Match token identity without joining on raw address/case/order strings.
+
+    Versioned wire values, CAIP-19, address-form values, and resolvable legacy
+    symbols converge through :class:`AssetIdentity`.  Unknown historical
+    display symbols retain exact case-insensitive compatibility, but address-
+    shaped values never receive a raw-string fallback.
+    """
+    return _position_token_matches_value(position, _field(intent, attr), _field(intent, "chain") or position.chain)
 
 
 def _covers_lending_leg(intent: Any, position: PositionInfo, token_attr: str) -> bool:
