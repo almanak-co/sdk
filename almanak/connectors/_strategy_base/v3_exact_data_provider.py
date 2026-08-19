@@ -4,15 +4,18 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation, localcontext
+from typing import Any
 
 from almanak.connectors._strategy_base.v3_pool_abi import V3_FEE_SELECTOR, V3_TOKEN0_SELECTOR, V3_TOKEN1_SELECTOR
 from almanak.core.asset_identity import AssetNamespace
 from almanak.core.capability_obligations import ExactTargetFeature
+from almanak.framework.data.interfaces import OHLCVCandle
 from almanak.framework.venues import (
     BaseExactVenueDataProvider,
     ExactVenueDataGateway,
     ExactVenueFeatureRequest,
     ExactVenueObservation,
+    OhlcvParameters,
     TwapParameters,
     VenueDataFailure,
     VenueDataFailureReason,
@@ -26,11 +29,19 @@ from almanak.framework.venues import (
 PROVIDER_CONTRACT_VERSION = "v3_exact_data.v1"
 PROVIDER_REF = "almanak.connectors._strategy_base.v3_exact_data_provider:V3ExactVenueDataProvider"
 TWAP_FEATURE_CONTRACT_VERSION = "exact_twap.v1"
+OHLCV_FEATURE_CONTRACT_VERSION = "exact_ohlcv.v1"
 _SUPPORTED_PROTOCOLS = frozenset({"pancakeswap_v3", "uniswap_v3"})
+_EXACT_OHLCV_SOURCE = "coingecko_onchain.exact_pool"
 _OBSERVE_SELECTOR = bytes.fromhex("883bdbfd")
 _DECIMALS_SELECTOR = bytes.fromhex("313ce567")
 _WORD_BYTES = 32
 _MAX_V3_TICK = 887_272
+
+
+def _safe_exception_detail(exc: BaseException) -> str:
+    """Collapse arbitrary transport text into the typed failure's ASCII wire contract."""
+    detail = " ".join(str(exc).split()).encode("ascii", "backslashreplace").decode("ascii")
+    return detail[:512].strip() or type(exc).__name__
 
 
 def _failure(
@@ -128,7 +139,7 @@ class V3ExactVenueDataProvider(BaseExactVenueDataProvider):
         self,
         request: ExactVenueFeatureRequest,
         gateway: ExactVenueDataGateway,
-    ) -> ExactVenueObservation[Decimal] | VenueDataFailure:
+    ) -> ExactVenueObservation[Any] | VenueDataFailure:
         binding = request.verified_binding.binding
         if binding.protocol not in _SUPPORTED_PROTOCOLS:
             return _failure(
@@ -137,6 +148,8 @@ class V3ExactVenueDataProvider(BaseExactVenueDataProvider):
                 VenueDataFailureReason.UNSUPPORTED_PROTOCOL,
                 f"exact V3 data does not support protocol {binding.protocol!r}",
             )
+        if request.feature is ExactTargetFeature.OHLCV and type(request.parameters) is OhlcvParameters:
+            return self._observe_ohlcv(request, gateway)
         if request.feature is not ExactTargetFeature.TWAP or type(request.parameters) is not TwapParameters:
             return _failure(
                 request,
@@ -161,7 +174,7 @@ class V3ExactVenueDataProvider(BaseExactVenueDataProvider):
                 request,
                 VenueDataFailureState.MISMATCHED,
                 VenueDataFailureReason.BINDING_MISMATCH,
-                f"exact V3 binding is invalid for TWAP: {exc}",
+                f"exact V3 binding is invalid for TWAP: {_safe_exception_detail(exc)}",
             )
         try:
             observe_payload = _encode_observe(parameters.window_seconds)
@@ -170,7 +183,7 @@ class V3ExactVenueDataProvider(BaseExactVenueDataProvider):
                 request,
                 VenueDataFailureState.UNSUPPORTED,
                 VenueDataFailureReason.UNSUPPORTED_FEATURE,
-                f"exact V3 TWAP parameters are unsupported: {exc}",
+                f"exact V3 TWAP parameters are unsupported: {_safe_exception_detail(exc)}",
             )
         try:
             opening_block = gateway.block_identity(chain=binding.chain, block_number=parameters.as_of_block)
@@ -179,7 +192,7 @@ class V3ExactVenueDataProvider(BaseExactVenueDataProvider):
                 request,
                 VenueDataFailureState.UNAVAILABLE,
                 VenueDataFailureReason.TRANSPORT_UNAVAILABLE,
-                f"cannot read exact V3 observation block: {exc}",
+                f"cannot read exact V3 observation block: {_safe_exception_detail(exc)}",
             )
         if opening_block.block_hash != request.verified_binding.evidence.block_hash:
             return _failure(
@@ -244,7 +257,7 @@ class V3ExactVenueDataProvider(BaseExactVenueDataProvider):
                 request,
                 VenueDataFailureState.UNAVAILABLE,
                 VenueDataFailureReason.TRANSPORT_UNAVAILABLE,
-                f"gateway exact V3 TWAP read failed: {exc}",
+                f"gateway exact V3 TWAP read failed: {_safe_exception_detail(exc)}",
             )
         if (token0, token1, observed_fee) != (*assets, expected_fee):
             return _failure(
@@ -274,7 +287,7 @@ class V3ExactVenueDataProvider(BaseExactVenueDataProvider):
                 request,
                 VenueDataFailureState.UNAVAILABLE,
                 VenueDataFailureReason.INCOMPLETE_PROVENANCE,
-                f"exact V3 TWAP measurement is invalid: {exc}",
+                f"exact V3 TWAP measurement is invalid: {_safe_exception_detail(exc)}",
             )
         try:
             return ExactVenueObservation.from_request(
@@ -300,13 +313,168 @@ class V3ExactVenueDataProvider(BaseExactVenueDataProvider):
                 request,
                 VenueDataFailureState.UNAVAILABLE,
                 VenueDataFailureReason.INCOMPLETE_PROVENANCE,
-                f"exact V3 TWAP observation provenance is invalid: {exc}",
+                f"exact V3 TWAP observation provenance is invalid: {_safe_exception_detail(exc)}",
+            )
+
+    def _observe_ohlcv(
+        self,
+        request: ExactVenueFeatureRequest,
+        gateway: ExactVenueDataGateway,
+    ) -> ExactVenueObservation[tuple[OHLCVCandle, ...]] | VenueDataFailure:
+        binding = request.verified_binding.binding
+        if request.feature_contract_version != OHLCV_FEATURE_CONTRACT_VERSION:
+            return _failure(
+                request,
+                VenueDataFailureState.UNSUPPORTED,
+                VenueDataFailureReason.UNSUPPORTED_FEATURE,
+                f"exact V3 OHLCV does not support feature contract {request.feature_contract_version!r}",
+            )
+        parameters = request.parameters
+        assert type(parameters) is OhlcvParameters
+        interval_seconds = int((parameters.end_at - parameters.start_at).total_seconds())
+        candle_count = interval_seconds // parameters.timeframe.seconds
+        if candle_count > 1000 or interval_seconds > 180 * 24 * 60 * 60:
+            return _failure(
+                request,
+                VenueDataFailureState.UNSUPPORTED,
+                VenueDataFailureReason.UNSUPPORTED_FEATURE,
+                "exact V3 OHLCV interval exceeds the provider's 1000-candle or 180-day request bound",
+            )
+        try:
+            pool = _pool_ref(request)
+            assets = _asset_addresses(request)
+            _expected_fee(request)
+        except (TypeError, ValueError) as exc:
+            return _failure(
+                request,
+                VenueDataFailureState.MISMATCHED,
+                VenueDataFailureReason.BINDING_MISMATCH,
+                f"exact V3 binding is invalid for OHLCV: {_safe_exception_detail(exc)}",
+            )
+        base_address = assets[parameters.base_asset_index]
+        quote_address = assets[parameters.quote_asset_index]
+        try:
+            response = gateway.exact_pool_ohlcv(
+                chain=binding.chain,
+                pool_address=pool.reference,
+                base_token_address=base_address,
+                quote_token_address=quote_address,
+                timeframe=parameters.timeframe,
+                start_ts=int(parameters.start_at.timestamp()),
+                end_ts=int(parameters.end_at.timestamp()),
+                binding_hash=request.binding_hash,
+                feature_identity=request.feature_identity,
+            )
+        except (AttributeError, TypeError, ValueError) as exc:
+            return _failure(
+                request,
+                VenueDataFailureState.UNAVAILABLE,
+                VenueDataFailureReason.INCOMPLETE_PROVENANCE,
+                "gateway exact V3 OHLCV response is unavailable or lacks identity echoes: "
+                f"{_safe_exception_detail(exc)}",
+            )
+        except Exception as exc:
+            return _failure(
+                request,
+                VenueDataFailureState.UNAVAILABLE,
+                VenueDataFailureReason.TRANSPORT_UNAVAILABLE,
+                f"gateway exact V3 OHLCV read failed: {_safe_exception_detail(exc)}",
+            )
+
+        expected_identity = (
+            binding.chain,
+            pool.reference,
+            parameters.timeframe,
+            int(parameters.start_at.timestamp()),
+            int(parameters.end_at.timestamp()),
+            request.binding_hash,
+            request.feature_identity,
+            base_address,
+            quote_address,
+            _EXACT_OHLCV_SOURCE,
+        )
+        observed_identity = (
+            response.chain,
+            response.pool_address,
+            response.timeframe,
+            response.start_ts,
+            response.end_ts,
+            response.binding_hash,
+            response.feature_identity,
+            response.base_token_address,
+            response.quote_token_address,
+            response.source,
+        )
+        if observed_identity != expected_identity:
+            return _failure(
+                request,
+                VenueDataFailureState.MISMATCHED,
+                VenueDataFailureReason.RESPONSE_IDENTITY_MISMATCH,
+                "gateway exact V3 OHLCV identity echo does not match the verified request",
+            )
+        expected_timestamps = tuple(
+            range(
+                int(parameters.start_at.timestamp()),
+                int(parameters.end_at.timestamp()),
+                parameters.timeframe.seconds,
+            )
+        )
+        observed_timestamps = tuple(int(candle.timestamp.timestamp()) for candle in response.candles)
+        if observed_timestamps != expected_timestamps:
+            return _failure(
+                request,
+                VenueDataFailureState.UNAVAILABLE,
+                VenueDataFailureReason.STALE_OBSERVATION,
+                "gateway exact V3 OHLCV page does not cover the complete requested interval",
+            )
+        for candle in response.candles:
+            values = (candle.open, candle.high, candle.low, candle.close, candle.volume)
+            if (
+                candle.volume is None
+                or any(type(value) is not Decimal or not value.is_finite() for value in values)
+                or min(candle.open, candle.high, candle.low, candle.close) <= 0
+                or candle.volume < 0
+                or not candle.low <= min(candle.open, candle.close) <= max(candle.open, candle.close) <= candle.high
+            ):
+                return _failure(
+                    request,
+                    VenueDataFailureState.UNAVAILABLE,
+                    VenueDataFailureReason.INCOMPLETE_PROVENANCE,
+                    "gateway exact V3 OHLCV page contains empty or invalid measured values",
+                )
+        try:
+            return ExactVenueObservation.from_request(
+                request=request,
+                value=response.candles,
+                anchor=VenueObservationAnchor(
+                    observed_at=response.observed_at,
+                    block_number=None,
+                    block_hash=None,
+                ),
+                provenance=VenueDataProvenance(
+                    provider_ref=PROVIDER_REF,
+                    provider_contract_version=PROVIDER_CONTRACT_VERSION,
+                    source=response.source,
+                    source_observation_ref=(
+                        f"{binding.protocol}:{binding.chain}:{pool.reference}:"
+                        f"{expected_timestamps[0]}:{int(parameters.end_at.timestamp())}:"
+                        f"{parameters.timeframe.value}:{base_address}:{quote_address}"
+                    ),
+                ),
+            )
+        except (OSError, OverflowError, TypeError, ValueError) as exc:
+            return _failure(
+                request,
+                VenueDataFailureState.UNAVAILABLE,
+                VenueDataFailureReason.INCOMPLETE_PROVENANCE,
+                f"exact V3 OHLCV observation provenance is invalid: {_safe_exception_detail(exc)}",
             )
 
 
 __all__ = [
     "PROVIDER_CONTRACT_VERSION",
     "PROVIDER_REF",
+    "OHLCV_FEATURE_CONTRACT_VERSION",
     "TWAP_FEATURE_CONTRACT_VERSION",
     "V3ExactVenueDataProvider",
 ]

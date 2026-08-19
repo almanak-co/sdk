@@ -86,6 +86,37 @@ def _make_search_response(pool_address: str = "0xabcdef1234567890") -> dict:
     }
 
 
+EXACT_POOL = "0x1111111111111111111111111111111111111111"
+EXACT_TOKEN0 = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+EXACT_TOKEN1 = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+EXACT_START = 1_766_001_600
+SOLANA_POOL = "HJPjoWUrhoZzkNfRpHuieeFk9WcZWjwy6PBjZ81ngndJ"
+SOLANA_TOKEN0 = "So11111111111111111111111111111111111111112"
+SOLANA_TOKEN1 = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+
+
+def _make_exact_response(
+    *,
+    timestamps: tuple[object, ...] = (EXACT_START, EXACT_START + 3600),
+    base: str = EXACT_TOKEN0,
+    quote: str = EXACT_TOKEN1,
+    volume: object = 0,
+) -> dict:
+    return {
+        "data": {
+            "id": "opaque-provider-observation-id",
+            "type": "ohlcv_request_response",
+            "attributes": {
+                "ohlcv_list": [[timestamp, 1, 2, 0.5, 1.5, volume] for timestamp in reversed(timestamps)],
+            },
+        },
+        "meta": {
+            "base": {"address": base},
+            "quote": {"address": quote},
+        },
+    }
+
+
 # ---------------------------------------------------------------------------
 # DataProvider protocol tests
 # ---------------------------------------------------------------------------
@@ -257,6 +288,305 @@ class TestGetOHLCV:
         with pytest.raises(DataSourceUnavailable, match="Unsupported chain"):
             await provider.get_ohlcv("WETH", chain="fantom")
 
+
+class TestExactPoolOHLCV:
+    @staticmethod
+    def _session(payload: dict) -> AsyncMock:
+        response = AsyncMock()
+        response.status = 200
+        response.json = AsyncMock(return_value=payload)
+        response.__aenter__ = AsyncMock(return_value=response)
+        response.__aexit__ = AsyncMock(return_value=False)
+        session = AsyncMock()
+        session.get = MagicMock(return_value=response)
+        session.closed = False
+        return session
+
+    @pytest.mark.asyncio
+    async def test_exact_pool_request_uses_token_denominated_interval_and_accepts_measured_zero(
+        self, provider: CoinGeckoOnchainOHLCVProvider
+    ) -> None:
+        session = self._session(_make_exact_response())
+        provider._session = session
+
+        result = await provider.get_exact_pool_ohlcv(
+            chain="ethereum",
+            pool_address=EXACT_POOL,
+            base_token_address=EXACT_TOKEN0,
+            quote_token_address=EXACT_TOKEN1,
+            timeframe=OHLCVTimeframe.ONE_HOUR,
+            start_ts=EXACT_START,
+            end_ts=EXACT_START + 7200,
+            binding_hash="11" * 32,
+            feature_identity="22" * 32,
+        )
+
+        assert tuple(int(candle.timestamp.timestamp()) for candle in result.candles) == (
+            EXACT_START,
+            EXACT_START + 3600,
+        )
+        assert result.candles[0].volume == Decimal(0)
+        call = session.get.call_args
+        assert call.args[0].endswith(f"/pools/{EXACT_POOL}/ohlcv/hour")
+        assert call.kwargs["params"] == {
+            "aggregate": "1",
+            "before_timestamp": EXACT_START + 7200,
+            "limit": 2,
+            "currency": "token",
+            "token": EXACT_TOKEN0,
+            "include_empty_intervals": "true",
+        }
+
+    @pytest.mark.asyncio
+    async def test_exact_pool_response_must_echo_the_bound_asset_pair(
+        self, provider: CoinGeckoOnchainOHLCVProvider
+    ) -> None:
+        provider._session = self._session(_make_exact_response(quote="0xcccccccccccccccccccccccccccccccccccccccc"))
+
+        with pytest.raises(DataSourceUnavailable, match="token identity mismatch"):
+            await provider.get_exact_pool_ohlcv(
+                chain="ethereum",
+                pool_address=EXACT_POOL,
+                base_token_address=EXACT_TOKEN0,
+                quote_token_address=EXACT_TOKEN1,
+                timeframe=OHLCVTimeframe.ONE_HOUR,
+                start_ts=EXACT_START,
+                end_ts=EXACT_START + 7200,
+                binding_hash="11" * 32,
+                feature_identity="22" * 32,
+            )
+
+    @pytest.mark.asyncio
+    async def test_exact_pool_response_must_echo_the_requested_direction(
+        self, provider: CoinGeckoOnchainOHLCVProvider
+    ) -> None:
+        provider._session = self._session(_make_exact_response(base=EXACT_TOKEN1, quote=EXACT_TOKEN0))
+
+        with pytest.raises(DataSourceUnavailable, match="token identity mismatch"):
+            await provider.get_exact_pool_ohlcv(
+                chain="ethereum",
+                pool_address=EXACT_POOL,
+                base_token_address=EXACT_TOKEN0,
+                quote_token_address=EXACT_TOKEN1,
+                timeframe=OHLCVTimeframe.ONE_HOUR,
+                start_ts=EXACT_START,
+                end_ts=EXACT_START + 7200,
+                binding_hash="11" * 32,
+                feature_identity="22" * 32,
+            )
+
+    @pytest.mark.asyncio
+    async def test_exact_pool_preserves_case_sensitive_solana_identity(self) -> None:
+        provider = CoinGeckoOnchainOHLCVProvider(api_key="test-key")
+        session = self._session(_make_exact_response(base=SOLANA_TOKEN0, quote=SOLANA_TOKEN1))
+        provider._session = session
+
+        result = await provider.get_exact_pool_ohlcv(
+            chain="solana",
+            pool_address=SOLANA_POOL,
+            base_token_address=SOLANA_TOKEN0,
+            quote_token_address=SOLANA_TOKEN1,
+            timeframe=OHLCVTimeframe.ONE_HOUR,
+            start_ts=EXACT_START,
+            end_ts=EXACT_START + 7200,
+            binding_hash="11" * 32,
+            feature_identity="22" * 32,
+        )
+
+        assert result.pool_address == SOLANA_POOL
+        assert result.base_token_address == SOLANA_TOKEN0
+        assert result.quote_token_address == SOLANA_TOKEN1
+        call = session.get.call_args
+        assert f"/pools/{SOLANA_POOL}/" in call.args[0]
+        assert call.kwargs["params"]["token"] == SOLANA_TOKEN0
+
+    @pytest.mark.asyncio
+    async def test_exact_pool_response_must_cover_every_requested_bucket(
+        self, provider: CoinGeckoOnchainOHLCVProvider
+    ) -> None:
+        provider._session = self._session(_make_exact_response(timestamps=(EXACT_START,)))
+
+        with pytest.raises(DataSourceUnavailable, match="complete requested interval"):
+            await provider.get_exact_pool_ohlcv(
+                chain="ethereum",
+                pool_address=EXACT_POOL,
+                base_token_address=EXACT_TOKEN0,
+                quote_token_address=EXACT_TOKEN1,
+                timeframe=OHLCVTimeframe.ONE_HOUR,
+                start_ts=EXACT_START,
+                end_ts=EXACT_START + 7200,
+                binding_hash="11" * 32,
+                feature_identity="22" * 32,
+            )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "malformed_row",
+        (
+            [EXACT_START, 1, 2, 1.25, 1.5, 0],
+            [EXACT_START, 1, 1.25, 0.5, 1.5, 0],
+        ),
+    )
+    async def test_exact_pool_response_rejects_impossible_ohlc_geometry(
+        self,
+        provider: CoinGeckoOnchainOHLCVProvider,
+        malformed_row: list[object],
+    ) -> None:
+        payload = _make_exact_response()
+        payload["data"]["attributes"]["ohlcv_list"][1] = malformed_row
+        provider._session = self._session(payload)
+
+        with pytest.raises(DataSourceUnavailable, match="invalid values"):
+            await provider.get_exact_pool_ohlcv(
+                chain="ethereum",
+                pool_address=EXACT_POOL,
+                base_token_address=EXACT_TOKEN0,
+                quote_token_address=EXACT_TOKEN1,
+                timeframe=OHLCVTimeframe.ONE_HOUR,
+                start_ts=EXACT_START,
+                end_ts=EXACT_START + 7200,
+                binding_hash="11" * 32,
+                feature_identity="22" * 32,
+            )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("invalid_timestamp", [float(EXACT_START), True])
+    async def test_exact_pool_response_rejects_non_integer_timestamps_without_coercion(
+        self,
+        provider: CoinGeckoOnchainOHLCVProvider,
+        invalid_timestamp: object,
+    ) -> None:
+        provider._session = self._session(_make_exact_response(timestamps=(invalid_timestamp, EXACT_START + 3600)))
+
+        with pytest.raises(DataSourceUnavailable, match="malformed row"):
+            await provider.get_exact_pool_ohlcv(
+                chain="ethereum",
+                pool_address=EXACT_POOL,
+                base_token_address=EXACT_TOKEN0,
+                quote_token_address=EXACT_TOKEN1,
+                timeframe=OHLCVTimeframe.ONE_HOUR,
+                start_ts=EXACT_START,
+                end_ts=EXACT_START + 7200,
+                binding_hash="11" * 32,
+                feature_identity="22" * 32,
+            )
+
+    @pytest.mark.asyncio
+    async def test_exact_pool_cache_keys_include_direction_and_interval(
+        self,
+        provider: CoinGeckoOnchainOHLCVProvider,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        session = self._session(_make_exact_response())
+        provider._session = session
+        kwargs = {
+            "chain": "ethereum",
+            "pool_address": EXACT_POOL,
+            "base_token_address": EXACT_TOKEN0,
+            "quote_token_address": EXACT_TOKEN1,
+            "timeframe": OHLCVTimeframe.ONE_HOUR,
+            "start_ts": EXACT_START,
+            "end_ts": EXACT_START + 7200,
+            "binding_hash": "11" * 32,
+            "feature_identity": "22" * 32,
+        }
+
+        await provider.get_exact_pool_ohlcv(**kwargs)
+        await provider.get_exact_pool_ohlcv(**kwargs)
+        assert session.get.call_count == 1
+
+        reverse_session = self._session(_make_exact_response(base=EXACT_TOKEN1, quote=EXACT_TOKEN0))
+        provider._session = reverse_session
+        await provider.get_exact_pool_ohlcv(
+            **{
+                **kwargs,
+                "base_token_address": EXACT_TOKEN1,
+                "quote_token_address": EXACT_TOKEN0,
+            }
+        )
+        assert reverse_session.get.call_count == 1
+
+        identity_session = self._session(_make_exact_response())
+        provider._session = identity_session
+        await provider.get_exact_pool_ohlcv(**{**kwargs, "feature_identity": "33" * 32})
+        assert identity_session.get.call_count == 1
+
+        version_session = self._session(_make_exact_response())
+        provider._session = version_session
+        monkeypatch.setattr(
+            "almanak.gateway.data.ohlcv.coingecko_onchain_provider.EXACT_POOL_OHLCV_CONTRACT_VERSION",
+            "coingecko_onchain.pool_ohlcv.v2",
+        )
+        await provider.get_exact_pool_ohlcv(**kwargs)
+        assert version_session.get.call_count == 1
+
+        interval_session = self._session(_make_exact_response(timestamps=(EXACT_START + 7200, EXACT_START + 10800)))
+        provider._session = interval_session
+        await provider.get_exact_pool_ohlcv(**{**kwargs, "start_ts": EXACT_START + 7200, "end_ts": EXACT_START + 14400})
+        assert interval_session.get.call_count == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", [429, 500])
+    async def test_exact_http_errors_increment_health_metrics(self, status: int) -> None:
+        provider = CoinGeckoOnchainOHLCVProvider(api_key="test-key")
+        response = AsyncMock()
+        response.status = status
+        response.text = AsyncMock(return_value="upstream failure")
+        response.__aenter__ = AsyncMock(return_value=response)
+        response.__aexit__ = AsyncMock(return_value=False)
+        session = AsyncMock()
+        session.get = MagicMock(return_value=response)
+        session.closed = False
+        provider._session = session
+
+        with pytest.raises(DataSourceUnavailable):
+            await provider.get_exact_pool_ohlcv(
+                chain="ethereum",
+                pool_address=EXACT_POOL,
+                base_token_address=EXACT_TOKEN0,
+                quote_token_address=EXACT_TOKEN1,
+                timeframe=OHLCVTimeframe.ONE_HOUR,
+                start_ts=EXACT_START,
+                end_ts=EXACT_START + 7200,
+                binding_hash="11" * 32,
+                feature_identity="22" * 32,
+            )
+
+        assert provider.health()["errors"] == 1
+
+    @pytest.mark.asyncio
+    async def test_exact_cache_is_lru_bounded_and_expired_entries_are_removed(self) -> None:
+        provider = CoinGeckoOnchainOHLCVProvider(
+            api_key="test-key",
+            cache_ttl=60,
+            exact_cache_max_entries=2,
+        )
+        kwargs = {
+            "chain": "ethereum",
+            "pool_address": EXACT_POOL,
+            "base_token_address": EXACT_TOKEN0,
+            "quote_token_address": EXACT_TOKEN1,
+            "timeframe": OHLCVTimeframe.ONE_HOUR,
+            "start_ts": EXACT_START,
+            "end_ts": EXACT_START + 7200,
+            "binding_hash": "11" * 32,
+        }
+        for identity in ("22" * 32, "33" * 32, "44" * 32):
+            provider._session = self._session(_make_exact_response())
+            await provider.get_exact_pool_ohlcv(**kwargs, feature_identity=identity)
+        assert len(provider._exact_cache) == 2
+
+        first_key = next(iter(provider._exact_cache))
+        first_result, _ = provider._exact_cache[first_key]
+        provider._exact_cache[first_key] = (first_result, 0.0)
+        provider._session = self._session(_make_exact_response())
+        await provider.get_exact_pool_ohlcv(**kwargs, feature_identity="55" * 32)
+
+        assert first_key not in provider._exact_cache
+        assert len(provider._exact_cache) == 2
+
+
+class TestGetOHLCVFailures:
     @pytest.mark.asyncio
     async def test_http_error_raises(self, provider: CoinGeckoOnchainOHLCVProvider) -> None:
         """Non-200 HTTP status raises DataSourceUnavailable."""

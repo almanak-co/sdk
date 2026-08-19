@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
+from datetime import UTC, datetime
 from decimal import Decimal, localcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -10,11 +12,15 @@ import pytest
 from almanak.connectors._strategy_base.exact_venue_data_registry import ExactVenueDataProviderRegistry
 from almanak.connectors._strategy_base.v3_pool_abi import V3_FEE_SELECTOR, V3_TOKEN0_SELECTOR, V3_TOKEN1_SELECTOR
 from almanak.core.asset_identity import AssetIdentity, AssetNamespace
+from almanak.framework.data.interfaces import OHLCVCandle
+from almanak.framework.data.timeframes import OHLCVTimeframe
 from almanak.framework.primitives.types import Primitive
 from almanak.framework.venues import (
     ExactVenueFeatureRequest,
     ExactVenueObservation,
     GatewayBlockIdentity,
+    GatewayExactOhlcvResponse,
+    OhlcvParameters,
     QuoteParameters,
     TwapParameters,
     VenueBindingComponent,
@@ -100,6 +106,24 @@ def _twap_request(protocol: str = "uniswap_v3", *, reverse: bool = False) -> Exa
     )
 
 
+OHLCV_START = 1_766_001_600
+OHLCV_END = OHLCV_START + 2 * 3600
+
+
+def _ohlcv_request(protocol: str = "uniswap_v3", *, reverse: bool = False) -> ExactVenueFeatureRequest:
+    return ExactVenueFeatureRequest(
+        verified_binding=_verified(protocol),
+        parameters=OhlcvParameters(
+            1 if reverse else 0,
+            0 if reverse else 1,
+            OHLCVTimeframe.ONE_HOUR,
+            datetime.fromtimestamp(OHLCV_START, tz=UTC),
+            datetime.fromtimestamp(OHLCV_END, tz=UTC),
+        ),
+        feature_contract_version="exact_ohlcv.v1",
+    )
+
+
 class FakeGateway:
     def __init__(self) -> None:
         self.reads: list[tuple[str, str, bytes, int]] = []
@@ -127,6 +151,56 @@ class FakeGateway:
         assert (chain, block_number) == ("base", 20)
         self.block_reads += 1
         return GatewayBlockIdentity(number=20, block_hash=self.block_hash, timestamp=1_766_000_000)
+
+
+class FakeOhlcvGateway(FakeGateway):
+    def __init__(self, request: ExactVenueFeatureRequest) -> None:
+        super().__init__()
+        self.request = request
+        self.ohlcv_calls = 0
+        self.response_pool = POOL
+        self.response_volume: Decimal | None = Decimal(0)
+
+    def exact_pool_ohlcv(self, **kwargs: object) -> GatewayExactOhlcvResponse:
+        self.ohlcv_calls += 1
+        parameters = self.request.parameters
+        assert type(parameters) is OhlcvParameters
+        assert kwargs == {
+            "chain": "base",
+            "pool_address": POOL,
+            "base_token_address": (TOKEN0 if parameters.base_asset_index == 0 else TOKEN1),
+            "quote_token_address": (TOKEN1 if parameters.quote_asset_index == 1 else TOKEN0),
+            "timeframe": OHLCVTimeframe.ONE_HOUR,
+            "start_ts": OHLCV_START,
+            "end_ts": OHLCV_END,
+            "binding_hash": self.request.binding_hash,
+            "feature_identity": self.request.feature_identity,
+        }
+        candles = tuple(
+            OHLCVCandle(
+                timestamp=datetime.fromtimestamp(timestamp, tz=UTC),
+                open=Decimal("1"),
+                high=Decimal("2"),
+                low=Decimal("0.5"),
+                close=Decimal("1.5"),
+                volume=self.response_volume,
+            )
+            for timestamp in (OHLCV_START, OHLCV_START + 3600)
+        )
+        return GatewayExactOhlcvResponse(
+            candles=candles,
+            chain="base",
+            pool_address=self.response_pool,
+            timeframe=OHLCVTimeframe.ONE_HOUR,
+            start_ts=OHLCV_START,
+            end_ts=OHLCV_END,
+            binding_hash=self.request.binding_hash,
+            feature_identity=self.request.feature_identity,
+            base_token_address=kwargs["base_token_address"],  # type: ignore[arg-type]
+            quote_token_address=kwargs["quote_token_address"],  # type: ignore[arg-type]
+            source="coingecko_onchain.exact_pool",
+            observed_at=datetime.fromtimestamp(OHLCV_END, tz=UTC),
+        )
 
 
 def test_public_sdk_facade_executes_the_connector_declared_provider() -> None:
@@ -285,6 +359,160 @@ def test_reverse_asset_order_inverts_the_same_exact_pool_measurement() -> None:
     assert type(forward) is ExactVenueObservation
     assert type(reverse) is ExactVenueObservation
     assert forward.value * reverse.value == Decimal(1)
+
+
+@pytest.mark.parametrize("protocol", ["uniswap_v3", "pancakeswap_v3"])
+def test_exact_ohlcv_uses_only_the_verified_pool_native_lane(protocol: str) -> None:
+    request = _ohlcv_request(protocol)
+    gateway = FakeOhlcvGateway(request)
+
+    result = ExactVenueDataProviderRegistry().observe(request, gateway)
+
+    assert type(result) is ExactVenueObservation
+    assert len(result.value) == 2
+    assert result.value[0].volume == Decimal(0)  # measured zero is not unmeasured
+    assert result.binding_hash == request.binding_hash
+    assert result.feature_identity == request.feature_identity
+    assert result.provenance.source == "coingecko_onchain.exact_pool"
+    assert result.anchor.block_number is None
+    assert gateway.ohlcv_calls == 1
+    assert gateway.reads == []
+    assert gateway.block_reads == 0
+
+
+def test_exact_ohlcv_reverse_direction_is_part_of_the_transport_identity() -> None:
+    request = _ohlcv_request(reverse=True)
+    gateway = FakeOhlcvGateway(request)
+
+    result = ExactVenueDataProviderRegistry().observe(request, gateway)
+
+    assert type(result) is ExactVenueObservation
+    assert gateway.ohlcv_calls == 1
+
+
+@pytest.mark.parametrize("pool_echo", ["", "0x3333333333333333333333333333333333333333"])
+def test_exact_ohlcv_refuses_missing_or_mismatched_pool_echo_without_fallback(pool_echo: str) -> None:
+    request = _ohlcv_request()
+    gateway = FakeOhlcvGateway(request)
+    gateway.response_pool = pool_echo
+
+    result = ExactVenueDataProviderRegistry().observe(request, gateway)
+
+    assert type(result) is VenueDataFailure
+    assert result.state is VenueDataFailureState.MISMATCHED
+    assert result.reason_code is VenueDataFailureReason.RESPONSE_IDENTITY_MISMATCH
+    assert gateway.reads == []
+
+
+def test_exact_ohlcv_old_gateway_without_exact_method_is_typed_unavailable() -> None:
+    request = _ohlcv_request()
+
+    class LegacyGateway:
+        def read(self, **_kwargs: object) -> bytes:
+            raise AssertionError("legacy fallback must not be used")
+
+        def block_identity(self, **_kwargs: object) -> GatewayBlockIdentity:
+            raise AssertionError("legacy fallback must not be used")
+
+    result = ExactVenueDataProviderRegistry().observe(request, LegacyGateway())
+
+    assert type(result) is VenueDataFailure
+    assert result.state is VenueDataFailureState.UNAVAILABLE
+    assert result.reason_code is VenueDataFailureReason.INCOMPLETE_PROVENANCE
+
+
+def test_exact_ohlcv_transport_detail_is_wire_safe_and_remains_typed() -> None:
+    request = _ohlcv_request()
+
+    class BrokenGateway(FakeOhlcvGateway):
+        def exact_pool_ohlcv(self, **_kwargs: object) -> GatewayExactOhlcvResponse:
+            raise RuntimeError("☃ line one\n" + "line two " * 80)
+
+    result = ExactVenueDataProviderRegistry().observe(request, BrokenGateway(request))
+
+    assert type(result) is VenueDataFailure
+    assert result.state is VenueDataFailureState.UNAVAILABLE
+    assert result.reason_code is VenueDataFailureReason.TRANSPORT_UNAVAILABLE
+    assert "\\u2603" in result.detail
+    assert "\n" not in result.detail
+
+
+def test_exact_ohlcv_empty_volume_is_unmeasured_but_zero_is_valid() -> None:
+    request = _ohlcv_request()
+    gateway = FakeOhlcvGateway(request)
+    gateway.response_volume = None
+
+    result = ExactVenueDataProviderRegistry().observe(request, gateway)
+
+    assert type(result) is VenueDataFailure
+    assert result.state is VenueDataFailureState.UNAVAILABLE
+    assert result.reason_code is VenueDataFailureReason.INCOMPLETE_PROVENANCE
+
+
+def test_exact_ohlcv_rejects_unknown_feature_contract_without_gateway_call() -> None:
+    request = replace(_ohlcv_request(), feature_contract_version="exact_ohlcv.v2")
+    gateway = FakeOhlcvGateway(request)
+
+    result = ExactVenueDataProviderRegistry().observe(request, gateway)
+
+    assert type(result) is VenueDataFailure
+    assert result.state is VenueDataFailureState.UNSUPPORTED
+    assert result.reason_code is VenueDataFailureReason.UNSUPPORTED_FEATURE
+    assert gateway.ohlcv_calls == 0
+
+
+def test_exact_ohlcv_rejects_interval_beyond_provider_bound_without_gateway_call() -> None:
+    end = OHLCV_START + 1001 * OHLCVTimeframe.ONE_HOUR.seconds
+    request = ExactVenueFeatureRequest(
+        verified_binding=_verified(),
+        parameters=OhlcvParameters(
+            0,
+            1,
+            OHLCVTimeframe.ONE_HOUR,
+            datetime.fromtimestamp(OHLCV_START, tz=UTC),
+            datetime.fromtimestamp(end, tz=UTC),
+        ),
+        feature_contract_version="exact_ohlcv.v1",
+    )
+    gateway = FakeOhlcvGateway(request)
+
+    result = ExactVenueDataProviderRegistry().observe(request, gateway)
+
+    assert type(result) is VenueDataFailure
+    assert result.state is VenueDataFailureState.UNSUPPORTED
+    assert result.reason_code is VenueDataFailureReason.UNSUPPORTED_FEATURE
+    assert gateway.ohlcv_calls == 0
+
+
+def test_exact_ohlcv_rejects_incomplete_candle_page() -> None:
+    request = _ohlcv_request()
+
+    class ShortPageGateway(FakeOhlcvGateway):
+        def exact_pool_ohlcv(self, **kwargs: object) -> GatewayExactOhlcvResponse:
+            full = super().exact_pool_ohlcv(**kwargs)
+            return replace(full, candles=full.candles[:1])
+
+    result = ExactVenueDataProviderRegistry().observe(request, ShortPageGateway(request))
+
+    assert type(result) is VenueDataFailure
+    assert result.state is VenueDataFailureState.UNAVAILABLE
+    assert result.reason_code is VenueDataFailureReason.STALE_OBSERVATION
+
+
+def test_exact_ohlcv_rejects_incoherent_candle_geometry_from_gateway() -> None:
+    request = _ohlcv_request()
+
+    class IncoherentGateway(FakeOhlcvGateway):
+        def exact_pool_ohlcv(self, **kwargs: object) -> GatewayExactOhlcvResponse:
+            full = super().exact_pool_ohlcv(**kwargs)
+            malformed = replace(full.candles[0], high=Decimal("1.25"), close=Decimal("1.5"))
+            return replace(full, candles=(malformed, *full.candles[1:]))
+
+    result = ExactVenueDataProviderRegistry().observe(request, IncoherentGateway(request))
+
+    assert type(result) is VenueDataFailure
+    assert result.state is VenueDataFailureState.UNAVAILABLE
+    assert result.reason_code is VenueDataFailureReason.INCOMPLETE_PROVENANCE
 
 
 def test_negative_fractional_tick_uses_v3_oracle_floor_semantics() -> None:

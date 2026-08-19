@@ -294,7 +294,7 @@ CONNECTOR = Connector(
             ),
             contract_version="v3_exact_data.v1",
             chains=(ARBITRUM, AVALANCHE, BASE, BSC, ETHEREUM, OPTIMISM, POLYGON),
-            features=(ExactTargetFeature.TWAP,),
+            features=(ExactTargetFeature.OHLCV, ExactTargetFeature.TWAP),
         ),
     ),
     strategy_intents=(IntentType.SWAP, IntentType.LP_OPEN, IntentType.LP_CLOSE, IntentType.LP_COLLECT_FEES),

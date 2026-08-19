@@ -23,7 +23,7 @@ from .data import (
 )
 from .gateway import GatewayClientExactVenueDataGateway, GatewayClientVenueVerificationGateway
 from .permissions import VenuePermissionEvidence, reconcile_venue_permissions
-from .provider import BaseExactVenueDataProvider, ExactVenueDataGateway, GatewayBlockIdentity
+from .provider import BaseExactVenueDataProvider, ExactVenueDataGateway, GatewayBlockIdentity, GatewayExactOhlcvResponse
 from .receipt import (
     VenueReceiptCorrelationError,
     VenueReceiptEvidence,
@@ -88,6 +88,7 @@ __all__ = [
     "GatewayClientExactVenueDataGateway",
     "ExactVenueDataGateway",
     "GatewayBlockIdentity",
+    "GatewayExactOhlcvResponse",
     "VenueVerificationRequest",
     "VenueVerificationResult",
     "VerifiedVenueBinding",

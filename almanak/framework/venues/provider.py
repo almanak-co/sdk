@@ -5,7 +5,11 @@ from __future__ import annotations
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Protocol
+
+from almanak.framework.data.interfaces import OHLCVCandle
+from almanak.framework.data.timeframes import OHLCVTimeframe
 
 from .data import ExactVenueDataResult, ExactVenueFeatureRequest
 
@@ -27,6 +31,24 @@ class GatewayBlockIdentity:
             raise ValueError("GatewayBlockIdentity.block_hash must be canonical lowercase bytes32")
 
 
+@dataclass(frozen=True, slots=True)
+class GatewayExactOhlcvResponse:
+    """Gateway candle page with all identity echoes needed by an exact reader."""
+
+    candles: tuple[OHLCVCandle, ...]
+    chain: str
+    pool_address: str
+    timeframe: OHLCVTimeframe
+    start_ts: int
+    end_ts: int
+    binding_hash: str
+    feature_identity: str
+    base_token_address: str
+    quote_token_address: str
+    source: str
+    observed_at: datetime
+
+
 class ExactVenueDataGateway(Protocol):
     """Gateway-only read seam available to exact venue data providers."""
 
@@ -40,6 +62,20 @@ class ExactVenueDataGateway(Protocol):
     ) -> bytes: ...
 
     def block_identity(self, *, chain: str, block_number: int) -> GatewayBlockIdentity: ...
+
+    def exact_pool_ohlcv(
+        self,
+        *,
+        chain: str,
+        pool_address: str,
+        base_token_address: str,
+        quote_token_address: str,
+        timeframe: OHLCVTimeframe,
+        start_ts: int,
+        end_ts: int,
+        binding_hash: str,
+        feature_identity: str,
+    ) -> GatewayExactOhlcvResponse: ...
 
 
 class BaseExactVenueDataProvider(ABC):
@@ -58,4 +94,5 @@ __all__ = [
     "BaseExactVenueDataProvider",
     "ExactVenueDataGateway",
     "GatewayBlockIdentity",
+    "GatewayExactOhlcvResponse",
 ]

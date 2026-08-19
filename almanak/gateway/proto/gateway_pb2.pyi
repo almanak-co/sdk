@@ -12541,6 +12541,12 @@ class CoinGeckoOnchainOHLCVRequest(_message.Message):
     POOL_ADDRESS_FIELD_NUMBER: _builtins.int
     QUOTE_FIELD_NUMBER: _builtins.int
     INCLUDE_EMPTY_INTERVALS_FIELD_NUMBER: _builtins.int
+    START_TS_FIELD_NUMBER: _builtins.int
+    END_TS_FIELD_NUMBER: _builtins.int
+    BINDING_HASH_FIELD_NUMBER: _builtins.int
+    FEATURE_IDENTITY_FIELD_NUMBER: _builtins.int
+    BASE_TOKEN_ADDRESS_FIELD_NUMBER: _builtins.int
+    QUOTE_TOKEN_ADDRESS_FIELD_NUMBER: _builtins.int
     token: _builtins.str
     """Token symbol (e.g., "ALMANAK", "WETH")"""
     chain: _builtins.str
@@ -12555,6 +12561,17 @@ class CoinGeckoOnchainOHLCVRequest(_message.Message):
     """Quote currency (default "USD")"""
     include_empty_intervals: _builtins.bool
     """Backfill no-trade intervals as continuous buckets (default false)"""
+    start_ts: _builtins.int
+    """Exact-pool mode. All fields 8-13 must be present together. The resolved
+    half-open interval and identity hashes are echoed by a new gateway; an old
+    gateway ignores these request fields and omits the response echoes, so the
+    exact SDK consumer fails closed instead of accepting an unbound page.
+    """
+    end_ts: _builtins.int
+    binding_hash: _builtins.str
+    feature_identity: _builtins.str
+    base_token_address: _builtins.str
+    quote_token_address: _builtins.str
     def __init__(
         self,
         *,
@@ -12565,8 +12582,14 @@ class CoinGeckoOnchainOHLCVRequest(_message.Message):
         pool_address: _builtins.str = ...,
         quote: _builtins.str = ...,
         include_empty_intervals: _builtins.bool = ...,
+        start_ts: _builtins.int = ...,
+        end_ts: _builtins.int = ...,
+        binding_hash: _builtins.str = ...,
+        feature_identity: _builtins.str = ...,
+        base_token_address: _builtins.str = ...,
+        quote_token_address: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "include_empty_intervals", b"include_empty_intervals", "limit", b"limit", "pool_address", b"pool_address", "quote", b"quote", "timeframe", b"timeframe", "token", b"token"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["base_token_address", b"base_token_address", "binding_hash", b"binding_hash", "chain", b"chain", "end_ts", b"end_ts", "feature_identity", b"feature_identity", "include_empty_intervals", b"include_empty_intervals", "limit", b"limit", "pool_address", b"pool_address", "quote", b"quote", "quote_token_address", b"quote_token_address", "start_ts", b"start_ts", "timeframe", b"timeframe", "token", b"token"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___CoinGeckoOnchainOHLCVRequest: _TypeAlias = CoinGeckoOnchainOHLCVRequest  # noqa: Y015
@@ -12608,14 +12631,53 @@ class CoinGeckoOnchainOHLCVResponse(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
     CANDLES_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    POOL_ADDRESS_FIELD_NUMBER: _builtins.int
+    TIMEFRAME_FIELD_NUMBER: _builtins.int
+    START_TS_FIELD_NUMBER: _builtins.int
+    END_TS_FIELD_NUMBER: _builtins.int
+    BINDING_HASH_FIELD_NUMBER: _builtins.int
+    FEATURE_IDENTITY_FIELD_NUMBER: _builtins.int
+    BASE_TOKEN_ADDRESS_FIELD_NUMBER: _builtins.int
+    QUOTE_TOKEN_ADDRESS_FIELD_NUMBER: _builtins.int
+    SOURCE_FIELD_NUMBER: _builtins.int
+    OBSERVED_AT_FIELD_NUMBER: _builtins.int
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    chain: _builtins.str
+    pool_address: _builtins.str
+    timeframe: _builtins.str
+    start_ts: _builtins.int
+    end_ts: _builtins.int
+    binding_hash: _builtins.str
+    feature_identity: _builtins.str
+    base_token_address: _builtins.str
+    quote_token_address: _builtins.str
+    source: _builtins.str
+    observed_at: _builtins.int
+    success: _builtins.bool
+    error: _builtins.str
     @_builtins.property
     def candles(self) -> _containers.RepeatedCompositeFieldContainer[Global___CoinGeckoOnchainOHLCVCandle]: ...
     def __init__(
         self,
         *,
         candles: _abc.Iterable[Global___CoinGeckoOnchainOHLCVCandle] | None = ...,
+        chain: _builtins.str = ...,
+        pool_address: _builtins.str = ...,
+        timeframe: _builtins.str = ...,
+        start_ts: _builtins.int = ...,
+        end_ts: _builtins.int = ...,
+        binding_hash: _builtins.str = ...,
+        feature_identity: _builtins.str = ...,
+        base_token_address: _builtins.str = ...,
+        quote_token_address: _builtins.str = ...,
+        source: _builtins.str = ...,
+        observed_at: _builtins.int = ...,
+        success: _builtins.bool = ...,
+        error: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["candles", b"candles"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["base_token_address", b"base_token_address", "binding_hash", b"binding_hash", "candles", b"candles", "chain", b"chain", "end_ts", b"end_ts", "error", b"error", "feature_identity", b"feature_identity", "observed_at", b"observed_at", "pool_address", b"pool_address", "quote_token_address", b"quote_token_address", "source", b"source", "start_ts", b"start_ts", "success", b"success", "timeframe", b"timeframe"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___CoinGeckoOnchainOHLCVResponse: _TypeAlias = CoinGeckoOnchainOHLCVResponse  # noqa: Y015

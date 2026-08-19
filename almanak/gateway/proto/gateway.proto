@@ -4952,6 +4952,17 @@ message CoinGeckoOnchainOHLCVRequest {
   string pool_address = 5;      // Explicit pool address (optional)
   string quote = 6;             // Quote currency (default "USD")
   bool include_empty_intervals = 7;  // Backfill no-trade intervals as continuous buckets (default false)
+
+  // Exact-pool mode. All fields 8-13 must be present together. The resolved
+  // half-open interval and identity hashes are echoed by a new gateway; an old
+  // gateway ignores these request fields and omits the response echoes, so the
+  // exact SDK consumer fails closed instead of accepting an unbound page.
+  int64 start_ts = 8;
+  int64 end_ts = 9;
+  string binding_hash = 10;
+  string feature_identity = 11;
+  string base_token_address = 12;
+  string quote_token_address = 13;
 }
 
 message CoinGeckoOnchainOHLCVCandle {
@@ -4965,6 +4976,19 @@ message CoinGeckoOnchainOHLCVCandle {
 
 message CoinGeckoOnchainOHLCVResponse {
   repeated CoinGeckoOnchainOHLCVCandle candles = 1;
+  string chain = 2;
+  string pool_address = 3;
+  string timeframe = 4;
+  int64 start_ts = 5;
+  int64 end_ts = 6;
+  string binding_hash = 7;
+  string feature_identity = 8;
+  string base_token_address = 9;
+  string quote_token_address = 10;
+  string source = 11;
+  int64 observed_at = 12;
+  bool success = 13;
+  string error = 14;
 }
 
 // =============================================================================

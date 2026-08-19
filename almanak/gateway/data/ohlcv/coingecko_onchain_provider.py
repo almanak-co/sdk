@@ -25,16 +25,19 @@ Example:
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
 from typing import Any
 
 import aiohttp
+from pydantic import BaseModel, ValidationError
 
 from almanak.core.finality import DataFinality
 from almanak.framework.data.interfaces import (
@@ -53,6 +56,7 @@ from almanak.framework.data.timeframes import (
     parse_ohlcv_timeframe,
 )
 from almanak.gateway.utils.rpc_provider import _get_gateway_api_key
+from almanak.gateway.validation import is_solana_chain
 from almanak.integrations.chains import integration_chain_map
 
 logger = logging.getLogger(__name__)
@@ -62,6 +66,8 @@ logger = logging.getLogger(__name__)
 _FREE_API_BASE = "https://api.coingecko.com/api/v3/onchain"
 _PRO_API_BASE = "https://pro-api.coingecko.com/api/v3/onchain"
 _SOURCE = "coingecko_onchain"
+_EXACT_SOURCE = "coingecko_onchain.exact_pool"
+EXACT_POOL_OHLCV_CONTRACT_VERSION = "coingecko_onchain.pool_ohlcv.v1"
 
 # Chain name -> CoinGecko Onchain network ID mapping. Onchain network ids are
 # their own namespace ("eth", "polygon_pos"), distinct from the token-level
@@ -78,6 +84,109 @@ class _HealthMetrics:
     cache_hits: int = 0
     errors: int = 0
     total_latency_ms: float = 0.0
+
+
+class _ExactPoolTokenIdentity(BaseModel):
+    """Token identity from the provider's exact-pool metadata envelope."""
+
+    address: str
+
+
+class _ExactPoolIdentityMetadata(BaseModel):
+    """Ordered base/quote identity from the provider response schema."""
+
+    base: _ExactPoolTokenIdentity
+    quote: _ExactPoolTokenIdentity
+
+
+@dataclass(frozen=True, slots=True)
+class ExactPoolOHLCVResult:
+    """One identity-checked pool-native candle response.
+
+    Unlike the legacy symbol/pool helper, this result carries the upstream
+    token-pair identity and the exact resolved interval.  The gateway service
+    uses those facts to build an identity echo for version-skew-safe exact-data
+    consumers.
+    """
+
+    candles: tuple[OHLCVCandle, ...]
+    chain: str
+    pool_address: str
+    base_token_address: str
+    quote_token_address: str
+    timeframe: OHLCVTimeframe
+    start_ts: int
+    end_ts: int
+    binding_hash: str
+    feature_identity: str
+    observed_at: datetime
+    source: str = _EXACT_SOURCE
+
+
+@dataclass(frozen=True, slots=True)
+class _ExactPoolOHLCVRequest:
+    chain: str
+    pool_address: str
+    base_token_address: str
+    quote_token_address: str
+    timeframe: OHLCVTimeframe
+    start_ts: int
+    end_ts: int
+    binding_hash: str
+    feature_identity: str
+    expected_timestamps: tuple[int, ...]
+
+
+def _normalize_exact_pool_request(
+    *,
+    chain: str,
+    pool_address: str,
+    base_token_address: str,
+    quote_token_address: str,
+    timeframe: OHLCVTimeframe,
+    start_ts: int,
+    end_ts: int,
+    binding_hash: str,
+    feature_identity: str,
+) -> _ExactPoolOHLCVRequest:
+    timeframe = validate_timeframe(timeframe)
+    if start_ts <= 0 or end_ts <= start_ts:
+        raise ValueError("exact OHLCV requires 0 < start_ts < end_ts")
+    if start_ts % timeframe.seconds or end_ts % timeframe.seconds:
+        raise ValueError("exact OHLCV interval must align to the requested timeframe")
+    expected_timestamps = tuple(range(start_ts, end_ts, timeframe.seconds))
+    if not expected_timestamps:
+        raise ValueError("exact OHLCV interval must contain at least one candle")
+    if len(expected_timestamps) > 1000:
+        raise ValueError("exact OHLCV interval exceeds the provider's 1000-candle request bound")
+    if end_ts - start_ts > 180 * 24 * 60 * 60:
+        raise ValueError("exact OHLCV interval exceeds the provider's 180-day request bound")
+
+    normalized = (chain, pool_address, base_token_address, quote_token_address)
+    normalized_chain = normalized[0].strip().lower()
+    normalized_pool, normalized_base, normalized_quote = (value.strip() for value in normalized[1:])
+    if not is_solana_chain(normalized_chain):
+        normalized_pool, normalized_base, normalized_quote = (
+            value.lower() for value in (normalized_pool, normalized_base, normalized_quote)
+        )
+    if not all((normalized_chain, normalized_pool, normalized_base, normalized_quote)):
+        raise ValueError("exact OHLCV identity fields must be non-empty")
+    if normalized_base == normalized_quote:
+        raise ValueError("exact OHLCV base and quote token addresses must differ")
+    if not all(re.fullmatch(r"[0-9a-f]{64}", value) for value in (binding_hash, feature_identity)):
+        raise ValueError("exact OHLCV hashes must be canonical lowercase SHA-256 hex")
+    return _ExactPoolOHLCVRequest(
+        chain=normalized_chain,
+        pool_address=normalized_pool,
+        base_token_address=normalized_base,
+        quote_token_address=normalized_quote,
+        timeframe=timeframe,
+        start_ts=start_ts,
+        end_ts=end_ts,
+        binding_hash=binding_hash,
+        feature_identity=feature_identity,
+        expected_timestamps=expected_timestamps,
+    )
 
 
 class _TokenBucket:
@@ -130,6 +239,7 @@ class CoinGeckoOnchainOHLCVProvider:
         request_timeout: float = 10.0,
         rate_limit: int = 30,
         api_key: str | None = None,
+        exact_cache_max_entries: int = 256,
     ) -> None:
         """Initialize the CoinGecko Onchain OHLCV provider.
 
@@ -139,13 +249,19 @@ class CoinGeckoOnchainOHLCVProvider:
             rate_limit: Maximum requests per minute. Default 30.
             api_key: CoinGecko Pro API key. Uses the gateway environment
                 fallback when omitted.
+            exact_cache_max_entries: Maximum high-cardinality exact responses
+                retained in the in-memory LRU cache. Default 256.
         """
+        if exact_cache_max_entries < 1:
+            raise ValueError("exact_cache_max_entries must be positive")
         self._cache_ttl = cache_ttl
+        self._exact_cache_max_entries = exact_cache_max_entries
         self._request_timeout = request_timeout
         self._rate_limiter = _TokenBucket(rate=rate_limit, period=60.0)
         self._metrics = _HealthMetrics()
         self._session: aiohttp.ClientSession | None = None
         self._cache: dict[str, tuple[list[OHLCVCandle], float]] = {}
+        self._exact_cache: OrderedDict[str, tuple[ExactPoolOHLCVResult, float]] = OrderedDict()
         self._api_key = api_key if api_key is not None else _get_gateway_api_key("COINGECKO_API_KEY")
 
         logger.info(
@@ -425,6 +541,222 @@ class CoinGeckoOnchainOHLCVProvider:
                 reason=f"Timeout after {self._request_timeout}s",
             ) from None
 
+    async def _fetch_exact_pool_payload(self, url: str, params: dict[str, str | int]) -> Any:
+        try:
+            session = await self._get_session()
+            async with session.get(url, params=params) as response:
+                if response.status == 429:
+                    self._metrics.errors += 1
+                    raise DataSourceUnavailable(
+                        source=_SOURCE,
+                        reason="Rate limited by CoinGecko Onchain API",
+                        retry_after=60.0,
+                    )
+                if response.status != 200:
+                    body = await response.text()
+                    self._metrics.errors += 1
+                    raise DataSourceUnavailable(source=_SOURCE, reason=f"HTTP {response.status}: {body[:200]}")
+                return await response.json()
+        except aiohttp.ClientError as exc:
+            self._metrics.errors += 1
+            raise DataSourceUnavailable(source=_SOURCE, reason=str(exc)) from exc
+        except TimeoutError:
+            self._metrics.errors += 1
+            raise DataSourceUnavailable(source=_SOURCE, reason=f"Timeout after {self._request_timeout}s") from None
+
+    def _parse_exact_pool_candles(
+        self,
+        payload: Any,
+        request: _ExactPoolOHLCVRequest,
+    ) -> tuple[OHLCVCandle, ...]:
+        try:
+            metadata = _ExactPoolIdentityMetadata.model_validate(payload["meta"])
+            observed_base = metadata.base.address.strip()
+            observed_quote = metadata.quote.address.strip()
+            if not is_solana_chain(request.chain):
+                observed_base = observed_base.lower()
+                observed_quote = observed_quote.lower()
+            rows = payload["data"]["attributes"]["ohlcv_list"]
+        except (KeyError, TypeError, AttributeError, ValidationError) as exc:
+            self._metrics.errors += 1
+            raise DataSourceUnavailable(
+                source=_SOURCE,
+                reason="exact pool OHLCV response omitted token identity or candles",
+            ) from exc
+        observed_pair = (observed_base, observed_quote)
+        expected_pair = (request.base_token_address, request.quote_token_address)
+        if observed_pair != expected_pair:
+            self._metrics.errors += 1
+            raise DataSourceUnavailable(
+                source=_SOURCE,
+                reason=f"exact pool OHLCV response token identity mismatch: expected={expected_pair} received={observed_pair}",
+            )
+
+        candles_by_timestamp: dict[int, OHLCVCandle] = {}
+        expected_timestamp_set = frozenset(request.expected_timestamps)
+        for row in rows:
+            if not isinstance(row, list) or len(row) < 6 or type(row[0]) is not int:
+                self._metrics.errors += 1
+                raise DataSourceUnavailable(
+                    source=_SOURCE, reason="exact pool OHLCV response contained a malformed row"
+                )
+            timestamp = int(row[0])
+            if timestamp not in expected_timestamp_set:
+                continue
+            try:
+                values = tuple(Decimal(str(item)) for item in row[1:6])
+            except (InvalidOperation, ValueError) as exc:
+                self._metrics.errors += 1
+                raise DataSourceUnavailable(
+                    source=_SOURCE, reason="exact pool OHLCV response contained malformed values"
+                ) from exc
+            open_, high, low, close, volume = values
+            if (
+                any(not value.is_finite() for value in values)
+                or min(open_, high, low, close) <= 0
+                or volume < 0
+                or not low <= min(open_, close) <= max(open_, close) <= high
+            ):
+                self._metrics.errors += 1
+                raise DataSourceUnavailable(source=_SOURCE, reason="exact pool OHLCV response contained invalid values")
+            if timestamp in candles_by_timestamp:
+                self._metrics.errors += 1
+                raise DataSourceUnavailable(source=_SOURCE, reason=f"exact pool OHLCV response duplicated {timestamp}")
+            candles_by_timestamp[timestamp] = OHLCVCandle(
+                timestamp=datetime.fromtimestamp(timestamp, tz=UTC),
+                open=open_,
+                high=high,
+                low=low,
+                close=close,
+                volume=volume,
+            )
+        received_timestamps = tuple(sorted(candles_by_timestamp))
+        if received_timestamps != request.expected_timestamps:
+            self._metrics.errors += 1
+            raise DataSourceUnavailable(
+                source=_SOURCE,
+                reason=(
+                    "exact pool OHLCV response did not cover the complete requested interval: "
+                    f"expected={request.expected_timestamps!r} received={received_timestamps!r}"
+                ),
+            )
+        return tuple(candles_by_timestamp[timestamp] for timestamp in request.expected_timestamps)
+
+    async def get_exact_pool_ohlcv(
+        self,
+        *,
+        chain: str,
+        pool_address: str,
+        base_token_address: str,
+        quote_token_address: str,
+        timeframe: OHLCVTimeframe,
+        start_ts: int,
+        end_ts: int,
+        binding_hash: str,
+        feature_identity: str,
+    ) -> ExactPoolOHLCVResult:
+        """Fetch one complete half-open candle interval from one exact pool.
+
+        This lane never searches by symbol and never falls back to another
+        provider.  It asks CoinGecko Onchain for token-denominated candles,
+        verifies the returned pool token metadata, and requires complete
+        boundary coverage.  A missing bucket is unavailable rather than a
+        partial success.
+        """
+        exact_request = _normalize_exact_pool_request(
+            chain=chain,
+            pool_address=pool_address,
+            base_token_address=base_token_address,
+            quote_token_address=quote_token_address,
+            timeframe=timeframe,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            binding_hash=binding_hash,
+            feature_identity=feature_identity,
+        )
+
+        network = _CHAIN_TO_NETWORK.get(exact_request.chain)
+        if network is None:
+            raise DataSourceUnavailable(
+                source=_SOURCE,
+                reason=f"Unsupported chain: {chain}. Supported: {', '.join(sorted(_CHAIN_TO_NETWORK))}",
+            )
+        tf_params = COINGECKO_ONCHAIN_OHLCV_TIMEFRAMES.resolve(exact_request.timeframe)
+        cache_key = ":".join(
+            (
+                EXACT_POOL_OHLCV_CONTRACT_VERSION,
+                exact_request.chain,
+                exact_request.pool_address,
+                exact_request.base_token_address,
+                exact_request.quote_token_address,
+                exact_request.timeframe.value,
+                str(start_ts),
+                str(end_ts),
+                binding_hash,
+                feature_identity,
+            )
+        )
+        cached = self._exact_cache.get(cache_key)
+        if cached is not None:
+            if time.monotonic() - cached[1] <= self._cache_ttl:
+                self._exact_cache.move_to_end(cache_key)
+                self._metrics.cache_hits += 1
+                return cached[0]
+            del self._exact_cache[cache_key]
+
+        self._metrics.total_requests += 1
+        if not self._rate_limiter.acquire():
+            self._metrics.errors += 1
+            raise DataSourceUnavailable(source=_SOURCE, reason="Rate limited (30 req/min)", retry_after=2.0)
+        if not self._api_key:
+            self._metrics.errors += 1
+            raise DataSourceUnavailable(
+                source=_SOURCE,
+                reason=(
+                    "CoinGecko Onchain API requires a valid COINGECKO_API_KEY; "
+                    "set ALMANAK_GATEWAY_COINGECKO_API_KEY on the gateway"
+                ),
+            )
+
+        url = f"{self._api_base}/networks/{network}/pools/{exact_request.pool_address}/ohlcv/{tf_params.timeframe}"
+        params: dict[str, str | int] = {
+            "aggregate": tf_params.aggregate,
+            "before_timestamp": end_ts,
+            "limit": len(exact_request.expected_timestamps),
+            "currency": "token",
+            # Address form avoids depending on CoinGecko's base/quote naming.
+            "token": exact_request.base_token_address,
+            "include_empty_intervals": "true",
+        }
+        started = time.monotonic()
+        payload = await self._fetch_exact_pool_payload(url, params)
+        candles = self._parse_exact_pool_candles(payload, exact_request)
+
+        result = ExactPoolOHLCVResult(
+            candles=candles,
+            chain=exact_request.chain,
+            pool_address=exact_request.pool_address,
+            base_token_address=exact_request.base_token_address,
+            quote_token_address=exact_request.quote_token_address,
+            timeframe=exact_request.timeframe,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            binding_hash=binding_hash,
+            feature_identity=feature_identity,
+            observed_at=datetime.now(UTC).replace(microsecond=0),
+        )
+        cached_at = time.monotonic()
+        expired = [key for key, (_, stored_at) in self._exact_cache.items() if cached_at - stored_at > self._cache_ttl]
+        for expired_key in expired:
+            del self._exact_cache[expired_key]
+        self._exact_cache[cache_key] = (result, cached_at)
+        self._exact_cache.move_to_end(cache_key)
+        while len(self._exact_cache) > self._exact_cache_max_entries:
+            self._exact_cache.popitem(last=False)
+        self._metrics.successful_requests += 1
+        self._metrics.total_latency_ms += (time.monotonic() - started) * 1000
+        return result
+
     # -- Internal helpers -------------------------------------------------------
 
     async def _get_session(self) -> aiohttp.ClientSession:
@@ -587,6 +919,7 @@ class CoinGeckoOnchainOHLCVProvider:
     def clear_cache(self) -> None:
         """Clear the OHLCV cache."""
         self._cache.clear()
+        self._exact_cache.clear()
         logger.info("Cleared CoinGecko Onchain OHLCV cache")
 
     async def __aenter__(self) -> CoinGeckoOnchainOHLCVProvider:
@@ -604,4 +937,5 @@ class CoinGeckoOnchainOHLCVProvider:
 
 __all__ = [
     "CoinGeckoOnchainOHLCVProvider",
+    "ExactPoolOHLCVResult",
 ]

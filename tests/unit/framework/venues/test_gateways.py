@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
 from almanak.core.rpc_network import Network
+from almanak.framework.data.timeframes import OHLCVTimeframe
 from almanak.framework.venues import VenueReferenceNamespace, VenueTargetRef, VenueTargetRole
 from almanak.framework.venues.gateway import (
     GatewayClientExactVenueDataGateway,
@@ -96,6 +98,112 @@ def test_exact_data_gateway_adapter_uses_generic_pinned_reads_and_strict_block_i
         block=123,
         raise_on_error=True,
     )
+
+
+def test_exact_data_gateway_adapter_requires_and_preserves_ohlcv_identity_echoes() -> None:
+    from almanak.gateway.proto import gateway_pb2
+
+    client = MagicMock()
+    client.is_connected = True
+    client.config.timeout = 12.0
+    client.integration.CoinGeckoOnchainGetOHLCV.return_value = gateway_pb2.CoinGeckoOnchainOHLCVResponse(
+        candles=(
+            gateway_pb2.CoinGeckoOnchainOHLCVCandle(
+                timestamp=1_766_001_600,
+                open="1",
+                high="2",
+                low="0.5",
+                close="1.5",
+                volume="0",
+            ),
+        ),
+        chain="base",
+        pool_address=TARGET.reference,
+        timeframe="1h",
+        start_ts=1_766_001_600,
+        end_ts=1_766_005_200,
+        binding_hash="11" * 32,
+        feature_identity="22" * 32,
+        base_token_address="0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        quote_token_address="0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        source="coingecko_onchain.exact_pool",
+        observed_at=1_766_005_200,
+        success=True,
+    )
+    gateway = GatewayClientExactVenueDataGateway(client)
+
+    response = gateway.exact_pool_ohlcv(
+        chain="base",
+        pool_address=TARGET.reference,
+        base_token_address="0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        quote_token_address="0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        timeframe=OHLCVTimeframe.ONE_HOUR,
+        start_ts=1_766_001_600,
+        end_ts=1_766_005_200,
+        binding_hash="11" * 32,
+        feature_identity="22" * 32,
+    )
+
+    assert response.chain == "base"
+    assert response.pool_address == TARGET.reference
+    assert response.timeframe is OHLCVTimeframe.ONE_HOUR
+    assert response.start_ts == 1_766_001_600
+    assert response.end_ts == 1_766_005_200
+    assert response.binding_hash == "11" * 32
+    assert response.feature_identity == "22" * 32
+    assert response.base_token_address == "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    assert response.quote_token_address == "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    assert response.source == "coingecko_onchain.exact_pool"
+    assert response.candles[0].volume == 0
+    assert response.observed_at == datetime.fromtimestamp(1_766_005_200, tz=UTC)
+    request = client.integration.CoinGeckoOnchainGetOHLCV.call_args.args[0]
+    assert request.pool_address == TARGET.reference
+    assert request.binding_hash == "11" * 32
+    assert request.feature_identity == "22" * 32
+    assert request.limit == 1
+    assert request.start_ts == 1_766_001_600
+    assert request.end_ts == 1_766_005_200
+    assert request.timeframe == "1h"
+    assert request.include_empty_intervals is True
+    assert request.base_token_address == "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    assert request.quote_token_address == "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+
+def test_exact_data_gateway_adapter_refuses_old_response_without_exact_acknowledgement() -> None:
+    from almanak.gateway.proto import gateway_pb2
+
+    client = MagicMock()
+    client.is_connected = True
+    client.config.timeout = 12.0
+    legacy_wire = gateway_pb2.CoinGeckoOnchainOHLCVResponse(
+        candles=(
+            gateway_pb2.CoinGeckoOnchainOHLCVCandle(
+                timestamp=1_766_001_600,
+                open="1",
+                high="2",
+                low="0.5",
+                close="1.5",
+                volume="0",
+            ),
+        )
+    ).SerializeToString()
+    client.integration.CoinGeckoOnchainGetOHLCV.return_value = gateway_pb2.CoinGeckoOnchainOHLCVResponse.FromString(
+        legacy_wire
+    )
+    gateway = GatewayClientExactVenueDataGateway(client)
+
+    with pytest.raises(ValueError, match="did not acknowledge exact OHLCV mode"):
+        gateway.exact_pool_ohlcv(
+            chain="base",
+            pool_address=TARGET.reference,
+            base_token_address="0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            quote_token_address="0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            timeframe=OHLCVTimeframe.ONE_HOUR,
+            start_ts=1_766_001_600,
+            end_ts=1_766_005_200,
+            binding_hash="11" * 32,
+            feature_identity="22" * 32,
+        )
 
 
 def test_gateway_internal_adapter_rejects_cross_chain_labelling(monkeypatch: pytest.MonkeyPatch) -> None:

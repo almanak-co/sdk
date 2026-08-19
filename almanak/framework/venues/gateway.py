@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
 
+from almanak.framework.data.interfaces import OHLCVCandle
+from almanak.framework.data.timeframes import OHLCVTimeframe
 from almanak.gateway.proto import gateway_pb2
 
-from .provider import GatewayBlockIdentity
+from .provider import GatewayBlockIdentity, GatewayExactOhlcvResponse
 from .types import VenueReferenceNamespace, VenueTargetRef
 
 if TYPE_CHECKING:
@@ -147,6 +151,81 @@ class GatewayClientExactVenueDataGateway:
             number=observed_number,
             block_hash=block_hash.lower(),
             timestamp=timestamp,
+        )
+
+    def exact_pool_ohlcv(
+        self,
+        *,
+        chain: str,
+        pool_address: str,
+        base_token_address: str,
+        quote_token_address: str,
+        timeframe: OHLCVTimeframe,
+        start_ts: int,
+        end_ts: int,
+        binding_hash: str,
+        feature_identity: str,
+    ) -> GatewayExactOhlcvResponse:
+        """Read a version-skew-safe exact pool candle page."""
+        response = self._client.integration.CoinGeckoOnchainGetOHLCV(
+            gateway_pb2.CoinGeckoOnchainOHLCVRequest(
+                token=base_token_address,
+                quote=quote_token_address,
+                chain=chain,
+                timeframe=timeframe.value,
+                limit=(end_ts - start_ts) // timeframe.seconds,
+                pool_address=pool_address,
+                include_empty_intervals=True,
+                start_ts=start_ts,
+                end_ts=end_ts,
+                binding_hash=binding_hash,
+                feature_identity=feature_identity,
+                base_token_address=base_token_address,
+                quote_token_address=quote_token_address,
+            ),
+            timeout=self._client.config.timeout,
+        )
+        if not response.success:
+            raise ValueError(response.error or "gateway did not acknowledge exact OHLCV mode")
+        candles: list[OHLCVCandle] = []
+        for raw in response.candles:
+            try:
+                open_ = Decimal(raw.open)
+                high = Decimal(raw.high)
+                low = Decimal(raw.low)
+                close = Decimal(raw.close)
+                volume = Decimal(raw.volume)
+            except (InvalidOperation, ValueError) as exc:
+                raise ValueError("gateway returned malformed exact OHLCV values") from exc
+            candles.append(
+                OHLCVCandle(
+                    timestamp=datetime.fromtimestamp(raw.timestamp, tz=UTC),
+                    open=open_,
+                    high=high,
+                    low=low,
+                    close=close,
+                    volume=volume,
+                )
+            )
+        if response.observed_at <= 0:
+            raise ValueError("gateway exact OHLCV response omitted observation time")
+        try:
+            response_timeframe = OHLCVTimeframe(response.timeframe)
+        except ValueError as exc:
+            raise ValueError("gateway exact OHLCV response omitted a canonical timeframe") from exc
+        return GatewayExactOhlcvResponse(
+            candles=tuple(candles),
+            chain=response.chain,
+            pool_address=response.pool_address,
+            timeframe=response_timeframe,
+            start_ts=response.start_ts,
+            end_ts=response.end_ts,
+            binding_hash=response.binding_hash,
+            feature_identity=response.feature_identity,
+            base_token_address=response.base_token_address,
+            quote_token_address=response.quote_token_address,
+            source=response.source,
+            observed_at=datetime.fromtimestamp(response.observed_at, tz=UTC),
         )
 
 

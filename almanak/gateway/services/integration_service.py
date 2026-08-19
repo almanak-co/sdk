@@ -7,6 +7,7 @@ in the gateway.
 
 import json
 import logging
+import re
 import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
@@ -20,6 +21,7 @@ from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
 from almanak.gateway.services._grpc_errors import set_error_from_upstream
 from almanak.gateway.validation import (
     ValidationError,
+    is_solana_chain,
     validate_address,
     validate_address_for_chain,
     validate_chain,
@@ -861,6 +863,110 @@ class IntegrationServiceServicer(gateway_pb2_grpc.IntegrationServiceServicer):
     # CoinGecko Onchain DEX OHLCV endpoint
     # =========================================================================
 
+    @staticmethod
+    def _validate_coingecko_onchain_ohlcv_request(
+        request: gateway_pb2.CoinGeckoOnchainOHLCVRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tuple[OHLCVTimeframe, int, str] | None:
+        """Validate shared legacy/exact fields and normalize the pool address."""
+        if not request.token or not request.token.strip():
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("token is required and cannot be empty")
+            return None
+        if not request.chain or not request.chain.strip():
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("chain is required and cannot be empty")
+            return None
+
+        try:
+            timeframe = parse_ohlcv_timeframe(
+                request.timeframe or OHLCVTimeframe.ONE_HOUR,
+                field_name="CoinGeckoOnchainOHLCVRequest.timeframe",
+            )
+        except (TypeError, ValueError) as exc:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(exc))
+            return None
+
+        limit = request.limit or 100
+        if limit < 1 or limit > 1000:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(f"limit must be between 1 and 1000, got {limit}")
+            return None
+
+        pool_address = (request.pool_address or "").strip()
+        if not pool_address:
+            return timeframe, limit, pool_address
+
+        # An unknown chain is left to the provider so the legacy router retains
+        # its existing unsupported-chain failover behavior without egressing.
+        try:
+            family_chain: str | None = validate_chain(request.chain)
+        except ValidationError:
+            family_chain = None
+        if family_chain is None:
+            return timeframe, limit, pool_address
+
+        try:
+            pool_address = validate_address_for_chain(pool_address, family_chain, field="pool_address")
+        except ValidationError as exc:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(exc))
+            return None
+        return timeframe, limit, pool_address
+
+    @staticmethod
+    def _validate_exact_ohlcv_identity(
+        request: gateway_pb2.CoinGeckoOnchainOHLCVRequest,
+        context: grpc.aio.ServicerContext,
+        pool_address: str,
+    ) -> tuple[bool, str, str] | None:
+        """Return exact-mode and normalized identity, or mark an invalid request."""
+        exact_mode = any(
+            (
+                request.start_ts,
+                request.end_ts,
+                request.binding_hash,
+                request.feature_identity,
+                request.base_token_address,
+                request.quote_token_address,
+            )
+        )
+        if not exact_mode:
+            return False, "", ""
+        base = request.base_token_address.strip()
+        quote = request.quote_token_address.strip()
+        if not all(
+            (
+                pool_address,
+                request.start_ts > 0,
+                request.end_ts > request.start_ts,
+                request.binding_hash,
+                request.feature_identity,
+                base,
+                quote,
+            )
+        ):
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("exact OHLCV identity and interval fields must all be present")
+            return None
+        if not all(re.fullmatch(r"[0-9a-f]{64}", value) for value in (request.binding_hash, request.feature_identity)):
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("exact OHLCV hashes must be canonical lowercase SHA-256 hex")
+            return None
+        try:
+            chain = validate_chain(request.chain)
+            base = validate_address_for_chain(base, chain, field="base_token_address")
+            quote = validate_address_for_chain(quote, chain, field="quote_token_address")
+            if not is_solana_chain(chain):
+                base = base.lower()
+                quote = quote.lower()
+        except ValidationError as exc:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(exc))
+            return None
+        return True, base, quote
+
     async def CoinGeckoOnchainGetOHLCV(
         self,
         request: gateway_pb2.CoinGeckoOnchainOHLCVRequest,
@@ -880,63 +986,15 @@ class IntegrationServiceServicer(gateway_pb2_grpc.IntegrationServiceServicer):
         """
         await self._ensure_initialized()
 
-        # --- Input validation at the gRPC boundary ---
-        if not request.token or not request.token.strip():
-            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details("token is required and cannot be empty")
+        validated_request = self._validate_coingecko_onchain_ohlcv_request(request, context)
+        if validated_request is None:
             return gateway_pb2.CoinGeckoOnchainOHLCVResponse()
+        req_timeframe, req_limit, req_pool_address = validated_request
 
-        if not request.chain or not request.chain.strip():
-            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details("chain is required and cannot be empty")
+        exact_identity = self._validate_exact_ohlcv_identity(request, context, req_pool_address)
+        if exact_identity is None:
             return gateway_pb2.CoinGeckoOnchainOHLCVResponse()
-
-        try:
-            req_timeframe = parse_ohlcv_timeframe(
-                request.timeframe or OHLCVTimeframe.ONE_HOUR,
-                field_name="CoinGeckoOnchainOHLCVRequest.timeframe",
-            )
-        except (TypeError, ValueError) as e:
-            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details(str(e))
-            return gateway_pb2.CoinGeckoOnchainOHLCVResponse()
-
-        req_limit = request.limit or 100
-        if req_limit < 1 or req_limit > 1000:
-            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details(f"limit must be between 1 and 1000, got {req_limit}")
-            return gateway_pb2.CoinGeckoOnchainOHLCVResponse()
-
-        # pool_address is optional -- empty means "resolve the pool by token
-        # symbol". When supplied it is interpolated straight into an outbound
-        # URL path segment by the provider, so a value carrying "/" or ".."
-        # could reshape the request path and reach other upstream endpoints.
-        req_pool_address = (request.pool_address or "").strip()
-        if req_pool_address:
-            # Chain-family detection only (Solana pools are base58, EVM pools
-            # are 0x-hex); the chain itself is still forwarded unmodified.
-            #
-            # An unrecognized chain skips the shape check rather than defaulting
-            # to the EVM branch, which would reject a base58 pool on, say, a
-            # not-yet-registered Solana-family network. Skipping cannot leak: the
-            # provider resolves its vendor network map -- derived from the same
-            # ChainRegistry that backs validate_chain, so never wider than it --
-            # *before* it builds any URL, so an unrecognized chain dies on the
-            # provider's retryable "Unsupported chain" error without egressing.
-            # That error is what the OHLCV router fails over on; rejecting it
-            # here would convert the failover into a hard INVALID_ARGUMENT.
-            try:
-                family_chain: str | None = validate_chain(request.chain)
-            except ValidationError:
-                family_chain = None
-
-            if family_chain is not None:
-                try:
-                    req_pool_address = validate_address_for_chain(req_pool_address, family_chain, field="pool_address")
-                except ValidationError as e:
-                    context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-                    context.set_details(str(e))
-                    return gateway_pb2.CoinGeckoOnchainOHLCVResponse()
+        exact_mode, exact_base, exact_quote = exact_identity
 
         try:
             from almanak.gateway.data.ohlcv.coingecko_onchain_provider import CoinGeckoOnchainOHLCVProvider
@@ -944,15 +1002,31 @@ class IntegrationServiceServicer(gateway_pb2_grpc.IntegrationServiceServicer):
             start_time_metric = time.monotonic()
 
             async with CoinGeckoOnchainOHLCVProvider(api_key=self.settings.coingecko_api_key) as provider:
-                candles = await provider.get_ohlcv(
-                    token=request.token.strip(),
-                    quote=request.quote or "USD",
-                    timeframe=req_timeframe,
-                    limit=req_limit,
-                    chain=request.chain.strip(),
-                    pool_address=req_pool_address or None,
-                    include_empty_intervals=request.include_empty_intervals,
-                )
+                candles: Any
+                if exact_mode:
+                    exact_result = await provider.get_exact_pool_ohlcv(
+                        chain=request.chain.strip(),
+                        pool_address=req_pool_address,
+                        base_token_address=exact_base,
+                        quote_token_address=exact_quote,
+                        timeframe=req_timeframe,
+                        start_ts=request.start_ts,
+                        end_ts=request.end_ts,
+                        binding_hash=request.binding_hash,
+                        feature_identity=request.feature_identity,
+                    )
+                    candles = exact_result.candles
+                else:
+                    exact_result = None
+                    candles = await provider.get_ohlcv(
+                        token=request.token.strip(),
+                        quote=request.quote or "USD",
+                        timeframe=req_timeframe,
+                        limit=req_limit,
+                        chain=request.chain.strip(),
+                        pool_address=req_pool_address or None,
+                        include_empty_intervals=request.include_empty_intervals,
+                    )
 
             latency = time.monotonic() - start_time_metric
             record_integration_request("coingecko_onchain", "get_ohlcv")
@@ -971,7 +1045,23 @@ class IntegrationServiceServicer(gateway_pb2_grpc.IntegrationServiceServicer):
                     )
                 )
 
-            return gateway_pb2.CoinGeckoOnchainOHLCVResponse(candles=candle_messages)
+            if exact_result is None:
+                return gateway_pb2.CoinGeckoOnchainOHLCVResponse(candles=candle_messages)
+            return gateway_pb2.CoinGeckoOnchainOHLCVResponse(
+                candles=candle_messages,
+                chain=exact_result.chain,
+                pool_address=exact_result.pool_address,
+                timeframe=exact_result.timeframe.value,
+                start_ts=exact_result.start_ts,
+                end_ts=exact_result.end_ts,
+                binding_hash=exact_result.binding_hash,
+                feature_identity=exact_result.feature_identity,
+                base_token_address=exact_result.base_token_address,
+                quote_token_address=exact_result.quote_token_address,
+                source=exact_result.source,
+                observed_at=int(exact_result.observed_at.timestamp()),
+                success=True,
+            )
 
         except ValueError as e:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
