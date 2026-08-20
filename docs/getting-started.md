@@ -212,23 +212,32 @@ class MyStrategy(IntentStrategy): ...
 #### Quote asset (performance denomination)
 
 `quote_asset` declares the asset your strategy's performance (PnL / ROI) is measured in. It
-defaults to **USD** and is definition-only: the hosted platform reads it for performance
-reporting; it does not change valuation or execution behaviour. Declare it explicitly so the
-choice is visible.
+defaults to **USD** and sets the numeraire for performance reporting: backtests and paper
+runs compute their canonical performance metrics in it (`performance_denomination` in the
+result summary names the unit; `*_usd` counterparts and the USD equity curve are kept
+alongside), and the hosted platform reports performance in it. It
+does not change execution behaviour — only how results are measured — so a wrong value
+reports performance in the wrong unit: a BTC-growth strategy declared `"USD"` shows USD PnL
+and no BTC-denominated metrics, and can show a loss in a falling-BTC market while actually
+accumulating BTC. Choose by asking what quantity the strategy is trying to grow — if the
+goal is stated ("increase BTC"), the denomination must match it. Declare it explicitly so
+the choice is visible.
 
-- **USD:** `quote_asset="USD"`. Correct for LP strategies (any pair), USD/stable lending and
-  vault yield, delta-neutral and basis trades, USD-collateral perps, and TA swaps that trade
-  for USD profit.
+- **USD:** `quote_asset="USD"`. Correct for LP strategies whose legs span asset families
+  (e.g. WETH/USDC), USD/stable lending and vault yield, delta-neutral and basis trades,
+  USD-collateral perps, and TA swaps that trade for USD profit.
 - **Token:** `quote_asset={"type": "token", "chain_id": <int>, "address": "0x..."}`. Only for
   strategies whose goal is to grow a quantity of that token — pure accumulators, native-asset
   or liquid staking, same-asset-family leverage loops (e.g. wstETH collateral / WETH borrow),
-  and token-denominated yield (e.g. Pendle YT on wstETH). Use a **numeric `chain_id`**, never
-  a chain name, and represent native gas tokens by their wrapped ERC-20 (ETH→WETH, MNT→WMNT;
-  Solana uses `chain_id: 0` with WSOL).
+  same-asset-family LP pools built to grow that asset (e.g. a WBTC/tBTC pool as a BTC
+  accumulator quotes in WBTC), and token-denominated yield (e.g. Pendle YT on wstETH). Use a
+  **numeric `chain_id`**, never a chain name, and represent native gas tokens by their
+  wrapped ERC-20 (ETH→WETH, MNT→WMNT; Solana uses `chain_id: 0` with WSOL).
 
 `quote_asset` is distinct from `quote_token` (a trading-pair leg in config). It can also be
 overridden per-deployment in `config.json` (`"quote_asset": "USD"` or the token object); the
-value is frozen at boot and is not hot-reloadable.
+override is applied on live runs at boot (backtests read the decorator value) and is not
+hot-reloadable.
 
 ## Available Intents
 

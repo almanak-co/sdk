@@ -327,13 +327,15 @@ class IntentStrategy(StrategyBase[ConfigT]):
         self._chains = chains or [chain]
         self._chain_wallets = {k.lower(): v for k, v in chain_wallets.items()} if chain_wallets else None
 
-        # Performance quote asset (definition-only). Resolved from the
+        # Performance quote asset (reporting numeraire). Resolved from the
         # @almanak_strategy decorator default here; a per-deployment config.json
         # override is applied once at boot by the runner/CLI
         # (apply_quote_asset_override) and then frozen — it is intentionally NOT
         # part of the hot-reloadable config surface, since changing the
         # denomination mid-run would make the performance series discontinuous.
-        # The SDK does not branch on this value; the hosted platform consumes it.
+        # Execution never branches on this value, but backtest/paper canonical
+        # metrics are derived in it (backtesting/numeraire.py) and the hosted
+        # platform reports performance in it.
         _qa_meta = getattr(self.__class__, "STRATEGY_METADATA", None)
         self._quote_asset: QuoteAsset = getattr(_qa_meta, "quote_asset", None) or QuoteAsset.usd()
 
@@ -1543,9 +1545,9 @@ class IntentStrategy(StrategyBase[ConfigT]):
     def quote_asset(self) -> QuoteAsset:
         """The resolved performance quote asset (decorator default or boot override).
 
-        Definition-only: exposed as metadata for the hosted platform. The SDK does
-        not change valuation/accounting/CLI behaviour based on it, and it is frozen
-        after boot (not part of the hot-reloadable config surface).
+        Reporting numeraire: backtest/paper canonical metrics and hosted performance
+        reporting are denominated in it. Execution never branches on it, and it is
+        frozen after boot (not part of the hot-reloadable config surface).
         """
         return getattr(self, "_quote_asset", None) or QuoteAsset.usd()
 

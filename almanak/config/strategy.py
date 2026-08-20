@@ -99,7 +99,8 @@ class StrategyConfig(BaseModel):
     vault_chain: str | None = None
     vault_safe_address: str | None = None
 
-    # Performance quote asset (definition-only; the hosted platform consumes it).
+    # Performance quote asset (reporting numeraire: backtest/paper reporting and
+    # the hosted platform measure performance in it; execution never branches on it).
     # Accepts "USD" or {"type": "token", "chain_id": <int>, "address": "0x..."}.
     # Normalised to the canonical dict at load (see ``_normalise_quote_asset``);
     # the @almanak_strategy decorator's quote_asset is the default when omitted.

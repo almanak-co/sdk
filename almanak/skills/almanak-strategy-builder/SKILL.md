@@ -220,9 +220,14 @@ but always declare them explicitly.
 ### Quote asset (performance denomination)
 
 `quote_asset` declares the asset your strategy's performance is measured in. It defaults
-to **USD** and is **definition-only** today: the hosted platform reads it for performance
-reporting, but the SDK does not change any valuation/accounting behaviour based on it — so
-adding it is always safe.
+to **USD** and sets the numeraire for performance reporting: backtests and paper runs
+compute their canonical performance metrics in it (`performance_denomination` in the
+result summary names the unit; `*_usd` counterparts are kept alongside), and the hosted
+platform reports performance in it. It does
+not change execution behaviour — only how results are measured — so a wrong value reports
+performance in the wrong unit: a BTC-growth strategy declared `"USD"` shows USD PnL and no
+BTC-denominated metrics. Choose by asking what quantity the strategy is trying to grow —
+if the goal is stated ("increase BTC"), the denomination must match it.
 
 - **USD (default):** `quote_asset="USD"`. Declare it explicitly rather than omitting it —
   the scaffold and packaged demos do, and an explicit value makes the choice reviewable.
@@ -234,12 +239,16 @@ adding it is always safe.
 
 Set a **token** quote asset only when the strategy's goal is to grow a quantity of that
 token — pure accumulators, ETH-denominated LST leverage loops (collateral *and* borrow are
-ETH-family), native-asset staking. LP, USD-yield lending, stablecoin, delta-neutral, and
-USD-collateral perp strategies stay on the USD default. `quote_asset` is distinct from
-`quote_token` (a trading-pair leg) and `starting_asset` (an LP round-trip asset).
+ETH-family), native-asset staking, and same-asset-family LP pools built to grow that asset
+(e.g. a WBTC/tBTC pool as a BTC accumulator quotes in WBTC). Mixed-family LP (e.g.
+WETH/USDC), USD-yield lending, stablecoin, delta-neutral, and USD-collateral perp
+strategies stay on the USD default. `quote_asset` is distinct from `quote_token` (a
+trading-pair leg) and `starting_asset` (an LP round-trip asset).
 
 You can also set it per-deployment in `config.json` (`"quote_asset": "USD"` or the token
-object), which overrides the decorator default. It is frozen at boot — not hot-reloadable.
+object), which overrides the decorator default on live runs at boot (backtests read the
+decorator value). It is frozen at boot — not hot-reloadable. When denominating a strategy
+for backtesting, set it on the decorator.
 
 ### Config Access
 
