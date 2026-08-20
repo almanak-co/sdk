@@ -13,14 +13,16 @@ Tests cover:
 
 from __future__ import annotations
 
+import asyncio
 import time
 from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 
+import aiohttp
 import pytest
 
-from almanak.framework.data.interfaces import DataSourceUnavailable, OHLCVCandle
+from almanak.framework.data.interfaces import DataSourceTimeout, DataSourceUnavailable, OHLCVCandle
 from almanak.framework.data.models import DataClassification, DataEnvelope
 from almanak.framework.data.timeframes import (
     CANONICAL_OHLCV_TIMEFRAMES,
@@ -166,6 +168,17 @@ class TestOHLCVProviderProtocol:
         with pytest.raises(ValueError, match="Invalid timeframe"):
             await provider.get_ohlcv("WETH", timeframe="7m")
 
+    @pytest.mark.asyncio
+    async def test_oversized_cache_identity_is_rejected(self, provider: CoinGeckoOnchainOHLCVProvider) -> None:
+        """Alternate in-process callers cannot retain arbitrarily large cache keys."""
+        with pytest.raises(ValueError, match="token must be at most 128 characters"):
+            await provider.get_ohlcv(
+                "T" * 129,
+                timeframe="1h",
+                pool_address="0xabc",
+                chain="ethereum",
+            )
+
 
 # ---------------------------------------------------------------------------
 # get_ohlcv tests (with mocked HTTP)
@@ -251,6 +264,31 @@ class TestGetOHLCV:
         assert "include_empty_intervals" not in params
 
     @pytest.mark.asyncio
+    async def test_include_empty_intervals_uses_distinct_cache_entry(
+        self, provider: CoinGeckoOnchainOHLCVProvider
+    ) -> None:
+        """Continuous and sparse candles must never share a cached response."""
+        mock_response = AsyncMock()
+        mock_response.status = 200
+        mock_response.json = AsyncMock(return_value=_make_ohlcv_response())
+        mock_response.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_response.__aexit__ = AsyncMock(return_value=False)
+
+        mock_session = AsyncMock()
+        mock_session.get = MagicMock(return_value=mock_response)
+        mock_session.closed = False
+        provider._session = mock_session
+
+        await provider.get_ohlcv(
+            "WETH", timeframe="1h", pool_address="0xabc123", chain="ethereum", include_empty_intervals=False
+        )
+        await provider.get_ohlcv(
+            "WETH", timeframe="1h", pool_address="0xabc123", chain="ethereum", include_empty_intervals=True
+        )
+
+        assert mock_session.get.call_count == 2
+
+    @pytest.mark.asyncio
     async def test_fetch_with_search(self, provider: CoinGeckoOnchainOHLCVProvider) -> None:
         """Fetch OHLCV by searching for pool first."""
         search_resp = AsyncMock()
@@ -301,6 +339,24 @@ class TestExactPoolOHLCV:
         session.get = MagicMock(return_value=response)
         session.closed = False
         return session
+
+    @pytest.mark.asyncio
+    async def test_exact_pool_rejects_oversized_retained_identity(
+        self, provider: CoinGeckoOnchainOHLCVProvider
+    ) -> None:
+        """Direct exact-provider callers cannot retain arbitrarily large cache keys."""
+        with pytest.raises(ValueError, match="pool_address must be at most 128 characters"):
+            await provider.get_exact_pool_ohlcv(
+                chain="ethereum",
+                pool_address="P" * 129,
+                base_token_address=EXACT_TOKEN0,
+                quote_token_address=EXACT_TOKEN1,
+                timeframe=OHLCVTimeframe.ONE_HOUR,
+                start_ts=EXACT_START,
+                end_ts=EXACT_START + 7200,
+                binding_hash="11" * 32,
+                feature_identity="22" * 32,
+            )
 
     @pytest.mark.asyncio
     async def test_exact_pool_request_uses_token_denominated_interval_and_accepts_measured_zero(
@@ -801,12 +857,98 @@ class TestCaching:
         assert result is not None
         assert len(result) == 1
 
+    def test_candle_cache_is_lru_bounded_and_prunes_all_expired_entries(self) -> None:
+        """Service-lifetime candle caching has a hard bound and global TTL pruning."""
+        provider = CoinGeckoOnchainOHLCVProvider(
+            api_key="test-key",
+            cache_ttl=60,
+            cache_max_entries=2,
+        )
+
+        provider._update_cache("first", [])
+        provider._update_cache("second", [])
+        assert provider._get_cached("first") == []
+
+        provider._update_cache("third", [])
+        assert "first" in provider._cache
+        assert "second" not in provider._cache
+
+        provider._cache["expired"] = ([], time.monotonic() - 61)
+        provider._update_cache("fourth", [])
+
+        assert "expired" not in provider._cache
+        assert len(provider._cache) == 2
+
+    def test_pool_cache_is_lru_bounded_and_prunes_stale_retention(self) -> None:
+        """Pool mappings retain bounded fallback history, never unbounded keys."""
+        provider = CoinGeckoOnchainOHLCVProvider(
+            api_key="test-key",
+            cache_max_entries=2,
+            pool_cache_ttl=60,
+            pool_cache_stale_ttl=120,
+        )
+
+        provider._store_pool_address("first", "0x1")
+        provider._store_pool_address("second", "0x2")
+        assert provider._get_cached_pool_address("first", allow_stale=True) == "0x1"
+
+        provider._store_pool_address("third", "0x3")
+        assert "first" in provider._pool_cache
+        assert "second" not in provider._pool_cache
+
+        expired_at = time.monotonic() - 121
+        provider._pool_cache["expired"] = ("0xdead", expired_at, expired_at)
+        provider._store_pool_address("fourth", "0x4")
+
+        assert "expired" not in provider._pool_cache
+        assert len(provider._pool_cache) == 2
+
+    def test_pool_cooldowns_are_lru_bounded_and_globally_pruned(self) -> None:
+        """Expired and least-recent cooldown keys cannot accumulate for process lifetime."""
+        provider = CoinGeckoOnchainOHLCVProvider(
+            api_key="test-key",
+            cache_max_entries=2,
+            pool_search_cooldown=30,
+        )
+        provider._pool_search_cooldowns["expired"] = time.monotonic() - 1
+
+        provider._start_pool_search_cooldown("first")
+        provider._start_pool_search_cooldown("second")
+        assert "expired" not in provider._pool_search_cooldowns
+        assert provider._pool_search_cooldown_remaining("first") is not None
+
+        provider._start_pool_search_cooldown("third")
+
+        assert "first" in provider._pool_search_cooldowns
+        assert "second" not in provider._pool_search_cooldowns
+        assert len(provider._pool_search_cooldowns) == 2
+
     def test_clear_cache(self, provider: CoinGeckoOnchainOHLCVProvider) -> None:
         key = "test:key"
+        now = time.monotonic()
         provider._cache[key] = ([], time.monotonic())
+        provider._pool_cache[key] = ("0xabc", now, now)
+        provider._pool_search_cooldowns[key] = time.monotonic() + 30
         assert len(provider._cache) == 1
+        assert len(provider._pool_cache) == 1
+        assert len(provider._pool_search_cooldowns) == 1
         provider.clear_cache()
         assert len(provider._cache) == 0
+        assert len(provider._pool_cache) == 0
+        assert len(provider._pool_search_cooldowns) == 0
+
+    def test_solana_cache_keys_preserve_base58_case(self, provider: CoinGeckoOnchainOHLCVProvider) -> None:
+        """Case-distinct Solana addresses must not collide in long-lived caches."""
+        lower_token = "HJPjoWUrhoZzkNfRpHuieeFk9WcZWjwy6PBjZ81ngndJ"
+        upper_token = lower_token.upper()
+
+        lower_key = provider._cache_key(lower_token, "solana", "1h", 100, lower_token)
+        upper_key = provider._cache_key(upper_token, "solana", "1h", 100, upper_token)
+        lower_pool_key = provider._pool_cache_key(lower_token, "USD", chain="solana", network="solana")
+        upper_pool_key = provider._pool_cache_key(upper_token, "USD", chain="solana", network="solana")
+
+        assert lower_key != upper_key
+        assert lower_pool_key != upper_pool_key
 
 
 # ---------------------------------------------------------------------------
@@ -933,9 +1075,254 @@ class TestPoolSearch:
         mock_session.closed = False
         provider._session = mock_session
 
-        url = await provider._resolve_pool_ohlcv_url("WETH", "USDC", "eth", "hour")
+        url = await provider._resolve_pool_ohlcv_url(
+            "WETH", "USDC", chain="ethereum", network="eth", timeframe_key="hour"
+        )
         assert "0xdeadbeef" in url
         assert "/ohlcv/hour" in url
+
+    @pytest.mark.asyncio
+    async def test_search_result_is_reused_across_candle_shapes(self, provider: CoinGeckoOnchainOHLCVProvider) -> None:
+        """Pool discovery is independent of timeframe and candle limit."""
+        search_resp = AsyncMock()
+        search_resp.status = 200
+        search_resp.json = AsyncMock(return_value=_make_search_response("0xdeadbeef"))
+        search_resp.__aenter__ = AsyncMock(return_value=search_resp)
+        search_resp.__aexit__ = AsyncMock(return_value=False)
+
+        mock_session = AsyncMock()
+        mock_session.get = MagicMock(return_value=search_resp)
+        mock_session.closed = False
+        provider._session = mock_session
+
+        hour_url = await provider._resolve_pool_ohlcv_url(
+            "WETH", "USD", chain="ethereum", network="eth", timeframe_key="hour"
+        )
+        day_url = await provider._resolve_pool_ohlcv_url(
+            "WETH", "USD", chain="ethereum", network="eth", timeframe_key="day"
+        )
+
+        assert mock_session.get.call_count == 1
+        assert hour_url.endswith("/0xdeadbeef/ohlcv/hour")
+        assert day_url.endswith("/0xdeadbeef/ohlcv/day")
+        assert provider._metrics.pool_cache_hits == 1
+
+    @pytest.mark.asyncio
+    async def test_concurrent_searches_are_single_flight(self, provider: CoinGeckoOnchainOHLCVProvider) -> None:
+        """Concurrent misses for one token issue only one search request."""
+        search_resp = AsyncMock()
+        search_resp.status = 200
+        search_resp.json = AsyncMock(return_value=_make_search_response("0xdeadbeef"))
+        search_resp.__aenter__ = AsyncMock(return_value=search_resp)
+        search_resp.__aexit__ = AsyncMock(return_value=False)
+
+        mock_session = AsyncMock()
+        mock_session.get = MagicMock(return_value=search_resp)
+        mock_session.closed = False
+        provider._session = mock_session
+
+        urls = await asyncio.gather(
+            provider._resolve_pool_ohlcv_url("WETH", "USD", chain="ethereum", network="eth", timeframe_key="hour"),
+            provider._resolve_pool_ohlcv_url("WETH", "USD", chain="ethereum", network="eth", timeframe_key="day"),
+        )
+
+        assert mock_session.get.call_count == 1
+        assert urls[0].endswith("/ohlcv/hour")
+        assert urls[1].endswith("/ohlcv/day")
+
+    @pytest.mark.asyncio
+    async def test_search_timeout_is_bounded_and_typed(self, provider: CoinGeckoOnchainOHLCVProvider) -> None:
+        """Pool discovery has a shorter deadline than the candle request."""
+        mock_session = AsyncMock()
+        mock_session.get = MagicMock(side_effect=TimeoutError)
+        mock_session.closed = False
+        provider._session = mock_session
+
+        with pytest.raises(DataSourceTimeout) as exc_info:
+            await provider._resolve_pool_ohlcv_url("WETH", "USD", chain="ethereum", network="eth", timeframe_key="hour")
+
+        assert exc_info.value.timeout_seconds == provider._pool_search_timeout
+        assert mock_session.get.call_args.kwargs["timeout"].total == provider._pool_search_timeout
+        assert provider._metrics.pool_search_timeouts == 1
+
+    @pytest.mark.asyncio
+    async def test_search_timeout_suppresses_immediate_repeat(self, provider: CoinGeckoOnchainOHLCVProvider) -> None:
+        """Router retries do not pay the same upstream timeout repeatedly."""
+        mock_session = AsyncMock()
+        mock_session.get = MagicMock(side_effect=TimeoutError)
+        mock_session.closed = False
+        provider._session = mock_session
+
+        with pytest.raises(DataSourceTimeout):
+            await provider._resolve_pool_ohlcv_url("WETH", "USD", chain="ethereum", network="eth", timeframe_key="hour")
+        with pytest.raises(DataSourceUnavailable, match="cooldown active") as exc_info:
+            await provider._resolve_pool_ohlcv_url("WETH", "USD", chain="ethereum", network="eth", timeframe_key="hour")
+
+        assert exc_info.value.retry_after is None
+        assert mock_session.get.call_count == 1
+        assert provider._metrics.pool_searches_suppressed == 1
+
+    @pytest.mark.asyncio
+    async def test_expired_search_cooldown_allows_new_attempt(self, provider: CoinGeckoOnchainOHLCVProvider) -> None:
+        """Discovery resumes automatically once the suppression window expires."""
+        key = provider._pool_cache_key("WETH", "USD", chain="ethereum", network="eth")
+        provider._pool_search_cooldowns[key] = time.monotonic() - 1
+
+        search_resp = AsyncMock()
+        search_resp.status = 200
+        search_resp.json = AsyncMock(return_value=_make_search_response("0xdeadbeef"))
+        search_resp.__aenter__ = AsyncMock(return_value=search_resp)
+        search_resp.__aexit__ = AsyncMock(return_value=False)
+        mock_session = AsyncMock()
+        mock_session.get = MagicMock(return_value=search_resp)
+        mock_session.closed = False
+        provider._session = mock_session
+
+        url = await provider._resolve_pool_ohlcv_url(
+            "WETH", "USD", chain="ethereum", network="eth", timeframe_key="hour"
+        )
+
+        assert url.endswith("/0xdeadbeef/ohlcv/hour")
+        assert mock_session.get.call_count == 1
+        assert key not in provider._pool_search_cooldowns
+
+    @pytest.mark.asyncio
+    async def test_aiohttp_timeout_is_classified_as_timeout(self, provider: CoinGeckoOnchainOHLCVProvider) -> None:
+        """aiohttp's timeout subclass must not be swallowed as a generic client error."""
+        mock_session = AsyncMock()
+        mock_session.get = MagicMock(side_effect=aiohttp.ServerTimeoutError())
+        mock_session.closed = False
+        provider._session = mock_session
+
+        with pytest.raises(DataSourceTimeout):
+            await provider.get_ohlcv("WETH", timeframe="1h", pool_address="0xabc", chain="ethereum")
+
+    @pytest.mark.asyncio
+    async def test_search_timeout_uses_expired_pool_mapping(self, provider: CoinGeckoOnchainOHLCVProvider) -> None:
+        """A transient refresh failure can safely reuse a known pool address."""
+        key = provider._pool_cache_key("WETH", "USD", chain="ethereum", network="eth")
+        provider._pool_cache_ttl = 1
+        discovered_at = time.monotonic() - 10
+        provider._pool_cache[key] = ("0xstale", discovered_at, discovered_at)
+
+        mock_session = AsyncMock()
+        mock_session.get = MagicMock(side_effect=TimeoutError)
+        mock_session.closed = False
+        provider._session = mock_session
+
+        url = await provider._resolve_pool_ohlcv_url(
+            "WETH", "USD", chain="ethereum", network="eth", timeframe_key="hour"
+        )
+        cached_url = await provider._resolve_pool_ohlcv_url(
+            "WETH", "USD", chain="ethereum", network="eth", timeframe_key="day"
+        )
+
+        assert url.endswith("/0xstale/ohlcv/hour")
+        assert cached_url.endswith("/0xstale/ohlcv/day")
+        assert mock_session.get.call_count == 1
+        assert provider._metrics.pool_search_timeouts == 1
+
+    @pytest.mark.asyncio
+    async def test_transient_http_error_uses_stale_mapping_for_bounded_grace(
+        self, provider: CoinGeckoOnchainOHLCVProvider
+    ) -> None:
+        """Retryable HTTP failures use stale identity without pinning it for the full TTL."""
+        key = provider._pool_cache_key("WETH", "USD", chain="ethereum", network="eth")
+        provider._pool_cache_ttl = 3600
+        provider._pool_search_cooldown = 30
+        discovered_at = time.monotonic() - 7200
+        provider._pool_cache[key] = ("0xstale", discovered_at, discovered_at)
+
+        search_resp = AsyncMock()
+        search_resp.status = 503
+        search_resp.__aenter__ = AsyncMock(return_value=search_resp)
+        search_resp.__aexit__ = AsyncMock(return_value=False)
+        mock_session = AsyncMock()
+        mock_session.get = MagicMock(return_value=search_resp)
+        mock_session.closed = False
+        provider._session = mock_session
+
+        url = await provider._resolve_pool_ohlcv_url(
+            "WETH", "USD", chain="ethereum", network="eth", timeframe_key="hour"
+        )
+        cached_url = await provider._resolve_pool_ohlcv_url(
+            "WETH", "USD", chain="ethereum", network="eth", timeframe_key="day"
+        )
+
+        _, cached_at, retained_discovered_at = provider._pool_cache[key]
+        remaining_ttl = provider._pool_cache_ttl - (time.monotonic() - cached_at)
+        assert url.endswith("/0xstale/ohlcv/hour")
+        assert cached_url.endswith("/0xstale/ohlcv/day")
+        assert remaining_ttl == pytest.approx(provider._pool_search_cooldown, abs=0.1)
+        assert retained_discovered_at == discovered_at
+        assert mock_session.get.call_count == 1
+        assert key in provider._pool_search_cooldowns
+
+    @pytest.mark.asyncio
+    async def test_pool_search_rate_limit_uses_candle_retry_delay(
+        self, provider: CoinGeckoOnchainOHLCVProvider
+    ) -> None:
+        """CoinGecko pool-search 429 responses retain the provider-wide retry delay."""
+        search_resp = AsyncMock()
+        search_resp.status = 429
+        search_resp.__aenter__ = AsyncMock(return_value=search_resp)
+        search_resp.__aexit__ = AsyncMock(return_value=False)
+        mock_session = AsyncMock()
+        mock_session.get = MagicMock(return_value=search_resp)
+        mock_session.closed = False
+        provider._session = mock_session
+
+        with pytest.raises(DataSourceUnavailable, match="HTTP 429") as exc_info:
+            await provider._resolve_pool_ohlcv_url("WETH", "USD", chain="ethereum", network="eth", timeframe_key="hour")
+
+        assert exc_info.value.retry_after == 60.0
+
+    @pytest.mark.asyncio
+    async def test_permanent_http_error_does_not_use_stale_mapping(
+        self, provider: CoinGeckoOnchainOHLCVProvider
+    ) -> None:
+        """Permanent discovery failures remain visible even when a stale mapping exists."""
+        key = provider._pool_cache_key("WETH", "USD", chain="ethereum", network="eth")
+        provider._pool_cache_ttl = 1
+        discovered_at = time.monotonic() - 10
+        provider._pool_cache[key] = ("0xstale", discovered_at, discovered_at)
+
+        search_resp = AsyncMock()
+        search_resp.status = 404
+        search_resp.__aenter__ = AsyncMock(return_value=search_resp)
+        search_resp.__aexit__ = AsyncMock(return_value=False)
+        mock_session = AsyncMock()
+        mock_session.get = MagicMock(return_value=search_resp)
+        mock_session.closed = False
+        provider._session = mock_session
+
+        with pytest.raises(DataSourceUnavailable, match="HTTP 404") as exc_info:
+            await provider._resolve_pool_ohlcv_url("WETH", "USD", chain="ethereum", network="eth", timeframe_key="hour")
+
+        assert exc_info.value.retry_after is None
+        assert key not in provider._pool_search_cooldowns
+
+    @pytest.mark.asyncio
+    async def test_network_with_underscore_uses_exact_prefix_fallback(
+        self, provider: CoinGeckoOnchainOHLCVProvider
+    ) -> None:
+        """Vendor network IDs containing underscores do not corrupt addresses."""
+        search_resp = AsyncMock()
+        search_resp.status = 200
+        search_resp.json = AsyncMock(return_value={"data": [{"id": "polygon_pos_0xdeadbeef", "attributes": {}}]})
+        search_resp.__aenter__ = AsyncMock(return_value=search_resp)
+        search_resp.__aexit__ = AsyncMock(return_value=False)
+
+        mock_session = AsyncMock()
+        mock_session.get = MagicMock(return_value=search_resp)
+        mock_session.closed = False
+        provider._session = mock_session
+
+        url = await provider._resolve_pool_ohlcv_url(
+            "WETH", "USD", chain="polygon", network="polygon_pos", timeframe_key="hour"
+        )
+
+        assert url.endswith("/0xdeadbeef/ohlcv/hour")
 
     @pytest.mark.asyncio
     async def test_search_no_pools_raises(self, provider: CoinGeckoOnchainOHLCVProvider) -> None:
@@ -952,7 +1339,9 @@ class TestPoolSearch:
         provider._session = mock_session
 
         with pytest.raises(DataSourceUnavailable, match="No pools found"):
-            await provider._resolve_pool_ohlcv_url("UNKNOWNTOKEN", "USDC", "eth", "hour")
+            await provider._resolve_pool_ohlcv_url(
+                "UNKNOWNTOKEN", "USDC", chain="ethereum", network="eth", timeframe_key="hour"
+            )
 
     @pytest.mark.asyncio
     async def test_search_http_error_raises(self, provider: CoinGeckoOnchainOHLCVProvider) -> None:
@@ -968,7 +1357,9 @@ class TestPoolSearch:
         provider._session = mock_session
 
         with pytest.raises(DataSourceUnavailable, match="Pool search failed"):
-            await provider._resolve_pool_ohlcv_url("WETH", "USDC", "eth", "hour")
+            await provider._resolve_pool_ohlcv_url(
+                "WETH", "USDC", chain="ethereum", network="eth", timeframe_key="hour"
+            )
 
 
 # ---------------------------------------------------------------------------

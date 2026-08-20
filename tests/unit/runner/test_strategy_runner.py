@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -105,17 +105,16 @@ class MockStrategy:
         )
 
 
+_MOCK_PRICES_USD = {"ETH": Decimal("2000"), "WETH": Decimal("2000"), "USDC": Decimal("1")}
+_MOCK_SWAP_FEE_TIER = 500
+
+
 class MockPriceOracle:
     """Mock price oracle for testing."""
 
     async def get_aggregated_price(self, token: str, quote: str = "USD") -> PriceResult:
-        prices = {
-            "ETH": Decimal("2000"),
-            "WETH": Decimal("2000"),
-            "USDC": Decimal("1"),
-        }
         return PriceResult(
-            price=prices.get(token, Decimal("1")),
+            price=_MOCK_PRICES_USD.get(token, Decimal("1")),
             source="mock",
             timestamp=datetime.now(UTC),
             confidence=1.0,
@@ -331,6 +330,62 @@ def price_oracle() -> MockPriceOracle:
     return MockPriceOracle()
 
 
+def _mock_pool_quote(*, amount_in: int, from_token, to_token, **_kwargs) -> int:
+    """Return a request-aware quote at the deterministic 0.05% test fee tier."""
+    px_in = _MOCK_PRICES_USD.get(getattr(from_token, "symbol", ""), Decimal("1"))
+    px_out = _MOCK_PRICES_USD.get(getattr(to_token, "symbol", ""), Decimal("1"))
+    dec_in = int(getattr(from_token, "decimals", 18))
+    dec_out = int(getattr(to_token, "decimals", 18))
+    fee_multiplier = Decimal(1) - Decimal(_MOCK_SWAP_FEE_TIER) / Decimal(1_000_000)
+    units_in = Decimal(amount_in) / (Decimal(10) ** dec_in)
+    units_out = units_in * px_in / px_out * fee_multiplier
+    return int(units_out * (Decimal(10) ** dec_out))
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_swap_compilation():
+    """Prevent runner unit tests from quoting or validating live V3 pools.
+
+    These tests characterize runner statuses, reconciliation, and alerting—not
+    network availability.  The quote remains request-aware and the real impact
+    guard remains active.  Fee selection is pinned to the same tier used by the
+    quote so calldata metadata and ``min_amount_out`` stay internally coherent.
+    """
+    import almanak.connectors._strategy_base.base.swap_adapter as swap_adapter_mod
+    import almanak.connectors.uniswap_v3.compiler as v3c
+
+    pool_ok = MagicMock(name="PoolValidationResult")
+    pool_ok.exists = True
+    pool_ok.is_valid = True
+    pool_ok.pool_address = None
+    pool_ok.reason = None
+    pool_ok.error = None
+    pool_ok.warning = None
+
+    with (
+        patch.object(
+            v3c.UniswapV3Compiler,
+            "_quote_swap_via_registry",
+            staticmethod(_mock_pool_quote),
+        ),
+        patch(
+            "almanak.connectors.uniswap_v3.pool_validation.validate_v3_pool",
+            return_value=pool_ok,
+        ),
+        patch.object(
+            swap_adapter_mod.DefaultSwapAdapter,
+            "_select_fee_tier_by_quoter",
+            return_value=None,
+        ),
+        patch.object(
+            swap_adapter_mod.DefaultSwapAdapter,
+            "_select_fee_tier_heuristic",
+            return_value=_MOCK_SWAP_FEE_TIER,
+        ),
+    ):
+        yield
+
+
 @pytest.fixture
 def balance_provider() -> MockBalanceProvider:
     return MockBalanceProvider()
@@ -474,6 +529,18 @@ class TestRunIteration:
         assert result.success is True
         assert isinstance(result.intent, SwapIntent)
         assert execution_orchestrator.execute_called is True
+        assert execution_orchestrator.last_bundle is not None
+        metadata = execution_orchestrator.last_bundle.metadata
+        assert metadata["selected_fee_tier"] == _MOCK_SWAP_FEE_TIER
+        expected_quote = int(
+            Decimal("1000")
+            * _MOCK_PRICES_USD["USDC"]
+            / _MOCK_PRICES_USD["ETH"]
+            * (Decimal(1) - Decimal(_MOCK_SWAP_FEE_TIER) / Decimal(1_000_000))
+            * Decimal(10**18)
+        )
+        expected_min = int(expected_quote * (Decimal(1) - Decimal(metadata["slippage"])))
+        assert metadata["min_amount_out"] == str(expected_min)
 
     @pytest.mark.asyncio
     async def test_strategy_error_returns_error_status(

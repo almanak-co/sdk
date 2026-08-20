@@ -45,6 +45,23 @@ REGISTRY_QUOTE = "almanak.connectors.uniswap_v3.compiler.UniswapV3Compiler._quot
 CL_RANGE_PRICE_TO_TICK = "almanak.connectors._strategy_base.cl_range.price_to_tick"
 
 
+@pytest.fixture
+def pin_framework_swap_path():
+    """Keep framework swap characterization tests off connector-owned RPC paths.
+
+    The tests using this fixture mock ``DefaultSwapAdapter`` and are intended to
+    exercise ``IntentCompiler._compile_swap``.  V3 protocols now dispatch to a
+    connector compiler first, which bypasses that mock and can issue live quote
+    and pool-validation calls.  Pin only the framework-focused classes; explicit
+    connector-dispatch coverage remains in ``TestCompileSwapDispatch``.
+    """
+    with patch(
+        "almanak.framework.intents.compiler.get_connector_compiler",
+        return_value=None,
+    ):
+        yield
+
+
 # Realistic oracle shared across most tests. Deliberately small so derived
 # int wei quantities are easy to reason about in asserts.
 _DEFAULT_PRICES: dict[str, Decimal] = {
@@ -230,12 +247,9 @@ def _make_lp_intent(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("pin_framework_swap_path")
 class TestCompileSwapHappyPaths:
-    """Per-protocol happy paths through the default router swap body.
-
-    Non-folded router protocols still compile in ``IntentCompiler``; Uniswap
-    V3-family protocols must dispatch to connector compilers instead.
-    """
+    """Per-protocol framework-router happy paths with the adapter mocked."""
 
     @pytest.mark.parametrize(
         "protocol",
@@ -277,26 +291,9 @@ class TestCompileSwapHappyPaths:
         connector_compiler.compile.assert_called_once()
 
 
+@pytest.mark.usefixtures("pin_framework_swap_path")
 class TestCompileSwapPriceImpactGuard:
     """The price impact guard is one of the highest-value branches."""
-
-    @pytest.fixture(autouse=True)
-    def _pin_framework_swap_path(self):
-        """Pin swap compilation to the framework ``_compile_swap`` path (VIB-5731).
-
-        These tests characterize the FRAMEWORK guard. When the global
-        connector-compiler registry is populated by earlier tests on the same
-        xdist worker (import-order dependent), ``compile()`` dispatches
-        uniswap_v3 swaps to the connector-owned compiler — a different code
-        path with its own guard (and a deliberate local-Anvil skip) — flipping
-        these verdicts on CI while passing locally. The connector path's guard
-        has its own suite; here the dispatch probe is forced off.
-        """
-        with patch(
-            "almanak.framework.intents.compiler.get_connector_compiler",
-            return_value=None,
-        ):
-            yield
 
     @patch(SWAP_ADAPTER_CLS)
     def test_price_impact_guard_trips_on_low_quoter(self, mock_adapter_cls: MagicMock) -> None:
@@ -323,10 +320,7 @@ class TestCompileSwapPriceImpactGuard:
             guard_calls.append(dict(kwargs))
             return real_check(**kwargs)
 
-        with (
-            patch(REGISTRY_QUOTE, return_value=200_000_000_000_000),
-            patch.object(compiler_mod, "check_price_impact", side_effect=_spy),
-        ):
+        with patch.object(compiler_mod, "check_price_impact", side_effect=_spy):
             result = compiler.compile(_make_swap_intent())
 
         diag = (
@@ -346,8 +340,7 @@ class TestCompileSwapPriceImpactGuard:
         mock_adapter_cls.return_value = _make_mock_swap_adapter(quoter_amount=None)
         compiler = _make_compiler()
 
-        with patch(REGISTRY_QUOTE, return_value=None):
-            result = compiler.compile(_make_swap_intent())
+        result = compiler.compile(_make_swap_intent())
 
         assert result.status == CompilationStatus.FAILED
         assert "on-chain quoter returned no amount" in (result.error or "").lower()
@@ -391,6 +384,7 @@ class TestCompileSwapSlippage:
         assert result.action_bundle.metadata["min_amount_out"] == str(quoter_amount)
 
 
+@pytest.mark.usefixtures("pin_framework_swap_path")
 class TestCompileSwapApprovalChain:
     """Approval chain construction differs per gateway-allowance state."""
 
@@ -555,6 +549,30 @@ class TestCompileSwapDispatch:
         mock_get_compiler.assert_called_once_with("enso")
         connector_compiler.compile.assert_called_once()
 
+    @pytest.mark.parametrize("protocol", ["uniswap_v3", "pancakeswap_v3"])
+    def test_v3_family_dispatches_to_connector_compiler(self, protocol: str) -> None:
+        """V3-family swaps remain connector-owned outside framework-path tests."""
+        compiler = _make_compiler()
+        sentinel = MagicMock(name=f"{protocol}-result")
+        connector_compiler = MagicMock()
+        connector_compiler.context_type = BaseCompilerContext
+        connector_compiler.compile.return_value = sentinel
+
+        with patch(
+            "almanak.framework.intents.compiler.get_connector_compiler",
+            return_value=connector_compiler,
+        ) as mock_get_compiler:
+            result = compiler.compile(_make_swap_intent(protocol=protocol))
+
+        assert result is sentinel
+        mock_get_compiler.assert_called_once_with(protocol)
+        connector_compiler.compile.assert_called_once()
+
+        from almanak.connectors.uniswap_v3.compiler import UniswapV3Compiler
+        from almanak.framework.intents.compiler import get_connector_compiler
+
+        assert isinstance(get_connector_compiler(protocol), UniswapV3Compiler)
+
     def test_curve_protocol_dispatches_to_connector_compiler(self) -> None:
         compiler = _make_compiler(chain="ethereum")
         sentinel = MagicMock(name="curve-result")
@@ -682,6 +700,7 @@ class TestCompileSwapDispatch:
         connector_compiler.compile.assert_called_once()
 
 
+@pytest.mark.usefixtures("pin_framework_swap_path")
 class TestCompileSwapAmountShapes:
     """Input-amount parsing: amount, amount_usd, 'all', and missing."""
 
@@ -769,6 +788,7 @@ class TestCompileSwapAmountShapes:
         assert "Cannot calculate slippage protection" in (result.error or "")
 
 
+@pytest.mark.usefixtures("pin_framework_swap_path")
 class TestCompileSwapNativeToken:
     """Native from/to token wrap/unwrap paths."""
 
@@ -844,6 +864,7 @@ class TestCompileSwapNativeToken:
         assert any("unwrap" in w.lower() or "receive WETH" in w for w in result.warnings)
 
 
+@pytest.mark.usefixtures("pin_framework_swap_path")
 class TestCompileSwapPoolValidation:
     """Pool validation branch (selected_fee_tier set)."""
 

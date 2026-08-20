@@ -36,6 +36,7 @@ from almanak.integrations._base.gateway.portfolio_chain import PortfolioProvider
 from almanak.integrations.chains import integration_chain_map
 
 if TYPE_CHECKING:
+    from almanak.gateway.data.ohlcv.coingecko_onchain_provider import CoinGeckoOnchainOHLCVProvider
     from almanak.integrations.binance.gateway.client import BinanceIntegration
     from almanak.integrations.coingecko.gateway.client import CoinGeckoIntegration
     from almanak.integrations.thegraph.gateway.client import TheGraphIntegration
@@ -45,6 +46,7 @@ logger = logging.getLogger(__name__)
 
 _COINGECKO_ASSET_PLATFORMS = frozenset(integration_chain_map("coingecko").values())
 _COINGECKO_CONTRACT_SOURCES = frozenset({"coingecko_api", "gateway_cache"})
+_MAX_COINGECKO_ONCHAIN_IDENTITY_LENGTH = 128
 
 
 class IntegrationServiceServicer(gateway_pb2_grpc.IntegrationServiceServicer):
@@ -68,6 +70,7 @@ class IntegrationServiceServicer(gateway_pb2_grpc.IntegrationServiceServicer):
         self._thegraph: TheGraphIntegration | None = None
         self._zerion: ZerionIntegration | None = None
         self._portfolio_chain: PortfolioProviderChain | None = None
+        self._coingecko_onchain_ohlcv: CoinGeckoOnchainOHLCVProvider | None = None
         self._initialized = False
 
     async def _ensure_initialized(self) -> None:
@@ -104,6 +107,21 @@ class IntegrationServiceServicer(gateway_pb2_grpc.IntegrationServiceServicer):
     def _build_api_client(self, name: str) -> Any:
         """Build a provider client solely through its integration manifest."""
         return INTEGRATION_REGISTRY.gateway_api_client_factory(name).build(settings=self.settings)
+
+    def _get_coingecko_onchain_ohlcv_provider(self) -> "CoinGeckoOnchainOHLCVProvider":
+        """Return the service-owned provider, constructing it on first use.
+
+        The provider owns an aiohttp connection pool, request budget, and
+        in-memory caches. Keeping it for the service lifetime makes those
+        controls effective across gRPC calls.
+        """
+        provider = getattr(self, "_coingecko_onchain_ohlcv", None)
+        if provider is None:
+            from almanak.gateway.data.ohlcv.coingecko_onchain_provider import CoinGeckoOnchainOHLCVProvider
+
+            provider = CoinGeckoOnchainOHLCVProvider(api_key=self.settings.coingecko_api_key)
+            self._coingecko_onchain_ohlcv = provider
+        return provider
 
     # =========================================================================
     # Binance endpoints
@@ -867,12 +885,23 @@ class IntegrationServiceServicer(gateway_pb2_grpc.IntegrationServiceServicer):
     def _validate_coingecko_onchain_ohlcv_request(
         request: gateway_pb2.CoinGeckoOnchainOHLCVRequest,
         context: grpc.aio.ServicerContext,
-    ) -> tuple[OHLCVTimeframe, int, str] | None:
+    ) -> tuple[OHLCVTimeframe, int, str, str, str] | None:
         """Validate shared legacy/exact fields and normalize the pool address."""
-        if not request.token or not request.token.strip():
+        token = request.token.strip()
+        if not token:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details("token is required and cannot be empty")
             return None
+        quote = request.quote.strip() if request.quote else "USD"
+        if not quote:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("quote cannot be blank")
+            return None
+        for field, value in (("token", token), ("quote", quote)):
+            if len(value) > _MAX_COINGECKO_ONCHAIN_IDENTITY_LENGTH:
+                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                context.set_details(f"{field} must be at most {_MAX_COINGECKO_ONCHAIN_IDENTITY_LENGTH} characters")
+                return None
         if not request.chain or not request.chain.strip():
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details("chain is required and cannot be empty")
@@ -896,7 +925,7 @@ class IntegrationServiceServicer(gateway_pb2_grpc.IntegrationServiceServicer):
 
         pool_address = (request.pool_address or "").strip()
         if not pool_address:
-            return timeframe, limit, pool_address
+            return timeframe, limit, pool_address, token, quote
 
         # An unknown chain is left to the provider so the legacy router retains
         # its existing unsupported-chain failover behavior without egressing.
@@ -905,7 +934,7 @@ class IntegrationServiceServicer(gateway_pb2_grpc.IntegrationServiceServicer):
         except ValidationError:
             family_chain = None
         if family_chain is None:
-            return timeframe, limit, pool_address
+            return timeframe, limit, pool_address, token, quote
 
         try:
             pool_address = validate_address_for_chain(pool_address, family_chain, field="pool_address")
@@ -913,7 +942,7 @@ class IntegrationServiceServicer(gateway_pb2_grpc.IntegrationServiceServicer):
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(exc))
             return None
-        return timeframe, limit, pool_address
+        return timeframe, limit, pool_address, token, quote
 
     @staticmethod
     def _validate_exact_ohlcv_identity(
@@ -989,7 +1018,7 @@ class IntegrationServiceServicer(gateway_pb2_grpc.IntegrationServiceServicer):
         validated_request = self._validate_coingecko_onchain_ohlcv_request(request, context)
         if validated_request is None:
             return gateway_pb2.CoinGeckoOnchainOHLCVResponse()
-        req_timeframe, req_limit, req_pool_address = validated_request
+        req_timeframe, req_limit, req_pool_address, req_token, req_quote = validated_request
 
         exact_identity = self._validate_exact_ohlcv_identity(request, context, req_pool_address)
         if exact_identity is None:
@@ -997,36 +1026,33 @@ class IntegrationServiceServicer(gateway_pb2_grpc.IntegrationServiceServicer):
         exact_mode, exact_base, exact_quote = exact_identity
 
         try:
-            from almanak.gateway.data.ohlcv.coingecko_onchain_provider import CoinGeckoOnchainOHLCVProvider
-
             start_time_metric = time.monotonic()
-
-            async with CoinGeckoOnchainOHLCVProvider(api_key=self.settings.coingecko_api_key) as provider:
-                candles: Any
-                if exact_mode:
-                    exact_result = await provider.get_exact_pool_ohlcv(
-                        chain=request.chain.strip(),
-                        pool_address=req_pool_address,
-                        base_token_address=exact_base,
-                        quote_token_address=exact_quote,
-                        timeframe=req_timeframe,
-                        start_ts=request.start_ts,
-                        end_ts=request.end_ts,
-                        binding_hash=request.binding_hash,
-                        feature_identity=request.feature_identity,
-                    )
-                    candles = exact_result.candles
-                else:
-                    exact_result = None
-                    candles = await provider.get_ohlcv(
-                        token=request.token.strip(),
-                        quote=request.quote or "USD",
-                        timeframe=req_timeframe,
-                        limit=req_limit,
-                        chain=request.chain.strip(),
-                        pool_address=req_pool_address or None,
-                        include_empty_intervals=request.include_empty_intervals,
-                    )
+            provider = self._get_coingecko_onchain_ohlcv_provider()
+            candles: Any
+            if exact_mode:
+                exact_result = await provider.get_exact_pool_ohlcv(
+                    chain=request.chain.strip(),
+                    pool_address=req_pool_address,
+                    base_token_address=exact_base,
+                    quote_token_address=exact_quote,
+                    timeframe=req_timeframe,
+                    start_ts=request.start_ts,
+                    end_ts=request.end_ts,
+                    binding_hash=request.binding_hash,
+                    feature_identity=request.feature_identity,
+                )
+                candles = exact_result.candles
+            else:
+                exact_result = None
+                candles = await provider.get_ohlcv(
+                    token=req_token,
+                    quote=req_quote,
+                    timeframe=req_timeframe,
+                    limit=req_limit,
+                    chain=request.chain.strip(),
+                    pool_address=req_pool_address or None,
+                    include_empty_intervals=request.include_empty_intervals,
+                )
 
             latency = time.monotonic() - start_time_metric
             record_integration_request("coingecko_onchain", "get_ohlcv")
@@ -1234,6 +1260,10 @@ class IntegrationServiceServicer(gateway_pb2_grpc.IntegrationServiceServicer):
             await self._binance.close()
         if self._coingecko:
             await self._coingecko.close()
+        coingecko_onchain_ohlcv = getattr(self, "_coingecko_onchain_ohlcv", None)
+        if coingecko_onchain_ohlcv:
+            await coingecko_onchain_ohlcv.close()
+            self._coingecko_onchain_ohlcv = None
         if self._thegraph:
             await self._thegraph.close()
         if self._portfolio_chain:

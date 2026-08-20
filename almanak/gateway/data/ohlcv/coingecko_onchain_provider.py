@@ -24,10 +24,12 @@ Example:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import threading
 import time
+import weakref
 from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -41,6 +43,7 @@ from pydantic import BaseModel, ValidationError
 
 from almanak.core.finality import DataFinality
 from almanak.framework.data.interfaces import (
+    DataSourceTimeout,
     DataSourceUnavailable,
     OHLCVCandle,
     validate_timeframe,
@@ -67,6 +70,7 @@ _FREE_API_BASE = "https://api.coingecko.com/api/v3/onchain"
 _PRO_API_BASE = "https://pro-api.coingecko.com/api/v3/onchain"
 _SOURCE = "coingecko_onchain"
 _EXACT_SOURCE = "coingecko_onchain.exact_pool"
+_MAX_CACHE_KEY_COMPONENT_LENGTH = 128
 EXACT_POOL_OHLCV_CONTRACT_VERSION = "coingecko_onchain.pool_ohlcv.v1"
 
 # Chain name -> CoinGecko Onchain network ID mapping. Onchain network ids are
@@ -84,6 +88,10 @@ class _HealthMetrics:
     cache_hits: int = 0
     errors: int = 0
     total_latency_ms: float = 0.0
+    pool_searches: int = 0
+    pool_cache_hits: int = 0
+    pool_search_timeouts: int = 0
+    pool_searches_suppressed: int = 0
 
 
 class _ExactPoolTokenIdentity(BaseModel):
@@ -97,6 +105,15 @@ class _ExactPoolIdentityMetadata(BaseModel):
 
     base: _ExactPoolTokenIdentity
     quote: _ExactPoolTokenIdentity
+
+
+class _TransientPoolSearchStatus(Exception):
+    """Internal signal that pool discovery received a retryable HTTP status."""
+
+    def __init__(self, *, status: int, reason: str) -> None:
+        self.status = status
+        self.reason = reason
+        super().__init__(reason)
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,6 +188,13 @@ def _normalize_exact_pool_request(
         )
     if not all((normalized_chain, normalized_pool, normalized_base, normalized_quote)):
         raise ValueError("exact OHLCV identity fields must be non-empty")
+    for field, value in (
+        ("pool_address", normalized_pool),
+        ("base_token_address", normalized_base),
+        ("quote_token_address", normalized_quote),
+    ):
+        if len(value) > _MAX_CACHE_KEY_COMPONENT_LENGTH:
+            raise ValueError(f"{field} must be at most {_MAX_CACHE_KEY_COMPONENT_LENGTH} characters")
     if normalized_base == normalized_quote:
         raise ValueError("exact OHLCV base and quote token addresses must differ")
     if not all(re.fullmatch(r"[0-9a-f]{64}", value) for value in (binding_hash, feature_identity)):
@@ -239,7 +263,12 @@ class CoinGeckoOnchainOHLCVProvider:
         request_timeout: float = 10.0,
         rate_limit: int = 30,
         api_key: str | None = None,
+        cache_max_entries: int = 256,
         exact_cache_max_entries: int = 256,
+        pool_cache_ttl: float = 3600.0,
+        pool_cache_stale_ttl: float = 86400.0,
+        pool_search_timeout: float = 5.0,
+        pool_search_cooldown: float = 30.0,
     ) -> None:
         """Initialize the CoinGecko Onchain OHLCV provider.
 
@@ -249,19 +278,45 @@ class CoinGeckoOnchainOHLCVProvider:
             rate_limit: Maximum requests per minute. Default 30.
             api_key: CoinGecko Pro API key. Uses the gateway environment
                 fallback when omitted.
+            cache_max_entries: Maximum entries retained in each request-keyed
+                in-memory cache. Default 256.
             exact_cache_max_entries: Maximum high-cardinality exact responses
                 retained in the in-memory LRU cache. Default 256.
+            pool_cache_ttl: Pool-address cache TTL in seconds. Default 3600.
+            pool_cache_stale_ttl: Maximum age of a pool address eligible for
+                transient-failure fallback. Default 86400 (24 hours).
+            pool_search_timeout: Timeout for pool discovery requests. Default 5.
+            pool_search_cooldown: Seconds to suppress repeated pool searches
+                after a transient discovery failure. Default 30.
         """
+        if cache_max_entries < 1:
+            raise ValueError("cache_max_entries must be positive")
         if exact_cache_max_entries < 1:
             raise ValueError("exact_cache_max_entries must be positive")
+        if pool_cache_stale_ttl < pool_cache_ttl:
+            raise ValueError("pool_cache_stale_ttl must be greater than or equal to pool_cache_ttl")
         self._cache_ttl = cache_ttl
+        self._cache_max_entries = cache_max_entries
         self._exact_cache_max_entries = exact_cache_max_entries
         self._request_timeout = request_timeout
+        self._pool_cache_ttl = pool_cache_ttl
+        self._pool_cache_stale_ttl = pool_cache_stale_ttl
+        self._pool_search_timeout = pool_search_timeout
+        self._pool_search_cooldown = pool_search_cooldown
+        self._rate_limit = rate_limit
         self._rate_limiter = _TokenBucket(rate=rate_limit, period=60.0)
         self._metrics = _HealthMetrics()
         self._session: aiohttp.ClientSession | None = None
-        self._cache: dict[str, tuple[list[OHLCVCandle], float]] = {}
+        self._cache: OrderedDict[str, tuple[list[OHLCVCandle], float]] = OrderedDict()
         self._exact_cache: OrderedDict[str, tuple[ExactPoolOHLCVResult, float]] = OrderedDict()
+        # Values are (address, active_cached_at, original_discovered_at).
+        # A stale fallback may refresh active_cached_at for a short grace
+        # period, but must never renew original_discovered_at.
+        self._pool_cache: OrderedDict[str, tuple[str, float, float]] = OrderedDict()
+        self._pool_search_cooldowns: OrderedDict[str, float] = OrderedDict()
+        self._pool_resolution_locks: weakref.WeakValueDictionary[tuple[int, str], asyncio.Lock] = (
+            weakref.WeakValueDictionary()
+        )
         self._api_key = api_key if api_key is not None else _get_gateway_api_key("COINGECKO_API_KEY")
 
         logger.info(
@@ -373,6 +428,10 @@ class CoinGeckoOnchainOHLCVProvider:
             "errors": m.errors,
             "success_rate": round(success_rate, 2),
             "average_latency_ms": round(avg_latency, 2),
+            "pool_searches": m.pool_searches,
+            "pool_cache_hits": m.pool_cache_hits,
+            "pool_search_timeouts": m.pool_search_timeouts,
+            "pool_searches_suppressed": m.pool_searches_suppressed,
         }
 
     # -- OHLCVProvider protocol -------------------------------------------------
@@ -414,28 +473,23 @@ class CoinGeckoOnchainOHLCVProvider:
 
         Raises:
             DataSourceUnavailable: On API errors, rate limiting, or missing data.
+            DataSourceTimeout: When pool discovery or candle retrieval exceeds its deadline.
             ValueError: If timeframe is invalid.
         """
         timeframe = validate_timeframe(timeframe)
+        for field, value in (("token", token), ("quote", quote), ("pool_address", pool_address)):
+            if value is not None and len(value) > _MAX_CACHE_KEY_COMPONENT_LENGTH:
+                raise ValueError(f"{field} must be at most {_MAX_CACHE_KEY_COMPONENT_LENGTH} characters")
         self._metrics.total_requests += 1
         limit = min(limit, 1000)
 
         # Check cache
-        cache_key = self._cache_key(token, chain, timeframe, limit, pool_address)
+        cache_key = self._cache_key(token, chain, timeframe, limit, pool_address, include_empty_intervals)
         cached = self._get_cached(cache_key)
         if cached is not None:
             self._metrics.cache_hits += 1
             self._metrics.successful_requests += 1
             return cached
-
-        # Rate limiting
-        if not self._rate_limiter.acquire():
-            self._metrics.errors += 1
-            raise DataSourceUnavailable(
-                source=_SOURCE,
-                reason="Rate limited (30 req/min)",
-                retry_after=2.0,
-            )
 
         # Resolve network
         network = _CHAIN_TO_NETWORK.get(chain.lower())
@@ -459,12 +513,21 @@ class CoinGeckoOnchainOHLCVProvider:
                 ),
             )
 
+        # Measure the complete operation, including automatic pool discovery.
+        start_time = time.monotonic()
+
         # Build URL
         if pool_address:
             url = f"{self._api_base}/networks/{network}/pools/{pool_address}/ohlcv/{tf_params.timeframe}"
         else:
             # Search for pool by token symbol -- use top pool from search
-            url = await self._resolve_pool_ohlcv_url(token, quote, network, tf_params.timeframe)
+            url = await self._resolve_pool_ohlcv_url(
+                token,
+                quote,
+                chain=chain,
+                network=network,
+                timeframe_key=tf_params.timeframe,
+            )
 
         params: dict[str, str | int] = {
             "aggregate": tf_params.aggregate,
@@ -474,9 +537,8 @@ class CoinGeckoOnchainOHLCVProvider:
         if include_empty_intervals:
             params["include_empty_intervals"] = "true"
 
-        start_time = time.monotonic()
-
         try:
+            self._acquire_rate_limit()
             session = await self._get_session()
             async with session.get(url, params=params) as response:
                 latency_ms = (time.monotonic() - start_time) * 1000
@@ -501,6 +563,7 @@ class CoinGeckoOnchainOHLCVProvider:
                     raise DataSourceUnavailable(
                         source=_SOURCE,
                         reason=reason,
+                        retry_after=0.5 if response.status >= 500 else None,
                     )
 
                 data = await response.json()
@@ -528,18 +591,20 @@ class CoinGeckoOnchainOHLCVProvider:
 
                 return candles
 
+        except TimeoutError:
+            self._metrics.errors += 1
+            raise DataSourceTimeout(
+                source=_SOURCE,
+                timeout_seconds=self._request_timeout,
+            ) from None
         except aiohttp.ClientError as e:
             self._metrics.errors += 1
             raise DataSourceUnavailable(
                 source=_SOURCE,
                 reason=str(e),
+                retry_after=0.25,
+                transport=True,
             ) from e
-        except TimeoutError:
-            self._metrics.errors += 1
-            raise DataSourceUnavailable(
-                source=_SOURCE,
-                reason=f"Timeout after {self._request_timeout}s",
-            ) from None
 
     async def _fetch_exact_pool_payload(self, url: str, params: dict[str, str | int]) -> Any:
         try:
@@ -557,12 +622,17 @@ class CoinGeckoOnchainOHLCVProvider:
                     self._metrics.errors += 1
                     raise DataSourceUnavailable(source=_SOURCE, reason=f"HTTP {response.status}: {body[:200]}")
                 return await response.json()
-        except aiohttp.ClientError as exc:
-            self._metrics.errors += 1
-            raise DataSourceUnavailable(source=_SOURCE, reason=str(exc)) from exc
         except TimeoutError:
             self._metrics.errors += 1
-            raise DataSourceUnavailable(source=_SOURCE, reason=f"Timeout after {self._request_timeout}s") from None
+            raise DataSourceTimeout(source=_SOURCE, timeout_seconds=self._request_timeout) from None
+        except aiohttp.ClientError as exc:
+            self._metrics.errors += 1
+            raise DataSourceUnavailable(
+                source=_SOURCE,
+                reason=str(exc),
+                retry_after=0.25,
+                transport=True,
+            ) from exc
 
     def _parse_exact_pool_candles(
         self,
@@ -785,67 +855,289 @@ class CoinGeckoOnchainOHLCVProvider:
         if self._session and not self._session.closed:
             await self._session.close()
             self._session = None
+        self._pool_resolution_locks.clear()
+
+    def _acquire_rate_limit(self) -> None:
+        """Account for one outbound request against the shared provider budget."""
+        if self._rate_limiter.acquire():
+            return
+        self._metrics.errors += 1
+        raise DataSourceUnavailable(
+            source=_SOURCE,
+            reason=f"Rate limited ({self._rate_limit} req/min)",
+            retry_after=2.0,
+        )
 
     async def _resolve_pool_ohlcv_url(
         self,
         token: str,
         quote: str,
+        *,
+        chain: str,
         network: str,
         timeframe_key: str,
     ) -> str:
         """Search CoinGecko Onchain for a pool and return the OHLCV URL.
 
-        Uses the search endpoint to find the top pool for the token pair.
+        Uses the search endpoint to find the top pool for the token pair. Pool
+        identity is cached independently from candle shape so requests for a
+        different timeframe or limit do not repeat discovery. A per-key lock
+        collapses concurrent first requests into one upstream search.
         """
-        # Try the search endpoint to find pools for this token
-        search_url = f"{self._api_base}/search/pools"
-        params = {"query": token, "network": network}
+        pool_cache_key = self._pool_cache_key(token, quote, chain=chain, network=network)
+        cached_address = self._get_cached_pool_address(pool_cache_key)
+        if cached_address is not None:
+            self._metrics.pool_cache_hits += 1
+            return self._pool_ohlcv_url(network, cached_address, timeframe_key)
 
-        try:
-            session = await self._get_session()
-            async with session.get(search_url, params=params) as response:
-                if response.status != 200:
-                    reason = f"Pool search failed for {token} on {network}: HTTP {response.status}"
-                    if response.status == 401:
-                        reason = (
-                            "CoinGecko Onchain pool search requires a valid COINGECKO_API_KEY; "
-                            "the key may be missing, invalid, or expired; HTTP 401"
+        loop_key = (id(asyncio.get_running_loop()), pool_cache_key)
+        lock = self._pool_resolution_locks.setdefault(loop_key, asyncio.Lock())
+        async with lock:
+            # Another request may have populated the cache while this request
+            # waited for the single-flight lock.
+            cached_address = self._get_cached_pool_address(pool_cache_key)
+            if cached_address is not None:
+                self._metrics.pool_cache_hits += 1
+                return self._pool_ohlcv_url(network, cached_address, timeframe_key)
+
+            stale_address = self._get_cached_pool_address(pool_cache_key, allow_stale=True)
+            cooldown_remaining = self._pool_search_cooldown_remaining(pool_cache_key)
+            if cooldown_remaining is not None:
+                if stale_address is not None:
+                    self._metrics.pool_cache_hits += 1
+                    return self._pool_ohlcv_url(network, stale_address, timeframe_key)
+                self._metrics.pool_searches_suppressed += 1
+                self._metrics.errors += 1
+                raise DataSourceUnavailable(
+                    source=_SOURCE,
+                    reason=(
+                        f"Pool discovery cooldown active for {token} on {network} ({cooldown_remaining:.1f}s remaining)"
+                    ),
+                )
+
+            search_url = f"{self._api_base}/search/pools"
+            params = {"query": token, "network": network}
+            search_started = time.monotonic()
+            self._metrics.pool_searches += 1
+
+            try:
+                self._acquire_rate_limit()
+                session = await self._get_session()
+                timeout = aiohttp.ClientTimeout(total=self._pool_search_timeout)
+                async with session.get(search_url, params=params, timeout=timeout) as response:
+                    self._check_pool_search_status(response.status, token, network, pool_cache_key)
+
+                    data = await response.json()
+                    pools = data.get("data", [])
+
+                    if not pools:
+                        self._metrics.errors += 1
+                        raise DataSourceUnavailable(
+                            source=_SOURCE,
+                            reason=f"No pools found for {token} on {network}",
                         )
-                    raise DataSourceUnavailable(
-                        source=_SOURCE,
-                        reason=reason,
+
+                    # Prefer the explicit address. Splitting the result ID on
+                    # the first underscore corrupts networks such as
+                    # ``polygon_pos`` (``polygon_pos_0x...``).
+                    first_pool = pools[0]
+                    pool_address = first_pool.get("attributes", {}).get("address", "")
+                    if not pool_address:
+                        pool_id = first_pool.get("id", "")
+                        network_prefix = f"{network}_"
+                        if pool_id.startswith(network_prefix):
+                            pool_address = pool_id.removeprefix(network_prefix)
+
+                    if not pool_address:
+                        self._metrics.errors += 1
+                        raise DataSourceUnavailable(
+                            source=_SOURCE,
+                            reason=f"Could not resolve pool address for {token} on {network}",
+                        )
+
+                    self._store_pool_address(pool_cache_key, pool_address)
+                    self._pool_search_cooldowns.pop(pool_cache_key, None)
+                    logger.info(
+                        "coingecko_onchain_pool_search_succeeded token=%s quote=%s network=%s latency_ms=%d",
+                        token,
+                        quote,
+                        network,
+                        int((time.monotonic() - search_started) * 1000),
                     )
+                    return self._pool_ohlcv_url(network, pool_address, timeframe_key)
 
-                data = await response.json()
-                pools = data.get("data", [])
-
-                if not pools:
-                    raise DataSourceUnavailable(
-                        source=_SOURCE,
-                        reason=f"No pools found for {token} on {network}",
+            except TimeoutError:
+                self._metrics.pool_search_timeouts += 1
+                if stale_address is not None:
+                    self._refresh_stale_pool_address(pool_cache_key, stale_address)
+                    logger.warning(
+                        "coingecko_onchain_pool_search_timeout_stale_fallback "
+                        "token=%s quote=%s network=%s timeout_s=%.1f",
+                        token,
+                        quote,
+                        network,
+                        self._pool_search_timeout,
                     )
-
-                # Use the first pool result
-                pool_id = pools[0].get("id", "")
-                # Pool ID format: "network_poolAddress"
-                if "_" in pool_id:
-                    pool_address = pool_id.split("_", 1)[1]
-                else:
-                    pool_address = pools[0].get("attributes", {}).get("address", "")
-
-                if not pool_address:
-                    raise DataSourceUnavailable(
-                        source=_SOURCE,
-                        reason=f"Could not resolve pool address for {token} on {network}",
+                    return self._pool_ohlcv_url(network, stale_address, timeframe_key)
+                self._metrics.errors += 1
+                self._start_pool_search_cooldown(pool_cache_key)
+                logger.warning(
+                    "coingecko_onchain_pool_search_timeout token=%s quote=%s network=%s timeout_s=%.1f",
+                    token,
+                    quote,
+                    network,
+                    self._pool_search_timeout,
+                )
+                raise DataSourceTimeout(
+                    source=_SOURCE,
+                    timeout_seconds=self._pool_search_timeout,
+                ) from None
+            except _TransientPoolSearchStatus as e:
+                if stale_address is not None:
+                    self._refresh_stale_pool_address(pool_cache_key, stale_address)
+                    logger.warning(
+                        "coingecko_onchain_pool_search_http_stale_fallback token=%s quote=%s network=%s status=%d",
+                        token,
+                        quote,
+                        network,
+                        e.status,
                     )
+                    return self._pool_ohlcv_url(network, stale_address, timeframe_key)
+                raise DataSourceUnavailable(
+                    source=_SOURCE,
+                    reason=e.reason,
+                    retry_after=60.0 if e.status == 429 else 0.5,
+                ) from e
+            except aiohttp.ClientError as e:
+                if stale_address is not None:
+                    self._refresh_stale_pool_address(pool_cache_key, stale_address)
+                    logger.warning(
+                        "coingecko_onchain_pool_search_network_stale_fallback token=%s quote=%s network=%s error=%s",
+                        token,
+                        quote,
+                        network,
+                        type(e).__name__,
+                    )
+                    return self._pool_ohlcv_url(network, stale_address, timeframe_key)
+                self._metrics.errors += 1
+                self._start_pool_search_cooldown(pool_cache_key)
+                raise DataSourceUnavailable(
+                    source=_SOURCE,
+                    reason=f"Pool search network error: {e}",
+                    retry_after=0.25,
+                    transport=True,
+                ) from e
 
-                return f"{self._api_base}/networks/{network}/pools/{pool_address}/ohlcv/{timeframe_key}"
+    def _pool_cache_key(self, token: str, quote: str, *, chain: str, network: str) -> str:
+        """Return the normalized key for a discovered pool address."""
+        normalized_token = token if is_solana_chain(chain) else token.upper()
+        return f"{network.lower()}:{normalized_token}:{quote.upper()}"
 
-        except aiohttp.ClientError as e:
-            raise DataSourceUnavailable(
-                source=_SOURCE,
-                reason=f"Pool search network error: {e}",
-            ) from e
+    def _get_cached_pool_address(self, key: str, *, allow_stale: bool = False) -> str | None:
+        """Return a cached pool address, optionally after its normal TTL."""
+        now = time.monotonic()
+        self._prune_pool_cache(now)
+        entry = self._pool_cache.get(key)
+        if entry is None:
+            return None
+        address, cached_at, _ = entry
+        if not allow_stale and now - cached_at > self._pool_cache_ttl:
+            return None
+        self._pool_cache.move_to_end(key)
+        return address
+
+    def _store_pool_address(
+        self,
+        key: str,
+        address: str,
+        *,
+        cached_at: float | None = None,
+        discovered_at: float | None = None,
+    ) -> None:
+        """Store one pool mapping while enforcing age and LRU bounds."""
+        now = time.monotonic()
+        self._prune_pool_cache(now)
+        self._pool_cache[key] = (
+            address,
+            now if cached_at is None else cached_at,
+            now if discovered_at is None else discovered_at,
+        )
+        self._pool_cache.move_to_end(key)
+        while len(self._pool_cache) > self._cache_max_entries:
+            self._pool_cache.popitem(last=False)
+
+    def _prune_pool_cache(self, now: float) -> None:
+        """Remove pool mappings too old for even stale fallback."""
+        expired = [
+            cache_key
+            for cache_key, (_, _, discovered_at) in self._pool_cache.items()
+            if now - discovered_at > self._pool_cache_stale_ttl
+        ]
+        for cache_key in expired:
+            del self._pool_cache[cache_key]
+
+    def _refresh_stale_pool_address(self, key: str, address: str) -> None:
+        """Keep a stale mapping briefly available, then retry discovery."""
+        now = time.monotonic()
+        grace = max(0.0, min(self._pool_search_cooldown, self._pool_cache_ttl))
+        cached_at = now - max(0.0, self._pool_cache_ttl - grace)
+        existing = self._pool_cache.get(key)
+        discovered_at = existing[2] if existing is not None else now
+        self._store_pool_address(key, address, cached_at=cached_at, discovered_at=discovered_at)
+
+    def _pool_search_cooldown_remaining(self, key: str) -> float | None:
+        """Return cooldown seconds remaining, removing expired entries."""
+        now = time.monotonic()
+        self._prune_pool_search_cooldowns(now)
+        expires_at = self._pool_search_cooldowns.get(key)
+        if expires_at is None:
+            return None
+        remaining = expires_at - now
+        self._pool_search_cooldowns.move_to_end(key)
+        return remaining
+
+    def _prune_pool_search_cooldowns(self, now: float) -> None:
+        """Remove expired cooldowns and enforce the request-key bound."""
+        expired = [cache_key for cache_key, expires_at in self._pool_search_cooldowns.items() if expires_at <= now]
+        for cache_key in expired:
+            del self._pool_search_cooldowns[cache_key]
+        while len(self._pool_search_cooldowns) > self._cache_max_entries:
+            self._pool_search_cooldowns.popitem(last=False)
+
+    def _check_pool_search_status(self, status: int, token: str, network: str, cache_key: str) -> None:
+        """Classify pool-search failures and trip cooldowns when retryable."""
+        if status == 200:
+            return
+
+        self._metrics.errors += 1
+        reason = f"Pool search failed for {token} on {network}: HTTP {status}"
+        if status == 401:
+            reason = (
+                "CoinGecko Onchain pool search requires a valid COINGECKO_API_KEY; "
+                "the key may be missing, invalid, or expired; HTTP 401"
+            )
+        transient_status = status in {408, 429} or status >= 500
+        if transient_status:
+            self._start_pool_search_cooldown(cache_key)
+            raise _TransientPoolSearchStatus(status=status, reason=reason)
+        raise DataSourceUnavailable(
+            source=_SOURCE,
+            reason=reason,
+        )
+
+    def _start_pool_search_cooldown(self, key: str) -> None:
+        """Suppress repeated discovery attempts after a transient failure."""
+        if self._pool_search_cooldown > 0:
+            now = time.monotonic()
+            self._prune_pool_search_cooldowns(now)
+            self._pool_search_cooldowns[key] = now + self._pool_search_cooldown
+            self._pool_search_cooldowns.move_to_end(key)
+            while len(self._pool_search_cooldowns) > self._cache_max_entries:
+                self._pool_search_cooldowns.popitem(last=False)
+
+    def _pool_ohlcv_url(self, network: str, pool_address: str, timeframe_key: str) -> str:
+        """Build an OHLCV URL from a previously validated provider response."""
+        return f"{self._api_base}/networks/{network}/pools/{pool_address}/ohlcv/{timeframe_key}"
 
     def _parse_ohlcv_response(self, data: dict[str, Any]) -> list[OHLCVCandle]:
         """Parse CoinGecko Onchain OHLCV JSON response into OHLCVCandle list.
@@ -897,29 +1189,50 @@ class CoinGeckoOnchainOHLCVProvider:
         timeframe: OHLCVTimeframe,
         limit: int,
         pool_address: str | None,
+        include_empty_intervals: bool = False,
     ) -> str:
         """Generate a cache key."""
         addr = pool_address or "auto"
-        return f"{token.upper()}:{chain.lower()}:{timeframe}:{limit}:{addr.lower()}"
+        case_sensitive_address = is_solana_chain(chain)
+        normalized_token = token if case_sensitive_address else token.upper()
+        normalized_address = addr if case_sensitive_address else addr.lower()
+        return (
+            f"{normalized_token}:{chain.lower()}:{timeframe}:{limit}:"
+            f"{normalized_address}:{int(include_empty_intervals)}"
+        )
 
     def _get_cached(self, key: str) -> list[OHLCVCandle] | None:
         """Return cached candles if fresh, else None."""
+        now = time.monotonic()
+        self._prune_ohlcv_cache(now)
         entry = self._cache.get(key)
         if entry is None:
             return None
-        candles, cached_at = entry
-        if time.monotonic() - cached_at > self._cache_ttl:
-            return None
+        candles, _ = entry
+        self._cache.move_to_end(key)
         return candles
 
     def _update_cache(self, key: str, candles: list[OHLCVCandle]) -> None:
-        """Store candles in the in-memory cache."""
-        self._cache[key] = (candles, time.monotonic())
+        """Store candles while pruning expired entries and enforcing the LRU bound."""
+        now = time.monotonic()
+        self._prune_ohlcv_cache(now)
+        self._cache[key] = (candles, now)
+        self._cache.move_to_end(key)
+        while len(self._cache) > self._cache_max_entries:
+            self._cache.popitem(last=False)
+
+    def _prune_ohlcv_cache(self, now: float) -> None:
+        """Remove all expired candle entries from the service-lifetime cache."""
+        expired = [cache_key for cache_key, (_, cached_at) in self._cache.items() if now - cached_at > self._cache_ttl]
+        for cache_key in expired:
+            del self._cache[cache_key]
 
     def clear_cache(self) -> None:
-        """Clear the OHLCV cache."""
+        """Clear the OHLCV and pool-resolution caches."""
         self._cache.clear()
         self._exact_cache.clear()
+        self._pool_cache.clear()
+        self._pool_search_cooldowns.clear()
         logger.info("Cleared CoinGecko Onchain OHLCV cache")
 
     async def __aenter__(self) -> CoinGeckoOnchainOHLCVProvider:

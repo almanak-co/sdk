@@ -97,6 +97,9 @@ class TestCoinGeckoOnchainGetOHLCV:
         svc._binance = None
         svc._coingecko = None
         svc._thegraph = None
+        svc._zerion = None
+        svc._portfolio_chain = None
+        svc._coingecko_onchain_ohlcv = None
         return svc
 
     @pytest.mark.asyncio
@@ -109,6 +112,20 @@ class TestCoinGeckoOnchainGetOHLCV:
 
         ctx.set_code.assert_called_with(grpc.StatusCode.INVALID_ARGUMENT)
         ctx.set_details.assert_called_with("token is required and cannot be empty")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("field", "value"), [("token", "T" * 129), ("quote", "Q" * 129)])
+    async def test_oversized_cache_identity_returns_invalid_argument(self, service, field, value):
+        """Request-controlled cache keys are bounded before provider construction."""
+        ctx = _make_context()
+        request = gateway_pb2.CoinGeckoOnchainOHLCVRequest(token="ALMANAK", quote="USD", chain="base")
+        setattr(request, field, value)
+
+        await service.CoinGeckoOnchainGetOHLCV(request, ctx)
+
+        ctx.set_code.assert_called_with(grpc.StatusCode.INVALID_ARGUMENT)
+        ctx.set_details.assert_called_with(f"{field} must be at most 128 characters")
+        assert service._coingecko_onchain_ohlcv is None
 
     @pytest.mark.asyncio
     async def test_empty_chain_returns_invalid_argument(self, service):
@@ -186,6 +203,32 @@ class TestCoinGeckoOnchainGetOHLCV:
         mock_provider.get_exact_pool_ohlcv.assert_not_called()
         # Should NOT have set an error code
         ctx.set_code.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_provider_is_reused_across_requests_and_closed_with_service(self, service):
+        """The service owns one provider so its session and caches survive RPCs."""
+        request = gateway_pb2.CoinGeckoOnchainOHLCVRequest(
+            token="ALMANAK",
+            chain="base",
+            timeframe="1h",
+            limit=2,
+        )
+        mock_provider = MagicMock()
+        mock_provider.get_ohlcv = AsyncMock(return_value=[_make_ohlcv_candle(0)])
+        mock_provider.close = AsyncMock()
+
+        with patch(
+            "almanak.gateway.data.ohlcv.coingecko_onchain_provider.CoinGeckoOnchainOHLCVProvider",
+            return_value=mock_provider,
+        ) as provider_cls:
+            await service.CoinGeckoOnchainGetOHLCV(request, _make_context())
+            await service.CoinGeckoOnchainGetOHLCV(request, _make_context())
+            await service.close()
+
+        provider_cls.assert_called_once_with(api_key="test-key")
+        assert mock_provider.get_ohlcv.await_count == 2
+        mock_provider.close.assert_awaited_once()
+        assert service._coingecko_onchain_ohlcv is None
 
     @pytest.mark.asyncio
     async def test_exact_mode_returns_complete_identity_acknowledgement(self, service):
@@ -448,6 +491,9 @@ class TestCoinGeckoOnchainPoolAddressValidation:
         svc._binance = None
         svc._coingecko = None
         svc._thegraph = None
+        svc._zerion = None
+        svc._portfolio_chain = None
+        svc._coingecko_onchain_ohlcv = None
         return svc
 
     @staticmethod
