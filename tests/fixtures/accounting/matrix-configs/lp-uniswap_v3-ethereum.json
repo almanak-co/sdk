@@ -8,7 +8,7 @@
     "range_width_pct": 0.20,
     "max_slippage": 0.005,
     "anvil_funding": {
-        "ETH": 1,
-        "USDC": 100
+        "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE": 1,
+        "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48": 100
     }
 }

@@ -10,7 +10,7 @@
     "lp_capital_split_pct": 0.50,
     "max_slippage": 0.005,
     "anvil_funding": {
-        "ETH": 1,
-        "USDC": 100
+        "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE": 1,
+        "0xaf88d065e77c8cC2239327C5EDb3A432268e5831": 100
     }
 }
