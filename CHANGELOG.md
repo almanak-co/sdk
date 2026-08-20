@@ -6,6 +6,55 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.26.1] - 2026-08-20
+
+### Added
+
+- **Exact-pool OHLCV observations.** OHLCV candles bind to the exact venue and
+  pool identity a strategy requests and are authenticated end-to-end through the
+  gateway, instead of resolving a symbol-adjacent series. (#3777)
+- **Exact Uniswap-V3 TWAP observations.** V3 TWAP reads resolve the exact pool and
+  fail closed on provider or transport faults rather than substituting aggregate
+  data. (#3749)
+- **Exact-venue binding for Curve swaps.** Curve swap compilation binds to a
+  verified pool identity and rejects malformed venue identity. (#3768)
+- **Exact-venue binding for Slipstream (Aerodrome CL) LP.** Slipstream LP venues
+  bind to the receipt-derived NPM manager generation, and teardown resolves
+  current and legacy concentrated-liquidity manager authority from
+  connector-owned contract roles. (#3747)
+- **Fail-closed exact data consumer across SDK seams.** A shared consumer
+  reconciles exact binding identity across the market-data and execution seams and
+  fails closed on mismatch. (#3773, #3776)
+- **Compound V3 accepts a Comet address as `market_id`.** compound_v3 gains the
+  exact-venue path Aave and Fluid already have: a catalogue key or a listed Comet
+  address resolves to the canonical key, and `expected_pool` becomes a Compound
+  supply/withdraw assertion. (#3774)
+- **Backtest feasibility preflight.** Infeasible backtest windows are rejected
+  before data materialization with an actionable `WINDOW_TOO_LONG` blocker naming
+  the feasible window and a coarser interval, instead of dying at the job timeout.
+  (#3780)
+- **Structured backtest preflight blockers.** Platform backtest preflight failures
+  arrive as structured `{failure_stage, code, blockers}` result artifacts and
+  callbacks, preserved even across redelivered FAILED callbacks. (#3779)
+
+### Changed
+
+- **`quote_asset` documentation clarifies the reporting numeraire.** Guides,
+  docstrings, and the strategy-builder skill now state that `quote_asset` sets the
+  reporting numeraire for canonical metrics, scope the config override to live
+  runs, and add same-family LP guidance. (#3791)
+- **Almanak Code updated to v1.0.49.** Bundled AlmanakCode agent version bump.
+  (#3790)
+
+### Fixed
+
+- **CoinGecko pool discovery is hardened.** Discovery derives cache case from the
+  chain family, tolerates transient discovery failures, and bounds provider
+  caches. (#3789)
+- **Teardown reconciles completeness by asset identity.** Teardown completeness is
+  measured against exact historical asset identity instead of symbol-derived
+  matches. (#3778)
+
 ## [2.26.0] - 2026-08-18
 
 ### Added
