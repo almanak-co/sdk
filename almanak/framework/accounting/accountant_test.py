@@ -65,6 +65,12 @@ from almanak.framework.primitives.taxonomy import (
     Primitive as _TaxonomyPrimitive,
 )
 from almanak.framework.primitives.types import EventKind
+from almanak.framework.valuation.net_debt import (
+    net_debt_from_positions_json,
+    parse_positions_payload,
+    read_position_decimal,
+    wallet_nav_usd,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -563,17 +569,34 @@ def _dec(v: Any) -> Decimal | None:
     if v is None or v == "":
         return None
     try:
-        return Decimal(str(v))
+        value = Decimal(str(v))
     except (InvalidOperation, TypeError):
         return None
+    # NaN parses as a Decimal but poisons every ordered comparison with
+    # InvalidOperation — a CRASH of the scoring cell instead of a FAIL. It is
+    # not a measurement; read it as unmeasured (Empty≠Zero, VIB-5857 hardening).
+    if value.is_nan():
+        return None
+    return value
 
 
 def _snapshot_equity(s: dict[str, Any]) -> Decimal | None:
-    """Strategy equity at a snapshot = ``total_value_usd + available_cash_usd``.
+    """Strategy equity at a snapshot = ``total_value_usd − debt_mark +
+    available_cash_usd`` (the canonical NAV, blueprint 27 §7.11).
 
     VIB-3614 split deployed (positions) from cash (uninvested wallet) into
     separate columns. The Senior DeFi Quant's equity curve / PnL view is the
-    SUM. A post-teardown snapshot with ``total_value_usd=0`` is *not* a
+    SUM of the two — but ``total_value_usd`` is Σ POSITIVE ``value_usd`` (the
+    negative debt leg is DROPPED, VIB-3614), so for a leveraged position it is
+    *gross collateral*, not equity. VIB-5857: summing it with cash overstated
+    mid-run equity by the entire outstanding debt. The debt is re-netted here
+    exactly once via the canonical read path (``net_debt_from_positions_json``
+    + ``wallet_nav_usd`` — never a local re-derivation). Round-trip fixtures
+    are unaffected (debt is zero at both endpoints and the bias cancelled);
+    only a run with debt open at an endpoint moves, which is what the
+    ``looping_debt_open`` fixture (VIB-6560) exists to measure.
+
+    A post-teardown snapshot with ``total_value_usd=0`` is *not* a
     missing measurement — every position closed cleanly and equity collapsed
     into ``available_cash_usd``. Treating that as null double-counts a
     successful unwind as an accounting failure (G8 false positive seen on
@@ -582,8 +605,20 @@ def _snapshot_equity(s: dict[str, Any]) -> Decimal | None:
     An ``UNAVAILABLE`` row is the runner's diagnostic failure contract. Its
     persisted ``0 + 0`` placeholders are not measurements and must never enter
     G6's ``priced`` bracket as a zero-valued endpoint. Returns ``None`` for
-    that confidence or when both columns are unmeasured. A measured pure-cash
-    or pure-deployed snapshot remains a valid equity point.
+    that confidence, when both columns are unmeasured, or when the row carries
+    a measured debt leg while ``total_value_usd`` is unmeasured — a real
+    liability with an unmeasured asset side is not an equity point, and
+    coercing the missing deployed column to ``0`` would produce the
+    wrong-signed ``0 − debt + cash`` (Empty ≠ Zero; ``wallet_nav_usd``'s
+    contract forbids the caller coercing an unmeasured term). For every other
+    shape the netting changes a row's VALUE but never its membership in the
+    ``priced`` bracket. A measured pure-cash or pure-deployed snapshot remains
+    a valid equity point.
+
+    Historical rows: the netting subtracts the debt via
+    :func:`_snapshot_debt_mark`, which excludes debt already counted inside a
+    LEGACY net-shaped SUPPLY leg (pre-VIB-5857, no ``supply_leg_convention``
+    marker) so those rows are branch-read, not reinterpreted.
     """
     if s.get("value_confidence") == "UNAVAILABLE":
         return None
@@ -591,7 +626,230 @@ def _snapshot_equity(s: dict[str, Any]) -> Decimal | None:
     cash = _dec(s.get("available_cash_usd"))
     if deployed is None and cash is None:
         return None
-    return (deployed or Decimal("0")) + (cash or Decimal("0"))
+    positions_json = s.get("positions_json")
+    _count, raw_debt_mark, _debt_cost = net_debt_from_positions_json(positions_json)
+    # The unmeasured-deployed guard keys on the RAW mark, not the corrected
+    # one: a legacy net-shaped row with unmeasured deployed would have its
+    # correction cancel the corrected mark to 0 and slip back into the
+    # bracket as ``0 + cash`` — a wrong VALUE admitted as measured, the same
+    # inversion relocated. Raw-column discipline, same as G9.
+    if deployed is None and raw_debt_mark != 0:
+        return None
+    debt_mark = _corrected_debt_mark(positions_json, raw_debt_mark)
+    return wallet_nav_usd(deployed or Decimal("0"), debt_mark, cash or Decimal("0"))
+
+
+def _snapshot_debt_mark(positions_json: Any) -> Decimal:
+    """The debt a NAV consumer must subtract from this row's ``total_value_usd``.
+
+    ``net_debt_from_positions_json`` gives the canonical Σ|negative legs|;
+    :func:`_legacy_net_supply_debt` then excludes the portion a LEGACY
+    net-shaped SUPPLY leg already netted internally — paired per reserve, so
+    the correction can only ever cancel the same reserve's own BORROW legs.
+
+    KNOWN LIMITATION (VIB-6703): an absent or unparsable ``positions_json``
+    parses to ``[]`` and yields a MEASURED ``debt_mark == 0``, so a leveraged
+    row that lost its legs scores gross-of-debt with no diagnostic. Kept
+    deliberately — refusing such rows here would move them in and out of
+    G5/G6's ``priced`` bracket on payload health; the follow-up surfaces a
+    diagnostic count in the cell detail instead.
+    """
+    _count, debt_mark, _debt_cost = net_debt_from_positions_json(positions_json)
+    return _corrected_debt_mark(positions_json, debt_mark)
+
+
+def _corrected_debt_mark(positions_json: Any, raw_debt_mark: Decimal) -> Decimal:
+    """Apply the legacy net-shaped-leg exclusion to a raw ``debt_mark``."""
+    if raw_debt_mark == 0:
+        return raw_debt_mark
+    return max(Decimal("0"), raw_debt_mark - _legacy_net_supply_debt(positions_json))
+
+
+def _missing_debt_leg_rows(snapshots: list[dict[str, Any]]) -> int:
+    """Rows where a marked-gross SUPPLY leg declares reserve debt but NO
+    same-reserve BORROW leg survives in the snapshot (VIB-6699 loudness).
+
+    Under the gross convention (VIB-5857) the debt lives ONLY in the signed
+    BORROW leg; blueprint 27 §7.11 names the structural precondition that the
+    leg be present, and the partial-discovery failure that loses the debt side
+    while the collateral side reprices would otherwise read as a silently
+    plausible (overstated) equity. A marked-gross leg is self-describing —
+    its enriched ``details.debt_value_usd`` says whether its reserve carries
+    debt — so the inconsistency is detectable and counted here. Bounds, stated:
+    account-state-protocol legs (no enriched details, VIB-6701) and legacy
+    unmarked legs cannot be checked this way; and this is diagnostic-only for
+    now (promotion to a verdict input follows the same corpus discipline as
+    ``_unreadable_payload_rows``).
+    """
+    n = 0
+    for s in snapshots:
+        legs = parse_positions_payload(s.get("positions_json"))
+        if not legs:
+            continue
+        borrow_keys: set[tuple[str, str, str]] = set()
+        for leg in legs:
+            v = read_position_decimal(leg, "value_usd")
+            if v is None or v >= 0:
+                continue
+            details = leg.get("details") if isinstance(leg, dict) else getattr(leg, "details", None)
+            key = _leg_reserve_key(leg, details if isinstance(details, dict) else None)
+            if key is not None:
+                borrow_keys.add(key)
+        for leg in legs:
+            details = leg.get("details") if isinstance(leg, dict) else getattr(leg, "details", None)
+            if not isinstance(details, dict):
+                continue
+            if details.get("supply_leg_convention") != "gross":
+                continue
+            debt = _dec(details.get("debt_value_usd"))
+            if debt is None or debt <= 0:
+                continue
+            v = read_position_decimal(leg, "value_usd")
+            if v is None or v <= 0:
+                continue
+            key = _leg_reserve_key(leg, details)
+            if key is None or key not in borrow_keys:
+                n += 1
+                break  # count the ROW once, not every affected leg
+    return n
+
+
+def _unreadable_payload_rows(snapshots: list[dict[str, Any]]) -> int:
+    """Rows whose deployed column claims positive value while ``positions_json``
+    yields no legs (VIB-6703 diagnostic).
+
+    ``total_value_usd`` is Σ positive leg ``value_usd`` (VIB-3614), so a
+    measured-positive total beside an absent / unparsable / empty payload is
+    incoherent by construction — and on a leveraged row it silently scores
+    gross-of-debt because ``debt_mark`` reads the (lost) legs. This count makes
+    that shape LOUD in the G4/G6 output instead of indistinguishable from a
+    genuinely debt-free row. Diagnostic-only for now: promoting it to a verdict
+    input requires sweeping the historical corpus for legacy position-blind
+    rows first (the plain ``looping`` fixture is one), which is a corpus
+    question tracked on VIB-6703 — the same promotion discipline the perp-fee
+    unmeasured counters follow.
+    """
+    n = 0
+    for s in snapshots:
+        deployed = _dec(s.get("total_value_usd"))
+        if deployed is None or deployed <= 0:
+            continue
+        if not parse_positions_payload(s.get("positions_json")):
+            n += 1
+    return n
+
+
+def _leg_reserve_key(leg: Any, details: dict[str, Any] | None) -> tuple[str, str, str] | None:
+    """Reserve identity for pairing a legacy SUPPLY leg with its BORROW
+    sibling: (protocol, chain, asset), case-folded. FAILS CLOSED: ``None``
+    when any component is missing/empty — an unidentifiable reserve must
+    neither feed the sibling pool nor receive a correction, because two
+    reserves collapsing into one empty-keyed bucket would let one reserve's
+    correction un-net another's real debt (NAV overstatement). The enriched
+    writer stamps protocol/chain unconditionally but ``details.asset`` only
+    when a symbol resolved, so the missing-asset shape is producible; an
+    unpairable legacy leg then simply stays double-subtracted (understated —
+    the safe direction, same as the stripped-details detection bound)."""
+
+    def _read(obj: Any, key: str) -> str:
+        raw = obj.get(key) if isinstance(obj, dict) else getattr(obj, key, None)
+        return str(raw).lower() if raw is not None else ""
+
+    asset = _read(details, "asset") if details is not None else ""
+    key = (_read(leg, "protocol"), _read(leg, "chain"), asset)
+    if not all(key):
+        return None
+    return key
+
+
+def _legacy_net_supply_debt(positions_json: Any) -> Decimal:
+    """Debt double-counted between a LEGACY net-shaped SUPPLY leg and its
+    same-reserve BORROW sibling (VIB-5857).
+
+    Before VIB-5857 the valuer's single-reserve enriched path persisted
+    ``value_usd = net_value_usd`` on a SUPPLY leg while a signed BORROW leg
+    still carried the same reserve's debt — so subtracting the full
+    ``debt_mark`` from a row written by that code double-subtracts. Those legs
+    are identified by the exact shape only that writer produced: enriched
+    ``details`` carrying ``net_value_usd`` and a strictly positive
+    ``debt_value_usd``, NO ``supply_leg_convention`` marker, and
+    ``value_usd == net_value_usd`` on the positive side. The equality cannot
+    hold coincidentally under the gross convention (gross == net only when
+    the reserve debt is zero, which the ``debt > 0`` guard excludes), and
+    account-state-protocol legs (morpho_blue / benqi / compound_v3 — VIB-6701)
+    never carry ``net_value_usd``/``debt_value_usd`` keys, so they are never
+    flagged and their (gross, strategy-reported) values keep netting normally.
+
+    **Paired per reserve, never global**: the exclusion for each legacy leg is
+    ``min(details.debt_value_usd, remaining same-reserve BORROW pool)``. The
+    double-count exists only where a BORROW sibling of the SAME reserve is
+    actually in ``debt_mark``; a legacy net leg with no sibling (its row's
+    total is already net for that reserve, debt_mark carries nothing to
+    cancel) contributes zero, so the correction can never un-net a DIFFERENT
+    reserve's real debt — that would overstate NAV, the dangerous direction.
+    The pool contains BORROW legs only and is CONSUMED as legs claim from it
+    (two legacy legs on one reserve cannot both cancel the same sibling), and
+    reserve identity fails closed (:func:`_leg_reserve_key` returns ``None``
+    on a missing component; unpairable legs are skipped on both sides and
+    simply stay double-subtracted — understated, the safe direction).
+
+    NaN discipline: any of the three money fields parsing to NaN disqualifies
+    the leg (ordered comparisons on NaN raise ``InvalidOperation``, which
+    would take the whole cell to CRASH rather than FAIL).
+
+    Detection bound, stated rather than implied: a legacy net-shaped leg whose
+    details were stripped of the enriched keys cannot be disambiguated and
+    will still double-subtract; `test_looping_same_reserve_vib5857.py` pins
+    both the correction firing and this bound with negative controls.
+    """
+    legs = parse_positions_payload(positions_json)
+
+    def _leg_field(leg: Any, key: str) -> Any:
+        return leg.get(key) if isinstance(leg, dict) else getattr(leg, key, None)
+
+    # The sibling pool holds ONLY BORROW legs (the docstring's contract — an
+    # underwater perp or negatively-valued LP sharing the reserve key must not
+    # enlarge what a correction may cancel) and is CONSUMED as legacy legs
+    # claim from it, so two legacy legs on one reserve cannot each cancel the
+    # same sibling debt and spill the surplus onto another reserve through the
+    # global clamp.
+    borrow_by_reserve: dict[tuple[str, str, str], Decimal] = {}
+    for leg in legs:
+        if str(_leg_field(leg, "position_type") or "").upper() != "BORROW":
+            continue
+        value = read_position_decimal(leg, "value_usd")
+        if value is None or value.is_nan() or value >= 0:
+            continue
+        details = _leg_field(leg, "details")
+        key = _leg_reserve_key(leg, details if isinstance(details, dict) else None)
+        if key is None:
+            continue
+        borrow_by_reserve[key] = borrow_by_reserve.get(key, Decimal("0")) + (-value)
+
+    total = Decimal("0")
+    for leg in legs:
+        details = _leg_field(leg, "details")
+        if not isinstance(details, dict):
+            continue
+        if details.get("supply_leg_convention") == "gross":
+            continue
+        value = read_position_decimal(leg, "value_usd")
+        if value is None or value.is_nan() or value <= 0:
+            continue
+        net = _dec(details.get("net_value_usd"))
+        debt = _dec(details.get("debt_value_usd"))
+        if net is None or debt is None or net.is_nan() or debt.is_nan() or debt <= 0:
+            continue
+        if value != net:
+            continue
+        key = _leg_reserve_key(leg, details)
+        if key is None:
+            continue
+        take = min(debt, borrow_by_reserve.get(key, Decimal("0")))
+        if take > 0:
+            borrow_by_reserve[key] -= take
+            total += take
+    return total
 
 
 def _json(s: Any) -> dict[str, Any]:
@@ -1560,9 +1818,11 @@ def _cell_g4_capital_deployed(snapshots: list[dict[str, Any]]) -> CellResult:
 
     Per the VIB-3614 column split (see ``_snapshot_equity`` docstring above):
 
-    * ``total_value_usd`` — the deployed (positions) side of strategy value.
+    * ``total_value_usd`` — the deployed (positions) side of strategy value,
+      Σ POSITIVE ``value_usd`` (gross of debt, VIB-3614).
     * ``available_cash_usd`` — the uninvested cash side.
-    * Strategy equity = ``total_value_usd + available_cash_usd``.
+    * Strategy equity = ``total_value_usd − debt_mark + available_cash_usd``
+      (VIB-5857 — the reported equity nets the debt legs).
 
     Earlier revisions of this cell tried to derive ``deployed`` as
     ``total - cash``, which inverted the semantics and produced negative
@@ -1608,12 +1868,23 @@ def _cell_g4_capital_deployed(snapshots: list[dict[str, Any]]) -> CellResult:
             "FAIL",
             f"negative side: deployed=${deployed} cash=${cash}",
         )
-    equity = deployed + cash
+    # The cell's PREDICATE is the sign/measured-ness checks above; the equity in
+    # the detail is reporting only — but a reported number must still be the
+    # canonical one. VIB-5857: equity nets the debt legs (``deployed`` is Σ
+    # positive value_usd, gross of debt), same projection as ``_snapshot_equity``
+    # including the legacy net-shaped-leg exclusion. The unreadable-payload
+    # count (VIB-6703) is appended so a positive deployed value with no
+    # readable legs is loud here too, not only in G6's decomposition.
+    debt_mark = _snapshot_debt_mark(last.get("positions_json"))
+    equity = wallet_nav_usd(deployed, debt_mark, cash)
+    unreadable = _unreadable_payload_rows(ordered)
+    missing_debt = _missing_debt_leg_rows(ordered)
     return CellResult(
         "G4",
         "Capital deployed right now",
         "PASS",
-        f"deployed=${deployed} cash=${cash} equity=${equity}",
+        f"deployed=${deployed} cash=${cash} debt_mark=${debt_mark} equity=${equity}"
+        f" unreadable_payload_rows={unreadable} missing_debt_leg_rows={missing_debt}",
     )
 
 
@@ -2257,9 +2528,10 @@ def _cell_g6_reconciliation(  # noqa: C901
             {},
         )
     # Wallet method: equity_final − equity_initial across all priced
-    # snapshots. ``_snapshot_equity`` sums total_value_usd (deployed) +
-    # available_cash_usd (uninvested wallet) — a post-teardown snapshot
-    # with all-cash equity is a valid endpoint, not a measurement gap.
+    # snapshots. ``_snapshot_equity`` is the netted NAV — total_value_usd
+    # (deployed, gross of debt) − debt_mark + available_cash_usd (VIB-5857).
+    # A post-teardown snapshot with all-cash equity is a valid endpoint, not
+    # a measurement gap.
     priced = [s for s in ordered_by_time if _snapshot_confidence_can_anchor_pnl(s) and _snapshot_equity(s) is not None]
     if len(priced) < 2:
         return (
@@ -2928,6 +3200,15 @@ def _cell_g6_reconciliation(  # noqa: C901
         # verdict below, so it is always emitted — "" when it cannot be computed.
         "window_residual_usd": ("" if window_residual is None else str(window_residual)),
         "ledger_rows_without_timestamp": str(coverage.rows_without_timestamp),
+        # VIB-6703: rows claiming positive deployed value with no readable legs
+        # — on a leveraged row this scores gross-of-debt with nothing else to
+        # show for it, so the count is always emitted (diagnostic-only; see
+        # ``_unreadable_payload_rows`` for the promotion discipline).
+        "unreadable_payload_rows": str(_unreadable_payload_rows(priced)),
+        # VIB-6699: marked-gross SUPPLY legs whose declared reserve debt has no
+        # surviving BORROW sibling — the partial-discovery shape that would
+        # otherwise read as silently plausible overstated equity.
+        "missing_debt_leg_rows": str(_missing_debt_leg_rows(priced)),
         **{k: str(v) for k, v in null_breakdown.items()},
     }
 
@@ -3173,9 +3454,9 @@ def _cell_g7_attribution(
 def _cell_g8_time_series(snapshots: list[dict[str, Any]]) -> CellResult:
     """G8 — strategy equity over time.
 
-    "Equity" here = ``total_value_usd + available_cash_usd``. VIB-3614 split
-    deployed (positions) from cash (uninvested wallet) into separate columns;
-    the equity curve a Senior DeFi Quant cares about is the SUM. A
+    "Equity" here = ``_snapshot_equity`` = ``total_value_usd − debt_mark +
+    available_cash_usd`` (VIB-5857 netted the debt term; VIB-3614 split
+    deployed from cash into separate columns). A
     post-teardown snapshot with ``total_value_usd=0`` is *not* a missing
     measurement — every position closed cleanly and the equity collapsed
     into ``available_cash_usd``. Treating that as null double-counts
@@ -3211,13 +3492,27 @@ def _cell_g8_time_series(snapshots: list[dict[str, Any]]) -> CellResult:
 def _cell_g9_confidence(snapshots: list[dict[str, Any]], acct_events: list[dict[str, Any]]) -> CellResult:
     bad = []
     for s in snapshots:
-        # G8 redefined "equity" as ``total_value_usd + available_cash_usd``
-        # to handle post-teardown snapshots where ``total_value_usd`` collapses
-        # to 0 and the equity is entirely in ``available_cash_usd``. G9 must
-        # mirror that — a cash-only snapshot still bears USD value and still
-        # requires a confidence stamp; previously it was waved through.
-        equity = _snapshot_equity(s)
-        if equity is not None and equity != 0 and not s.get("value_confidence"):
+        # A cash-only snapshot still bears USD value and still requires a
+        # confidence stamp (post-teardown, total_value_usd collapses to 0 and
+        # the equity is entirely in available_cash_usd); previously it was
+        # waved through.
+        # VIB-5857: test USD-bearing-ness on the RAW columns plus the raw debt
+        # legs, not the netted equity — a fully-drawn leveraged snapshot whose
+        # netted equity lands on exactly 0 still bears USD value (widening),
+        # and a 0/0 row carrying a live BORROW leg bears a real liability
+        # (keeps the class the netted-equity form caught via equity == −debt).
+        # Both directions are pinned by
+        # tests/unit/accounting/test_snapshot_equity_netting_vib5857.py.
+        deployed = _dec(s.get("total_value_usd"))
+        cash = _dec(s.get("available_cash_usd"))
+        bears_usd = (
+            (deployed is not None and deployed != 0)
+            or (cash is not None and cash != 0)
+            # RAW mark on purpose: whether a liability needs a confidence
+            # stamp must not depend on the legacy-shape correction.
+            or net_debt_from_positions_json(s.get("positions_json"))[1] != 0
+        )
+        if bears_usd and not s.get("value_confidence"):
             bad.append(("snapshot", s.get("id")))
     for r in acct_events:
         if not r.get("confidence"):

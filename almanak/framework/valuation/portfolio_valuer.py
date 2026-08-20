@@ -224,6 +224,19 @@ class _WalletMatchIndex:
     exact_addresses: frozenset[str]  # non-EVM (e.g. Solana base58, case-significant)
 
 
+def _supply_convention_marker(position_type: Any) -> dict[str, str]:
+    """The VIB-5857 gross-convention marker, for a SUPPLY leg only.
+
+    ``_reprice_lending_on_chain_enriched`` builds one ``enriched`` dict per
+    call and is invoked for the BORROW leg of a reserve as well as its SUPPLY
+    leg, so stamping ``supply_leg_convention`` unconditionally persists a
+    SUPPLY-only claim onto debt legs. The marker lives here, rather than as a
+    branch at the call site, so the caller stays under its complexity gate —
+    lowering that gate to fit a correctness fix would be the wrong trade.
+    """
+    return {"supply_leg_convention": "gross"} if position_type == PositionType.SUPPLY else {}
+
+
 def _is_evm_address_shape(value: str) -> bool:
     """0x-prefixed 42-char ASCII hex. Case-folding such an address is
     semantically safe (EVM addresses are case-insensitive at the protocol
@@ -5207,10 +5220,18 @@ class PortfolioValuer:
             # above, so ``.value_or`` returns the real value here; an unmeasured
             # price would yield Decimal("0") rather than a wrong sign — but it
             # cannot occur on this path (guarded), keeping the wire bytes identical.
+            #
+            # VIB-5857: the SUPPLY leg carries GROSS collateral value, never
+            # net-of-debt. Debt on the same reserve is represented ONLY by the
+            # strategy's own BORROW leg (negative), so the read-path netting
+            # ``NAV = total_value_usd − debt_mark`` (blueprint 27 §7.11) subtracts
+            # it exactly once. A net-shaped SUPPLY leg beside a signed BORROW leg
+            # double-subtracts — the pinned −24000 shape in
+            # ``test_netting_parity.py`` / ``test_portfoliovaluer_contract.py``.
             if position.position_type == PositionType.BORROW:
                 result_value = (-valued.debt_value_usd).value_or(Decimal("0"))
             else:
-                result_value = valued.net_value_usd.value_or(Decimal("0"))
+                result_value = valued.supply_value_usd.value_or(Decimal("0"))
 
             # Serialize the USD legs through the MeasuredMoney payload codec
             # (measured→str, unmeasured→None) so persistence stays byte-compatible
@@ -5223,6 +5244,26 @@ class PortfolioValuer:
                 "debt_value_usd": valued.debt_value_usd.to_payload(),
                 "net_value_usd": valued.net_value_usd.to_payload(),
                 "collateral_enabled": valued.collateral_enabled,
+                # VIB-5857 schema marker: a SUPPLY leg written under this key
+                # carries GROSS collateral in ``value_usd``. Historical legs
+                # without it carried ``net_value_usd`` instead — for a
+                # same-reserve loop those are net-of-debt and must NOT have
+                # ``debt_mark`` subtracted a second time. Reader status: the
+                # Accountant equity reader implements the branch
+                # (``accountant_test._legacy_net_supply_debt`` excludes debt a
+                # legacy net-shaped leg already counted); the dashboard/gateway
+                # NAV lanes do not branch yet — their legacy-row exposure is
+                # pre-existing (they have netted since VIB-5222) and tracked
+                # with the un-netted-lane work (VIB-6698/VIB-6700).
+                #
+                # Stamped BELOW, and only on a SUPPLY leg: this same ``enriched``
+                # dict is built for the BORROW leg of the reserve too, so an
+                # unconditional stamp persists a SUPPLY-only claim onto debt
+                # legs. Both current readers happen to filter on
+                # ``value_usd > 0`` first, so nothing misreads it today — but
+                # that is incidental protection, not a contract, and the wrong
+                # bytes are already in every snapshot the reader would have to
+                # keep guarding against.
                 "valuation_source": "on_chain",
                 # VIB-5417: record the wallet the on-chain read actually used —
                 # which may be the strategy-wallet fallback resolved above when
@@ -5230,6 +5271,7 @@ class PortfolioValuer:
                 # self-describing: a downstream consumer can see which owner the
                 # leg was priced for instead of an absent wallet.
                 "wallet_address": wallet_address,
+                **_supply_convention_marker(position.position_type),
             }
 
             # VIB-5006: stamp the Track-C lending observability fields the
@@ -6125,9 +6167,19 @@ class PortfolioValuer:
         Queries getUserReserveData for the position's asset and calculates
         supply value and/or debt value using live prices.
 
-        For SUPPLY positions: returns supply_value - debt_value (net).
+        For SUPPLY positions: returns GROSS supply_value_usd (VIB-5857) —
+        debt on the same reserve is represented only by the strategy's own
+        BORROW leg, so read-path netting subtracts it exactly once.
         For BORROW positions: returns negative debt_value_usd so it
         reduces the portfolio total when summed.
+
+        NOTE: this non-enriched path returns a bare Decimal and therefore
+        structurally CANNOT stamp the ``supply_leg_convention`` marker. It has
+        no production caller today — the live dispatch is
+        ``_reprice_position_enriched`` — and is kept in gross/net parity with
+        the enriched path for the ``test_lending_valuer.py`` parity tests. If
+        this path is ever re-wired into production, route it through the
+        enriched variant so its legs carry the marker.
 
         Returns:
             USD value if successful, None to signal fallback needed.
@@ -6208,7 +6260,9 @@ class PortfolioValuer:
                 asset=token_symbol,
             )
 
-            # For SUPPLY positions: return net value (supply - debt).
+            # For SUPPLY positions: return GROSS supply value (VIB-5857) —
+            # same-reserve debt belongs to the BORROW leg alone, so the
+            # read-path ``total_value_usd − debt_mark`` nets it exactly once.
             # For BORROW positions: return negative debt value so it
             # reduces the portfolio total when summed in _get_positions.
             # USD legs are MeasuredMoney (VIB-5216); price is guarded measured
@@ -6216,7 +6270,7 @@ class PortfolioValuer:
             if position.position_type == PositionType.BORROW:
                 result = (-valued.debt_value_usd).value_or(Decimal("0"))
             else:
-                result = valued.net_value_usd.value_or(Decimal("0"))
+                result = valued.supply_value_usd.value_or(Decimal("0"))
 
             logger.debug(
                 "Lending re-priced: position=%s type=%s value=$%s (supply=$%s debt=$%s) collateral=%s",

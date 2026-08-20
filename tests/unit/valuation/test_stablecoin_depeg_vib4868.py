@@ -329,7 +329,10 @@ class TestLendingStableDepeg:
 
         assert result is not None
         value_usd, details = result
-        assert value_usd == Decimal("4000")  # 5000 supply - 1000 debt
+        # VIB-5857: GROSS supply ($5000), not net-of-debt ($4000) — the
+        # same-reserve debt is the BORROW leg's to carry, once.
+        assert value_usd == Decimal("5000")
+        assert details["supply_leg_convention"] == "gross"
         assert details.get("valuation_status") != "no_path"
         assert "unavailable_reason" not in details
 
@@ -389,3 +392,69 @@ class TestLendingStableDepeg:
         assert value_usd == Decimal("6250")  # 5000 sUSDe * $1.25, valued normally (not degraded)
         assert details.get("valuation_status") != "no_path"
         assert "unavailable_reason" not in details
+
+
+class TestSupplyConventionMarkerAtTheCallSite:
+    """VIB-5857: `supply_leg_convention` is a SUPPLY-only claim, asserted on the
+    PERSISTED PAYLOAD rather than on the helper that builds it.
+
+    `_reprice_lending_on_chain_enriched` builds one `enriched` dict per call and
+    is dispatched for a reserve's BORROW leg as well as its SUPPLY leg
+    (`_reprice_position_enriched` routes both types here), so an unconditional
+    stamp persisted a SUPPLY-only claim onto debt legs in `positions_json`.
+
+    This lives here, at the real call site, because a unit test of the marker
+    helper alone does NOT guard the defect: re-adding the literal
+    `"supply_leg_convention": "gross"` to the `enriched` dict restores the bug
+    with every helper-level assertion still green. Found by the delta review of
+    PR #3775, which also established that no test anywhere drove this repricer
+    with a BORROW leg.
+    """
+
+    def _valuer_with_reader(self, on_chain):
+        valuer = PortfolioValuer(gateway_client=MagicMock())
+        valuer._lending_reader = MagicMock()
+        valuer._lending_reader.read_position.return_value = on_chain
+        return valuer
+
+    def _same_reserve_loop(self):
+        return LendingPositionOnChain(
+            asset_address=USDC,
+            current_atoken_balance=5_000_000_000,  # 5000 USDC supplied
+            current_stable_debt=0,
+            current_variable_debt=1_000_000_000,  # 1000 USDC borrowed, same reserve
+            liquidity_rate=0,
+            usage_as_collateral_enabled=True,
+        )
+
+    def test_borrow_leg_payload_does_not_carry_the_marker(self):
+        valuer = self._valuer_with_reader(self._same_reserve_loop())
+        market = MagicMock()
+        market.price.return_value = Decimal("1.0")
+
+        with patch.object(PortfolioValuer, "_get_token_decimals", return_value=6):
+            result = valuer._reprice_lending_on_chain_enriched(_lending_position("BORROW", "USDC"), "arbitrum", market)
+
+        assert result is not None
+        value_usd, details = result
+        # The debt leg is signed negative and is NOT gross collateral.
+        assert value_usd == Decimal("-1000")
+        assert "supply_leg_convention" not in details, (
+            "a BORROW leg must not claim the SUPPLY-only gross convention — "
+            "a reader that trusts the marker without checking the leg's sign "
+            "would classify this debt leg as gross collateral"
+        )
+
+    def test_supply_leg_payload_still_carries_the_marker(self):
+        """The other arm: scoping the marker must not remove it from SUPPLY."""
+        valuer = self._valuer_with_reader(self._same_reserve_loop())
+        market = MagicMock()
+        market.price.return_value = Decimal("1.0")
+
+        with patch.object(PortfolioValuer, "_get_token_decimals", return_value=6):
+            result = valuer._reprice_lending_on_chain_enriched(_lending_position("SUPPLY", "USDC"), "arbitrum", market)
+
+        assert result is not None
+        value_usd, details = result
+        assert value_usd == Decimal("5000")  # GROSS collateral, not net of the 1000 debt
+        assert details["supply_leg_convention"] == "gross"

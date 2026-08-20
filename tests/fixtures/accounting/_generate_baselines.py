@@ -819,7 +819,18 @@ def generate_looping_fixture(db_path: str | Path) -> None:
             ("BORROW", "WETH", "0.05", "WETH", "0.05", "0xa3", debt_key, "LENDING_DEBT", "INCREASE", "lending"),
             ("REPAY", "WETH", "0.1", "WETH", "0.1", "0xa4", debt_key, "LENDING_DEBT", "DECREASE", "lending"),
             ("REPAY", "WETH", "0.15", "WETH", "0.15", "0xa5", debt_key, "LENDING_DEBT", "CLOSE", "lending"),
-            ("WITHDRAW", "aUSDC", "1000.0", "USDC", "1000.0", "0xa6", coll_key, "LENDING_COLLATERAL", "CLOSE", "lending"),
+            (
+                "WITHDRAW",
+                "aUSDC",
+                "1000.0",
+                "USDC",
+                "1000.0",
+                "0xa6",
+                coll_key,
+                "LENDING_COLLATERAL",
+                "CLOSE",
+                "lending",
+            ),
         ]
 
         for idx, (
@@ -850,7 +861,9 @@ def generate_looping_fixture(db_path: str | Path) -> None:
                 protocol=protocol,
                 tx_hash=tx,
                 post_state={
-                    "collateral_value_usd": "1000.0" if pos_type == "LENDING_COLLATERAL" and ev_type != "CLOSE" else "0",
+                    "collateral_value_usd": "1000.0"
+                    if pos_type == "LENDING_COLLATERAL" and ev_type != "CLOSE"
+                    else "0",
                     "debt_value_usd": "500.0" if pos_type == "LENDING_DEBT" and ev_type not in ("CLOSE",) else "0",
                     "health_factor": "2.0",
                 },
@@ -1446,6 +1459,378 @@ def generate_looping_debt_open_fixture(db_path: str | Path) -> None:
             # ``or``-drop defect, and G5 FAILs on exactly that signature; this
             # fixture isolates ONE defect (VIB-5857), so it does not encode a
             # second one.
+            initial_value_usd=str(first_equity),
+            gas_spent_usd=str(sum(gas_usd, Decimal("0"))),
+            total_value_usd=str(last_total),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# ─── Same-reserve looping fixture (VIB-5857 companion) ────────────────────
+#
+# ``looping_debt_open`` deliberately keeps its collateral and debt on DISJOINT
+# reserves (WBNB supply / USDC debt) because at the time it was frozen the
+# same-reserve SUPPLY-leg shape was undecided (the VIB-5857 "landmine": a
+# net-of-debt SUPPLY leg beside a signed BORROW leg double-subtracts under
+# ``NAV = total_value_usd − debt_mark``). VIB-5857 resolved the convention:
+# the SUPPLY leg carries GROSS collateral value; debt is represented ONLY by
+# the negative BORROW leg. This fixture is the same-reserve companion that
+# makes BOTH halves of that decision measurable:
+#
+# * legs are written in the ratified GROSS shape, so under the netted
+#   ``_snapshot_equity`` the books tie exactly (G6 gap 0, PASS);
+# * ``test_looping_same_reserve_vib5857.py`` degrades a COPY into the legacy
+#   net-SUPPLY shape and shows the double-subtract reappear — the pinned
+#   ``−24000`` contract shape (``test_netting_parity.py``) at fixture level.
+#
+# Economics mirror ``looping_debt_open`` line for line (same magnitudes, flat
+# marks, measured-zero interest, gas-only NAV movement) so the only variable
+# between the two fixtures is the reserve topology.
+#
+# Position keys: a same-reserve loop derives THE SAME key for its SUPPLY and
+# BORROW events (``lending_accounting._derive_position_key`` =
+# ``lending:{chain}:{protocol}:{wallet}:{asset}`` — no leg discriminator).
+# This fixture uses that production-derived colliding key on purpose rather
+# than inventing a private discriminator; the identity conflation itself is a
+# separate, pre-existing defect (VIB-6697), and none of the cells this fixture
+# pins depend on key uniqueness (the basis store skips the amount_token-less
+# BORROW/REPAY rows as policy-v1 legacy, same as ``looping_debt_open`` /
+# VIB-6571).
+
+# Same-reserve marks: everything is WBNB at one flat price.
+_LSR_SUPPLY_END_USD = Decimal("2.923350182028013944740031133")
+_LSR_DEBT_END_USD = Decimal("0.87001967417207508600")
+_LSR_WITHDRAW_USD = Decimal("1.00")
+_LSR_REPAY_PRINCIPAL_USD = Decimal("0.50")
+_LSR_SUPPLY_OPEN_USD = _LSR_SUPPLY_END_USD + _LSR_WITHDRAW_USD
+_LSR_DEBT_OPEN_USD = _LSR_DEBT_END_USD + _LSR_REPAY_PRINCIPAL_USD
+
+# ONE key for both legs — exactly what ``_derive_position_key`` yields for a
+# same-reserve loop (see the module comment above).
+_LSR_KEY = "lending:bsc:aave_v3:wallet:WBNB"
+
+
+def _lsr_reserve_details(supply_usd: Decimal, debt_usd: Decimal) -> dict:
+    """The enriched reserve read BOTH legs share.
+
+    Production values a same-reserve loop by reading ONE reserve
+    (``getUserReserveData``) for each leg: the read returns the aToken balance
+    AND the debt together, so the SUPPLY leg's details carry a non-zero
+    ``debt_value_usd`` and the BORROW leg's details carry a non-zero
+    ``supply_value_usd``. ``net_value_usd`` = supply − debt for both.
+    ``supply_leg_convention: "gross"`` is the VIB-5857 schema marker the valuer
+    stamps: ``value_usd`` on a SUPPLY leg under this marker is GROSS collateral,
+    never net-of-debt.
+    """
+    supply_units = _ldo_units(supply_usd, _LDO_PRICE_BNB)
+    debt_units = _ldo_units(debt_usd, _LDO_PRICE_BNB)
+    return {
+        "amount": supply_units,
+        "asset": "WBNB",
+        "asset_address": _LDO_WBNB_ADDR,
+        "borrow_balance": debt_units,
+        "collateral_enabled": True,
+        "debt_value_usd": str(debt_usd),
+        "health_factor": _LDO_HEALTH_FACTOR,
+        "net_value_usd": str(supply_usd - debt_usd),
+        "stable_debt_balance": "0",
+        "supply_apy_pct": "0.010846239415788261974020200",
+        "supply_balance": supply_units,
+        "supply_leg_convention": "gross",
+        "supply_value_usd": str(supply_usd),
+        "valuation_source": "on_chain",
+        "variable_debt_balance": debt_units,
+        "wallet_address": _WALLET,
+    }
+
+
+def _lsr_supply_leg(supply_usd: Decimal, debt_usd: Decimal, ts: str, ledger_entry_id: str) -> dict:
+    """Same-reserve SUPPLY leg — ``value_usd`` is GROSS collateral (VIB-5857).
+
+    The legacy (pre-VIB-5857) writer put ``net_value_usd`` here instead; the
+    companion test degrades a copy of this fixture into that shape to prove the
+    double-subtract is measurable.
+    """
+    return {
+        "position_type": "SUPPLY",
+        "protocol": _LDO_PROTOCOL,
+        "chain": _LDO_CHAIN,
+        "value_usd": str(supply_usd),
+        "label": "aave_v3 SUPPLY",
+        "tokens": [],
+        "details": _lsr_reserve_details(supply_usd, debt_usd),
+        "cost_basis_usd": str(supply_usd),
+        "unrealized_pnl_usd": "0",
+        "entry_timestamp": _ts(60),
+        "last_update_timestamp": ts,
+        "ledger_entry_id": ledger_entry_id,
+    }
+
+
+def _lsr_borrow_leg(supply_usd: Decimal, debt_usd: Decimal, ts: str, ledger_entry_id: str) -> dict:
+    """Same-reserve BORROW leg — signed negative, per the canonical money
+    representation (blueprint 27 §7.11). Shares the reserve read (and therefore
+    the non-zero ``supply_value_usd`` in its details) with the SUPPLY leg."""
+    return {
+        "position_type": "BORROW",
+        "protocol": _LDO_PROTOCOL,
+        "chain": _LDO_CHAIN,
+        "value_usd": str(-debt_usd),
+        "label": "aave_v3 BORROW",
+        "tokens": [],
+        "details": _lsr_reserve_details(supply_usd, debt_usd),
+        "cost_basis_usd": str(debt_usd),
+        "unrealized_pnl_usd": "0",
+        "entry_timestamp": _ts(120),
+        "last_update_timestamp": ts,
+        "ledger_entry_id": ledger_entry_id,
+    }
+
+
+def _lsr_lending_payload(event_type: str, amount_usd: Decimal, units: str) -> dict:
+    """Lending payloads for the four same-reserve lifecycle legs.
+
+    Identical to ``_ldo_lending_payload`` except every leg's asset is WBNB
+    (same reserve) and every leg shares ``_LSR_KEY``. Interest is a MEASURED
+    ``"0"`` on both carry legs (Empty != Zero) for the same reason as the
+    disjoint-reserve fixture. Deliberately omits ``amount_token`` to stay
+    corpus-consistent (VIB-6571) — the basis store skips BORROW/REPAY as
+    policy-v1 legacy, which also keeps the shared position key inert for
+    basis reconstruction.
+    """
+    base = {
+        "event_type": event_type,
+        "protocol": _LDO_PROTOCOL,
+        "asset": "WBNB",
+        "amount": units,
+        "amount_usd": str(amount_usd),
+        "confidence": "HIGH",
+        "position_key": _LSR_KEY,
+    }
+    if event_type == "SUPPLY":
+        base["supply_apr_pct"] = "0.0108"
+        base["health_factor_after"] = _LDO_HEALTH_FACTOR
+        base["cost_basis_usd"] = str(amount_usd)
+    elif event_type == "WITHDRAW":
+        base["interest_accrued_usd"] = "0"
+        base["interest_delta_usd"] = "0"
+        base["realized_pnl_usd"] = "0"
+        base["health_factor_after"] = _LDO_HEALTH_FACTOR
+    elif event_type == "BORROW":
+        base["borrowed_amount"] = units
+        base["borrowed_amount_usd"] = str(amount_usd)
+        base["borrow_apr_pct"] = "3.1848"
+        base["health_factor_after"] = _LDO_HEALTH_FACTOR
+        base.pop("amount", None)
+        base.pop("amount_usd", None)
+    elif event_type == "REPAY":
+        base["principal_repaid"] = units
+        base["principal_repaid_usd"] = str(amount_usd)
+        base["interest_paid"] = "0"
+        base["interest_paid_usd"] = "0"
+        base["principal_delta_usd"] = str(amount_usd)
+        base["interest_delta_usd"] = "0"
+        base["health_factor_after"] = _LDO_HEALTH_FACTOR
+    return base
+
+
+def generate_looping_same_reserve_fixture(db_path: str | Path) -> None:
+    """Generate the same-reserve debt-open lending fixture (VIB-5857 companion).
+
+    Structure mirrors ``generate_looping_debt_open_fixture`` — 4 ledger rows
+    (SUPPLY → BORROW → REPAY → WITHDRAW), 4 accounting events, 4 position
+    events, 7 portfolio snapshots, 1 portfolio_metrics row, partial deleverage
+    so a collateral leg AND a debt leg are both live at the endpoint — except
+    that supply and debt sit on the SAME WBNB reserve, the topology the
+    disjoint fixture explicitly excludes. SUPPLY legs are written in the
+    ratified GROSS shape (``value_usd = supply_value_usd``, VIB-5857) with the
+    ``supply_leg_convention: "gross"`` marker.
+
+    Scored under the EXISTING ``looping`` ScorecardProfile, same as
+    ``looping_debt_open`` — only the STIMULUS differs.
+    """
+    db_path = Path(db_path)
+    conn = _connect(db_path)
+    try:
+        cycle = "cycle-loop-same-reserve-001"
+
+        # ── Native-gas ladder (identical to the disjoint fixture) ───────
+        bnb = [_LDO_BNB_START]
+        for g in _LDO_GAS_BNB:
+            bnb.append(bnb[-1] - g)
+        gas_usd = [g * _LDO_PRICE_BNB for g in _LDO_GAS_BNB]
+
+        # ── Four landed transactions — all WBNB, one shared key ─────────
+        steps = (
+            ("SUPPLY", _LSR_SUPPLY_OPEN_USD, "LENDING_COLLATERAL", "OPEN"),
+            ("BORROW", _LSR_DEBT_OPEN_USD, "LENDING_DEBT", "OPEN"),
+            ("REPAY", _LSR_REPAY_PRINCIPAL_USD, "LENDING_DEBT", "DECREASE"),
+            ("WITHDRAW", _LSR_WITHDRAW_USD, "LENDING_COLLATERAL", "DECREASE"),
+        )
+        ledger_ids: list[str] = []
+        for idx, (event_type, amount_usd, pos_type, ev_type) in enumerate(steps, start=1):
+            ts = _ts(60 * idx)
+            ledger_id = _stable_id("tl-lsr", idx)
+            ledger_ids.append(ledger_id)
+            units = _ldo_units(amount_usd, _LDO_PRICE_BNB)
+            _insert_ledger(
+                conn,
+                row_id=ledger_id,
+                cycle_id=cycle,
+                timestamp=ts,
+                intent_type=event_type,
+                token_in="WBNB",
+                amount_in=units,
+                token_out="WBNB",
+                amount_out=units,
+                chain=_LDO_CHAIN,
+                protocol=_LDO_PROTOCOL,
+                tx_hash=f"0xlsr{idx}",
+                gas_usd=str(gas_usd[idx - 1]),
+                post_state={"health_factor": _LDO_HEALTH_FACTOR},
+            )
+            _insert_acct_event(
+                conn,
+                row_id=_stable_id("ae-lsr", idx),
+                cycle_id=cycle,
+                timestamp=ts,
+                chain=_LDO_CHAIN,
+                protocol=_LDO_PROTOCOL,
+                event_type=event_type,
+                position_key=_LSR_KEY,
+                ledger_entry_id=ledger_id,
+                tx_hash=f"0xlsr{idx}",
+                payload=_lsr_lending_payload(event_type, amount_usd, units),
+                primitive_name="lending",
+            )
+            _insert_position_event(
+                conn,
+                row_id=_stable_id("pe-lsr", idx),
+                cycle_id=cycle,
+                timestamp=ts,
+                position_id=_LSR_KEY,
+                position_type=pos_type,
+                event_type=ev_type,
+                chain=_LDO_CHAIN,
+                protocol=_LDO_PROTOCOL,
+                token0="WBNB",
+                token1="",
+                amount0=units,
+                amount1="",
+                value_usd=str(amount_usd),
+                tx_hash=f"0xlsr{idx}",
+                ledger_entry_id=ledger_id,
+                gas_usd=str(gas_usd[idx - 1]),
+            )
+
+        # ── Seven snapshots ──────────────────────────────────────────────
+        tl_supply, tl_borrow, tl_repay, tl_withdraw = ledger_ids
+        supply_open, supply_end = _LSR_SUPPLY_OPEN_USD, _LSR_SUPPLY_END_USD
+        debt_open, debt_end = _LSR_DEBT_OPEN_USD, _LSR_DEBT_END_USD
+
+        def _held_wbnb(v: Decimal, ts: str, src: str) -> dict:
+            return _ldo_token_leg("WBNB", v, _LDO_PRICE_BNB, ts, src)
+
+        # (offset, bnb_index, legs). Borrowed WBNB sits in the wallet as a
+        # TOKEN leg, exactly like the disjoint fixture's borrowed USDC; after
+        # the WITHDRAW the withdrawn WBNB joins it as a second wallet lot.
+        ladder: tuple[tuple[int, int, list[dict]], ...] = (
+            # 1 — pre-trade: holds the WBNB it is about to supply.
+            (0, 0, [_held_wbnb(supply_open, _ts(0), "")]),
+            # 2 — after SUPPLY: the WBNB became collateral. No debt yet, so the
+            #     gross and net SUPPLY-leg shapes coincide on this row.
+            (70, 1, [_lsr_supply_leg(supply_open, Decimal("0"), _ts(70), tl_supply)]),
+            # 3 — after BORROW: same-reserve debt leg live, borrowed WBNB in hand.
+            (
+                130,
+                2,
+                [
+                    _lsr_supply_leg(supply_open, debt_open, _ts(130), tl_supply),
+                    _lsr_borrow_leg(supply_open, debt_open, _ts(130), tl_borrow),
+                    _held_wbnb(debt_open, _ts(130), tl_borrow),
+                ],
+            ),
+            # 4 — idle hold, no transaction. Same legs, later marks.
+            (
+                160,
+                2,
+                [
+                    _lsr_supply_leg(supply_open, debt_open, _ts(160), tl_supply),
+                    _lsr_borrow_leg(supply_open, debt_open, _ts(160), tl_borrow),
+                    _held_wbnb(debt_open, _ts(160), tl_borrow),
+                ],
+            ),
+            # 5 — after partial REPAY: debt shrinks, borrowed WBNB leaves the wallet.
+            (
+                190,
+                3,
+                [
+                    _lsr_supply_leg(supply_open, debt_end, _ts(190), tl_supply),
+                    _lsr_borrow_leg(supply_open, debt_end, _ts(190), tl_repay),
+                    _held_wbnb(debt_end, _ts(190), tl_borrow),
+                ],
+            ),
+            # 6 — after partial WITHDRAW: collateral shrinks, WBNB returns.
+            (
+                250,
+                4,
+                [
+                    _lsr_supply_leg(supply_end, debt_end, _ts(250), tl_withdraw),
+                    _lsr_borrow_leg(supply_end, debt_end, _ts(250), tl_repay),
+                    _held_wbnb(debt_end, _ts(250), tl_borrow),
+                    _held_wbnb(_LSR_WITHDRAW_USD, _ts(250), tl_withdraw),
+                ],
+            ),
+            # 7 — THE ENDPOINT. Still leveraged on ONE reserve: gross collateral
+            #     leg AND signed-negative debt leg, same asset.
+            (
+                310,
+                4,
+                [
+                    _lsr_supply_leg(supply_end, debt_end, _ts(310), tl_withdraw),
+                    _lsr_borrow_leg(supply_end, debt_end, _ts(310), tl_repay),
+                    _held_wbnb(debt_end, _ts(310), tl_borrow),
+                    _held_wbnb(_LSR_WITHDRAW_USD, _ts(310), tl_withdraw),
+                ],
+            ),
+        )
+
+        first_equity: Decimal | None = None
+        last_total: Decimal | None = None
+        for i, (offset, bnb_idx, legs) in enumerate(ladder, start=1):
+            values = [Decimal(leg["value_usd"]) for leg in legs]
+            # VIB-3614: the deployed column is Σ POSITIVE value_usd — the debt
+            # leg is DROPPED here and must be re-subtracted by any NAV consumer.
+            # With the GROSS SUPPLY shape this is gross collateral + wallet lots.
+            total = sum((v for v in values if v > 0), Decimal("0"))
+            # deployed_capital_usd is GROSS Σ|cost_basis| (blueprint 27 §7.11).
+            deployed = sum((abs(Decimal(leg["cost_basis_usd"])) for leg in legs), Decimal("0"))
+            cash = bnb[bnb_idx] * _LDO_PRICE_BNB
+            if first_equity is None:
+                first_equity = total + cash
+            last_total = total
+            _insert_portfolio_snapshot(
+                conn,
+                cycle_id=cycle,
+                iteration_number=i,
+                timestamp=_ts(offset),
+                total_value_usd=str(total),
+                available_cash_usd=str(cash),
+                deployed_capital_usd=str(deployed),
+                chain=_LDO_CHAIN,
+                positions_json=_ldo_positions_json(legs),
+                token_prices_json=_LDO_TOKEN_PRICES_JSON,
+                wallet_balances_json=_ldo_wallet_balances_json(bnb[bnb_idx]),
+            )
+
+        assert first_equity is not None and last_total is not None
+        _insert_portfolio_metrics(
+            conn,
+            # Opening EQUITY (deployed + cash) — see the VIB-6349 note on the
+            # disjoint fixture; snapshot 1 carries no debt so gross and net
+            # equity coincide at the baseline.
             initial_value_usd=str(first_equity),
             gas_spent_usd=str(sum(gas_usd, Decimal("0"))),
             total_value_usd=str(last_total),

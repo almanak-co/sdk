@@ -510,8 +510,12 @@ class TestPortfolioValuerLendingRepricing:
         ):
             result = valuer._reprice_position(position, "arbitrum", market)
 
-        # Expected: supply 5000 - debt 1000 = 4000 (net, for SUPPLY position)
-        assert result == Decimal("4000")
+        # VIB-5857: a SUPPLY leg carries GROSS collateral ($5000), never
+        # net-of-debt ($4000). The same-reserve debt belongs solely to the
+        # strategy's BORROW leg (negative), so the read-path netting
+        # ``NAV = total_value_usd − debt_mark`` subtracts it exactly once —
+        # a net SUPPLY leg beside a signed BORROW leg double-subtracts.
+        assert result == Decimal("5000")
 
     def test_borrow_position_returns_debt_value(self):
         """BORROW position returns the debt value, not net."""

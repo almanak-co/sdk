@@ -34,11 +34,13 @@ either way — it is a measured-ness cell, not a value cell. G6's ``gap_usd`` is
 value, it already carries a numeric ratchet floor, and its status is FAIL
 (rank 0), so magnitude is the only thing that can move.
 
-The defect under test is VIB-5857 — ``_snapshot_equity`` sums
+The defect under test was VIB-5857 — ``_snapshot_equity`` summed
 ``total_value_usd + available_cash_usd`` while ``total_value_usd`` is Σ POSITIVE
-``value_usd`` (the debt leg dropped, VIB-3614), so mid-run NAV overstates
-leveraged equity by the entire debt. Fixing it is explicitly NOT in scope here;
-this file only proves the instrument can now see it.
+``value_usd`` (the debt leg dropped, VIB-3614), so mid-run NAV overstated
+leveraged equity by the entire debt. The fix has since LANDED (production
+``_snapshot_equity`` is now the netted projection); this file keeps measuring
+both NAMED projections against the frozen DB, which is exactly why it survived
+the fix unchanged — see the paragraph below.
 
 These tests are themselves negative-controlled: `test_probe_is_dead_*` degrade a
 COPY of the fixture in the two ways that would silently kill the probe (empty the
@@ -258,9 +260,11 @@ class TestStructuralNonVacuity:
         assert saw_debt, "no snapshot carries a debt leg — the fixture is inert"
 
     def test_collateral_and_debt_are_disjoint_reserves(self) -> None:
-        """Same-reserve SUPPLY+BORROW is the VIB-5857 landmine and belongs in a
-        later, explicit fixture. Freezing an invented same-reserve payload into
-        the FIRST 'can fail' corpus would risk encoding the landmine as truth."""
+        """Same-reserve SUPPLY+BORROW is the VIB-5857 landmine and lives in its
+        own explicit fixture (``looping_same_reserve``, scored under the same
+        profile; see ``test_looping_same_reserve_vib5857.py`` for the leg-shape
+        × projection matrix). THIS fixture stays disjoint so the two stimuli
+        remain independently meaningful."""
         legs = json.loads(str(_snapshots(_FIXTURE_DB)[-1]["positions_json"]))["positions"]
         supply = {leg["details"]["asset"] for leg in legs if leg["position_type"] == "SUPPLY"}
         borrow = {leg["details"]["asset"] for leg in legs if leg["position_type"] == "BORROW"}
@@ -420,10 +424,16 @@ def test_fixture_is_registered_in_the_ratchet() -> None:
 
     assert "looping_debt_open" in gate.PRIMITIVES
     assert gate._FIXTURE_SCORING_PROFILE["looping_debt_open"] == _PROFILE
-    # The numeric floor is what makes a FAIL cell ratchetable at all: status is
-    # already rank 0, so magnitude is the only thing left that can regress.
+    # The numeric floor keeps G6's magnitude ratcheted. While VIB-5857 was open
+    # the floor was the endpoint debt_mark (0.87…) at status FAIL; landing the
+    # netted ``_snapshot_equity`` moved it to an exact 0 at status PASS, and the
+    # ratchet's job is now to hold the books tied — any re-widening of the gap
+    # is a regression the gate reports.
     manifest = json.loads((_FIXTURE_DIR / "expected_cells.json").read_text())
-    assert Decimal(manifest["cell_metrics"]["G6"]["gap_usd"]) > 0
+    # ``== 0``, not ``>= 0``: gap_usd is declared non-negative by the ratchet
+    # (``_METRIC_NON_NEGATIVE``), so ``>= 0`` could never fail. The books tie
+    # exactly on this fixture; any re-widening must flip this red.
+    assert Decimal(manifest["cell_metrics"]["G6"]["gap_usd"]) == 0
 
 
 def _canonical_dump(db: Path) -> str:

@@ -124,9 +124,16 @@ def read_position_decimal(pos: Any, key: str) -> Decimal | None:
     if raw is None or raw == "":
         return None
     try:
-        return Decimal(str(raw))
+        value = Decimal(str(raw))
     except (InvalidOperation, ValueError, TypeError):
         return None
+    # A NaN is not a measurement (Empty≠Zero): parsing it as a Decimal succeeds
+    # but every ordered comparison downstream raises InvalidOperation, turning a
+    # single poisoned leg into a crash of the whole netting read. Treat it as
+    # unmeasured, exactly like an unparsable string (VIB-5857 hardening).
+    if value.is_nan():
+        return None
+    return value
 
 
 def compute_net_debt_projection(items: Any) -> tuple[int, Decimal, Decimal, Decimal]:

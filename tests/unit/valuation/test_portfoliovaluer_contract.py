@@ -19,7 +19,9 @@ Source conventions under test (verified against HEAD; do NOT re-derive):
     wallet pseudo-positions, dropping debt legs (VIB-3614) — ``portfolio_valuer.py:751-762``.
   * ``deployed_capital_usd`` = Σ ``abs(cost_basis_usd)`` (GROSS) — ``portfolio_valuer.py:707-710``.
   * lending sign convention: BORROW ``value_usd = -debt_value_usd``; SUPPLY
-    ``value_usd = net_value_usd`` — ``portfolio_valuer.py:2571-2574``.
+    ``value_usd = supply_value_usd`` (GROSS — VIB-5857 ratified gross over the
+    former ``net_value_usd``; see ``_reprice_lending_on_chain_enriched`` /
+    ``_reprice_lending_on_chain``).
   * NAV = ``total_value_usd - debt_mark`` where ``debt_mark`` = Σ |negative value_usd|
     (``compute_net_debt_projection``); ties to true net equity for the canonical
     separate-reserve shape (VIB-4983 / VIB-5201).
@@ -169,6 +171,15 @@ def test_net_leg_shape_double_subtracts_debt():
     ``debt_mark`` again → NAV double-subtracts to -24000. Pinning this exact wrong value
     means any future change that makes the unsafe shape "work" (produce $8,000) flips this
     test red, forcing a deliberate decision rather than silent convention drift.
+
+    THE DECISION WAS MADE — VIB-5857 (2026-08-18) ratified GROSS: the valuer now
+    emits ``value_usd = supply_value_usd`` on every SUPPLY leg (marker
+    ``supply_leg_convention: "gross"``), so production no longer produces this
+    shape. The pin STAYS: it is what makes a historical net-shaped snapshot
+    (rows written before the marker existed) unsafe to re-read under the netted
+    contract, and what catches any regression that re-nets the SUPPLY leg. The
+    fixture-level twin is ``test_looping_same_reserve_vib5857.py``'s
+    shape × projection matrix.
     """
     positions = _net_supply_plus_borrow()
     _count, debt_mark, _debt_cost, _net_cost = compute_net_debt_projection(positions)
@@ -198,3 +209,38 @@ def test_deployed_capital_usd_is_gross():
     assert debt_cost == Decimal("31800")
     # The two are not expected to agree — gross − net = 63600.
     assert _valuer_deployed_capital_usd(positions) - net_cost == Decimal("63600")
+
+
+class TestSupplyConventionMarkerIsSupplyScoped:
+    """VIB-5857: ``supply_leg_convention`` is a SUPPLY-leg claim, so only a
+    SUPPLY leg may carry it.
+
+    ``_reprice_lending_on_chain_enriched`` builds one ``enriched`` dict per call
+    and runs for a reserve's BORROW leg as well as its SUPPLY leg, so stamping
+    the marker unconditionally persisted a SUPPLY-only claim onto debt legs in
+    ``positions_json``. Nothing misreads it today, because both readers
+    (``_legacy_net_supply_debt`` and ``_missing_debt_leg_rows``) filter on
+    ``value_usd > 0`` before trusting it — but that is incidental protection,
+    not a contract: a future reader that trusts the marker without also checking
+    the sign would classify a debt leg as gross collateral.
+
+    Found by CodeRabbit on PR #3775.
+    """
+
+    def test_supply_leg_still_carries_the_marker(self):
+        from almanak.framework.teardown.models import PositionType
+        from almanak.framework.valuation.portfolio_valuer import _supply_convention_marker
+
+        assert _supply_convention_marker(PositionType.SUPPLY) == {"supply_leg_convention": "gross"}
+
+    def test_borrow_leg_is_not_labelled_gross_supply(self):
+        from almanak.framework.teardown.models import PositionType
+        from almanak.framework.valuation.portfolio_valuer import _supply_convention_marker
+
+        assert _supply_convention_marker(PositionType.BORROW) == {}
+
+    def test_non_lending_leg_is_not_labelled_gross_supply(self):
+        from almanak.framework.teardown.models import PositionType
+        from almanak.framework.valuation.portfolio_valuer import _supply_convention_marker
+
+        assert _supply_convention_marker(PositionType.PERP) == {}

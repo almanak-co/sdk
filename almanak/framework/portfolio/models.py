@@ -411,13 +411,18 @@ class PortfolioSnapshot:
     timestamp: datetime
     deployment_id: str
 
-    # Core values
+    # Core values.
+    # total_value_usd is Σ POSITIVE position value_usd — the negative debt leg
+    # is DROPPED (VIB-3614), so for a leveraged strategy this is GROSS
+    # collateral, not equity. NAV = total_value_usd − debt_mark +
+    # available_cash_usd, with debt_mark re-derived from the signed legs by
+    # valuation/net_debt.py (blueprint 27 §7.11; VIB-5857).
     total_value_usd: Decimal
     # Uninvested wallet funds. VIB-5057: wallet tokens backed by OPEN FIFO
     # swap-inventory lots are deployed strategy capital, NOT cash — the writer
     # subtracts their value here and surfaces them as TOKEN position rows
     # (details.source == "swap_inventory_lots") counted in total_value_usd.
-    # NAV (total_value_usd + available_cash_usd) is invariant under that split.
+    # NAV is invariant under that split (the moved value stays a positive leg).
     available_cash_usd: Decimal
 
     # Value confidence indicator for dashboard display

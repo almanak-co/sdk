@@ -1731,7 +1731,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
                 position_summary = self.get_open_positions()
                 from ..teardown.models import PositionType as _PT
 
-                non_perp_value = Decimal("0")
+                non_perp_positive_value = Decimal("0")
                 for p in position_summary.positions:
                     # VIB-5252: a strategy-reported PERP leg's value_usd is gross
                     # NOTIONAL (collateral × leverage), not net equity. Net equity
@@ -1747,22 +1747,57 @@ class IntentStrategy(StrategyBase[ConfigT]):
                     if p.position_type == _PT.PERP:
                         perp_notional_excluded = True
                         continue
+                    # VIB-5857: normalise the BORROW sign HERE, exactly as the
+                    # canonical valuer does on both its enriched and its fallback
+                    # lending paths ("strategies may report either the gross debt
+                    # as positive (framework negates) or an already-normalised
+                    # negative value"). Strategies do report the gross magnitude:
+                    # ``benqi_looping`` guards ``self._debt_usdc > _DUST_USD``,
+                    # ``morpho_looping`` guards ``live.debt_value_usd > dust_usd``.
+                    # ``debt_mark`` is SIGN-based (Σ|negative ``value_usd``|,
+                    # blueprint 27 §7.11), so copying that positive sign through
+                    # persists a row whose debt nets NOTHING and whose NAV reads
+                    # ``supply + debt``. An already-negative leg passes through
+                    # unchanged, and ``None`` stays ``None`` — unmeasured, never
+                    # coerced to a measured zero (Empty ≠ Zero).
+                    #
+                    # KNOWN BOUND (VIB-6720): this mirrors only two of the
+                    # valuer's three BORROW branches. The valuer additionally
+                    # treats ``value_usd == 0`` as NO SIGNAL and degrades the
+                    # snapshot to UNAVAILABLE; here a zero stays a MEASURED zero
+                    # at HIGH confidence. That matters because
+                    # ``pancakeswap_aave_carry_bsc`` emits both legs at ``0``
+                    # expecting the valuer to reprice them — and this fallback
+                    # runs precisely when the valuer failed. Pre-existing shape,
+                    # unchanged here; tracked rather than widened mid-PR.
+                    leg_value = p.value_usd
+                    if p.position_type == _PT.BORROW and leg_value is not None and leg_value > 0:
+                        leg_value = -leg_value
                     positions.append(
                         PositionValue(
                             position_type=p.position_type,
                             protocol=p.protocol,
                             chain=p.chain,
-                            value_usd=p.value_usd,
+                            value_usd=leg_value,
                             label=f"{p.protocol} {p.position_type.value}",
                             tokens=p.details.get("tokens", []),
                             details=p.details,
                         )
                     )
-                    non_perp_value += p.value_usd or Decimal("0")
-                # Preserve the declared total byte-identically when no perp leg was
-                # dropped (the common path); fall back to the non-perp leg sum only
-                # when a perp leg was excluded, so non-perp strategies are unaffected.
-                position_value = non_perp_value if perp_notional_excluded else position_summary.total_value_usd
+                    # VIB-3614 / VIB-5278 (closed by VIB-5857): the persisted
+                    # ``total_value_usd`` column is Σ POSITIVE ``value_usd`` —
+                    # the canonical valuer drops negative (debt) legs, and every
+                    # NAV consumer re-nets via ``total_value_usd − debt_mark``.
+                    # ``position_summary.total_value_usd`` is an UNSIGNED sum over
+                    # whatever the strategy reported (``TeardownPositionSummary``
+                    # sums ``p.value_usd`` verbatim), so stamping it here booked
+                    # the debt as an ASSET. Summing the sign-normalised legs
+                    # instead makes the column gross-of-debt as its contract says,
+                    # and the signed BORROW leg above gives ``debt_mark`` the debt
+                    # in its one canonical place.
+                    if leg_value is not None and leg_value > 0:
+                        non_perp_positive_value += leg_value
+                position_value = non_perp_positive_value
             except Exception as e:  # noqa: BLE001  # Intentional graceful degradation
                 logger.warning(f"Failed to get open positions: {e}")
                 positions_unavailable = True
@@ -1841,13 +1876,14 @@ class IntentStrategy(StrategyBase[ConfigT]):
                 deployment_id=self.deployment_id,
                 # VIB-3614: total_value_usd is strategy-scoped (open-position value only);
                 # wallet cash lives in available_cash_usd. Consumers reconstruct NAV as
-                # total_value_usd + available_cash_usd, so adding wallet_value here would
-                # double-count the wallet (VIB-5271). This aligns with the positions-only
-                # storage contract the canonical PortfolioValuer emits
-                # (portfolio_valuer.py: total_value_usd=position_value_positive). Note the
-                # canonical path additionally drops negative (debt) legs while this degraded
-                # fallback reports the raw position-summary total — residual divergence
-                # tracked in VIB-5278, pre-existing and out of scope here.
+                # total_value_usd − debt_mark + available_cash_usd (blueprint 27 §7.11),
+                # so adding wallet_value here would double-count the wallet (VIB-5271).
+                # This aligns with the positions-only storage contract the canonical
+                # PortfolioValuer emits (portfolio_valuer.py:
+                # total_value_usd=position_value_positive), INCLUDING dropping negative
+                # (debt) legs — the VIB-5278 divergence, closed by VIB-5857 because a
+                # net-shaped total behind this column makes the consumer-side debt_mark
+                # subtraction a double-subtract.
                 total_value_usd=position_value,
                 available_cash_usd=wallet_value,
                 # Degrade to ESTIMATED when positions could not be read, a perp

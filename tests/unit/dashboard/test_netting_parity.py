@@ -143,6 +143,12 @@ def test_net_supply_plus_borrow_double_subtracts_debt():
     this exact wrong value means a future change that makes this shape "work"
     silently (i.e. produce $8,000) flips this test red, forcing a deliberate
     decision rather than a silent convention drift.
+
+    The decision was made — VIB-5857 (2026-08-18) ratified GROSS SUPPLY legs,
+    so production no longer emits this shape (only historical rows, written
+    before the ``supply_leg_convention`` marker, still carry it). The pin stays
+    as the guard against re-netting the leg and against re-reading legacy rows
+    under the netted contract.
     """
     positions = _net_supply_plus_borrow()
     _count, debt_mark, _debt_cost, _net_cost = compute_net_debt_projection(positions)

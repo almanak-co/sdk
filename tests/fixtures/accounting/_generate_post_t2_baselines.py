@@ -35,6 +35,7 @@ from scripts.ci.check_accounting_ratchet import _FIXTURE_SCORING_PROFILE  # noqa
 from tests.fixtures.accounting._generate_baselines import (  # noqa: E402
     generate_looping_debt_open_fixture,
     generate_looping_fixture,
+    generate_looping_same_reserve_fixture,
     generate_lp_fixture,
     generate_perp_fixture,
     generate_settlement_fixture,
@@ -45,11 +46,19 @@ _PRIMITIVE_VERSION_MAP = {
     "lp": Primitive.LP,
     "looping": Primitive.LENDING,
     "looping_debt_open": Primitive.LENDING,
+    "looping_same_reserve": Primitive.LENDING,
     "perp": Primitive.PERP,
     "settlement": Primitive.SETTLEMENT,
 }
 
-_LEDGER_ROW_COUNT = {"lp": 4, "looping": 6, "looping_debt_open": 4, "perp": 4, "settlement": 4}
+_LEDGER_ROW_COUNT = {
+    "lp": 4,
+    "looping": 6,
+    "looping_debt_open": 4,
+    "looping_same_reserve": 4,
+    "perp": 4,
+    "settlement": 4,
+}
 
 
 def _emit(primitive: str, generator) -> None:
@@ -107,6 +116,7 @@ def main() -> None:
     _emit("lp", generate_lp_fixture)
     _emit("looping", generate_looping_fixture)
     _emit("looping_debt_open", generate_looping_debt_open_fixture)
+    _emit("looping_same_reserve", generate_looping_same_reserve_fixture)
     _emit("perp", generate_perp_fixture)
     _emit("settlement", generate_settlement_fixture)
 
