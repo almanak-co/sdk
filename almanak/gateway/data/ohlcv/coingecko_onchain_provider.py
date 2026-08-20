@@ -791,7 +791,16 @@ class CoinGeckoOnchainOHLCVProvider:
         url = f"{self._api_base}/networks/{network}/pools/{exact_request.pool_address}/ohlcv/{tf_params.timeframe}"
         params: dict[str, str | int] = {
             "aggregate": tf_params.aggregate,
-            "before_timestamp": end_ts,
+            # Upstream ``before_timestamp`` is INCLUSIVE of the bucket it names,
+            # while ``expected_timestamps`` is the half-open range
+            # ``[start_ts, end_ts)``. Passing ``end_ts`` therefore asked for the
+            # window shifted one bucket late: the ``end_ts`` candle came back and
+            # was discarded by the expected-set filter, while ``start_ts`` was
+            # never fetched at all, so the coverage check below could never pass
+            # and every exact request failed closed (VIB-6734). Anchor on the
+            # last expected bucket -- derived from the same tuple the coverage
+            # check uses, so the query cannot drift from the expectation.
+            "before_timestamp": exact_request.expected_timestamps[-1],
             "limit": len(exact_request.expected_timestamps),
             "currency": "token",
             # Address form avoids depending on CoinGecko's base/quote naming.

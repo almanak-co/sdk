@@ -384,14 +384,73 @@ class TestExactPoolOHLCV:
         assert result.candles[0].volume == Decimal(0)
         call = session.get.call_args
         assert call.args[0].endswith(f"/pools/{EXACT_POOL}/ohlcv/hour")
+        # ``before_timestamp`` is INCLUSIVE upstream and must name the LAST
+        # expected bucket (EXACT_START + 3600), not the exclusive end of the
+        # half-open interval (EXACT_START + 7200). This assertion previously
+        # pinned the exclusive end, which made every live request come back one
+        # bucket short and fail the coverage check below (VIB-6734).
         assert call.kwargs["params"] == {
             "aggregate": "1",
-            "before_timestamp": EXACT_START + 7200,
+            "before_timestamp": EXACT_START + 3600,
             "limit": 2,
             "currency": "token",
             "token": EXACT_TOKEN0,
             "include_empty_intervals": "true",
         }
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("timeframe", "buckets"),
+        [
+            (OHLCVTimeframe.ONE_HOUR, 1),
+            (OHLCVTimeframe.ONE_HOUR, 2),
+            (OHLCVTimeframe.ONE_HOUR, 5),
+            (OHLCVTimeframe.FIFTEEN_MINUTES, 4),
+        ],
+    )
+    async def test_exact_pool_query_window_covers_every_expected_bucket_VIB_6734(
+        self,
+        provider: CoinGeckoOnchainOHLCVProvider,
+        timeframe: OHLCVTimeframe,
+        buckets: int,
+    ) -> None:
+        """The outgoing query must be able to return every expected bucket.
+
+        Upstream ``before_timestamp`` is inclusive, so anchoring it on the
+        exclusive ``end_ts`` shifts the window one bucket late: ``start_ts`` is
+        never requested and the coverage check can never pass. That made the
+        exact lane fail closed on every input (VIB-6734).
+
+        This pins the relationship rather than a literal, so it fails for any
+        timeframe or window length if the anchoring regresses.
+        """
+        span = timeframe.seconds * buckets
+        expected = tuple(range(EXACT_START, EXACT_START + span, timeframe.seconds))
+        session = self._session(_make_exact_response(timestamps=expected))
+        provider._session = session
+
+        await provider.get_exact_pool_ohlcv(
+            chain="ethereum",
+            pool_address=EXACT_POOL,
+            base_token_address=EXACT_TOKEN0,
+            quote_token_address=EXACT_TOKEN1,
+            timeframe=timeframe,
+            start_ts=EXACT_START,
+            end_ts=EXACT_START + span,
+            binding_hash="11" * 32,
+            feature_identity="22" * 32,
+        )
+
+        params = session.get.call_args.kwargs["params"]
+        assert params["limit"] == len(expected)
+        # Inclusive anchor on the newest expected bucket.
+        assert params["before_timestamp"] == expected[-1]
+        # The inclusive window [anchor - (limit-1)*tf, anchor] must contain the
+        # oldest expected bucket -- the property that actually has to hold.
+        oldest_reachable = params["before_timestamp"] - (params["limit"] - 1) * timeframe.seconds
+        assert oldest_reachable == expected[0], (
+            f"query window starts at {oldest_reachable} but the oldest expected bucket is {expected[0]}"
+        )
 
     @pytest.mark.asyncio
     async def test_exact_pool_response_must_echo_the_bound_asset_pair(
