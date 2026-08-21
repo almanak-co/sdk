@@ -43,7 +43,7 @@ the on-chain scan is wallet-scoped, not deployment-scoped).
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
@@ -85,19 +85,302 @@ def _lp_identity(position: PositionInfo) -> str:
     labelled with the registry primitive (``lp`` / ``lp_v4``), never a real
     connector slug, so including it would re-split the pair this key exists to
     collapse. Older/single-manager rows without authority metadata retain the
-    historical token-only key. A manager-qualified row never aliases that
-    unqualified fallback, so missing authority degrades toward a loud duplicate
-    rather than suppressing a distinct physical NFT.
+    historical token-only key.
+
+    This function returns exactly ONE key, and a manager-qualified key never
+    equals the unqualified one. That is not the whole identity story any more:
+    the two forms are bridged — conditionally and OUTSIDE this function — by
+    :func:`_lp_bridge_tokens`, because leaving them unbridged double-counted
+    every V3-family LP and failed a successful teardown (VIB-6730). Do not
+    "restore" the separation here on the strength of this paragraph; the
+    condition under which bridging is safe is a property of the enumerated set
+    and is documented on :func:`_unambiguous_lp_nft_ids`.
+    """
+    parts = _lp_nft_parts(position)
+    if parts is None:
+        return str(position.position_id)
+    token_id, manager = parts
+    if manager:
+        return f"nft:{manager}:{token_id}"
+    return f"nft:{token_id}"
+
+
+# Connector-private contract-kind names for an LP position's ERC-721 manager.
+# The kind vocabulary is explicitly connector-private and may grow, so this asks
+# for several and takes the first that resolves rather than assuming one.
+_LP_MANAGER_CONTRACT_KINDS: tuple[str, ...] = (
+    "position_manager",
+    "nft_position_manager",
+    "cl_nft",
+    "cl_nft_current",
+    "nft",
+)
+
+
+def _derived_lp_manager(protocol: str, chain: str) -> str:
+    """The ERC-721 manager authority for a row whose producer supplied none (VIB-6735).
+
+    Resolved from the CONNECTOR'S OWN address table, which is the same source the
+    receipt parsers use to stamp ``nft_manager_addr`` onto the ``position_registry``
+    row. That is what makes this a reconstruction of the registry row's authority
+    rather than a guess about it, and it is why the two halves match by
+    construction.
+
+    **Do not route this through** ``_nft_manager_for_protocol_chain``. An earlier
+    version of this function did, gated on ``PROTOCOL_FAMILY_REGISTRY`` membership,
+    and it was wrong for SushiSwap V3 on every chain: Sushi is in the UniV3 LP
+    family, so it passed the gate, but that helper has no Sushi entry and falls
+    through to the canonical Uniswap NPM. Measured — connector truth vs. that
+    helper:
+
+    ==========  ==========================================  ==========================================
+    chain       ``sushiswap_v3`` position_manager           what the helper returned
+    ==========  ==========================================  ==========================================
+    ethereum    ``0x2214a42d8e2a1d20635c2cb0664422c528b6a432``  ``0xc36442b4…`` (Uniswap)
+    arbitrum    ``0xf0cbce1942a68beb3d1b73f0dd86c8dcc363ef49``  ``0xc36442b4…`` (Uniswap)
+    base        ``0x80c7dd17b01855a6d2347444a0fcc36136a314de``  ``0x03a520b3…``
+    polygon     ``0xb7402ee99f0a008e461098ac3a27f4957df89a40``  ``0xc36442b4…`` (Uniswap)
+    ==========  ==========================================  ==========================================
+
+    A false authority is worse than none: the Sushi row would fail to dedupe with
+    its own registry row (VIB-6730 unfixed for Sushi) and could additionally alias
+    an unrelated Uniswap NFT of the same token id and suppress it — the strand
+    direction. That helper's own docstring claims Sushi shares the canonical NPM;
+    it does not. The claim is stale, it also feeds ``physical_identity_hash`` via
+    ``strategy_runner``, and it is tracked separately — this function must not
+    inherit it.
+
+    Returns ``""`` when no connector publishes a manager for ``(protocol, chain)``:
+    an unknown protocol, a registry primitive (``lp`` / ``lp_v4``, which name no
+    connector), or an unsupported chain. Those rows keep the bare key and fall back
+    to :func:`_lp_bridge_tokens`.
+
+    KNOWN RESIDUAL — a SLUG MISMATCH here is a strand vector (VIB-6752, Urgent).
+    An NFT-shaped row whose protocol resolves to nothing keeps the bare key and can
+    therefore be bridge-merged with a manager-qualified row of the same token id,
+    dropping the latter from the enumeration. That is reachable today via one shipped
+    strategy: ``agni_lp_mantle`` declares ``protocol="agni"`` while the address table
+    registers ``agni_finance``, so it derives no authority — and its rows ARE
+    NFT-shaped, because ``resolve_nft_token_id`` reads ``details`` BEFORE
+    ``position_id`` and the strategy sets ``details["nft_id"]``. Checking
+    ``position_id`` alone says "not NFT-shaped" and is wrong; that mistake is why this
+    was initially assessed as harmless.
+
+    The slug cannot simply be renamed — the SDK routes Agni *intents* under ``agni``
+    while the address table uses ``agni_finance``, so the fix is alias normalisation
+    or a bridge restriction, tracked on VIB-6752 with its own proof. Shipping with
+    this open was an explicit operator scope decision, not a silent deferral.
+
+    Note also that the family guard in ``test_registry_enumeration.py`` does NOT cover
+    this: it checks the two LP grouping families, and ``agni_finance`` and ``camelot``
+    are V3-shape forks outside them.
+
+    Note the lowercase: connector tables store mixed-case addresses while producers
+    and :func:`_lp_nft_parts` store them lowercased, and an un-normalised value
+    would compare unequal to the identical address and silently re-split the pair.
+    """
+    from almanak.connectors._strategy_base.address_registry import addresses_for
+    from almanak.connectors._strategy_base.protocol_aliases import normalize_protocol
+
+    raw_protocol = (protocol or "").strip().lower()
+    chain_norm = (chain or "").strip().lower()
+    if not raw_protocol or not chain_norm:
+        return ""
+
+    # Strategies declare the slug they route INTENTS under; the address table is
+    # keyed by the canonical connector slug, and the two are not always the same
+    # word. `agni_lp_mantle` reports ``protocol="agni"`` while the table registers
+    # ``agni_finance``, so an un-normalised lookup returned nothing for a venue that
+    # publishes a real manager — leaving an NFT-shaped row bare and therefore
+    # bridgeable onto another manager's NFT of the same token id (VIB-6752).
+    # ``normalize_protocol`` is the canonical alias seam and a documented no-op on
+    # already-canonical values; measured across every LP protocol, it changes
+    # exactly one result (agni/mantle) and leaves the rest byte-identical.
+    protocol_norm = normalize_protocol(chain_norm, raw_protocol)
+
+    table = addresses_for(protocol_norm, chain_norm) or {}
+    candidates = {str(table[kind]).strip().lower() for kind in _LP_MANAGER_CONTRACT_KINDS if table.get(kind)}
+    if len(candidates) != 1:
+        # 0 -> this connector publishes no manager for the chain.
+        # >1 -> the venue publishes MORE THAN ONE reviewed manager, so no single
+        #       address is "the" authority for (protocol, chain) and any choice
+        #       would be a guess. Refuse; the bare key plus the bounded bridge is
+        #       correct here and a wrong address is not.
+        return ""
+    return candidates.pop()
+
+
+def _lp_nft_parts(position: PositionInfo) -> tuple[str, str] | None:
+    """``(token_id, manager)`` for an NFT-shaped LP row, or ``None``.
+
+    ``manager`` is the lowercased ERC-721 manager address. It comes from the
+    producer when one supplied it, and otherwise from
+    :func:`_derived_lp_manager`, which reconstructs it from ``(protocol, chain)``
+    using the registry's own authority (VIB-6735). ``""`` means neither source
+    could name one — an unrecognised protocol, or an unknown chain. Split out of
+    :func:`_lp_identity` so the bridge below can ask which of the two halves a
+    row actually carries without re-parsing the rendered identity string.
     """
     token_id = resolve_nft_token_id(position)
-    if token_id is not None:
-        details = position.details if isinstance(position.details, dict) else {}
-        raw_manager = details.get("nft_manager_addr") or details.get("position_manager") or details.get("nft_manager")
-        manager = str(raw_manager).strip().lower() if raw_manager else ""
+    if token_id is None:
+        return None
+    details = position.details if isinstance(position.details, dict) else {}
+    raw_manager = details.get("nft_manager_addr") or details.get("position_manager") or details.get("nft_manager")
+    if raw_manager:
+        return str(token_id), str(raw_manager).strip().lower()
+    return str(token_id), _derived_lp_manager(str(position.protocol or ""), str(position.chain or ""))
+
+
+def _unambiguous_lp_nft_ids(positions: Iterable[PositionInfo]) -> frozenset[tuple[str, str]]:
+    """``(chain, token_id)`` pairs that name AT MOST ONE manager authority (VIB-6730).
+
+    :func:`_lp_identity` qualifies a token id with its ERC-721 manager whenever the
+    producer supplies one, and leaves it bare when the producer does not. Both forms
+    are correct, but they never intersect — so the identical physical NFT enumerates
+    TWICE the moment the two sources disagree about whether to supply the authority.
+
+    That disagreement is not an edge case, it is the norm. Every V3-family receipt
+    parser writes ``nft_manager_addr`` into the ``position_registry`` payload
+    (``uniswap_v3/receipt_parser.py``), while a strategy's ``get_open_positions()``
+    reports the pool, the ticks and the amounts and essentially never the manager.
+    So a plain uniswap_lp open→teardown enumerates its one NFT as two positions, one
+    of which has no on-chain post-condition, and TD-15 refuses to certify a close
+    that demonstrably happened (VIB-6730). Blueprint 14 §"Enumeration is ADDITIVE"
+    states the intended contract — the same physical NFT never double-counts, while
+    equal numeric IDs on two NPM generations remain distinct — and only the second
+    half of it survived.
+
+    Bridging the two forms unconditionally would buy the first half by giving up the
+    second: Slipstream-style token ids are per-manager counters, so ``(manager A, 42)``
+    and ``(manager B, 42)`` are two physical positions that a bare ``nft:42`` alias
+    would silently merge — and a merge STRANDS a position, the one direction this
+    module refuses to fail in.
+
+    The ambiguity is a property of the enumerated SET, not of any single row, so it is
+    decided here over the whole set: a token id seen under two or more distinct
+    managers is ambiguous and no bare alias is emitted for it, leaving those rows split
+    (loud). A token id seen under at most one manager cannot alias a different physical
+    position, so the qualified row may also answer to its bare form and match the
+    unqualified row naming the same NFT.
+    """
+    managers: dict[tuple[str, str], set[str]] = {}
+    for position in positions:
+        if position.position_type != PositionType.LP:
+            continue
+        parts = _lp_nft_parts(position)
+        if parts is None:
+            continue
+        token_id, manager = parts
+        seen = managers.setdefault((str(position.chain or "").lower(), token_id), set())
         if manager:
-            return f"nft:{manager}:{token_id}"
-        return f"nft:{token_id}"
-    return str(position.position_id)
+            seen.add(manager)
+    return frozenset(key for key, found in managers.items() if len(found) <= 1)
+
+
+def _lp_bridge_tokens(
+    position: PositionInfo,
+    unambiguous_nft_ids: frozenset[tuple[str, str]],
+) -> frozenset[tuple[str, ...]]:
+    """The bare-id alias a manager-qualified LP row may additionally answer to.
+
+    Empty for a row that carries no manager (its identity is already the bare form)
+    and for a token id :func:`_unambiguous_lp_nft_ids` found under more than one
+    manager. Additive only — it never removes the row's own qualified identity, so a
+    bridged row still matches another manager-qualified row exactly as before.
+
+    KNOWN LIMITATION (VIB-6735). "At most one manager" means at most one *observed*
+    manager: an unqualified row contributes none, so it is treated as belonging to
+    the single observed authority. If a deployment ran two managers on one chain
+    whose token ids happened to collide, and the strategy reported the row for
+    manager B without an authority while the registry held only manager A's row,
+    the bridge would merge them and A would leave the enumeration unclosed.
+
+    The two-counter precondition is NOT exotic, and an earlier version of this note
+    wrongly said no shipped configuration produces it. The UniV3
+    NonfungiblePositionManager and the UniV4 PositionManager are two independent
+    counters on the same chain, and BOTH primitives ship registry cutovers
+    (``_LP_REGISTRY_SPECS``), so a deployment running V3 and V4 LP together is a
+    shipped configuration — only the numeric id collision is left to chance.
+    Measured: a V4 strategy row and a V3 registry row sharing an id merge, dropping
+    the V3 row. The mirror case is the loud one: when BOTH registry rows are present
+    two managers are observed, the bridge switches off for that id, and the original
+    VIB-6730 double-count returns for it. Still pinned by
+    ``test_vib6735_complementary_source_rows_are_split_not_silently_merged`` rather
+    than left latent.
+
+    WHICH VENUES STILL REACH IT, after the derivation (VIB-6735, accepted residual).
+    The derivation closes this for every venue publishing exactly ONE reviewed
+    manager: both arms then carry the same qualified key and the bridge is never
+    consulted. What remains is the venues that deliberately derive NOTHING —
+    multi-generation venues such as Aerodrome/Velodrome Slipstream, which publish a
+    legacy AND a current NPM so naming either would be a guess, plus protocols no
+    connector publishes a manager for.
+
+    Measured on the shipped code: a strategy row for a CURRENT-generation Slipstream
+    NFT #7 and a registry row for a LEGACY NFT #7 — two physically distinct NFTs —
+    enumerate as ONE, dropping the registry row. Preconditions are compound (both
+    generations in one deployment, colliding numeric ids, a missing registry write),
+    and the hole PREDATES this function: the bridge behaved this way before any
+    derivation existed. It is narrowed here, not introduced, and ships as an accepted
+    residual by explicit operator decision.
+
+    Closing it properly means refusing the bare alias when the unqualified arm is a
+    STRATEGY row whose protocol resolves to nothing — which requires distinguishing
+    strategy rows from legacy manager-less REGISTRY rows, where bridging is correct
+    and load-bearing for VIB-5723. That is a change to the identity model and needs
+    its own proof. Do NOT "simplify" this by refusing the bridge outright.
+
+    CORRECTION (VIB-6735). An earlier version of this note said the hole "cannot be
+    closed from the enumeration alone". That is FALSE, and it is the sentence a
+    reader would use to justify never fixing this. B's authority is often derivable
+    from fields already on the row, and :func:`_derived_lp_manager` does exactly
+    that — see its docstring for the resolver and its limits.
+
+    Read that function, not this paragraph, for HOW. Two earlier drafts of this note
+    named a specific mechanism and both aged badly within a day:
+
+    * they pointed at ``_nft_manager_for_protocol_chain``, which is **wrong for
+      SushiSwap V3 on every chain** (it has no Sushi entry and falls through to the
+      canonical Uniswap NPM) and is tracked as VIB-6750. Do not route identity
+      through it;
+    * they described resolution as "recognised protocol → look up an address", which
+      produced a second wrong-value defect: Aerodrome Slipstream publishes a legacy
+      AND a current NPM, and picking either is a guess.
+
+    The surviving principle, which is what actually generalises: **a false authority
+    is worse than none.** Where exactly one reviewed manager exists, derive it; where
+    zero or several do, name nothing and let the bare key fall back to the bounded
+    bridge. An over-split is loud; a wrong merge strands a position.
+
+    Two measurements, recorded because both refute an argument that looks sound
+    (VIB-6735):
+
+    * **The id spaces overlap completely — do NOT reason "different eras cannot
+      collide".** Measured 2026-08-20: Arbitrum V3 ``NonfungiblePositionManager``
+      ``totalSupply()`` = 4,981,127 with live ids past 5,654,302, while the V4
+      ``PositionManager`` ``nextTokenId()`` = 197,204. Every id V4 has ever
+      minted on that chain also exists on V3. Ethereum is the same shape
+      (1,215,211 vs 377,924). What makes a collision unlikely is only that ONE
+      deployment must hold both specific NFTs, not any property of the counters.
+    * **Pool identity is NOT available as a discriminator here.** The obvious
+      tightening — bridge only when the two rows agree on a pool — cannot be
+      implemented at this layer: ``uniswap_lp`` publishes ``details["pool"]`` as
+      the human label ``"WETH/USDC/500"`` (``strategy.py`` parses it with
+      ``split("/")``), not an address, so the flagship VIB-6730 case carries no
+      pool identifier on the strategy arm at all. Requiring agreement would
+      refuse to bridge exactly the case this function exists to fix. V4 has the
+      same trap in the other direction: its ``details["pool"]`` is a label too
+      and the identifier lives in ``details["pool_id"]``.
+    """
+    parts = _lp_nft_parts(position)
+    if parts is None:
+        return frozenset()
+    token_id, manager = parts
+    if not manager:
+        return frozenset()
+    if (str(position.chain or "").lower(), token_id) not in unambiguous_nft_ids:
+        return frozenset()
+    return frozenset({("lp", f"nft:{token_id}")})
 
 
 def _lp_default_identity(position: PositionInfo) -> frozenset[tuple[str, ...]]:
@@ -244,6 +527,7 @@ def _dedupe_keys(
     position: PositionInfo,
     *,
     wallet_for_chain: Callable[[str], str | None] | None = None,
+    unambiguous_nft_ids: frozenset[tuple[str, str]] = frozenset(),
 ) -> frozenset[tuple[str, ...]]:
     """Every ``(chain, position_type, alias)`` key that names ``position``.
 
@@ -268,7 +552,12 @@ def _dedupe_keys(
     position (the inline multi-chain teardown lane, ``runner_teardown``
     §"For multi-chain strategies").
 
-    Non-perp positions return a SINGLE key, so their behaviour is unchanged.
+    Non-perp positions return a SINGLE key, except an LP row bridged by
+    ``unambiguous_nft_ids`` (VIB-6730), which additionally answers to the bare-id
+    form of its own NFT so a manager-qualified row and an unqualified one naming
+    the same physical NFT stop enumerating twice. The bridge set is computed over
+    the whole enumeration by :func:`_unambiguous_lp_nft_ids`; the default empty
+    set reproduces the previous behaviour exactly.
 
     Venue tokens are placed in the key VERBATIM — never case-folded (see
     ``almanak.connectors._strategy_base.perp_identity``: ``drift``'s identity
@@ -295,6 +584,12 @@ def _dedupe_keys(
         default = _IDENTITY_DEFAULTS.get(position.position_type)
         if default is not None:
             tokens = default(position)
+            # VIB-6730: bridge the manager-qualified and bare NFT identity forms,
+            # but ONLY under the framework default. A venue that published its own
+            # identity tokens owns that namespace, and grafting a framework alias
+            # onto it could merge two rows the venue deliberately kept apart.
+            if position.position_type == PositionType.LP:
+                tokens = tokens | _lp_bridge_tokens(position, unambiguous_nft_ids)
     if not tokens:
         # Empty ≠ Zero: an UNMEASURED identity must never collapse two rows, so
         # it falls back to the raw id rather than to a permissive wildcard.
@@ -918,8 +1213,17 @@ def reconcile_lp_with_registry(
     if not registry_available or not registry_positions:
         return strategy_summary
 
+    # VIB-6730: whether a manager-qualified LP row may also answer to its bare-id
+    # form is a property of the SET, not of the row, so it is decided once over
+    # both arms of the union before any key is computed.
+    unambiguous_nft_ids = _unambiguous_lp_nft_ids([*strategy_summary.positions, *registry_positions])
+
     def _keys(position: PositionInfo) -> frozenset[tuple[str, ...]]:
-        return _dedupe_keys(position, wallet_for_chain=wallet_for_chain)
+        return _dedupe_keys(
+            position,
+            wallet_for_chain=wallet_for_chain,
+            unambiguous_nft_ids=unambiguous_nft_ids,
+        )
 
     # Two rows are the SAME position iff their alias sets INTERSECT (VIB-6287).
     # A row may legitimately carry several aliases — a GMX registry row carries
@@ -1229,14 +1533,41 @@ async def resolve_open_positions_with_registry(strategy: Any) -> TeardownPositio
     return reconciled
 
 
-def _registry_open_keys(read: RegistryReadResult) -> set[tuple[str, str]]:
+def _lp_match_keys(
+    position: PositionInfo,
+    unambiguous_nft_ids: frozenset[tuple[str, str]],
+) -> set[tuple[str, str]]:
+    """Every ``(chain, identity)`` key under which this LP may be recognised.
+
+    The row's own identity (VIB-5723) plus, for a manager-qualified NFT whose id
+    is unambiguous across the enumeration, its bare-id form (VIB-6730) — so the
+    completeness check matches the same physical NFT no matter which of the two
+    sources supplied the manager authority.
+    """
+    chain = str(position.chain or "").lower()
+    keys = {(chain, _lp_identity(position))}
+    keys |= {(chain, alias) for _, alias in _lp_bridge_tokens(position, unambiguous_nft_ids)}
+    return keys
+
+
+def _registry_open_keys(
+    read: RegistryReadResult,
+    unambiguous_nft_ids: frozenset[tuple[str, str]] = frozenset(),
+) -> set[tuple[str, str]]:
     """``(chain, identity)`` keys for the registry-reported OPEN LP positions.
 
     Keyed on the source-independent LP identity (VIB-5723) so a strategy LP
     reported under the composite position-key format still matches its own
     registry row instead of logging a false "ABSENT from position_registry".
+    Registry rows carry the NFT manager and strategy rows typically do not, so
+    the bridge aliases are folded in too (VIB-6730) — without them a registry row
+    for the very NFT the strategy just reported reads as absent, which is the
+    false ABSENT this function exists to prevent.
     """
-    return {(str(p.chain or "").lower(), _lp_identity(p)) for p in read.positions}
+    keys: set[tuple[str, str]] = set()
+    for position in read.positions:
+        keys |= _lp_match_keys(position, unambiguous_nft_ids)
+    return keys
 
 
 async def _verify_lp_enumeration_completeness(
@@ -1294,12 +1625,12 @@ async def _verify_lp_enumeration_completeness(
             )
         return
 
-    registry_keys = _registry_open_keys(read)
+    unambiguous_nft_ids = _unambiguous_lp_nft_ids([*read.positions, *strategy_lp])
+    registry_keys = _registry_open_keys(read, unambiguous_nft_ids)
     network = str(getattr(strategy, "_gateway_network", "") or "")
 
     for position in strategy_lp:
-        key = (str(position.chain or "").lower(), _lp_identity(position))
-        absent_from_registry = key not in registry_keys
+        absent_from_registry = not (_lp_match_keys(position, unambiguous_nft_ids) & registry_keys)
         # Only verify the discrepancy set: a strategy LP the registry already
         # confirms (matched) needs no chain read unless its primitive's read
         # failed (registry answer incomplete for it).

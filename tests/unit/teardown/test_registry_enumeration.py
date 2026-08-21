@@ -41,6 +41,17 @@ from tests.unit.connectors.gmx_v2.market_fixtures import market_address
 DEPLOYMENT_ID = "deployment:abc123def456"
 
 
+# The Arbitrum UniV3 NonfungiblePositionManager. Present because the REAL
+# producer always writes it: ``uniswap_v3/receipt_parser.py`` puts
+# ``nft_manager_addr`` in every ``position_registry`` LP payload it emits, and
+# refuses to emit a partial row. This fixture used to omit it, which made the
+# whole registry-enumeration suite exercise a shape production never produces —
+# and hid VIB-6730, where the manager-qualified key on the registry row and the
+# unqualified key the strategy reports never intersected, so one NFT enumerated
+# twice.
+V3_NFT_MANAGER = "0xc36442b4a4522e871399cd717abdd847ab11fe88"
+
+
 def _v3_row(token_id: str = "555", pool: str = "0xPOOL") -> dict[str, Any]:
     return {
         "chain": "arbitrum",
@@ -53,8 +64,15 @@ def _v3_row(token_id: str = "555", pool: str = "0xPOOL") -> dict[str, Any]:
             "tick_lower": -100,
             "tick_upper": 100,
             "liquidity": "12345",
+            "nft_manager_addr": V3_NFT_MANAGER,
         },
     }
+
+
+# The Base UniV4 PositionManager. Same reason as ``V3_NFT_MANAGER``:
+# ``uniswap_v4/receipt_parser.py`` writes ``position_manager`` into every LP
+# payload it emits and refuses to emit the row without one.
+V4_POSITION_MANAGER = "0x7c5f5a4bbd8fd63184577525326123b519429bdc"
 
 
 def _v4_row(token_id: str = "777", pool_id: str = "0xPOOLIDHASH") -> dict[str, Any]:
@@ -63,7 +81,12 @@ def _v4_row(token_id: str = "777", pool_id: str = "0xPOOLIDHASH") -> dict[str, A
         "primitive": "lp_v4",
         "accounting_category": "lp_v4",
         "status": "open",
-        "payload": {"token_id": token_id, "pool_id": pool_id, "liquidity": "9999"},
+        "payload": {
+            "token_id": token_id,
+            "pool_id": pool_id,
+            "liquidity": "9999",
+            "position_manager": V4_POSITION_MANAGER,
+        },
     }
 
 
@@ -1496,7 +1519,7 @@ def test_a_bridge_row_collapses_a_key_only_row_into_a_tuple_only_row(monkeypatch
     monkeypatch.setattr(
         registry_enumeration_module,
         "_dedupe_keys",
-        lambda position, wallet_for_chain=None: aliases[position.position_id],
+        lambda position, wallet_for_chain=None, unambiguous_nft_ids=frozenset(): aliases[position.position_id],
     )
 
     out = reconcile_lp_with_registry(
@@ -1528,7 +1551,7 @@ def test_unmeasured_rows_never_collapse_into_one_another():
     with _mock.patch.object(
         registry_enumeration_module,
         "_dedupe_keys",
-        lambda position, wallet_for_chain=None: monkeypatch_free_empty,
+        lambda position, wallet_for_chain=None, unambiguous_nft_ids=frozenset(): monkeypatch_free_empty,
     ):
         out = reconcile_lp_with_registry(
             strategy_summary=TeardownPositionSummary(deployment_id="d", timestamp=datetime.now(UTC), positions=[]),
@@ -1564,7 +1587,7 @@ def test_the_restart_shape_is_order_independent(monkeypatch, order):
     monkeypatch.setattr(
         registry_enumeration_module,
         "_dedupe_keys",
-        lambda position, wallet_for_chain=None: aliases[position.position_id],
+        lambda position, wallet_for_chain=None, unambiguous_nft_ids=frozenset(): aliases[position.position_id],
     )
 
     out = reconcile_lp_with_registry(
@@ -1577,3 +1600,568 @@ def test_the_restart_shape_is_order_independent(monkeypatch, order):
         f"restart shape, arrival order {order}: one physical position enumerated as "
         f"{[p.position_id for p in out.positions]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# VIB-6730 — the manager-qualified and bare NFT identity forms must bridge.
+#
+# Field repro (Arbitrum Anvil fork, 2026-08-19): a `uniswap_lp` run closed its
+# LP successfully on-chain (NFT 5653574 burned, `ownerOf` reverts) and teardown
+# still reported FAILED, latching the deployment out of new entries (VIB-5572).
+# Enumeration had counted the ONE physical NFT twice —
+# `positions=['5653574', '5653574']` — because the registry row carried
+# `nft_manager_addr` (every V3-family receipt parser writes it) while the
+# strategy's `get_open_positions()` did not (essentially none do). One copy had
+# an on-chain post-condition and the other did not, so TD-15 refused to certify
+# a close that had demonstrably happened.
+#
+# The pair below is the whole point: the bridge must collapse the same NFT
+# across the two forms WITHOUT ever collapsing equal token ids that belong to
+# two different manager authorities (Slipstream NPM generations).
+# ---------------------------------------------------------------------------
+
+
+def _unqualified_strategy_lp(token_id: str = "5653574", chain: str = "arbitrum") -> PositionInfo:
+    """The exact strategy-reported shape from the VIB-6730 repro.
+
+    `almanak/demo_strategies/uniswap_lp/strategy.py` reports the pool, the fee
+    tier, the amounts and the token symbols — and no manager authority.
+    """
+    return PositionInfo(
+        position_type=PositionType.LP,
+        position_id=token_id,
+        chain=chain,
+        protocol="uniswap_v3",
+        value_usd=Decimal("62.5"),
+        details={"pool": "0xPOOL", "fee_tier": 500, "token0": "WETH", "token1": "USDC"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_vib6730_manager_qualified_registry_row_dedupes_against_unqualified_strategy_lp() -> None:
+    """1 physical NFT, manager on one side only → 1 union entry, not 2."""
+    sm = _FakeRegistrySM({"lp": [_v3_row("5653574")], "lp_v4": []})
+    registry_positions, available = await read_open_lp_positions_from_registry(
+        state_manager=sm, deployment_id=DEPLOYMENT_ID
+    )
+    assert available is True
+    assert registry_positions[0].details["nft_manager_addr"] == V3_NFT_MANAGER
+
+    merged = reconcile_lp_with_registry(
+        strategy_summary=TeardownPositionSummary(
+            deployment_id=DEPLOYMENT_ID,
+            timestamp=datetime.now(UTC),
+            positions=[_unqualified_strategy_lp("5653574")],
+        ),
+        registry_positions=registry_positions,
+        registry_available=True,
+    )
+
+    assert [p.position_id for p in merged.positions] == ["5653574"]
+    # The strategy's richer copy survives — it is the one carrying the value and
+    # the pool metadata the closing lane reads.
+    assert merged.positions[0].protocol == "uniswap_v3"
+
+
+def test_vib6730_equal_token_ids_under_two_managers_are_never_bridged() -> None:
+    """The bridge must not buy dedup by merging two physical positions.
+
+    Slipstream-style token ids are per-manager counters, so `(manager A, 42)`
+    and `(manager B, 42)` are different NFTs. With the id ambiguous, no bare
+    alias is emitted for it and every row stays distinct — over-split and loud,
+    which is the only direction this module is allowed to fail in.
+    """
+    manager_a = "0x" + "aa" * 20
+    manager_b = "0x" + "bb" * 20
+
+    merged = reconcile_lp_with_registry(
+        strategy_summary=TeardownPositionSummary(
+            deployment_id=DEPLOYMENT_ID,
+            timestamp=datetime.now(UTC),
+            positions=[_lp("42", nft_manager_addr=manager_a), _unqualified_strategy_lp("42")],
+        ),
+        registry_positions=[_lp("42", protocol="lp", nft_manager_addr=manager_b)],
+        registry_available=True,
+    )
+
+    assert len(merged.positions) == 3
+    assert {str(p.details.get("nft_manager_addr") or "") for p in merged.positions} == {
+        manager_a,
+        manager_b,
+        "",
+    }
+
+
+def test_vib6730_bridge_stays_chain_scoped() -> None:
+    """Same token id, different chains → still two positions.
+
+    The bare alias is only ever emitted alongside the row's own identity, and
+    every key remains `(chain, position_type, ...)`-scoped, so bridging cannot
+    let an Arbitrum NFT suppress a Base NFT that happens to share its number.
+    """
+    merged = reconcile_lp_with_registry(
+        strategy_summary=TeardownPositionSummary(
+            deployment_id=DEPLOYMENT_ID,
+            timestamp=datetime.now(UTC),
+            positions=[_unqualified_strategy_lp("42", chain="arbitrum")],
+        ),
+        registry_positions=[_lp("42", protocol="lp", chain="base", nft_manager_addr=V3_NFT_MANAGER)],
+        registry_available=True,
+    )
+
+    assert len(merged.positions) == 2
+    assert {p.chain for p in merged.positions} == {"arbitrum", "base"}
+
+
+@pytest.mark.asyncio
+async def test_vib6730_completeness_check_matches_manager_qualified_row_no_false_absent() -> None:
+    """No false "ABSENT from position_registry" for a row that plainly exists.
+
+    Before the fix this fired on every V3-family LP teardown: the registry key
+    was `nft:<manager>:<id>` and the strategy key was `nft:<id>`, so the row was
+    reported missing from the very registry that held it, and TD-06 recorded the
+    registry as incomplete on a perfectly complete registry.
+    """
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from almanak.framework.teardown.registry_enumeration import _verify_lp_enumeration_completeness
+
+    read = RegistryReadResult(
+        positions=[_position_info_from_registry_row(_v3_row("5653574"), primitive="lp")],
+        available=True,
+        failed_primitives=(),
+    )
+    strategy = MagicMock()
+    strategy._gateway_client = MagicMock()
+    strategy._gateway_network = ""
+    summary = TeardownPositionSummary(
+        deployment_id=DEPLOYMENT_ID,
+        timestamp=datetime.now(UTC),
+        positions=[_unqualified_strategy_lp("5653574")],
+    )
+    with patch(
+        "almanak.framework.teardown.live_position_reads.chain_verify_lp_open",
+        new=AsyncMock(return_value=True),
+    ) as verify:
+        await _verify_lp_enumeration_completeness(strategy=strategy, strategy_summary=summary, read=read)
+
+    # Matched → the discrepancy set is empty → zero chain reads and no warning.
+    verify.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_vib6730_registry_row_already_closed_still_enumerates_one_position() -> None:
+    """The ticket's second lead, pinned as a non-cause.
+
+    `_registry_open_keys` reads only `status='open'` rows, so it was proposed
+    that a row already flipped to `closed` by the time the verify runs would
+    make every on-chain-discovered position look absent. It does not: with no
+    OPEN row the registry contributes nothing to the union (one position, from
+    the strategy), and the ABSENT warning is additionally gated on the chain
+    confirming the position still OPEN — which a closed position cannot do.
+    """
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from almanak.framework.teardown.registry_enumeration import _verify_lp_enumeration_completeness
+
+    merged = reconcile_lp_with_registry(
+        strategy_summary=TeardownPositionSummary(
+            deployment_id=DEPLOYMENT_ID,
+            timestamp=datetime.now(UTC),
+            positions=[_unqualified_strategy_lp("5653574")],
+        ),
+        registry_positions=[],  # the row is `closed`, so the OPEN read returns nothing
+        registry_available=True,
+    )
+    assert [p.position_id for p in merged.positions] == ["5653574"]
+
+    strategy = MagicMock()
+    strategy._gateway_client = MagicMock()
+    strategy._gateway_network = ""
+    with patch(
+        "almanak.framework.teardown.live_position_reads.chain_verify_lp_open",
+        new=AsyncMock(return_value=False),  # burned on-chain
+    ):
+        with patch.object(registry_enumeration_module.logger, "warning") as warn:
+            await _verify_lp_enumeration_completeness(
+                strategy=strategy,
+                strategy_summary=merged,
+                read=RegistryReadResult(positions=[], available=True, failed_primitives=()),
+            )
+
+    assert not [c for c in warn.call_args_list if "ABSENT" in str(c)]
+
+
+def test_vib6735_complementary_source_rows_are_split_not_silently_merged() -> None:
+    """The complementary-source hole is CLOSED: split loudly, never strand (VIB-6735).
+
+    This test used to pin the opposite. While the manager was taken only from the
+    producer, "at most one *observed* manager" was satisfied whenever the second
+    authority never appeared, so a strategy row that is physically manager B's NFT
+    merged with a registry row that is manager A's NFT of the same numeric id, and
+    A was dropped from the enumeration — the strand direction, and the one
+    direction this module refuses to fail in. Its docstring said the assertion had
+    to be inverted to ``== 2`` when VIB-6735 landed rather than deleted. This is
+    that inversion.
+
+    :func:`_derived_lp_manager` now reconstructs the missing authority from
+    ``(protocol, chain)`` using the same lookup that builds the registry row's own
+    ``physical_identity_hash``. Here the strategy row declares ``uniswap_v3`` on
+    ``arbitrum`` and resolves to the canonical NPM, which differs from ``manager_a``
+    — so TWO managers are observed, the bridge switches off for that id, and the
+    rows stay separate.
+
+    The residual is now a loud double-count instead of a silent strand, which is
+    the correct failure polarity: an operator sees two positions for one NFT, and
+    both get closed. Nothing goes unclosed.
+    """
+    manager_a = "0x" + "aa" * 20
+
+    merged = reconcile_lp_with_registry(
+        strategy_summary=TeardownPositionSummary(
+            deployment_id=DEPLOYMENT_ID,
+            timestamp=datetime.now(UTC),
+            positions=[_unqualified_strategy_lp("42")],  # physically manager B's NFT
+        ),
+        registry_positions=[_lp("42", protocol="lp", nft_manager_addr=manager_a)],
+        registry_available=True,
+    )
+
+    # Two managers in play -> no bare alias -> both rows survive. Reverting
+    # _derived_lp_manager collapses this to 1 and strands manager A's position.
+    assert len(merged.positions) == 2
+
+
+# ---------------------------------------------------------------------------
+# VIB-6735: deriving the missing ERC-721 manager authority
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("protocol", "chain", "expected"),
+    (
+        ("uniswap_v3", "arbitrum", "0xc36442b4a4522e871399cd717abdd847ab11fe88"),
+        # Sushi has its OWN manager on every chain. An earlier revision routed this
+        # through a helper that falls through to the canonical Uniswap NPM and got
+        # 0xc36442b4... here -- a false authority, which is worse than none.
+        ("sushiswap_v3", "arbitrum", "0xf0cbce1942a68beb3d1b73f0dd86c8dcc363ef49"),
+        ("sushiswap_v3", "ethereum", "0x2214a42d8e2a1d20635c2cb0664422c528b6a432"),
+        ("uniswap_v4", "arbitrum", "0xd88f38f930b7952f2db2432cb002e7abbf3dd869"),
+        ("pancakeswap_v3", "bsc", "0x46a15b0b27311cedf172ab29e4f4766fbe7f4364"),
+    ),
+)
+def test_vib6735_derived_manager_resolves_recognized_protocols(protocol: str, chain: str, expected: str) -> None:
+    """A recognized protocol resolves to its real per-chain manager, lowercased.
+
+    Lowercasing is load-bearing, not cosmetic: the underlying lookup returns the
+    UniV3 NPM in mixed case (``0xC36442b4...``) while every producer and
+    ``_lp_nft_parts`` store it lowercased. An un-normalised value would compare
+    unequal to the identical address and silently re-split the very pair this
+    derivation exists to join.
+    """
+    assert registry_enumeration_module._derived_lp_manager(protocol, chain) == expected
+
+
+@pytest.mark.parametrize(
+    "protocol",
+    (
+        "lp",  # the registry primitive, NOT a connector slug
+        "lp_v4",
+        "some_unlisted_v3_fork",
+        "",
+    ),
+)
+def test_vib6735_derived_manager_refuses_unrecognized_protocols(protocol: str) -> None:
+    """Unrecognized protocols get NO authority — never a confidently wrong one.
+
+    This is the whole safety argument for the derivation. The underlying
+    ``_nft_manager_for_protocol_chain`` falls through to the canonical UniV3 NPM
+    for ANY unrecognized protocol — measured: ``lp``, ``lp_v4`` and a nonsense slug
+    all return ``0xC36442b4...``. Consuming that fallback would stamp a wrong
+    manager on an unrecognized fork and manufacture a false identity, which is the
+    failure this module exists to prevent. An empty result keeps the bare key and
+    leaves ``_lp_bridge_tokens`` as the bounded fallback.
+    """
+    assert registry_enumeration_module._derived_lp_manager(protocol, "arbitrum") == ""
+    # Guard the specific wrong answer, so a future refactor that "simplifies" the
+    # allowlist away fails here rather than in a teardown.
+    assert registry_enumeration_module._derived_lp_manager(protocol, "arbitrum") != (
+        "0xc36442b4a4522e871399cd717abdd847ab11fe88"
+    )
+
+
+def test_vib6735_sushi_never_resolves_to_the_uniswap_manager() -> None:
+    """A family member with its OWN manager must not inherit Uniswap's.
+
+    SushiSwap V3 is in the UniV3 LP grouping family, so a membership-gated
+    derivation lets it through -- but Sushi deploys its own NonfungiblePositionManager
+    on every chain it supports. Resolving it through a helper that falls through to
+    the canonical Uniswap NPM produced a FALSE authority: the Sushi row would fail to
+    dedupe against its own registry row, and could alias an unrelated Uniswap NFT of
+    the same token id and suppress it. Pinned per chain because the wrong answer was
+    wrong on all of them.
+    """
+    from almanak.connectors.sushiswap_v3.addresses import SUSHISWAP_V3
+
+    for chain, entry in SUSHISWAP_V3.items():
+        expected = (entry.get("position_manager") or "").strip().lower()
+        if not expected:
+            continue
+        derived = registry_enumeration_module._derived_lp_manager("sushiswap_v3", chain)
+        assert derived == expected, f"{chain}: derived {derived!r}, connector says {expected!r}"
+        assert derived != "0xc36442b4a4522e871399cd717abdd847ab11fe88", f"{chain}: inherited the Uniswap NPM"
+
+
+def test_vib6735_derived_manager_returns_empty_for_unknown_chain() -> None:
+    """A recognized protocol on a chain with no registered manager stays bare."""
+    assert registry_enumeration_module._derived_lp_manager("uniswap_v3", "not_a_chain") == ""
+
+
+def test_vib6735_derivation_qualifies_the_flagship_unqualified_strategy_row() -> None:
+    """The VIB-6730 strategy row now carries the registry row's own authority.
+
+    ``uniswap_lp`` reports no manager; the V3 receipt parser always writes
+    ``0xc36442b4...``. After derivation both sides key identically, so the pair
+    matches WITHOUT needing the bare-form bridge at all.
+    """
+    parts = registry_enumeration_module._lp_nft_parts(_unqualified_strategy_lp("5653574"))
+    assert parts == ("5653574", "0xc36442b4a4522e871399cd717abdd847ab11fe88")
+
+    registry_parts = registry_enumeration_module._lp_nft_parts(
+        _lp("5653574", protocol="lp", nft_manager_addr="0xC36442b4a4522E871399CD717aBDD847Ab11FE88")
+    )
+    assert registry_parts == parts
+
+
+def test_vib6735_producer_supplied_manager_still_wins_over_derivation() -> None:
+    """An explicit authority is never overridden by the derived one."""
+    explicit = "0x" + "bb" * 20
+    row = _unqualified_strategy_lp("42")
+    row.details["nft_manager_addr"] = explicit
+    assert registry_enumeration_module._lp_nft_parts(row) == ("42", explicit)
+
+
+def _fallback_chains(protocol: str) -> frozenset[str]:
+    """Chains a protocol reaches only through the migration NPM view."""
+    from almanak.framework.migration.backfill import _NPM_ADDRESSES_BY_PROTOCOL
+
+    return frozenset((_NPM_ADDRESSES_BY_PROTOCOL.get(protocol) or {}).keys())
+
+
+def _reviewed_lp_managers(protocol: str, chain: str) -> frozenset[str]:
+    """Every reviewed ERC-721 manager the connector publishes for (protocol, chain).
+
+    More than one means the venue ships multiple generations and no single address
+    is "the" authority — Aerodrome Slipstream on Base publishes a legacy and a
+    current NPM, and new positions always mint under the current one.
+
+    Deliberately does NOT consult ``_NPM_ADDRESSES_BY_PROTOCOL``. That map is a
+    per-protocol SINGLETON view, so for a multi-generation venue it reports one
+    address where the connector publishes two — which is exactly how the Aerodrome
+    defect was produced, and an earlier version of this helper inherited the same
+    blind spot and would have blessed it again.
+    """
+    from almanak.connectors._strategy_base.address_registry import addresses_for
+
+    # The RECEIPT PARSER is the authority where one exists, because it is what
+    # stamps ``nft_manager_addr`` onto the registry row this derivation must match.
+    # They are not always the same source: uniswap_v3 on mantle is stamped
+    # 0x218bf598... ("Agni Finance fork") by the parser, while the uniswap_v3
+    # address table names 0x5911cb36... (the governance deployment). Comparing only
+    # against the table made this guard demand the value that does NOT match the
+    # registry row -- it would have ENFORCED the VIB-6730 wedge on mantle instead of
+    # catching it.
+    parser_map = _receipt_parser_managers(protocol)
+    if parser_map.get(chain):
+        return frozenset({str(parser_map[chain]).strip().lower()})
+
+    table = addresses_for(protocol, chain) or {}
+    return frozenset(
+        str(table[k]).strip().lower() for k in registry_enumeration_module._LP_MANAGER_CONTRACT_KINDS if table.get(k)
+    )
+
+
+def _receipt_parser_managers(protocol: str) -> dict[str, str]:
+    """Per-chain manager map the protocol's receipt parser stamps registry rows with."""
+    import importlib
+
+    try:
+        mod = importlib.import_module(f"almanak.connectors.{protocol}.receipt_parser")
+    except Exception:  # noqa: BLE001 -- not every protocol names a connector module
+        return {}
+    return dict(getattr(mod, "POSITION_MANAGER_ADDRESSES", {}) or {})
+
+
+@pytest.mark.parametrize("family", ("univ3", "univ4"))
+def test_vib6735_derivation_agrees_with_the_connector_or_refuses(family: str) -> None:
+    """The derivation must AGREE with the connector, or name nothing at all.
+
+    Non-emptiness is the wrong property, and asserting it is how two wrong-value
+    defects reached review. SushiSwap derived a non-empty address that was Uniswap's
+    (VIB-6750). Aerodrome Slipstream derived a non-empty address that was the LEGACY
+    NPM while every new position mints under the CURRENT one -- re-opening the very
+    double-count VIB-6730 exists to fix, for a shipped connector, and an earlier
+    version of this test asserted that legacy value as correct.
+
+    The contract this pins instead:
+
+    * connector publishes exactly ONE reviewed manager -> derivation must equal it;
+    * connector publishes ZERO or MORE THAN ONE        -> derivation must be EMPTY.
+
+    The second clause is the Aerodrome case. A venue shipping two reviewed
+    generations has no single "the" authority for ``(protocol, chain)``, so any
+    choice is a guess, and this module's own rule is that a false authority is worse
+    than none: an empty result keeps the bare key and falls back to the bounded
+    bridge, which is what correctly deduped Aerodrome before the derivation existed.
+
+    Coverage is per protocol, not aggregate. An aggregate count passes while a
+    protocol contributes zero pairs -- which is how the Slipstream forks were skipped
+    silently, since they publish no address table under their own slug and were
+    invisible to an address-table-only domain.
+    """
+    from almanak.connectors._strategy_base.address_registry import address_supported_chains
+    from almanak.framework.intents.compiler_constants import (
+        UNIV3_LP_GROUPING_PROTOCOLS,
+        UNIV4_LP_GROUPING_PROTOCOLS,
+    )
+
+    protocols = UNIV3_LP_GROUPING_PROTOCOLS if family == "univ3" else UNIV4_LP_GROUPING_PROTOCOLS
+    assert protocols, f"{family} family is empty -- the registry did not load"
+
+    violations: list[str] = []
+    per_protocol: dict[str, int] = {}
+    for protocol in sorted(protocols):
+        chains = set(address_supported_chains(protocol) or frozenset()) | set(_fallback_chains(protocol))
+        per_protocol[protocol] = len(chains)
+        for chain in sorted(chains):
+            derived = registry_enumeration_module._derived_lp_manager(protocol, chain)
+            managers = _reviewed_lp_managers(protocol, chain)
+            if len(managers) == 1:
+                expected = next(iter(managers))
+                if derived != expected:
+                    violations.append(
+                        f"{protocol}/{chain}: derived {derived or '(empty)'}, connector publishes {expected}"
+                    )
+            elif derived:
+                violations.append(
+                    f"{protocol}/{chain}: derived {derived} while the connector publishes "
+                    f"{len(managers)} reviewed managers -- no single authority exists, so this is a guess"
+                )
+
+    empty = [p for p, n in per_protocol.items() if n == 0]
+    assert not empty, (
+        f"{family}: these protocols contributed no (protocol, chain) pairs, so they are unguarded: {empty}"
+    )
+    assert not violations, f"{family}: derivation disagrees with the connector: {violations}"
+
+
+def test_vib6730_no_slug_ever_derives_a_superseded_slipstream_generation() -> None:
+    """No protocol slug may derive a NON-CURRENT Slipstream NPM. Ever.
+
+    This pins the blocker directly, independently of which branch happens to
+    produce the refusal today, because the branch is an accident of registration
+    and the invariant is not.
+
+    Measured on the shipped code, the two Aerodrome-family slugs refuse for
+    DIFFERENT reasons: ``aerodrome`` publishes both ``cl_nft`` (legacy) and
+    ``cl_nft_current``, so it hits the >1-candidate refusal; ``aerodrome_slipstream``
+    — the slug real Slipstream rows actually carry — has no address table registered
+    at all, so it hits the older zero-candidate branch. Same safe output, different
+    reason.
+
+    That difference is a live regression path. Register an ``aerodrome_slipstream``
+    table with a single LEGACY address and the derivation would return it, the
+    guard in this file would pass it (one reviewed manager, derived equals it), and
+    VIB-6730 would silently re-open for Slipstream: new positions mint under the
+    CURRENT manager, so a legacy authority on the strategy arm splits the pair and
+    the one physical NFT enumerates twice.
+
+    Hence this test asserts the property that actually matters — the derived value
+    is never a superseded generation — rather than the mechanism that currently
+    delivers it.
+    """
+    from almanak.connectors.aerodrome.addresses import SLIPSTREAM_LP_DEPLOYMENTS
+
+    offenders: list[str] = []
+    checked = 0
+    for chain, deployments in SLIPSTREAM_LP_DEPLOYMENTS.items():
+        if len(deployments) < 2:
+            continue  # single-generation chain: nothing to supersede
+        superseded = {str(d.position_manager).strip().lower() for d in deployments[1:]}
+        current = str(deployments[0].position_manager).strip().lower()
+        assert current not in superseded, f"{chain}: deployment ordering is not newest-first"
+        for slug in ("aerodrome", "aerodrome_slipstream", "velodrome_slipstream"):
+            checked += 1
+            derived = registry_enumeration_module._derived_lp_manager(slug, chain)
+            if derived and derived in superseded:
+                offenders.append(f"{slug}/{chain} -> {derived} (superseded; current is {current})")
+
+    assert checked, "no multi-generation Slipstream chain examined — the guard would be vacuous"
+    assert not offenders, (
+        "derivation returned a SUPERSEDED Slipstream manager: "
+        f"{offenders}. New positions mint under the current NPM, so a superseded "
+        "authority splits the pair and re-opens the VIB-6730 double-count."
+    )
+
+
+def test_vib6752_alias_slug_resolves_to_the_canonical_connector_manager() -> None:
+    """A strategy's declared slug must resolve even when it differs from the table key.
+
+    ``agni_lp_mantle`` reports ``protocol="agni"`` — the slug the SDK routes Agni
+    INTENTS under — while the address table registers ``agni_finance``. An
+    un-normalised lookup returned nothing, so the row stayed bare, and a bare
+    NFT-shaped row can be bridge-merged onto another manager's NFT of the same
+    token id and strand it (VIB-6752).
+
+    The row IS NFT-shaped despite its prefixed ``position_id``, which is the part
+    that made this easy to miss: ``resolve_nft_token_id`` reads ``details`` FIRST
+    and the strategy sets ``details["nft_id"]``. Checking ``position_id`` alone
+    says "not NFT-shaped" and is wrong.
+
+    Pinned per chain, and asserted to be a NO-OP for canonical slugs, because the
+    normalisation must not perturb the venues the fork proof and the Aerodrome
+    multi-generation refusal depend on.
+    """
+    from almanak.connectors._strategy_base.address_registry import addresses_for
+    from almanak.connectors._strategy_base.protocol_aliases import normalize_protocol
+
+    # The alias resolves, and it resolves to a manager the connector really publishes.
+    derived = registry_enumeration_module._derived_lp_manager("agni", "mantle")
+    assert derived, "the 'agni' slug must resolve — an unresolved NFT-shaped row is bridgeable"
+    canonical = normalize_protocol("mantle", "agni")
+    assert canonical == "agni_finance", f"alias seam changed: agni -> {canonical}"
+    published = {
+        str((addresses_for(canonical, "mantle") or {}).get(k, "")).strip().lower()
+        for k in registry_enumeration_module._LP_MANAGER_CONTRACT_KINDS
+    } - {""}
+    assert derived in published, f"derived {derived} is not published by {canonical}: {sorted(published)}"
+
+    # And it is a no-op everywhere else, including the multi-generation refusals.
+    unchanged = {
+        ("uniswap_v3", "arbitrum"),
+        ("sushiswap_v3", "arbitrum"),
+        ("uniswap_v4", "arbitrum"),
+        ("pancakeswap_v3", "bsc"),
+        ("camelot", "arbitrum"),
+    }
+    for proto, chain in sorted(unchanged):
+        # VALUE equality, not truthiness. An earlier revision of this loop asserted
+        # only that each pair still derived something truthy -- the exact property
+        # this file's own docstrings condemn, since both wrong-value defects on this
+        # PR (SushiSwap, Aerodrome) were non-empty. Normalisation could have changed
+        # any of these five addresses and a truthiness check would have passed.
+        assert normalize_protocol(chain, proto) == proto, (
+            f"{proto}/{chain}: normalisation is not a no-op on this canonical slug"
+        )
+        expected = {
+            str((addresses_for(proto, chain) or {}).get(k, "")).strip().lower()
+            for k in registry_enumeration_module._LP_MANAGER_CONTRACT_KINDS
+        } - {""}
+        assert len(expected) == 1, f"{proto}/{chain}: fixture assumption changed, {sorted(expected)}"
+        assert registry_enumeration_module._derived_lp_manager(proto, chain) == next(iter(expected)), (
+            f"{proto}/{chain} must still resolve to the connector's own manager after normalisation"
+        )
+    for proto, chain in (("aerodrome", "base"), ("aerodrome_slipstream", "base")):
+        assert registry_enumeration_module._derived_lp_manager(proto, chain) == "", (
+            f"{proto}/{chain} must still REFUSE — normalisation must not defeat the multi-generation guard"
+        )
