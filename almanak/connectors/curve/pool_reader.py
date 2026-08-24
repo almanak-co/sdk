@@ -44,12 +44,20 @@ POOL_READER_SPEC = PoolReaderSpec(
     ),
     # Curve's pairwise resolver (MetaRegistry find_pool_for_coins) is a live
     # registry lookup, not a static factory address — so this slot stays empty
-    # and pair-only reader resolution fails closed (see module docstring).
+    # and pair lookups go through the pair_resolver binding below instead.
     factory_addresses={},
     known_pools={},
     # Single total sweep: Curve has no fee-tier discriminator.
     candidate_pool_keys=(CURVE_POOL_KEY,),
     discriminator_kind=PoolDiscriminatorKind.NONE,
+    pair_resolver=ImportRef(
+        module="almanak.connectors.curve.pair_resolver",
+        attribute="resolve_pair_payload",
+    ),
+    identity_probe=ImportRef(
+        module="almanak.connectors.curve.pool_identity",
+        attribute="identify_pool_payload",
+    ),
 )
 
 _UNSUPPORTED = {

@@ -222,8 +222,12 @@ class TestGammaOrdering:
         stableswap: the re-read recovers the gamma value → crypto. Guards the
         ~10^10 cached valuation mis-mark (crypto valued as stableswap)."""
         gw = FakeMetaRegistryGateway(
-            coins=[USDC, WBTC, WETH], decimals=[6, 8, 18], n_coins=3,
-            gamma=10**11, gamma_blips=1, confirm_healthy=True,
+            coins=[USDC, WBTC, WETH],
+            decimals=[6, 8, 18],
+            n_coins=3,
+            gamma=10**11,
+            gamma_blips=1,
+            confirm_healthy=True,
         )
         meta = pool_resolver.resolve_pool_metadata("ethereum", POOL, gateway_client=gw)
         assert meta is not None
@@ -314,9 +318,7 @@ class TestFailClosed:
         assert resolve_pool_metadata("ethereum", POOL) is None
 
     def test_address_provider_zero_returns_none(self) -> None:
-        gw = FakeMetaRegistryGateway(
-            coins=[DAI, USDC, USDT], decimals=[18, 6, 6], n_coins=3, meta_registry=ZERO
-        )
+        gw = FakeMetaRegistryGateway(coins=[DAI, USDC, USDT], decimals=[18, 6, 6], n_coins=3, meta_registry=ZERO)
         assert resolve_pool_metadata("ethereum", POOL, gateway_client=gw) is None
 
     def test_metaregistry_revert_returns_none(self) -> None:
@@ -405,3 +407,36 @@ class TestAdapterFallback:
         assert info.n_coins == 3
         assert [a.lower() for a in info.coin_addresses] == [DAI.lower(), USDC.lower(), USDT.lower()]
         assert info.coin_decimals == [18, 6, 6]
+
+
+class TestDefinitiveMissRetry:
+    """A single target-read flake behind a healthy canary must not memoise a
+    permanent non-membership (observed live: Ethereum 3pool over a
+    load-balanced RPC)."""
+
+    def test_single_flake_miss_is_retried_and_resolves(self) -> None:
+        from unittest.mock import patch
+
+        meta = object()
+        with patch.object(pool_resolver, "_resolve_uncached", side_effect=[None, meta]) as reads:
+            assert resolve_pool_metadata("ethereum", POOL) is meta
+        assert reads.call_count == 2
+        # the rescued value is what got memoised
+        with patch.object(pool_resolver, "_resolve_uncached", side_effect=AssertionError("must hit memo")):
+            assert resolve_pool_metadata("ethereum", POOL) is meta
+
+    def test_double_miss_is_cached_definitive(self) -> None:
+        from unittest.mock import patch
+
+        with patch.object(pool_resolver, "_resolve_uncached", side_effect=[None, None]) as reads:
+            assert resolve_pool_metadata("ethereum", POOL) is None
+        assert reads.call_count == 2
+        assert pool_resolver.resolution_is_definitive("ethereum", POOL)
+
+    def test_miss_then_transient_is_not_cached(self) -> None:
+        from unittest.mock import patch
+
+        blip = pool_resolver._TransientTransport("blip")
+        with patch.object(pool_resolver, "_resolve_uncached", side_effect=[None, blip]):
+            assert resolve_pool_metadata("ethereum", POOL) is None
+        assert not pool_resolver.resolution_is_definitive("ethereum", POOL)

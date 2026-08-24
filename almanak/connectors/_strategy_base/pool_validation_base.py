@@ -33,6 +33,7 @@ __all__ = [
     "PoolValidationResult",
     "decode_address",
     "eth_call",
+    "reader_rpc_call",
 ]
 
 ZERO_ADDRESS = "0x" + "0" * 40
@@ -196,3 +197,24 @@ def decode_address(data: bytes) -> str:
     if len(data) < 32:
         return ZERO_ADDRESS
     return "0x" + data[12:32].hex()
+
+
+def reader_rpc_call(
+    gateway_client: GatewayClient | None = None,
+    rpc_url: str | None = None,
+    timeout: float = 10.0,
+):
+    """Bridge this module's transport to the pool readers' ``RpcCallFn`` shape.
+
+    Readers expect ``(chain, to, calldata) -> bytes`` that RAISES on an
+    unreadable target; this module's ``eth_call`` returns ``None`` instead —
+    convert so reader error handling stays on its own path.
+    """
+
+    def _call(chain: str, to: str, data: str) -> bytes:
+        raw = eth_call(rpc_url or "", to, data, timeout=timeout, chain=chain, gateway_client=gateway_client)
+        if raw is None:
+            raise ValueError(f"eth_call returned no data for {to} on {chain}")
+        return raw
+
+    return _call

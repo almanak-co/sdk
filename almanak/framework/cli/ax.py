@@ -2463,9 +2463,16 @@ def _pool_title_suffix(protocol: str, fee_tier: int) -> str:
     return f"{fee_tier / 10000:.2f}%"
 
 
+def _looks_like_pool_address(value: str) -> bool:
+    body = value.removeprefix("0x").removeprefix("0X")
+    if body == value:  # the documented contract requires the 0x prefix
+        return False
+    return len(body) in (40, 64) and all(c in "0123456789abcdefABCDEF" for c in body)
+
+
 @ax.command("pool")
 @click.argument("token_a")
-@click.argument("token_b")
+@click.argument("token_b", required=False, default=None)
 @click.option(
     "--fee-tier",
     type=int,
@@ -2490,15 +2497,41 @@ def pool(ctx, token_a, token_b, fee_tier, protocol):
     --fee-tier the protocol's native fee tiers are swept and the deepest
     pool is used.
 
+    Single-address form: identifies what the address is — protocol, pair,
+    fee tier / pool type, LP token — reverse-verified against the owning
+    protocol's factory or registry.
+
     \b
     Examples:
         almanak ax pool WBTC WETH                      # deepest WBTC-WETH pool
         almanak ax pool USDC ETH --fee-tier 500         # exactly the 0.05% tier
+        almanak ax pool 0x0b1c...2d69                   # identify this address
         almanak ax pool WBTC WETH --json                # JSON output
     """
     from almanak.framework.cli.ax_render import render_error, render_result
 
     json_output = ctx.obj["json_output"]
+
+    if token_b is None:
+        if not _looks_like_pool_address(token_a):
+            render_error(
+                f"'{token_a}' is not a contract address. Pass two token symbols to look up a pool, "
+                "or one 0x-address to identify it.",
+                json_output=json_output,
+            )
+            sys.exit(1)
+        try:
+            response = _run_tool(ctx, "resolve_pool_address", {"address": token_a, "chain": ctx.obj["chain"]})
+            render_result(response, json_output=json_output, title=f"Pool identity: {token_a}")
+            if _response_is_error(response):
+                sys.exit(1)
+        except click.ClickException:
+            raise
+        except Exception as e:
+            render_error(str(e), json_output=json_output)
+            sys.exit(1)
+        return
+
     try:
         response = _run_tool(
             ctx,

@@ -369,6 +369,20 @@ def resolve_pool_metadata(
             rpc_url=rpc_url,
             timeout=timeout,
         )
+        if result is None:
+            # The health canary is a SEPARATE request: behind a load-balanced
+            # transport the target read can flake (bad backend / rate limit)
+            # while the canary answers, misclassifying the miss as definitive
+            # (observed live: Ethereum 3pool). Re-read once before recording a
+            # permanent non-membership; two independent misses with a healthy
+            # canary is a far stronger signal.
+            result = _resolve_uncached(
+                chain=chain,
+                pool_address=pool_address,
+                gateway_client=gateway_client,
+                rpc_url=rpc_url,
+                timeout=timeout,
+            )
     except _TransientTransport as exc:
         # A read failed AND transport health could not be confirmed — the failure
         # is ambiguous (blip vs genuine revert). Return None WITHOUT caching so the

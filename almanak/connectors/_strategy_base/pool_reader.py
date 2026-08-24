@@ -32,6 +32,9 @@ class PoolDiscriminatorKind(Enum):
 
     FEE_TIER = "fee_tier"
     TICK_SPACING = "tick_spacing"
+    #: Solidly pool families: the third getPool argument is the stable/volatile
+    #: bool, encoded as a 0/1 pool key.
+    STABLE_FLAG = "stable_flag"
     NONE = "none"
 
 
@@ -61,6 +64,15 @@ class PoolReaderSpec:
     reader_kind: str = "v3_slot0"
     reader: ImportRef = field(default_factory=lambda: _DEFAULT_V3_READER)
     discriminator_kind: PoolDiscriminatorKind = PoolDiscriminatorKind.FEE_TIER
+    # Optional connector-owned pair→pool resolver for protocols whose lookup is
+    # not a static factory call (e.g. Curve's live MetaRegistry). Loads a
+    # ``resolve_pair_payload(chain, token_a, token_b, *, fee_tier, gateway_client,
+    # rpc_url, usd_price, timeout) -> dict | None`` callable.
+    pair_resolver: ImportRef | None = None
+    # Optional connector-owned address-form identity probe (ALM-3368). Loads an
+    # ``identify_pool_payload(spec, chain, address, *, gateway_client, rpc_url,
+    # timeout) -> dict | None`` callable.
+    identity_probe: ImportRef | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.reader, ImportRef):
@@ -69,6 +81,9 @@ class PoolReaderSpec:
             raise TypeError("PoolReaderSpec.reader_kind must be a non-empty compatibility string")
         if not isinstance(self.discriminator_kind, PoolDiscriminatorKind):
             raise TypeError("PoolReaderSpec.discriminator_kind must be a PoolDiscriminatorKind")
+        for name, value in (("pair_resolver", self.pair_resolver), ("identity_probe", self.identity_probe)):
+            if value is not None and not isinstance(value, ImportRef):
+                raise TypeError(f"PoolReaderSpec.{name} must be an ImportRef or None")
         if self.reader == _DEFAULT_V3_READER and self.reader_kind != "v3_slot0":
             raise ValueError(
                 f"legacy reader_kind={self.reader_kind!r} has no implicit class binding; "

@@ -228,10 +228,11 @@ class GetPoolStateRequest(BaseModel):
     token_b: str = Field(description="Second token symbol")
     fee_tier: int | None = Field(
         default=None,
-        gt=0,
+        ge=0,
         description=(
             "Pool fee tier in hundredths of a bip (e.g. 500, 3000, 10000); tick spacing for "
-            "Slipstream-family DEXs. Omit to sweep the protocol's native tiers and use the deepest pool."
+            "Slipstream-family DEXs; the stable flag (0 volatile, 1 stable) for Solidly-family classic pools. "
+            "Omit to sweep the protocol's native tiers and use the deepest pool."
         ),
     )
     chain: str = Field(default=DEFAULT_CHAIN)
@@ -253,6 +254,39 @@ class GetPoolStateResponse(BaseModel):
     volume_24h_usd: str = ""
     fee_apr: str = ""
     tvl_usd: str = ""
+
+
+class ResolvePoolAddressRequest(BaseModel):
+    """Identify and validate a pool/receipt address of unknown kind (ALM-3368)."""
+
+    address: str = Field(description="Contract address to identify (0x-prefixed, 40 hex chars)")
+    chain: str = Field(default=DEFAULT_CHAIN)
+
+
+class ResolvePoolAddressResponse(BaseModel):
+    address: str
+    kind: str = Field(default="unknown", description="pool | erc20 | unknown")
+    family: str | None = Field(default=None, description="clamm | solidly | curve (pools only)")
+    protocol: str | None = Field(
+        default=None, description="Factory-verified protocol slug; family-level hint when unverified"
+    )
+    token0: str | None = None
+    token1: str | None = None
+    fee_tier: int | None = None
+    tick_spacing: int | None = None
+    stable: bool | None = Field(default=None, description="Solidly pool type flag (stable vs volatile)")
+    coins: list[str] = Field(default_factory=list, description="Curve coin addresses in on-chain order")
+    lp_token: str | None = Field(
+        default=None, description="LP token address; equals the pool address for fungible-LP pools"
+    )
+    symbol: str | None = None
+    decimals: int | None = None
+    factory_verified: str = Field(
+        default="unverified",
+        description="verified (factory acknowledges this address) | mismatch (readable factories disown it) | unverified",
+    )
+    identified_via: str = "abi-probe"
+    notes: list[str] = Field(default_factory=list)
 
 
 class GetLPPositionRequest(BaseModel):

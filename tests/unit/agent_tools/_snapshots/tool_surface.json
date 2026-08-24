@@ -137,7 +137,7 @@
           "fee_tier": {
             "anyOf": [
               {
-                "exclusiveMinimum": 0,
+                "minimum": 0,
                 "type": "integer"
               },
               {
@@ -145,7 +145,7 @@
               }
             ],
             "default": null,
-            "description": "Pool fee tier in hundredths of a bip (e.g. 500, 3000, 10000); tick spacing for Slipstream-family DEXs. Omit to sweep the protocol's native tiers and use the deepest pool.",
+            "description": "Pool fee tier in hundredths of a bip (e.g. 500, 3000, 10000); tick spacing for Slipstream-family DEXs; the stable flag (0 volatile, 1 stable) for Solidly-family classic pools. Omit to sweep the protocol's native tiers and use the deepest pool.",
             "title": "Fee Tier"
           },
           "pool_address": {
@@ -178,6 +178,30 @@
         "type": "object"
       },
       "name": "get_pool_state"
+    },
+    {
+      "description": "Identify a pool/receipt address of unknown kind: which protocol it belongs to, its pair, fee tier or pool type, LP token, and whether the protocol's factory or registry acknowledges it.",
+      "inputSchema": {
+        "description": "Identify and validate a pool/receipt address of unknown kind (ALM-3368).",
+        "properties": {
+          "address": {
+            "description": "Contract address to identify (0x-prefixed, 40 hex chars)",
+            "title": "Address",
+            "type": "string"
+          },
+          "chain": {
+            "default": "arbitrum",
+            "title": "Chain",
+            "type": "string"
+          }
+        },
+        "required": [
+          "address"
+        ],
+        "title": "ResolvePoolAddressRequest",
+        "type": "object"
+      },
+      "name": "resolve_pool_address"
     },
     {
       "description": "Get details about an existing LP position: range, liquidity, accrued fees.",
@@ -1913,7 +1937,7 @@
             "fee_tier": {
               "anyOf": [
                 {
-                  "exclusiveMinimum": 0,
+                  "minimum": 0,
                   "type": "integer"
                 },
                 {
@@ -1921,7 +1945,7 @@
                 }
               ],
               "default": null,
-              "description": "Pool fee tier in hundredths of a bip (e.g. 500, 3000, 10000); tick spacing for Slipstream-family DEXs. Omit to sweep the protocol's native tiers and use the deepest pool.",
+              "description": "Pool fee tier in hundredths of a bip (e.g. 500, 3000, 10000); tick spacing for Slipstream-family DEXs; the stable flag (0 volatile, 1 stable) for Solidly-family classic pools. Omit to sweep the protocol's native tiers and use the deepest pool.",
               "title": "Fee Tier"
             },
             "pool_address": {
@@ -1951,6 +1975,33 @@
             "token_b"
           ],
           "title": "GetPoolStateRequest",
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Identify a pool/receipt address of unknown kind: which protocol it belongs to, its pair, fee tier or pool type, LP token, and whether the protocol's factory or registry acknowledges it.",
+        "name": "resolve_pool_address",
+        "parameters": {
+          "description": "Identify and validate a pool/receipt address of unknown kind (ALM-3368).",
+          "properties": {
+            "address": {
+              "description": "Contract address to identify (0x-prefixed, 40 hex chars)",
+              "title": "Address",
+              "type": "string"
+            },
+            "chain": {
+              "default": "arbitrum",
+              "title": "Chain",
+              "type": "string"
+            }
+          },
+          "required": [
+            "address"
+          ],
+          "title": "ResolvePoolAddressRequest",
           "type": "object"
         }
       },

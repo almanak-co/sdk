@@ -65,6 +65,9 @@ FROZEN_SCHEMA_CHAIN_DEFAULTS: dict[str, str] = {
     "ListTokenPoolsRequest": "arbitrum",
     "OpenLPPositionRequest": "arbitrum",
     "RepayLendingRequest": "arbitrum",
+    # ALM-3368 address-form identity tool. Read-only; same DEFAULT_CHAIN as
+    # every other read schema — declared because the freeze is a whitelist.
+    "ResolvePoolAddressRequest": "arbitrum",
     "ResolveTokenRequest": "arbitrum",
     "SettleVaultRequest": "base",
     "SimulateIntentRequest": "arbitrum",

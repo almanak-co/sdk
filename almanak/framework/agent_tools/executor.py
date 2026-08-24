@@ -8,6 +8,7 @@ envelopes.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -279,6 +280,14 @@ def _sanitize_analytics_field(value: object) -> str:
     return text
 
 
+# Hard wall-clock budget for one resolve_pool_address identity sweep. The
+# serial probe walk is many probes × several RPC calls each (10s per call),
+# so without a total bound a stalled transport pins the tool for minutes.
+_IDENTITY_SWEEP_DEADLINE_S = 25.0
+# Distinguishes "sweep finished with no claim" from an early-returned response.
+_UNKNOWN_SENTINEL: Any = object()
+
+
 def _error_payload(code: AgentErrorCode, message: str, *, recoverable: bool = False) -> ToolErrorPayload:
     """Build a standardized error payload for ToolResponse envelopes.
 
@@ -547,7 +556,7 @@ class ToolExecutor:
                 suggestion="; ".join(suggestions),
             )
 
-    def _lookup_token_price(self, token: str) -> Decimal | None:
+    def _lookup_token_price(self, token: str, chain: str | None = None) -> Decimal | None:
         """Synchronous price lookup for spend-limit pre-checks.
 
         Returns the USD price of a token, or None if unavailable.
@@ -557,7 +566,7 @@ class ToolExecutor:
             from almanak.gateway.proto import gateway_pb2
 
             resp = self._client.market.GetPrice(
-                gateway_pb2.PriceRequest(token=token, quote="USD", chain=self._default_chain)
+                gateway_pb2.PriceRequest(token=token, quote="USD", chain=chain or self._default_chain)
             )
             price = Decimal(str(resp.price))
             return price if price > 0 else None
@@ -901,6 +910,8 @@ class ToolExecutor:
 
     # ── DATA TOOLS ──────────────────────────────────────────────────────
 
+    # crap-allowlist: mechanical tool-name router — one dispatch line per tool, so cc
+    # grows with the catalog; each branch is covered by its tool's own executor tests.
     async def _dispatch_data(self, tool_name: str, args: dict) -> ToolResponse:  # noqa: C901
         from almanak.gateway.proto import gateway_pb2
 
@@ -1003,6 +1014,9 @@ class ToolExecutor:
 
         if tool_name == "get_pool_state":
             return await self._execute_get_pool_state(args)
+
+        if tool_name == "resolve_pool_address":
+            return await self._execute_resolve_pool_address(args)
 
         if tool_name == "get_lp_position":
             return await self._execute_get_lp_position(args)
@@ -2287,6 +2301,203 @@ class ToolExecutor:
             )
         return pool_address, selected_key
 
+    async def _execute_resolve_pool_address(self, args: dict) -> ToolResponse:
+        """Identify an address of unknown kind: pool (which protocol/pair), LP/receipt token, or neither.
+
+        Iterates the connector-declared ``identity_probe``s from the pool-reader
+        registry — each probe claims only addresses its own factory/registry
+        acknowledges, so ABI-identical forks disambiguate by provenance and a
+        spoofed contract is never reported as ``verified``. Falls back to the
+        protocol-neutral ERC-20 classification, then ``unknown``.
+        """
+        from almanak.connectors._strategy_base.pool_identity_base import identify_erc20
+        from almanak.connectors._strategy_pool_reader_registry import POOL_READER_REGISTRY
+
+        raw_address = str(args.get("address", "")).strip()
+        chain = args.get("chain", self._default_chain)
+
+        hex_body = raw_address.removeprefix("0x").removeprefix("0X")
+        if (
+            hex_body == raw_address
+            or len(hex_body) not in (40, 64)
+            or not all(c in "0123456789abcdefABCDEF" for c in hex_body)
+        ):
+            return ToolResponse(
+                status=ToolResponseStatus.ERROR,
+                error=_error_payload(
+                    AgentErrorCode.VALIDATION_ERROR,
+                    f"Not an address: {raw_address!r}. Pass a 0x-prefixed 20-byte contract address "
+                    "or a 32-byte pool id.",
+                    recoverable=True,
+                ),
+            )
+        address = "0x" + hex_body.lower()
+
+        def _sweep() -> ToolResponse:
+            probe_faults: list[str] = []
+            for spec in POOL_READER_REGISTRY.all():
+                if spec.identity_probe is None:
+                    continue
+                try:
+                    probe = spec.identity_probe.load()
+                    payload = probe(spec, chain, address, gateway_client=self._client)
+                except Exception:  # noqa: BLE001 — a faulting probe abstains for now; others still get their turn
+                    logger.debug("identity probe failed for %s on %s", spec.protocol, chain, exc_info=True)
+                    probe_faults.append(spec.protocol)
+                    continue
+                if payload is not None:
+                    return ToolResponse(status=ToolResponseStatus.SUCCESS, data={"address": address, **payload})
+
+            if probe_faults:
+                # No probe claimed the address, but some could not answer: a
+                # definitive "unknown"/plain-token verdict could misidentify a
+                # pool whose protocol probe was the one that faulted.
+                return ToolResponse(
+                    status=ToolResponseStatus.ERROR,
+                    error=_error_payload(
+                        AgentErrorCode.RPC_FAILED,
+                        f"Identity probes could not answer for {address} on {chain} "
+                        f"({len(probe_faults)} protocol probe(s) faulted); retry before concluding it is not a pool.",
+                        recoverable=True,
+                    ),
+                )
+
+            if len(hex_body) == 40:
+                erc20 = identify_erc20(chain, address, gateway_client=self._client)
+                if erc20 is not None:
+                    return ToolResponse(status=ToolResponseStatus.SUCCESS, data={"address": address, **erc20})
+            return _UNKNOWN_SENTINEL
+
+        # Hard total deadline: the serial sweep is many probes × several RPC
+        # calls each, so a stalled transport must not pin the tool (or ax
+        # pool) for minutes. to_thread also unblocks the event loop.
+        try:
+            result = await asyncio.wait_for(asyncio.to_thread(_sweep), timeout=_IDENTITY_SWEEP_DEADLINE_S)
+        except TimeoutError:
+            return ToolResponse(
+                status=ToolResponseStatus.ERROR,
+                error=_error_payload(
+                    AgentErrorCode.RPC_FAILED,
+                    f"Identity sweep exceeded {_IDENTITY_SWEEP_DEADLINE_S:.0f}s for {address} on {chain}; "
+                    "transport is stalling — retry before concluding it is not a pool.",
+                    recoverable=True,
+                ),
+            )
+        if result is not _UNKNOWN_SENTINEL:
+            return result
+
+        return ToolResponse(
+            status=ToolResponseStatus.SUCCESS,
+            data={
+                "address": address,
+                "kind": "unknown",
+                "factory_verified": "unverified",
+                "identified_via": "abi-probe",
+                "notes": [
+                    "No registered protocol claims this address and no ERC-20 interface answered — "
+                    "it may be an EOA, a non-pool contract, or deployed on a different chain than queried."
+                ],
+            },
+        )
+
+    def _resolve_pool_via_pair_resolver(self, chain: str, protocol: str, reader_spec: Any, args: dict) -> ToolResponse:
+        """Pair→pool via a connector-declared resolver (ALM-3365).
+
+        Covers protocols whose lookup is not a factory ``getPool`` call:
+        the connector loads its own resolver (live registry walk, synthetic
+        pool-id derivation, flag-keyed factory sweep) and returns a
+        protocol-shaped payload; the executor stays protocol-clean.
+        """
+        from almanak.framework.data.tokens import get_token_resolver
+
+        if args.get("pool_address"):
+            # An explicit address names ONE pool (possibly a hooked V4 id or
+            # an N-asset Curve pool the pair sweep would never surface) —
+            # read it directly instead of resolving the pair.
+            return self._read_pool_via_connector_reader(chain, protocol, reader_spec, args["pool_address"])
+
+        token_a_sym = args["token_a"]
+        token_b_sym = args["token_b"]
+        resolver = get_token_resolver()
+        token_a = resolver.resolve_for_swap(token_a_sym, chain)
+        token_b = resolver.resolve_for_swap(token_b_sym, chain)
+        if token_a is None or token_b is None:
+            missing = token_a_sym if token_a is None else token_b_sym
+            return ToolResponse(
+                status=ToolResponseStatus.ERROR,
+                error=_error_payload(
+                    AgentErrorCode.VALIDATION_ERROR, f"Could not resolve token '{missing}' on {chain}"
+                ),
+            )
+
+        try:
+            resolve_pair = reader_spec.pair_resolver.load()
+            payload = resolve_pair(
+                chain,
+                token_a.address,
+                token_b.address,
+                fee_tier=args.get("fee_tier"),
+                gateway_client=self._client,
+                usd_price=lambda token: self._lookup_token_price(token, chain=chain),
+            )
+        except ValueError as e:
+            return ToolResponse(
+                status=ToolResponseStatus.ERROR,
+                error=_error_payload(AgentErrorCode.VALIDATION_ERROR, str(e), recoverable=True),
+            )
+        except Exception as e:  # noqa: BLE001 — resolver faults surface as recoverable tool errors
+            return ToolResponse(
+                status=ToolResponseStatus.ERROR,
+                error=_error_payload(
+                    AgentErrorCode.RPC_FAILED,
+                    f"Pair resolution failed for {protocol} {token_a_sym}/{token_b_sym} on {chain}: {e}",
+                    recoverable=True,
+                ),
+            )
+        if payload is None:
+            return ToolResponse(
+                status=ToolResponseStatus.ERROR,
+                error=_error_payload(
+                    AgentErrorCode.EMPTY_POOL,
+                    f"Pool not found: {protocol} {token_a_sym}/{token_b_sym} on {chain}. "
+                    "The connector's pair resolver returned no viable pool.",
+                ),
+            )
+        # Set last: the request identity must survive any payload key collision.
+        data = {**payload, "requested_token_a": token_a.address, "requested_token_b": token_b.address}
+        return ToolResponse(status=ToolResponseStatus.SUCCESS, data=data)
+
+    def _read_pool_via_connector_reader(
+        self, chain: str, protocol: str, reader_spec: Any, pool_address: str
+    ) -> ToolResponse:
+        """Read one explicitly named pool through the connector's own reader."""
+        from almanak.connectors._strategy_base.pool_validation_base import reader_rpc_call
+
+        try:
+            reader_cls = reader_spec.reader.load()
+            reader = reader_cls(rpc_call=reader_rpc_call(gateway_client=self._client), spec=reader_spec)
+            state = reader.read_pool_price(pool_address, chain).value
+        except Exception as e:  # noqa: BLE001 — reader faults surface as recoverable tool errors
+            return ToolResponse(
+                status=ToolResponseStatus.ERROR,
+                error=_error_payload(
+                    AgentErrorCode.RPC_FAILED,
+                    f"Pool read failed for {protocol} {pool_address} on {chain}: {e}",
+                    recoverable=True,
+                ),
+            )
+        data = {
+            "pool_address": pool_address,
+            "current_price": str(state.price),
+            "tick": state.tick,
+            "liquidity": str(state.liquidity or 0),
+            "fee_tier": state.fee_tier,
+            "fee_tier_source": "unspecified",
+            "token0_decimals": state.token0_decimals,
+            "token1_decimals": state.token1_decimals,
+        }
+        return ToolResponse(status=ToolResponseStatus.SUCCESS, data=data)
+
     async def _execute_get_pool_state(self, args: dict) -> ToolResponse:
         """Read CL pool state via slot0() and liquidity() RPC calls.
 
@@ -2309,12 +2520,28 @@ class ToolExecutor:
         # slugs dispatch too. The connector owns "which address / which
         # selector"; the executor owns the RPC + decode.
         cap, protocol, reader_spec = _resolve_pool_state_capability(chain, args.get("protocol", DEFAULT_LP_PROTOCOL))
+        if cap is None and reader_spec is not None and reader_spec.pair_resolver is not None:
+            # Non-factory protocols (live registry / synthetic-id lookups)
+            # resolve through the connector-declared pair resolver.
+            return self._resolve_pool_via_pair_resolver(chain, protocol, reader_spec, args)
         if cap is None:
             return ToolResponse(
                 status=ToolResponseStatus.ERROR,
                 error=_error_payload(
                     AgentErrorCode.VALIDATION_ERROR,
                     f"Unsupported protocol '{protocol}' for pool lookup. Supported: {_pool_state_supported_keys()}",
+                    recoverable=True,
+                ),
+            )
+        if fee_tier == 0:
+            # 0 is only meaningful in the resolver lane (Solidly stable flag);
+            # for factory getPool discriminators it is the no-tier sentinel —
+            # reject before any RPC (PR #3212 review).
+            return ToolResponse(
+                status=ToolResponseStatus.ERROR,
+                error=_error_payload(
+                    AgentErrorCode.VALIDATION_ERROR,
+                    f"fee_tier 0 is not a valid factory pool key for '{protocol}'; omit it to sweep native tiers",
                     recoverable=True,
                 ),
             )

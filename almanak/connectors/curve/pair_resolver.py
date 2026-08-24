@@ -589,3 +589,60 @@ def format_pair_miss(
         "Pass an explicit pool address as intent.pool to target a specific pool "
         "(deposit-gated pools remain non-deployable)."
     )
+
+
+def resolve_pair_payload(
+    chain: str,
+    token_a: str,
+    token_b: str,
+    *,
+    fee_tier: int | None = None,  # noqa: ARG001 — uniform pair-resolver signature; Curve pools are not tier-keyed
+    gateway_client: GatewayClient | None = None,
+    rpc_url: str | None = None,
+    usd_price: Callable[[str], Decimal | None] | None = None,
+    timeout: float = 10.0,
+) -> dict | None:
+    """Agent-tool payload adapter over :func:`build_pair_candidates` (ALM-3365).
+
+    Loaded via ``POOL_READER_SPEC.pair_resolver``. Returns the deepest screened
+    candidate, or ``None`` for a transport-confirmed honest miss. Raises when
+    registry enumeration is indeterminate — never conflated with a miss.
+    """
+    candidates = build_pair_candidates(
+        chain,
+        f"{_short(token_a)}/{_short(token_b)}",
+        token_a,
+        token_b,
+        gateway_client=gateway_client,
+        rpc_url=rpc_url,
+        usd_price=usd_price or (lambda _sym: None),
+        timeout=timeout,
+    )
+    if candidates.indeterminate:
+        raise RuntimeError(
+            f"Curve pair resolution indeterminate for {_short(token_a)}/{_short(token_b)} on {chain}: "
+            "registry enumeration could not be confirmed against a healthy transport"
+        )
+    if not candidates.ranked:
+        return None
+    best = candidates.ranked[0]
+    meta = best.metadata
+    payload = {
+        "pool_address": best.address,
+        "fee_tier_source": "sweep",
+        "liquidity_usd": str(best.liquidity_usd) if best.liquidity_usd is not None else "",
+        "provenance_suspect": best.provenance_suspect,
+        "resolved_via": "meta_registry_find_pool_for_coins",
+        "candidates_rejected": len(candidates.rejected),
+    }
+    if meta is not None:
+        payload.update(
+            {
+                "lp_token": meta.lp_token,
+                "coins": list(meta.coin_addresses),
+                "coin_symbols": list(meta.coin_symbols),
+                "pool_type": meta.pool_type,
+                "is_metapool": meta.is_metapool,
+            }
+        )
+    return payload

@@ -222,6 +222,18 @@ _BUILTIN_TOOLS: list[ToolDefinition] = [
         latency_class=LatencyClass.MEDIUM,
     ),
     ToolDefinition(
+        name="resolve_pool_address",
+        description=(
+            "Identify a pool/receipt address of unknown kind: which protocol it belongs to, its pair, "
+            "fee tier or pool type, LP token, and whether the protocol's factory or registry acknowledges it."
+        ),
+        category=ToolCategory.DATA,
+        risk_tier=RiskTier.NONE,
+        request_schema=schemas.ResolvePoolAddressRequest,
+        response_schema=schemas.ResolvePoolAddressResponse,
+        latency_class=LatencyClass.MEDIUM,
+    ),
+    ToolDefinition(
         name="get_lp_position",
         description="Get details about an existing LP position: range, liquidity, accrued fees.",
         category=ToolCategory.DATA,

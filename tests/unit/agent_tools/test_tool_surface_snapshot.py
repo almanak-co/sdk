@@ -99,11 +99,11 @@ def test_tool_surface_matches_golden() -> None:
 
 
 def test_tool_surface_count_is_pinned() -> None:
-    """Sanity pin: 40 tools both ways (mirrors test_catalog.py count pins).
+    """Sanity pin: 41 tools both ways (mirrors test_catalog.py count pins).
 
-    39 -> 40 in VIB-6599, which adds ``list_token_pools`` (read-only venue
-    discovery, ``RiskTier.NONE``).
+    39 -> 40 in VIB-6599 (``list_token_pools``); 40 -> 41 in ALM-3368, which
+    adds ``resolve_pool_address`` (read-only identity probe, ``RiskTier.NONE``).
     """
     surface = _render_surface()
-    assert len(surface["openai_tools"]) == 40
-    assert len(surface["mcp_tools"]) == 40
+    assert len(surface["openai_tools"]) == 41
+    assert len(surface["mcp_tools"]) == 41

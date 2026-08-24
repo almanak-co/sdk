@@ -1212,6 +1212,56 @@ class TestAxReadCommands:
         assert "WETH/USDC (" not in result.output
 
     @patch("almanak.framework.cli.ax._get_executor")
+    def test_pool_single_address_dispatches_resolve_pool_address(self, mock_get_exec):
+        mock_executor, mock_client = _mock_executor_and_client()
+        mock_get_exec.return_value = (mock_executor, mock_client)
+
+        captured: dict = {}
+
+        async def mock_execute(tool_name, args):
+            captured["tool_name"] = tool_name
+            captured["args"] = args
+            return ToolResponse(
+                status="success",
+                data={"kind": "pool", "protocol": "curve", "factory_verified": "verified"},
+            )
+
+        mock_executor.execute = mock_execute
+
+        runner = CliRunner()
+        address = "0x11c1fbd4b3de66bc0565779b35171a6cf3e71f59"
+        result = runner.invoke(almanak, ["ax", "pool", address, "-c", "base"])
+        assert result.exit_code == 0
+        assert captured["tool_name"] == "resolve_pool_address"
+        assert captured["args"] == {"address": address, "chain": "base"}
+
+    @patch("almanak.framework.cli.ax._get_executor")
+    def test_pool_single_non_address_argument_is_rejected(self, mock_get_exec):
+        mock_executor, mock_client = _mock_executor_and_client()
+        mock_get_exec.return_value = (mock_executor, mock_client)
+        mock_executor.execute = None  # must never be reached
+
+        runner = CliRunner()
+        for bad in ("WETH", "11c1fbd4b3de66bc0565779b35171a6cf3e71f59"):  # bare hex lacks the documented 0x prefix
+            result = runner.invoke(almanak, ["ax", "pool", bad])
+            assert result.exit_code == 1, bad
+            assert "not a contract address" in result.output
+
+    @patch("almanak.framework.cli.ax._get_executor")
+    def test_pool_single_address_resolver_error_exits_nonzero(self, mock_get_exec):
+        mock_executor, mock_client = _mock_executor_and_client()
+        mock_get_exec.return_value = (mock_executor, mock_client)
+
+        async def mock_execute(tool_name, args):
+            return _error_response("probes faulted", code=AgentErrorCode.RPC_FAILED)
+
+        mock_executor.execute = mock_execute
+
+        runner = CliRunner()
+        result = runner.invoke(almanak, ["ax", "pool", "0x" + "11" * 32])
+        assert result.exit_code == 1
+
+    @patch("almanak.framework.cli.ax._get_executor")
     def test_lending_reserves_human_table(self, mock_get_exec):
         """Human (non-JSON) output renders a scannable column table, not a flat repr."""
         mock_executor, mock_client = _mock_executor_and_client()

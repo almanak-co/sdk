@@ -44,6 +44,10 @@ POOL_READER_SPEC = PoolReaderSpec(
     get_pool_selector=V3_GET_POOL_SELECTOR,
     # PancakeSwap V3 uses a 2500 (0.25%) tier where Uniswap uses 3000 (0.3%).
     candidate_pool_keys=(100, 500, 2500, 10000),
+    identity_probe=ImportRef(
+        module="almanak.connectors._strategy_base.pool_identity_base",
+        attribute="identify_clamm_pool",
+    ),
 )
 
 POOL_DATA_SPEC = PoolDataSpec(

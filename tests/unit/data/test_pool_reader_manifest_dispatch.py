@@ -68,13 +68,16 @@ def test_framework_classes_match_their_manifest_specs() -> None:
 
 
 def test_aerodrome_slipstream_dispatch_is_not_aliased_to_classic() -> None:
-    """Only Slipstream enters the concentrated-liquidity live-reader lane."""
+    """Classic and Slipstream dispatch to distinct readers (ALM-3365)."""
+    from almanak.connectors.aerodrome.solidly_reader import SolidlyPoolReader
+
     registry = PoolReaderRegistry(rpc_call=_noop_rpc)
-    with pytest.raises(ValueError, match="Unknown protocol"):
-        registry.get_reader("base", "aerodrome")
-    assert registry.get_reader("base", "aerodrome_slipstream") is not None
+    classic = registry.get_reader("base", "aerodrome")
+    slipstream = registry.get_reader("base", "aerodrome_slipstream")
+    assert isinstance(classic, SolidlyPoolReader)
+    assert type(classic) is not type(slipstream)
     on_base = registry.protocols_for_chain("base")
-    assert "aerodrome" not in on_base
+    assert "aerodrome" in on_base
     assert "aerodrome_slipstream" in on_base
 
 

@@ -41,6 +41,14 @@ POOL_READER_SPEC = PoolReaderSpec(
     ),
     factory_addresses={chain: addrs["state_view"] for chain, addrs in UNISWAP_V4.items() if "state_view" in addrs},
     candidate_pool_keys=(100, 500, 3000, 10000),
+    pair_resolver=ImportRef(
+        module="almanak.connectors.uniswap_v4.pair_resolver",
+        attribute="resolve_pair_payload",
+    ),
+    identity_probe=ImportRef(
+        module="almanak.connectors.uniswap_v4.pool_identity",
+        attribute="identify_pool_payload",
+    ),
 )
 
 _UNSUPPORTED = {

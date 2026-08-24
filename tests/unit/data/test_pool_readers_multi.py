@@ -457,9 +457,12 @@ class TestPoolReaderRegistry:
 
     def test_get_reader_aerodrome_classic_is_not_a_slipstream_alias(self):
         """Classic Solidly pools never dispatch through the Slipstream ABI."""
+        from almanak.connectors.aerodrome.solidly_reader import SolidlyPoolReader
+
         registry = PoolReaderRegistry(rpc_call=self._noop_rpc)
-        with pytest.raises(ValueError, match="Unknown protocol"):
-            registry.get_reader("base", "aerodrome")
+        classic = registry.get_reader("base", "aerodrome")
+        assert isinstance(classic, SolidlyPoolReader)
+        assert not isinstance(classic, AerodromePoolReader)
 
     def test_get_reader_pancakeswap(self):
         """Get a PancakeSwapV3PoolReader from the registry."""
@@ -670,7 +673,8 @@ class TestManifestPoolReaderSpecs:
 
     def test_aerodrome_slipstream_spec_feeds_reader(self):
         spec = POOL_READER_REGISTRY.require("aerodrome_slipstream")
-        assert POOL_READER_REGISTRY.lookup("aerodrome") is None
+        classic_spec = POOL_READER_REGISTRY.lookup("aerodrome")
+        assert classic_spec is not None and classic_spec.get_pool_selector == "0x79bc57d5"
         assert spec.factory_addresses is AERODROME_CL_FACTORY
         assert spec.known_pools is _AERODROME_KNOWN_POOLS
         assert spec.get_pool_selector == "0x28af8d0b"

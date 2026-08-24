@@ -8,7 +8,6 @@ from almanak.connectors._strategy_base.pool_data import (
     PoolDataSource,
     PoolDataSpec,
     PoolReferenceKind,
-    unsupported_pool_data_spec,
 )
 from almanak.connectors._strategy_base.pool_reader import PoolDiscriminatorKind, PoolReaderSpec
 
@@ -21,11 +20,14 @@ _KNOWN_POOLS: dict[str, dict[tuple[str, str, int], str]] = {
             "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
             100,
         ): "0xb2cc224c1c9feE385f8ad6a55b4d94E92359DC59",
+        # Corrected 2026-08-18: this slot previously pointed at the CLASSIC
+        # AERO/USDC vAMM pool (0x6cDc…971d) — wrong pair, wrong AMM family.
+        # Verified on-chain: cl_factory.getPool(WETH, USDC, 200) below.
         (
             "0x4200000000000000000000000000000000000006",
             "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
             200,
-        ): "0x6cDcb1C4A4D1C3C6d054b27AC5B77e89eAFb971d",
+        ): "0x148bC43946a902258916E580B0e6D92AAa74746F",
     },
 }
 
@@ -43,15 +45,50 @@ SLIPSTREAM_POOL_READER_SPEC = PoolReaderSpec(
     # in sync if it grows).
     candidate_pool_keys=(1, 10, 50, 100, 200, 2000),
     discriminator_kind=PoolDiscriminatorKind.TICK_SPACING,
+    identity_probe=ImportRef(
+        module="almanak.connectors._strategy_base.pool_identity_base",
+        attribute="identify_clamm_pool",
+    ),
 )
 
-AERODROME_CLASSIC_POOL_DATA_SPEC = unsupported_pool_data_spec(
+CLASSIC_POOL_READER_SPEC = PoolReaderSpec(
+    protocol="aerodrome",
+    factory_addresses={chain: addrs["factory"] for chain, addrs in AERODROME.items() if "factory" in addrs},
+    reader=ImportRef(
+        module="almanak.connectors.aerodrome.solidly_reader",
+        attribute="SolidlyPoolReader",
+    ),
+    reader_kind="solidly_reserves",
+    known_pools={},
+    # Solidly getPool(address,address,bool): the stable flag is the pool key.
+    get_pool_selector="0x79bc57d5",
+    candidate_pool_keys=(0, 1),
+    discriminator_kind=PoolDiscriminatorKind.STABLE_FLAG,
+    pair_resolver=ImportRef(
+        module="almanak.connectors.aerodrome.pair_resolver",
+        attribute="resolve_pair_payload",
+    ),
+    identity_probe=ImportRef(
+        module="almanak.connectors.aerodrome.pool_identity",
+        attribute="identify_pool_payload",
+    ),
+)
+
+AERODROME_CLASSIC_POOL_DATA_SPEC = PoolDataSpec(
     protocol="aerodrome",
     reference_kind=PoolReferenceKind.EVM_CONTRACT,
-    reason=(
-        "Aerodrome Classic is a Solidly pool family; its generic N-asset metadata, "
-        "state, and price adapters have not been wired to the pool-data interface."
-    ),
+    bindings={
+        PoolDataFacet.SPOT_PRICE: PoolDataSource.LIVE_PRICE_READER,
+        PoolDataFacet.LIQUIDITY: PoolDataSource.LIVE_PRICE_READER,
+    },
+    unsupported={
+        PoolDataFacet.METADATA: "Solidly generic N-asset metadata is not wired to the pool-data interface.",
+        PoolDataFacet.BALANCES: "Solidly generic pool balances are not wired to the pool-data interface.",
+        PoolDataFacet.HISTORICAL_STATE: "Solidly archive state transport is not implemented.",
+        PoolDataFacet.TWAP: "Solidly native TWAP observations are not wired.",
+        PoolDataFacet.TICK_LIQUIDITY: "Solidly pools have no concentrated-liquidity tick model.",
+    },
+    price_reader=CLASSIC_POOL_READER_SPEC,
 )
 
 SLIPSTREAM_POOL_DATA_SPEC = PoolDataSpec(
@@ -78,6 +115,7 @@ POOL_READER_SPEC = SLIPSTREAM_POOL_READER_SPEC
 
 __all__ = [
     "AERODROME_CLASSIC_POOL_DATA_SPEC",
+    "CLASSIC_POOL_READER_SPEC",
     "POOL_DATA_SPECS",
     "POOL_READER_SPEC",
     "SLIPSTREAM_POOL_DATA_SPEC",

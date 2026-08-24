@@ -30,6 +30,10 @@ POOL_READER_SPEC = PoolReaderSpec(
         attribute="SushiSwapV3PoolReader",
     ),
     get_pool_selector=V3_GET_POOL_SELECTOR,
+    identity_probe=ImportRef(
+        module="almanak.connectors._strategy_base.pool_identity_base",
+        attribute="identify_clamm_pool",
+    ),
 )
 
 POOL_DATA_SPEC = PoolDataSpec(

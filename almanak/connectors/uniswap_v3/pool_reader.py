@@ -61,6 +61,10 @@ POOL_READER_SPEC = PoolReaderSpec(
     ),
     known_pools=_KNOWN_POOLS,
     get_pool_selector=V3_GET_POOL_SELECTOR,
+    identity_probe=ImportRef(
+        module="almanak.connectors._strategy_base.pool_identity_base",
+        attribute="identify_clamm_pool",
+    ),
 )
 
 _V3_BINDINGS = {
@@ -89,6 +93,12 @@ AGNI_POOL_READER_SPEC = PoolReaderSpec(
         attribute="UniswapV3PoolPriceReader",
     ),
     get_pool_selector=V3_GET_POOL_SELECTOR,
+    # Same shared CLAMM probe: reverse-verification runs against Agni's own
+    # factory, so the fork disambiguates from canonical V3 by provenance.
+    identity_probe=ImportRef(
+        module="almanak.connectors._strategy_base.pool_identity_base",
+        attribute="identify_clamm_pool",
+    ),
 )
 
 AGNI_POOL_DATA_SPEC = PoolDataSpec(

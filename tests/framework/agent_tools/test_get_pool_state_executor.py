@@ -182,6 +182,8 @@ def test_no_direct_callers_of_execute_get_pool_state_outside_executor():
             continue
         if path.endswith("tests/framework/agent_tools/test_get_pool_state_executor.py"):
             continue
+        if path.endswith("tests/framework/agent_tools/test_pair_resolver_dispatch.py"):
+            continue
         bad.append(line)
 
     assert not bad, (
