@@ -642,10 +642,6 @@ class TestUniswapV3CollectFeesIntent:
 
     @pytest.mark.intent(IntentType.LP_OPEN, IntentType.SWAP, IntentType.LP_COLLECT_FEES)
     @pytest.mark.asyncio
-    @pytest.mark.xfail(
-        strict=True,
-        reason="VIB-5968: same-pool fee-accrual fixture not yet wired — swap routes to different fee tier than LP position (as of 2026-05-12; re-pointed to VIB-5968 2026-07-24)",
-    )
     async def test_collect_fees_weth_usdc(
         self,
         web3: Web3,
@@ -682,6 +678,12 @@ class TestUniswapV3CollectFeesIntent:
         assert liquidity_before > 0, "Setup LP_OPEN must yield positive liquidity"
 
         # 2. Execute a same-pool swap to generate trading fees.
+        # VIB-5968: pin the swap to the LP position's own fee tier (POOL is
+        # the 3000 pool). Without the pin, auto tier selection quotes
+        # whichever WETH/USDC tier the fork block's liquidity favours — the
+        # W35 2026-08-24 fork roll flipped it INTO 3000 and tripped the old
+        # strict xfail; the next roll could flip it back out. Pinning makes
+        # same-pool accrual structural instead of a weekly coin toss.
         swap_intent = SwapIntent(
             from_token="USDC",
             to_token="WETH",
@@ -689,6 +691,7 @@ class TestUniswapV3CollectFeesIntent:
             max_slippage=Decimal("0.05"),
             protocol="uniswap_v3",
             chain=CHAIN_NAME,
+            swap_params={"fee_tier": 3000},
         )
         compiler = IntentCompiler(
             chain=CHAIN_NAME,
