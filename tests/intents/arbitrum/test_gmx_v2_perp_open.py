@@ -25,20 +25,28 @@ from web3 import Web3
 
 from almanak.connectors.gmx_v2 import GMXv2ReceiptParser
 from almanak.connectors.gmx_v2.addresses import GMX_V2
+from almanak.connectors.gmx_v2.anvil_order_executor import execute_pending_orders_on_anvil
+from almanak.connectors.gmx_v2.teardown_reads import read_open_positions
+from almanak.framework.execution.extracted_data import AsyncOrderKind
+from almanak.framework.execution.orchestrator import ExecutionOrchestrator
+from almanak.framework.intents.compiler import IntentCompiler
+from almanak.framework.intents.perp_intents import PerpOpenIntent
+from almanak.framework.intents.vocabulary import IntentType
+from tests.intents._gmx_v2_perp_support import (
+    AnvilGateway,
+    assert_gmx_event_key,
+    assert_gmx_event_name,
+)
+from tests.intents.conftest import (
+    get_token_balance,
+    get_token_decimals,
+)
 from tests.support.gmx_v2 import GMX_V2_TOKENS
 from tests.unit.connectors.gmx_v2.market_fixtures import fake_dynamic_gateway, market_address
 
 # Address-first primary spelling: the strategy-declared market-token address
 # (the label path is covered separately by the core-alias unit tests).
 _ETH_USD_MARKET = market_address("arbitrum", "ETH/USD")
-from almanak.framework.execution.orchestrator import ExecutionOrchestrator
-from almanak.framework.intents.compiler import IntentCompiler
-from almanak.framework.intents.perp_intents import PerpOpenIntent
-from almanak.framework.intents.vocabulary import IntentType
-from tests.intents.conftest import (
-    get_token_balance,
-    get_token_decimals,
-)
 
 # =============================================================================
 # Constants
@@ -106,15 +114,10 @@ class TestGmxV2PerpOpenIntent:
     Tests the PerpOpenIntent → ExchangeRouter multicall path with USDC
     collateral (non-native, requires ERC-20 approve first).
 
-    What this proves vs. what GMX owns:
-    ─────────────────────────────────
-    OUR pipeline: intent compile → approve + multicall → TX receipt → receipt
-    parse → balance delta confirmed.
-    KEEPER (GMX infra): executing the queued order → position fill.
-
-    Anvil never runs the GMX keeper, so ``PositionIncrease`` is not emitted.
-    Layer 4 asserts ORDER IS QUEUED (``OrderCreated`` event + order key) AND
-    collateral was transferred — the keeper-executed fill is out of scope.
+    The test covers submission through the SDK pipeline, then explicitly runs
+    the pending order through the managed-Anvil keeper helper. It reconciles
+    the parsed fill with a raw ``PositionIncrease`` event and the resulting
+    on-chain position, in addition to the collateral and fee balance changes.
     """
 
     @pytest.mark.intent(IntentType.PERP_OPEN)
@@ -124,6 +127,7 @@ class TestGmxV2PerpOpenIntent:
         funded_wallet: str,
         orchestrator: ExecutionOrchestrator,
         price_oracle_arbitrum: dict[str, Decimal],
+        intent_evidence,
     ):
         """Open a long ETH/USD position with 100 USDC collateral via GMX V2.
 
@@ -133,8 +137,8 @@ class TestGmxV2PerpOpenIntent:
           2. Both TXs execute with status=1 on the Anvil fork
           3. GMXv2ReceiptParser finds exactly 1 OrderCreated event in the
              multicall receipt; the extracted order key is non-zero
-          4. USDC wallet balance decreased by exactly collateral_amount;
-             native ETH decreased by at least the execution fee
+          4. USDC and native-ETH deltas are exact, then the pending order is
+             settled and its PositionIncrease is reconciled with on-chain state
         """
         # ------------------------------------------------------------------
         # Setup — collateral params
@@ -171,6 +175,7 @@ class TestGmxV2PerpOpenIntent:
             max_slippage=Decimal("0.01"),
             protocol="gmx_v2",
             leverage=Decimal("3"),
+            chain=CHAIN_NAME,
         )
 
         compiler = IntentCompiler(
@@ -250,8 +255,13 @@ class TestGmxV2PerpOpenIntent:
         # ------------------------------------------------------------------
         # Layer 3 — Receipt parsing (GMXv2ReceiptParser on multicall receipt)
         # ------------------------------------------------------------------
-        parser = GMXv2ReceiptParser()
-        parsed = parser.parse_receipt(multicall_receipt)
+        parser = GMXv2ReceiptParser(chain=CHAIN_NAME)
+        parsed = intent_evidence.capture_parse(
+            intent=intent,
+            transaction_result=multicall_result,
+            parser=parser.parse_receipt,
+            receipt_role="submission",
+        )
 
         assert parsed.success, f"parse_receipt reported failure: {parsed.error}"
 
@@ -271,29 +281,18 @@ class TestGmxV2PerpOpenIntent:
             f"OrderCreated event key must be non-zero, got {order_key!r}"
         )
 
-        # The parser also populates order_events via _parse_order_event.
-        # NOTE — known receipt-parser limitation (to be fixed in a follow-up):
-        # GMX V2's EventEmitter encodes event data using ``EventUtils.EventLogData``
-        # (dynamic arrays of key-value pairs), NOT a simple flat ABI tuple.
-        # ``_decode_order_data`` uses a hardcoded flat-offset layout that produces
-        # garbage values for all fields except the order key (which is correctly
-        # read from topic[2], independent of the data blob). The test therefore
-        # only asserts on the key (reliable) and documents the data-decoding gap
-        # rather than asserting wrong field values.
         assert len(parsed.order_events) >= 1, (
             "GMXv2ReceiptParser.order_events must contain the parsed OrderCreated data"
         )
         oe = parsed.order_events[0]
         assert oe.key == order_key, "order_events[0].key must match event data key"
-        # oe.order_type / oe.is_long / oe.execution_fee are decoded from the
-        # EventUtils data blob with wrong flat offsets — NOT asserted here.
-        # Asserting the key (from topic[2]) is the reliable proof that the
-        # parser routed to the correct event and extracted the primary identifier.
-        print(
-            f"Parse OK: OrderCreated key={order_key[:20]}... "
-            f"(data-field decoding uses simplified flat layout — order_type/is_long "
-            f"not asserted; EventUtils ABI decoder is a follow-up gap)"
+        submission_witness = assert_gmx_event_key(
+            multicall_receipt,
+            chain=CHAIN_NAME,
+            event_name="OrderCreated",
+            key=order_key,
         )
+        print(f"Parse OK: OrderCreated key={order_key[:20]}... independently matched to the raw EventEmitter log")
 
         # Extraction methods (used by ResultEnricher)
         extracted_key = parser.extract_position_id(multicall_receipt)
@@ -350,4 +349,119 @@ class TestGmxV2PerpOpenIntent:
             f"(exec_fee={execution_fee_wei / 1e18:.6f} + gas≈{total_gas_cost_wei / 1e18:.6f})"
         )
 
-        print(f"\nALL 4 LAYERS PASSED — GMX V2 PERP_OPEN ETH/USD LONG (order key: {order_key[:20]}...)")
+        intent_evidence.record_fidelity(
+            receipt_role="submission",
+            hard=True,
+            flags={
+                "parser_order_key_eq_raw_event_key": submission_witness["matched_key"] == order_key.lower(),
+                "wallet_debit_eq_order_vault_credit": usdc_spent == vault_usdc_gained,
+                "collateral_delta_eq_compiled_amount": usdc_spent == collateral_wei,
+            },
+            witnesses=[submission_witness],
+            notes=["Submission proves the exact queued increase order; settlement is sealed separately."],
+        )
+        intent_evidence.record_balance_deltas(
+            receipt_role="submission",
+            checks={"wallet_debit_eq_order_vault_credit": usdc_spent == vault_usdc_gained},
+            wallet_usdc={
+                "symbol": "USDC",
+                "before": usdc_before,
+                "after": usdc_after,
+                "delta": usdc_after - usdc_before,
+            },
+            order_vault_usdc={
+                "symbol": "USDC",
+                "before": vault_usdc_before,
+                "after": vault_usdc_after,
+                "delta": vault_usdc_after - vault_usdc_before,
+            },
+        )
+
+        # GMX is asynchronous: execute the exact queued key on managed Anvil,
+        # then prove the terminal PositionIncrease separately from submission.
+        orders = parser.extract_async_orders(multicall_receipt, intent_type=IntentType.PERP_OPEN.value)
+        assert orders is not None and len(orders) == 1
+        assert orders[0].kind is AsyncOrderKind.INCREASE
+        assert orders[0].order_id.lower() == order_key.lower()
+        gateway = AnvilGateway(web3, CHAIN_NAME, price_oracle_arbitrum)
+        settlement = execute_pending_orders_on_anvil(
+            gateway_client=gateway,
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            orders=tuple(orders),
+            network="anvil",
+        )
+        assert settlement.ok, settlement.reason
+        assert settlement.executed_order_keys == (orders[0].order_id,)
+        assert len(settlement.execution_receipts) == 1
+        keeper_receipt = settlement.execution_receipts[0]
+        fill = intent_evidence.capture_parse(
+            intent=intent,
+            transaction_result=keeper_receipt,
+            parser=lambda receipt: parser.extract_perp_fill(
+                receipt,
+                order_key=order_key,
+                account=funded_wallet,
+            ),
+            parser_method="extract_perp_fill",
+            receipt_role="settlement",
+        )
+        assert fill is not None
+        assert fill.is_open is True
+        assert fill.order_key is not None and fill.order_key.lower() == order_key.lower()
+        assert fill.position_key is not None
+        assert fill.market is not None
+        assert fill.collateral_token is not None
+        assert fill.size_delta_usd is not None
+        settlement_witness = assert_gmx_event_name(
+            keeper_receipt,
+            chain=CHAIN_NAME,
+            event_name="PositionIncrease",
+        )
+        positions = read_open_positions(gateway, CHAIN_NAME, funded_wallet)
+        assert positions.ok and len(positions.positions) == 1
+        position = positions.positions[0]
+        assert position.collateral_token.lower() == USDC_ADDRESS.lower()
+        assert position.collateral_amount > 0
+        settlement_flags = {
+            "raw_position_increase_event_present": (
+                settlement_witness["matched_event_name_topic"] == settlement_witness["event_name_topic"]
+            ),
+            "parser_order_key_eq_submitted_key": fill.order_key.lower() == order_key.lower(),
+            "parser_market_eq_onchain_position": fill.market.lower() == position.market.lower(),
+            "parser_collateral_eq_onchain_position": (
+                fill.collateral_token.lower() == position.collateral_token.lower()
+            ),
+            "parser_direction_eq_onchain_position": fill.is_long == position.is_long,
+            "parser_size_delta_eq_onchain_position": (
+                fill.size_delta_usd == Decimal(position.size_in_usd) / Decimal(10**30)
+            ),
+            "executed_key_eq_submitted_key": tuple(key.lower() for key in settlement.executed_order_keys)
+            == (order_key.lower(),),
+            "open_position_measured_onchain": len(positions.positions) == 1,
+        }
+        # record_fidelity is a no-op on DisabledIntentEvidenceRecorder (default CI).
+        assert all(settlement_flags.values()), (
+            f"GMX PERP_OPEN settlement proof failed: {sorted(k for k, v in settlement_flags.items() if not v)}"
+        )
+        intent_evidence.record_fidelity(
+            receipt_role="settlement",
+            hard=True,
+            flags=settlement_flags,
+            witnesses=[settlement_witness],
+        )
+        intent_evidence.record_balance_deltas(
+            receipt_role="settlement",
+            checks={"open_position_measured_onchain": len(positions.positions) == 1},
+            position_collateral={
+                "symbol": "USDC raw",
+                "before": 0,
+                "after": position.collateral_amount,
+                "delta": position.collateral_amount,
+            },
+        )
+
+        print(
+            f"\nALL 4 LAYERS PASSED — GMX V2 PERP_OPEN ETH/USD LONG "
+            f"submitted and settled (order key: {order_key[:20]}...)"
+        )

@@ -58,6 +58,21 @@ from almanak.framework.permissions.generator import (
     INFRASTRUCTURE_NON_LOAD_BEARING_SELECTORS,
     generate_manifest,
 )
+from scripts.qa.permission_attestation import derive_permission_attestation
+
+#: Set by ``tests/intents/conftest.py::pytest_configure`` when the opt-in
+#: receipt-evidence contract is enabled.
+#:
+#: Deriving the attestation fail-closes the Safe lane when the compiled call
+#: graph is not covered by the generated permission manifest. That is a
+#: valuable invariant -- a mined transaction is not proof the manifest
+#: authorized the call, especially behind a MultiSend wrapper -- but turning it
+#: on by default changes the pass/fail contract of every Safe intent lane in
+#: ``test-intents.yml``, which runs on every pull request. Adding these test
+#: lanes and re-gating everyone's Safe lanes are two different decisions, so
+#: this stays part of the evidence contract here. Promoting it to a default-on
+#: CI gate is tracked separately and needs a green nine-chain run as evidence.
+ATTEST_COMPILED_PERMISSIONS = False
 from tests.intents._zodiac_helpers import (
     _exec_safe_tx,
     apply_manifest_targets,
@@ -2542,6 +2557,7 @@ class ZodiacOrchestrator:
         self.recorded_intents = recorded_intents
         self.strategy_name = strategy_name
         self._applied_targets: set[tuple[str, str, int]] = set()
+        self._permission_attestation: dict[str, Any] | None = None
 
     async def execute(self, action_bundle: Any, context: Any = None) -> Any:
         """Route ``action_bundle.transactions`` through ``execTransactionWithRole``.
@@ -2630,6 +2646,12 @@ class ZodiacOrchestrator:
                 gas_cost_wei=receipt["gasUsed"] * receipt.get("effectiveGasPrice", 0),
                 logs=[dict(log) for log in receipt.get("logs", [])],
             )
+            # Test-only evidence attached to the result object.  The receipt
+            # recorder seals this alongside the raw receipt, and the sealer
+            # independently re-derives it.  A mined transaction alone is not
+            # proof that the deployment manifest authorized the compiled
+            # call graph (especially when a MultiSend wrapper is involved).
+            tx_result.qa_permission_attestation = self._permission_attestation
 
             if receipt["status"] != 1:
                 # Disambiguate: authz-denial vs protocol revert. We replay the
@@ -2684,6 +2706,9 @@ class ZodiacOrchestrator:
         without compiling anything; the subsequent execute will fail loudly
         on a Zodiac authz revert which is the right signal.
         """
+        # An attestation describes exactly one bundle. Never let an early return
+        # attach the previous bundle's sealed call graph to this execution.
+        self._permission_attestation = None
         if self.recorded_intents is None:
             return
         if self.safe_address is None or self.owner_eoa is None or self.owner_private_key is None:
@@ -2727,6 +2752,31 @@ class ZodiacOrchestrator:
             config=config,
             rpc_url=self.rpc_url,
         )
+        if ATTEST_COMPILED_PERMISSIONS:
+            transactions = []
+            for tx in getattr(action_bundle, "transactions", None) or []:
+                to_addr, value, data = _normalise_bundle_tx(tx)
+                transactions.append(
+                    {
+                        "to": to_addr,
+                        "value": value,
+                        "data": data,
+                        "operation": int(get_operation_type(to_addr)),
+                    }
+                )
+            exact_resources = metadata.get("qa_exact_resources", [])
+            self._permission_attestation = derive_permission_attestation(
+                transactions=transactions,
+                manifest=manifest,
+                chain=self.chain,
+                exact_resources=exact_resources,
+            )
+            if self._permission_attestation["status"] != "PASS":
+                raise AssertionError(
+                    "Compiled Safe calls are not closed over the generated permission manifest: "
+                    f"missing={self._permission_attestation['missing_authorizations']!r}; "
+                    f"resources={self._permission_attestation['resource_failures']!r}"
+                )
         targets = manifest.to_zodiac_targets()
         new_targets = _filter_new_targets(targets, self._applied_targets)
         if not new_targets:

@@ -60,6 +60,7 @@ from almanak.framework.execution.result_enricher import enrich_result
 from almanak.framework.intents import SupplyIntent, WithdrawIntent
 from almanak.framework.intents.compiler import IntentCompiler
 from almanak.framework.intents.vocabulary import IntentType
+from tests.intents._euler_v2_proof import euler_position_raw, record_euler_lending_proof
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
     assert_accounting_persisted,
@@ -222,6 +223,7 @@ class TestEulerV2SupplyIntent:
     - Balance changes match expected amounts
     """
 
+    @pytest.mark.qa_proof(protocol="euler_v2", contract="lending.v1")
     @pytest.mark.intent(IntentType.SUPPLY)
     @pytest.mark.asyncio
     async def test_supply_usdc_using_intent(
@@ -233,6 +235,7 @@ class TestEulerV2SupplyIntent:
         price_oracle: dict[str, Decimal],
         layer5_accounting_harness,
         anvil_eth_call_adapter,
+        intent_evidence,
     ):
         """Test USDC supply using SupplyIntent.
 
@@ -256,6 +259,7 @@ class TestEulerV2SupplyIntent:
 
         # Record balances BEFORE
         usdc_before = get_token_balance(web3, usdc, funded_wallet)
+        position_before = euler_position_raw(web3, vault=EULER_V2_USDC_VAULT, account=funded_wallet, debt=False)
         print(f"USDC before: {format_token_amount(usdc_before, decimals)}")
 
         # Create SupplyIntent
@@ -319,6 +323,7 @@ class TestEulerV2SupplyIntent:
 
         # Verify balance changes
         usdc_after = get_token_balance(web3, usdc, funded_wallet)
+        position_after = euler_position_raw(web3, vault=EULER_V2_USDC_VAULT, account=funded_wallet, debt=False)
         usdc_spent = usdc_before - usdc_after
 
         print("\n--- Results ---")
@@ -370,8 +375,24 @@ class TestEulerV2SupplyIntent:
         assert Decimal(payload["principal_delta_usd"]) > 0
         assert payload["interest_delta_usd"] is None, "SUPPLY has no interest leg — must be None, not 0"
 
+        record_euler_lending_proof(
+            intent_evidence=intent_evidence,
+            intent=intent,
+            execution_result=execution_result,
+            vault=EULER_V2_USDC_VAULT,
+            decimals=decimals,
+            wallet_before_raw=usdc_before,
+            wallet_after_raw=usdc_after,
+            position_before=position_before,
+            position_after=position_after,
+            requested_amount_raw=expected_usdc_spent,
+            asset_address=usdc,
+            account=funded_wallet,
+        )
+
         print("\nALL CHECKS PASSED")
 
+    @pytest.mark.qa_proof(protocol="euler_v2", target="WITHDRAW", contract="lending.v1")
     @pytest.mark.intent(IntentType.SUPPLY, IntentType.WITHDRAW)
     @pytest.mark.asyncio
     async def test_withdraw_usdc_using_intent(
@@ -383,6 +404,7 @@ class TestEulerV2SupplyIntent:
         price_oracle: dict[str, Decimal],
         layer5_accounting_harness,
         anvil_eth_call_adapter,
+        intent_evidence,
     ):
         """Test USDC withdraw using WithdrawIntent (after supplying).
 
@@ -427,6 +449,7 @@ class TestEulerV2SupplyIntent:
         print(f"{'=' * 80}")
 
         usdc_before = get_token_balance(web3, usdc, funded_wallet)
+        position_before = euler_position_raw(web3, vault=EULER_V2_USDC_VAULT, account=funded_wallet, debt=False)
         print(f"USDC before withdraw: {format_token_amount(usdc_before, decimals)}")
 
         # Create WithdrawIntent
@@ -471,6 +494,7 @@ class TestEulerV2SupplyIntent:
 
         # Verify balance changes
         usdc_after = get_token_balance(web3, usdc, funded_wallet)
+        position_after = euler_position_raw(web3, vault=EULER_V2_USDC_VAULT, account=funded_wallet, debt=False)
         usdc_received = usdc_after - usdc_before
 
         print(f"\nUSDC received: {format_token_amount(usdc_received, decimals)}")
@@ -525,6 +549,21 @@ class TestEulerV2SupplyIntent:
         assert Decimal(payload["principal_delta_usd"]) > 0
         assert payload["interest_delta_usd"] is None, (
             "Unmatched WITHDRAW (no Layer-5 SUPPLY lot) must degrade interest to None — never a fabricated 0"
+        )
+
+        record_euler_lending_proof(
+            intent_evidence=intent_evidence,
+            intent=intent,
+            execution_result=execution_result,
+            vault=EULER_V2_USDC_VAULT,
+            decimals=decimals,
+            wallet_before_raw=usdc_before,
+            wallet_after_raw=usdc_after,
+            position_before=position_before,
+            position_after=position_after,
+            requested_amount_raw=expected_usdc_received,
+            asset_address=usdc,
+            account=funded_wallet,
         )
 
         print("\nALL CHECKS PASSED")

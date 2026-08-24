@@ -43,7 +43,11 @@ from almanak.framework.intents.compiler import IntentCompiler
 from almanak.framework.intents.perp_intents import PerpCloseIntent, PerpOpenIntent
 from almanak.framework.intents.vocabulary import IntentType
 from almanak.gateway.proto import gateway_pb2
-from tests.intents._gmx_v2_perp_support import gmx_oracle_price_map
+from tests.intents._gmx_v2_perp_support import (
+    assert_gmx_event_key,
+    assert_gmx_event_name,
+    gmx_oracle_price_map,
+)
 from tests.intents.conftest import fund_native_token, get_token_balance
 
 CHAIN_NAME = "arbitrum"
@@ -161,12 +165,13 @@ class TestGmxV2PerpCloseIntent:
         anvil_rpc_url: str,
         price_oracle_arbitrum: dict[str, Decimal],
         monkeypatch: pytest.MonkeyPatch,
+        intent_evidence,
     ) -> None:
         fork_age_seconds = int(time.time()) - int(web3.eth.get_block("latest")["timestamp"])
         assert abs(fork_age_seconds) <= 7 * 24 * 60 * 60, (
             f"GMX PERP_CLOSE intent proof requires a fork no older than seven days; age={fork_age_seconds}s"
         )
-        parser = GMXv2ReceiptParser()
+        parser = GMXv2ReceiptParser(chain=CHAIN_NAME)
         compiler = _build_compiler(
             wallet=funded_wallet,
             orchestrator=orchestrator,
@@ -206,6 +211,7 @@ class TestGmxV2PerpCloseIntent:
             max_slippage=Decimal("0.01"),
             protocol="gmx_v2",
             leverage=Decimal("3"),
+            chain=CHAIN_NAME,
         )
         open_compilation = compiler.compile(open_intent)
         assert open_compilation.status.value == "SUCCESS", open_compilation.error
@@ -255,6 +261,7 @@ class TestGmxV2PerpCloseIntent:
             size_usd=Decimal(position_before.size_in_usd) / _GMX_USD_SCALE,
             max_slippage=Decimal("0.01"),
             protocol="gmx_v2",
+            chain=CHAIN_NAME,
         )
         close_compilation = compiler.compile(close_intent)
         assert close_compilation.status.value == "SUCCESS", close_compilation.error
@@ -272,12 +279,21 @@ class TestGmxV2PerpCloseIntent:
         assert close_execution.success, close_execution.error
         assert len(close_execution.transaction_results) == 1
         close_submission_receipt = _receipt_dict(close_execution)
-        close_orders = parser.extract_async_orders(
-            close_submission_receipt,
-            intent_type=IntentType.PERP_CLOSE.value,
+        close_orders = intent_evidence.capture_parse(
+            intent=close_intent,
+            transaction_result=close_execution.transaction_results[-1],
+            parser=lambda receipt: parser.extract_async_orders(receipt, intent_type=IntentType.PERP_CLOSE.value),
+            parser_method="extract_async_orders",
+            receipt_role="submission",
         )
         assert close_orders is not None and len(close_orders) == 1
         assert close_orders[0].kind is AsyncOrderKind.DECREASE
+        submission_witness = assert_gmx_event_key(
+            close_submission_receipt,
+            chain=CHAIN_NAME,
+            event_name="OrderCreated",
+            key=close_orders[0].order_id,
+        )
 
         usdc_before_settlement = get_token_balance(web3, USDC_ADDRESS, funded_wallet)
         close_settlement = execute_pending_orders_on_anvil(
@@ -291,6 +307,28 @@ class TestGmxV2PerpCloseIntent:
         assert close_settlement.executed_order_keys == (close_orders[0].order_id,)
         assert len(close_settlement.execution_receipts) == 1
         keeper_receipt = close_settlement.execution_receipts[0]
+
+        fill = intent_evidence.capture_parse(
+            intent=close_intent,
+            transaction_result=keeper_receipt,
+            parser=lambda receipt: parser.extract_perp_fill(
+                receipt,
+                order_key=close_orders[0].order_id,
+                account=funded_wallet,
+            ),
+            parser_method="extract_perp_fill",
+            receipt_role="settlement",
+        )
+        assert fill is not None
+        assert fill.is_open is False
+        assert fill.order_key is not None
+        assert fill.order_key.lower() == close_orders[0].order_id.lower()
+        assert fill.position_key is not None
+        settlement_witness = assert_gmx_event_name(
+            keeper_receipt,
+            chain=CHAIN_NAME,
+            event_name="PositionDecrease",
+        )
 
         # Layer 3: run the production enrichment path over the terminal keeper
         # receipt. It normalizes raw JSON-RPC numerics before the GMX parser
@@ -316,3 +354,60 @@ class TestGmxV2PerpCloseIntent:
         positions_after = read_open_positions(gateway, CHAIN_NAME, funded_wallet)
         assert positions_after.ok
         assert positions_after.positions == ()
+        intent_evidence.record_fidelity(
+            receipt_role="submission",
+            hard=True,
+            flags={
+                "parser_order_key_eq_raw_event_key": (
+                    submission_witness["matched_key"] == close_orders[0].order_id.lower()
+                ),
+                "decrease_kind_measured_from_receipt": close_orders[0].kind is AsyncOrderKind.DECREASE,
+            },
+            witnesses=[submission_witness],
+            notes=["Submission proves the exact queued decrease order; settlement is sealed separately."],
+        )
+        native_balance_after_close = web3.eth.get_balance(funded_wallet)
+        intent_evidence.record_balance_deltas(
+            receipt_role="submission",
+            checks={"native_execution_fee_debited": native_balance_after_close < native_balance_before_close},
+            native_execution_fee={
+                "symbol": "ETH wei",
+                "before": native_balance_before_close,
+                "after": native_balance_after_close,
+                "delta": native_balance_after_close - native_balance_before_close,
+            },
+        )
+        intent_evidence.record_fidelity(
+            receipt_role="settlement",
+            hard=True,
+            flags={
+                "raw_position_decrease_event_present": (
+                    settlement_witness["matched_event_name_topic"] == settlement_witness["event_name_topic"]
+                ),
+                "parser_order_key_eq_submitted_key": (fill.order_key.lower() == close_orders[0].order_id.lower()),
+                "enriched_collateral_eq_preclose_position": (
+                    collateral_returned == Decimal(position_before.collateral_amount)
+                ),
+                "position_measured_closed_onchain": positions_after.positions == (),
+            },
+            witnesses=[settlement_witness],
+        )
+        intent_evidence.record_balance_deltas(
+            receipt_role="settlement",
+            checks={
+                "wallet_collateral_increased": usdc_after_settlement > usdc_before_settlement,
+                "position_measured_closed_onchain": positions_after.positions == (),
+            },
+            wallet_usdc={
+                "symbol": "USDC",
+                "before": usdc_before_settlement,
+                "after": usdc_after_settlement,
+                "delta": usdc_after_settlement - usdc_before_settlement,
+            },
+            position_collateral={
+                "symbol": "USDC raw",
+                "before": position_before.collateral_amount,
+                "after": 0,
+                "delta": -position_before.collateral_amount,
+            },
+        )

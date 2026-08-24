@@ -11,6 +11,7 @@ from typing import Any
 
 from web3 import Web3
 
+from almanak.connectors.gmx_v2.addresses import GMX_V2
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents.compiler import IntentCompiler
 from almanak.gateway.proto import gateway_pb2
@@ -27,6 +28,19 @@ _ASSET_SPELLINGS: dict[str, tuple[str, ...]] = {
 }
 _SPELLING_TO_BASE: dict[str, str] = {
     spelling.upper(): base for base, spellings in _ASSET_SPELLINGS.items() for spelling in spellings
+}
+_EVENT_LOG_DATA_TYPE = (
+    "(((string,address)[],(string,address[])[]),((string,uint256)[],(string,uint256[])[]),"
+    "((string,int256)[],(string,int256[])[]),((string,bool)[],(string,bool[])[]),"
+    "((string,bytes32)[],(string,bytes32[])[]),((string,bytes)[],(string,bytes[])[]),"
+    "((string,string)[],(string,string[])[]))"
+)
+_EVENT_EMITTER_SIGNATURE_BY_TOPIC_COUNT = {
+    2: Web3.to_hex(Web3.keccak(text=f"EventLog(address,string,string,{_EVENT_LOG_DATA_TYPE})")).lower(),
+    3: Web3.to_hex(Web3.keccak(text=f"EventLog1(address,string,string,bytes32,{_EVENT_LOG_DATA_TYPE})")).lower(),
+    4: Web3.to_hex(
+        Web3.keccak(text=f"EventLog2(address,string,string,bytes32,bytes32,{_EVENT_LOG_DATA_TYPE})")
+    ).lower(),
 }
 
 
@@ -135,6 +149,76 @@ def receipt_dict(execution: Any, transaction_index: int = -1) -> dict[str, Any]:
     return receipt
 
 
+def assert_gmx_event_key(
+    receipt: Mapping[str, Any],
+    *,
+    chain: str,
+    event_name: str,
+    key: str,
+) -> dict[str, Any]:
+    """Prove an exact GMX EventEmitter name/key pair from raw receipt topics.
+
+    This intentionally does not use ``GMXv2ReceiptParser`` or its topic table:
+    it is the independent witness against which parser output is reconciled.
+    """
+    emitter = Web3.to_checksum_address(GMX_V2[chain]["event_emitter"])
+    event_name_topic = Web3.to_hex(Web3.keccak(text=event_name)).lower()
+    expected_key = key.lower() if isinstance(key, str) else Web3.to_hex(key).lower()
+    for log in receipt.get("logs", []):
+        address = log.get("address")
+        topics = [
+            topic.lower() if isinstance(topic, str) else Web3.to_hex(topic).lower() for topic in log.get("topics", [])
+        ]
+        matched_key = next((topic for topic in topics[2:] if topic == expected_key), None)
+        if (
+            isinstance(address, str)
+            and address.lower() == emitter.lower()
+            and len(topics) >= 3
+            and topics[0] == _EVENT_EMITTER_SIGNATURE_BY_TOPIC_COUNT.get(len(topics))
+            and topics[1] == event_name_topic
+            and matched_key is not None
+        ):
+            return {
+                "kind": "raw_gmx_event_key",
+                "event_emitter": emitter,
+                "event_name": event_name,
+                "event_name_topic": event_name_topic,
+                "matched_event_name_topic": topics[1],
+                "key": expected_key,
+                "matched_key": matched_key,
+                "log_index": log.get("log_index", log.get("logIndex")),
+            }
+    raise AssertionError(f"Raw receipt has no {event_name} emitted by {emitter} for exact key {expected_key}")
+
+
+def assert_gmx_event_name(receipt: Mapping[str, Any], *, chain: str, event_name: str) -> dict[str, Any]:
+    """Prove an exact GMX EventEmitter event name from raw receipt topics."""
+    emitter = Web3.to_checksum_address(GMX_V2[chain]["event_emitter"])
+    event_name_topic = Web3.to_hex(Web3.keccak(text=event_name)).lower()
+    for log in receipt.get("logs", []):
+        address = log.get("address")
+        topics = [
+            topic.lower() if isinstance(topic, str) else Web3.to_hex(topic).lower() for topic in log.get("topics", [])
+        ]
+        if (
+            isinstance(address, str)
+            and address.lower() == emitter.lower()
+            and len(topics) >= 2
+            and topics[0] == _EVENT_EMITTER_SIGNATURE_BY_TOPIC_COUNT.get(len(topics))
+            and topics[1] == event_name_topic
+        ):
+            return {
+                "kind": "raw_gmx_event_name",
+                "event_emitter": emitter,
+                "event_name": event_name,
+                "event_name_topic": event_name_topic,
+                "matched_event_name_topic": topics[1],
+                "indexed_topics": topics[2:],
+                "log_index": log.get("log_index", log.get("logIndex")),
+            }
+    raise AssertionError(f"Raw receipt has no {event_name} emitted by {emitter}")
+
+
 def assert_recent_fork(web3: Web3) -> None:
     fork_age_seconds = int(time.time()) - int(web3.eth.get_block("latest")["timestamp"])
     assert abs(fork_age_seconds) <= 7 * 24 * 60 * 60, (
@@ -158,6 +242,8 @@ __all__ = [
     "gmx_oracle_price_map",
     "advance_past_cancel_age",
     "assert_recent_fork",
+    "assert_gmx_event_key",
+    "assert_gmx_event_name",
     "build_compiler",
     "receipt_dict",
 ]

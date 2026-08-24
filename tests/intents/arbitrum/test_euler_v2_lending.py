@@ -80,6 +80,7 @@ from almanak.framework.intents import (
 )
 from almanak.framework.intents.compiler import IntentCompiler
 from almanak.framework.intents.vocabulary import IntentType
+from tests.intents._euler_v2_proof import euler_position_raw, record_euler_lending_proof
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
     assert_accounting_persisted,
@@ -257,6 +258,7 @@ def _assert_high_confidence_state(payload: dict) -> None:
 class TestEulerV2SupplyIntent:
     """Test Euler V2 supply/withdraw operations using SupplyIntent and WithdrawIntent."""
 
+    @pytest.mark.qa_proof(protocol="euler_v2", contract="lending.v1")
     @pytest.mark.intent(IntentType.SUPPLY)
     @pytest.mark.asyncio
     async def test_supply_usdc_using_intent(
@@ -268,6 +270,7 @@ class TestEulerV2SupplyIntent:
         price_oracle: dict[str, Decimal],
         layer5_accounting_harness,
         anvil_eth_call_adapter,
+        intent_evidence,
     ) -> None:
         """Supply USDC into the eUSDC-1 vault via SupplyIntent."""
         tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
@@ -282,6 +285,7 @@ class TestEulerV2SupplyIntent:
 
         # Record balance BEFORE
         usdc_before = get_token_balance(web3, usdc, funded_wallet)
+        position_before = euler_position_raw(web3, vault=EULER_V2_USDC_VAULT, account=funded_wallet, debt=False)
         assert usdc_before >= int(supply_amount * Decimal(10**decimals)), (
             f"Funded wallet lacks required USDC. Need {supply_amount}, have {usdc_before / 10**decimals}"
         )
@@ -328,6 +332,7 @@ class TestEulerV2SupplyIntent:
 
         # Layer 4: Balance delta — exact USDC spent
         usdc_after = get_token_balance(web3, usdc, funded_wallet)
+        position_after = euler_position_raw(web3, vault=EULER_V2_USDC_VAULT, account=funded_wallet, debt=False)
         usdc_spent = usdc_before - usdc_after
         expected_usdc_spent = int(supply_amount * Decimal(10**decimals))
         assert usdc_spent == expected_usdc_spent, (
@@ -376,6 +381,21 @@ class TestEulerV2SupplyIntent:
         assert payload["principal_delta_usd"] is not None, "SUPPLY must measure principal_delta_usd"
         assert Decimal(payload["principal_delta_usd"]) > 0
         assert payload["interest_delta_usd"] is None, "SUPPLY has no interest leg — must be None, not 0"
+
+        record_euler_lending_proof(
+            intent_evidence=intent_evidence,
+            intent=intent,
+            execution_result=execution_result,
+            vault=EULER_V2_USDC_VAULT,
+            decimals=decimals,
+            wallet_before_raw=usdc_before,
+            wallet_after_raw=usdc_after,
+            position_before=position_before,
+            position_after=position_after,
+            requested_amount_raw=expected_usdc_spent,
+            asset_address=usdc,
+            account=funded_wallet,
+        )
 
         print("\nALL CHECKS PASSED")
 
@@ -446,8 +466,7 @@ class TestEulerV2SupplyIntent:
         assert shares_before > 0, "Supply must mint vault shares"
         # Precondition for the REDEEM_MAX branch: this deposit is fully liquid.
         assert max_redeem == shares_before, (
-            f"Fresh deposit must be fully redeemable (cash covers it): "
-            f"maxRedeem={max_redeem} shares={shares_before}"
+            f"Fresh deposit must be fully redeemable (cash covers it): maxRedeem={max_redeem} shares={shares_before}"
         )
 
         usdc_before = get_token_balance(web3, usdc, funded_wallet)
@@ -519,6 +538,7 @@ class TestEulerV2SupplyIntent:
         )
 
     @pytest.mark.withdraw
+    @pytest.mark.qa_proof(protocol="euler_v2", target="WITHDRAW", contract="lending.v1")
     @pytest.mark.intent(IntentType.SUPPLY, IntentType.WITHDRAW)
     @pytest.mark.asyncio
     async def test_withdraw_usdc_using_intent(
@@ -530,6 +550,7 @@ class TestEulerV2SupplyIntent:
         price_oracle: dict[str, Decimal],
         layer5_accounting_harness,
         anvil_eth_call_adapter,
+        intent_evidence,
     ) -> None:
         """Supply, then withdraw a portion of USDC via WithdrawIntent."""
         tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
@@ -565,6 +586,7 @@ class TestEulerV2SupplyIntent:
         print(f"{'=' * 80}")
 
         usdc_before = get_token_balance(web3, usdc, funded_wallet)
+        position_before = euler_position_raw(web3, vault=EULER_V2_USDC_VAULT, account=funded_wallet, debt=False)
         print(f"USDC before withdraw: {format_token_amount(usdc_before, decimals)}")
 
         # Layer 1: Compile
@@ -602,6 +624,7 @@ class TestEulerV2SupplyIntent:
 
         # Layer 4: Balance delta — exact USDC received
         usdc_after = get_token_balance(web3, usdc, funded_wallet)
+        position_after = euler_position_raw(web3, vault=EULER_V2_USDC_VAULT, account=funded_wallet, debt=False)
         usdc_received = usdc_after - usdc_before
         expected_usdc_received = int(withdraw_amount * Decimal(10**decimals))
         assert usdc_received == expected_usdc_received, (
@@ -657,6 +680,21 @@ class TestEulerV2SupplyIntent:
         assert Decimal(payload["principal_delta_usd"]) > 0
         assert payload["interest_delta_usd"] is None, (
             "Unmatched WITHDRAW (no Layer-5 SUPPLY lot) must degrade interest to None — never a fabricated 0"
+        )
+
+        record_euler_lending_proof(
+            intent_evidence=intent_evidence,
+            intent=intent,
+            execution_result=execution_result,
+            vault=EULER_V2_USDC_VAULT,
+            decimals=decimals,
+            wallet_before_raw=usdc_before,
+            wallet_after_raw=usdc_after,
+            position_before=position_before,
+            position_after=position_after,
+            requested_amount_raw=expected_usdc_received,
+            asset_address=usdc,
+            account=funded_wallet,
         )
 
         print("\nALL CHECKS PASSED")
@@ -742,6 +780,7 @@ class TestEulerV2SupplyIntent:
 class TestEulerV2BorrowIntent:
     """Test Euler V2 borrow/repay operations using BorrowIntent / RepayIntent."""
 
+    @pytest.mark.qa_proof(protocol="euler_v2", target="BORROW", contract="lending.v1")
     @pytest.mark.intent(IntentType.SUPPLY, IntentType.BORROW)
     @pytest.mark.asyncio
     async def test_borrow_usdc_with_weth_collateral(
@@ -753,6 +792,7 @@ class TestEulerV2BorrowIntent:
         price_oracle: dict[str, Decimal],
         layer5_accounting_harness,
         anvil_eth_call_adapter,
+        intent_evidence,
     ) -> None:
         """Borrow USDC against WETH collateral on Euler V2 Arbitrum.
 
@@ -838,6 +878,7 @@ class TestEulerV2BorrowIntent:
 
         # Layer 5: capture pre-state BEFORE execution (mirrors the runner)
         pre_state = _capture_lending_state(intent, funded_wallet, anvil_eth_call_adapter, price_oracle, post=False)
+        position_before = euler_position_raw(web3, vault=EULER_V2_USDC_VAULT, account=funded_wallet, debt=True)
 
         execution_result = await orchestrator.execute(compilation_result.action_bundle)
         assert execution_result.success, f"Execution failed: {execution_result.error}"
@@ -869,6 +910,7 @@ class TestEulerV2BorrowIntent:
 
         # Balance deltas — exact
         usdc_after = get_token_balance(web3, usdc, funded_wallet)
+        position_after = euler_position_raw(web3, vault=EULER_V2_USDC_VAULT, account=funded_wallet, debt=True)
         weth_after = get_token_balance(web3, weth, funded_wallet)
         usdc_received = usdc_after - usdc_before
         weth_spent = weth_before - weth_after
@@ -917,6 +959,21 @@ class TestEulerV2BorrowIntent:
         assert Decimal(payload["principal_delta_usd"]) > 0
         assert payload["interest_delta_usd"] is None, "BORROW has no interest leg yet — must be None, not 0"
 
+        record_euler_lending_proof(
+            intent_evidence=intent_evidence,
+            intent=intent,
+            execution_result=execution_result,
+            vault=EULER_V2_USDC_VAULT,
+            decimals=usdc_decimals,
+            wallet_before_raw=usdc_before,
+            wallet_after_raw=usdc_after,
+            position_before=position_before,
+            position_after=position_after,
+            requested_amount_raw=expected_usdc_received,
+            asset_address=usdc,
+            account=funded_wallet,
+        )
+
     @pytest.mark.withdraw
     @pytest.mark.intent(IntentType.SUPPLY, IntentType.BORROW, IntentType.REPAY, IntentType.WITHDRAW)
     @pytest.mark.asyncio
@@ -947,7 +1004,6 @@ class TestEulerV2BorrowIntent:
         redeem(MAX) and still goes flat.**
         """
         tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
-        usdc = tokens["USDC"]
         weth = tokens["WETH"]
 
         compiler = IntentCompiler(
@@ -1107,6 +1163,7 @@ class TestEulerV2BorrowIntent:
         assert weth_received > 0, "Full exit must return WETH to the wallet (no-op guard)"
 
     @pytest.mark.repay
+    @pytest.mark.qa_proof(protocol="euler_v2", target="REPAY", contract="lending.v1")
     @pytest.mark.intent(IntentType.SUPPLY, IntentType.BORROW, IntentType.REPAY)
     @pytest.mark.asyncio
     async def test_repay_usdc_after_borrow(
@@ -1118,6 +1175,7 @@ class TestEulerV2BorrowIntent:
         price_oracle: dict[str, Decimal],
         layer5_accounting_harness,
         anvil_eth_call_adapter,
+        intent_evidence,
     ) -> None:
         """Repay portion of USDC debt via RepayIntent (after borrow setup)."""
         tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
@@ -1204,6 +1262,7 @@ class TestEulerV2BorrowIntent:
         borrowed_principal_usd = Decimal(borrow_payload["principal_delta_usd"])
 
         usdc_before = get_token_balance(web3, usdc, funded_wallet)
+        position_before = euler_position_raw(web3, vault=EULER_V2_USDC_VAULT, account=funded_wallet, debt=True)
 
         intent = RepayIntent(
             protocol="euler_v2",
@@ -1236,6 +1295,7 @@ class TestEulerV2BorrowIntent:
 
         # Balance delta — exact
         usdc_after = get_token_balance(web3, usdc, funded_wallet)
+        position_after = euler_position_raw(web3, vault=EULER_V2_USDC_VAULT, account=funded_wallet, debt=True)
         usdc_spent = usdc_before - usdc_after
         expected_usdc_spent = int(repay_amount * Decimal(10**usdc_decimals))
         assert usdc_spent == expected_usdc_spent
@@ -1296,6 +1356,21 @@ class TestEulerV2BorrowIntent:
             f"same-block partial repay accrues no interest — interest_delta_usd must be a measured 0, got {interest_usd}"
         )
         assert principal_usd + interest_usd == repaid_usd, "principal + interest must tie to repaid cash flow"
+
+        record_euler_lending_proof(
+            intent_evidence=intent_evidence,
+            intent=intent,
+            execution_result=execution_result,
+            vault=EULER_V2_USDC_VAULT,
+            decimals=usdc_decimals,
+            wallet_before_raw=usdc_before,
+            wallet_after_raw=usdc_after,
+            position_before=position_before,
+            position_after=position_after,
+            requested_amount_raw=expected_usdc_spent,
+            asset_address=usdc,
+            account=funded_wallet,
+        )
 
     @pytest.mark.intent(IntentType.BORROW)
     @pytest.mark.asyncio

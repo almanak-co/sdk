@@ -24,6 +24,7 @@ from almanak.framework.intents.vocabulary import IntentType
 from tests.intents._gmx_v2_perp_support import (
     AnvilGateway,
     advance_past_cancel_age,
+    assert_gmx_event_key,
     assert_recent_fork,
     build_compiler,
     receipt_dict,
@@ -49,6 +50,7 @@ class TestGmxV2PerpCancelIntent:
         funded_wallet: str,
         orchestrator: ExecutionOrchestrator,
         price_oracle_arbitrum: dict[str, Decimal],
+        intent_evidence,
     ) -> None:
         assert_recent_fork(web3)
         parser = GMXv2ReceiptParser(chain=CHAIN_NAME)
@@ -81,6 +83,7 @@ class TestGmxV2PerpCancelIntent:
         assert open_compilation.action_bundle is not None
         open_execution = await orchestrator.execute(open_compilation.action_bundle)
         assert open_execution.success, open_execution.error
+        intent_evidence.bind(open_intent, outcome_class="setup", receipt_expected=False)
         open_receipt = receipt_dict(open_execution)
         created = parser.extract_async_orders(open_receipt, intent_type=IntentType.PERP_OPEN.value)
         assert created is not None and len(created) == 1
@@ -126,11 +129,22 @@ class TestGmxV2PerpCancelIntent:
         cancel_receipt = receipt_dict(cancel_execution)
 
         # Layer 3: OrderCancelled correlates to the exact submitted key.
-        parsed = parser.parse_receipt(cancel_receipt)
+        parsed = intent_evidence.capture_parse(
+            intent=cancel_intent,
+            transaction_result=cancel_execution.transaction_results[-1],
+            parser=parser.parse_receipt,
+            receipt_role="cancellation",
+        )
         assert parsed.success, parsed.error
         cancelled = [event for event in parsed.events if event.event_name == "OrderCancelled"]
         assert len(cancelled) == 1
         assert cancelled[0].data["key"].lower() == order_key.lower()
+        cancellation_witness = assert_gmx_event_key(
+            cancel_receipt,
+            chain=CHAIN_NAME,
+            event_name="OrderCancelled",
+            key=order_key,
+        )
         assert parsed.position_increases == []
         assert parsed.position_decreases == []
 
@@ -138,11 +152,46 @@ class TestGmxV2PerpCancelIntent:
         # fabricated position-close lifecycle.
         pending_after = read_pending_orders(gateway, CHAIN_NAME, funded_wallet)
         assert pending_after.ok and pending_after.order_keys == []
-        assert get_token_balance(web3, USDC_ADDRESS, funded_wallet) == wallet_usdc_initial
-        assert get_token_balance(web3, USDC_ADDRESS, ORDER_VAULT_ADDRESS) == vault_usdc_initial
+        wallet_usdc_after = get_token_balance(web3, USDC_ADDRESS, funded_wallet)
+        vault_usdc_after = get_token_balance(web3, USDC_ADDRESS, ORDER_VAULT_ADDRESS)
+        assert wallet_usdc_after == wallet_usdc_initial
+        assert vault_usdc_after == vault_usdc_initial
         assert web3.eth.get_balance(funded_wallet) > wallet_native_before_cancel
         positions = read_open_positions(gateway, CHAIN_NAME, funded_wallet)
         assert positions.ok and positions.positions == ()
+        intent_evidence.record_fidelity(
+            receipt_role="cancellation",
+            hard=True,
+            flags={
+                "parser_cancelled_key_eq_raw_event_key": (cancellation_witness["matched_key"] == order_key.lower()),
+                "pending_order_removed": pending_after.order_keys == [],
+                "wallet_refund_eq_order_vault_debit": (
+                    wallet_usdc_after - wallet_usdc_initial == vault_usdc_initial - vault_usdc_after == 0
+                ),
+                "no_position_fabricated": positions.positions == (),
+            },
+            witnesses=[cancellation_witness],
+        )
+        intent_evidence.record_balance_deltas(
+            receipt_role="cancellation",
+            checks={
+                "wallet_refund_and_vault_debit_reconcile": (
+                    wallet_usdc_after - wallet_usdc_initial == vault_usdc_initial - vault_usdc_after == 0
+                )
+            },
+            wallet_usdc={
+                "symbol": "USDC",
+                "before": wallet_usdc_initial - collateral_raw,
+                "after": wallet_usdc_after,
+                "delta": collateral_raw,
+            },
+            order_vault_usdc={
+                "symbol": "USDC",
+                "before": vault_usdc_initial + collateral_raw,
+                "after": vault_usdc_after,
+                "delta": -collateral_raw,
+            },
+        )
 
     @pytest.mark.intent(IntentType.PERP_OPEN, IntentType.PERP_CANCEL_ORDER)
     async def test_cancel_fails_closed_when_exchange_router_permission_is_revoked(
@@ -151,6 +200,7 @@ class TestGmxV2PerpCancelIntent:
         funded_wallet: str,
         orchestrator: ExecutionOrchestrator,
         price_oracle_arbitrum: dict[str, Decimal],
+        intent_evidence,
     ) -> None:
         """Negative Safe control: the cancel grant is load-bearing and denial
         leaves both the exact order and every fund balance unchanged."""
@@ -178,6 +228,7 @@ class TestGmxV2PerpCancelIntent:
         assert opened.status.value == "SUCCESS" and opened.action_bundle is not None
         open_execution = await orchestrator.execute(opened.action_bundle)
         assert open_execution.success, open_execution.error
+        intent_evidence.bind(open_intent, outcome_class="setup", receipt_expected=False)
         orders = parser.extract_async_orders(
             receipt_dict(open_execution),
             intent_type=IntentType.PERP_OPEN.value,
@@ -189,6 +240,7 @@ class TestGmxV2PerpCancelIntent:
         cancel_intent = PerpCancelIntent(order_key=order_key, protocol="gmx_v2", chain=CHAIN_NAME)
         cancellation = compiler.compile(cancel_intent)
         assert cancellation.status.value == "SUCCESS" and cancellation.action_bundle is not None
+        intent_evidence.bind(cancel_intent, outcome_class="authorization_denial", receipt_expected=False)
 
         # Apply the manifest once, then revoke its load-bearing router target.
         # The orchestrator fingerprint cache deliberately prevents silent

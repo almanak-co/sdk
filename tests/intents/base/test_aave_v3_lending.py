@@ -25,6 +25,7 @@ from almanak.connectors.aave_v3.receipt_parser import AaveV3ReceiptParser
 from almanak.framework.execution.orchestrator import ExecutionContext, ExecutionOrchestrator
 from almanak.framework.intents import BorrowIntent, RepayIntent, SupplyIntent, WithdrawIntent
 from almanak.framework.intents.compiler import IntentCompiler
+from almanak.framework.intents.compiler_models import IntentCompilerConfig
 from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
@@ -32,6 +33,7 @@ from tests.intents.conftest import (
     get_token_balance,
     get_token_decimals,
 )
+from tests.intents.proofs.aave_v3_lending import execute_aave_lending_target
 
 # =============================================================================
 # Test Configuration
@@ -793,6 +795,227 @@ class TestAaveV3BorrowIntent:
         assert usdc_after == usdc_before, "USDC balance must be unchanged after failed borrow"
 
         print("\nALL CHECKS PASSED ✓")
+
+
+async def _execute_atomic_setup(
+    *,
+    intent,
+    funded_wallet: str,
+    orchestrator: ExecutionOrchestrator,
+    execution_context: ExecutionContext,
+    price_oracle: dict[str, Decimal],
+) -> None:
+    result = IntentCompiler(
+        chain=CHAIN_NAME,
+        wallet_address=funded_wallet,
+        price_oracle=price_oracle,
+    ).compile(intent)
+    assert result.status.value == "SUCCESS" and result.action_bundle is not None
+    execution = await orchestrator.execute(result.action_bundle, execution_context)
+    assert execution.success, execution.error
+
+
+@pytest.mark.base
+@pytest.mark.lending
+class TestAaveV3AtomicEoaProofs:
+    """Production-helper regression coverage; canonical proof nodes live separately."""
+
+    async def _target(
+        self,
+        *,
+        intent_name: str,
+        intent,
+        symbol: str,
+        amount: Decimal,
+        position_key: str,
+        web3: Web3,
+        funded_wallet: str,
+        orchestrator: ExecutionOrchestrator,
+        execution_context: ExecutionContext,
+        price_oracle: dict[str, Decimal],
+        intent_evidence,
+    ) -> None:
+        token = CHAIN_CONFIGS[CHAIN_NAME]["tokens"][symbol]
+        await execute_aave_lending_target(
+            intent_name=intent_name,
+            intent=intent,
+            chain=CHAIN_NAME,
+            wallet=funded_wallet,
+            token_symbol=symbol,
+            token_address=token,
+            token_decimals=get_token_decimals(web3, token),
+            pool_address=AAVE_V3_POOL_ADDRESSES[CHAIN_NAME],
+            amount=amount,
+            orchestrator=orchestrator,
+            execution_context=execution_context,
+            price_oracle=price_oracle,
+            compiler_config=IntentCompilerConfig(managed_fork=True),
+            rpc_url=str(web3.provider.endpoint_uri),
+            gateway_client=None,
+            intent_evidence=intent_evidence,
+            read_token_balance=lambda: get_token_balance(web3, token, funded_wallet),
+            read_position=lambda: get_user_account_data(web3, funded_wallet)[position_key],
+        )
+
+    @pytest.mark.no_zodiac(reason="Exact-axis QA parity: EOA atomic proof")
+    @pytest.mark.intent(IntentType.SUPPLY)
+    @pytest.mark.asyncio
+    async def test_supply_usdc_atomic_eoa(
+        self, web3, funded_wallet, orchestrator, execution_context, price_oracle, intent_evidence
+    ):
+        amount = Decimal("1")
+        token = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]["USDC"]
+        await self._target(
+            intent_name="SUPPLY",
+            intent=SupplyIntent(
+                protocol="aave_v3",
+                token=token,
+                amount=amount,
+                chain=CHAIN_NAME,
+                expected_pool=AAVE_V3_POOL_ADDRESSES[CHAIN_NAME],
+            ),
+            symbol="USDC",
+            amount=amount,
+            position_key="totalCollateralBase",
+            web3=web3,
+            funded_wallet=funded_wallet,
+            orchestrator=orchestrator,
+            execution_context=execution_context,
+            price_oracle=price_oracle,
+            intent_evidence=intent_evidence,
+        )
+
+    @pytest.mark.no_zodiac(reason="Exact-axis QA parity: EOA atomic proof")
+    @pytest.mark.intent(IntentType.WITHDRAW)
+    @pytest.mark.asyncio
+    async def test_withdraw_usdc_atomic_eoa(
+        self, web3, funded_wallet, orchestrator, execution_context, price_oracle, intent_evidence
+    ):
+        token = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]["USDC"]
+        await _execute_atomic_setup(
+            intent=SupplyIntent(
+                protocol="aave_v3",
+                token=token,
+                amount=Decimal("1"),
+                chain=CHAIN_NAME,
+                expected_pool=AAVE_V3_POOL_ADDRESSES[CHAIN_NAME],
+            ),
+            funded_wallet=funded_wallet,
+            orchestrator=orchestrator,
+            execution_context=execution_context,
+            price_oracle=price_oracle,
+        )
+        amount = Decimal("0.5")
+        await self._target(
+            intent_name="WITHDRAW",
+            intent=WithdrawIntent(
+                protocol="aave_v3",
+                token=token,
+                amount=amount,
+                chain=CHAIN_NAME,
+                expected_pool=AAVE_V3_POOL_ADDRESSES[CHAIN_NAME],
+            ),
+            symbol="USDC",
+            amount=amount,
+            position_key="totalCollateralBase",
+            web3=web3,
+            funded_wallet=funded_wallet,
+            orchestrator=orchestrator,
+            execution_context=execution_context,
+            price_oracle=price_oracle,
+            intent_evidence=intent_evidence,
+        )
+
+    async def _setup_borrow(self, funded_wallet, orchestrator, execution_context, price_oracle) -> str:
+        usdc = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]["USDC"]
+        weth = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]["WETH"]
+        await _execute_atomic_setup(
+            intent=SupplyIntent(
+                protocol="aave_v3",
+                token=usdc,
+                amount=Decimal("2"),
+                chain=CHAIN_NAME,
+                expected_pool=AAVE_V3_POOL_ADDRESSES[CHAIN_NAME],
+            ),
+            funded_wallet=funded_wallet,
+            orchestrator=orchestrator,
+            execution_context=execution_context,
+            price_oracle=price_oracle,
+        )
+        return weth
+
+    @pytest.mark.no_zodiac(reason="Exact-axis QA parity: EOA atomic proof")
+    @pytest.mark.intent(IntentType.BORROW)
+    @pytest.mark.asyncio
+    async def test_borrow_weth_atomic_eoa(
+        self, web3, funded_wallet, orchestrator, execution_context, price_oracle, intent_evidence
+    ):
+        weth = await self._setup_borrow(funded_wallet, orchestrator, execution_context, price_oracle)
+        amount = Decimal("0.0001")
+        await self._target(
+            intent_name="BORROW",
+            intent=BorrowIntent(
+                protocol="aave_v3",
+                collateral_token=CHAIN_CONFIGS[CHAIN_NAME]["tokens"]["USDC"],
+                collateral_amount=Decimal(0),
+                borrow_token=weth,
+                borrow_amount=amount,
+                interest_rate_mode="variable",
+                chain=CHAIN_NAME,
+            ),
+            symbol="WETH",
+            amount=amount,
+            position_key="totalDebtBase",
+            web3=web3,
+            funded_wallet=funded_wallet,
+            orchestrator=orchestrator,
+            execution_context=execution_context,
+            price_oracle=price_oracle,
+            intent_evidence=intent_evidence,
+        )
+
+    @pytest.mark.no_zodiac(reason="Exact-axis QA parity: EOA atomic proof")
+    @pytest.mark.intent(IntentType.REPAY)
+    @pytest.mark.asyncio
+    async def test_repay_weth_atomic_eoa(
+        self, web3, funded_wallet, orchestrator, execution_context, price_oracle, intent_evidence
+    ):
+        weth = await self._setup_borrow(funded_wallet, orchestrator, execution_context, price_oracle)
+        await _execute_atomic_setup(
+            intent=BorrowIntent(
+                protocol="aave_v3",
+                collateral_token=CHAIN_CONFIGS[CHAIN_NAME]["tokens"]["USDC"],
+                collateral_amount=Decimal(0),
+                borrow_token=weth,
+                borrow_amount=Decimal("0.0001"),
+                interest_rate_mode="variable",
+                chain=CHAIN_NAME,
+            ),
+            funded_wallet=funded_wallet,
+            orchestrator=orchestrator,
+            execution_context=execution_context,
+            price_oracle=price_oracle,
+        )
+        amount = Decimal("0.00005")
+        await self._target(
+            intent_name="REPAY",
+            intent=RepayIntent(
+                protocol="aave_v3",
+                token=weth,
+                amount=amount,
+                interest_rate_mode="variable",
+                chain=CHAIN_NAME,
+            ),
+            symbol="WETH",
+            amount=amount,
+            position_key="totalDebtBase",
+            web3=web3,
+            funded_wallet=funded_wallet,
+            orchestrator=orchestrator,
+            execution_context=execution_context,
+            price_oracle=price_oracle,
+            intent_evidence=intent_evidence,
+        )
 
 
 if __name__ == "__main__":

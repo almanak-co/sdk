@@ -10,6 +10,7 @@ This module provides common infrastructure for all per-chain Intent tests:
 """
 
 import inspect
+import json
 import os
 import sqlite3
 import time
@@ -18,6 +19,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -165,6 +167,36 @@ class AnvilEthCallAdapter:
         """Mirror the gateway connectivity signal over the managed fork."""
         return bool(self.web3.is_connected())
 
+    # GatewayClientVenueVerificationGateway (framework/venues/gateway.py) drives an
+    # SDK GatewayClient, not a verifier: it calls ``client.eth_call(...)``,
+    # ``client.rpc.Call(request, timeout=client.config.timeout)`` and
+    # ``client.block_number(chain)``. This adapter already answered the first and
+    # third; ``rpc``/``config``/``Call`` complete the client surface so the exact
+    # venue checks introduced in #3749 can run against the managed fork.
+    @property
+    def rpc(self) -> "AnvilEthCallAdapter":
+        return self
+
+    @property
+    def config(self) -> Any:
+        return SimpleNamespace(timeout=30.0)
+
+    def Call(self, request: Any, timeout: float | None = None) -> Any:  # noqa: N802
+        """Serve the gateway RpcRequest contract straight off the fork provider."""
+        del timeout
+        try:
+            params = json.loads(request.params or "[]")
+            response = self.web3.provider.make_request(request.method, params)
+            if response.get("error"):
+                return SimpleNamespace(success=False, result="", error=json.dumps(response["error"]))
+            return SimpleNamespace(success=True, result=json.dumps(response.get("result")), error="")
+        except Exception as exc:  # noqa: BLE001 - converted to the gateway response contract
+            return SimpleNamespace(
+                success=False,
+                result="",
+                error=json.dumps({"code": -32603, "message": f"{type(exc).__name__}: {exc}"}),
+            )
+
     def with_v4_pool_key(self, pool_key: Any) -> "AnvilEthCallAdapter":
         """Return a copy of this adapter bound to ``pool_key`` for getSlot0 reads."""
         import dataclasses
@@ -210,8 +242,14 @@ class AnvilEthCallAdapter:
         )
         return bytes(result)
 
-    def block_number(self, *, chain: str) -> int:
-        del chain
+    def block_number(self, chain: str | None = None, *, timeout: float | None = None) -> int:
+        # ``chain`` is positional here to match GatewayClient.block_number, which is
+        # the shape GatewayVenueVerifier calls: ``self._client.block_number(chain)``
+        # (almanak/framework/venues/gateway.py). The exact-venue work in #3749 routes
+        # V3 pool verification through that call; a keyword-only signature here made
+        # every exact lane fail compilation with "gateway_unavailable". Keyword
+        # callers still work, so this satisfies both the client and verifier shapes.
+        del chain, timeout
         return self.web3.eth.block_number
 
     def block_hash(self, *, chain: str, block_number: int) -> str:
@@ -1797,6 +1835,156 @@ def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
         "markers", "l3_semantic: L3 semantic verification — cross-checks intent params against receipt"
     )
+    config.addinivalue_line(
+        "markers",
+        "qa_proof(protocol, role='positive_runtime', version=1): exact-cell proof node eligible for QA sealing",
+    )
+    # The compiled-permission attestation is part of the opt-in evidence
+    # contract, not a default-on lane gate. Imported lazily so a plain
+    # collection does not pay for the harness module.
+    from tests.intents import _permission_onchain_harness
+
+    _permission_onchain_harness.ATTEST_COMPILED_PERMISSIONS = _intent_evidence_output(config) is not None
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    """Register the opt-in §17a receipt-evidence output contract."""
+    group = parser.getgroup("intent evidence")
+    group.addoption("--intent-evidence-dir", type=Path, help="Write exact-node Intent receipt evidence")
+    group.addoption("--intent-evidence-network", choices=("anvil", "mainnet"))
+    group.addoption("--intent-evidence-exec-path", choices=("safe", "eoa"))
+    group.addoption("--intent-evidence-git-sha", default=None)
+
+
+def _intent_evidence_output(config: pytest.Config) -> Path | None:
+    configured = config.getoption("--intent-evidence-dir", default=None) or os.environ.get(
+        "ALMANAK_INTENT_EVIDENCE_DIR"
+    )
+    return Path(configured) if configured else None
+
+
+class _CompileObservations(list):
+    """Intents passed to ``IntentCompiler.compile``, and which of them compiled.
+
+    Zodiac consumes this as the plain list of intents it must authorize, so the
+    element type is deliberately unchanged for the twelve chain conftests that
+    pass it as ``recorded_intents``.
+
+    ``succeeded`` is the narrower set the receipt evidence uses for Layer 1.
+    The two cannot be the same list: ``compile()`` reports failure by returning
+    ``CompilationResult(status=FAILED)`` far more often than by raising, so
+    membership in the attempt list says nothing about whether compilation
+    worked.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.succeeded: list[Any] = []
+
+
+def _compilation_succeeded(result: Any) -> bool:
+    """Allowlist ``SUCCESS`` only.
+
+    ``PARTIAL`` means some transactions built and some failed, which is not a
+    passing compile layer; a status this cannot read is not one either.
+    """
+    status = getattr(result, "status", None)
+    return str(getattr(status, "value", status)).upper() == "SUCCESS"
+
+
+def _record_compilation(observations: _CompileObservations, intent: Any, result: Any) -> None:
+    """Record one compile attempt and whether it produced a compiled bundle."""
+    observations.append(intent)
+    if _compilation_succeeded(result):
+        observations.succeeded.append(intent)
+
+
+@pytest.fixture
+def intent_evidence(  # type: ignore[no-untyped-def]
+    request: pytest.FixtureRequest,
+    _zodiac_intent_recorder: _CompileObservations,
+):
+    """Return the opt-in per-node recorder used by Layer-3 golden tests."""
+    output_dir = _intent_evidence_output(request.config)
+    if output_dir is None:
+        from tests.intents.intent_evidence import DisabledIntentEvidenceRecorder
+
+        return DisabledIntentEvidenceRecorder()
+    network = request.config.getoption("--intent-evidence-network", default=None) or os.environ.get(
+        "ALMANAK_INTENT_EVIDENCE_NETWORK"
+    )
+    if network not in {"anvil", "mainnet"}:
+        pytest.fail("Evidence-enabled tests require --intent-evidence-network=anvil|mainnet")
+    marker_exec = "eoa" if request.node.get_closest_marker("no_zodiac") is not None else "safe"
+    configured_exec = request.config.getoption("--intent-evidence-exec-path", default=None) or os.environ.get(
+        "ALMANAK_INTENT_EVIDENCE_EXEC_PATH"
+    )
+    if configured_exec is not None and configured_exec != marker_exec:
+        pytest.fail(f"Intent evidence exec path {configured_exec!r} disagrees with collected node {marker_exec!r}")
+    from tests.intents.intent_evidence import IntentEvidenceRecorder
+
+    declared_intents = {
+        str(getattr(value, "value", value)).upper()
+        for marker in request.node.iter_markers("intent")
+        for value in marker.args
+    }
+
+    recorder = IntentEvidenceRecorder(
+        output_dir=output_dir,
+        nodeid=request.node.nodeid,
+        network=network,
+        exec_path=marker_exec,
+        git_sha=request.config.getoption("--intent-evidence-git-sha", default=None)
+        or os.environ.get("ALMANAK_INTENT_EVIDENCE_GIT_SHA", "unknown"),
+        declared_intents=declared_intents,
+        # The intents that COMPILED, not the ones compile was attempted on.
+        observed_intents=_zodiac_intent_recorder.succeeded,
+    )
+    request.node._intent_evidence_recorder = recorder  # type: ignore[attr-defined]
+    return recorder
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[Any]):  # type: ignore[no-untyped-def]
+    """Finalize evidence only after pytest has determined the call outcome."""
+    outcome = yield
+    report = outcome.get_result()
+    recorder = getattr(item, "_intent_evidence_recorder", None)
+    if recorder is None or report.when != "call":
+        return
+    _finalize_intent_evidence(recorder, report)
+
+
+def _finalize_intent_evidence(recorder: Any, report: Any) -> None:
+    """Publish the node's evidence, letting a refusal fail only a passing node.
+
+    ``finalize()`` refuses to publish when a bound intent never returned from
+    ``IntentCompiler.compile``. On a passing node that refusal must fail the
+    test: a green node cannot publish a Layer 1 nothing observed.
+
+    On an already-failed node the original failure is the more useful one, and
+    raising out of a hookwrapper here would both mask it and turn the failure
+    into a pytest hook ERROR. The refusal is attached to the report instead.
+    """
+    status = "PASS" if report.passed else "SKIP" if report.skipped else "FAIL"
+    try:
+        recorder.finalize(outcome=status, duration_seconds=float(report.duration))
+    except Exception as exc:  # noqa: BLE001 - re-raised below whenever it is the only signal
+        if report.passed:
+            raise
+        report.sections.append(
+            ("Intent evidence", f"finalize refused to publish: {type(exc).__name__}: {exc}"),
+        )
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    """Assemble immutable node fragments into the sealer input manifest."""
+    output_dir = _intent_evidence_output(session.config)
+    if output_dir is None or not (output_dir / "nodes").is_dir():
+        return
+    from tests.intents.intent_evidence import build_evidence_manifest
+
+    build_evidence_manifest(output_dir)
 
 
 # =============================================================================
@@ -2723,7 +2911,72 @@ price_oracle_robinhood = _create_price_oracle_fixture("robinhood")
 # =============================================================================
 
 
-@pytest.fixture(scope="module")
+def _aave_v3_fork_price_oracle(chain_name: str, web3: Web3) -> dict[str, Decimal]:
+    """Read Aave's canonical USD prices from one stable Anvil head.
+
+    Exact Aave proof nodes must not depend on a live off-chain quote.  A live
+    CoinGecko response is neither reproducible at the fork block nor reliably
+    available (the unauthenticated endpoint rate-limits).  Aave's own oracle is
+    also the price authority used by the protocol for collateral and borrow
+    capacity, so reading it at the Anvil head gives the compiler and accounting
+    harness a block-consistent input without weakening any raw-amount checks.
+
+    Calls deliberately use ``latest`` rather than an explicit numeric block.
+    Anvil may forward an uncached numeric-block storage read to its upstream as
+    an archive request, which makes a valid current-state proof depend on an
+    archive RPC.  The head is sampled before and after the complete batch and
+    the fixture fails if it moved, preserving the single-state contract without
+    imposing that unrelated infrastructure requirement.
+    """
+    from almanak.connectors.aave_v3.addresses import AAVE_V3, AAVE_V3_TOKENS
+
+    contracts = AAVE_V3.get(chain_name)
+    tokens = AAVE_V3_TOKENS.get(chain_name)
+    if not contracts or not tokens:
+        raise RuntimeError(f"Aave V3 has no canonical oracle/token registry for {chain_name}")
+
+    oracle = web3.eth.contract(
+        address=Web3.to_checksum_address(contracts["oracle"]),
+        abi=[
+            {
+                "inputs": [],
+                "name": "BASE_CURRENCY_UNIT",
+                "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+                "stateMutability": "view",
+                "type": "function",
+            },
+            {
+                "inputs": [{"internalType": "address", "name": "asset", "type": "address"}],
+                "name": "getAssetPrice",
+                "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+                "stateMutability": "view",
+                "type": "function",
+            },
+        ],
+    )
+    block_number = web3.eth.block_number
+    base_unit = int(oracle.functions.BASE_CURRENCY_UNIT().call())
+    if base_unit <= 0:
+        raise RuntimeError(f"Aave V3 oracle returned invalid BASE_CURRENCY_UNIT on {chain_name}")
+
+    prices: dict[str, Decimal] = {}
+    for symbol, address in sorted(tokens.items()):
+        raw_price = int(oracle.functions.getAssetPrice(Web3.to_checksum_address(address)).call())
+        if raw_price <= 0:
+            raise RuntimeError(
+                f"Aave V3 oracle returned no price for canonical {symbol} reserve "
+                f"{address} on {chain_name} at block {block_number}"
+            )
+        prices[symbol] = Decimal(raw_price) / Decimal(base_unit)
+    final_block_number = web3.eth.block_number
+    if final_block_number != block_number:
+        raise RuntimeError(
+            f"Anvil head moved while reading Aave V3 prices on {chain_name}: {block_number} -> {final_block_number}"
+        )
+    return prices
+
+
+@pytest.fixture
 def price_oracle(chain_name: str, request) -> dict[str, Decimal]:
     """Select the appropriate session-scoped price oracle for this chain.
 
@@ -2740,7 +2993,13 @@ def price_oracle(chain_name: str, request) -> dict[str, Decimal]:
     Returns:
         Dict mapping token symbols to USD prices
     """
-    # Map chain names to their session-scoped fixtures
+    proof_marker = request.node.get_closest_marker("qa_proof")
+    if proof_marker is not None and proof_marker.kwargs.get("protocol") == "aave_v3":
+        return _aave_v3_fork_price_oracle(chain_name, request.getfixturevalue("web3"))
+
+    # Non-Aave tests retain their existing provider until each protocol owns a
+    # block-consistent price authority.  This branch is intentionally explicit:
+    # a provider fallback must never silently enter an exact Aave proof.
     fixture_map = {
         "arbitrum": "price_oracle_arbitrum",
         "base": "price_oracle_base",
@@ -3028,29 +3287,33 @@ def _declare_managed_fork(monkeypatch: pytest.MonkeyPatch) -> None:
 def _zodiac_intent_recorder(
     request: pytest.FixtureRequest,
     monkeypatch: pytest.MonkeyPatch,
-) -> list[Any]:
+) -> _CompileObservations:
     """Capture every intent passed to ``IntentCompiler.compile`` during the test.
 
-    Returns a live ``list`` that the orchestrator reads at execute time to
-    derive a manifest from the test's actual intents (late-binding). The
-    monkey-patch is auto-reverted at fixture teardown via ``monkeypatch``.
+    Returns a live list that the orchestrator reads at execute time to derive a
+    manifest from the test's actual intents (late-binding). The monkey-patch is
+    auto-reverted at fixture teardown via ``monkeypatch``.
 
-    No-op for opt-out tests: the captured list is returned empty and no
-    monkey-patch is installed, so the standard ``IntentCompiler.compile`` is
-    untouched.
+    Despite the historical fixture name, compilation is observed for both Safe
+    and EOA tests. Zodiac consumes the list only on its own path; the
+    receipt-evidence contract reads ``succeeded`` from the same observation.
     """
-    captured: list[Any] = []
-    if no_zodiac_marker(request) is not None:
-        return captured
-
+    captured = _CompileObservations()
     from almanak.framework.intents.compiler import IntentCompiler
     from tests.intents._permission_onchain_harness import _associate_zodiac_source_intent
 
     original_compile = IntentCompiler.compile
 
     def recording_compile(self, intent):  # type: ignore[no-redef]
-        captured.append(intent)
         result = original_compile(self, intent)
+        # Recorded only once compile returns, and classified by the status it
+        # returned. Appending first would make the list mean "compilation was
+        # attempted"; appending without reading the status would make it mean
+        # "compile did not raise". Neither is Layer 1. Zodiac reads this list at
+        # execute time -- strictly after compile has returned -- so the later
+        # append changes nothing on that path except to keep an intent that
+        # never compiled out of the derived manifest scope.
+        _record_compilation(captured, intent, result)
         # Preserve the exact input/output association. Tests may compile B
         # before executing A, so a global "latest intent" lookup can make A's
         # bundle validate against the wrong source intent.

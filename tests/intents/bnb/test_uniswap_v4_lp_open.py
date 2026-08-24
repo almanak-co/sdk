@@ -92,14 +92,14 @@ LP_POOL = "BNB/USDT/500"
 # when gas spend is at the BSC upper end (~5 mBNB for ~5 TXs). funded_wallet
 # is seeded by the bnb conftest with 100 native BNB and 100,000 USDT, so
 # this is well inside the funding envelope (~0.1% of the seed).
-LP_AMOUNT_BNB = Decimal("0.1")    # ~$67 of BNB at fork prices (~$670/BNB)
-LP_AMOUNT_USDT = Decimal("100")   # ~$100 of USDT (18 decimals on BSC)
+LP_AMOUNT_BNB = Decimal("0.1")  # ~$67 of BNB at fork prices (~$670/BNB)
+LP_AMOUNT_USDT = Decimal("100")  # ~$100 of USDT (18 decimals on BSC)
 
 # Wide price range centred around the ~673 USDT/BNB mid-price. Roughly 7x
 # below and ~3x above ensures the position is unambiguously in-range and
 # both tokens must be deposited (no-op guard). Units are token1/token0 =
 # USDT-per-BNB (BNB is currency0 as address(0) < any ERC20 address).
-LP_RANGE_LOWER = Decimal("100")   # 100 USDT per BNB
+LP_RANGE_LOWER = Decimal("100")  # 100 USDT per BNB
 LP_RANGE_UPPER = Decimal("2000")  # 2000 USDT per BNB
 
 
@@ -204,9 +204,7 @@ def _assert_v4_open_position_hash(payload: dict) -> None:
             "correct above (amounts/pool/ticks/confidence hard-asserted)."
         )
     # Reactivates automatically once VIB-4636 wires position_hash through.
-    assert isinstance(ph, str) and ph.startswith("0x"), (
-        f"V4 position_hash must be 0x-prefixed hex, got {ph!r}"
-    )
+    assert isinstance(ph, str) and ph.startswith("0x"), f"V4 position_hash must be 0x-prefixed hex, got {ph!r}"
     assert len(ph) == 66, f"V4 position_hash must be a 32-byte keccak hash, got {ph!r}"
 
 
@@ -258,9 +256,9 @@ class TestUniswapV4LPOpenIntent:
         usdt_decimals = get_token_decimals(web3, usdt_addr)
         bnb_decimals = 18  # Native BNB is 18 decimals
 
-        print(f"\n{'='*80}")
+        print(f"\n{'=' * 80}")
         print("Test: LP_OPEN BNB/USDT via Uniswap V4 on BNB Chain")
-        print(f"{'='*80}")
+        print(f"{'=' * 80}")
         print(f"BNB amount:  {LP_AMOUNT_BNB}")
         print(f"USDT amount: {LP_AMOUNT_USDT}")
         print(f"Price range: {LP_RANGE_LOWER} - {LP_RANGE_UPPER} USDT/BNB")
@@ -311,16 +309,16 @@ class TestUniswapV4LPOpenIntent:
         print("Compiling intent to ActionBundle...")
         compilation_result = compiler.compile(intent)
 
-        assert compilation_result.status.value == "SUCCESS", (
-            f"Compilation failed: {compilation_result.error}"
-        )
+        assert compilation_result.status.value == "SUCCESS", f"Compilation failed: {compilation_result.error}"
         assert compilation_result.action_bundle is not None, "ActionBundle must be created"
 
         bundle = compilation_result.action_bundle
         print(f"ActionBundle created with {len(bundle.transactions)} transactions")
-        print(f"Metadata: liquidity={bundle.metadata.get('liquidity')}, "
-              f"tick_lower={bundle.metadata.get('tick_lower')}, "
-              f"tick_upper={bundle.metadata.get('tick_upper')}")
+        print(
+            f"Metadata: liquidity={bundle.metadata.get('liquidity')}, "
+            f"tick_lower={bundle.metadata.get('tick_lower')}, "
+            f"tick_upper={bundle.metadata.get('tick_upper')}"
+        )
 
         # Layer 2: Execution
         print("\nExecuting via ExecutionOrchestrator...")
@@ -331,9 +329,7 @@ class TestUniswapV4LPOpenIntent:
 
         # Enrich for accounting (populates result.lp_open_data — Layer 5 needs
         # it; mirrors the V3 golden / SushiSwap precedent ordering).
-        execution_result = _enrich_for_accounting(
-            execution_result, intent, funded_wallet, bundle.metadata
-        )
+        execution_result = _enrich_for_accounting(execution_result, intent, funded_wallet, bundle.metadata)
 
         # Layer 3: Receipt Parsing
         parser = UniswapV4ReceiptParser(chain=CHAIN_NAME)
@@ -341,9 +337,10 @@ class TestUniswapV4LPOpenIntent:
         liquidity = None
         saw_modify_liquidity_event = False
         saw_transfer_event = False
+        parsed_usdt_deposit = 0
 
         for i, tx_result in enumerate(execution_result.transaction_results):
-            print(f"\nTransaction {i+1}:")
+            print(f"\nTransaction {i + 1}:")
             print(f"  Hash: {tx_result.tx_hash[:16]}...")
             print(f"  Gas used: {tx_result.gas_used}")
 
@@ -359,6 +356,12 @@ class TestUniswapV4LPOpenIntent:
                     saw_modify_liquidity_event = True
                 if parse_result.transfer_events:
                     saw_transfer_event = True
+                parsed_usdt_deposit += sum(
+                    transfer.amount
+                    for transfer in parse_result.transfer_events
+                    if transfer.token.lower() == usdt_addr.lower()
+                    and transfer.to_address.lower() == parser.pool_manager
+                )
 
                 # Extract position_id from ERC-721 Transfer (mint) event
                 extracted_id = parser.extract_position_id(receipt_dict)
@@ -376,12 +379,9 @@ class TestUniswapV4LPOpenIntent:
         assert position_id > 0, f"Position ID must be positive, got {position_id}"
         assert liquidity is not None, "Must extract liquidity from ModifyLiquidity event"
         assert liquidity > 0, f"Liquidity must be positive, got {liquidity}"
-        assert saw_modify_liquidity_event, (
-            "parse_receipt() must surface the ModifyLiquidity event for an LP_OPEN"
-        )
-        assert saw_transfer_event, (
-            "parse_receipt() must surface the ERC-721 mint Transfer for an LP_OPEN"
-        )
+        assert saw_modify_liquidity_event, "parse_receipt() must surface the ModifyLiquidity event for an LP_OPEN"
+        assert saw_transfer_event, "parse_receipt() must surface the ERC-721 mint Transfer for an LP_OPEN"
+        assert parsed_usdt_deposit > 0, "parse_receipt() must decode a positive USDT LP deposit"
 
         # Layer 4: Balance Deltas
         bnb_after = web3.eth.get_balance(Web3.to_checksum_address(funded_wallet))
@@ -402,40 +402,28 @@ class TestUniswapV4LPOpenIntent:
         # in-range. Both currencies MUST have been deposited. Permitting `or`
         # here would let a V4 no-op silently pass.
         #
-        # BNB is native: ``bnb_spent`` is the wallet's native delta, which
-        # equals ``actual_bnb_deposited + gas_used*gas_price``. SETTLE_PAIR
-        # refunds the slippage cushion via the PoolManager, so the deposit
-        # itself is bounded above by ``amount0_max`` (~1.30× amount0 under
-        # the LP minimum 30% slippage when on-chain sqrtPrice falls back to
-        # the oracle estimate; the cushion drops to 5% when the StateView
-        # query succeeds). We assert bnb_spent is strictly positive AND
-        # bounded above by ``amount0_max + 0.01 BNB`` gas headroom — anything
-        # outside that window is either a no-op (lower bound) or a regression
-        # that overspent (upper bound).
-        # Gas headroom for the native-BNB bound (defined here so the lower
-        # and upper bounds can both reference it without duplication). At BSC
-        # gas prices an LP_OPEN bundle (2× ERC20 approve, 2× Permit2.approve,
-        # 1× mint = 5 TXs) totals well under 0.005 BNB, so 0.01 BNB is a
-        # safe ceiling. Sized to 10% of LP_AMOUNT_BNB (mirrors the avalanche
-        # sibling VIB-4367 which uses 0.1/1.0 = 10%) so the lower-bound
-        # assertion still has plenty of room above gas-only.
-        gas_headroom = int(Decimal("0.01") * (Decimal(10) ** bnb_decimals))
-
-        # Lower bound for the BNB deposit: subtract the gas-headroom ceiling
-        # so we still prove the position actually consumed native BNB. If a
-        # tick/pool-key regression makes this position mint as one-sided
-        # USDT liquidity, ``bnb_spent`` would be ~= gas alone (well below
-        # gas_headroom), and this assertion catches it; a plain ``> 0`` check
-        # would mask that case as long as any gas was paid.
-        actual_bnb_deposit = bnb_spent - gas_headroom
-        assert actual_bnb_deposit > 0, (
-            "In-range LP_OPEN must deposit native BNB above the gas-only "
-            "floor (no-op guard). "
-            f"bnb_spent={bnb_spent}, gas_headroom={gas_headroom}, "
-            f"deposit_estimate={actual_bnb_deposit}"
+        # BNB is native: the gas-adjusted wallet delta measures the value sent
+        # with the PositionManager call, not the position's exact principal.
+        # Unlike an ERC-20 Transfer delta, msg.value can be an upper-bound
+        # prepayment, so the position-state reader below is authoritative for
+        # the amount actually represented by the minted liquidity. Keep the
+        # wallet signal as an independent nonzero and max-spend witness.
+        #
+        # Isolate that value using the orchestrator's receipt-derived gas total.
+        # A fixed gas allowance is invalid because BSC gas prices can move
+        # independently of the forked protocol state.
+        gas_spent = execution_result.total_gas_cost_wei
+        assert gas_spent > 0, "LP_OPEN must report a positive receipt-derived gas cost"
+        native_value_sent = bnb_spent - gas_spent
+        assert native_value_sent > 0, (
+            "In-range LP_OPEN must send native BNB after measured gas is "
+            "removed (no-op guard). "
+            f"bnb_spent={bnb_spent}, gas_spent={gas_spent}, "
+            f"native_value_sent={native_value_sent}"
         )
-        assert usdt_spent > 0, (
-            f"In-range LP_OPEN must deposit USDT (no-op guard). usdt_spent={usdt_spent}"
+        assert usdt_spent > 0, f"In-range LP_OPEN must deposit USDT (no-op guard). usdt_spent={usdt_spent}"
+        assert parsed_usdt_deposit == usdt_spent, (
+            f"parsed USDT LP deposit must match the wallet delta: parsed={parsed_usdt_deposit}, delta={usdt_spent}"
         )
 
         # Upper-bound checks. For USDT the bound is the requested max1
@@ -446,20 +434,14 @@ class TestUniswapV4LPOpenIntent:
         assert usdt_spent <= max_usdt_spend, (
             f"USDT spend exceeded requested amount1: spent={usdt_spent}, max={max_usdt_spend}"
         )
-        # For native BNB include a gas headroom: a modifyLiquidities TX plus
-        # 4 approval TXs (2× ERC-20 approve, 2× Permit2.approve, 1× mint) at
-        # BSC gas prices ought to stay well below 0.01 BNB. The adapter caps
-        # amount0_max at amount0 * (1 + lp_default_slippage) where
+        # The adapter caps amount0_max at amount0 * (1 +
+        # lp_default_slippage) where
         # lp_default_slippage is 0.30 when sqrtPrice came from oracle prices
-        # or 0.05 when on-chain. Take the looser 30% cap + the gas headroom
-        # defined above to keep this robust regardless of which path the
-        # compiler took.
-        max_native_spend = int(
-            Decimal(max_bnb_spend) * Decimal("1.30")
-        ) + gas_headroom
-        assert bnb_spent <= max_native_spend, (
-            f"Native BNB spend exceeded amount0_max + gas headroom: "
-            f"spent={bnb_spent}, max={max_native_spend}"
+        # or 0.05 when on-chain. Take the looser 30% cap to keep this robust
+        # regardless of which path the compiler took.
+        max_native_value = int(Decimal(max_bnb_spend) * Decimal("1.30"))
+        assert native_value_sent <= max_native_value, (
+            f"Native BNB value exceeded amount0_max: sent={native_value_sent}, max={max_native_value}"
         )
 
         print(f"\nPosition ID: {position_id}")
@@ -495,18 +477,14 @@ class TestUniswapV4LPOpenIntent:
         # Tie the persisted amounts to the Layer-4 signals — `>= 0` would
         # pass on a zero or mis-scaled row (CodeRabbit PR #2369). USDT
         # (token1, ERC-20) is a clean delta → exact equality. Native BNB
-        # (token0) cannot be matched exactly because ``bnb_spent`` is
-        # gas-polluted, so bound the persisted amount to the proven Layer-4
-        # native-deposit window: at least the gas-discounted floor and no
-        # more than what actually left the wallet.
+        # (token0) has no Transfer event, so its gas-adjusted msg.value is an
+        # upper bound while the position-state reader supplies the principal.
         assert Decimal(payload["amount1"]) == (Decimal(usdt_spent) / Decimal(10**usdt_decimals))
         _amount0_h = Decimal(payload["amount0"])
-        assert (Decimal(actual_bnb_deposit) / Decimal(10**bnb_decimals)) <= _amount0_h <= (
-            Decimal(bnb_spent) / Decimal(10**bnb_decimals)
-        ), (
-            f"persisted LP_OPEN amount0 ({_amount0_h}) must fall within the "
-            f"proven native-BNB deposit window "
-            f"[{actual_bnb_deposit}, {bnb_spent}] / 1e{bnb_decimals}"
+        native_value_sent_h = Decimal(native_value_sent) / Decimal(10**bnb_decimals)
+        assert Decimal(0) < _amount0_h <= native_value_sent_h, (
+            f"persisted LP_OPEN amount0 ({_amount0_h}) must be positive and "
+            f"must not exceed gas-adjusted msg.value ({native_value_sent_h})"
         )
         assert payload["tick_lower"] is not None
         assert payload["tick_upper"] is not None
@@ -532,9 +510,9 @@ class TestUniswapV4LPOpenIntent:
         and (Layer 5) that a failed LP_OPEN writes ZERO accounting_events
         rows (epic VIB-4591 decision #7).
         """
-        print(f"\n{'='*80}")
+        print(f"\n{'=' * 80}")
         print("Test: LP_OPEN with invalid pool (should fail)")
-        print(f"{'='*80}")
+        print(f"{'=' * 80}")
 
         # Snapshot balances BEFORE compile so we can assert the failure-path
         # conservation invariant (no on-chain tx, no balance movement).
@@ -561,9 +539,7 @@ class TestUniswapV4LPOpenIntent:
 
         compilation_result = compiler.compile(intent)
 
-        assert compilation_result.status.value == "FAILED", (
-            "Compilation should fail for invalid token symbols"
-        )
+        assert compilation_result.status.value == "FAILED", "Compilation should fail for invalid token symbols"
         assert compilation_result.error is not None
         assert compilation_result.action_bundle is None, (
             "Compiler must not return an ActionBundle on FAILED compilation"
@@ -574,12 +550,10 @@ class TestUniswapV4LPOpenIntent:
         bnb_after = web3.eth.get_balance(Web3.to_checksum_address(funded_wallet))
         usdt_after = get_token_balance(web3, usdt_addr, funded_wallet)
         assert bnb_after == bnb_before, (
-            f"Native BNB balance must remain unchanged on compile failure. "
-            f"before={bnb_before}, after={bnb_after}"
+            f"Native BNB balance must remain unchanged on compile failure. before={bnb_before}, after={bnb_after}"
         )
         assert usdt_after == usdt_before, (
-            f"USDT balance must remain unchanged on compile failure. "
-            f"before={usdt_before}, after={usdt_after}"
+            f"USDT balance must remain unchanged on compile failure. before={usdt_before}, after={usdt_after}"
         )
 
         print(f"Compilation failed as expected: {compilation_result.error}")

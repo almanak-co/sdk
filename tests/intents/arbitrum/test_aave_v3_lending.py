@@ -31,15 +31,15 @@ from typing import Any
 import pytest
 from web3 import Web3
 
+from almanak.connectors.aave_v3.adapter import (
+    AAVE_V3_POOL_ADDRESSES,
+)
+from almanak.connectors.aave_v3.receipt_parser import AaveV3ReceiptParser
 from almanak.framework.accounting.lending_accounting import (
     capture_lending_post_state,
     capture_lending_pre_state,
     lending_state_to_dict,
 )
-from almanak.connectors.aave_v3.adapter import (
-    AAVE_V3_POOL_ADDRESSES,
-)
-from almanak.connectors.aave_v3.receipt_parser import AaveV3ReceiptParser
 from almanak.framework.execution.orchestrator import (
     ExecutionContext,
     ExecutionOrchestrator,
@@ -57,6 +57,7 @@ from tests.intents.conftest import (
     get_token_balance,
     get_token_decimals,
 )
+from tests.intents.intent_evidence import decode_explorer_view
 
 # =============================================================================
 # Test Configuration
@@ -237,6 +238,7 @@ class TestAaveV3SupplyIntent:
       LendingAccountingEvent (confidence=HIGH, identity sextuple)
     """
 
+    @pytest.mark.qa_proof(protocol="aave_v3", contract="lending.v1")
     @pytest.mark.intent(IntentType.SUPPLY)
     @pytest.mark.asyncio
     async def test_supply_usdc_using_intent(
@@ -248,6 +250,57 @@ class TestAaveV3SupplyIntent:
         price_oracle: dict[str, Decimal],
         layer5_accounting_harness,
         anvil_eth_call_adapter,
+        intent_evidence,
+    ):
+        """Run the exact receipt-fidelity scenario through Safe + Zodiac."""
+        await self._run_supply_usdc(
+            web3,
+            funded_wallet,
+            orchestrator,
+            execution_context,
+            price_oracle,
+            layer5_accounting_harness,
+            anvil_eth_call_adapter,
+            intent_evidence,
+        )
+
+    @pytest.mark.qa_proof(protocol="aave_v3", contract="lending.v1")
+    @pytest.mark.no_zodiac(reason="Exact-axis QA parity: exercise the same receipt contract through EOA")
+    @pytest.mark.intent(IntentType.SUPPLY)
+    @pytest.mark.asyncio
+    async def test_supply_usdc_using_intent_eoa(
+        self,
+        web3: Web3,
+        funded_wallet: str,
+        orchestrator: ExecutionOrchestrator,
+        execution_context: ExecutionContext,
+        price_oracle: dict[str, Decimal],
+        layer5_accounting_harness,
+        anvil_eth_call_adapter,
+        intent_evidence,
+    ):
+        """Run the exact receipt-fidelity scenario through the EOA path."""
+        await self._run_supply_usdc(
+            web3,
+            funded_wallet,
+            orchestrator,
+            execution_context,
+            price_oracle,
+            layer5_accounting_harness,
+            anvil_eth_call_adapter,
+            intent_evidence,
+        )
+
+    async def _run_supply_usdc(
+        self,
+        web3: Web3,
+        funded_wallet: str,
+        orchestrator: ExecutionOrchestrator,
+        execution_context: ExecutionContext,
+        price_oracle: dict[str, Decimal],
+        layer5_accounting_harness,
+        anvil_eth_call_adapter,
+        intent_evidence,
     ):
         """Test USDC supply using SupplyIntent.
 
@@ -264,9 +317,9 @@ class TestAaveV3SupplyIntent:
 
         supply_amount = Decimal("1000")  # 1000 USDC
 
-        print(f"\n{'='*80}")
+        print(f"\n{'=' * 80}")
         print(f"Test: Supply {supply_amount} USDC to Aave V3 using SupplyIntent")
-        print(f"{'='*80}")
+        print(f"{'=' * 80}")
 
         # Record balances BEFORE
         usdc_before = get_token_balance(web3, usdc, funded_wallet)
@@ -282,6 +335,9 @@ class TestAaveV3SupplyIntent:
             amount=supply_amount,
             chain=CHAIN_NAME,
         )
+        # Bind before compilation so compile/execute failures remain attributable
+        # without manufacturing receipt evidence from an approval transaction.
+        intent_evidence.bind(intent)
 
         print(f"\nCreated SupplyIntent: protocol={intent.protocol}, token={intent.token}, amount={intent.amount}")
 
@@ -301,9 +357,7 @@ class TestAaveV3SupplyIntent:
         print(f"ActionBundle created with {len(compilation_result.action_bundle.transactions)} transactions")
 
         # Layer 5: capture pre-state BEFORE execution (mirrors the runner)
-        pre_state = _capture_lending_state(
-            intent, funded_wallet, anvil_eth_call_adapter, price_oracle, post=False
-        )
+        pre_state = _capture_lending_state(intent, funded_wallet, anvil_eth_call_adapter, price_oracle, post=False)
 
         # Execute via ExecutionOrchestrator (with simulation enabled for accurate gas estimation)
         print("\nExecuting via ExecutionOrchestrator...")
@@ -312,20 +366,43 @@ class TestAaveV3SupplyIntent:
         assert execution_result.success, f"Execution failed: {execution_result.error}"
         print(f"Execution successful! {len(execution_result.transaction_results)} transactions confirmed")
 
-        # Parse receipts
+        # Parse only the transaction that emitted Aave's Supply event. Safe
+        # bundles also contain approvals; those receipts are not SUPPLY proof.
+        from almanak.connectors.aave_v3.receipt_parser import EVENT_TOPICS
+
+        supply_tx_results = []
         for i, tx_result in enumerate(execution_result.transaction_results):
-            print(f"\nTransaction {i+1}:")
+            print(f"\nTransaction {i + 1}:")
             print(f"  Hash: {tx_result.tx_hash[:16]}...")
             print(f"  Gas used: {tx_result.gas_used}")
+            if tx_result.receipt is None:
+                continue
+            receipt = tx_result.receipt.to_dict()
+            if any(
+                log.get("topics") and str(log["topics"][0]).lower() == EVENT_TOPICS["Supply"]
+                for log in receipt.get("logs", [])
+            ):
+                supply_tx_results.append(tx_result)
 
-            if tx_result.receipt:
-                parser = AaveV3ReceiptParser()
-                parse_result = parser.parse_receipt(tx_result.receipt.to_dict())
-
-                if parse_result.success and parse_result.supplies:
-                    for supply_event in parse_result.supplies:
-                        print(f"  Supply amount:  {supply_event.amount}")
-                        print(f"  Reserve: {supply_event.reserve}")
+        assert len(supply_tx_results) == 1, (
+            f"Expected exactly one Aave V3 Supply-emitting receipt in the bundle, got {len(supply_tx_results)}"
+        )
+        supply_tx_result = supply_tx_results[0]
+        parser = AaveV3ReceiptParser(chain=CHAIN_NAME)
+        parse_result = intent_evidence.capture_parse(
+            intent=intent,
+            transaction_result=supply_tx_result,
+            parser=lambda receipt: parser.parse_receipt(receipt),
+        )
+        assert parse_result.success, f"Receipt parsing failed: {parse_result.error}"
+        usdc_supplies = [event for event in parse_result.supplies if event.reserve.lower() == usdc.lower()]
+        assert len(usdc_supplies) == 1, (
+            "Expected exactly one parsed USDC Supply event, "
+            f"got reserves {[event.reserve for event in parse_result.supplies]}"
+        )
+        supply_event = usdc_supplies[0]
+        print(f"  Supply amount:  {supply_event.amount}")
+        print(f"  Reserve: {supply_event.reserve}")
 
         # Verify balance changes
         usdc_after = get_token_balance(web3, usdc, funded_wallet)
@@ -337,24 +414,93 @@ class TestAaveV3SupplyIntent:
         # Verify USDC was spent
         expected_usdc_spent = int(supply_amount * Decimal(10**decimals))
         assert usdc_spent == expected_usdc_spent, (
-            f"USDC spent must EXACTLY equal supply amount. " f"Expected: {expected_usdc_spent}, Got: {usdc_spent}"
+            f"USDC spent must EXACTLY equal supply amount. Expected: {expected_usdc_spent}, Got: {usdc_spent}"
+        )
+        assert int(supply_event.amount) == expected_usdc_spent
+        assert supply_event.reserve.lower() == usdc.lower()
+        assert supply_event.user.lower() == funded_wallet.lower()
+        assert supply_event.on_behalf_of.lower() == funded_wallet.lower()
+
+        explorer_logs = decode_explorer_view(supply_tx_result.receipt.to_dict())["logs"]
+        wallet = funded_wallet.lower()
+        input_transfers = [
+            log
+            for log in explorer_logs
+            if log.get("name") == "Transfer"
+            and str(log.get("address", "")).lower() == usdc.lower()
+            and str((log.get("args") or {}).get("from", "")).lower() == wallet
+        ]
+        transfer_unambiguous = len(input_transfers) == 1
+        if transfer_unambiguous:
+            assert int(input_transfers[0]["args"]["value"]) == expected_usdc_spent
+
+        intent_evidence.record_fidelity(
+            hard=transfer_unambiguous,
+            flags={
+                "parse_success": True,
+                "single_usdc_supply_event": len(usdc_supplies) == 1,
+                "reserve_match": supply_event.reserve.lower() == usdc.lower(),
+                "user_match": supply_event.user.lower() == wallet,
+                "beneficiary_match": supply_event.on_behalf_of.lower() == wallet,
+                "amount_eq_wallet_delta": int(supply_event.amount) == usdc_spent,
+                "input_transfer_unambiguous": transfer_unambiguous,
+                "amount_eq_transfer": transfer_unambiguous
+                and int(input_transfers[0]["args"]["value"]) == int(supply_event.amount),
+            },
+            witnesses=[
+                {
+                    "kind": "wallet_balance_delta",
+                    "token": usdc,
+                    "amount_raw": usdc_spent,
+                },
+                {
+                    "kind": "independent_transfer_logs",
+                    "input_matches": input_transfers,
+                },
+            ],
+            notes=[]
+            if transfer_unambiguous
+            else ["USDC Transfer-log wallet-direction match was ambiguous; keep this receipt SOFT."],
+        )
+        intent_evidence.record_balance_deltas(
+            checks={"wallet_delta_eq_independent_transfer_log": transfer_unambiguous},
+            token={
+                "address": usdc,
+                "symbol": "USDC",
+                "before": usdc_before,
+                "after": usdc_after,
+                "delta": -usdc_spent,
+            },
         )
 
         # Verify account data changed
         account_data_after = get_user_account_data(web3, funded_wallet)
         print(f"Collateral after: {account_data_after['totalCollateralBase']}")
 
-        assert (
-            account_data_after["totalCollateralBase"] > account_data_before["totalCollateralBase"]
-        ), "Collateral must increase after supply"
+        assert account_data_after["totalCollateralBase"] > account_data_before["totalCollateralBase"], (
+            "Collateral must increase after supply"
+        )
+        intent_evidence.record_semantic_contract(
+            schema_version=1,
+            profile="lending.v1",
+            intent="SUPPLY",
+            account=funded_wallet,
+            asset_address=usdc,
+            asset_decimals=decimals,
+            resource_address=AAVE_V3_POOL_ADDRESSES[CHAIN_NAME],
+            requested_amount_raw=expected_usdc_spent,
+            wallet_before_raw=usdc_before,
+            wallet_after_raw=usdc_after,
+            position_before=account_data_before["totalCollateralBase"],
+            position_after=account_data_after["totalCollateralBase"],
+            parser_amount_raw=int(supply_event.amount),
+        )
 
         # ── Layer 5: real accounting pipeline ────────────────────────────────
         enriched = _enrich_for_accounting(
             execution_result, intent, funded_wallet, compilation_result.action_bundle.metadata
         )
-        post_state = _capture_lending_state(
-            intent, funded_wallet, anvil_eth_call_adapter, price_oracle, post=True
-        )
+        post_state = _capture_lending_state(intent, funded_wallet, anvil_eth_call_adapter, price_oracle, post=True)
 
         row = await assert_accounting_persisted(
             layer5_accounting_harness,
@@ -385,7 +531,8 @@ class TestAaveV3SupplyIntent:
 
         print("\nALL CHECKS PASSED")
 
-    @pytest.mark.intent(IntentType.SUPPLY, IntentType.WITHDRAW)
+    @pytest.mark.qa_proof(protocol="aave_v3", contract="lending.v1")
+    @pytest.mark.intent(IntentType.WITHDRAW)
     @pytest.mark.asyncio
     async def test_withdraw_usdc_using_intent(
         self,
@@ -396,6 +543,57 @@ class TestAaveV3SupplyIntent:
         price_oracle: dict[str, Decimal],
         layer5_accounting_harness,
         anvil_eth_call_adapter,
+        intent_evidence,
+    ):
+        """Run the exact withdraw receipt-fidelity scenario through Safe + Zodiac."""
+        await self._run_withdraw_usdc(
+            web3,
+            funded_wallet,
+            orchestrator,
+            execution_context,
+            price_oracle,
+            layer5_accounting_harness,
+            anvil_eth_call_adapter,
+            intent_evidence,
+        )
+
+    @pytest.mark.qa_proof(protocol="aave_v3", contract="lending.v1")
+    @pytest.mark.no_zodiac(reason="Exact-axis QA parity: exercise the same receipt contract through EOA")
+    @pytest.mark.intent(IntentType.WITHDRAW)
+    @pytest.mark.asyncio
+    async def test_withdraw_usdc_using_intent_eoa(
+        self,
+        web3: Web3,
+        funded_wallet: str,
+        orchestrator: ExecutionOrchestrator,
+        execution_context: ExecutionContext,
+        price_oracle: dict[str, Decimal],
+        layer5_accounting_harness,
+        anvil_eth_call_adapter,
+        intent_evidence,
+    ):
+        """Run the exact withdraw receipt-fidelity scenario through the EOA path."""
+        await self._run_withdraw_usdc(
+            web3,
+            funded_wallet,
+            orchestrator,
+            execution_context,
+            price_oracle,
+            layer5_accounting_harness,
+            anvil_eth_call_adapter,
+            intent_evidence,
+        )
+
+    async def _run_withdraw_usdc(
+        self,
+        web3: Web3,
+        funded_wallet: str,
+        orchestrator: ExecutionOrchestrator,
+        execution_context: ExecutionContext,
+        price_oracle: dict[str, Decimal],
+        layer5_accounting_harness,
+        anvil_eth_call_adapter,
+        intent_evidence,
     ):
         """Test USDC withdraw using WithdrawIntent (after supplying).
 
@@ -435,9 +633,9 @@ class TestAaveV3SupplyIntent:
         # Now withdraw 1000 USDC
         withdraw_amount = Decimal("1000")
 
-        print(f"\n{'='*80}")
+        print(f"\n{'=' * 80}")
         print(f"Test: Withdraw {withdraw_amount} USDC from Aave V3 using WithdrawIntent")
-        print(f"{'='*80}")
+        print(f"{'=' * 80}")
 
         usdc_before = get_token_balance(web3, usdc, funded_wallet)
         print(f"USDC before withdraw: {format_token_amount(usdc_before, decimals)}")
@@ -452,6 +650,7 @@ class TestAaveV3SupplyIntent:
             amount=withdraw_amount,
             chain=CHAIN_NAME,
         )
+        intent_evidence.bind(intent)
 
         print(f"\nCreated WithdrawIntent: protocol={intent.protocol}, token={intent.token}, amount={intent.amount}")
 
@@ -460,30 +659,42 @@ class TestAaveV3SupplyIntent:
         assert compilation_result.status.value == "SUCCESS"
         assert compilation_result.action_bundle is not None
 
-        pre_state = _capture_lending_state(
-            intent, funded_wallet, anvil_eth_call_adapter, price_oracle, post=False
-        )
+        pre_state = _capture_lending_state(intent, funded_wallet, anvil_eth_call_adapter, price_oracle, post=False)
 
         execution_result = await orchestrator.execute(compilation_result.action_bundle, execution_context)
         assert execution_result.success, f"Execution failed: {execution_result.error}"
 
         # Layer 3: parse receipts and assert decoded Withdraw amount > 0
-        parser = AaveV3ReceiptParser(chain=CHAIN_NAME)
-        decoded_withdraw_amount = Decimal("0")
-        for tx_result in execution_result.transaction_results:
-            if tx_result.receipt:
-                parse_result = parser.parse_receipt(tx_result.receipt.to_dict())
-                assert parse_result.success, (
-                    f"Receipt parser failed on tx {tx_result.tx_hash}: {parse_result.error}"
-                )
-                for w in parse_result.withdraws:
-                    if w.amount > decoded_withdraw_amount:
-                        decoded_withdraw_amount = w.amount
+        from almanak.connectors.aave_v3.receipt_parser import EVENT_TOPICS
 
-        assert decoded_withdraw_amount > 0, (
-            "Layer 3: AaveV3ReceiptParser must decode at least one Withdraw event "
-            "with amount > 0 from the withdraw transaction receipts"
+        withdraw_tx_results = []
+        for tx_result in execution_result.transaction_results:
+            if tx_result.receipt is None:
+                continue
+            receipt = tx_result.receipt.to_dict()
+            if any(
+                log.get("topics") and str(log["topics"][0]).lower() == EVENT_TOPICS["Withdraw"]
+                for log in receipt.get("logs", [])
+            ):
+                withdraw_tx_results.append(tx_result)
+
+        assert len(withdraw_tx_results) == 1, (
+            f"Expected exactly one Aave V3 Withdraw-emitting receipt in the bundle, got {len(withdraw_tx_results)}"
         )
+        withdraw_tx_result = withdraw_tx_results[0]
+        parser = AaveV3ReceiptParser(chain=CHAIN_NAME)
+        parse_result = intent_evidence.capture_parse(
+            intent=intent,
+            transaction_result=withdraw_tx_result,
+            parser=lambda receipt: parser.parse_receipt(receipt),
+        )
+        assert parse_result.success, f"Receipt parser failed: {parse_result.error}"
+        usdc_withdraws = [event for event in parse_result.withdraws if event.reserve.lower() == usdc.lower()]
+        assert len(usdc_withdraws) == 1, (
+            "Expected exactly one parsed USDC Withdraw event, "
+            f"got reserves {[event.reserve for event in parse_result.withdraws]}"
+        )
+        withdraw_event = usdc_withdraws[0]
 
         # Verify balance changes
         usdc_after = get_token_balance(web3, usdc, funded_wallet)
@@ -496,14 +707,78 @@ class TestAaveV3SupplyIntent:
             f"USDC received must EXACTLY equal withdraw amount. "
             f"Expected: {expected_usdc_received}, Got: {usdc_received}"
         )
+        assert int(withdraw_event.amount) == expected_usdc_received
+        assert withdraw_event.reserve.lower() == usdc.lower()
+        assert withdraw_event.user.lower() == funded_wallet.lower()
+        assert withdraw_event.to.lower() == funded_wallet.lower()
+
+        explorer_logs = decode_explorer_view(withdraw_tx_result.receipt.to_dict())["logs"]
+        wallet = funded_wallet.lower()
+        output_transfers = [
+            log
+            for log in explorer_logs
+            if log.get("name") == "Transfer"
+            and str(log.get("address", "")).lower() == usdc.lower()
+            and str((log.get("args") or {}).get("to", "")).lower() == wallet
+        ]
+        transfer_unambiguous = len(output_transfers) == 1
+        if transfer_unambiguous:
+            assert int(output_transfers[0]["args"]["value"]) == expected_usdc_received
+
+        intent_evidence.record_fidelity(
+            hard=transfer_unambiguous,
+            flags={
+                "parse_success": True,
+                "single_usdc_withdraw_event": len(usdc_withdraws) == 1,
+                "reserve_match": withdraw_event.reserve.lower() == usdc.lower(),
+                "user_match": withdraw_event.user.lower() == wallet,
+                "recipient_match": withdraw_event.to.lower() == wallet,
+                "amount_eq_wallet_delta": int(withdraw_event.amount) == usdc_received,
+                "output_transfer_unambiguous": transfer_unambiguous,
+                "amount_eq_transfer": transfer_unambiguous
+                and int(output_transfers[0]["args"]["value"]) == int(withdraw_event.amount),
+            },
+            witnesses=[
+                {"kind": "wallet_balance_delta", "token": usdc, "amount_raw": usdc_received},
+                {"kind": "independent_transfer_logs", "output_matches": output_transfers},
+            ],
+            notes=[]
+            if transfer_unambiguous
+            else ["USDC Transfer-log wallet-direction match was ambiguous; keep this receipt SOFT."],
+        )
+        intent_evidence.record_balance_deltas(
+            checks={"wallet_delta_eq_independent_transfer_log": transfer_unambiguous},
+            token={
+                "address": usdc,
+                "symbol": "USDC",
+                "before": usdc_before,
+                "after": usdc_after,
+                "delta": usdc_received,
+            },
+        )
 
         # Verify account data changed
         account_data_after = get_user_account_data(web3, funded_wallet)
         print(f"Collateral after: {account_data_after['totalCollateralBase']}")
 
-        assert (
-            account_data_after["totalCollateralBase"] < account_data_before["totalCollateralBase"]
-        ), "Collateral must decrease after withdraw"
+        assert account_data_after["totalCollateralBase"] < account_data_before["totalCollateralBase"], (
+            "Collateral must decrease after withdraw"
+        )
+        intent_evidence.record_semantic_contract(
+            schema_version=1,
+            profile="lending.v1",
+            intent="WITHDRAW",
+            account=funded_wallet,
+            asset_address=usdc,
+            asset_decimals=decimals,
+            resource_address=AAVE_V3_POOL_ADDRESSES[CHAIN_NAME],
+            requested_amount_raw=expected_usdc_received,
+            wallet_before_raw=usdc_before,
+            wallet_after_raw=usdc_after,
+            position_before=account_data_before["totalCollateralBase"],
+            position_after=account_data_after["totalCollateralBase"],
+            parser_amount_raw=int(withdraw_event.amount),
+        )
 
         # ── Layer 5: real accounting pipeline ────────────────────────────────
         # The SUPPLY above was NOT persisted through the Layer-5 harness, so
@@ -514,9 +789,7 @@ class TestAaveV3SupplyIntent:
         enriched = _enrich_for_accounting(
             execution_result, intent, funded_wallet, compilation_result.action_bundle.metadata
         )
-        post_state = _capture_lending_state(
-            intent, funded_wallet, anvil_eth_call_adapter, price_oracle, post=True
-        )
+        post_state = _capture_lending_state(intent, funded_wallet, anvil_eth_call_adapter, price_oracle, post=True)
 
         row = await assert_accounting_persisted(
             layer5_accounting_harness,
@@ -539,8 +812,7 @@ class TestAaveV3SupplyIntent:
         assert payload["principal_delta_usd"] is not None, "WITHDRAW must measure a principal leg"
         assert Decimal(payload["principal_delta_usd"]) > 0
         assert payload["interest_delta_usd"] is None, (
-            "Unmatched WITHDRAW (no Layer-5 SUPPLY lot) must degrade interest to "
-            "None — never a fabricated 0"
+            "Unmatched WITHDRAW (no Layer-5 SUPPLY lot) must degrade interest to None — never a fabricated 0"
         )
         # Withdraw reduces collateral on-chain.
         assert Decimal(payload["collateral_value_after_usd"]) < Decimal(payload["collateral_value_before_usd"])
@@ -575,9 +847,9 @@ class TestAaveV3SupplyIntent:
         # Try to supply more than we have
         excessive_amount = balance_decimal * Decimal("100")
 
-        print(f"\n{'='*80}")
+        print(f"\n{'=' * 80}")
         print("Test: SupplyIntent with Insufficient Balance")
-        print(f"{'='*80}")
+        print(f"{'=' * 80}")
         print(f"Balance:   {balance_decimal} USDC")
         print(f"Trying:    {excessive_amount} USDC")
 
@@ -647,6 +919,7 @@ class TestAaveV3BorrowIntent:
       LendingAccountingEvent with the exact FIFO principal/interest split
     """
 
+    @pytest.mark.qa_proof(protocol="aave_v3", contract="lending.v1")
     @pytest.mark.intent(IntentType.BORROW)
     @pytest.mark.asyncio
     async def test_borrow_usdc_with_wsteth_collateral_using_intent(
@@ -658,6 +931,57 @@ class TestAaveV3BorrowIntent:
         price_oracle: dict[str, Decimal],
         layer5_accounting_harness,
         anvil_eth_call_adapter,
+        intent_evidence,
+    ):
+        """Run the exact borrow receipt-fidelity scenario through Safe + Zodiac."""
+        await self._run_borrow_usdc_with_wsteth_collateral(
+            web3,
+            funded_wallet,
+            orchestrator,
+            execution_context,
+            price_oracle,
+            layer5_accounting_harness,
+            anvil_eth_call_adapter,
+            intent_evidence,
+        )
+
+    @pytest.mark.qa_proof(protocol="aave_v3", contract="lending.v1")
+    @pytest.mark.no_zodiac(reason="Exact-axis QA parity: exercise the same receipt contract through EOA")
+    @pytest.mark.intent(IntentType.BORROW)
+    @pytest.mark.asyncio
+    async def test_borrow_usdc_with_wsteth_collateral_using_intent_eoa(
+        self,
+        web3: Web3,
+        funded_wallet: str,
+        orchestrator: ExecutionOrchestrator,
+        execution_context: ExecutionContext,
+        price_oracle: dict[str, Decimal],
+        layer5_accounting_harness,
+        anvil_eth_call_adapter,
+        intent_evidence,
+    ):
+        """Run the exact borrow receipt-fidelity scenario through the EOA path."""
+        await self._run_borrow_usdc_with_wsteth_collateral(
+            web3,
+            funded_wallet,
+            orchestrator,
+            execution_context,
+            price_oracle,
+            layer5_accounting_harness,
+            anvil_eth_call_adapter,
+            intent_evidence,
+        )
+
+    async def _run_borrow_usdc_with_wsteth_collateral(
+        self,
+        web3: Web3,
+        funded_wallet: str,
+        orchestrator: ExecutionOrchestrator,
+        execution_context: ExecutionContext,
+        price_oracle: dict[str, Decimal],
+        layer5_accounting_harness,
+        anvil_eth_call_adapter,
+        intent_evidence,
     ):
         """Test borrowing USDC against wstETH collateral via the two-intent form.
 
@@ -694,9 +1018,9 @@ class TestAaveV3BorrowIntent:
         collateral_amount = Decimal("1")
         borrow_amount = Decimal("500")
 
-        print(f"\n{'='*80}")
+        print(f"\n{'=' * 80}")
         print(f"Test: Borrow {borrow_amount} USDC with {collateral_amount} wstETH collateral (two-intent form)")
-        print(f"{'='*80}")
+        print(f"{'=' * 80}")
 
         # Record balances BEFORE
         wsteth_before = get_token_balance(web3, wsteth, funded_wallet)
@@ -733,7 +1057,7 @@ class TestAaveV3BorrowIntent:
         supply_event_seen = False
         for tx_result in supply_exec.transaction_results:
             if tx_result.receipt:
-                parse_result = AaveV3ReceiptParser().parse_receipt(tx_result.receipt.to_dict())
+                parse_result = AaveV3ReceiptParser(chain=CHAIN_NAME).parse_receipt(tx_result.receipt.to_dict())
                 if parse_result.success and parse_result.supplies:
                     collateral_supply = next(
                         (s for s in parse_result.supplies if s.reserve.lower() == wsteth.lower()),
@@ -757,6 +1081,7 @@ class TestAaveV3BorrowIntent:
             interest_rate_mode="variable",
             chain=CHAIN_NAME,
         )
+        intent_evidence.bind(intent)
 
         print("\nCreated standalone BorrowIntent:")
         print(f"  Borrow: {intent.borrow_amount} {intent.borrow_token}")
@@ -770,9 +1095,7 @@ class TestAaveV3BorrowIntent:
 
         print(f"ActionBundle created with {len(compilation_result.action_bundle.transactions)} transactions")
 
-        pre_state = _capture_lending_state(
-            intent, funded_wallet, anvil_eth_call_adapter, price_oracle, post=False
-        )
+        pre_state = _capture_lending_state(intent, funded_wallet, anvil_eth_call_adapter, price_oracle, post=False)
 
         # Execute via ExecutionOrchestrator
         print("\nExecuting via ExecutionOrchestrator...")
@@ -784,37 +1107,47 @@ class TestAaveV3BorrowIntent:
         # Parse receipts (Layer 3) — the standalone borrow must emit a Borrow
         # event on the USDC reserve and NO Supply event (collateral moved in
         # step 1; a Supply here would mean the bundled shape leaked back).
-        borrow_event_seen = False
+        from almanak.connectors.aave_v3.receipt_parser import EVENT_TOPICS
+
+        borrow_tx_results = []
         for i, tx_result in enumerate(execution_result.transaction_results):
-            print(f"\nTransaction {i+1}:")
+            print(f"\nTransaction {i + 1}:")
             print(f"  Hash: {tx_result.tx_hash[:16]}...")
             print(f"  Gas used: {tx_result.gas_used}")
 
-            if tx_result.receipt:
-                parser = AaveV3ReceiptParser()
-                parse_result = parser.parse_receipt(tx_result.receipt.to_dict())
+            if tx_result.receipt is None:
+                continue
+            receipt = tx_result.receipt.to_dict()
+            if any(
+                log.get("topics") and str(log["topics"][0]).lower() == EVENT_TOPICS["Borrow"]
+                for log in receipt.get("logs", [])
+            ):
+                borrow_tx_results.append(tx_result)
 
-                if parse_result.success:
-                    assert not parse_result.supplies, (
-                        f"Standalone borrow must not emit Supply events. Got reserves: "
-                        f"{[s.reserve for s in parse_result.supplies]}"
-                    )
-                    if parse_result.borrows:
-                        usdc_borrow = next(
-                            (b for b in parse_result.borrows if b.reserve.lower() == usdc.lower()),
-                            None,
-                        )
-                        assert usdc_borrow is not None, (
-                            f"Expected a Borrow event for USDC. Got reserves: "
-                            f"{[b.reserve for b in parse_result.borrows]}"
-                        )
-                        assert usdc_borrow.amount > 0, "USDC borrow amount must be > 0"
-                        borrow_event_seen = True
-                        for borrow_event in parse_result.borrows:
-                            print(f"  Borrow amount: {borrow_event.amount}")
-                            print(f"  Interest rate mode: {borrow_event.interest_rate_mode}")
-
-        assert borrow_event_seen, "Expected at least one Borrow event for the USDC borrow leg"
+        assert len(borrow_tx_results) == 1, (
+            f"Expected exactly one Aave V3 Borrow-emitting receipt in the bundle, got {len(borrow_tx_results)}"
+        )
+        borrow_tx_result = borrow_tx_results[0]
+        parser = AaveV3ReceiptParser(chain=CHAIN_NAME)
+        parse_result = intent_evidence.capture_parse(
+            intent=intent,
+            transaction_result=borrow_tx_result,
+            parser=lambda receipt: parser.parse_receipt(receipt),
+        )
+        assert parse_result.success, f"Receipt parser failed: {parse_result.error}"
+        assert not parse_result.supplies, (
+            "Standalone borrow must not emit Supply events. "
+            f"Got reserves: {[event.reserve for event in parse_result.supplies]}"
+        )
+        usdc_borrows = [event for event in parse_result.borrows if event.reserve.lower() == usdc.lower()]
+        assert len(usdc_borrows) == 1, (
+            "Expected exactly one parsed USDC Borrow event, "
+            f"got reserves {[event.reserve for event in parse_result.borrows]}"
+        )
+        borrow_event = usdc_borrows[0]
+        assert borrow_event.amount > 0, "USDC borrow amount must be > 0"
+        print(f"  Borrow amount: {borrow_event.amount}")
+        print(f"  Interest rate mode: {borrow_event.interest_rate_mode}")
 
         # Verify balance changes
         wsteth_after = get_token_balance(web3, wsteth, funded_wallet)
@@ -830,8 +1163,7 @@ class TestAaveV3BorrowIntent:
         # Verify wstETH was spent as collateral
         expected_wsteth_spent = int(collateral_amount * Decimal(10**wsteth_decimals))
         assert wsteth_spent == expected_wsteth_spent, (
-            f"wstETH spent must EXACTLY equal collateral amount. "
-            f"Expected: {expected_wsteth_spent}, Got: {wsteth_spent}"
+            f"wstETH spent must EXACTLY equal collateral amount. Expected: {expected_wsteth_spent}, Got: {wsteth_spent}"
         )
 
         # Verify USDC was received (allow small tolerance for Aave origination fees/rounding)
@@ -839,12 +1171,69 @@ class TestAaveV3BorrowIntent:
         # Allow up to 1% tolerance for protocol fees and rounding
         min_expected = int(expected_usdc_received * Decimal("0.99"))
         assert usdc_received >= min_expected, (
-            f"USDC received must be at least 99% of borrow amount. "
-            f"Expected min: {min_expected}, Got: {usdc_received}"
+            f"USDC received must be at least 99% of borrow amount. Expected min: {min_expected}, Got: {usdc_received}"
         )
         assert usdc_received <= expected_usdc_received, (
             f"USDC received should not exceed borrow amount. "
             f"Expected max: {expected_usdc_received}, Got: {usdc_received}"
+        )
+        assert int(borrow_event.amount) == expected_usdc_received
+        assert borrow_event.reserve.lower() == usdc.lower()
+        assert borrow_event.user.lower() == funded_wallet.lower()
+        assert borrow_event.on_behalf_of.lower() == funded_wallet.lower()
+        assert borrow_event.interest_rate_mode == 2
+
+        explorer_logs = decode_explorer_view(borrow_tx_result.receipt.to_dict())["logs"]
+        wallet = funded_wallet.lower()
+        output_transfers = [
+            log
+            for log in explorer_logs
+            if log.get("name") == "Transfer"
+            and str(log.get("address", "")).lower() == usdc.lower()
+            and str((log.get("args") or {}).get("to", "")).lower() == wallet
+        ]
+        transfer_unambiguous = len(output_transfers) == 1
+        if transfer_unambiguous:
+            assert int(output_transfers[0]["args"]["value"]) == expected_usdc_received
+
+        intent_evidence.record_fidelity(
+            hard=transfer_unambiguous,
+            flags={
+                "parse_success": True,
+                "single_usdc_borrow_event": len(usdc_borrows) == 1,
+                "reserve_match": borrow_event.reserve.lower() == usdc.lower(),
+                "user_match": borrow_event.user.lower() == wallet,
+                "beneficiary_match": borrow_event.on_behalf_of.lower() == wallet,
+                "variable_rate_match": borrow_event.interest_rate_mode == 2,
+                "amount_eq_wallet_delta": int(borrow_event.amount) == usdc_received,
+                "output_transfer_unambiguous": transfer_unambiguous,
+                "amount_eq_transfer": transfer_unambiguous
+                and int(output_transfers[0]["args"]["value"]) == int(borrow_event.amount),
+            },
+            witnesses=[
+                {"kind": "wallet_balance_delta", "token": usdc, "amount_raw": usdc_received},
+                {"kind": "independent_transfer_logs", "output_matches": output_transfers},
+            ],
+            notes=[]
+            if transfer_unambiguous
+            else ["USDC Transfer-log wallet-direction match was ambiguous; keep this receipt SOFT."],
+        )
+        intent_evidence.record_balance_deltas(
+            checks={"wallet_deltas_eq_independent_transfer_logs": transfer_unambiguous},
+            collateral={
+                "address": wsteth,
+                "symbol": "wstETH",
+                "before": wsteth_before,
+                "after": wsteth_after,
+                "delta": -wsteth_spent,
+            },
+            borrowed={
+                "address": usdc,
+                "symbol": "USDC",
+                "before": usdc_before,
+                "after": usdc_after,
+                "delta": usdc_received,
+            },
         )
 
         # Verify account data changed
@@ -854,14 +1243,27 @@ class TestAaveV3BorrowIntent:
 
         assert account_data_after["totalDebtBase"] > 0, "Debt must be created"
         assert account_data_after["healthFactor"] > 1e18, "Health factor must be > 1.0"
+        intent_evidence.record_semantic_contract(
+            schema_version=1,
+            profile="lending.v1",
+            intent="BORROW",
+            account=funded_wallet,
+            asset_address=usdc,
+            asset_decimals=usdc_decimals,
+            resource_address=AAVE_V3_POOL_ADDRESSES[CHAIN_NAME],
+            requested_amount_raw=expected_usdc_received,
+            wallet_before_raw=usdc_before,
+            wallet_after_raw=usdc_after,
+            position_before=account_data_before["totalDebtBase"],
+            position_after=account_data_after["totalDebtBase"],
+            parser_amount_raw=int(borrow_event.amount),
+        )
 
         # ── Layer 5: real accounting pipeline ────────────────────────────────
         enriched = _enrich_for_accounting(
             execution_result, intent, funded_wallet, compilation_result.action_bundle.metadata
         )
-        post_state = _capture_lending_state(
-            intent, funded_wallet, anvil_eth_call_adapter, price_oracle, post=True
-        )
+        post_state = _capture_lending_state(intent, funded_wallet, anvil_eth_call_adapter, price_oracle, post=True)
 
         row = await assert_accounting_persisted(
             layer5_accounting_harness,
@@ -891,7 +1293,8 @@ class TestAaveV3BorrowIntent:
 
         print("\nALL CHECKS PASSED")
 
-    @pytest.mark.intent(IntentType.BORROW, IntentType.REPAY)
+    @pytest.mark.qa_proof(protocol="aave_v3", contract="lending.v1")
+    @pytest.mark.intent(IntentType.REPAY)
     @pytest.mark.asyncio
     async def test_repay_usdc_using_intent(
         self,
@@ -902,6 +1305,57 @@ class TestAaveV3BorrowIntent:
         price_oracle: dict[str, Decimal],
         layer5_accounting_harness,
         anvil_eth_call_adapter,
+        intent_evidence,
+    ):
+        """Run the exact repay receipt-fidelity scenario through Safe + Zodiac."""
+        await self._run_repay_usdc(
+            web3,
+            funded_wallet,
+            orchestrator,
+            execution_context,
+            price_oracle,
+            layer5_accounting_harness,
+            anvil_eth_call_adapter,
+            intent_evidence,
+        )
+
+    @pytest.mark.qa_proof(protocol="aave_v3", contract="lending.v1")
+    @pytest.mark.no_zodiac(reason="Exact-axis QA parity: exercise the same receipt contract through EOA")
+    @pytest.mark.intent(IntentType.REPAY)
+    @pytest.mark.asyncio
+    async def test_repay_usdc_using_intent_eoa(
+        self,
+        web3: Web3,
+        funded_wallet: str,
+        orchestrator: ExecutionOrchestrator,
+        execution_context: ExecutionContext,
+        price_oracle: dict[str, Decimal],
+        layer5_accounting_harness,
+        anvil_eth_call_adapter,
+        intent_evidence,
+    ):
+        """Run the exact repay receipt-fidelity scenario through the EOA path."""
+        await self._run_repay_usdc(
+            web3,
+            funded_wallet,
+            orchestrator,
+            execution_context,
+            price_oracle,
+            layer5_accounting_harness,
+            anvil_eth_call_adapter,
+            intent_evidence,
+        )
+
+    async def _run_repay_usdc(
+        self,
+        web3: Web3,
+        funded_wallet: str,
+        orchestrator: ExecutionOrchestrator,
+        execution_context: ExecutionContext,
+        price_oracle: dict[str, Decimal],
+        layer5_accounting_harness,
+        anvil_eth_call_adapter,
+        intent_evidence,
     ):
         """Test repaying USDC debt using RepayIntent.
 
@@ -988,9 +1442,9 @@ class TestAaveV3BorrowIntent:
         # Now repay partial debt
         repay_amount = Decimal("200")
 
-        print(f"\n{'='*80}")
+        print(f"\n{'=' * 80}")
         print(f"Test: Repay {repay_amount} USDC debt using RepayIntent")
-        print(f"{'='*80}")
+        print(f"{'=' * 80}")
 
         usdc_before = get_token_balance(web3, usdc, funded_wallet)
         print(f"USDC before repay: {format_token_amount(usdc_before, usdc_decimals)}")
@@ -1006,6 +1460,7 @@ class TestAaveV3BorrowIntent:
             amount=repay_amount,
             chain=CHAIN_NAME,
         )
+        intent_evidence.bind(intent)
 
         print(f"\nCreated RepayIntent: token={intent.token}, amount={intent.amount}")
 
@@ -1014,30 +1469,46 @@ class TestAaveV3BorrowIntent:
         assert compilation_result.status.value == "SUCCESS"
         assert compilation_result.action_bundle is not None
 
-        pre_state = _capture_lending_state(
-            intent, funded_wallet, anvil_eth_call_adapter, price_oracle, post=False
-        )
+        pre_state = _capture_lending_state(intent, funded_wallet, anvil_eth_call_adapter, price_oracle, post=False)
 
         execution_result = await orchestrator.execute(compilation_result.action_bundle, execution_context)
         assert execution_result.success, f"Execution failed: {execution_result.error}"
 
-        # Layer 3: parse receipts and assert decoded Repay amount > 0
-        parser = AaveV3ReceiptParser(chain=CHAIN_NAME)
-        decoded_repay_amount = Decimal("0")
-        for tx_result in execution_result.transaction_results:
-            if tx_result.receipt:
-                parse_result = parser.parse_receipt(tx_result.receipt.to_dict())
-                assert parse_result.success, (
-                    f"Receipt parser failed on tx {tx_result.tx_hash}: {parse_result.error}"
-                )
-                for r in parse_result.repays:
-                    if r.amount > decoded_repay_amount:
-                        decoded_repay_amount = r.amount
+        # Layer 3: bind evidence to the one transaction that actually emitted
+        # Repay. The bundle also contains an ERC-20 approval, while the test
+        # setup contains Supply and Borrow transactions; none of those may be
+        # attributed to the REPAY cell.
+        from almanak.connectors.aave_v3.receipt_parser import EVENT_TOPICS
 
-        assert decoded_repay_amount > 0, (
-            "Layer 3: AaveV3ReceiptParser must decode at least one Repay event "
-            "with amount > 0 from the repay transaction receipts"
+        repay_tx_results = []
+        for tx_result in execution_result.transaction_results:
+            if tx_result.receipt is None:
+                continue
+            receipt = tx_result.receipt.to_dict()
+            if any(
+                log.get("topics") and str(log["topics"][0]).lower() == EVENT_TOPICS["Repay"]
+                for log in receipt.get("logs", [])
+            ):
+                repay_tx_results.append(tx_result)
+
+        assert len(repay_tx_results) == 1, (
+            f"Expected exactly one Aave V3 Repay-emitting receipt in the bundle, got {len(repay_tx_results)}"
         )
+        repay_tx_result = repay_tx_results[0]
+        parser = AaveV3ReceiptParser(chain=CHAIN_NAME)
+        parse_result = intent_evidence.capture_parse(
+            intent=intent,
+            transaction_result=repay_tx_result,
+            parser=lambda receipt: parser.parse_receipt(receipt),
+        )
+        assert parse_result.success, f"Receipt parser failed: {parse_result.error}"
+        usdc_repays = [event for event in parse_result.repays if event.reserve.lower() == usdc.lower()]
+        assert len(usdc_repays) == 1, (
+            "Expected exactly one parsed USDC Repay event, "
+            f"got reserves {[event.reserve for event in parse_result.repays]}"
+        )
+        repay_event = usdc_repays[0]
+        assert repay_event.amount > 0, "Parsed USDC repay amount must be > 0"
 
         # Verify balance changes
         usdc_after = get_token_balance(web3, usdc, funded_wallet)
@@ -1047,7 +1518,58 @@ class TestAaveV3BorrowIntent:
 
         expected_usdc_spent = int(repay_amount * Decimal(10**usdc_decimals))
         assert usdc_spent == expected_usdc_spent, (
-            f"USDC spent must EXACTLY equal repay amount. " f"Expected: {expected_usdc_spent}, Got: {usdc_spent}"
+            f"USDC spent must EXACTLY equal repay amount. Expected: {expected_usdc_spent}, Got: {usdc_spent}"
+        )
+        wallet = funded_wallet.lower()
+        assert int(repay_event.amount) == expected_usdc_spent
+        assert repay_event.reserve.lower() == usdc.lower()
+        assert repay_event.user.lower() == wallet
+        assert repay_event.repayer.lower() == wallet
+        assert repay_event.use_atokens is False
+
+        explorer_logs = decode_explorer_view(repay_tx_result.receipt.to_dict())["logs"]
+        input_transfers = [
+            log
+            for log in explorer_logs
+            if log.get("name") == "Transfer"
+            and str(log.get("address", "")).lower() == usdc.lower()
+            and str((log.get("args") or {}).get("from", "")).lower() == wallet
+        ]
+        transfer_unambiguous = len(input_transfers) == 1
+        if transfer_unambiguous:
+            assert int(input_transfers[0]["args"]["value"]) == expected_usdc_spent
+
+        intent_evidence.record_fidelity(
+            hard=transfer_unambiguous,
+            flags={
+                "parse_success": True,
+                "single_usdc_repay_event": len(usdc_repays) == 1,
+                "reserve_match": repay_event.reserve.lower() == usdc.lower(),
+                "debtor_match": repay_event.user.lower() == wallet,
+                "repayer_match": repay_event.repayer.lower() == wallet,
+                "cash_repay_match": repay_event.use_atokens is False,
+                "amount_eq_wallet_delta": int(repay_event.amount) == usdc_spent,
+                "input_transfer_unambiguous": transfer_unambiguous,
+                "amount_eq_transfer": transfer_unambiguous
+                and int(input_transfers[0]["args"]["value"]) == int(repay_event.amount),
+            },
+            witnesses=[
+                {"kind": "wallet_balance_delta", "token": usdc, "amount_raw": -usdc_spent},
+                {"kind": "independent_transfer_logs", "input_matches": input_transfers},
+            ],
+            notes=[]
+            if transfer_unambiguous
+            else ["USDC Transfer-log wallet-direction match was ambiguous; keep this receipt SOFT."],
+        )
+        intent_evidence.record_balance_deltas(
+            checks={"wallet_delta_eq_independent_transfer_log": transfer_unambiguous},
+            repaid={
+                "address": usdc,
+                "symbol": "USDC",
+                "before": usdc_before,
+                "after": usdc_after,
+                "delta": -usdc_spent,
+            },
         )
 
         # Verify account data changed
@@ -1056,17 +1578,28 @@ class TestAaveV3BorrowIntent:
         print(f"Health factor after: {account_data_after['healthFactor']}")
 
         assert account_data_after["totalDebtBase"] < account_data_before["totalDebtBase"], "Debt must decrease"
-        assert (
-            account_data_after["healthFactor"] > account_data_before["healthFactor"]
-        ), "Health factor must improve"
+        assert account_data_after["healthFactor"] > account_data_before["healthFactor"], "Health factor must improve"
+        intent_evidence.record_semantic_contract(
+            schema_version=1,
+            profile="lending.v1",
+            intent="REPAY",
+            account=funded_wallet,
+            asset_address=usdc,
+            asset_decimals=usdc_decimals,
+            resource_address=AAVE_V3_POOL_ADDRESSES[CHAIN_NAME],
+            requested_amount_raw=expected_usdc_spent,
+            wallet_before_raw=usdc_before,
+            wallet_after_raw=usdc_after,
+            position_before=account_data_before["totalDebtBase"],
+            position_after=account_data_after["totalDebtBase"],
+            parser_amount_raw=int(repay_event.amount),
+        )
 
         # ── Layer 5: borrow-then-repay FIFO split ────────────────────────────
         enriched = _enrich_for_accounting(
             execution_result, intent, funded_wallet, compilation_result.action_bundle.metadata
         )
-        post_state = _capture_lending_state(
-            intent, funded_wallet, anvil_eth_call_adapter, price_oracle, post=True
-        )
+        post_state = _capture_lending_state(intent, funded_wallet, anvil_eth_call_adapter, price_oracle, post=True)
 
         row = await assert_accounting_persisted(
             layer5_accounting_harness,
@@ -1094,8 +1627,7 @@ class TestAaveV3BorrowIntent:
         # principal + interest must reconcile to the repaid cash flow.
         assert payload["principal_delta_usd"] is not None, "matched REPAY must measure principal"
         assert payload["interest_delta_usd"] is not None, (
-            "matched REPAY (BORROW lot present in harness) must produce a "
-            "measured interest leg — not None"
+            "matched REPAY (BORROW lot present in harness) must produce a measured interest leg — not None"
         )
         principal_usd = Decimal(payload["principal_delta_usd"])
         interest_usd = Decimal(payload["interest_delta_usd"])
@@ -1104,8 +1636,7 @@ class TestAaveV3BorrowIntent:
         # Anvil): repay_amount / borrow_amount of borrowed_principal_usd.
         repaid_usd = repay_amount * (borrowed_principal_usd / borrow_amount)
         assert principal_usd == repaid_usd, (
-            f"FIFO principal_delta_usd must equal the matched principal "
-            f"({repaid_usd}); got {principal_usd}"
+            f"FIFO principal_delta_usd must equal the matched principal ({repaid_usd}); got {principal_usd}"
         )
         assert interest_usd == Decimal("0"), (
             f"same-block partial repay accrues no interest — interest_delta_usd "
@@ -1183,9 +1714,9 @@ class TestAaveV3BorrowIntent:
         assert borrow_exec.success, f"Borrow setup failed: {borrow_exec.error}"
 
         repay_amount = Decimal("200")
-        print(f"\n{'='*80}")
+        print(f"\n{'=' * 80}")
         print(f"Test: Standalone Repay {repay_amount} USDC — degradation contract")
-        print(f"{'='*80}")
+        print(f"{'=' * 80}")
 
         intent = RepayIntent(
             protocol="aave_v3",
@@ -1198,9 +1729,7 @@ class TestAaveV3BorrowIntent:
         assert compilation_result.status.value == "SUCCESS"
         assert compilation_result.action_bundle is not None
 
-        pre_state = _capture_lending_state(
-            intent, funded_wallet, anvil_eth_call_adapter, price_oracle, post=False
-        )
+        pre_state = _capture_lending_state(intent, funded_wallet, anvil_eth_call_adapter, price_oracle, post=False)
 
         usdc_before = get_token_balance(web3, usdc, funded_wallet)
         execution_result = await orchestrator.execute(compilation_result.action_bundle, execution_context)
@@ -1212,9 +1741,7 @@ class TestAaveV3BorrowIntent:
         for tx_result in execution_result.transaction_results:
             if tx_result.receipt:
                 parse_result = parser.parse_receipt(tx_result.receipt.to_dict())
-                assert parse_result.success, (
-                    f"Receipt parser failed on tx {tx_result.tx_hash}: {parse_result.error}"
-                )
+                assert parse_result.success, f"Receipt parser failed on tx {tx_result.tx_hash}: {parse_result.error}"
                 for r in parse_result.repays:
                     if r.amount > decoded_repay_amount:
                         decoded_repay_amount = r.amount
@@ -1232,9 +1759,7 @@ class TestAaveV3BorrowIntent:
         enriched = _enrich_for_accounting(
             execution_result, intent, funded_wallet, compilation_result.action_bundle.metadata
         )
-        post_state = _capture_lending_state(
-            intent, funded_wallet, anvil_eth_call_adapter, price_oracle, post=True
-        )
+        post_state = _capture_lending_state(intent, funded_wallet, anvil_eth_call_adapter, price_oracle, post=True)
 
         row = await assert_accounting_persisted(
             layer5_accounting_harness,
@@ -1264,12 +1789,10 @@ class TestAaveV3BorrowIntent:
             "unmatched REPAY must report a measured principal (Decimal('0'), not None)"
         )
         assert Decimal(payload["principal_delta_usd"]) == 0, (
-            "unmatched REPAY attributes zero principal (FIFO pool empty) — a "
-            "measured 0, not the full repaid cash flow"
+            "unmatched REPAY attributes zero principal (FIFO pool empty) — a measured 0, not the full repaid cash flow"
         )
         assert payload["interest_delta_usd"] is None, (
-            "standalone repay with no Layer-5 BORROW lot must degrade "
-            "interest_delta_usd to None — never a fabricated 0"
+            "standalone repay with no Layer-5 BORROW lot must degrade interest_delta_usd to None — never a fabricated 0"
         )
 
         print("\nALL CHECKS PASSED")
@@ -1293,9 +1816,9 @@ class TestAaveV3BorrowIntent:
         tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
         usdc = tokens["USDC"]
 
-        print(f"\n{'='*80}")
+        print(f"\n{'=' * 80}")
         print("Test: BorrowIntent without Collateral (should fail)")
-        print(f"{'='*80}")
+        print(f"{'=' * 80}")
 
         usdc_before = get_token_balance(web3, usdc, funded_wallet)
 
