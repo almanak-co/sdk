@@ -60,6 +60,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Awaitable, Callable
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import click
@@ -87,6 +88,28 @@ GATEWAY_SHUTDOWN_TIMEOUT_SECONDS = 10.0
 # case "MCP tool crashed mid-test and never told us to stop" → leaked Anvil
 # subprocess chewing memory until the Cloud Run instance is recycled.
 IDLE_TIMEOUT_SECONDS = 1800  # 30 min
+
+# === Persistent data-plane gateway (sidecar-shared, ALM pool-history gap) ===
+#
+# Alongside the per-test ephemeral gateway above, the controller hosts ONE
+# long-lived mainnet gateway on a fixed loopback port so the (credential-less)
+# worker container's `almanak ax` / SDK calls reach real data lanes
+# (PoolHistory, pool analytics, RPC reads) instead of auto-starting a keyless
+# in-process gateway whose provider failures masquerade as platform
+# capability gaps. 50051 is `ax`'s default probe port — existing clients
+# connect with zero configuration.
+#
+# Enablement is keyed on ALMANAK_GATEWAY_AUTH_TOKEN being present in the
+# controller's env (the deploy injects the same static token into the worker,
+# whose typed config sends it automatically). No token → data gateway
+# disabled, controller behaves exactly as before — local dev unaffected.
+#
+# The data gateway is structurally unable to sign: its env strips every
+# private-key variable, and it runs standalone (utility DB, no workspace).
+DATA_GATEWAY_PORT = int(os.environ.get("ALMANAK_DATA_GATEWAY_PORT", "50051"))
+DATA_GATEWAY_STARTUP_TIMEOUT_SECONDS = 90.0
+DATA_GATEWAY_RESTART_BACKOFF_INITIAL_SECONDS = 2.0
+DATA_GATEWAY_RESTART_BACKOFF_MAX_SECONDS = 60.0
 
 # Default test wallet (Anvil account #0). Public test key — fine to embed
 # rather than env so the controller works with zero extra config in dev.
@@ -127,6 +150,9 @@ class StatusResponse(BaseModel):
     workspace_path: str | None = None
     started_at_unix: float | None = None
     age_seconds: float | None = None
+    # Persistent data-plane gateway (None = disabled, no token configured).
+    data_gateway_running: bool | None = None
+    data_gateway_port: int | None = None
 
 
 # === Startup-failure cause surfacing (ALM-3274 / ALM-3264 / ALM-3266) ===
@@ -270,6 +296,13 @@ class _Gateway:
 _current: _Gateway | None = None
 _lifecycle_lock = asyncio.Lock()
 
+# Persistent data-plane gateway state — owned by the supervisor task, which
+# is the only writer. Independent of the test-gateway slot above: both run
+# concurrently during a test ladder (fixed port vs ephemeral port).
+_data_gateway_proc: asyncio.subprocess.Process | None = None
+_data_gateway_ready: bool = False
+_data_gateway_task: asyncio.Task | None = None
+
 
 # === Utilities ===
 
@@ -300,10 +333,93 @@ def _build_gateway_env(workspace: Path, port: int, startup_error_file: str | Non
         # sidecar boot.
         "ALMANAK_GATEWAY_ALLOW_INSECURE": "true",
     }
+    # The data-gateway deploy puts a static ALMANAK_GATEWAY_AUTH_TOKEN in the
+    # controller's env. The per-test gateway must keep today's exact
+    # insecure-loopback semantics — drop the token so auth never half-enables
+    # on the test path (allow_insecure + auth_token together is ambiguous).
+    env.pop("ALMANAK_GATEWAY_AUTH_TOKEN", None)
     if startup_error_file is not None:
         # Typed as GatewaySettings.startup_error_file in the child — the
         # one-shot handoff path for a redacted startup-failure summary.
         env["ALMANAK_GATEWAY_STARTUP_ERROR_FILE"] = startup_error_file
+    return env
+
+
+def _data_gateway_auth_token() -> str | None:
+    """Static token gating (and authenticating) the data-plane gateway."""
+    token = os.environ.get("ALMANAK_GATEWAY_AUTH_TOKEN", "").strip()
+    return token or None
+
+
+# Any env var whose NAME matches this is potential signing material (EVM,
+# Solana, mnemonics — bare, prefixed, or from any future integration) and is
+# stripped from the data gateway wholesale. Name-pattern, not an exact list,
+# so a new `FOO_PRIVATE_KEY` in the sidecar env never reaches the child.
+_SIGNER_ENV_NAME_PATTERN = re.compile(r"PRIVATE_KEY|MNEMONIC|SEED_PHRASE", re.IGNORECASE)
+
+# Exact-name signer/wallet plumbing: Safe/Zodiac config, wallet registry,
+# and the remote signer service can enable signing WITHOUT a raw key in env,
+# so they are stripped too (both the ALMANAK_GATEWAY_-prefixed forms and the
+# unprefixed fallbacks that ``_apply_gateway_env_fallbacks`` would promote).
+_SIGNER_ENV_EXACT = frozenset(
+    {
+        "ALMANAK_SAFE_ADDRESS",
+        "ALMANAK_EOA_ADDRESS",
+        "ALMANAK_ZODIAC_ADDRESS",
+        "ALMANAK_SIGNER_SERVICE_URL",
+        "ALMANAK_SIGNER_SERVICE_JWT",
+        "ALMANAK_GATEWAY_SAFE_ADDRESS",
+        "ALMANAK_GATEWAY_SAFE_MODE",
+        "ALMANAK_GATEWAY_EOA_ADDRESS",
+        "ALMANAK_GATEWAY_ZODIAC_ROLES_ADDRESS",
+        "ALMANAK_GATEWAY_SIGNER_SERVICE_URL",
+        "ALMANAK_GATEWAY_SIGNER_SERVICE_JWT",
+        "ALMANAK_GATEWAY_WALLETS",
+        "ALMANAK_GATEWAY_OPERATOR_TOKEN",
+        "ALMANAK_STRATEGY_FOLDER",
+        "ALMANAK_STATE_DB",
+        "ALMANAK_GATEWAY_ALLOW_INSECURE",
+        "ALMANAK_GATEWAY_STARTUP_ERROR_FILE",
+    }
+)
+
+
+def _build_data_gateway_env(port: int, auth_token: str) -> dict[str, str]:
+    """Subprocess env for the persistent data-plane managed_serve.
+
+    Mainnet, standalone (utility DB, no workspace binding), token-authed —
+    and structurally unable to sign (codex P1 on PR #3803):
+
+    * every var whose name looks like signing material is stripped by
+      pattern, and all known signer/wallet-plumbing vars by exact name;
+    * the canonical key vars are then PINNED TO EMPTY rather than left
+      absent — ``_load_dotenv_once`` uses ``override=False``, so a present
+      (even empty) env var can never be repopulated from a ``.env`` file;
+    * belt-and-braces, the supervisor also launches the child from a fresh
+      empty directory so the cwd ``.env`` ladder finds nothing at all.
+
+    A compromise of the worker can then at most read public market data
+    through this gateway, bounded by its per-provider rate buckets.
+    """
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in _SIGNER_ENV_EXACT and not _SIGNER_ENV_NAME_PATTERN.search(key)
+    }
+    env.update(
+        {
+            "ALMANAK_GATEWAY_NETWORK": "mainnet",
+            "ALMANAK_GATEWAY_GRPC_HOST": "127.0.0.1",
+            "ALMANAK_GATEWAY_GRPC_PORT": str(port),
+            "ALMANAK_GATEWAY_STANDALONE": "true",
+            "ALMANAK_GATEWAY_AUTH_TOKEN": auth_token,
+            # Empty-pin (not pop): dotenv override=False means these can
+            # never be refilled from a .env; falsy values read as "no key".
+            "ALMANAK_PRIVATE_KEY": "",
+            "ALMANAK_GATEWAY_PRIVATE_KEY": "",
+            "ALMANAK_GATEWAY_SOLANA_PRIVATE_KEY": "",
+        }
+    )
     return env
 
 
@@ -410,15 +526,144 @@ async def _spawn_gateway(workspace: Path, port: int) -> _Gateway:
         _unlink_quiet(err_path)
 
 
+# === Data-plane gateway supervisor ===
+
+
+async def _data_gateway_supervisor(auth_token: str) -> None:
+    """Own the persistent data gateway: spawn, watch, restart with backoff.
+
+    Sole writer of ``_data_gateway_proc`` / ``_data_gateway_ready``. On task
+    cancellation (controller shutdown) the child gets a SIGTERM — same signal
+    Cloud Run sends it anyway on instance teardown.
+    """
+    global _data_gateway_proc, _data_gateway_ready
+    backoff = DATA_GATEWAY_RESTART_BACKOFF_INITIAL_SECONDS
+    # Fresh empty working directory: the child's cwd `.env` ladder finds
+    # nothing, closing the dotenv route back to any stripped signer var.
+    spawn_cwd = tempfile.mkdtemp(prefix="data_gateway_cwd_")
+    try:
+        while True:
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    sys.executable,
+                    "-m",
+                    "almanak.gateway.managed_serve",
+                    env=_build_data_gateway_env(DATA_GATEWAY_PORT, auth_token),
+                    cwd=spawn_cwd,
+                    stdout=None,
+                    stderr=None,
+                )
+            except Exception:
+                logger.exception("data gateway spawn failed; retrying in %.0fs", backoff)
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, DATA_GATEWAY_RESTART_BACKOFF_MAX_SECONDS)
+                continue
+
+            _data_gateway_proc = proc
+            logger.info("data gateway subprocess: pid=%d port=%d", proc.pid, DATA_GATEWAY_PORT)
+
+            deadline = time.monotonic() + DATA_GATEWAY_STARTUP_TIMEOUT_SECONDS
+            if await _wait_for_port(proc, DATA_GATEWAY_PORT, deadline):
+                _data_gateway_ready = True
+                backoff = DATA_GATEWAY_RESTART_BACKOFF_INITIAL_SECONDS
+                logger.info("data gateway ready on 127.0.0.1:%d", DATA_GATEWAY_PORT)
+            elif proc.returncode is None:
+                # Alive but never bound the port within budget — hung; recycle.
+                logger.error(
+                    "data gateway not reachable within %.0fs; killing PID=%d",
+                    DATA_GATEWAY_STARTUP_TIMEOUT_SECONDS,
+                    proc.pid,
+                )
+                proc.kill()
+
+            try:
+                await proc.wait()
+            finally:
+                _data_gateway_ready = False
+            # Cleared only on the normal exit path: if wait() was cancelled,
+            # the CancelledError handler below still needs the handle to
+            # SIGTERM the child.
+            _data_gateway_proc = None
+            logger.warning("data gateway exited (code=%s); restarting in %.0fs", proc.returncode, backoff)
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, DATA_GATEWAY_RESTART_BACKOFF_MAX_SECONDS)
+    except asyncio.CancelledError:
+        live_proc = _data_gateway_proc
+        _data_gateway_ready = False
+        _data_gateway_proc = None
+        if live_proc is not None and live_proc.returncode is None:
+            # SIGTERM → bounded wait → SIGKILL (CodeRabbit on PR #3803):
+            # exiting while the child still owns :50051 would make the next
+            # controller start race a zombie for the port.
+            try:
+                live_proc.send_signal(signal.SIGTERM)
+                try:
+                    await asyncio.wait_for(live_proc.wait(), timeout=GATEWAY_SHUTDOWN_TIMEOUT_SECONDS)
+                except TimeoutError:
+                    logger.warning(
+                        "data gateway PID=%d did not exit on SIGTERM within %.0fs; sending SIGKILL",
+                        live_proc.pid,
+                        GATEWAY_SHUTDOWN_TIMEOUT_SECONDS,
+                    )
+                    live_proc.kill()
+                    await live_proc.wait()
+            except ProcessLookupError:
+                pass
+        raise
+
+
 # === FastAPI app ===
 
 
-app = FastAPI(title="Almanak Test Controller", version="1.0.0")
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    """Start/stop the data-gateway supervisor with the app.
+
+    Uvicorn drives this in production; the unit tests' non-context-manager
+    ``TestClient`` usage deliberately skips it (supervisor behaviour is
+    tested directly).
+    """
+    global _data_gateway_task
+    token = _data_gateway_auth_token()
+    if token is None:
+        logger.info("data gateway disabled: ALMANAK_GATEWAY_AUTH_TOKEN not set")
+    else:
+        _data_gateway_task = asyncio.create_task(_data_gateway_supervisor(token))
+    try:
+        yield
+    finally:
+        task = _data_gateway_task
+        _data_gateway_task = None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+
+app = FastAPI(title="Almanak Test Controller", version="1.0.0", lifespan=_lifespan)
 
 
 @app.get("/health")
 async def health() -> dict[str, bool]:
     return {"ok": True}
+
+
+@app.get("/ready")
+async def ready() -> dict[str, bool | str]:
+    """Startup-probe target: 200 once the controller is fully serviceable.
+
+    With the data gateway disabled (no auth token in env) this is equivalent
+    to ``/health``, so probes can point here unconditionally. With it enabled,
+    a 503 holds the (dependent) worker container back until the data gateway
+    accepts connections — the worker's SDK is entitled to assume it.
+    """
+    if _data_gateway_auth_token() is None:
+        return {"ok": True, "data_gateway": "disabled"}
+    if _data_gateway_ready:
+        return {"ok": True, "data_gateway": "ready"}
+    raise HTTPException(status_code=503, detail="data gateway not ready")
 
 
 def _reap_stale_current() -> _Gateway | None:
@@ -446,15 +691,24 @@ def _reap_stale_current() -> _Gateway | None:
 
 @app.get("/status", response_model=StatusResponse)
 async def get_status() -> StatusResponse:
+    data_enabled = _data_gateway_auth_token() is not None
+    data_gateway_running: bool | None = _data_gateway_ready if data_enabled else None
+    data_gateway_port: int | None = DATA_GATEWAY_PORT if data_enabled else None
     gw = _reap_stale_current()
     if gw is None:
-        return StatusResponse(running=False)
+        return StatusResponse(
+            running=False,
+            data_gateway_running=data_gateway_running,
+            data_gateway_port=data_gateway_port,
+        )
     return StatusResponse(
         running=True,
         port=gw.port,
         workspace_path=str(gw.workspace),
         started_at_unix=gw.started_at,
         age_seconds=time.time() - gw.started_at,
+        data_gateway_running=data_gateway_running,
+        data_gateway_port=data_gateway_port,
     )
 
 

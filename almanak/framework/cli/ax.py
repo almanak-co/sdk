@@ -456,6 +456,20 @@ def _start_managed_gateway(
     from almanak.config.env import gateway_config_from_env
     from almanak.gateway.managed import ManagedGateway, find_available_gateway_port, is_port_in_use
 
+    # Managed-environment guard (ALMANAK_GATEWAY_NO_SPAWN): every ax
+    # auto-start path funnels through this function, so this is the single
+    # choke point. In environments with a platform-provisioned gateway, a
+    # silent auto-start would produce a keyless in-process gateway whose
+    # data-lane failures masquerade as platform capability gaps — fail
+    # loudly instead so the absence is reported as an environment fault.
+    if load_config().gateway.no_spawn:
+        raise click.ClickException(
+            f"no gateway reachable at {host}:{port} and gateway auto-start is disabled "
+            "(ALMANAK_GATEWAY_NO_SPAWN). This environment expects a platform-managed "
+            "gateway on that address; its absence is an environment fault — report it "
+            "rather than treating data as unavailable."
+        )
+
     resolved_network = network or "mainnet"
     chain = ctx.obj["chain"]
 

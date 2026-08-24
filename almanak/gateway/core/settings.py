@@ -341,6 +341,18 @@ class GatewaySettings(_GatewaySettingsBase):  # type: ignore[valid-type,misc]
     # When False (default), gateway will fail to start without auth_token configured
     allow_insecure: bool = False
 
+    # Managed-environment guard: when True, CLI surfaces that would auto-start
+    # a gateway on connect failure (``almanak ax``'s ``_start_managed_gateway``)
+    # refuse and fail loudly instead. Set in environments where a
+    # platform-provisioned gateway is expected to be listening (e.g. the
+    # AlmanakCode worker container, whose sidecar hosts the credentialed data
+    # gateway on the default port): a silent auto-start there produces a
+    # keyless in-process gateway whose "provider unavailable" data-lane
+    # failures look like platform capability gaps rather than what they are —
+    # an environment fault. Unset (default) everywhere else; local dev and
+    # self-hosted operation keep today's auto-start behaviour.
+    no_spawn: bool = False
+
     # VIB-4493 Phase 1 — second-factor token for mutation RPCs on
     # DashboardService (PreviewReconcile / ApplyReconcile /
     # RefreshRegistryFromChain). When set, those handlers require the

@@ -53,8 +53,14 @@ def _reset_module_state():
     from almanak.test_controller import __main__ as ctrl
 
     ctrl._current = None
+    ctrl._data_gateway_proc = None
+    ctrl._data_gateway_ready = False
+    ctrl._data_gateway_task = None
     yield
     ctrl._current = None
+    ctrl._data_gateway_proc = None
+    ctrl._data_gateway_ready = False
+    ctrl._data_gateway_task = None
 
 
 @pytest.fixture
@@ -608,3 +614,203 @@ def _suppress_unrelated_import(caplog):
 
 
 _ = tempfile  # imported for future signature-compat
+
+
+# ─── persistent data-plane gateway ───────────────────────────────────────
+
+
+def test_ready_reports_disabled_without_token(client: TestClient, monkeypatch) -> None:
+    monkeypatch.delenv("ALMANAK_GATEWAY_AUTH_TOKEN", raising=False)
+    resp = client.get("/ready")
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True, "data_gateway": "disabled"}
+
+
+def test_ready_503_when_enabled_but_not_ready(client: TestClient, monkeypatch) -> None:
+    monkeypatch.setenv("ALMANAK_GATEWAY_AUTH_TOKEN", "tok")
+    resp = client.get("/ready")
+    assert resp.status_code == 503
+
+
+def test_ready_ok_when_enabled_and_ready(client: TestClient, monkeypatch) -> None:
+    from almanak.test_controller import __main__ as ctrl
+
+    monkeypatch.setenv("ALMANAK_GATEWAY_AUTH_TOKEN", "tok")
+    ctrl._data_gateway_ready = True
+    resp = client.get("/ready")
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True, "data_gateway": "ready"}
+
+
+def test_status_data_gateway_fields_disabled(client: TestClient, monkeypatch) -> None:
+    monkeypatch.delenv("ALMANAK_GATEWAY_AUTH_TOKEN", raising=False)
+    body = client.get("/status").json()
+    assert body["data_gateway_running"] is None
+    assert body["data_gateway_port"] is None
+
+
+def test_status_data_gateway_fields_enabled(client: TestClient, monkeypatch) -> None:
+    from almanak.test_controller import __main__ as ctrl
+
+    monkeypatch.setenv("ALMANAK_GATEWAY_AUTH_TOKEN", "tok")
+    ctrl._data_gateway_ready = True
+    body = client.get("/status").json()
+    assert body["data_gateway_running"] is True
+    assert body["data_gateway_port"] == ctrl.DATA_GATEWAY_PORT
+
+
+def test_test_gateway_env_drops_inherited_auth_token(workspace: Path, monkeypatch) -> None:
+    """The per-test gateway must keep exact insecure-loopback semantics even
+    when the deploy put a static token in the controller's env."""
+    from almanak.test_controller import __main__ as ctrl
+
+    monkeypatch.setenv("ALMANAK_GATEWAY_AUTH_TOKEN", "tok")
+    env = ctrl._build_gateway_env(workspace, 12345)
+    assert "ALMANAK_GATEWAY_AUTH_TOKEN" not in env
+    assert env["ALMANAK_GATEWAY_ALLOW_INSECURE"] == "true"
+
+
+def test_data_gateway_env_shape(monkeypatch) -> None:
+    """Mainnet, standalone, token-authed — and structurally unable to sign."""
+    from almanak.test_controller import __main__ as ctrl
+
+    monkeypatch.setenv("ALMANAK_STRATEGY_FOLDER", "/tmp/some-workspace")
+    monkeypatch.setenv("ALMANAK_GATEWAY_ALLOW_INSECURE", "true")
+    monkeypatch.setenv("ALMANAK_GATEWAY_STARTUP_ERROR_FILE", "/tmp/err.json")
+    # Signing material in every known shape — raw keys (bare / prefixed /
+    # Solana / future integrations), mnemonics, and keyless signer plumbing
+    # (Safe/Zodiac, wallet registry, remote signer) — must all be stripped
+    # (codex P1 on PR #3803).
+    monkeypatch.setenv("ALMANAK_PRIVATE_KEY", "0xdead")
+    monkeypatch.setenv("ALMANAK_GATEWAY_PRIVATE_KEY", "0xbeef")
+    monkeypatch.setenv("ALMANAK_GATEWAY_SOLANA_PRIVATE_KEY", "base58stuff")
+    monkeypatch.setenv("SOLANA_PRIVATE_KEY", "base58stuff")
+    monkeypatch.setenv("SOME_FUTURE_PRIVATE_KEY", "0xf00d")
+    monkeypatch.setenv("WALLET_MNEMONIC", "abandon abandon ...")
+    monkeypatch.setenv("ALMANAK_GATEWAY_SAFE_MODE", "zodiac")
+    monkeypatch.setenv("ALMANAK_GATEWAY_WALLETS", "{}")
+    monkeypatch.setenv("ALMANAK_GATEWAY_SIGNER_SERVICE_URL", "https://signer")
+    monkeypatch.setenv("ALMANAK_SIGNER_SERVICE_JWT", "jwt")
+    monkeypatch.setenv("COINGECKO_API_KEY", "cg-key")
+
+    env = ctrl._build_data_gateway_env(50051, "tok")
+
+    for stripped in (
+        "ALMANAK_STRATEGY_FOLDER",
+        "ALMANAK_GATEWAY_ALLOW_INSECURE",
+        "ALMANAK_GATEWAY_STARTUP_ERROR_FILE",
+        "SOLANA_PRIVATE_KEY",
+        "SOME_FUTURE_PRIVATE_KEY",
+        "WALLET_MNEMONIC",
+        "ALMANAK_GATEWAY_SAFE_MODE",
+        "ALMANAK_GATEWAY_WALLETS",
+        "ALMANAK_GATEWAY_SIGNER_SERVICE_URL",
+        "ALMANAK_SIGNER_SERVICE_JWT",
+    ):
+        assert stripped not in env
+    # The canonical key vars are pinned EMPTY, not popped: dotenv loads with
+    # override=False, so a present-but-empty var can't be refilled from .env.
+    assert env["ALMANAK_PRIVATE_KEY"] == ""
+    assert env["ALMANAK_GATEWAY_PRIVATE_KEY"] == ""
+    assert env["ALMANAK_GATEWAY_SOLANA_PRIVATE_KEY"] == ""
+    assert env["ALMANAK_GATEWAY_NETWORK"] == "mainnet"
+    assert env["ALMANAK_GATEWAY_GRPC_HOST"] == "127.0.0.1"
+    assert env["ALMANAK_GATEWAY_GRPC_PORT"] == "50051"
+    assert env["ALMANAK_GATEWAY_STANDALONE"] == "true"
+    assert env["ALMANAK_GATEWAY_AUTH_TOKEN"] == "tok"
+    # Provider keys must flow through — they are the point of the gateway.
+    assert env["COINGECKO_API_KEY"] == "cg-key"
+
+
+@pytest.mark.asyncio
+async def test_data_gateway_supervisor_sigterms_child_on_cancel(monkeypatch) -> None:
+    """Controller shutdown must not orphan the data-gateway subprocess."""
+    import signal as _signal
+
+    from almanak.test_controller import __main__ as ctrl
+
+    proc = MagicMock()
+    proc.pid = 777
+    proc.returncode = None
+    blocker = asyncio.Event()
+
+    async def _wait() -> None:
+        await blocker.wait()
+
+    proc.wait = _wait
+
+    def _on_sigterm(signum) -> None:
+        # Child exits promptly on SIGTERM: the shutdown handler's bounded
+        # wait must observe the exit and never need SIGKILL.
+        proc.returncode = -15
+        blocker.set()
+
+    proc.send_signal = MagicMock(side_effect=_on_sigterm)
+    proc.kill = MagicMock()
+
+    async def _fake_spawn(*args, **kwargs):
+        return proc
+
+    async def _fake_wait_for_port(p, port, deadline) -> bool:
+        return True
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_spawn)
+    monkeypatch.setattr(ctrl, "_wait_for_port", _fake_wait_for_port)
+
+    task = asyncio.create_task(ctrl._data_gateway_supervisor("tok"))
+    for _ in range(200):
+        if ctrl._data_gateway_ready:
+            break
+        await asyncio.sleep(0.01)
+    assert ctrl._data_gateway_ready is True
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    proc.send_signal.assert_called_once_with(_signal.SIGTERM)
+    proc.kill.assert_not_called()  # graceful exit observed within the bounded wait
+    assert ctrl._data_gateway_ready is False
+    assert ctrl._data_gateway_proc is None
+
+
+@pytest.mark.asyncio
+async def test_data_gateway_supervisor_restarts_after_exit(monkeypatch) -> None:
+    """A crashed data gateway is respawned (with backoff), not abandoned."""
+    from almanak.test_controller import __main__ as ctrl
+
+    monkeypatch.setattr(ctrl, "DATA_GATEWAY_RESTART_BACKOFF_INITIAL_SECONDS", 0.01)
+    spawned: list[MagicMock] = []
+
+    def _make_proc() -> MagicMock:
+        proc = MagicMock()
+        proc.pid = 800 + len(spawned)
+        proc.returncode = None
+
+        async def _wait() -> None:
+            proc.returncode = 1  # simulate crash after becoming ready
+
+        proc.wait = _wait
+        return proc
+
+    async def _fake_spawn(*args, **kwargs):
+        proc = _make_proc()
+        spawned.append(proc)
+        return proc
+
+    async def _fake_wait_for_port(p, port, deadline) -> bool:
+        return True
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_spawn)
+    monkeypatch.setattr(ctrl, "_wait_for_port", _fake_wait_for_port)
+
+    task = asyncio.create_task(ctrl._data_gateway_supervisor("tok"))
+    for _ in range(500):
+        if len(spawned) >= 2:
+            break
+        await asyncio.sleep(0.01)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert len(spawned) >= 2
