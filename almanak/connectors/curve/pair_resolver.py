@@ -206,6 +206,20 @@ def build_pair_candidates(
     ``ctx.services.require_token_price``). Never raises: transport failures
     yield ``indeterminate=True``.
     """
+    # Memoize prices (including ``None`` misses) for THIS sweep only: the same
+    # two symbols would otherwise be re-priced once per candidate, and a slow
+    # or failing price ladder multiplies to a timeout (14 gateway calls /
+    # ~112s observed on staging for one cbETH/WETH resolution). Intra-sweep
+    # scope keeps the module's no-staleness contract — nothing outlives one
+    # resolution.
+    price_memo: dict[str, Decimal | None] = {}
+    uncached_usd_price = usd_price
+
+    def _memoized_usd_price(symbol: str) -> Decimal | None:
+        if symbol not in price_memo:
+            price_memo[symbol] = uncached_usd_price(symbol)
+        return price_memo[symbol]
+
     ranked: list[PairCandidate] = []
     rejected: list[PairCandidate] = []
     try:
@@ -226,7 +240,7 @@ def build_pair_candidates(
                 coin_b=coin_b,
                 gateway_client=gateway_client,
                 rpc_url=rpc_url,
-                usd_price=usd_price,
+                usd_price=_memoized_usd_price,
                 liquidity_floor_usd=liquidity_floor_usd,
                 timeout=timeout,
             )

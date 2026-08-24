@@ -172,6 +172,21 @@ class TestBuildPairCandidates:
         assert dust.address.lower() == POOL_DUST.lower()
         assert "below" in dust.rejection and "floor" in dust.rejection
 
+    def test_prices_fetched_once_per_symbol_per_sweep(self) -> None:
+        # Regression (rc3 staging): the same two symbols were re-priced once
+        # per candidate; a degraded price ladder (~10s/call) multiplied to a
+        # tool timeout. Misses (None) must be memoised for the sweep too.
+        calls: list[str] = []
+
+        def counting_prices(symbol):
+            calls.append(symbol)
+            return _prices(symbol) if symbol != "CRVUSD" else None  # CRVUSD unpriceable
+
+        gw = FakePairGateway({POOL_MID: _MID, POOL_BIG: _BIG, POOL_DUST: _DUST})
+        build_pair_candidates("ethereum", "CRVUSD/WBTC", CRVUSD, WBTC, gateway_client=gw, usd_price=counting_prices)
+        assert sorted(set(calls)) == ["CRVUSD", "WBTC"]
+        assert len(calls) == 2, f"expected one price call per distinct symbol, got {calls}"
+
     def test_confirmed_non_pool_candidate_is_rejected_not_fatal(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def resolve_only_big(chain, pool_address, **_kwargs):
             return _metadata(pool_address) if pool_address.lower() == POOL_BIG.lower() else None
