@@ -74,8 +74,33 @@ logger = logging.getLogger(__name__)
 # Constants
 # =============================================================================
 
+
 # Function selectors for Aerodrome Router (Solidly fork)
 # Note: Aerodrome uses different signatures than UniswapV2 due to the `stable` parameter
+MAX_SLIPPAGE_BPS = 10_000
+
+
+def _floored_pair(quoted: tuple[int, int] | None, slippage_bps: int) -> tuple[int, int] | None:
+    """Return a strictly positive ``(min_a, min_b)``, or ``None`` if none exists.
+
+    The router returns ``(0, 0)`` from ``quoteRemoveLiquidity`` when the pool
+    is absent, and integer division turns a sufficiently small quote into a
+    zero floor. Either case would encode an unprotected minimum of zero.
+    Both the quote and both computed floors must be positive or the caller
+    fails closed. Out-of-range bps are refused, not clamped.
+    """
+    if quoted is None:
+        return None
+    quoted_a, quoted_b = quoted
+    if quoted_a <= 0 or quoted_b <= 0:
+        return None
+    amount_a_min = compute_min_amount_out_from_bps(quoted_a, slippage_bps)
+    amount_b_min = compute_min_amount_out_from_bps(quoted_b, slippage_bps)
+    if amount_a_min <= 0 or amount_b_min <= 0:
+        return None
+    return amount_a_min, amount_b_min
+
+
 # addLiquidity(address,address,bool,uint256,uint256,uint256,uint256,address,uint256)
 ADD_LIQUIDITY_SELECTOR = "0x5a47ddc3"
 # removeLiquidity(address,address,bool,uint256,uint256,uint256,address,uint256)
@@ -673,18 +698,32 @@ class AerodromeAdapter:
             amount_a_wei = int(amount_a * Decimal(10**token_a_decimals))
             amount_b_wei = int(amount_b * Decimal(10**token_b_decimals))
 
-            # For LP operations, set minimums to 0.
-            # Aerodrome (Solidly-based AMM) adjusts amounts to match the pool's current
-            # ratio during addLiquidity. Any excess tokens are refunded to the user.
-            # Setting tight minimums causes InsufficientAmountB() reverts when the
-            # actual amounts added don't match user-specified amounts.
-            _ = slippage_bps  # Acknowledge but don't use for LP
-            amount_a_min = 0
-            amount_b_min = 0
+            # Solidly rebalances a deposit to the pool's reserve ratio and
+            # refunds the excess, so mins must come from quoteAddLiquidity.
+            if not 0 <= slippage_bps < MAX_SLIPPAGE_BPS:
+                return LiquidityResult(
+                    success=False,
+                    error=f"Aerodrome slippage_bps must be within [0, {MAX_SLIPPAGE_BPS}), got {slippage_bps}",
+                )
+            floors = _floored_pair(
+                self._quote_add_liquidity(token_a_address, token_b_address, stable, amount_a_wei, amount_b_wei),
+                slippage_bps,
+            )
+            if floors is None:
+                return LiquidityResult(
+                    success=False,
+                    error=(
+                        "Aerodrome add liquidity cannot honour the requested "
+                        f"{slippage_bps} bps slippage cap: no positive minimum amounts can be "
+                        "computed (the router quote is unavailable, zero, or too small to floor). "
+                        "Refusing to submit an unfloored mint."
+                    ),
+                )
+            amount_a_min, amount_b_min = floors
 
             logger.debug(
                 f"Aerodrome add liquidity: amount_a_min={amount_a_min}, "
-                f"amount_b_min={amount_b_min} (set to 0 for LP operations)"
+                f"amount_b_min={amount_b_min} at {slippage_bps} bps"
             )
 
             transactions: list[TransactionData] = []
@@ -773,10 +812,29 @@ class AerodromeAdapter:
             # LP tokens have 18 decimals
             liquidity_wei = int(liquidity * Decimal(10**18))
 
-            # For minimums, we need to estimate. Set to 0 with slippage protection
-            # In production, you'd query pool reserves to estimate
-            amount_a_min = 0
-            amount_b_min = 0
+            # Solidly refunds unused reserves; mins must come from
+            # quoteRemoveLiquidity.
+            if not 0 <= slippage_bps < MAX_SLIPPAGE_BPS:
+                return LiquidityResult(
+                    success=False,
+                    error=f"Aerodrome slippage_bps must be within [0, {MAX_SLIPPAGE_BPS}), got {slippage_bps}",
+                )
+            floors = _floored_pair(
+                self._quote_remove_liquidity(token_a_address, token_b_address, stable, liquidity_wei),
+                slippage_bps,
+            )
+            if floors is None:
+                return LiquidityResult(
+                    success=False,
+                    error=(
+                        "Aerodrome remove liquidity cannot honour the requested "
+                        f"{slippage_bps} bps slippage cap: no positive minimum amounts can be "
+                        "computed (the router quote is unavailable, zero — which the router also "
+                        "returns for a missing pool — or too small to floor). Refusing to submit "
+                        "an unfloored burn."
+                    ),
+                )
+            amount_a_min, amount_b_min = floors
 
             transactions: list[TransactionData] = []
 
@@ -1750,6 +1808,43 @@ class AerodromeAdapter:
             is_onchain=False,
         )
 
+    def _quote_add_liquidity(
+        self, token_a: str, token_b: str, stable: bool, amount_a_wei: int, amount_b_wei: int
+    ) -> tuple[int, int] | None:
+        """Router quote for the amounts a deposit would actually place."""
+        web3 = self._ensure_web3()
+        if web3 is None:
+            return None
+        return self.sdk.quote_add_liquidity(token_a, token_b, stable, amount_a_wei, amount_b_wei, web3)
+
+    def _quote_remove_liquidity(
+        self, token_a: str, token_b: str, stable: bool, liquidity_wei: int
+    ) -> tuple[int, int] | None:
+        """Router quote for the amounts a burn would return."""
+        web3 = self._ensure_web3()
+        if web3 is None:
+            return None
+        return self.sdk.quote_remove_liquidity(token_a, token_b, stable, liquidity_wei, web3)
+
+    def _ensure_web3(self) -> Any:
+        """Return the connector's read transport, gateway first.
+
+        The single egress path for Aerodrome read calls. Direct RPC remains a
+        fallback for ad-hoc script usage only.
+        """
+        from web3 import Web3
+
+        if self._web3 is None:
+            if self.config.gateway_client is not None:
+                from almanak.framework.web3.gateway_provider import GatewayWeb3Provider
+
+                self._web3 = Web3(GatewayWeb3Provider(self.config.gateway_client, chain=self.chain))
+            elif self.config.rpc_url:
+                self._web3 = Web3(  # vib-2986-exempt: gateway-internal fallback
+                    Web3.HTTPProvider(self.config.rpc_url, request_kwargs={"timeout": 15})
+                )
+        return self._web3
+
     def _try_get_amount_out_onchain(
         self,
         token_in: str,
@@ -1764,19 +1859,8 @@ class AerodromeAdapter:
         None if neither is available or the quote cannot be fetched.
         """
         try:
-            from web3 import Web3
-
-            if self._web3 is None:
-                if self.config.gateway_client is not None:
-                    from almanak.framework.web3.gateway_provider import GatewayWeb3Provider
-
-                    self._web3 = Web3(GatewayWeb3Provider(self.config.gateway_client, chain=self.chain))
-                elif self.config.rpc_url:
-                    self._web3 = Web3(  # vib-2986-exempt: gateway-internal fallback
-                        Web3.HTTPProvider(self.config.rpc_url, request_kwargs={"timeout": 15})
-                    )
-                else:
-                    return None
+            if self._ensure_web3() is None:
+                return None
 
             from .sdk import SwapRoute
 

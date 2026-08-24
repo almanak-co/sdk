@@ -17,9 +17,13 @@ loader picks the right object without forcing a near-empty
 
 LP compile paths for both surfaces query on-chain state:
 
-- Classic LP_CLOSE requires RPC for ``router.removeLiquidity`` LP-balance
-  reads; static permissions surface the router's ``removeLiquidity`` selector
-  so offline manifests never silently omit it.
+- Classic LP_OPEN / LP_CLOSE floor against ``quoteAddLiquidity`` /
+  ``quoteRemoveLiquidity`` and fail closed without a positive floor. Static
+  permissions therefore carry the router's ``addLiquidity`` /
+  ``removeLiquidity`` selectors, each scoped to the intent that emits it,
+  so offline manifests never silently omit the mint or burn. The LP-token
+  approve cannot be listed here: its target is the pool contract
+  (pair-specific) and is discovered when compile succeeds with RPC.
 - Slipstream LP_OPEN compiles via ``validate_aerodrome_cl_pool`` (RPC) and
   LP_CLOSE/LP_COLLECT_FEES via ``adapter.remove_cl_liquidity`` /
   ``collect_cl_fees`` (RPC for position state). Static permissions therefore
@@ -43,7 +47,12 @@ from almanak.framework.permissions.hints import (
     StaticPermissionEntry,
 )
 
-from .adapter import CL_EXACT_INPUT_SINGLE_SELECTOR, SWAP_EXACT_TOKENS_SELECTOR
+from .adapter import (
+    ADD_LIQUIDITY_SELECTOR,
+    CL_EXACT_INPUT_SINGLE_SELECTOR,
+    REMOVE_LIQUIDITY_SELECTOR,
+    SWAP_EXACT_TOKENS_SELECTOR,
+)
 from .addresses import AERODROME, slipstream_lp_deployments
 
 if TYPE_CHECKING:
@@ -63,13 +72,15 @@ _CL_EXACT_INPUT_SINGLE_SIG = "exactInputSingle((address,address,int24,address,ui
 _CLASSIC_SWAP_SIG = "swapExactTokensForTokens(uint256,uint256,Route[],address,uint256)"
 
 # =========================================================================
-# Classic (V1/V2 Solidly-fork) — unchanged surface
+# Classic (V1/V2 Solidly-fork)
 # =========================================================================
 
-# Build static removeLiquidity permissions for each chain where Aerodrome is deployed.
-# LP_CLOSE compilation requires RPC (to query on-chain LP balance), so the compiler
-# can't discover the Router's removeLiquidity selector during offline permission
-# generation.  Static permissions bypass compilation entirely.
+# Classic mint/burn compile fail closed without a router quote, so offline
+# discovery never emits these selectors from calldata. Static permissions
+# inject them per intent. The LP-token approve is pair-specific (the pool
+# IS the ERC-20) and cannot be listed here.
+_ADD_LIQUIDITY_SIG = "addLiquidity(address,address,bool,uint256,uint256,uint256,uint256,address,uint256)"
+_REMOVE_LIQUIDITY_SIG = "removeLiquidity(address,address,bool,uint256,uint256,uint256,address,uint256)"
 _static_permissions: dict[str, list[StaticPermissionEntry]] = {}
 for _chain, _addrs in AERODROME.items():
     if "router" not in _addrs:
@@ -78,9 +89,14 @@ for _chain, _addrs in AERODROME.items():
         StaticPermissionEntry(
             target=_addrs["router"],
             label="Aerodrome Router",
-            selectors={
-                "0x0dede6c4": "removeLiquidity(address,address,bool,uint256,uint256,uint256,address,uint256)",
-            },
+            selectors={ADD_LIQUIDITY_SELECTOR: _ADD_LIQUIDITY_SIG},
+            intent_types=frozenset({IntentType.LP_OPEN}),
+        ),
+        StaticPermissionEntry(
+            target=_addrs["router"],
+            label="Aerodrome Router",
+            selectors={REMOVE_LIQUIDITY_SELECTOR: _REMOVE_LIQUIDITY_SIG},
+            intent_types=frozenset({IntentType.LP_CLOSE}),
         ),
     ]
 
@@ -89,8 +105,8 @@ PERMISSION_HINTS = PermissionHints(
     needs_rpc_discovery=True,
     selector_labels={
         CL_EXACT_INPUT_SINGLE_SELECTOR: _CL_EXACT_INPUT_SINGLE_SIG,
-        "0x5a47ddc3": "addLiquidity(address,address,bool,uint256,uint256,uint256,uint256,address,uint256)",
-        "0x0dede6c4": "removeLiquidity(address,address,bool,uint256,uint256,uint256,address,uint256)",
+        ADD_LIQUIDITY_SELECTOR: _ADD_LIQUIDITY_SIG,
+        REMOVE_LIQUIDITY_SELECTOR: _REMOVE_LIQUIDITY_SIG,
         SWAP_EXACT_TOKENS_SELECTOR: _CLASSIC_SWAP_SIG,
     },
     static_permissions=_static_permissions,

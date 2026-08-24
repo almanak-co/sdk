@@ -719,11 +719,20 @@ class LPOpenIntent(BaseIntent):
             (0.5%) — V4 does NOT inherit the V3-family default, so do not
             generalise "V3 family" to "all Uniswap LP".
 
-            NOT consumed by plain ``aerodrome`` (the v2 constant-product AMM),
-            which discards it and submits a literal ``amount_a_min=0,
-            amount_b_min=0``. Setting this field on ``aerodrome`` yields NO floor
-            rather than a tighter one — an unfloored mint, not a protected one, so
-            none of the advice below buys you anything there.
+            Also consumed by plain ``aerodrome`` (the v2 constant-product AMM):
+            the mint is floored against the router's own ``quoteAddLiquidity``
+            result, haircut by this tolerance. Flooring the REQUESTED amounts
+            would revert with ``InsufficientAmountB()`` because Solidly rebalances
+            a deposit to the pool ratio and refunds the excess, so the floor is
+            derived from the quote instead (ALM-3367). If the quote is
+            unavailable the compile is REFUSED rather than submitting an
+            unfloored mint.
+
+            NOT consumed by ``traderjoe_v2``, which encodes
+            ``amountXMin=0, amountYMin=0`` and relies on ``id_slippage`` (a bin
+            bound read from ``protocol_params``, NOT from this field) — so a
+            caller declaring 10 bps and one declaring 50% get byte-identical
+            calldata there.
             Omitting it is SUPPORTED: the V3-family / Slipstream default is a real
             1% PRICE tolerance (ALM-3186 / VIB-6225 replaced the old ``0.99``
             placeholder), mapped into the ``amount0Min``/``amount1Min`` pair by
@@ -992,31 +1001,28 @@ class LPCloseIntent(BaseIntent):
             defense-in-depth for the direct-compile path only.
         max_slippage: Optional maximum acceptable slippage applied to the
             withdrawal's min-amounts floor (e.g. ``0.005`` = 0.5%), in the same
-            units as :attr:`SwapIntent.max_slippage`. Consumed by the Curve
-            compiler to size the ``remove_liquidity`` ``min_amounts`` calldata.
-            When ``None`` (the default), Curve falls back to its built-in 50 bps.
+            units as :attr:`SwapIntent.max_slippage`. Consumed on CLOSE by the
+            Curve compiler (sizes ``remove_liquidity`` ``min_amounts``) and by
+            plain ``aerodrome`` (v2 ``removeLiquidity`` floors derived from
+            the router's ``quoteRemoveLiquidity`` haircut by this tolerance).
+            When ``None`` (the default), each consuming connector falls back
+            to its built-in 50 bps. Setting this on Aerodrome is not a no-op.
 
-            NOTE — this parameter is consumed on CLOSE by Curve only. The
-            Uniswap V3 and Aerodrome close paths submit literal ZERO minimums
-            and ignore this field entirely. (The calldata names differ per
-            connector: ``amount0Min``/``amount1Min`` on the V3-shaped
-            ``decreaseLiquidity`` paths, ``amount_a_min``/``amount_b_min`` on
-            ``aerodrome`` v2 ``removeLiquidity`` — same zero, different field.) So
-            setting it on those protocols does NOT tighten the exit — an exit
-            cannot currently be floored on those connectors AT ALL, even when one
-            is explicitly requested. Do not read that as safe. A zero minimum is
-            unprotected in a way the OPEN side no longer is (ALM-3186 gave the
-            open default a real price band; the close lane still ships a literal
-            zero — VIB-6220): a
-            proportional burn returns the split the live price implies, which is
-            equivalent value only while that price is HONEST. Under a manipulated
-            price the burn hands back the cheap leg and the minimums are the only
-            on-chain defence — here there are none. The stated in-connector
-            rationale is that a full close is lower risk than a mint because the
-            position is already yours and no competing liquidity is being added
-            (``connectors/aerodrome/adapter.py``); that bounds the exposure, it
-            does not remove it. See the LP SLIPPAGE DOCTRINE in
-            ``framework/intents/compiler.py``.
+            The Uniswap V3 family still submits literal ZERO minimums on
+            ``decreaseLiquidity`` (``amount0Min``/``amount1Min``) and a
+            ``uint128``-max ``collect`` cap, ignoring this field entirely
+            (VIB-6220 — verified from decoded calldata on a real fork,
+            2026-08-20). Setting it on the V3 family does NOT tighten the
+            exit — a V3-shaped exit cannot currently be floored AT ALL, even
+            when one is explicitly requested. Do not read that as safe. A
+            zero minimum is unprotected in a way the OPEN side no longer is
+            (ALM-3186 gave the open default a real price band; the V3 close
+            lane still ships a literal zero — VIB-6220): a proportional burn
+            returns the split the live price implies, which is equivalent
+            value only while that price is HONEST. Under a manipulated price
+            the burn hands back the cheap leg and the minimums are the only
+            on-chain defence — on the V3 close lane there are none. See the
+            LP SLIPPAGE DOCTRINE in ``framework/intents/compiler.py``.
         coin_index: Optional single-sided exit selector (VIB-5437). When set to a
             non-negative pool-coin index, the close withdraws the ENTIRE position
             into that one coin via Curve's ``remove_liquidity_one_coin`` (min-out
@@ -1641,13 +1647,16 @@ class Intent:
                 Uniswap V4 ``0.005`` (0.5%). V4 does NOT inherit the V3-family
                 LP default -- do not generalise "V3 family" to "all Uniswap LP".
 
-                NOT consumed by plain ``aerodrome`` (the v2 constant-product AMM):
-                that path discards the value and submits a literal
-                ``amount_a_min=0, amount_b_min=0``
-                (``connectors/aerodrome/adapter.py``), so setting this field on
-                ``aerodrome`` gives you NO floor rather than a tighter one. Do not
-                read a set ``max_slippage`` as protection there, and read the
-                advice below as scoped to the CONSUMING connectors only.
+                Also consumed by plain ``aerodrome`` (the v2 constant-product
+                AMM): the mint is floored against the router's own
+                ``quoteAddLiquidity`` result, haircut by
+                this tolerance, and the compile is REFUSED if that quote is
+                unavailable (ALM-3367, ``connectors/aerodrome/adapter.py``).
+
+                NOT consumed by ``traderjoe_v2``: that path encodes
+                ``amountXMin=0, amountYMin=0`` and relies on ``id_slippage``,
+                which is read from ``protocol_params`` and NOT derived from this
+                field. Do not read a set ``max_slippage`` as protection there.
 
                 Omitting it is SUPPORTED: the V3-family / Slipstream default is a
                 real 1% PRICE tolerance (ALM-3186 / VIB-6225 replaced the ``0.99``
@@ -1758,13 +1767,15 @@ class Intent:
                 per-connector compiler guards are defense-in-depth only.
             max_slippage: Optional maximum acceptable slippage on the withdrawal's
                 min-amounts floor (e.g. 0.005 = 0.5%). When None (the default),
-                Curve uses its built-in 50 bps. Consumed on CLOSE by the Curve
-                compiler only — the Uniswap V3 and Aerodrome close paths submit a
-                literal zero floor and ignore this field, so setting it there does
-                NOT tighten the exit. (Zero under connector-specific calldata
-                names: ``amount0Min``/``amount1Min`` on the V3-shaped
-                ``decreaseLiquidity`` paths, ``amount_a_min``/``amount_b_min`` on
-                ``aerodrome`` v2 ``removeLiquidity``.) See the LP SLIPPAGE DOCTRINE in
+                each consuming connector uses its own built-in 50 bps. Consumed on
+                CLOSE by the Curve compiler and by plain ``aerodrome``, whose v2
+                ``removeLiquidity`` floors are derived from the router's
+                ``quoteRemoveLiquidity`` haircut by this tolerance (ALM-3367).
+                The Uniswap V3 family still submits a literal zero floor and
+                ignores this field, so setting it THERE does NOT tighten the exit
+                (``amount0Min``/``amount1Min`` on the V3-shaped
+                ``decreaseLiquidity`` paths, plus a ``uint128``-max ``collect``
+                cap — VIB-6220). See the LP SLIPPAGE DOCTRINE in
                 ``framework/intents/compiler.py``.
             coin_index: Optional single-sided exit selector (Curve only, VIB-5437).
                 A non-negative pool-coin index withdraws the whole position into

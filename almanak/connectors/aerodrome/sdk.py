@@ -735,6 +735,71 @@ class AerodromeSDK:
             logger.warning(f"Error getting amount out: {e}")
             return None
 
+    def quote_add_liquidity(
+        self,
+        token_a: str,
+        token_b: str,
+        stable: bool,
+        amount_a_desired: int,
+        amount_b_desired: int,
+        web3: Any,
+    ) -> tuple[int, int] | None:
+        """Quote the amounts the router would actually deposit.
+
+        Solidly routers rebalance a deposit to the pool's current reserve ratio
+        and refund the remainder, so the amounts that reach the pool are almost
+        never the amounts requested. Slippage floors must therefore be derived
+        from this quote rather than from the desired amounts — flooring the
+        desired amounts is what causes ``InsufficientAmountB()`` reverts.
+
+        Returns ``(amount_a, amount_b)``, or ``None`` when the view call is
+        unavailable. Callers must treat ``None`` as "cannot protect this
+        deposit" and fail closed.
+        """
+        router = web3.eth.contract(
+            address=web3.to_checksum_address(self.addresses["router"]),
+            abi=self._router_abi,
+        )
+        try:
+            amount_a, amount_b, _liquidity = router.functions.quoteAddLiquidity(
+                web3.to_checksum_address(token_a),
+                web3.to_checksum_address(token_b),
+                stable,
+                web3.to_checksum_address(self.addresses["factory"]),
+                amount_a_desired,
+                amount_b_desired,
+            ).call()
+            return int(amount_a), int(amount_b)
+        except Exception as e:
+            logger.warning(f"Error quoting add liquidity: {e}")
+            return None
+
+    def quote_remove_liquidity(
+        self,
+        token_a: str,
+        token_b: str,
+        stable: bool,
+        liquidity: int,
+        web3: Any,
+    ) -> tuple[int, int] | None:
+        """Quote the amounts a burn of ``liquidity`` LP tokens would return."""
+        router = web3.eth.contract(
+            address=web3.to_checksum_address(self.addresses["router"]),
+            abi=self._router_abi,
+        )
+        try:
+            amount_a, amount_b = router.functions.quoteRemoveLiquidity(
+                web3.to_checksum_address(token_a),
+                web3.to_checksum_address(token_b),
+                stable,
+                web3.to_checksum_address(self.addresses["factory"]),
+                liquidity,
+            ).call()
+            return int(amount_a), int(amount_b)
+        except Exception as e:
+            logger.warning(f"Error quoting remove liquidity: {e}")
+            return None
+
     def get_amounts_out(
         self,
         amount_in: int,

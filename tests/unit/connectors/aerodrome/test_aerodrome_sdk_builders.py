@@ -199,6 +199,87 @@ class TestGetAmountsOut:
         assert out is None
 
 
+class TestQuoteAddLiquidity:
+    def test_calls_router_with_documented_argument_order(self, sdk: AerodromeSDK) -> None:
+        contract = MagicMock()
+        contract.functions.quoteAddLiquidity.return_value.call.return_value = (111, 222, 333)
+        web3 = _make_web3_with_contract(contract)
+
+        out = sdk.quote_add_liquidity(USDC_ADDRESS, WETH_ADDRESS, False, 10, 20, web3)
+
+        assert out == (111, 222), "must drop the liquidity return and keep (amountA, amountB)"
+        contract.functions.quoteAddLiquidity.assert_called_once_with(
+            USDC_ADDRESS,
+            WETH_ADDRESS,
+            False,
+            sdk.addresses["factory"],
+            10,
+            20,
+        )
+
+    def test_converts_return_values_to_int(self, sdk: AerodromeSDK) -> None:
+        contract = MagicMock()
+        contract.functions.quoteAddLiquidity.return_value.call.return_value = (True, 2, 3)
+        web3 = _make_web3_with_contract(contract)
+
+        quoted = sdk.quote_add_liquidity(USDC_ADDRESS, WETH_ADDRESS, False, 1, 1, web3)
+
+        assert quoted is not None
+        assert [type(v) for v in quoted] == [int, int]
+
+    def test_returns_none_on_router_exception(self, sdk: AerodromeSDK) -> None:
+        contract = MagicMock()
+        contract.functions.quoteAddLiquidity.return_value.call.side_effect = RuntimeError("revert")
+        web3 = _make_web3_with_contract(contract)
+        assert sdk.quote_add_liquidity(USDC_ADDRESS, WETH_ADDRESS, False, 1, 1, web3) is None
+
+    def test_forwards_zero_zero_as_the_tuple(self, sdk: AerodromeSDK) -> None:
+        contract = MagicMock()
+        contract.functions.quoteAddLiquidity.return_value.call.return_value = (0, 0, 0)
+        web3 = _make_web3_with_contract(contract)
+        assert sdk.quote_add_liquidity(USDC_ADDRESS, WETH_ADDRESS, False, 1, 1, web3) == (0, 0)
+
+
+class TestQuoteRemoveLiquidity:
+    def test_calls_router_with_documented_argument_order(self, sdk: AerodromeSDK) -> None:
+        contract = MagicMock()
+        contract.functions.quoteRemoveLiquidity.return_value.call.return_value = (444, 555)
+        web3 = _make_web3_with_contract(contract)
+
+        out = sdk.quote_remove_liquidity(USDC_ADDRESS, WETH_ADDRESS, True, 99, web3)
+
+        assert out == (444, 555)
+        contract.functions.quoteRemoveLiquidity.assert_called_once_with(
+            USDC_ADDRESS,
+            WETH_ADDRESS,
+            True,
+            sdk.addresses["factory"],
+            99,
+        )
+
+    def test_converts_return_values_to_int(self, sdk: AerodromeSDK) -> None:
+        contract = MagicMock()
+        contract.functions.quoteRemoveLiquidity.return_value.call.return_value = (True, 2)
+        web3 = _make_web3_with_contract(contract)
+
+        quoted = sdk.quote_remove_liquidity(USDC_ADDRESS, WETH_ADDRESS, False, 1, web3)
+
+        assert quoted is not None
+        assert [type(v) for v in quoted] == [int, int]
+
+    def test_returns_none_on_router_exception(self, sdk: AerodromeSDK) -> None:
+        contract = MagicMock()
+        contract.functions.quoteRemoveLiquidity.return_value.call.side_effect = RuntimeError("revert")
+        web3 = _make_web3_with_contract(contract)
+        assert sdk.quote_remove_liquidity(USDC_ADDRESS, WETH_ADDRESS, False, 1, web3) is None
+
+    def test_forwards_zero_zero_as_the_tuple(self, sdk: AerodromeSDK) -> None:
+        contract = MagicMock()
+        contract.functions.quoteRemoveLiquidity.return_value.call.return_value = (0, 0)
+        web3 = _make_web3_with_contract(contract)
+        assert sdk.quote_remove_liquidity(USDC_ADDRESS, WETH_ADDRESS, False, 1, web3) == (0, 0)
+
+
 # =============================================================================
 # TX builders
 # =============================================================================

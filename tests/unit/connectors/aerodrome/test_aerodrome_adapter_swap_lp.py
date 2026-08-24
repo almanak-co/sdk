@@ -14,6 +14,7 @@ from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
 import pytest
+from web3 import Web3
 
 from almanak.connectors.aerodrome.adapter import (
     AerodromeAdapter,
@@ -75,7 +76,17 @@ def adapter(usdc_weth_resolver: MagicMock) -> AerodromeAdapter:
         wallet_address=TEST_WALLET,
         allow_placeholder_prices=True,
     )
-    return AerodromeAdapter(cfg, token_resolver=usdc_weth_resolver)
+    built = AerodromeAdapter(cfg, token_resolver=usdc_weth_resolver)
+    # LP legs are floored against the router's own quote and refuse to build
+    # without one. These unit tests have no transport, so stand in for the
+    # quote: a pool that accepts the full deposit. Tests that care about the
+    # refusal override this back to None.
+    built._quote_add_liquidity = lambda _ta, _tb, _stable, a_wei, b_wei: (a_wei, b_wei)  # type: ignore[method-assign]
+    built._quote_remove_liquidity = lambda _ta, _tb, _stable, liquidity_wei: (  # type: ignore[method-assign]
+        liquidity_wei,
+        liquidity_wei,
+    )
+    return built
 
 
 # =============================================================================
@@ -708,3 +719,306 @@ class TestResultDataclassesToDict:
         d = tx.to_dict()
         assert d["value"] == "10"
         assert d["tx_type"] == "swap"
+
+
+# =============================================================================
+# ALM-3367 — LP legs must carry a real slippage floor
+# =============================================================================
+
+_ADD_LIQUIDITY_SELECTOR = "0x5a47ddc3"
+_REMOVE_LIQUIDITY_SELECTOR = "0x0dede6c4"
+
+
+def _decode_uints(tx_data: object, selector: str, *word_indexes: int) -> tuple[int, ...]:
+    text = tx_data if isinstance(tx_data, str) else "0x" + bytes(tx_data).hex()
+    if text[:10].lower() != selector:
+        raise AssertionError(f"expected {selector}, got {text[:10]!r}")
+    words = bytes.fromhex(text[10:])
+    return tuple(int.from_bytes(words[i * 32 : (i + 1) * 32], "big") for i in word_indexes)
+
+
+def _add_liquidity_minimums(result) -> tuple[int, int]:
+    """Recover (amountAMin, amountBMin) from the emitted router calldata."""
+    for tx in result.transactions:
+        data = tx.data if hasattr(tx, "data") else tx["data"]
+        text = data if isinstance(data, str) else "0x" + bytes(data).hex()
+        if text[:10].lower() != _ADD_LIQUIDITY_SELECTOR:
+            continue
+        mins = _decode_uints(text, _ADD_LIQUIDITY_SELECTOR, 5, 6)
+        return mins[0], mins[1]
+    raise AssertionError("no addLiquidity() transaction in the result")
+
+
+def _remove_liquidity_minimums(result) -> tuple[int, int]:
+    """Recover (amountAMin, amountBMin) from the emitted removeLiquidity calldata."""
+    for tx in result.transactions:
+        data = tx.data if hasattr(tx, "data") else tx["data"]
+        text = data if isinstance(data, str) else "0x" + bytes(data).hex()
+        if text[:10].lower() != _REMOVE_LIQUIDITY_SELECTOR:
+            continue
+        mins = _decode_uints(text, _REMOVE_LIQUIDITY_SELECTOR, 4, 5)
+        return mins[0], mins[1]
+    raise AssertionError("no removeLiquidity() transaction in the result")
+
+
+class TestLPSlippageFloor:
+    def test_add_liquidity_floors_both_sides_against_the_router_quote(self, adapter: AerodromeAdapter) -> None:
+        # Requested (100e6, 0.05e18); the pool rebalances to a strictly smaller quote.
+        quoted_a, quoted_b = 80_000_000, 40_000_000_000_000_000
+        adapter._quote_add_liquidity = lambda *_args: (quoted_a, quoted_b)  # type: ignore[method-assign]
+
+        result = adapter.add_liquidity(
+            token_a="USDC",
+            token_b="WETH",
+            amount_a=Decimal("100"),
+            amount_b=Decimal("0.05"),
+            stable=False,
+            slippage_bps=100,
+        )
+
+        assert result.success
+        amount_a_min, amount_b_min = _add_liquidity_minimums(result)
+        assert amount_a_min == quoted_a * 9_900 // 10_000
+        assert amount_b_min == quoted_b * 9_900 // 10_000
+        assert amount_a_min != 100_000_000 * 9_900 // 10_000, "floor must be of the quote, not the request"
+        assert amount_a_min > 0 and amount_b_min > 0
+
+    def test_remove_liquidity_floors_both_sides_against_the_router_quote(self, adapter: AerodromeAdapter) -> None:
+        quoted_a, quoted_b = 70_000_000, 30_000_000_000_000_000
+        adapter._quote_remove_liquidity = lambda *_args: (quoted_a, quoted_b)  # type: ignore[method-assign]
+
+        result = adapter.remove_liquidity(
+            token_a="USDC",
+            token_b="WETH",
+            liquidity=Decimal("1"),
+            stable=False,
+            slippage_bps=100,
+            pool_address="0x" + "cc" * 20,
+        )
+
+        assert result.success
+        amount_a_min, amount_b_min = _remove_liquidity_minimums(result)
+        assert amount_a_min == quoted_a * 9_900 // 10_000
+        assert amount_b_min == quoted_b * 9_900 // 10_000
+        assert amount_a_min != 10**18 * 9_900 // 10_000, "floor must be of the quote, not the LP wei"
+
+    def test_add_liquidity_refuses_rather_than_submitting_zero_minimums(self, adapter: AerodromeAdapter) -> None:
+        """Fail closed: no quote means no protection, and no transaction."""
+        adapter._quote_add_liquidity = lambda *_args: None  # type: ignore[method-assign]
+
+        result = adapter.add_liquidity(
+            token_a="USDC",
+            token_b="WETH",
+            amount_a=Decimal("100"),
+            amount_b=Decimal("0.05"),
+            stable=False,
+            slippage_bps=100,
+        )
+
+        assert not result.success
+        assert result.transactions == []
+        assert "unfloored mint" in (result.error or "")
+
+    def test_remove_liquidity_refuses_rather_than_submitting_zero_minimums(self, adapter: AerodromeAdapter) -> None:
+        adapter._quote_remove_liquidity = lambda *_args: None  # type: ignore[method-assign]
+
+        result = adapter.remove_liquidity(
+            token_a="USDC",
+            token_b="WETH",
+            liquidity=Decimal("1"),
+            stable=False,
+            slippage_bps=100,
+        )
+
+        assert not result.success
+        assert "unfloored burn" in (result.error or "")
+
+    @pytest.mark.parametrize("bad_bps", [-1, 10_000, 20_000])
+    def test_out_of_range_slippage_is_refused_not_clamped(self, adapter: AerodromeAdapter, bad_bps: int) -> None:
+        """A cap at or beyond 100% floors at zero for small amounts if clamped."""
+        result = adapter.add_liquidity(
+            token_a="USDC",
+            token_b="WETH",
+            amount_a=Decimal("100"),
+            amount_b=Decimal("0.05"),
+            stable=False,
+            slippage_bps=bad_bps,
+        )
+
+        assert not result.success
+        assert "slippage_bps must be within" in (result.error or "")
+
+    def test_floored_pair_uses_the_canonical_bps_floor(self) -> None:
+        from almanak.connectors.aerodrome.adapter import _floored_pair
+
+        assert _floored_pair((1_000, 1_000), 100) == (990, 990)
+        assert _floored_pair((1_000, 1_000), 0) == (1_000, 1_000)
+        assert _floored_pair((3, 3), 100) == (2, 2)
+        with pytest.raises(ValueError, match="slippage_bps must be in"):
+            _floored_pair((1_000, 1_000), 10_000)
+
+
+class TestLPFloorPostcondition:
+    """A quote is not enough: the encoded floor must itself be positive."""
+
+    @pytest.mark.parametrize(
+        ("quote", "label"),
+        [
+            ((0, 0), "router returns (0,0) for a missing pool"),
+            ((0, 10**18), "one side quotes zero"),
+            ((1, 1), "quote too small to floor — 1 * 9900 // 10000 == 0"),
+        ],
+    )
+    def test_add_liquidity_refuses_a_quote_that_cannot_produce_a_positive_floor(
+        self, adapter: AerodromeAdapter, quote: tuple[int, int], label: str
+    ) -> None:
+        adapter._quote_add_liquidity = lambda *_args: quote  # type: ignore[method-assign]
+
+        result = adapter.add_liquidity(
+            token_a="USDC",
+            token_b="WETH",
+            amount_a=Decimal("100"),
+            amount_b=Decimal("0.05"),
+            stable=False,
+            slippage_bps=100,
+        )
+
+        assert not result.success, label
+        assert result.transactions == []
+        assert "unfloored mint" in (result.error or "")
+
+    @pytest.mark.parametrize("quote", [(0, 0), (10**18, 0), (1, 1)])
+    def test_remove_liquidity_refuses_a_quote_that_cannot_produce_a_positive_floor(
+        self, adapter: AerodromeAdapter, quote: tuple[int, int]
+    ) -> None:
+        adapter._quote_remove_liquidity = lambda *_args: quote  # type: ignore[method-assign]
+
+        result = adapter.remove_liquidity(
+            token_a="USDC",
+            token_b="WETH",
+            liquidity=Decimal("1"),
+            stable=False,
+            slippage_bps=100,
+        )
+
+        assert not result.success
+        assert "unfloored burn" in (result.error or "")
+
+    def test_floored_pair_never_returns_a_zero_bound(self) -> None:
+        from almanak.connectors.aerodrome.adapter import _floored_pair
+
+        assert _floored_pair((10**18, 10**6), 100) == (99 * 10**16, 990_000)
+        assert _floored_pair(None, 100) is None
+        assert _floored_pair((0, 0), 100) is None
+        assert _floored_pair((1, 10**18), 100) is None, "a floor of zero is not a floor"
+
+
+class TestRouterQuoteHelpers:
+    """Direct cover for the SDK quote helpers the LP floors are derived from.
+
+    A wrong router method name, a transposed ABI argument, or a swallowed
+    exception here yields a plausible-but-wrong floor rather than an obvious
+    failure — the floor would still be non-zero and would still pass every
+    presence check.
+    """
+
+    @staticmethod
+    def _sdk_with_fake_web3(returns):
+        from almanak.connectors.aerodrome.sdk import AerodromeSDK
+
+        calls: dict = {}
+
+        class _Fn:
+            def __init__(self, name):
+                self._name = name
+
+            def __call__(self, *args):
+                calls["method"] = self._name
+                calls["args"] = args
+                return self
+
+            def call(self):
+                if isinstance(returns, Exception):
+                    raise returns
+                return returns
+
+        class _Functions:
+            def __getattr__(self, name):
+                return _Fn(name)
+
+        class _Contract:
+            functions = _Functions()
+
+        class _Eth:
+            @staticmethod
+            def contract(address=None, abi=None):
+                calls["address"] = address
+                return _Contract()
+
+        class _Web3:
+            eth = _Eth()
+
+            @staticmethod
+            def to_checksum_address(a):
+                return Web3.to_checksum_address(a)
+
+        sdk = AerodromeSDK.__new__(AerodromeSDK)
+        sdk.addresses = {"router": "0x" + "77" * 20, "factory": "0x" + "88" * 20}
+        sdk._router_abi = []
+        return sdk, _Web3, calls
+
+    def test_quote_add_liquidity_calls_the_router_with_the_documented_argument_order(self) -> None:
+        sdk, web3, calls = self._sdk_with_fake_web3((111, 222, 333))
+
+        result = sdk.quote_add_liquidity(USDC_ADDRESS, WETH_ADDRESS, False, 10, 20, web3)
+
+        assert result == (111, 222), "must drop the liquidity return and keep (amountA, amountB)"
+        assert calls["method"] == "quoteAddLiquidity"
+        assert calls["address"] == Web3.to_checksum_address("0x" + "77" * 20), "must query the router"
+        token_a, token_b, stable, factory, desired_a, desired_b = calls["args"]
+        assert (token_a, token_b) == (
+            Web3.to_checksum_address(USDC_ADDRESS),
+            Web3.to_checksum_address(WETH_ADDRESS),
+        )
+        assert stable is False
+        assert factory == Web3.to_checksum_address("0x" + "88" * 20)
+        assert (desired_a, desired_b) == (10, 20), "desired amounts must not be transposed"
+
+    def test_quote_remove_liquidity_calls_the_router_with_the_documented_argument_order(self) -> None:
+        sdk, web3, calls = self._sdk_with_fake_web3((444, 555))
+
+        result = sdk.quote_remove_liquidity(USDC_ADDRESS, WETH_ADDRESS, True, 99, web3)
+
+        assert result == (444, 555)
+        assert calls["method"] == "quoteRemoveLiquidity"
+        token_a, token_b, stable, factory, liquidity = calls["args"]
+        assert stable is True
+        assert liquidity == 99
+        assert factory == Web3.to_checksum_address("0x" + "88" * 20)
+
+    def test_quotes_return_integers_not_the_router_types(self) -> None:
+        # quoteAddLiquidity returns (amountA, amountB, liquidity) — three values.
+        sdk, web3, _ = self._sdk_with_fake_web3((True, 2, 3))
+        quoted = sdk.quote_add_liquidity(USDC_ADDRESS, WETH_ADDRESS, False, 1, 1, web3)
+
+        assert quoted is not None
+        assert [type(v) for v in quoted] == [int, int]
+
+    @pytest.mark.parametrize("method", ["quote_add_liquidity", "quote_remove_liquidity"])
+    def test_a_reverting_quote_becomes_None_so_the_caller_fails_closed(self, method: str) -> None:
+        sdk, web3, _ = self._sdk_with_fake_web3(RuntimeError("execution reverted"))
+        args = (
+            (USDC_ADDRESS, WETH_ADDRESS, False, 1, 1, web3)
+            if method == "quote_add_liquidity"
+            else (USDC_ADDRESS, WETH_ADDRESS, False, 1, web3)
+        )
+
+        assert getattr(sdk, method)(*args) is None
+
+    def test_a_zero_zero_quote_is_forwarded_not_collapsed_to_None(self) -> None:
+        # Adapter _floored_pair is what refuses (0, 0); the SDK must not hide it.
+        sdk, web3, _ = self._sdk_with_fake_web3((0, 0, 0))
+        assert sdk.quote_add_liquidity(USDC_ADDRESS, WETH_ADDRESS, False, 1, 1, web3) == (0, 0)
+
+        sdk, web3, _ = self._sdk_with_fake_web3((0, 0))
+        assert sdk.quote_remove_liquidity(USDC_ADDRESS, WETH_ADDRESS, False, 1, web3) == (0, 0)

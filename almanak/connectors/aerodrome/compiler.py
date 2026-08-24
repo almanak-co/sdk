@@ -644,7 +644,17 @@ def _slipstream_tick_straddle_failure(
     )
 
 
-# crap-allowlist: VIB-4853 — import-path swap only (pool-validation moved into connectors, #2527); function body unchanged, anvil-only coverage. Refactor + coverage backfill tracked in VIB-4139.
+def _lp_slippage_bps(intent: Any) -> int | None:
+    """Convert an LP intent's optional tolerance to basis points.
+
+    ``max_slippage`` is optional on LP intents and permission discovery compiles
+    synthetic intents that carry none, so ``None`` is a legitimate input meaning
+    "use the connector default". ``slippage_to_bps`` rejects non-Decimal, so the
+    conversion is guarded here rather than at each call site.
+    """
+    return slippage_to_bps(intent.max_slippage) if intent.max_slippage is not None else None
+
+
 def compile_lp_open_aerodrome(compiler, intent: LPOpenIntent) -> CompilationResult:
     """Compile LP_OPEN intent for Aerodrome Finance (Solidly fork on Base).
 
@@ -741,6 +751,7 @@ def compile_lp_open_aerodrome(compiler, intent: LPOpenIntent) -> CompilationResu
 
         # Create Aerodrome adapter to build all transactions
         # The adapter handles approvals and the addLiquidity call
+        lp_slippage_bps = _lp_slippage_bps(intent)
         config = AerodromeConfig(
             chain=compiler.chain,
             wallet_address=compiler.wallet_address,
@@ -751,13 +762,13 @@ def compile_lp_open_aerodrome(compiler, intent: LPOpenIntent) -> CompilationResu
         )
         adapter = AerodromeAdapter(config)
 
-        # Build addLiquidity transaction using the adapter
         liquidity_result = adapter.add_liquidity(
             token_a=token0_symbol,
             token_b=token1_symbol,
             amount_a=intent.amount0,
             amount_b=intent.amount1,
             stable=stable,
+            slippage_bps=lp_slippage_bps,
             recipient=compiler.wallet_address,
         )
 
@@ -1025,6 +1036,7 @@ def compile_lp_close_aerodrome(compiler, intent: LPCloseIntent) -> CompilationRe
             )
 
         # Create Aerodrome adapter
+        lp_slippage_bps = _lp_slippage_bps(intent)
         config = AerodromeConfig(
             chain=compiler.chain,
             wallet_address=compiler.wallet_address,
@@ -1124,6 +1136,7 @@ def compile_lp_close_aerodrome(compiler, intent: LPCloseIntent) -> CompilationRe
             token_b=token1_symbol,
             liquidity=lp_balance,
             stable=stable,
+            slippage_bps=lp_slippage_bps,
             recipient=compiler.wallet_address,
             pool_address=pool_address,
         )
