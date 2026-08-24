@@ -519,6 +519,14 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         # sentinel (_NO_CHAIN_KEY) — never None, so it is a valid dict key for
         # _price_aggregators throughout (VIB-5651).
         self._primary_chain: str = _NO_CHAIN_KEY
+        # Chains learned from requests on an UNCONFIGURED gateway (on-demand
+        # mode). Kept OUT of settings.chains on purpose: that object is shared
+        # with RpcService, whose documented "empty settings.chains = accept any
+        # chain" mode must not silently collapse into a one-chain allowlist the
+        # moment a price/balance request registers its first chain (codex P1 on
+        # PR #3806). Gates never read this list — it exists solely so
+        # _do_initialize builds aggregators for these chains.
+        self._on_demand_chains: list[str] = []
         # Last-resort price fallback (populated by _do_initialize). Consulted
         # by GetPrice only when the primary aggregator raises AllDataSourcesFailed.
         self._manual_price_override: Any = None
@@ -626,13 +634,32 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         return {chain.lower() for chain in (self.settings.chains or []) if chain}
 
     def _chain_configuration_error(self, chain: str) -> str | None:
-        """Explain why ``chain`` cannot be routed by this gateway, if applicable."""
+        """Explain why ``chain`` cannot be routed by this gateway, if applicable.
+
+        An UNCONFIGURED gateway (empty ``settings.chains``) accepts any valid
+        chain — the same documented on-demand mode as RpcService's
+        ``_chain_not_configured_error``. On-demand chain registrations never
+        mutate ``settings.chains``, so this stays true for the gateway's whole
+        life; once chains ARE provisioned (boot config or RegisterChains) the
+        allowlist is a hard boundary.
+        """
+        if not self.settings.chains:
+            return None
         if chain in self._configured_chains():
             return None
         return f"Chain '{chain}' is not configured on this gateway"
 
-    async def _auto_reinitialize_balance_chains(self, requested_chains: list[str]) -> None:
-        """Late-register valid balance chains when the gateway started unconfigured."""
+    async def _auto_reinitialize_unconfigured_chains(self, requested_chains: list[str]) -> None:
+        """Late-register valid requested chains when the gateway started unconfigured.
+
+        On-demand mode for unconfigured gateways: mirrors RpcService's
+        documented "empty settings.chains = accept any chain" semantics.
+        Callers: GetBalance / GetBalances (original), GetPrice (data-gateway
+        parity — an unconfigured gateway previously rejected every
+        chain-hinted price request with INVALID_ARGUMENT while serving the
+        same chain's balances, pool state, and history). No-op once any
+        chain is configured — the allowlist stays a hard boundary for
+        provisioned gateways."""
         if self.settings.chains:
             return
 
@@ -646,10 +673,12 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
                 valid_chains.append(chain)
 
         for chain in valid_chains:
+            if chain in self._on_demand_chains:
+                continue
             try:
-                await self.reinitialize(chain)
+                await self.reinitialize(chain, provisioned=False)
             except Exception as e:
-                logger.warning("MarketService balance auto-reinit failed for chain %s: %s", chain, e)
+                logger.warning("MarketService on-demand auto-reinit failed for chain %s: %s", chain, e)
 
     @staticmethod
     async def _close_aggregator_sources(aggregators: dict[str, Any]) -> None:
@@ -730,6 +759,9 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         from almanak.gateway.data.price.manual_override import ManualPriceOverrideSource
 
         chains = list(self.settings.chains or [])
+        for on_demand in getattr(self, "_on_demand_chains", []):
+            if on_demand not in chains:
+                chains.append(on_demand)
         # IMPORTANT: Never default to a hardcoded chain -- that silently gives wrong
         # Chainlink oracle data for strategies running on a different chain (QA #4/#7/#8).
         # A no-chain gateway serves a single CoinGecko-only aggregator under the sentinel.
@@ -808,22 +840,32 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         )
         return sources
 
-    async def reinitialize(self, chain: str) -> None:
+    async def reinitialize(self, chain: str, *, provisioned: bool = True) -> None:
         """Re-initialize price sources with full pricing stack for the given chain.
 
-        Called by RegisterChains when chain info becomes available after startup.
+        Called by RegisterChains when chain info becomes available after startup
+        (``provisioned=True``, the default: the chain joins ``settings.chains``
+        and tightens the allowlist exactly as before). The on-demand path on an
+        unconfigured gateway passes ``provisioned=False``: the chain's
+        aggregator is built, but ``settings.chains`` is NOT mutated — the
+        shared settings object also drives RpcService's "empty = accept any
+        chain" mode and the gates' provisioned-allowlist semantics, neither of
+        which a request may silently change (codex P1 on PR #3806).
         Upgrades from CoinGecko-only to the full per-chain stack.
         """
         async with self._init_lock:
-            if not self.settings.chains:
-                self.settings.chains = [chain]
-            elif chain not in self.settings.chains:
-                # Pricing is keyed by chain, not list index (VIB-5651 lead
-                # decision 4): we no longer force the requested chain to index 0.
-                # Just ensure it is present so its aggregator gets built and the
-                # request is served — the observable outcome the old reordering
-                # was protecting.
-                self.settings.chains.append(chain)
+            if provisioned:
+                if not self.settings.chains:
+                    self.settings.chains = [chain]
+                elif chain not in self.settings.chains:
+                    # Pricing is keyed by chain, not list index (VIB-5651 lead
+                    # decision 4): we no longer force the requested chain to index 0.
+                    # Just ensure it is present so its aggregator gets built and the
+                    # request is served — the observable outcome the old reordering
+                    # was protecting.
+                    self.settings.chains.append(chain)
+            elif chain not in self._on_demand_chains:
+                self._on_demand_chains.append(chain)
 
             # Rebuild-then-close (audit-3195 Important #1): capture the old
             # aggregators, let ``_do_initialize`` atomically rebind
@@ -836,7 +878,17 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             # Manifest-shared source instances are distinct from the freshly
             # built ones, so closing them can't touch the live sources.
             old_aggregators = dict(self._price_aggregators)
-            self._do_initialize()
+            try:
+                self._do_initialize()
+            except BaseException:
+                # Transactional for the on-demand path (coderabbit on PR
+                # #3806): a failed build must not leave the chain recorded as
+                # servable. ``_price_aggregators`` was never reassigned (the
+                # rebind happens only when the dict comprehension completes),
+                # so the old map keeps serving.
+                if not provisioned and chain in self._on_demand_chains:
+                    self._on_demand_chains.remove(chain)
+                raise
             await self._close_aggregator_sources(old_aggregators)
 
         logger.info("MarketService re-initialized with chain=%s", chain)
@@ -1168,6 +1220,11 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
                 context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
                 context.set_details(str(e))
                 return gateway_pb2.PriceResponse()
+            # Same on-demand rule as GetBalance: a gateway started without
+            # chain configuration learns its first chain from the request
+            # (~10ms in-process aggregator build, no network I/O). Once any
+            # chain is configured the gate below stays a hard boundary.
+            await self._auto_reinitialize_unconfigured_chains([requested_chain])
             if error := self._chain_configuration_error(requested_chain):
                 context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
                 context.set_details(error)
@@ -1988,7 +2045,7 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         # balance chain from the request. Once any chain is configured, however,
         # the allowlist is a hard boundary: never query another chain's provider
         # or fall back to the primary chain's price aggregator.
-        await self._auto_reinitialize_balance_chains([chain])
+        await self._auto_reinitialize_unconfigured_chains([chain])
         if error := self._chain_configuration_error(chain):
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(error)
@@ -2115,7 +2172,7 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         # Match unary GetBalance's late-registration contract. Resolve all valid
         # request chains before concurrent item processing so a no-chain gateway
         # cannot nondeterministically register only whichever task runs first.
-        await self._auto_reinitialize_balance_chains([req.chain for req in request.requests])
+        await self._auto_reinitialize_unconfigured_chains([req.chain for req in request.requests])
 
         async def _get_single_balance(req: gateway_pb2.BalanceRequest) -> gateway_pb2.BalanceResponse:
             """Get a single balance, returning error in response on failure."""

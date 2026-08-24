@@ -366,10 +366,19 @@ async def test_getprice_rejects_valid_but_unconfigured_chain_before_routing():
 
 
 @pytest.mark.asyncio
-async def test_getprice_explicit_chain_requires_prior_registration_on_no_chain_gateway():
-    """A no-chain gateway must not dial an RPC from an unregistered price hint."""
-    import grpc
+async def test_getprice_explicit_chain_registers_on_demand_on_no_chain_gateway():
+    """An UNCONFIGURED gateway serves an explicit-chain price hint on demand.
 
+    Contract change (PR #3806): the old behavior rejected every chain-hinted
+    price request on a no-chain gateway with INVALID_ARGUMENT, while the same
+    gateway's RpcService forwarded that chain's eth_calls (documented
+    "empty settings.chains = accept any chain" mode) and GetBalance
+    late-registered the chain. GetPrice now takes the identical on-demand
+    step. The original protection this test pinned — never dial an RPC for a
+    chain the operator explicitly provisioned AWAY from — lives on for
+    provisioned gateways in
+    ``test_getprice_rejects_unregistered_explicit_chain`` above.
+    """
     settings = _market_settings_stub([])
     servicer = MarketServiceServicer(settings)
     await servicer._ensure_initialized()
@@ -377,15 +386,28 @@ async def test_getprice_explicit_chain_requires_prior_registration_on_no_chain_g
     context = MagicMock()
     request = gateway_pb2.PriceRequest(token=RENBTC_ADDRESS, quote="USD", chain="base")
 
+    async def _register(chain: str, *, provisioned: bool = True) -> None:
+        assert provisioned is False
+        servicer._on_demand_chains.append(chain)
+
+    price_result = MagicMock(price=Decimal("1.23"), source="aggregated", confidence=0.9, stale=False)
+    price_result.timestamp = MagicMock()
+    price_result.timestamp.timestamp.return_value = 1787420000
+    aggregator = MagicMock()
+    aggregator.get_aggregated_price = AsyncMock(return_value=price_result)
+    aggregator.get_last_details = MagicMock(return_value=None)
+
     with (
-        patch.object(servicer, "_get_onchain_lookup", new=AsyncMock()) as onchain_lookup,
-        patch.object(servicer, "_aggregator_for") as aggregator_for,
+        patch.object(servicer, "reinitialize", new=AsyncMock(side_effect=_register)) as reinit,
+        patch.object(servicer, "_resolve_token_for_pricing", new=AsyncMock(return_value=None)),
+        patch.object(servicer, "_aggregator_for", return_value=aggregator),
     ):
         response = await servicer.GetPrice(request, context)
 
-    context.set_code.assert_called_once_with(grpc.StatusCode.INVALID_ARGUMENT)
-    assert "not configured" in context.set_details.call_args.args[0]
-    assert response.price == ""
-    onchain_lookup.assert_not_awaited()
-    aggregator_for.assert_not_called()
+    reinit.assert_awaited_once_with("base", provisioned=False)
+    # Shared-settings invariant: the on-demand registration must not mutate
+    # settings.chains (it also drives RpcService's open mode).
+    assert settings.chains == []
+    context.set_code.assert_not_called()
+    assert response.price == "1.23"
     await servicer.close()

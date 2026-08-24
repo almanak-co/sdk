@@ -187,8 +187,13 @@ class TestGetBalanceAutoReinit:
 
             await servicer.GetBalance(mock_request, mock_context)
 
-        # After GetBalance, should have upgraded to full EVM stack (override still separate)
-        assert settings.chains[0] == "arbitrum"
+        # After GetBalance the full per-chain stack serves the request, but
+        # the chain is recorded ON-DEMAND: settings.chains stays empty so the
+        # shared settings object can't collapse RpcService's documented
+        # "empty = accept any chain" mode into a one-chain allowlist
+        # (codex P1 on PR #3806).
+        assert settings.chains == []
+        assert servicer._on_demand_chains == ["arbitrum"]
         assert len(servicer._price_aggregator._sources) == 5
 
     @pytest.mark.asyncio
