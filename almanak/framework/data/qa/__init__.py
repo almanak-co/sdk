@@ -24,6 +24,17 @@ Example:
 """
 
 from .config import QAConfig, QAThresholds, load_config
+from .resource_identity import (
+    AuthoritativeFeed,
+    DataCapability,
+    DataRequirement,
+    FeedIdentity,
+    PriceRoute,
+    PriceRouteKind,
+    discriminate_feed_identity,
+    evaluate_data_requirement,
+    validate_price_route,
+)
 from .runner import QAReport, QARunner, TestDuration
 
 __all__ = [
@@ -33,4 +44,13 @@ __all__ = [
     "QAThresholds",
     "TestDuration",
     "load_config",
+    "AuthoritativeFeed",
+    "DataCapability",
+    "DataRequirement",
+    "FeedIdentity",
+    "PriceRoute",
+    "PriceRouteKind",
+    "discriminate_feed_identity",
+    "evaluate_data_requirement",
+    "validate_price_route",
 ]

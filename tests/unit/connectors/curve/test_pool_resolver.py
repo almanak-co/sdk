@@ -156,6 +156,19 @@ def _clear_resolver_cache():
 
 
 class TestHappyPath:
+    def test_alm_3251_live_curve_identity_is_chain_observable_not_producer_attested(self) -> None:
+        """Positive control: the SDK can attest address, ordered coins and LP token."""
+        gw = FakeMetaRegistryGateway(coins=[DAI, USDC, USDT], decimals=[18, 6, 6], n_coins=3, gamma=None)
+        meta = resolve_pool_metadata("ethereum", POOL, gateway_client=gw)
+
+        assert meta is not None
+        assert meta.address.lower() == POOL.lower()
+        assert [address.lower() for address in meta.coin_addresses] == [DAI.lower(), USDC.lower(), USDT.lower()]
+        assert meta.lp_token.lower() == LP_TOKEN.lower()
+        assert not hasattr(meta, "curve_pool_binding")
+        assert not hasattr(meta, "token_fingerprint")
+        assert not hasattr(meta, "pool_fingerprint")
+
     def test_stableswap_3pool_shape(self) -> None:
         gw = FakeMetaRegistryGateway(coins=[DAI, USDC, USDT], decimals=[18, 6, 6], n_coins=3, gamma=None)
         meta = resolve_pool_metadata("ethereum", POOL, gateway_client=gw)

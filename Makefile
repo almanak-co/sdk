@@ -1,4 +1,4 @@
-.PHONY: all help clean test test-unit test-acceptance-pack test-connectors test-intents test-integration test-all test-ci test-coverage crap crap-fresh crap-diff crap-diff-fresh test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single test-accounting-matrix test-accounting-matrix-quick list-demo-strategies check-pendle-expiry set-almanak-code-version build-platform-wheels build-platform-runner build publish lint lint-check format format-check security docs docs-cli docs-generated docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop audit-intent-paths check-xfail-hygiene check-xfail-liveness check-config-boundary check-connector-registry check-lifecycle-capability-ratchet check-lifecycle-capability-baseline check-sdk-scoped-lifecycle-claims generate-sdk-scoped-lifecycle-claims check-sdk-scoped-support-shadow generate-sdk-scoped-support-shadow check-strategy-taxonomy check-teardown-state-persistence check-connector-chains check-chain-truth check-demos check-intent-coverage check-orphan-scripts check-import-provenance check-deployment-scoped-tables check-deployment-id-proto-surface check-gateway-isolation check-decimal-policy check-decimal-policy-baseline regen-contract-baselines check-accounting-ratchet check-accounting-merge-gate scan-coupling scan-coupling-report scan-coupling-baseline check-hardcoded-addresses check-hardcoded-addresses-baseline check-placeholder-prices check-permission-coverage check-ci-status
+.PHONY: all help clean test test-unit test-acceptance-pack test-connectors test-intents test-integration test-all test-ci test-coverage crap crap-fresh crap-diff crap-diff-fresh test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single test-accounting-matrix test-accounting-matrix-quick list-demo-strategies test-qa-invariants check-qa-counterexamples check-qa-scalar-projection check-qa-invalidations check-pendle-expiry set-almanak-code-version build-platform-wheels build-platform-runner build publish lint lint-check format format-check security docs docs-cli docs-generated docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop audit-intent-paths check-xfail-hygiene check-xfail-liveness check-config-boundary check-connector-registry check-lifecycle-capability-ratchet check-lifecycle-capability-baseline check-sdk-scoped-lifecycle-claims generate-sdk-scoped-lifecycle-claims check-sdk-scoped-support-shadow generate-sdk-scoped-support-shadow check-strategy-taxonomy check-teardown-state-persistence check-connector-chains check-chain-truth check-demos check-intent-coverage check-orphan-scripts check-import-provenance check-deployment-scoped-tables check-deployment-id-proto-surface check-gateway-isolation check-decimal-policy check-decimal-policy-baseline regen-contract-baselines check-accounting-ratchet check-accounting-merge-gate scan-coupling scan-coupling-report scan-coupling-baseline check-hardcoded-addresses check-hardcoded-addresses-baseline check-placeholder-prices check-permission-coverage check-ci-status
 
 # Load .env file if it exists
 -include .env
@@ -763,6 +763,36 @@ test-accounting-matrix-quick:
 # See docs/internal/qa/teardown-regression-matrix.md.
 test-teardown-matrix: ## Teardown seam x primitive regression matrix (VIB-5479)
 	uv run pytest tests/unit/teardown/test_regression_matrix.py -q --import-mode=importlib
+
+# Foundational semantic invariant matrix — the cross-cutting regression layer
+# between narrow unit examples and real-fork Intent/Quant evidence
+# (docs/internal/qa/foundational-invariant-contract.md, blueprint 10). Known
+# product gaps are strict xfails, so an XPASS fails this gate and forces a
+# deliberate promotion to green. The standard unit suite also collects it; this
+# target is the narrow gate both documents already told operators to run.
+test-qa-invariants: ## Foundational semantic invariant matrix (narrow gate)
+	uv run pytest tests/unit/testing/test_foundational_invariant_matrix.py -q --import-mode=importlib
+
+# Execute every permanent user-ticket counterexample registered in
+# docs/internal/qa/catalog/v1/ticket-counterexamples.json. The registry is an
+# executable contract, not a documentation index: the gate fails if a
+# registered node id no longer collects or no longer passes.
+check-qa-counterexamples: ## Run the registered user-ticket QA counterexamples
+	uv run python scripts/ci/check_qa_counterexamples.py
+
+# Refuse scalar health/maturity projections in the QA product renderers. Raw
+# numerator/denominator diagnostics stay legal; collapsing them into a single
+# coverage/health/support grade does not, because one number cannot say WHICH
+# invariants a cell satisfied. QA Framework v1 section 06.
+check-qa-scalar-projection: ## Refuse scalar coverage grades in QA renderers
+	uv run python scripts/ci/check_qa_scalar_projection.py
+
+# Report (default) or apply the append-only QA experiment-invalidation manifest
+# against a QA store. Reporting is read-only; applying appends invalidation
+# records and never rewrites or deletes ledger bytes. Point at another store
+# with ALMANAK_QA_STORE or `--store`.
+check-qa-invalidations: ## Report the QA ledger invalidation manifest vs the store
+	uv run python scripts/quant-test/qa_invalidate.py
 
 # Check Pendle market expiry dates in demo and incubating strategy configs.
 # Fails if any demo strategy references a market expiring within 30 days.

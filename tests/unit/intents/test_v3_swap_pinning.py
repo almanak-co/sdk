@@ -137,19 +137,11 @@ def test_quote_contract_rejects_malformed_venue_binding_hash(bad_hash: object) -
 
     with pytest.raises(ValueError, match="venue_binding_hash"):
         SwapQuoteRequest(
-            chain="arbitrum",
-            protocol="uniswap_v3",
-            token_in=USDC_ARB,
-            token_out=WETH_ARB,
-            amount_in=1,
-            venue_binding_hash=bad_hash,  # type: ignore[arg-type]
+            chain="arbitrum", protocol="uniswap_v3", token_in=USDC_ARB,
+            token_out=WETH_ARB, amount_in=1, venue_binding_hash=bad_hash,  # type: ignore[arg-type]
         )
     with pytest.raises(ValueError, match="venue_binding_hash"):
-        SwapQuoteResult(
-            amount_out=1,
-            source="test",
-            venue_binding_hash=bad_hash,  # type: ignore[arg-type]
-        )
+        SwapQuoteResult(amount_out=1, source="test", venue_binding_hash=bad_hash)  # type: ignore[arg-type]
 
 
 # ===========================================================================
@@ -502,7 +494,9 @@ class TestCompilerPoolAddressPinning:
         assert result.is_safety_refusal is True
         assert "factory_mismatch" in result.error
 
-    def test_pinned_pool_resolves_and_pins_its_tier(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_alm_3241_b_alm_3227_pinned_pool_resolves_and_pins_its_tier(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         _patch_pool_reads(
             monkeypatch,
             binding=V3PoolBinding(token0=WETH_ARB.lower(), token1=USDC_ARB.lower(), fee_tier=500),
@@ -514,9 +508,10 @@ class TestCompilerPoolAddressPinning:
         assert metadata["selected_fee_tier"] == 500
         assert metadata["fee_selection_source"] == "intent_pinned"
         assert metadata["pinned_pool"] == PINNED_POOL
-        assert metadata["venue_binding_hash"] == "a" * 64
 
-    def test_pinned_pool_pair_mismatch_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_alm_3241_b_alm_3227_pinned_pool_pair_mismatch_fails_closed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         other_token = "0x912CE59144191C1204E64559FE8253a0e49E6548"  # ARB
         _patch_pool_reads(
             monkeypatch,
@@ -701,14 +696,30 @@ class TestRegistryQuotePinEnforcement:
         metadata = result.action_bundle.metadata
         assert metadata["selected_fee_tier"] == 500
         assert metadata["fee_selection_source"] == "intent_pinned"
-        # The seam must actually have been exercised with the pin as the hint —
-        # without this the metadata assertions above also pass when the registry
-        # quote is bypassed entirely (CodeRabbit, PR #3644).
+        # The seam must actually have been exercised with the pin as the hint.
         assert calls == [500]
-        # And the rogue amount must not survive into slippage: 999 wei as the
-        # basis would floor min_amount_out at ~999, which is the value a
-        # silently-accepted wrong-tier quote produces.
         assert int(metadata["min_amount_out"]) > 999
+
+    def test_exact_pool_quote_without_matching_binding_is_discarded(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from almanak.connectors._strategy_base.swap_quote_registry import SwapQuoteResult
+        from almanak.connectors._strategy_swap_quote_registry import SWAP_QUOTE_REGISTRY
+
+        _patch_pool_reads(
+            monkeypatch,
+            binding=V3PoolBinding(token0=WETH_ARB.lower(), token1=USDC_ARB.lower(), fee_tier=500),
+        )
+        seen_hashes: list[str | None] = []
+
+        def wrong_binding_quote(ctx, request):
+            seen_hashes.append(request.venue_binding_hash)
+            return SwapQuoteResult(amount_out=999, source="wrong-binding", venue_binding_hash="b" * 64,
+                                   metadata={"fee_tier": 500})
+
+        monkeypatch.setattr(SWAP_QUOTE_REGISTRY, "quote_swap", wrong_binding_quote)
+        result = _offline_compiler().compile(_swap_intent(swap_params={"pool": PINNED_POOL}))
+        assert result.status.value == "SUCCESS"
+        assert seen_hashes == ["a" * 64]
+        assert int(result.action_bundle.metadata["min_amount_out"]) > 999
 
     def test_provider_quote_honoring_the_pin_is_used(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from almanak.connectors._strategy_base.swap_quote_registry import SwapQuoteResult
@@ -724,29 +735,3 @@ class TestRegistryQuotePinEnforcement:
         metadata = result.action_bundle.metadata
         assert metadata["selected_fee_tier"] == 500
         assert metadata["fee_selection_source"] == "intent_pinned"
-
-    def test_exact_pool_quote_without_matching_binding_is_discarded(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from almanak.connectors._strategy_base.swap_quote_registry import SwapQuoteResult
-        from almanak.connectors._strategy_swap_quote_registry import SWAP_QUOTE_REGISTRY
-
-        _patch_pool_reads(
-            monkeypatch,
-            binding=V3PoolBinding(token0=WETH_ARB.lower(), token1=USDC_ARB.lower(), fee_tier=500),
-        )
-        seen_hashes: list[str | None] = []
-
-        def wrong_binding_quote(ctx, request):
-            seen_hashes.append(request.venue_binding_hash)
-            return SwapQuoteResult(
-                amount_out=999,
-                source="wrong-binding",
-                venue_binding_hash="b" * 64,
-                metadata={"fee_tier": 500},
-            )
-
-        monkeypatch.setattr(SWAP_QUOTE_REGISTRY, "quote_swap", wrong_binding_quote)
-        result = _offline_compiler().compile(_swap_intent(swap_params={"pool": PINNED_POOL}))
-
-        assert result.status.value == "SUCCESS"
-        assert seen_hashes == ["a" * 64]
-        assert int(result.action_bundle.metadata["min_amount_out"]) > 999

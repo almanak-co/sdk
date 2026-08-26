@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "goal": "action-density",
+  "feasibility": {
+    "status": "feasible",
+    "source_files": [
+      "docs/internal/quant-user-runs/_batches/20260817-0218-quant4-mainnet/aave-supply-base-strategy/strategy.py",
+      "docs/internal/quant-user-runs/_batches/20260817-0218-quant4-mainnet/aave-supply-base-strategy/config.json"
+    ],
+    "transition_sequence": ["not_supplied -> SUPPLY -> supplied", "supplied -> HOLD", "teardown -> WITHDRAW -> closed"]
+  },
+  "requirements": [
+    {"id":"runtime-supply","phase":"runtime","intent_type":"SUPPLY","min_executed":1,"max_executed":1},
+    {
+      "id":"teardown-withdraw",
+      "phase":"teardown",
+      "intent_type":"WITHDRAW",
+      "min_executed":1,
+      "close_obligation": {
+        "position_identity":"eip155:8453/aave-v3-reserve:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913/account:0x4b79ba310849a2A5E55348D14F17f18E7D0f993f/supply",
+        "resource_identity":"eip155:8453/aave-v3-pool:0xA238Dd80C259a72e81d7e4664a9801593F98d1c5/reserve:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "amount_binding":{"mode":"full_close_sentinel","sentinel_raw":"115792089237316195423570985008687907853269984665640564039457584007913129639935"},
+        "maximum_terminal_residual_raw":"0"
+      }
+    }
+  ],
+  "teardown":{"required":true,"coverage":"proved"},
+  "guards":[{"id":"canonical-pool-reserve-binding","required_for":"production","mandatory":true}]
+}

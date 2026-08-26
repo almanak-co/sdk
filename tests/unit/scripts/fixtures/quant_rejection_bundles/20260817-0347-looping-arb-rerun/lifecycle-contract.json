@@ -1,0 +1,24 @@
+{
+  "schema_version":1,
+  "goal":"action-density",
+  "feasibility":{"status":"feasible","source_files":["docs/internal/quant-user-runs/_batches/20260817-0218-quant4-mainnet/looping-arb-strategy/strategy.py","docs/internal/quant-user-runs/_batches/20260817-0218-quant4-mainnet/looping-arb-strategy/config.json","almanak/framework/teardown/lending_unwind.py"],"transition_sequence":["idle -> SUPPLY -> supplied","supplied -> BORROW -> borrowed","borrowed -> SWAP -> swapped","swapped -> SUPPLY -> resupplied","resupplied -> BORROW -> complete","complete -> HOLD","teardown -> dynamic REPAY/WITHDRAW/SWAP -> closed"]},
+  "requirements":[
+    {"id":"runtime-initial-supply","phase":"runtime","intent_type":"SUPPLY","min_executed":1},
+    {"id":"runtime-first-borrow","phase":"runtime","intent_type":"BORROW","min_executed":1},
+    {"id":"runtime-leverage-swap","phase":"runtime","intent_type":"SWAP","min_executed":1},
+    {"id":"runtime-resupply","phase":"runtime","intent_type":"SUPPLY","min_executed":1},
+    {"id":"runtime-second-borrow","phase":"runtime","intent_type":"BORROW","min_executed":1},
+    {"id":"teardown-repay","phase":"teardown","intent_type":"REPAY","min_executed":1},
+    {"id":"teardown-withdraw","phase":"teardown","intent_type":"WITHDRAW","min_executed":1},
+    {"id":"teardown-swap","phase":"teardown","intent_type":"SWAP","min_executed":1}
+  ],
+  "teardown":{"required":true,"coverage":"proved"},
+  "guards":[
+    {"id":"canonical-pool-reserve-binding","required_for":"production","mandatory":true},
+    {"id":"health-factor-floor","required_for":"production","mandatory":true},
+    {"id":"runtime-price-impact","required_for":"production","mandatory":true},
+    {"id":"runtime-min-output","required_for":"production","mandatory":true},
+    {"id":"teardown-price-impact","required_for":"production","mandatory":true},
+    {"id":"teardown-min-output","required_for":"production","mandatory":true}
+  ]
+}

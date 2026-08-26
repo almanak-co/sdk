@@ -51,10 +51,10 @@ from almanak.framework.data.ohlcv.gateway_data_adapter import GatewayOHLCVDataPr
 from almanak.framework.data.ohlcv.gateway_provider import GatewayOHLCVProvider
 from almanak.framework.data.ohlcv.ohlcv_router import OHLCVRouter
 from almanak.framework.data.ohlcv.routing_provider import RoutingOHLCVProvider
-from almanak.gateway.data.ohlcv.coingecko_onchain_provider import CoinGeckoOnchainOHLCVProvider
 from almanak.framework.data.price.gateway_oracle import GatewayPriceOracle
 from almanak.framework.gateway_client import GatewayClient, GatewayClientConfig
 from almanak.framework.market import IndicatorProvider, MarketSnapshot
+from almanak.gateway.data.ohlcv.coingecko_onchain_provider import CoinGeckoOnchainOHLCVProvider
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
@@ -358,8 +358,7 @@ def test_strategy_market_snapshot_contract() -> None:
         )
         if prediction_price is not None:
             assert isinstance(prediction_price, Decimal)
-        else:
-            summary["metrics"]["prediction_price"] = None
+        summary["metrics"]["prediction_price"] = str(prediction_price) if prediction_price is not None else None
 
         def _provider_attribution() -> dict[str, Any]:
             """Probe async/envelope APIs to collect provider source metadata."""
@@ -371,6 +370,8 @@ def test_strategy_market_snapshot_contract() -> None:
                         "source": result.source,
                         "confidence": result.confidence,
                         "stale": result.stale,
+                        "observed_at": result.timestamp.isoformat(),
+                        "pair": f"{token.upper()}/USD",
                     }
                     if result.source_details:
                         price_sources[token]["source_details"] = result.source_details
@@ -386,9 +387,24 @@ def test_strategy_market_snapshot_contract() -> None:
                     "latency_ms": envelope.meta.latency_ms,
                     "cache_hit": envelope.meta.cache_hit,
                     "candle_count": len(envelope.value),
+                    "observed_at": envelope.meta.observed_at.isoformat(),
+                    "timeframe": "4h",
+                    "pair": "WETH/USD",
+                    "first_candle_at": envelope.value[0].timestamp.isoformat() if envelope.value else None,
+                    "last_candle_at": envelope.value[-1].timestamp.isoformat() if envelope.value else None,
+                    "timestamps_strictly_increasing": all(
+                        left.timestamp < right.timestamp
+                        for left, right in zip(envelope.value, envelope.value[1:], strict=False)
+                    ),
                 }
             except Exception:  # noqa: BLE001
-                ohlcv_source = {"source": "unknown", "confidence": 0.0, "latency_ms": 0, "cache_hit": False, "candle_count": 0}
+                ohlcv_source = {
+                    "source": "unknown",
+                    "confidence": 0.0,
+                    "latency_ms": 0,
+                    "cache_hit": False,
+                    "candle_count": 0,
+                }
 
             return {"price_sources": price_sources, "ohlcv_source": ohlcv_source}
 
@@ -507,6 +523,7 @@ def test_strategy_market_snapshot_contract() -> None:
         summary["status"] = "pass" if not summary["errors"] else "fail"
     finally:
         summary["timings_ms"]["total"] = round((time.perf_counter() - start_total) * 1000, 2)
+        summary["completed_at_utc"] = datetime.now(UTC).isoformat()
         summary_path = OUTPUT_DIR / "summary.json"
         summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
 

@@ -145,3 +145,6 @@ docs/internal/quant-user-runs/*
 # mirror. Run artifacts inside _harness/ (e.g. __pycache__) stay ignored.
 !docs/internal/quant-user-runs/_harness/
 docs/internal/quant-user-runs/_harness/__pycache__/
+
+# Local Coverage QA store (PoC) if using repo-local root instead of ~/.almanak/qa
+.qa-store/

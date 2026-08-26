@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "run_id": "20260817-0347-looping-arb-rerun",
+  "chain_id": 42161,
+  "wallet": "0x64E817FEd3Ec20EaD2dDc5cda3d666eF40655226",
+  "start_nonce": 77,
+  "end_nonce": 81,
+  "nonce_delta": 4,
+  "observed_transactions": [
+    {"hash": "0x7cdd9e467b4b365885d9f3b523cdfcaeaf19bb87102db7ba88df162336d861a7", "status": 1, "block_number": 495358035, "gas_used": 55589, "role": "SUPPLY support transaction"},
+    {"hash": "0x23e2eca5299aac7a670e5d76ca920727a183a4baa11d3d8a5935135814f4467c", "status": 1, "block_number": 495358041, "gas_used": 197865, "role": "SUPPLY Aave Pool transaction; parser measured 4,000,000 raw USDC"},
+    {"hash": "0xf819789b83c29db7c01396ca0e72833606572ddb027eb469ebe3b144b3890f43", "status": 1, "block_number": 495358048, "gas_used": 45635, "role": "SUPPLY collateral-enable support transaction"},
+    {"hash": "0x91ebc1c9458494a8077d4ec01e12ee2154f66a9f382f0841ba61e5271616e15d", "status": 1, "block_number": 495358681, "gas_used": 196679, "role": "teardown WITHDRAW; parser measured 3,999,999 raw USDC"}
+  ],
+  "submitted_transaction_count": 4,
+  "status_1_receipt_count": 4,
+  "replay_count": 0,
+  "bijection": "PASS",
+  "borrow_attempt": {
+    "submitted": false,
+    "tx_hash": null,
+    "txs_planned": 0,
+    "txs_sent": 0,
+    "reason": "insufficient native gas before submission: need 27064800000000 wei, have 26046293166000 wei, deficit 1018506834000 wei",
+    "runner_classification": "BROADCAST_RECONCILIATION_REQUIRED",
+    "classification_assessment": "misleading: the iteration record proves no transaction crossed the submission boundary"
+  },
+  "raw_artifacts": {
+    "runtime": ["chain/runtime-approval.json", "chain/runtime-supply.json", "chain/runtime-collateral-enable.json"],
+    "teardown": ["chain/teardown-withdraw.json"],
+    "harness": ["chain/gas-topup.json", "chain/sweep-usdc.json"]
+  },
+  "evidence_limit": "The four strategy submissions have raw transaction/receipt JSON and pinned nonce/state. Top-up and sweep are retained separately and are not counted as strategy receipts.",
+  "conclusion": "All four observed strategy submissions mined once with status 1 and nonce 77→81 is bijective. BORROW was never submitted and cannot be counted."
+}

@@ -90,6 +90,18 @@ from .protocol_harness import (
     generate_gas_estimation_tests,
     run_ci_tests,
 )
+from .semantic_invariants import (
+    InvariantFamily,
+    InvariantSpec,
+    Mutation,
+    ObservationDiff,
+    declared_shape,
+    equivalent_observation_diffs,
+    identity_operations,
+    missing_evidence_fields,
+    richer_than_production_fields,
+    validate_invariant_catalog,
+)
 
 __all__ = [
     # A/B Testing
@@ -139,4 +151,15 @@ __all__ = [
     "PROTOCOL_OPERATIONS",
     # Copy-trading replay
     "CopyReplayRunner",
+    # Foundational semantic invariants
+    "InvariantFamily",
+    "InvariantSpec",
+    "Mutation",
+    "ObservationDiff",
+    "declared_shape",
+    "equivalent_observation_diffs",
+    "identity_operations",
+    "missing_evidence_fields",
+    "richer_than_production_fields",
+    "validate_invariant_catalog",
 ]

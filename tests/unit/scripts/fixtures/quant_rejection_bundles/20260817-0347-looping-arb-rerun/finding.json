@@ -1,0 +1,47 @@
+{
+  "verdicts": {
+    "strategy": "FAIL",
+    "books": "PASS (caveat)",
+    "dashboard": "FAIL",
+    "harness": "FAIL"
+  },
+  "axes": {
+    "A_act": "strategy",
+    "A1": "strategy",
+    "A2": "strategy",
+    "A3": "strategy",
+    "A4": "strategy",
+    "A5": "strategy",
+    "A6": "books",
+    "A7": "dashboard",
+    "A_cap": "harness"
+  },
+  "dash_div": 0,
+  "headline": "SUPPLY and its exact WITHDRAW closure succeeded, but the declared looping lifecycle stopped before BORROW because the funding plan did not reserve enough native gas for the action sequence.",
+  "outcomes": {
+    "A_act": ["FAIL", "Action-density required SUPPLY→BORROW→SWAP→SUPPLY→BORROW, but only SUPPLY executed; this directly fails the Strategy contract even though the initiating cause was harness gas planning."],
+    "A1": ["UNVERIFIED", "Four observed SUPPLY/teardown transactions were unique status-1 receipts, but the Uniswap path and full receipt artifact contract were not exercised."],
+    "A2": ["UNVERIFIED", "Positive USDC collateral existed, but BORROW was never submitted, so positive USDT debt and the requested health-factor state were never established."],
+    "A3": ["PASS", "A separate graceful teardown found the one open SUPPLY position, executed one status-1 WITHDRAW, and proved it closed on chain."],
+    "A4": ["UNVERIFIED", "No debt-bearing withdrawal or swap occurred, so the health-floor and swap-guard obligations were not exercised."],
+    "A5": ["PASS", "Pinned block 495359016 proves USDC/USDT aToken and debt balances, collateral, and debt are all zero; USDC is consolidated at 3,999,999 raw before sweep."],
+    "A6": ["PASS", "Immutable SQLite records successful SUPPLY and WITHDRAW rows, the failed unsubmitted BORROW, exact transaction linkage, principal deltas, measured gas, and preserves unmeasured SUPPLY interest as null."],
+    "A7": ["UNVERIFIED", "Only an early Dashboard screenshot exists; pre-teardown and terminal Dashboard observations are missing."],
+    "A_cap": ["PASS", "The 0.0001 ETH rescue top-up remained inside the approved $1 gas/$5 wallet caps; 3.999999 USDC was swept and wallet #12 released."]
+  },
+  "findings": [
+    ["The funding planner's cap PASS did not establish action-sequence gas feasibility; the second intended action was short 1018506834000 wei and never submitted.", "HIGH", "SEQUENCE-GAS-FEASIBILITY-UNPROVEN", "harness"],
+    ["A pre-submission insufficient-funds rejection with txs_sent=0 was labeled BROADCAST_RECONCILIATION_REQUIRED as though the submission boundary had been crossed.", "MED", "PRE-SUBMISSION-ERROR-MISCLASSIFIED", "strategy"],
+    ["Only the early Dashboard phase was captured; no pre-teardown or terminal view is available.", "HIGH", "DASHBOARD-PHASES-INCOMPLETE", "dashboard"],
+    ["The command journal retained only initialization, so the closeout is not CLEAN conductor provenance.", "HIGH", "INCOMPLETE-EVIDENCE-JOURNAL", "harness"],
+    ["Aave SUPPLY and WITHDRAW still use the legacy VIB-5218 money-leg fallback.", "LOW", "LEGACY-MONEY-LEG-FALLBACK", "books"]
+  ],
+  "deviations": [
+    ["HARNESS", "Whole-wallet cap validation did not reserve gas for the complete required runtime and teardown sequence.", "TICKET-NEEDED: add sequence-aware gas feasibility to funding plans"],
+    ["SDK-BUG", "A before-submission insufficient-funds error is misclassified as broadcast reconciliation required.", "TICKET-NEEDED: distinguish pre-submission rejection from ambiguous broadcast"],
+    ["VERIFY", "All four strategy receipts, the rescue top-up, and the sweep are retained as raw transaction/receipt JSON.", "PRESERVE: keep raw chain artifacts mandatory for closeout"]
+  ],
+  "branch": "detached HEAD at 1a62591298c4b009aafba6190de440a003196cc5",
+  "hold": "none; graceful teardown was requested immediately after BORROW failed",
+  "money_note": "4 USDC supplied and 3.999999 USDC withdrawn; 0.000001 USDC principal difference plus native gas."
+}

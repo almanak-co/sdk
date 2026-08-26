@@ -1,0 +1,151 @@
+{
+  "verdicts": {
+    "strategy": "PASS (caveat)",
+    "books": "PASS (caveat)",
+    "dashboard": "FAIL",
+    "harness": "FAIL"
+  },
+  "axes": {
+    "A_act": "strategy",
+    "A1": "strategy",
+    "A2": "strategy",
+    "A3": "books",
+    "A4": "strategy",
+    "A5": "strategy",
+    "A6": "dashboard",
+    "A7": "books",
+    "A_cap": "harness"
+  },
+  "dash_div": 0,
+  "headline": "Exact Aave Base SUPPLY/HOLD/WITHDRAW lifecycle reached terminal zero, but the card fails because Dashboard APY was unmeasured and the post-teardown Dashboard was unavailable.",
+  "outcomes": {
+    "A_act": [
+      "PASS",
+      "Exactly one SUPPLY executed before eight reasoned HOLD iterations; the action compiled to three required subtransactions."
+    ],
+    "A1": [
+      "PASS",
+      "Three runtime submissions have three unique status-1 receipts and reconcile to wallet nonce 51→54."
+    ],
+    "A2": [
+      "PASS",
+      "Pinned Base block 50073226 has 3,599,999 raw aToken principal and positive collateral; authenticated connector proof is CONFIRMED_OPEN."
+    ],
+    "A3": [
+      "PASS",
+      "Stable SQLite records a HIGH-confidence SUPPLY accounting event with principal_delta_usd 3.600 and interest_delta_usd null."
+    ],
+    "A4": [
+      "PASS",
+      "A separate graceful request was acknowledged, started, executed one WITHDRAW, and completed."
+    ],
+    "A5": [
+      "PASS",
+      "Pinned teardown block 50073511 proves aToken, stable/variable debt, collateral and collateral-use are all zero."
+    ],
+    "A6": [
+      "FAIL",
+      "Early/pre-teardown UI showed Supply APY N/A despite a measured ~3.56%; the post-teardown capture is chrome-error ERR_CONNECTION_REFUSED and contains no product observation."
+    ],
+    "A7": [
+      "PASS",
+      "Wallet/component PnL differ by only $0.000003193028, inside tolerance; the residual is identified as omitted Base L1 data-fee/native accounting."
+    ],
+    "A_cap": [
+      "PASS",
+      "Funding anchor was $4.01348256, no capital was added mid-run, 3.600001 USDC was swept, and durable pool wallet #1 was released; retained native gas and 360,000 raw allowance are disclosed."
+    ]
+  },
+  "findings": [
+    [
+      "The Dashboard process exited with the runner before the mandatory post-teardown observation, so terminal UI truth is unmeasured.",
+      "HIGH",
+      "POST-TEARDOWN-UI-UNAVAILABLE",
+      "dashboard"
+    ],
+    [
+      "The required report/deviation freeze occurred after sweep and the observer transcript is not a complete tool-native command record.",
+      "HIGH",
+      "LATE-EVIDENCE-FREEZE",
+      "harness"
+    ],
+    [
+      "Supply APY rendered N/A while the runtime repeatedly measured approximately 3.56%.",
+      "MED",
+      "DASHBOARD-APY-UNMEASURED",
+      "dashboard"
+    ],
+    [
+      "Aave accounting used the legacy intent_fallback money-leg guesser rather than a connector-declared PrimitiveMoneyLeg.",
+      "MED",
+      "LEGACY-MONEY-LEG",
+      "books"
+    ],
+    [
+      "Base wallet-native gas cost exceeds persisted gas_used times effective_gas_price by 1,678,873,749 wei, leaving L1 data fees outside ledger gas accounting.",
+      "MED",
+      "BASE-L1-FEE-OMISSION",
+      "books"
+    ],
+    [
+      "Cleanup left a 360,000-raw USDC allowance to the canonical Aave Pool after token sweep and wallet release.",
+      "MED",
+      "RESIDUAL-ALLOWANCE",
+      "harness"
+    ],
+    [
+      "The result enricher expects redemption_amounts for WITHDRAW while AaveV3ReceiptParser emits withdraw_amounts.",
+      "LOW",
+      "PARSER-CAPABILITY-VOCABULARY",
+      "strategy"
+    ],
+    [
+      "Two position-verifier attempts failed authentication before a distinct session-authenticated read succeeded; all attempts remain preserved.",
+      "LOW",
+      "VERIFIER-AUTH-ERGONOMICS",
+      "harness"
+    ]
+  ],
+  "deviations": [
+    [
+      "SDK-GAP",
+      "Aave lacks a connector-declared PrimitiveMoneyLeg, so ledger construction falls back to intent attributes.",
+      "VIB-5218"
+    ],
+    [
+      "SDK-BUG",
+      "Dashboard does not display the measured Aave supply APY.",
+      "TICKET-NEEDED: wire measured Aave supply APY into Dashboard"
+    ],
+    [
+      "SDK-BUG",
+      "Managed runner stops the Dashboard before the mandatory post-teardown product observation can be captured.",
+      "TICKET-NEEDED: preserve or reproducibly reopen post-teardown Dashboard"
+    ],
+    [
+      "SDK-GAP",
+      "Base ledger gas accounting omits the L1 data-fee component observable in wallet native balance deltas.",
+      "TICKET-NEEDED: account for OP-stack L1 data fees"
+    ],
+    [
+      "VERIFY",
+      "Aave WITHDRAW parser capability vocabulary differs from the result enricher expectation.",
+      "TICKET-NEEDED: align Aave withdrawal capability naming"
+    ],
+    [
+      "VERIFY",
+      "Mainnet cleanup leaves non-zero token allowance after the supplied position and wallet token balance reach zero.",
+      "TICKET-NEEDED: define revoke-or-quarantine policy for residual approvals"
+    ]
+  ],
+  "tickets": [
+    {
+      "id": "VIB-5218",
+      "status": "known",
+      "covers": "Aave PrimitiveMoneyLeg declaration gap"
+    }
+  ],
+  "branch": "detached HEAD at 1a62591298c4b009aafba6190de440a003196cc5",
+  "hold": "~9m25s from launch to graceful teardown request; eight reasoned HOLD iterations",
+  "money_note": "Net component PnL -$0.00580346; wallet/component gap $0.00000319, with Base L1 fee omission disclosed."
+}

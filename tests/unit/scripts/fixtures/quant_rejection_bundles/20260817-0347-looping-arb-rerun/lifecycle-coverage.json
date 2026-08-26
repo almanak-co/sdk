@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "run_id": "20260817-0347-looping-arb-rerun",
+  "requested_runtime_sequence": ["SUPPLY", "BORROW", "SWAP", "SUPPLY", "BORROW"],
+  "observed_runtime_sequence": ["SUPPLY"],
+  "runtime_target_intents_executed": 1,
+  "runtime_target_intents_required": 5,
+  "failed_target": {
+    "intent": "BORROW",
+    "submitted": false,
+    "reason": "native gas shortfall of 1018506834000 wei"
+  },
+  "requested_teardown_sequence": ["REPAY", "WITHDRAW", "SWAP_WHEN_REQUIRED"],
+  "observed_teardown_sequence": ["WITHDRAW"],
+  "teardown_intents_executed": 1,
+  "teardown_interpretation": "WITHDRAW was the complete live plan because BORROW never created debt and no swap inventory existed. This proves closure of the exercised SUPPLY position, not the requested full looping teardown.",
+  "terminal_state": {
+    "block_number": 495359016,
+    "nonce": 81,
+    "usdc_balance_raw_before_sweep": 3999999,
+    "usdt_balance_raw": 0,
+    "aave_usdc_atoken_raw": 0,
+    "aave_usdc_debt_raw": 0,
+    "aave_usdt_atoken_raw": 0,
+    "aave_usdt_debt_raw": 0,
+    "aave_collateral_base": 0,
+    "aave_debt_base": 0
+  },
+  "coverage": "partial",
+  "outcome": "FAIL",
+  "seal_eligibility": "INELIGIBLE",
+  "reason": "Only the first of five required runtime intents executed. Successful closure of that partial position cannot attest BORROW, SWAP, resupply, or second borrow behavior."
+}

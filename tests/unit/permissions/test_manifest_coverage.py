@@ -19,6 +19,7 @@ import pytest
 from almanak.framework.execution.signer.safe.constants import (
     MULTISEND_ADDRESSES,
     MULTISEND_SELECTOR,
+    get_operation_type,
 )
 from almanak.framework.intents.compiler import (
     DEFAULT_SWAP_FEE_TIER,
@@ -30,6 +31,7 @@ from almanak.framework.intents.compiler import (
 from almanak.framework.permissions.generator import generate_manifest, load_strategy_config
 from almanak.framework.permissions.hints import get_permission_hints
 from almanak.framework.permissions.synthetic_intents import build_synthetic_intents
+from scripts.qa.permission_attestation import derive_permission_attestation
 
 logger = logging.getLogger(__name__)
 
@@ -202,21 +204,8 @@ class TestManifestCoverage:
                 strict=False,
             )
 
-            # Build lookup set from manifest: {(target, selector)}
-            manifest_pairs: set[tuple[str, str]] = set()
-            for perm in manifest.permissions:
-                for sel in perm.function_selectors:
-                    manifest_pairs.add((perm.target.lower(), sel.selector.lower()))
-
-            # Also track manifest targets without selectors (e.g. Enso delegates
-            # which have empty selector lists = wildcard)
-            wildcard_targets: set[str] = set()
-            for perm in manifest.permissions:
-                if not perm.function_selectors:
-                    wildcard_targets.add(perm.target.lower())
-
             # Independently compile synthetic intents and verify coverage
-            missing: list[tuple[str, str, str, str]] = []  # (protocol, intent_type, target, selector)
+            missing: list[tuple[str, str, dict[str, object]]] = []
 
             for protocol in protocols:
                 compiler = _get_compiler_for_protocol(protocol, chain)
@@ -243,22 +232,27 @@ class TestManifestCoverage:
                         if result.status.value != "SUCCESS":
                             continue
 
-                        for tx in result.transactions:
-                            target = tx.to.lower()
-                            selector = tx.data[:10].lower() if tx.data and len(tx.data) >= 10 else None
-
-                            if selector is None:
-                                continue
-
-                            # Check: pair must be in manifest OR target is a wildcard
-                            if (target, selector) not in manifest_pairs and target not in wildcard_targets:
-                                missing.append((protocol, intent_type, target, selector))
+                        attestation = derive_permission_attestation(
+                            transactions=[
+                                {
+                                    "to": tx.to,
+                                    "data": tx.data,
+                                    "value": tx.value,
+                                    "operation": int(get_operation_type(tx.to)),
+                                }
+                                for tx in result.transactions
+                            ],
+                            manifest=manifest,
+                            chain=chain,
+                        )
+                        missing.extend((protocol, intent_type, call) for call in attestation["missing_authorizations"])
 
             assert not missing, (
-                f"Manifest for {name} on {chain} is missing {len(missing)} (target, selector) pair(s):\n"
+                f"Manifest for {name} on {chain} is missing {len(missing)} effective call authorization(s):\n"
                 + "\n".join(
-                    f"  - {protocol}/{intent_type}: target={target} selector={selector}"
-                    for protocol, intent_type, target, selector in missing
+                    f"  - {protocol}/{intent_type}: target={call['target']} selector={call['selector']} "
+                    f"operation={call['operation']} value={call['value']} path={call['path']}"
+                    for protocol, intent_type, call in missing
                 )
             )
 
