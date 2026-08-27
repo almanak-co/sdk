@@ -93,7 +93,7 @@ def test_uniswap_v4_provider_uses_shared_eth_call(monkeypatch: pytest.MonkeyPatc
             "data": calls[0]["data"],
             "rpc_url": "http://anvil.local",
             "gateway_client": None,
-            "timeout": 10.0,
+            "timeout": v4_sdk.V4_QUOTER_DIRECT_RPC_TIMEOUT_SECONDS,
         }
     ]
     assert str(calls[0]["data"]).startswith(v4_sdk.QUOTE_EXACT_INPUT_SINGLE_SELECTOR)
