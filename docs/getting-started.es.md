@@ -257,6 +257,36 @@ Sin estos hooks, tu estrategia perdera todo su estado interno al reiniciar. Esto
     - Almacena valores `Decimal` como cadenas (`str(amount)`) y parsealos al cargar (`Decimal(state["amount"])`) para un viaje de ida y vuelta JSON seguro.
     - El callback `on_intent_executed()` es el lugar natural para actualizar el estado despues de un trade (por ej. almacenar un nuevo ID de posicion), y luego `get_persistent_state()` lo recoge para guardarlo.
 
+## El tiempo en las estrategias { #time-in-strategies }
+
+Toda regla temporal de una estrategia — cooldowns, cadencias, contadores diarios o “N horas desde la última ejecución” — debe usar **`market.timestamp`**, el reloj del snapshot. Nunca uses `datetime.now()` ni `time.time()` dentro de `decide()` o `on_intent_executed()` para valores que alimentan una decisión.
+
+En vivo, el reloj real y el reloj del mercado suelen coincidir, por lo que el error parece funcionar. En un backtest se reproducen semanas de tiempo simulado en minutos: un cooldown de 24 horas medido con el reloj real nunca expira y la estrategia queda bloqueada después de la primera operación.
+
+`on_intent_executed()` no recibe un snapshot, así que captura su timestamp en `decide()` y reutilízalo en el callback:
+
+```python
+class MyStrategy(IntentStrategy):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._last_buy_ts: datetime | None = None
+        self._pending_ts: datetime | None = None
+
+    def decide(self, market: MarketSnapshot) -> Intent:
+        now = market.timestamp
+        if self._last_buy_ts and now - self._last_buy_ts < timedelta(hours=24):
+            return Intent.hold(reason="Cadence: waiting for next 24h window")
+        self._pending_ts = now
+        return Intent.swap(...)
+
+    def on_intent_executed(self, intent, success, result) -> None:
+        if success and self._pending_ts is not None:
+            self._last_buy_ts = self._pending_ts
+            self._pending_ts = None
+```
+
+El reloj real solo es aceptable para campos de reporte que nunca influyen en una decisión, como logs o etiquetas de “generado a las” del dashboard.
+
 ## Desmontaje de la estrategia (requerido)
 
 Cada estrategia debe implementar el desmontaje para que los operadores puedan cerrar posiciones de forma segura. Sin desmontaje, las solicitudes de cierre se ignoran silenciosamente y las posiciones permanecen abiertas. Las plantillas de `almanak strat new` incluyen stubs -- completalos a medida que construyes tu estrategia.

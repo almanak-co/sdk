@@ -194,9 +194,9 @@ rejected at adapter boundaries instead of being forwarded to an agent.
 
 ## Built-in Tools
 
-The default catalog includes 39 tools organized into four categories.
+The default catalog includes 41 tools organized into four categories.
 
-### Data Tools (15)
+### Data Tools (17)
 
 Read-only tools with no on-chain side effects. Risk tier: **NONE**.
 
@@ -206,11 +206,13 @@ Read-only tools with no on-chain side effects. Risk tier: **NONE**.
 | `get_balance` | Get balance of a single token in a wallet | `token`, `chain`, `wallet_address` |
 | `batch_get_balances` | Get token balances for a wallet on a chain | `tokens`, `chain`, `wallet_address` |
 | `get_indicator` | Calculate technical indicator (RSI, SMA, EMA, MACD, BB, ATR) | `token`, `indicator`, `period`, `chain` |
-| `get_pool_state` | Get liquidity pool details (price, tick, TVL, fees) | `token_a`, `token_b`, `fee_tier`, `chain` |
+| `get_pool_state` | Resolve and read liquidity-pool state across supported pool families | `token_a`, `token_b`, `protocol`, `fee_tier`, `pool_address`, `chain` |
+| `resolve_pool_address` | Identify a pool or receipt-token address and verify its protocol, pair, pool type, and factory/registry provenance | `address`, `chain` |
 | `get_lp_position` | Get LP position details (range, liquidity, fees) | `position_id`, `chain` |
 | `list_lp_positions` | List all Uniswap V3-style LP positions owned by a wallet (compact per-position summary) | `wallet_address`, `chain` |
 | `list_lending_positions` | List a wallet's lending positions with account totals and health factor (Aave V3) | `wallet_address`, `chain` |
 | `list_lending_reserves` | List a lending protocol's reserves/markets with borrowable/active/collateral flags. Aave-style reserves enumerate live; market-keyed protocols (`morpho_blue`) list curated COLLATERAL/LOAN markets with their immutable `market_id` + LLTV | `protocol`, `asset`, `collateral`, `loan`, `chain` |
+| `list_token_pools` | List spot AMM venues for a token, including measured reserves and 24h volume | `token`, `chain`, `min_liquidity_usd` |
 | `get_portfolio` | Aggregate a wallet's on-chain state (native + ERC20 balances, LP positions, lending) | `wallet_address`, `chain` |
 | `resolve_token` | Resolve token symbol/address to full metadata | `token`, `chain` |
 | `get_risk_metrics` | Get portfolio risk metrics (VaR, Sharpe, vol, drawdown) | `chain` |

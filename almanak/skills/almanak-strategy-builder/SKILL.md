@@ -12,7 +12,7 @@ description: >-
   debugging strategy execution on Anvil forks. Do NOT use for general
   smart contract development, Solidity code, or non-strategy SDK internals.
 metadata:
-  version: "2.26.1"
+  version: "2.26.2"
   author: Almanak
   license: Apache-2.0
   type: documentation
@@ -484,7 +484,7 @@ Intent.lp_close(
     collect_fees=True,       # Collect accumulated fees
     protocol="uniswap_v3",
     amount=None,             # "all" = chain off prior LP_OPEN's minted LP (fungible-LP allowlist, e.g. Pendle)
-    max_slippage=None,       # Optional slippage bound on withdrawal min-amounts (Curve; default 50 bps)
+    max_slippage=None,       # Withdrawal floor for Curve/Aerodrome (each defaults to 50 bps)
     coin_index=None,         # Single-sided exit: withdraw all as one pool coin (Curve only, VIB-5437)
     imbalanced_amounts=None, # Exact per-coin exit amounts, fail-closed max-burn (Curve StableSwap only, VIB-5438)
 )
@@ -494,6 +494,12 @@ Intent.lp_close(
 > `imbalanced_amounts` routes via `remove_liquidity_imbalance`. They are mutually
 > exclusive; leave both `None` for the proportional all-coin close. Only connectors
 > declaring the `lp_close_exit_selectors` capability (currently Curve) compile them.
+
+> **LP close slippage:** Curve and classic Aerodrome consume `max_slippage` and
+> default to 50 bps when it is omitted. Aerodrome derives its minimum outputs from
+> the router's `quoteRemoveLiquidity` result and refuses compilation if it cannot
+> obtain a protective quote. Uniswap V3-family closes still ignore this field and
+> submit zero minimums, so setting it does not protect those exits.
 
 > `position_id` from `lp_open`'s result is the registry handle (VIB-4192 / T06b).
 > **Persist it in strategy state** (`self.state["lp_position_id"] = result.position_id`)

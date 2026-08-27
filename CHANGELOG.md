@@ -6,6 +6,61 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.26.2] - 2026-08-28
+
+### Added
+
+- **Connector-owned pool discovery and inspection.** Added pair resolution and
+  pool-state reads for Curve, Aerodrome Classic, and Uniswap V4, plus
+  factory/registry-verified address identification through the new
+  `resolve_pool_address` agent tool and `almanak ax pool <address>`. (#3800,
+  #3801, #3802)
+- **Managed test data gateway.** Added a persistent, credential-isolated data
+  gateway sidecar with readiness reporting and `ALMANAK_GATEWAY_NO_SPAWN`, so
+  managed clients fail loudly instead of silently spawning a keyless local
+  gateway. (#3803)
+
+### Changed
+
+- **Almanak Code updated to v1.0.55.** The bundled agent gains mid-turn
+  steering, improved linked-repository root-layout handling, cleaner turn
+  completion and cancellation behavior, and provider-neutral repository
+  wording. (#3798, #3808, #3809, #3811, #3812)
+- **Public guidance synchronized.** Updated agent-tool discovery, gateway
+  configuration, Aerodrome LP slippage guidance, and strategy-time
+  documentation across English, Chinese, French, and Spanish.
+
+### Fixed
+
+- **Leveraged lending NAV is debt-correct.** Lending supply legs remain gross
+  while debt is represented separately and netted exactly once, correcting
+  leveraged NAV, same-reserve lending valuation, and degraded accounting
+  fallbacks. (#3775)
+- **LP teardown reconciles NFT identity correctly.** Manager-qualified and bare
+  V3-family LP NFT identities are bridged only when unambiguous, preventing a
+  successful unwind from being reported as failed. (#3786)
+- **Exact OHLCV windows include the intended first bucket.** Pool-history
+  queries now anchor on the last expected timestamp instead of fetching an
+  extra end bucket and dropping the first requested interval. (#3783)
+- **On-demand gateways serve prices immediately.** `GetPrice` can initialize an
+  unconfigured chain without requiring a balance request first; provisioned
+  chain allowlists remain strict. (#3806)
+- **Curve pair resolution avoids redundant price calls.** Symbol prices are
+  memoized for each resolution sweep, including misses, preventing repeated
+  provider calls and timeouts. (#3807)
+- **Aerodrome Slipstream uses the correct known WETH/USDC pool.** Corrected the
+  connector-owned known-pool identity used during resolution. (#3800)
+- **Direct Uniswap V4 quotes tolerate slow forked nodes.** The direct-RPC
+  Quoter timeout now allows computation-heavy tick traversal to finish while
+  preserving fail-closed behavior.
+
+### Security
+
+- **Aerodrome Classic LP slippage is enforced.** Mint and burn compilation now
+  derives minimum amounts from router quotes, honors `max_slippage`, and fails
+  closed when safe floors cannot be established, eliminating zero-minimum
+  sandwich exposure. (#3796)
+
 ## [2.26.1] - 2026-08-20
 
 ### Added

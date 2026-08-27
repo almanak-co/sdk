@@ -147,6 +147,7 @@ almanak gateway --network anvil  # Start standalone for local Anvil testing
 # Direct DeFi actions (no strategy files needed)
 almanak ax price ETH                           # Get token price
 almanak ax balance USDC --chain base           # Check wallet balance
+almanak ax pool 0x0b1c...2d69 --chain base     # Identify and factory-verify a pool address
 almanak ax swap USDC ETH 100 --dry-run         # Simulate a swap
 almanak ax swap USDC ETH 100                   # Execute after confirmation
 almanak ax --chain polygon lending-reserves    # Which Aave reserves are borrowable/active before you configure a strategy

@@ -200,6 +200,7 @@ Load-bearing for hosted (Almanak Infra) deployments. Each variable is read once 
 | `ALMANAK_GATEWAY_AUTH_TOKEN` | Shared-secret token for gRPC authentication. When set, clients must provide this token in metadata to access services. **Required on hosted deployments.** |
 | `ALMANAK_GATEWAY_ALLOW_INSECURE` | When `true`, allows the gateway to start without `ALMANAK_GATEWAY_AUTH_TOKEN`. Default `false` (gateway refuses to start). **Local development only** — never set on hosted deployments. |
 | `ALMANAK_GATEWAY_OPERATOR_TOKEN` | Second-factor token (VIB-4493 Phase 1) required for mutation RPCs on `DashboardService` (`PreviewReconcile`, `ApplyReconcile`, `RefreshRegistryFromChain`). Callers must send the same value in the `x-operator-token` metadata header in addition to the regular auth token. When unset (default), the handlers fall back to auth-token-only — safe for single-user / local deployments. |
+| `ALMANAK_GATEWAY_NO_SPAWN` | Managed-environment guard for `almanak ax`. When `true`, a failed gateway connection is reported as an environment fault instead of silently auto-starting a local, uncredentialed gateway. Default `false`; set only where a platform-provisioned gateway is expected. |
 
 !!! danger "Hosted deployments are unsafe without these"
     Omitting `ALMANAK_GATEWAY_AUTH_TOKEN` (or enabling `ALMANAK_GATEWAY_ALLOW_INSECURE=true`) on a hosted gateway exposes every gRPC service to unauthenticated callers — including `ExecutionService`, which signs and submits transactions. Treat both as production secrets.

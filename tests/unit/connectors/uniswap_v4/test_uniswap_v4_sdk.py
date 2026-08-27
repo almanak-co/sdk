@@ -19,6 +19,7 @@ from almanak.connectors.uniswap_v4.sdk import (
     TICK_SPACING,
     UNISWAP_V4_GAS_ESTIMATES,
     UNIVERSAL_ROUTER_EXECUTE_SELECTOR,
+    V4_QUOTER_DIRECT_RPC_TIMEOUT_SECONDS,
     V4_SWAP_EXACT_IN_SINGLE,
     V4_SWAP_GAS_CEILING,
     V4_SWAP_ROUTER_OVERHEAD_GAS,
@@ -296,6 +297,21 @@ class TestGetQuote:
                     amount_in=100,
                     fee_tier=3000,
                 )
+
+    def test_direct_rpc_quote_uses_slow_call_timeout(self):
+        sdk = self._make_sdk()
+        encoded_result = (123).to_bytes(32, "big") + (456).to_bytes(32, "big")
+
+        with patch("almanak.connectors.uniswap_v4.sdk.eth_call", return_value=encoded_result) as mock_call:
+            quote = sdk.get_quote(
+                token_in=self.TOKEN_IN,
+                token_out=self.TOKEN_OUT,
+                amount_in=100,
+                fee_tier=3000,
+            )
+
+        assert quote.amount_out == 123
+        assert mock_call.call_args.kwargs["timeout"] == V4_QUOTER_DIRECT_RPC_TIMEOUT_SECONDS
 
     def test_no_result_raises_value_error(self):
         sdk = self._make_sdk()

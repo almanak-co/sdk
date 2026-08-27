@@ -257,6 +257,36 @@ Sans ces hooks, votre stratégie perdra tout son état interne au redémarrage. 
     - Stockez les valeurs `Decimal` sous forme de chaînes (`str(amount)`) et parsez-les au chargement (`Decimal(state["amount"])`) pour un aller-retour JSON sûr.
     - Le callback `on_intent_executed()` est l'endroit naturel pour mettre à jour l'état après un trade (par ex. stocker un nouvel ID de position), et `get_persistent_state()` le récupère ensuite pour la sauvegarde.
 
+## Le temps dans les stratégies { #time-in-strategies }
+
+Toute règle temporelle d'une stratégie — cooldown, cadence, compteur journalier ou « N heures depuis la dernière exécution » — doit utiliser **`market.timestamp`**, l'horloge du snapshot. N'utilisez jamais `datetime.now()` ou `time.time()` dans `decide()` ou `on_intent_executed()` pour une valeur qui influence une décision.
+
+En production, l'horloge réelle et l'horloge de marché concordent généralement, ce qui masque l'erreur. En backtest, plusieurs semaines sont rejouées en quelques minutes : un cooldown de 24 heures calculé avec l'horloge réelle n'expire jamais et la stratégie reste bloquée après son premier trade.
+
+`on_intent_executed()` ne reçoit pas de snapshot. Capturez donc son timestamp dans `decide()` et réutilisez-le dans le callback :
+
+```python
+class MyStrategy(IntentStrategy):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._last_buy_ts: datetime | None = None
+        self._pending_ts: datetime | None = None
+
+    def decide(self, market: MarketSnapshot) -> Intent:
+        now = market.timestamp
+        if self._last_buy_ts and now - self._last_buy_ts < timedelta(hours=24):
+            return Intent.hold(reason="Cadence: waiting for next 24h window")
+        self._pending_ts = now
+        return Intent.swap(...)
+
+    def on_intent_executed(self, intent, success, result) -> None:
+        if success and self._pending_ts is not None:
+            self._last_buy_ts = self._pending_ts
+            self._pending_ts = None
+```
+
+L'horloge réelle reste acceptable uniquement pour les champs de reporting qui ne participent jamais à une décision, comme les logs ou les libellés « généré à » du dashboard.
+
 ## Démontage de la stratégie (requis)
 
 Chaque stratégie doit implémenter le démontage pour que les opérateurs puissent fermer les positions en toute sécurité. Sans démontage, les demandes de fermeture sont silencieusement ignorées et les positions restent ouvertes. Les templates `almanak strat new` incluent des stubs -- remplissez-les au fur et à mesure que vous construisez votre stratégie.

@@ -68,6 +68,12 @@ TICK_SPACING: dict[int, int] = V4_DEFAULT_TICK_SPACING
 
 FEE_TIERS: list[int] = [100, 500, 3000, 10000]
 
+# Direct-RPC V4 quotes can be computation-heavy on forked nodes because the
+# Quoter simulates every crossed tick. Keep enough headroom for local Anvil and
+# other direct-RPC callers while preserving the adapter's fail-closed behavior.
+# Gateway-routed calls do not use this requests timeout.
+V4_QUOTER_DIRECT_RPC_TIMEOUT_SECONDS = 30.0
+
 # Zero address represents native ETH in V4
 NATIVE_CURRENCY = "0x0000000000000000000000000000000000000000"
 
@@ -742,7 +748,7 @@ class UniswapV4SDK:
                 data=calldata,
                 rpc_url=rpc_url or self.rpc_url,
                 gateway_client=self._gateway_client,
-                timeout=10.0,
+                timeout=V4_QUOTER_DIRECT_RPC_TIMEOUT_SECONDS,
             )
         except Exception as exc:
             raise ValueError(f"V4 Quoter quoteExactInputSingle failed: {exc}") from exc

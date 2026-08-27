@@ -253,6 +253,36 @@ class MyStrategy(IntentStrategy):
     - 将 `Decimal` 值存储为字符串（`str(amount)`）并在读取时解析（`Decimal(state["amount"])`），以确保 JSON 往返安全。
     - `on_intent_executed()` 回调是在交易后更新状态的最佳位置（例如存储新的头寸 ID），然后 `get_persistent_state()` 会在保存时获取它。
 
+## 策略中的时间 { #time-in-strategies }
+
+策略中所有基于时间的规则（冷却、交易节奏、每日计数器以及“距离上次成交 N 小时”）都必须使用 **`market.timestamp`**，即市场快照的时钟。不要在 `decide()` 或 `on_intent_executed()` 中使用 `datetime.now()` 或 `time.time()` 来驱动交易决策。
+
+实时交易中墙上时钟与市场时钟通常一致，因此错误实现看起来可以工作；但回测会在几分钟内重放数周的模拟时间。若用墙上时钟计算 24 小时冷却，冷却将永远不会到期，策略会在首次交易后一直持有。
+
+`on_intent_executed()` 不接收市场快照，因此应在 `decide()` 中保存快照时间，并在回调中复用：
+
+```python
+class MyStrategy(IntentStrategy):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._last_buy_ts: datetime | None = None
+        self._pending_ts: datetime | None = None
+
+    def decide(self, market: MarketSnapshot) -> Intent:
+        now = market.timestamp
+        if self._last_buy_ts and now - self._last_buy_ts < timedelta(hours=24):
+            return Intent.hold(reason="Cadence: waiting for next 24h window")
+        self._pending_ts = now
+        return Intent.swap(...)
+
+    def on_intent_executed(self, intent, success, result) -> None:
+        if success and self._pending_ts is not None:
+            self._last_buy_ts = self._pending_ts
+            self._pending_ts = None
+```
+
+墙上时钟仅适用于永远不会影响决策的报告字段，例如日志或仪表板中的“生成时间”。
+
 ## 策略拆卸（必需）
 
 每个策略都必须实现拆卸功能，以便运营者可以安全地关闭头寸。没有拆卸功能，关闭请求会被静默忽略，头寸将保持开启状态。`almanak strat new` 模板包含存根 -- 在构建策略时填写它们。

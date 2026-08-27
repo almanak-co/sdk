@@ -93,6 +93,7 @@
 | `ALMANAK_GATEWAY_AUTH_TOKEN` | gRPC 身份验证的共享密钥令牌。设置后，客户端必须在元数据中提供此令牌才能访问服务。**托管部署上必须设置。** |
 | `ALMANAK_GATEWAY_ALLOW_INSECURE` | 设置为 `true` 时，允许网关在未设置 `ALMANAK_GATEWAY_AUTH_TOKEN` 的情况下启动。默认 `false`（网关拒绝启动）。**仅限本地开发** — 切勿在托管部署上设置。 |
 | `ALMANAK_GATEWAY_OPERATOR_TOKEN` | `DashboardService` 上变更类 RPC（`PreviewReconcile`、`ApplyReconcile`、`RefreshRegistryFromChain`）所需的二次因子令牌（VIB-4493 第一阶段）。调用方必须在 `x-operator-token` 元数据头中发送相同的值，同时还要带上常规的身份验证令牌。未设置（默认）时，这些处理程序回退到仅 auth-token 验证 — 对单用户 / 本地部署是安全的。 |
+| `ALMANAK_GATEWAY_NO_SPAWN` | `almanak ax` 的托管环境保护开关。设置为 `true` 时，网关连接失败会被报告为环境故障，而不会静默启动一个没有凭据的本地网关。默认 `false`；仅在预期使用平台预置网关的环境中设置。 |
 
 !!! danger "未设置这些变量的托管部署不安全"
     在托管网关上省略 `ALMANAK_GATEWAY_AUTH_TOKEN`（或启用 `ALMANAK_GATEWAY_ALLOW_INSECURE=true`）会将每个 gRPC 服务暴露给未经身份验证的调用方 — 包括对交易进行签名和提交的 `ExecutionService`。请将两者都视为生产环境的密钥。
