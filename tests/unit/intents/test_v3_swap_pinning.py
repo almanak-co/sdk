@@ -508,6 +508,10 @@ class TestCompilerPoolAddressPinning:
         assert metadata["selected_fee_tier"] == 500
         assert metadata["fee_selection_source"] == "intent_pinned"
         assert metadata["pinned_pool"] == PINNED_POOL
+        # A pinned pool must also stamp the venue binding it was resolved
+        # against — without this the metadata assertions above still pass when
+        # the binding is never computed (PR #3745).
+        assert metadata["venue_binding_hash"] == "a" * 64
 
     def test_alm_3241_b_alm_3227_pinned_pool_pair_mismatch_fails_closed(
         self, monkeypatch: pytest.MonkeyPatch
