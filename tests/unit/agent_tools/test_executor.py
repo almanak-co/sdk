@@ -2628,3 +2628,43 @@ class TestListReadCommands:
         ok, msg = executor._rpc_call("arbitrum", "0xabc", "0x70a08231", "test")
         assert ok is False
         assert "INSUFFICIENT_LIQUIDITY" in msg
+
+
+class TestOrientedPriceFields:
+    """_oriented_price_fields (ALM-3446): direction-carrying price payload."""
+
+    def test_labeled_when_symbols_available(self):
+        from almanak.framework.agent_tools.executor import _oriented_price_fields
+
+        f = _oriented_price_fields(2415.5174758105245, "USDC", "ALMANAK")
+        assert f["price_token1_per_token0"] == "2415.5174758105245"
+        assert float(f["price_token0_per_token1"]) == pytest.approx(1 / 2415.5174758105245)
+        assert f["price_label"].startswith("1 USDC = 2415.5174758105245 ALMANAK; 1 ALMANAK = 0.000413")
+        assert f["price_label"].endswith("USDC")
+
+    def test_zero_price_leaves_inverse_and_label_unmeasured(self):
+        from almanak.framework.agent_tools.executor import _oriented_price_fields
+
+        f = _oriented_price_fields(0, "USDC", "ALMANAK")
+        assert f["price_token1_per_token0"] == "0"
+        # Empty != Zero: no fabricated reciprocal for an uninitialized pool.
+        assert f["price_token0_per_token1"] == ""
+        assert f["price_label"] == ""
+
+    def test_no_symbols_gives_directional_fields_without_label(self):
+        from almanak.framework.agent_tools.executor import _oriented_price_fields
+
+        f = _oriented_price_fields(1.5)
+        assert f["price_token1_per_token0"] == "1.5"
+        assert float(f["price_token0_per_token1"]) == pytest.approx(1 / 1.5)
+        assert f["price_label"] == ""
+
+    @pytest.mark.parametrize("bad_price", ["NaN", "Infinity", "-Infinity", -1.5, "not-a-number"])
+    def test_non_finite_or_negative_price_leaves_inverse_and_label_unmeasured(self, bad_price):
+        from almanak.framework.agent_tools.executor import _oriented_price_fields
+
+        f = _oriented_price_fields(bad_price, "USDC", "ALMANAK")
+        # NaN/Infinity are truthy and divide without raising (1/Inf == 0);
+        # none of these have a usable reciprocal — Empty != Zero.
+        assert f["price_token0_per_token1"] == ""
+        assert f["price_label"] == ""

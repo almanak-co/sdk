@@ -138,6 +138,16 @@ async def test_get_pool_state_uniswap_v3_arbitrum_golden() -> None:
     # Price is derived deterministically from sqrt_price + token decimals.
     expected_raw = (sqrt_price_x96 / 2**96) ** 2
     assert d["current_price_raw"] == str(expected_raw)
+    # Oriented price fields (ALM-3446): both legs present, mutually inverse,
+    # and the label names each leg's unit so the direction cannot be misread.
+    # WETH (0x82aF…) < USDC (0xaf88…) on arbitrum, so token0=WETH, token1=USDC.
+    assert d["token0"] == "WETH"
+    assert d["token1"] == "USDC"
+    assert d["price_token1_per_token0"] == d["current_price"]
+    assert float(d["price_token0_per_token1"]) == pytest.approx(1 / float(d["current_price"]))
+    assert d["price_label"] == (
+        f"1 WETH = {d['current_price']} USDC; 1 USDC = {d['price_token0_per_token1']} WETH"
+    )
 
 
 @pytest.mark.asyncio

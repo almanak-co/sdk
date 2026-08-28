@@ -239,6 +239,33 @@ def _coerce_floats_to_str(obj: Any) -> Any:
     return obj
 
 
+def _oriented_price_fields(price: Any, sym0: str | None = None, sym1: str | None = None) -> dict[str, str]:
+    """Directional pool-price fields (ALM-3446).
+
+    ``current_price`` is a bare token1-per-token0 ratio whose direction is not
+    stated in the payload itself, and consumers have surfaced it inverted.
+    Emit both legs under names that carry the direction, plus a human label
+    when token symbols are available. A zero, negative, or non-finite price
+    yields ``""`` (unmeasured) for the inverse and label — never a fabricated
+    reciprocal (Empty != Zero).
+    """
+    try:
+        parsed = Decimal(str(price))
+    except (InvalidOperation, ValueError):
+        parsed = None
+    # NaN/Infinity are truthy and divide without raising (1/Inf == 0, a
+    # fabricated zero); only a finite positive price has a usable reciprocal.
+    inverse = str(Decimal(1) / parsed) if parsed is not None and parsed.is_finite() and parsed > 0 else ""
+    label = ""
+    if inverse and sym0 is not None and sym1 is not None:
+        label = f"1 {sym0} = {price} {sym1}; 1 {sym1} = {inverse} {sym0}"
+    return {
+        "price_token1_per_token0": str(price),
+        "price_token0_per_token1": inverse,
+        "price_label": label,
+    }
+
+
 def _decode_int24(word_hex: str) -> int:
     """Decode an ABI-encoded int24 value from a 32-byte hex word.
 
@@ -2489,6 +2516,9 @@ class ToolExecutor:
         data = {
             "pool_address": pool_address,
             "current_price": str(state.price),
+            # No token symbols on this lane (PoolPrice carries only decimals),
+            # so the directional field names disambiguate and the label stays "".
+            **_oriented_price_fields(state.price),
             "tick": state.tick,
             "liquidity": str(state.liquidity or 0),
             "fee_tier": state.fee_tier,
@@ -2630,6 +2660,9 @@ class ToolExecutor:
         decimal_adjustment = 10 ** (token0.decimals - token1.decimals)
         adjusted_price = raw_price * decimal_adjustment
 
+        sym0 = token0.symbol if hasattr(token0, "symbol") else str(token0.address)
+        sym1 = token1.symbol if hasattr(token1, "symbol") else str(token1.address)
+
         # Off-chain analytics (24h volume / fee APR / TVL) via the gateway's
         # existing PoolAnalyticsService (VIB-4727: DefiLlama primary,
         # CoinGecko Onchain fallback). Strictly best-effort: any
@@ -2643,6 +2676,7 @@ class ToolExecutor:
                 "pool_address": pool_address,
                 "current_price": str(adjusted_price),
                 "current_price_raw": str(raw_price),
+                **_oriented_price_fields(adjusted_price, sym0, sym1),
                 "tick": tick,
                 "liquidity": str(liquidity),
                 "sqrt_price_x96": str(sqrt_price_x96),
@@ -2650,8 +2684,8 @@ class ToolExecutor:
                 # tier (unmeasured — never fabricated).
                 "fee_tier": fee_tier,
                 "fee_tier_source": fee_tier_source,
-                "token0": token0.symbol if hasattr(token0, "symbol") else str(token0.address),
-                "token1": token1.symbol if hasattr(token1, "symbol") else str(token1.address),
+                "token0": sym0,
+                "token1": sym1,
                 "token0_decimals": token0.decimals,
                 "token1_decimals": token1.decimals,
                 "volume_24h_usd": analytics["volume_24h_usd"],
