@@ -160,6 +160,8 @@ class TestDexScreenerFetchPrice:
                 "priceUsd": "84.50",
                 "liquidity": {"usd": 5000000},
                 "volume": {"h24": 1000000},
+                "baseToken": {"address": "So11111111111111111111111111111111111111112", "symbol": "SOL"},
+                "quoteToken": {"address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", "symbol": "USDC"},
             }
         ]
 
@@ -207,6 +209,8 @@ class TestDexScreenerFetchPrice:
                 "priceUsd": "0.001",
                 "liquidity": {"usd": 100},  # Below 10k minimum
                 "volume": {"h24": 100},
+                "baseToken": {"address": "So11111111111111111111111111111111111111112", "symbol": "SOL"},
+                "quoteToken": {"address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", "symbol": "USDC"},
             }
         ]
 

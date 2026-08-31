@@ -23,15 +23,34 @@ from almanak.framework.data.tokens import ResolvedToken
 from almanak.gateway.data.price.dexscreener import DexScreenerPriceSource
 
 
-def _pair_json(price: str, chain_id: str, liquidity_usd: float = 5_000_000) -> list[dict]:
-    return [
-        {
-            "chainId": chain_id,
-            "priceUsd": price,
-            "liquidity": {"usd": liquidity_usd},
-            "volume": {"h24": 1_000_000},
-        }
-    ]
+_TEST_ADDRESS = "0x1234567890aBcDeF1234567890AbCdEf12345678"
+
+
+def _pair(
+    price: str,
+    chain_id: str,
+    liquidity_usd: float = 5_000_000,
+    base_address: str = _TEST_ADDRESS,
+    base_symbol: str = "FOO",
+    quote_address: str = "0x000000000000000000000000000000000000dEaD",
+    quote_symbol: str = "USDX",
+    price_native: str | None = None,
+) -> dict:
+    pair = {
+        "chainId": chain_id,
+        "priceUsd": price,
+        "liquidity": {"usd": liquidity_usd},
+        "volume": {"h24": 1_000_000},
+        "baseToken": {"address": base_address, "symbol": base_symbol},
+        "quoteToken": {"address": quote_address, "symbol": quote_symbol},
+    }
+    if price_native is not None:
+        pair["priceNative"] = price_native
+    return pair
+
+
+def _pair_json(price: str, chain_id: str, liquidity_usd: float = 5_000_000, **kwargs) -> list[dict]:
+    return [_pair(price, chain_id, liquidity_usd, **kwargs)]
 
 
 def _mock_session(source: DexScreenerPriceSource):
@@ -154,127 +173,212 @@ async def test_unsupported_chain_raises_chain_unsupported_skip():
     assert "chain_unsupported:no-such-chain" in str(exc_info.value)
 
 
+def _resolved(address: str, chain: str, symbol: str) -> MagicMock:
+    chain_mock = MagicMock()
+    chain_mock.value = chain
+    token = MagicMock()
+    token.address = address
+    token.chain = chain_mock
+    token.symbol = symbol
+    return token
+
+
+_BASE_USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+_BASE_AERO = "0x940181a94A35A4569E4529A3CDfB74e38FD98631"
+_BASE_USDBC = "0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA"
+
+
 @pytest.mark.asyncio
-async def test_lst_quarantine_wsteth_ethereum_raises_skip():
-    """VIB-4439 F1 (B2): WSTETH on Ethereum is in the LST quarantine list.
-
-    DexScreener's wstETH/USD price on Ethereum is structurally unreliable
-    (the dominant pool is wstETH/WETH, no direct USD liquidity), and the
-    fixture run on 2026-05-15 observed DexScreener returning $97.31 vs the
-    Chainlink truth ~$3500. The quarantine raises
-    ``DataSourceUnavailable(reason="quarantined_lst_token:WSTETH:ethereum")``
-    so the aggregator skips this source on this specific token+chain and
-    consensus on the working oracles (Chainlink direct + Chainlink derived
-    + CoinGecko).
-    """
+async def test_orientation_prefers_base_side_pair_over_deeper_quote_side():
+    """ALM-3147 negative control (Base USDC, 2026-08-31): the deepest Base
+    pool has USDC as the QUOTE token, so liquidity-only selection returned
+    AERO's $0.48 as USDC's price. A base-side pair must win regardless of
+    liquidity. Fails on the pre-orientation code."""
     source = DexScreenerPriceSource(cache_ttl=30)
+    usdc = _resolved(_BASE_USDC, "base", "USDC")
 
-    eth_chain = MagicMock()
-    eth_chain.value = "ethereum"
-    wsteth_token = MagicMock()
-    wsteth_token.address = "0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0"  # mainnet wstETH
-    wsteth_token.chain = eth_chain
-    wsteth_token.symbol = "WSTETH"
+    _captured, set_payload, patcher = _mock_session(source)
+    set_payload(
+        [
+            _pair(
+                "0.48",
+                chain_id="base",
+                liquidity_usd=28_000_000,
+                base_address=_BASE_AERO,
+                base_symbol="AERO",
+                quote_address=_BASE_USDC,
+                quote_symbol="USDC",
+                price_native="0.48",
+            ),
+            _pair(
+                "1.0001",
+                chain_id="base",
+                liquidity_usd=180_000,
+                base_address=_BASE_USDC,
+                base_symbol="USDC",
+                quote_address=_BASE_USDBC,
+                quote_symbol="USDbC",
+            ),
+        ]
+    )
 
-    with pytest.raises(DataSourceUnavailable) as exc_info:
-        await source.get_price("WSTETH", "USD", resolved_token=wsteth_token)
+    with patcher:
+        result = await source.get_price(_BASE_USDC, "USD", resolved_token=usdc)
 
-    assert "quarantined_lst_token:WSTETH:ethereum" in str(exc_info.value), (
-        f"DexScreener must raise quarantined_lst_token for WSTETH on Ethereum. "
-        f"Got: {exc_info.value!r}"
+    assert result.price == Decimal("1.0001"), (
+        f"Base-side pair must win over a deeper quote-side pair — returning the "
+        f"quote-side priceUsd is AERO's price, not USDC's. Got: {result.price}"
     )
 
 
 @pytest.mark.asyncio
-async def test_lst_quarantine_matches_resolved_symbol_not_raw_token() -> None:
-    """CodeRabbit on PR #2323: the quarantine must match against the
-    ``resolved_token.symbol`` (not the raw ``token`` argument) so an
-    address-based call ("0x7f39..." rather than "WSTETH") cannot bypass it.
-    This is the typical path from the aggregator's address-based lookup.
-    """
+async def test_orientation_inverts_quote_side_when_no_base_side_pair():
+    """When the requested token appears ONLY as the quote leg, the price is
+    recovered by inverting ``priceUsd / priceNative`` — never by returning
+    the base token's price. AERO/USDC with AERO at $0.48 and priceNative
+    0.48 USDC-per-AERO implies USDC = $1.00."""
     source = DexScreenerPriceSource(cache_ttl=30)
+    usdc = _resolved(_BASE_USDC, "base", "USDC")
 
-    eth_chain = MagicMock()
-    eth_chain.value = "ethereum"
-    wsteth_token = MagicMock()
-    wsteth_token.address = "0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0"
-    wsteth_token.chain = eth_chain
-    wsteth_token.symbol = "WSTETH"
+    _captured, set_payload, patcher = _mock_session(source)
+    set_payload(
+        [
+            _pair(
+                "0.48",
+                chain_id="base",
+                liquidity_usd=28_000_000,
+                base_address=_BASE_AERO,
+                base_symbol="AERO",
+                quote_address=_BASE_USDC,
+                quote_symbol="USDC",
+                price_native="0.48",
+            ),
+        ]
+    )
 
-    # Call with the ADDRESS as the ``token`` arg — the path that previously
-    # slipped past the quarantine when the check used ``token.upper()``.
-    with pytest.raises(DataSourceUnavailable) as exc_info:
-        await source.get_price(wsteth_token.address, "USD", resolved_token=wsteth_token)
+    with patcher:
+        result = await source.get_price(_BASE_USDC, "USD", resolved_token=usdc)
 
-    assert "quarantined_lst_token:WSTETH:ethereum" in str(exc_info.value), (
-        f"Quarantine must match resolved_token.symbol even when token arg is "
-        f"an address. Got: {exc_info.value!r}"
+    assert result.price == Decimal("1"), (
+        f"Quote-side-only token must be priced via priceUsd/priceNative inversion. Got: {result.price}"
     )
 
 
 @pytest.mark.asyncio
-async def test_lst_quarantine_does_not_apply_to_other_chains():
-    """The quarantine is per-(token, chain). The same wstETH symbol on a
-    different chain is NOT quarantined — DexScreener may have a working
-    USD pool there. Today only the WSTETH+ethereum pair is quarantined."""
-    from unittest.mock import patch
-
+async def test_orientation_quote_side_with_unusable_price_native_raises_skip():
+    """A quote-side pair whose ``priceNative`` is missing/zero cannot be
+    inverted — the source must opt out with DataSourceUnavailable rather
+    than fall back to the base token's price."""
     source = DexScreenerPriceSource(cache_ttl=30)
+    usdc = _resolved(_BASE_USDC, "base", "USDC")
 
-    op_chain = MagicMock()
-    op_chain.value = "optimism"
-    wsteth_op = MagicMock()
-    wsteth_op.address = "0x1F32b1c2345538c0c6f582fCB022739c4A194Ebb"  # OP wstETH
-    wsteth_op.chain = op_chain
-    wsteth_op.symbol = "WSTETH"
+    _captured, set_payload, patcher = _mock_session(source)
+    set_payload(
+        [
+            _pair(
+                "0.48",
+                chain_id="base",
+                liquidity_usd=28_000_000,
+                base_address=_BASE_AERO,
+                base_symbol="AERO",
+                quote_address=_BASE_USDC,
+                quote_symbol="USDC",
+                price_native="0",
+            ),
+        ]
+    )
 
-    # Patch _fetch_price so the test does not hit the real DexScreener API.
-    # The quarantine check fires BEFORE _fetch_price; we just need to prove
-    # the call reaches _fetch_price (i.e., the quarantine did NOT trip).
-    with patch.object(
-        source,
-        "_fetch_price",
-        side_effect=DataSourceUnavailable(source="dexscreener", reason="mocked_no_data"),
-    ):
-        with pytest.raises(DataSourceUnavailable) as exc_info:
-            await source.get_price("WSTETH", "USD", resolved_token=wsteth_op)
+    with patcher:
+        with pytest.raises(DataSourceUnavailable, match="No liquid pair"):
+            await source.get_price(_BASE_USDC, "USD", resolved_token=usdc)
 
-    # Must reach the patched _fetch_price (mocked_no_data) — quarantine
-    # must not short-circuit for chains other than ethereum.
-    assert "mocked_no_data" in str(exc_info.value), (
-        f"Quarantine should NOT apply to wstETH on optimism — get_price must "
-        f"reach _fetch_price. Got: {exc_info.value!r}"
+
+@pytest.mark.asyncio
+async def test_wsteth_ethereum_prices_via_base_side_pair_without_quarantine():
+    """The VIB-4439 wstETH incident ($97 vs ~$3500) was this same bug:
+    the deepest pool is AAVE/wstETH. The per-token quarantine is deleted;
+    the orientation check must pick the base-side wstETH/WETH pair."""
+    source = DexScreenerPriceSource(cache_ttl=30)
+    wsteth_addr = "0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0"
+    wsteth = _resolved(wsteth_addr, "ethereum", "WSTETH")
+
+    _captured, set_payload, patcher = _mock_session(source)
+    set_payload(
+        [
+            _pair(
+                "122.88",  # AAVE's price — the pre-fix corruption
+                chain_id="ethereum",
+                liquidity_usd=10_336_070,
+                base_address="0x7Fc66500c84A76Ad7e9c93437bFc5Ac33E2DDaE9",
+                base_symbol="AAVE",
+                quote_address=wsteth_addr,
+                quote_symbol="wstETH",
+                price_native="0.04058",
+            ),
+            _pair(
+                "3039.32",
+                chain_id="ethereum",
+                liquidity_usd=6_064_730,
+                base_address=wsteth_addr,
+                base_symbol="wstETH",
+                quote_address="0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+                quote_symbol="WETH",
+            ),
+        ]
+    )
+
+    with patcher:
+        result = await source.get_price("WSTETH", "USD", resolved_token=wsteth)
+
+    assert result.price == Decimal("3039.32"), (
+        f"wstETH must price from its base-side pair, not the deeper AAVE/wstETH "
+        f"pool's base price. Got: {result.price}"
     )
 
 
 @pytest.mark.asyncio
-async def test_lst_quarantine_does_not_apply_to_non_lst_tokens_on_ethereum():
-    """The quarantine is per-(token, chain). Tokens other than WSTETH on
-    Ethereum are NOT quarantined — DexScreener is the correct source for
-    most ERC-20s with real USD liquidity."""
-    from unittest.mock import patch
+async def test_symbol_search_requires_symbol_match():
+    """The symbol-search fallback (no address available) returns pairs for
+    whatever the free-text query matched. A pair whose base AND quote are
+    both other tokens must be discarded instead of priced."""
+    source = DexScreenerPriceSource(default_chain_id="base", cache_ttl=30)
 
-    source = DexScreenerPriceSource(cache_ttl=30)
-
-    eth_chain = MagicMock()
-    eth_chain.value = "ethereum"
-    usdc_token = MagicMock()
-    usdc_token.address = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
-    usdc_token.chain = eth_chain
-    usdc_token.symbol = "USDC"
-
-    with patch.object(
-        source,
-        "_fetch_price",
-        side_effect=DataSourceUnavailable(source="dexscreener", reason="mocked_no_data"),
-    ):
-        with pytest.raises(DataSourceUnavailable) as exc_info:
-            await source.get_price("USDC", "USD", resolved_token=usdc_token)
-
-    assert "mocked_no_data" in str(exc_info.value), (
-        f"Quarantine should NOT apply to USDC on ethereum — get_price must "
-        f"reach _fetch_price. Got: {exc_info.value!r}"
+    _captured, set_payload, patcher = _mock_session(source)
+    # The search endpoint wraps results in {"pairs": [...]} (unlike the
+    # token-pairs endpoint, which returns a bare list).
+    set_payload(
+        {
+            "pairs": [
+                _pair(
+                    "5.23",
+                    chain_id="base",
+                    base_symbol="SOMETOKEN",
+                    quote_symbol="WETH",
+                ),
+            ]
+        }
     )
+
+    with patcher:
+        with pytest.raises(DataSourceUnavailable, match="No liquid pair"):
+            await source.get_price("ZZZUNKNOWN", "USD", resolved_token=None)
+
+    # Same payload, but the base side actually IS the requested symbol.
+    set_payload(
+        {
+            "pairs": [
+                _pair(
+                    "5.23",
+                    chain_id="base",
+                    base_symbol="ZZZUNKNOWN",
+                    quote_symbol="WETH",
+                ),
+            ]
+        }
+    )
+    with patcher:
+        result = await source.get_price("ZZZUNKNOWN", "USD", resolved_token=None)
+    assert result.price == Decimal("5.23")
 
 
 @pytest.mark.asyncio
@@ -295,7 +399,14 @@ async def test_default_chain_preserves_legacy_behavior():
     source = DexScreenerPriceSource(default_chain_id="solana", cache_ttl=30)
 
     captured, set_payload, patcher = _mock_session(source)
-    set_payload(_pair_json("84.50", chain_id="solana"))
+    set_payload(
+        _pair_json(
+            "84.50",
+            chain_id="solana",
+            base_address="So11111111111111111111111111111111111111112",
+            base_symbol="SOL",
+        )
+    )
 
     with patcher:
         # No resolved_token → fall back to the default chain.
@@ -317,7 +428,14 @@ async def test_resolved_token_chain_overrides_default_chain_id():
     source = DexScreenerPriceSource(default_chain_id="solana", cache_ttl=30)
 
     captured, set_payload, patcher = _mock_session(source)
-    set_payload(_pair_json("3200.00", chain_id="ethereum"))
+    set_payload(
+        _pair_json(
+            "3200.00",
+            chain_id="ethereum",
+            base_address="0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+            base_symbol="WETH",
+        )
+    )
 
     eth_chain = MagicMock()
     eth_chain.value = "ethereum"

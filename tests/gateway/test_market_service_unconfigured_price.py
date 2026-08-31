@@ -205,3 +205,42 @@ class TestGetPriceOnDemandChain:
         ctx.set_code.assert_called_once_with(grpc.StatusCode.INVALID_ARGUMENT)
         ctx.set_details.assert_called_once_with("Chain 'arbitrum' is not configured on this gateway")
         assert response.price == ""
+
+
+class TestIdentityResolutionOnDemand:
+    """ALM-3147 companion: the identity gate in ``_resolve_token_for_pricing``
+    read ``settings.chains`` directly, so an on-demand gateway never produced
+    a ResolvedToken — losing the peg fast-path and address-based lookups even
+    though GetPrice itself served the chain. The gate must use the same
+    servable-chain predicate as GetPrice."""
+
+    BASE_USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+
+    @pytest.mark.asyncio
+    async def test_identity_resolves_on_unconfigured_gateway(self):
+        from almanak.framework.data.tokens.pegs import is_pegged
+
+        servicer = _servicer([])
+
+        resolved = await servicer._resolve_token_for_pricing(self.BASE_USDC, "base")
+
+        assert resolved is not None, (
+            "Static-registry identity must resolve on an unconfigured (on-demand) "
+            "gateway — it is an in-memory lookup, not an RPC call."
+        )
+        assert resolved.symbol == "USDC"
+        assert resolved.chain == "base"
+        assert is_pegged(resolved.token_ref) is not None, (
+            "Base USDC's registry peg must survive resolution — this is what "
+            "authorizes the aggregator's peg fast-path."
+        )
+
+    @pytest.mark.asyncio
+    async def test_identity_gate_stays_hard_for_provisioned_gateways(self):
+        """Once any chain is provisioned the allowlist is a hard boundary for
+        identity resolution too — same contract as GetPrice's own gate."""
+        servicer = _servicer(["arbitrum"])
+
+        resolved = await servicer._resolve_token_for_pricing(self.BASE_USDC, "base")
+
+        assert resolved is None

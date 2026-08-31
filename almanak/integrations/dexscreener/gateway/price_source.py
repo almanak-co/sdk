@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -207,31 +208,6 @@ class _LazyKnownTokenAddresses(dict[str, dict[str, str]]):
 
 
 _KNOWN_TOKEN_ADDRESSES: dict[str, dict[str, str]] = _LazyKnownTokenAddresses()
-
-
-# VIB-4439 / MorphoMay15 F1 (B2): DexScreener's price for liquid-staking tokens
-# is structurally unreliable on chains where the dominant on-DEX pair is the
-# LST/native pair (e.g. wstETH/WETH on Ethereum) — there is no direct USD
-# liquidity for DexScreener to read, so the API returns the price from a low-
-# liquidity USD-paired pool, producing values that diverge wildly from the
-# Chainlink truth. Combined with the F1 B3 fail-closed semantic, a broken
-# DexScreener number is enough to halt valid Morpho strategies on Ethereum.
-#
-# Each entry below is keyed by (TOKEN_UPPER, chain_name) — both must match for
-# the quarantine to apply. The list is intentionally narrow: only add tokens
-# whose DexScreener output has been observed to diverge from at least one
-# independent oracle by > the aggregator outlier threshold (default 2 %) on a
-# real fork run, and document the run / VIB ticket in the comment beside it.
-# Other chains where the same token DOES have direct USD liquidity (e.g.
-# wstETH on optimism with WSTETH/USDC pools) stay unquarantined.
-_DEXSCREENER_QUARANTINED_TOKEN_CHAINS: frozenset[tuple[str, str]] = frozenset(
-    {
-        # wstETH on Ethereum mainnet — DexScreener returned $97.31 vs
-        # Chainlink WSTETH/USD ~$3500 during the Morpho looping fixture run
-        # on 2026-05-15 (see docs/internal/MorphoMay15.md §6.1).
-        ("WSTETH", "ethereum"),
-    }
-)
 
 
 @dataclass
@@ -476,25 +452,6 @@ class DexScreenerPriceSource(BasePriceSource):
         # safe to share across a multi-chain gateway.
         chain_name, platform = self._resolve_chain_for_call(resolved_token)
 
-        # VIB-4439 F1 (B2): quarantine LST × chain pairs where DexScreener's
-        # pool-based pricing diverges from independent oracles. Raising
-        # DataSourceUnavailable lets the aggregator skip this source and
-        # consensus on the others (Chainlink direct + Chainlink derived +
-        # CoinGecko). Without the quarantine, DexScreener pollutes the median
-        # for tokens it can't price reliably (see comment on
-        # ``_DEXSCREENER_QUARANTINED_TOKEN_CHAINS`` for the criteria).
-        #
-        # Match against ``resolved_token.symbol`` first when available so an
-        # address-based call ("0x7f39..." rather than "WSTETH") cannot bypass
-        # the quarantine. Only fall back to ``token.upper()`` when the caller
-        # has not resolved the token yet — keeps the symbol path covered.
-        quarantine_symbol = (getattr(resolved_token, "symbol", None) or token).upper()
-        if (quarantine_symbol, chain_name) in _DEXSCREENER_QUARANTINED_TOKEN_CHAINS:
-            raise DataSourceUnavailable(
-                source=self.source_name,
-                reason=f"quarantined_lst_token:{quarantine_symbol}:{chain_name}",
-            )
-
         cache_key = self._cache_key_for(chain_name, token, quote, resolved_token)
 
         # Check fresh cache
@@ -597,27 +554,15 @@ class DexScreenerPriceSource(BasePriceSource):
                 reason=f"No pairs found for '{token}' on {platform}",
             )
 
-        best = self._pick_best_pair(chain_pairs)
-        if best is None:
+        picked = self._pick_best_pair(chain_pairs, address=address, token=token)
+        if picked is None:
             raise DataSourceUnavailable(
                 source="dexscreener",
-                reason=f"No liquid pair for '{token}' on {platform} (min ${self._min_liquidity_usd})",
+                reason=(
+                    f"No liquid pair with '{token}' on a matched side on {platform} (min ${self._min_liquidity_usd})"
+                ),
             )
-
-        price_str = best.get("priceUsd", "0")
-        try:
-            price = Decimal(str(price_str))
-        except Exception as e:
-            raise DataSourceUnavailable(
-                source="dexscreener",
-                reason=f"Invalid price '{price_str}' for {token}",
-            ) from e
-
-        if price <= 0:
-            raise DataSourceUnavailable(
-                source="dexscreener",
-                reason=f"Zero/negative price for {token}",
-            )
+        best, price = picked
 
         confidence = self._calculate_confidence(best)
 
@@ -647,23 +592,83 @@ class DexScreenerPriceSource(BasePriceSource):
             data = await response.json()
             return data.get("pairs", []) or []
 
-    def _pick_best_pair(self, pairs: list[dict]) -> dict | None:
-        """Pick the best pair from a list, preferring high liquidity."""
-        valid = []
+    def _pick_best_pair(
+        self,
+        pairs: list[dict],
+        *,
+        address: str | None = None,
+        token: str | None = None,
+    ) -> tuple[dict, Decimal] | None:
+        """Pick the best pair and the USD price of the REQUESTED token.
+
+        DexScreener's ``priceUsd``/``priceNative`` describe a pair's BASE
+        token, but the API returns pools where the requested token may sit on
+        either side (ALM-3147) — liquidity-only selection returned the base
+        token's price for quote-side assets (Base USDC via AERO/USDC → $0.48).
+
+        Base-side pairs win, ordered by liquidity, using ``priceUsd``
+        directly. A token appearing only on the quote side is priced by
+        inverting ``priceUsd / priceNative``. Pairs matching neither side are
+        discarded (the guard the symbol-search path was missing).
+        """
+        addr_lower = address.lower() if address else None
+        token_upper = token.upper() if token else None
+        token_lower = token.lower() if token else None
+
+        base_side: list[tuple[float, dict, Decimal]] = []
+        quote_side: list[tuple[float, dict, Decimal]] = []
         for p in pairs:
             liq = (p.get("liquidity") or {}).get("usd", 0)
             try:
                 liq = float(liq) if liq else 0
             except (ValueError, TypeError):
                 liq = 0
-            if liq >= self._min_liquidity_usd and p.get("priceUsd"):
-                valid.append((liq, p))
+            if not math.isfinite(liq) or liq < self._min_liquidity_usd:
+                continue
+            try:
+                price_usd = Decimal(str(p.get("priceUsd")))
+            except (ArithmeticError, ValueError, TypeError):
+                continue
+            # is_finite() before the sign comparison: a NaN Decimal raises
+            # InvalidOperation on <=, which would abort the whole loop.
+            if not price_usd.is_finite() or price_usd <= 0:
+                continue
+            if self._side_matches(p.get("baseToken"), addr_lower, token_upper, token_lower):
+                base_side.append((liq, p, price_usd))
+            elif self._side_matches(p.get("quoteToken"), addr_lower, token_upper, token_lower):
+                try:
+                    price_native = Decimal(str(p.get("priceNative")))
+                except (ArithmeticError, ValueError, TypeError):
+                    continue
+                if not price_native.is_finite() or price_native <= 0:
+                    continue
+                quote_side.append((liq, p, price_usd / price_native))
 
-        if not valid:
+        candidates = base_side if base_side else quote_side
+        if not candidates:
             return None
 
-        valid.sort(key=lambda x: x[0], reverse=True)
-        return valid[0][1]
+        candidates.sort(key=lambda entry: entry[0], reverse=True)
+        return candidates[0][1], candidates[0][2]
+
+    @staticmethod
+    def _side_matches(
+        side: dict | None,
+        addr_lower: str | None,
+        token_upper: str | None,
+        token_lower: str | None,
+    ) -> bool:
+        """Whether one side of a pair IS the requested token — by address
+        when known (exact, immune to symbol collisions), else by symbol."""
+        if not isinstance(side, dict):
+            return False
+        side_addr = (side.get("address") or "").lower()
+        if addr_lower is not None:
+            return side_addr == addr_lower
+        side_symbol = (side.get("symbol") or "").upper()
+        if token_upper is not None and side_symbol == token_upper:
+            return True
+        return token_lower is not None and side_addr == token_lower
 
     def _calculate_confidence(self, pair: dict) -> float:
         """Calculate confidence score based on pair quality."""

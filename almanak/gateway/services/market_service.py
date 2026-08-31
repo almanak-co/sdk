@@ -1101,17 +1101,17 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             )
             return None
 
-        # Require the chain to be one this gateway is configured for. A chain
-        # can be in ALLOWED_CHAINS but not in this gateway's settings.chains,
-        # which would still let a caller force an on-chain lookup on a chain
-        # the operator never opted into.
-        configured_chains = {c.lower() for c in settings_chains if c}
-        if chain not in configured_chains:
+        # Require the chain to be one this gateway serves, using the same
+        # predicate as GetPrice's own gate so an unconfigured gateway's
+        # on-demand mode applies here too. Gating on ``settings.chains``
+        # alone left every on-demand request without a ResolvedToken —
+        # no peg fast-path, no address-based source lookups (ALM-3147).
+        if (config_error := self._chain_configuration_error(chain)) is not None:
             logger.info(
-                "Token price identity lookup for %s on %s skipped: chain not in gateway's configured chains %s",
+                "Token price identity lookup for %s on %s skipped: %s",
                 token,
                 chain,
-                sorted(configured_chains),
+                config_error,
             )
             return None
 
