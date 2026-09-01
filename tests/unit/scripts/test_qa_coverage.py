@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
+import html
 import importlib.util
 import io
 import json
+import re
 import shutil
 import sqlite3
 import stat
@@ -296,7 +299,7 @@ def _write_minimal_official_quant_bundle(qa, bundle: Path) -> None:
     _write_quant_audit_decision(qa, bundle)
 
 
-def _write_bottom_up_evidence(bundle: Path, *, status: str = "FAIL") -> dict:
+def _write_dedicated_evidence(bundle: Path, *, status: str = "FAIL") -> dict:
     chain = bundle / "chain"
     chain.mkdir(parents=True, exist_ok=True)
     artifacts = []
@@ -358,7 +361,7 @@ def _write_bottom_up_evidence(bundle: Path, *, status: str = "FAIL") -> dict:
     stages["receipt_balance"]["artifacts"] = artifacts
     payload = {
         "schema_version": 1,
-        "artifact_kind": "almanak.accounting_bottom_up_evidence",
+        "artifact_kind": "almanak.accounting_dedicated_evidence",
         "row_id": "lp-uniswap_v3-arbitrum",
         "fixture": "lp",
         "chain": "arbitrum",
@@ -372,7 +375,7 @@ def _write_bottom_up_evidence(bundle: Path, *, status: str = "FAIL") -> dict:
         "status": status,
     }
     (bundle / "chain-witnesses.json").write_text(json.dumps({"artifacts": artifacts}) + "\n")
-    (bundle / "bottom-up-evidence.json").write_text(json.dumps(payload))
+    (bundle / "dedicated-evidence.json").write_text(json.dumps(payload))
     return payload
 
 
@@ -665,7 +668,8 @@ def test_lab_home_is_reachable_from_every_board_and_states_the_rules(
     assert "intent-run" in home
     # The home page carries the canonical Lab chrome like every other board.
     assert 'data-active-page="home.html"' in home
-    assert 'href="intent.html">Intent</a>' in home
+    assert 'href="evidence.html">Evidence</a>' in home
+    assert 'href="index.html">Today</a>' in home
 
     # The logo is the route to it, from every rendered board.
     boards = sorted(path.name for path in (store / "lab").glob("*.html"))
@@ -691,7 +695,10 @@ def test_bootstrap_renders_empty_lab_with_all_four_views(modules, catalog_path: 
         "tickets": {},
     }
     assert stat.S_IMODE(store.stat().st_mode) == 0o700
-    page = output.read_text()
+    # Quant is one lane of eight and no longer owns the Lab entry point; Today
+    # does. Its four axis views moved with it to quant.html.
+    assert output.name == "index.html"
+    page = (store / "lab" / "quant.html").read_text()
     assert 'data-network="mainnet"' in page
     assert 'data-network="anvil"' in page
     assert 'data-exec="eoa"' in page
@@ -699,15 +706,26 @@ def test_bootstrap_renders_empty_lab_with_all_four_views(modules, catalog_path: 
     assert "No sealed experiment yet" in page
     assert "Local tamper-evident QA Coverage Lab" in page
     assert "Ledger SHA-256" in page
-    assert ">Quant</a>" in page
-    assert 'href="intent.html">Intent</a>' in page
-    assert 'href="accounting.html">Accounting</a>' in page
-    assert 'href="data.html">Data</a>' in page
-    assert 'href="protocol.html">Protocol</a>' in page
-    assert 'href="backtesting.html">Backtesting</a>' in page
-    assert 'href="ax.html">ax</a>' in page
-    assert 'href="readiness.html">Checklists</a>' in page
-    assert 'href="history.html">History</a>' in page
+    # Reachability is the property that matters, and it is now carried by the
+    # lane switcher rather than by one top-level tab per lane. Asserting the
+    # hrefs keeps the guarantee ("every lane is one click away") while letting
+    # the chrome stop growing with the lane count.
+    for lane_page in (
+        "quant.html",
+        "intent.html",
+        "accounting.html",
+        "data.html",
+        "demo.html",
+        "protocol.html",
+        "backtesting.html",
+        "ax.html",
+    ):
+        assert f'href="{lane_page}"' in page, f"{lane_page} unreachable from the Quant board"
+    assert 'href="index.html">Today</a>' in page
+    assert 'href="evidence.html">Evidence</a>' in page
+    assert 'href="readiness.html">Readiness</a>' in page
+    # History left the bar; the ledger chip is now its route.
+    assert 'class="chip-ledger" href="history.html"' in page
     assert '<a class="logo" href="home.html"' in page
     assert ">AQA</a>" in page
     assert "Almanak QA Lab" in page
@@ -747,7 +765,7 @@ def test_bootstrap_renders_empty_lab_with_all_four_views(modules, catalog_path: 
     assert "NO EXACT TEST" in intent_html
     assert "NOT CERTIFIABLE" in intent_html
     assert "NO TEST PATH" in intent_html
-    assert "NO LIVE RUNNER" in intent_html
+    assert "MAINNET RUNNER MISSING" in intent_html
     assert "Broad test source" in intent_html
     assert "Atomic proof recipe" in intent_html
     assert "Sealed runtime result" in intent_html
@@ -758,7 +776,7 @@ def test_bootstrap_renders_empty_lab_with_all_four_views(modules, catalog_path: 
     assert "Issue assessment" in intent_html
     assert "Prepare re-check" in intent_html
     assert ".c-gap,.c-proof-gap{background:linear-gradient(#704019,#3e250f);color:#ffc27d}" in intent_html
-    assert '<i class="sw" style="background:var(--orange)"></i>NO EXACT TEST' in intent_html
+    assert '<i class="sw c-proof-gap"></i>NO EXACT TEST' in intent_html
     assert "/test-intent intent.aave_v3.arbitrum.SUPPLY.anvil.safe" in intent_html
     assert "Exact proof recipe" in intent_html
     assert "Broad file coverage cannot paint this cell" in intent_html
@@ -779,20 +797,20 @@ def test_bootstrap_renders_empty_lab_with_all_four_views(modules, catalog_path: 
     history_page = store / "lab" / "history.html"
     assert history_page.is_file()
     assert "No reproducible experiments sealed yet" in history_page.read_text()
+    # Four destinations, not one tab per lane. Lanes are reached through the
+    # Evidence switcher, so promoting one back into this tuple is the
+    # regression that put a growth axis in a fixed-width bar.
     canonical_nav = (
-        ("index.html", "Quant"),
-        ("intent.html", "Intent"),
-        ("accounting.html", "Accounting"),
-        ("data.html", "Data"),
-        ("protocol.html", "Protocol"),
-        ("backtesting.html", "Backtesting"),
-        ("ax.html", "ax"),
-        ("readiness.html", "Checklists"),
-        ("history.html", "History"),
+        ("index.html", "Today"),
+        ("evidence.html", "Evidence"),
+        ("readiness.html", "Readiness"),
         ("tickets.html", "QA Tickets"),
     )
     for page_name in (
         "index.html",
+        "evidence.html",
+        "quant.html",
+        "demo.html",
         "intent.html",
         "accounting.html",
         "data.html",
@@ -809,9 +827,19 @@ def test_bootstrap_renders_empty_lab_with_all_four_views(modules, catalog_path: 
         assert ">AQA</a>" in header
         assert 'class="brand-copy"' in header
         assert 'aria-label="QA Lab"' in header
-        assert header.count(' active"') == 1
+        # At most one highlighted destination: two would make "you are here"
+        # ambiguous. Zero is correct for a page routed outside the bar — home
+        # via the logo, History via the ledger chip — and those pages assert
+        # their own route below.
+        expected_active = 0 if qa._PAGE_DESTINATION[page_name] is None else 1
+        assert header.count(' active"') == expected_active, page_name
         positions = [header.index(f'href="{href}">{label}</a>') for href, label in canonical_nav]
         assert positions == sorted(positions)
+    for unbarred in ("history.html", "home.html"):
+        header = (store / "lab" / unbarred).read_text().split("</header>", 1)[0]
+        assert qa._PAGE_DESTINATION[unbarred] is None
+        assert '<a class="logo" href="home.html"' in header
+    assert 'href="history.html"' in (store / "lab" / "quant.html").read_text()
     assert intent_catalog["summary"]["required"] > 0
     recheck_catalog = json.loads((store / "catalog" / "recheck_routes.json").read_text())
     assert recheck_catalog["mode"] == "render_only_no_dispatch"
@@ -819,9 +847,12 @@ def test_bootstrap_renders_empty_lab_with_all_four_views(modules, catalog_path: 
     accounting_page = store / "lab" / "accounting.html"
     assert accounting_page.is_file()
     accounting_html = accounting_page.read_text()
-    assert "Dedicated Accounting Bottom-Up truth" in accounting_html
-    assert "Neither can create a Bottom-Up PASS" in accounting_html
-    assert 'class="btn active" href="accounting.html">Accounting</a>' in accounting_html
+    assert "Dedicated Accounting truth" in accounting_html
+    assert "Neither can create a Dedicated PASS" in accounting_html
+    # The board still identifies itself, but through the destination map and the
+    # lane switcher rather than a top-level tab of its own.
+    assert 'data-active-page="accounting.html"' in accounting_html
+    assert "Evidence · Accounting" in accounting_html
     accounting_catalog = json.loads((store / "catalog" / qa.ACCOUNTING_CATALOG_NAME).read_text())
     matrix = yaml.safe_load(qa.DEFAULT_ACCOUNTING_MATRIX.read_text())
     matrix_rows = matrix["rows"]
@@ -840,12 +871,16 @@ def test_bootstrap_renders_empty_lab_with_all_four_views(modules, catalog_path: 
     assert all(profile["total"] > 0 for profile in accounting_catalog["profiles"])
     assert all(sum(profile["counts"].values()) == profile["total"] for profile in accounting_catalog["profiles"])
     # Reference baselines are inventory only; they never paint latest execution.
-    assert json.loads((store / "index" / qa.ACCOUNTING_BOTTOM_UP_INDEX).read_text()) == {}
-    assert json.loads((store / "index" / qa.ACCOUNTING_TOP_DOWN_INDEX).read_text()) == {}
+    assert json.loads((store / "index" / qa.ACCOUNTING_DEDICATED_INDEX).read_text()) == {}
+    assert json.loads((store / "index" / qa.ACCOUNTING_CORROBORATION_INDEX).read_text()) == {}
     data_page = store / "lab" / "data.html"
     assert data_page.is_file()
     assert "First-class Data Tests" in data_page.read_text()
-    assert 'class="btn active" href="data.html">Data</a>' in data_page.read_text()
+    # Same self-identification contract as the Accounting board: the page names
+    # itself through the destination map and the lane switcher, not a tab.
+    data_html = data_page.read_text()
+    assert 'data-active-page="data.html"' in data_html
+    assert "Evidence · Data" in data_html
     data_catalog = json.loads((store / "catalog" / qa.DATA_CATALOG_NAME).read_text())
     assert data_catalog["summary"]["contract_cells"] == 24
     assert data_catalog["summary"]["contract_checks"] == 8
@@ -906,7 +941,7 @@ def test_history_lab_surfaces_legacy_volatile_warning(modules, tmp_path: Path) -
     qa, _, _ = modules
     history = qa._load_history_module()
     store = tmp_path / "store"
-    run = store / "runs" / "2026" / "08" / "10" / "legacy-benqi"
+    run = store / "quant" / "2026" / "08" / "10" / "legacy-benqi"
     run.mkdir(parents=True)
     (run / "result.txt").write_text("PASS\n")
     manifest = run / "manifest.json"
@@ -960,7 +995,7 @@ def test_history_lab_renders_unadmitted_partial_rows_as_forensic_never_scientifi
     store = tmp_path / "store"
 
     def seal(run_id: str, verdict: str, hour: int) -> None:
-        run = store / "runs" / "2026" / "08" / "10" / run_id
+        run = store / "quant" / "2026" / "08" / "10" / run_id
         run.mkdir(parents=True)
         (run / "result.txt").write_text(f"{verdict}\n")
         manifest = run / "manifest.json"
@@ -1022,7 +1057,7 @@ def test_intent_junit_seal_maps_results_and_repaints_lab(modules, catalog_path: 
         "source_provenance": {
             "kind": "sealed-quant-runtime",
             "quant_run_id": "quant-source-run",
-            "quant_store_path": "runs/2026/08/04/quant-source-run",
+            "quant_store_path": "quant/2026/08/04/quant-source-run",
             "ledger_entry_id": "ledger-1",
             "accounting_event_id": "accounting-1",
         },
@@ -1144,6 +1179,10 @@ def test_intent_junit_seal_maps_results_and_repaints_lab(modules, catalog_path: 
     assert 'class="raw-detail"' in decode_html
     assert "Back to Intent Lab" in decode_html
     assert 'href="01-hard.json"' in decode_html
+    # The tx hash sits on its own line; on Anvil there is no explorer to link to.
+    assert 'class="txline"' in decode_html
+    assert "no public explorer URL" in decode_html
+    assert "Open chain explorer" not in decode_html
     intent_html = (store / "lab" / "intent.html").read_text()
     assert cell_id in intent_html
     assert "DECODE ×${decodeCount}" in intent_html
@@ -1155,7 +1194,7 @@ def test_intent_junit_seal_maps_results_and_repaints_lab(modules, catalog_path: 
     assert "Non-green sealed" in intent_html
     assert "status==='PASS'&&exact&&evidence==='COMPLETE'" in intent_html
     assert "Protocol sign-off · strongest exact chain" in intent_html
-    assert "Safe + EOA" in intent_html
+    assert "EOA + Safe" in intent_html
     assert "latest-per-cell aggregate" in intent_html
     assert '"human_summary"' in intent_html
     assert "Open source quant report" in intent_html
@@ -1685,6 +1724,9 @@ def test_exact_cell_runner_executes_only_planned_node_then_seals(monkeypatch, mo
     assert launched["command"][3:4] == [nodeid]
     assert not any(arg == "tests/intents/arbitrum" for arg in launched["command"])
     assert launched["kwargs"]["env"]["ANVIL_FORK_CACHE_PATH"] == "/tmp/anvil-cache/arbitrum"
+    # The seal lane must run the proof nodes STRICT: without this env the known-red
+    # excuses (VIB-6212/VIB-6810) xfail and the board would stop saying red.
+    assert launched["kwargs"]["env"]["ALMANAK_QA_STRICT_PROOFS"] == "1"
     assert seal_call["network"] == "anvil"
     assert seal_call["exec_path"] == "safe"
     assert seal_call["sdk_provenance"] == TEST_SDK
@@ -2058,7 +2100,7 @@ def test_strategy_caveat_and_product_freshness_require_exact_passes(modules) -> 
     assert not qa.product_is_green({"strategy": "PASS", "books": "PASS", "dashboard": "PASS"}, claims)
 
 
-def test_books_index_preserves_last_pass_without_cross_painting_bottom_up(
+def test_books_index_preserves_last_pass_without_cross_painting_dedicated(
     modules, catalog_path: Path, tmp_path: Path
 ) -> None:
     qa, _, _ = modules
@@ -2075,7 +2117,7 @@ def test_books_index_preserves_last_pass_without_cross_painting_bottom_up(
         "cell_id": quant_cell_id,
         "run_id": "latest-fail",
         "sealed_at": "2026-08-04T00:00:00Z",
-        "store_path": "runs/2026/08/04/latest-fail",
+        "store_path": "quant/2026/08/04/latest-fail",
         "verdicts": {"books": "FAIL"},
         "artifacts": [],
     }
@@ -2088,10 +2130,10 @@ def test_books_index_preserves_last_pass_without_cross_painting_bottom_up(
     assert latest[books_cell_id]["status"] == "FAIL"
     assert latest[books_cell_id]["last_pass_at"] == "2026-08-01T00:00:00Z"
 
-    dedicated = {"source": "accounting-bottom-up", "status": "PASS", "run_id": "accountant-001"}
-    (store / "index" / qa.ACCOUNTING_BOTTOM_UP_INDEX).write_text(json.dumps({books_cell_id: dedicated}))
+    dedicated = {"source": "accounting", "status": "PASS", "run_id": "accountant-001"}
+    (store / "index" / qa.ACCOUNTING_DEDICATED_INDEX).write_text(json.dumps({books_cell_id: dedicated}))
     assert qa.rebuild_books_index(store, catalog)[books_cell_id]["source"] == "quant-test"
-    assert json.loads((store / "index" / qa.ACCOUNTING_BOTTOM_UP_INDEX).read_text())[books_cell_id] == dedicated
+    assert json.loads((store / "index" / qa.ACCOUNTING_DEDICATED_INDEX).read_text())[books_cell_id] == dedicated
 
 
 def test_accounting_seal_is_immutable_fail_closed_and_repaints_lab(modules, catalog_path: Path, tmp_path: Path) -> None:
@@ -2127,7 +2169,7 @@ def test_accounting_seal_is_immutable_fail_closed_and_repaints_lab(modules, cata
         },
     }
     (bundle / "accountant.json").write_text(json.dumps(accountant))
-    _write_bottom_up_evidence(bundle)
+    _write_dedicated_evidence(bundle)
     (bundle / "strat.log").write_text("strategy evidence\n")
     (bundle / "teardown.log").write_text("completed\n")
     db = strategy / "almanak_state.db"
@@ -2196,7 +2238,7 @@ def test_accounting_seal_is_immutable_fail_closed_and_repaints_lab(modules, cata
     )
 
     assert target.is_dir()
-    books_history = (store / "index" / "accounting_bottom_up_runs.jsonl").read_text().splitlines()
+    books_history = (store / "index" / "accounting_dedicated_runs.jsonl").read_text().splitlines()
     assert [json.loads(row)["run_id"] for row in books_history] == [target.name]
     assert (target / "almanak_state.db").is_file()
     assert (target / "positions.json").is_file()
@@ -2213,25 +2255,29 @@ def test_accounting_seal_is_immutable_fail_closed_and_repaints_lab(modules, cata
     assert fees["gas_by_lane"]["unknown"]["measured_usd"] == "0"
     assert json.loads((target / "pnl.json").read_text())["evidence_status"] == "MEASURED"
     report = (target / "report.html").read_text()
-    assert "Sealed Accounting Bottom-Up proof" in report
-    assert "Bottom-Up stage contract" in report
+    assert "Sealed dedicated Accounting proof" in report
+    assert "dedicated stage contract" in report
     assert "Money trail" in report
     assert "Positions and lifecycle" in report
     assert "PnL reconciliation" in report
     assert "gap=$0.42" in report
-    assert ">1</td>" in report
+    # The snapshots table must carry the fixture's position count. The original
+    # guard was the bare cell position_count() rendered (`>1</td>`); the report
+    # formatting commits replaced that with _positions_cell(), which shows the
+    # same count plus its type breakdown — assert the same fact in that markup.
+    assert "<td>1<small>LP" in report
     cell_id = "books.uniswap_v3.lp_simple.arbitrum.anvil.eoa"
-    latest = json.loads((store / "index" / qa.ACCOUNTING_BOTTOM_UP_INDEX).read_text())[cell_id]
-    assert latest["source"] == "accounting-bottom-up"
+    latest = json.loads((store / "index" / qa.ACCOUNTING_DEDICATED_INDEX).read_text())[cell_id]
+    assert latest["source"] == "accounting"
     assert latest["status"] == "FAIL"
     assert latest["matrix_gate_status"] == "PASS"
     assert latest["last_pass_at"] is None
     assert latest["report_path"].endswith("/report.html")
     lab = (store / "lab" / "accounting.html").read_text()
     assert "Accounting Test report" in lab
-    assert "Latest dedicated Bottom-Up proofs" in lab
+    assert "Latest dedicated proofs" in lab
     assert "matrix row" in lab
-    with pytest.raises(FileExistsError, match="Immutable Accounting Bottom-Up run"):
+    with pytest.raises(FileExistsError, match="Immutable Accounting dedicated run"):
         qa.seal_accounting_bundle(
             bundle=bundle,
             store=store,
@@ -2374,10 +2420,8 @@ def test_catalog_sync_builds_full_support_universe_and_preserves_executable_over
     assert catalog["chains"] == ["arbitrum", "base"]
 
 
-def test_seal_links_every_file_and_repaints_lab(modules, catalog_path: Path, tmp_path: Path) -> None:
-    qa, _, _ = modules
-    store = tmp_path / "store"
-    bundle = tmp_path / "bundle"
+def _write_minimal_quant_bundle(qa, bundle: Path) -> Path:
+    """Build the canonical admitted Quant bundle shared by the seal and migration tests."""
     (bundle / "dashboard").mkdir(parents=True)
     (bundle / "report.html").write_text("<h1>sealed report</h1>")
     (bundle / "run.log").write_text("runner evidence\n")
@@ -2454,6 +2498,14 @@ def test_seal_links_every_file_and_repaints_lab(modules, catalog_path: Path, tmp
         f"LIFECYCLE_COVERAGE_CONFIRMED: yes\nLIFECYCLE_CONTRACT_SHA256: {digest}\nRECEIPT_INTEGRITY_CONFIRMED: yes\n"
     )
     _write_quant_audit_decision(qa, bundle)
+    return bundle
+
+
+def test_seal_links_every_file_and_repaints_lab(modules, catalog_path: Path, tmp_path: Path) -> None:
+    qa, _, _ = modules
+    store = tmp_path / "store"
+    bundle = _write_minimal_quant_bundle(qa, tmp_path / "bundle")
+    digest = hashlib.sha256((bundle / "lifecycle-contract.json").read_bytes()).hexdigest()
     cell_id = "lp.uniswap_v3.arbitrum.simple.mainnet.eoa"
     sealed_at = datetime(2026, 8, 3, 12, 30, tzinfo=UTC)
 
@@ -2470,22 +2522,22 @@ def test_seal_links_every_file_and_repaints_lab(modules, catalog_path: Path, tmp
         now=sealed_at,
     )
 
-    assert target == store / "runs/2026/08/03/run-001"
+    assert target == store / "quant/2026/08/03/run-001"
     manifest = json.loads((target / "manifest.json").read_text())
     assert manifest["cell_id"] == cell_id
     assert manifest["exec_path"] == "eoa"
     assert {row["relpath"] for row in manifest["artifacts"]} == {
-        "runs/2026/08/03/run-001/dashboard/h01-full.png",
-        "runs/2026/08/03/run-001/almanak_state.db",
-        "runs/2026/08/03/run-001/finding.json",
-        "runs/2026/08/03/run-001/git.json",
-        "runs/2026/08/03/run-001/report.html",
-        "runs/2026/08/03/run-001/run.log",
-        "runs/2026/08/03/run-001/lifecycle-contract.json",
-        "runs/2026/08/03/run-001/lifecycle-coverage.json",
-        "runs/2026/08/03/run-001/receipt-reconciliation.json",
-        "runs/2026/08/03/run-001/audit.md",
-        "runs/2026/08/03/run-001/audit-decision.json",
+        "quant/2026/08/03/run-001/dashboard/h01-full.png",
+        "quant/2026/08/03/run-001/almanak_state.db",
+        "quant/2026/08/03/run-001/finding.json",
+        "quant/2026/08/03/run-001/git.json",
+        "quant/2026/08/03/run-001/report.html",
+        "quant/2026/08/03/run-001/run.log",
+        "quant/2026/08/03/run-001/lifecycle-contract.json",
+        "quant/2026/08/03/run-001/lifecycle-coverage.json",
+        "quant/2026/08/03/run-001/receipt-reconciliation.json",
+        "quant/2026/08/03/run-001/audit.md",
+        "quant/2026/08/03/run-001/audit-decision.json",
     }
     assert all(len(row["sha256"]) == 64 for row in manifest["artifacts"])
 
@@ -2494,11 +2546,11 @@ def test_seal_links_every_file_and_repaints_lab(modules, catalog_path: Path, tmp
     assert latest["last_product_green_at"] is None
     assert latest["report_path"].endswith("/report.html")
     assert {row["kind"] for row in latest["artifacts"]} >= {"manifest", "report.html", "png", "log"}
-    page = (store / "lab" / "index.html").read_text()
+    page = (store / "lab" / "quant.html").read_text()
     assert "run-001" in page
     assert "h01-full.png" in page
     books_id = "books.uniswap_v3.lp_simple.arbitrum.mainnet.eoa"
-    books = json.loads((store / "index" / qa.ACCOUNTING_TOP_DOWN_INDEX).read_text())
+    books = json.loads((store / "index" / qa.ACCOUNTING_CORROBORATION_INDEX).read_text())
     assert books_id not in books
     accounting_page = (store / "lab" / "accounting.html").read_text()
     assert "run-001" not in accounting_page
@@ -2873,7 +2925,8 @@ def test_strategy_only_official_pass_is_labelled_and_never_sets_product_freshnes
     assert row["last_product_green_at"] is None
 
     # The scope reaches the Lab payload and is rendered as a badge.
-    lab = qa.render_lab(store=store, catalog_path=REAL_CATALOG).read_text()
+    qa.render_lab(store=store, catalog_path=REAL_CATALOG)
+    lab = (store / "lab" / "quant.html").read_text()
     payload = json.loads(lab.split("const LAB_DATA=", 1)[1].split(";const RECHECK_ROUTES", 1)[0])
     assert payload["index"][cell_id]["admission"]["claim_scope"]["required"] == ["strategy"]
     # Both render sites are wired, and the badge rule exists to style them.
@@ -2929,7 +2982,7 @@ def _seal_known_good_baseline(qa, store: Path, tmp_path: Path, *, run_id: str) -
     assert json.loads(baseline["cell_latest"])["lp.uniswap_v3.arbitrum.simple.anvil.eoa"]["run_id"] == run_id
     assert baseline["ledger"]
     # And the run-directory probe used by assertion 4 must be able to find one.
-    assert list((store / "runs").rglob(run_id))
+    assert list((store / "quant").rglob(run_id))
     return baseline
 
 
@@ -2957,7 +3010,7 @@ def _assert_official_state_unchanged(
     # 4: no run directory for the rejected run.  Scoped to runs/**/<run_id>,
     # NEVER to the runs/ tree: seal_bundle creates the empty day directory
     # before validation, so a whole-tree comparison fails for the wrong reason.
-    assert not list((store / "runs").rglob(run_id))
+    assert not list((store / "quant").rglob(run_id))
 
     # 5: the forensic record IS present, and the run was never quarantined.
     attempts = [json.loads(row) for row in (store / "index" / "attempts.jsonl").read_text().splitlines()]
@@ -3175,7 +3228,7 @@ def test_official_seal_records_a_readable_admission_trail(modules, catalog_path:
     }
     assert all(row["mutant_status"] != "PASS" for row in control["liveness"]["mutations"])
 
-    lab = (store / "lab" / "index.html").read_text()
+    lab = (store / "lab" / "quant.html").read_text()
     assert "admissionBlock" in lab, "the rail no longer renders the admission trail"
     assert '"admission_control"' in lab, "the rail has no admission data to render"
 
@@ -3508,7 +3561,7 @@ def test_ticket_index_groups_reporting_experiments_and_imports_linear_metadata(
         start=1,
     ):
         run_id = f"run-{sequence}"
-        run = store / "runs" / "2026" / "08" / f"0{sequence + 2}" / run_id
+        run = store / "quant" / "2026" / "08" / f"0{sequence + 2}" / run_id
         run.mkdir(parents=True)
         (run / "report.html").write_text(f"<h1>report {sequence}</h1>")
         (run / "finding.json").write_text(
@@ -3599,7 +3652,7 @@ def test_ticket_index_groups_reporting_experiments_and_imports_linear_metadata(
     assert "https://linear.app/almanak/issue/QA-4242/example" in page
     assert "run-2" in page and "run-1" in page
 
-    quant_page = (store / "lab" / "index.html").read_text()
+    quant_page = (store / "lab" / "quant.html").read_text()
     assert "Tickets filed by QA" not in quant_page
 
 
@@ -3653,3 +3706,509 @@ def test_ticket_metadata_rejects_non_linear_links(modules) -> None:
                 }
             ]
         )
+
+
+def _seal_one_quant_run(qa, catalog_path: Path, tmp_path: Path) -> Path:
+    """Seal a minimal admitted Quant bundle so a migration has real evidence to move."""
+    store = tmp_path / "store"
+    qa.bootstrap_store(store, catalog_path)
+    bundle = tmp_path / "migration-bundle"
+    _write_minimal_quant_bundle(qa, bundle)
+    qa.seal_bundle(
+        bundle=bundle,
+        store=store,
+        catalog_path=catalog_path,
+        cell_id="lp.uniswap_v3.arbitrum.simple.mainnet.eoa",
+        network="mainnet",
+        exec_path="eoa",
+        lane="daily",
+        run_id="migrate-001",
+        selection={"bucket": "recency", "reason": "oldest"},
+        now=datetime(2026, 8, 3, 12, 30, tzinfo=UTC),
+    )
+    return store
+
+
+def _demote_store_to_legacy_layout(qa, store: Path) -> None:
+    """Rebuild the store under the pre-schema-2 layout using the chain's own digest rule.
+
+    Written with plain string surgery rather than the migrator's remap so the forward
+    migration is not being tested against its own inverse.
+    """
+    history = qa._load_history_module()
+    (store / "quant").rename(store / "runs")
+    ledger = store / "index" / history.HISTORY_LEDGER_NAME
+    rows = [json.loads(line) for line in ledger.read_text().splitlines() if line.strip()]
+    previous = None
+    rebuilt = []
+    for row in rows:
+        row = json.loads(json.dumps(row).replace('"quant/', '"runs/'))
+        if "artifact_set_sha256" in row and row.get("artifacts") is not None:
+            row["artifact_set_sha256"] = history._sha256_bytes(history._canonical_bytes(row["artifacts"]))
+        row["previous_record_sha256"] = previous
+        row.pop("record_sha256", None)
+        previous = history._record_digest(row)
+        row["record_sha256"] = previous
+        rebuilt.append(row)
+    ledger.write_text("".join(json.dumps(r, sort_keys=True, separators=(",", ":")) + "\n" for r in rebuilt))
+    (store / "store.json").unlink(missing_ok=True)
+
+
+def test_bootstrap_refuses_a_store_whose_evidence_predates_the_current_layout(
+    modules, catalog_path: Path, tmp_path: Path
+) -> None:
+    """The guard exists so a rename can never leave two plausible evidence roots.
+
+    Without it, bootstrap would create an empty ``quant/`` beside a populated
+    ``runs/`` and the Quant board would render "no sealed run on this machine yet"
+    over real sealed evidence.
+    """
+    qa, _, _ = modules
+    store = _seal_one_quant_run(qa, catalog_path, tmp_path)
+    _demote_store_to_legacy_layout(qa, store)
+
+    with pytest.raises(qa.StoreSchemaError) as excinfo:
+        qa.bootstrap_store(store, catalog_path)
+
+    assert "store-migrate" in str(excinfo.value)
+    assert not (store / "quant").exists(), "refusal must not leave a second evidence root behind"
+    assert list((store / "runs").rglob("migrate-001")), "refusal must not disturb the legacy evidence"
+
+
+def test_layout_migration_moves_evidence_and_leaves_the_chain_verifiable(
+    modules, catalog_path: Path, tmp_path: Path
+) -> None:
+    """Renaming an evidence directory rewrites every dependent digest.
+
+    The assertions below are made against ``verify_history`` — the chain's own
+    validator — rather than against a reversal of the migrator, so a migrator that
+    corrupts the record cannot satisfy them by being self-consistent.
+    """
+    qa, _, _ = modules
+    history = qa._load_history_module()
+    store = _seal_one_quant_run(qa, catalog_path, tmp_path)
+    _demote_store_to_legacy_layout(qa, store)
+    legacy_terminal = json.loads((store / "index" / history.HISTORY_LEDGER_NAME).read_text().splitlines()[-1])[
+        "record_sha256"
+    ]
+    legacy_count = len(history.read_history(store))
+
+    result = qa.migrate_store_layout(store, apply=True)
+
+    assert result["status"] == "MIGRATED"
+    assert result["pre_migration_terminal_sha256"] == legacy_terminal
+    assert not (store / "runs").exists()
+    assert list((store / "quant").rglob("migrate-001"))
+
+    migrated = history.read_history(store)  # raises on any chain, digest, or sequence break
+    assert len(migrated) == legacy_count
+    assert history.verify_history(store)["status"] in {"PASS", "PASS_WITH_WARNINGS"}
+
+    ledger_text = (store / "index" / history.HISTORY_LEDGER_NAME).read_text()
+    assert '"runs/' not in ledger_text, "a migrated ledger must not still point at the old root"
+    for record in migrated:
+        for artifact in record.get("artifacts") or []:
+            assert (store / artifact["relpath"]).exists(), f"migrated artifact is missing: {artifact['relpath']}"
+
+    preserved = store / "index" / f"{Path(history.HISTORY_LEDGER_NAME).stem}.pre-schema2.jsonl"
+    assert '"runs/' in preserved.read_text(), "the pre-migration ledger must be preserved verbatim"
+    manifest = json.loads((store / "store.json").read_text())
+    assert manifest["schema_version"] == qa.STORE_SCHEMA_VERSION
+    assert manifest["migrations"][-1]["pre_migration_terminal_sha256"] == legacy_terminal
+
+    assert qa.migrate_store_layout(store, apply=True)["status"] == "ALREADY_CURRENT"
+
+
+def test_the_intent_board_legend_help_and_painter_share_one_vocabulary(modules) -> None:
+    """One declaration must feed the swatch legend, the operator help, and the JS.
+
+    These were three lists that disagreed. The legend advertised VERIFIED, FAILED,
+    NO LIVE RUNNER and NOT SUPPORTED — four labels the board never rendered, so an
+    engineer matching a swatch to a cell was looking up words that did not exist.
+    The help text defined four labels out of thirteen, and every label it omitted
+    (MAP DRIFT, CONTRACT GAP, LIVE ENVELOPE GAP, SOFT, CONTROL, LEGACY) was one that
+    can be mistaken for a pass. A board that explains only its obviously-unfinished
+    states is at its least helpful exactly where it matters most.
+    """
+    qa, _, _ = modules
+    declared = {row[0] for row in qa.INTENT_STATUSES}
+    painted = set(re.findall(r"INTENT_STATUS\.(\w+)", qa.INTENT_JS))
+
+    assert painted, "the board must paint its labels from the declaration, not from literals"
+    assert painted == declared, (
+        f"painted-but-undeclared: {sorted(painted - declared)}; declared-but-never-painted: {sorted(declared - painted)}"
+    )
+    assert not re.search(r"label:'[A-Z][A-Z ]*'", qa.INTENT_JS), "a hardcoded label can drift from the legend"
+
+    legend = qa._intent_legend_html()
+    help_html = qa._intent_status_help_html()
+    for _id, key, group, label, meaning in qa.INTENT_STATUSES:
+        assert group in qa.INTENT_STATUS_GROUPS, f"{label} is in an undeclared group: {group}"
+        assert label in legend, f"{label} is paintable but missing from the colour legend"
+        assert label in help_html, f"{label} is paintable but has no definition in the help"
+        assert html.escape(meaning) in help_html, f"{label} is listed but its meaning is not rendered"
+        assert html.escape(meaning) in legend, f"{label}'s legend swatch has no hover definition"
+        # the swatch is painted by the same class as the cell, so it cannot drift
+        assert f'class="sw c-{key}"' in legend, f"{label}'s swatch does not use its own cell colour"
+
+    for group in qa.INTENT_STATUS_GROUPS:
+        assert group in help_html, f"the help omits the {group!r} group entirely"
+
+
+# --- Fidelity vocabulary ------------------------------------------------------
+
+
+def _intent_tree_fidelity_flag_names() -> set[str]:
+    """Every key passed as ``flags={...}`` to ``record_fidelity`` under tests/intents, via AST."""
+    names: set[str] = set()
+    for path in (REPO_ROOT / "tests" / "intents").rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or getattr(node.func, "attr", None) != "record_fidelity":
+                continue
+            for keyword in node.keywords:
+                if keyword.arg == "flags" and isinstance(keyword.value, ast.Dict):
+                    names.update(key.value for key in keyword.value.keys if isinstance(key, ast.Constant))
+    return names
+
+
+def test_every_intent_tree_fidelity_flag_is_registered_with_a_question(modules) -> None:
+    qa_coverage, _, _ = modules
+    names = _intent_tree_fidelity_flag_names()
+    assert names, "AST sweep found no record_fidelity(flags=...) sites; the sweep itself is broken"
+    unregistered = sorted(name for name in names if name not in qa_coverage.FIDELITY_CHECKS)
+    assert not unregistered, f"fidelity flags used by tests/intents without a registered question: {unregistered}"
+    group_keys = {key for key, _, _ in qa_coverage.FIDELITY_GROUPS}
+    for name, (group, question) in qa_coverage.FIDELITY_CHECKS.items():
+        assert group in group_keys, name
+        assert question and question != name, name
+
+
+def test_fidelity_flag_groups_follow_reasoning_order_and_keep_raw_names(modules) -> None:
+    qa_coverage, _, _ = modules
+    flags = {
+        "output_transfer_unambiguous": True,
+        "amount_eq_wallet_delta": False,
+        "beneficiary_match": True,
+        "parse_success": True,
+        "brand_new_predicate_nobody_described": True,
+    }
+    groups = qa_coverage.fidelity_flag_groups(flags)
+    assert [group["key"] for group in groups] == ["parser", "witness", "quality"]
+    parser_rows = groups[0]["rows"]
+    assert [row["name"] for row in parser_rows] == [
+        "parse_success",
+        "beneficiary_match",
+        "brand_new_predicate_nobody_described",
+    ]
+    assert parser_rows[-1]["registered"] is False
+    assert parser_rows[-1]["question"] == "Brand new predicate nobody described"
+    witness_row = groups[1]["rows"][0]
+    assert witness_row["passed"] is False
+    assert witness_row["question"] == "Parsed amount = the test wallet's balance change"
+
+
+def test_fidelity_verdict_sentence_names_failures_and_witness_count(modules) -> None:
+    qa_coverage, _, _ = modules
+    witnesses = [{"kind": "wallet_balance_delta"}, {"kind": "independent_transfer_logs"}]
+    assert qa_coverage.fidelity_verdict_sentence({"a": True, "b": True}, witnesses, True) == (
+        "All 2 checks passed, checked against 2 independent witnesses — receipt graded HARD."
+    )
+    assert qa_coverage.fidelity_verdict_sentence({"a": True}, [], False) == (
+        "All 1 checks passed, with no independent witness recorded — receipt graded SOFT."
+    )
+    failing = qa_coverage.fidelity_verdict_sentence({"amount_eq_transfer": False, "user_match": True}, witnesses, False)
+    assert failing.startswith("1 of 2 checks failed (amount = transfer)")
+    assert failing.endswith("receipt capped at SOFT.")
+    assert "cannot be graded HARD" in qa_coverage.fidelity_verdict_sentence({}, witnesses, False)
+
+
+def test_fidelity_checklist_html_marks_failures_and_unregistered_names(modules) -> None:
+    qa_coverage, _, _ = modules
+    html_out = qa_coverage.fidelity_checklist_html(
+        {"amount_eq_wallet_delta": False, "mystery_flag": True},
+        esc=lambda value: str(value),
+    )
+    assert '<li class="fail"><span class="mark">✗</span>' in html_out
+    assert "Parsed amount = the test wallet's balance change" in html_out
+    assert "<code>amount_eq_wallet_delta</code>" in html_out
+    assert "no description registered" in html_out
+    assert "Can the witnesses be trusted?" not in html_out
+    witness_html = qa_coverage.fidelity_witness_html(
+        [{"kind": "wallet_balance_delta", "token": "0x" + "ab" * 20, "amount_raw": 500}, {"kind": "novel_kind"}],
+        esc=lambda value: str(value),
+    )
+    assert "Wallet balance change" in witness_html
+    assert "amount raw 500" in witness_html
+    assert "0xabab…abab" in witness_html
+    assert "Novel kind" in witness_html
+    assert "nothing outside the parser corroborates" in qa_coverage.fidelity_witness_html([], esc=str)
+
+
+def test_harness_failure_seal_retracts_a_stale_green(modules, catalog_path: Path, tmp_path: Path) -> None:
+    """A run that fails before producing evidence must retract the cell, not vanish.
+
+    Before seal_intent_harness_failure existed, this exact shape — pytest exits, no
+    evidence-manifest.json — raised without sealing, and intent_latest.json kept the
+    previous PASS with no trace that a newer run failed. Observed live 2026-08-28:
+    a base fork failure left the board unchanged. The instrument could add green but
+    never retract it.
+    """
+    qa, _, _ = modules
+    store = tmp_path / "store"
+    qa.bootstrap_store(store, catalog_path)
+    plan = qa.intent_cell_plan(cell_id="intent.aave_v3.arbitrum.SUPPLY.anvil.safe")
+    cell_id = plan["cell_id"]
+
+    # a previously sealed green for the same cell
+    latest_path = store / "index" / "intent_latest.json"
+    latest_path.write_text(
+        json.dumps(
+            {
+                cell_id: {
+                    "intent_cell_id": cell_id,
+                    "status": "PASS",
+                    "evidence_status": "COMPLETE",
+                    "contract_status": "VERIFIED",
+                    "attribution_mode": "exact-runtime",
+                    "last_pass_at": "2026-08-01T00:00:00Z",
+                    "sealed_at": "2026-08-01T00:00:00Z",
+                    "catalog_sha256": plan["catalog_sha256"],
+                }
+            }
+        )
+    )
+
+    # yesterday's failure shape: a run.log and plan.json, pytest produced NO junit
+    # and NO evidence manifest
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    (workspace / "run.log").write_text("fixture skip: Anvil could not start\n")
+    (workspace / "plan.json").write_text(json.dumps(plan))
+
+    target = qa.seal_intent_harness_failure(
+        store=store,
+        catalog_path=catalog_path,
+        plan=plan,
+        run_id="hf-retract-001",
+        workspace=workspace,
+        returncode=1,
+        sdk=TEST_SDK,
+    )
+
+    row = json.loads(latest_path.read_text())[cell_id]
+    assert row["status"] == "FAIL", "the stale green must be retracted"
+    assert row["evidence_status"] == "HARNESS_FAIL"
+    assert row["attribution_mode"] == "harness-failure"
+    assert row["last_pass_at"] == "2026-08-01T00:00:00Z", "retraction removes the claim, not the history"
+    assert "missing: results.xml, evidence-manifest.json" in row["failure_reason"]
+
+    # the retraction is a first-class immutable seal: report + preserved inputs + ledger row
+    assert (target / "report.html").is_file()
+    assert (target / "run.log").is_file()
+    history = qa._load_history_module()
+    records = history.read_history(store)
+    assert records, "the retraction must enter the hash-chained ledger"
+    last = records[-1]
+    assert last["surface"] == "intent"
+    assert last["cell_verdicts"] == {cell_id: "FAIL"}
+
+
+def test_harness_failure_seal_can_never_write_a_pass(modules, catalog_path: Path, tmp_path: Path) -> None:
+    """Even a green JUnit cannot turn a harness failure into a PASS.
+
+    The exact live shape: pytest exits 0 with a passing-looking results.xml (a skip),
+    but the evidence manifest was never published. Evidence publication failed, so
+    nothing was proven; the seal must be FAIL/HARNESS_FAIL regardless of what the
+    JUnit says. PASS admission belongs exclusively to seal_intent_junit's
+    fail-closed path.
+    """
+    qa, _, _ = modules
+    store = tmp_path / "store"
+    qa.bootstrap_store(store, catalog_path)
+    plan = qa.intent_cell_plan(cell_id="intent.aave_v3.arbitrum.SUPPLY.anvil.safe")
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    nodeid = plan["proof_recipe"]["nodeids"][0]
+    classname = nodeid.split("::")[0].removesuffix(".py").replace("/", ".") + "." + nodeid.split("::")[1]
+    (workspace / "results.xml").write_text(
+        f'<testsuite tests="1"><testcase classname="{classname}" name="{nodeid.split("::")[-1]}" time="1.0" /></testsuite>'
+    )
+    (workspace / "run.log").write_text("1 passed\n")
+
+    target = qa.seal_intent_harness_failure(
+        store=store,
+        catalog_path=catalog_path,
+        plan=plan,
+        run_id="hf-nopass-001",
+        workspace=workspace,
+        returncode=0,
+        sdk=TEST_SDK,
+    )
+
+    summary = json.loads((target / "summary.json").read_text())
+    assert [cell["status"] for cell in summary["cells"]] == ["FAIL"]
+    assert [cell["evidence_status"] for cell in summary["cells"]] == ["HARNESS_FAIL"]
+    row = json.loads((store / "index" / "intent_latest.json").read_text())[plan["cell_id"]]
+    assert row["status"] == "FAIL"
+    assert row.get("last_pass_at") is None
+
+
+def test_the_harness_canary_cell_resolves_to_a_real_failing_node(modules) -> None:
+    """The canary is only an alarm if its wiring cannot rot silently.
+
+    Three ways it could disarm without anyone noticing: the synthesized cell
+    drops out of the catalog, the plan stops resolving, or the nodeid points at
+    a test that no longer exists (an unpainted canary must mean "never run",
+    never "file was deleted"). Each is pinned here; the runtime failure itself
+    is pinned by test_the_canary_fails_when_armed_and_skips_when_not.
+    """
+    qa, _, _ = modules
+    catalog = qa.build_intent_catalog()
+    cell = next(c for c in catalog["cells"] if c["id"] == qa.HARNESS_CANARY_CELL_ID)
+    assert cell["protocol"] == "harness_control"
+    assert cell["presence"] == "covered"
+    assert cell["mainnet_recipes"] == [], "the canary must never grow a mainnet runner"
+
+    plan = qa.intent_cell_plan(cell_id=f"{qa.HARNESS_CANARY_CELL_ID}.anvil.safe")
+    nodeids = plan["proof_recipe"]["nodeids"]
+    assert len(nodeids) == 1
+    path, function = nodeids[0].split("::")
+    source = (Path(qa.REPO_ROOT) / path).read_text()
+    assert f"def {function}(" in source, "canary nodeid points at a test that no longer exists"
+    assert "_fail_if_armed()" in source
+
+
+def test_the_canary_fails_when_armed_and_skips_when_not(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Negative control on the canary itself: armed, it MUST raise.
+
+    If someone 'fixes' the canary, its cells would seal PASS and paint CANARY
+    BROKEN — but only after a run. This catches the disarm at unit speed.
+    """
+    from tests.qa_lab import test_harness_canary as canary
+
+    monkeypatch.setenv("ALMANAK_QA_CANARY", "1")
+    with pytest.raises(AssertionError, match="fails by design"):
+        canary.test_harness_canary_must_fail_safe()
+
+    monkeypatch.delenv("ALMANAK_QA_CANARY")
+    with pytest.raises(pytest.skip.Exception):
+        canary.test_harness_canary_must_fail_eoa()
+
+
+def test_seal_admission_refusal_retracts_instead_of_keeping_the_stale_green(
+    modules, catalog_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A completed run whose evidence is refused at admission must retract the cell.
+
+    This is the keep-stale-green hole one layer below the incomplete-evidence
+    shape: pytest exits 0, evidence-manifest.json exists, but seal_intent_junit
+    raises (a semantic-contract violation, a JUnit/evidence mismatch). The old
+    behaviour propagated the exception with no seal, leaving the previous PASS
+    standing — a run that PROVED its evidence inadmissible left the board
+    claiming the cell was fine.
+    """
+    qa, _, _ = modules
+    store = tmp_path / "store"
+    qa.bootstrap_store(store, catalog_path)
+    plan = qa.intent_cell_plan(cell_id="intent.aave_v3.arbitrum.SUPPLY.anvil.safe")
+    cell_id = plan["cell_id"]
+    latest_path = store / "index" / "intent_latest.json"
+    latest_path.write_text(
+        json.dumps(
+            {
+                cell_id: {
+                    "intent_cell_id": cell_id,
+                    "status": "PASS",
+                    "evidence_status": "COMPLETE",
+                    "attribution_mode": "exact-runtime",
+                    "catalog_sha256": plan["catalog_sha256"],
+                }
+            }
+        )
+    )
+
+    class _CompletedRun:
+        """Stands in for pytest: writes complete-looking seal input, exits 0."""
+
+        def __init__(self, command):
+            junit = next(arg.split("=", 1)[1] for arg in command if arg.startswith("--junitxml="))
+            evidence = next(arg.split("=", 1)[1] for arg in command if arg.startswith("--intent-evidence-dir="))
+            Path(junit).write_text('<testsuite tests="1"><testcase classname="t" name="n" time="1"/></testsuite>')
+            Path(evidence).mkdir(parents=True, exist_ok=True)
+            (Path(evidence) / "evidence-manifest.json").write_text("{}")
+            self.stdout = io.StringIO("")
+
+        def wait(self):
+            return 0
+
+    real_popen = qa.subprocess.Popen
+
+    def _popen(command, **kwargs):
+        # Only the proof-run pytest is faked; the catalog worker and any other
+        # subprocess the seal path spawns must stay real.
+        if any(str(arg).startswith("--junitxml=") for arg in command):
+            return _CompletedRun(command)
+        return real_popen(command, **kwargs)
+
+    def _refusing_seal(**_: object):
+        raise ValueError("semantic contract parser amount 1 does not equal request 2")
+
+    history = qa._load_history_module()
+    monkeypatch.setattr(qa, "intent_cell_plan", lambda *, cell_id: plan)
+    monkeypatch.setattr(qa, "fork_upstream_is_public_rpc", lambda _chain: False)
+    monkeypatch.setattr(qa, "seal_intent_junit", _refusing_seal)
+    monkeypatch.setattr(qa.subprocess, "Popen", _popen)
+    monkeypatch.setattr(history, "provenance_from_worktree", lambda *a, **k: TEST_SDK)
+
+    with pytest.raises(RuntimeError, match="seal admission refused"):
+        qa.run_intent_cell(cell_id=f"{cell_id}", store=store, catalog_path=catalog_path, run_id="admission-001")
+
+    row = json.loads(latest_path.read_text())[cell_id]
+    assert row["status"] == "FAIL", "an admission refusal must retract the stale green"
+    assert row["evidence_status"] == "HARNESS_FAIL"
+    assert "seal admission refused" in row["failure_reason"]
+    assert "parser amount 1 does not equal request 2" in row["failure_reason"]
+    retraction_dirs = list((store / "intents").rglob("admission-001-retraction"))
+    assert len(retraction_dirs) == 1
+    assert (retraction_dirs[0] / "admission-refusal.txt").is_file()
+
+
+def test_mainnet_failure_seal_retracts_the_cell_from_a_failed_bundle(
+    modules, catalog_path: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """A funded mainnet failure must paint FAIL on the board, not vanish.
+
+    Observed live 2026-08-30: three funded Uniswap mainnet runs failed (open
+    positions, quarantined wallets) and intent_latest.json had NO entry for any
+    of them — the mainnet runner sealed only on PASS while the Anvil lane
+    already retracted through seal_intent_harness_failure. The retraction must
+    carry the runner's own measured error and the runner.log as run.log.
+    """
+    qa, _, _ = modules
+    # The live runner seals only from the clean SHA its plan bound; the unit test
+    # runs in whatever tree the developer has, so pin the provenance instead.
+    monkeypatch.setattr(qa._load_history_module(), "provenance_from_worktree", lambda root: dict(TEST_SDK))
+    store = tmp_path / "store"
+    qa.bootstrap_store(store, catalog_path)
+    cell_id = "intent.aave_v3.arbitrum.SUPPLY.mainnet.eoa"
+
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "plan.json").write_text(json.dumps({"cell_id": cell_id, "plan_sha256": "irrelevant"}))
+    (bundle / "result.json").write_text(
+        json.dumps({"overall": "FAIL", "error": "TypeError: missing 1 required keyword-only argument"})
+    )
+    (bundle / "runner.log").write_text("boom\n")
+
+    target = qa.seal_mainnet_intent_failure(store=store, catalog_path=catalog_path, bundle=bundle)
+
+    row = json.loads((store / "index" / "intent_latest.json").read_text())[cell_id]
+    assert row["status"] == "FAIL"
+    assert row["evidence_status"] == "HARNESS_FAIL"
+    assert row["failure_reason"] == "TypeError: missing 1 required keyword-only argument"
+    summary = json.loads((target / "summary.json").read_text())
+    assert summary["failure_reason"] == "TypeError: missing 1 required keyword-only argument"
+    assert summary["network"] == "mainnet"
+    assert (target / "run.log").is_file(), "runner.log must reach the retraction as run.log"
+    assert target.name.endswith("-retraction")

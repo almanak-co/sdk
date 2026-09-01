@@ -321,6 +321,10 @@ def _bundle(tmp_path: Path) -> Path:
         },
     )
     release = _write(tmp_path / "raw/release.json", {"pool_index": 7, "funded": False})
+    allowances = _write(
+        tmp_path / "raw/allowances.json",
+        {"chain_id": 42161, "block_number": 3, "block_hash": "0x" + "cd" * 32, "wallet": WALLET, "allowances": []},
+    )
     anchors = _write(
         tmp_path / "anchors.json",
         {
@@ -392,6 +396,7 @@ def _bundle(tmp_path: Path) -> Path:
         ],
         "terminal": [
             {"id": RECIPE.terminal[0], "artifact": ref(terminal)},
+            {"id": "NO_RESIDUAL_ALLOWANCES", "artifact": ref(allowances)},
             {"id": "POOL_WALLET_RELEASED", "artifact": ref(release)},
         ],
         "capital": {

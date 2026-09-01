@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import subprocess
 import sys
+import textwrap
 import typing
 from pathlib import Path
 
@@ -235,8 +237,7 @@ def test_mixed_intents_no_off_diagonal_credit(gate):
     # off-diagonal (across, SWAP) or (uniswap_v3, BRIDGE).
     pairs = _scan(
         gate,
-        'BridgeIntent(preferred_bridge="Across", to_chain="x")\n'
-        'SwapIntent(protocol="uniswap_v3", amount=1)',
+        'BridgeIntent(preferred_bridge="Across", to_chain="x")\nSwapIntent(protocol="uniswap_v3", amount=1)',
     )
     assert pairs == {("across", "BRIDGE"), ("uniswap_v3", "SWAP")}
 
@@ -307,3 +308,112 @@ def test_canon_chain_case_folds_non_registry_venue(gate):
     # Already-canonical inputs are unchanged (case-fold is a no-op on them).
     assert gate._canon_chain("solana") == "solana"
     assert gate._canon_chain("ethereum") == "ethereum"
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Sub-protocol lanes (VIB-6804): a connector's lifecycle declarations can name
+# a venue under its own protocol slug. The gate must require those triples, or
+# the lane is invisible to coverage while the support matrix advertises it.
+# ────────────────────────────────────────────────────────────────────────────
+
+
+def test_registry_introspect_requires_sub_protocol_lanes_from_lifecycle_declarations():
+    """Sub-protocol lanes are required triples and first-class validator keys.
+
+    Runs in a SUBPROCESS: ``_registry_introspect`` clears ``CONNECTOR_REGISTRY``
+    and pops every ``almanak.connectors.*`` module before re-importing, which
+    replaces module and class objects under any already-imported test on the
+    same xdist worker (2026-09-01: intermittent shard curve/TraderJoe/perps
+    unit failures traced to this worker poisoning).
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    code = textwrap.dedent(
+        """
+        import importlib.util
+        import sys
+
+        spec = importlib.util.spec_from_file_location("gate_probe", "scripts/ci/check_intent_coverage.py")
+        gate = importlib.util.module_from_spec(spec)
+        sys.modules["gate_probe"] = gate
+        spec.loader.exec_module(gate)
+
+        required, connector_chains, connector_intents, _venues = gate._registry_introspect()
+        lane = {triple for triple in required if triple[0] == "aerodrome_slipstream"}
+        assert lane == {
+            ("aerodrome_slipstream", "SWAP", "base"),
+            ("aerodrome_slipstream", "LP_OPEN", "base"),
+            ("aerodrome_slipstream", "LP_CLOSE", "base"),
+        }, lane
+        assert connector_intents["aerodrome_slipstream"] == frozenset({"SWAP", "LP_OPEN", "LP_CLOSE"})
+        assert connector_chains["aerodrome_slipstream"] == frozenset({"base"})
+        assert ("aerodrome", "LP_OPEN", "base") in required
+        """
+    )
+    result = subprocess.run(  # noqa: S603 - fixed interpreter, inline probe script
+        [sys.executable, "-c", code],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert result.returncode == 0, f"lane requirement probe failed: {result.stdout}\n{result.stderr}"
+
+
+def test_registry_introspect_never_lets_a_lane_shadow_a_connector():
+    """A lane whose protocol equals a registered connector name must raise.
+
+    The previous version subtracted the connector names from the
+    required-protocol set -- but lanes are inserted into both validator tables,
+    so that set was empty for every registry state and the assertion could not
+    fail. The RuntimeError branch is exercised in a SUBPROCESS because
+    ``_registry_introspect`` clears ``CONNECTOR_REGISTRY`` and pops every
+    ``almanak.connectors.*`` module from sys.modules; doing that in the shared
+    xdist worker with a stubbed re-import left the registry EMPTY and poisoned
+    every later registry consumer on the worker (2026-09-01: persistent shard-5
+    curve/TraderJoe unit failures across three CI reruns).
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    code = textwrap.dedent(
+        """
+        import importlib.util
+        import sys
+        from types import SimpleNamespace
+
+        spec = importlib.util.spec_from_file_location("gate_probe", "scripts/ci/check_intent_coverage.py")
+        gate = importlib.util.module_from_spec(spec)
+        sys.modules["gate_probe"] = gate
+        spec.loader.exec_module(gate)
+
+        from almanak.connectors._connector import CONNECTOR_REGISTRY
+
+        chains_spec = SimpleNamespace(is_offchain=False)
+
+        def connector(name, declarations):
+            return SimpleNamespace(
+                name=name,
+                strategy_intent_names=("SWAP",),
+                supported_chains=chains_spec,
+                supported_chains_for_intent=lambda intent: ("base",),
+                lifecycle_declarations=declarations,
+            )
+
+        shadow = SimpleNamespace(protocol="beta", chain="base", intent=SimpleNamespace(value="LP_OPEN"))
+        CONNECTOR_REGISTRY.with_strategy_support = lambda: [connector("alpha", [shadow]), connector("beta", [])]
+        try:
+            gate._registry_introspect()
+        except RuntimeError as exc:
+            assert "collides with a registered connector name" in str(exc), str(exc)
+            raise SystemExit(0)
+        raise SystemExit(1)
+        """
+    )
+    result = subprocess.run(  # noqa: S603 - fixed interpreter, inline probe script
+        [sys.executable, "-c", code],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, f"collision guard did not fire: {result.stdout}\n{result.stderr}"

@@ -123,7 +123,7 @@ async def execute_aave_lending_target(
     parsed = intent_evidence.capture_parse(
         intent=intent,
         transaction_result=target,
-        parser=AaveV3ReceiptParser().parse_receipt,
+        parser=AaveV3ReceiptParser(chain=chain).parse_receipt,
         explorer_url=f"{explorer_tx_base}{target.tx_hash}" if explorer_tx_base else None,
     )
     if not parsed.success:

@@ -194,14 +194,28 @@ def _receipt_dict(transaction_result: Any) -> dict[str, Any]:
     Serialization belongs at the evidence boundary, after parser invocation.
     Normalizing HexBytes and other web3 values before invoking the parser would
     make evidence mode exercise a different input contract than production.
+
+    Production never hands a parser the bare snake_case ``TransactionReceipt``
+    dict: ``ResultEnricher`` adds the web3 camelCase aliases first
+    (``transactionHash`` / ``gasUsed`` / ``blockNumber`` ...). Without the same
+    aliases here, every parser read an empty ``transactionHash`` and a ``None``
+    ``gasUsed`` — each sealed artifact carried an empty parser hash and the
+    "invalid gas quantity" warning on every Intent cell. The rule is imported,
+    not copied, so the two contracts cannot drift apart again.
     """
+    from almanak.framework.execution.result_enricher import _SNAKE_TO_CAMEL
+
     receipt = getattr(transaction_result, "receipt", transaction_result)
     if receipt is None:
         raise ValueError("Intent receipt evidence requires a transaction receipt")
     value = receipt.to_dict() if hasattr(receipt, "to_dict") else receipt
     if not isinstance(value, Mapping):
         raise ValueError("Transaction receipt must be an object")
-    return dict(value)
+    shaped = dict(value)
+    for snake_key, camel_key in _SNAKE_TO_CAMEL.items():
+        if snake_key in shaped and camel_key not in shaped:
+            shaped[camel_key] = shaped[snake_key]
+    return shaped
 
 
 def _fidelity(
@@ -321,6 +335,7 @@ class IntentEvidenceRecorder:
         declared_intents: set[str] | None = None,
         observed_intents: list[Any] | None = None,
         source_provenance: Mapping[str, Any] | None = None,
+        explorer_tx_base: str | None = None,
     ) -> None:
         if network not in {"anvil", "mainnet"} or exec_path not in {"safe", "eoa"}:
             raise ValueError("Intent evidence axes must be anvil|mainnet and safe|eoa")
@@ -330,6 +345,13 @@ class IntentEvidenceRecorder:
         self.exec_path = exec_path
         self.git_sha = git_sha
         self.chain_id = chain_id
+        #: When set, every capture_parse without an explicit explorer_url derives
+        #: one from this base. Mainnet seal admission requires an HTTPS explorer
+        #: URL on every receipt artifact; only the Aave proof threaded a base
+        #: through its own signature, so the first Uniswap SWAP run to reach
+        #: sealing (2026-09-01) was refused. The recorder is the one seam every
+        #: proof already passes through.
+        self.explorer_tx_base = explorer_tx_base
         self.declared_intents = declared_intents
         self.observed_intents = observed_intents
         self.source_provenance = json_safe(source_provenance or {})
@@ -466,6 +488,8 @@ class IntentEvidenceRecorder:
             parser_exception = exc
             parser_error = {"type": f"{type(exc).__module__}.{type(exc).__qualname__}", "message": str(exc)}
         tx_hash = receipt.get("tx_hash", receipt.get("transactionHash", getattr(transaction_result, "tx_hash", None)))
+        if explorer_url is None and self.explorer_tx_base and tx_hash:
+            explorer_url = f"{self.explorer_tx_base}0x{str(tx_hash).removeprefix('0x')}"
         node_hash = hashlib.sha256(self.nodeid.encode()).hexdigest()[:16]
         cell_hash = hashlib.sha256(cell_id.encode()).hexdigest()[:12]
         relpath = Path("receipts") / node_hash / f"{cell_hash}-parse{invocation:02d}.json"

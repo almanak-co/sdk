@@ -900,3 +900,177 @@ def test_solidly_lp_profile_is_refused_for_a_protocol_it_cannot_rederive() -> No
 
     with pytest.raises(ValueError, match="No authoritative Solidly LP event contract"):
         validate_semantic_contract(payload, expected_profile="solidly_lp.v1")
+
+
+# ---------------------------------------------------------------------------
+# Harness discrimination vectors (2026-08-28 adversarial-review round)
+# ---------------------------------------------------------------------------
+
+
+def test_a_zero_delta_wallet_cannot_inherit_green() -> None:
+    """A run in which nothing moved must not verify.
+
+    The classic vacuous green: every recorded balance identical before and
+    after, a plausible receipt attached. The wallet-flow re-derivation must
+    refuse on the delta, not average it away. (Distinct from the ``wallet``
+    mutation above, which records a wrong-but-nonzero delta.)
+    """
+    payload = deepcopy(_supply_payload())
+    payload["semantic_contract"]["wallet_after_raw"] = payload["semantic_contract"]["wallet_before_raw"]
+
+    with pytest.raises(ValueError, match="wallet delta"):
+        validate_semantic_contract(payload, expected_profile="lending.v1")
+
+
+def test_an_approval_only_receipt_cannot_prove_a_supply() -> None:
+    """A status=1 receipt full of plausible ERC-20 noise proves nothing.
+
+    The dangerous shape is not an empty receipt (the ``event-removed`` mutation)
+    but a SUCCESSFUL transaction whose logs are all approvals and transfers on
+    the right token with no protocol event at the committed resource. The
+    protocol parser itself returns success=True for such receipts
+    (receipt_parser.py returns success on any log mix), so this validator is
+    the only layer that can refuse it.
+    """
+    payload = deepcopy(_supply_payload())
+    asset = payload["semantic_contract"]["asset_address"]
+    payload["raw_receipt"]["logs"] = [
+        {
+            "address": asset,
+            "topics": [
+                _topic("Approval(address,address,uint256)"),
+                _address_topic(ACCOUNT),
+                _address_topic(payload["semantic_contract"]["resource_address"]),
+            ],
+            "data": "0x" + _word(AMOUNT),
+        },
+        {
+            "address": asset,
+            "topics": [
+                _topic("Transfer(address,address,uint256)"),
+                _address_topic(ACCOUNT),
+                _address_topic(payload["semantic_contract"]["resource_address"]),
+            ],
+            "data": "0x" + _word(AMOUNT),
+        },
+    ]
+
+    with pytest.raises(ValueError, match="found 0"):
+        validate_semantic_contract(payload, expected_profile="lending.v1")
+
+
+def test_a_crossed_parser_input_amount_cannot_inherit_green() -> None:
+    """The parser's input amount carrying the OUTPUT's value must refuse on the input leg.
+
+    Both numbers are genuine amounts from the same swap — only the attribution is
+    crossed. Corrupting exactly one field isolates the input-flow check: the
+    output leg stays valid, so nothing else can refuse on its behalf. (The mirror
+    corruption is the existing ``parser-output`` mutation above.) A first draft of
+    this test swapped BOTH fields and survived a neutered input check because the
+    output leg refused instead — a control that a mutant can dodge pins nothing.
+    """
+    payload = _swap_payload()
+    contract = payload["semantic_contract"]
+    contract["parser_amount_raw"] = contract["parser_output_amount_raw"]
+
+    with pytest.raises(ValueError, match="input flow"):
+        validate_semantic_contract(payload, expected_profile="swap.v1")
+
+
+# ---------------------------------------------------------------------------
+# Aerodrome Slipstream rides the V3 LP profile on the open side; only venue
+# identity differs (tick-spacing pools on reviewed factory generations).
+# ---------------------------------------------------------------------------
+
+_SLIPSTREAM_LEGACY_FACTORY = "0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A"
+_SLIPSTREAM_LEGACY_NPM = "0x827922686190790b37229fd06084350E74485b72"
+_SLIPSTREAM_CURRENT_NPM = "0xe1f8cd9AC4e4A65F54f38a5CdAfCA44f6dD68b53"
+_SLIPSTREAM_POOL = "0xb2cc224c1c9feE385f8ad6a55b4d94E92359DC59"
+
+
+def _slipstream_lp_open_payload() -> dict:
+    payload = _v3_lp_open_payload()
+    token0 = "0x4200000000000000000000000000000000000006"
+    token1 = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+    tick_spacing = 100
+    liquidity = 987654321
+    position_words = [
+        0,
+        0,
+        int(token0, 16),
+        int(token1, 16),
+        tick_spacing,
+        (1 << 256) - 100,
+        100,
+        liquidity,
+        0,
+        0,
+        0,
+        0,
+    ]
+    payload["protocol"] = "aerodrome_slipstream"
+    payload["source_request"]["pool_reference"] = "WETH/USDC/100"
+    payload["source_request"].pop("fee_tier_units", None)
+    payload["semantic_contract"].update(
+        pool_reference="WETH/USDC/100",
+        resource_address=_SLIPSTREAM_LEGACY_NPM,
+        factory_address=_SLIPSTREAM_LEGACY_FACTORY,
+        pool_address=_SLIPSTREAM_POOL,
+        fee_tier=tick_spacing,
+        pool_key_kind="tick_spacing",
+        pool_lookup_raw=_address_topic(_SLIPSTREAM_POOL),
+        position_state_raw="0x" + "".join(_word(value) for value in position_words),
+    )
+    for log in payload["raw_receipt"]["logs"]:
+        if log["address"] == UNISWAP_V3["base"]["position_manager"]:
+            log["address"] = _SLIPSTREAM_LEGACY_NPM
+        for index, topic in enumerate(log["topics"]):
+            if topic == _address_topic(UNISWAP_V3["base"]["position_manager"]):
+                log["topics"][index] = _address_topic(_SLIPSTREAM_LEGACY_NPM)
+    return payload
+
+
+def test_slipstream_lp_open_is_rederived_from_reviewed_deployment_and_factory_lookup() -> None:
+    result = validate_semantic_contract(_slipstream_lp_open_payload(), expected_profile="v3_lp.v1")
+
+    assert result["status"] == "VERIFIED"
+    assert result["facts"]["pool_key_kind"] == "tick_spacing"
+    assert result["facts"]["fee_tier"] == 100
+    assert result["facts"]["pool_address"] == _SLIPSTREAM_POOL.lower()
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        # The legacy pool with the CURRENT generation's NPM is not a reviewed pair:
+        # an NFT minted by one NPM cannot be closed through another.
+        (lambda p: p["semantic_contract"].update(resource_address=_SLIPSTREAM_CURRENT_NPM), "reviewed Slipstream"),
+        (lambda p: p["semantic_contract"].update(factory_address="0x" + "77" * 20), "reviewed Slipstream"),
+        (
+            lambda p: p["semantic_contract"].update(pool_lookup_raw=_address_topic("0x" + "77" * 20)),
+            "tick-spacing pool",
+        ),
+        (
+            lambda p: p["semantic_contract"].update(pool_lookup_raw=_address_topic("0x" + "00" * 20)),
+            "tick-spacing pool",
+        ),
+        (lambda p: p["semantic_contract"].pop("pool_key_kind"), "tick_spacing pool key"),
+        (lambda p: p["semantic_contract"].update(fee_tier=50), "positions\\(\\) witness"),
+    ],
+    ids=("npm-generation", "factory", "lookup-other-pool", "lookup-zero", "key-kind", "tick-spacing"),
+)
+def test_slipstream_lp_open_mutations_cannot_inherit_green(mutation, message: str) -> None:
+    payload = _slipstream_lp_open_payload()
+    mutation(payload)
+
+    with pytest.raises(ValueError, match=message):
+        validate_semantic_contract(payload, expected_profile="v3_lp.v1")
+
+
+def test_slipstream_close_is_not_admitted_to_the_burning_v3_close_contract() -> None:
+    payload = _slipstream_lp_open_payload()
+    payload["intent"] = "LP_CLOSE"
+    payload["semantic_contract"]["intent"] = "LP_CLOSE"
+
+    with pytest.raises(ValueError, match="No authoritative V3 LP event contract for aerodrome_slipstream.LP_CLOSE"):
+        validate_semantic_contract(payload, expected_profile="v3_lp.v1")

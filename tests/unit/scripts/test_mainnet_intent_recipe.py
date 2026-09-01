@@ -106,10 +106,10 @@ def test_uniswap_swap_recipe_is_exact_pool_and_inverse_cleanup(recipe) -> None:
     assert recipe.semantic_profile == "swap.v1"
     assert recipe.target == (f"SWAP:USDC:WETH:0.5:{recipe.fee_tier}:{recipe.resource_address}",)
     assert recipe.cleanup == (
-        f"SWAP_ALL:WETH:USDC:ALL:{recipe.fee_tier}:{recipe.resource_address}",
+        f"SWAP_BACK:WETH:USDC:MEASURED:{recipe.fee_tier}:{recipe.resource_address}",
         "SWEEP_TO_MASTER",
     )
-    assert recipe.terminal == ("TOKEN_BALANCE_ZERO:WETH", "POOL_WALLET_RELEASED")
+    assert recipe.terminal == ("TOKEN_BALANCE_ZERO:WETH", "NO_RESIDUAL_ALLOWANCES", "POOL_WALLET_RELEASED")
     assert recipe.resource_address == compute_pool_address(
         recipe.factory_address,
         recipe.asset_address,
@@ -123,8 +123,8 @@ def test_traderjoe_swap_recipe_is_exact_pair_and_inverse_cleanup() -> None:
 
     assert recipe.semantic_profile == "liquidity_book_swap.v1"
     assert recipe.target == (f"SWAP:WAVAX:USDT:0.01:20:{recipe.resource_address}",)
-    assert recipe.cleanup == (f"SWAP_ALL:USDT:WAVAX:ALL:20:{recipe.resource_address}", "SWEEP_TO_MASTER")
-    assert recipe.terminal == ("TOKEN_BALANCE_ZERO:USDT", "POOL_WALLET_RELEASED")
+    assert recipe.cleanup == (f"SWAP_BACK:USDT:WAVAX:MEASURED:20:{recipe.resource_address}", "SWEEP_TO_MASTER")
+    assert recipe.terminal == ("TOKEN_BALANCE_ZERO:USDT", "NO_RESIDUAL_ALLOWANCES", "POOL_WALLET_RELEASED")
 
 
 @pytest.mark.parametrize("chain", ["arbitrum", "avalanche"])
@@ -327,7 +327,7 @@ def test_live_obligation_parser_rejects_ambiguous_or_unsupported_actions(obligat
         ),
         (
             UNISWAP_V3_ARBITRUM_SWAP_EOA.cleanup[0],
-            ("SWAP_ALL", "WETH", "USDC", None, 500, UNISWAP_V3_ARBITRUM_SWAP_EOA.resource_address),
+            ("SWAP_BACK", "WETH", "USDC", None, 500, UNISWAP_V3_ARBITRUM_SWAP_EOA.resource_address),
         ),
     ],
 )
@@ -344,7 +344,9 @@ def test_uniswap_live_obligation_parser_is_typed_and_exact(obligation: str, expe
     "obligation",
     [
         "SWAP:USDC:WETH:0.5:500",
-        "SWAP_ALL:WETH:USDC:1:500:0x" + "11" * 20,
+        "SWAP_ALL:WETH:USDC:ALL:500:0x" + "11" * 20,
+        "SWAP_BACK:WETH:USDC:ALL:500:0x" + "11" * 20,
+        "SWAP_BACK:WETH:USDC:1:500:0x" + "11" * 20,
         "SWAP:USDC:WETH:0:500:0x" + "11" * 20,
         "SWAP:USDC:WETH:1:0:0x" + "11" * 20,
     ],
@@ -472,3 +474,310 @@ def test_every_recipe_decimal_agrees_with_the_map() -> None:
         output_symbol = getattr(recipe, "output_asset_symbol", None)
         if output_symbol:
             assert recipe.output_asset_decimals == MAINNET_ASSET_DECIMALS[output_symbol]
+
+
+def test_run_diagnostics_carry_the_runners_own_log_into_the_bundle(tmp_path: Path) -> None:
+    import logging
+
+    runner = _runner_module()
+    root = logging.getLogger()
+    before = (list(root.handlers), root.level)
+    diagnostics = runner._RunDiagnostics(tmp_path)
+    logging.getLogger("almanak.test.compile").error("Gateway balance query failed: no attribute")
+    logging.getLogger("almanak.test.parse").warning("token_resolution_error token=0xabc chain=ethereum")
+    logging.getLogger("almanak.test.parse").info("Parsed Aave V3: REPAY 0.00005")
+    summary = diagnostics.finish(tmp_path)
+
+    assert (list(root.handlers), root.level) == before, "handlers and level are restored"
+    assert summary == {"log": "runner.log", "errors": 1, "warnings": 1}
+    written = json.loads((tmp_path / "diagnostics.json").read_text(encoding="utf-8"))
+    assert written["errors"] == 1 and written["warnings"] == 1
+    assert [row["level"] for row in written["records"]] == ["ERROR", "WARNING"]
+    log = (tmp_path / "runner.log").read_text(encoding="utf-8")
+    assert "Gateway balance query failed" in log and "Parsed Aave V3" in log
+
+
+def test_recover_seal_refuses_error_diagnostics_unless_a_human_accepts_them(tmp_path: Path, monkeypatch) -> None:
+    runner = _runner_module()
+    plan = _plan()
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "evidence").mkdir()
+    (bundle / "results.xml").write_text("<testsuite/>", encoding="utf-8")
+    (bundle / "envelope.json").write_text("{}", encoding="utf-8")
+    (bundle / "plan.json").write_text(json.dumps(plan), encoding="utf-8")
+    (bundle / "result.json").write_text(
+        json.dumps({"target": "PASS", "cleanup": "PASS", "terminal_position_zero": True, "sweep": "PASS"}),
+        encoding="utf-8",
+    )
+    (bundle / "diagnostics.json").write_text(json.dumps({"errors": 1, "warnings": 3}), encoding="utf-8")
+    monkeypatch.setattr(runner, "_git_sha", lambda: plan["git_sha"])
+    monkeypatch.setattr(runner, "validate_mainnet_envelope", lambda path: None)
+    monkeypatch.setattr(
+        runner.subprocess,
+        "run",
+        lambda command, **kwargs: SimpleNamespace(returncode=0, stdout="/immutable/seal\n", stderr=""),
+    )
+
+    with pytest.raises(ValueError, match="ERROR-level diagnostic"):
+        runner.recover_seal_command(SimpleNamespace(bundle=bundle))
+    assert runner.recover_seal_command(SimpleNamespace(bundle=bundle, accept_error_diagnostics=True)) == 0
+
+
+def test_runner_call_sites_bind_every_required_proof_helper_argument() -> None:
+    """The reverse-cleanup helper gained a required ``amount_in_raw`` (60dd623cfb)
+    and the runner's call site silently kept the old shape; the TypeError surfaced
+    only AFTER live funding (2026-08-30 SWAP cleanup). Bind every runner call site
+    to its helper's signature so helper drift breaks in CI, not on mainnet.
+    """
+    import ast
+    import inspect
+
+    runner = _runner_module()
+    helpers = {
+        name: getattr(runner, name)
+        for name in (
+            "execute_uniswap_v3_exact_reverse_cleanup",
+            "execute_traderjoe_v2_reverse_cleanup",
+            "run_uniswap_v3_swap_exact_proof",
+            "run_traderjoe_v2_swap_exact_proof",
+            "run_uniswap_v3_lp_open_exact_proof",
+            "run_uniswap_v3_lp_close_exact_proof",
+            "execute_aave_lending_target",
+        )
+    }
+    source = (REPO / "scripts" / "quant-test" / "run_mainnet_intent.py").read_text(encoding="utf-8")
+    seen: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name) or node.func.id not in helpers:
+            continue
+        seen.add(node.func.id)
+        assert not node.args, f"{node.func.id} must be called keyword-only at line {node.lineno}"
+        keywords = {kw.arg for kw in node.keywords if kw.arg is not None}
+        required = {
+            parameter.name
+            for parameter in inspect.signature(helpers[node.func.id]).parameters.values()
+            if parameter.kind is inspect.Parameter.KEYWORD_ONLY and parameter.default is inspect.Parameter.empty
+        }
+        missing = sorted(required - keywords)
+        assert not missing, f"{node.func.id} call at line {node.lineno} omits required arguments: {missing}"
+    assert seen == set(helpers), f"enumeration lost call sites: {sorted(set(helpers) - seen)}"
+
+
+def test_hygiene_unwind_attempts_every_item_and_never_raises(tmp_path: Path, monkeypatch) -> None:
+    """One revoke failure must not block the next pair, an unclosable position is
+    recorded as stuck, and the pass reports zeros only from re-derived chain
+    observations. This is the inverted-semantics duty lane the 2026-08-30
+    incident lacked: the verdict path aborted on its first exception and every
+    later risk-reducing step was skipped.
+    """
+    import asyncio
+
+    runner = _runner_module()
+    recipe = SimpleNamespace(
+        protocol="uniswap_v3",
+        intent="LP_OPEN",
+        chain="arbitrum",
+        resource_address="0x" + "22" * 20,
+        factory_address="0x" + "33" * 20,
+        terminal=("UNISWAP_V3_NFT_BALANCE_ZERO", runner.NO_RESIDUAL_ALLOWANCES, "POOL_WALLET_RELEASED"),
+    )
+    pairs = [("0x" + "aa" * 20, "0x" + "bb" * 20), ("0x" + "cc" * 20, "0x" + "dd" * 20)]
+    attempted: list[tuple[str, str]] = []
+
+    def send(web3, *, account, token, spender, chain_id):
+        attempted.append((token, spender))
+        if token == pairs[0][0]:
+            raise RuntimeError("revoke reverted")
+        return SimpleNamespace(), "0x" + "e" * 64
+
+    monkeypatch.setattr(runner, "_approval_pairs", lambda rows, *, wallet: list(pairs))
+    monkeypatch.setattr(runner, "_allowance", lambda web3, *, token, owner, spender, block="latest": 5)
+    monkeypatch.setattr(runner, "_send_allowance_revoke", send)
+    monkeypatch.setattr(runner, "_write_receipt_artifact", lambda **kwargs: tmp_path / "receipt.json")
+    monkeypatch.setattr(runner, "_owned_position_ids", lambda web3, *, collection, wallet: [123])
+    monkeypatch.setattr(runner, "_capture_terminal_paths", lambda **kwargs: ({}, False))
+    monkeypatch.setattr(runner, "_observe_allowances", lambda **kwargs: (tmp_path / "allowances.json", False))
+    web3 = SimpleNamespace(
+        eth=SimpleNamespace(account=SimpleNamespace(from_key=lambda key: SimpleNamespace(address="0x" + "11" * 20)))
+    )
+
+    paths, terminal_zero = asyncio.run(
+        runner._hygiene_unwind(
+            web3=web3,
+            output=tmp_path,
+            recipe=recipe,
+            wallet="0x" + "11" * 20,
+            private_key="0x" + "ab" * 32,
+            rows=[],
+            orchestrator=None,
+            context=None,
+            rpc_url="",
+            gateway_client=None,
+            price_oracle={},
+        )
+    )
+
+    assert attempted == pairs, "one failed revoke must not block the next pair"
+    assert terminal_zero is False
+    assert paths[runner.NO_RESIDUAL_ALLOWANCES] == tmp_path / "allowances.json"
+    report = json.loads((tmp_path / "hygiene.json").read_text())
+    stuck_kinds = [item["kind"] for item in report["stuck"]]
+    assert "standing_allowance" in stuck_kinds, "the reverted revoke is recorded, not raised"
+    assert "open_position" in stuck_kinds, "an unclosable position is recorded as stuck"
+    assert [item["kind"] for item in report["actions"]] == ["revoke"], "the second pair still revoked"
+
+
+def test_anchor_target_prices_copies_only_symbols_the_anchor_priced() -> None:
+    """A swap's output token is never funded, so it has no anchor row; demanding
+    one crashed envelope building (KeyError 'WETH') on the first SWAP run whose
+    cleanup passed. The envelope copies what the anchor priced, nothing more.
+    """
+    runner = _runner_module()
+    rows = {"ETH": {"price": "2500", "native": True}, "USDC": {"price": "1"}}
+    assert runner._anchor_target_prices(rows, UNISWAP_V3_ARBITRUM_SWAP_EOA) == {"USDC": "1"}
+    assert runner._anchor_target_prices({**rows, "WETH": {"price": "2500.1"}}, UNISWAP_V3_ARBITRUM_SWAP_EOA) == {
+        "USDC": "1",
+        "WETH": "2500.1",
+    }
+
+
+def test_hygiene_unwind_recovers_pairs_from_the_chain_when_rows_were_lost(tmp_path: Path, monkeypatch) -> None:
+    """The 2026-09-01 LP_CLOSE crash unwound before its setup rows were assigned:
+    _approval_pairs saw nothing and a wallet holding two live approvals was
+    RELEASED on a vacuously-zero observation. Hygiene must re-derive approvals
+    from the chain's own Approval logs since funding.
+    """
+    import asyncio
+
+    runner = _runner_module()
+    recipe = SimpleNamespace(
+        protocol="aave_v3",
+        intent="REPAY",
+        chain="arbitrum",
+        resource_address="0x" + "22" * 20,
+        terminal=(runner.NO_RESIDUAL_ALLOWANCES,),
+    )
+    pair = ("0x" + "aa" * 20, "0x" + "bb" * 20)
+    sent: list[tuple[str, str]] = []
+    observed: dict = {}
+
+    monkeypatch.setattr(runner, "_approval_pairs", lambda rows, *, wallet: [])
+    monkeypatch.setattr(runner, "_funding_start_block", lambda web3, output: 500)
+    monkeypatch.setattr(runner, "_chain_approval_pairs", lambda web3, *, wallet, from_block: [pair])
+    monkeypatch.setattr(runner, "_allowance", lambda web3, **kwargs: 7)
+    monkeypatch.setattr(
+        runner,
+        "_send_allowance_revoke",
+        lambda web3, *, account, token, spender, chain_id: (
+            sent.append((token, spender)),
+            (SimpleNamespace(), "0x" + "e" * 64),
+        )[1],
+    )
+    monkeypatch.setattr(runner, "_write_receipt_artifact", lambda **kwargs: tmp_path / "receipt.json")
+    monkeypatch.setattr(
+        runner,
+        "_observe_allowances",
+        lambda **kwargs: (observed.setdefault("pairs", list(kwargs["pairs"])), (tmp_path / "a.json", True))[1],
+    )
+    monkeypatch.setattr(runner, "_capture_terminal_paths", lambda **kwargs: ({}, True))
+    web3 = SimpleNamespace(
+        eth=SimpleNamespace(account=SimpleNamespace(from_key=lambda key: SimpleNamespace(address="0x" + "11" * 20)))
+    )
+
+    _, terminal_zero = asyncio.run(
+        runner._hygiene_unwind(
+            web3=web3,
+            output=tmp_path,
+            recipe=recipe,
+            wallet="0x" + "11" * 20,
+            private_key="0x" + "ab" * 32,
+            rows=[],
+            orchestrator=None,
+            context=None,
+            rpc_url="",
+            gateway_client=None,
+            price_oracle={},
+        )
+    )
+
+    assert sent == [pair], "the chain-census pair must be revoked despite empty rows"
+    assert observed["pairs"] == [pair], "the observation must cover the census pairs"
+    assert terminal_zero is True
+    report = json.loads((tmp_path / "hygiene.json").read_text())
+    assert report["approval_census_ok"] is True
+
+
+def test_hygiene_unwind_treats_an_unproven_empty_pair_set_as_not_zero(tmp_path: Path, monkeypatch) -> None:
+    """Zero pairs proven by nothing (rows lost AND census unavailable) must
+    quarantine the wallet, never release it on a vacuous observation.
+    """
+    import asyncio
+
+    runner = _runner_module()
+    recipe = SimpleNamespace(
+        protocol="aave_v3",
+        intent="REPAY",
+        chain="arbitrum",
+        resource_address="0x" + "22" * 20,
+        terminal=(runner.NO_RESIDUAL_ALLOWANCES,),
+    )
+    monkeypatch.setattr(runner, "_approval_pairs", lambda rows, *, wallet: [])
+    monkeypatch.setattr(runner, "_funding_start_block", lambda web3, output: None)
+    monkeypatch.setattr(runner, "_observe_allowances", lambda **kwargs: (tmp_path / "a.json", True))
+    monkeypatch.setattr(runner, "_capture_terminal_paths", lambda **kwargs: ({}, True))
+    web3 = SimpleNamespace(
+        eth=SimpleNamespace(account=SimpleNamespace(from_key=lambda key: SimpleNamespace(address="0x" + "11" * 20)))
+    )
+
+    _, terminal_zero = asyncio.run(
+        runner._hygiene_unwind(
+            web3=web3,
+            output=tmp_path,
+            recipe=recipe,
+            wallet="0x" + "11" * 20,
+            private_key="0x" + "ab" * 32,
+            rows=[],
+            orchestrator=None,
+            context=None,
+            rpc_url="",
+            gateway_client=None,
+            price_oracle={},
+        )
+    )
+
+    assert terminal_zero is False, "vacuous zero must not release the wallet"
+    report = json.loads((tmp_path / "hygiene.json").read_text())
+    assert any(item["kind"] == "approval_census" for item in report["stuck"])
+    assert report["approval_census_ok"] is False
+
+
+def test_chain_approval_census_excludes_erc721_approvals(monkeypatch) -> None:
+    """ERC-721 Approval shares topic0 with ERC-20 but has no allowance() to read.
+
+    get_logs matches topic0 only, so a position-NFT approval (4 topics, empty
+    data) lands in the same result set; admitting it sends `allowance(address,
+    address)` to a contract that reverts, which marks a clean run FAIL in the
+    verdict path and wedges the hygiene pass.
+    """
+    from types import SimpleNamespace
+
+    runner = _runner_module()
+    wallet = "0x" + "11" * 20
+    owner_word = "0x" + wallet.removeprefix("0x").rjust(64, "0")
+    spender_word = "0x" + ("bb" * 20).rjust(64, "0")
+    erc20 = {
+        "address": "0x" + "aa" * 20,
+        "topics": [runner.APPROVAL_TOPIC, owner_word, spender_word],
+        "data": "0x" + "01".rjust(64, "0"),
+    }
+    erc721 = {
+        "address": "0x" + "cc" * 20,
+        "topics": [runner.APPROVAL_TOPIC, owner_word, spender_word, "0x" + "07".rjust(64, "0")],
+        "data": "0x",
+    }
+    web3 = SimpleNamespace(eth=SimpleNamespace(get_logs=lambda params: [erc20, erc721]))
+
+    pairs = runner._chain_approval_pairs(web3, wallet=wallet, from_block=1)
+
+    assert pairs == [("0x" + "aa" * 20, "0x" + "bb" * 20)]

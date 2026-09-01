@@ -171,4 +171,8 @@ def test_read_only_and_anvil_routes_do_not_request_money_approval(recheck_module
     assert aave["approval"]["required"] is False
     assert aave_mainnet["route_status"] == "ROUTABLE"
     assert aave_mainnet["approval"]["required"] is True
-    assert "run_mainnet_intent.py plan" in aave_mainnet["command"]
+    assert aave_mainnet["command"] == "/test-intent intent.aave_v3.arbitrum.SUPPLY.mainnet.eoa"
+    assert aave_mainnet["owner"] == "/test-intent"
+    assert "run_mainnet_intent.py" in aave_mainnet["runbook"]
+    assert any("ALMANAK_QA_MAINNET_LANE=enabled" in item for item in aave_mainnet["prerequisites"])
+    assert any("single-use" in item for item in aave_mainnet["prerequisites"])

@@ -191,17 +191,17 @@ def test_negative_control_stripping_the_invalidation_makes_the_record_reappear(
 def test_seq_13_accounting_record_is_explicitly_dispositioned_not_silently_skipped(manifest) -> None:
     """The one Aug 8-11 record the correction did not invalidate.
 
-    It sits in the window but on the accounting-bottom-up surface, so it needs
+    It sits in the window but on the accounting surface, so it needs
     a stated disposition with evidence rather than an unexplained absence.
     """
-    run_id = "20260810-1419z-accounting-bottom-up-aave_v3-complex-arbitrum-8a67bdc"
+    run_id = "20260810-1419z-accounting-aave_v3-complex-arbitrum-8a67bdc"
     assert run_id not in {entry["run_id"] for entry in manifest["entries"]}
 
     excluded = {row["run_id"]: row for row in manifest["considered_and_excluded"]}
     assert run_id in excluded, "a record inside the correction window must be dispositioned, not skipped"
     row = excluded[run_id]
     assert row["disposition"] == "not-poison"
-    assert row["surface"] == "accounting-bottom-up"
+    assert row["surface"] == "accounting"
     # The disposition has to be argued, not asserted.
     assert len(row["evidence"]) >= 3
     assert row["residual_risk"]

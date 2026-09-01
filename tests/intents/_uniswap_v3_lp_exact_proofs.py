@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
+import pytest
 from web3 import Web3
 
 from almanak.connectors.uniswap_v3.addresses import UNISWAP_V3
@@ -15,6 +17,7 @@ from almanak.framework.execution.orchestrator import ExecutionContext, Execution
 from almanak.framework.intents import LPCloseIntent, LPOpenIntent
 from almanak.framework.intents.compiler import IntentCompiler
 from almanak.framework.intents.compiler_models import IntentCompilerConfig
+from tests.intents._parameter_fidelity import TxOutcome, check_calldata
 from tests.intents.conftest import CHAIN_CONFIGS, get_token_balance, get_token_decimals
 from tests.intents.intent_evidence import DisabledIntentEvidenceRecorder, decode_explorer_view
 from tests.intents.pool_helpers import fail_if_v3_pool_missing
@@ -362,6 +365,26 @@ def _compiled_close_calls(bundle: Any) -> list[dict[str, Any]]:
     return calls
 
 
+def _decrease_minimums(call: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+    """Decode the compiled ``decreaseLiquidity`` call and rule whether its floors bind.
+
+    The intent declares a slippage tolerance; the chain enforces only what reaches
+    ``amount0Min`` / ``amount1Min``. The verdict is the weak I3 reading -- at least one
+    leg binds -- because a leg can legitimately be zero at a range edge. The decoded
+    values are returned as a witness so the DECODE page shows the numbers, not just
+    the verdict.
+    """
+    verdict = check_calldata(call["to"], call["data"])
+    witness: dict[str, Any] = {
+        "kind": "decoded_calldata",
+        "function": verdict.function or verdict.selector,
+        "outcome": verdict.outcome.value,
+    }
+    for constraint in verdict.constraints:
+        witness[constraint.path.rsplit(".", 1)[-1]] = str(constraint.value)
+    return verdict.outcome is TxOutcome.PROTECTED, witness
+
+
 async def run_uniswap_v3_lp_close_exact_proof(
     *,
     chain: str,
@@ -434,6 +457,7 @@ async def run_uniswap_v3_lp_close_exact_proof(
     assert compiled.status.value == "SUCCESS", f"LP_CLOSE compilation failed: {compiled.error}"
     assert compiled.action_bundle is not None
     compiled_calls = _compiled_close_calls(compiled.action_bundle)
+    decrease_minimums_bind, decrease_minimums_witness = _decrease_minimums(compiled_calls[0])
     executed = await orchestrator.execute(compiled.action_bundle, execution_context)
     assert executed.success, f"LP_CLOSE execution failed: {executed.error}"
 
@@ -540,7 +564,10 @@ async def run_uniswap_v3_lp_close_exact_proof(
         "terminal_state_block_hash": terminal_header["hash"].hex(),
     }
     role_flags = {
-        "decrease": {"liquidity_removed_eq_pre_state": decrease.liquidity_removed == pre_state["liquidity"]},
+        "decrease": {
+            "liquidity_removed_eq_pre_state": decrease.liquidity_removed == pre_state["liquidity"],
+            "decrease_minimums_bind": decrease_minimums_bind,
+        },
         "collect": {
             "parser_amount0_eq_wallet_delta": collect.amount0_collected == token0_returned,
             "parser_amount1_eq_wallet_delta": collect.amount1_collected == token1_returned,
@@ -554,7 +581,12 @@ async def run_uniswap_v3_lp_close_exact_proof(
         },
     }
     for role, flags in role_flags.items():
-        intent_evidence.record_fidelity(hard=True, flags=flags, receipt_role=role)
+        intent_evidence.record_fidelity(
+            hard=True,
+            flags=flags,
+            witnesses=[decrease_minimums_witness] if role == "decrease" else None,
+            receipt_role=role,
+        )
         intent_evidence.record_balance_deltas(
             receipt_role=role,
             checks={f"{role}_value_and_state_contract": all(flags.values())},
@@ -562,6 +594,21 @@ async def run_uniswap_v3_lp_close_exact_proof(
             token1={"address": token1, "before": token1_before, "after": token1_after, "delta": token1_returned},
         )
         intent_evidence.record_semantic_contract(receipt_role=role, receipt_role_name=role, **common_contract)
+
+    # Asserted only after the close landed and the receipts were sealed: the position is
+    # closed and the funds are back, so a red here strands nothing on a live chain. The
+    # false flag is already in the sealed receipt; this makes the pytest node red too.
+    if not decrease_minimums_bind and os.environ.get("ALMANAK_QA_STRICT_PROOFS") != "1":
+        # Excuse EXACTLY this known-red assertion, never the whole node: every
+        # assertion above stays a hard failure in CI. Self-healing — the moment
+        # the compiler binds the floors this branch is not taken and the assert
+        # below re-arms, with no marker left to remove. The QA Lab seal lane
+        # (ALMANAK_QA_STRICT_PROOFS=1) never takes this branch and stays FAIL.
+        pytest.xfail("VIB-6212: compiled decreaseLiquidity floors do not bind (as of 2026-09-01)")
+    assert decrease_minimums_bind, (
+        "LP_CLOSE declared a slippage tolerance but the compiled decreaseLiquidity floors do not bind "
+        f"({decrease_minimums_witness}); the chain would accept any output."
+    )
 
     return LPCloseTargetResult(
         intent=close_intent,

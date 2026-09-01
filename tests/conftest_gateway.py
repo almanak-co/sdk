@@ -445,7 +445,11 @@ class AnvilFixture:
             # Start Anvil
             started = self._loop.run_until_complete(self._manager.start())
             if not started:
-                self._error = RuntimeError("RollingForkManager.start() returned False")
+                # Surface the manager's own reason: "returned False" hides a rate
+                # limit, a dead upstream, and a missing binary behind one boolean,
+                # and pytest shows captured logs for failures but not for skips.
+                reason = self._manager.last_start_error or "RollingForkManager.start() returned False"
+                self._error = RuntimeError(reason)
                 return
 
             self._ready.set()

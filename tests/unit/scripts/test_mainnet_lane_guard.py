@@ -69,7 +69,7 @@ def test_cli_run_never_reaches_the_money_path_without_a_re_enable(runner, monkey
     """The negative control: without the guard this reaches ``execute_plan``."""
     reached: dict[str, bool] = {}
 
-    async def _fake_execute_plan(*, plan_path, approval_path, output):
+    async def _fake_execute_plan(*, plan_path, approval_path, output, operator_authorized=False):
         reached["money_path"] = True
         return {"overall": "PASS"}
 
@@ -124,3 +124,19 @@ def test_recover_seal_is_deliberately_exempt(runner) -> None:
     Guarding it would strand evidence for runs that already happened.
     """
     assert "recover-seal" not in runner.MAINNET_LANE_GUARDED_COMMANDS
+
+
+def test_the_importable_money_path_requires_the_flag_not_just_the_env(runner, monkeypatch) -> None:
+    """The env var alone must not open ``execute_plan`` for an importing agent.
+
+    ``execute_plan`` used to hardcode ``operator_authorized=True`` at its own
+    guard, so the CLI flag was never a second independent act on the import
+    path. The flag now defaults to False and must be threaded in explicitly.
+    """
+    import asyncio
+
+    monkeypatch.setenv("ALMANAK_QA_MAINNET_LANE", "enabled")
+    with pytest.raises(runner.MainnetLaneDisabledError, match=runner.MAINNET_LANE_FLAG):
+        asyncio.run(
+            runner.execute_plan(plan_path=Path("/tmp/p.json"), approval_path=Path("/tmp/a.json"), output=Path("/tmp/o"))
+        )

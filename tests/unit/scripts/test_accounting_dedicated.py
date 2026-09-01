@@ -1,4 +1,4 @@
-"""Load-bearing tests for the dedicated Accounting Bottom-Up evidence contract."""
+"""Load-bearing tests for the dedicated Accounting dedicated evidence contract."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.qa import accounting_bottom_up as bottom_up
+from scripts.qa import accounting_dedicated as dedicated
 from scripts.qa import run_accounting_matrix as matrix_runner
 from scripts.qa.run_accounting_matrix import _read_detached_anvil_pid, _read_managed_anvil_rpc_url
 
@@ -75,7 +75,7 @@ def _payload(bundle: Path) -> dict:
     ]
     stages = {
         name: {"status": "PASS", "anchor": f"anchor:{name}", "facts": {}, "artifacts": [], "diagnostic": ""}
-        for name in bottom_up.STAGE_ORDER
+        for name in dedicated.STAGE_ORDER
     }
     stages["receipt_balance"].update(
         facts={
@@ -89,7 +89,7 @@ def _payload(bundle: Path) -> dict:
     )
     return {
         "schema_version": 1,
-        "artifact_kind": bottom_up.ARTIFACT_KIND,
+        "artifact_kind": dedicated.ARTIFACT_KIND,
         "row_id": "looping-aave_v3-arbitrum",
         "fixture": "looping",
         "chain": "arbitrum",
@@ -98,14 +98,14 @@ def _payload(bundle: Path) -> dict:
         "exec_path": "eoa",
         "deployment_id": "deployment:test",
         "expected_shape": {"SUPPLY": 1, "BORROW": 1, "REPAY": 1, "WITHDRAW": 1},
-        "stage_order": list(bottom_up.STAGE_ORDER),
+        "stage_order": list(dedicated.STAGE_ORDER),
         "stages": stages,
         "status": "PASS",
     }
 
 
 def test_validator_accepts_complete_anchored_manifest(tmp_path: Path) -> None:
-    bottom_up.validate_bottom_up_evidence(_payload(tmp_path), bundle=tmp_path)
+    dedicated.validate_dedicated_evidence(_payload(tmp_path), bundle=tmp_path)
 
 
 @pytest.mark.parametrize("mutation", ["missing-stage", "self-promoted", "no-balance-anchor"])
@@ -119,7 +119,7 @@ def test_validator_rejects_incomplete_or_self_promoted_evidence(tmp_path: Path, 
         payload["stages"]["receipt_balance"]["artifacts"] = []
 
     with pytest.raises(ValueError):
-        bottom_up.validate_bottom_up_evidence(payload, bundle=tmp_path)
+        dedicated.validate_dedicated_evidence(payload, bundle=tmp_path)
 
 
 def test_validator_rejects_tampered_chain_artifact(tmp_path: Path) -> None:
@@ -128,7 +128,7 @@ def test_validator_rejects_tampered_chain_artifact(tmp_path: Path) -> None:
     receipt_path.write_text("edited after observation\n")
 
     with pytest.raises(ValueError, match="tampered"):
-        bottom_up.validate_bottom_up_evidence(payload, bundle=tmp_path)
+        dedicated.validate_dedicated_evidence(payload, bundle=tmp_path)
 
 
 def test_validator_rejects_semantically_fabricated_balance_pass(tmp_path: Path) -> None:
@@ -141,7 +141,7 @@ def test_validator_rejects_semantically_fabricated_balance_pass(tmp_path: Path) 
     balance_artifact["sha256"] = hashlib.sha256(balance_path.read_bytes()).hexdigest()
 
     with pytest.raises(ValueError, match="mismatched balance"):
-        bottom_up.validate_bottom_up_evidence(payload, bundle=tmp_path)
+        dedicated.validate_dedicated_evidence(payload, bundle=tmp_path)
 
 
 def test_validator_recomputes_delta_from_block_pinned_balances(tmp_path: Path) -> None:
@@ -154,7 +154,7 @@ def test_validator_recomputes_delta_from_block_pinned_balances(tmp_path: Path) -
     balance_artifact["sha256"] = hashlib.sha256(balance_path.read_bytes()).hexdigest()
 
     with pytest.raises(ValueError, match="mismatched balance"):
-        bottom_up.validate_bottom_up_evidence(payload, bundle=tmp_path)
+        dedicated.validate_dedicated_evidence(payload, bundle=tmp_path)
 
 
 def test_validator_accepts_exact_zero_close_for_indexed_receipt_token(tmp_path: Path) -> None:
@@ -174,7 +174,7 @@ def test_validator_accepts_exact_zero_close_for_indexed_receipt_token(tmp_path: 
     balance_path.write_text(json.dumps(checks) + "\n")
     balance_artifact["sha256"] = hashlib.sha256(balance_path.read_bytes()).hexdigest()
 
-    bottom_up.validate_bottom_up_evidence(payload, bundle=tmp_path)
+    dedicated.validate_dedicated_evidence(payload, bundle=tmp_path)
 
 
 def test_validator_rejects_zero_close_mode_with_nonzero_residual(tmp_path: Path) -> None:
@@ -195,7 +195,7 @@ def test_validator_rejects_zero_close_mode_with_nonzero_residual(tmp_path: Path)
     balance_artifact["sha256"] = hashlib.sha256(balance_path.read_bytes()).hexdigest()
 
     with pytest.raises(ValueError, match="mismatched balance"):
-        bottom_up.validate_bottom_up_evidence(payload, bundle=tmp_path)
+        dedicated.validate_dedicated_evidence(payload, bundle=tmp_path)
 
 
 def test_validator_accepts_exact_indexed_transfer_derivation(tmp_path: Path) -> None:
@@ -219,8 +219,8 @@ def test_validator_accepts_exact_indexed_transfer_derivation(tmp_path: Path) -> 
                 "underlying_transfer_log_delta_raw": "-101",
                 "scaled_balance_before_raw": "50",
                 "scaled_balance_after_raw": "100",
-                "liquidity_index_before_ray": str(2 * bottom_up.RAY),
-                "liquidity_index_after_ray": str(2 * bottom_up.RAY),
+                "liquidity_index_before_ray": str(2 * dedicated.RAY),
+                "liquidity_index_after_ray": str(2 * dedicated.RAY),
                 "derived_balance_before_raw": "100",
                 "derived_balance_after_raw": "200",
                 "expected_scaled_delta_raw": "50",
@@ -232,7 +232,7 @@ def test_validator_accepts_exact_indexed_transfer_derivation(tmp_path: Path) -> 
     balance_path.write_text(json.dumps(checks) + "\n")
     balance_artifact["sha256"] = hashlib.sha256(balance_path.read_bytes()).hexdigest()
 
-    bottom_up.validate_bottom_up_evidence(payload, bundle=tmp_path)
+    dedicated.validate_dedicated_evidence(payload, bundle=tmp_path)
 
 
 def test_validator_rejects_tampered_indexed_transfer_derivation(tmp_path: Path) -> None:
@@ -256,8 +256,8 @@ def test_validator_rejects_tampered_indexed_transfer_derivation(tmp_path: Path) 
                 "underlying_transfer_log_delta_raw": "-100",
                 "scaled_balance_before_raw": "100",
                 "scaled_balance_after_raw": "151",
-                "liquidity_index_before_ray": str(bottom_up.RAY),
-                "liquidity_index_after_ray": str(2 * bottom_up.RAY),
+                "liquidity_index_before_ray": str(dedicated.RAY),
+                "liquidity_index_after_ray": str(2 * dedicated.RAY),
                 "derived_balance_before_raw": "100",
                 "derived_balance_after_raw": "300",
                 "expected_scaled_delta_raw": "50",
@@ -270,7 +270,7 @@ def test_validator_rejects_tampered_indexed_transfer_derivation(tmp_path: Path) 
     balance_artifact["sha256"] = hashlib.sha256(balance_path.read_bytes()).hexdigest()
 
     with pytest.raises(ValueError, match="mismatched balance"):
-        bottom_up.validate_bottom_up_evidence(payload, bundle=tmp_path)
+        dedicated.validate_dedicated_evidence(payload, bundle=tmp_path)
 
 
 def test_indexed_transfer_proof_is_exact_and_capability_detected(monkeypatch) -> None:
@@ -286,21 +286,21 @@ def test_indexed_transfer_proof_is_exact_and_capability_detected(monkeypatch) ->
         assert method == "eth_call"
         call, block = params
         data = call["data"]
-        if data.startswith(bottom_up.SCALED_BALANCE_OF_SELECTOR):
+        if data.startswith(dedicated.SCALED_BALANCE_OF_SELECTOR):
             return hex(50 if block == "0x9" else 100)
         if data.startswith("0x70a08231") and call["to"] == underlying:
             return hex(1000 if block == "0x9" else 899)
-        if data == bottom_up.UNDERLYING_ASSET_SELECTOR:
+        if data == dedicated.UNDERLYING_ASSET_SELECTOR:
             return encoded_address(underlying)
-        if data == bottom_up.POOL_SELECTOR:
+        if data == dedicated.POOL_SELECTOR:
             return encoded_address(pool)
-        if data.startswith(bottom_up.NORMALIZED_INCOME_SELECTOR):
-            return hex(2 * bottom_up.RAY)
+        if data.startswith(dedicated.NORMALIZED_INCOME_SELECTOR):
+            return hex(2 * dedicated.RAY)
         raise AssertionError(data)
 
-    monkeypatch.setattr(bottom_up, "_rpc", fake_rpc)
+    monkeypatch.setattr(dedicated, "_rpc", fake_rpc)
 
-    proof = bottom_up._indexed_transfer_proof(
+    proof = dedicated._indexed_transfer_proof(
         url="http://127.0.0.1:8545",
         token=token,
         wallet=wallet,
@@ -319,10 +319,10 @@ def test_indexed_transfer_proof_is_exact_and_capability_detected(monkeypatch) ->
 
 
 def test_a_token_scaled_delta_uses_direction_specific_v35_rounding() -> None:
-    index = 2 * bottom_up.RAY
+    index = 2 * dedicated.RAY
 
-    assert bottom_up._a_token_scaled_delta(-101, index) == (50, "a_token_mint_floor")
-    assert bottom_up._a_token_scaled_delta(101, index) == (-51, "a_token_burn_ceil")
+    assert dedicated._a_token_scaled_delta(-101, index) == (50, "a_token_mint_floor")
+    assert dedicated._a_token_scaled_delta(101, index) == (-51, "a_token_burn_ceil")
 
 
 def test_validator_binds_transaction_witness_hash_to_receipt_and_ledger(tmp_path: Path) -> None:
@@ -335,7 +335,7 @@ def test_validator_binds_transaction_witness_hash_to_receipt_and_ledger(tmp_path
     transaction_artifact["sha256"] = hashlib.sha256(transaction_path.read_bytes()).hexdigest()
 
     with pytest.raises(ValueError, match="transaction artifacts do not match"):
-        bottom_up.validate_bottom_up_evidence(payload, bundle=tmp_path)
+        dedicated.validate_dedicated_evidence(payload, bundle=tmp_path)
 
 
 def test_validator_rejects_matching_but_malformed_transaction_hashes(tmp_path: Path) -> None:
@@ -352,7 +352,7 @@ def test_validator_rejects_matching_but_malformed_transaction_hashes(tmp_path: P
         artifact["sha256"] = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
 
     with pytest.raises(ValueError, match="malformed ledger transaction hash"):
-        bottom_up.validate_bottom_up_evidence(payload, bundle=tmp_path)
+        dedicated.validate_dedicated_evidence(payload, bundle=tmp_path)
 
 
 TEST_TX_HASH = "0x" + "ab" * 32
@@ -381,7 +381,7 @@ def test_independent_balance_mismatch_turns_chain_stage_red(tmp_path: Path, monk
     token = "0x" + "22" * 20
     transfer = {
         "address": token,
-        "topics": [bottom_up.TRANSFER_TOPIC, "0x" + "0" * 24 + wallet[2:], "0x" + "0" * 24 + "33" * 20],
+        "topics": [dedicated.TRANSFER_TOPIC, "0x" + "0" * 24 + wallet[2:], "0x" + "0" * 24 + "33" * 20],
         "data": "0x" + f"{5:064x}",
     }
 
@@ -399,8 +399,8 @@ def test_independent_balance_mismatch_turns_chain_stage_red(tmp_path: Path, monk
         assert method == "eth_call"
         return hex(100 if params[1] == "0x9" else 96)
 
-    monkeypatch.setattr(bottom_up, "_rpc", fake_rpc)
-    observed = bottom_up.capture_anvil_witnesses(
+    monkeypatch.setattr(dedicated, "_rpc", fake_rpc)
+    observed = dedicated.capture_anvil_witnesses(
         db_path=db_path,
         rpc_url="http://127.0.0.1:8545",
         output_dir=tmp_path / "chain",
@@ -418,7 +418,7 @@ def test_erc721_transfer_is_retained_as_receipt_evidence_not_parsed_as_erc20(tmp
     nft_transfer = {
         "address": "0x" + "22" * 20,
         "topics": [
-            bottom_up.TRANSFER_TOPIC,
+            dedicated.TRANSFER_TOPIC,
             "0x" + "0" * 24 + "00" * 20,
             "0x" + "0" * 24 + wallet[2:],
             "0x" + "0" * 63 + "1",
@@ -439,8 +439,8 @@ def test_erc721_transfer_is_retained_as_receipt_evidence_not_parsed_as_erc20(tmp
             return {"from": wallet}
         raise AssertionError(f"ERC-721 Transfer caused unexpected {method}")
 
-    monkeypatch.setattr(bottom_up, "_rpc", fake_rpc)
-    observed = bottom_up.capture_anvil_witnesses(
+    monkeypatch.setattr(dedicated, "_rpc", fake_rpc)
+    observed = dedicated.capture_anvil_witnesses(
         db_path=db_path,
         rpc_url="http://127.0.0.1:8545",
         output_dir=tmp_path / "chain",
@@ -466,9 +466,9 @@ def test_capture_rejects_malformed_ledger_hash_before_rpc_or_artifact_path(tmp_p
     def forbidden_rpc(*_args, **_kwargs) -> object:
         raise AssertionError("malformed ledger hash reached JSON-RPC")
 
-    monkeypatch.setattr(bottom_up, "_rpc", forbidden_rpc)
+    monkeypatch.setattr(dedicated, "_rpc", forbidden_rpc)
     output_dir = tmp_path / "chain"
-    observed = bottom_up.capture_anvil_witnesses(
+    observed = dedicated.capture_anvil_witnesses(
         db_path=db_path,
         rpc_url="http://127.0.0.1:8545",
         output_dir=output_dir,
@@ -618,7 +618,7 @@ def test_independent_receipt_and_balance_witness_can_pass(tmp_path: Path, monkey
                     {
                         "address": token,
                         "topics": [
-                            bottom_up.TRANSFER_TOPIC,
+                            dedicated.TRANSFER_TOPIC,
                             "0x" + "0" * 24 + wallet[2:],
                             "0x" + "0" * 24 + "33" * 20,
                         ],
@@ -631,8 +631,8 @@ def test_independent_receipt_and_balance_witness_can_pass(tmp_path: Path, monkey
         assert method == "eth_call"
         return hex(100 if params[1] == "0x9" else 95)
 
-    monkeypatch.setattr(bottom_up, "_rpc", fake_rpc)
-    observed = bottom_up.capture_anvil_witnesses(
+    monkeypatch.setattr(dedicated, "_rpc", fake_rpc)
+    observed = dedicated.capture_anvil_witnesses(
         db_path=db_path,
         rpc_url="http://localhost:8545",
         output_dir=tmp_path / "chain",
@@ -675,7 +675,7 @@ def test_builder_rejects_incomplete_receipt_set_even_when_shape_landed(tmp_path:
     teardown_log = tmp_path / "teardown.log"
     teardown_log.write_text("completed\n")
 
-    evidence = bottom_up.build_bottom_up_evidence(
+    evidence = dedicated.build_dedicated_evidence(
         row_id="looping-aave_v3-arbitrum",
         fixture="looping",
         chain="arbitrum",
@@ -744,7 +744,7 @@ def test_teardown_stage_requires_terminal_counts_and_chain_verification(tmp_path
         details_total: int | None = None,
         published_skipped: int | None = None,
         extra_status: str | None = None,
-    ) -> bottom_up.BottomUpEvidence:
+    ) -> dedicated.BottomUpEvidence:
         total = passed + xfailed + skipped + (1 if extra_status else 0)
         cell_details: list[dict[str, str]] = (
             [{"id": f"P{i}", "status": "PASS"} for i in range(passed)]
@@ -764,7 +764,7 @@ def test_teardown_stage_requires_terminal_counts_and_chain_verification(tmp_path
         if published_skipped is not None:
             scores["skipped"] = published_skipped
         accountant = {"scores": scores, "cell_details": cell_details}
-        return bottom_up.build_bottom_up_evidence(
+        return dedicated.build_dedicated_evidence(
             row_id="lending-aave-arbitrum",
             fixture="lending",
             chain="arbitrum",
@@ -800,7 +800,7 @@ def test_teardown_stage_requires_terminal_counts_and_chain_verification(tmp_path
     assert real_shape.stages["accountant"].facts["derived_status_counts"] == {"PASS": 18, "SKIP": 2, "XFAIL": 3}
     assert real_shape.stages["accountant"].facts["unmeasured_cell_ids"] == ["S0", "S1"]
     assert build(passed=18, xfailed=3, skipped=2, published_skipped=2).stages["accountant"].status == "PASS"
-    at_ceiling = build(passed=18, xfailed=3, skipped=bottom_up.MAX_UNMEASURED_ACCOUNTANT_CELLS)
+    at_ceiling = build(passed=18, xfailed=3, skipped=dedicated.MAX_UNMEASURED_ACCOUNTANT_CELLS)
     assert at_ceiling.stages["accountant"].status == "PASS"
 
     # The named vacuity: 1 PASS + 20 SKIP of 21 cells sealed as a green Books row.
@@ -810,7 +810,7 @@ def test_teardown_stage_requires_terminal_counts_and_chain_verification(tmp_path
     assert "20 unmeasured (SKIP) cell(s)" in vacuous_skip.stages["accountant"].diagnostic
     # One cell past the ceiling, so the bound itself discriminates -- not merely
     # the extreme case.
-    over_ceiling = build(passed=17, xfailed=3, skipped=bottom_up.MAX_UNMEASURED_ACCOUNTANT_CELLS + 1)
+    over_ceiling = build(passed=17, xfailed=3, skipped=dedicated.MAX_UNMEASURED_ACCOUNTANT_CELLS + 1)
     assert over_ceiling.stages["accountant"].status == "FAIL"
     assert "unmeasured (SKIP) cell(s)" in over_ceiling.stages["accountant"].diagnostic
 
@@ -824,7 +824,7 @@ def test_teardown_stage_requires_terminal_counts_and_chain_verification(tmp_path
     mismatched_details = build(skipped=20, details_total=1)
     assert mismatched_details.stages["accountant"].status == "FAIL"
     assert mismatched_details.status == "FAIL"
-    missing_details = bottom_up.build_bottom_up_evidence(
+    missing_details = dedicated.build_dedicated_evidence(
         row_id="lending-aave-arbitrum",
         fixture="lending",
         chain="arbitrum",

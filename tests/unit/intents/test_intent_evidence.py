@@ -430,3 +430,63 @@ def test_swap_source_request_binds_both_assets_and_exact_amount(tmp_path: Path) 
         "target_asset_reference": intent.to_token,
         "amount": "1.25",
     }
+
+
+def test_parsers_receive_the_same_camelcase_aliases_production_gives_them(tmp_path: Path) -> None:
+    """Evidence mode must exercise production's parser input contract, not the bare to_dict()."""
+    seen: dict = {}
+
+    def parser(receipt: dict) -> dict:
+        seen.update(receipt)
+        return receipt
+
+    transaction = SimpleNamespace(receipt={**_receipt(), "gas_used": 160856, "from_address": "0x" + "11" * 20})
+    recorder = DisabledIntentEvidenceRecorder()
+    result = recorder.capture_parse(intent=object(), transaction_result=transaction, parser=parser)
+
+    assert seen["transactionHash"] == "0xabc" and seen["tx_hash"] == "0xabc"
+    assert seen["gasUsed"] == 160856 and seen["blockNumber"] == 42 and seen["from"] == "0x" + "11" * 20
+    assert result["tx_hash"] == "0xabc"
+    assert result["gas_used"] == 160856
+
+
+def test_recorder_derives_https_explorer_urls_for_every_capture(tmp_path: Path) -> None:
+    """Mainnet seal admission requires an HTTPS explorer URL on every receipt
+    artifact. Only the Aave proof threaded a base through its own signature, so
+    the first Uniswap SWAP run to reach sealing (2026-09-01) was refused one
+    layer past the envelope. The recorder derives the URL for every proof; an
+    explicitly passed explorer_url still wins; without a base nothing changes.
+    """
+    intent = SimpleNamespace(protocol="uniswap_v3", chain="arbitrum", intent_type=SimpleNamespace(value="SWAP"))
+    transaction = SimpleNamespace(
+        receipt=_receipt(),
+        tx_hash="0xabc",
+        gas_used=99,
+        qa_permission_attestation=_permission_attestation(),
+    )
+
+    def artifact_for(recorder, **kwargs):
+        recorder.capture_parse(intent=intent, transaction_result=transaction, parser=lambda receipt: None, **kwargs)
+        recorder.finalize(outcome="PASS", duration_seconds=0.1)
+        manifest = json.loads(build_evidence_manifest(recorder.output_dir).read_text())
+        relpath = manifest["nodes"][0]["intents"][0]["receipt_artifacts"][0]
+        return json.loads((recorder.output_dir / relpath).read_text())
+
+    def recorder(base, sub):
+        return IntentEvidenceRecorder(
+            output_dir=tmp_path / sub,
+            nodeid=f"tests/intents/arbitrum/test_x.py::T::t_{sub}",
+            network="mainnet",
+            exec_path="eoa",
+            declared_intents={"SWAP"},
+            explorer_tx_base=base,
+        )
+
+    derived = artifact_for(recorder("https://arbiscan.io/tx/", "derived"))
+    assert derived["tx"]["explorer_url"] == "https://arbiscan.io/tx/0xabc"
+
+    explicit = artifact_for(recorder("https://arbiscan.io/tx/", "explicit"), explorer_url="https://arbiscan.io/tx/0xdd")
+    assert explicit["tx"]["explorer_url"] == "https://arbiscan.io/tx/0xdd", "an explicit URL must win"
+
+    bare = artifact_for(recorder(None, "bare"))
+    assert bare["tx"]["explorer_url"] is None, "no base means unchanged behaviour"

@@ -809,6 +809,120 @@ class TestRpcCallRawTimeout:
         assert captured_post_timeout[0].total == 2.5
 
 
+class TestStartFailureReason:
+    """start() must leave WHY it failed on last_start_error, masked for evidence use.
+
+    Before this, every failure mode collapsed into ``return False``; the fixture
+    then raised "RollingForkManager.start() returned False" and pytest hid the
+    logged reason because skips do not print captured logs. A transient upstream
+    outage (base, 2026-08-28) cost a debugging session to re-derive what Anvil's
+    own stderr had already said.
+    """
+
+    @pytest.mark.asyncio
+    async def test_dead_process_reason_carries_stderr_tail_with_the_key_masked(self, rpc_url: str) -> None:
+        manager = RollingForkManager(rpc_url=rpc_url, chain="base", startup_timeout_seconds=1.0)
+
+        class DeadProcess:
+            returncode = 1
+
+            def poll(self):
+                return 1
+
+            def communicate(self):
+                # Anvil echoes the fork URL, key included — the stored reason must not.
+                return b"", f"error: could not instantiate forked environment: {rpc_url} rate limited".encode()
+
+            def terminate(self):
+                pass
+
+            def wait(self, timeout=None):
+                return 1
+
+            def kill(self):
+                pass
+
+        with (
+            patch.object(manager, "_validate_source_chain_id", new=AsyncMock()),
+            patch.object(manager, "_is_port_open", return_value=False),
+            patch("subprocess.Popen", return_value=DeadProcess()),
+        ):
+            started = await manager.start()
+
+        assert started is False
+        reason = manager.last_start_error
+        assert reason is not None
+        assert "exited during startup" in reason
+        assert "rate limited" in reason, "the upstream's own words must survive to the operator"
+        assert "***" in reason and rpc_url.rsplit("/", 1)[-1] not in reason, (
+            "the API key must be masked: this string is embedded in skip messages and JUnit XML"
+        )
+
+    @pytest.mark.asyncio
+    async def test_timeout_reason_names_chain_port_and_masked_upstream(self, rpc_url: str) -> None:
+        manager = RollingForkManager(rpc_url=rpc_url, chain="base", startup_timeout_seconds=0.0)
+
+        class SilentProcess:
+            returncode = None
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                pass
+
+            def wait(self, timeout=None):
+                return 0
+
+            def kill(self):
+                pass
+
+        with (
+            patch.object(manager, "_validate_source_chain_id", new=AsyncMock()),
+            patch.object(manager, "_is_port_open", return_value=False),
+            patch("subprocess.Popen", return_value=SilentProcess()),
+        ):
+            started = await manager.start()
+
+        assert started is False
+        reason = manager.last_start_error
+        assert reason is not None and "did not become ready" in reason
+        assert "base" in reason and str(manager.anvil_port) in reason
+        assert rpc_url.rsplit("/", 1)[-1] not in reason
+
+    @pytest.mark.asyncio
+    async def test_a_successful_start_clears_the_previous_failure_reason(self, rpc_url: str) -> None:
+        manager = RollingForkManager(rpc_url=rpc_url, chain="base", startup_timeout_seconds=1.0)
+        manager._last_start_error = "stale reason from an earlier attempt"
+
+        class LiveProcess:
+            returncode = None
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                pass
+
+            def wait(self, timeout=None):
+                return 0
+
+            def kill(self):
+                pass
+
+        with (
+            patch.object(manager, "_validate_source_chain_id", new=AsyncMock()),
+            patch.object(manager, "_wait_for_ready", new=AsyncMock(return_value=True)),
+            patch.object(manager, "_get_block_number", new=AsyncMock(return_value=123)),
+            patch.object(manager, "_rpc_call_raw", new=AsyncMock(return_value=(True, None))),
+            patch("subprocess.Popen", return_value=LiveProcess()),
+        ):
+            started = await manager.start()
+
+        assert started is True
+        assert manager.last_start_error is None, "a stale reason would misattribute the NEXT failure"
+
+
 # =============================================================================
 # Integration Tests (require Anvil)
 # =============================================================================
@@ -857,3 +971,37 @@ class TestRollingForkManagerIntegration:
         This test requires Anvil to be installed.
         """
         pytest.skip("Requires Anvil installation")
+
+
+def test_record_start_error_masks_path_keys_even_when_the_url_is_truncated() -> None:
+    """Anvil stderr is truncated to its tail before masking.
+
+    When the echoed fork URL straddles the truncation boundary, the exact-URL
+    replacement finds no match and the query-parameter regex does not apply to
+    an Alchemy/Infura PATH key — the surviving fragment must still be scrubbed,
+    because this string lands in skip messages and JUnit XML.
+    """
+    key = "abcdef12345_67890_extra1234"
+    url = f"https://eth-mainnet.g.alchemy.com/v2/{key}"
+    manager = RollingForkManager.__new__(RollingForkManager)
+    manager.rpc_url = url
+
+    truncated_tail = f"...lchemy.com/v2/{key} rate limited"
+    manager._record_start_error(f"Anvil exited: {truncated_tail}")
+
+    assert key not in manager._last_start_error
+    assert "***" in manager._last_start_error
+
+    # reqwest terminates the echoed URL with ")" -- the scrub must not depend
+    # on a whitespace terminator.
+    manager._record_start_error(f"error sending request for url (...lchemy.com/v2/{key})")
+    assert key not in manager._last_start_error
+
+    # Ordinary long path segments are diagnostics, not keys; they must survive.
+    manager._record_start_error("cache at /tmp/anvil-fork-cache-20260901-abcdef/state.json missing")
+    assert "/tmp/anvil-fork-cache-20260901-abcdef/state.json" in manager._last_start_error
+
+    # Truncation that cuts BEFORE the /v2/ prefix must still mask: the key
+    # itself is known from the configured URL and replaced at any offset.
+    manager._record_start_error(f"Anvil exited: ...{key} rate limited")
+    assert key not in manager._last_start_error

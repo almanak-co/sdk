@@ -78,3 +78,30 @@ def test_aave_target_receipt_accepts_hexbytes_event_topic() -> None:
     execution_result = SimpleNamespace(transaction_results=[transaction])
 
     assert _target_transaction(execution_result, IntentType.SUPPLY) is transaction
+
+
+def _decrease_liquidity_call(amount0_min: int, amount1_min: int) -> dict:
+    selector = Web3.keccak(text="decreaseLiquidity((uint256,uint128,uint256,uint256,uint256))")[:4]
+    body = Web3().codec.encode(
+        ["(uint256,uint128,uint256,uint256,uint256)"], [(1, 84795287261, amount0_min, amount1_min, 1_900_000_000)]
+    )
+    return {
+        "to": "0x" + "11" * 20,
+        "data": Web3.to_hex(selector + body),
+        "value": 0,
+        "tx_type": "lp_decrease_liquidity",
+    }
+
+
+def test_lp_close_minimums_flag_is_red_on_zero_floors_and_green_when_a_leg_binds() -> None:
+    from tests.intents._uniswap_v3_lp_exact_proofs import _decrease_minimums
+
+    binds, witness = _decrease_minimums(_decrease_liquidity_call(0, 0))
+    assert binds is False
+    assert witness["outcome"] == "UNPROTECTED"
+    assert (witness["amount0Min"], witness["amount1Min"]) == ("0", "0")
+
+    binds, witness = _decrease_minimums(_decrease_liquidity_call(0, 999_000))
+    assert binds is True
+    assert witness["outcome"] == "PROTECTED"
+    assert witness["amount1Min"] == "999000"

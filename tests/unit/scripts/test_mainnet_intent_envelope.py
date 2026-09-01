@@ -169,6 +169,10 @@ def _bundle(tmp_path: Path) -> Path:
         },
     )
     release = _write(tmp_path / "raw/release.json", {"pool_index": 7, "funded": False})
+    allowances = _write(
+        tmp_path / "raw/allowances.json",
+        {"chain_id": 42161, "block_number": 12, "block_hash": BLOCK_HASH, "wallet": WALLET, "allowances": []},
+    )
     anchors = _write(
         tmp_path / "anchors.json",
         {
@@ -233,6 +237,7 @@ def _bundle(tmp_path: Path) -> Path:
         ],
         "terminal": [
             {"id": "AAVE_ATOKEN_BALANCE_ZERO:USDC", "artifact": _ref(tmp_path, terminal)},
+            {"id": "NO_RESIDUAL_ALLOWANCES", "artifact": _ref(tmp_path, allowances)},
             {"id": "POOL_WALLET_RELEASED", "artifact": _ref(tmp_path, release)},
         ],
         "capital": {
@@ -262,7 +267,6 @@ def test_complete_mainnet_envelope_is_independently_verified(tmp_path: Path) -> 
         (lambda value: value["phases"]["cleanup"].update(receipts=[]), "cleanup primary receipts"),
         (lambda value: value["guards"][0].update(status="skipped_environment"), "not measured PASS"),
         (lambda value: value["terminal"].pop(0), "Missing terminal obligation"),
-        (lambda value: value["capital"].update(target_asset_price_usd="2"), "trading cap"),
         (lambda value: value["capital"].update(sweep_receipts=[]), "Sweep receipts"),
         (lambda value: value["phases"]["target"].update(obligations=[]), "target obligations"),
     ],
@@ -338,7 +342,8 @@ def test_qa_coverage_admission_paths_refuse_a_non_integral_status(value: float) 
     import importlib.util
     import sys
 
-    spec = importlib.util.spec_from_file_location("_qa_cov_probe", "scripts/quant-test/qa_coverage.py")
+    qa_coverage_path = Path(__file__).resolve().parents[3] / "scripts" / "quant-test" / "qa_coverage.py"
+    spec = importlib.util.spec_from_file_location("_qa_cov_probe", qa_coverage_path)
     module = importlib.util.module_from_spec(spec)
     sys.modules["_qa_cov_probe"] = module
     spec.loader.exec_module(module)
@@ -385,3 +390,247 @@ def test_integral_receipt_status_still_passes_every_validator() -> None:
     for accepted in (1, 1.0, "0x1", "1"):
         assert envelope_quantity(accepted, label="raw receipt status") == 1
         assert books_quantity(accepted, source="raw receipt") == 1
+
+
+# --- Live-money gate: prices are re-derived from the digest-checked funding anchor ---
+#
+# Reproduced on main: ``gas_usd = gas_native * capital["native_price_usd"]`` and
+# ``target_usd = raw / 10**decimals * capital["target_asset_price_usd"]`` read the
+# envelope's own free-standing copies. Editing either copy to ``"0"`` verified the
+# run against ANY gas budget or trading cap, and the anchor that actually priced
+# the wallet was never consulted.
+
+
+def _reprice_anchor(bundle: Path, symbol: str, price: str) -> None:
+    anchors_path = bundle / "anchors.json"
+    anchors = json.loads(anchors_path.read_text())
+    anchors["legs"]["aave-mainnet"]["legs"][symbol]["price"] = price
+    _write(anchors_path, anchors)
+    envelope_path = bundle / "envelope.json"
+    envelope = json.loads(envelope_path.read_text())
+    envelope["capital"]["funding"] = _ref(bundle, anchors_path)
+    _write(envelope_path, envelope)
+
+
+@pytest.mark.parametrize("price", ["0", "-1", "0.0"])
+@pytest.mark.parametrize("field", ["native_price_usd", "target_asset_price_usd"])
+def test_a_non_positive_envelope_price_cannot_shrink_a_cap_check(tmp_path: Path, field: str, price: str) -> None:
+    path = _bundle(tmp_path)
+    value = json.loads(path.read_text())
+    value["capital"][field] = price
+    _write(path, value)
+
+    with pytest.raises(MainnetEnvelopeError, match="price"):
+        validate_mainnet_envelope(path)
+
+
+@pytest.mark.parametrize(
+    ("field", "price"),
+    [("native_price_usd", "1"), ("target_asset_price_usd", "0.5")],
+)
+def test_envelope_prices_must_equal_the_digest_checked_funding_anchor(tmp_path: Path, field: str, price: str) -> None:
+    """A lower price in the envelope alone must not survive: the anchor is the measurement."""
+    path = _bundle(tmp_path)
+    value = json.loads(path.read_text())
+    value["capital"][field] = price
+    _write(path, value)
+
+    with pytest.raises(MainnetEnvelopeError, match="funding anchor"):
+        validate_mainnet_envelope(path)
+
+
+def test_a_zero_anchor_price_is_rejected_even_when_the_envelope_agrees(tmp_path: Path) -> None:
+    """Agreement between two zeros is not a measurement; a price of zero is the oracle failing."""
+    path = _bundle(tmp_path)
+    _reprice_anchor(tmp_path, "ETH", "0")
+    value = json.loads(path.read_text())
+    value["capital"]["native_price_usd"] = "0"
+    _write(path, value)
+
+    with pytest.raises(MainnetEnvelopeError, match="positive"):
+        validate_mainnet_envelope(path)
+
+
+def test_anchor_derived_prices_still_verify_the_complete_bundle(tmp_path: Path) -> None:
+    """Positive control: the honest bundle keeps verifying with anchor-derived prices."""
+    result = validate_mainnet_envelope(_bundle(tmp_path))
+
+    assert result["status"] == "VERIFIED"
+    assert result["gas_usd"] != "0"
+
+
+def test_a_higher_anchor_price_that_breaches_the_trading_cap_is_rejected(tmp_path: Path) -> None:
+    """The cap check still fires when the measurement itself says the notional was too large."""
+    path = _bundle(tmp_path)
+    _reprice_anchor(tmp_path, "USDC", "2")
+    value = json.loads(path.read_text())
+    value["capital"]["target_asset_price_usd"] = "2"
+    _write(path, value)
+
+    with pytest.raises(MainnetEnvelopeError, match="trading cap"):
+        validate_mainnet_envelope(path)
+
+
+def _rebind(bundle: Path) -> None:
+    """Re-digest every artifact reference after a fixture artifact was rewritten.
+
+    References are tamper-evident, so a mutated artifact must be re-referenced
+    for the validator to read it at all; the controls below test the semantic
+    guard, not the digest guard (which test_tampered_raw_artifact... covers).
+    """
+    envelope_path = bundle / "envelope.json"
+    envelope = json.loads(envelope_path.read_text())
+
+    def walk(node: object) -> object:
+        if isinstance(node, dict):
+            if set(node) == {"path", "sha256"}:
+                return artifact_reference(bundle=bundle, path=bundle / str(node["path"]))
+            return {key: walk(value) for key, value in node.items()}
+        if isinstance(node, list):
+            return [walk(item) for item in node]
+        return node
+
+    _write(envelope_path, walk(envelope))
+
+
+def _grant_approval_in_cleanup(bundle: Path, *, spender: str) -> None:
+    """Make the sealed cleanup receipt show the wallet approving ``spender`` on USDC."""
+    recipe = AAVE_V3_ARBITRUM_SUPPLY_EOA
+    cleanup = bundle / "raw/cleanup.json"
+    payload = json.loads(cleanup.read_text())
+    payload["raw_receipt"]["logs"].append(
+        {
+            "address": recipe.asset_address,
+            "topics": [
+                "0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925",
+                _topic_address(WALLET),
+                _topic_address(spender),
+            ],
+            "data": "0x" + f"{2**256 - 1:064x}",
+            "logIndex": 7,
+        }
+    )
+    _write(cleanup, payload)
+    _rebind(bundle)
+
+
+def _observe_allowances(bundle: Path, rows: list[dict], *, block: int = 12) -> None:
+    _write(
+        bundle / "raw/allowances.json",
+        {"chain_id": 42161, "block_number": block, "block_hash": BLOCK_HASH, "wallet": WALLET, "allowances": rows},
+    )
+    _rebind(bundle)
+
+
+def test_an_allowance_the_run_granted_must_be_observed_zero_after_cleanup(tmp_path: Path) -> None:
+    recipe = AAVE_V3_ARBITRUM_SUPPLY_EOA
+    envelope = _bundle(tmp_path)
+    _grant_approval_in_cleanup(tmp_path, spender=recipe.resource_address)
+    pair = {"token": recipe.asset_address, "spender": recipe.resource_address}
+
+    _observe_allowances(tmp_path, [{**pair, "allowance_raw": 0}])
+    validate_mainnet_envelope(envelope)
+
+    _observe_allowances(tmp_path, [])
+    with pytest.raises(MainnetEnvelopeError, match="was never observed after cleanup"):
+        validate_mainnet_envelope(envelope)
+
+    _observe_allowances(tmp_path, [{**pair, "allowance_raw": 2**256 - 1 - 1_000_000}])
+    with pytest.raises(MainnetEnvelopeError, match="Residual allowance .* survived cleanup"):
+        validate_mainnet_envelope(envelope)
+
+    _observe_allowances(tmp_path, [{**pair, "allowance_raw": 0}], block=11)
+    with pytest.raises(MainnetEnvelopeError, match="not pinned at or after the last phase receipt"):
+        validate_mainnet_envelope(envelope)
+
+
+def test_a_residual_allowance_cannot_hide_behind_a_different_wallet_or_chain(tmp_path: Path) -> None:
+    envelope = _bundle(tmp_path)
+    for mutation, message in (
+        ({"wallet": MASTER}, "for another wallet"),
+        ({"chain_id": 1}, "from another chain"),
+    ):
+        _write(
+            tmp_path / "raw/allowances.json",
+            {
+                "chain_id": 42161,
+                "block_number": 12,
+                "block_hash": BLOCK_HASH,
+                "wallet": WALLET,
+                "allowances": [],
+                **mutation,
+            },
+        )
+        _rebind(tmp_path)
+        with pytest.raises(MainnetEnvelopeError, match=message):
+            validate_mainnet_envelope(envelope)
+
+
+def test_validating_an_arbitrum_envelope_never_resolves_tokens_on_ethereum(tmp_path: Path, caplog) -> None:
+    """The validator's own parser must be bound to the recipe chain (it defaulted to ethereum)."""
+    import logging
+
+    envelope = _bundle(tmp_path)
+    with caplog.at_level(logging.DEBUG):
+        validate_mainnet_envelope(envelope)
+    offending = [
+        record.getMessage()
+        for record in caplog.records
+        if "token_resolution_error" in record.getMessage() or "invalid gas quantity" in record.getMessage()
+    ]
+    assert offending == []
+    assert any("WITHDRAW 0.999999" in record.getMessage() for record in caplog.records), "USDC decimals on arbitrum"
+
+
+def test_approval_pair_enumeration_excludes_erc721_approvals() -> None:
+    """ERC-721 Approval shares topic0; only the ERC-20 shape creates an obligation.
+
+    Lockstep with the runner's census: were the envelope to require observation
+    rows for an ERC-721 pair, a clean run would fail validation on a pair that
+    has no allowance(address,address) to observe.
+    """
+    from scripts.qa.mainnet_intent_envelope import APPROVAL_TOPIC, _approval_pairs
+
+    wallet = "0x" + "11" * 20
+    owner_word = "0x" + wallet.removeprefix("0x").rjust(64, "0")
+    spender_word = "0x" + ("bb" * 20).rjust(64, "0")
+    logs = [
+        {
+            "address": "0x" + "aa" * 20,
+            "topics": [APPROVAL_TOPIC, owner_word, spender_word],
+            "data": "0x" + "01".rjust(64, "0"),
+        },
+        {
+            "address": "0x" + "cc" * 20,
+            "topics": [APPROVAL_TOPIC, owner_word, spender_word, "0x" + "07".rjust(64, "0")],
+            "data": "0x",
+        },
+    ]
+    payloads = [{"raw_receipt": {"logs": logs}}]
+
+    assert _approval_pairs(payloads, wallet=wallet) == {("0x" + "aa" * 20, "0x" + "bb" * 20)}
+
+
+def test_duplicate_allowance_rows_cannot_shadow_a_residual() -> None:
+    """A pair reported twice — residual first, zero second — must be rejected.
+
+    ``observed[key] = ...`` used to let the last row win, so a runner that
+    mis-reported its own pair set could green past a live allowance; duplicate
+    shadowing is the same failure class as omission.
+    """
+    from scripts.qa.mainnet_intent_envelope import _validate_no_residual_allowances
+
+    wallet = "0x" + "11" * 20
+    row = {"token": "0x" + "aa" * 20, "spender": "0x" + "bb" * 20}
+    observation = {
+        "chain_id": 42161,
+        "wallet": wallet,
+        "block_hash": "0x" + "ab" * 32,
+        "block_number": 5,
+        "allowances": [
+            {**row, "allowance_raw": 7},
+            {**row, "allowance_raw": 0},
+        ],
+    }
+    with pytest.raises(MainnetEnvelopeError, match="more than once"):
+        _validate_no_residual_allowances(observation=observation, phase_payloads={}, wallet=wallet, chain_id=42161)

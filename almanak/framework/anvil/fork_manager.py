@@ -431,6 +431,11 @@ class RollingForkManager:
     _is_running: bool = field(default=False, repr=False, init=False)
     _current_block: int | None = field(default=None, repr=False, init=False)
     _start_time: float | None = field(default=None, repr=False, init=False)
+    # Why the last start() attempt returned False. start() collapses every failure
+    # mode into a boolean; without this, the reason exists only in a log line that
+    # pytest hides for skips, and the operator is handed "returned False" (VIB: the
+    # 2026-08-28 base outage cost a debugging session for a transient upstream blip).
+    _last_start_error: str | None = field(default=None, repr=False, init=False)
 
     def __post_init__(self) -> None:
         """Validate configuration after initialization."""
@@ -465,6 +470,36 @@ class RollingForkManager:
     def current_block(self) -> int | None:
         """Get the current fork block number."""
         return self._current_block
+
+    @property
+    def last_start_error(self) -> str | None:
+        """Why the most recent ``start()`` returned False, masked for evidence use.
+
+        None after a successful start. The text is safe to embed in skip messages
+        and JUnit XML: the fork URL and any key-shaped tokens are masked before
+        storage, because Anvil's stderr echoes the upstream URL verbatim.
+        """
+        return self._last_start_error
+
+    def _record_start_error(self, message: str) -> None:
+        """Store a masked failure reason for the caller to surface."""
+        from urllib.parse import urlsplit
+
+        masked = message.replace(self.rpc_url, ForkManagerConfig._mask_url(self.rpc_url))
+        # The surest scrub is the key we already KNOW: the last path segment of
+        # the configured upstream URL, replaced at ANY truncation offset. This
+        # also covers providers with no /vN/ prefix (QuickNode, Ankr).
+        key_segment = urlsplit(self.rpc_url).path.strip("/").split("/")[-1] if self.rpc_url else ""
+        if len(key_segment) >= 20:
+            masked = masked.replace(key_segment, "***")
+        masked = re.sub(r"(api[_-]?key|apikey|key|token)=([^&\s]+)", r"\1=***", masked, flags=re.IGNORECASE)
+        # Alchemy/Infura carry the key in the URL PATH (/v2/<key>). Truncated stderr
+        # can defeat the exact-URL replace above, so scrub key-shaped segments behind
+        # a version-prefix from the body too -- anchored so ordinary long filesystem
+        # path segments in diagnostics survive, and terminator-agnostic so reqwest's
+        # "(https://.../v2/<key>)" form is covered.
+        masked = re.sub(r"(/v\d+/)[A-Za-z0-9_-]{20,}(?![A-Za-z0-9_-])", r"\1***", masked)
+        self._last_start_error = masked
 
     async def _validate_source_chain_id(self) -> None:
         """Validate the source RPC URL returns the expected chain ID.
@@ -534,6 +569,7 @@ class RollingForkManager:
             logger.warning("Anvil fork is already running")
             return True
 
+        self._last_start_error = None
         try:
             # Validate source RPC chain ID before forking
             await self._validate_source_chain_id()
@@ -562,7 +598,13 @@ class RollingForkManager:
             # Wait for Anvil to be ready
             ready = await self._wait_for_ready()
             if not ready:
-                logger.error("Anvil fork startup timed out")
+                if self._last_start_error is None:
+                    self._record_start_error(
+                        f"Anvil for {self.chain} did not become ready within "
+                        f"{self.startup_timeout_seconds:.0f}s (port {self.anvil_port}, "
+                        f"upstream {ForkManagerConfig._mask_url(self.rpc_url)})"
+                    )
+                logger.error("Anvil fork startup failed: %s", self._last_start_error)
                 await self.stop()
                 return False
 
@@ -597,9 +639,13 @@ class RollingForkManager:
             return True
 
         except FileNotFoundError:
+            self._record_start_error(
+                "Anvil binary not found; install Foundry: curl -L https://foundry.paradigm.xyz | bash"
+            )
             logger.error("Anvil not found. Please install Foundry: curl -L https://foundry.paradigm.xyz | bash")
             return False
         except Exception as e:
+            self._record_start_error(f"{type(e).__name__}: {e}")
             logger.exception(f"Failed to start Anvil fork: {e}")
             await self.stop()
             return False
@@ -1587,6 +1633,15 @@ class RollingForkManager:
             # Check if process died
             if self._process is not None and self._process.poll() is not None:
                 stdout, stderr = self._process.communicate()
+                # The tail of stderr is where Anvil says WHY (bad upstream, rate
+                # limit, unsupported flag); the head is banner noise. Keep it short
+                # enough for a skip message, and mask before storing — Anvil echoes
+                # the fork URL, key included.
+                detail = (stderr.decode(errors="replace").strip() or stdout.decode(errors="replace").strip())[-400:]
+                self._record_start_error(
+                    f"Anvil process for {self.chain} exited during startup"
+                    f" (code {self._process.returncode}): {detail or 'no output'}"
+                )
                 logger.error(f"Anvil process exited unexpectedly. stdout: {stdout.decode()}, stderr: {stderr.decode()}")
                 return False
 

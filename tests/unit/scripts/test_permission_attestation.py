@@ -142,3 +142,51 @@ def test_external_to_catalog_is_measured_not_a_producer_label() -> None:
 
     with pytest.raises(ValueError, match="not derived"):
         validate_permission_attestation(attestation)
+
+
+# --- Live-money gate: an unknown chain label cannot produce an attestation ---
+#
+# Reproduced on main: ``effective_calls`` resolved the canonical MultiSend with
+# ``MULTISEND_ADDRESSES.get(chain.lower()) or ""``, so a chain label the registry
+# does not know produced a permission closure attestation for calls that carried
+# no MultiSend selector. A registered chain that has no Safe MultiSend is a
+# different case and stays attestable for plain calls.
+
+
+@pytest.mark.parametrize("chain", ["not-a-chain", "arbitrum ", "Arbitrum", ""])
+def test_an_unknown_chain_label_cannot_be_attested(chain: str) -> None:
+    with pytest.raises(ValueError, match="Unknown chain"):
+        derive_permission_attestation(
+            transactions=[{"to": POOL, "data": SELECTOR}],
+            manifest=_manifest((POOL, SELECTOR, 0, False)),
+            chain=chain,
+        )
+
+
+def _registered_chain_without_multisend() -> str:
+    from almanak.core.chains import ChainRegistry
+    from almanak.framework.execution.signer.safe.constants import MULTISEND_ADDRESSES
+
+    candidates = sorted(set(ChainRegistry.names()) - set(MULTISEND_ADDRESSES))
+    if not candidates:
+        pytest.skip("every registered chain declares a Safe MultiSend")
+    return candidates[0]
+
+
+def test_a_registered_chain_without_a_multisend_attests_plain_calls_and_refuses_batches() -> None:
+    chain = _registered_chain_without_multisend()
+
+    attestation = derive_permission_attestation(
+        transactions=[{"to": POOL, "data": SELECTOR}],
+        manifest=_manifest((POOL, SELECTOR, 0, False)),
+        chain=chain,
+    )
+    assert attestation["missing_authorizations"] == []
+
+    batch = MultiSendEncoder.encode_from_dicts([{"to": POOL, "value": 0, "data": SELECTOR}], Web3())
+    with pytest.raises(ValueError, match="not the canonical MultiSend"):
+        derive_permission_attestation(
+            transactions=[{"to": POOL, "data": batch, "operation": 1}],
+            manifest=_manifest((POOL, SELECTOR, 0, False)),
+            chain=chain,
+        )

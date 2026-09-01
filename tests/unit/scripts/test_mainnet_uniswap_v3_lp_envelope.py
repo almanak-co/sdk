@@ -47,7 +47,7 @@ def test_lp_recipe_is_one_exact_dynamic_nft_lifecycle(recipe) -> None:
     assert recipe.pool_address
     assert recipe.factory_address
     assert recipe.fee_tier == 500
-    assert recipe.terminal == ("UNISWAP_V3_NFT_BALANCE_ZERO", "POOL_WALLET_RELEASED")
+    assert recipe.terminal == ("UNISWAP_V3_NFT_BALANCE_ZERO", "NO_RESIDUAL_ALLOWANCES", "POOL_WALLET_RELEASED")
     if recipe.intent == "LP_OPEN":
         assert recipe.setup == ()
         assert recipe.target[0].startswith("LP_OPEN:")
@@ -255,6 +255,10 @@ def _lp_close_envelope(tmp_path: Path) -> Path:
             "balance_raw": 0,
         },
     )
+    allowances_path = _write(
+        tmp_path / "raw/allowances.json",
+        {"chain_id": 8453, "block_number": 200, "block_hash": "0x" + "cd" * 32, "wallet": ACCOUNT, "allowances": []},
+    )
     release_path = _write(
         tmp_path / "raw/release.json",
         {"pool_index": 7, "wallet": ACCOUNT, "funded": False, "swept_at": "2026-08-16T12:01:00Z"},
@@ -346,6 +350,10 @@ def _lp_close_envelope(tmp_path: Path) -> Path:
         ],
         "terminal": [
             {"id": "UNISWAP_V3_NFT_BALANCE_ZERO", "artifact": artifact_reference(bundle=tmp_path, path=terminal_path)},
+            {
+                "id": "NO_RESIDUAL_ALLOWANCES",
+                "artifact": artifact_reference(bundle=tmp_path, path=allowances_path),
+            },
             {"id": "POOL_WALLET_RELEASED", "artifact": artifact_reference(bundle=tmp_path, path=release_path)},
         ],
         "capital": {
