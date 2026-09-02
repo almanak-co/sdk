@@ -131,12 +131,14 @@ class TestRegistry:
         assert get_teardown_post_condition("pancakeswap_v3") is _uniswap_v3_post_condition
 
     def test_aerodrome_not_registered_by_uniswap_v3_hook(self) -> None:
-        """Aerodrome volatile/stable pools use ERC-20 LP tokens, not NFTs.
-        The Uniswap V3 hook's NPM ABI does not apply, so the slug must
-        NOT register here. Documents the registration boundary so a
-        future change that "helpfully" extends this list to Aerodrome
-        catches a test."""
-        assert not has_teardown_post_condition("aerodrome")
+        """Aerodrome volatile/stable pools use ERC-20 LP tokens, not NFTs, and
+        Slipstream NFTs live on one of TWO reviewed managers. The single-NPM
+        Uniswap V3 hook's resolution does not apply to either, so the slugs must
+        NOT resolve to this hook (they resolve to the connector-owned Aerodrome
+        hook instead). Documents the registration boundary so a future change
+        that "helpfully" extends this list to Aerodrome catches a test."""
+        assert get_teardown_post_condition("aerodrome") is not _uniswap_v3_post_condition
+        assert get_teardown_post_condition("aerodrome_slipstream") is not _uniswap_v3_post_condition
 
 
 # ---------------------------------------------------------------------------
@@ -618,9 +620,7 @@ class TestNPMRegistryCoverage:
         # Closed (because liquidity=0 and tokensOwed=(0,0)) is the proof
         # the hook reached the gateway path; fail-closed paths do not call
         # the gateway and would surface a non-empty ``error`` instead.
-        assert result.closed is True, (
-            f"hook fell through to fail-closed for {protocol}/{chain}: {result.error}"
-        )
+        assert result.closed is True, f"hook fell through to fail-closed for {protocol}/{chain}: {result.error}"
         gateway.query_position_liquidity.assert_called_once()
         called_npm = gateway.query_position_liquidity.call_args.kwargs["position_manager"]
         assert called_npm.lower() == npm.lower()
@@ -693,9 +693,7 @@ def test_verify_closure_no_false_positive_after_burnt_nft(
     strategy = _make_strategy_with_tracker_still_set()
     pre_exec = _make_lp_position_summary()
 
-    result = asyncio.run(
-        mgr._verify_closure(strategy=strategy, pre_execution_positions=pre_exec)
-    )
+    result = asyncio.run(mgr._verify_closure(strategy=strategy, pre_execution_positions=pre_exec))
 
     assert result is True
     # The strategy's in-memory tracker MUST NOT have been the
@@ -726,9 +724,7 @@ def test_verify_closure_correctly_flags_residual_position(
 
     pre_exec = _make_lp_position_summary()
 
-    result = asyncio.run(
-        mgr._verify_closure(strategy=strategy, pre_execution_positions=pre_exec)
-    )
+    result = asyncio.run(mgr._verify_closure(strategy=strategy, pre_execution_positions=pre_exec))
 
     assert result is False
 
@@ -784,9 +780,7 @@ def test_verify_closure_aggregates_multi_protocol_failures(
         deployment_id="multi", timestamp=datetime.now(UTC), positions=[]
     )
 
-    result = asyncio.run(
-        mgr._verify_closure(strategy=strategy, pre_execution_positions=pre_exec)
-    )
+    result = asyncio.run(mgr._verify_closure(strategy=strategy, pre_execution_positions=pre_exec))
 
     assert result is False
     # Both positions must have been queried — early-exit on first
@@ -860,9 +854,7 @@ def test_verify_closure_uses_orchestrator_client_for_v3_post_condition(
         ],
     )
 
-    result = asyncio.run(
-        mgr._verify_closure(strategy=strategy, pre_execution_positions=pre_exec)
-    )
+    result = asyncio.run(mgr._verify_closure(strategy=strategy, pre_execution_positions=pre_exec))
 
     assert result is True
     fake_gateway.query_position_liquidity.assert_called_once()

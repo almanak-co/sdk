@@ -1629,8 +1629,8 @@ class IntentCompiler:
                 f"swap_params {'/'.join(unsupported)} pinning is not supported for protocol "
                 f"'{protocol}': its swap compiler does not consume the pin, and an explicit "
                 f"pin must never be silently discarded. fee_tier pins are supported on "
-                f"{', '.join(sorted(SWAP_PIN_KEY_SUPPORT['fee_tier']))}; pool pins additionally "
-                f"on curve. For Aerodrome CL pools use swap_params tick_spacing instead."
+                f"{', '.join(sorted(SWAP_PIN_KEY_SUPPORT['fee_tier']))}; pool pins on "
+                f"{', '.join(sorted(SWAP_PIN_KEY_SUPPORT['pool']))}."
             ),
             intent_id=intent.intent_id,
         )

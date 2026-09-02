@@ -5,13 +5,19 @@ The TraderJoe V2 connector owns its LBPair validator. It queries the LBFactory's
 resolve the pair address, then — unless ``allow_empty_reserves`` is set —
 confirms non-zero liquidity via the pair's ``getReserves()`` (selector
 ``0x0902f1ac``). Factory addresses are resolved through :class:`AddressRegistry`.
+
+It also owns the pair-side identity reader used by the exact bare-address
+LP lane: ``getTokenX()`` / ``getTokenY()`` / ``getBinStep()`` reverse an LB
+pair address into the ``(tokenX, tokenY, binStep)`` key the factory needs.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from almanak.connectors._strategy_base.address_registry import AddressRegistry
+from almanak.connectors._strategy_base.pool_identity_base import decode_word_uint
 from almanak.connectors._strategy_base.pool_validation_base import (
     ZERO_ADDRESS,
     PoolValidationReason,
@@ -23,7 +29,14 @@ from almanak.connectors._strategy_base.pool_validation_base import (
 if TYPE_CHECKING:
     from almanak.framework.gateway_client import GatewayClient
 
-__all__ = ["validate_traderjoe_pool"]
+__all__ = [
+    "LB_PAIR_GET_BIN_STEP_SELECTOR",
+    "LB_PAIR_GET_TOKEN_X_SELECTOR",
+    "LB_PAIR_GET_TOKEN_Y_SELECTOR",
+    "LBPairBinding",
+    "read_lb_pair_binding",
+    "validate_traderjoe_pool",
+]
 
 # getLBPairInformation(address,address,uint256) selector
 # See `almanak/connectors/traderjoe_v2/abis/LBFactory.json`
@@ -31,6 +44,77 @@ _TRADERJOE_GET_LB_PAIR_INFO_SELECTOR = "0x704037bd"
 
 # TraderJoe V2 LBPair getReserves() selector
 _TRADERJOE_GET_RESERVES_SELECTOR = "0x0902f1ac"
+
+# LBPair pair-side identity selectors (keccak4 of the LBPair.json signatures).
+# An LB pair is keyed by (tokenX, tokenY, binStep); unlike V3 pools the token
+# order is fixed at creation and is NOT address-sorted, so tokenX /
+# tokenY must be read from the pair, never inferred.
+LB_PAIR_GET_TOKEN_X_SELECTOR = "0x05e8746d"  # getTokenX() -> address
+LB_PAIR_GET_TOKEN_Y_SELECTOR = "0xda10610c"  # getTokenY() -> address
+LB_PAIR_GET_BIN_STEP_SELECTOR = "0x17f11ecc"  # getBinStep() -> uint16
+
+_MAX_UINT16 = (1 << 16) - 1
+
+
+@dataclass(frozen=True)
+class LBPairBinding:
+    """``tokenX``/``tokenY``/``binStep`` read from a TraderJoe V2 LB pair.
+
+    Addresses are lowercase ``0x…`` strings as returned by ``decode_address``.
+    The tuple is the pair's own claim of identity; it is never trusted on its
+    own — the caller must round-trip it through the registered LB factory and
+    require the same pair address back.
+    """
+
+    token_x: str
+    token_y: str
+    bin_step: int
+
+
+def read_lb_pair_binding(
+    pool_address: str,
+    rpc_url: str | None,
+    *,
+    chain: str | None = None,
+    gateway_client: GatewayClient | None = None,
+) -> LBPairBinding | None:
+    """Read the pair-side identity tuple of an exact LB pair address.
+
+    Mirrors ``read_v3_pool_binding`` / ``read_slipstream_cl_pool_binding`` for
+    the Liquidity Book: the address is the authoritative input and this read
+    reverses it into the ``(tokenX, tokenY, binStep)`` key that
+    ``LBFactory.getLBPairInformation`` and the LBRouter need.
+
+    Returns:
+        The pair's binding, or ``None`` when any read fails or returns a value
+        no real LB pair would (zero token address, bin step outside
+        ``1..65535``). Callers decide whether ``None`` is a hard error; this
+        reader stays diagnostic.
+    """
+    if rpc_url is None and gateway_client is None:
+        return None
+
+    def _read(selector: str) -> bytes | None:
+        return eth_call(rpc_url or "", pool_address, selector, chain=chain, gateway_client=gateway_client)
+
+    token_x_raw = _read(LB_PAIR_GET_TOKEN_X_SELECTOR)
+    token_y_raw = _read(LB_PAIR_GET_TOKEN_Y_SELECTOR)
+    bin_step_raw = _read(LB_PAIR_GET_BIN_STEP_SELECTOR)
+    if token_x_raw is None or token_y_raw is None or bin_step_raw is None:
+        return None
+
+    token_x = decode_address(token_x_raw)
+    token_y = decode_address(token_y_raw)
+    if ZERO_ADDRESS in (token_x, token_y) or token_x == token_y:
+        return None
+
+    # Shared word decoder (same seam as the CLAMM identity probe); an LB bin
+    # step is a positive uint16, anything else is not a pair.
+    bin_step = decode_word_uint(bin_step_raw)
+    if bin_step is None or bin_step <= 0 or bin_step > _MAX_UINT16:
+        return None
+
+    return LBPairBinding(token_x=token_x, token_y=token_y, bin_step=bin_step)
 
 
 def validate_traderjoe_pool(

@@ -2,6 +2,7 @@
 
 from unittest.mock import MagicMock, patch
 
+from almanak.connectors._strategy_base.pool_validation_base import PoolValidationReason, PoolValidationResult
 from almanak.connectors.aerodrome.compiler import compile_lp_close_aerodrome
 from almanak.framework.intents.compiler import CompilationStatus, IntentCompiler, IntentCompilerConfig
 from almanak.framework.intents.vocabulary import Intent
@@ -266,6 +267,14 @@ def test_aerodrome_lp_close_bare_pool_address_success() -> None:
         patch(
             "almanak.connectors.aerodrome.compiler.get_aerodrome_pool_metadata",
             return_value=(token0_addr, token1_addr, False),
+        ),
+        # The bare address is authenticated against the
+        # factory (round-trip must return the same address) before any tx.
+        patch(
+            "almanak.connectors.aerodrome.pool_validation.validate_aerodrome_pool",
+            return_value=PoolValidationResult(
+                exists=True, reason=PoolValidationReason.CONFIRMED, pool_address=pool_address
+            ),
         ),
         patch.object(compiler, "_resolve_token", side_effect=[token0, token1]),
         patch.object(compiler, "_get_chain_rpc_url", return_value="http://localhost:8545"),

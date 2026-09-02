@@ -449,8 +449,14 @@ async def chain_verify_lp_open(
     return bool(liquidity > 0)
 
 
+# Public name for connector-owned post-conditions that must resolve the SAME
+# reviewed manager the reconciliation lane reads, so the two lanes never
+# disagree about which ERC-721 contract owns a multi-generation position.
+reviewed_npm_for_position = _reviewed_npm_for_position
+
 __all__ = [
     "LiveLendingPosition",
     "chain_verify_lp_open",
     "redrive_lending_position",
+    "reviewed_npm_for_position",
 ]

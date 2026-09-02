@@ -117,6 +117,61 @@ def test_query_position_liquidity_reads_positions_word_seven() -> None:
     assert client.query_position_liquidity("arbitrum", TOKEN, 5676758) is None
 
 
+def test_positions_reads_fold_a_burned_nft_revert_to_measured_zero() -> None:
+    """Uniswap V3-family NPMs revert ``positions(tokenId)`` with "Invalid token ID" once the NFT is
+    burned; the real client folds that to 0 / (0, 0) so a burned position is MEASURED closed."""
+    client, eth = _client()
+
+    def _revert(tx: dict, block_identifier: object = "latest") -> bytes:
+        raise ValueError("execution reverted: Invalid token ID")
+
+    eth.call = _revert  # type: ignore[method-assign]
+    assert client.query_position_liquidity("arbitrum", TOKEN, 5676758) == 0
+    assert client.query_position_tokens_owed("arbitrum", TOKEN, 5676758) == (0, 0)
+
+
+def test_positions_reads_keep_other_failures_unavailable() -> None:
+    client, eth = _client()
+    eth.fail = True
+    assert client.query_position_liquidity("arbitrum", TOKEN, 5676758) is None
+    assert client.query_position_tokens_owed("arbitrum", TOKEN, 5676758) is None
+    eth.fail = False
+    eth.result = (10**18).to_bytes(32, "big")  # truncated payload is unavailable, not a guess
+    assert client.query_position_tokens_owed("arbitrum", TOKEN, 5676758) is None
+
+
+def test_tokens_owed_reads_positions_words_ten_and_eleven() -> None:
+    client, eth = _client()
+    words = [0] * 12
+    words[10], words[11] = 17, 23
+    eth.result = b"".join(value.to_bytes(32, "big") for value in words)
+    assert client.query_position_tokens_owed("arbitrum", TOKEN, 5676758, block=42) == (17, 23)
+    (_, block), *_ = eth.calls
+    assert block == 42
+
+
+def test_burned_nft_chain_verifies_through_the_shared_npm_closure_rule() -> None:
+    """The closure post-condition must certify a burned NFT read through this shim."""
+    from almanak.connectors._strategy_base.teardown_post_condition import verify_npm_position_closure
+
+    client, eth = _client()
+
+    def _revert(tx: dict, block_identifier: object = "latest") -> bytes:
+        raise ValueError("execution reverted: Invalid token ID")
+
+    eth.call = _revert  # type: ignore[method-assign]
+    result = verify_npm_position_closure(
+        protocol="uniswap_v3",
+        position_id="5676758",
+        chain="arbitrum",
+        token_id=5676758,
+        npm_address=TOKEN,
+        gateway_client=client,
+        block=42,
+    )
+    assert result.closed is True and not result.unmeasured
+
+
 def test_balance_reads_fail_to_none_like_the_real_client() -> None:
     client, eth = _client()
     assert client.query_erc20_balance("base", TOKEN, WALLET) is None, "chain mismatch is unavailable, not a guess"

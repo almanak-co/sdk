@@ -277,7 +277,7 @@ class TestUnsupportedConnectorPinGate:
         ("protocol", "swap_params"),
         [
             ("traderjoe_v2", {"fee_tier": 500}),
-            ("aerodrome", {"pool": PINNED_POOL}),
+            ("aerodrome", {"fee_tier": 500}),  # aerodrome consumes pool, not fee_tier
             ("enso", {"fee_tier": 500}),
             ("curve", {"fee_tier": 500}),  # curve consumes pool, not fee_tier
         ],

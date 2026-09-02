@@ -122,8 +122,9 @@ CONNECTOR = Connector(
     # Clamped even though `fungible_lp` is False. The two flags are independent: that
     # one auto-registers the framework-default teardown post-condition, whose closure
     # rule is `balanceOf <= 10 wei` and would report a CORRECT clamped close as FAILED.
-    # Aerodrome has no such post-condition registered (VIB-6487), so the clamp is safe
-    # here and is NOT yet safe on Curve (VIB-6489).
+    # Aerodrome's own teardown post-condition (below) treats a remaining LP-token
+    # balance as unmeasured rather than a residual, so the clamp is safe here and is
+    # NOT yet safe on Curve.
     fungible_lp_close=FungibleLpCloseDecl(
         units="raw",
         decimals=18,
@@ -222,6 +223,13 @@ CONNECTOR = Connector(
     primitive=ImportRef(
         module="almanak.connectors.aerodrome.primitive",
         attribute="PRIMITIVE",
+    ),
+    # Slipstream NFT closure is chain-verified on the exact reviewed manager
+    # generation. Classic LP: a zero LP-token balance is a measured closure; a
+    # remainder is unmeasured, never a residual, because closes are clamped.
+    teardown_post_condition=ImportRef(
+        module="almanak.connectors.aerodrome.teardown_post_condition",
+        attribute="aerodrome_teardown_post_condition",
     ),
     venue_verifiers=(
         VenueVerifierDecl(

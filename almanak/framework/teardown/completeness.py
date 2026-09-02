@@ -972,6 +972,24 @@ def _covers_supply(intent: Any, position: PositionInfo, itype: str, wallet: str 
     return itype == "WITHDRAW" and _covers_lending_leg(intent, position, "token")
 
 
+# Detail keys under which a position summary records its pool CONTRACT address
+# (as opposed to the human label under ``pool``). ``pool`` itself is included so
+# a summary that already stores the address there matches an address-bound
+# intent case-insensitively.
+_LP_POOL_ADDRESS_DETAIL_KEYS: tuple[str, ...] = ("pool_address", "pool_addr", "lp_token", "lp_token_address", "pool")
+
+
+def _looks_like_address(value: str) -> bool:
+    """True for a 0x-prefixed 20-byte hex string (already lower-cased by callers)."""
+    if len(value) != 42 or not value.startswith("0x"):
+        return False
+    try:
+        int(value, 16)
+    except ValueError:
+        return False
+    return True
+
+
 def _covers_lp(intent: Any, position: PositionInfo, itype: str, wallet: str | None = None) -> bool:
     if itype != "LP_CLOSE":
         return False
@@ -979,10 +997,23 @@ def _covers_lp(intent: Any, position: PositionInfo, itype: str, wallet: str | No
     intent_id = str(_field(intent, "position_id") or "").lower()
     if pos_id and intent_id and pos_id == intent_id:
         return True
-    pool = str((position.details or {}).get("pool") or "").lower()
+    details = position.details or {}
+    pool = str(details.get("pool") or "").lower()
     intent_pool = str(_field(intent, "pool") or "").lower()
     if pool and intent_pool and pool == intent_pool:
         return True
+    # An intent may name the pool by its exact contract address while the
+    # position summary still labels it symbolically ("WETH/USDC/15"). The two
+    # are the same venue when the summary also records the pool's address
+    # under one of the address-shaped detail keys; compare those directly so
+    # an address-bound close is never mis-reported as leaving the position
+    # uncovered. Only a literal address-to-address equality counts — a
+    # symbolic label is never resolved here.
+    if _looks_like_address(intent_pool):
+        for key in _LP_POOL_ADDRESS_DETAIL_KEYS:
+            recorded = str(details.get(key) or "").lower()
+            if recorded == intent_pool:
+                return True
     # An LP_CLOSE on the same chain with no contradicting id/pool is accepted
     # (a strategy commonly tracks one LP and closes it by live liquidity).
     return not intent_id and not intent_pool

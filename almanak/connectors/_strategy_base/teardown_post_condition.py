@@ -170,6 +170,100 @@ def resolve_nft_token_id(position: Any) -> int | None:
 _REGISTRY: dict[str, TeardownPostCondition] = {}
 
 
+def verify_npm_position_closure(
+    *,
+    protocol: str,
+    position_id: str,
+    chain: str,
+    token_id: int,
+    npm_address: str,
+    gateway_client: Any,
+    block: int | str | None = None,
+    label: str = "Uniswap V3",
+) -> ClosureCheckResult:
+    """Read one NFT position on ``npm_address`` and classify its closure (three-valued).
+
+    Shared tail of every NonfungiblePositionManager-shaped post-condition (the
+    V3 family and Aerodrome Slipstream): the caller has already resolved WHICH
+    manager owns the NFT; this reads ``liquidity`` and ``tokensOwed`` through the
+    gateway's typed RPCs, pinned to ``block``, and applies the closure rule.
+
+    - ``liquidity == 0`` and both ``tokensOwed == 0`` → ``closed=True`` (covers
+      the burnt-NFT path, whose ``positions(tokenId)`` revert the gateway folds
+      into value-0 responses, and the decrease-without-burn path).
+    - Any measured non-zero residual → ``closed=False`` with a residual map.
+    - A read fault (``None`` or a raise) → ``unmeasured=True`` (Empty ≠ Zero):
+      lowered to UNVERIFIED by the verifier, never a fabricated residual.
+    """
+    try:
+        liquidity = gateway_client.query_position_liquidity(
+            chain=chain,
+            position_manager=npm_address,
+            token_id=token_id,
+            block=block,
+        )
+    except Exception as exc:  # noqa: BLE001 — fail-closed
+        return ClosureCheckResult(
+            closed=False,
+            unmeasured=True,
+            protocol=protocol,
+            position_id=position_id,
+            error=f"{label} query_position_liquidity raised: {exc}",
+        )
+    if liquidity is None:
+        return ClosureCheckResult(
+            closed=False,
+            unmeasured=True,
+            protocol=protocol,
+            position_id=position_id,
+            error=(
+                f"{label} query_position_liquidity returned None "
+                "(gateway/RPC error); cannot confirm closure — fail-closed"
+            ),
+        )
+    try:
+        tokens_owed = gateway_client.query_position_tokens_owed(
+            chain=chain,
+            position_manager=npm_address,
+            token_id=token_id,
+            block=block,
+        )
+    except Exception as exc:  # noqa: BLE001 — fail-closed
+        return ClosureCheckResult(
+            closed=False,
+            unmeasured=True,
+            protocol=protocol,
+            position_id=position_id,
+            error=f"{label} query_position_tokens_owed raised: {exc}",
+        )
+    if tokens_owed is None:
+        return ClosureCheckResult(
+            closed=False,
+            unmeasured=True,
+            protocol=protocol,
+            position_id=position_id,
+            error=(
+                f"{label} query_position_tokens_owed returned None "
+                "(gateway/RPC error); cannot confirm closure — fail-closed"
+            ),
+        )
+    tokens_owed0, tokens_owed1 = tokens_owed
+    if liquidity == 0 and tokens_owed0 == 0 and tokens_owed1 == 0:
+        return ClosureCheckResult(closed=True, protocol=protocol, position_id=position_id)
+    return ClosureCheckResult(
+        closed=False,
+        protocol=protocol,
+        position_id=position_id,
+        residual={
+            "position_manager": npm_address,
+            "token_id": token_id,
+            "liquidity": int(liquidity),
+            "tokens_owed0": int(tokens_owed0),
+            "tokens_owed1": int(tokens_owed1),
+        },
+    )
+
+
 def _register_teardown_post_condition(protocol: str, hook: TeardownPostCondition) -> None:
     """Register a post-condition for a protocol (framework-internal).
 
@@ -208,4 +302,5 @@ __all__ = [
     "get_teardown_post_condition",
     "has_teardown_post_condition",
     "resolve_nft_token_id",
+    "verify_npm_position_closure",
 ]

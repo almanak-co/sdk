@@ -10,9 +10,11 @@ the ``cl_factory`` contract kind). Factory addresses are resolved through
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from almanak.connectors._strategy_base.address_registry import AddressRegistry
+from almanak.connectors._strategy_base.pool_identity_base import decode_word_int
 from almanak.connectors._strategy_base.pool_validation_base import (
     ZERO_ADDRESS,
     PoolValidationReason,
@@ -20,13 +22,18 @@ from almanak.connectors._strategy_base.pool_validation_base import (
     decode_address,
     eth_call,
 )
+from almanak.connectors._strategy_base.solidly_pool_abi import SOLIDLY_FACTORY_SELECTOR
+from almanak.connectors._strategy_base.v3_pool_abi import V3_TOKEN0_SELECTOR, V3_TOKEN1_SELECTOR
 from almanak.connectors.aerodrome.addresses import SlipstreamDeployment, slipstream_lp_deployments
 
 if TYPE_CHECKING:
     from almanak.framework.gateway_client import GatewayClient
 
 __all__ = [
+    "SLIPSTREAM_TICK_SPACING_SELECTOR",
+    "SlipstreamPoolBinding",
     "encode_aerodrome_cl_get_pool",
+    "read_slipstream_cl_pool_binding",
     "validate_aerodrome_cl_pool",
     "validate_aerodrome_pool",
 ]
@@ -37,6 +44,13 @@ _AERODROME_GET_POOL_SELECTOR = "0x79bc57d5"
 
 # Aerodrome Slipstream CL getPool(address,address,int24) selector
 _AERODROME_CL_GET_POOL_SELECTOR = "0x28af8d0b"
+
+# Slipstream CL pool ``tickSpacing()`` selector (``int24``). Slipstream pools
+# are keyed by tick spacing where Uniswap V3 pools are keyed by fee, so this
+# is the pool-side counterpart of the factory's ``getPool(...,int24)`` key.
+SLIPSTREAM_TICK_SPACING_SELECTOR = "0xd0c93a7c"
+
+_MAX_INT24 = (1 << 23) - 1
 
 
 def _encode_get_pool_aerodrome(token_a: str, token_b: str, stable: bool) -> str:
@@ -118,6 +132,72 @@ def validate_aerodrome_pool(
         )
 
     return PoolValidationResult(exists=True, reason=PoolValidationReason.CONFIRMED, pool_address=pool_address)
+
+
+@dataclass(frozen=True)
+class SlipstreamPoolBinding:
+    """``token0``/``token1``/``tickSpacing``/``factory`` read from a Slipstream CL pool.
+
+    Addresses are lowercase ``0x…`` strings as returned by ``decode_address``.
+    ``factory`` is the pool's own claim of provenance; it selects the reviewed
+    factory/position-manager generation but is never trusted on its own — the
+    caller must round-trip the tuple through that reviewed factory and require
+    the same pool address back.
+    """
+
+    token0: str
+    token1: str
+    tick_spacing: int
+    factory: str
+
+
+def read_slipstream_cl_pool_binding(
+    pool_address: str,
+    rpc_url: str | None,
+    *,
+    chain: str | None = None,
+    gateway_client: GatewayClient | None = None,
+) -> SlipstreamPoolBinding | None:
+    """Read the pool-side identity tuple of an exact Slipstream CL pool address.
+
+    Mirrors ``read_v3_pool_binding`` for the V3-family lane: the address is the
+    authoritative input and this read reverses it into the ``(token0, token1,
+    tick_spacing)`` key the factory and position manager need, plus the pool's
+    declared ``factory()`` so the caller can pick the matching reviewed
+    generation.
+
+    Returns:
+        The pool's binding, or ``None`` when any read fails or returns a value
+        no real Slipstream pool would (zero token/factory address, non-positive
+        tick spacing). Callers decide whether ``None`` is a hard error; this
+        reader stays diagnostic.
+    """
+    if rpc_url is None and gateway_client is None:
+        return None
+
+    def _read(selector: str) -> bytes | None:
+        return eth_call(rpc_url or "", pool_address, selector, chain=chain, gateway_client=gateway_client)
+
+    token0_raw = _read(V3_TOKEN0_SELECTOR)
+    token1_raw = _read(V3_TOKEN1_SELECTOR)
+    tick_spacing_raw = _read(SLIPSTREAM_TICK_SPACING_SELECTOR)
+    factory_raw = _read(SOLIDLY_FACTORY_SELECTOR)
+    if token0_raw is None or token1_raw is None or tick_spacing_raw is None or factory_raw is None:
+        return None
+
+    token0 = decode_address(token0_raw)
+    token1 = decode_address(token1_raw)
+    factory = decode_address(factory_raw)
+    if ZERO_ADDRESS in (token0, token1, factory):
+        return None
+
+    # Shared signed-word decoder (same seam as the CLAMM identity probe); a
+    # Slipstream tick spacing is a positive int24, anything else is not a pool.
+    tick_spacing = decode_word_int(tick_spacing_raw)
+    if tick_spacing is None or tick_spacing <= 0 or tick_spacing > _MAX_INT24:
+        return None
+
+    return SlipstreamPoolBinding(token0=token0, token1=token1, tick_spacing=tick_spacing, factory=factory)
 
 
 def validate_aerodrome_cl_pool(

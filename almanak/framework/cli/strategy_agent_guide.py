@@ -50,7 +50,7 @@ TEMPLATE_INTENT_MAP: dict[str, list[str]] = {
 # Maps intent type -> the Intent factory method signature (simplified)
 _INTENT_QUICK_REF: dict[str, str] = {
     "SWAP": 'Intent.swap(from_token, to_token, amount_usd=, max_slippage=Decimal("0.005"))',
-    "LP_OPEN": 'Intent.lp_open(pool="WETH/USDC/3000", amount0=, amount1=, range_lower=, range_upper=, protocol=)',
+    "LP_OPEN": 'Intent.lp_open(pool="WETH/USDC/3000" | "0x<exact pool>", amount0=, amount1=, range_lower=, range_upper=, protocol=)',
     "LP_CLOSE": "Intent.lp_close(position_id=, pool=None, collect_fees=True, protocol=)",
     "LP_COLLECT_FEES": "Intent.collect_fees(pool, protocol=)",
     "SUPPLY": "Intent.supply(protocol, token, amount, use_as_collateral=True)",
@@ -89,7 +89,7 @@ TEMPLATE_CONFIG_DOCS: dict[str, list[tuple[str, str, str]]] = {
         (
             "pool",
             "string",
-            "Pool identifier in TOKEN0/TOKEN1/FEE format (e.g. 'WETH/USDC/3000'). Do NOT use raw hex addresses.",
+            "Pool identifier. This template parses the symbolic format 'TOKEN0/TOKEN1/FEE' (e.g. 'WETH/USDC/3000'; tick-spacing protocols such as aerodrome_slipstream use 'TOKEN0/TOKEN1/<tick_spacing>'). The compiler ALSO accepts an exact 0x pool address on uniswap_v3-family, aerodrome, aerodrome_slipstream and traderjoe_v2, but this template's range math and dashboard labels split the string, so keep the symbolic format here unless you replace that parsing.",
         ),
         ("protocol", "string", "LP protocol (uniswap_v3, aerodrome, etc.)"),
         ("base_token", "string", "Pool base token"),
@@ -154,7 +154,7 @@ TEMPLATE_CONFIG_DOCS: dict[str, list[tuple[str, str, str]]] = {
         (
             "pool",
             "string",
-            "Pool identifier in TOKEN0/TOKEN1/FEE format (e.g. 'WETH/USDC/3000'). Do NOT use raw hex addresses.",
+            "Pool identifier. This template parses the symbolic format 'TOKEN0/TOKEN1/FEE' (e.g. 'WETH/USDC/3000'; tick-spacing protocols such as aerodrome_slipstream use 'TOKEN0/TOKEN1/<tick_spacing>'). The compiler ALSO accepts an exact 0x pool address on uniswap_v3-family, aerodrome, aerodrome_slipstream and traderjoe_v2, but this template's range math and dashboard labels split the string, so keep the symbolic format here unless you replace that parsing.",
         ),
         ("protocol", "string", "LP protocol (uniswap_v3, aerodrome, etc.)"),
         ("base_token", "string", "Pool base token"),
@@ -185,10 +185,11 @@ TEMPLATE_FOOTGUNS: dict[str, list[str]] = {
     "blank": [],
     "ta_swap": [
         "In rsi_bb mode, if Bollinger Bands data is unavailable, the strategy silently falls back to RSI-only signals.",
+        "swap_params={'pool': '0x...'} pins a swap to one exact pool on uniswap_v3-family, aerodrome, aerodrome_slipstream and curve (pair must match, factory must confirm, no fallback); other connectors reject the pin loudly.",
     ],
     "dynamic_lp": [
-        "pool MUST use symbolic format 'TOKEN0/TOKEN1/FEE' (e.g. 'WETH/USDC/3000'), NOT a raw hex address. Raw addresses trigger silent fallback to WETH/USDC.",
-        "Pass amount0/amount1 in the same order as your pool string (e.g. for 'WETH/USDC/3000', amount0=WETH amount, amount1=USDC amount). The compiler will reorder to match on-chain token0/token1 sorting if needed.",
+        "In THIS template keep pool in the symbolic format 'TOKEN0/TOKEN1/FEE' (e.g. 'WETH/USDC/3000'): the scaffolded range math derives the tick spacing by splitting the string and the dashboard label parser falls back to WETH/USDC labels for anything else. An exact 0x pool address is a supported COMPILER input (uniswap_v3-family, aerodrome, aerodrome_slipstream, traderjoe_v2): the pool's own token order and fee/tick spacing are read on-chain, the registered factory must return that same address, and nothing is substituted; aerodrome_slipstream admits current-generation pools only. Use it only after replacing the template's string parsing.",
+        "Pass amount0/amount1 in the same order as your pool string (e.g. for 'WETH/USDC/3000', amount0=WETH amount, amount1=USDC amount). uniswap_v3-family reorders a non-canonical pool string to on-chain token0/token1; aerodrome_slipstream REJECTS a non-canonical order (put the lower-address token first). With an exact 0x pool, amount0/amount1 follow the pool contract's own token0/token1.",
         "Provide BOTH amount0 and amount1. Single-sided LP (one amount = 0) wastes liquidity or reverts on most protocols.",
         "range_lower/range_upper are PRICES (e.g. 1800.0), not ticks. The compiler converts to ticks.",
     ],
@@ -207,7 +208,8 @@ TEMPLATE_FOOTGUNS: dict[str, list[str]] = {
     "copy_trader": [],
     "perps": [],
     "multi_step": [
-        "pool MUST use symbolic format 'TOKEN0/TOKEN1/FEE', NOT a raw hex address.",
+        "In THIS template keep pool in the symbolic format 'TOKEN0/TOKEN1/FEE' (the scaffolded parsing splits the string); an exact 0x pool address is a supported compiler input on uniswap_v3-family, aerodrome, aerodrome_slipstream and traderjoe_v2 but needs that parsing replaced first.",
+        "swap_params={'pool': '0x...'} pins a swap to one exact pool on uniswap_v3-family, aerodrome, aerodrome_slipstream and curve (pair must match, factory must confirm, no fallback); other connectors reject the pin loudly.",
         "The swap-then-LP sequence uses estimated amounts with a 5% slippage buffer. Actual amounts may differ.",
         "rebalance_drift_pct is a percentage (e.g. 3 = 3% drift triggers rebalance). Do not confuse with dynamic_lp's rebalance_threshold_pct which has different semantics.",
     ],

@@ -25,12 +25,12 @@ from almanak.framework.venues import (
 )
 
 from .addresses import SlipstreamDeployment, slipstream_deployment_for_factory
-from .pool_validation import encode_aerodrome_cl_get_pool
+from .pool_validation import SLIPSTREAM_TICK_SPACING_SELECTOR, encode_aerodrome_cl_get_pool
 
 VERIFIER_CONTRACT_VERSION = "aerodrome_slipstream_exact_pool.v1"
 BINDING_POLICY_VERSION = 1
 
-_TICK_SPACING_SELECTOR = "0xd0c93a7c"
+_TICK_SPACING_SELECTOR = SLIPSTREAM_TICK_SPACING_SELECTOR
 _ZERO_ADDRESS = "0x" + "0" * 40
 _ABI_WORD_BYTES = 32
 _ABI_ADDRESS_PADDING_BYTES = 12

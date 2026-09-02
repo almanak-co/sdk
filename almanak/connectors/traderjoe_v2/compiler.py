@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
@@ -36,6 +37,40 @@ if TYPE_CHECKING:
     from almanak.framework.gateway_client import GatewayClient
 
 logger = logging.getLogger(__name__)
+
+
+def _looks_like_evm_address(value: str) -> bool:
+    """Return True iff ``value`` is a valid 0x-prefixed 20-byte address (same rule as the V3 lane)."""
+    from eth_utils import is_address
+
+    return bool(value) and is_address(value)
+
+
+def _looks_like_bare_lb_pair(pool: str) -> bool:
+    """True when ``pool`` is offered as an exact address rather than a symbolic key."""
+    return isinstance(pool, str) and pool.lower().startswith("0x") and "/" not in pool
+
+
+@dataclass(frozen=True, slots=True)
+class _ResolvedLBPair:
+    """One admitted LB pair, however the intent named it.
+
+    Both the symbolic ``TOKEN_X/TOKEN_Y[/BIN_STEP]`` lane and the exact
+    bare-address lane resolve to this shape before the shared LP_OPEN /
+    LP_CLOSE body runs. ``token_x_symbol`` / ``token_y_symbol`` are the
+    display symbols the body uses in descriptions and logs (the symbolic lane
+    keeps the caller's spelling; the exact lane uses the resolved metadata).
+    ``gateway_client`` / ``rpc_url`` are the transport pair the adapter must
+    use, normalised through ``_resolve_traderjoe_v2_gateway_rpc``.
+    """
+
+    token_x: TokenInfo
+    token_y: TokenInfo
+    token_x_symbol: str
+    token_y_symbol: str
+    bin_step: int
+    gateway_client: GatewayClient | None
+    rpc_url: str | None
 
 
 class TraderJoeV2Compiler(BaseProtocolCompiler[SwapCompilerContext]):
@@ -116,8 +151,8 @@ class _TraderJoeV2CompileImpl(CompilerServicesFacadeMixin):
         """Parse ``intent.pool`` as ``TOKEN_X/TOKEN_Y[/BIN_STEP]``.
 
         Defaults ``BIN_STEP`` to 20 (most common for TraderJoe V2) when
-        omitted. Preserves the exact "Invalid pool format..." error string
-        pinned by the LP characterization tests.
+        omitted. A bare ``0x…`` address never reaches this gate — it is
+        routed to :meth:`_resolve_exact_lb_pair` first.
         """
         pool_parts = intent.pool.split("/")
         if len(pool_parts) < 2:
@@ -125,6 +160,7 @@ class _TraderJoeV2CompileImpl(CompilerServicesFacadeMixin):
                 status=CompilationStatus.FAILED,
                 error=(
                     f"Invalid pool format for TraderJoe V2: {intent.pool}. Expected format: TOKEN_X/TOKEN_Y/BIN_STEP"
+                    " or an exact 0x pool address"
                 ),
                 intent_id=intent.intent_id,
             )
@@ -237,6 +273,230 @@ class _TraderJoeV2CompileImpl(CompilerServicesFacadeMixin):
             approvals.extend(self._build_approve_tx(token_y_info.address, router_address, amount_y_wei))
         return approvals
 
+    def _resolve_symbolic_lb_pair_for_open(self, intent: LPOpenIntent) -> _ResolvedLBPair | CompilationResult:
+        """Resolve a ``TOKEN_X/TOKEN_Y[/BIN_STEP]`` key for LP_OPEN (pre-lane behaviour, unchanged)."""
+        from almanak.connectors.traderjoe_v2.pool_validation import validate_traderjoe_pool
+
+        pool_spec = self._parse_traderjoe_v2_pool_spec(intent)
+        if isinstance(pool_spec, CompilationResult):
+            return pool_spec
+        token_x_symbol, token_y_symbol, bin_step = pool_spec
+
+        tokens = self._resolve_traderjoe_v2_lp_tokens(
+            intent=intent,
+            token_x_symbol=token_x_symbol,
+            token_y_symbol=token_y_symbol,
+        )
+        if isinstance(tokens, CompilationResult):
+            return tokens
+        token_x_info, token_y_info = tokens
+
+        # Resolve transport up front so pool validation AND the adapter
+        # use the same gateway/RPC pair. A disconnected ``self._gateway_client``
+        # would otherwise make ``validate_traderjoe_pool`` fail against a
+        # stale client even though the adapter falls back to RPC.
+        gateway_client, rpc_url = self._resolve_traderjoe_v2_gateway_rpc(
+            adapter_name="TraderJoe V2 adapter",
+        )
+
+        # Validate pool existence (best-effort; LP_OPEN can seed empty pools).
+        pool_check = validate_traderjoe_pool(
+            self.chain,
+            token_x_info.address,
+            token_y_info.address,
+            bin_step,
+            rpc_url,
+            gateway_client=gateway_client,
+            allow_empty_reserves=True,
+        )
+        failed = self._validate_pool(pool_check, intent.intent_id)
+        if failed is not None:
+            return failed
+
+        return _ResolvedLBPair(
+            token_x=token_x_info,
+            token_y=token_y_info,
+            token_x_symbol=token_x_symbol,
+            token_y_symbol=token_y_symbol,
+            bin_step=bin_step,
+            gateway_client=gateway_client,
+            rpc_url=rpc_url,
+        )
+
+    def _resolve_symbolic_lb_pair_for_close(
+        self, intent: LPCloseIntent, pool: str
+    ) -> _ResolvedLBPair | CompilationResult:
+        """Resolve a ``TOKEN_X/TOKEN_Y[/BIN_STEP]`` key for LP_CLOSE (pre-lane behaviour, unchanged).
+
+        The LP_CLOSE lane never validated the pair against the factory here;
+        ``sdk.get_pool_address`` performs that lookup downstream.
+        """
+        pool_parts = pool.split("/")
+        if len(pool_parts) < 2:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"Invalid pool format for TraderJoe V2: {pool}. Expected format: TOKEN_X/TOKEN_Y/BIN_STEP"
+                    " or an exact 0x pool address"
+                ),
+                intent_id=intent.intent_id,
+            )
+
+        token_x_symbol = pool_parts[0]
+        token_y_symbol = pool_parts[1]
+        bin_step = int(pool_parts[2]) if len(pool_parts) > 2 else 20
+
+        # Resolve token addresses via TokenResolver
+        token_x_info = self._resolve_token(token_x_symbol)
+        token_y_info = self._resolve_token(token_y_symbol)
+
+        if not token_x_info or not token_y_info:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"Unknown tokens for pool {pool} on {self.chain}",
+                intent_id=intent.intent_id,
+            )
+
+        # TraderJoe V2 adapter accepts either a connected gateway_client
+        # (production path) or a direct RPC URL (local/backtest fallback).
+        # Treat a disconnected client as unavailable so we don't hand a
+        # dead client to the adapter.
+        gateway_client, rpc_url = self._resolve_traderjoe_v2_gateway_rpc(
+            adapter_name="TraderJoe V2 adapter",
+        )
+        return _ResolvedLBPair(
+            token_x=token_x_info,
+            token_y=token_y_info,
+            token_x_symbol=token_x_symbol,
+            token_y_symbol=token_y_symbol,
+            bin_step=bin_step,
+            gateway_client=gateway_client,
+            rpc_url=rpc_url,
+        )
+
+    def _resolve_exact_lb_pair(self, pool_address: str, intent_id: str) -> _ResolvedLBPair | CompilationResult:
+        """Resolve and authenticate an exact bare-address TraderJoe V2 LB pair.
+
+        The address is authoritative: the compiler reads the pair's
+        ``getTokenX()``/``getTokenY()``/``getBinStep()`` through the gateway,
+        resolves both tokens by contract address, and requires the registered
+        LB factory to return the same address for that tuple. No symbol
+        inference, bin-step auto-detection, or alternate-pool substitution is
+        permitted — the same contract as the Uniswap V3-family and Aerodrome
+        Slipstream exact lanes.
+
+        Shared by LP_OPEN and LP_CLOSE: an LB position is identified by pair +
+        bin ids, so a strategy that opened by address must be able to close by
+        address (bin ids still travel in ``protocol_params["bin_ids"]``).
+        """
+        from almanak.connectors._strategy_base.address_registry import AddressRegistry
+        from almanak.connectors.traderjoe_v2.pool_validation import read_lb_pair_binding, validate_traderjoe_pool
+
+        if not _looks_like_evm_address(pool_address):
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"Invalid exact TraderJoe V2 LB pair address: {pool_address}",
+                intent_id=intent_id,
+            )
+
+        factory = AddressRegistry.resolve_contract_address("traderjoe_v2", self.chain, "factory")
+        if not factory:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"TraderJoe V2 LB factory not registered for chain '{self.chain}'.",
+                intent_id=intent_id,
+            )
+
+        gateway_client = self._gateway_client
+        gateway_connected = gateway_client is not None and bool(getattr(gateway_client, "is_connected", False))
+        internal_preflight = bool(self._gateway_internal_preflight)
+        if not gateway_connected and not internal_preflight:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"Cannot resolve exact TraderJoe V2 LB pair {pool_address} on {self.chain}: "
+                    "a connected gateway is required for getTokenX()/getTokenY()/getBinStep() reads."
+                ),
+                intent_id=intent_id,
+            )
+        # Direct RPC is permitted only while compiling inside the gateway process.
+        # Strategy/framework callers must cross the gateway channel.
+        internal_rpc = self._get_chain_rpc_url() if internal_preflight else None
+
+        binding = read_lb_pair_binding(
+            pool_address,
+            internal_rpc,
+            chain=self.chain,
+            gateway_client=gateway_client,
+        )
+        if binding is None:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"Cannot resolve exact TraderJoe V2 LB pair {pool_address} on {self.chain}: "
+                    "getTokenX()/getTokenY()/getBinStep() reads failed or returned non-pool values."
+                ),
+                intent_id=intent_id,
+            )
+
+        token_x_info = self._resolve_token(binding.token_x)
+        token_y_info = self._resolve_token(binding.token_y)
+        if token_x_info is None or token_y_info is None:
+            missing = binding.token_x if token_x_info is None else binding.token_y
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"Cannot resolve token metadata for {missing} from exact TraderJoe V2 LB pair "
+                    f"{pool_address} on {self.chain}."
+                ),
+                intent_id=intent_id,
+            )
+
+        # Authenticate the pair's self-reported tuple: the registered LB factory
+        # must round-trip that tuple to THIS address. A contract that merely
+        # answers the ABI (a fork, a spoof, an unregistered deployment) fails here.
+        pool_check = validate_traderjoe_pool(
+            self.chain,
+            binding.token_x,
+            binding.token_y,
+            binding.bin_step,
+            internal_rpc,
+            gateway_client=gateway_client,
+            allow_empty_reserves=True,
+        )
+        if pool_check.exists is not True:
+            detail = pool_check.error or pool_check.warning or "factory lookup unavailable"
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"Cannot authenticate exact TraderJoe V2 LB pair {pool_address} against the registered "
+                    f"LB factory {factory} on {self.chain}: {detail}"
+                ),
+                intent_id=intent_id,
+            )
+        canonical = pool_check.pool_address or ""
+        if canonical.lower() != pool_address.lower():
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"Exact TraderJoe V2 LB pair {pool_address} is not the registered LB factory's pair for "
+                    f"{binding.token_x}/{binding.token_y} bin_step {binding.bin_step} on {self.chain}; "
+                    f"the factory returned {canonical or 'no pool'}. Refusing alternate-pool substitution."
+                ),
+                intent_id=intent_id,
+            )
+
+        adapter_gateway, adapter_rpc = self._resolve_traderjoe_v2_gateway_rpc(adapter_name="TraderJoe V2 adapter")
+        return _ResolvedLBPair(
+            token_x=token_x_info,
+            token_y=token_y_info,
+            token_x_symbol=token_x_info.symbol,
+            token_y_symbol=token_y_info.symbol,
+            bin_step=binding.bin_step,
+            gateway_client=adapter_gateway,
+            rpc_url=adapter_rpc,
+        )
+
     # crap-allowlist: VIB-4139 — import-path swap only (pool-validation moved into
     # connectors, #2527): the only change to this method is the
     # ``validate_traderjoe_pool`` import path; function body unchanged, anvil-only
@@ -249,6 +509,13 @@ class _TraderJoeV2CompileImpl(CompilerServicesFacadeMixin):
         - Liquidity is distributed across bins with explicit distributions
         - LP tokens are fungible ERC1155-like tokens per bin (not NFTs)
 
+        Pool format: ``TOKEN_X/TOKEN_Y[/BIN_STEP]`` or an exact bare ``0x…``
+        LB pair address. A bare address is an execution constraint, not a
+        discovery hint: the pair's own tokenX/tokenY/binStep are read through
+        the gateway and the registered LB factory must round-trip that tuple
+        to the same address (see :meth:`_resolve_exact_lb_pair`). In that
+        form ``amount0``/``amount1`` follow the pair's tokenX/tokenY order.
+
         Args:
             intent: LPOpenIntent to compile
 
@@ -260,45 +527,24 @@ class _TraderJoeV2CompileImpl(CompilerServicesFacadeMixin):
         try:
             from almanak.connectors.traderjoe_v2 import TraderJoeV2Adapter, TraderJoeV2Config
 
-            pool_spec = self._parse_traderjoe_v2_pool_spec(intent)
-            if isinstance(pool_spec, CompilationResult):
-                return pool_spec
-            token_x_symbol, token_y_symbol, bin_step = pool_spec
-
-            tokens = self._resolve_traderjoe_v2_lp_tokens(
-                intent=intent,
-                token_x_symbol=token_x_symbol,
-                token_y_symbol=token_y_symbol,
-            )
-            if isinstance(tokens, CompilationResult):
-                return tokens
-            token_x_info, token_y_info = tokens
+            # Two admission lanes, one resolved shape. A bare address is exact
+            # and authenticated against the registered LB factory; a symbolic
+            # key keeps the pre-lane parse -> resolve -> validate behaviour.
+            if _looks_like_bare_lb_pair(intent.pool):
+                resolved = self._resolve_exact_lb_pair(intent.pool, intent.intent_id)
+            else:
+                resolved = self._resolve_symbolic_lb_pair_for_open(intent)
+            if isinstance(resolved, CompilationResult):
+                return resolved
+            token_x_info = resolved.token_x
+            token_y_info = resolved.token_y
+            token_x_symbol = resolved.token_x_symbol
+            token_y_symbol = resolved.token_y_symbol
+            bin_step = resolved.bin_step
+            gateway_client = resolved.gateway_client
+            rpc_url = resolved.rpc_url
             token_x_addr = token_x_info.address
             token_y_addr = token_y_info.address
-
-            # Resolve transport up front so pool validation AND the adapter
-            # use the same gateway/RPC pair. A disconnected ``self._gateway_client``
-            # would otherwise make ``validate_traderjoe_pool`` fail against a
-            # stale client even though the adapter falls back to RPC.
-            gateway_client, rpc_url = self._resolve_traderjoe_v2_gateway_rpc(
-                adapter_name="TraderJoe V2 adapter",
-            )
-
-            # Validate pool existence (best-effort; LP_OPEN can seed empty pools).
-            from almanak.connectors.traderjoe_v2.pool_validation import validate_traderjoe_pool
-
-            pool_check = validate_traderjoe_pool(
-                self.chain,
-                token_x_addr,
-                token_y_addr,
-                bin_step,
-                rpc_url,
-                gateway_client=gateway_client,
-                allow_empty_reserves=True,
-            )
-            failed = self._validate_pool(pool_check, intent.intent_id)
-            if failed is not None:
-                return failed
 
             amount_x_wei = int(intent.amount0 * Decimal(10**token_x_info.decimals))
             amount_y_wei = int(intent.amount1 * Decimal(10**token_y_info.decimals))
@@ -423,53 +669,29 @@ class _TraderJoeV2CompileImpl(CompilerServicesFacadeMixin):
             # Import TraderJoe V2 adapter
             from almanak.connectors.traderjoe_v2 import TraderJoeV2Adapter, TraderJoeV2Config
 
-            # Parse pool info (format: TOKEN_X/TOKEN_Y/BIN_STEP)
+            # Pool: TOKEN_X/TOKEN_Y[/BIN_STEP] or an exact bare LB pair address.
+            # An LB position is identified by pair + bin ids, so a strategy
+            # that opened by address can close by address; bin ids still come
+            # from ``protocol_params["bin_ids"]`` below.
             if intent.pool is None:
                 return CompilationResult(
                     status=CompilationStatus.FAILED,
                     error="pool is required for TraderJoe V2 LP close",
                     intent_id=intent.intent_id,
                 )
-            pool_parts = intent.pool.split("/")
-            if len(pool_parts) < 2:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Invalid pool format for TraderJoe V2: {intent.pool}. Expected format: TOKEN_X/TOKEN_Y/BIN_STEP",
-                    intent_id=intent.intent_id,
-                )
-
-            token_x_symbol = pool_parts[0]
-            token_y_symbol = pool_parts[1]
-            bin_step = int(pool_parts[2]) if len(pool_parts) > 2 else 20
-
-            # Resolve token addresses via TokenResolver
-            token_x_info = self._resolve_token(token_x_symbol)
-            token_y_info = self._resolve_token(token_y_symbol)
-
-            if not token_x_info or not token_y_info:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Unknown tokens for pool {intent.pool} on {self.chain}",
-                    intent_id=intent.intent_id,
-                )
-
-            token_x_addr = token_x_info.address
-            token_y_addr = token_y_info.address
-
-            # TraderJoe V2 adapter accepts either a connected gateway_client
-            # (production path) or a direct RPC URL (local/backtest fallback).
-            # Treat a disconnected client as unavailable so we don't hand a
-            # dead client to the adapter.
-            gateway_client = self._gateway_client
-            if gateway_client is not None and not gateway_client.is_connected:
-                gateway_client = None
-
-            rpc_url = None if gateway_client is not None else self._get_chain_rpc_url()
-            if gateway_client is None and not rpc_url:
-                raise ValueError(
-                    "Connected gateway_client or RPC URL required for TraderJoe V2 adapter. "
-                    "Either provide rpc_url to IntentCompiler or use GatewayExecutionOrchestrator."
-                )
+            if _looks_like_bare_lb_pair(intent.pool):
+                resolved = self._resolve_exact_lb_pair(intent.pool, intent.intent_id)
+            else:
+                resolved = self._resolve_symbolic_lb_pair_for_close(intent, intent.pool)
+            if isinstance(resolved, CompilationResult):
+                return resolved
+            token_x_symbol = resolved.token_x_symbol
+            token_y_symbol = resolved.token_y_symbol
+            bin_step = resolved.bin_step
+            token_x_addr = resolved.token_x.address
+            token_y_addr = resolved.token_y.address
+            gateway_client = resolved.gateway_client
+            rpc_url = resolved.rpc_url
 
             # Create TraderJoe V2 adapter
             config = TraderJoeV2Config(

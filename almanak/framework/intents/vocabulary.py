@@ -223,7 +223,11 @@ class SwapIntent(BaseIntent):
             500 = 0.05%) or ``{"pool": "0x..."}`` pins the swap to one exact
             pool: auto tier selection is disabled and compilation fails loudly
             if the pinned pool is unusable, instead of falling back to another
-            tier.
+            tier. For Aerodrome / Velodrome, ``{"pool": "0x..."}`` pins either
+            a Classic (Solidly) or a Slipstream CL pool: the pool's on-chain
+            identity must match the swap pair, the registered factory must
+            round-trip it to the same address, and a CL pool must live on the
+            factory the registered swap router is bound to.
         intent_id: Unique identifier for this intent
         created_at: Timestamp when the intent was created
 
@@ -663,11 +667,12 @@ class LPOpenIntent(BaseIntent):
     """Intent to open a liquidity position.
 
     Attributes:
-        pool: Pool address or identifier. For the Uniswap V3 family, a bare
+        pool: Pool address or identifier. For the Uniswap V3 family, Aerodrome
+            Slipstream, Aerodrome/Velodrome Classic, and TraderJoe V2, a bare
             address is an exact execution constraint authenticated on-chain
-            against the registered chain/protocol factory. In that form,
-            ``amount0``/``amount1`` and price bounds use the pool contract's
-            canonical token0/token1 orientation.
+            against the registered chain/protocol factory. In that form, ``amount0``/``amount1`` and
+            price bounds use the pool contract's canonical token0/token1
+            orientation (the LB pair's own tokenX/tokenY for TraderJoe V2).
         amount0: Amount of token0 to provide
         amount1: Amount of token1 to provide
         range_spec: Canonical typed concentrated-liquidity range — a
@@ -975,7 +980,13 @@ class LPCloseIntent(BaseIntent):
         pool: Pool address (optional, for validation). For a Uniswap V3-family
             bare address, compilation verifies both the registered factory
             identity and that ``position_id`` records the same token pair and
-            fee before emitting any close transaction.
+            fee before emitting any close transaction. For Aerodrome Slipstream
+            a bare address must equal the pool the NFT's reviewed manager and
+            factory reconstruct; a symbolic key is not cross-checked. For a
+            TraderJoe V2 bare LB pair address, compilation reads the pair's
+            tokenX/tokenY/binStep and requires the registered LB factory to
+            return the same address; the bins to close still come from
+            ``protocol_params["bin_ids"]``.
         collect_fees: Whether to collect accumulated fees
         protocol: LP protocol (e.g., "uniswap_v3", "camelot")
         chain: Optional target chain for execution (defaults to strategy's primary chain)

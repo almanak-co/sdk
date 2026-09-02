@@ -104,11 +104,13 @@ UNISWAP_V3_FORKS: frozenset[str] = frozenset(
 # pinning key. The intent compiler rejects a pinned swap routed to any protocol
 # outside the key's set (after alias/default normalization), so an explicit pin
 # can never be silently discarded by a connector that ignores swap_params
-# (PR #3644 review). Aerodrome pins CL pools via its own ``tick_spacing`` key
-# and is deliberately absent here.
+# (a reviewer-found gap). Aerodrome/Velodrome (both slugs normalize to these
+# two) consume ``pool`` as an exact, factory-authenticated pin of either a
+# Classic or a Slipstream CL pool; they pin CL spacing via their own
+# ``tick_spacing`` key and have no ``fee_tier`` concept.
 SWAP_PIN_KEY_SUPPORT: dict[str, frozenset[str]] = {
     "fee_tier": UNISWAP_V3_FORKS,
-    "pool": UNISWAP_V3_FORKS | frozenset({"curve"}),
+    "pool": UNISWAP_V3_FORKS | frozenset({"curve", "aerodrome", "aerodrome_slipstream"}),
 }
 
 

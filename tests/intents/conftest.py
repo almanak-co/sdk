@@ -256,29 +256,74 @@ class AnvilEthCallAdapter:
         del chain
         return "0x" + bytes(self.web3.eth.get_block(block_number)["hash"]).hex()
 
+    def _positions_words(self, position_manager: str, token_id: int, block: int | str | None) -> list[bytes] | None:
+        """``positions(tokenId)`` as 32-byte words, or ``None`` on a read fault.
+
+        A burned NFT reverts with "Invalid token ID"; mirror the production
+        ``GatewayClient`` by folding that revert into an all-zero position
+        (liquidity 0, tokensOwed 0) — a MEASURED closure — while any other
+        failure stays ``None`` (unmeasured).
+        """
+        data = "0x99fbab88" + format(int(token_id), "064x")
+        try:
+            result = self.web3.eth.call(
+                {"to": Web3.to_checksum_address(position_manager), "data": data},
+                block_identifier="latest" if block is None else block,
+            )
+        except Exception as exc:  # noqa: BLE001 - mirrors the gateway's fold/unavailable contract
+            if "invalid token id" in str(exc).lower():
+                return [b"\x00" * 32] * 12
+            return None
+        if len(result) < 12 * 32:
+            return None
+        return [bytes(result[i : i + 32]) for i in range(0, 12 * 32, 32)]
+
     def query_position_liquidity(
         self,
         *,
         chain: str,
         position_manager: str,
         token_id: int,
+        block: int | str | None = None,
     ) -> int | None:
-        """Mirror the gateway V3 position-liquidity query over Anvil."""
-        data = "0x99fbab88" + format(int(token_id), "064x")
+        """Mirror the gateway V3 position-liquidity query over Anvil (block-pinned)."""
+        del chain
+        words = self._positions_words(position_manager, token_id, block)
+        return None if words is None else int.from_bytes(words[7], byteorder="big")
+
+    def query_position_tokens_owed(
+        self,
+        *,
+        chain: str,
+        position_manager: str,
+        token_id: int,
+        block: int | str | None = None,
+    ) -> tuple[int, int] | None:
+        """Mirror the gateway V3 tokensOwed query over Anvil (block-pinned)."""
+        del chain
+        words = self._positions_words(position_manager, token_id, block)
+        if words is None:
+            return None
+        return int.from_bytes(words[10], byteorder="big"), int.from_bytes(words[11], byteorder="big")
+
+    def query_erc20_balance(
+        self,
+        chain: str,
+        token_address: str,
+        wallet_address: str,
+        block: int | str | None = None,
+    ) -> int | None:
+        """Mirror the gateway ERC-20 ``balanceOf`` query over Anvil (block-pinned)."""
+        del chain
+        data = "0x70a08231" + wallet_address.lower().removeprefix("0x").zfill(64)
         try:
             result = self.web3.eth.call(
-                {
-                    "to": Web3.to_checksum_address(position_manager),
-                    "data": data,
-                }
+                {"to": Web3.to_checksum_address(token_address), "data": data},
+                block_identifier="latest" if block is None else block,
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 - unavailable, never a guess
             return None
-        del chain
-        if len(result) < 8 * 32:
-            return None
-        offset = 7 * 32
-        return int.from_bytes(result[offset : offset + 32], byteorder="big")
+        return int.from_bytes(result[:32], byteorder="big") if len(result) >= 32 else None
 
     def query_native_balance(self, chain: str, wallet_address: str, block: int | str | None = None) -> int | None:
         """Gateway-shaped block-pinned native balance, backed by the Anvil Web3.

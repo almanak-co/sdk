@@ -831,9 +831,10 @@ class CompilerQueries:
         - "0xTOKEN0/0xTOKEN1/FEE" (raw token addresses also work)
 
         This generic, offline parser does not resolve bare pool addresses. The
-        Uniswap V3 connector intercepts an address-bound LP intent before this
-        method and resolves token0()/token1()/fee() through the gateway, then
-        authenticates the tuple against the registered factory. Other connector
+        Uniswap V3 family, Aerodrome (Classic and Slipstream), and TraderJoe V2
+        connectors intercept an address-bound LP intent before this method,
+        read the pool's own identity through the gateway, and authenticate it
+        against the registered factory. Any other connector
         families must implement an equivalent connector-owned resolver before
         accepting a bare address; they must not infer a placeholder pair here.
 

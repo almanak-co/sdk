@@ -674,6 +674,7 @@ EXPECTED_TEARDOWN_POST_CONDITION_MODULES = {
     # VIB-5795: lending closure verifiers (per-connector manifest hooks over the
     # shared _strategy_base/lending_post_condition.py template).
     "aave_v3": "almanak.connectors.aave_v3.teardown_post_condition",
+    "aerodrome": "almanak.connectors.aerodrome.teardown_post_condition",
     "benqi": "almanak.connectors.benqi.teardown_post_condition",
     "euler_v2": "almanak.connectors.euler_v2.teardown_post_condition",
     "gmx_v2": "almanak.connectors.gmx_v2.teardown_post_condition",

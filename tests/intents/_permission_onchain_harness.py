@@ -2738,7 +2738,10 @@ class ZodiacOrchestrator:
         # than silently falling back to a synthetic symbolic pair.
         funding = config.setdefault("anvil_funding", {})
         metadata = getattr(action_bundle, "metadata", None) or {}
-        for key in ("token0", "token1"):
+        # ``token0``/``token1`` is the V3-family / Slipstream naming;
+        # ``token_x``/``token_y`` is the TraderJoe V2 Liquidity Book naming
+        # (LB pairs are not address-sorted, so the connector keeps X/Y).
+        for key in ("token0", "token1", "token_x", "token_y"):
             token = metadata.get(key)
             address = token.get("address") if isinstance(token, dict) else None
             if isinstance(address, str) and address.startswith("0x"):

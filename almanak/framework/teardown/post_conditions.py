@@ -53,6 +53,7 @@ from almanak.connectors._strategy_base.teardown_post_condition import (
     get_teardown_post_condition,
     has_teardown_post_condition,
     resolve_nft_token_id,
+    verify_npm_position_closure,
 )
 from almanak.connectors._strategy_base.vault_post_condition import (
     erc4626_vault_teardown_post_condition,
@@ -338,87 +339,17 @@ def _uniswap_v3_post_condition(
             ),
         )
 
-    # Read on-chain truth via the gateway. Both helpers already fold the
-    # "invalid token id" revert (canonical Uniswap V3 NPM behaviour for a
-    # burnt NFT) into a value-0 response, so we don't need to pre-check
-    # ownerOf separately.
-    try:
-        liquidity = gateway_client.query_position_liquidity(
-            chain=chain,
-            position_manager=npm_address,
-            token_id=token_id,
-            block=block,
-        )
-    except Exception as exc:  # noqa: BLE001 — fail-closed
-        return ClosureCheckResult(
-            closed=False,
-            unmeasured=True,
-            protocol=protocol,
-            position_id=position_id,
-            error=f"Uniswap V3 query_position_liquidity raised: {exc}",
-        )
-
-    if liquidity is None:
-        return ClosureCheckResult(
-            closed=False,
-            unmeasured=True,
-            protocol=protocol,
-            position_id=position_id,
-            error=(
-                "Uniswap V3 query_position_liquidity returned None "
-                "(gateway/RPC error); cannot confirm closure — fail-closed"
-            ),
-        )
-
-    try:
-        tokens_owed = gateway_client.query_position_tokens_owed(
-            chain=chain,
-            position_manager=npm_address,
-            token_id=token_id,
-            block=block,
-        )
-    except Exception as exc:  # noqa: BLE001 — fail-closed
-        return ClosureCheckResult(
-            closed=False,
-            unmeasured=True,
-            protocol=protocol,
-            position_id=position_id,
-            error=f"Uniswap V3 query_position_tokens_owed raised: {exc}",
-        )
-
-    if tokens_owed is None:
-        return ClosureCheckResult(
-            closed=False,
-            unmeasured=True,
-            protocol=protocol,
-            position_id=position_id,
-            error=(
-                "Uniswap V3 query_position_tokens_owed returned None "
-                "(gateway/RPC error); cannot confirm closure — fail-closed"
-            ),
-        )
-
-    tokens_owed0, tokens_owed1 = tokens_owed
-
-    if liquidity == 0 and tokens_owed0 == 0 and tokens_owed1 == 0:
-        return ClosureCheckResult(
-            closed=True,
-            protocol=protocol,
-            position_id=position_id,
-        )
-
-    residual: dict[str, Any] = {
-        "position_manager": npm_address,
-        "token_id": token_id,
-        "liquidity": int(liquidity),
-        "tokens_owed0": int(tokens_owed0),
-        "tokens_owed1": int(tokens_owed1),
-    }
-    return ClosureCheckResult(
-        closed=False,
+    # Read on-chain truth via the gateway and classify. Shared with every other
+    # NPM-shaped hook (Aerodrome Slipstream) so the closure rule cannot drift.
+    return verify_npm_position_closure(
         protocol=protocol,
         position_id=position_id,
-        residual=residual,
+        chain=chain,
+        token_id=token_id,
+        npm_address=npm_address,
+        gateway_client=gateway_client,
+        block=block,
+        label="Uniswap V3",
     )
 
 
