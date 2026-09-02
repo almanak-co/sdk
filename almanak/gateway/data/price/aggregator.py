@@ -502,11 +502,33 @@ class PriceAggregator:
 
         # Store per-call diagnostics BEFORE the failure check so that
         # get_last_details() is populated even when all sources fail.
+        # ``observations`` and ``aggregate_price`` are evidence-only additions
+        # (VIB-6820 QA data-check): consumers that map details into
+        # PriceResponse read the three original keys explicitly, so these
+        # extra keys never cross the gRPC boundary or change serving behavior.
+        # Evidence capture must also never FAIL serving: a provider result
+        # with a malformed timestamp still prices, so stringify defensively
+        # instead of assuming a datetime.
         detail_key = f"{token.upper()}/{quote.upper()}"
         self._last_details[detail_key] = {
             "sources_ok": [r.source for r in results.valid_results],
             "sources_failed": results.errors,
             "outliers": [r.source for r in results.outliers],
+            "observations": {
+                r.source: {
+                    "price": str(r.price),
+                    "timestamp": (
+                        r.timestamp.isoformat()
+                        if hasattr(r.timestamp, "isoformat")
+                        # Absent stays absent (JSON null), never the string "None".
+                        else (str(r.timestamp) if r.timestamp is not None else None)
+                    ),
+                    "confidence": r.confidence,
+                    "stale": r.stale,
+                }
+                for r in (*results.valid_results, *results.outliers)
+            },
+            "aggregate_price": str(results.price) if results.valid_results else None,
         }
 
         # Check if all sources failed

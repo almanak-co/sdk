@@ -885,7 +885,8 @@ def test_bootstrap_renders_empty_lab_with_all_four_views(modules, catalog_path: 
     assert data_catalog["summary"]["contract_cells"] == 24
     assert data_catalog["summary"]["contract_checks"] == 8
     assert data_catalog["summary"]["qa_data_categories"] == 5
-    assert data_catalog["summary"]["scheduled_cells"] == 8
+    # No scheduler is installed anywhere (VIB-6820): zero cells may claim one.
+    assert data_catalog["summary"]["scheduled_cells"] == 0
     assert data_catalog["summary"]["identity_requirements"] > 0
     assert set(data_catalog["summary"]["identity_requirement_kinds"]) == {
         "direct_chainlink_feed",

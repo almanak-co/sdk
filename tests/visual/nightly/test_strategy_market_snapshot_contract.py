@@ -49,7 +49,11 @@ from almanak.framework.data.indicators.sync_wrappers import (
 )
 from almanak.framework.data.ohlcv.gateway_data_adapter import GatewayOHLCVDataProvider
 from almanak.framework.data.ohlcv.gateway_provider import GatewayOHLCVProvider
-from almanak.framework.data.ohlcv.ohlcv_router import OHLCVRouter
+from almanak.framework.data.ohlcv.ohlcv_router import (
+    _DEX_QUIET_POOL_PROVIDERS,
+    OHLCVRouter,
+    _is_upstream_stale,
+)
 from almanak.framework.data.ohlcv.routing_provider import RoutingOHLCVProvider
 from almanak.framework.data.price.gateway_oracle import GatewayPriceOracle
 from almanak.framework.gateway_client import GatewayClient, GatewayClientConfig
@@ -381,11 +385,21 @@ def test_strategy_market_snapshot_contract() -> None:
             ohlcv_source: dict[str, Any] = {}
             try:
                 envelope = router.get_ohlcv("WETH", chain=chain, timeframe="4h", limit=120)
+                # Staleness must be judged by production's own budget, not a
+                # QA-invented one: reuse the router's upstream-staleness
+                # predicate (ALM-2697 / VIB-4875) against the served candles.
+                ohlcv_stale, _ = _is_upstream_stale(
+                    envelope.value,
+                    "4h",
+                    datetime.now(UTC),
+                    is_dex=envelope.meta.source in _DEX_QUIET_POOL_PROVIDERS,
+                )
                 ohlcv_source = {
                     "source": envelope.meta.source,
                     "confidence": envelope.meta.confidence,
                     "latency_ms": envelope.meta.latency_ms,
                     "cache_hit": envelope.meta.cache_hit,
+                    "stale": ohlcv_stale,
                     "candle_count": len(envelope.value),
                     "observed_at": envelope.meta.observed_at.isoformat(),
                     "timeframe": "4h",
@@ -403,6 +417,7 @@ def test_strategy_market_snapshot_contract() -> None:
                     "confidence": 0.0,
                     "latency_ms": 0,
                     "cache_hit": False,
+                    "stale": True,
                     "candle_count": 0,
                 }
 

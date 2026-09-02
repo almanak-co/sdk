@@ -27,8 +27,10 @@ def test_data_catalog_separates_pipeline_readiness_from_schedule(qa) -> None:
     catalog = qa.build_data_catalog()
 
     assert {cell["pipeline_status"] for cell in catalog["cells"]} == {"ready"}
-    assert {cell["chain"] for cell in catalog["cells"] if cell["scheduled"]} == {"arbitrum"}
-    assert {cell["chain"] for cell in catalog["cells"] if not cell["scheduled"]} == {"base", "ethereum"}
+    # No scheduler is installed anywhere (VIB-6820): a schedule claim may only
+    # return alongside a verifiably installed scheduler, never as aspiration.
+    assert not any(cell["scheduled"] for cell in catalog["cells"])
+    assert {cell["schedule"] for cell in catalog["cells"]} == {"operator / unscheduled"}
     assert all(cell["runner"] == "make test-nightly-visual" for cell in catalog["cells"])
     assert all("data-seal --bundle <nightly-output-directory>" in cell["sealer"] for cell in catalog["cells"])
     assert all(cell["sealer_is_template"] is True for cell in catalog["cells"])
@@ -67,9 +69,10 @@ def test_data_cell_state_prioritizes_sealed_evidence_over_structure(qa) -> None:
         "sealed": True,
         "raw_status": "PASS",
     }
+    # UNMEASURED stays fail-closed (red) but is labeled as what it is.
     assert qa._data_cell_state(ready, {"status": "UNMEASURED"}) == {
         "key": "fail",
-        "label": "FAIL",
+        "label": "UNMEASURED",
         "sealed": True,
         "raw_status": "UNMEASURED",
     }
