@@ -34,11 +34,17 @@ Example:
             ...
 """
 
+import inspect
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
+
+from almanak.core.chains import DEFAULT_CHAIN, LEGACY_SERIALIZED_CHAIN
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from almanak.framework.backtesting.config import BacktestDataConfig
@@ -130,6 +136,17 @@ class StrategyBacktestConfig:
     warnings instead of failing.
     """
 
+    chain: str = DEFAULT_CHAIN
+    """Chain governing every lookup an intent, position, or market state leaves
+    unspecified (pool descriptors, funding/APY providers, token identities).
+
+    The engine sets this to the run's chain when it builds the adapter
+    (``PnLBacktester._init_adapter(..., chain=run_context.chain)``); a bare
+    intent then resolves under the chain the backtest actually runs on rather
+    than the SDK-wide default (ALM-3427). Standalone adapter construction keeps
+    ``DEFAULT_CHAIN``. An intent that declares its own ``chain`` always wins.
+    """
+
     def __post_init__(self) -> None:
         """Validate configuration after initialization.
 
@@ -156,6 +173,7 @@ class StrategyBacktestConfig:
             "reconcile_on_tick": self.reconcile_on_tick,
             "extra_params": dict(self.extra_params),
             "strict_reproducibility": self.strict_reproducibility,
+            "chain": self.chain,
         }
 
     @classmethod
@@ -180,6 +198,7 @@ class StrategyBacktestConfig:
             reconcile_on_tick=data.get("reconcile_on_tick", False),
             extra_params=data.get("extra_params", {}),
             strict_reproducibility=data.get("strict_reproducibility", False),
+            chain=data.get("chain", LEGACY_SERIALIZED_CHAIN),
         )
 
     def with_updates(self, **kwargs: Any) -> "StrategyBacktestConfig":
@@ -264,6 +283,15 @@ class StrategyBacktestAdapter(ABC):
             ) -> bool:
                 # Custom rebalance trigger logic
                 return False
+    """
+
+    config_class: ClassVar[type[StrategyBacktestConfig]] = StrategyBacktestConfig
+    """Config type the registry instantiates when it must build one itself.
+
+    :func:`get_adapter_with_config` constructs ``config_class(strategy_type=<registered
+    name>, chain=<run chain>)`` so the run's chain reaches the adapter at
+    construction time instead of the config sitting on ``DEFAULT_CHAIN``.
+    Concrete adapters point this at their own config dataclass.
     """
 
     @property
@@ -632,6 +660,8 @@ def get_adapter(strategy_type: str) -> StrategyBacktestAdapter | None:
 def get_adapter_with_config(
     strategy_type: str,
     data_config: "BacktestDataConfig | None" = None,
+    *,
+    chain: str | None = None,
 ) -> StrategyBacktestAdapter | None:
     """Get an instantiated adapter for a strategy type with data config.
 
@@ -643,6 +673,11 @@ def get_adapter_with_config(
         strategy_type: Strategy type identifier (case-insensitive)
         data_config: BacktestDataConfig for historical data provider settings.
             If provided, will be passed to the adapter constructor.
+        chain: The run's chain. When given, the adapter is built with
+            ``adapter_class.config_class(strategy_type=<registered name>,
+            chain=chain)`` so lookups an intent leaves chain-less resolve on the
+            run chain rather than ``DEFAULT_CHAIN`` (ALM-3427). ``None`` keeps
+            the adapter's own default config.
 
     Returns:
         Instantiated adapter or None if not found
@@ -654,20 +689,41 @@ def get_adapter_with_config(
             use_historical_volume=True,
             use_historical_funding=True,
         )
-        adapter = get_adapter_with_config("lp", data_config=data_config)
+        adapter = get_adapter_with_config("lp", data_config=data_config, chain="ethereum")
         if adapter:
             fill = adapter.execute_intent(intent, portfolio, market_state)
     """
-    adapter_class = AdapterRegistry.get(strategy_type)
-    if adapter_class:
-        # Try to pass data_config to the adapter constructor
-        # All registered adapters (LP, Perp, Lending) accept data_config parameter
-        try:
-            return adapter_class(data_config=data_config)  # type: ignore[call-arg]
-        except TypeError:
-            # Fallback for adapters that don't accept data_config
-            return adapter_class()
-    return None
+    metadata = AdapterRegistry.get_metadata(strategy_type)
+    if metadata is None:
+        return None
+    adapter_class = metadata.adapter_class
+    accepted = _constructor_parameters(adapter_class)
+    kwargs: dict[str, Any] = {}
+    if data_config is not None and "data_config" in accepted:
+        kwargs["data_config"] = data_config
+    if chain is not None:
+        if "config" not in accepted:
+            # An adapter that takes no config carries no chain-keyed lookups;
+            # say so rather than let a run chain vanish without a trace.
+            logger.debug("Adapter %s accepts no config; run chain %r not applied", adapter_class.__name__, chain)
+        else:
+            kwargs["config"] = adapter_class.config_class(strategy_type=metadata.name, chain=chain)
+    return adapter_class(**kwargs)
+
+
+def _constructor_parameters(adapter_class: type[StrategyBacktestAdapter]) -> frozenset[str]:
+    """Keyword parameters ``adapter_class(...)`` accepts (empty when unknown)."""
+    try:
+        signature = inspect.signature(adapter_class)
+    except (TypeError, ValueError):
+        return frozenset()
+    names: set[str] = set()
+    for name, parameter in signature.parameters.items():
+        if parameter.kind is inspect.Parameter.VAR_KEYWORD:
+            return frozenset({"config", "data_config"})
+        if parameter.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY):
+            names.add(name)
+    return frozenset(names)
 
 
 __all__ = [

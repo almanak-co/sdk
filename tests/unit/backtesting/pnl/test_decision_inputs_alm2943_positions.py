@@ -264,3 +264,128 @@ class TestViewDirect:
         view = _bound_view(portfolio, market_state)
 
         assert view.position_health("aave_v3").health_factor == borrow.health_factor
+
+
+def _gmx_long(protocol: str = "gmx_v2", mark: str = "2860") -> SimulatedPosition:
+    # 20x long: $5000 collateral, $100k notional, liquidation at $2850 with the
+    # mark at $2860 — 0.35% from liquidation. Any "safe" answer here is fabricated.
+    return SimulatedPosition(
+        position_type=PositionType.PERP_LONG,
+        protocol=protocol,
+        tokens=["WETH"],
+        amounts={"WETH": D("100000") / D(mark)},
+        entry_price=D(mark),
+        entry_time=TS,
+        leverage=D("20"),
+        collateral_usd=D("5000"),
+        notional_usd=D("100000"),
+        liquidation_price=D("2850"),
+    )
+
+
+class TestPositionHealthRefusesNonLending:
+    """ALM-3064: the lending no-position contract (Infinity) is lending-only.
+
+    A perpetuals venue or an unrecognised protocol must refuse exactly like the
+    live lane (``HealthUnavailableError`` + decision-input ledger entry), never
+    answer with a lending-shaped ``Infinity``.
+    """
+
+    def test_open_gmx_perp_refuses_with_ledger(self):
+        portfolio = SimulatedPortfolio(initial_capital_usd=D("10000"))
+        portfolio.positions.append(_gmx_long())
+        snapshot = _view_snapshot(portfolio)
+
+        with pytest.raises(HealthUnavailableError, match="ALM-3064"):
+            snapshot.position_health("gmx_v2", "")
+
+        detail = snapshot._critical_data_failures.get(("position_health", "simulation"))
+        assert detail is not None, "refusal must land in the decision-input ledger"
+        assert "perpetuals venue" in detail
+        assert "ALM-3064" in detail
+
+    def test_sim_view_raises_directly_for_perp_venue(self):
+        # The view itself raises (not just the snapshot wrapper), so every
+        # consumer of the view sees the refusal.
+        portfolio = SimulatedPortfolio(initial_capital_usd=D("10000"))
+        portfolio.positions.append(_gmx_long())
+        view = _bound_view(portfolio)
+
+        with pytest.raises(HealthUnavailableError, match="perpetuals venue"):
+            view.position_health("gmx_v2")
+
+    def test_registered_perp_venue_refuses_even_with_no_position(self):
+        # A connector-declared perps venue is never a lending account: no
+        # position does NOT mean "empty lending account ⇒ Infinity".
+        portfolio = SimulatedPortfolio(initial_capital_usd=D("10000"))
+        snapshot = _view_snapshot(portfolio)
+
+        with pytest.raises(HealthUnavailableError, match="perpetuals venue"):
+            snapshot.position_health("gmx_v2", "")
+        assert ("position_health", "simulation") in snapshot._critical_data_failures
+
+    def test_perp_alias_resolves_through_registry(self):
+        portfolio = SimulatedPortfolio(initial_capital_usd=D("10000"))
+        portfolio.positions.append(_gmx_long())
+        view = _bound_view(portfolio)
+
+        with pytest.raises(HealthUnavailableError, match="perpetuals venue"):
+            view.position_health("GMX")
+
+    def test_open_perp_on_unregistered_venue_refuses_as_perp(self):
+        # Booked perp under a protocol string the perps registry does not know:
+        # the open ``is_perp`` position alone is enough to refuse as a perp.
+        portfolio = SimulatedPortfolio(initial_capital_usd=D("10000"))
+        portfolio.positions.append(_gmx_long(protocol="some_perp_dex"))
+        view = _bound_view(portfolio)
+
+        with pytest.raises(HealthUnavailableError, match="perpetuals venue"):
+            view.position_health("some_perp_dex")
+
+    def test_unknown_protocol_refuses_not_infinity(self):
+        portfolio = SimulatedPortfolio(initial_capital_usd=D("10000"))
+        snapshot = _view_snapshot(portfolio)
+
+        with pytest.raises(HealthUnavailableError, match="Unsupported protocol for health monitoring"):
+            snapshot.position_health("not_a_protocol", "")
+
+        detail = snapshot._critical_data_failures.get(("position_health", "simulation"))
+        assert detail is not None
+        assert "ALM-3064" in detail
+
+    @pytest.mark.parametrize("protocol", ["aave_v3", "morpho_blue", "compound_v3", "Aave"])
+    def test_recognised_lending_venue_keeps_no_position_contract(self, protocol):
+        # Recognition mirrors the live lane (account-state / market-health
+        # reads), so per-market venues without a full lending spec still get
+        # the documented empty-account answer — no ledger noise.
+        portfolio = SimulatedPortfolio(initial_capital_usd=D("10000"))
+        snapshot = _view_snapshot(portfolio)
+
+        health = snapshot.position_health(protocol, "")
+
+        assert health.health_factor == D("Infinity")
+        assert health.collateral_value_usd == D("0")
+        assert health.debt_value_usd == D("0")
+        assert not snapshot._critical_data_failures
+
+    def test_lending_health_unchanged_with_perp_in_book(self):
+        # A perp elsewhere in the book must not disturb the lending plane.
+        portfolio = SimulatedPortfolio(initial_capital_usd=D("10000"))
+        portfolio.positions.extend([_supply(), _borrow(), _gmx_long()])
+        snapshot = _view_snapshot(portfolio)
+
+        health = snapshot.position_health("aave_v3", "")
+
+        assert health.health_factor == D("3.3")
+        assert health.collateral_value_usd == D("4000")
+        assert health.debt_value_usd == D("1000")
+        assert not snapshot._critical_data_failures
+
+    def test_health_factor_accessor_still_none_for_perp_venue(self):
+        # ``health_factor`` is guarded on lending positions and never reaches
+        # the refusal: ``None`` = truly no lending position, unchanged.
+        portfolio = SimulatedPortfolio(initial_capital_usd=D("10000"))
+        portfolio.positions.append(_gmx_long())
+        view = _bound_view(portfolio)
+
+        assert view.health_factor("gmx_v2") is None

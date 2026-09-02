@@ -1391,15 +1391,15 @@ def test_lp_decide_visible_total_is_residual_wallet() -> None:
     assert result.trades[0].success
     # Engine equity includes the position; the wallet total must not.
     assert result.equity_curve[1].value_usd == INITIAL_CAPITAL
-    # Ticks 0-1 pre-open (decide at tick 1 snapshots before the queued fill
-    # applies): the full capital is wallet cash — counted once.
+    # Tick 0 is pre-open: the full capital is wallet cash — counted once.
     assert strategy.totals_seen[0] == INITIAL_CAPITAL
-    assert strategy.totals_seen[1] == INITIAL_CAPITAL
-    # From tick 2 the wallet is the $5,000 residual — counted once, not once
-    # per mirror key.
+    # The LP_OPEN emitted at tick 0 fills at tick 1, and fills apply BEFORE
+    # that tick's snapshot is built, so decide() at tick 1 already sees the
+    # $5,000 residual wallet — counted once, not once per mirror key — and
+    # every later tick agrees.
     residual = INITIAL_CAPITAL - Decimal("5000")
     assert len(strategy.totals_seen) >= 4
-    assert all(total == residual for total in strategy.totals_seen[2:])
+    assert all(total == residual for total in strategy.totals_seen[1:])
 
 
 @pytest.mark.trust_cell("lp:rejection_no_state_change")

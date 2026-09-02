@@ -182,9 +182,6 @@ class PerpBacktestConfig(StrategyBacktestConfig):
     protocol: str = "gmx"
     """Default protocol for margin/funding lookups."""
 
-    chain: str = DEFAULT_CHAIN
-    """Blockchain for funding rate lookups (arbitrum, avalanche)."""
-
     def __post_init__(self) -> None:
         """Validate perp-specific configuration.
 
@@ -353,6 +350,8 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
             # Strategy should consider adjusting position
             pass
     """
+
+    config_class = PerpBacktestConfig
 
     def __init__(
         self,

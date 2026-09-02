@@ -1347,3 +1347,130 @@ class TestPrewarmAfterOpen:
         await backtester._prewarm_after_open(intent, self._trade_record(True), market_state, config)
 
         assert calls == [{"chain": config.chain}]
+
+
+# Run chain governs adapter lookups.
+
+
+_ALM3427_POOL = "0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640"
+_ALM3427_TOKEN0 = "0x00000000000000000000000000000000000000a1"
+_ALM3427_TOKEN1 = "0x00000000000000000000000000000000000000b2"
+_ALM3427_BASE_TOKEN1 = "0x00000000000000000000000000000000000000c3"
+
+
+def _register_real_lp_adapter():
+    from almanak.framework.backtesting.adapters.lp_adapter import LPBacktestAdapter
+
+    AdapterRegistry.register("lp", LPBacktestAdapter, aliases=["liquidity_provider"])
+    return LPBacktestAdapter
+
+
+def _alm3427_descriptor(chain: str, token1: str = _ALM3427_TOKEN1):
+    from almanak.framework.data.pools.descriptor import PoolDescriptor
+
+    return PoolDescriptor(chain, "uniswap_v3", _ALM3427_POOL, _ALM3427_TOKEN0, token1, 18, 6, 500, "historical:test")
+
+
+def _alm3427_intent(chain: str | None):
+    from almanak.framework.intents.vocabulary import LPOpenIntent
+
+    return LPOpenIntent(
+        pool=_ALM3427_POOL,
+        amount0=Decimal("1"),
+        amount1=Decimal("1"),
+        range_lower=Decimal("0.4"),
+        range_upper=Decimal("0.6"),
+        protocol="uniswap_v3",
+        chain=chain,
+        fee_tier_units=500,
+    )
+
+
+def test_init_adapter_run_chain_governs_chain_less_lp_intent(backtester):
+    """ALM-3427: an Ethereum run must resolve a chain-less LP intent under
+    'ethereum', not DEFAULT_CHAIN — the descriptor is bound on the run chain."""
+    _register_real_lp_adapter()
+
+    backtester._init_adapter(MockStrategy(tags=["lp"]), chain="ethereum")
+    lp = backtester._adapter.get_sub_adapter("lp")
+    assert lp.config.chain == "ethereum"
+
+    descriptor = _alm3427_descriptor("ethereum")
+    backtester._bind_pool_descriptors([descriptor])
+    intent = _alm3427_intent(chain=None)
+
+    assert lp._pool_descriptor_for_intent(intent) is descriptor
+    assert lp._lp_open_tokens(intent) == (("ethereum", _ALM3427_TOKEN0), ("ethereum", _ALM3427_TOKEN1))
+
+
+def test_init_adapter_explicit_intent_chain_wins_over_run_chain(backtester):
+    """An intent that declares its own chain resolves there even on another run chain."""
+    _register_real_lp_adapter()
+
+    backtester._init_adapter(MockStrategy(tags=["lp"]), chain="ethereum")
+    lp = backtester._adapter.get_sub_adapter("lp")
+    ethereum_descriptor = _alm3427_descriptor("ethereum")
+    base_descriptor = _alm3427_descriptor("base", token1=_ALM3427_BASE_TOKEN1)
+    backtester._bind_pool_descriptors([ethereum_descriptor, base_descriptor])
+    intent = _alm3427_intent(chain="base")
+
+    assert lp._pool_descriptor_for_intent(intent) is base_descriptor
+    assert lp._lp_open_tokens(intent) == (("base", _ALM3427_TOKEN0), ("base", _ALM3427_BASE_TOKEN1))
+
+
+def test_init_adapter_without_run_chain_keeps_adapter_default(backtester):
+    """No run chain (direct callers, older tests) leaves the adapters on their own default."""
+    from almanak.core.chains import DEFAULT_CHAIN
+
+    _register_real_lp_adapter()
+
+    backtester._init_adapter(MockStrategy(tags=["lp"]))
+
+    assert backtester._adapter.config.chain == DEFAULT_CHAIN
+    assert backtester._adapter.get_sub_adapter("lp").config.chain == DEFAULT_CHAIN
+
+
+def test_init_adapter_explicit_type_binds_run_chain():
+    """The explicit single-adapter escape hatch receives the run chain too."""
+    lp_adapter_class = _register_real_lp_adapter()
+    backtester = PnLBacktester(
+        data_provider=MockDataProvider(),
+        fee_models={"default": DefaultFeeModel()},
+        slippage_models={"default": DefaultSlippageModel()},
+        strategy_type="lp",
+    )
+
+    backtester._init_adapter(MockStrategy(tags=["perpetual"]), chain="ethereum")
+
+    assert isinstance(backtester._adapter, lp_adapter_class)
+    assert backtester._adapter.config.chain == "ethereum"
+
+
+def test_initialize_backtest_hands_run_context_chain_to_adapter(backtester):
+    """The engine's init phase builds the adapter on ``BacktestRunContext.chain``."""
+    from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
+    from almanak.framework.backtesting.pnl.logging_utils import BacktestLogger
+
+    _register_real_lp_adapter()
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    config = PnLBacktestConfig(
+        start_time=start,
+        end_time=start + timedelta(hours=1),
+        interval_seconds=3600,
+        chain="Ethereum",
+        tokens=["WETH", "USDC"],
+        token_funding=_pnl_token_funding(Decimal("100"), chain="ethereum"),
+        include_gas_costs=False,
+        preflight_validation=False,
+    )
+
+    state = _engine_helpers.initialize_backtest(
+        backtester=backtester,
+        strategy=MockStrategy(tags=["lp"]),
+        config=config,
+        bt_logger=BacktestLogger(backtest_id="alm-3427", json_format=False),
+    )
+
+    assert state.run_context.chain == "ethereum"
+    assert backtester._adapter.config.chain == "ethereum"
+    assert backtester._adapter.get_sub_adapter("lp").config.chain == "ethereum"

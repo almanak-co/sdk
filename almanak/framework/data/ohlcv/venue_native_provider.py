@@ -37,7 +37,7 @@ from almanak.framework.data.ohlcv.venue_context import (
 )
 from almanak.framework.data.timeframes import OHLCVTimeframe, parse_ohlcv_timeframe
 
-__all__ = ["VenueNativeOHLCVProvider"]
+__all__ = ["VenueNativeOHLCVProvider", "market_labels_agree"]
 
 logger = logging.getLogger(__name__)
 
@@ -62,8 +62,13 @@ def _market_identity(label: str) -> str:
     return perp_market_pair_key(head) or head.upper()
 
 
-def _market_labels_agree(served: str, requested: str) -> bool:
+def market_labels_agree(served: str, requested: str) -> bool:
     """True when a served market label is the one that was requested.
+
+    Public because it is the *one* definition of "same market" on the
+    strategy side: the live venue-native lane and the GMX backtest oracle
+    source (ALM-3171) both bind a served page to its request through it, so
+    the two guards cannot disagree with each other or with the resolver.
 
     Exact on identity, tolerant only of the spellings the venue and the registry
     are both entitled to use for one market: a collateral bracket
@@ -297,7 +302,7 @@ class VenueNativeOHLCVProvider:
                 source=self.name,
                 reason=f"{venue} returned no market label for {market} on {chain}; cannot bind the page to the request",
             )
-        if not _market_labels_agree(served_market, market):
+        if not market_labels_agree(served_market, market):
             raise DataSourceUnavailable(
                 source=self.name,
                 reason=(

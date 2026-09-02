@@ -455,6 +455,18 @@ async def _block_at_or_before(
     return lower_number, lower_timestamp
 
 
+def _is_extra_data_failure(exc: BaseException) -> bool:
+    """Return whether a block resolution failed only on web3's ``extraData`` length check."""
+    from web3.exceptions import ExtraDataLengthError
+
+    current: BaseException | None = exc
+    while current is not None:
+        if isinstance(current, ExtraDataLengthError):
+            return True
+        current = current.__cause__
+    return False
+
+
 class _HistoricalBlockResolver:
     """Request-scoped timestamp resolver with cached, tightly anchored searches.
 
@@ -488,10 +500,50 @@ class _HistoricalBlockResolver:
         return measured
 
     async def bounds(self) -> tuple[tuple[int, int], tuple[int, int]]:
+        """Return ``(earliest resolvable block, latest block)`` anchors.
+
+        The lower anchor is genesis whenever genesis decodes. ALM-3450: on
+        chains whose legacy genesis carries a non-standard ``extraData``
+        (OP Mainnet's pre-Bedrock block 0 is 117 bytes) web3 raises
+        ``ExtraDataLengthError`` for block 0 even though every block a
+        backtest can ask about decodes fine. The descriptor ``poa`` flag is the
+        primary fix; the resolver must still not *depend* on decoding genesis,
+        so that specific failure falls back to the earliest decodable block.
+        Any other block-0 failure (RPC outage, malformed response) is not a
+        genesis-shape problem and keeps failing loudly.
+        """
         if self._bounds is None:
-            genesis, latest = await asyncio.gather(self.sample(0), self.sample("latest"))
+            genesis, latest = await asyncio.gather(self.sample(0), self.sample("latest"), return_exceptions=True)
+            if isinstance(latest, BaseException):
+                raise latest
+            if isinstance(genesis, BaseException):
+                if not _is_extra_data_failure(genesis):
+                    raise genesis
+                genesis = await self._earliest_decodable_block(latest)
             self._bounds = (genesis, latest)
         return self._bounds
+
+    async def _earliest_decodable_block(self, latest: tuple[int, int]) -> tuple[int, int]:
+        """Bisect for the lowest block whose header decodes, given genesis does not.
+
+        Decodability is monotonic in block number for the legacy-genesis
+        shape this handles (old blocks reject, new blocks decode), so a plain
+        bisection between the rejected genesis and the decoded head is exact
+        and bounded (``log2(head)`` archive reads, once per resolver).
+        """
+        from almanak.gateway.services.rate_history_service import RateHistoryUnavailable
+
+        undecodable_number = 0
+        decodable = latest
+        while decodable[0] - undecodable_number > 1:
+            candidate = (undecodable_number + decodable[0]) // 2
+            try:
+                decodable = await self.sample(candidate)
+            except RateHistoryUnavailable as exc:
+                if not _is_extra_data_failure(exc):
+                    raise
+                undecodable_number = candidate
+        return decodable
 
     async def at_or_before(
         self,
@@ -528,18 +580,19 @@ class _HistoricalBlockResolver:
                 self._protocol,
                 f"interval_secs must be > 0 (got {interval_secs})",
             )
-        genesis, latest = await self.bounds()
-        if start_ts < genesis[1]:
+        earliest, latest = await self.bounds()
+        if start_ts < earliest[1]:
             raise RateHistoryUnavailable(
                 self._protocol,
-                f"requested historical series starts before chain genesis ({start_ts} < {genesis[1]})",
+                "requested historical series starts before the earliest resolvable archive block "
+                f"{_format_block_sample(earliest)} ({start_ts} < {earliest[1]})",
             )
         if end_ts > latest[1]:
             raise RateHistoryUnavailable(
                 self._protocol,
                 f"requested historical series ends after the measured chain head ({end_ts} > {latest[1]})",
             )
-        return genesis, latest
+        return earliest, latest
 
     async def grid(
         self,

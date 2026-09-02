@@ -96,6 +96,16 @@ class TestLPBacktestConfig:
         assert config.volume_multiplier == Decimal("10")
         assert config.base_liquidity == Decimal("1000000")
 
+    def test_standalone_adapter_keeps_default_chain(self) -> None:
+        """ALM-3427: outside an engine the adapter stays on DEFAULT_CHAIN; the
+        engine (not this default) is what binds the run chain."""
+        from almanak.core.chains import DEFAULT_CHAIN
+
+        assert LPBacktestAdapter().config.chain == DEFAULT_CHAIN
+        assert LPBacktestConfig(strategy_type="lp").chain == DEFAULT_CHAIN
+        assert LPBacktestConfig(strategy_type="lp", chain="ethereum").chain == "ethereum"
+        assert LPBacktestAdapter(LPBacktestConfig(strategy_type="lp", chain="ethereum")).config.chain == "ethereum"
+
     def test_custom_config(self) -> None:
         """Test custom configuration values."""
         config = LPBacktestConfig(

@@ -283,3 +283,67 @@ def test_cross_chain_drop_is_loud(caplog) -> None:
     assert len(dropped_warnings) == 1
     assert "arbitrum" in dropped_warnings[0].message
     assert "NOT funded" in dropped_warnings[0].message
+
+
+POLYGON_NATIVE_PRECOMPILE = "0x0000000000000000000000000000000000001010"
+
+
+def test_polygon_native_precompile_alias_funding_uses_canonical_sentinel_everywhere() -> None:
+    """ALM-3058: ``0x...1010`` funding lands under the identity ``balance("POL")`` reads."""
+    from almanak.core.chains import ChainRegistry
+
+    native = normalize_token_key("polygon", NATIVE_SENTINEL)
+    funding = [
+        _funding_entry(
+            symbol="POL",
+            address=POLYGON_NATIVE_PRECOMPILE,
+            chain="polygon",
+            amount="100",
+            amount_type="token",
+        )
+    ]
+
+    assert funded_token_refs(funding, chain="polygon") == [native]
+
+    seeds = resolve_funding_seeds(
+        raw_funding=funding,
+        chain="polygon",
+        market_state=_market_state({native: Decimal("0.5")}, chain="polygon"),
+    )
+
+    assert seeds[0].entry.address == NATIVE_SENTINEL
+    # The registry keeps Polygon's gas/price symbol pinned to MATIC; POL is an
+    # accepted symbol for the same native coin and resolves to the same key.
+    assert seeds[0].entry.symbol == ChainRegistry.resolve("polygon").native.symbol.upper()
+    assert seeds[0].token == native
+    assert seeds[0].amount_tokens == Decimal("100")
+    assert seeds[0].value_usd == Decimal("50")
+
+    portfolio = build_initial_portfolio_from_token_funding(
+        raw_funding=funding,
+        chain="polygon",
+        market_state=_market_state({native: Decimal("0.5")}, chain="polygon"),
+    )
+
+    assert portfolio.tokens == {native: Decimal("100")}
+    assert portfolio.get_token_balance("POL") == Decimal("100")
+    assert portfolio.get_token_balance("MATIC") == Decimal("100")
+    assert portfolio.get_token_balance(NATIVE_SENTINEL) == Decimal("100")
+    assert portfolio.initial_capital_usd == Decimal("50")
+
+
+def test_polygon_native_precompile_alias_is_not_folded_off_polygon() -> None:
+    """The fold is chain-scoped: elsewhere ``0x...1010`` stays an ordinary address."""
+    funding = [_funding_entry(symbol="X1010", address=POLYGON_NATIVE_PRECOMPILE, chain="arbitrum", amount="1")]
+
+    assert funded_token_refs(funding, chain="arbitrum") == [normalize_token_key("arbitrum", POLYGON_NATIVE_PRECOMPILE)]
+
+
+def test_polygon_precompile_and_zero_address_aliases_duplicate_fails_closed() -> None:
+    funding = [
+        _funding_entry(symbol="POL", address=POLYGON_NATIVE_PRECOMPILE, chain="polygon", amount="1"),
+        _funding_entry(symbol="MATIC", address=PLATFORM_NATIVE_ALIAS, chain="polygon", amount="1"),
+    ]
+
+    with pytest.raises(TokenFundingInitializationError, match="duplicate canonical token identity"):
+        funded_token_refs(funding, chain="polygon")

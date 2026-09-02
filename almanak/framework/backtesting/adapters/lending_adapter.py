@@ -51,6 +51,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
+from almanak.core.chains import LEGACY_SERIALIZED_CHAIN
 from almanak.framework.backtesting.adapters.base import (
     StrategyBacktestAdapter,
     StrategyBacktestConfig,
@@ -264,6 +265,7 @@ class LendingBacktestConfig(StrategyBacktestConfig):
             reconcile_on_tick=data.get("reconcile_on_tick", False),
             extra_params=data.get("extra_params", {}),
             strict_reproducibility=data.get("strict_reproducibility", False),
+            chain=data.get("chain", LEGACY_SERIALIZED_CHAIN),
             interest_accrual_method=data.get("interest_accrual_method", "compound"),
             health_factor_tracking_enabled=data.get("health_factor_tracking_enabled", True),
             liquidation_threshold=Decimal(str(data.get("liquidation_threshold", "0.825"))),
@@ -353,6 +355,8 @@ class LendingBacktestAdapter(StrategyBacktestAdapter):
             # Strategy should consider adjusting position
             pass
     """
+
+    config_class = LendingBacktestConfig
 
     def __init__(
         self,
@@ -932,7 +936,7 @@ class LendingBacktestAdapter(StrategyBacktestAdapter):
             borrow_token,
             market_price,
             borrow_amount,
-            chain=getattr(market_state, "chain", None) or getattr(self._config, "chain", None),
+            chain=getattr(market_state, "chain", None) or self._config.chain,
             token_addresses=None,
             context="lending.borrow_health",
         )

@@ -56,18 +56,20 @@ def canonical_token_funding_entries(
 ) -> list[TokenFunding]:
     """Return active-chain funding entries on the canonical token identity plane.
 
-    The platform serializes an EVM native gas asset as the zero address, while
-    the SDK's price, balance, and portfolio planes use the ERC-7528 sentinel.
-    This is the single backtesting ingestion boundary for that compatibility
-    alias: every downstream consumer receives the registered chain's canonical
-    native symbol and sentinel address. The alias is refused for unknown and
-    non-EVM chains rather than being treated as an unpriceable token.
+    The platform serializes an EVM native gas asset as the zero address (and
+    Polygon's POL also as the ``0x...1010`` precompile, ALM-3058), while the
+    SDK's price, balance, and portfolio planes use the ERC-7528 sentinel. This
+    is the single backtesting ingestion boundary for those compatibility
+    aliases: every downstream consumer receives the registered chain's
+    canonical native symbol and sentinel address. An alias is refused for
+    unknown and non-EVM chains rather than being treated as an unpriceable
+    token.
 
     Unless ``require_active`` is set, an absent or invalid basket returns an
     empty list so token-map builders can use this boundary before a backtest
-    config is required. A present zero-address alias that cannot be
-    canonicalized, or a basket whose entries collapse to one canonical token
-    identity, always raises.
+    config is required. A present native alias that cannot be canonicalized,
+    or a basket whose entries collapse to one canonical token identity, always
+    raises.
     """
     _reject_negative_active_funding(raw_funding, chain=chain)
     funding = parse_token_funding(raw_funding, strategy_chain=chain)
@@ -101,21 +103,40 @@ def canonical_token_funding_entries(
     return canonical
 
 
+def _native_funding_alias_label(entry: TokenFunding, chain: str) -> str | None:
+    """Name the native alias ``entry.address`` uses on ``chain``, or ``None`` for a real token.
+
+    Two alias shapes are accepted: the platform's chain-agnostic zero address
+    (any registered EVM chain) and the resolver's chain-scoped native address
+    aliases (ALM-3058; e.g. Polygon ``0x...1010``), which share one table with
+    the intent-compiler and snapshot planes so funding can never key a wallet
+    by an address those planes fold away.
+    """
+    if entry.address.lower() == _PLATFORM_EVM_NATIVE_ALIAS:
+        return "zero-address native alias"
+
+    from almanak.framework.data.tokens.resolver import is_native_address_alias
+
+    if is_native_address_alias(entry.address, chain):
+        return f"native address alias {entry.address.lower()}"
+    return None
+
+
 def _canonicalize_funding_entry(entry: TokenFunding, *, default_chain: str) -> TokenFunding:
-    """Canonicalize the platform's EVM-native alias, leaving ERC-20s unchanged."""
-    if entry.address.lower() != _PLATFORM_EVM_NATIVE_ALIAS:
+    """Canonicalize native-coin address aliases, leaving ERC-20s unchanged."""
+    entry_chain = entry.chain or default_chain
+    alias_label = _native_funding_alias_label(entry, entry_chain)
+    if alias_label is None:
         return entry
 
-    entry_chain = entry.chain or default_chain
     descriptor = ChainRegistry.try_resolve(entry_chain)
     if descriptor is None:
         raise TokenFundingInitializationError(
-            "token_funding zero-address native alias requires a registered EVM chain; "
-            f"chain '{entry_chain}' is unknown."
+            f"token_funding {alias_label} requires a registered EVM chain; chain '{entry_chain}' is unknown."
         )
     if descriptor.family is not ChainFamily.EVM:
         raise TokenFundingInitializationError(
-            "token_funding zero-address native alias is only valid on registered EVM chains; "
+            f"token_funding {alias_label} is only valid on registered EVM chains; "
             f"chain '{descriptor.name}' uses family '{descriptor.family.value}'."
         )
 

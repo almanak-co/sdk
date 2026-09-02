@@ -140,7 +140,90 @@ def _registered_token_addresses(backtester: PnLBacktester) -> dict[str, tuple[st
     for symbol, entry in (getattr(backtester, "token_addresses", None) or {}).items():
         if is_token_key(entry):
             token_addresses[str(symbol).upper()] = normalize_token_key(entry[0], entry[1])
+    # The run's funded basket is part of the registered identity plane:
+    # token_funding names the wallet's assets by symbol AND
+    # address, so a funded symbol must resolve — balance reads, credits and
+    # debits, intent sizing — even when neither the provider nor the caller
+    # registered it. Explicit same-chain registrations keep precedence
+    # (initialize_backtest already refused a funded symbol that disagrees
+    # with them); a foreign-chain registration is dead weight on this run's
+    # alias bridges and yields to the funded same-chain identity.
+    for symbol, entry in (getattr(backtester, "_funding_token_addresses", None) or {}).items():
+        if not is_token_key(entry):
+            continue
+        funded = normalize_token_key(entry[0], entry[1])
+        existing = token_addresses.get(str(symbol).upper())
+        if existing is None or existing[0] != funded[0]:
+            token_addresses[str(symbol).upper()] = funded
+    _complete_native_symbol_aliases(token_addresses)
     return token_addresses
+
+
+def _complete_native_symbol_aliases(token_addresses: dict[str, tuple[str, str]]) -> None:
+    """Register a native coin under every symbol its chain accepts.
+
+    The funding canonicalizer and the map builders name a native by its
+    chain's canonical symbol (``MATIC`` on Polygon), while strategies and the
+    platform name the same coin by an accepted alias (``POL``). One asset,
+    one key: once the sentinel is registered on a chain under any symbol, the
+    remaining accepted symbols point at it too, unless the caller already
+    bound them elsewhere.
+    """
+    from almanak.framework.data.tokens.defaults import NATIVE_SENTINEL
+
+    sentinel = NATIVE_SENTINEL.lower()
+    native_chains = {key[0] for key in token_addresses.values() if is_token_key(key) and key[1] == sentinel}
+    for run_chain in native_chains:
+        native_key = (run_chain, sentinel)
+        for symbol in native_symbols_for(run_chain):
+            token_addresses.setdefault(symbol.upper(), native_key)
+
+
+def _funding_token_addresses(
+    canonical_funding: list[dict[str, Any]],
+    *,
+    chain: str,
+    registered: Mapping[str, tuple[str, str]],
+) -> dict[str, tuple[str, str]]:
+    """``{SYMBOL: (chain, address)}`` for the run's funded basket (ALM-3398).
+
+    ``token_funding`` is the only place a user names the wallet's assets by
+    symbol AND address, yet the identity map feeding the snapshot and
+    market-state alias bridges and the portfolio identity table was built
+    from provider and caller registrations alone. A funded-but-unregistered
+    symbol therefore read as ``Cannot determine balance`` — or, for a
+    stablecoin, as the cash lane's MEASURED zero — while the address-keyed
+    balance sat funded (Empty != Zero).
+
+    Refuses, loudly and at init, a funded symbol whose address disagrees
+    with a same-chain explicit registration or with another funded entry:
+    one symbol must never name one asset on the price plane and another on
+    the balance plane.
+    """
+    run_chain = str(chain).lower()
+    funded: dict[str, tuple[str, str]] = {}
+    for entry in canonical_funding:
+        symbol = str(entry.get("symbol") or "").strip().upper()
+        address = entry.get("address")
+        if not symbol or not isinstance(address, str) or not address:
+            continue
+        key = normalize_token_key(str(entry.get("chain") or run_chain), address)
+        if key[0] != run_chain:
+            continue
+        for source, other in (
+            ("registered token-address map", registered.get(symbol)),
+            ("token_funding", funded.get(symbol)),
+        ):
+            if other is None or not is_token_key(other):
+                continue
+            other_key = normalize_token_key(other[0], other[1])
+            if other_key[0] == run_chain and other_key != key:
+                raise TokenFundingInitializationError(
+                    f"token_funding symbol {symbol} names {token_ref_display(key)} but the {source} "
+                    f"names {token_ref_display(other_key)}; declare exactly one identity per symbol."
+                )
+        funded[symbol] = key
+    return funded
 
 
 def _token_address_registrations(
@@ -1314,8 +1397,13 @@ def initialize_backtest(
         # Initialize MEV simulator based on config
         backtester._init_mev_simulator(config)
 
+        # One immutable answer to "which chain, which window, how strict" for
+        # the whole run; built before the adapter so the adapter is born on the
+        # run chain instead of DEFAULT_CHAIN.
+        run_context = BacktestRunContext.from_configs(config, backtester.data_config)
+
         # Initialize strategy adapter for strategy-specific backtesting
-        backtester._init_adapter(strategy)
+        backtester._init_adapter(strategy, chain=run_context.chain)
 
         strategy_config = backtester._get_strategy_config_dict(strategy) or {}
         token_funding = config.token_funding
@@ -1338,6 +1426,10 @@ def initialize_backtest(
         canonical_funding = [
             entry.model_dump(mode="json") for entry in active_token_funding_entries(token_funding, chain=config.chain)
         ]
+        # Run-scoped: a reused engine must not carry a previous run's funded
+        # basket into this run's identity plane or its conflict check. The
+        # basket itself is registered after the provider hook below.
+        backtester._funding_token_addresses = {}
 
         # Create parameter source tracker for audit trail
         # This must be created after _init_adapter so we can track adapter-specific params
@@ -1356,7 +1448,6 @@ def initialize_backtest(
 
         # Initialize an empty wallet. Token funding is converted to explicit
         # units at the first market tick, when first historical prices exist.
-        run_context = BacktestRunContext.from_configs(config, backtester.data_config)
         if backtester.data_config is not None:
             # One strictness answer for the whole run: no plane can stay soft.
             backtester.data_config.strict_historical_mode = run_context.fidelity.strict
@@ -1423,6 +1514,20 @@ def initialize_backtest(
                 f"Registered {len(token_address_registrations)} token address(es) "
                 "with the data provider for coin-id resolution"
             )
+
+        # Put the funded basket on the run's ENGINE-SIDE identity plane:
+        # from here on ``_registered_token_addresses`` also names
+        # every funded symbol, so the snapshot and market-state alias bridges
+        # and the portfolio identity table resolve ``balance("WETH")`` onto
+        # the address-native funded key. Deliberately after the provider
+        # hook: the price lane already fetches funded tokens by address
+        # (``funded_token_refs`` above), and the provider's symbol map stays
+        # exactly what CLI / service callers and the numeraire contribute.
+        backtester._funding_token_addresses = _funding_token_addresses(
+            canonical_funding,
+            chain=config.chain,
+            registered=_registered_token_addresses(backtester),
+        )
 
         # Create historical data config
         data_config = HistoricalDataConfig(
@@ -1847,7 +1952,33 @@ async def execute_iteration_loop(
                 state.initial_portfolio_seeded = True
                 bt_logger.info(f"Seeded initial portfolio from token_funding: ${initial_value:,.2f}")
 
-            # Create market snapshot for strategy
+            # Execute any pending intents that have waited long enough.
+            #
+            # Fills run BEFORE this tick's snapshot is built: the
+            # snapshot seeds wallet balances EAGERLY (_seed_snapshot_balances)
+            # while position reads (SimulatedPositionView) are LAZY over the
+            # live portfolio. Filling after the snapshot handed decide() a
+            # pre-fill wallet next to a post-fill position — an LP_OPEN's
+            # capital counted twice on the tick it landed. One post-fill state
+            # now feeds every decide()-time plane; the indicator and data-
+            # quality bookkeeping below is fill-independent and stays where it
+            # is.
+            state.pending_intents = await backtester._process_pending_intents(
+                pending_intents=state.pending_intents,
+                portfolio=state.portfolio,
+                market_state=market_state,
+                config=config,
+                data_quality_tracker=state.data_quality_tracker,
+                strategy=strategy,
+            )
+
+            # Mirror the sim's open LP positions into the run's IL calculator
+            # AFTER fills, BEFORE the snapshot and decide(): a position filled
+            # this tick is registered at this tick's (fill-exact) prices, and
+            # decide() can immediately read il_exposure on it.
+            sync_il_calculator_positions(il_calculator, state.portfolio, market_state, config.chain)
+
+            # Create market snapshot for strategy (post-fill wallet state)
             gas_view.bind(market_state, timestamp)
             ohlcv_view.bind(timestamp)
             position_view.bind(market_state, timestamp)
@@ -1964,22 +2095,6 @@ async def execute_iteration_loop(
                             at=timestamp,
                             detail="no price in market state for this tick",
                         )
-
-            # Execute any pending intents that have waited long enough
-            state.pending_intents = await backtester._process_pending_intents(
-                pending_intents=state.pending_intents,
-                portfolio=state.portfolio,
-                market_state=market_state,
-                config=config,
-                data_quality_tracker=state.data_quality_tracker,
-                strategy=strategy,
-            )
-
-            # Mirror the sim's open LP positions into the run's IL calculator
-            # AFTER fills, BEFORE decide(): a position filled this tick is
-            # registered at this tick's (fill-exact) prices, and decide() can
-            # immediately read il_exposure on it (ALM-2943).
-            sync_il_calculator_positions(il_calculator, state.portfolio, market_state, config.chain)
 
             # Get strategy decision (warm-up + error-handler branch)
             decide_result = _invoke_strategy_decide(

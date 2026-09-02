@@ -406,6 +406,31 @@ class TestMultiProtocolAdapterInitialization:
         # Just test the method doesn't fail
         assert lp_adapter is None or hasattr(lp_adapter, "adapter_name")
 
+    def test_config_chain_reaches_every_sub_adapter(self):
+        """ALM-3427: the router's chain is the run chain and every sub-adapter is built on it."""
+        adapter = MultiProtocolBacktestAdapter(
+            MultiProtocolBacktestConfig(strategy_type="multi_protocol", chain="ethereum")
+        )
+
+        assert set(adapter.sub_adapters) >= {"lp", "perp", "lending", "arbitrage"}
+        assert {name: sub.config.chain for name, sub in adapter.sub_adapters.items()} == dict.fromkeys(
+            adapter.sub_adapters, "ethereum"
+        )
+
+    def test_default_config_keeps_sub_adapters_on_default_chain(self):
+        """Standalone construction (no engine, no run chain) keeps today's default."""
+        from almanak.core.chains import DEFAULT_CHAIN
+
+        adapter = MultiProtocolBacktestAdapter()
+
+        assert adapter.config.chain == DEFAULT_CHAIN
+        assert {sub.config.chain for sub in adapter.sub_adapters.values()} == {DEFAULT_CHAIN}
+
+    def test_config_chain_survives_dict_roundtrip(self):
+        config = MultiProtocolBacktestConfig(strategy_type="multi_protocol", chain="base")
+
+        assert MultiProtocolBacktestConfig.from_dict(config.to_dict()).chain == "base"
+
 
 # =============================================================================
 # Position Aggregation Tests

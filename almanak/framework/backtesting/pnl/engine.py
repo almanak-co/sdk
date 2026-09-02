@@ -871,6 +871,19 @@ def create_market_snapshot_from_state(
         "pool_analytics is unavailable in this backtest snapshot: no historical pool-analytics "
         "reader was wired for the requested run"
     )
+    # A lending_rate / best_lending_rate cache miss must never dial
+    # a live gateway from inside a backtest. The sim's own lending plane
+    # (``lending_rates`` seeded below via set_lending_rate) is the ONLY rate
+    # source; the snapshot's lazy gateway lane refuses under
+    # ``backtest_no_historical_plane`` when this is set. A reachable gateway
+    # sidecar (the hosted job runs one) would otherwise answer this
+    # HISTORICAL tick with TODAY's rate — look-ahead bias. Live snapshots
+    # leave this None so the lazy gateway lane is untouched.
+    snapshot._lending_rate_refusal_detail = (
+        "no historical lending-rate plane in this backtest snapshot: only rates seeded from the "
+        "run's lending config (set_lending_rate) are served, and a live gateway read would leak "
+        "today's rate into a historical tick"
+    )
     # Views that refuse must land their refusals in THIS tick's
     # decision-input ledger (the snapshot is fresh per tick).
     for view in (pool_price_view, pool_reader, slippage_view):
@@ -1466,10 +1479,19 @@ class SimulatedPositionView:
     def position_health(self, protocol: str, market_id: str = "") -> Any:
         """Health of the sim's lending state for ``protocol``, as :class:`PositionHealth`.
 
-        Mirrors the live no-position contract: a protocol the sim holds no
-        lending position for returns the empty-account shape (no debt ⇒
-        ``Infinity`` health factor, zero collateral/debt) — exactly what an
-        on-chain ``getUserAccountData`` read of an empty account yields.
+        Mirrors the live no-position contract: a RECOGNISED LENDING venue the
+        sim holds no lending position for returns the empty-account shape (no
+        debt ⇒ ``Infinity`` health factor, zero collateral/debt) — exactly what
+        an on-chain ``getUserAccountData`` read of an empty account yields.
+
+        That contract is lending-shaped only (ALM-3064). A perpetuals venue
+        (connector-declared perps read, or an open simulated perp on the
+        requested protocol) and an unrecognised protocol both REFUSE with
+        :class:`HealthUnavailableError` — the same answer the live lane gives
+        (``PositionHealthProvider.get_health`` fails closed on protocols
+        without a lending read). A 20x perp 0.35% from its liquidation price
+        answered with a lending-shaped ``Infinity`` is a fabricated safe value,
+        not an empty account. Perp exposure is served by ``perp_positions``.
 
         With positions, collateral is the sim's TOTAL supply value — the same
         cross-position simplification the liquidation guard applies (all
@@ -1492,6 +1514,10 @@ class SimulatedPositionView:
             pos for pos in self._portfolio.positions if pos.is_lending and str(pos.protocol).lower() == protocol_norm
         ]
         if not protocol_positions:
+            # Only a recognised lending venue may answer "empty account".
+            # Perps / unknown protocols refuse — raised here so the
+            # snapshot wrapper ledgers it under ("position_health", "simulation").
+            self._refuse_non_lending_health(protocol_norm)
             # Documented no-position contract: empty account, no debt ⇒ Infinity.
             return PositionHealth(
                 health_factor=Decimal("Infinity"),
@@ -1533,6 +1559,49 @@ class SimulatedPositionView:
             market_id=market_id,
             price_source="backtest_simulation",
         )
+
+    def _refuse_non_lending_health(self, protocol_norm: str) -> None:
+        """Raise ``HealthUnavailableError`` unless ``protocol_norm`` is a recognised lending venue.
+
+        Called only on the no-lending-position branch of :meth:`position_health`.
+        Dispatch is registry-driven, never protocol-name literals (VIB-4851):
+
+        - **Perpetuals venue** — ``PerpsReadRegistry.canonical`` resolves it, OR
+          the sim holds an open perp booked under it. ``position_health`` models
+          lending health only; a lending-shaped ``Infinity`` for a leveraged perp
+          is a fabricated safe answer (ALM-3064). Refuse.
+        - **Unrecognised protocol** — neither a perps read nor the lending reads
+          the live lane dispatches on (``LendingReadRegistry.market_health_reader``
+          / ``supports_account_state`` — the exact "Unsupported protocol for
+          health monitoring" check in ``PositionHealthProvider.get_health``).
+          Refuse rather than answer for a venue the sim cannot model.
+        - **Recognised lending venue** — return; the caller serves the
+          documented empty-account contract.
+        """
+        from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
+        from almanak.connectors._strategy_base.perps_read_registry import PerpsReadRegistry
+        from almanak.framework.market.errors import HealthUnavailableError
+
+        perp_key = PerpsReadRegistry.canonical(protocol_norm) or protocol_norm
+        holds_perp = any(
+            pos.is_perp and (PerpsReadRegistry.canonical(str(pos.protocol)) or str(pos.protocol).lower()) == perp_key
+            for pos in self._portfolio.positions
+        )
+        if PerpsReadRegistry.canonical(protocol_norm) is not None or holds_perp:
+            raise HealthUnavailableError(
+                f"position_health models lending health only; {protocol_norm!r} is a perpetuals venue "
+                "(ALM-3064). Returning the lending no-position contract (health_factor=Infinity) would be "
+                "a fabricated safe value for a leveraged perp; read perp exposure via perp_positions()."
+            )
+        lending_key = LendingReadRegistry.normalize_protocol(protocol_norm)
+        if LendingReadRegistry.market_health_reader(
+            lending_key
+        ) is None and not LendingReadRegistry.supports_account_state(lending_key):
+            raise HealthUnavailableError(
+                f"Unsupported protocol for health monitoring: {protocol_norm!r} (ALM-3064). The backtest holds no "
+                "lending position for it and it is not a recognised lending venue, so the lending no-position "
+                "contract (health_factor=Infinity) does not apply."
+            )
 
     def health_factor(self, protocol: str, chain: str | None = None) -> Decimal | None:
         """Health factor for ``protocol`` from the sim's state; ``None`` = truly no position."""
@@ -2979,12 +3048,28 @@ def _registered_key_held(
     token_addresses: Mapping[str, tuple[str, str]] | None,
     portfolio: SimulatedPortfolio,
 ) -> bool:
-    if not token_addresses:
-        return False
-    entry = token_addresses.get(str(symbol).upper())
-    if entry is None or not is_token_key(entry):
-        return False
-    return normalize_token_key(entry[0], entry[1]) in portfolio.tokens
+    """True when ``symbol`` names an asset the portfolio holds under an address key.
+
+    Two identity sources are consulted: the run's registered map (the
+    snapshot alias bridge) and the portfolio's own identity table (the
+    credit/debit plane, ``register_token_identities``). Either one proving
+    the asset is held under its address key is enough to keep the cash lane
+    from writing a symbol key with ``cash_usd`` — a face value the funded
+    balance would then be read as (ALM-3398: a token-funded portfolio has
+    ``cash_usd == 0``, so ``balance("USDC")`` returned a MEASURED zero over a
+    funded wallet). Without an alias the symbol read then refuses instead
+    (Empty != Zero) rather than reporting the wrong number.
+    """
+    symbol_upper = str(symbol).upper()
+    candidates: list[TokenRef] = []
+    entry = token_addresses.get(symbol_upper) if token_addresses else None
+    if entry is not None and is_token_key(entry):
+        candidates.append(normalize_token_key(entry[0], entry[1]))
+    identity_lookup = getattr(portfolio, "token_identity", None)
+    identity = identity_lookup(symbol_upper) if callable(identity_lookup) else None
+    if identity is not None:
+        candidates.append(identity.key)
+    return any(candidate in portfolio.tokens for candidate in candidates)
 
 
 def _portfolio_chain(portfolio: SimulatedPortfolio, fallback: str) -> str:
@@ -3843,6 +3928,10 @@ class PnLBacktester:
     _error_handler: BacktestErrorHandler | None = None
     _fallback_usage: dict[str, int] | None = None
     _gas_price_records: list["GasPriceRecord"] | None = None
+    #: Run-scoped ``{SYMBOL: (chain, address)}`` for the funded basket;
+    #: rebuilt by ``initialize_backtest`` and merged into
+    #: ``_registered_token_addresses`` so funded symbols resolve everywhere.
+    _funding_token_addresses: dict[str, tuple[str, str]] = field(default_factory=dict, init=False, repr=False)
     _prepared_spot_price_history: _SpotPriceHistoryPreparation | None = field(
         default=None,
         init=False,
@@ -4144,6 +4233,8 @@ class PnLBacktester:
     def _init_adapter(
         self,
         strategy: BacktestableStrategy,
+        *,
+        chain: str | None = None,
     ) -> None:
         """Initialize the strategy adapter based on detected type.
 
@@ -4156,6 +4247,11 @@ class PnLBacktester:
 
         Args:
             strategy: Strategy to initialize adapter for
+            chain: The run's chain (``BacktestRunContext.chain``). Threaded
+                into every adapter config so a chain-less intent resolves its
+                pool descriptors, funding and APY providers on the chain the
+                backtest runs on, not ``DEFAULT_CHAIN`` (ALM-3427). ``None``
+                keeps the adapters' own default.
         """
         # An EXPLICIT strategy_type still forces a single adapter (escape
         # hatch). Otherwise every strategy gets the per-intent router:
@@ -4168,6 +4264,7 @@ class PnLBacktester:
                 strategy,
                 data_config=self.data_config,
                 config={"strategy_type": self.strategy_type},
+                chain=chain,
             )
             if adapter:
                 self._adapter = adapter
@@ -4197,6 +4294,9 @@ class PnLBacktester:
                 swap_lane=swap_lane,
                 reconcile_positions=False,
                 execution_coordination_enabled=False,
+                # The router's chain is the run chain, handed down into every
+                # sub-adapter config; absent a run chain keep the SDK default.
+                chain=chain if chain is not None else DEFAULT_CHAIN,
             ),
             data_config=self.data_config,
         )

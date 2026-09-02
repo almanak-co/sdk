@@ -122,6 +122,9 @@ class ExternalChainIds:
         )
 
 
+_EVM_ADDRESS_RE = re.compile(r"0x[0-9a-fA-F]{40}")
+
+
 @dataclass(frozen=True)
 class NativeToken:
     """Native-gas token metadata for a chain.
@@ -168,6 +171,16 @@ class NativeToken:
             non-standard native id, so values can be populated incrementally.
             Populate from the SLIP-44 registry, NEVER guessed (ETH-denominated
             chains are 60; SOL is 501). VIB-5175 (CAIP adoption, Phase 1).
+        address_aliases: Contract-shaped addresses that ALSO denote this chain's
+            native coin. Some chains front the gas coin with a well-known
+            precompile that explorers, wallets and funding flows treat as "the
+            native asset" (Polygon's ``0x...1010`` MRC-20 precompile for POL).
+            Every SDK identity plane keys the native coin by the native
+            sentinel, so the token resolver folds these aliases onto it before
+            any cache or registry key is derived; a wallet funded by alias
+            must land on the same key every symbol read resolves to. Strictly
+            chain-scoped: the same address is an ordinary (or nonexistent)
+            contract elsewhere. Empty for every chain without such a precompile.
     """
 
     symbol: str
@@ -181,8 +194,21 @@ class NativeToken:
     slip44: int | None = None
     # Appended to preserve the positional slots of every pre-existing field.
     wrapped_alias_pairs: tuple[tuple[str, str], ...] = ()
+    address_aliases: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
+        seen_aliases: set[str] = set()
+        for alias in self.address_aliases:
+            if not isinstance(alias, str) or not _EVM_ADDRESS_RE.fullmatch(alias):
+                raise ValueError(
+                    f"NativeToken address_aliases entries must be 0x-prefixed 40-hex addresses, got {alias!r}"
+                )
+            lowered = alias.lower()
+            if self.wrapped_address is not None and lowered == self.wrapped_address.lower():
+                raise ValueError(f"NativeToken address_aliases must not name the wrapped-native address {alias!r}")
+            if lowered in seen_aliases:
+                raise ValueError(f"NativeToken address_aliases contains duplicate alias {alias!r}")
+            seen_aliases.add(lowered)
         for field_name in ("coingecko_id", "wrapped_coingecko_id"):
             value = getattr(self, field_name)
             if value is not None and (not isinstance(value, str) or not value or value != value.strip()):
@@ -435,9 +461,10 @@ class RpcProfile:
         anvil_port: Default port for the chain's managed Anvil fork.
             Picked to avoid collisions across the multi-chain Anvil cluster.
         poa: Whether the chain requires POA middleware (Avalanche, Polygon,
-            BSC). When ``True``, ``get_cached_web3`` injects
-            ``ExtraDataToPOAMiddleware`` so ``eth.get_block("latest")``
-            does not reject the 32-byte ``extraData`` field.
+            BSC, and Optimism whose pre-Bedrock genesis carries a 117-byte
+            ``extraData`` — ALM-3450). When ``True``, ``get_cached_web3``
+            injects ``ExtraDataToPOAMiddleware`` so ``eth.get_block(...)``
+            does not reject an ``extraData`` field longer than 32 bytes.
         block_time_seconds: Average block time in seconds. Used by the
             backtesting archive-RPC provider to estimate historical block
             numbers from timestamps. ``None`` means "no archive-RPC support

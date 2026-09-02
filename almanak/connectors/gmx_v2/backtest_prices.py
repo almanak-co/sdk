@@ -36,6 +36,7 @@ from almanak.framework.backtesting.pnl.data_provider import (
 from almanak.framework.backtesting.pnl.providers.coingecko import OHLCVCache
 from almanak.framework.backtesting.pnl.types import DataConfidence
 from almanak.framework.data.interfaces import DataSourceUnavailable
+from almanak.framework.data.ohlcv.venue_native_provider import market_labels_agree
 from almanak.framework.data.timeframes import CANONICAL_OHLCV_TIMEFRAMES, parse_ohlcv_timeframe
 
 if TYPE_CHECKING:
@@ -125,6 +126,16 @@ class _GMXOracleMarketSource:
                 source="gmx_oracle",
                 reason="gateway returned incomplete GMX market provenance",
             )
+        # Provenance that is merely present and self-consistent proves
+        # nothing about *which* market it is for. Page 1 is latched as ground
+        # truth for the whole series, so a page about a different market (a
+        # gateway dispatch bug, a mis-associated response, a connector that
+        # resolved the wrong catalogue entry) would silently price the backtest
+        # off another instrument. Bind the page to the request first. Label
+        # agreement uses the live lane's helper so both guards mean the same
+        # thing by "same market"; an address request cannot be compared as a
+        # label, so it binds on the served market token instead.
+        self._require_requested_market(response)
         current = (self.resolved_market, self.market_token, self.index_token, self.index_symbol)
         if current != (None, None, None, None) and current != identity:
             raise DataSourceUnavailable(
@@ -132,6 +143,41 @@ class _GMXOracleMarketSource:
                 reason="verified GMX market identity changed while paging history",
             )
         self.resolved_market, self.market_token, self.index_token, self.index_symbol = identity
+
+    def _require_requested_market(self, response: Any) -> None:
+        """Refuse a candle page whose served market is not the requested one.
+
+        ``response.venue`` and ``response.chain`` are not compared: the gateway
+        echoes the request's own values into them
+        (``rate_history_service._perp_price_success_response``), so they
+        attest nothing about the page. ``market`` / ``market_token`` come from
+        the connector's verified catalogue record and are the binding fields.
+        """
+        requested = self.requested_market
+        served_market = str(response.market)
+        # Anything 0x-prefixed binds as an address: the label helper waves
+        # every 0x request through, so a malformed address must reach the
+        # token comparison, where it never matches and is refused.
+        if requested.lower().startswith("0x"):
+            served_token = str(response.market_token).lower()
+            if served_token == requested.lower():
+                return
+            raise DataSourceUnavailable(
+                source="gmx_oracle",
+                reason=(
+                    f"gateway served market token {served_token!r} ({served_market!r}) on a request for "
+                    f"{requested!r} ({self.chain}); refusing a candle page that is not about the requested market"
+                ),
+            )
+        if market_labels_agree(served_market, requested):
+            return
+        raise DataSourceUnavailable(
+            source="gmx_oracle",
+            reason=(
+                f"gateway answered for market {served_market!r} on a request for {requested!r} "
+                f"({self.chain}); refusing a candle page that is not about the requested market"
+            ),
+        )
 
     @staticmethod
     def _decode_candle(raw: Any, timeframe: str) -> OHLCV:

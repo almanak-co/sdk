@@ -9,6 +9,7 @@ import pytest
 from almanak.framework.backtesting.adapters import (
     AdapterRegistry,
     StrategyBacktestAdapter,
+    StrategyBacktestConfig,
     StrategyTypeHint,
     detect_strategy_type,
     get_adapter,
@@ -17,6 +18,7 @@ from almanak.framework.backtesting.adapters import (
     list_available_adapters,
     register_adapter,
 )
+from almanak.framework.backtesting.adapters.base import get_adapter_with_config
 from almanak.framework.backtesting.adapters.registry import (
     KNOWN_STRATEGY_TYPES,
     STRATEGY_TYPE_ARBITRAGE,
@@ -45,9 +47,7 @@ class MockLPAdapter(StrategyBacktestAdapter):
     def execute_intent(self, intent: Any, portfolio: Any, market_state: Any) -> Any:
         return None
 
-    def update_position(
-        self, position: Any, market_state: Any, elapsed_seconds: float
-    ) -> None:
+    def update_position(self, position: Any, market_state: Any, elapsed_seconds: float) -> None:
         pass
 
     def value_position(self, position: Any, market_state: Any) -> Decimal:
@@ -67,9 +67,7 @@ class MockPerpAdapter(StrategyBacktestAdapter):
     def execute_intent(self, intent: Any, portfolio: Any, market_state: Any) -> Any:
         return None
 
-    def update_position(
-        self, position: Any, market_state: Any, elapsed_seconds: float
-    ) -> None:
+    def update_position(self, position: Any, market_state: Any, elapsed_seconds: float) -> None:
         pass
 
     def value_position(self, position: Any, market_state: Any) -> Decimal:
@@ -137,12 +135,8 @@ def clean_registry():
 @pytest.fixture
 def registered_adapters():
     """Register test adapters."""
-    AdapterRegistry.register(
-        "lp", MockLPAdapter, description="LP adapter", aliases=["liquidity"]
-    )
-    AdapterRegistry.register(
-        "perp", MockPerpAdapter, description="Perp adapter", aliases=["perpetual"]
-    )
+    AdapterRegistry.register("lp", MockLPAdapter, description="LP adapter", aliases=["liquidity"])
+    AdapterRegistry.register("perp", MockPerpAdapter, description="Perp adapter", aliases=["perpetual"])
     return {"lp": MockLPAdapter, "perp": MockPerpAdapter}
 
 
@@ -473,6 +467,43 @@ def test_get_adapter_case_insensitive(registered_adapters):
     assert isinstance(adapter, MockLPAdapter)
 
 
+class ConfigAwareAdapter(MockLPAdapter):
+    """Adapter with the production constructor shape (config + data_config)."""
+
+    config_class = StrategyBacktestConfig
+
+    def __init__(self, config: StrategyBacktestConfig | None = None, data_config: Any = None) -> None:
+        self.config = config or StrategyBacktestConfig(strategy_type="lp")
+        self.data_config = data_config
+
+
+def test_get_adapter_with_config_binds_run_chain_under_registered_name():
+    """ALM-3427: the run chain lands on a config built for the canonical type, even via an alias."""
+    AdapterRegistry.register("lp", ConfigAwareAdapter, aliases=["liquidity"])
+
+    adapter = get_adapter_with_config("liquidity", data_config="dc", chain="ethereum")
+
+    assert isinstance(adapter, ConfigAwareAdapter)
+    assert adapter.config.strategy_type == "lp"
+    assert adapter.config.chain == "ethereum"
+    assert adapter.data_config == "dc"
+
+
+def test_get_adapter_with_config_without_chain_keeps_default():
+    from almanak.core.chains import DEFAULT_CHAIN
+
+    AdapterRegistry.register("lp", ConfigAwareAdapter)
+
+    assert get_adapter_with_config("lp").config.chain == DEFAULT_CHAIN
+
+
+def test_get_adapter_with_config_skips_chain_for_adapters_without_config_kwarg():
+    """An adapter whose constructor takes no config still instantiates when a chain is given."""
+    AdapterRegistry.register("lp", MockLPAdapter)
+
+    assert isinstance(get_adapter_with_config("lp", data_config="dc", chain="ethereum"), MockLPAdapter)
+
+
 def test_list_available_adapters(registered_adapters):
     """Test listing available adapters."""
     adapters = list_available_adapters()
@@ -635,7 +666,13 @@ class TestMultiCategoryIntentDetection:
 
     def test_lp_plus_lending_detects_multi_protocol(self):
         hint = detect_strategy_type(
-            {"metadata": {"tags": [], "supported_protocols": [], "intent_types": ["LP_OPEN", "LP_CLOSE", "SUPPLY", "WITHDRAW", "HOLD"]}}
+            {
+                "metadata": {
+                    "tags": [],
+                    "supported_protocols": [],
+                    "intent_types": ["LP_OPEN", "LP_CLOSE", "SUPPLY", "WITHDRAW", "HOLD"],
+                }
+            }
         )
         assert hint.strategy_type == "multi_protocol"
         assert hint.confidence == "high"
@@ -651,7 +688,13 @@ class TestMultiCategoryIntentDetection:
         # lane either way, so single-accrual-category strategies keep their
         # dedicated adapter.
         hint = detect_strategy_type(
-            {"metadata": {"tags": [], "supported_protocols": [], "intent_types": ["LP_OPEN", "LP_CLOSE", "SWAP", "HOLD"]}}
+            {
+                "metadata": {
+                    "tags": [],
+                    "supported_protocols": [],
+                    "intent_types": ["LP_OPEN", "LP_CLOSE", "SWAP", "HOLD"],
+                }
+            }
         )
         assert hint.strategy_type == "lp"
 

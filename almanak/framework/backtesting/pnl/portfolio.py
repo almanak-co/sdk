@@ -1042,6 +1042,17 @@ class SimulatedPortfolio:
                     chain=chain, address=address, symbol=str(symbol)
                 )
 
+    def token_identity(self, symbol: str) -> TokenIdentity | None:
+        """Public read of the registered identity for a plain symbol, or ``None``.
+
+        Registered-only, never guessed: this consults the table built by
+        :meth:`register_token_identities` and does not fall through to the
+        token registry (unlike :meth:`_resolve_key`), so callers probing
+        "is this symbol held under an address key?" never trigger symbol
+        resolution warnings or invent an identity the run did not declare.
+        """
+        return self._identity_table.get(str(symbol).strip().upper())
+
     def _resolve_key(self, token: TokenRef) -> TokenRef:
         """Resolve a token reference to its single balance key.
 

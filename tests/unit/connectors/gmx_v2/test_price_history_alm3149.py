@@ -55,6 +55,7 @@ def _candle(timestamp: datetime, price: str = "12.5") -> SimpleNamespace:
 def _page(
     timeframe: str,
     *timestamps: datetime,
+    market: str = "NEWMARKET/USD",
     market_token: str = MARKET_TOKEN,
     index_token: str = INDEX_TOKEN,
     index_symbol: str = "NEWMARKET",
@@ -62,7 +63,7 @@ def _page(
     return SimpleNamespace(
         success=True,
         error="",
-        market="NEWMARKET/USD",
+        market=market,
         market_token=market_token,
         index_token=index_token,
         index_symbol=index_symbol,
@@ -493,6 +494,77 @@ async def test_market_identity_drift_is_rejected_while_paging() -> None:
 
     with pytest.raises(DataSourceUnavailable, match="identity changed"):
         await source.prepare(requested="1h", start=start, end=end)
+
+
+@pytest.mark.parametrize(
+    ("requested", "served_market", "served_market_token"),
+    [
+        pytest.param("NEWMARKET/USD", "OTHER/USD", MARKET_TOKEN, id="label-different-market"),
+        pytest.param("NEWMARKET/USD", "NEWMARKET/USDT", MARKET_TOKEN, id="label-different-quote"),
+        pytest.param("NEWMARKET/USD", "NEWMARKET", MARKET_TOKEN, id="label-served-vaguer-than-request"),
+        pytest.param(MARKET_TOKEN, "NEWMARKET/USD", "0x" + "c" * 40, id="address-different-market-token"),
+        pytest.param("0xdeadbeef", "NEWMARKET/USD", MARKET_TOKEN, id="address-malformed-request"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_first_page_for_different_market_than_requested_is_refused(
+    requested: str, served_market: str, served_market_token: str
+) -> None:
+    """ALM-3171: page 1 is latched as ground truth, so it must be *our* market before it is latched."""
+    start = datetime(2025, 1, 1, tzinfo=UTC)
+    end = start + timedelta(days=2)
+    source = _GMXOracleMarketSource(chain="arbitrum", market=requested, venue="gmx_v2")
+    fetched: list[int] = []
+
+    async def fetch_page(*, timeframe: str, before_ts: int, limit: int) -> SimpleNamespace:
+        del limit
+        fetched.append(before_ts)
+        return _page(timeframe, start, end - timedelta(hours=1), market=served_market, market_token=served_market_token)
+
+    source._fetch_page = fetch_page  # type: ignore[method-assign]
+
+    with pytest.raises(DataSourceUnavailable, match="not about the requested market"):
+        await source.prepare(requested="1h", start=start, end=end)
+
+    assert len(fetched) == 1
+    assert (source.resolved_market, source.market_token, source.index_token, source.index_symbol) == (
+        None,
+        None,
+        None,
+        None,
+    )
+
+
+@pytest.mark.parametrize(
+    ("requested", "served_market", "served_market_token"),
+    [
+        pytest.param("NEWMARKET/USD", "NEWMARKET/USD", MARKET_TOKEN, id="exact"),
+        pytest.param(" newmarket_usd ", "NEWMARKET/USD [NEWMARKET-USDC]", MARKET_TOKEN, id="resolver-spellings"),
+        pytest.param("NEWMARKET", "NEWMARKET/USD", MARKET_TOKEN, id="bare-alias-request"),
+        pytest.param(MARKET_TOKEN.upper(), "NEWMARKET/USD", MARKET_TOKEN.lower(), id="address-request"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_page_for_requested_market_is_accepted_and_latched(
+    requested: str, served_market: str, served_market_token: str
+) -> None:
+    """The guard must accept every spelling the resolver accepts, or it would refuse correct pages."""
+    start = datetime(2025, 1, 1, tzinfo=UTC)
+    end = start + timedelta(days=2)
+    source = _GMXOracleMarketSource(chain="arbitrum", market=requested, venue="gmx_v2")
+
+    async def fetch_page(*, timeframe: str, before_ts: int, limit: int) -> SimpleNamespace:
+        del before_ts, limit
+        closes = [start + timedelta(hours=index) for index in range(-1, 49)]
+        return _page(timeframe, *closes, market=served_market, market_token=served_market_token)
+
+    source._fetch_page = fetch_page  # type: ignore[method-assign]
+
+    assert await source.prepare(requested="1h", start=start, end=end) == "1h"
+
+    assert source.resolved_market == served_market
+    assert source.market_token == MARKET_TOKEN.lower()
+    assert source.index_symbol == "NEWMARKET"
 
 
 @pytest.mark.asyncio

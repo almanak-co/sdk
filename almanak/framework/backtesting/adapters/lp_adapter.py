@@ -52,7 +52,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Final, Literal, NoReturn, cast
 
-from almanak.core.chains import DEFAULT_CHAIN, LEGACY_SERIALIZED_CHAIN, ChainRegistry
+from almanak.core.chains import LEGACY_SERIALIZED_CHAIN, ChainRegistry
 from almanak.core.constants import STABLECOINS
 from almanak.framework.backtesting.adapters._sync_bridge import (
     in_running_event_loop_task,
@@ -297,9 +297,6 @@ class LPBacktestConfig(StrategyBacktestConfig):
     ``position_value_usd * volume_multiplier``. Set True only when you knowingly
     accept a rough, order-of-magnitude-uncertain fee estimate (e.g. quick
     parameter sweeps), and understand the result is LOW confidence."""
-
-    chain: str = DEFAULT_CHAIN
-    """Chain for historical data routing. Options: ethereum, arbitrum, base, optimism, polygon."""
 
     def __post_init__(self) -> None:
         """Validate LP-specific configuration.
@@ -642,6 +639,8 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         value = adapter.value_position(position, market_state)
     """
 
+    config_class = LPBacktestConfig
+
     def __init__(
         self,
         config: LPBacktestConfig | None = None,
@@ -688,8 +687,7 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         # fee/step segment ("WETH/USDC/3000" -> 3000) is part of the identity:
         # a fee-blind key made every tier of a pair share one resolved address
         # (ALM-2949). Keyed without chain: one adapter instance serves one
-        # backtest chain, and config.chain may sit on its DEFAULT while intents
-        # carry the real one.
+        # backtest chain (config.chain, set to the run chain by the engine).
         self._resolved_pool_addresses: dict[tuple[str, frozenset[str], int | None], str] = {}
         # resolved address -> how it was chosen (result-doc provenance).
         self._resolved_pool_provenance: dict[str, str] = {}

@@ -45,6 +45,9 @@ DESCRIPTOR = register_chain(
             wrapped_alias_pairs=(("POL", "WPOL"),),
             wrapped_coingecko_id="wmatic",
             slip44=966,  # SLIP-44 "Matic" — Polygon native (CAIP-19)
+            # The MRC-20 precompile fronting POL; explorers, wallets and the
+            # platform funding lane all name the native coin by it.
+            address_aliases=("0x0000000000000000000000000000000000001010",),
         ),
         external_ids=ExternalChainIds(
             tenderly="polygon",

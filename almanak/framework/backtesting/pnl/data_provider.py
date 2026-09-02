@@ -63,10 +63,40 @@ def utc_isoformat(value: datetime | None) -> str | None:
     return aware.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
+_NATIVE_ALIAS_CACHE: dict[str, tuple[frozenset[str], str]] = {}
+
+
+def _native_alias_fold(chain_lower: str) -> tuple[frozenset[str], str]:
+    """``(lowercased alias addresses, sentinel)`` for ``chain``; empty on unknown chains."""
+    cached = _NATIVE_ALIAS_CACHE.get(chain_lower)
+    if cached is not None:
+        return cached
+    from almanak.core.chains import ChainRegistry
+    from almanak.framework.data.tokens.defaults import NATIVE_SENTINEL
+
+    descriptor = ChainRegistry.try_resolve(chain_lower)
+    aliases = frozenset(alias.lower() for alias in descriptor.native.address_aliases) if descriptor else frozenset()
+    entry = (aliases, NATIVE_SENTINEL.lower())
+    _NATIVE_ALIAS_CACHE[chain_lower] = entry
+    return entry
+
+
 def normalize_token_key(chain: str, address: str) -> TokenKey:
-    """Return the canonical market-data key for an address on a chain."""
-    normalized_address = address.lower() if is_address_like(address) else address
-    return chain.lower(), normalized_address
+    """Return the canonical market-data key for an address on a chain.
+
+    A chain-scoped native-coin alias address (Polygon's ``0x...1010``) folds
+    onto the native sentinel here, at the one seam every engine plane keys
+    through, so a wallet funded, priced, or read by the alias can never occupy
+    a second key beside the sentinel the resolver and funding lane already use.
+    """
+    chain_lower = chain.lower()
+    if not is_address_like(address):
+        return chain_lower, address
+    normalized_address = address.lower()
+    aliases, sentinel = _native_alias_fold(chain_lower)
+    if normalized_address in aliases:
+        normalized_address = sentinel
+    return chain_lower, normalized_address
 
 
 def is_token_key(token: object) -> TypeGuard[TokenKey]:

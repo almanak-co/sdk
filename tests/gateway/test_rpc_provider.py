@@ -12,6 +12,7 @@ from web3.providers import AsyncBaseProvider
 from web3.types import RPCEndpoint, RPCResponse
 
 from almanak.gateway.utils.rpc_provider import (
+    POA_CHAINS,
     NodeProvider,
     _get_custom_url,
     _has_chain_specific_url,
@@ -20,6 +21,7 @@ from almanak.gateway.utils.rpc_provider import (
     get_rpc_url,
     has_api_key_configured,
     inject_poa_middleware,
+    is_poa_chain,
 )
 
 
@@ -137,7 +139,7 @@ class _PoABlockProvider(AsyncBaseProvider):
 class TestPoAMiddleware:
     """Descriptor-driven middleware configuration for sync and async clients."""
 
-    @pytest.mark.parametrize("chain", ["bsc", "bnb", "polygon", "avalanche"])
+    @pytest.mark.parametrize("chain", ["bsc", "bnb", "polygon", "avalanche", "optimism", "op"])
     def test_injects_middleware_for_poa_chains(self, chain: str) -> None:
         web3 = AsyncWeb3(_PoABlockProvider())
 
@@ -197,6 +199,26 @@ class TestPoAMiddleware:
 
         expected = async_middleware if async_client else sync_middleware
         assert web3.middleware_onion.injected == [(expected, 0)]
+
+
+class TestPoaChainMembership:
+    """``POA_CHAINS`` is derived from the descriptors; pin the chains that need it."""
+
+    @pytest.mark.parametrize("chain", ["bsc", "polygon", "avalanche", "optimism"])
+    def test_descriptor_declared_poa_chains(self, chain: str) -> None:
+        assert chain in POA_CHAINS
+        assert is_poa_chain(chain)
+
+    def test_optimism_pre_bedrock_genesis_requires_poa_middleware(self) -> None:
+        """ALM-3450: OP Mainnet's legacy genesis carries a 117-byte extraData."""
+        assert "optimism" in POA_CHAINS
+        assert is_poa_chain("op")
+
+    @pytest.mark.parametrize("chain", ["ethereum", "arbitrum", "base"])
+    def test_standard_genesis_chains_are_not_poa(self, chain: str) -> None:
+        """Base is OP-stack but Bedrock-native: its genesis extraData decodes without middleware."""
+        assert chain not in POA_CHAINS
+        assert not is_poa_chain(chain)
 
 
 class TestGetRpcUrl:

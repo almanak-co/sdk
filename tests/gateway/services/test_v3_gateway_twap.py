@@ -20,12 +20,14 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
+from web3.exceptions import ExtraDataLengthError
 
 from almanak.connectors._base.v3_gateway_twap import (
     _block_at_or_before,
     _decode_observe_response,
     _fetch_pool_tokens_and_decimals,
     _historical_blocks_for_grid,
+    _HistoricalBlockResolver,
     _read_word,
     _tick_to_price,
     _twap_call_observe,
@@ -649,6 +651,91 @@ def test_historical_block_resolver_bisects_after_interpolation_stalls() -> None:
     assert resolved == (999, 0)
     assert resolved[1] <= 500
     assert any(block > 100 for block in probed_blocks), probed_blocks
+
+
+def _make_legacy_genesis_web3(*, undecodable_below: int, latest_block: int = 400):
+    """Fake chain whose oldest headers reject like OP Mainnet's pre-Bedrock genesis (ALM-3450)."""
+    probed: list[int] = []
+
+    async def _get_block(block_identifier):
+        number = latest_block if block_identifier == "latest" else int(block_identifier)
+        probed.append(number)
+        if number < undecodable_below:
+            raise ExtraDataLengthError(
+                "The field extraData is 117 bytes, but should be 32. It is quite likely that you are "
+                "connected to a POA chain."
+            )
+        return {"number": number, "timestamp": 1_000 + number * 10}
+
+    return SimpleNamespace(eth=SimpleNamespace(get_block=_get_block)), probed
+
+
+@pytest.mark.parametrize(
+    ("undecodable_below", "expected_lower"),
+    [
+        pytest.param(1, (1, 1_010), id="genesis-only"),
+        pytest.param(105, (105, 2_050), id="pre-bedrock-band"),
+    ],
+)
+def test_historical_block_resolver_bounds_do_not_depend_on_decoding_genesis(
+    undecodable_below: int, expected_lower: tuple[int, int]
+) -> None:
+    """ALM-3450: an undecodable block 0 anchors the lower bound at the earliest decodable block."""
+    web3, probed = _make_legacy_genesis_web3(undecodable_below=undecodable_below)
+    resolver = _HistoricalBlockResolver(web3, protocol="uniswap_v3")
+
+    lower, latest = asyncio.run(resolver.bounds())
+
+    assert lower == expected_lower
+    assert latest == (400, 5_000)
+    # genesis + head + one bounded bisection, never a linear scan of the legacy band.
+    assert len(probed) <= 2 + 10
+    assert asyncio.run(resolver.bounds()) == (lower, latest)
+
+
+def test_historical_block_grid_resolves_when_genesis_rejects_extra_data() -> None:
+    web3, _probed = _make_legacy_genesis_web3(undecodable_below=105)
+
+    samples = asyncio.run(
+        _historical_blocks_for_grid(
+            web3,
+            start_ts=2_125,
+            end_ts=2_165,
+            interval_secs=20,
+            protocol="uniswap_v3",
+        )
+    )
+
+    assert samples == [(112, 2_120), (114, 2_140), (116, 2_160)]
+
+
+def test_historical_block_resolver_reports_window_before_earliest_resolvable_block() -> None:
+    web3, _probed = _make_legacy_genesis_web3(undecodable_below=105)
+
+    with pytest.raises(RateHistoryUnavailable, match="earliest resolvable archive block block 105"):
+        asyncio.run(
+            _historical_blocks_for_grid(
+                web3,
+                start_ts=1_500,
+                end_ts=2_165,
+                interval_secs=20,
+                protocol="uniswap_v3",
+            )
+        )
+
+
+def test_historical_block_resolver_still_fails_on_non_extra_data_genesis_error() -> None:
+    """Only the extraData shape is tolerated; an RPC outage at block 0 stays loud."""
+
+    async def _get_block(block_identifier):
+        if block_identifier == "latest":
+            return {"number": 400, "timestamp": 5_000}
+        raise RuntimeError("archive node unavailable")
+
+    web3 = SimpleNamespace(eth=SimpleNamespace(get_block=_get_block))
+
+    with pytest.raises(RateHistoryUnavailable, match="failed to resolve archive block 0"):
+        asyncio.run(_HistoricalBlockResolver(web3, protocol="uniswap_v3").bounds())
 
 
 def test_historical_series_preserves_grid_cardinality_and_block_provenance() -> None:

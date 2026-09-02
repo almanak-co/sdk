@@ -42,6 +42,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal
 
+from almanak.core.chains import LEGACY_SERIALIZED_CHAIN
 from almanak.framework.backtesting.adapters.base import (
     StrategyBacktestAdapter,
     StrategyBacktestConfig,
@@ -357,6 +358,7 @@ class ArbitrageBacktestConfig(StrategyBacktestConfig):
             reconcile_on_tick=data.get("reconcile_on_tick", False),
             extra_params=data.get("extra_params", {}),
             strict_reproducibility=data.get("strict_reproducibility", False),
+            chain=data.get("chain", LEGACY_SERIALIZED_CHAIN),
             mev_simulation_enabled=data.get("mev_simulation_enabled", False),
             cumulative_slippage_model=data.get("cumulative_slippage_model", "multiplicative"),
             execution_delay_seconds=data.get("execution_delay_seconds", 1.0),
@@ -411,6 +413,8 @@ class ArbitrageBacktestAdapter(StrategyBacktestAdapter):
             initial_amount=Decimal("10000"),
         )
     """
+
+    config_class = ArbitrageBacktestConfig
 
     def __init__(self, config: ArbitrageBacktestConfig | None = None) -> None:
         """Initialize the arbitrage backtest adapter.

@@ -258,6 +258,32 @@ _STATIC_ADDRESS_CANONICAL_SYMBOLS: dict[tuple[str, str], str] = {
     ("polygon", NATIVE_SENTINEL.lower()): "POL",
 }
 
+
+def fold_native_address_alias(address: str, chain: str) -> str:
+    """Return ``NATIVE_SENTINEL`` when ``address`` is a native-coin alias on ``chain``.
+
+    The aliases are declared per chain on ``NativeToken.address_aliases`` (the
+    Polygon ``0x...1010`` precompile); the fold runs before any cache,
+    negative-cache or registry key is derived so one native identity reaches
+    every downstream plane. Any other address (including the same alias on a
+    chain where it is not a native alias, and any address on an unknown chain)
+    is returned unchanged. ``chain`` may be a canonical name, a registered
+    alias, or a CAIP-2 id. All-numeric aliases are checksum-neutral.
+    """
+    descriptor = ChainRegistry.try_resolve(str(chain))
+    if descriptor is None:
+        return address
+    lowered = address.strip().lower()
+    if any(lowered == alias.lower() for alias in descriptor.native.address_aliases):
+        return NATIVE_SENTINEL
+    return address
+
+
+def is_native_address_alias(address: str, chain: str) -> bool:
+    """True when ``address`` is a chain-scoped alias for ``chain``'s native coin."""
+    return fold_native_address_alias(address, chain) != address
+
+
 # Lazy cache of the CoinGecko-ID -> canonical-symbol reverse map.  Populated
 # on first call to _normalize_symbol_input(); ~1357 entries built from
 # DEFAULT_TOKENS.  Cheap to build but we cache to avoid the cost on every
@@ -796,6 +822,13 @@ class TokenResolver:
 
             if is_address:
                 _validate_address(token, chain_lower)
+                # Fold chain-scoped native-coin aliases (Polygon
+                # ``0x...1010``) onto NATIVE_SENTINEL here, before the
+                # negative-cache key, the cache key, and the static-registry
+                # key are derived, so every downstream plane sees one native
+                # identity and the alias can never be negative-cached as an
+                # unknown ERC-20.
+                token = fold_native_address_alias(token, chain_lower)
             elif _looks_like_address(token):
                 _validate_address(token, chain_lower)
 
@@ -2203,4 +2236,6 @@ __all__ = [
     "TokenResolver",
     "get_token_resolver",
     "create_token_resolver",
+    "fold_native_address_alias",
+    "is_native_address_alias",
 ]

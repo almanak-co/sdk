@@ -64,6 +64,14 @@ DESCRIPTOR = register_chain(
             block_time_seconds=2.0,
             rate_limit_rpm=300,
             fork_requires_archive=True,
+            # OP Mainnet's pre-Bedrock (legacy OVM) genesis carries a
+            # 117-byte Clique-style ``extraData``; web3 rejects it with
+            # ``ExtraDataLengthError`` unless the POA middleware remaps the
+            # field, which broke every archive block resolution that touched
+            # block 0 (historical exact-pool preflight). Base and other
+            # Bedrock-native OP-stack chains have a <=32-byte genesis
+            # ``extraData`` and do not need this.
+            poa=True,
         ),
         explorer=Explorer(
             api_url="https://api-optimistic.etherscan.io/api",

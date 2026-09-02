@@ -46,6 +46,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal
 
+from almanak.core.chains import LEGACY_SERIALIZED_CHAIN
 from almanak.framework.backtesting.adapters.base import (
     AdapterRegistry,
     StrategyBacktestAdapter,
@@ -402,6 +403,7 @@ class MultiProtocolBacktestConfig(StrategyBacktestConfig):
             reconcile_on_tick=data.get("reconcile_on_tick", False),
             extra_params=data.get("extra_params", {}),
             strict_reproducibility=data.get("strict_reproducibility", False),
+            chain=data.get("chain", LEGACY_SERIALIZED_CHAIN),
             reconcile_positions=data.get("reconcile_positions", True),
             swap_lane=data.get("swap_lane", "arbitrage"),
             unified_liquidation_model=data.get("unified_liquidation_model", "conservative"),
@@ -455,6 +457,8 @@ class MultiProtocolBacktestAdapter(StrategyBacktestAdapter):
         risk_result = adapter.calculate_unified_risk(portfolio, market_state)
     """
 
+    config_class = MultiProtocolBacktestConfig
+
     def __init__(
         self,
         config: MultiProtocolBacktestConfig | None = None,
@@ -465,6 +469,9 @@ class MultiProtocolBacktestAdapter(StrategyBacktestAdapter):
         Args:
             config: Multi-protocol-specific configuration. If None, uses default
                 MultiProtocolBacktestConfig with strategy_type="multi_protocol".
+                Its ``chain`` is the run chain and is handed to every
+                sub-adapter's config, so a chain-less intent routed through the
+                router resolves where the backtest runs (ALM-3427).
             data_config: Engine BacktestDataConfig, threaded through to every
                 sub-adapter so their historical-data providers honor the
                 caller's settings (ALM-2930: dropping it left the LP sub-adapter
@@ -489,8 +496,8 @@ class MultiProtocolBacktestAdapter(StrategyBacktestAdapter):
             if adapter_type == "multi_protocol":
                 continue
 
-            # Get adapter instance
-            adapter = get_adapter_with_config(adapter_type, data_config=self._data_config)
+            # Get adapter instance, bound to the run chain this router serves.
+            adapter = get_adapter_with_config(adapter_type, data_config=self._data_config, chain=self._config.chain)
             if adapter:
                 self._sub_adapters[adapter_type] = adapter
                 logger.debug("Initialized sub-adapter for protocol type: %s", adapter_type)

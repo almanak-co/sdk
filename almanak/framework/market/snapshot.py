@@ -160,16 +160,26 @@ def _is_evm_address(token: Any) -> bool:
 
 
 def _token_cache_key(token: str, chain: str) -> str:
-    """Return the native snapshot cache key for address-shaped tokens."""
+    """Return the native snapshot cache key for address-shaped tokens.
+
+    Chain-scoped native-coin alias addresses fold onto the native sentinel so
+    an alias read lands on the key the engine seeded for the native coin.
+    """
     if not isinstance(token, str):
         return token
     stripped = token.strip()
     prefix, separator, address = stripped.partition(":")
     if separator and prefix and _is_evm_address(address):
-        return f"{prefix.lower()}:{address.lower()}"
+        return f"{prefix.lower()}:{_fold_native_alias(address, prefix)}"
     if _is_evm_address(stripped):
-        return f"{chain.lower()}:{stripped.lower()}"
+        return f"{chain.lower()}:{_fold_native_alias(stripped, chain)}"
     return token
+
+
+def _fold_native_alias(address: str, chain: str) -> str:
+    from almanak.framework.data.tokens.resolver import fold_native_address_alias
+
+    return fold_native_address_alias(address, chain).lower()
 
 
 def _alias_target_display_key(key: str) -> str | None:
@@ -649,6 +659,13 @@ class MarketSnapshot:
         # guidance; None on live snapshots keeps the `unconfigured`
         # misconfiguration semantics.
         self._pool_analytics_refusal_detail: str | None = None
+        # Backtest factories stamp a refusal detail so a
+        # ``lending_rate`` / ``best_lending_rate`` cache miss refuses under
+        # ``backtest_no_historical_plane`` instead of lazily dialing a live
+        # gateway — a reachable sidecar would answer a HISTORICAL tick with
+        # TODAY's rate (look-ahead bias). None on live snapshots keeps the
+        # lazy gateway lane untouched. Read via ``_lazy_gateway_rate_monitor``.
+        self._lending_rate_refusal_detail: str | None = None
 
         # Per-indicator caches (tuple keys for timeframe-aware caching)
         self._macd_cache: dict[tuple[str, OHLCVTimeframe, int, int, int], MACDData] = {}
@@ -3612,6 +3629,51 @@ class MarketSnapshot:
             raise LendingMarketResolutionError(protocol=protocol, reason=reason)
         return self._lending_market_info_from_proto(response.market)
 
+    def _refuse_backtest_gateway_rate(self, *, source: str, subject: str) -> None:
+        """Raise when a backtest snapshot would serve a lending rate from any monitor.
+
+        Guards both the constructor-injected monitor and the lazily-built
+        gateway monitor: inside a PnL backtest only seeded rates are served,
+        so no monitor, however it was wired, can answer a historical tick
+        with a current rate. Live snapshots leave the detail ``None``.
+        """
+        detail = getattr(self, "_lending_rate_refusal_detail", None)
+        if detail:
+            message = f"{source} refused for {subject}: {detail}"
+            self._record_critical_data_failure(source, "backtest_no_historical_plane", message)
+            raise ValueError(message)
+
+    def _lazy_gateway_rate_monitor(self, *, source: str, requested_chain: str, subject: str) -> Any:
+        """Build the framework-internal gateway ``RateMonitor`` for a cache miss — or refuse.
+
+        Single chokepoint for every accessor that would otherwise dial the
+        gateway's ``RateHistoryService`` when no ``rate_monitor`` was injected
+        (:meth:`lending_rate`, :meth:`best_lending_rate`).
+
+        ALM-3008: inside a PnL backtest a cache miss must NEVER reach a live
+        gateway. The lazily-built monitor resolves a gateway client (the
+        injected one, else the default-port singleton) and calls
+        ``GetLendingRateCurrent`` — so a reachable sidecar (the hosted Cloud
+        Run job runs one) would answer a HISTORICAL tick with TODAY's rate:
+        look-ahead bias dressed as data. The backtest snapshot factory stamps
+        ``_lending_rate_refusal_detail``; when set, this records a typed
+        ``<source>/backtest_no_historical_plane`` decision-input failure and
+        raises the same ``ValueError`` the gateway-unavailable branch raises,
+        BEFORE constructing anything. Live snapshots leave the detail ``None``
+        and get the monitor exactly as before.
+        """
+        self._refuse_backtest_gateway_rate(source=source, subject=subject)
+
+        from almanak.framework.data.rates.monitor import RateMonitor
+
+        # ``_internal=True``: this IS the canonical lending-rate lane, not a
+        # deprecated strategy-side bypass (VIB-4869 disposition). The monitor
+        # is the framework-internal gateway gRPC client backing the accessor.
+        # gateway_client=self._gateway_client (VIB-5824): route through the
+        # snapshot's real client so this lazy lane dials the gateway the runner
+        # started, not the default-port 50051 singleton.
+        return RateMonitor(chain=requested_chain, gateway_client=self._gateway_client, _internal=True)
+
     def lending_rate(
         self,
         protocol: str,
@@ -3640,6 +3702,10 @@ class MarketSnapshot:
            strategies that inject rates synthetically (backtests / tests).
         2. The constructor-injected ``rate_monitor`` (legacy path), if set.
         3. A lazily-constructed default ``RateMonitor`` (calls the gateway).
+
+        Inside a PnL backtest steps 2 and 3 both REFUSE (ALM-3008): only
+        seeded rates are served, so a historical tick can never be answered
+        with a current rate by any monitor.
 
         Args:
             protocol: Protocol identifier (``"aave_v3"``, ``"compound_v3"``,
@@ -3694,6 +3760,11 @@ class MarketSnapshot:
         if cache_key in self._lending_rate_cache:
             return self._lending_rate_cache[cache_key]
 
+        # A backtest refuses here, before ANY monitor is consulted: an injected
+        # gateway-backed monitor would otherwise answer a historical tick with
+        # a current rate exactly like the lazy lane below.
+        self._refuse_backtest_gateway_rate(source="lending_rate", subject=f"{protocol}/{token}/{side_str}")
+
         # Use the constructor-injected RateMonitor if present (legacy path
         # — preserves test surfaces that mock the monitor).
         if self._rate_monitor is not None:
@@ -3725,17 +3796,16 @@ class MarketSnapshot:
         # for a strategy that asked for a live rate is a bigger footgun than
         # raising loudly.
         from almanak.framework.data.interfaces import DataSourceUnavailable
-        from almanak.framework.data.rates.monitor import RateMonitor
 
         requested_chain = chain if chain is not None else (self._chain if self._chain is not None else "ethereum")
 
-        # ``_internal=True``: this IS the canonical lending-rate lane, not a
-        # deprecated strategy-side bypass (VIB-4869 disposition). The monitor
-        # is the framework-internal gateway gRPC client backing this method.
-        # gateway_client=self._gateway_client (VIB-5824): route through the
-        # snapshot's real client so this lazy lane dials the gateway the runner
-        # started, not the default-port 50051 singleton.
-        monitor = RateMonitor(chain=requested_chain, gateway_client=self._gateway_client, _internal=True)
+        # Refuses inside a backtest before anything is constructed;
+        # live snapshots get the gateway-backed monitor as before.
+        monitor = self._lazy_gateway_rate_monitor(
+            source="lending_rate",
+            requested_chain=requested_chain,
+            subject=f"{protocol}/{token}/{side_str}",
+        )
 
         async def _fetch_via_gateway() -> Any:
             # Bypass the monitor's placeholder-fallback wrapper so an
@@ -3784,9 +3854,12 @@ class MarketSnapshot:
            preserves test surfaces that mock the monitor.
         2. A lazily-constructed framework-internal ``RateMonitor``
            (``_internal=True``) that fans out to the gateway. This keeps
-           direct instantiations (README-style flows, unit / backtest
-           harnesses calling ``create_market_snapshot()`` directly) working
-           without an injected monitor, instead of unconditionally raising.
+           direct instantiations (README-style flows, unit harnesses calling
+           ``create_market_snapshot()`` directly) working without an injected
+           monitor, instead of unconditionally raising. Inside a PnL backtest
+           this lane REFUSES (ALM-3008): there is no historical fan-out plane,
+           and a live read would leak today's rates into a historical tick.
+           Read the seeded rate per protocol via :meth:`lending_rate` instead.
 
         As with :meth:`lending_rate`, the lazy lane queries the gateway
         directly and **raises loudly** when the gateway is unreachable rather
@@ -3825,6 +3898,9 @@ class MarketSnapshot:
         except ValueError as exc:
             raise ValueError(f"Invalid lending rate side {side!r}: expected 'supply' or 'borrow'") from exc
 
+        # A backtest refuses before ANY monitor, injected or lazy, is consulted.
+        self._refuse_backtest_gateway_rate(source="best_lending_rate", subject=f"best {side_str} rate on {token}")
+
         # Use the constructor-injected RateMonitor if present (legacy path —
         # preserves test surfaces that mock the monitor and any placeholder
         # behaviour those callers relied on).
@@ -3844,12 +3920,16 @@ class MarketSnapshot:
         # fallback so an unreachable gateway raises rather than silently
         # returning hardcoded numbers — matching :meth:`lending_rate`.
         from almanak.framework.data.interfaces import DataSourceUnavailable
-        from almanak.framework.data.rates.monitor import BestRateResult, RateMonitor
+        from almanak.framework.data.rates.monitor import BestRateResult
 
         requested_chain = chain if chain is not None else (self._chain if self._chain is not None else "ethereum")
-        # gateway_client=self._gateway_client (VIB-5824): dial the runner's real
-        # gateway, not the default-port 50051 singleton.
-        monitor = RateMonitor(chain=requested_chain, gateway_client=self._gateway_client, _internal=True)
+        # Refuses inside a backtest before anything is constructed;
+        # live snapshots get the gateway-backed monitor as before.
+        monitor = self._lazy_gateway_rate_monitor(
+            source="best_lending_rate",
+            requested_chain=requested_chain,
+            subject=f"best {side_str} rate on {token}",
+        )
         target_protocols = protocols if protocols else monitor.protocols
 
         async def _best_via_gateway() -> Any:
@@ -3964,9 +4044,13 @@ class MarketSnapshot:
         In backtests (ALM-2943) the engine wires a simulated position view and
         health is served from the sim's own tracked lending positions — the
         same collateral/debt/threshold plane the liquidation guard marks each
-        tick — with no gateway involved. No position for the protocol returns
-        the empty-account shape (no debt ⇒ ``Infinity`` health factor);
-        genuinely uncomputable reads refuse with a decision-input ledger entry.
+        tick — with no gateway involved. A recognised lending venue with no
+        position returns the empty-account shape (no debt ⇒ ``Infinity``
+        health factor). A perpetuals venue or an unrecognised protocol raises
+        ``HealthUnavailableError`` after a ``("position_health", "simulation")``
+        ledger entry: a perp's health is not a lending health factor, so read
+        perp exposure through ``perp_positions()`` instead. Genuinely
+        uncomputable reads refuse the same way.
 
         Args:
             protocol: "aave_v3", "morpho_blue", or "compound_v3"

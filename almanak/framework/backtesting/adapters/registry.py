@@ -588,6 +588,8 @@ def get_adapter_for_strategy_with_config(
     strategy: Any,
     data_config: "BacktestDataConfig | None" = None,
     config: dict[str, Any] | None = None,
+    *,
+    chain: str | None = None,
 ) -> StrategyBacktestAdapter | None:
     """Get the appropriate backtest adapter for a strategy with data config.
 
@@ -600,6 +602,8 @@ def get_adapter_for_strategy_with_config(
         data_config: BacktestDataConfig for historical data provider settings.
             If provided, will be passed to the adapter constructor.
         config: Optional config dict that may contain explicit strategy_type
+        chain: The run's chain, threaded into the adapter config so chain-less
+            intents resolve on it (see :func:`get_adapter_with_config`).
 
     Returns:
         Instantiated adapter or None if no adapter matches
@@ -624,7 +628,7 @@ def get_adapter_for_strategy_with_config(
         logger.debug("No strategy type detected, using generic backtesting")
         return None
 
-    adapter = get_adapter_with_config(hint.strategy_type, data_config=data_config)
+    adapter = get_adapter_with_config(hint.strategy_type, data_config=data_config, chain=chain)
     if adapter:
         logger.debug(
             f"Found adapter for strategy type '{hint.strategy_type}' with data_config: {adapter.__class__.__name__}"

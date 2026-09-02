@@ -1042,3 +1042,35 @@ class TestBuildResultResponse:
             intent_type_wire_value({"value": "SWAP"})  # type: ignore[arg-type]
         with pytest.raises(ValueError, match="non-empty string"):
             intent_type_wire_value("  ")
+
+
+class TestPolygonNativePrecompileAlias:
+    """ALM-3058 / ALM-3035: ``0x...1010`` and ``POL`` are one display and price-series key."""
+
+    ALIAS = "0x0000000000000000000000000000000000001010"
+
+    def test_normalize_backtest_token_refs_folds_alias_onto_pol(self):
+        assert normalize_backtest_token_refs([self.ALIAS, "POL", NATIVE_SENTINEL], "polygon") == ["POL"]
+
+    def test_build_backtest_token_address_map_registers_alias_funding_at_sentinel(self):
+        config = PnLBacktestConfig(
+            start_time=datetime(2025, 1, 1, tzinfo=UTC),
+            end_time=datetime(2025, 1, 2, tzinfo=UTC),
+            chain="polygon",
+            tokens=["POL"],
+            token_funding=[
+                {
+                    "symbol": "POL",
+                    "address": self.ALIAS,
+                    "chain": "polygon",
+                    "amount": "100",
+                    "amount_type": "token",
+                }
+            ],
+            preflight_validation=False,
+        )
+
+        token_addresses = build_backtest_token_address_map(config)
+
+        assert token_addresses["POL"] == ("polygon", NATIVE_SENTINEL.lower())
+        assert all(address != self.ALIAS for _chain, address in token_addresses.values())
