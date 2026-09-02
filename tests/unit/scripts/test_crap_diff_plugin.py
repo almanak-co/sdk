@@ -13,6 +13,7 @@ from textwrap import dedent
 from unittest.mock import MagicMock, patch
 
 import pytest
+from diff_cover.report_generator import DiffViolations
 
 from scripts.ci import crap_diff_plugin as plugin
 
@@ -400,6 +401,34 @@ class TestCrapReporterViolations:
         assert "CRAP=" in msg
         assert "bad" in msg
 
+    def test_comment_change_in_high_crap_function_is_not_a_violation(self, tmp_path: Path):
+        pkg = tmp_path / "almanak"
+        pkg.mkdir()
+        target = pkg / "bad.py"
+        _write_high_crap_module(target)
+        source = target.read_text().replace("def bad(x, y, z):\n", "def bad(x, y, z):\n    # rationale\n", 1)
+        source += "\n\ndef clean():\n    return 1\n"
+        target.write_text(source)
+
+        reporter = self._make_reporter(tmp_path)
+        key = str(target.resolve())
+        comment_line = source.splitlines().index("    # rationale") + 1
+        clean_line = source.splitlines().index("def clean():") + 2
+        executable = set(range(1, len(source.splitlines()) + 1)) - {comment_line}
+        reporter._coverage_loaded = True
+        reporter._coverage_available = True
+        reporter._executable_by_path[key] = executable
+        reporter._executed_by_path[key] = {clean_line}
+
+        summary = DiffViolations(
+            reporter.violations(str(target)),
+            reporter.measured_lines(str(target)),
+            {comment_line, clean_line},
+        )
+
+        assert summary.lines == set()
+        assert summary.measured_lines == {clean_line}
+
     def test_path_outside_package_root_yields_no_violations(self, tmp_path: Path):
         # File outside `almanak/` package_root.
         outsider = tmp_path / "outside.py"
@@ -522,20 +551,35 @@ class TestCrapReporterViolations:
         assert captured2.err == ""
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# CrapReporter.measured_lines()
-# ──────────────────────────────────────────────────────────────────────────────
-
-
 class TestMeasuredLines:
-    """Returning None tells diff-cover 'every changed line is measured' —
-    standard linter idiom. Pinned because diff-cover's downstream behavior
-    depends on the None sentinel, not on an empty list."""
-
-    def test_returns_none(self, tmp_path: Path):
-        cfg = plugin._Config(coverage_data=str(tmp_path / ".coverage"))
+    def test_returns_only_coverage_executable_lines(self, tmp_path: Path):
+        pkg = tmp_path / "almanak"
+        pkg.mkdir()
+        target = pkg / "module.py"
+        target.write_text("# rationale\ndef f():\n    return 1\n")
+        cfg = plugin._Config(
+            coverage_data=str(tmp_path / ".coverage"),
+            package_root=str(pkg),
+        )
         reporter = plugin.CrapReporter(config=cfg)
-        assert reporter.measured_lines("anything.py") is None
+        reporter._coverage_loaded = True
+        reporter._coverage_available = True
+        reporter._executable_by_path[str(target.resolve())] = {2, 3}
+
+        assert reporter.measured_lines(str(target)) == [2, 3]
+
+    def test_path_outside_package_root_has_no_measured_lines(self, tmp_path: Path):
+        pkg = tmp_path / "almanak"
+        pkg.mkdir()
+        target = tmp_path / "outside.py"
+        target.write_text("value = 1\n")
+        cfg = plugin._Config(
+            coverage_data=str(tmp_path / ".coverage"),
+            package_root=str(pkg),
+        )
+        reporter = plugin.CrapReporter(config=cfg)
+
+        assert reporter.measured_lines(str(target)) == []
 
 
 # ──────────────────────────────────────────────────────────────────────────────

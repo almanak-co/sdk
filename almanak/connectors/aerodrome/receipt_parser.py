@@ -53,20 +53,8 @@ from almanak.framework.utils.log_formatters import (
 logger = logging.getLogger(__name__)
 
 
-# =============================================================================
-# Event Topic Signatures
-# =============================================================================
-
 EVENT_TOPICS: dict[str, str] = {
-    # Aerodrome / Velodrome V2 (Solidly fork) Pool emits:
-    #   Swap(address indexed sender, address indexed to,
-    #        uint256 amount0In, uint256 amount1In,
-    #        uint256 amount0Out, uint256 amount1Out)
-    # keccak256 of that signature is 0xb3e277... NOT 0xd78ad95f...
-    # (the latter is Uniswap V2's Swap signature, which has `to` as the
-    # last unindexed param). _decode_swap_data already assumes the Solidly
-    # fork layout (sender + to both indexed); only the topic hash was off.
-    # Fix surfaced by tests/intents/optimism/test_aerodrome_swap.py (VIB-4389).
+    # Solidly V2 indexes both sender and to; Uniswap V2 uses a different topic and layout.
     "Swap": "0xb3e2773606abfd36b5bd91394b3a54d1398336c65005baf7bf7a05efeffaf75b",
     "SwapCL": "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67",
     "Mint": "0x4c209b5fc8ad50758f13e2e1088ba56a560dff690a1c6fef26394f4c03821c4f",
@@ -74,7 +62,6 @@ EVENT_TOPICS: dict[str, str] = {
     "Sync": "0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1",
     "Transfer": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
     "Approval": "0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925",
-    # Slipstream CL NFT events (NonfungiblePositionManager)
     "IncreaseLiquidity": "0x3067048beee31b25b2f1681f88dac838c8bba36af25bfb2b7cf7473a5847e35f",
     "DecreaseLiquidity": "0x26f6a048ee9138f2c0ce266f322cb99228e8d619ae2bff30c67f8dcf9d2377b4",
     "CollectCL": "0x40d0efd1a53d60ecbf40971b9daf7dc90178c3aadc7aab1765632738fa8b8f01",
@@ -82,15 +69,9 @@ EVENT_TOPICS: dict[str, str] = {
 
 TOPIC_TO_EVENT: dict[str, str] = {v: k for k, v in EVENT_TOPICS.items()}
 
-# Legacy exports
 SWAP_EVENT_TOPIC = EVENT_TOPICS["Swap"]
 MINT_EVENT_TOPIC = EVENT_TOPICS["Mint"]
 BURN_EVENT_TOPIC = EVENT_TOPICS["Burn"]
-
-
-# =============================================================================
-# Enums
-# =============================================================================
 
 
 class AerodromeEventType(Enum):
@@ -114,11 +95,6 @@ EVENT_NAME_TO_TYPE: dict[str, AerodromeEventType] = {
     "Transfer": AerodromeEventType.TRANSFER,
     "Approval": AerodromeEventType.APPROVAL,
 }
-
-
-# =============================================================================
-# Data Classes
-# =============================================================================
 
 
 @dataclass
@@ -337,7 +313,7 @@ class ParsedSwapResult:
 class ParsedLiquidityResult:
     """High-level liquidity result extracted from receipt."""
 
-    operation: str  # "add" or "remove"
+    operation: str
     token0: str
     token1: str
     token0_symbol: str
@@ -417,11 +393,6 @@ class ParseResult:
         }
 
 
-# =============================================================================
-# Receipt Parser
-# =============================================================================
-
-
 class AerodromeReceiptParser(FailClosedExtractMixin):
     """Parser for Aerodrome transaction receipts.
 
@@ -429,20 +400,14 @@ class AerodromeReceiptParser(FailClosedExtractMixin):
     and event registry management. Maintains full backward compatibility.
     """
 
-    # Capability surface for the ResultEnricher SUPPORTED_EXTRACTIONS check
-    # (VIB-4434 W2 — see audit doc §5). Each entry maps to a present
-    # ``extract_<field>`` method on the class. Aerodrome V1 is a Solidly
-    # fork with fungible LP — there is no NFT-position model and no
-    # standalone tick extraction; the LP_OPEN fields ``lp_open_data`` /
-    # ``tick_lower`` / ``tick_upper`` are intentionally absent and narrowed
-    # via ``EXTRACTION_SPECS_REMOVE_BY_PROTOCOL["aerodrome"]["LP_OPEN"]``.
     SUPPORTED_EXTRACTIONS: frozenset[str] = frozenset(
         {
             "swap_amounts",
-            "position_id",  # returns the pool address (Solidly-fork LP id semantics)
+            # Classic LPs are fungible; their pool address is the position identity.
+            "position_id",
             "liquidity",
             "lp_close_data",
-            "protocol_fees",  # UNAVAILABLE-with-reason per VIB-3204 / VIB-3495
+            "protocol_fees",
         }
     )
 
@@ -481,7 +446,6 @@ class AerodromeReceiptParser(FailClosedExtractMixin):
 
         self.registry = EventRegistry(EVENT_TOPICS, EVENT_NAME_TO_TYPE)
 
-        # Try to resolve symbols and decimals from addresses via TokenResolver
         if self.token0_address and not self.token0_symbol:
             symbol, decimals = self._resolve_token_info(self.token0_address)
             if symbol:
@@ -495,7 +459,6 @@ class AerodromeReceiptParser(FailClosedExtractMixin):
             if decimals is not None:
                 self.token1_decimals = decimals
 
-        # If symbols were provided but decimals weren't, resolve decimals
         if self.token0_symbol and self.token0_decimals is None:
             _, decimals = self._resolve_token_info(self.token0_symbol)
             if decimals is not None:
@@ -505,7 +468,7 @@ class AerodromeReceiptParser(FailClosedExtractMixin):
             if decimals is not None:
                 self.token1_decimals = decimals
 
-        # Log warning if decimals remain unresolved — do NOT default to 18.
+        # Keep unresolved decimals as None so accounting can preserve unmeasured state.
         if self.token0_decimals is None:
             logger.debug(f"token0 decimals unresolved for chain={self.chain} (address={self.token0_address})")
         if self.token1_decimals is None:
@@ -565,9 +528,7 @@ class AerodromeReceiptParser(FailClosedExtractMixin):
             status = receipt.get("status", 1)
             tx_success = status == 1
 
-            # Reverts must be reported before the empty-logs short-circuit,
-            # otherwise an early-revert receipt (status=0, logs=[]) would be
-            # silently surfaced as a successful empty receipt (issue #2064).
+            # Reverted receipts can have no logs, so status must be checked first.
             if not tx_success:
                 return ParseResult(
                     success=True,
@@ -596,7 +557,6 @@ class AerodromeReceiptParser(FailClosedExtractMixin):
                 if parsed_event:
                     events.append(parsed_event)
 
-                    # Extract typed data based on event type
                     if parsed_event.event_type == AerodromeEventType.SWAP:
                         swap_data = self._parse_swap_event(parsed_event)
                         if swap_data:
@@ -617,31 +577,25 @@ class AerodromeReceiptParser(FailClosedExtractMixin):
                         if transfer_data:
                             transfer_events.append(transfer_data)
 
-            # Build high-level swap result
             swap_result = None
             if swap_events:
                 swap_result = self._build_swap_result(
-                    swap_events[0],  # Use first swap event
+                    swap_events[0],
                     transfer_events,
                     quoted_amount_out,
                 )
 
-            # Build liquidity result
             liquidity_result = None
             if mint_events:
                 liquidity_result = self._build_liquidity_result("add", mint_events[0])
             elif burn_events:
                 liquidity_result = self._build_liquidity_result("remove", burn_events[0])
 
-            # Log parsed receipt with user-friendly formatting
             tx_fmt = format_tx_hash(tx_hash)
             gas_fmt = format_gas_cost(receipt.get("gasUsed"))
 
             if swap_result:
                 slippage_fmt = format_slippage_bps(swap_result.slippage_bps)
-                # ``amount_*_decimal`` may be None when token decimals could
-                # not be resolved (Empty != zero invariant); fall back to "?"
-                # rather than crashing the log line.
                 in_fmt = f"{swap_result.amount_in_decimal:.4f}" if swap_result.amount_in_decimal is not None else "?"
                 out_fmt = f"{swap_result.amount_out_decimal:.4f}" if swap_result.amount_out_decimal is not None else "?"
                 logger.info(
@@ -700,7 +654,6 @@ class AerodromeReceiptParser(FailClosedExtractMixin):
             if not topics:
                 return None
 
-            # Normalize first topic (event signature)
             first_topic = topics[0]
             if isinstance(first_topic, bytes):
                 first_topic = "0x" + first_topic.hex()
@@ -708,22 +661,18 @@ class AerodromeReceiptParser(FailClosedExtractMixin):
                 first_topic = str(first_topic)
             first_topic = first_topic.lower()
 
-            # Check if known event
             event_name = self.registry.get_event_name(first_topic)
             if event_name is None:
                 return None
 
             event_type = self.registry.get_event_type(event_name) or AerodromeEventType.UNKNOWN
 
-            # Get raw data
             data = HexDecoder.normalize_hex(log.get("data", ""))
 
-            # Normalize contract address
             contract_address = log.get("address", "")
             if isinstance(contract_address, bytes):
                 contract_address = "0x" + contract_address.hex()
 
-            # Convert topics to strings
             topics_str = []
             for topic in topics:
                 if isinstance(topic, bytes):
@@ -731,7 +680,6 @@ class AerodromeReceiptParser(FailClosedExtractMixin):
                 else:
                     topics_str.append(str(topic))
 
-            # Parse log data
             parsed_data = self._decode_log_data(event_name, topics, data, contract_address)
 
             return AerodromeEvent(
@@ -795,11 +743,9 @@ class AerodromeReceiptParser(FailClosedExtractMixin):
         - data: amount0In, amount1In, amount0Out, amount1Out (4x uint256)
         """
         try:
-            # Indexed: sender, to
             sender = HexDecoder.topic_to_address(topics[1]) if len(topics) > 1 else ""
             to = HexDecoder.topic_to_address(topics[2]) if len(topics) > 2 else ""
 
-            # Non-indexed: amount0In, amount1In, amount0Out, amount1Out
             amount0_in = HexDecoder.decode_uint256(data, 0)
             amount1_in = HexDecoder.decode_uint256(data, 32)
             amount0_out = HexDecoder.decode_uint256(data, 64)
@@ -847,8 +793,6 @@ class AerodromeReceiptParser(FailClosedExtractMixin):
 
         pool_address = address.lower() if isinstance(address, str) else ""
 
-        # Convert signed amounts to the V1-style amount_in/amount_out format:
-        # positive = user pays (amount_in), negative = user receives (amount_out)
         amount0_in = amount0 if amount0 > 0 else 0
         amount1_in = amount1 if amount1 > 0 else 0
         amount0_out = abs(amount0) if amount0 < 0 else 0
@@ -877,10 +821,8 @@ class AerodromeReceiptParser(FailClosedExtractMixin):
         - data: amount0, amount1 (2x uint256)
         """
         try:
-            # Indexed: sender
             sender = HexDecoder.topic_to_address(topics[1]) if len(topics) > 1 else ""
 
-            # Non-indexed: amount0, amount1
             amount0 = HexDecoder.decode_uint256(data, 0)
             amount1 = HexDecoder.decode_uint256(data, 32)
 
@@ -911,11 +853,9 @@ class AerodromeReceiptParser(FailClosedExtractMixin):
         - data: amount0, amount1 (2x uint256)
         """
         try:
-            # Indexed: sender, to
             sender = HexDecoder.topic_to_address(topics[1]) if len(topics) > 1 else ""
             to = HexDecoder.topic_to_address(topics[2]) if len(topics) > 2 else ""
 
-            # Non-indexed: amount0, amount1
             amount0 = HexDecoder.decode_uint256(data, 0)
             amount1 = HexDecoder.decode_uint256(data, 32)
 
@@ -1040,7 +980,6 @@ class AerodromeReceiptParser(FailClosedExtractMixin):
         Returns:
             ParsedSwapResult with full swap details, or None if decimals unresolved
         """
-        # Determine which token is in/out
         if swap_event.token0_is_input:
             token_in = self.token0_address or ""
             token_out = self.token1_address or ""
@@ -1059,23 +998,16 @@ class AerodromeReceiptParser(FailClosedExtractMixin):
         amount_in = swap_event.amount_in
         amount_out = swap_event.amount_out
 
-        # Try to resolve decimals if not already known
         if token_in_decimals is None and token_in:
             token_in_decimals = self._resolve_decimals(token_in)
         if token_out_decimals is None and token_out:
             token_out_decimals = self._resolve_decimals(token_out)
 
-        # Convert to decimal with proper decimals.
-        # Return None when decimals are unresolved to avoid leaking fabricated
-        # zero values to direct callers of parse_receipt().
-        # extract_swap_amounts() handles this by falling back to raw swap_events.
         if token_in_decimals is not None and token_out_decimals is not None:
             amount_in_decimal = Decimal(str(amount_in)) / Decimal(10**token_in_decimals)
             amount_out_decimal = Decimal(str(amount_out)) / Decimal(10**token_out_decimals)
         else:
-            # DEBUG not WARNING: this is expected in the enrichment path where the
-            # parser is constructed without token metadata.  extract_swap_amounts()
-            # has its own fallback that resolves decimals from Transfer events.
+            # Omit swap_result rather than fabricate decimal amounts from unknown units.
             logger.debug(
                 "Token decimals unresolved (in=%s, out=%s); omitting swap_result",
                 token_in_decimals,
@@ -1083,13 +1015,11 @@ class AerodromeReceiptParser(FailClosedExtractMixin):
             )
             return None
 
-        # Calculate effective price
         if amount_in_decimal > 0:
             effective_price = amount_out_decimal / amount_in_decimal
         else:
             effective_price = Decimal("0")
 
-        # Calculate slippage
         slippage_bps = 0
         if quoted_amount_out and quoted_amount_out > 0:
             slippage_pct_float = (quoted_amount_out - amount_out) / quoted_amount_out
@@ -1134,11 +1064,10 @@ class AerodromeReceiptParser(FailClosedExtractMixin):
         amount0 = liquidity_event.amount0
         amount1 = liquidity_event.amount1
 
-        # Resolve decimals, falling back to resolver if constructor value is None
         t0_dec = self.token0_decimals if self.token0_decimals is not None else self._resolve_decimals(token0)
         t1_dec = self.token1_decimals if self.token1_decimals is not None else self._resolve_decimals(token1)
 
-        # Convert to decimal (zero if decimals still unknown)
+        # This legacy result uses zero for unknown decimal scaling; it does not prove a zero raw amount.
         amount0_decimal = Decimal(str(amount0)) / Decimal(10**t0_dec) if t0_dec is not None else Decimal(0)
         amount1_decimal = Decimal(str(amount1)) / Decimal(10**t1_dec) if t1_dec is not None else Decimal(0)
 
@@ -1155,10 +1084,6 @@ class AerodromeReceiptParser(FailClosedExtractMixin):
             pool_address=liquidity_event.pool_address,
         )
 
-    # =============================================================================
-    # Extraction Methods (for Result Enrichment)
-    # =============================================================================
-
     def build_extract_kwargs(
         self,
         *,
@@ -1174,10 +1099,6 @@ class AerodromeReceiptParser(FailClosedExtractMixin):
     ) -> dict[str, tuple[str, int]]:
         """Map compiler token metadata to ``{address: (symbol, decimals)}``."""
         return {address.lower(): value for address, value in build_token_meta_hint_map(swap_token_meta).items()}
-
-    # ---- VIB-3159: tagged-variant wrappers ------------------------------------
-    # See uniswap_v3/receipt_parser.py for the rationale. The raw methods
-    # preserve their legacy return types so direct callers keep working.
 
     def extract_swap_amounts_result(
         self,
@@ -1288,8 +1209,6 @@ class AerodromeReceiptParser(FailClosedExtractMixin):
                 effective_price=effective_price,
                 slippage_bps=slippage_bps,
                 expected_out_decimal=expected_out,
-                # VIB-4978: canonicalise the (symbol, addr, hint) trio to a symbol
-                # so the ledger/Trade Tape never shows a raw contract address.
                 token_in=resolve_swap_token_symbol_with_fallback(
                     seed.token_in_symbol, token_in_addr, seed.token_in_hint, self.chain
                 ),
@@ -1301,10 +1220,6 @@ class AerodromeReceiptParser(FailClosedExtractMixin):
         except Exception as e:
             logger.warning(f"Failed to extract swap amounts: {e}")
             return None
-
-    # ------------------------------------------------------------------
-    # Extraction helpers — keep each CC small and individually testable.
-    # ------------------------------------------------------------------
 
     def _seed_swap_fields(self, parse_result: ParseResult) -> "_SwapSeed | None":
         """Extract raw amounts + token hints from the parsed result.
@@ -1391,7 +1306,7 @@ class AerodromeReceiptParser(FailClosedExtractMixin):
                 if not token_out_addr and p_out:
                     token_out_addr = p_out
 
-        # Stage 2.5: direction fallback from compiler hints (single-swap only)
+        # Compiler direction hints are unsafe for multi-hop receipts with intermediate tokens.
         if single_swap and swap_token_meta:
             if not token_in_addr:
                 in_slot = swap_token_meta.get("token_in")
@@ -1476,6 +1391,7 @@ class AerodromeReceiptParser(FailClosedExtractMixin):
             Tuple of (token_in_addr, token_out_addr, amount_in, amount_out).
             Empty strings / 0 for fields that could not be determined.
         """
+        # Safe and Zodiac transfers belong to the effective Safe, not the receipt signer.
         wallet = resolve_trading_wallet(receipt)
         if not wallet:
             return "", "", 0, 0
@@ -1584,20 +1500,15 @@ class AerodromeReceiptParser(FailClosedExtractMixin):
         try:
             result = self.parse_receipt(receipt)
 
-            # Primary: use Burn events
             if result.burn_events:
                 total_amount0 = sum(b.amount0 for b in result.burn_events)
                 total_amount1 = sum(b.amount1 for b in result.burn_events)
 
-                # VIB-6053 — bind leg IDENTITY to the burned amounts. The Burn's
-                # amount0/amount1 are in the POOL's slot order, which may be the
-                # opposite of the user's pool label; a removeLiquidity transfers
-                # exactly those amounts out of the pool, so the value-match is
-                # exact. ``None`` on a miss — consumers fail closed, never guess.
                 burn_pool = next(
                     (b.pool_address for b in result.burn_events if getattr(b, "pool_address", "")),
                     "",
                 )
+                # Burn amounts use pool slot order; outgoing transfers recover exact currencies.
                 currency0, currency1 = currencies_for_amounts(
                     transfers_by_token(receipt.get("logs", []), chain=self.chain, from_address=burn_pool)
                     if burn_pool
@@ -1609,21 +1520,14 @@ class AerodromeReceiptParser(FailClosedExtractMixin):
                 return LPCloseData(
                     amount0_collected=total_amount0,
                     amount1_collected=total_amount1,
-                    # VIB-4470 — Aerodrome V1 doesn't separate fees from
-                    # principal; fees are unmeasured (Empty ≠ Zero).
+                    # V1 receipts do not separate principal from fees.
                     fees0=None,
                     fees1=None,
                     liquidity_removed=None,
-                    currency0=currency0,  # VIB-6053 — index-aligned with amount0_collected
-                    currency1=currency1,  # VIB-6053 — index-aligned with amount1_collected
+                    currency0=currency0,
+                    currency1=currency1,
                 )
 
-            # Fallback: use Transfer events for token returns.
-            # In a removeLiquidity TX, the pool transfers token0 and token1
-            # to the recipient. We identify these by:
-            # 1. Filtering out LP token burns (transfers to/from zero address)
-            # 2. Matching by known token0/token1 addresses if available
-            # 3. Otherwise grouping by token_address (contract that emitted Transfer)
             if result.transfer_events:
                 lp_close = self._extract_lp_close_from_transfers(result.transfer_events)
                 if lp_close:
@@ -1660,48 +1564,36 @@ class AerodromeReceiptParser(FailClosedExtractMixin):
 
         zero_addr = "0x0000000000000000000000000000000000000000"
 
-        # Path A: match by known token addresses, take last transfer per token
         if self.token0_address and self.token1_address:
-            # VIB-6053 — Empty != Zero (blueprint 27 §10.10). These seed as ``None``
-            # (UNMEASURED), not ``0``: a token with NO Transfer in this receipt was
-            # not observed to return zero, it was not observed at all. Seeding ``0``
-            # made an unobserved leg indistinguishable from a genuinely-zero one and
-            # published a fabricated measured zero downstream.
+            # A missing transfer is unmeasured, not a measured zero.
             amount0: int | None = None
             amount1: int | None = None
             for t in transfer_events:
                 addr = t.token_address.lower()
                 to = t.to_addr.lower()
                 frm = t.from_addr.lower()
-                # Skip burns and mints (to/from zero)
                 if to == zero_addr or frm == zero_addr:
                     continue
                 if addr == self.token0_address:
-                    amount0 = t.value  # last write wins, avoiding router double-count
+                    amount0 = t.value
                 elif addr == self.token1_address:
                     amount1 = t.value
             if (amount0 or 0) > 0 or (amount1 or 0) > 0:
                 return LPCloseData(
                     amount0_collected=amount0,
                     amount1_collected=amount1,
-                    # VIB-4470 — Transfer-event fallback doesn't separate
-                    # fees from principal (Empty ≠ Zero).
+                    # Transfer fallback cannot separate principal from fees.
                     fees0=None,
                     fees1=None,
                     liquidity_removed=None,
-                    # VIB-6053 — the slots were assigned BY ADDRESS above, so the
-                    # identity is known exactly; emit it so no consumer has to
-                    # re-derive the pairing from the user's pool label.
                     currency0=self.token0_address,
                     currency1=self.token1_address,
                 )
 
-        # Path B: group by recipient, find one who received 2+ distinct tokens
         token_amounts_by_recipient: dict[str, dict[str, int]] = {}
         for t in transfer_events:
             to = t.to_addr.lower()
             frm = t.from_addr.lower()
-            # Skip LP token burns (to zero) and mints (from zero)
             if to == zero_addr or frm == zero_addr:
                 continue
             token_addr = t.token_address.lower()
@@ -1709,27 +1601,9 @@ class AerodromeReceiptParser(FailClosedExtractMixin):
                 token_amounts_by_recipient[to] = {}
             token_amounts_by_recipient[to][token_addr] = token_amounts_by_recipient[to].get(token_addr, 0) + t.value
 
-        # Find a recipient who received 2+ types of tokens (the LP closer)
         for token_amounts in token_amounts_by_recipient.values():
             if len(token_amounts) >= 2:
-                # VIB-6045 — assign the slots BY TOKEN ADDRESS, never by amount.
-                #
-                # This previously did ``sorted(token_amounts.values(), reverse=True)``
-                # and took ``amounts[0]`` / ``amounts[1]``: a raw-integer magnitude
-                # sort ACROSS TOKENS WITH DIFFERENT DECIMALS. A WETH leg (18 dp,
-                # raw 2.9e16) always "outranks" a USDC leg (6 dp, raw 5.5e7) of the
-                # same USD value, so slot assignment tracked decimals rather than
-                # anything meaningful — and the identity was discarded entirely, so
-                # no downstream consumer could repair it. On base/optimism this
-                # booked a $110 close as a $29.3bn ledger row, and the same number
-                # sizes the teardown swap-back (ALM-2766 clamp), so it stranded
-                # real funds.
-                #
-                # Ascending address order is the Solidly/V3-family pool convention
-                # (``token0()`` is the numerically-lower address), so this
-                # reproduces the pool's own slot order — and the currencies are
-                # emitted alongside, which is what makes the pairing verifiable
-                # instead of assumed.
+                # Pool slots are address-ordered; raw amounts across token units are incomparable.
                 ordered = sorted(token_amounts.items(), key=lambda kv: int(kv[0], 16))
                 (token0, value0), (token1, value1) = ordered[0], ordered[1]
                 if len(ordered) > 2:
@@ -1745,12 +1619,10 @@ class AerodromeReceiptParser(FailClosedExtractMixin):
                 return LPCloseData(
                     amount0_collected=value0,
                     amount1_collected=value1,
-                    # VIB-4470 — Transfer-event fallback doesn't separate fees
-                    # from principal (Empty ≠ Zero).
+                    # Transfer fallback cannot separate principal from fees.
                     fees0=None,
                     fees1=None,
                     liquidity_removed=None,
-                    # VIB-6045 / VIB-6053 — identity travels WITH the amounts.
                     currency0=token0,
                     currency1=token1,
                 )
@@ -1787,7 +1659,6 @@ class AerodromeReceiptParser(FailClosedExtractMixin):
                 if not topic0.startswith("0x"):
                     topic0 = "0x" + topic0
                 if topic0.lower() == mint_topic.lower():
-                    # The Mint event is emitted by the pool contract
                     pool_address = log.get("address", "")
                     if isinstance(pool_address, bytes | bytearray):
                         pool_address = "0x" + bytes(pool_address).hex()
@@ -1816,7 +1687,6 @@ class AerodromeReceiptParser(FailClosedExtractMixin):
         try:
             result = self.parse_receipt(receipt)
 
-            # Look for LP token transfer from zero address (mint)
             zero_addr = "0x0000000000000000000000000000000000000000"
             for transfer in result.transfer_events:
                 if transfer.from_addr.lower() == zero_addr:
@@ -1827,10 +1697,6 @@ class AerodromeReceiptParser(FailClosedExtractMixin):
         except Exception as e:
             logger.warning(f"Failed to extract liquidity: {e}")
             return None
-
-    # =============================================================================
-    # Protocol Fee Extraction (VIB-3204)
-    # =============================================================================
 
     def extract_protocol_fees(self, _receipt: dict[str, Any]) -> "ProtocolFees":
         """VIB-3495: Aerodrome LP protocol fee coverage audit.
@@ -1849,15 +1715,12 @@ class AerodromeReceiptParser(FailClosedExtractMixin):
         """
         from almanak.framework.execution.extracted_data import ProtocolFees
 
-        # VIB-3495: Aerodrome V1 fee rate is in pool storage (not the receipt).
-        # The fee amount in token units is implicit in the Swap event's
-        # amount_in vs amount_out gap, but USD conversion is unavailable here.
+        # V1 fees are implicit in swap amounts and unavailable as receipt-level USD values.
         return ProtocolFees(
             total_usd=None,
             unavailable_reason="protocol_fee_not_emitted_in_receipt",
         )
 
-    # Backward compatibility methods
     def is_aerodrome_event(self, topic: str | bytes) -> bool:
         """Check if a topic is a known Aerodrome event.
 
@@ -1867,7 +1730,6 @@ class AerodromeReceiptParser(FailClosedExtractMixin):
         Returns:
             True if topic is a known Aerodrome event
         """
-        # Normalize topic to lowercase hex string with 0x prefix
         if isinstance(topic, bytes):
             topic = "0x" + topic.hex()
         else:
@@ -1887,7 +1749,6 @@ class AerodromeReceiptParser(FailClosedExtractMixin):
         Returns:
             Event type or UNKNOWN
         """
-        # Normalize topic to lowercase hex string with 0x prefix
         if isinstance(topic, bytes):
             topic = "0x" + topic.hex()
         else:
@@ -1899,34 +1760,18 @@ class AerodromeReceiptParser(FailClosedExtractMixin):
         return self.registry.get_event_type_from_topic(topic) or AerodromeEventType.UNKNOWN
 
 
-# =============================================================================
-# Aerodrome Slipstream CL Receipt Parser
-# =============================================================================
-
-# Zero address constant for ERC-721 mint detection
 _ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 
-# Slipstream CL NFT event topic constants
 _INCREASE_LIQUIDITY_TOPIC = EVENT_TOPICS["IncreaseLiquidity"].lower()
 _DECREASE_LIQUIDITY_TOPIC = EVENT_TOPICS["DecreaseLiquidity"].lower()
 _COLLECT_CL_TOPIC = EVENT_TOPICS["CollectCL"].lower()
 _ERC721_TRANSFER_TOPIC = EVENT_TOPICS["Transfer"].lower()
-# Slipstream CL Pool emits the standard Uniswap V3-style Pool.Mint event.
-# keccak256("Mint(address,address,int24,int24,uint128,uint256,uint256)")
 _SLIPSTREAM_POOL_MINT_TOPIC = "0x7a53080ba414158be7ec69b987b5fb7d07dee101fe85488f0853ae16239d0bde"
-# Slipstream CL Pool emits the standard Uniswap V3-style Pool.Burn event on close.
-# keccak256("Burn(address,int24,int24,uint128,uint256,uint256)")
-# Distinct from EVENT_TOPICS["Burn"] (V2 AMM ``Burn(address,uint256,uint256,address)``)
-# — Slipstream is a Uniswap V3 fork at the pool layer.
+# Slipstream Pool.Burn uses the V3 signature, distinct from fungible V2 Pool.Burn.
 _SLIPSTREAM_POOL_BURN_TOPIC = "0x0c396cd989a39f4459b5fa1aed6a9a8dcdbc45908acfd67e028cd568da98982c"
-# SwapCL event topic from the CL pool — carries post-swap current tick.
 _SLIPSTREAM_SWAP_CL_TOPIC = EVENT_TOPICS["SwapCL"].lower()
 
 
-# Reviewed Aerodrome Slipstream NonfungiblePositionManager generations,
-# sourced from the connector-owned deployment registry. Slipstream is a
-# Base-only deployment today; adding another chain or manager is an explicit
-# reviewed registry change rather than implicit address discovery.
 def _build_slipstream_npm_addresses() -> dict[str, tuple[str, ...]]:
     from .addresses import SLIPSTREAM_LP_DEPLOYMENTS, slipstream_lp_deployments
 
@@ -1955,10 +1800,6 @@ SLIPSTREAM_RECEIPT_SPEC = V3ForkSpec(
         "DecreaseLiquidity": AerodromeEventType.UNKNOWN,
         "CollectCL": AerodromeEventType.UNKNOWN,
     },
-    # The shared V3 spec owns one canonical manager per chain. Slipstream's
-    # receipt override below resolves the exact observed manager across every
-    # reviewed generation, while the canonical entry keeps the shared facade's
-    # single-manager contract intact.
     position_manager_addresses={
         chain: managers[0] for chain, managers in _SLIPSTREAM_NPM_ADDRESSES.items() if managers
     },
@@ -2017,22 +1858,9 @@ class AerodromeSlipstreamReceiptParser(V3ForkReceiptParser, AerodromeReceiptPars
     event where from == zero_address.
     """
 
-    # Compose with the V1 base set rather than restating it, so any addition
-    # to the parent stays in lockstep with Slipstream's surface.
-    #
-    # Slipstream extends V1 with three V3-style fields:
-    #   * ``lp_open_data`` — typed LPOpenData populated from IncreaseLiquidity
-    #     + ERC-721 Transfer; ``tick_lower`` / ``tick_upper`` are emitted
-    #     INSIDE this struct.
-    #   * ``fees0`` / ``fees1`` — Slipstream-only standalone fee extractors.
-    #
-    # Standalone ``extract_tick_lower`` / ``extract_tick_upper`` deliberately
-    # do NOT exist (ticks ship via ``lp_open_data``); both flat fields are
-    # narrowed via ``EXTRACTION_SPECS_REMOVE_BY_PROTOCOL["aerodrome_slipstream"]
-    # ["LP_OPEN"]`` so the SUPPORTED_EXTRACTIONS capability check does not
-    # emit false info-warnings (VIB-4434 W2).
     SUPPORTED_EXTRACTIONS: frozenset[str] = AerodromeReceiptParser.SUPPORTED_EXTRACTIONS | frozenset(
         {
+            # Tick bounds travel inside lp_open_data rather than standalone tick fields.
             "lp_open_data",
             "fees0",
             "fees1",
@@ -2090,13 +1918,13 @@ class AerodromeSlipstreamReceiptParser(V3ForkReceiptParser, AerodromeReceiptPars
             NFT tokenId as string (e.g. "12345"), or None if not found
         """
         try:
+            # The mint-shaped ERC-721 Transfer supplies identity only from a reviewed manager emitter.
             npm_address = self._nft_manager_address(receipt)
             if not npm_address:
                 return None
             logs = receipt.get("logs", [])
             for log in logs:
                 topics = log.get("topics", [])
-                # ERC-721 Transfer has exactly 4 topics
                 if len(topics) != 4:
                     continue
 
@@ -2115,12 +1943,10 @@ class AerodromeSlipstreamReceiptParser(V3ForkReceiptParser, AerodromeReceiptPars
                 if str(address).lower() != npm_address:
                     continue
 
-                # Check if from == zero_address (mint)
                 from_addr = HexDecoder.topic_to_address(topics[1])
                 if from_addr.lower() != _ZERO_ADDRESS:
                     continue
 
-                # tokenId is in topics[3] (indexed uint256)
                 topic3 = topics[3]
                 if isinstance(topic3, bytes | bytearray):
                     token_id_hex = bytes(topic3).hex()
@@ -2159,10 +1985,8 @@ class AerodromeSlipstreamReceiptParser(V3ForkReceiptParser, AerodromeReceiptPars
                 if topic0.lower() != _INCREASE_LIQUIDITY_TOPIC:
                     continue
 
-                # IncreaseLiquidity: topics[1]=tokenId(indexed), data=liquidity(uint128)+amount0(uint256)+amount1(uint256)
                 data = HexDecoder.normalize_hex(log.get("data", ""))
                 if len(data) >= 2 + 64:
-                    # uint128 liquidity is the first 32-byte slot in data
                     liquidity = HexDecoder.decode_uint256(data, 0)
                     return liquidity
 
@@ -2198,6 +2022,7 @@ class AerodromeSlipstreamReceiptParser(V3ForkReceiptParser, AerodromeReceiptPars
         normalized = HexDecoder.normalize_hex(data)
         if not normalized or normalized == "0x":
             return None
+        # Decode errors are parse failures, not missing IncreaseLiquidity events.
         try:
             return _SlipstreamIncrease(
                 token_id=token_id,
@@ -2214,6 +2039,7 @@ class AerodromeSlipstreamReceiptParser(V3ForkReceiptParser, AerodromeReceiptPars
         npm_address: str,
     ) -> tuple[_SlipstreamIncrease, Any | None] | None:
         """Pair the first valid NPM increase with its latest NPM-owned Pool Mint."""
+        # Pair the first usable IncreaseLiquidity with its latest preceding Pool Mint.
         last_npm_mint: Any | None = None
         for log in logs:
             topics, address, data = self._slipstream_log_fields(log)
@@ -2277,9 +2103,7 @@ class AerodromeSlipstreamReceiptParser(V3ForkReceiptParser, AerodromeReceiptPars
         npm_address = self._nft_manager_address(receipt)
         if not npm_address:
             if chain_key not in _SLIPSTREAM_NPM_ADDRESSES:
-                # Fail loud on unsupported chains rather than defaulting to
-                # Base. An ordinary approval receipt on a supported chain has
-                # no NPM emitter and is simply not an LP-open receipt.
+                # Never borrow another chain's NPM for emitter attribution.
                 logger.warning(
                     "Slipstream NPM not registered for chain %r; no reviewed deployment is available",
                     chain_key,
@@ -2305,9 +2129,7 @@ class AerodromeSlipstreamReceiptParser(V3ForkReceiptParser, AerodromeReceiptPars
             f"liquidity={increase.liquidity} amount0={increase.amount0} amount1={increase.amount1} "
             f"ticks=[{tick_lower}, {tick_upper}] current_tick={current_tick}"
         )
-        # VIB-6053 — bind leg IDENTITY to the amounts just decoded (CL pool slot
-        # order, which may be the OPPOSITE of the user's pool label). See the
-        # uniswap_v3 twin for the full rationale.
+        # Pool-slot amounts stay paired with transfer-derived currency identity.
         currency0, currency1 = currencies_for_amounts(
             transfers_by_token(logs, chain=self.chain, to_address=pool_address) if pool_address else {},
             increase.amount0,
@@ -2323,8 +2145,8 @@ class AerodromeSlipstreamReceiptParser(V3ForkReceiptParser, AerodromeReceiptPars
             amount1=increase.amount1,
             current_tick=current_tick,
             pool_address=pool_address,
-            currency0=currency0,  # VIB-6053 — index-aligned with amount0
-            currency1=currency1,  # VIB-6053 — index-aligned with amount1
+            currency0=currency0,
+            currency1=currency1,
         )
 
     @staticmethod
@@ -2369,9 +2191,7 @@ class AerodromeSlipstreamReceiptParser(V3ForkReceiptParser, AerodromeReceiptPars
                 v = int(topic, 16)
             except (ValueError, TypeError):
                 return None
-            # Indexed int24 is stored as a 32-byte two's-complement value;
-            # sign-extend by inspecting the top bit of the original 256-bit
-            # word (negative numbers come back as huge unsigned values).
+            # Indexed int24 values are sign-extended on the left into 256 bits.
             if v >= 2**255:
                 v -= 2**256
             return v
@@ -2431,16 +2251,12 @@ class AerodromeSlipstreamReceiptParser(V3ForkReceiptParser, AerodromeReceiptPars
                 continue
 
             normalized = HexDecoder.normalize_hex(data)
-            # ``normalize_hex`` returns the payload WITHOUT a 0x prefix, so a
-            # fully-formed SwapCL data field is exactly 5 × 64 = 320 hex chars
-            # (amount0 + amount1 + sqrtPriceX96 + liquidity + tick). Skip
-            # truncated logs but keep scanning for a later valid one.
             if not normalized or len(normalized) < 5 * 64:
                 continue
             try:
+                # Receipt order makes the latest valid SwapCL the final post-swap state.
                 latest_tick = HexDecoder.decode_int24(normalized, 128)
             except Exception:
-                # Malformed slot at offset 128 — skip this log, try next.
                 continue
         return latest_tick
 
@@ -2477,9 +2293,6 @@ class AerodromeSlipstreamReceiptParser(V3ForkReceiptParser, AerodromeReceiptPars
         try:
             logs = receipt.get("logs", [])
 
-            # Pass 1: prefer the Collect event — includes principal + pre-existing fees.
-            # Collect: topics[0]=sig, topics[1]=tokenId(indexed),
-            #          data = recipient(address,32b) + amount0Collected(uint256) + amount1Collected(uint256)
             for log in logs:
                 topics = log.get("topics", [])
                 if not topics:
@@ -2495,15 +2308,10 @@ class AerodromeSlipstreamReceiptParser(V3ForkReceiptParser, AerodromeReceiptPars
                     continue
 
                 data = HexDecoder.normalize_hex(log.get("data", ""))
-                # data = address(32b) + amount0(32b) + amount1(32b)
                 if len(data) >= 2 + 96:
                     amount0 = HexDecoder.decode_uint256(data, 32)
                     amount1 = HexDecoder.decode_uint256(data, 64)
-                    # VIB-6053 — bind leg IDENTITY to the collected amounts. The
-                    # Collect is emitted by the NPM, so the pool address is not the
-                    # log's own address; the amounts land on the Collect's
-                    # ``recipient`` (data word 0), and a Collect transfers exactly
-                    # the collected amounts, so the value-match there is exact.
+                    # Collect is emitted by the NPM; recipient transfers identify its currency legs.
                     recipient = HexDecoder.decode_address_from_data(data, 0)
                     currency0, currency1 = currencies_for_amounts(
                         transfers_by_token(logs, chain=self.chain, to_address=recipient) if recipient else {},
@@ -2513,20 +2321,14 @@ class AerodromeSlipstreamReceiptParser(V3ForkReceiptParser, AerodromeReceiptPars
                     return LPCloseData(
                         amount0_collected=amount0,
                         amount1_collected=amount1,
-                        # VIB-4470 — Slipstream's Collect event bundles
-                        # principal+fees in ``amount0/amount1Collected``;
-                        # fees are not separately observable here. Honest
-                        # ``None`` (Empty ≠ Zero) vs the prior ``0`` lie.
+                        # Collect combines principal and fees, so fee components are unmeasured.
                         fees0=None,
                         fees1=None,
                         source="collect",
-                        currency0=currency0,  # VIB-6053 — index-aligned with amount0_collected
-                        currency1=currency1,  # VIB-6053 — index-aligned with amount1_collected
+                        currency0=currency0,
+                        currency1=currency1,
                     )
 
-            # Pass 2: fall back to DecreaseLiquidity (first tx receipt in two-tx close).
-            # DecreaseLiquidity: topics[1]=tokenId(indexed),
-            #                    data = liquidity(uint128) + amount0(uint256) + amount1(uint256)
             for log in logs:
                 topics = log.get("topics", [])
                 if not topics:
@@ -2549,9 +2351,7 @@ class AerodromeSlipstreamReceiptParser(V3ForkReceiptParser, AerodromeReceiptPars
                     return LPCloseData(
                         amount0_collected=amount0,
                         amount1_collected=amount1,
-                        # VIB-4470 — DecreaseLiquidity carries principal
-                        # only; fees haven't been Collected yet so they are
-                        # unmeasured (Empty ≠ Zero) rather than zero.
+                        # DecreaseLiquidity reports principal before collection; fees are unmeasured.
                         fees0=None,
                         fees1=None,
                         liquidity_removed=liquidity,
@@ -2596,8 +2396,6 @@ class AerodromeSlipstreamReceiptParser(V3ForkReceiptParser, AerodromeReceiptPars
                     topic0 = "0x" + topic0
                 topic0_lower = topic0.lower()
 
-                # Fees are not separable from principal in an LP_CLOSE bundle —
-                # see docstring. Bail out as soon as we see DecreaseLiquidity.
                 if topic0_lower == _DECREASE_LIQUIDITY_TOPIC:
                     return None
 
@@ -2605,10 +2403,6 @@ class AerodromeSlipstreamReceiptParser(V3ForkReceiptParser, AerodromeReceiptPars
                     continue
 
                 data = HexDecoder.normalize_hex(log.get("data", ""))
-                # data layout: recipient(32b) + amount0(32b) + amount1(32b).
-                # ``normalize_hex`` strips the ``0x`` prefix, so 96 bytes = 192
-                # hex chars; reject any malformed payload that would cause
-                # ``decode_uint256(data, 64)`` below to read past the end.
                 if len(data) < 192:
                     continue
                 total0 += HexDecoder.decode_uint256(data, 32)
@@ -2679,25 +2473,6 @@ class AerodromeSlipstreamReceiptParser(V3ForkReceiptParser, AerodromeReceiptPars
             "no IncreaseLiquidity event in receipt",
         )
 
-    # =========================================================================
-    # Registry-mode payload builders (VIB-4305 / T12 follow-up to PR #2241).
-    # =========================================================================
-    #
-    # Strategy-runner ``_maybe_save_ledger_with_registry`` consumes these two
-    # methods to compose ``position_registry.payload`` for LP_OPEN / LP_CLOSE
-    # intents on Slipstream CL positions. They mirror the Uniswap V3 reference
-    # implementation in
-    # ``almanak/connectors/uniswap_v3/receipt_parser.py``
-    # (PR #1869 / T08 / T12). The dict-shape helpers
-    # (``open_payload_disagrees`` / ``build_close_receipt_payload`` /
-    # ``merge_open_payload_fields``) are shared via
-    # ``almanak.connectors._strategy_base.v3_registry_payload`` — they
-    # operate on plain dicts with no UniV3-specific assumptions, and
-    # re-implementing them here would be drift. The receipt-decoding
-    # (token_id from DecreaseLiquidity, pool from Pool Burn, NPM address)
-    # is Slipstream-specific because the emitter addresses and event
-    # signatures differ from canonical UniV3.
-
     def _nft_manager_address(self, receipt: dict[str, Any] | None = None) -> str:
         """Return the unique reviewed Slipstream NPM observed in ``receipt``.
 
@@ -2714,9 +2489,6 @@ class AerodromeSlipstreamReceiptParser(V3ForkReceiptParser, AerodromeReceiptPars
         if not managers:
             return ""
         if receipt is None:
-            # Compatibility-only inspection path. Production payload builders
-            # always supply the receipt and derive the physical authority from
-            # its emitter rather than assuming one generation.
             return managers[0] if len(managers) == 1 else ""
 
         observed: set[str] = set()
@@ -2881,24 +2653,15 @@ class AerodromeSlipstreamReceiptParser(V3ForkReceiptParser, AerodromeReceiptPars
         if lp_data is None:
             return None
         if lp_data.position_id is None or lp_data.position_id <= 0:
-            # token_id is the identity anchor; a zero/negative value would
-            # corrupt physical_identity_hash. Refuse to build the payload.
             return None
         if not lp_data.pool_address:
-            # pool_address is the semantic_grouping_key anchor; missing it
-            # would let two un-grouped rows in the same pool collide on
-            # ix_registry_auto_mode. Refuse rather than emit a partial row.
             return None
         if lp_data.tick_lower is None or lp_data.tick_upper is None:
-            # Range is part of the position's economic identity; missing
-            # ticks would let teardown / rebalancing read malformed bounds.
             return None
         if lp_data.liquidity is None:
             return None
         nft_manager_addr = self._nft_manager_address(receipt)
         if not nft_manager_addr:
-            # No unique reviewed NPM emitted the receipt: refuse to emit a
-            # payload with an empty or ambiguous physical authority.
             return None
 
         payload: dict[str, Any] = {
@@ -2978,12 +2741,10 @@ class AerodromeSlipstreamReceiptParser(V3ForkReceiptParser, AerodromeReceiptPars
         token_id = self._decreaseliquidity_token_id(receipt)
         if token_id is None or token_id <= 0:
             return None
-        # ``extract_lp_close_data`` does NOT populate ``pool_address`` for
-        # Slipstream (the NPM Collect / DecreaseLiquidity events don't carry
-        # the pool emitter — the Pool Burn does). Decode it explicitly.
         pool_address = self._pool_address_from_burn(receipt)
         if not pool_address:
             return None
+        # Close identity requires receipt-derived DecreaseLiquidity and Pool Burn anchors.
         if v3_registry_payload.open_payload_disagrees(
             open_payload=open_payload,
             token_id=token_id,

@@ -21,12 +21,7 @@ from almanak.core.intent_types import IntentType
 CONNECTOR = Connector(
     name="fluid",
     external_ids={"defillama": "fluid-dex"},
-    # SWAP (Phase 1, VIB-5029, 4 chains) + fToken lending SUPPLY/WITHDRAW
-    # (Phase 2, VIB-5030, arbitrum+base). Fluid's LP surface is
-    # whitelist-gated on-chain (Phase-0 finding, VIB-5028 §V4) and ships
-    # later via SmartLending / smart vaults (VIB-5032); vault borrow is
-    # VIB-5031. ``kind`` stays SWAP (primary surface); the intent/chain
-    # override below scopes lending to its validated chains.
+    # SWAP is the primary kind; intent and chain declarations scope lending.
     kind=ProtocolKind.SWAP,
     # The platform spec emits ``protocol: "fluid_lending"`` for fToken
     # supply strategies — same connector, alias resolved at compile ingress.
@@ -64,9 +59,7 @@ CONNECTOR = Connector(
         module="almanak.connectors.fluid.pool_data",
         attribute="POOL_DATA_SPEC",
     ),
-    # fToken aggregate account-state read (VIB-5030): market-scoped on the
-    # per-underlying fToken; powers lending pre/post-state capture
-    # (confidence=HIGH) and valuation. Compound V3 / Silo V2 shape.
+    # fToken account-state reads are market-scoped per underlying token.
     lending_read=LendingReadDecl(
         account_state=ImportRef(
             module="almanak.connectors.fluid.lending_read",
@@ -76,34 +69,16 @@ CONNECTOR = Connector(
             module="almanak.connectors.fluid.lending_read",
             attribute="FLUID_FTOKEN_MARKETS",
         ),
-        # Lending-scoped alias (aave precedent: "aave" -> aave_v3): the
-        # platform spec emits ``protocol: "fluid_lending"`` and the raw
-        # string travels on the intent into the accounting layer, whose
-        # ``_GENERIC_PRE_STATE_PROTOCOLS`` gate and position-key derivation
-        # canonicalize via ``LendingReadRegistry.normalize_protocol``.
-        # Without this alias the gate degrades fluid rows to ESTIMATED and
-        # the keys diverge (``:fluid_lending:`` vs ``:fluid:``).
+        # Normalize the lending alias for accounting gates and position keys.
         aliases=("fluid_lending",),
-        # VIB-5493: fTokens are supply-only and carry NO market_id — one fToken
-        # per underlying token per chain, so the position identity IS the token.
-        # The teardown lending guard splits its position key per token for
-        # token-keyed protocols, so two distinct Fluid supplies (e.g. USDC + USDT)
-        # are two positions instead of collapsing to one ``(fluid, chain, "")``
-        # key (which silently dropped the second withdraw). The vault CDP surface
-        # (``fluid_vault``) stays account/vault-keyed — it REQUIRES a market_id.
+        # fTokens have no market_id, so each underlying token is a distinct
+        # position; Fluid vault CDPs remain market-keyed.
         token_keyed=True,
     ),
-    # Fluid's lending compiler ships metadata amounts wei-encoded
-    # (``supply_amount`` / ``withdraw_amount`` = ERC-4626 asset base units);
-    # the orchestrator's pre-flight balance check and description formatter
-    # both derive the wei/human classification from this declaration
-    # (VIB-3747 / VIB-4851 C1). Without it the amounts would be classified
-    # human and mis-scaled by 10**decimals.
+    # Lending metadata amounts are ERC-4626 asset base units.
     metadata_amount_encoding=MetadataAmountEncoding(lending="wei"),
     strategy_intents=(IntentType.SWAP, IntentType.SUPPLY, IntentType.WITHDRAW),
-    # fToken lending is Arbitrum + Base only; SWAP is all four proven chains.
-    # The per-intent override is the canonical truth for both runtime checks
-    # and generated matrix rows.
+    # Lending is limited to Arbitrum and Base; SWAP is supported on all four chains.
     supported_chains=SupportedChainsSpec(
         chains=(ARBITRUM, BASE),
         intent_overrides={IntentType.SWAP: (ARBITRUM, BASE, ETHEREUM, POLYGON)},

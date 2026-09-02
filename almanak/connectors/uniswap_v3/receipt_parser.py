@@ -46,10 +46,6 @@ from almanak.framework.utils.log_formatters import (
 logger = logging.getLogger(__name__)
 
 
-# =============================================================================
-# Event Topic Signatures
-# =============================================================================
-
 EVENT_TOPICS: dict[str, str] = {
     "Swap": "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67",
     "Mint": "0x7a53080ba414158be7ec69b987b5fb7d07dee101fe85488f0853ae16239d0bde",
@@ -58,18 +54,12 @@ EVENT_TOPICS: dict[str, str] = {
     "Flash": "0xbdbdb71d7860376ba52b25a5028beea23581364a40522f6bcfb86bb1f2dca633",
     "Transfer": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
     "Approval": "0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925",
-    # NonfungiblePositionManager.IncreaseLiquidity(uint256 indexed tokenId, uint128 liquidity, uint256 amount0, uint256 amount1)
-    # keccak("IncreaseLiquidity(uint256,uint128,uint256,uint256)")
     "IncreaseLiquidity": "0x3067048beee31b25b2f1681f88dac838c8bba36af25bfb2b7cf7473a5847e35f",
-    # NonfungiblePositionManager.DecreaseLiquidity(uint256 indexed tokenId, uint128 liquidity, uint256 amount0, uint256 amount1)
-    # keccak("DecreaseLiquidity(uint256,uint128,uint256,uint256)") — VIB-4198 (T12) so the
-    # close-side parser can recover token_id from receipt facts alone (mirrors LP_OPEN's
-    # IncreaseLiquidity → token_id pattern; required for physical_identity_hash on
-    # registry-mode LP_CLOSE writes).
+    # Its indexed tokenId proves close identity; Collect alone may be fee-only.
     "DecreaseLiquidity": "0x26f6a048ee9138f2c0ce266f322cb99228e8d619ae2bff30c67f8dcf9d2377b4",
 }
 
-# Uniswap V3 NonfungiblePositionManager addresses (varies by chain; forks use different addresses)
+# Fork-specific position managers differ from canonical Uniswap deployments.
 POSITION_MANAGER_ADDRESSES: dict[str, str] = {
     "ethereum": "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
     "arbitrum": "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
@@ -79,26 +69,19 @@ POSITION_MANAGER_ADDRESSES: dict[str, str] = {
     "avalanche": "0x655C406EBFa14EE2006250925e54ec43AD184f8B",
     "bnb": "0x7b8A01B39D58278b5DE7e48c8449c9f4F5170613",
     "bsc": "0x7b8A01B39D58278b5DE7e48c8449c9f4F5170613",
-    "mantle": "0x218bf598D1453383e2F4AA7b14fFB9BfB102D637",  # Agni Finance fork
+    "mantle": "0x218bf598D1453383e2F4AA7b14fFB9BfB102D637",
     "monad": "0x7197E214c0b767cFB76Fb734ab638E2c192F4E53",
-    "xlayer": "0x315e413A11AB0df498eF83873012430ca36638Ae",  # Non-canonical (Governance Proposal 67)
-    "zerog": "0x8F67A30Ed186e3E1f6504c6dE3239Ef43A2e0d72",  # JAINE DEX NPM (Uniswap V3 fork)
-    "robinhood": "0x73991a25C818Bf1f1128dEAaB1492D45638DE0D3",  # Non-canonical (Orbit L2, verified factory() cross-check)
+    "xlayer": "0x315e413A11AB0df498eF83873012430ca36638Ae",
+    "zerog": "0x8F67A30Ed186e3E1f6504c6dE3239Ef43A2e0d72",
+    "robinhood": "0x73991a25C818Bf1f1128dEAaB1492D45638DE0D3",
 }
 
-# Zero address for detecting mints
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 ZERO_ADDRESS_PADDED = "0x" + "0" * 64
 
 TOPIC_TO_EVENT: dict[str, str] = {v: k for k, v in EVENT_TOPICS.items()}
 
-# Legacy exports
 SWAP_EVENT_TOPIC = EVENT_TOPICS["Swap"]
-
-
-# =============================================================================
-# Enums
-# =============================================================================
 
 
 class UniswapV3EventType(Enum):
@@ -150,11 +133,6 @@ UNISWAP_V3_RECEIPT_SPEC = V3ForkSpec(
     strict_data_words={"Swap": 5, **V3_STANDARD_LP_DATA_WORDS},
     strict_event_layouts=V3_STANDARD_TRANSFER_LAYOUTS,
 )
-
-
-# =============================================================================
-# Data Classes
-# =============================================================================
 
 
 @dataclass
@@ -308,10 +286,6 @@ class ParsedSwapResult:
     pool_address: str
     sqrt_price_x96_after: int = 0
     tick_after: int = 0
-    # VIB-3164 — per-side decimal-resolution status. False means the
-    # corresponding ``amount_*_decimal`` was computed with the legacy
-    # 18-decimal fallback and must not be treated as measured
-    # (Empty != Zero, blueprint 27).
     token_in_decimals_resolved: bool = True
     token_out_decimals_resolved: bool = True
 
@@ -397,11 +371,6 @@ class ParseResult:
         }
 
 
-# =============================================================================
-# Receipt Parser
-# =============================================================================
-
-
 class UniswapV3ReceiptParser(V3ForkReceiptParser):
     """Parser for Uniswap V3 transaction receipts.
 
@@ -416,9 +385,9 @@ class UniswapV3ReceiptParser(V3ForkReceiptParser):
             "tick_lower",
             "tick_upper",
             "liquidity",
-            "lp_open_data",  # NonfungiblePositionManager.IncreaseLiquidity (LP_OPEN)
+            "lp_open_data",
             "lp_close_data",
-            "protocol_fees",  # VIB-3204 — extract_protocol_fees implemented below
+            "protocol_fees",
         }
     )
     V3_FORK_SPEC = UNISWAP_V3_RECEIPT_SPEC
@@ -461,7 +430,6 @@ class UniswapV3ReceiptParser(V3ForkReceiptParser):
             dict(self.v3_fork_spec.event_name_to_type),
         )
 
-        # Try to resolve symbols and decimals from addresses via TokenResolver
         if self.token0_address and not self.token0_symbol:
             symbol, decimals = self._resolve_token_info(self.token0_address)
             if symbol:
@@ -475,7 +443,6 @@ class UniswapV3ReceiptParser(V3ForkReceiptParser):
             if decimals is not None:
                 self.token1_decimals = decimals
 
-        # If symbols were provided but decimals weren't, resolve decimals
         if self.token0_symbol and self.token0_decimals is None:
             _, decimals = self._resolve_token_info(self.token0_symbol)
             if decimals is not None:
@@ -485,19 +452,7 @@ class UniswapV3ReceiptParser(V3ForkReceiptParser):
             if decimals is not None:
                 self.token1_decimals = decimals
 
-        # Track whether decimals are resolved (18 is unreliable for non-ETH tokens).
-        #
-        # VIB-3164 DEFERRED: ideally an unresolved decimal would stay ``None``
-        # (Empty != Zero) and ``_build_swap_result`` would fail loud rather than
-        # coerce to 18. That change is held back because this parser runs on the
-        # live ResultEnricher path with chain-only context: when a swap's
-        # Transfer events cannot be classified against the pool address the
-        # decimals stay unresolved, and hard-failing there would convert a silent
-        # miscount into a pipeline-halting CriticalAccountingError on live money.
-        # Closing this safely needs the compiler to thread token decimals into
-        # the parser (or better Transfer classification) first; tracked as a
-        # follow-up. Until then the historical 18-default below is retained and
-        # the unresolved case is flagged in ``_build_swap_result``.
+        # Fallback scaling remains explicitly unmeasured for accounting.
         self._token0_decimals_resolved = self.token0_decimals is not None
         self._token1_decimals_resolved = self.token1_decimals is not None
         if self.token0_decimals is None:
@@ -536,9 +491,7 @@ class UniswapV3ReceiptParser(V3ForkReceiptParser):
             status = receipt.get("status", 1)
             tx_success = status == 1
 
-            # Reverts must be reported before the empty-logs short-circuit,
-            # otherwise an early-revert receipt (status=0, logs=[]) would be
-            # silently surfaced as a successful empty receipt (issue #2064).
+            # Reverted receipts commonly have no logs, so status must be checked first.
             if not tx_success:
                 return ParseResult(
                     success=True,
@@ -565,7 +518,6 @@ class UniswapV3ReceiptParser(V3ForkReceiptParser):
                 if parsed_event:
                     events.append(parsed_event)
 
-                    # Extract typed data based on event type
                     if parsed_event.event_type == UniswapV3EventType.SWAP:
                         swap_data = self._parse_swap_event(parsed_event)
                         if swap_data:
@@ -576,25 +528,20 @@ class UniswapV3ReceiptParser(V3ForkReceiptParser):
                         if transfer_data:
                             transfer_events.append(transfer_data)
 
-            # Build high-level swap result
             swap_result = None
             if swap_events:
                 swap_result = self._build_swap_result(
-                    swap_events[0],  # Use first swap event
+                    swap_events[0],
                     transfer_events,
                     quoted_amount_out,
                     swap_token_meta=swap_token_meta,
                     single_swap=len(swap_events) == 1,
                 )
 
-            # Log parsed receipt with user-friendly formatting
             tx_fmt = format_tx_hash(tx_hash)
             gas_fmt = format_gas_cost(receipt.get("gasUsed"))
             if swap_result:
                 slippage_fmt = format_slippage_bps(swap_result.slippage_bps) if swap_result.slippage_bps else "N/A"
-                # ``amount_*_decimal`` may be None when token decimals could
-                # not be resolved (Empty != zero invariant); fall back to "?"
-                # rather than crashing the log line.
                 in_fmt = f"{swap_result.amount_in_decimal:.4f}" if swap_result.amount_in_decimal is not None else "?"
                 out_fmt = f"{swap_result.amount_out_decimal:.4f}" if swap_result.amount_out_decimal is not None else "?"
                 logger.info(
@@ -742,9 +689,9 @@ class UniswapV3ReceiptParser(V3ForkReceiptParser):
                 not the intent's to_token, so the compiler's to_token hint would
                 map to the wrong pool slot.
         """
+        # Inferred metadata stays receipt-local so cached parsers cannot leak token state.
         overrides: dict[str, Any] = {}
 
-        # Only resolve if we have unresolved decimals
         needs_token0 = not self._token0_decimals_resolved
         needs_token1 = not self._token1_decimals_resolved
         if not needs_token0 and not needs_token1:
@@ -888,6 +835,7 @@ class UniswapV3ReceiptParser(V3ForkReceiptParser):
         intermediate token, not the intent's to_token. Writes overrides only —
         never ``self``. Reads ``overrides`` for dedup checks but never mutates it.
         """
+        # Intent direction cannot identify an intermediate pool in a multi-hop receipt.
         if not swap_token_meta or not single_swap or not (needs_token0 or needs_token1):
             return {}
         token_in_meta = swap_token_meta.get("token_in")
@@ -963,16 +911,10 @@ class UniswapV3ReceiptParser(V3ForkReceiptParser):
         Returns:
             ParsedSwapResult with full swap details
         """
-        # Try to resolve token addresses and decimals from Transfer events when not
-        # provided at construction time. This fixes wrong decimals (e.g., USDC treated
-        # as 18 decimals instead of 6) when the parser is used via the ResultEnricher
-        # without token context.
         overrides = self._resolve_tokens_from_transfers(
             transfer_events, swap_event, swap_token_meta=swap_token_meta, single_swap=single_swap
         )
 
-        # Apply per-receipt overrides (from inferred addresses) on top of self values.
-        # These are local to this receipt and don't persist on the parser instance.
         t0_addr = overrides.get("token0_address", self.token0_address) or ""
         t0_symbol = overrides.get("token0_symbol", self.token0_symbol) or ""
         t0_decimals = overrides.get("token0_decimals", self.token0_decimals)
@@ -980,22 +922,10 @@ class UniswapV3ReceiptParser(V3ForkReceiptParser):
         t1_symbol = overrides.get("token1_symbol", self.token1_symbol) or ""
         t1_decimals = overrides.get("token1_decimals", self.token1_decimals)
 
-        # Track whether decimals are resolved or still at the 18-default (VIB-592).
-        # Branch 1 of _resolve_tokens_from_transfers sets self._token*_decimals_resolved.
-        # Branch 2 provides decimals via overrides dict without setting the flag.
+        # An 18-decimal fallback remains unresolved unless this receipt supplied the real value.
         t0_unresolved = not self._token0_decimals_resolved and "token0_decimals" not in overrides
         t1_unresolved = not self._token1_decimals_resolved and "token1_decimals" not in overrides
         if t0_unresolved or t1_unresolved:
-            # VIB-3164 / DEFERRED: ideally an unresolved decimal would fail loud
-            # here (Empty != Zero). But this parser is constructed by the live
-            # ResultEnricher with chain-only context, and when a swap's Transfer
-            # events cannot be classified against the pool address the decimals
-            # stay unresolved. Hard-failing here turns a silent miscount into a
-            # pipeline-halting CriticalAccountingError on the live money path —
-            # unsafe to ship without first making decimals resolvable in this
-            # shape (thread compiler token context, or improve Transfer
-            # classification). Tracked for a follow-up; for now we warn and fall
-            # through to the 18-decimal default below (the historical behaviour).
             logger.warning(
                 "Token decimals unresolved after Transfer analysis "
                 f"(token0={'unresolved' if t0_unresolved else 'ok'}, "
@@ -1004,7 +934,6 @@ class UniswapV3ReceiptParser(V3ForkReceiptParser):
                 "(VIB-3164 deferred: see receipt_parser __init__ note)."
             )
 
-        # Determine which token is in/out
         if swap_event.token0_is_input:
             token_in = t0_addr
             token_out = t1_addr
@@ -1027,26 +956,22 @@ class UniswapV3ReceiptParser(V3ForkReceiptParser):
         amount_in = swap_event.amount_in
         amount_out = swap_event.amount_out
 
-        # Convert to decimal with proper decimals
         assert token_in_decimals is not None, "token_in_decimals must not be None"
         assert token_out_decimals is not None, "token_out_decimals must not be None"
         amount_in_decimal = Decimal(str(amount_in)) / Decimal(10**token_in_decimals)
         amount_out_decimal = Decimal(str(amount_out)) / Decimal(10**token_out_decimals)
 
-        # Calculate effective price
         if amount_in_decimal > 0:
             effective_price = amount_out_decimal / amount_in_decimal
         else:
             effective_price = Decimal("0")
 
-        # Calculate slippage
+        # Basis points are (expected - actual) / expected * 10_000.
         slippage_bps = 0
         if quoted_amount_out and quoted_amount_out > 0:
-            # Slippage = (expected - actual) / expected * 10000
             slippage_pct_float = (quoted_amount_out - amount_out) / quoted_amount_out
             slippage_bps = int(slippage_pct_float * 10000)
         elif self.quoted_price and self.quoted_price > 0:
-            # Calculate from quoted price
             slippage_pct_decimal = (self.quoted_price - effective_price) / self.quoted_price
             slippage_bps = int(slippage_pct_decimal * 10000)
 
@@ -1068,17 +993,7 @@ class UniswapV3ReceiptParser(V3ForkReceiptParser):
             token_out_decimals_resolved=token_out_decimals_resolved,
         )
 
-    # =============================================================================
-    # Position ID Extraction
-    # =============================================================================
-
-    # ---- VIB-3159: tagged-variant wrappers ------------------------------------
-    # The ``_result`` variants are the canonical entry points for the framework's
-    # ``ResultEnricher``. They distinguish "no event of this type" from "parse
-    # error", which the legacy return-``None``-for-both signature could not do.
-    # The raw public methods below preserve their legacy return types so
-    # strategies and tests that call them directly keep working.
-
+    # Result variants keep parser failures distinct from missing events.
     def extract_position_id_result(self, receipt: dict[str, Any]) -> ExtractResult[int]:
         """Fail-closed variant of :meth:`extract_position_id` — see VIB-3159."""
         return self._wrap_extract(
@@ -1168,16 +1083,14 @@ class UniswapV3ReceiptParser(V3ForkReceiptParser):
             if not logs:
                 return None
 
-            # Get position manager address for this chain
+            # Unknown chains retain the canonical NPM fallback used by this parser.
             position_manager = POSITION_MANAGER_ADDRESSES.get(self.chain, "").lower()
             if not position_manager:
-                # Fall back to default (Ethereum/Arbitrum/Optimism address)
                 position_manager = "0xC36442b4a4522E871399CD717aBDD847Ab11FE88".lower()
 
             transfer_topic = EVENT_TOPICS["Transfer"].lower()
 
             for log in logs:
-                # Handle both dict and object-style logs
                 if hasattr(log, "get"):
                     topics = log.get("topics", [])
                     address = log.get("address", "")
@@ -1185,49 +1098,41 @@ class UniswapV3ReceiptParser(V3ForkReceiptParser):
                     topics = getattr(log, "topics", [])
                     address = getattr(log, "address", "")
 
-                # Normalize address
                 if isinstance(address, bytes):
                     address = "0x" + address.hex()
                 address = str(address).lower()
 
-                # Check if this is from the position manager
                 if address != position_manager:
                     continue
 
-                # Need at least 4 topics for ERC-721 Transfer
                 if len(topics) < 4:
                     continue
 
-                # Check if this is a Transfer event
                 first_topic = topics[0]
                 if isinstance(first_topic, bytes):
                     first_topic = "0x" + first_topic.hex()
                 first_topic = str(first_topic).lower()
-                # Ensure 0x prefix for comparison
                 if not first_topic.startswith("0x"):
                     first_topic = "0x" + first_topic
 
                 if first_topic != transfer_topic:
                     continue
 
-                # Check if from address is zero (minting)
                 from_topic = topics[1]
                 if isinstance(from_topic, bytes):
                     from_topic = "0x" + from_topic.hex()
                 from_topic = str(from_topic).lower()
-                # Ensure 0x prefix for comparison
                 if not from_topic.startswith("0x"):
                     from_topic = "0x" + from_topic
 
                 if from_topic != ZERO_ADDRESS_PADDED:
                     continue
 
-                # Extract tokenId from topics[3] (ERC-721 has indexed tokenId)
+                # ERC-721 tokenId is indexed in topics[3].
                 token_id_topic = topics[3]
                 if isinstance(token_id_topic, bytes):
                     token_id_topic = "0x" + token_id_topic.hex()
                 token_id_topic = str(token_id_topic)
-                # Ensure 0x prefix for hex parsing
                 if not token_id_topic.startswith("0x"):
                     token_id_topic = "0x" + token_id_topic
 
@@ -1266,10 +1171,6 @@ class UniswapV3ReceiptParser(V3ForkReceiptParser):
         parser = UniswapV3ReceiptParser(chain=chain)
         return parser.extract_position_id({"logs": logs})
 
-    # =============================================================================
-    # Swap Amounts Extraction (for Result Enrichment)
-    # =============================================================================
-
     def extract_swap_amounts(
         self,
         receipt: dict[str, Any],
@@ -1307,11 +1208,9 @@ class UniswapV3ReceiptParser(V3ForkReceiptParser):
         from almanak.framework.execution.extracted_data import SwapAmounts
 
         try:
-            # Parse the receipt to get swap result
             parse_result = self.parse_receipt(receipt, swap_token_meta=swap_token_meta)
 
             if not parse_result.swap_result:
-                # Log diagnostic info to help debug enrichment failures (VIB-1653)
                 num_events = len(parse_result.events)
                 swap_count = len(parse_result.swap_events)
                 logger.debug(
@@ -1322,25 +1221,17 @@ class UniswapV3ReceiptParser(V3ForkReceiptParser):
 
             sr = parse_result.swap_result
 
-            # VIB-3203: prefer the enricher-supplied ``expected_out`` (human
-            # Decimal) over the parser-constructor ``quoted_price``. Receipt
-            # parsers built by the ReceiptParserRegistry do not receive
-            # quoted_price, so without this kwarg slippage_bps was always None.
             slippage_bps = sr.slippage_bps if sr.slippage_bps else None
+            # expected_out and amount_out_decimal share human token units.
             if expected_out is not None and expected_out > 0 and sr.amount_out_decimal > 0:
                 realized_slippage = (expected_out - sr.amount_out_decimal) / expected_out
                 slippage_bps = int(realized_slippage * Decimal(10_000))
 
-            # VIB-4087 — slippage_bps came from on-chain Swap event log
-            # decoding (parse_receipt) plus, optionally, the compiler-supplied
-            # ``expected_out`` for realized-slippage refinement. Both branches
-            # are RECEIPT_DECODED. ``NONE`` only applies when the parser
-            # could not extract a swap event at all (caught by the early
-            # return above).
             from almanak.framework.execution.extracted_data import SlippageSource
 
             slippage_source = SlippageSource.RECEIPT_DECODED if slippage_bps is not None else SlippageSource.NONE
 
+            # Ledger token identity must resolve to symbols rather than contract addresses.
             return SwapAmounts(
                 amount_in=sr.amount_in,
                 amount_out=sr.amount_out,
@@ -1359,10 +1250,6 @@ class UniswapV3ReceiptParser(V3ForkReceiptParser):
         except Exception as e:
             logger.warning(f"Failed to extract swap amounts: {e}")
             return None
-
-    # =============================================================================
-    # LP Extraction Methods (for Result Enrichment)
-    # =============================================================================
 
     def extract_tick_lower(self, receipt: dict[str, Any]) -> int | None:
         """Extract tick lower from LP mint transaction receipt.
@@ -1388,7 +1275,6 @@ class UniswapV3ReceiptParser(V3ForkReceiptParser):
                 if len(topics) < 4:
                     continue
 
-                # Check if this is a Mint event
                 first_topic = topics[0]
                 if isinstance(first_topic, bytes):
                     first_topic = "0x" + first_topic.hex()
@@ -1397,13 +1283,12 @@ class UniswapV3ReceiptParser(V3ForkReceiptParser):
                 if first_topic != mint_topic:
                     continue
 
-                # tickLower is in topics[2] (indexed int24)
                 tick_lower_topic = topics[2]
                 if isinstance(tick_lower_topic, bytes):
                     tick_lower_topic = "0x" + tick_lower_topic.hex()
                 tick_lower_topic = str(tick_lower_topic)
 
-                # Decode as int24 (signed)
+                # Indexed int24 values are two's-complement and sign-extended to 256 bits.
                 tick_lower = HexDecoder.decode_int24(tick_lower_topic, 0)
                 return tick_lower
 
@@ -1437,7 +1322,6 @@ class UniswapV3ReceiptParser(V3ForkReceiptParser):
                 if len(topics) < 4:
                     continue
 
-                # Check if this is a Mint event
                 first_topic = topics[0]
                 if isinstance(first_topic, bytes):
                     first_topic = "0x" + first_topic.hex()
@@ -1446,13 +1330,11 @@ class UniswapV3ReceiptParser(V3ForkReceiptParser):
                 if first_topic != mint_topic:
                     continue
 
-                # tickUpper is in topics[3] (indexed int24)
                 tick_upper_topic = topics[3]
                 if isinstance(tick_upper_topic, bytes):
                     tick_upper_topic = "0x" + tick_upper_topic.hex()
                 tick_upper_topic = str(tick_upper_topic)
 
-                # Decode as int24 (signed)
                 tick_upper = HexDecoder.decode_int24(tick_upper_topic, 0)
                 return tick_upper
 
@@ -1503,7 +1385,6 @@ class UniswapV3ReceiptParser(V3ForkReceiptParser):
                 if len(topics) < 4:
                     continue
 
-                # Check if this is a Mint event
                 first_topic = topics[0]
                 if isinstance(first_topic, bytes):
                     first_topic = "0x" + first_topic.hex()
@@ -1512,13 +1393,11 @@ class UniswapV3ReceiptParser(V3ForkReceiptParser):
                 if first_topic != mint_topic:
                     continue
 
-                # Extract liquidity from data field
                 data = HexDecoder.normalize_hex(log.get("data", ""))
                 if not data or data == "0x":
                     continue
 
-                # uint128 ``amount`` is the SECOND non-indexed field; the
-                # first is the sender address, which occupies data[0..32].
+                # Pool Mint slots are sender@0, liquidity@32, amount0@64, amount1@96.
                 liquidity = HexDecoder.decode_uint128(data, 32)
                 return liquidity
 
@@ -1575,37 +1454,20 @@ class UniswapV3ReceiptParser(V3ForkReceiptParser):
         """
         from almanak.framework.execution.extracted_data import LPOpenData
 
-        # No outer ``try/except Exception`` here. The fail-closed variant
-        # ``extract_lp_open_data_result`` is the documented entry point for
-        # callers that need parser-crash vs. event-missing disambiguation
-        # (VIB-3159 / Blueprint 19). A blanket-catch in this method would
-        # collapse "parser crashed on a malformed receipt" into "no event
-        # present" and re-introduce the ghost-position class of bug. Let
-        # genuinely unexpected exceptions propagate; the ``_result``
-        # wrapper converts them to ``ExtractError``. The legacy callers
-        # that call this method directly are receipt-shape tests with
-        # well-formed inputs — they cannot trip the propagation path.
+        # Let parse failures propagate so result variants can distinguish missing events.
         logs = receipt.get("logs") or []
         if not logs:
             return None
 
         increase_topic = EVENT_TOPICS["IncreaseLiquidity"].lower()
 
-        # Position manager address for this chain — log filter so we
-        # don't accidentally pick up an unrelated contract that happens
-        # to share the topic0 (e.g. a custom router with its own event
-        # of the same shape). Falls back to the canonical Uniswap V3
-        # NPM address if the chain isn't registered.
+        # Unknown chains retain the canonical NPM fallback used by this parser.
         position_manager = POSITION_MANAGER_ADDRESSES.get(self.chain, "").lower()
         if not position_manager:
             position_manager = "0xC36442b4a4522E871399CD717aBDD847Ab11FE88".lower()
 
         mint_topic = EVENT_TOPICS["Mint"].lower()
-        # Receipts come back from the RPC in logIndex order, so iterating in
-        # list order is also chronological order. Track the most recent
-        # eligible Pool Mint we've seen so the next matching IncreaseLiquidity
-        # claims ITS ticks (not some unrelated pool's ticks from a multi-
-        # position bundle).
+        # Pair IncreaseLiquidity with the latest preceding NPM-owned Pool Mint.
         last_npm_mint: dict[str, Any] | None = None
 
         for log in logs:
@@ -1632,10 +1494,6 @@ class UniswapV3ReceiptParser(V3ForkReceiptParser):
             if not first_topic.startswith("0x"):
                 first_topic = "0x" + first_topic
 
-            # Pool Mint events emitted by NPM-mediated mints carry
-            # ``owner = NPM`` in topics[1]. Track the most recent such Mint
-            # so the next matching IncreaseLiquidity gets ITS ticks (not
-            # some unrelated pool's ticks from a multi-position bundle).
             if first_topic == mint_topic and len(topics) >= 4:
                 if self._mint_owner_matches_npm(topics, position_manager):
                     last_npm_mint = log
@@ -1644,14 +1502,12 @@ class UniswapV3ReceiptParser(V3ForkReceiptParser):
             if address != position_manager:
                 continue
 
-            # IncreaseLiquidity needs at least topic0 + tokenId
             if len(topics) < 2:
                 continue
 
             if first_topic != increase_topic:
                 continue
 
-            # tokenId is indexed → topics[1]
             token_id_topic = topics[1]
             if isinstance(token_id_topic, bytes):
                 token_id_topic = "0x" + token_id_topic.hex()
@@ -1662,33 +1518,20 @@ class UniswapV3ReceiptParser(V3ForkReceiptParser):
             try:
                 token_id = int(token_id_topic, 16)
             except (ValueError, TypeError):
-                # Malformed indexed topic on an otherwise-matched event
-                # is a known shape we want to skip-not-crash; the next
-                # log might be a legitimate match.
+                # A later matching log may still be valid.
                 continue
 
-            # data: liquidity (uint128 — left-padded to 32 bytes),
-            # amount0 (uint256), amount1 (uint256). Each field starts
-            # on a 32-byte boundary; HexDecoder handles 0x-prefix.
             normalized = HexDecoder.normalize_hex(data)
             if not normalized or normalized == "0x":
                 continue
 
+            # IncreaseLiquidity slots are liquidity@0, amount0@32, amount1@64.
             liquidity = HexDecoder.decode_uint128(normalized, 0)
             amount0 = HexDecoder.decode_uint256(normalized, 32)
             amount1 = HexDecoder.decode_uint256(normalized, 64)
 
             tick_lower, tick_upper = self._ticks_from_mint(last_npm_mint)
 
-            # VIB-3887: derive current_tick from a Swap event emitted by
-            # the same pool in the same receipt. The Uniswap V3 Swap event
-            # carries ``tick`` (post-swap current tick). When the strategy
-            # batches swap-then-mint atomically — the canonical Almanak
-            # LP_OPEN pattern — the receipt contains exactly such a Swap
-            # event and we recover the live tick without an extra RPC.
-            # When no Swap is present (pure NPM.mint with pre-balanced
-            # amounts), ``current_tick`` stays None and the framework
-            # leaves ``in_range`` undecided — better than guessing.
             pool_address = ""
             if last_npm_mint is not None:
                 addr_attr = (
@@ -1699,6 +1542,7 @@ class UniswapV3ReceiptParser(V3ForkReceiptParser):
                 if isinstance(addr_attr, bytes):
                     addr_attr = "0x" + addr_attr.hex()
                 pool_address = str(addr_attr).lower()
+            # Only a Swap from the paired pool can supply post-open state.
             current_tick = self._current_tick_from_swap_event(logs, pool_address)
 
             if current_tick is None:
@@ -1713,16 +1557,7 @@ class UniswapV3ReceiptParser(V3ForkReceiptParser):
                     f"amount0={amount0} amount1={amount1} ticks=[{tick_lower}, {tick_upper}] "
                     f"current_tick={current_tick}"
                 )
-            # VIB-6053 — bind leg IDENTITY to the amounts just decoded. ``amount0``
-            # / ``amount1`` are in the POOL's canonical slot order, which may be the
-            # OPPOSITE of the user's pool label. Emitting each slot's currency is
-            # what lets every consumer pair (token, amount) within ONE layer;
-            # without it the ledger paired a receipt-ordered amount with a
-            # label-ordered symbol and scaled it by the wrong token's decimals
-            # ($100 position recorded as $26.5bn). The V3 mint callback transfers
-            # exactly amount0Owed / amount1Owed, so the value-match against the
-            # wallet -> pool transfers is exact. ``None`` on a miss — consumers
-            # fail closed rather than guess.
+            # Amounts use pool slot order, which may differ from user-facing labels.
             currency0, currency1 = currencies_for_amounts(
                 transfers_by_token(logs, chain=self.chain, to_address=pool_address) if pool_address else {},
                 amount0,
@@ -1737,10 +1572,10 @@ class UniswapV3ReceiptParser(V3ForkReceiptParser):
                 amount0=amount0,
                 amount1=amount1,
                 current_tick=current_tick,
-                pool_address=pool_address,  # VIB-3893: framework slot0 fallback
-                position_hash=None,  # VIB-4473: V4-only — V3 lot-matches on position_token_id
-                currency0=currency0,  # VIB-6053 — index-aligned with amount0
-                currency1=currency1,  # VIB-6053 — index-aligned with amount1
+                pool_address=pool_address,
+                position_hash=None,  # V3 lot identity is the NFT tokenId; hashes are V4-only.
+                currency0=currency0,
+                currency1=currency1,
             )
 
         return None
@@ -1754,9 +1589,8 @@ class UniswapV3ReceiptParser(V3ForkReceiptParser):
         if isinstance(owner_topic, bytes):
             owner_topic = "0x" + owner_topic.hex()
         owner_topic = str(owner_topic).lower()
-        # Indexed addresses are right-aligned in a 32-byte topic. Compare the
-        # low 40 hex chars (20 bytes) to the NPM address.
         try:
+            # Indexed addresses are right-aligned in 32-byte topics.
             owner_addr = "0x" + owner_topic.removeprefix("0x").rjust(64, "0")[-40:]
         except Exception:
             return False
@@ -1780,6 +1614,7 @@ class UniswapV3ReceiptParser(V3ForkReceiptParser):
             if isinstance(topic, bytes):
                 topic = "0x" + topic.hex()
             try:
+                # Indexed int24 values are two's-complement and sign-extended to 256 bits.
                 return HexDecoder.decode_int24(str(topic), 0)
             except Exception:
                 return None
@@ -1826,7 +1661,7 @@ class UniswapV3ReceiptParser(V3ForkReceiptParser):
                 first_topic = "0x" + first_topic.hex()
             if str(first_topic).lower() != swap_topic:
                 continue
-            latest_swap_log = log  # later swaps override (post-swap tick is the live one)
+            latest_swap_log = log  # Latest Swap carries the receipt's final pool state.
 
         if latest_swap_log is None:
             return None
@@ -1839,7 +1674,7 @@ class UniswapV3ReceiptParser(V3ForkReceiptParser):
             normalized = HexDecoder.normalize_hex(str(data))
             if not normalized or normalized == "0x":
                 return None
-            # tick is the 5th 32-byte slot in the data payload (offset 128).
+            # Swap tick is the fifth 32-byte data slot.
             return HexDecoder.decode_int24(normalized, 128)
         except Exception:
             return None
@@ -1895,15 +1730,8 @@ class UniswapV3ReceiptParser(V3ForkReceiptParser):
             burn_liquidity_total = 0
             saw_burn = False
             saw_collect = False
-            # VIB-3940: capture the pool address from the Burn event emitter
-            # so the framework's slot0 fallback can fetch ``current_tick``
-            # at close-block when no Swap is in the receipt (canonical pure-
-            # burn close path). Mirrors the LPOpenData.pool_address capture
-            # from VIB-3893.
+            # Burn anchors registry identity; Collect retains a separate leg emitter.
             pool_address = ""
-            # VIB-6053 — pool address as seen on the COLLECT log (see the collect
-            # branch below). Separate from ``pool_address`` so the registry anchor
-            # keeps its Burn-only semantics.
             collect_pool_address = ""
 
             for log in logs:
@@ -1919,36 +1747,19 @@ class UniswapV3ReceiptParser(V3ForkReceiptParser):
                 data = HexDecoder.normalize_hex(log.get("data", ""))
 
                 if first_topic == collect_topic and len(topics) >= 4:
-                    # data: recipient (32B padded address)
-                    #     ‖ amount0 (uint128, 32B padded)
-                    #     ‖ amount1 (uint128, 32B padded)
-                    # `recipient` is non-indexed in the Pool Collect event, so
-                    # amount0/amount1 sit at offsets 32 and 64 — not 0 and 32.
+                    # Collect slots are recipient@0, amount0@32, amount1@64.
                     collect_amount0 += HexDecoder.decode_uint128(data, 32)
                     collect_amount1 += HexDecoder.decode_uint128(data, 64)
                     saw_collect = True
-                    # VIB-6053 — the pool emits Collect as well as Burn, so this
-                    # log's emitter IS the pool. Captured separately because a V3
-                    # close is a SPLIT-TX sequence (decreaseLiquidity -> collect ->
-                    # burn): the collect-only receipt carries no Burn, so the
-                    # Burn-derived ``pool_address`` is empty there and the
-                    # leg-identity scan would silently find no counterparty.
                     collect_pool_address = collect_pool_address or log_emitter_address(log, chain=self.chain)
 
                 elif first_topic == burn_topic and len(topics) >= 4:
-                    # uint128 amount (padded) ‖ uint256 amount0 ‖ uint256 amount1
-                    # Accumulate across multiple Burn logs in the same receipt
-                    # (multicall LP_CLOSE) — the previous overwrite-only path
-                    # silently kept just the last Burn's liquidity.
+                    # Burn slots are liquidity@0, amount0@32, amount1@64.
                     burn_liquidity_total += HexDecoder.decode_uint128(data, 0)
                     burn_amount0 += HexDecoder.decode_uint256(data, 32)
                     burn_amount1 += HexDecoder.decode_uint256(data, 64)
                     saw_burn = True
                     if not pool_address:
-                        # Burn is emitted by the pool itself — its emitter
-                        # address IS the pool. Capture once on the first Burn
-                        # we see; later Burns in a multicall close should be
-                        # the same pool.
                         addr = log.get("address", "")
                         if isinstance(addr, bytes):
                             addr = "0x" + addr.hex()
@@ -1960,68 +1771,24 @@ class UniswapV3ReceiptParser(V3ForkReceiptParser):
 
             liquidity_removed = burn_liquidity_total if saw_burn else None
 
-            # Fees attribution from a single receipt — the parser cannot
-            # disambiguate between two legitimate collect-only shapes:
-            #
-            #   (a) LP_COLLECT_FEES intent / fee-only harvest: position never
-            #       had a ``decreaseLiquidity`` call, so no Burn ever existed.
-            #       The collected amount IS the fees. (Mirrors the V3
-            #       compiler's no-liquidity-but-owed-tokens code path at
-            #       ``almanak/connectors/uniswap_v3/compiler.py:907``
-            #       — when ``liquidity == 0`` the decrease step is skipped.)
-            #   (b) LP_CLOSE split-tx collect leg: the V3 compiler emits
-            #       LP_CLOSE as three sequential txs (decreaseLiquidity →
-            #       collect → burn). The collect-only receipt has
-            #       ``burn_amount = 0`` but the principal is real, decoded
-            #       from a sibling decrease receipt.
-            #
-            # The parser returns its best single-receipt understanding and
-            # tags ``source``. Disambiguation happens at the aggregate layer
-            # (``ResultEnricher._select_preferred_aggregate``): when a
-            # ``decrease_liquidity`` sibling is present (case b), the
-            # aggregator OVERRIDES ``fees = max(collect.amount -
-            # decrease.amount, 0)``. When no sibling is present (case a),
-            # the parser's collect-as-fees attribution is correct.
-            # See ``docs/internal/lp-close-may20.md`` §6.3.
+            # Collect-only may be a fee harvest or one leg of a split close.
             if saw_collect:
                 fees0: int | None = max(collect_amount0 - burn_amount0, 0)
                 fees1: int | None = max(collect_amount1 - burn_amount1, 0)
             else:
-                # Burn-only receipt (no Collect): principal is observed, fees
-                # are unmeasured. VIB-4470 / blueprint 27 §Empty ≠ Zero.
+                # Burn exposes principal but not fees.
                 fees0 = None
                 fees1 = None
 
-            # VIB-3940: try to recover ``current_tick`` from any Swap event
-            # in the same receipt (multicall close that includes a router
-            # swap will emit one on the pool). When absent, the runner's
-            # slot0() fallback will fill the field after parsing.
             current_tick = self._current_tick_from_swap_event(logs, pool_address) if pool_address else None
 
-            # ``source`` tags the receipt shape so the aggregator's
-            # preferred-source picker (VIB-4310,
-            # ``_AGGREGATE_FIELDS["lp_close_data"] = "collect"``) can prefer
-            # the collect candidate over the decrease candidate. Convention
-            # mirrors Aerodrome Slipstream: ``"collect"`` whenever a Collect
-            # event was observed (including a single-tx multicall close that
-            # carries both Collect AND Burn), ``"decrease_liquidity"`` when
-            # only the Burn/DecreaseLiquidity side was observed. Without the
-            # tag the picker would fall through to ``candidates[0]`` and emit
-            # ``amount*_collected = principal-only`` from the decrease
-            # receipt, silently dropping real fees from mainnet rows.
+            # Aggregation prefers Collect when reconstructing split closes.
             source = "collect" if saw_collect else "decrease_liquidity"
 
             amount0_collected = collect_amount0 if saw_collect else burn_amount0
             amount1_collected = collect_amount1 if saw_collect else burn_amount1
 
-            # VIB-6053 — bind leg IDENTITY to the collected amounts (see the
-            # LP_OPEN twin above). A Collect transfers exactly the collected
-            # amounts out of the pool, so the value-match is exact on the
-            # ``source="collect"`` shape — which is also the shape the enricher's
-            # preferred-source picker selects (VIB-4310). A burn-only receipt
-            # moves no tokens (``decreaseLiquidity`` only credits ``tokensOwed``),
-            # so there is nothing to bind and both stay ``None``: honestly
-            # unidentified rather than guessed.
+            # Burn-only receipts move no tokens, so their currencies remain unidentified.
             currency0, currency1 = currencies_for_amounts(
                 transfers_by_token(logs, chain=self.chain, from_address=pool_address or collect_pool_address)
                 if (pool_address or collect_pool_address)
@@ -2036,49 +1803,16 @@ class UniswapV3ReceiptParser(V3ForkReceiptParser):
                 fees0=fees0,
                 fees1=fees1,
                 liquidity_removed=liquidity_removed,
-                current_tick=current_tick,  # VIB-3940
-                pool_address=pool_address,  # VIB-3940 — for framework slot0 fallback
+                current_tick=current_tick,
+                pool_address=pool_address,
                 source=source,
-                currency0=currency0,  # VIB-6053 — index-aligned with amount0_collected
-                currency1=currency1,  # VIB-6053 — index-aligned with amount1_collected
+                currency0=currency0,
+                currency1=currency1,
             )
 
         except Exception as e:
             logger.warning(f"Failed to extract lp_close_data: {e}")
             return None
-
-    # =============================================================================
-    # Registry payload extraction — VIB-4198 (T12) UniV3 LP cutover
-    # =============================================================================
-    #
-    # The position_registry's ``payload`` column carries the per-primitive
-    # JSON shape ratified by PRD §Registry Data Shape and the T08 goldens
-    # (``tests/fixtures/multi-position-tracking/univ3-arbitrum/``). For UniV3
-    # LP, the shape is:
-    #
-    #   token_id          str — NFT tokenId, decimal-string formatted (matches
-    #                            the T08 golden encoding)
-    #   pool_address      str — lowercased hex address of the V3 pool
-    #   tick_lower        int — lower tick boundary (int24, signed)
-    #   tick_upper        int — upper tick boundary (int24, signed)
-    #   liquidity         str — uint128 liquidity, decimal-string formatted
-    #   amount0           str — token0 deposited (LP_OPEN) (raw uint256)
-    #   amount1           str — token1 deposited (LP_OPEN) (raw uint256)
-    #   amount0_open      str — LP_CLOSE only: principal+ open-side amount0
-    #   amount1_open      str — LP_CLOSE only: principal open-side amount1
-    #   amount0_close     str — LP_CLOSE only: amount0 reported by Burn
-    #   amount1_close     str — LP_CLOSE only: amount1 reported by Burn
-    #   fee_owed_0        str — LP_CLOSE only: collected fee in token0
-    #   fee_owed_1        str — LP_CLOSE only: collected fee in token1
-    #   fee_tier          int — pool fee tier (e.g. 500 for 0.05%); None if
-    #                            not derivable from the receipt alone
-    #   nft_manager_addr  str — lowercased hex address of the position manager
-    #
-    # The hash inputs for ``physical_identity_hash`` are
-    # ``(chain, nft_manager_addr.lower(), token_id)`` — receipt-derivable
-    # only, no off-chain calls. Two different LP_OPENs on the same NFT id
-    # collide by design (NFT id IS the identity); two different NFTs on the
-    # same pool produce distinct hashes and distinct registry rows.
 
     def _decreaseliquidity_token_id(self, receipt: dict[str, Any]) -> int | None:
         """Recover ``tokenId`` from a ``DecreaseLiquidity`` log on the close-side
@@ -2154,8 +1888,6 @@ class UniswapV3ReceiptParser(V3ForkReceiptParser):
         builder) inject the value from the intent's ``fee_tier`` field when
         present. Returning ``None`` (not 0) honors CLAUDE.md "Empty ≠ zero".
         """
-        # Registry-payload builder supplies fee_tier from intent.protocol_params
-        # at the call site. The parser stays receipt-only here.
         _ = receipt
         return None
 
@@ -2190,21 +1922,15 @@ class UniswapV3ReceiptParser(V3ForkReceiptParser):
             ``None`` when the LP_OPEN data isn't extractable from the
             receipt.
         """
+        # Refuse partial identity or range data rather than emit a corrupt registry row.
         lp_data = self.extract_lp_open_data(receipt)
         if lp_data is None:
             return None
         if lp_data.position_id is None or lp_data.position_id <= 0:
-            # token_id is the identity anchor; a zero/negative value would
-            # corrupt physical_identity_hash. Refuse to build the payload.
             return None
         if not lp_data.pool_address:
-            # pool_address is the semantic_grouping_key anchor; missing it
-            # would let two un-grouped rows in the same pool collide on
-            # ix_registry_auto_mode. Refuse rather than emit a partial row.
             return None
         if lp_data.tick_lower is None or lp_data.tick_upper is None:
-            # Range is part of the position's economic identity; missing
-            # ticks would let teardown / rebalancing read malformed bounds.
             return None
         if lp_data.liquidity is None:
             return None
@@ -2325,6 +2051,7 @@ class UniswapV3ReceiptParser(V3ForkReceiptParser):
         pool_address = (lp_close.pool_address or "").lower()
         if not pool_address:
             return None
+        # Close identity requires Burn and DecreaseLiquidity, not fee-only Collect.
         if self._open_payload_disagrees(
             open_payload=open_payload,
             token_id=token_id,
@@ -2342,10 +2069,6 @@ class UniswapV3ReceiptParser(V3ForkReceiptParser):
         if fee_tier is not None and fee_tier > 0:
             payload.setdefault("fee_tier", int(fee_tier))
         return payload
-
-    # =============================================================================
-    # Protocol Fee Extraction (VIB-3204)
-    # =============================================================================
 
     def extract_protocol_fees(
         self,
@@ -2388,10 +2111,8 @@ class UniswapV3ReceiptParser(V3ForkReceiptParser):
             Swap event is present OR when ``fee_tier_bps`` is missing.
         """
 
+        # Missing fee metadata is unknown, not a measured zero.
         if fee_tier_bps is None or fee_tier_bps <= 0:
-            # Cannot compute without the compile-time fee tier; do not
-            # guess — leave the field unset so the caller distinguishes
-            # "no compile-time metadata" from "zero fee measured".
             return None
 
         try:
@@ -2399,36 +2120,13 @@ class UniswapV3ReceiptParser(V3ForkReceiptParser):
             if not parse_result.swap_result:
                 return None
 
-            # VIB-3204 audit fix (Codex P1): do NOT return
-            # ``ProtocolFees(total_usd=Decimal(0))`` here. Every successful
-            # Uniswap V3 swap charges a non-zero LP fee; reporting
-            # ``total_usd=0`` would tell PnL attribution "this swap was
-            # free" — worse than reporting "unknown". The parser does not
-            # have price-oracle access, so it cannot perform the USD
-            # conversion at this layer.
-            #
-            # We return ``None`` (ExtractMissing semantic) so downstream
-            # consumers know the fee is not yet measured at this layer.
-            # The missing component is USD price, NOT the fee itself:
-            # callers with price access can compute it as
-            #   fee_in_token = amount_in_decimal * fee_tier_bps / 1_000_000
-            #   fee_usd      = fee_in_token * price(token_in)
-            # using values already attached to ``result.swap_amounts`` and
-            # ``result.extracted_data``. When PnL attribution (VIB-3205)
-            # consolidates this, it will plug in the price.
-            #
-            # When a future iteration of this parser gains price access
-            # (e.g. via a ``price_oracle`` kwarg forwarded through the
-            # enricher like ``expected_out`` / ``fee_tier_bps``), this
-            # branch should return a populated ``ProtocolFees`` with a
-            # real ``total_usd``.
+            # Token-denominated fees lack a USD price at this layer.
             return None
 
         except Exception as e:
             logger.warning(f"Failed to extract protocol_fees: {e}")
             return None
 
-    # Backward compatibility methods
     def is_uniswap_event(self, topic: str | bytes) -> bool:
         """Check if a topic is a known Uniswap V3 event.
 

@@ -67,51 +67,33 @@ class CutoverSpec:
     reader_factory: Callable[..., BackfillReader]
 
 
-# T12 (VIB-4198): UniV3 LP is the proof-case cutover. Subsequent cutovers
-# (T16 perp, T23 Pendle LP, T28 Aave) append entries here.
-#
-# VIB-4583: UniV4 LP is its own isolated cutover (Primitive.LP_V4 / 'lp_v4').
-# It is tracked by a SEPARATE migration_state row from the V3 'lp' cutover so
-# their backfill-complete flags and grouping-policy versions stay independent.
-#
-# TD-04 (VIB-5462): LENDING (Aave canonical) is its own isolated cutover
-# (Primitive.LENDING / 'lending'). The registry row shape (market_id + leg +
-# protocol) is protocol-agnostic, so enabling Spark / Fluid / Morpho / Compound
-# is a thin add to ``_LENDING_REGISTRY_PROTOCOLS`` in migration/backfill.py — no
-# new entry here. Kept minimal and self-contained so the parallel GMX/Pendle
-# cutover tickets (TD-02/TD-03) append cleanly after.
+# Semantically distinct cutovers use separate migration_state rows so their
+# completion flags and grouping-policy versions remain independent.
 ACTIVE_CUTOVERS: tuple[CutoverSpec, ...] = (
     CutoverSpec(
         primitive=Primitive.LP,
         cutover_key="lp",
         reader_factory=UniV3LPCutoverReader,
     ),
+    # V4 LP state is isolated from V3 LP state.
     CutoverSpec(
         primitive=Primitive.LP_V4,
         cutover_key="lp_v4",
         reader_factory=UniV4LPCutoverReader,
     ),
+    # Lending protocols share an independent, protocol-agnostic cutover state.
     CutoverSpec(
         primitive=Primitive.LENDING,
         cutover_key="lending",
         reader_factory=LendingCutoverReader,
     ),
-    # TD-02 (VIB-5460): PERP (GMX V2 canonical) is its own isolated cutover
-    # (Primitive.PERP / 'perp'). The registry row shape (venue position_key anchor
-    # + market/collateral/direction/size payload) is protocol-agnostic, so
-    # enabling another GMX-shape perp venue is a thin add to the GMX_V2_PERP
-    # protocol family — no new entry here. Kept minimal and self-contained so the
-    # parallel Pendle cutover ticket (TD-03) appends cleanly after.
+    # Perpetual positions have independent cutover state.
     CutoverSpec(
         primitive=Primitive.PERP,
         cutover_key="perp",
         reader_factory=PerpCutoverReader,
     ),
-    # TD-03 (VIB-5461): Pendle PT + LP share ONE isolated cutover keyed on the
-    # otherwise-empty swap-primitive partition (Primitive.SWAP / 'pendle'). The
-    # registry row shape (market_id anchor + kind ∈ {pt,lp}) is kind-agnostic;
-    # the backfill covers PT (LP is a runtime-only write — see
-    # PendleCutoverReader). Self-contained single entry.
+    # Pendle PT and LP share one kind-agnostic, market-keyed cutover state.
     CutoverSpec(
         primitive=Primitive.SWAP,
         cutover_key="pendle",
@@ -150,47 +132,17 @@ async def enforce_or_run_cutover(
     a corrupt-by-construction registry state.
     """
     sm = runner.state_manager
-    # Late import — runner module + cutover-spec ordering would otherwise
-    # cause a circular at module-load time. The factory takes the bound
-    # state manager.
     spec = next(
         (s for s in ACTIVE_CUTOVERS if s.primitive == primitive and s.cutover_key == cutover_key),
         None,
     )
     if spec is None:
-        # Defensive: caller passed an (primitive, cutover_key) pair not in
-        # ACTIVE_CUTOVERS. We treat this as a programmer error rather than
-        # silently skipping — the boot guard's purpose is to prevent
-        # routing on a half-deployed cutover.
+        # Unknown pairs are programmer errors and must never bypass the guard.
         raise RegistryCutoverNotDeployedError(deployment_id, primitive, cutover_key)
 
-    # Ensure the row exists before reading it. The cutover spec calls for
-    # the cutover ticket to create the row at deploy time; in this PR we
-    # create it lazily on first runner start (functionally equivalent for
-    # local SDK + Tier-1 hosted gateway boot).
-    #
-    # Audit M3 (CodeRabbit): the state-manager surface now raises
-    # ``CutoverStorageNotSupported`` (instead of silently returning
-    # ``None`` / ``[]`` / no-op) on backends that don't implement the
-    # cutover accessors. The boot guard is the canonical place to
-    # decide degrade vs hard refusal:
-    #
-    # - Local SQLite implements the full surface → no exception, the
-    #   normal outcome a/b/c path applies.
-    # - GatewayStateManager (hosted, Postgres) does not implement
-    #   migration_state until T19/VIB-4205 ships → catch
-    #   ``CutoverStorageNotSupported`` and degrade controlled-ly:
-    #   registry mode stays OFF, the runner runs the legacy
-    #   ``save_ledger_entry`` path. Cutover spec §2.4 explicitly
-    #   sanctions this pre-T19.
     cache: set[tuple[Primitive, str]] = getattr(runner, "_cutover_complete_cache", set())
-    # Audit M3: the canonical "this backend doesn't support cutover storage"
-    # signal is :class:`CutoverStorageNotSupported`. ``AttributeError`` is
-    # also accepted here as a controlled-degrade trigger because some
-    # state-manager surfaces (test mocks, third-party adapters that
-    # don't subclass ``StateManager``) may not even define the method.
-    # Either is treated as "registry mode OFF for this build" — never
-    # silent default.
+    # Unsupported cutover storage keeps registry mode off and preserves the
+    # legacy writer; adapters may signal this by omitting the accessor.
     try:
         await sm.upsert_migration_state(
             deployment_id=deployment_id,
@@ -219,9 +171,7 @@ async def enforce_or_run_cutover(
         runner._cutover_complete_cache = cache  # type: ignore[attr-defined]
         return
     if state is None:
-        # Outcome (c): row genuinely missing AFTER upsert succeeded.
-        # That's a programmer error in the writer (or a race on a
-        # concurrent delete); halt loud rather than silently degrade.
+        # A missing row after successful upsert is a writer contract violation.
         raise RegistryCutoverNotDeployedError(deployment_id, primitive, cutover_key)
 
     if state.position_registry_backfill_complete:
@@ -234,22 +184,19 @@ async def enforce_or_run_cutover(
         )
         return
 
-    # Outcome (b): row exists, complete=0 → run the backfill inline.
     reader = spec.reader_factory(state_manager=sm)
     try:
         report = await reader.run(deployment_id=deployment_id)
     except BackfillFailedError:
         raise
     except Exception as exc:
-        # Wrap every other exception so the runner sees the canonical
-        # failure type per cutover spec §2.2 / §3.3.
+        # Normalize unexpected failures to the canonical cutover failure type.
         raise BackfillFailedError(
             f"Backfill driver loop crashed for (deployment_id={deployment_id!r}, "
             f"primitive={primitive.value!r}, cutover_key={cutover_key!r}): "
             f"{type(exc).__name__}: {exc}"
         ) from exc
 
-    # Re-fetch — the writer set complete=1 just before returning.
     state2 = await sm.get_migration_state(
         deployment_id=deployment_id,
         primitive=primitive.value,

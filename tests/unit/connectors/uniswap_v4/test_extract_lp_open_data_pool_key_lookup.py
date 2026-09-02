@@ -1,34 +1,4 @@
-"""Tests for ``UniswapV4ReceiptParser.extract_lp_open_data`` PoolKey lookup
-on single-sided V4 LP_OPEN receipts (VIB-4535).
-
-V0 (PR #2335) emitted a structured WARNING for single-sided opens and STILL
-returned ``LPOpenData`` with ``amount1=None`` / ``currency1=None`` -- the
-downstream ``lp_handler`` then wrote an ambiguous accounting event with the
-currency1 leg silently unmeasured. T07 (VIB-4472) already solved the
-symmetric problem on the close path by calling the gateway PoolKey lookup.
-VIB-4535 mirrors that mechanism on the open path:
-
-- When ``_sum_deposit_transfers_by_currency_order`` returns a single-sided
-  result (``amount1 is None``), the parser calls
-  ``self._pool_key_lookup(pool_id, chain)``.
-- On success: both currencies are resolved from the PoolKey, the observed
-  amount is mapped onto its correct leg (currency0 OR currency1), and the
-  missing leg honours Empty != Zero (blueprint 27): a missing ERC-20 leg is
-  measured zero (``0`` — every ERC-20 Transfer was observed), while a missing
-  native-ETH leg (VIB-4483) stays ``None`` (the native deposit emits no
-  Transfer, so its absence is NOT evidence of zero; the runner stamps it from
-  a post-mint position-state read).
-- On lookup failure (no callable, callable returns None, callable raises):
-  the LPOpenData is DROPPED with telemetry -- same disposition as T07's
-  close-side drops.
-
-This module covers the four required acceptance-criteria scenarios:
-(a) two-sided regression (lookup not called), (b) single-sided + lookup
-success, (c) single-sided + lookup NOT_FOUND, (d) single-sided + lookup
-UNAVAILABLE / transport error, plus the no-lookup-callable case for paper
-/ dry_run / unit modes with no gateway. Telemetry assertions verify the
-canonical drop-reason and counter increment per close-side patterns.
-"""
+"""Behavioral tests for PoolKey lookup while parsing V4 LP_OPEN receipts."""
 
 from __future__ import annotations
 
@@ -221,11 +191,6 @@ def _counter_value(chain: str, reason: V4LPDropReason, outcome: str) -> float:
     return value if value is not None else 0.0
 
 
-# =============================================================================
-# (a) Two-sided open — lookup NOT called (regression)
-# =============================================================================
-
-
 class TestTwoSidedDoesNotCallLookup:
     """Regression: the canonical two-sided mint MUST NOT call the lookup. The
     predicate is ``amount0 is not None and amount1 is None`` — both-non-None
@@ -263,11 +228,6 @@ class TestTwoSidedDoesNotCallLookup:
         assert data.amount1 == USDC_AMOUNT
 
 
-# =============================================================================
-# (b) Single-sided open — lookup success → measured zero on missing leg
-# =============================================================================
-
-
 class TestSingleSidedLookupSuccess:
     """When only one currency is observed AND the PoolKey lookup succeeds, the
     parser stamps the missing leg as measured zero (``Decimal("0")`` semantics;
@@ -281,8 +241,8 @@ class TestSingleSidedLookupSuccess:
         data = parser.extract_lp_open_data(receipt)
 
         assert data is not None
-        assert data.amount0 == WETH_AMOUNT  # observed
-        assert data.amount1 == 0  # measured zero, NOT None (Empty != Zero)
+        assert data.amount0 == WETH_AMOUNT
+        assert data.amount1 == 0
         assert data.currency0 == WETH_BASE.lower()
         assert data.currency1 == USDC_BASE.lower()
 
@@ -294,8 +254,8 @@ class TestSingleSidedLookupSuccess:
         data = parser.extract_lp_open_data(receipt)
 
         assert data is not None
-        assert data.amount0 == 0  # measured zero
-        assert data.amount1 == USDC_AMOUNT  # observed
+        assert data.amount0 == 0
+        assert data.amount1 == USDC_AMOUNT
         assert data.currency0 == WETH_BASE.lower()
         assert data.currency1 == USDC_BASE.lower()
 
@@ -327,11 +287,6 @@ class TestSingleSidedLookupSuccess:
         assert captured["chain"] == CHAIN
 
 
-# =============================================================================
-# (c) Single-sided open — lookup NOT_FOUND → drop + telemetry
-# =============================================================================
-
-
 class TestSingleSidedLookupNotFound:
     def test_drops_with_warning_and_counter(self, caplog: pytest.LogCaptureFixture) -> None:
         reason = V4LPDropReason.POOL_KEY_NOT_FOUND
@@ -344,17 +299,12 @@ class TestSingleSidedLookupNotFound:
         with caplog.at_level(logging.WARNING, logger=PARSER_LOGGER):
             data = parser.extract_lp_open_data(receipt)
 
-        assert data is None, "VIB-4535: NOT_FOUND must drop, not return warn-and-write LPOpenData"
+        assert data is None, "NOT_FOUND must drop rather than return ambiguous LPOpenData"
         joined = " ".join(rec.message for rec in caplog.records)
         assert "pool_key_not_found" in joined
         assert tx_hash in joined
         assert POOL_ID.lower() in joined.lower()
         assert _counter_value(CHAIN, reason, "drop") == before + 1.0
-
-
-# =============================================================================
-# (d) Single-sided open — lookup UNAVAILABLE (raise) → drop + telemetry
-# =============================================================================
 
 
 class TestSingleSidedLookupRaises:
@@ -379,11 +329,6 @@ class TestSingleSidedLookupRaises:
         assert _counter_value(CHAIN, reason, "drop") == before + 1.0
 
 
-# =============================================================================
-# (e) Single-sided open — no lookup callable → drop + telemetry
-# =============================================================================
-
-
 class TestSingleSidedMissingLookup:
     """Paper / dry_run / unit mode: no gateway means no lookup callable. The
     parser MUST drop fail-loud rather than emit ambiguous attribution."""
@@ -406,65 +351,35 @@ class TestSingleSidedMissingLookup:
         assert _counter_value(CHAIN, reason, "drop") == before + 1.0
 
 
-# =============================================================================
-# Defense-in-depth: native-ETH currency0 → raise (mirror of close-side T07)
-# =============================================================================
-
-
 class TestSingleSidedNativeCurrencyLeftUnmeasured:
-    """Native-ETH (currency0 == 0x0) is SUPPORTED (VIB-4483 / P-V1-B).
-
-    A native-ETH V4 pool deposits its ETH leg via ``msg.value`` and emits NO
-    ERC-20 Transfer, so the single observed transfer is always the ERC-20 leg.
-    The parser must NOT raise (V0 used to) and must NOT fabricate a measured
-    zero on the unobserved native leg (Empty != Zero — that would be a
-    misattribution since the ETH genuinely deposited). Instead it attributes
-    the observed ERC-20 amount to its correct PoolKey leg and leaves the
-    native leg ``None`` (unmeasured) for the runner to stamp from a post-mint
-    ``QueryV4PositionState`` read. Mirror of the close-side acceptance path.
-    """
+    """A native deposit emits no Transfer, so its unobserved leg remains None."""
 
     def test_native_currency0_leaves_native_leg_none(self, caplog: pytest.LogCaptureFixture) -> None:
         from almanak.connectors.uniswap_v4.sdk import NATIVE_CURRENCY
 
-        # PoolKey with native ETH as currency0 (after sort, since 0x0 < anything).
-        native_pool_key = PoolKey(
-            currency0=NATIVE_CURRENCY, currency1=WETH_BASE, fee=3000, tick_spacing=60
-        )
+        native_pool_key = PoolKey(currency0=NATIVE_CURRENCY, currency1=WETH_BASE, fee=3000, tick_spacing=60)
 
         tx_hash = "0xsinglesided_native"
-        # Only the ERC-20 (currency1 = WETH) leg transfers into the PoolManager.
         receipt = _single_sided_receipt(token=WETH_BASE, amount=WETH_AMOUNT, tx_hash=tx_hash)
         parser = UniswapV4ReceiptParser(chain=CHAIN, pool_key_lookup=lambda pid, chain: native_pool_key)
 
         with caplog.at_level(logging.WARNING, logger=PARSER_LOGGER):
             data = parser.extract_lp_open_data(receipt)
 
-        assert data is not None, "native-ETH single-sided open must NOT be dropped/raised (VIB-4483)"
-        # currency0 = native (0x0), currency1 = WETH. The observed WETH leg
-        # lands on amount1; the native leg stays None (unmeasured), NOT zero.
+        assert data is not None, "native-ETH single-sided open must not be dropped"
         assert data.currency0 == NATIVE_CURRENCY
         assert data.currency1 == WETH_BASE
         assert data.amount0 is None, "native leg MUST be None (unmeasured), never a fabricated zero"
         assert data.amount1 == WETH_AMOUNT, "observed ERC-20 leg must be measured on its PoolKey leg"
 
 
-# =============================================================================
-# Defense-in-depth: observed currency not in PoolKey → drop (transfer_set_mismatch)
-# =============================================================================
-
-
 class TestSingleSidedTransferSetMismatch:
-    """Mirror of close-side ``transfer_set_mismatch``: if the single observed
-    currency is NEITHER currency0 NOR currency1 from the PoolKey, the parser
-    cannot honestly attribute and MUST drop. Catches a parser mis-extraction
-    or a stale cache returning the wrong PoolKey."""
+    """A currency outside the PoolKey cannot be attributed and must be dropped."""
 
     def test_observed_currency_outside_pool_key_drops(self, caplog: pytest.LogCaptureFixture) -> None:
         reason = V4LPDropReason.TRANSFER_SET_MISMATCH
         before = _counter_value(CHAIN, reason, "drop")
 
-        # Use a third token address that is NOT in the PoolKey {WETH, USDC}.
         STRANGER = "0xc0ffee0000000000000000000000000000000000"
         tx_hash = "0xsinglesided_mismatch"
         receipt = _single_sided_receipt(token=STRANGER, amount=12345, tx_hash=tx_hash)
@@ -477,41 +392,3 @@ class TestSingleSidedTransferSetMismatch:
         joined = " ".join(rec.message for rec in caplog.records)
         assert "transfer_set_mismatch" in joined
         assert _counter_value(CHAIN, reason, "drop") == before + 1.0
-
-
-# =============================================================================
-# Code-comment audit (VIB-4486 mis-tag → VIB-4535)
-# =============================================================================
-
-
-class TestCodeCommentReferences:
-    """The original V0 receipt_parser.py cited VIB-4486 (V3 fee separation) in
-    two places on the V4 open path. Per VIB-4535 spec, those references must
-    be corrected to VIB-4535. This test fails-loud if the mis-tag returns."""
-
-    def test_no_vib_4486_references_in_receipt_parser(self) -> None:
-        import almanak.connectors.uniswap_v4.receipt_parser as receipt_parser_module
-
-        source_path = receipt_parser_module.__file__
-        assert source_path is not None
-        with open(source_path, encoding="utf-8") as fh:
-            source = fh.read()
-        assert "VIB-4486" not in source, (
-            "VIB-4535 spec requires the mis-tagged 'VIB-4486 family' references "
-            "in the V4 open path be updated to cite VIB-4535. VIB-4486 is V3 fee "
-            "separation -- a different concern."
-        )
-
-    def test_vib_4535_referenced_in_receipt_parser(self) -> None:
-        """The fix MUST cite VIB-4535 in the docstring / inline comment so a
-        future reader can find the ticket."""
-        import almanak.connectors.uniswap_v4.receipt_parser as receipt_parser_module
-
-        source_path = receipt_parser_module.__file__
-        assert source_path is not None
-        with open(source_path, encoding="utf-8") as fh:
-            source = fh.read()
-        assert source.count("VIB-4535") >= 2, (
-            "VIB-4535 must be cited at least twice (at the implementation site "
-            "and in the helper docstring) for traceability."
-        )

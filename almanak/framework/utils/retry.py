@@ -16,38 +16,8 @@
     ``intents/state_machine.py``. None of those are affected by this
     deprecation.
 
-This module provides reusable retry decorators for handling transient failures
-in external API calls (price providers, RPC endpoints, etc.).
-
-Key Features:
-    - Exponential backoff with configurable base and max delay
-    - Jitter to prevent thundering herd problem
-    - Support for both sync and async functions
-    - Configurable retry conditions based on exception types
-    - Logging of retry attempts
-
-Usage:
-    # Basic usage with default settings
-    @retry_with_backoff()
-    async def fetch_price(token: str) -> float:
-        ...
-
-    # Custom configuration
-    @retry_with_backoff(
-        max_retries=5,
-        base_delay=2.0,
-        max_delay=60.0,
-        retryable_exceptions=(TimeoutError, ConnectionError),
-    )
-    def call_external_api() -> dict:
-        ...
-
-    # Using RetryConfig for consistent settings
-    config = RetryConfig(max_retries=3, base_delay=1.0, max_delay=32.0)
-
-    @retry_with_backoff(config=config)
-    async def another_api_call() -> str:
-        ...
+The decorators support synchronous and asynchronous functions, exponential
+backoff, jitter, configurable exception types, and retry callbacks.
 """
 
 from __future__ import annotations
@@ -90,14 +60,8 @@ def _emit_deprecation(stacklevel: int = 3) -> None:
 
 _emit_deprecation(stacklevel=2)
 
-# Type variables for generic function signatures
 P = ParamSpec("P")
 T = TypeVar("T")
-
-
-# =============================================================================
-# Configuration
-# =============================================================================
 
 
 @dataclass
@@ -125,7 +89,6 @@ class RetryConfig:
     )
 
     def __post_init__(self) -> None:
-        """Validate configuration values."""
         if self.max_retries < 0:
             raise ValueError("max_retries must be >= 0")
         if self.base_delay <= 0:
@@ -136,13 +99,7 @@ class RetryConfig:
             raise ValueError("jitter_factor must be between 0 and 1")
 
 
-# Default configuration - can be customized per use case
 DEFAULT_RETRY_CONFIG = RetryConfig()
-
-
-# =============================================================================
-# Backoff Calculation
-# =============================================================================
 
 
 def calculate_backoff_delay(
@@ -164,21 +121,11 @@ def calculate_backoff_delay(
     Returns:
         Delay in seconds with jitter applied
     """
-    # Exponential backoff: base_delay * 2^attempt
     delay = base_delay * (2**attempt)
-
-    # Cap at max_delay
     delay = min(delay, max_delay)
-
-    # Add jitter: random value between 0 and (delay * jitter_factor)
     jitter = random.uniform(0, delay * jitter_factor)
 
     return delay + jitter
-
-
-# =============================================================================
-# Retry Decorators
-# =============================================================================
 
 
 def retry_with_backoff(
@@ -207,13 +154,7 @@ def retry_with_backoff(
     Returns:
         Decorated function with retry behavior
 
-    Example:
-        @retry_with_backoff(max_retries=5, base_delay=2.0)
-        async def fetch_data():
-            response = await client.get("/api/data")
-            return response.json()
     """
-    # Build effective config from defaults + overrides
     base_config = config or DEFAULT_RETRY_CONFIG
     effective_config = RetryConfig(
         max_retries=max_retries if max_retries is not None else base_config.max_retries,
@@ -228,8 +169,6 @@ def retry_with_backoff(
     def decorator(
         func: Callable[P, T | Awaitable[T]],
     ) -> Callable[P, T | Awaitable[T]]:
-        """Decorate function with retry logic."""
-        # Check if async
         if asyncio.iscoroutinefunction(func):
             return _wrap_async(func, effective_config, on_retry)
         return _wrap_sync(func, effective_config, on_retry)
@@ -242,8 +181,6 @@ def _wrap_async[**P, T](
     config: RetryConfig,
     on_retry: Callable[[int, Exception, float], None] | None,
 ) -> Callable[P, Awaitable[T]]:
-    """Wrap async function with retry logic."""
-
     @functools.wraps(func)
     async def wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
         last_exception: Exception | None = None
@@ -254,12 +191,10 @@ def _wrap_async[**P, T](
             except config.retryable_exceptions as e:
                 last_exception = e
 
-                # Check if we have retries left
                 if attempt >= config.max_retries:
                     logger.warning(f"All {config.max_retries + 1} attempts failed for {func.__name__}: {e}")
                     raise
 
-                # Calculate delay
                 delay = calculate_backoff_delay(
                     attempt,
                     config.base_delay,
@@ -267,17 +202,14 @@ def _wrap_async[**P, T](
                     config.jitter_factor,
                 )
 
-                # Log retry
                 logger.debug(
                     f"Retry {attempt + 1}/{config.max_retries} for {func.__name__} "
                     f"after {delay:.2f}s: {type(e).__name__}: {e}"
                 )
 
-                # Callback if provided
                 if on_retry:
                     on_retry(attempt, e, delay)
 
-                # Wait before retry
                 await asyncio.sleep(delay)
 
         # Should not reach here, but satisfy type checker
@@ -293,8 +225,6 @@ def _wrap_sync[**P, T](
     config: RetryConfig,
     on_retry: Callable[[int, Exception, float], None] | None,
 ) -> Callable[P, T]:
-    """Wrap sync function with retry logic."""
-
     @functools.wraps(func)
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
         last_exception: Exception | None = None
@@ -305,12 +235,10 @@ def _wrap_sync[**P, T](
             except config.retryable_exceptions as e:
                 last_exception = e
 
-                # Check if we have retries left
                 if attempt >= config.max_retries:
                     logger.warning(f"All {config.max_retries + 1} attempts failed for {func.__name__}: {e}")
                     raise
 
-                # Calculate delay
                 delay = calculate_backoff_delay(
                     attempt,
                     config.base_delay,
@@ -318,17 +246,14 @@ def _wrap_sync[**P, T](
                     config.jitter_factor,
                 )
 
-                # Log retry
                 logger.debug(
                     f"Retry {attempt + 1}/{config.max_retries} for {func.__name__} "
                     f"after {delay:.2f}s: {type(e).__name__}: {e}"
                 )
 
-                # Callback if provided
                 if on_retry:
                     on_retry(attempt, e, delay)
 
-                # Wait before retry
                 time.sleep(delay)
 
         # Should not reach here, but satisfy type checker
@@ -339,25 +264,11 @@ def _wrap_sync[**P, T](
     return wrapper
 
 
-# =============================================================================
-# Context Manager for Retry
-# =============================================================================
-
-
 class RetryContext:
     """Context manager for retry operations without decorator.
 
     Useful when you need more control over the retry loop, or when
     decorating is not practical.
-
-    Usage:
-        async with RetryContext(max_retries=3) as ctx:
-            while ctx.should_retry():
-                try:
-                    result = await some_operation()
-                    break
-                except TimeoutError as e:
-                    await ctx.handle_error(e)
     """
 
     def __init__(
@@ -368,14 +279,6 @@ class RetryContext:
         base_delay: float | None = None,
         max_delay: float | None = None,
     ) -> None:
-        """Initialize retry context.
-
-        Args:
-            config: RetryConfig instance
-            max_retries: Override max retries
-            base_delay: Override base delay
-            max_delay: Override max delay
-        """
         base = config or DEFAULT_RETRY_CONFIG
         self._max_retries = max_retries if max_retries is not None else base.max_retries
         self._base_delay = base_delay if base_delay is not None else base.base_delay
@@ -385,14 +288,12 @@ class RetryContext:
         self._last_error: Exception | None = None
 
     async def __aenter__(self) -> RetryContext:
-        """Enter async context."""
         return self
 
     async def __aexit__(self, *args: Any) -> None:
         """Exit async context."""
 
     def __enter__(self) -> RetryContext:
-        """Enter sync context."""
         return self
 
     def __exit__(self, *args: Any) -> None:
@@ -474,10 +375,6 @@ class RetryContext:
         time.sleep(delay)
         self._attempt += 1
 
-
-# =============================================================================
-# Exports
-# =============================================================================
 
 __all__ = [
     "RetryConfig",

@@ -1,34 +1,4 @@
-"""Protocol Testing Harness.
-
-This module provides a standardized testing framework for all protocol connectors,
-ensuring consistent test coverage across different DeFi protocol integrations.
-
-The harness provides:
-- Standard test interface for all connectors
-- Basic operations tests (supply, borrow, swap, etc.)
-- Error handling tests
-- Receipt parsing tests
-- Gas estimation tests
-- Support for both mainnet fork tests and unit tests
-- Test coverage report generation
-- CI integration utilities
-
-Usage:
-    from almanak.framework.testing import ProtocolTestHarness, ProtocolTestSuite
-
-    # Create a test harness for an adapter
-    harness = ProtocolTestHarness(
-        adapter_class=AaveV3Adapter,
-        config_class=AaveV3Config,
-        protocol_type=ProtocolType.LENDING,
-    )
-
-    # Run all tests
-    results = harness.run_all_tests()
-
-    # Generate coverage report
-    report = harness.generate_coverage_report()
-"""
+"""Standardized unit and mainnet-fork test harness for protocol connectors."""
 
 import logging
 import subprocess
@@ -54,11 +24,6 @@ _SYNTHETIC_TEST_ACCOUNTS = (
 )
 
 
-# =============================================================================
-# Type Definitions
-# =============================================================================
-
-
 class AdapterProtocol(Protocol):
     """Protocol defining the interface adapters must implement for testing."""
 
@@ -69,11 +34,6 @@ class AdapterProtocol(Protocol):
 
 AdapterT = TypeVar("AdapterT", bound=AdapterProtocol)
 ConfigT = TypeVar("ConfigT")
-
-
-# =============================================================================
-# Enums
-# =============================================================================
 
 
 class ProtocolType(Enum):
@@ -115,26 +75,9 @@ class TestEnvironment(Enum):
     TESTNET = "TESTNET"
 
 
-# =============================================================================
-# Data Classes
-# =============================================================================
-
-
 @dataclass
 class TestCase:
-    """Definition of a single test case.
-
-    Attributes:
-        name: Test case name
-        description: What the test verifies
-        category: Test category (basic ops, error handling, etc.)
-        environment: Required test environment
-        test_fn: Function that executes the test
-        setup_fn: Optional setup function
-        teardown_fn: Optional teardown function
-        timeout_seconds: Test timeout
-        skip_reason: If set, test will be skipped with this reason
-    """
+    """Definition of a single test case."""
 
     name: str
     description: str
@@ -147,7 +90,6 @@ class TestCase:
     skip_reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize to dictionary."""
         return {
             "name": self.name,
             "description": self.description,
@@ -160,18 +102,7 @@ class TestCase:
 
 @dataclass
 class TestResult:
-    """Result of executing a single test.
-
-    Attributes:
-        test_name: Name of the test
-        status: Pass/fail/skip/error status
-        duration_ms: Test execution time in milliseconds
-        error_message: Error message if failed
-        stack_trace: Stack trace if error occurred
-        assertions_passed: Number of assertions that passed
-        assertions_failed: Number of assertions that failed
-        timestamp: When the test was executed
-    """
+    """Result of executing a single test."""
 
     test_name: str
     status: TestStatus
@@ -183,7 +114,6 @@ class TestResult:
     timestamp: datetime = field(default_factory=datetime.now)
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize to dictionary."""
         return {
             "test_name": self.test_name,
             "status": self.status.value,
@@ -198,19 +128,7 @@ class TestResult:
 
 @dataclass
 class TestSuiteResult:
-    """Result of executing a test suite.
-
-    Attributes:
-        suite_name: Name of the test suite
-        total_tests: Total number of tests
-        passed: Number of tests passed
-        failed: Number of tests failed
-        skipped: Number of tests skipped
-        errors: Number of tests with errors
-        duration_ms: Total execution time
-        results: Individual test results
-        coverage: Coverage percentage (0-100)
-    """
+    """Result of executing a test suite."""
 
     suite_name: str
     total_tests: int = 0
@@ -224,18 +142,15 @@ class TestSuiteResult:
 
     @property
     def pass_rate(self) -> float:
-        """Calculate pass rate percentage."""
         if self.total_tests == 0:
             return 0.0
         return (self.passed / self.total_tests) * 100
 
     @property
     def success(self) -> bool:
-        """Check if all tests passed."""
         return self.failed == 0 and self.errors == 0
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize to dictionary."""
         return {
             "suite_name": self.suite_name,
             "total_tests": self.total_tests,
@@ -252,19 +167,7 @@ class TestSuiteResult:
 
 @dataclass
 class CoverageReport:
-    """Test coverage report for a protocol connector.
-
-    Attributes:
-        protocol_name: Name of the protocol being tested
-        protocol_type: Type of protocol (DEX, Lending, etc.)
-        total_operations: Total operations the adapter supports
-        tested_operations: Operations with test coverage
-        coverage_percentage: Overall coverage percentage
-        operation_coverage: Coverage per operation
-        category_coverage: Coverage per test category
-        recommendations: Suggested tests to improve coverage
-        generated_at: Report generation timestamp
-    """
+    """Test coverage report for a protocol connector."""
 
     protocol_name: str
     protocol_type: ProtocolType
@@ -277,7 +180,6 @@ class CoverageReport:
     generated_at: datetime = field(default_factory=datetime.now)
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize to dictionary."""
         return {
             "protocol_name": self.protocol_name,
             "protocol_type": self.protocol_type.value,
@@ -293,15 +195,7 @@ class CoverageReport:
 
 @dataclass
 class ForkConfig:
-    """Configuration for mainnet fork tests.
-
-    Attributes:
-        chain: Target blockchain
-        fork_block: Block number to fork from (None for latest)
-        rpc_url: RPC endpoint URL
-        anvil_port: Port for Anvil
-        timeout_seconds: Fork startup timeout
-    """
+    """Configuration for mainnet fork tests."""
 
     chain: str
     fork_block: int | None = None
@@ -310,7 +204,6 @@ class ForkConfig:
     timeout_seconds: float = 60.0
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize to dictionary."""
         return {
             "chain": self.chain,
             "fork_block": self.fork_block,
@@ -320,11 +213,6 @@ class ForkConfig:
         }
 
 
-# =============================================================================
-# Test Operations Definitions
-# =============================================================================
-
-# Standard operations per protocol type
 PROTOCOL_OPERATIONS: dict[ProtocolType, list[str]] = {
     ProtocolType.DEX: [
         "swap",
@@ -383,20 +271,9 @@ PROTOCOL_OPERATIONS: dict[ProtocolType, list[str]] = {
 }
 
 
-# =============================================================================
-# Anvil Fork Manager
-# =============================================================================
-
-
 @dataclass
 class AnvilFork:
-    """Manages an Anvil fork process for mainnet fork testing.
-
-    Attributes:
-        config: Fork configuration
-        process: Subprocess running Anvil
-        is_running: Whether the fork is currently running
-    """
+    """Manage an Anvil fork process for mainnet fork testing."""
 
     config: ForkConfig
     process: subprocess.Popen[bytes] | None = None
@@ -431,7 +308,6 @@ class AnvilFork:
                 stderr=subprocess.PIPE,
             )
 
-            # Wait for Anvil to start
             start_time = time.time()
             while time.time() - start_time < self.config.timeout_seconds:
                 if self._is_ready():
@@ -485,22 +361,9 @@ class AnvilFork:
         return f"http://localhost:{self.config.anvil_port}"
 
 
-# =============================================================================
-# Test Context
-# =============================================================================
-
-
 @dataclass
 class TestContext:
-    """Context provided to test functions.
-
-    Attributes:
-        adapter: The protocol adapter instance
-        config: The adapter configuration
-        fork: Optional Anvil fork for mainnet tests
-        test_accounts: Test account addresses
-        test_tokens: Test token addresses per chain
-    """
+    """Context provided to test functions."""
 
     adapter: Any
     config: Any
@@ -514,31 +377,20 @@ class TestContext:
             self.test_accounts = list(_SYNTHETIC_TEST_ACCOUNTS)
 
         if not self.test_tokens:
-            # Derived from the descriptor-owned Anvil funding catalogue
-            # (VIB-4851 CS-6). Deliberate widening vs the legacy 6-chain
-            # literal: ProtocolTestContext has zero external constructors,
-            # every legacy (chain, symbol) entry is address-identical in
-            # the catalogue, and the legacy membership followed no
-            # derivable rule.
+            # Use the descriptor-owned funding catalogue so test tokens stay
+            # aligned with every supported Anvil chain.
             self.test_tokens = {chain: dict(tokens) for chain, tokens in anvil_funding_tokens_map().items()}
-
-
-# =============================================================================
-# Assertion Helpers
-# =============================================================================
 
 
 class AssertionTracker:
     """Tracks assertions during test execution."""
 
     def __init__(self) -> None:
-        """Initialize the tracker."""
         self.passed: int = 0
         self.failed: int = 0
         self.errors: list[str] = []
 
     def assert_true(self, condition: bool, message: str = "") -> None:
-        """Assert that a condition is true."""
         if condition:
             self.passed += 1
         else:
@@ -546,7 +398,6 @@ class AssertionTracker:
             self.errors.append(f"Expected True: {message}")
 
     def assert_false(self, condition: bool, message: str = "") -> None:
-        """Assert that a condition is false."""
         if not condition:
             self.passed += 1
         else:
@@ -554,7 +405,6 @@ class AssertionTracker:
             self.errors.append(f"Expected False: {message}")
 
     def assert_equal(self, actual: Any, expected: Any, message: str = "") -> None:
-        """Assert that two values are equal."""
         if actual == expected:
             self.passed += 1
         else:
@@ -562,7 +412,6 @@ class AssertionTracker:
             self.errors.append(f"Expected {expected}, got {actual}: {message}")
 
     def assert_not_equal(self, actual: Any, expected: Any, message: str = "") -> None:
-        """Assert that two values are not equal."""
         if actual != expected:
             self.passed += 1
         else:
@@ -570,7 +419,6 @@ class AssertionTracker:
             self.errors.append(f"Expected {actual} != {expected}: {message}")
 
     def assert_none(self, value: Any, message: str = "") -> None:
-        """Assert that a value is None."""
         if value is None:
             self.passed += 1
         else:
@@ -578,7 +426,6 @@ class AssertionTracker:
             self.errors.append(f"Expected None, got {value}: {message}")
 
     def assert_not_none(self, value: Any, message: str = "") -> None:
-        """Assert that a value is not None."""
         if value is not None:
             self.passed += 1
         else:
@@ -586,7 +433,6 @@ class AssertionTracker:
             self.errors.append(f"Expected not None: {message}")
 
     def assert_greater(self, actual: Any, expected: Any, message: str = "") -> None:
-        """Assert that actual > expected."""
         if actual > expected:
             self.passed += 1
         else:
@@ -594,7 +440,6 @@ class AssertionTracker:
             self.errors.append(f"Expected {actual} > {expected}: {message}")
 
     def assert_greater_equal(self, actual: Any, expected: Any, message: str = "") -> None:
-        """Assert that actual >= expected."""
         if actual >= expected:
             self.passed += 1
         else:
@@ -602,7 +447,6 @@ class AssertionTracker:
             self.errors.append(f"Expected {actual} >= {expected}: {message}")
 
     def assert_less(self, actual: Any, expected: Any, message: str = "") -> None:
-        """Assert that actual < expected."""
         if actual < expected:
             self.passed += 1
         else:
@@ -610,7 +454,6 @@ class AssertionTracker:
             self.errors.append(f"Expected {actual} < {expected}: {message}")
 
     def assert_less_equal(self, actual: Any, expected: Any, message: str = "") -> None:
-        """Assert that actual <= expected."""
         if actual <= expected:
             self.passed += 1
         else:
@@ -618,7 +461,6 @@ class AssertionTracker:
             self.errors.append(f"Expected {actual} <= {expected}: {message}")
 
     def assert_in(self, item: Any, container: Any, message: str = "") -> None:
-        """Assert that item is in container."""
         if item in container:
             self.passed += 1
         else:
@@ -626,7 +468,6 @@ class AssertionTracker:
             self.errors.append(f"Expected {item} in {container}: {message}")
 
     def assert_not_in(self, item: Any, container: Any, message: str = "") -> None:
-        """Assert that item is not in container."""
         if item not in container:
             self.passed += 1
         else:
@@ -634,7 +475,6 @@ class AssertionTracker:
             self.errors.append(f"Expected {item} not in {container}: {message}")
 
     def assert_type(self, value: Any, expected_type: type, message: str = "") -> None:
-        """Assert that value is of expected type."""
         if isinstance(value, expected_type):
             self.passed += 1
         else:
@@ -649,7 +489,6 @@ class AssertionTracker:
         message: str = "",
         **kwargs: Any,
     ) -> None:
-        """Assert that a function raises an exception."""
         try:
             fn(*args, **kwargs)
             self.failed += 1
@@ -662,13 +501,7 @@ class AssertionTracker:
 
     @property
     def all_passed(self) -> bool:
-        """Check if all assertions passed."""
         return self.failed == 0
-
-
-# =============================================================================
-# Protocol Test Suite Interface
-# =============================================================================
 
 
 class ProtocolTestSuite[AdapterT: AdapterProtocol, ConfigT](ABC):
@@ -761,11 +594,6 @@ class ProtocolTestSuite[AdapterT: AdapterProtocol, ConfigT](ABC):
         )
 
 
-# =============================================================================
-# Standard Test Generators
-# =============================================================================
-
-
 def generate_config_validation_tests[ConfigT](
     config_class: type[ConfigT],
     valid_chains: list[str],
@@ -783,7 +611,6 @@ def generate_config_validation_tests[ConfigT](
     """
     tests: list[TestCase] = []
 
-    # Test valid configuration
     def test_valid_config(ctx: TestContext, tracker: AssertionTracker) -> bool:
         config = ctx.config
         tracker.assert_not_none(config, "Config should be created")
@@ -798,7 +625,6 @@ def generate_config_validation_tests[ConfigT](
         )
     )
 
-    # Test invalid chain
     def test_invalid_chain(ctx: TestContext, tracker: AssertionTracker) -> bool:
         tracker.assert_raises(
             ValueError,
@@ -818,7 +644,6 @@ def generate_config_validation_tests[ConfigT](
         )
     )
 
-    # Test invalid wallet address
     def test_invalid_wallet(ctx: TestContext, tracker: AssertionTracker) -> bool:
         tracker.assert_raises(
             ValueError,
@@ -858,10 +683,9 @@ def generate_basic_operations_tests(
     operations = PROTOCOL_OPERATIONS.get(protocol_type, [])
 
     for operation in operations:
-        # Generate a test stub for each operation
+
         def make_test(op: str) -> Callable[[TestContext, AssertionTracker], bool]:
             def test_operation(ctx: TestContext, tracker: AssertionTracker) -> bool:
-                # Check if adapter has the operation method
                 adapter = ctx.adapter
                 has_method = hasattr(adapter, op)
                 tracker.assert_true(
@@ -903,19 +727,17 @@ def generate_gas_estimation_tests(
 
         def make_gas_test(op: str) -> Callable[[TestContext, AssertionTracker], bool]:
             def test_gas_estimation(ctx: TestContext, tracker: AssertionTracker) -> bool:
-                # Check for gas estimate constant or method
                 adapter = ctx.adapter
                 gas_attr = f"{op}_gas_estimate"
                 gas_method = f"estimate_{op}_gas"
 
                 has_estimate = hasattr(adapter, gas_attr) or hasattr(adapter, gas_method)
 
-                # Gas estimation is optional but recommended
                 if has_estimate:
                     tracker.passed += 1
                 else:
                     logger.warning(f"No gas estimation found for {op}")
-                    tracker.passed += 1  # Don't fail, just warn
+                    tracker.passed += 1  # Gas estimates are recommended, not required.
 
                 return tracker.all_passed
 
@@ -931,11 +753,6 @@ def generate_gas_estimation_tests(
         )
 
     return tests
-
-
-# =============================================================================
-# Protocol Test Harness
-# =============================================================================
 
 
 class ProtocolTestHarness[AdapterT: AdapterProtocol, ConfigT]:
@@ -981,7 +798,6 @@ class ProtocolTestHarness[AdapterT: AdapterProtocol, ConfigT]:
         self._fork: AnvilFork | None = None
         self._context: TestContext | None = None
 
-        # Initialize test cases
         self._initialize_tests()
 
     def _initialize_tests(self) -> None:
@@ -989,7 +805,6 @@ class ProtocolTestHarness[AdapterT: AdapterProtocol, ConfigT]:
         if self.test_suite:
             self._test_cases = self.test_suite.get_all_test_cases()
         else:
-            # Generate standard tests
             operations = PROTOCOL_OPERATIONS.get(self.protocol_type, [])
             self._test_cases = generate_basic_operations_tests(
                 self.protocol_type, self.protocol_name
@@ -1085,7 +900,6 @@ class ProtocolTestHarness[AdapterT: AdapterProtocol, ConfigT]:
                 error_message=test_case.skip_reason,
             )
 
-        # Create context if not provided
         if context is None:
             try:
                 adapter = self.create_adapter()
@@ -1102,7 +916,6 @@ class ProtocolTestHarness[AdapterT: AdapterProtocol, ConfigT]:
                     error_message=f"Failed to create adapter: {e}",
                 )
 
-        # Run setup
         if test_case.setup_fn:
             try:
                 test_case.setup_fn(context)
@@ -1113,7 +926,6 @@ class ProtocolTestHarness[AdapterT: AdapterProtocol, ConfigT]:
                     error_message=f"Setup failed: {e}",
                 )
 
-        # Run test
         tracker = AssertionTracker()
         start_time = time.time()
 
@@ -1133,14 +945,12 @@ class ProtocolTestHarness[AdapterT: AdapterProtocol, ConfigT]:
                 assertions_failed=tracker.failed,
             )
 
-        # Run teardown
         if test_case.teardown_fn:
             try:
                 test_case.teardown_fn(context)
             except Exception as e:
                 logger.warning(f"Teardown failed for {test_case.name}: {e}")
 
-        # Determine status
         duration_ms = (time.time() - start_time) * 1000
         if tracker.all_passed:
             status = TestStatus.PASSED
@@ -1201,7 +1011,6 @@ class ProtocolTestHarness[AdapterT: AdapterProtocol, ConfigT]:
         Returns:
             Test suite result for fork tests
         """
-        # Set up fork
         if not self.setup_fork(chain, fork_block, rpc_url):
             return TestSuiteResult(
                 suite_name=f"{self.protocol_name}_fork_tests",
@@ -1257,7 +1066,6 @@ class ProtocolTestHarness[AdapterT: AdapterProtocol, ConfigT]:
 
         duration_ms = (time.time() - start_time) * 1000
 
-        # Calculate totals
         passed = sum(1 for r in results if r.status == TestStatus.PASSED)
         failed = sum(1 for r in results if r.status == TestStatus.FAILED)
         skipped = sum(1 for r in results if r.status == TestStatus.SKIPPED)
@@ -1288,7 +1096,6 @@ class ProtocolTestHarness[AdapterT: AdapterProtocol, ConfigT]:
         if not operations:
             return 100.0 if results else 0.0
 
-        # Count operations with passing tests
         tested = set()
         for result in results:
             if result.status == TestStatus.PASSED:
@@ -1306,7 +1113,6 @@ class ProtocolTestHarness[AdapterT: AdapterProtocol, ConfigT]:
         """
         operations = PROTOCOL_OPERATIONS.get(self.protocol_type, [])
 
-        # Check which operations have tests
         operation_coverage: dict[str, bool] = {}
         for op in operations:
             has_test = any(op in tc.name for tc in self._test_cases)
@@ -1314,17 +1120,14 @@ class ProtocolTestHarness[AdapterT: AdapterProtocol, ConfigT]:
 
         tested_ops = sum(1 for covered in operation_coverage.values() if covered)
 
-        # Category coverage
         category_coverage: dict[str, float] = {}
         for category in TestCategory:
             cat_tests = [t for t in self._test_cases if t.category == category]
             if cat_tests:
-                # Simple: all tests count equally
                 category_coverage[category.value] = 100.0
             else:
                 category_coverage[category.value] = 0.0
 
-        # Generate recommendations
         recommendations: list[str] = []
         for op, covered in operation_coverage.items():
             if not covered:
@@ -1378,23 +1181,9 @@ class ProtocolTestHarness[AdapterT: AdapterProtocol, ConfigT]:
         print(f"{'=' * 60}\n")
 
 
-# =============================================================================
-# CI Integration
-# =============================================================================
-
-
 @dataclass
 class CIConfig:
-    """Configuration for CI test runs.
-
-    Attributes:
-        fail_on_error: Fail CI if any test errors
-        fail_on_failure: Fail CI if any test fails
-        min_coverage: Minimum coverage percentage required
-        generate_junit: Generate JUnit XML report
-        generate_coverage: Generate coverage report
-        output_dir: Directory for reports
-    """
+    """Configuration for CI test runs."""
 
     fail_on_error: bool = True
     fail_on_failure: bool = True
@@ -1419,13 +1208,10 @@ def run_ci_tests(
     """
     import os
 
-    # Create output directory
     os.makedirs(config.output_dir, exist_ok=True)
 
-    # Run tests
     results = harness.run_all_tests()
 
-    # Generate reports
     if config.generate_coverage:
         coverage = harness.generate_coverage_report()
         coverage_path = os.path.join(config.output_dir, "coverage.json")
@@ -1440,7 +1226,6 @@ def run_ci_tests(
         _generate_junit_xml(results, junit_path)
         logger.info(f"JUnit report written to {junit_path}")
 
-    # Determine exit code
     exit_code = 0
 
     if config.fail_on_error and results.errors > 0:
@@ -1514,11 +1299,6 @@ def _escape_xml(text: str) -> str:
         .replace('"', "&quot;")
         .replace("'", "&apos;")
     )
-
-
-# =============================================================================
-# Convenience Functions
-# =============================================================================
 
 
 def create_lending_test_harness[AdapterT: AdapterProtocol, ConfigT](

@@ -1225,105 +1225,11 @@ def reconcile_lp_with_registry(
             unambiguous_nft_ids=unambiguous_nft_ids,
         )
 
-    # Two rows are the SAME position iff their alias sets INTERSECT (VIB-6287).
-    # A row may legitimately carry several aliases — a GMX registry row carries
-    # both the venue position key it recorded and the market/collateral/side
-    # tuple it can resolve — and a row carrying both BRIDGES a key-only row to a
-    # tuple-only row. "Same iff intersecting" is therefore not an equivalence on
-    # its own: it must be closed transitively, or the bridge is wasted.
-    #
-    # A greedy single pass CANNOT do that. Strategy row {sem}, registry rows {key}
-    # and {key, sem}:
-    #
-    #   {key}       disjoint from {sem}  -> APPENDED
-    #   {key, sem}  intersects           -> discarded, and its aliases are LOST
-    #
-    # so `key ~ sem` is never learned and one position enumerates as two.
-    #
-    # PRECISE SHAPE, because two reviewers and I each described this differently
-    # and all three descriptions were partly right (#3534 panel):
-    #
-    #   * NON-TRANSITIVE ALWAYS. A discarded row's aliases are never absorbed, so
-    #     the bridge is lost in every arrangement.
-    #   * ADDITIONALLY ORDER-DEPENDENT whenever `seen` is NOT pre-seeded by a
-    #     strategy row — i.e. the RESTART shape, where every row comes from the
-    #     registry, which is the shape the registry cutover exists for. Measured:
-    #     (key, bridge, sem) -> 2 rows, (bridge, key, sem) -> 1 row, same inputs.
-    #     With a strategy row present, order genuinely cannot matter: `seen` holds
-    #     {sem} before the loop, so the bridge always intersects and is always
-    #     discarded.
-    #
-    # The registry read carries NO `ORDER BY` (`state/backends/sqlite.py`), so row
-    # order is whatever the backend returns — rowid order on SQLite in practice,
-    # genuinely unspecified on Postgres and free to shift after updates or VACUUM.
-    #
-    # Absorbing a duplicate's aliases instead of dropping them fixes neither shape:
-    # by the time the bridge arrives the key-only row has already been appended.
-    # Only computing the components BEFORE choosing representatives is correct.
-    #
-    # POLARITY — over-SPLIT, loud, never a silent strand. Five vectors were checked
-    # for a consumer that could SKIP a position instead of double-processing it
-    # (positional/`zip` pairing, first-match intent consumption, abort-on-first-
-    # failure, caps/truncation, dict-overwrite); all five refuted. But the
-    # mechanism is stronger than "an extra row only adds an obligation": a
-    # duplicate makes `type_counts[PERP] == 2`, which flips the VIB-5494 Item-2
-    # guard in `check_intent_coverage` and RETROACTIVELY TIGHTENS the requirement
-    # on the REAL row — an intent that would have passed as a lenient default is
-    # then rejected. So a duplicate can turn an otherwise-PASSING teardown into a
-    # failing one. Still the loud direction; not merely a cosmetic extra row.
-    #
-    # LATENT, NOT LIVE — and the reason is worth keeping. The arrangement needs two
-    # `position_registry` rows for one physical position, which the table's
-    # PRIMARY KEY (deployment_id, chain, primitive, physical_identity_hash)
-    # forbids: all three perp producers feed the same normalised tuple, and the
-    # backfill inserts ON CONFLICT DO NOTHING. **But that PK lives in a schema this
-    # repo does not own** (AGENTS.md §Database schema ownership — the deployed
-    # Postgres schema is owned by `metrics-database`, and the in-repo
-    # `POSTGRES_SCHEMA` is legacy reference-only). Verified unreachable on local
-    # SQLite against the real CREATE TABLE; NOT verifiable for hosted Postgres from
-    # this repo, and no SDK-side code asserts it. That is precisely why the fix
-    # ships anyway: the invariant now holds STRUCTURALLY in the enumeration instead
-    # of depending on a constraint the SDK can neither see nor test.
-    #
-    # A row with an EMPTY alias set is UNMEASURED: it links nothing, joins no
-    # component, and is always kept. Empty must never behave like a shared alias,
-    # which would collapse every unmeasured row into one.
-    #
-    # WHY THE CLOSURE STAYS — the question was open at the end of the #3534 panel
-    # and was settled by MEASUREMENT, not by preference. Six rounds of review found
-    # a defect in each, four of them over-collapse regressions in this closure's own
-    # fixes, and the honest reading at that point was "a latent fix that keeps
-    # producing reachable strands". Replacing the closure with the greedy pairwise
-    # pass and running the suite is what actually answers it:
-    #
-    #   4 failed, 1769 passed  (tests/unit/teardown, pairwise variant)
-    #
-    # and all four are the transitive cases — `..._bridge_row_collapses_...` and
-    # `..._restart_shape_is_order_independent`. Nothing else moves; every
-    # mainnet-proven VIB-6287 case passes either way. So the closure is load-bearing
-    # for exactly one thing: making "same iff the sets intersect" an actual
-    # equivalence relation. Intersection is not transitive, so the pairwise pass does
-    # not implement the contract stated in
-    # `_strategy_base/perp_identity.py` — it implements "matches an
-    # already-claimed set", which is order-dependent (measured: (key, bridge, sem)
-    # -> 2 rows, (bridge, key, sem) -> 1) against a registry read carrying no
-    # ORDER BY. Shipping it would mean either a module whose own documented contract
-    # is false, or weakening that contract for every venue that adopts the seam
-    # later.
-    #
-    # What made the closure dangerous was never the closure: it was rows emitting an
-    # UNVERIFIED multi-alias set, which merges two distinct positions. That is now
-    # refused at the source (`gmx_v2/perp_identity.py`, "a row may emit at most one
-    # identity family"), so a row bridges only when the venue has VERIFIED by
-    # keccak derivation that its id and its attributes name one position.
-    #
-    # THE REMAINING GAP, stated rather than implied: that precondition is a contract
-    # the framework asserts and CANNOT enforce. GMX honours it structurally; the next
-    # connector to publish a hook can emit an unverified multi-alias set and silently
-    # strand. VIB-6329 adds the framework-side census guard. Until it lands, the
-    # emission contract in `_strategy_base/perp_identity.py` is the only thing
-    # standing between a new hook and the silent direction — which is why this
-    # paragraph is here and not in a commit message.
+    # Intersecting alias sets identify one position, and bridging sets require the
+    # transitive closure of that relation. Registry row order is unspecified, so
+    # deduplication must be order-independent: build every component before choosing
+    # representatives. Empty alias sets are unmeasured, join no component, and remain
+    # separate.
     parent: dict[tuple[str, ...], tuple[str, ...]] = {}
 
     def _find(alias: tuple[str, ...]) -> tuple[str, ...]:

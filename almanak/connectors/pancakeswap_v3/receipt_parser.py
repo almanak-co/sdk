@@ -47,41 +47,18 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# =============================================================================
-# Event Topic Signatures (same as Uniswap V3)
-# =============================================================================
-
-# PancakeSwap V3 uses a DIFFERENT Swap event signature than Uniswap V3!
-# UniswapV3: Swap(address,address,int256,int256,uint160,uint128,int24) - 7 params
-# PancakeSwapV3: Swap(address,address,int256,int256,uint160,uint128,int24,uint128,uint128) - 9 params
-# The extra 2 uint128 params are protocolFeesToken0 and protocolFeesToken1
 EVENT_TOPICS: dict[str, str] = {
-    "Swap": "0x19b47279256b2a23a1665c810c8d55a1758940ee09377d4f8d26497a3577dc83",  # PancakeSwap V3 (9 params)
+    # PancakeSwap adds two trailing protocol-fee fields to the canonical V3 Swap ABI.
+    "Swap": "0x19b47279256b2a23a1665c810c8d55a1758940ee09377d4f8d26497a3577dc83",
     "Mint": "0x7a53080ba414158be7ec69b987b5fb7d07dee101fe85488f0853ae16239d0bde",
     "Burn": "0x0c396cd989a39f4459b5fa1aed6a9a8dcdbc45908acfd67e028cd568da98982c",
     "Collect": "0x70935338e69775456a85ddef226c395fb668b63fa0115f5f20610b388e6ca9c0",
     "Transfer": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
-    # NonfungiblePositionManager.IncreaseLiquidity(uint256 indexed tokenId, uint128 liquidity,
-    #   uint256 amount0, uint256 amount1)
-    # keccak("IncreaseLiquidity(uint256,uint128,uint256,uint256)") — identical to
-    # Uniswap V3 (PancakeSwap V3 is a direct UV3 fork at the NPM contract level).
     "IncreaseLiquidity": "0x3067048beee31b25b2f1681f88dac838c8bba36af25bfb2b7cf7473a5847e35f",
-    # NonfungiblePositionManager.DecreaseLiquidity(uint256 indexed tokenId, uint128 liquidity,
-    #   uint256 amount0, uint256 amount1)
-    # keccak("DecreaseLiquidity(uint256,uint128,uint256,uint256)") — identical to Uniswap V3
-    # (PancakeSwap V3 is a direct UV3 fork at the NPM contract level). VIB-4305 (T12) so the
-    # close-side parser can recover token_id from receipt facts alone (mirrors LP_OPEN's
-    # IncreaseLiquidity → token_id pattern; required for physical_identity_hash on
-    # registry-mode LP_CLOSE writes).
     "DecreaseLiquidity": "0x26f6a048ee9138f2c0ce266f322cb99228e8d619ae2bff30c67f8dcf9d2377b4",
 }
 
 TOPIC_TO_EVENT: dict[str, str] = {v: k for k, v in EVENT_TOPICS.items()}
-
-
-# =============================================================================
-# Enums
-# =============================================================================
 
 
 class PancakeSwapV3EventType(Enum):
@@ -104,20 +81,7 @@ EVENT_NAME_TO_TYPE: dict[str, PancakeSwapV3EventType] = {
 }
 
 
-# PancakeSwap V3 NonfungiblePositionManager addresses, sourced from the
-# connector-local registry (single source of truth — ``PANCAKESWAP_V3``
-# in ``almanak/connectors/pancakeswap_v3/addresses.py``). Mirrors the
-# Aerodrome Slipstream pattern (``_build_slipstream_npm_addresses``) —
-# adding a new chain is a one-line change in ``addresses.py`` and this
-# dict rebuilds automatically.
-#
-# Historical note: this dict used to be hand-maintained as a flat
-# ``{chain: addr}`` mapping. PancakeSwap V3 happens to use the same NPM
-# deployer address across every supported chain today, but treating that
-# coincidence as canonical hides drift the next time PCS deploys with a
-# different address (the same trap that bit the early Uniswap V3 multi-
-# chain story before VIB-3893). Reading from ``PANCAKESWAP_V3`` keeps the
-# registry authoritative.
+# Derive NPM addresses from the connector registry so chain deployments cannot drift.
 def _build_pancakeswap_v3_npm_addresses() -> dict[str, str]:
     """Derive ``{chain: nft_position_manager}`` from ``PANCAKESWAP_V3``.
 
@@ -132,8 +96,6 @@ def _build_pancakeswap_v3_npm_addresses() -> dict[str, str]:
         nft = entry.get("nft")
         if nft:
             out[chain.lower()] = nft.lower()
-    # Preserve the historical ``bnb`` alias of ``bsc`` — the connector
-    # __init__ docstring documents both names.
     if "bsc" in out and "bnb" not in out:
         out["bnb"] = out["bsc"]
     return out
@@ -168,13 +130,7 @@ PANCAKESWAP_V3_RECEIPT_SPEC = V3ForkSpec(
     strict_event_layouts=V3_STANDARD_TRANSFER_LAYOUTS,
 )
 
-# Zero address for detecting mints
 ZERO_ADDRESS_PADDED = "0x" + "0" * 64
-
-
-# =============================================================================
-# Data Classes
-# =============================================================================
 
 
 @dataclass
@@ -195,8 +151,8 @@ class SwapEventData:
     sqrt_price_x96: int = 0
     liquidity: int = 0
     tick: int = 0
-    protocol_fees_token0: int = 0  # PancakeSwap V3 specific
-    protocol_fees_token1: int = 0  # PancakeSwap V3 specific
+    protocol_fees_token0: int = 0
+    protocol_fees_token1: int = 0
 
     @property
     def token0_in(self) -> bool:
@@ -247,16 +203,6 @@ class ParseResult:
         }
 
 
-# =============================================================================
-# Internal swap-amount extraction state (Phase 8.4 refactor)
-#
-# These dataclasses are NOT part of the public API — they bundle state
-# between the per-phase helpers of ``extract_swap_amounts`` so each helper
-# stays small, pure, and individually testable. Mirrors the Phase 7.3
-# Aerodrome ``_SwapSeed`` and the Phase 6 UniV4 pattern.
-# =============================================================================
-
-
 @dataclass
 class _WalletTransfers:
     """ERC-20 Transfer events partitioned by wallet involvement.
@@ -291,11 +237,6 @@ class _SwapDecimals:
     decimals_out: int
 
 
-# =============================================================================
-# Receipt Parser
-# =============================================================================
-
-
 class PancakeSwapV3ReceiptParser(V3ForkReceiptParser, BaseReceiptParser[SwapEventData, ParseResult]):
     """Parser for PancakeSwap V3 transaction receipts.
 
@@ -310,9 +251,9 @@ class PancakeSwapV3ReceiptParser(V3ForkReceiptParser, BaseReceiptParser[SwapEven
             "tick_lower",
             "tick_upper",
             "liquidity",
-            "lp_open_data",  # extract_lp_open_data — see VIB-3887 / VIB-3893
+            "lp_open_data",
             "lp_close_data",
-            "protocol_fees",  # VIB-3204 — extract_protocol_fees implemented below
+            "protocol_fees",
         }
     )
     V3_FORK_SPEC = PANCAKESWAP_V3_RECEIPT_SPEC
@@ -346,18 +287,14 @@ class PancakeSwapV3ReceiptParser(V3ForkReceiptParser, BaseReceiptParser[SwapEven
         if event_name != "Swap":
             return {}
 
-        # Parse indexed topics
         sender = HexDecoder.topic_to_address(topics[1]) if len(topics) > 1 else ""
         recipient = HexDecoder.topic_to_address(topics[2]) if len(topics) > 2 else ""
 
-        # Parse non-indexed data (each value is 32 bytes = 64 hex chars)
-        # PancakeSwap V3 has 7 data fields vs UniV3's 5
         amount0 = HexDecoder.decode_int256(data, 0)
         amount1 = HexDecoder.decode_int256(data, 32)
         sqrt_price_x96 = HexDecoder.decode_uint160(data, 64)
         liquidity = HexDecoder.decode_uint128(data, 96)
         tick = HexDecoder.decode_int24(data, 128)
-        # PancakeSwap V3 specific: protocol fees (offset 160 and 192)
         protocol_fees_token0 = HexDecoder.decode_uint128(data, 160)
         protocol_fees_token1 = HexDecoder.decode_uint128(data, 192)
 
@@ -392,7 +329,6 @@ class PancakeSwapV3ReceiptParser(V3ForkReceiptParser, BaseReceiptParser[SwapEven
         """
         _ = (log_index, tx_hash, block_number, raw_topics, raw_data)
 
-        # Only create SwapEventData for actual Swap events
         if event_name != "Swap" or not decoded_data:
             return None
 
@@ -465,10 +401,6 @@ class PancakeSwapV3ReceiptParser(V3ForkReceiptParser, BaseReceiptParser[SwapEven
             block_number=block_number,
         )
 
-    # =============================================================================
-    # Extraction Methods (for Result Enrichment)
-    # =============================================================================
-
     def extract_swap_amounts(
         self,
         receipt: dict[str, Any],
@@ -515,13 +447,7 @@ class PancakeSwapV3ReceiptParser(V3ForkReceiptParser, BaseReceiptParser[SwapEven
             if not self._swap_status_ok(receipt):
                 return None
 
-            # CodeRabbit review (PR #1798): guard against transfer-only
-            # receipts that happen to contain one wallet-out and one wallet-in
-            # ERC-20 Transfer but NO PancakeSwap V3 Swap event. Without this
-            # check, a plain ERC-20 transfer or an LP-add receipt (which can
-            # legitimately produce wallet Transfer logs) would be misclassified
-            # as a swap and pollute downstream PnL. Enforces the method-contract
-            # invariant "returns None if no swap event found".
+            # Wallet transfers also occur outside swaps; require a protocol Swap log.
             if not self._has_pcs_swap_log(receipt):
                 return None
 
@@ -544,11 +470,6 @@ class PancakeSwapV3ReceiptParser(V3ForkReceiptParser, BaseReceiptParser[SwapEven
         except Exception as e:
             logger.warning(f"Failed to extract swap amounts: {e}")
             return None
-
-    # ------------------------------------------------------------------
-    # extract_swap_amounts — per-phase helpers (Phase 8.4 refactor).
-    # Each is small, single-purpose, and independently testable.
-    # ------------------------------------------------------------------
 
     @staticmethod
     def _swap_status_ok(receipt: dict[str, Any]) -> bool:
@@ -588,6 +509,7 @@ class PancakeSwapV3ReceiptParser(V3ForkReceiptParser, BaseReceiptParser[SwapEven
         nothing, so ``extract_swap_amounts`` returned ``None`` and the ledger
         booked a success row with EMPTY amounts (Empty != Zero violation).
         """
+        # Safe and Zodiac transfers involve the Safe rather than the submitting EOA.
         return resolve_trading_wallet(receipt)
 
     def _collect_wallet_transfers(
@@ -711,6 +633,7 @@ class PancakeSwapV3ReceiptParser(V3ForkReceiptParser, BaseReceiptParser[SwapEven
         addr_out = seed.token_out.lower() if seed.token_out else ""
         decimals_in: int | None
         decimals_out: int | None
+        # Compiler hints scale only the matching transfer-derived token address.
         if hint_by_addr and addr_in in hint_by_addr:
             decimals_in = resolve_token_decimals(seed.token_in, self.chain, hints=hint_by_addr)
         else:
@@ -721,6 +644,7 @@ class PancakeSwapV3ReceiptParser(V3ForkReceiptParser, BaseReceiptParser[SwapEven
         else:
             decimals_out = self._resolve_decimals(seed.token_out)
 
+        # Output must be measurable; unresolved input remains explicitly unmeasured.
         if decimals_out is None:
             logger.warning("Cannot compute swap amounts: output token decimals unknown")
             return None
@@ -736,11 +660,6 @@ class PancakeSwapV3ReceiptParser(V3ForkReceiptParser, BaseReceiptParser[SwapEven
         """Assemble the final SwapAmounts, including realized slippage."""
         from almanak.framework.execution.extracted_data import SwapAmounts
 
-        # "Empty != zero" invariant (docs/internal/blueprints/27-accounting.md):
-        # When input decimals could not be resolved, we cannot compute
-        # ``amount_in_decimal`` -- emit ``None`` (unmeasured), NOT
-        # ``Decimal(0)`` (measured zero). The raw integer ``amount_in``
-        # is still preserved so the row can be emitted gracefully.
         amount_in_decimal: Decimal | None
         if seed.amount_in and decimals.decimals_in is not None:
             amount_in_decimal = Decimal(seed.amount_in) / Decimal(10**decimals.decimals_in)
@@ -749,27 +668,17 @@ class PancakeSwapV3ReceiptParser(V3ForkReceiptParser, BaseReceiptParser[SwapEven
 
         amount_out_decimal = Decimal(seed.amount_out) / Decimal(10**decimals.decimals_out)
 
-        # ``effective_price`` is unmeasurable when ``amount_in_decimal`` is
-        # unmeasured -- emit ``None``, never substitute a sentinel zero.
-        # The ledger writer / swap_handler already handle ``None`` via the
-        # existing ``is not None`` guards.
         effective_price: Decimal | None
         if amount_in_decimal is not None and amount_in_decimal > 0:
             effective_price = amount_out_decimal / amount_in_decimal
         else:
             effective_price = None
 
-        # VIB-3203 Phase B: realized slippage when enricher supplies a quote.
         slippage_bps: int | None = None
         if expected_out is not None and expected_out > 0 and amount_out_decimal > 0:
             realized = (expected_out - amount_out_decimal) / expected_out
             slippage_bps = int(realized * Decimal(10_000))
 
-        # ``amount_in_decimal_resolved=False`` flags the asymmetric
-        # fail-soft case where input decimals were unknown. Combined with
-        # ``amount_in_decimal=None`` and ``effective_price=None`` this
-        # preserves the "Empty != zero" invariant -- downstream consumers
-        # see "unmeasured", not a literal zero.
         return SwapAmounts(
             amount_in=seed.amount_in,
             amount_out=seed.amount_out,
@@ -778,7 +687,6 @@ class PancakeSwapV3ReceiptParser(V3ForkReceiptParser, BaseReceiptParser[SwapEven
             effective_price=effective_price,
             slippage_bps=slippage_bps,
             expected_out_decimal=expected_out,
-            # VIB-4978: canonical symbol into the ledger, not the raw address.
             token_in=resolve_swap_token_symbol(seed.token_in, chain) or None,
             token_out=resolve_swap_token_symbol(seed.token_out, chain) or None,
             amount_in_decimal_resolved=decimals.decimals_in is not None,
@@ -994,7 +902,6 @@ class PancakeSwapV3ReceiptParser(V3ForkReceiptParser, BaseReceiptParser[SwapEven
                 if not data or data == "0x":
                     continue
 
-                # Liquidity is at offset 32 (after sender address at offset 0)
                 liquidity = HexDecoder.decode_uint128(data, 32)
                 return liquidity
 
@@ -1058,13 +965,8 @@ class PancakeSwapV3ReceiptParser(V3ForkReceiptParser, BaseReceiptParser[SwapEven
             burn_liquidity_total = 0
             saw_burn = False
             saw_collect = False
-            # VIB-4305 / mirror VIB-3940: capture the pool address from the
-            # Burn event emitter so the registry-payload builder has the
-            # semantic_grouping_key anchor without an off-chain RPC.
+            # Burn anchors close identity; split Collect receipts retain a separate leg emitter.
             pool_address = ""
-            # VIB-6053 — pool address as seen on the COLLECT log (see the collect
-            # branch below). Separate from ``pool_address`` so the registry anchor
-            # keeps its Burn-only semantics.
             collect_pool_address = ""
 
             for log in logs:
@@ -1080,32 +982,17 @@ class PancakeSwapV3ReceiptParser(V3ForkReceiptParser, BaseReceiptParser[SwapEven
                 data = HexDecoder.normalize_hex(log.get("data", ""))
 
                 if first_topic == collect_topic and len(topics) >= 4:
-                    # data: recipient (32B padded address)
-                    #       ‖ amount0 (uint128, 32B padded)
-                    #       ‖ amount1 (uint128, 32B padded)
                     collect_amount0 += HexDecoder.decode_uint128(data, 32)
                     collect_amount1 += HexDecoder.decode_uint128(data, 64)
                     saw_collect = True
-                    # VIB-6053 — the pool emits Collect as well as Burn, so this
-                    # log's emitter IS the pool. Captured separately because a V3
-                    # close is a SPLIT-TX sequence (decreaseLiquidity -> collect ->
-                    # burn): the collect-only receipt carries no Burn, so the
-                    # Burn-derived ``pool_address`` above is empty there and the
-                    # leg-identity scan would silently find no counterparty. Kept
-                    # out of ``pool_address`` itself so the VIB-4305 registry
-                    # anchor keeps its existing Burn-only semantics.
                     collect_pool_address = collect_pool_address or log_emitter_address(log, chain=self.chain)
 
                 elif first_topic == burn_topic and len(topics) >= 4:
-                    # uint128 amount (padded) ‖ uint256 amount0 ‖ uint256 amount1
-                    # Accumulate across multiple Burn logs (multicall LP_CLOSE).
                     burn_liquidity_total += HexDecoder.decode_uint128(data, 0)
                     burn_amount0 += HexDecoder.decode_uint256(data, 32)
                     burn_amount1 += HexDecoder.decode_uint256(data, 64)
                     saw_burn = True
                     if not pool_address:
-                        # Burn is emitted by the pool itself — its emitter
-                        # address IS the pool. Capture once on the first Burn.
                         addr = log.get("address", "")
                         if isinstance(addr, bytes):
                             addr = "0x" + addr.hex()
@@ -1117,43 +1004,24 @@ class PancakeSwapV3ReceiptParser(V3ForkReceiptParser, BaseReceiptParser[SwapEven
 
             liquidity_removed = burn_liquidity_total if saw_burn else None
 
-            # Fees attribution from a single receipt — see
-            # ``almanak/connectors/uniswap_v3/receipt_parser.py``
-            # for the full rationale. Parser returns its best single-receipt
-            # understanding; the aggregate layer
-            # (``ResultEnricher._select_preferred_aggregate``) disambiguates
-            # LP_COLLECT_FEES (collect-only, no decrease sibling) from
-            # split-tx LP_CLOSE (collect-only with a decrease sibling) and
-            # overrides fees in the second case.
+            # Collect-only is ambiguous until aggregation sees any decrease sibling.
             if saw_collect:
                 fees0: int | None = max(collect_amount0 - burn_amount0, 0)
                 fees1: int | None = max(collect_amount1 - burn_amount1, 0)
             else:
-                # Burn-only receipt (no Collect): principal is observed, fees
-                # are unmeasured. VIB-4470 / blueprint 27 §Empty ≠ Zero.
+                # Burn exposes principal but not fees.
                 fees0 = None
                 fees1 = None
 
-            # Try to recover ``current_tick`` from any Swap event in the same
-            # receipt (multicall close that includes a router swap will emit
-            # one on the pool). When absent, the runner's slot0() fallback
-            # will fill the field after parsing.
             current_tick = self._current_tick_from_swap_event(logs, pool_address) if pool_address else None
 
-            # ``source`` tags the receipt shape for the aggregator's
-            # preferred-source picker (VIB-4310,
-            # ``_AGGREGATE_FIELDS["lp_close_data"] = "collect"``). Convention
-            # mirrors Aerodrome Slipstream — see uniswap_v3/receipt_parser.py
-            # for full rationale.
+            # Aggregation prefers Collect data when a close spans receipts.
             source = "collect" if saw_collect else "decrease_liquidity"
 
             amount0_collected = collect_amount0 if saw_collect else burn_amount0
             amount1_collected = collect_amount1 if saw_collect else burn_amount1
 
-            # VIB-6053 — bind leg IDENTITY to the collected amounts. See the
-            # uniswap_v3 twin: exact on the ``source="collect"`` shape (which the
-            # aggregator prefers); a burn-only receipt moves no tokens, so both
-            # stay ``None`` — honestly unidentified rather than guessed.
+            # Collect transfers identify currencies exactly; Burn-only receipts cannot.
             currency0, currency1 = currencies_for_amounts(
                 transfers_by_token(logs, chain=self.chain, from_address=pool_address or collect_pool_address)
                 if (pool_address or collect_pool_address)
@@ -1171,24 +1039,15 @@ class PancakeSwapV3ReceiptParser(V3ForkReceiptParser, BaseReceiptParser[SwapEven
                 current_tick=current_tick,
                 pool_address=pool_address,
                 source=source,
-                currency0=currency0,  # VIB-6053 — index-aligned with amount0_collected
-                currency1=currency1,  # VIB-6053 — index-aligned with amount1_collected
+                currency0=currency0,
+                currency1=currency1,
             )
 
         except Exception as e:
             logger.warning(f"Failed to extract lp_close_data: {e}")
             return None
 
-    # =============================================================================
-    # extract_lp_open_data — PancakeSwap V3 LP_OPEN payload extraction
-    # (mirrors uniswap_v3 / aerodrome — see VIB-3887 / VIB-3893)
-    # =============================================================================
-
-    # crap-allowlist: VIB-6140 — cc=29 after PR #3451's purely-additive currency0/1
-    # identity emission. The decomposition (the shared `currencies_from_counterparty`
-    # helper) is DELIBERATELY deferred to VIB-6140 per the identity-seam plan's ordering
-    # constraint: that refactor alters leg-identity derivation in every V3 parser, so it
-    # must earn its own real-fork proof + lane re-run and NOT land just to pass this gate.
+    # crap-allowlist: cc=29; leg-identity decomposition needs cross-parser real-fork validation.
     def extract_lp_open_data(self, receipt: dict[str, Any]) -> "LPOpenData | None":  # noqa: C901
         """Extract LP open data from a PancakeSwap V3 mint receipt.
 
@@ -1240,10 +1099,7 @@ class PancakeSwapV3ReceiptParser(V3ForkReceiptParser, BaseReceiptParser[SwapEven
         chain_key = (self.chain or "").lower()
         position_manager = POSITION_MANAGER_ADDRESSES.get(chain_key)
         if not position_manager:
-            # Fail loud on unsupported chains rather than defaulting to one
-            # of the known NPMs. A silent fallback would mis-attribute logs
-            # the moment PCS deploys with a different address (the same
-            # trap that bit early Uniswap V3 multi-chain expansion).
+            # A guessed NPM could misattribute logs on an unsupported chain.
             logger.warning(
                 "PancakeSwap V3 NPM not registered for chain %r — extend "
                 "almanak.connectors.pancakeswap_v3.addresses.PANCAKESWAP_V3[<chain>]['nft']",
@@ -1254,9 +1110,7 @@ class PancakeSwapV3ReceiptParser(V3ForkReceiptParser, BaseReceiptParser[SwapEven
         increase_topic = EVENT_TOPICS["IncreaseLiquidity"].lower()
         mint_topic = EVENT_TOPICS["Mint"].lower()
 
-        # Track the most recent Pool Mint emitted with owner == NPM so the
-        # next matching IncreaseLiquidity claims ITS ticks (and pool
-        # address) — a multi-position bundle won't cross-contaminate.
+        # Pair IncreaseLiquidity with the latest preceding NPM-owned Mint.
         last_npm_mint: dict[str, Any] | None = None
 
         for log in logs:
@@ -1283,7 +1137,6 @@ class PancakeSwapV3ReceiptParser(V3ForkReceiptParser, BaseReceiptParser[SwapEven
             if not first_topic.startswith("0x"):
                 first_topic = "0x" + first_topic
 
-            # Track the most recent Pool Mint emitted with owner == NPM.
             if first_topic == mint_topic and len(topics) >= 4:
                 if self._mint_owner_matches_npm(topics, position_manager):
                     last_npm_mint = log
@@ -1314,21 +1167,7 @@ class PancakeSwapV3ReceiptParser(V3ForkReceiptParser, BaseReceiptParser[SwapEven
             if not normalized or normalized == "0x":
                 continue
 
-            # IncreaseLiquidity data layout: liquidity (uint128, left-padded
-            # to 32 bytes), amount0 (uint256), amount1 (uint256). Decode
-            # failures here represent a malformed receipt (NPM emitted a
-            # structurally-invalid IncreaseLiquidity log), NOT a missing
-            # event — propagate so ``extract_lp_open_data_result`` wraps as
-            # ``ExtractError`` rather than ``ExtractMissing`` (VIB-3159 /
-            # Blueprint 19 fail-closed disambiguation).
-            #
-            # Length guard (Codex P2 on PR #2248): ``HexDecoder.decode_uint256``
-            # silently returns ``0`` when reading past the end of the
-            # normalized string, so a truncated payload (fewer than 3 * 64
-            # = 192 hex chars after the ``0x``) would record amount0=0 /
-            # amount1=0 instead of raising. Reject up front so ``_result``
-            # wraps the row as ``ExtractError`` rather than admitting a
-            # measured-zero (CLAUDE.md §Accounting "Empty ≠ Zero").
+            # HexDecoder reads beyond truncated data as zero, so require all three ABI slots.
             stripped = normalized[2:] if normalized.startswith("0x") else normalized
             if len(stripped) < 3 * 64:
                 raise ValueError(f"Truncated IncreaseLiquidity payload: {len(stripped)} hex chars, expected >= 192")
@@ -1359,9 +1198,7 @@ class PancakeSwapV3ReceiptParser(V3ForkReceiptParser, BaseReceiptParser[SwapEven
                 f"liquidity={liquidity} amount0={amount0} amount1={amount1} "
                 f"ticks=[{tick_lower}, {tick_upper}] current_tick={current_tick}"
             )
-            # VIB-6053 — bind leg IDENTITY to the amounts just decoded (pool slot
-            # order, which may be the OPPOSITE of the user's pool label). See the
-            # uniswap_v3 twin for the full rationale.
+            # Transfer directions preserve pool-slot identity when user labels are reversed.
             currency0, currency1 = currencies_for_amounts(
                 transfers_by_token(logs, chain=self.chain, to_address=pool_address) if pool_address else {},
                 amount0,
@@ -1377,8 +1214,8 @@ class PancakeSwapV3ReceiptParser(V3ForkReceiptParser, BaseReceiptParser[SwapEven
                 amount1=amount1,
                 current_tick=current_tick,
                 pool_address=pool_address,
-                currency0=currency0,  # VIB-6053 — index-aligned with amount0
-                currency1=currency1,  # VIB-6053 — index-aligned with amount1
+                currency0=currency0,
+                currency1=currency1,
             )
 
         return None
@@ -1418,9 +1255,7 @@ class PancakeSwapV3ReceiptParser(V3ForkReceiptParser, BaseReceiptParser[SwapEven
                 v = int(topic, 16)
             except (ValueError, TypeError):
                 return None
-            # Indexed int24 is stored as a 32-byte two's-complement value;
-            # sign-extend by inspecting the top bit of the original 256-bit
-            # word (negative numbers come back as huge unsigned values).
+            # Indexed int24 values are sign-extended on the left into 256 bits.
             if v >= 2**255:
                 v -= 2**256
             return v
@@ -1483,23 +1318,18 @@ class PancakeSwapV3ReceiptParser(V3ForkReceiptParser, BaseReceiptParser[SwapEven
             if topic0 != swap_topic:
                 continue
 
+            # Tick is the fifth slot; trailing protocol-fee fields do not shift it.
             normalized = HexDecoder.normalize_hex(data)
-            # PancakeSwap V3 Swap data is 7 × 64 = 448 hex chars. Demand at
-            # least the first 5 slots (320 hex chars) so we can read tick
-            # at offset 128. Truncated logs are skipped — keep scanning.
             if not normalized or len(normalized) < 5 * 64:
                 continue
             try:
+                # Receipt order makes the latest valid Swap the final post-swap state.
                 latest_tick = HexDecoder.decode_int24(normalized, 128)
             except Exception:
                 continue
         return latest_tick
 
-    # =============================================================================
-    # Fail-closed wrappers (VIB-3159 / Blueprint 19) — disambiguate
-    # "parser crashed" from "no event present"
-    # =============================================================================
-
+    # Result variants keep parser failures distinct from missing events.
     def extract_swap_amounts_result(
         self,
         receipt: dict[str, Any],
@@ -1532,26 +1362,6 @@ class PancakeSwapV3ReceiptParser(V3ForkReceiptParser, BaseReceiptParser[SwapEven
             "no IncreaseLiquidity event from position manager",
         )
 
-    # =============================================================================
-    # Registry Payload Extraction (VIB-4305 / T12 mirror of Uniswap V3)
-    #
-    # Composes the ``position_registry.payload`` dict for LP_OPEN / LP_CLOSE
-    # so the runner's registry-mode write path populates ``position_registry``
-    # for PancakeSwap LP positions. Without these methods the runner emits
-    # ``Registry-mode skip: parser returned no LP_OPEN registry payload`` and
-    # falls back to ``save_ledger_entry``, which leaves the Positions
-    # dashboard empty for Pancake LPs (the exact gap VIB-4305 fixes).
-    #
-    # The Uniswap V3 implementation is the canonical template (PancakeSwap V3
-    # is a direct UV3 fork at the NPM contract level — same IncreaseLiquidity
-    # / DecreaseLiquidity / Burn / Collect / Mint event signatures). Helpers
-    # ``open_payload_disagrees`` / ``build_close_receipt_payload`` /
-    # ``merge_open_payload_fields`` are shared via
-    # ``almanak.connectors._strategy_base.v3_registry_payload`` rather than
-    # duplicated — they operate on the receipt-only payload dict, which is
-    # the same shape across V3 forks.
-    # =============================================================================
-
     def _decreaseliquidity_token_id(self, receipt: dict[str, Any]) -> int | None:
         """Recover ``tokenId`` from a ``DecreaseLiquidity`` log on the close-side
         receipt.
@@ -1573,7 +1383,6 @@ class PancakeSwapV3ReceiptParser(V3ForkReceiptParser, BaseReceiptParser[SwapEven
         decrease_topic = EVENT_TOPICS["DecreaseLiquidity"].lower()
         position_manager = self._nft_manager_address()
         if not position_manager:
-            # Unsupported chain — fail loud rather than guessing.
             return None
 
         for log in logs:
@@ -1647,25 +1456,16 @@ class PancakeSwapV3ReceiptParser(V3ForkReceiptParser, BaseReceiptParser[SwapEven
         if lp_data is None:
             return None
         if lp_data.position_id is None or lp_data.position_id <= 0:
-            # token_id is the identity anchor; a zero/negative value would
-            # corrupt physical_identity_hash. Refuse to build the payload.
             return None
         if not lp_data.pool_address:
-            # pool_address is the semantic_grouping_key anchor; missing it
-            # would let two un-grouped rows in the same pool collide on
-            # ix_registry_auto_mode. Refuse rather than emit a partial row.
             return None
         if lp_data.tick_lower is None or lp_data.tick_upper is None:
-            # Range is part of the position's economic identity; missing
-            # ticks would let teardown / rebalancing read malformed bounds.
             return None
         if lp_data.liquidity is None:
             return None
 
         nft_manager_addr = self._nft_manager_address()
         if not nft_manager_addr:
-            # Unsupported chain — refuse the payload rather than stamp a
-            # collision-prone empty NPM into ``physical_identity_hash``.
             return None
 
         payload: dict[str, Any] = {
@@ -1680,9 +1480,6 @@ class PancakeSwapV3ReceiptParser(V3ForkReceiptParser, BaseReceiptParser[SwapEven
         }
         if fee_tier is not None and fee_tier > 0:
             payload["fee_tier"] = int(fee_tier)
-        # Optional token symbol labels — Pancake parser doesn't take symbols
-        # in its constructor today, but we forward them when present so a
-        # future enrichment iteration plugs in without a parser-shape change.
         token0_symbol = getattr(self, "token0_symbol", None)
         token1_symbol = getattr(self, "token1_symbol", None)
         if token0_symbol:
@@ -1745,6 +1542,7 @@ class PancakeSwapV3ReceiptParser(V3ForkReceiptParser, BaseReceiptParser[SwapEven
         pool_address = (lp_close.pool_address or "").lower()
         if not pool_address:
             return None
+        # Close identity requires DecreaseLiquidity and Burn; Collect alone is a fee harvest.
         if v3_registry_payload.open_payload_disagrees(
             open_payload=open_payload,
             token_id=token_id,
@@ -1766,10 +1564,6 @@ class PancakeSwapV3ReceiptParser(V3ForkReceiptParser, BaseReceiptParser[SwapEven
         if fee_tier is not None and fee_tier > 0:
             payload.setdefault("fee_tier", int(fee_tier))
         return payload
-
-    # =============================================================================
-    # Protocol Fee Extraction (VIB-3204)
-    # =============================================================================
 
     def extract_protocol_fees(
         self,
@@ -1805,8 +1599,6 @@ class PancakeSwapV3ReceiptParser(V3ForkReceiptParser, BaseReceiptParser[SwapEven
             populated ``ProtocolFees``. Also returns ``None`` when no
             Swap event is present OR when ``fee_tier_bps`` is missing.
         """
-        # ProtocolFees import kept local to preserve import order semantics
-        # inherited from the pre-fix version of this method.
         from almanak.framework.execution.extracted_data import ProtocolFees  # noqa: F401
 
         if fee_tier_bps is None or fee_tier_bps <= 0:
@@ -1826,9 +1618,7 @@ class PancakeSwapV3ReceiptParser(V3ForkReceiptParser, BaseReceiptParser[SwapEven
                 if not topics:
                     continue
                 if self._normalize_topic(topics[0]) == swap_topic:
-                    # Swap detected + valid fee_tier_bps, but we cannot
-                    # convert to USD in this layer. Return None (unknown)
-                    # rather than a misleading Decimal(0).
+                    # Token-denominated fees lack a USD price here; zero would be fabricated.
                     return None
             return None
 
@@ -1836,7 +1626,6 @@ class PancakeSwapV3ReceiptParser(V3ForkReceiptParser, BaseReceiptParser[SwapEven
             logger.warning(f"Failed to extract protocol_fees: {e}")
             return None
 
-    # Backward compatibility methods
     def parse_swap(self, log: dict[str, Any]) -> SwapEventData | None:
         """Parse a Swap event from a single log entry.
 
@@ -1851,7 +1640,6 @@ class PancakeSwapV3ReceiptParser(V3ForkReceiptParser, BaseReceiptParser[SwapEven
         if isinstance(pool_address, bytes):
             pool_address = "0x" + pool_address.hex()
 
-        # Decode using internal method
         data_normalized = HexDecoder.normalize_hex(data)
         decoded_data = self._decode_log_data("Swap", topics, data_normalized, pool_address)
 

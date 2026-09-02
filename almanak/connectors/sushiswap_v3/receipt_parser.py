@@ -79,10 +79,6 @@ from almanak.framework.utils.log_formatters import (
 logger = logging.getLogger(__name__)
 
 
-# =============================================================================
-# Event Topic Signatures (identical to Uniswap V3)
-# =============================================================================
-
 EVENT_TOPICS: dict[str, str] = {
     "Swap": "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67",
     "Mint": "0x7a53080ba414158be7ec69b987b5fb7d07dee101fe85488f0853ae16239d0bde",
@@ -91,14 +87,8 @@ EVENT_TOPICS: dict[str, str] = {
     "Flash": "0xbdbdb71d7860376ba52b25a5028beea23581364a40522f6bcfb86bb1f2dca633",
     "Transfer": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
     "Approval": "0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925",
-    # NonfungiblePositionManager.IncreaseLiquidity(uint256 indexed tokenId,
-    # uint128 liquidity, uint256 amount0, uint256 amount1) — identical to the
-    # Uniswap V3 NPM event (Sushi V3 is a fork). Used by ``extract_lp_open_data``
-    # to recover (tokenId, liquidity, amount0, amount1) from an LP_OPEN receipt.
     "IncreaseLiquidity": "0x3067048beee31b25b2f1681f88dac838c8bba36af25bfb2b7cf7473a5847e35f",
-    # NonfungiblePositionManager.DecreaseLiquidity — emitted on LP_CLOSE.
-    # Kept alongside IncreaseLiquidity for parity with the Uniswap V3 baseline
-    # (registry-mode close-side identity hash, VIB-4198/T12).
+    # Its indexed tokenId proves close identity; Collect alone may be fee-only.
     "DecreaseLiquidity": "0x26f6a048ee9138f2c0ce266f322cb99228e8d619ae2bff30c67f8dcf9d2377b4",
 }
 
@@ -122,11 +112,6 @@ def _normalize_topic(topic: str | bytes) -> str:
     return topic
 
 
-# SushiSwap V3 NonfungiblePositionManager addresses, sourced from the
-# connector-local address registry (single source of truth — ``SUSHISWAP_V3`` in
-# ``almanak/connectors/sushiswap_v3/addresses.py``). Adding a new chain is a
-# one-line change in ``addresses.py`` and this dict rebuilds automatically
-# at import time.
 def _build_sushiswap_v3_npm_addresses() -> dict[str, str]:
     """Build {chain: position_manager} from the canonical SUSHISWAP_V3 registry.
 
@@ -146,9 +131,7 @@ def _build_sushiswap_v3_npm_addresses() -> dict[str, str]:
         pm = entry.get("position_manager")
         if pm:
             out[chain.lower()] = pm.lower()
-    # Framework canonical chain key for Binance Smart Chain is ``bnb``; the
-    # contracts registry uses ``bsc``. Alias the two so a receipt parsed with
-    # either key resolves the same address.
+    # The framework uses ``bnb`` while the contracts registry uses ``bsc``.
     if "bsc" in out and "bnb" not in out:
         out["bnb"] = out["bsc"]
     return out
@@ -156,19 +139,12 @@ def _build_sushiswap_v3_npm_addresses() -> dict[str, str]:
 
 POSITION_MANAGER_ADDRESSES: dict[str, str] = _build_sushiswap_v3_npm_addresses()
 
-# Zero address for detecting mints (ERC-721 Transfer from address(0))
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 ZERO_ADDRESS_PADDED = "0x" + "0" * 64
 
 TOPIC_TO_EVENT: dict[str, str] = {v: k for k, v in EVENT_TOPICS.items()}
 
-# Legacy exports
 SWAP_EVENT_TOPIC = EVENT_TOPICS["Swap"]
-
-
-# =============================================================================
-# Enums
-# =============================================================================
 
 
 class SushiSwapV3EventType(Enum):
@@ -219,11 +195,6 @@ SUSHISWAP_V3_RECEIPT_SPEC = V3ForkSpec(
     strict_data_words={"Swap": 5, **V3_STANDARD_LP_DATA_WORDS},
     strict_event_layouts=V3_STANDARD_TRANSFER_LAYOUTS,
 )
-
-
-# =============================================================================
-# Data Classes
-# =============================================================================
 
 
 @dataclass
@@ -284,8 +255,8 @@ class SwapEventData:
 
     sender: str
     recipient: str
-    amount0: int  # Signed: positive = user paid, negative = user received
-    amount1: int  # Signed: positive = user paid, negative = user received
+    amount0: int  # Signed: positive is paid to the pool; negative is received.
+    amount1: int  # Signed: positive is paid to the pool; negative is received.
     sqrt_price_x96: int
     liquidity: int
     tick: int
@@ -461,11 +432,6 @@ class ParseResult:
         }
 
 
-# =============================================================================
-# Receipt Parser
-# =============================================================================
-
-
 class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
     """Parser for SushiSwap V3 transaction receipts.
 
@@ -488,12 +454,6 @@ class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
         result = parser.parse_receipt(receipt)
     """
 
-    # Capability surface for the ResultEnricher SUPPORTED_EXTRACTIONS check
-    # (VIB-4434 W2 — see audit doc §5). Each entry maps to a present
-    # ``extract_<field>`` method on the class. ``protocol_fees`` is NOT
-    # included because ``extract_protocol_fees`` is not implemented on
-    # SushiSwap V3 today (A5 gap — audit doc §2 / VIB-3204 / VIB-3495).
-    # Once implemented, add it here in lockstep.
     SUPPORTED_EXTRACTIONS: frozenset[str] = frozenset(
         {
             "position_id",
@@ -545,7 +505,6 @@ class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
             dict(self.v3_fork_spec.event_name_to_type),
         )
 
-        # Try to resolve symbols and decimals from addresses via TokenResolver
         if self.token0_address and not self.token0_symbol:
             symbol, decimals = self._resolve_token_info(self.token0_address)
             if symbol:
@@ -559,7 +518,6 @@ class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
             if decimals is not None:
                 self.token1_decimals = decimals
 
-        # If symbols were provided but decimals weren't, resolve decimals
         if self.token0_symbol and self.token0_decimals is None:
             _, decimals = self._resolve_token_info(self.token0_symbol)
             if decimals is not None:
@@ -569,7 +527,7 @@ class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
             if decimals is not None:
                 self.token1_decimals = decimals
 
-        # Log warning if decimals remain unresolved — do NOT default to 18.
+        # Unresolved decimals remain unmeasured; never default to 18.
         if self.token0_decimals is None:
             logger.debug(f"token0 decimals unresolved for chain={self.chain} (address={self.token0_address})")
         if self.token1_decimals is None:
@@ -608,15 +566,12 @@ class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
 
             block_number = receipt.get("blockNumber", 0)
             logs = receipt.get("logs", [])
-            # Normalize status to int (could be hex string like "0x1")
             status = receipt.get("status", 1)
             if isinstance(status, str):
                 status = int(status, 16) if status.startswith("0x") else int(status)
             tx_success = status == 1
 
-            # Reverts must be reported before the empty-logs short-circuit,
-            # otherwise an early-revert receipt (status=0, logs=[]) would be
-            # silently surfaced as a successful empty receipt (issue #2064).
+            # Early reverts often emit no logs, so status must be checked first.
             if not tx_success:
                 return ParseResult(
                     success=True,
@@ -643,7 +598,6 @@ class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
                 if parsed_event:
                     events.append(parsed_event)
 
-                    # Extract typed data based on event type
                     if parsed_event.event_type == SushiSwapV3EventType.SWAP:
                         swap_data = self._parse_swap_event(parsed_event)
                         if swap_data:
@@ -654,23 +608,18 @@ class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
                         if transfer_data:
                             transfer_events.append(transfer_data)
 
-            # Build high-level swap result
             swap_result = None
             if swap_events:
                 swap_result = self._build_swap_result(
-                    swap_events[0],  # Use first swap event
+                    swap_events[0],
                     transfer_events,
                     quoted_amount_out,
                 )
 
-            # Log parsed receipt with user-friendly formatting
             tx_fmt = format_tx_hash(tx_hash)
             gas_fmt = format_gas_cost(receipt.get("gasUsed"))
             if swap_result:
                 slippage_fmt = format_slippage_bps(swap_result.slippage_bps) if swap_result.slippage_bps else "N/A"
-                # ``amount_*_decimal`` may be None when token decimals could
-                # not be resolved (Empty != zero invariant); fall back to "?"
-                # rather than crashing the log line.
                 in_fmt = f"{swap_result.amount_in_decimal:.4f}" if swap_result.amount_in_decimal is not None else "?"
                 out_fmt = f"{swap_result.amount_out_decimal:.4f}" if swap_result.amount_out_decimal is not None else "?"
                 logger.info(
@@ -798,7 +747,6 @@ class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
         Returns:
             ParsedSwapResult with full swap details
         """
-        # Determine which token is in/out
         if swap_event.token0_is_input:
             token_in = self.token0_address or ""
             token_out = self.token1_address or ""
@@ -817,20 +765,16 @@ class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
         amount_in = swap_event.amount_in
         amount_out = swap_event.amount_out
 
-        # Try to resolve decimals if not already known
         if token_in_decimals is None and token_in:
             token_in_decimals = self._resolve_decimals(token_in)
         if token_out_decimals is None and token_out:
             token_out_decimals = self._resolve_decimals(token_out)
 
-        # Convert to decimal with proper decimals.
-        # Return None when decimals are unresolved to avoid leaking fabricated
-        # zero values to direct callers of parse_receipt().
-        # extract_swap_amounts() handles this by falling back to raw swap_events.
         if token_in_decimals is not None and token_out_decimals is not None:
             amount_in_decimal = Decimal(str(amount_in)) / Decimal(10**token_in_decimals)
             amount_out_decimal = Decimal(str(amount_out)) / Decimal(10**token_out_decimals)
         else:
+            # Unknown units are unmeasured; omit the result rather than fabricate values.
             logger.warning(
                 "Token decimals unresolved (in=%s, out=%s); omitting swap_result",
                 token_in_decimals,
@@ -838,20 +782,16 @@ class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
             )
             return None
 
-        # Calculate effective price
         if amount_in_decimal > 0:
             effective_price = amount_out_decimal / amount_in_decimal
         else:
             effective_price = Decimal("0")
 
-        # Calculate slippage
         slippage_bps = 0
         if quoted_amount_out and quoted_amount_out > 0:
-            # Slippage = (expected - actual) / expected * 10000
             slippage_pct_float = (quoted_amount_out - amount_out) / quoted_amount_out
             slippage_bps = int(slippage_pct_float * 10000)
         elif self.quoted_price and self.quoted_price > 0:
-            # Calculate from quoted price
             slippage_pct_decimal = (self.quoted_price - effective_price) / self.quoted_price
             slippage_bps = int(slippage_pct_decimal * 10000)
 
@@ -870,10 +810,6 @@ class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
             sqrt_price_x96_after=swap_event.sqrt_price_x96,
             tick_after=swap_event.tick,
         )
-
-    # =============================================================================
-    # Position ID Extraction (for LP positions)
-    # =============================================================================
 
     def extract_position_id(self, receipt: dict[str, Any]) -> int | None:
         """Extract LP position ID (NFT tokenId) from a transaction receipt.
@@ -902,13 +838,10 @@ class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
             if not logs:
                 return None
 
-            # Get position manager address for this chain. Fail loud when the
-            # chain isn't registered rather than silently defaulting to a
-            # different chain's NPM — a stale default would mis-attribute
-            # every NFT mint and silently return None for the real position.
             chain_key = (self.chain or "").lower()
             position_manager = POSITION_MANAGER_ADDRESSES.get(chain_key)
             if not position_manager:
+                # Unsupported chains cannot borrow Uniswap's or another chain's NPM.
                 logger.warning(
                     "SushiSwap V3 NPM not registered for chain %r — extend "
                     "almanak.connectors.sushiswap_v3.addresses.SUSHISWAP_V3[<chain>]['position_manager']",
@@ -919,7 +852,6 @@ class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
             transfer_topic = EVENT_TOPICS["Transfer"].lower()
 
             for log in logs:
-                # Handle both dict and object-style logs
                 if hasattr(log, "get"):
                     topics = log.get("topics", [])
                     address = log.get("address", "")
@@ -927,20 +859,16 @@ class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
                     topics = getattr(log, "topics", [])
                     address = getattr(log, "address", "")
 
-                # Normalize address
                 if isinstance(address, bytes):
                     address = "0x" + address.hex()
                 address = str(address).lower()
 
-                # Check if this is from the position manager
                 if address != position_manager:
                     continue
 
-                # Need at least 4 topics for ERC-721 Transfer
                 if len(topics) < 4:
                     continue
 
-                # Check if this is a Transfer event
                 first_topic = topics[0]
                 if isinstance(first_topic, bytes):
                     first_topic = "0x" + first_topic.hex()
@@ -949,7 +877,6 @@ class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
                 if first_topic != transfer_topic:
                     continue
 
-                # Check if from address is zero (minting)
                 from_topic = topics[1]
                 if isinstance(from_topic, bytes):
                     from_topic = "0x" + from_topic.hex()
@@ -958,13 +885,12 @@ class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
                 if from_topic != ZERO_ADDRESS_PADDED:
                     continue
 
-                # Extract tokenId from topics[3] (ERC-721 has indexed tokenId)
+                # ERC-721 tokenId is indexed in topics[3].
                 token_id_topic = topics[3]
                 if isinstance(token_id_topic, bytes):
                     token_id_topic = "0x" + token_id_topic.hex()
                 token_id_topic = str(token_id_topic)
 
-                # Use HexDecoder for consistent uint256 decoding
                 token_id = HexDecoder.decode_uint256(token_id_topic, 0)
                 logger.info(f"Extracted LP position ID from receipt: {token_id}")
                 return token_id
@@ -996,10 +922,6 @@ class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
         """
         parser = SushiSwapV3ReceiptParser(chain=chain)
         return parser.extract_position_id({"logs": logs})
-
-    # =============================================================================
-    # Swap Amounts Extraction (for Result Enrichment)
-    # =============================================================================
 
     def _resolve_swap_decimals_with_hints(
         self,
@@ -1033,7 +955,7 @@ class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
 
         hint_by_addr = self._build_hint_map(swap_token_meta)
 
-        # Direction fallback: fill still-empty sides from hint slots (single-swap only)
+        # Compiler direction hints are safe only for single-swap receipts.
         if single_swap and swap_token_meta:
             if not token_in_addr:
                 in_slot = swap_token_meta.get("token_in")
@@ -1044,11 +966,11 @@ class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
                 if isinstance(out_slot, dict) and out_slot.get("address"):
                     token_out_addr = str(out_slot["address"]).lower()
 
-        # Per-address resolution: hints win over TokenResolver
         addr_in = token_in_addr.lower() if token_in_addr else ""
         addr_out = token_out_addr.lower() if token_out_addr else ""
         in_decimals: int | None
         out_decimals: int | None
+        # Compiler metadata takes precedence over resolver decimals for the same address.
         try:
             if addr_in in hint_by_addr:
                 in_decimals = resolve_token_decimals(token_in_addr, self.chain, hints=hint_by_addr)
@@ -1071,7 +993,6 @@ class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
             )
             return None
 
-        # Collect any hint-supplied symbols for backfilling
         hint_symbols: dict[str, str] = {}
         if addr_in in hint_by_addr:
             hint_symbols["token_in"] = hint_by_addr[addr_in][0]
@@ -1117,9 +1038,6 @@ class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
         try:
             parse_result = self.parse_receipt(receipt)
 
-            # Extract raw amounts from swap_result if available, otherwise
-            # fall back to raw swap_events (swap_result may be None when
-            # _build_swap_result fails closed due to unresolved decimals).
             sr = parse_result.swap_result
             if sr:
                 raw_in = sr.amount_in
@@ -1130,6 +1048,7 @@ class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
                 token_out_symbol = sr.token_out_symbol
                 slippage_bps = sr.slippage_bps if sr.slippage_bps else None
             elif parse_result.swap_events:
+                # Raw events remain available when unresolved decimals omit swap_result.
                 se = parse_result.swap_events[0]
                 raw_in = se.amount_in
                 raw_out = se.amount_out
@@ -1141,7 +1060,6 @@ class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
             else:
                 return None
 
-            # VIB-3164: resolve decimals with compiler hints, then fail-closed.
             single_swap = len(parse_result.swap_events) == 1
             resolved = self._resolve_swap_decimals_with_hints(
                 receipt,
@@ -1158,17 +1076,15 @@ class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
             amount_out_decimal = Decimal(str(raw_out)) / Decimal(10**out_decimals)
             effective_price = amount_out_decimal / amount_in_decimal if amount_in_decimal > 0 else Decimal("0")
 
-            # VIB-3203: compute realized slippage from the compiler-supplied
-            # pre-slippage-discount quote. Overrides parser-side slippage,
-            # which is None on the enrichment path.
+            # The compiler quote and amount_out_decimal share human token units.
             if expected_out is not None and expected_out > 0 and amount_out_decimal > 0:
                 realized_slippage = (expected_out - amount_out_decimal) / expected_out
                 slippage_bps = int(realized_slippage * Decimal(10_000))
 
-            # Backfill symbols from hints when the existing symbol is empty
             effective_token_in_symbol = token_in_symbol or hint_symbols.get("token_in", "")
             effective_token_out_symbol = token_out_symbol or hint_symbols.get("token_out", "")
 
+            # Ledger token identity must resolve to symbols rather than contract addresses.
             return SwapAmounts(
                 amount_in=raw_in,
                 amount_out=raw_out,
@@ -1177,8 +1093,6 @@ class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
                 effective_price=effective_price,
                 slippage_bps=slippage_bps,
                 expected_out_decimal=expected_out,
-                # VIB-4978: canonicalise the (symbol, addr, hint) trio to a symbol
-                # so the ledger/Trade Tape never shows a raw contract address.
                 token_in=resolve_swap_token_symbol_with_fallback(
                     effective_token_in_symbol, token_in_addr, token_in_hint, self.chain
                 ),
@@ -1244,10 +1158,6 @@ class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
         token_out_addr, amount_out = transfers_to[-1] if transfers_to else ("", 0)
         return token_in_addr, token_out_addr, amount_in, amount_out
 
-    # =============================================================================
-    # LP Extraction Methods (for Result Enrichment)
-    # =============================================================================
-
     def extract_tick_lower(self, receipt: dict[str, Any]) -> int | None:
         """Extract tick lower from LP mint transaction receipt.
 
@@ -1272,7 +1182,6 @@ class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
                 if len(topics) < 4:
                     continue
 
-                # Check if this is a Mint event
                 first_topic = topics[0]
                 if isinstance(first_topic, bytes):
                     first_topic = "0x" + first_topic.hex()
@@ -1281,13 +1190,11 @@ class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
                 if first_topic != mint_topic:
                     continue
 
-                # tickLower is in topics[2] (indexed int24)
                 tick_lower_topic = topics[2]
                 if isinstance(tick_lower_topic, bytes):
                     tick_lower_topic = "0x" + tick_lower_topic.hex()
                 tick_lower_topic = str(tick_lower_topic)
 
-                # Decode as int24 (signed)
                 tick_lower = HexDecoder.decode_int24(tick_lower_topic, 0)
                 return tick_lower
 
@@ -1321,7 +1228,6 @@ class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
                 if len(topics) < 4:
                     continue
 
-                # Check if this is a Mint event
                 first_topic = topics[0]
                 if isinstance(first_topic, bytes):
                     first_topic = "0x" + first_topic.hex()
@@ -1330,13 +1236,11 @@ class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
                 if first_topic != mint_topic:
                     continue
 
-                # tickUpper is in topics[3] (indexed int24)
                 tick_upper_topic = topics[3]
                 if isinstance(tick_upper_topic, bytes):
                     tick_upper_topic = "0x" + tick_upper_topic.hex()
                 tick_upper_topic = str(tick_upper_topic)
 
-                # Decode as int24 (signed)
                 tick_upper = HexDecoder.decode_int24(tick_upper_topic, 0)
                 return tick_upper
 
@@ -1376,7 +1280,6 @@ class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
                 if len(topics) < 4:
                     continue
 
-                # Check if this is a Mint event
                 first_topic = topics[0]
                 if isinstance(first_topic, bytes):
                     first_topic = "0x" + first_topic.hex()
@@ -1385,16 +1288,11 @@ class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
                 if first_topic != mint_topic:
                     continue
 
-                # Extract liquidity from data field
                 data = HexDecoder.normalize_hex(log.get("data", ""))
                 if not data or data == "0x":
                     continue
 
-                # Mint event data layout (non-indexed fields):
-                # - sender (address, padded to 32 bytes) - offset 0
-                # - amount (uint128, padded to 32 bytes) - offset 32
-                # - amount0 (uint256) - offset 64
-                # - amount1 (uint256) - offset 96
+                # Pool Mint slots are sender@0, liquidity@32, amount0@64, amount1@96.
                 liquidity = HexDecoder.decode_uint128(data, 32)
                 return liquidity
 
@@ -1446,12 +1344,7 @@ class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
         """
         from almanak.framework.execution.extracted_data import LPOpenData
 
-        # No outer ``try/except Exception`` here. The fail-closed variant
-        # ``extract_lp_open_data_result`` is the documented entry point for
-        # callers that need parser-crash vs. event-missing disambiguation
-        # (VIB-3159 / Blueprint 19). A blanket-catch in this method would
-        # collapse "parser crashed on a malformed receipt" into "no event
-        # present" and re-introduce the ghost-position class of bug.
+        # Let parse failures propagate so result variants can distinguish missing events.
         logs = receipt.get("logs") or []
         if not logs:
             return None
@@ -1459,12 +1352,7 @@ class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
         chain_key = (self.chain or "").lower()
         npm_address = POSITION_MANAGER_ADDRESSES.get(chain_key)
         if not npm_address:
-            # Fail loud on unsupported chains rather than defaulting to any
-            # specific chain. A silent fallback would mis-attribute logs once
-            # SushiSwap V3 ships on a chain we haven't registered — the
-            # parser's address-filter would reject every IncreaseLiquidity
-            # from the real NPM, silently returning ``None`` and breaking
-            # LP accounting end-to-end.
+            # Unsupported chains cannot borrow Uniswap's or another chain's NPM.
             logger.warning(
                 "SushiSwap V3 NPM not registered for chain %r — extend "
                 "almanak.connectors.sushiswap_v3.addresses.SUSHISWAP_V3[<chain>]['position_manager']",
@@ -1475,10 +1363,7 @@ class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
         increase_topic = EVENT_TOPICS["IncreaseLiquidity"].lower()
         mint_topic = EVENT_TOPICS["Mint"].lower()
 
-        # Track the most recent Pool Mint whose ``owner`` indexed topic
-        # equals the NPM. The next matching IncreaseLiquidity claims ITS
-        # ticks (and pool address) — a multi-position bundle won't
-        # cross-contaminate.
+        # Pair IncreaseLiquidity with the latest preceding NPM-owned Pool Mint.
         last_npm_mint: dict[str, Any] | None = None
 
         for log in logs:
@@ -1505,7 +1390,6 @@ class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
             if not first_topic.startswith("0x"):
                 first_topic = "0x" + first_topic
 
-            # Track the most recent Pool Mint emitted with owner == NPM.
             if first_topic == mint_topic and len(topics) >= 4:
                 if self._mint_owner_matches_npm(topics, npm_address):
                     last_npm_mint = log
@@ -1530,18 +1414,14 @@ class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
             try:
                 token_id = int(token_id_topic, 16)
             except (ValueError, TypeError):
-                # Malformed indexed topic on an otherwise-matched event is
-                # a known shape we want to skip-not-crash; the next log
-                # might be a legitimate match.
+                # A later matching log may still be valid.
                 continue
 
             normalized = HexDecoder.normalize_hex(data)
             if not normalized or normalized == "0x":
                 continue
 
-            # IncreaseLiquidity data layout: liquidity (uint128, left-padded
-            # to 32 bytes), amount0 (uint256), amount1 (uint256). Each field
-            # starts on a 32-byte boundary.
+            # IncreaseLiquidity slots are liquidity@0, amount0@32, amount1@64.
             liquidity = HexDecoder.decode_uint128(normalized, 0)
             amount0 = HexDecoder.decode_uint256(normalized, 32)
             amount1 = HexDecoder.decode_uint256(normalized, 64)
@@ -1566,10 +1446,7 @@ class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
                 f"liquidity={liquidity} amount0={amount0} amount1={amount1} "
                 f"ticks=[{tick_lower}, {tick_upper}] current_tick={current_tick}"
             )
-            # VIB-6053 — bind leg IDENTITY to the amounts just decoded (the
-            # ``amount0``/``amount1`` pair is in the POOL's canonical slot order,
-            # which may be the OPPOSITE of the user's pool label). See the
-            # uniswap_v3 twin for the full rationale.
+            # Amounts use pool slot order, which may differ from the user-facing label order.
             currency0, currency1 = currencies_for_amounts(
                 transfers_by_token(logs, chain=self.chain, to_address=pool_address) if pool_address else {},
                 amount0,
@@ -1584,9 +1461,9 @@ class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
                 amount0=amount0,
                 amount1=amount1,
                 current_tick=current_tick,
-                pool_address=pool_address,  # VIB-3893: framework slot0 fallback
-                currency0=currency0,  # VIB-6053 — index-aligned with amount0
-                currency1=currency1,  # VIB-6053 — index-aligned with amount1
+                pool_address=pool_address,
+                currency0=currency0,
+                currency1=currency1,
             )
 
         return None
@@ -1638,9 +1515,7 @@ class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
             if isinstance(topic, bytes):
                 topic = "0x" + topic.hex()
             try:
-                # int24 sign-extension. HexDecoder.decode_int24 handles
-                # two's-complement; raw int(...) would return the unsigned
-                # value for negative ticks.
+                # Indexed int24 values are two's-complement and sign-extended to 256 bits.
                 return HexDecoder.decode_int24(str(topic), 0)
             except Exception:
                 return None
@@ -1690,7 +1565,7 @@ class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
                 first_topic = "0x" + first_topic.hex()
             if str(first_topic).lower() != swap_topic:
                 continue
-            latest_swap_log = log  # later swaps override (post-swap tick is the live one)
+            latest_swap_log = log  # Latest Swap carries the receipt's final pool state.
 
         if latest_swap_log is None:
             return None
@@ -1703,7 +1578,7 @@ class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
             normalized = HexDecoder.normalize_hex(str(data))
             if not normalized or normalized == "0x":
                 return None
-            # tick is the 5th 32-byte slot in the data payload (offset 128).
+            # Swap tick is the fifth 32-byte data slot.
             return HexDecoder.decode_int24(normalized, 128)
         except Exception:
             return None
@@ -1761,16 +1636,8 @@ class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
             burn_liquidity_total = 0
             saw_collect = False
             saw_burn = False
-            # VIB-4198 / T12: capture pool address from the Burn event emitter
-            # (the V3 pool itself emits Burn). Empty when no Burn is present
-            # — bare ``collect()`` fee-harvests don't reveal the pool in the
-            # current log shape. The registry-payload close-path treats an
-            # empty pool_address as "fall back to save_ledger_entry", per
-            # CLAUDE.md "Empty ≠ zero".
+            # Burn anchors registry identity; Collect retains a separate leg emitter.
             pool_address = ""
-            # VIB-6053 — pool address as seen on the COLLECT log (see the collect
-            # branch below). Separate from ``pool_address`` so the registry anchor
-            # keeps its Burn-only semantics.
             collect_pool_address = ""
 
             for log in logs:
@@ -1778,7 +1645,6 @@ class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
                 if not topics:
                     continue
 
-                # Check event type
                 first_topic = topics[0]
                 if isinstance(first_topic, bytes):
                     first_topic = "0x" + first_topic.hex()
@@ -1787,33 +1653,19 @@ class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
                 data = HexDecoder.normalize_hex(log.get("data", ""))
 
                 if first_topic == collect_topic and len(topics) >= 4:
-                    # Collect event - amounts collected
-                    # Collect(address indexed owner, address recipient, int24 indexed tickLower,
-                    #         int24 indexed tickUpper, uint128 amount0, uint128 amount1)
-                    # data layout: recipient (offset 0), amount0 (offset 32), amount1 (offset 64)
+                    # Collect slots are recipient@0, amount0@32, amount1@64.
                     collect_amount0 += HexDecoder.decode_uint128(data, 32)
                     collect_amount1 += HexDecoder.decode_uint128(data, 64)
                     saw_collect = True
-                    # VIB-6053 — the pool emits Collect as well as Burn, so this
-                    # log's emitter IS the pool. Captured separately because a V3
-                    # close is a SPLIT-TX sequence (decreaseLiquidity -> collect ->
-                    # burn): the collect-only receipt carries no Burn, so the
-                    # Burn-derived ``pool_address`` is empty there and the
-                    # leg-identity scan would silently find no counterparty.
                     collect_pool_address = collect_pool_address or log_emitter_address(log, chain=self.chain)
 
                 elif first_topic == burn_topic and len(topics) >= 4:
-                    # Burn event - liquidity being removed
-                    # data: amount (uint128), amount0 (uint256), amount1 (uint256)
+                    # Burn slots are liquidity@0, amount0@32, amount1@64.
                     burn_liquidity_total += HexDecoder.decode_uint128(data, 0)
                     burn_amount0 += HexDecoder.decode_uint256(data, 32)
                     burn_amount1 += HexDecoder.decode_uint256(data, 64)
                     saw_burn = True
                     if not pool_address:
-                        # Burn is emitted by the pool itself — its emitter
-                        # address IS the pool. Capture once on the first
-                        # Burn we see; subsequent Burns in a multicall close
-                        # should be the same pool.
                         addr = log.get("address", "")
                         if isinstance(addr, bytes):
                             addr = "0x" + addr.hex()
@@ -1825,37 +1677,22 @@ class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
 
             liquidity_removed = burn_liquidity_total if saw_burn else None
 
-            # Fees attribution from a single receipt — see
-            # ``almanak/connectors/uniswap_v3/receipt_parser.py``
-            # for the full rationale. Parser returns its best single-receipt
-            # understanding; the aggregate layer
-            # (``ResultEnricher._select_preferred_aggregate``) disambiguates
-            # LP_COLLECT_FEES (collect-only, no decrease sibling) from
-            # split-tx LP_CLOSE (collect-only with a decrease sibling) and
-            # overrides fees in the second case.
+            # Collect-only may be a fee harvest or one leg of a split close.
             if saw_collect:
                 fees0: int | None = max(collect_amount0 - burn_amount0, 0)
                 fees1: int | None = max(collect_amount1 - burn_amount1, 0)
             else:
-                # Burn-only receipt (no Collect): principal is observed, fees
-                # are unmeasured. VIB-4470 / blueprint 27 §Empty ≠ Zero.
+                # Burn exposes principal but not fees.
                 fees0 = None
                 fees1 = None
 
-            # ``source`` tags the receipt shape for the aggregator's
-            # preferred-source picker (VIB-4310,
-            # ``_AGGREGATE_FIELDS["lp_close_data"] = "collect"``). Convention
-            # mirrors Aerodrome Slipstream — see uniswap_v3/receipt_parser.py
-            # for full rationale.
+            # Aggregation prefers Collect when reconstructing split closes.
             source = "collect" if saw_collect else "decrease_liquidity"
 
             amount0_collected = collect_amount0 if saw_collect else burn_amount0
             amount1_collected = collect_amount1 if saw_collect else burn_amount1
 
-            # VIB-6053 — bind leg IDENTITY to the collected amounts. See the
-            # uniswap_v3 twin: exact on the ``source="collect"`` shape (which the
-            # aggregator prefers); a burn-only receipt moves no tokens, so both
-            # stay ``None`` — honestly unidentified rather than guessed.
+            # Burn-only receipts move no tokens, so their currencies remain unidentified.
             currency0, currency1 = currencies_for_amounts(
                 transfers_by_token(logs, chain=self.chain, from_address=pool_address or collect_pool_address)
                 if (pool_address or collect_pool_address)
@@ -1870,35 +1707,15 @@ class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
                 fees0=fees0,
                 fees1=fees1,
                 liquidity_removed=liquidity_removed,
-                pool_address=pool_address,  # VIB-4198 / T12 — registry-mode close
+                pool_address=pool_address,
                 source=source,
-                currency0=currency0,  # VIB-6053 — index-aligned with amount0_collected
-                currency1=currency1,  # VIB-6053 — index-aligned with amount1_collected
+                currency0=currency0,
+                currency1=currency1,
             )
 
         except Exception as e:
             logger.warning(f"Failed to extract lp_close_data: {e}")
             return None
-
-    # =============================================================================
-    # Registry payload extraction — VIB-4198 (T12) SushiSwap V3 LP cutover
-    # =============================================================================
-    #
-    # SushiSwap V3 is a clean Uniswap V3 fork. The registry payload shape is
-    # identical to the UniV3 baseline (PRD §Registry Data Shape + T08 golden
-    # contract), and so are the shape-only helpers
-    # (``open_payload_disagrees``, ``build_close_receipt_payload``,
-    # ``merge_open_payload_fields``). These helpers live in the shared module
-    # ``almanak.connectors._strategy_base.v3_registry_payload`` rather than
-    # being duplicated across forks — duplication
-    # would let the two forks drift on Audit M1 cross-check semantics and on
-    # the T08 contract.
-    #
-    # Sushi-specific bits (NPM address dict and DecreaseLiquidity emitter
-    # filter) stay here because they depend on Sushi's NPM addresses, NOT
-    # Uniswap's — the two forks deploy distinct NonfungiblePositionManagers
-    # on every chain (e.g. Arbitrum: UV3 = 0xC36442b4..., Sushi V3 =
-    # 0x2214A42d...).
 
     def _decreaseliquidity_token_id(self, receipt: dict[str, Any]) -> int | None:
         """Recover ``tokenId`` from a ``DecreaseLiquidity`` log on the close-side
@@ -1922,8 +1739,6 @@ class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
         decrease_topic = EVENT_TOPICS["DecreaseLiquidity"].lower()
         position_manager = POSITION_MANAGER_ADDRESSES.get(self.chain, "").lower()
         if not position_manager:
-            # Unknown chain — refuse rather than guess. Mirrors the
-            # ``extract_lp_open_data`` fail-loud contract above.
             return None
 
         for log in logs:
@@ -1995,26 +1810,18 @@ class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
         lp_data = self.extract_lp_open_data(receipt)
         if lp_data is None:
             return None
+        # Refuse partial identity or range data rather than emit a corrupt registry row.
         if lp_data.position_id is None or lp_data.position_id <= 0:
-            # token_id is the identity anchor; a zero/negative value would
-            # corrupt physical_identity_hash. Refuse to build the payload.
             return None
         if not lp_data.pool_address:
-            # pool_address is the semantic_grouping_key anchor; missing it
-            # would let two un-grouped rows in the same pool collide on
-            # ix_registry_auto_mode. Refuse rather than emit a partial row.
             return None
         if lp_data.tick_lower is None or lp_data.tick_upper is None:
-            # Range is part of the position's economic identity; missing
-            # ticks would let teardown / rebalancing read malformed bounds.
             return None
         if lp_data.liquidity is None:
             return None
 
         nft_manager_addr = self._nft_manager_address()
         if not nft_manager_addr:
-            # Sushi NPM not registered for this chain — refuse rather than
-            # forge an identity tuple. The runner will fall back.
             return None
 
         payload: dict[str, Any] = {
@@ -2090,6 +1897,7 @@ class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
         pool_address = (lp_close.pool_address or "").lower()
         if not pool_address:
             return None
+        # Close identity requires Burn and DecreaseLiquidity, not fee-only Collect.
         if v3_registry_payload.open_payload_disagrees(
             open_payload=open_payload,
             token_id=token_id,
@@ -2099,9 +1907,6 @@ class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
 
         nft_manager_addr = self._nft_manager_address()
         if not nft_manager_addr:
-            # Sushi NPM not registered for this chain — but if we reached
-            # this point ``_decreaseliquidity_token_id`` already required
-            # the NPM to match an emitted log, so this is defensive only.
             return None
 
         payload = v3_registry_payload.build_close_receipt_payload(
@@ -2115,10 +1920,7 @@ class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
             payload.setdefault("fee_tier", int(fee_tier))
         return payload
 
-    # =============================================================================
-    # Fail-closed result variants (VIB-3159 / Blueprint 19)
-    # =============================================================================
-
+    # Result variants keep parser failures distinct from missing events.
     def extract_swap_amounts_result(
         self,
         receipt: dict[str, Any],
@@ -2150,7 +1952,6 @@ class SushiSwapV3ReceiptParser(V3ForkReceiptParser):
             "no logs or no IncreaseLiquidity event from SushiSwap V3 position manager",
         )
 
-    # Backward compatibility methods
     def is_sushiswap_event(self, topic: str | bytes) -> bool:
         """Check if a topic is a known SushiSwap V3 event.
 

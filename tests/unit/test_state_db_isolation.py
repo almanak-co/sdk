@@ -36,7 +36,6 @@ async def test_state_db_isolation_separate_paths():
         await sm2.initialize()
 
         try:
-            # Save state in shard 1
             state1 = StateData(
                 deployment_id="test_strategy",
                 version=1,
@@ -44,19 +43,16 @@ async def test_state_db_isolation_separate_paths():
             )
             await sm1.save_state(state1)
 
-            # Verify shard 1 sees its own state
             loaded1 = await sm1.load_state("test_strategy")
             assert loaded1 is not None
             assert loaded1.state["shard"] == "1"
             assert loaded1.state["value"] == 42
 
-            # Verify shard 2 does NOT see shard 1's state
             from almanak.framework.state.state_manager import StateNotFoundError
 
             with pytest.raises(StateNotFoundError):
                 await sm2.load_state("test_strategy")
 
-            # Save different state in shard 2
             state2 = StateData(
                 deployment_id="test_strategy",
                 version=1,
@@ -64,13 +60,11 @@ async def test_state_db_isolation_separate_paths():
             )
             await sm2.save_state(state2)
 
-            # Verify each shard sees only its own state
             loaded1_again = await sm1.load_state("test_strategy")
             loaded2 = await sm2.load_state("test_strategy")
             assert loaded1_again.state["shard"] == "1"
             assert loaded2.state["shard"] == "2"
 
-            # Verify both DB files exist independently
             assert os.path.exists(db1)
             assert os.path.exists(db2)
         finally:
@@ -88,16 +82,7 @@ async def test_sqlite_config_reads_env_var(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_sqlite_config_default_without_env_var(monkeypatch, tmp_path):
-    """SQLiteConfigLight defaults to the per-user utility DB path (VIB-3761).
-
-    The cwd-relative ``./almanak_state.db`` legacy default is removed —
-    the canonical resolver returns
-    ``$XDG_DATA_HOME/almanak/utility/almanak_state.db`` (or the
-    ``~/.local/share`` equivalent) so multiple strategies launched from
-    the same cwd cannot collide on a single SQLite file. Sentinel
-    ``:hosted-mode-no-sqlite-path:`` is reserved for hosted-mode
-    construction.
-    """
+    """SQLiteConfigLight defaults to the per-user utility DB path."""
     from pathlib import Path
 
     monkeypatch.delenv("ALMANAK_IS_HOSTED", raising=False)

@@ -15,7 +15,6 @@ import grpc
 
 logger = logging.getLogger(__name__)
 
-# Metadata keys for authentication token
 AUTH_METADATA_KEY = "authorization"
 AUTH_METADATA_KEY_ALT = "x-auth-token"
 
@@ -70,18 +69,7 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
         continuation: Callable[[grpc.HandlerCallDetails], Awaitable[grpc.RpcMethodHandler]],
         handler_call_details: grpc.HandlerCallDetails,
     ) -> grpc.RpcMethodHandler:
-        """Intercept gRPC calls to enforce authentication.
-
-        Args:
-            continuation: The next interceptor or handler
-            handler_call_details: Details about the call including metadata
-
-        Returns:
-            The RPC method handler if authenticated
-
-        Raises:
-            Rejects with UNAUTHENTICATED if token is missing or invalid
-        """
+        """Intercept gRPC calls to enforce authentication."""
         # Skip authentication for health checks - needed for container probes
         method = handler_call_details.method
         if "/grpc.health.v1.Health/" in method:
@@ -91,15 +79,12 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
         if "/grpc.reflection.v1alpha.ServerReflection/" in method:
             return await continuation(handler_call_details)
 
-        # Extract token from metadata
         metadata = dict(handler_call_details.invocation_metadata or [])
         provided_token = metadata.get(AUTH_METADATA_KEY) or metadata.get(AUTH_METADATA_KEY_ALT)
 
-        # Handle "Bearer <token>" format
         if provided_token and provided_token.startswith("Bearer "):
             provided_token = provided_token[7:]
 
-        # Validate token
         if not provided_token:
             if self._record_failure():
                 return self._create_throttled_handler(method)
@@ -115,7 +100,6 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
             logger.warning("Authentication failed: invalid token for method %s", method)
             return self._create_abort_handler(grpc.StatusCode.UNAUTHENTICATED, "Invalid authentication token")
 
-        # Token is valid - proceed with the request
         return await continuation(handler_call_details)
 
     def _record_failure(self) -> bool:
@@ -147,15 +131,7 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
         )
 
     def _create_abort_handler(self, code: grpc.StatusCode, message: str) -> grpc.RpcMethodHandler:
-        """Create a handler that returns the given gRPC status code.
-
-        Args:
-            code: The gRPC status code to abort with.
-            message: Error message to include in the response
-
-        Returns:
-            An RPC method handler that rejects with the given status code
-        """
+        """Create a handler that rejects with the given gRPC status code."""
 
         async def abort_unary_unary(request, context: grpc.aio.ServicerContext):
             await context.abort(code, message)
@@ -174,5 +150,4 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
             return
             yield  # noqa: RET507 - Required for async generator type
 
-        # Return a handler that works for any RPC type
         return grpc.unary_unary_rpc_method_handler(abort_unary_unary)

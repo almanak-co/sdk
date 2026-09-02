@@ -1,4 +1,4 @@
-.PHONY: all help clean test test-unit test-acceptance-pack test-connectors test-intents test-integration test-all test-ci test-coverage crap crap-fresh crap-diff crap-diff-fresh test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single test-accounting-matrix test-accounting-matrix-quick list-demo-strategies test-qa-invariants check-qa-counterexamples check-qa-scalar-projection check-qa-invalidations check-pendle-expiry set-almanak-code-version build-platform-wheels build-platform-runner build publish lint lint-check format format-check security docs docs-cli docs-generated docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop audit-intent-paths check-xfail-hygiene check-xfail-liveness check-config-boundary check-connector-registry check-lifecycle-capability-ratchet check-lifecycle-capability-baseline check-sdk-scoped-lifecycle-claims generate-sdk-scoped-lifecycle-claims check-sdk-scoped-support-shadow generate-sdk-scoped-support-shadow check-strategy-taxonomy check-teardown-state-persistence check-connector-chains check-chain-truth check-demos check-intent-coverage check-orphan-scripts check-import-provenance check-deployment-scoped-tables check-deployment-id-proto-surface check-gateway-isolation check-decimal-policy check-decimal-policy-baseline regen-contract-baselines check-accounting-ratchet check-accounting-merge-gate scan-coupling scan-coupling-report scan-coupling-baseline check-hardcoded-addresses check-hardcoded-addresses-baseline check-placeholder-prices check-permission-coverage check-ci-status
+.PHONY: all help clean test test-unit test-acceptance-pack test-connectors test-intents test-integration test-all test-ci test-coverage crap crap-fresh crap-diff crap-diff-fresh test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single test-accounting-matrix test-accounting-matrix-quick list-demo-strategies test-qa-invariants check-qa-counterexamples check-qa-scalar-projection check-qa-invalidations check-pendle-expiry set-almanak-code-version build-platform-wheels build-platform-runner build publish lint lint-check format format-check security docs docs-cli docs-generated docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop audit-intent-paths check-comment-quality check-xfail-hygiene check-xfail-liveness check-config-boundary check-connector-registry check-lifecycle-capability-ratchet check-lifecycle-capability-baseline check-sdk-scoped-lifecycle-claims generate-sdk-scoped-lifecycle-claims check-sdk-scoped-support-shadow generate-sdk-scoped-support-shadow check-strategy-taxonomy check-teardown-state-persistence check-connector-chains check-chain-truth check-demos check-intent-coverage check-orphan-scripts check-import-provenance check-deployment-scoped-tables check-deployment-id-proto-surface check-gateway-isolation check-decimal-policy check-decimal-policy-baseline regen-contract-baselines check-accounting-ratchet check-accounting-merge-gate scan-coupling scan-coupling-report scan-coupling-baseline check-hardcoded-addresses check-hardcoded-addresses-baseline check-placeholder-prices check-permission-coverage check-ci-status
 
 # Load .env file if it exists
 -include .env
@@ -17,6 +17,7 @@ help: ## Show this help
 lint: ## Ruff check + format with auto-fix (local dev)
 	uv run ruff check almanak scripts/quant-test --fix
 	uv run ruff format almanak scripts/quant-test
+	uv run python scripts/ci/check_comment_quality.py
 
 # Run linting without auto-fix - fails on errors (CI)
 lint-check: ## Ruff check + format, no fixes (CI)
@@ -26,6 +27,7 @@ lint-check: ## Ruff check + format, no fixes (CI)
 	# catches defects and it now gates these mainnet-signing scripts in CI.
 	uv run ruff format almanak --check
 	$(MAKE) test-quant-report
+	$(MAKE) check-comment-quality
 
 test-quant-report: ## Fail-closed guards in the quant-test report renderer
 	# These guards decide whether a mainnet QA run reads PASS or FAIL. They were
@@ -79,6 +81,9 @@ check-orphan-scripts:
 # the branch under test -- exactly the false-green #3441 fixed by hand.
 check-import-provenance:
 	uv run python scripts/ci/check_import_provenance.py
+
+check-comment-quality: ## Reject new historical or decorative Python comments
+	uv run python scripts/ci/check_comment_quality.py
 
 # Enforce xfail hygiene: every @pytest.mark.xfail under tests/intents/ must
 # carry a ticket ref, a dated reason, and an explicit strict=. See issue #1694.
@@ -441,8 +446,8 @@ crap-fresh:
 	$(MAKE) test-coverage
 	$(MAKE) crap
 
-# Diff-aware CRAP gate — fails if a PR adds or modifies a line inside any
-# function whose CRAP score exceeds [tool.crap-diff].threshold (default 30).
+# Diff-aware CRAP gate — fails if a PR adds or modifies an executable line
+# inside any function whose CRAP score exceeds [tool.crap-diff].threshold (default 30).
 # Requires a `.coverage` data file (produced by `make test-ci` or
 # `make test-coverage`) and at least one ancestor commit on the compare branch.
 # Override BASE for non-PR runs: `make crap-diff BASE=origin/feat/foo`.

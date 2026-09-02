@@ -21,17 +21,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-# =============================================================================
-# TYPE ALIASES
-# =============================================================================
-
-# Migration function signature: takes state dict, returns migrated state dict
 MigrationFunction = Callable[[dict[str, Any]], dict[str, Any]]
-
-
-# =============================================================================
-# EXCEPTIONS
-# =============================================================================
 
 
 class MigrationError(Exception):
@@ -80,11 +70,6 @@ class MigrationNotFoundError(Exception):
         super().__init__(message or f"No migration registered for version {version}")
 
 
-# =============================================================================
-# DATA CLASSES
-# =============================================================================
-
-
 @dataclass
 class StateMigration:
     """Defines a single state migration.
@@ -124,7 +109,6 @@ class StateMigration:
         Returns:
             Migrated state dict (new copy)
         """
-        # Deep copy to avoid mutation
         state_copy = copy.deepcopy(state)
         return self.migration_fn(state_copy)
 
@@ -191,11 +175,6 @@ class RollbackInfo:
         return target_version in self.safe_rollback_versions
 
 
-# =============================================================================
-# MIGRATION REGISTRY
-# =============================================================================
-
-
 class MigrationRegistry:
     """Registry of all state migrations.
 
@@ -204,7 +183,7 @@ class MigrationRegistry:
 
     def __init__(self) -> None:
         self._migrations: dict[int, StateMigration] = {}
-        self._current_version: int = 1  # Default schema version
+        self._current_version: int = 1
 
     def register(self, migration: StateMigration) -> None:
         """Register a migration.
@@ -220,7 +199,6 @@ class MigrationRegistry:
 
         self._migrations[migration.version] = migration
 
-        # Update current version if this is newer
         if migration.version > self._current_version:
             self._current_version = migration.version
 
@@ -278,14 +256,12 @@ class MigrationRegistry:
         safe_versions = []
         unsafe_versions = []
 
-        # Find the minimum safe version based on all migrations up to current
         min_safe_version = 1
         for v in range(2, current_version + 1):
             migration = self._migrations.get(v)
             if migration:
                 min_safe_version = max(min_safe_version, migration.rollback_safe_until_version)
 
-        # Categorize all versions
         for v in range(1, current_version):
             if v >= min_safe_version:
                 safe_versions.append(v)
@@ -314,7 +290,6 @@ class MigrationRegistry:
         self._current_version = 1
 
 
-# Global registry instance
 _registry = MigrationRegistry()
 
 
@@ -359,12 +334,6 @@ def migration(
 ) -> Callable[[MigrationFunction], MigrationFunction]:
     """Decorator for registering a migration function.
 
-    Example:
-        @migration(version=2, description="Add field_x to state")
-        def migrate_v1_to_v2(state: dict) -> dict:
-            state["field_x"] = "default_value"
-            return state
-
     Args:
         version: Target schema version
         description: Human-readable description
@@ -384,11 +353,6 @@ def migration(
         return fn
 
     return decorator
-
-
-# =============================================================================
-# MIGRATION FUNCTIONS
-# =============================================================================
 
 
 def migrate(
@@ -411,21 +375,15 @@ def migrate(
     Returns:
         MigrationResult with migrated state and metadata
 
-    Example:
-        result = migrate(state, from_version=1, to_version=3)
-        if result.success:
-            new_state = result.state
     """
     import time
 
     start_time = time.perf_counter()
     reg = registry or _registry
 
-    # Default to current version
     if to_version is None:
         to_version = reg.current_version
 
-    # Nothing to do
     if from_version >= to_version:
         return MigrationResult(
             success=True,
@@ -436,7 +394,6 @@ def migrate(
             duration_ms=0.0,
         )
 
-    # Get migration path
     try:
         migrations = reg.get_migrations_path(from_version, to_version)
     except MigrationNotFoundError as e:
@@ -450,7 +407,6 @@ def migrate(
             duration_ms=(time.perf_counter() - start_time) * 1000,
         )
 
-    # Apply migrations sequentially
     current_state = state
     applied: list[int] = []
 
@@ -526,12 +482,7 @@ def get_rollback_safe_version(
 
     if rollback_info.safe_rollback_versions:
         return min(rollback_info.safe_rollback_versions)
-    return current_version  # Can't rollback at all
-
-
-# =============================================================================
-# AUTO-MIGRATION HELPERS
-# =============================================================================
+    return current_version
 
 
 def needs_migration(
@@ -591,7 +542,6 @@ def auto_migrate(
         registry=reg,
     )
 
-    # Update schema version in state if successful
     if result.success:
         result.state[schema_version_key] = result.to_version
 
@@ -635,7 +585,6 @@ def migrate_state_data(
     )
 
     if result.success:
-        # Create new StateData with migrated state
         migrated_state_data = StateData(
             deployment_id=state_data.deployment_id,
             version=state_data.version,
@@ -646,26 +595,4 @@ def migrate_state_data(
         )
         return migrated_state_data, result
     else:
-        # Return original if migration failed
         return state_data, result
-
-
-# =============================================================================
-# BUILT-IN EXAMPLE MIGRATIONS
-# =============================================================================
-
-# Example migrations are commented out - uncomment to register them:
-
-# @migration(version=2, description="Add 'metadata' field to state")
-# def migrate_v1_to_v2(state: dict[str, Any]) -> dict[str, Any]:
-#     """Add metadata field with default empty dict."""
-#     if "metadata" not in state:
-#         state["metadata"] = {}
-#     return state
-
-# @migration(version=3, description="Rename 'pnl' to 'pnl_usd'", rollback_safe_until_version=2)
-# def migrate_v2_to_v3(state: dict[str, Any]) -> dict[str, Any]:
-#     """Rename pnl field to pnl_usd for clarity."""
-#     if "pnl" in state:
-#         state["pnl_usd"] = state.pop("pnl")
-#     return state

@@ -64,9 +64,8 @@ logger = logging.getLogger(__name__)
 # underlying TCP connectors finalize cleanup before the event loop exits.
 _AIOHTTP_SHUTDOWN_GRACE_SECONDS = 0.25
 
-# States the SDK / gateway own — written by the strategy runner or by the
-# gateway itself once a pod is past the deploy phase. Derived from the
-# canonical vocabulary so the boot guard cannot drift from service validation.
+# Writable lifecycle states are derived from the canonical vocabulary so boot
+# validation cannot drift from service validation.
 _SDK_OWNED_STATES = frozenset(state for state in LifecycleState if state.is_writable)
 
 
@@ -148,9 +147,6 @@ class _RegisterChainsServicer(gateway_pb2_grpc.HealthServicer):
 
         chain_wallet_map, errors = validate_and_map_chains(chains, chain_wallets, wallet_address)
 
-        # Publish session topology BEFORE pre-warm so compilers pick it up, and
-        # include ALL registry chains (not just requested) so cross-chain
-        # intents can resolve destination wallets.
         full_chain_wallets = merge_all_registry_chains(self._wallet_registry, chain_wallet_map)
         self._execution._registered_chain_wallets = full_chain_wallets if full_chain_wallets else None
         self._execution._compiler_cache.clear()
@@ -161,7 +157,6 @@ class _RegisterChainsServicer(gateway_pb2_grpc.HealthServicer):
 
         await reinitialize_market_service(self._market, initialized)
 
-        # Derive a legacy wallet_address for backward compat.
         legacy_wallet = wallet_address or (full_chain_wallets.get(initialized[0], "") if initialized else "")
 
         if errors:
@@ -212,11 +207,8 @@ class GatewayServer:
         self._executor: futures.ThreadPoolExecutor | None = None
         self._health_servicer = health_aio.HealthServicer()
         self._metrics_server: MetricsServer | None = None
-        # Captured from the singleton factory during ``start`` for
-        # observability; not used elsewhere today.
         self._instance_registry: Any | None = None
 
-        # Execution servicer (needs reference for RegisterChains pre-warming)
         self._execution_servicer: ExecutionServiceServicer | None = None
 
         # Servicers that manage HTTP sessions (need cleanup on shutdown)
@@ -227,39 +219,20 @@ class GatewayServer:
         self._funding_rate_servicer: FundingRateServiceServicer | None = None
         self._perp_fill_servicer: PerpFillServiceServicer | None = None
         self._simulation_servicer: SimulationServiceServicer | None = None
-        # VIB-4812 — connector-owned servicers (e.g. Polymarket, Enso) are
-        # discovered via ``GATEWAY_REGISTRY.capability_providers(GatewayServicerCapability)``
-        # in ``_register_services``. The constructed servicer instances are
-        # appended to ``self._connector_servicers`` so the shutdown loop can
-        # call ``close()`` on each without naming individual providers.
+        # Retain connector-owned servicers for shutdown without naming providers.
         self._connector_servicers: list[Any] = []
-        # VIB-4727: pool analytics (off-chain DefiLlama / CoinGecko Onchain egress
-        # moved from the framework PoolAnalyticsReader to the gateway).
         self._pool_analytics_servicer: PoolAnalyticsServiceServicer | None = None
-        # VIB-4728 / POOL-2 (VIB-4750): pool history skeleton. Default-disabled
-        # kill-switch (ALMANAK_GATEWAY_POOL_HISTORY_ENABLED) gates the handler;
-        # the servicer is always registered so auth + telemetry surfaces work
-        # from day 1. POOL-5 (VIB-4753) wires actual providers.
         self._pool_history_servicer: PoolHistoryServiceServicer | None = None
-        # VIB-4859 / W7: rate history (lending APY / perp funding / DEX TWAP /
-        # DEX volume). Dispatcher walks
-        # ``GatewayLendingRateHistoryCapability`` / ``GatewayFundingHistoryCapability``
-        # / ``GatewayDexTwapCapability`` / ``GatewayDexVolumeCapability`` providers.
         self._rate_history_servicer: RateHistoryServiceServicer | None = None
         self._token_servicer: TokenServiceServicer | None = None
         self._lifecycle_servicer: LifecycleServiceServicer | None = None
         self._teardown_servicer: TeardownServiceServicer | None = None
-        # T24 / VIB-4210: PositionService for reconciliation control-plane RPC.
-        # Holds in-process references to state_servicer + rpc_servicer for
-        # registry reads + chain enumeration (ADR §4 algorithm steps 3–4).
         self._position_servicer: PositionServiceServicer | None = None
         self._state_servicer: StateServiceServicer | None = None
 
-        # VIB-1280: background heartbeat TTL enforcer task
         self._heartbeat_ttl_task: asyncio.Task | None = None
 
-        # VIB-3761: handle for the local-DB single-writer flock; held for
-        # the gateway lifetime in local mode, ``None`` in hosted mode.
+        # Held for the gateway lifetime to enforce one local DB and one gateway.
         self._local_db_lock: int | None = None
 
     async def _heartbeat_ttl_loop(self, interval_seconds: int = 60, stale_threshold_seconds: int = 300) -> None:
@@ -294,65 +267,42 @@ class GatewayServer:
         ``_server_start_helpers``) so every branch can be unit-tested without
         binding a real port.
         """
-        # Phase 0: deployment-mode invariants (VIB-3760).
-        # ALMANAK_IS_HOSTED and the gateway's deployment-shape settings must agree.
-        # Runs before everything else so a misconfigured restart fails fast,
-        # before we touch storage, ports, or interceptors.
+        # Fail fast on deployment-shape mismatches before touching storage or ports.
         validate_deployment_invariants(self.settings)
 
-        # Phase 1: interceptors + 2: grpc server build
         interceptors = build_interceptors(self.settings)
         self._executor = futures.ThreadPoolExecutor(max_workers=self.settings.grpc_max_workers)
         self.server = grpc.aio.server(self._executor, interceptors=interceptors)
 
-        # Phase 3.25: single-writer flock on the local DB (VIB-3761).
-        # Refuses to start a second gateway against the same DB path —
-        # OS-level enforcement of the 1 strategy = 1 DB = 1 gateway rule.
-        # No-op in hosted mode.
+        # Enforce one strategy, one DB, and one gateway in local mode.
         self._local_db_lock = acquire_local_db_flock(self.settings)
 
-        # Phase 3: storage singletons (timeline, registry, lifecycle).
-        # Registry is a process-wide singleton; the returned handle is not
-        # needed by ``start`` itself but we capture it for parity with
-        # ``lifecycle_store`` and to make the bootstrap read symmetrically.
         initialize_timeline_store(self.settings, get_timeline_store)
         self._instance_registry = initialize_instance_registry(self.settings)
         lifecycle_store = initialize_lifecycle_store(self.settings)
 
-        # Phase 3.5: schema-contract validation (VIB-3763).
-        # Refuse to start when the live state backend is missing any column
-        # the SDK's accounting writers require — eager so a bad schema fails
-        # the supervisor restart loop instead of landing as silent first-
-        # iteration accounting failures.
+        # Refuse to boot when the live schema lacks accounting-writer columns.
         await validate_state_schema_at_boot(self.settings)
 
-        # Phase 4: pricing-source log
         log_pricing_source_configuration(self.settings)
 
-        # Standard gRPC health protocol
         health_pb2_grpc.add_HealthServicer_to_server(self._health_servicer, self.server)
 
-        # Phase 6: wallet-registry plugin
         wallet_registry = load_wallet_registry(self.settings)
         self._wallet_registry = wallet_registry
 
-        # Phase 7: servicer registration
         self._register_services(wallet_registry, lifecycle_store)
 
-        # Phase 8: reflection + NOT_SERVING + port bind
         reflection.enable_server_reflection(build_reflection_service_names(), self.server)
-        # VIB-2413: mark NOT_SERVING BEFORE opening the port so clients cannot
-        # race warmup and hit uninitialized providers.
+        # Publish NOT_SERVING before exposing the port to prevent warmup races.
         await self._health_servicer.set("", health_pb2.HealthCheckResponse.NOT_SERVING)
         listen_addr = f"{self.settings.grpc_host}:{self.settings.grpc_port}"
         self.bound_port = self.server.add_insecure_port(listen_addr)
 
-        # Phase 9: optional metrics HTTP server
         if self.settings.metrics_enabled:
             self._metrics_server = MetricsServer(port=self.settings.metrics_port)
             self._metrics_server.start()
 
-        # Phase 10: serve + heartbeat TTL enforcer
         await self.server.start()
         logger.info(f"Gateway gRPC server started on {self.settings.grpc_host}:{self.bound_port}")
         self._heartbeat_ttl_task = asyncio.create_task(
@@ -361,20 +311,14 @@ class GatewayServer:
         )
         logger.debug("Heartbeat TTL enforcer task started (interval=60s, threshold=300s)")
 
-        # Phase 11-12: warmup
         await self._warmup_market_service()
         await self._prewarm_if_chains_known()
 
-        # Phase 13: flip SERVING (VIB-2413)
         await self._health_servicer.set("", health_pb2.HealthCheckResponse.SERVING)
         logger.info("Gateway marked SERVING (warmup complete)")
 
-        # Phase 14: announce INITIALIZING in hosted mode (strategy-pod only).
-        # Moves the agent out of V2_DEPLOYING as soon as the pod is reachable,
-        # so the platform UI can light up step 4 ("Initializing agent") before
-        # the strategy container has finished booting. Gated on
-        # ``lifecycle_writer`` so the dashboard-pod gateway never participates
-        # — see ``GatewaySettings.lifecycle_writer``.
+        # Only the hosted strategy-pod gateway configured as lifecycle writer
+        # announces INITIALIZING; dashboard gateways never write lifecycle state.
         await self._announce_initializing(lifecycle_store)
 
     async def _announce_initializing(self, lifecycle_store: Any) -> None:
@@ -417,9 +361,6 @@ class GatewayServer:
         except Exception:
             logger.exception("Failed to announce INITIALIZING state for agent %s", aid)
 
-    # ------------------------------------------------------------------
-    # Phase 7 helper: servicer registration
-    # ------------------------------------------------------------------
     def _register_services(self, wallet_registry: Any | None, lifecycle_store: Any) -> None:
         """Build + register every Phase-2/3 servicer on ``self.server``.
 
@@ -428,19 +369,14 @@ class GatewayServer:
         RegisterChains needs execution + market. Every other registration
         is order-independent.
         """
-        # Phase 2: execution first (needed by RegisterChains custom health)
         self._execution_servicer = ExecutionServiceServicer(self.settings)
         gateway_pb2_grpc.add_ExecutionServiceServicer_to_server(self._execution_servicer, self.server)
         self._execution_servicer.wallet_registry = wallet_registry
 
-        # Market servicer — created early so RegisterChains can upgrade it
-        # from CoinGecko-only to the full 4-source stack once chain info
-        # arrives.
         self._market_servicer = MarketServiceServicer(self.settings)
         self._market_servicer.wallet_registry = wallet_registry
         gateway_pb2_grpc.add_MarketServiceServicer_to_server(self._market_servicer, self.server)
 
-        # Custom Health servicer carrying RegisterChains RPC.
         register_chains_servicer = _RegisterChainsServicer(
             self._health_servicer,
             self._execution_servicer,
@@ -450,10 +386,8 @@ class GatewayServer:
         )
         gateway_pb2_grpc.add_HealthServicer_to_server(register_chains_servicer, self.server)
 
-        # Cross-reference so execution can self-serve prices through market.
         self._execution_servicer.market_servicer = self._market_servicer
 
-        # Phase 2 state/observe
         state_servicer = StateServiceServicer(self.settings)
         gateway_pb2_grpc.add_StateServiceServicer_to_server(state_servicer, self.server)
         self._state_servicer = state_servicer
@@ -461,7 +395,6 @@ class GatewayServer:
         self._observe_servicer = ObserveServiceServicer(self.settings)
         gateway_pb2_grpc.add_ObserveServiceServicer_to_server(self._observe_servicer, self.server)
 
-        # Phase 3 data/integration services
         self._rpc_servicer = RpcServiceServicer(self.settings)
         gateway_pb2_grpc.add_RpcServiceServicer_to_server(self._rpc_servicer, self.server)
 
@@ -474,31 +407,12 @@ class GatewayServer:
         self._funding_rate_servicer = FundingRateServiceServicer(self.settings)
         gateway_pb2_grpc.add_FundingRateServiceServicer_to_server(self._funding_rate_servicer, self.server)
 
-        # VIB-5595 — per-fill economics + funding deltas for async-settlement
-        # perp venues (Hyperliquid). Registry-driven dispatch over connectors
-        # advertising ``GatewayPerpFillsCapability``; the fill-history HTTP
-        # egress lives in the connector's gateway provider, not here.
         self._perp_fill_servicer = PerpFillServiceServicer(self.settings)
         gateway_pb2_grpc.add_PerpFillServiceServicer_to_server(self._perp_fill_servicer, self.server)
 
         self._simulation_servicer = SimulationServiceServicer(self.settings)
         gateway_pb2_grpc.add_SimulationServiceServicer_to_server(self._simulation_servicer, self.server)
 
-        # VIB-4812 — every connector that ships its own gRPC servicer
-        # advertises ``GatewayServicerCapability`` on its
-        # ``almanak.connectors.<protocol>.gateway.provider`` module. The
-        # registry is the discovery surface: ``server.py`` knows nothing
-        # about which protocols are connector-owned. Adding a new
-        # connector-owned servicer is a one-line registration in
-        # ``almanak.connectors._gateway_registry`` plus the connector's own
-        # provider module — no edit here.
-        #
-        # Each provider's ``register_servicers(server, settings)`` performs
-        # the underlying ``gateway_pb2_grpc.add_<X>ServiceServicer_to_server``
-        # call and stashes the constructed servicer on itself (exposed via
-        # ``provider.servicer``). We collect those references so the
-        # shutdown loop can call ``close()`` on each without naming
-        # individual protocols.
         from almanak.connectors._base.gateway_capabilities import (
             GatewayServicerCapability,
         )
@@ -517,31 +431,17 @@ class GatewayServer:
             if provider.servicer is not None:
                 self._connector_servicers.append(provider.servicer)
 
-        # VIB-4727: pool analytics service. Owns the HTTP egress to
-        # DefiLlama / CoinGecko Onchain so strategy containers do not.
         self._pool_analytics_servicer = PoolAnalyticsServiceServicer(self.settings)
         gateway_pb2_grpc.add_PoolAnalyticsServiceServicer_to_server(self._pool_analytics_servicer, self.server)
 
-        # VIB-4728 / POOL-2: pool history skeleton. Default-disabled; POOL-5
-        # wires providers. Registered here so the auth interceptor +
-        # telemetry surface engage from day 1.
         self._pool_history_servicer = PoolHistoryServiceServicer(self.settings)
         gateway_pb2_grpc.add_PoolHistoryServiceServicer_to_server(self._pool_history_servicer, self.server)
 
-        # VIB-4859 / W7: rate history (lending APY / perp funding /
-        # DEX TWAP / DEX volume). Dispatcher walks the four sibling
-        # capabilities declared by registered connectors. With no
-        # implementers wired yet the servicer returns INVALID_ARGUMENT
-        # for every request — Step 2 of the migration lights up the
-        # Aave V3 + Uniswap V3 prototype.
         self._rate_history_servicer = RateHistoryServiceServicer(self.settings)
         gateway_pb2_grpc.add_RateHistoryServiceServicer_to_server(self._rate_history_servicer, self.server)
 
         self._token_servicer = TokenServiceServicer(self.settings)
         gateway_pb2_grpc.add_TokenServiceServicer_to_server(self._token_servicer, self.server)
-        # Wire TokenService into MarketService so balance providers can fall
-        # back to the dynamic resolution stack for symbols absent from the
-        # static registry (CoinGecko / DexScreener / protocol APIs).
         self._market_servicer._token_servicer = self._token_servicer
 
         self._lifecycle_servicer = LifecycleServiceServicer(store=lifecycle_store)
@@ -550,23 +450,12 @@ class GatewayServer:
         self._teardown_servicer = TeardownServiceServicer(settings=self.settings)
         gateway_pb2_grpc.add_TeardownServiceServicer_to_server(self._teardown_servicer, self.server)
 
-        # T24 / VIB-4210: PositionService — control-plane reconciliation RPC.
-        # Holds cross-servicer references for in-process chain enumeration
-        # (RpcServiceServicer) + registry reads/writes (StateServiceServicer).
-        # The gateway IS the egress layer (CLAUDE.md gateway-boundary rule);
-        # in-process invocation of sibling servicers is the correct path,
-        # NOT a TCP loopback hop. Wired after rpc_servicer + state_servicer
-        # exist so neither attribute can be None at first call.
         self._position_servicer = PositionServiceServicer(self.settings)
         self._position_servicer.rpc_servicer = self._rpc_servicer
         self._position_servicer.state_servicer = self._state_servicer
         self._position_servicer.wallet_registry = wallet_registry
         gateway_pb2_grpc.add_PositionServiceServicer_to_server(self._position_servicer, self.server)
 
-        # VIB-4493 Phase 1C/D: wire PositionService into DashboardService so
-        # GetReconciliationReport / PreviewReconcile / ApplyReconcile /
-        # RefreshRegistryFromChain can invoke Reconcile in-process. Same
-        # cross-servicer pattern as PositionService's own state/rpc refs above.
         self._dashboard_servicer.position_servicer = self._position_servicer
 
         logger.debug("Registered Phase 2 services: Market, State, Execution, Observe")
@@ -578,9 +467,6 @@ class GatewayServer:
             )
         logger.debug("Registered Dashboard, Token, Lifecycle, Teardown, and Position services")
 
-    # ------------------------------------------------------------------
-    # Phase 11 helper: market service warmup
-    # ------------------------------------------------------------------
     async def _warmup_market_service(self) -> None:
         """Pre-warm MarketServiceServicer HTTP/RPC caches.
 
@@ -597,9 +483,6 @@ class GatewayServer:
         except Exception as e:
             logger.warning(f"Market service warmup failed (will lazy-init on first call): {e}")
 
-    # ------------------------------------------------------------------
-    # Phase 12 helper: orchestrator pre-warm guard
-    # ------------------------------------------------------------------
     async def _prewarm_if_chains_known(self) -> None:
         """Pre-warm execution orchestrators when any chain source is known."""
         if self.settings.chains or (self._wallet_registry and self._wallet_registry.all_chains()):
@@ -614,7 +497,6 @@ class GatewayServer:
         Returns the first available wallet address (for balance provider warmup),
         or None if no wallet is configured.
         """
-        # Registry-aware path
         if self._wallet_registry is not None:
             for chain in self._wallet_registry.all_chains():
                 try:
@@ -624,7 +506,6 @@ class GatewayServer:
                     continue
             return None
 
-        # Legacy path: Safe address first, then derive from private key
         safe_mode_enabled = self.settings.safe_mode in ("direct", "zodiac")
         if self.settings.safe_address and safe_mode_enabled:
             return self.settings.safe_address
@@ -646,14 +527,10 @@ class GatewayServer:
             logger.warning("Cannot pre-warm: execution servicer not available")
             return
 
-        # VIB-2580: In single-chain Anvil mode, only pre-warm the configured chain.
-        # Warming all registry chains triggers RPC calls to non-running Anvil ports
-        # (e.g., port 8548 for Base when only Arbitrum/8545 is running), producing
-        # ERROR-level "Cannot connect to host" log entries that obscure real issues.
+        # In single-chain Anvil mode, avoid RPC calls to inactive chain forks.
         configured_chains = set(self.settings.chains) if self.settings.chains else set()
         is_anvil_mode = self.settings.network == "anvil"
 
-        # Registry-aware branch: iterate wallet_registry chains
         if self._wallet_registry is not None:
             for chain in self._wallet_registry.all_chains():
                 if self._skip_chain_in_anvil_mode(chain, configured_chains, is_anvil_mode):
@@ -661,7 +538,6 @@ class GatewayServer:
                 await self._prewarm_registry_chain(chain)
             return
 
-        # Legacy path: derive wallet from private key / Safe address
         for chain in self.settings.chains:
             await self._prewarm_chain_legacy(chain)
 
@@ -731,7 +607,6 @@ class GatewayServer:
         Args:
             grace: Grace period in seconds for in-flight requests.
         """
-        # Cancel background heartbeat TTL enforcer (VIB-1280)
         if self._heartbeat_ttl_task and not self._heartbeat_ttl_task.done():
             self._heartbeat_ttl_task.cancel()
             try:
@@ -745,11 +620,9 @@ class GatewayServer:
             await self._health_servicer.set("", health_pb2.HealthCheckResponse.NOT_SERVING)
             await self.server.stop(grace=grace)
             logger.info("Gateway gRPC server stopped")
-        # Shutdown thread pool executor
         if self._executor:
             self._executor.shutdown(wait=True)
-        # Close servicer resources (HTTP sessions, etc.)
-        # Note: _lifecycle_servicer is excluded -- it delegates to the
+        # _lifecycle_servicer is excluded because it delegates to the
         # LifecycleStore singleton whose lifecycle is managed via
         # reset_lifecycle_store() and owns no HTTP sessions.
         gateway_owned_servicers: tuple[Any, ...] = (
@@ -765,24 +638,8 @@ class GatewayServer:
             self._rate_history_servicer,
             self._token_servicer,
         )
-        # VIB-4812: connector-owned servicers (Polymarket, Enso, …) are
-        # discovered via ``GATEWAY_REGISTRY`` at boot and accumulated on
-        # ``self._connector_servicers``. Adding a new connector-owned
-        # servicer requires no edit here. The capability contract
-        # (``GatewayServicerCapability``) mandates only ``register_servicers``;
-        # ``close()`` is therefore best-effort for the connector-owned slice —
-        # a future connector whose servicer holds no aiohttp / web3 resources
-        # may legitimately not implement it.
-        #
-        # ``close()`` may be sync or async (gateway-owned helpers under
-        # ``timeline/store.py``, ``registry/store.py`` and ``lifecycle/`` are
-        # synchronous; aiohttp / web3-backed servicers are coroutines).
-        # Inspect the return value rather than committing to ``await`` so a
-        # future sync-close connector doesn't crash shutdown with ``TypeError:
-        # object NoneType can't be used in 'await' expression``. Any error
-        # from one ``close()`` is logged and shutdown continues with the
-        # remaining servicers — losing a single connector's teardown is
-        # better than stranding the rest.
+        # Connector close is optional and may be synchronous or asynchronous;
+        # one close failure must not prevent the remaining shutdown work.
         for servicer in (*gateway_owned_servicers, *self._connector_servicers):
             if not servicer:
                 continue
@@ -798,14 +655,9 @@ class GatewayServer:
                     "Error closing servicer %s during shutdown",
                     type(servicer).__qualname__,
                 )
-        # Allow aiohttp's underlying connectors to finalize cleanup.
-        # Without this yield, session.__del__ fires the "Unclosed client session"
-        # warning before the TCP transport has been torn down (VIB-1832).
+        # Let aiohttp finalize TCP cleanup before the event loop exits.
         await asyncio.sleep(_AIOHTTP_SHUTDOWN_GRACE_SECONDS)
-        # Reset LifecycleStore singleton so a subsequent start() gets a fresh instance
         reset_lifecycle_store()
-        # VIB-3761: release the local-DB single-writer flock so the next
-        # gateway run on the same path can acquire it. No-op in hosted mode.
         if self._local_db_lock is not None:
             from almanak.framework.local_paths import release_local_db_lock
 
@@ -849,23 +701,11 @@ def main() -> None:
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
 
-    # Install centralized secret redaction on all logging channels
     install_redaction()
 
-    # Initialize structlog for audit logging
     configure_structlog()
 
-    # Fire the deployment-start banner before any other gateway-boot log so
-    # users can clearly see where this deployment's logs begin (vs the
-    # previous deployment's logs in the same Cloud Logging stream).
-    # Banner emission is observability — most failures (e.g. a formatting
-    # bug in identity helpers) must not stop the gateway from booting. But
-    # ``deployment_id()`` raises ``FatalBootError`` when hosted mode is
-    # set with a blank id; that is the hosted-misconfig boot guard and must
-    # propagate so the pod refuses to start rather than writing under an
-    # empty identity. ``FatalBootError`` is imported lazily to keep
-    # ``almanak.framework.deployment`` out of the gateway's module-load
-    # closure (enforced by tests/gateway/test_imports_lean.py).
+    # Banner failures are best-effort, but FatalBootError must fail boot.
     try:
         emit_gateway_banner(logger)
     except Exception as exc:
@@ -875,10 +715,6 @@ def main() -> None:
             raise
         logger.warning(f"Failed to emit deployment-start banner: {exc}")
 
-    # Phase 1 (config-service plan): the standalone gateway entrypoint owns
-    # its own dotenv ingest because there is no Click main group to call
-    # ``_load_dotenv_once`` for it. ``load_config`` produces a fully-resolved
-    # GatewaySettings (incl. unprefixed ALMANAK_* and Polymarket fallbacks).
     from almanak.config.service import load_config
 
     config = load_config()
