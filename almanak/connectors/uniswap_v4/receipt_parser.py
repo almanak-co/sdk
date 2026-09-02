@@ -1,32 +1,10 @@
-"""Uniswap V4 Receipt Parser.
+"""Parse Uniswap V4 PoolManager and PositionManager receipt events.
 
-Parses transaction receipts for V4 events emitted by PoolManager and
-PositionManager:
-- Swap events (PoolManager)
-- ModifyLiquidity events (PoolManager)
-- ERC-721 Transfer events (PositionManager, for position ID extraction)
-
-V4 Swap event:
-    event Swap(
-        PoolId indexed id,
-        address indexed sender,
-        int128 amount0,
-        int128 amount1,
-        uint160 sqrtPriceX96,
-        uint128 liquidity,
-        int24 tick,
-        uint24 fee
-    )
-
-V4 ModifyLiquidity event:
-    event ModifyLiquidity(
-        PoolId indexed id,
-        address indexed sender,
-        int24 tickLower,
-        int24 tickUpper,
-        int256 liquidityDelta,
-        bytes32 salt
-    )
+``Swap`` indexes ``PoolId`` and ``sender``; its data words are signed
+``amount0``/``amount1`` followed by ``sqrtPriceX96``, liquidity, tick, and fee.
+``ModifyLiquidity`` has the same indexed fields and data words for tick bounds,
+signed liquidity delta, and salt. The standard Transfer topic represents both
+ERC-20 transfers (three topics) and PositionManager ERC-721 transfers (four).
 """
 
 from __future__ import annotations
@@ -57,32 +35,19 @@ if TYPE_CHECKING:
     from almanak.connectors.uniswap_v4.sdk import PoolKey
     from almanak.framework.execution.extracted_data import LPCloseData, LPOpenData, SwapAmounts
 
-# Sync ``(pool_id_hex, chain) -> PoolKey | None`` callable injected by the
-# framework so the V4 receipt parser can resolve a ``ModifyLiquidity.pool_id``
-# back to its canonical PoolKey (currency0 < currency1) without performing
-# any network I/O itself. Production callers wrap
-# ``gateway_pool_key_client.lookup_v4_pool_key`` (async); tests inject a
-# direct dict-backed lambda.
+# Synchronous injection keeps network I/O outside the parser while resolving a
+# ModifyLiquidity pool ID to its canonical currency0 < currency1 PoolKey.
 PoolKeyLookup = Callable[[str, str], "PoolKey | None"]
 
 logger = logging.getLogger(__name__)
 
 
-# =============================================================================
-# Event Topic Signatures
-# =============================================================================
-
-# V4 PoolManager event topics
 EVENT_TOPICS: dict[str, str] = {
-    # Swap(bytes32 indexed id, address indexed sender, int128 amount0, int128 amount1,
-    #       uint160 sqrtPriceX96, uint128 liquidity, int24 tick, uint24 fee)
+    # Swap(bytes32,address,int128,int128,uint160,uint128,int24,uint24)
     "Swap": "0x40e9cecb9f5f1f1c5b9c97dec2917b7ee92e57ba5563708daca94dd84ad7112f",
-    # ModifyLiquidity(bytes32 indexed id, address indexed sender,
-    #                  int24 tickLower, int24 tickUpper, int256 liquidityDelta, bytes32 salt)
+    # ModifyLiquidity(bytes32,address,int24,int24,int256,bytes32)
     "ModifyLiquidity": "0xf208f4912782fd25c7f114ca3723a2d5dd6f3bcc3ac8db5af63baa85f711d5ec",
-    # Transfer (ERC-20 standard)
     "Transfer": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
-    # Approval (ERC-20 standard)
     "Approval": "0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925",
 }
 
@@ -91,14 +56,7 @@ MODIFY_LIQUIDITY_TOPIC = EVENT_TOPICS["ModifyLiquidity"]
 TRANSFER_EVENT_TOPIC = EVENT_TOPICS["Transfer"]
 
 
-# =============================================================================
-# Enums
-# =============================================================================
-
-
 class UniswapV4EventType(Enum):
-    """Uniswap V4 event types."""
-
     SWAP = "SWAP"
     MODIFY_LIQUIDITY = "MODIFY_LIQUIDITY"
     TRANSFER = "TRANSFER"
@@ -106,15 +64,8 @@ class UniswapV4EventType(Enum):
     UNKNOWN = "UNKNOWN"
 
 
-# =============================================================================
-# Data Classes
-# =============================================================================
-
-
 @dataclass
 class SwapEventData:
-    """Decoded V4 Swap event data."""
-
     pool_id: str
     sender: str
     amount0: int
@@ -127,8 +78,6 @@ class SwapEventData:
 
 @dataclass
 class ModifyLiquidityEventData:
-    """Decoded V4 ModifyLiquidity event data."""
-
     pool_id: str
     sender: str
     tick_lower: int
@@ -139,8 +88,6 @@ class ModifyLiquidityEventData:
 
 @dataclass
 class TransferEventData:
-    """Decoded ERC-20/ERC-721 Transfer event."""
-
     token: str
     from_address: str
     to_address: str
@@ -151,19 +98,10 @@ class TransferEventData:
 class ParsedSwapResult:
     """High-level parsed swap result.
 
-    ``amount_in_decimal`` / ``amount_out_decimal`` retain the historical
-    ``Decimal(0)`` default so downstream consumers that never checked for
-    None continue to see a safe sentinel (type is intentionally ``Decimal``,
-    NOT ``Decimal | None`` — see issue #1778 guardrail).
-
-    The companion ``amount_in_decimal_resolved`` / ``amount_out_decimal_resolved``
-    flags let callers that DO care about the distinction (e.g. the
-    observability ledger) tell a measured zero apart from an unresolvable-
-    decimals sentinel without having to re-derive that state. ``True``
-    means the human-readable amount was computed from a successfully
-    resolved ``decimals`` value on the token resolver; ``False`` means the
-    parser fell back to ``Decimal(0)`` because decimals were not
-    resolvable for that side (#1778).
+    Raw amounts are token base units. Decimal fields intentionally remain
+    ``Decimal`` and use ``Decimal(0)`` when decimals are unresolved; the
+    companion ``*_decimal_resolved`` flags distinguish that sentinel from a
+    measured zero.
     """
 
     amount_in: int
@@ -183,8 +121,6 @@ class ParsedSwapResult:
 
 @dataclass
 class ParseResult:
-    """Full parse result from a V4 transaction receipt."""
-
     swap_events: list[SwapEventData] = field(default_factory=list)
     modify_liquidity_events: list[ModifyLiquidityEventData] = field(default_factory=list)
     transfer_events: list[TransferEventData] = field(default_factory=list)
@@ -192,21 +128,8 @@ class ParseResult:
     error: str | None = None
 
 
-# =============================================================================
-# UniswapV4ReceiptParser
-# =============================================================================
-
-
 class UniswapV4ReceiptParser:
-    """Parse Uniswap V4 transaction receipts.
-
-    Extracts swap amounts, effective prices, and balance deltas from
-    V4 PoolManager events.
-
-    Args:
-        chain: Chain name for context.
-        pool_manager_address: PoolManager address to filter events.
-    """
+    """Extract swaps, liquidity changes, transfers, and accounting identities."""
 
     def __init__(
         self,
@@ -231,20 +154,10 @@ class UniswapV4ReceiptParser:
         else:
             self.position_manager = chain_addrs.get("position_manager", "").lower()
 
-        # Infrastructure address set used by the direction-based token
-        # identification fallback (see ``_identify_tokens_by_direction``).
-        # A Transfer that enters or leaves one of these addresses is
-        # infra-routing flow (user <-> swap rails), not a user-to-user
-        # transfer. This MUST include more than the PoolManager — V4 swaps
-        # often route ERC-20 legs through UniversalRouter + Permit2 and
-        # WRAP_ETH / UNWRAP_WETH touches the chain's canonical wrapped-native
-        # contract rather than the PoolManager. A narrow set (pool_manager
-        # only) silently degrades the fallback to log-order elimination —
-        # see issue #1767.
-        #
-        # Canonical Permit2 address is the same on every EVM chain
-        # (https://github.com/Uniswap/permit2). Re-using the SDK's own
-        # constant rather than re-declaring it keeps the two in sync.
+        # Direction inference must recognize every swap rail, not just the
+        # PoolManager: flash accounting and wrap/unwrap paths cross the router,
+        # Permit2, PositionManager, or wrapped-native contract. The later pass
+        # ignores infra-to-infra hops because they do not identify the user side.
         from almanak.connectors.uniswap_v4.sdk import PERMIT2_ADDRESS
         from almanak.framework.data.tokens.defaults import WRAPPED_NATIVE
 
@@ -271,24 +184,10 @@ class UniswapV4ReceiptParser:
         tx_hash: str,
         extras: str = "",
     ) -> None:
-        """Emit a structured WARNING and increment the parser-drops counter.
+        """Record every LP parse drop through one log/metric contract.
 
-        The single chokepoint for every V4 LP parser drop path. Every drop
-        site MUST go through here so the WARNING fields and the counter
-        label set stay locked together. ``outcome="drop"`` for return-None
-        paths; ``outcome="raise"`` for the native-ETH typed-error path
-        (counter is still incremented BEFORE the raise so dashboards see
-        the event).
-
-        Args:
-            outcome: "drop" or "raise".
-            reason: ``V4LPDropReason`` member; its string value is the
-                stable error code in both the log and the counter label.
-            pool_id: 32-byte canonical V4 pool_id (lowercase 66-char hex).
-            tx_hash: Receipt transaction hash for traceability.
-            extras: Free-form ``key=value`` tokens already formatted by the
-                caller, appended verbatim to the WARNING. Stays optional so
-                the helper does not lock down per-reason payload shape.
+        ``drop`` denotes a ``None`` result and ``raise`` a typed failure. The
+        metric is incremented before any caller raises.
         """
         record_v4_lp_parser_drop(chain=self.chain, reason=reason, outcome=outcome)
         suffix = f" {extras}" if extras else ""
@@ -310,17 +209,9 @@ class UniswapV4ReceiptParser:
         *,
         swap_token_meta: dict[str, dict[str, Any]] | None = None,
     ) -> ParseResult:
-        """Parse a transaction receipt for V4 events.
+        """Decode supported events and build a swap summary when present.
 
-        Args:
-            receipt: Transaction receipt dict with 'logs' field.
-            quoted_amount_out: Expected output for slippage calculation.
-            swap_token_meta: VIB-3164 — compiler-supplied token metadata.
-                Forwarded to ``_build_swap_result`` so hints can resolve
-                decimals when the TokenResolver misses.
-
-        Returns:
-            ParseResult with decoded events and swap summary.
+        Compiler token metadata supplies decimal hints when resolution fails.
         """
         result = ParseResult()
         logs = receipt.get("logs", [])
@@ -347,7 +238,6 @@ class UniswapV4ReceiptParser:
                 if transfer:
                     result.transfer_events.append(transfer)
 
-        # Build high-level swap result from events
         if result.swap_events:
             result.swap_result = self._build_swap_result(
                 result.swap_events,
@@ -367,22 +257,9 @@ class UniswapV4ReceiptParser:
     ) -> SwapAmounts | None:
         """Extract swap amounts for ResultEnricher integration.
 
-        Args:
-            receipt: Transaction receipt dict.
-            expected_out: VIB-3203 — pre-slippage-discount quote in human
-                (Decimal) units from the compiler's ActionBundle metadata.
-                Overrides the parser's internal ``slippage_bps`` when provided,
-                since the enrichment path does not supply constructor-level
-                quote data.
-            swap_token_meta: VIB-3164 — compiler-supplied token metadata
-                threaded from ``build_extract_kwargs`` via the ResultEnricher
-                hook. Forwarded to ``parse_receipt`` -> ``_build_swap_result``
-                so hints resolve decimals when the TokenResolver misses.
-                Shape: ``{"token_in": {"address": ..., "symbol": ...,
-                "decimals": ...}, "token_out": {...}}``.
-
-        Returns:
-            SwapAmounts or None if no swap event found.
+        ``expected_out`` is a human-unit pre-slippage quote. Token metadata has
+        ``token_in``/``token_out`` entries containing address, symbol, and
+        decimals and is used when the resolver misses.
         """
         from almanak.framework.execution.extracted_data import SwapAmounts
 
@@ -392,7 +269,6 @@ class UniswapV4ReceiptParser:
 
         sr = parsed.swap_result
 
-        # VIB-3203: prefer the framework-supplied ``expected_out`` quote.
         slippage_bps = sr.slippage_bps
         if expected_out is not None and expected_out > 0 and sr.amount_out_decimal > 0:
             realized_slippage = (expected_out - sr.amount_out_decimal) / expected_out
@@ -406,8 +282,7 @@ class UniswapV4ReceiptParser:
             effective_price=sr.effective_price or Decimal(0),
             slippage_bps=slippage_bps,
             expected_out_decimal=expected_out,
-            # VIB-4978: stamp the canonical symbol (not the raw contract address)
-            # into the ledger so the Trade Tape and downstream FIFO basis key agree.
+            # Ledger and FIFO identity use canonical symbols, not addresses.
             token_in=resolve_swap_token_symbol(sr.token_in, self.chain),
             token_out=resolve_swap_token_symbol(sr.token_out, self.chain),
             amount_in_decimal_resolved=sr.amount_in_decimal_resolved,
@@ -417,33 +292,19 @@ class UniswapV4ReceiptParser:
     def extract_position_id(self, receipt: dict[str, Any]) -> int | None:
         """Extract LP position NFT tokenId from ERC-721 Transfer event.
 
-        Looks for a Transfer event emitted by the PositionManager contract
-        where from_address is the zero address (indicating a mint).
-
-        Falls back to ERC-721 mint Transfers from other known V4 PositionManager
-        addresses if no exact chain match is found (handles address mismatches
-        or proxy patterns). Rejects mints from unknown contracts to fail closed.
-
-        Called by ResultEnricher for LP_OPEN intents.
-
-        Args:
-            receipt: Transaction receipt dict.
-
-        Returns:
-            Position ID (tokenId) or None if not found.
+        Prefer a zero-address mint from the configured PositionManager. A sole
+        mint from another known V4 PositionManager is an address-mismatch
+        fallback; unknown or multiple fallback emitters fail closed.
         """
         logs = receipt.get("logs", [])
         tx_hash = receipt.get("transactionHash", "unknown")
 
-        # Build set of known V4 PositionManager addresses for fallback constraint
         known_pm_addresses = {
             addrs["position_manager"].lower() for addrs in UNISWAP_V4.values() if addrs.get("position_manager")
         }
 
-        # Collect ERC-721 mint Transfer candidates as fallback
-        fallback_candidates: list[tuple[int, str]] = []  # (token_id, emitting_address)
-        # Count ERC-721 *mints* (from == zero) seen in this receipt, to grade the
-        # terminal "no position ID found" diagnostic (VIB-2702, see below).
+        fallback_candidates: list[tuple[int, str]] = []
+        # Missing mints are normal on approval transactions; unmatched mints are not.
         erc721_mint_count = 0
 
         for log in logs:
@@ -455,17 +316,15 @@ class UniswapV4ReceiptParser:
             if topic0 != TRANSFER_EVENT_TOPIC.lower():
                 continue
 
-            # ERC-721 Transfer: topic[1]=from, topic[2]=to, topic[3]=tokenId
+            # ERC-721 Transfer uses topics for from, to, and tokenId; ERC-20 has only three topics.
             from_addr = topics[1] if isinstance(topics[1], str) else hex(topics[1])
 
-            # Only consider mint events (from = zero address)
             try:
                 if int(from_addr, 16) != 0:
                     continue
             except (ValueError, TypeError):
                 continue
 
-            # Past this point the log is a genuine ERC-721 mint (from == zero).
             erc721_mint_count += 1
 
             token_id_hex = topics[3] if isinstance(topics[3], str) else hex(topics[3])
@@ -474,13 +333,11 @@ class UniswapV4ReceiptParser:
             except (ValueError, TypeError):
                 continue
 
-            # Check if emitted by PositionManager (preferred match)
             log_address = log.get("address", "")
             log_address_lower = log_address.lower() if isinstance(log_address, str) else ""
             if self.position_manager and log_address_lower == self.position_manager:
                 return token_id
 
-            # Only consider known V4 PositionManager addresses as fallback candidates
             if log_address_lower in known_pm_addresses:
                 fallback_candidates.append((token_id, log_address_lower))
 
@@ -510,17 +367,6 @@ class UniswapV4ReceiptParser:
             )
             return None
 
-        # Log diagnostic info when extraction fails completely.
-        #
-        # extract_position_id is called once per receipt in an LP_OPEN bundle, but
-        # only the final modifyLiquidities tx mints the position NFT — the leading
-        # ERC-20 approve + Permit2 txs legitimately carry no ERC-721 mint. Warning
-        # on those produces 4 spurious "no position ID found" lines per LP_OPEN
-        # (VIB-2702). Grade the diagnostic on whether this receipt contained any
-        # ERC-721 mint (from == zero) at all:
-        #   - zero ERC-721 mints  -> expected for approve/Permit2 txs -> DEBUG.
-        #   - one or more mints, but none from a known V4 PositionManager ->
-        #     genuine anomaly worth surfacing -> WARNING.
         log_at = logger.warning if erc721_mint_count > 0 else logger.debug
         log_at(
             "V4 extract_position_id: no position ID found. "
@@ -534,21 +380,11 @@ class UniswapV4ReceiptParser:
         return None
 
     def extract_liquidity(self, receipt: dict[str, Any]) -> int | None:
-        """Extract liquidity delta from ModifyLiquidity event.
-
-        Called by ResultEnricher for LP_OPEN intents.
-
-        Args:
-            receipt: Transaction receipt dict.
-
-        Returns:
-            Liquidity amount or None if not found.
-        """
+        """Return the first positive ModifyLiquidity delta."""
         parsed = self.parse_receipt(receipt)
         if not parsed.modify_liquidity_events:
             return None
 
-        # Return the first positive (mint) liquidity delta
         for event in parsed.modify_liquidity_events:
             if event.liquidity_delta > 0:
                 return event.liquidity_delta
@@ -558,44 +394,20 @@ class UniswapV4ReceiptParser:
     def extract_lp_open_data(self, receipt: dict[str, Any]) -> LPOpenData | None:
         """Extract LP open data from a V4 mint receipt.
 
-        VIB-4474 / V4 LP accounting V0. Walks the receipt for the canonical
-        PositionManager-mediated mint shape:
+        The first positive ModifyLiquidity must come from a known
+        PositionManager; hook- or router-initiated mints are rejected. Its salt
+        must equal ``bytes32(tokenId)`` from the PositionManager ERC-721 mint.
+        The exact v4-core identity is
+        ``keccak(packed(positionManager, tickLower, tickUpper, salt))``.
 
-        1. ``ModifyLiquidity`` with ``liquidity_delta > 0`` (a mint, not a burn)
-           and ``sender`` in ``POSITION_MANAGER_ADDRESS_SET`` (allowlist).
-        2. ERC-721 ``Transfer(from=0x0, ...)`` emitted by the PositionManager
-           NFT contract to recover the position ``tokenId``.
-        3. Salt/tokenId consistency check: ``salt == bytes32(tokenId)`` per
-           v4-periphery ``PositionManager._mint()``. Mismatched salt is the
-           failure signal -- non-zero salt that matches the tokenId is the
-           CANONICAL V4 path and must pass.
-        4. ``position_hash = keccak(packed(positionManager, tickLower, tickUpper, salt))``
-           per v4-core ``Position.calculatePositionKey``.
-
-        Amount attribution: sum ERC-20 Transfers landing in the PoolManager
-        grouped by token, then assign by sorted-address order
-        (currency0 < currency1 invariant). When only one currency is observed
-        (e.g. a concentrated-liquidity position opened out of range, or a
-        single-sided deposit), the gateway PoolKey lookup is invoked to
-        resolve both currency addresses and stamp a measured zero on the
-        unobserved leg (VIB-4535 — symmetric with T07's close-side
-        ``extract_lp_close_data``). On lookup failure the LPOpenData is
-        dropped (telemetry counters: ``missing_pool_key_lookup`` /
-        ``pool_key_not_found`` / ``pool_key_lookup_error``) rather than
-        emitted with ambiguous attribution.
-
-        Non-allowlisted ``sender`` or salt/tokenId mismatch → structured
-        WARNING + returns None. The writer must not crash on a parser miss
-        (Empty != Zero / blueprint 27).
-
-        Args:
-            receipt: Transaction receipt dict with 'logs' field.
-
-        Returns:
-            ``LPOpenData`` with ``pool_address`` set to the 32-byte V4 pool_id
-            (66-char lowercase hex) and ``position_hash`` set to the v4-core
-            position key. ``None`` when no eligible mint was found or any
-            validation gate fired.
+        ERC-20 deposits are raw base units summed by token and assigned in
+        ``currency0 < currency1`` order. A single observed currency requires a
+        canonical PoolKey lookup; lookup failure or a token outside that key
+        drops the result rather than guessing. An absent ERC-20 leg is measured
+        zero, but native currency is ``None`` because ``msg.value`` emits no
+        Transfer. With no transfers and no lookup, the legacy all-``None``
+        shape remains fail-open for callers that use intent token order. The
+        first same-pool Swap supplies ``current_tick``.
         """
         from almanak.connectors.uniswap_v4.hooks import compute_position_hash
         from almanak.connectors.uniswap_v4.sdk import POSITION_MANAGER_ADDRESS_SET
@@ -653,13 +465,6 @@ class UniswapV4ReceiptParser:
 
         amount0, amount1, currency0, currency1 = self._sum_deposit_transfers_by_currency_order(parsed.transfer_events)
 
-        # VIB-4535: when only one currency landed in PoolManager we cannot
-        # honestly attribute it to currency0 vs currency1 from the observed
-        # transfers alone. Resolve via the gateway PoolKey lookup -- mirror of
-        # close-side T07 (extract_lp_close_data). The helper returns a resolved
-        # (amount0, amount1, currency0, currency1) tuple (with the unobserved
-        # native leg left ``None`` for the runner to stamp from a post-mint
-        # position-state read, VIB-4483) or ``None`` to signal a drop.
         if amount0 is not None and amount1 is None:
             resolved = self._resolve_single_sided_lp_open(
                 pool_id_hex=mint_event.pool_id.lower(),
@@ -671,25 +476,6 @@ class UniswapV4ReceiptParser:
                 return None
             amount0, amount1, currency0, currency1 = resolved
         elif amount0 is None and amount1 is None and self._pool_key_lookup is not None:
-            # VIB-5119: a fully-native single-sided mint (out-of-range, only the
-            # native ETH leg moved) deposits ETH via ``msg.value`` and emits NO
-            # ERC-20 deposit Transfer, so the sum above returns all-``None``. We
-            # cannot resolve currencies from transfers alone — resolve the
-            # native-leg PoolKey via the gateway lookup (mirror of the
-            # single-sided branch above and close-side T07) so ``currency0`` /
-            # ``currency1`` ARE set, which is what gates the runner's native-amount
-            # capture (``_native_v4_open_eligible``). The native leg stays
-            # ``None`` (unmeasured — the runner's
-            # ``_stamp_v4_lp_open_native_amounts`` fills it from a post-mint
-            # position-state read); the ERC-20 leg is a measured ``0`` (genuinely
-            # zero this out-of-range mint). A non-native PoolKey that landed zero
-            # deposit Transfers is not attributable and stays a drop.
-            #
-            # When NO ``pool_key_lookup`` is configured (degraded / unit path) we
-            # do NOT drop here — we preserve the legacy both-``None`` /
-            # null-currency shape (Empty ≠ Zero; the LP handler falls back to
-            # user-intent token order). Only attempt resolution when a lookup
-            # exists, mirroring how production always wires it.
             resolved = self._resolve_native_only_lp_open(
                 pool_id_hex=mint_event.pool_id.lower(),
                 tx_hash=tx_hash,
@@ -714,12 +500,6 @@ class UniswapV4ReceiptParser:
             current_tick=current_tick,
             pool_address=mint_event.pool_id.lower(),
             position_hash=position_hash,
-            # VIB-4426 P1 #4 — emit canonical sorted currency addresses so
-            # build_lp_accounting_event resolves token symbols/decimals by
-            # address (not user-intent index). VIB-4535 closed the V0 hole
-            # where single-sided opens left currency1 unresolved; the
-            # PoolKey-lookup branch above now resolves both currencies (or
-            # drops fail-loud on lookup failure) for those receipts.
             currency0=currency0,
             currency1=currency1,
         )
@@ -727,19 +507,10 @@ class UniswapV4ReceiptParser:
     def _sum_deposit_transfers_by_currency_order(
         self, transfer_events: list[TransferEventData]
     ) -> tuple[int | None, int | None, str | None, str | None]:
-        """Aggregate deposit ERC-20 transfers (TO PoolManager) by token, then
-        return ``(amount0, amount1, currency0, currency1)`` ordered by
-        ascending token address.
+        """Sum PoolManager deposits in address order.
 
-        Matches the V4 PoolKey invariant ``currency0 < currency1`` and the
-        symmetric logic in ``extract_lp_close_data``. Returns
-        ``(None, None, None, None)`` when no transfers landed in PoolManager
-        -- ``None`` is the honest "unmeasured" signal per blueprint 27
-        §Empty ≠ Zero (callers must not substitute zero). On a single-sided
-        deposit, currency1 is ``None`` (we know one address transferred but
-        cannot infer the unobserved currency from transfers alone); the
-        caller (``extract_lp_open_data``) resolves the missing leg via the
-        gateway PoolKey lookup -- see VIB-4535.
+        No transfers returns all ``None``. One token cannot reveal which
+        PoolKey leg is absent, so the caller must resolve the key.
         """
         deposited_by_token: dict[str, int] = {}
         for transfer in transfer_events:
@@ -767,42 +538,11 @@ class UniswapV4ReceiptParser:
     ) -> tuple[int | None, int | None, str, str] | None:
         """Resolve a single-sided LP_OPEN via the gateway PoolKey lookup.
 
-        VIB-4535: when only one currency landed in PoolManager,
-        ``extract_lp_open_data`` cannot honestly attribute it to currency0 vs
-        currency1 from the observed transfers alone. This helper mirrors
-        T07's close-side ``extract_lp_close_data`` lookup discipline:
-
-        - Calls ``self._pool_key_lookup(pool_id_hex, chain)`` to get the
-          canonical PoolKey.
-        - On lookup failure (no callable / returns None / raises) emits a
-          structured WARNING + telemetry and returns ``None`` (caller drops).
-        - On observed-currency-outside-PoolKey returns ``None`` with
-          ``transfer_set_mismatch`` telemetry (caller drops).
-        - On success returns ``(amount0, amount1, currency0, currency1)``.
-
-        Unobserved-leg attribution honours Empty ≠ Zero (blueprint 27):
-
-        * **ERC-20 unobserved leg** → measured ``0``. We observed every
-          ERC-20 Transfer leaving / entering the PoolManager, so an ERC-20
-          currency with no Transfer truly received zero in this open (a
-          legitimate out-of-range single-sided ERC-20 deposit).
-        * **native-ETH unobserved leg** (``currency == 0x0``, VIB-4483) →
-          ``None`` (unmeasured). The native leg emits NO ERC-20 Transfer, so
-          its absence from the observed set is NOT evidence of zero — the
-          ETH genuinely deposited via ``msg.value`` and the receipt simply
-          cannot see it. Stamping ``0`` here would be a measured-zero lie
-          (receipt_parser.py historical note). The runner fills this leg AFTER
-          the tx lands (VIB-4483: a post-mint ``QueryV4PositionState`` read +
-          concentrated-liquidity math; VIB-5121: on a read-failure fallback, a
-          block-pinned wallet native-balance bracket) and stamps it via
-          ``_stamp_lp_open_native_amounts``; on total failure it stays ``None``
-          (honest unmeasured), never a fabricated zero.
-
-        Returns:
-            ``None`` to signal the caller should drop ``LPOpenData``, OR
-            a resolved ``(amount0, amount1, currency0, currency1)`` tuple
-            where an unobserved native leg is ``None`` and an unobserved
-            ERC-20 leg is ``0``.
+        Missing, failed, or inconsistent lookup is fail-closed. An unobserved
+        ERC-20 leg is measured ``0``; an unobserved address-zero native leg is
+        ``None`` because its ``msg.value`` deposit is invisible to Transfer
+        logs. The runner first uses post-mint position state, then a block-pinned
+        wallet/Safe native-balance bracket; total failure remains unmeasured.
         """
         from almanak.connectors.uniswap_v4.sdk import NATIVE_CURRENCY
 
@@ -839,10 +579,6 @@ class UniswapV4ReceiptParser:
         pk_currency0 = pool_key.currency0.lower()
         pk_currency1 = pool_key.currency1.lower()
 
-        # The single observed currency MUST be one of the two PoolKey
-        # currencies; otherwise attribution is impossible (mirror of the
-        # close-side ``transfer_set_mismatch`` drop). Catches parser
-        # mis-extraction or a stale cache returning the wrong PoolKey.
         if observed_currency not in (pk_currency0, pk_currency1):
             self._emit_drop_telemetry(
                 outcome="drop",
@@ -853,11 +589,6 @@ class UniswapV4ReceiptParser:
             )
             return None
 
-        # Map the observed amount onto its leg. The unobserved leg is a
-        # measured ``0`` for an ERC-20 currency (no Transfer = truly zero) but
-        # ``None`` for the native-ETH currency (no Transfer ≠ zero — the ETH
-        # deposit is invisible to the receipt; the runner stamps it from a
-        # post-mint position-state read).
         def _unobserved(currency: str) -> int | None:
             return None if currency == NATIVE_CURRENCY else 0
 
@@ -873,28 +604,9 @@ class UniswapV4ReceiptParser:
     ) -> tuple[int | None, int | None, str, str] | None:
         """Resolve a fully-native single-sided LP_OPEN via the gateway PoolKey lookup.
 
-        VIB-5119: a single-sided out-of-range mint that moves ONLY the native
-        ETH leg deposits via ``msg.value`` and emits NO ERC-20 deposit Transfer,
-        so ``_sum_deposit_transfers_by_currency_order`` returns all-``None`` and
-        there is no observed currency to anchor attribution on. This helper
-        mirrors ``_resolve_single_sided_lp_open`` (and close-side T07) but for
-        the zero-observed-transfer shape: it resolves the canonical PoolKey and,
-        ONLY when that PoolKey carries the native-ETH currency, returns a
-        resolved tuple with the native leg ``None`` (unmeasured — the runner's
-        ``_stamp_v4_lp_open_native_amounts`` fills it from a post-mint
-        position-state read) and the ERC-20 leg a measured ``0`` (genuinely zero
-        this mint).
-
-        Scoping (Empty ≠ Zero / fail-loud): an all-ERC-20 PoolKey that somehow
-        landed ZERO deposit Transfers is NOT attributable — both legs would be
-        unanchored guesses — so it stays a drop (``transfer_set_mismatch``).
-        Only a native-leg PoolKey, whose native deposit is structurally
-        invisible to the receipt, is allowed to resolve from the lookup alone.
-
-        Returns:
-            ``None`` to signal the caller should drop ``LPOpenData``, OR a
-            resolved ``(amount0, amount1, currency0, currency1)`` tuple where the
-            native leg is ``None`` and the ERC-20 leg is ``0``.
+        Zero observed transfers is attributable only when the PoolKey contains
+        address-zero native currency. The native leg is unmeasured ``None`` and
+        the ERC-20 leg measured ``0``; an all-ERC-20 key fails closed.
         """
         from almanak.connectors.uniswap_v4.sdk import NATIVE_CURRENCY
 
@@ -931,11 +643,6 @@ class UniswapV4ReceiptParser:
         pk_currency0 = pool_key.currency0.lower()
         pk_currency1 = pool_key.currency1.lower()
 
-        # Scope the zero-observed-transfer bypass to native-leg pools only. An
-        # all-ERC-20 pool with zero observed deposit Transfers is a genuine
-        # attribution failure (we observed every PoolManager Transfer and saw
-        # none), so it must drop — mirror of the close-side empty-observed
-        # protection. Only the native leg's deposit is structurally invisible.
         if NATIVE_CURRENCY not in (pk_currency0, pk_currency1):
             self._emit_drop_telemetry(
                 outcome="drop",
@@ -946,8 +653,6 @@ class UniswapV4ReceiptParser:
             )
             return None
 
-        # Native leg → ``None`` (unmeasured; runner stamps it). ERC-20 leg →
-        # measured ``0`` (no Transfer = truly zero this out-of-range mint).
         def _unobserved(currency: str) -> int | None:
             return None if currency == NATIVE_CURRENCY else 0
 
@@ -956,55 +661,18 @@ class UniswapV4ReceiptParser:
     def extract_lp_close_data(self, receipt: dict[str, Any]) -> LPCloseData | None:
         """Extract LP close data from a V4 burn receipt.
 
-        VIB-4476 / V4 LP accounting V0. Token attribution is driven by the
-        canonical ``PoolKey`` resolved via the gateway
-        ``LookupV4PoolKey`` RPC (T03), NOT by sorting observed Transfer
-        logs. Sorted-Transfer attribution is broken for (a) native ETH
-        (which emits no ERC-20 Transfer) and (b) any non-trivial pair
-        ordering where the on-chain ``currency0 < currency1`` invariant
-        does not match the order the transfers happen to appear in.
+        The first negative ModifyLiquidity supplies the pool ID and removed
+        liquidity. Raw base-unit withdrawals are summed only from Transfers
+        leaving PoolManager and assigned by the looked-up PoolKey, never by log
+        order. Lookup failure or any observed token outside the key fails
+        closed; a missing ERC-20 key leg is measured zero.
 
-        Walks the receipt for:
-
-        1. ``ModifyLiquidity`` with ``liquidity_delta < 0`` (a burn, not a
-           mint). Pull ``pool_id`` from ``topics[1]``.
-        2. Canonical ``PoolKey`` for that ``pool_id`` via the injected
-           ``pool_key_lookup`` callable.
-        3. Transfer-set integrity check: the set of token addresses in
-           observed ``Transfer`` logs leaving the PoolManager MUST be a
-           non-empty subset of ``{currency0, currency1}`` from the PoolKey.
-           On a token outside that set: structured WARNING + return ``None``
-           (fail-loud over silent misattribution).
-        4. PoolKey-ordered amount assignment: ``amount0_collected`` =
-           sum of transfers of ``currency0``; ``amount1_collected`` =
-           sum of transfers of ``currency1``.
-
-        Native-ETH currency (VIB-4483 / P-V1-B) is supported: the native leg is
-        returned as raw ETH (no ERC-20 Transfer) so its ``amount{0,1}_collected``
-        principal is ``None`` (unmeasured, Empty ≠ Zero — VIB-5117) rather than a
-        fabricated ``0``; the runner fills it pre-burn from a
-        ``QueryV4PositionState`` read (``_stamp_v4_lp_close_native_principal``).
-        A fully-native single-sided close emits NO ERC-20 Transfer at all; the
-        empty-observed-tokens gate below allows it through ONLY for a native-leg
-        PoolKey (VIB-5119) so the LP_CLOSE event is still booked. Uncollected
-        FEES are measured pre-burn via ``_stamp_v4_lp_close_fees`` (VIB-4482).
-
-        Emits:
-
-        - ``pool_address`` = 32-byte canonical pool_id (66-char lowercase hex)
-        - ``source = "modify_liquidity"``
-        - ``fees0 = None``, ``fees1 = None`` — V4 bundles fees into the
-          withdrawal Transfer in V0; explicit ``None`` is the honest signal
-          (Empty ≠ Zero, blueprint 27). Separate fee measurement is V1
-          P-V1-A (VIB-4482).
-
-        Args:
-            receipt: Transaction receipt dict with 'logs' field.
-
-        Returns:
-            ``LPCloseData`` with PoolKey-driven amount attribution, or
-            ``None`` when no eligible burn is found, the PoolKey lookup
-            fails, or the observed Transfer set does not match the PoolKey.
+        Address-zero native currency returns raw ETH without an ERC-20 event,
+        so its principal is unmeasured ``None`` and is filled from pre-burn
+        position state. An empty observed set is valid only for a native pool;
+        it remains an attribution failure for an all-ERC-20 pool. V4 does not
+        separate fees from withdrawal Transfers here, so ``fees0``/``fees1``
+        remain ``None`` and the runner measures fees separately before burning.
         """
         from almanak.framework.execution.extracted_data import LPCloseData
 
@@ -1017,21 +685,8 @@ class UniswapV4ReceiptParser:
                 burn_event = event
                 break
         if burn_event is None:
-            # VIB-4637 — fees-only LP_COLLECT_FEES path. A V4 fee harvest
-            # compiles to ``DECREASE_LIQUIDITY(liquidity=0) + TAKE_PAIR``
-            # (see sdk.build_collect_fees_tx), so the PoolManager emits a
-            # ``ModifyLiquidity`` with ``liquidity_delta == 0`` — NO
-            # principal-removing burn. The negative-delta branch above never
-            # fires, so before VIB-4637 this returned ``None`` → no typed
-            # ``pool_address`` → the LP handler dropped the LP_COLLECT_FEES
-            # event entirely (the ``weth/usdc/3000`` V4 position-key tail is
-            # rejected by ``_clean_pool_address_candidate`` as a V3 fee-tier
-            # descriptor). The canonical 32-byte V4 PoolId is right there in
-            # ``ModifyLiquidity.topics[1]`` (chain truth — no PoolKey lookup
-            # or extra RPC needed), so stamp it on a principal-zero
-            # ``LPCloseData``. The handler's resolver accept-branch
-            # (``^0x[0-9a-f]{64}$``) then books the event. Mirrors the merged
-            # TraderJoe V2 collect path (VIB-4634).
+            # Fee collection emits zero-delta ModifyLiquidity plus TAKE_PAIR;
+            # its indexed pool ID is sufficient without a PoolKey lookup.
             return self._extract_fees_only_collect_data(parsed)
 
         liquidity_removed = abs(burn_event.liquidity_delta)
@@ -1070,19 +725,6 @@ class UniswapV4ReceiptParser:
         currency0 = pool_key.currency0.lower()
         currency1 = pool_key.currency1.lower()
 
-        # VIB-4483 (P-V1-B) / VIB-5117: native-ETH currency is supported on
-        # close. The native leg is returned to the wallet as raw ETH (TAKE_PAIR)
-        # and emits NO ERC-20 Transfer, so the ``collected_by_token`` walk below
-        # never observes it. Per Empty ≠ Zero, an unobserved NATIVE leg is
-        # ``None`` (unmeasured), NOT ``0`` (which would be a misattribution that
-        # understates realized PnL by the full native principal). The runner
-        # fills it at ledger-build from a pre-burn ``QueryV4PositionState`` read
-        # (``_stamp_v4_lp_close_native_principal`` — mirror of the open-side
-        # native fill, VIB-4483); on read failure the leg stays unmeasured. An
-        # unobserved ERC-20 leg, by contrast, is a genuine measured ``0`` (the
-        # PoolKey resolved and we saw every PoolManager Transfer, so a missing
-        # ERC-20 currency truly received zero in this burn).
-
         collected_by_token: dict[str, int] = {}
         for transfer in parsed.transfer_events:
             if transfer.from_address.lower() == self.pool_manager:
@@ -1094,31 +736,6 @@ class UniswapV4ReceiptParser:
         observed_tokens = set(collected_by_token.keys())
         expected_tokens = {currency0, currency1}
         pool_has_native_leg = NATIVE_CURRENCY in expected_tokens
-        # VIB-4426 P1 #3 — allow legitimate single-sided closes. A
-        # concentrated-liquidity position that is out of range at burn time
-        # legitimately returns only one of {currency0, currency1}; the
-        # missing leg is a measured zero, not a "transfer-set mismatch".
-        # Pre-fix the strict equality check dropped these as
-        # ``transfer_set_mismatch`` and the LP_CLOSE accounting event was
-        # silently lost.
-        #
-        # The drop predicate is: any observed token outside the PoolKey
-        # currency set IS a real attribution error (could be a token the
-        # parser mis-extracted) and stays a drop.
-        #
-        # VIB-5119 — empty observed set: a fully-native single-sided close
-        # (out-of-range, only the native ETH leg returned via TAKE_PAIR) emits
-        # NO ERC-20 Transfer at all, so ``observed_tokens`` is empty even though
-        # the close DID happen on-chain. Pre-fix the ``not observed_tokens``
-        # guard dropped this as ``transfer_set_mismatch`` and the LP_CLOSE
-        # accounting event was silently lost (the position showed open in the
-        # books). Allow the empty-observed case ONLY when the PoolKey carries
-        # the native-ETH leg (whose return is structurally invisible to the
-        # receipt) — the native principal is then filled pre-burn by
-        # ``_stamp_v4_lp_close_native_principal``. A genuine all-ERC-20 burn
-        # that emits no expected Transfer is still a real attribution failure
-        # and MUST drop — that protection is preserved by the
-        # ``pool_has_native_leg`` scope.
         empty_observed_drop = not observed_tokens and not pool_has_native_leg
         if empty_observed_drop or not observed_tokens.issubset(expected_tokens):
             self._emit_drop_telemetry(
@@ -1130,15 +747,6 @@ class UniswapV4ReceiptParser:
             )
             return None
 
-        # A leg with no PoolManager Transfer is a MEASURED ZERO for an ERC-20
-        # currency (the PoolKey lookup succeeded AND we observed every transfer
-        # from the PoolManager, so a non-observed ERC-20 currency truly received
-        # zero in this burn) but UNMEASURED ``None`` for the NATIVE currency
-        # (VIB-5117 — native ETH is returned via TAKE_PAIR with no Transfer, so
-        # its absence from ``collected_by_token`` says nothing about its value;
-        # the runner fills it from a pre-burn position-state read). Mirror of
-        # the open-side ``_resolve_single_sided_lp_open._unobserved``.
-        # (``NATIVE_CURRENCY`` is imported above for the empty-observed gate.)
         def _leg(currency: str) -> int | None:
             if currency in collected_by_token:
                 return collected_by_token[currency]
@@ -1150,19 +758,11 @@ class UniswapV4ReceiptParser:
         return LPCloseData(
             amount0_collected=amount0_collected,
             amount1_collected=amount1_collected,
-            # VIB-4470 / VIB-4476 — V4 currently bundles fees into the
-            # withdrawal Transfer; fee separation is V1 P-V1-A (VIB-4482).
-            # Explicit ``None`` is the honest signal (Empty ≠ Zero).
             fees0=None,
             fees1=None,
             liquidity_removed=liquidity_removed,
             pool_address=pool_id_hex,
             source="modify_liquidity",
-            # VIB-4426 P1 #4 — emit canonical PoolKey-sorted currency
-            # addresses so the LP handler can resolve symbols/decimals by
-            # address (not by user-intent index). Without these the
-            # handler would mis-pair amount0 (in PoolKey order) with the
-            # intent's token0 (in user-supplied order).
             currency0=currency0,
             currency1=currency1,
         )
@@ -1170,40 +770,11 @@ class UniswapV4ReceiptParser:
     def _extract_fees_only_collect_data(self, parsed: ParseResult) -> LPCloseData | None:
         """Build ``LPCloseData`` for a fees-only V4 LP_COLLECT_FEES receipt.
 
-        VIB-4637. A V4 fee harvest compiles to
-        ``DECREASE_LIQUIDITY(liquidity=0) + TAKE_PAIR``, so the PoolManager
-        emits a ``ModifyLiquidity`` with ``liquidity_delta == 0`` and no
-        principal-removing burn. The only thing this path needs from the
-        receipt is the canonical 32-byte V4 ``pool_id`` (``topics[1]`` of the
-        zero-delta ``ModifyLiquidity``) so the LP accounting handler can
-        resolve a ``pool_address`` and book the LP_COLLECT_FEES event. The
-        PoolId is chain truth carried in the event itself — NO PoolKey lookup
-        or extra RPC is required (unlike the burn path, which needs the
-        lookup to attribute withdrawn principal across currency0/currency1).
-
-        Directional null-contract (Empty ≠ Zero ≠ None — blueprint 27 §10.10):
-
-        * ``amount0_collected`` / ``amount1_collected`` = ``0`` — a fees-only
-          collect withdraws NO principal; that is a measured zero, not
-          unmeasured. (The fields are typed ``int``, so ``0`` is the only
-          honest value for "no principal moved".)
-        * ``liquidity_removed`` = ``0`` — no liquidity was removed; measured
-          zero, symmetric with the principal legs.
-        * ``fees0`` / ``fees1`` = ``None`` — V4 bundles fees into the
-          withdrawal Transfer in V0 and does not surface them separately
-          here; explicit ``None`` is the honest "unmeasured" signal. Fee
-          separation is V1 P-V1-A (VIB-4482); the dedicated
-          ``extract_fees0`` / ``extract_fees1`` path carries any measured
-          fees independently.
-        * ``currency0`` / ``currency1`` = ``None`` — left unmeasured rather
-          than guessed. This path deliberately avoids the PoolKey lookup, so
-          the canonical sorted currency addresses are not resolved here; the
-          handler resolves token symbols/decimals from the position key /
-          prior OPEN payload, and never from a fabricated pairing.
-
-        Returns ``None`` when no zero-delta ``ModifyLiquidity`` is present
-        (i.e. the receipt is not a recognisable V4 fees-only collect) so the
-        enricher treats it as "no event" rather than a parse error.
+        ``DECREASE_LIQUIDITY(0) + TAKE_PAIR`` emits zero-delta
+        ModifyLiquidity, whose indexed pool ID is chain truth and needs no
+        lookup. Principal and removed liquidity are measured zero; bundled
+        fees and unresolved currencies are ``None``. No zero-delta event means
+        no recognizable collect rather than a parse error.
         """
         from almanak.framework.execution.extracted_data import LPCloseData
 
@@ -1216,24 +787,16 @@ class UniswapV4ReceiptParser:
             return None
 
         return LPCloseData(
-            # Fees-only collect: no principal withdrawn — measured zero.
             amount0_collected=0,
             amount1_collected=0,
-            # V4 bundles fees into the withdrawal Transfer in V0 — unmeasured
-            # here (Empty ≠ Zero); separate fee measurement is VIB-4482.
             fees0=None,
             fees1=None,
-            # No liquidity removed on a fees-only collect — measured zero.
             liquidity_removed=0,
             pool_address=collect_event.pool_id.lower(),
             source="modify_liquidity",
-            # Currencies are NOT resolved on this lookup-free path — leave
-            # them unmeasured rather than fabricate a pairing.
             currency0=None,
             currency1=None,
         )
-
-    # -- Registry payload (VIB-4583) ------------------------------------------
 
     def extract_registry_payload_open(
         self,
@@ -1241,37 +804,23 @@ class UniswapV4ReceiptParser:
         *,
         fee_tier: int | None = None,
     ) -> dict[str, Any] | None:
-        """Build the V4 LP_OPEN ``position_registry.payload`` dict (VIB-4583).
+        """Build an LP_OPEN registry payload from canonical V4 identity.
 
-        Structural twin of the V3 parser's ``extract_registry_payload_open``,
-        with the V4 identity tuple: ``token_id`` (NFT tokenId), ``pool_id`` (the
-        32-byte PoolKey hash V4 reports as ``LPOpenData.pool_address``), and the
-        per-chain ``PositionManager`` address. Returns ``None`` — caller falls
-        back to plain ``save_ledger_entry`` — when any load-bearing identity
-        field is missing (Empty ≠ Zero: a zero-substituted ``token_id`` or
-        fabricated ``pool_id`` would silently corrupt ``physical_identity_hash``).
-
-        ``fee_tier`` is forwarded from the intent's compile-time metadata and is
-        carried opaquely (V4 keys identity on PoolManager+tokenId, not fee tier).
-        ``None`` ⇒ the key stays absent (never substitute ``0``).
+        Physical identity requires tokenId and the chain's PositionManager;
+        the 32-byte pool ID is the semantic grouping key. Missing fields fail
+        closed rather than using zero or fabricated values. Fee tier is optional
+        metadata, not identity.
         """
         lp_data = self.extract_lp_open_data(receipt)
         if lp_data is None:
             return None
         if lp_data.position_id is None or lp_data.position_id <= 0:
-            # token_id is the physical identity anchor — refuse to build a row
-            # with a zero/negative tokenId.
             return None
         if not lp_data.pool_address:
-            # pool_id (reported as pool_address) is the semantic_grouping_key
-            # anchor — missing it would let two un-grouped rows in the same V4
-            # pool collide on ix_registry_auto_mode.
             return None
 
         position_manager = self.position_manager or None
         if not position_manager:
-            # Fail-closed: no V4 PositionManager known for this chain. NEVER
-            # fabricate one (it would poison physical_identity_hash_univ4).
             return None
 
         payload: dict[str, Any] = {
@@ -1283,7 +832,6 @@ class UniswapV4ReceiptParser:
             "liquidity": str(lp_data.liquidity) if lp_data.liquidity is not None else None,
             "amount0": str(lp_data.amount0) if lp_data.amount0 is not None else None,
             "amount1": str(lp_data.amount1) if lp_data.amount1 is not None else None,
-            # V4 PoolKey-sorted currency addresses (Empty ≠ Zero — None stays None).
             "currency0": lp_data.currency0,
             "currency1": lp_data.currency1,
         }
@@ -1298,22 +846,11 @@ class UniswapV4ReceiptParser:
         open_payload: dict[str, Any] | None = None,
         fee_tier: int | None = None,
     ) -> dict[str, Any] | None:
-        """Build the V4 LP_CLOSE ``position_registry.payload`` dict (VIB-4583).
+        """Build an LP_CLOSE registry payload using its matched OPEN identity.
 
-        A V4 close burn emits ``ModifyLiquidity`` (carrying the ``pool_id``) and
-        Transfer logs (the withdrawn amounts) but NO NFT ``tokenId`` — V4, like
-        a V3 ``DecreaseLiquidity``-less burn, does not re-emit the tokenId on the
-        Transfer. The tokenId therefore comes from the matched OPEN-side registry
-        row (``open_payload``), which the runner threads through after resolving
-        the close intent's ``position_id`` against the prior open. Without an
-        ``open_payload`` carrying a tokenId we CANNOT build the
-        physical_identity_hash, so we return ``None`` (fall back to plain
-        ledger write) rather than fabricate one.
-
-        The close receipt's ``pool_id`` is cross-checked against the
-        ``open_payload`` pool_id — a disagreement means the wrong OPEN row was
-        threaded, so we refuse the close (the close must not overwrite anchors
-        with a mismatched identity).
+        Close receipts do not re-emit the NFT tokenId, so it must come from the
+        OPEN payload. Missing tokenId fails closed, and a supplied OPEN pool ID
+        must match the close receipt before identity fields are merged.
         """
         lp_close = self.extract_lp_close_data(receipt)
         if lp_close is None:
@@ -1322,13 +859,10 @@ class UniswapV4ReceiptParser:
         if not pool_id:
             return None
 
-        # token_id is not receipt-derivable for a V4 close — it MUST come from
-        # the threaded OPEN row. Empty ≠ Zero: refuse rather than fabricate.
         token_id = self._open_payload_token_id_int(open_payload) if open_payload else None
         if token_id is None or token_id <= 0:
             return None
 
-        # Cross-check identity: the threaded OPEN row must be for THIS pool.
         open_pool = str((open_payload or {}).get("pool_id") or "").lower()
         if open_pool and open_pool != pool_id:
             return None
@@ -1341,16 +875,9 @@ class UniswapV4ReceiptParser:
             "token_id": str(token_id),
             "pool_id": pool_id,
             "position_manager": position_manager,
-            # VIB-5117 — Empty ≠ Zero on the principal legs: a native leg the
-            # burn receipt could not observe is ``None`` here → emit JSON
-            # ``null``, never the literal string ``"None"``. The runner fills
-            # the native principal at ledger-build from the pre-burn position
-            # state; if that read failed the leg stays unmeasured. Symmetric
-            # with the fee_owed guards below.
+            # Preserve unmeasured native principal as JSON null, never "None".
             "amount0_close": (str(lp_close.amount0_collected) if lp_close.amount0_collected is not None else None),
             "amount1_close": (str(lp_close.amount1_collected) if lp_close.amount1_collected is not None else None),
-            # V4 bundles fees into the withdrawal Transfer in V0 — unmeasured
-            # (Empty ≠ Zero); separate fee measurement is VIB-4482.
             "fee_owed_0": str(lp_close.fees0) if lp_close.fees0 is not None else None,
             "fee_owed_1": str(lp_close.fees1) if lp_close.fees1 is not None else None,
             "currency0": lp_close.currency0,
@@ -1358,19 +885,12 @@ class UniswapV4ReceiptParser:
         }
         if lp_close.liquidity_removed is not None:
             payload["liquidity"] = str(lp_close.liquidity_removed)
-        # Merge OPEN-time fields the close receipt cannot re-derive (ticks,
-        # OPEN-time amounts, fee tier). OPEN-time liquidity wins for the row's
-        # ``liquidity`` (matches the V3 registry contract).
         self._merge_open_payload_fields_v4(payload, open_payload, fee_tier=fee_tier)
         return payload
 
     @staticmethod
     def _open_payload_token_id_int(open_payload: dict[str, Any]) -> int | None:
-        """Coerce ``open_payload['token_id']`` to ``int`` or ``None``.
-
-        Mirrors the V3 parser's helper. ``None`` for missing / empty /
-        non-integer values.
-        """
+        """Coerce a non-empty OPEN tokenId to int."""
         raw = open_payload.get("token_id")
         if raw is None or raw == "":
             return None
@@ -1386,13 +906,9 @@ class UniswapV4ReceiptParser:
         *,
         fee_tier: int | None,
     ) -> None:
-        """Merge OPEN-time fields onto a V4 close ``payload`` in place (VIB-4583).
+        """Merge fields that a close receipt cannot re-derive.
 
-        The close receipt cannot re-derive ticks, OPEN-time amounts, the original
-        mint liquidity, or the fee tier — those come from the OPEN-side registry
-        row threaded by the runner. ``open_payload=None`` ⇒ best-effort no-op
-        (only the incoming ``fee_tier`` kwarg is applied). OPEN-time liquidity
-        wins for the registry row's ``liquidity``.
+        OPEN-time liquidity wins over burned liquidity for the registry row.
         """
         if open_payload is None:
             if fee_tier is not None and fee_tier > 0:
@@ -1406,14 +922,11 @@ class UniswapV4ReceiptParser:
         if open_payload.get("amount1") is not None:
             payload.setdefault("amount1_open", open_payload["amount1"])
         if open_payload.get("liquidity") is not None:
-            # OPEN-time liquidity wins (mint amount, not the burned amount).
             payload["liquidity"] = open_payload["liquidity"]
         if open_payload.get("fee_tier") is not None:
             payload.setdefault("fee_tier", open_payload["fee_tier"])
         elif fee_tier is not None and fee_tier > 0:
             payload.setdefault("fee_tier", int(fee_tier))
-
-    # -- Decoding helpers -----------------------------------------------------
 
     def _decode_modify_liquidity_event(self, log: dict[str, Any]) -> ModifyLiquidityEventData | None:
         """Decode a V4 ModifyLiquidity event from a log entry."""
@@ -1429,7 +942,7 @@ class UniswapV4ReceiptParser:
                 HexDecoder.decode_address_from_data(topics[2][2:]) if isinstance(topics[2], str) else hex(topics[2])
             )
 
-            # Data layout: int24 tickLower, int24 tickUpper, int256 liquidityDelta, bytes32 salt
+            # Indexed pool ID and sender are followed by four 32-byte ABI words.
             clean_data = data[2:] if data.startswith("0x") else data
 
             tick_lower = HexDecoder.decode_int24(clean_data[0:64])
@@ -1463,9 +976,7 @@ class UniswapV4ReceiptParser:
                 HexDecoder.decode_address_from_data(topics[2][2:]) if isinstance(topics[2], str) else hex(topics[2])
             )
 
-            # Data layout: int128 amount0, int128 amount1, uint160 sqrtPriceX96,
-            #              uint128 liquidity, int24 tick, uint24 fee
-            # Each field is 32 bytes in ABI encoding
+            # Signed int128 deltas are sign-extended to full 32-byte ABI words.
             clean_data = data[2:] if data.startswith("0x") else data
 
             amount0 = HexDecoder.decode_int256(clean_data[0:64])
@@ -1515,14 +1026,6 @@ class UniswapV4ReceiptParser:
             logger.warning("Failed to decode Transfer event: %s", e)
             return None
 
-    # -- _build_swap_result phase helpers -------------------------------------
-    #
-    # _build_swap_result orchestrates five independent phases. Each phase is
-    # extracted into a small, independently testable helper so the public
-    # contract (ParsedSwapResult field semantics, sign conventions, and
-    # parse_receipt API) is preserved byte-for-byte while CC drops well below
-    # the refactor target.
-
     @staticmethod
     def _compute_swap_amounts(swap: SwapEventData) -> tuple[int, int]:
         """Derive (amount_in, amount_out) from a V4 Swap event.
@@ -1530,14 +1033,11 @@ class UniswapV4ReceiptParser:
         V4 sign convention (swapper's perspective):
             positive = tokens RECEIVED by the swapper from the pool
             negative = tokens PAID by the swapper to the pool
-        Verified against real mainnet transactions (2026-03-29).
         """
         if swap.amount0 > 0:
-            # Swapper received token0, paid token1
             amount_in = abs(swap.amount1)
             amount_out = swap.amount0
         else:
-            # Swapper paid token0, received token1
             amount_in = abs(swap.amount0)
             amount_out = swap.amount1
 
@@ -1579,10 +1079,10 @@ class UniswapV4ReceiptParser:
         token_in_addr: str | None,
         token_out_addr: str | None,
     ) -> tuple[str | None, str | None]:
-        """Fallback 1: V4 flash accounting via UniversalRouter/Permit2 may
-        route Transfers away from PoolManager. Match by amount instead.
-        Skip transfers for tokens already assigned to the other side to
-        handle stablecoin-to-stablecoin swaps where amount_in == amount_out.
+        """Match routed flash-accounting transfers by raw amount.
+
+        Excluding the token already assigned to the opposite side preserves
+        distinct tokens when equal-decimal pairs have equal raw amounts.
         """
         for transfer in transfer_events:
             if token_in_addr is None and transfer.amount == amount_in and transfer.token != token_out_addr:
@@ -1597,23 +1097,13 @@ class UniswapV4ReceiptParser:
         token_in_addr: str | None,
         token_out_addr: str | None,
     ) -> tuple[str | None, str | None]:
-        """Fallback 2: For WETH-routed swaps, ERC-20 amounts may diverge from
-        Swap event amounts due to WRAP_ETH/UNWRAP_WETH. Identify tokens by
-        transfer direction relative to any known infra address (PoolManager,
-        PositionManager, UniversalRouter, Permit2, wrapped-native contract).
+        """Infer token sides from transfers crossing an infrastructure boundary.
 
-        Historically this used only ``{self.pool_manager}``, which silently
-        failed for router-routed receipts (Transfers never touched
-        PoolManager) and fell through to log-order-based elimination —
-        issue #1767. The broadened ``self._infra_addresses`` catches those
-        paths.
-
-        Last-resort elimination now uses a deterministic tiebreaker
-        (lowest-lowercase-address -> output) instead of log order, and logs
-        a WARNING so operators see that the assignment is a guess. A
-        deterministic guess is still a guess — callers downstream should
-        treat tokens produced by this last-resort branch as lower
-        confidence than tokens produced by the direction pass.
+        Wrap/unwrap can make ERC-20 amounts differ from Swap deltas. A transfer
+        from infrastructure is output and one to infrastructure is input;
+        infra-to-infra hops provide no user direction. If no evidence remains,
+        lowercase address order supplies a deterministic, warned guess rather
+        than making attribution depend on log order.
         """
         seen_tokens: set[str] = set()
         if token_in_addr:
@@ -1629,26 +1119,15 @@ class UniswapV4ReceiptParser:
             to_lower = transfer.to_address.lower()
             from_is_infra = from_lower in self._infra_addresses
             to_is_infra = to_lower in self._infra_addresses
-            # Only directional evidence fires when EXACTLY ONE side is
-            # infra (user <-> rails). Infra-to-infra hops (e.g. Permit2 ->
-            # PoolManager) are internal routing plumbing and carry no
-            # directional information about the user's swap.
             if from_is_infra == to_is_infra:
                 continue
-            # Token sent FROM infrastructure TO non-infra = output (user receives)
             if token_out_addr is None and from_is_infra:
                 token_out_addr = transfer.token
                 seen_tokens.add(token_lower)
-            # Token sent TO infrastructure FROM non-infra = input (user pays)
             elif token_in_addr is None and to_is_infra:
                 token_in_addr = transfer.token
                 seen_tokens.add(token_lower)
 
-        # Last resort: deterministic tiebreaker over remaining unseen
-        # tokens — sort by lowercase address so the assignment does NOT
-        # depend on log ordering. Lowest address -> output (arbitrary but
-        # stable). Emit a WARNING: any hit here means all 3 identification
-        # passes failed to find a signal, which is a suspicious receipt.
         if token_in_addr is None or token_out_addr is None:
             remaining = sorted(
                 {t.token for t in transfer_events if t.token.lower() not in seen_tokens},
@@ -1678,11 +1157,7 @@ class UniswapV4ReceiptParser:
         amount_in: int,
         amount_out: int,
     ) -> tuple[str | None, str | None]:
-        """Orchestrate the three token-identification passes.
-
-        Returns (token_in_addr, token_out_addr). Either may be None if the
-        receipt does not contain enough Transfer evidence.
-        """
+        """Identify token sides by PoolManager, amount, then direction evidence."""
         token_in_addr, token_out_addr = self._identify_tokens_by_pool_manager(transfer_events)
         if not transfer_events:
             return token_in_addr, token_out_addr
@@ -1704,9 +1179,8 @@ class UniswapV4ReceiptParser:
     ) -> tuple[int | None, int | None]:
         """Resolve decimals for token_in and token_out via the token_resolver.
 
-        Lazy-loads the global resolver if one wasn't injected at construction.
-        Returns (None, None) on any failure; callers must handle missing
-        decimals by falling back to Decimal(0) for human-readable fields.
+        The global resolver is loaded lazily when none was injected. Each side
+        independently returns ``None`` on failure.
         """
         token_in_decimals: int | None = None
         token_out_decimals: int | None = None
@@ -1743,19 +1217,11 @@ class UniswapV4ReceiptParser:
         token_in_decimals: int | None,
         token_out_decimals: int | None,
     ) -> tuple[Decimal | None, Decimal | None, Decimal | None]:
-        """Compute (amount_in_decimal, amount_out_decimal, effective_price).
+        """Convert base units and compute output-per-input effective price.
 
-        Returns ``None`` for either ``amount_*_decimal`` when decimals could
-        not be resolved for that side. This explicit ``None`` lets callers
-        (``_build_swap_result`` and ``extract_swap_amounts``) tell an
-        unresolvable-decimals case apart from a legitimately measured zero
-        — historically this helper emitted ``Decimal(0)`` as a sentinel,
-        conflating the two (issue #1778, Codex finding on PR #1774).
-
-        ``effective_price`` is computed ONLY when BOTH decimals are
-        resolved AND both amounts are positive, to avoid mixing raw
-        integers with Decimals for cross-decimal pairs (e.g. USDC/WETH),
-        which would be off by orders of magnitude.
+        Unresolved decimals produce ``None`` per side. Price requires both
+        resolved, positive human-unit amounts so cross-decimal pairs never mix
+        base units with decimal units.
         """
         amount_in_decimal: Decimal | None
         amount_out_decimal: Decimal | None
@@ -1803,11 +1269,9 @@ class UniswapV4ReceiptParser:
     ) -> tuple[str | None, str | None]:
         """Fill None sides from compiler hint slots (single-swap only).
 
-        VIB-3164 direction fallback: applied ONLY when there is exactly one Swap
-        event in the receipt. In a multi-hop receipt the first Swap event's
-        output is an intermediate token — the same gate as the uniswap_v3
-        template's Branch 3. Never overwrites a non-None address (the hint for
-        a different address is simply irrelevant to the identified address).
+        In a multi-hop receipt the first event's output is intermediate, so
+        intent-level endpoints cannot safely fill its sides. Existing addresses
+        are never overwritten.
         """
         if not single_swap or not swap_token_meta:
             return token_in_addr, token_out_addr
@@ -1827,12 +1291,7 @@ class UniswapV4ReceiptParser:
         token_out_addr: str | None,
         hint_by_addr: dict[str, tuple[str, int]],
     ) -> tuple[int | None, int | None]:
-        """Resolve decimals per side; compiler hints win over TokenResolver.
-
-        VIB-3164: calls the existing ``_resolve_token_decimals`` first, then
-        overrides either side from the hint map if the address (lowercased)
-        is present. Simplest correct shape: delegate then override.
-        """
+        """Resolve decimals per side, with matching compiler hints authoritative."""
         token_in_decimals: int | None = None
         token_out_decimals: int | None = None
         if token_in_addr:
@@ -1872,36 +1331,18 @@ class UniswapV4ReceiptParser:
     ) -> ParsedSwapResult:
         """Build a high-level swap result from decoded events.
 
-        Orchestrates five pure phase helpers (VIB-3164 inserts stage 3.5 and
-        replaces stage 4 with a hint-aware variant):
-          1. _compute_swap_amounts               — sign convention
-          2. _calculate_slippage_bps             — realized slippage vs quote
-          3. _identify_swap_tokens               — pool_mgr / amount / direction
-          3.5 _apply_token_meta_addresses        — direction fallback from hints
-          4. _resolve_token_decimals_with_hints  — hints win over resolver
-          5. _compute_decimal_amounts            — human-readable amounts + price
-
-        ``_compute_decimal_amounts`` returns ``Decimal | None`` per side to
-        distinguish "decimals unresolvable" from "measured zero" (#1778).
-        ``ParsedSwapResult`` still carries ``Decimal`` fields for backward
-        compatibility — the unresolvable case is coerced back to ``Decimal(0)``
-        here and flagged via ``*_decimal_resolved=False`` so downstream consumers
-        that care about the distinction (ledger) can see it without a type change
-        to the dataclass.
-
-        Do NOT convert the ``Decimal(0)`` coercion — issue #1778 guardrail.
+        Receipt order is significant: the first Swap supplies amounts and
+        post-swap state. Decimal conversion uses ``None`` internally for
+        unresolved sides, then preserves the public ``Decimal(0)`` sentinel and
+        records the distinction in ``*_decimal_resolved``.
         """
-        # Use the first swap event (single-hop; multi-hop receipts may emit
-        # several Swap events but the first carries the user's input side).
         swap = swap_events[0]
         amount_in, amount_out = self._compute_swap_amounts(swap)
         slippage_bps = self._calculate_slippage_bps(amount_out, quoted_amount_out)
         token_in_addr, token_out_addr = self._identify_swap_tokens(transfer_events, amount_in, amount_out)
-        # VIB-3164 stage 3.5: fill None sides from compiler hints (single-swap gate)
         token_in_addr, token_out_addr = self._apply_token_meta_addresses(
             token_in_addr, token_out_addr, swap_token_meta, single_swap=len(swap_events) == 1
         )
-        # VIB-3164 stage 4: hint-aware decimal resolution (hints win per address)
         hint_by_addr = self._build_hint_map(swap_token_meta)
         token_in_decimals, token_out_decimals = self._resolve_token_decimals_with_hints(
             token_in_addr, token_out_addr, hint_by_addr
