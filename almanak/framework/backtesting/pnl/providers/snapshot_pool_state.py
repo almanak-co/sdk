@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from bisect import bisect_right
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
@@ -18,7 +19,7 @@ from almanak.framework.backtesting.pnl.data_manifest import (
 )
 from almanak.framework.backtesting.pnl.data_provider import MarketState, is_address_like
 from almanak.framework.backtesting.pnl.providers.perp._gateway_history import run_sync_gateway_call
-from almanak.framework.data.interfaces import DataSourceUnavailable, data_source_error_from_grpc
+from almanak.framework.data.interfaces import DataSourceTimeout, DataSourceUnavailable, data_source_error_from_grpc
 from almanak.framework.data.models import DataClassification, DataEnvelope, DataMeta
 from almanak.framework.data.pools.descriptor import PoolDescriptor
 from almanak.framework.data.pools.reader import PoolPrice
@@ -28,7 +29,16 @@ from almanak.framework.market.errors import PoolPriceUnavailableError, PoolReser
 # page comfortably inside the fixed gateway deadline; long windows are served
 # through multiple independently bounded RPCs.
 _MAX_POINTS_PER_REQUEST = 128
+# The client deadline is fixed per RPC while archive latency is not, so a page
+# that expires it is retried as two half pages: each carries half the archive
+# work against the same deadline. A page is only split while both halves stay
+# at or above the floor, which bounds the retries to four splits per page; a
+# page that cannot be split further and still expires is a real outage, not
+# variance.
+_MIN_POINTS_PER_REQUEST = 8
 _ARCHIVE_LADDER = ("on_chain_archive",)
+
+logger = logging.getLogger(__name__)
 
 
 def _unix_seconds(timestamp: datetime) -> int:
@@ -335,19 +345,46 @@ def fetch_historical_pool_state_points(
     points: list[HistoricalPoolStatePoint] = []
     for offset in range(0, len(targets), _MAX_POINTS_PER_REQUEST):
         chunk = targets[offset : offset + _MAX_POINTS_PER_REQUEST]
-        request = gateway_pb2.GetDexPoolStateSeriesRequest(
-            dex=normalized[0],
-            chain=normalized[1],
-            pool_address=normalized[2],
-            start_ts=chunk[0],
-            end_ts=chunk[-1],
-            interval_secs=interval_secs,
-        )
-        response = _get_pool_state_series_response(client, request)
-        source = _pool_state_response_source(response, normalized, len(chunk))
-        for sample, raw in zip(chunk, response.points, strict=True):
-            points.append(_pool_state_point(raw, sample=sample, source=source))
+        points.extend(_fetch_pool_state_page(client, gateway_pb2, normalized, chunk, interval_secs))
     return points
+
+
+def _fetch_pool_state_page(
+    client: Any,
+    gateway_pb2: Any,
+    normalized: tuple[str, str, str],
+    chunk: list[int],
+    interval_secs: int,
+) -> list[HistoricalPoolStatePoint]:
+    request = gateway_pb2.GetDexPoolStateSeriesRequest(
+        dex=normalized[0],
+        chain=normalized[1],
+        pool_address=normalized[2],
+        start_ts=chunk[0],
+        end_ts=chunk[-1],
+        interval_secs=interval_secs,
+    )
+    try:
+        response = _get_pool_state_series_response(client, request)
+    except DataSourceTimeout as exc:
+        if len(chunk) < 2 * _MIN_POINTS_PER_REQUEST:
+            raise
+        half = len(chunk) // 2
+        logger.warning(
+            "Pool-state page of %d points for %s/%s/%s hit the %.0fs gateway deadline; retrying as two pages of %d and %d",
+            len(chunk),
+            *normalized,
+            exc.timeout_seconds,
+            half,
+            len(chunk) - half,
+        )
+        return _fetch_pool_state_page(client, gateway_pb2, normalized, chunk[:half], interval_secs) + (
+            _fetch_pool_state_page(client, gateway_pb2, normalized, chunk[half:], interval_secs)
+        )
+    source = _pool_state_response_source(response, normalized, len(chunk))
+    return [
+        _pool_state_point(raw, sample=sample, source=source) for sample, raw in zip(chunk, response.points, strict=True)
+    ]
 
 
 @dataclass(frozen=True, slots=True)

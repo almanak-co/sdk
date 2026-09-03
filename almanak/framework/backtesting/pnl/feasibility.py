@@ -37,8 +37,10 @@ DEFAULT_PAGE_LATENCY_SECONDS = 20.0
 DEFAULT_TICKS_PER_SECOND = 3.5
 # Fallback only: the platform runner job injects ALMANAK_BACKTEST_BUDGET_SECONDS
 # from the same value it passes to `gcloud run jobs ... --task-timeout`, so the
-# gate follows the real task timeout wherever that is raised or lowered.
-DEFAULT_BUDGET_SECONDS = 900.0
+# gate follows the real task timeout wherever that is raised or lowered. The
+# fallback mirrors the runner's value, which is sized for one year at a
+# one-hour tick with the safety margin below applied.
+DEFAULT_BUDGET_SECONDS = 7200.0
 # Data + simulation are not the whole run: price-grid iteration, metrics and
 # artifact upload also draw on the same budget.
 DEFAULT_SAFETY_MARGIN = 0.8
@@ -88,6 +90,9 @@ class FeasibilityEstimate:
     data_seconds: float
     simulation_seconds: float
     knobs: FeasibilityKnobs
+    # The strategy's own decision cadence, when declared. A coarser tick than
+    # this starves the strategy's indicators, so it is never recommended.
+    strategy_cadence_seconds: int | None = None
 
     @property
     def total_seconds(self) -> float:
@@ -136,11 +141,14 @@ def estimate_cost(
     interval_seconds: int,
     target_count: int,
     knobs: FeasibilityKnobs | None = None,
+    strategy_cadence_seconds: int | None = None,
 ) -> FeasibilityEstimate:
     """Estimate data + simulation seconds for one window. Pure computation."""
     resolved = knobs if knobs is not None else FeasibilityKnobs.from_env()
     if target_count < 0:
         raise ValueError("target_count cannot be negative")
+    if strategy_cadence_seconds is not None and strategy_cadence_seconds <= 0:
+        raise ValueError("strategy_cadence_seconds must be positive when given")
     points = expected_points(duration_seconds, interval_seconds)
     pages = expected_pages(points)
     ticks = max(duration_seconds, 0) // interval_seconds
@@ -154,6 +162,7 @@ def estimate_cost(
         data_seconds=pages * resolved.page_latency_seconds * target_count,
         simulation_seconds=ticks / resolved.ticks_per_second,
         knobs=resolved,
+        strategy_cadence_seconds=strategy_cadence_seconds,
     )
 
 
@@ -162,12 +171,14 @@ def estimate_config_cost(
     *,
     target_count: int,
     knobs: FeasibilityKnobs | None = None,
+    strategy_cadence_seconds: int | None = None,
 ) -> FeasibilityEstimate:
     return estimate_cost(
         duration_seconds=config.duration_seconds,
         interval_seconds=config.interval_seconds,
         target_count=target_count,
         knobs=knobs,
+        strategy_cadence_seconds=strategy_cadence_seconds,
     )
 
 
@@ -226,6 +237,7 @@ class BacktestWindowTooLongError(PreflightValidationError):
                 "pool_state_targets": estimate.target_count,
                 "requested_days": round(estimate.duration_days, 2),
                 "feasible_days": round(_feasible_days(estimate), 2),
+                "strategy_cadence_seconds": estimate.strategy_cadence_seconds,
                 # Operator-only escape hatches: deliberately kept out of the
                 # user-facing recommendations, which end users cannot act on.
                 "knob_env_vars": {
@@ -253,11 +265,19 @@ def _feasible_days(estimate: FeasibilityEstimate) -> float:
 
 
 def _coarser_interval_hours(estimate: FeasibilityEstimate) -> float | None:
-    """Interval that keeps the requested window inside budget, if one exists."""
+    """Interval that keeps the requested window inside budget, if one exists.
+
+    ``None`` when no such interval exists or when it would be coarser than the
+    strategy's own decision cadence: a tick the indicators cannot fill is not
+    a remedy the user can act on.
+    """
     ticks = max_feasible_ticks(target_count=estimate.target_count, knobs=estimate.knobs)
     if ticks <= 0:
         return None
-    return math.ceil(estimate.duration_seconds / ticks) / 3600
+    coarser_seconds = math.ceil(estimate.duration_seconds / ticks)
+    if estimate.strategy_cadence_seconds is not None and coarser_seconds > estimate.strategy_cadence_seconds:
+        return None
+    return coarser_seconds / 3600
 
 
 def _window_too_long_message(estimate: FeasibilityEstimate) -> str:
@@ -285,7 +305,9 @@ def _window_too_long_recommendations(estimate: FeasibilityEstimate) -> list[str]
     coarser_hours = _coarser_interval_hours(estimate)
     if coarser_hours is not None and coarser_hours > estimate.interval_seconds / 3600:
         recommendations.append(f"use a coarser interval of ~{coarser_hours:.1f}h to keep the full window")
-    recommendations.append(f"hosted backtest runs are currently limited to ~{estimate.budget_seconds:.0f}s of run time")
+    recommendations.append(
+        f"hosted backtest runs are currently limited to ~{estimate.budget_seconds / 60:.0f} min of run time"
+    )
     return recommendations
 
 
@@ -294,6 +316,7 @@ def enforce_window_feasibility(
     *,
     target_count: int,
     knobs: FeasibilityKnobs | None = None,
+    strategy_cadence_seconds: int | None = None,
 ) -> FeasibilityEstimate | None:
     """Reject infeasible windows before any pool-state page is fetched.
 
@@ -302,7 +325,12 @@ def enforce_window_feasibility(
     """
     if target_count <= 0:
         return None
-    estimate = estimate_config_cost(config, target_count=target_count, knobs=knobs)
+    estimate = estimate_config_cost(
+        config,
+        target_count=target_count,
+        knobs=knobs,
+        strategy_cadence_seconds=strategy_cadence_seconds,
+    )
     if not estimate.feasible:
         raise BacktestWindowTooLongError(estimate)
     logger.info(

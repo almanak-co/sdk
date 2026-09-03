@@ -200,7 +200,7 @@ def test_knobs_default_to_documented_values(monkeypatch: pytest.MonkeyPatch) -> 
 
     assert knobs.page_latency_seconds == 20.0
     assert knobs.ticks_per_second == 3.5
-    assert knobs.budget_seconds == 900.0
+    assert knobs.budget_seconds == 7200.0
     assert knobs.safety_margin == 0.8
 
 
@@ -221,11 +221,21 @@ def test_env_overrides_every_knob(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_unusable_env_values_fall_back_to_defaults(monkeypatch: pytest.MonkeyPatch, raw: str) -> None:
     monkeypatch.setenv(ENV_BUDGET_SECONDS, raw)
 
-    assert FeasibilityKnobs.from_env().budget_seconds == 900.0
+    assert FeasibilityKnobs.from_env().budget_seconds == 7200.0
+
+
+def test_default_budget_admits_one_year_at_one_hour(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The product promise: a year-long hourly single-pool window runs on the default budget."""
+    for name in (ENV_PAGE_LATENCY_SECONDS, ENV_TICKS_PER_SECOND, ENV_BUDGET_SECONDS, ENV_SAFETY_MARGIN):
+        monkeypatch.delenv(name, raising=False)
+
+    for targets in (1, 2):
+        estimate = enforce_window_feasibility(_config(365), target_count=targets)
+        assert estimate is not None and estimate.feasible
 
 
 def test_env_budget_can_admit_a_window_the_default_rejects(monkeypatch: pytest.MonkeyPatch) -> None:
-    config = _config(180)
+    config = _config(3 * 365)
     for name in (ENV_PAGE_LATENCY_SECONDS, ENV_TICKS_PER_SECOND, ENV_BUDGET_SECONDS, ENV_SAFETY_MARGIN):
         monkeypatch.delenv(name, raising=False)
     with pytest.raises(BacktestWindowTooLongError):
@@ -285,7 +295,7 @@ def test_recommendations_stay_user_actionable() -> None:
     recommendations = excinfo.value.preflight_blockers[0]["recommendations"]
 
     assert any("shorten the window to ~" in item for item in recommendations)
-    assert any("hosted backtest runs are currently limited to ~900s" in item for item in recommendations)
+    assert any("hosted backtest runs are currently limited to ~15 min" in item for item in recommendations)
     joined = " ".join(recommendations)
     assert "ALMANAK_" not in joined
     for name in (ENV_BUDGET_SECONDS, ENV_PAGE_LATENCY_SECONDS, ENV_TICKS_PER_SECOND, ENV_SAFETY_MARGIN):
@@ -322,6 +332,29 @@ def test_recommended_shorter_window_is_actually_feasible() -> None:
     assert retry.feasible
 
     assert enforce_window_feasibility(_config(feasible_days), target_count=1, knobs=knobs) is not None
+
+
+def test_coarser_interval_is_never_beyond_the_strategy_cadence() -> None:
+    """A 180d hourly window at the 900s budget needs a ~2.7h tick to fit."""
+
+    def recommendations(cadence: int | None) -> list[str]:
+        with pytest.raises(BacktestWindowTooLongError) as excinfo:
+            enforce_window_feasibility(_config(180), target_count=1, knobs=_knobs(), strategy_cadence_seconds=cadence)
+        assert excinfo.value.details["strategy_cadence_seconds"] == cadence
+        return excinfo.value.preflight_blockers[0]["recommendations"]
+
+    assert any("coarser interval" in item for item in recommendations(None))
+    assert any("coarser interval" in item for item in recommendations(4 * _HOUR))
+    assert not any("coarser interval" in item for item in recommendations(_HOUR))
+    assert any("shorten the window" in item for item in recommendations(_HOUR))
+
+
+def test_strategy_cadence_is_read_from_data_granularity() -> None:
+    assert _engine_helpers._strategy_cadence_seconds({"data_granularity": "4h"}) == 4 * _HOUR
+    assert _engine_helpers._strategy_cadence_seconds({}) is None
+    assert _engine_helpers._strategy_cadence_seconds(None) is None
+    assert _engine_helpers._strategy_cadence_seconds({"data_granularity": "sometimes"}) is None
+    assert _engine_helpers._strategy_cadence_seconds({"data_granularity": 14400}) is None
 
 
 def test_more_targets_shrink_the_recommended_window() -> None:
@@ -364,7 +397,7 @@ def test_gate_makes_no_network_call(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_engine_seam_rejects_long_window_before_any_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[dict[str, Any]] = []
     monkeypatch.setattr(snapshot_pool_state, "fetch_historical_pool_state_points", _spy_fetcher(calls))
-    config = _config(180)
+    config = _config(3 * 365)
 
     with pytest.raises(BacktestWindowTooLongError) as excinfo:
         asyncio.run(
@@ -409,7 +442,7 @@ async def test_readiness_reports_window_too_long_blocker(monkeypatch: pytest.Mon
         slippage_models={"default": DefaultSlippageModel()},
     )
 
-    result = await backtester.check_readiness(_Strategy(), _config(180))
+    result = await backtester.check_readiness(_Strategy(), _config(3 * 365))
 
     assert calls == []
     assert not result.ready

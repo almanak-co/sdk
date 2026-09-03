@@ -387,6 +387,128 @@ def test_gateway_fetch_pages_long_windows_below_the_gateway_deadline(monkeypatch
     assert [(request.end_ts - request.start_ts) // request.interval_secs + 1 for request in requests] == [128, 1]
 
 
+def test_gateway_fetch_splits_a_page_that_hits_the_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Archive latency varies per page; one slow page must not fail the run."""
+    from almanak.framework.backtesting.pnl.providers import twap
+
+    class DeadlineExceeded(grpc.RpcError):
+        def code(self):
+            return grpc.StatusCode.DEADLINE_EXCEEDED
+
+    sizes = []
+
+    def get_series(request, timeout):
+        samples = list(range(request.start_ts, request.end_ts + 1, request.interval_secs))
+        sizes.append(len(samples))
+        if len(samples) > 64:
+            raise DeadlineExceeded()
+        return SimpleNamespace(
+            success=True,
+            error="",
+            source="on_chain_archive",
+            dex="uniswap_v3",
+            chain="polygon",
+            pool_address=POOL,
+            points=[_gateway_point(sample, sample) for sample in samples],
+        )
+
+    client = SimpleNamespace(
+        rate_history=SimpleNamespace(GetDexPoolStateSeries=get_series),
+        config=SimpleNamespace(timeout=30),
+    )
+    gateway_pb2 = SimpleNamespace(GetDexPoolStateSeriesRequest=lambda **values: SimpleNamespace(**values))
+    monkeypatch.setattr(twap, "_twap_get_connected_gateway_client", lambda: (client, gateway_pb2))
+
+    points = fetch_historical_pool_state_points(
+        protocol="uniswap_v3",
+        chain="polygon",
+        pool_address=POOL,
+        start_ts=1_000,
+        end_ts=1_000 + 128 * 3_600,
+        interval_secs=3_600,
+    )
+
+    assert [point.timestamp for point in points] == list(range(1_000, 1_000 + 129 * 3_600, 3_600))
+    assert sizes == [128, 64, 64, 1]
+
+
+def test_gateway_fetch_refuses_when_the_floor_page_still_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    from almanak.framework.backtesting.pnl.providers import twap
+
+    class DeadlineExceeded(grpc.RpcError):
+        def code(self):
+            return grpc.StatusCode.DEADLINE_EXCEEDED
+
+    sizes = []
+
+    def get_series(request, timeout):
+        sizes.append((request.end_ts - request.start_ts) // request.interval_secs + 1)
+        raise DeadlineExceeded()
+
+    client = SimpleNamespace(
+        rate_history=SimpleNamespace(GetDexPoolStateSeries=get_series),
+        config=SimpleNamespace(timeout=30),
+    )
+    gateway_pb2 = SimpleNamespace(GetDexPoolStateSeriesRequest=lambda **values: SimpleNamespace(**values))
+    monkeypatch.setattr(twap, "_twap_get_connected_gateway_client", lambda: (client, gateway_pb2))
+
+    with pytest.raises(DataSourceTimeout, match="timed out after 30.0s"):
+        fetch_historical_pool_state_points(
+            protocol="uniswap_v3",
+            chain="polygon",
+            pool_address=POOL,
+            start_ts=1_000,
+            end_ts=1_000 + 127 * 3_600,
+            interval_secs=3_600,
+        )
+
+    assert sizes == [128, 64, 32, 16, 8]
+
+
+@pytest.mark.parametrize(
+    ("points", "sizes"),
+    [
+        pytest.param(9, [9], id="just-above-floor-is-not-split"),
+        pytest.param(15, [15], id="below-two-floor-pages-is-not-split"),
+        pytest.param(16, [16, 8], id="two-floor-pages-split-once"),
+    ],
+)
+def test_gateway_fetch_never_retries_a_page_below_the_floor(
+    monkeypatch: pytest.MonkeyPatch, points: int, sizes: list[int]
+) -> None:
+    from almanak.framework.backtesting.pnl.providers import twap
+
+    class DeadlineExceeded(grpc.RpcError):
+        def code(self):
+            return grpc.StatusCode.DEADLINE_EXCEEDED
+
+    seen = []
+
+    def get_series(request, timeout):
+        seen.append((request.end_ts - request.start_ts) // request.interval_secs + 1)
+        raise DeadlineExceeded()
+
+    client = SimpleNamespace(
+        rate_history=SimpleNamespace(GetDexPoolStateSeries=get_series),
+        config=SimpleNamespace(timeout=30),
+    )
+    gateway_pb2 = SimpleNamespace(GetDexPoolStateSeriesRequest=lambda **values: SimpleNamespace(**values))
+    monkeypatch.setattr(twap, "_twap_get_connected_gateway_client", lambda: (client, gateway_pb2))
+
+    with pytest.raises(DataSourceTimeout):
+        fetch_historical_pool_state_points(
+            protocol="uniswap_v3",
+            chain="polygon",
+            pool_address=POOL,
+            start_ts=1_000,
+            end_ts=1_000 + (points - 1) * 3_600,
+            interval_secs=3_600,
+        )
+
+    assert seen == sizes
+    assert all(size >= 8 for size in seen)
+
+
 def test_gateway_fetch_maps_client_deadline_to_retryable_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     from almanak.framework.backtesting.pnl.providers import twap
 

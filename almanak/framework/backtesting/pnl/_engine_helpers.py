@@ -916,6 +916,23 @@ async def _prepare_declared_historical_twap(
     return source
 
 
+def _strategy_cadence_seconds(strategy_config: Mapping[str, Any] | None) -> int | None:
+    """The strategy's declared ``data_granularity`` in seconds, or ``None``.
+
+    Malformed values are left for the granularity resolver to reject with its
+    own message; here they simply carry no cadence.
+    """
+    from almanak.framework.data.timeframes import parse_ohlcv_timeframe
+
+    configured = (strategy_config or {}).get("data_granularity")
+    if configured is None:
+        return None
+    try:
+        return parse_ohlcv_timeframe(configured, field_name="strategy config data_granularity").seconds
+    except (TypeError, ValueError):
+        return None
+
+
 async def _prepare_declared_historical_pool_state(
     strategy: BacktestableStrategy,
     strategy_config: Mapping[str, Any],
@@ -999,7 +1016,11 @@ async def _prepare_declared_historical_pool_state(
     # Fail fast on windows that cannot finish inside the job budget: the
     # estimate is pure arithmetic, so it lands before the first serial
     # gateway page instead of after ~600s of loading (ALM-3385).
-    enforce_window_feasibility(config, target_count=len(targets))
+    enforce_window_feasibility(
+        config,
+        target_count=len(targets),
+        strategy_cadence_seconds=_strategy_cadence_seconds(strategy_config),
+    )
     source = SnapshotPoolStateSource(
         start_time=config.start_time,
         end_time=config.end_time,
