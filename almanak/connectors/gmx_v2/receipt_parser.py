@@ -73,42 +73,66 @@ def _normalize_datetime_to_utc(dt: datetime) -> datetime:
         Datetime with UTC timezone.
     """
     if dt.tzinfo is None:
+        # Naive datetime - assume UTC
         return dt.replace(tzinfo=UTC)
     return dt.astimezone(UTC)
 
 
-# GMX V2 emits protocol events through a centralized EventEmitter:
+# =============================================================================
+# Event Topic Signatures
+# =============================================================================
+
+# GMX v2 event name hashes (keccak256 of event name strings).
+#
+# GMX V2 uses a centralized EventEmitter contract that emits all protocol events
+# via EventLog/EventLog1/EventLog2 event types. The event structure is:
 #   topic[0] = keccak256 of EventLog/EventLog1/EventLog2 signature
 #   topic[1] = keccak256 of event name string (indexed string eventNameHash)
 #   topic[2+] = additional indexed parameters (for EventLog1/EventLog2)
-# EVENT_TOPICS contains keccak256(eventName) values matched against topic[1].
+#
+# These hashes represent keccak256(eventName) and are matched against topic[1]
+# to identify the specific GMX V2 event type.
 EVENT_TOPICS: dict[str, str] = {
+    # Order events
     "OrderCreated": "0xa7427759bfd3b941f14e687e129519da3c9b0046c5b9aaa290bb1dede63753b3",
     "OrderExecuted": "0x680f10f06595d3d707241f604672ec4b6ae50eb82728ec2f3c65f6789e897760",
     "OrderCancelled": "0xc7bb288dfd646d5b6c69d5099dd75b72f9c8c09ec9d40984c8ad8182357ae4b2",
     "OrderFrozen": "0x073fdba4e5f6b272d64068005c56e7adbaa6d8de035ca1f7b08422c6dc9fe606",
     "OrderUpdated": "0x84b670ed7b7ee8ccb350963a7dea39493daff6e7a43ab021a0e4ac2d652d359e",
+    # Position events
     "PositionIncrease": "0xf94196ccb31f81a3e67df18f2a62cbfb50009c80a7d3c728a3f542e3abc5cb63",
     "PositionDecrease": "0x07d51b51b408d7c62dcc47cc558da5ce6a6e0fd129a427ebce150f52b0e5171a",
     "PositionFeesInfo": "0x8655f9667b66fc9e7efb1b6d44319284e1d7cffbff9751f70e263723a7080b83",
     "PositionFeesCollected": "0xe096982abd597114bdaa4a60612f87fabfcc7206aa12d61c50e7ba1e6c291100",
+    # Deposit events
     "DepositCreated": "0xccee02d31cafad9001fbdc4dd5cf4957e152a372530316a7d856401e4c5d74bd",
     "DepositExecuted": "0x2856020a9644603d22d7b029b5649a55d708b88d9049150f146ac26c4107b880",
     "DepositCancelled": "0x70056e709adf36c0cb909b41ebecb620a44a31b6dc3867b92c2acf971785cdb5",
+    # Withdrawal events
     "WithdrawalCreated": "0xfe021e2242f6c652ae824bc1428ee0fe7e8771a27295b9450792445dc456e37d",
     "WithdrawalExecuted": "0x7998e9258f1701223baddabfe884a5dc09ee23a6b31b57c9e8150d60c97707f8",
     "WithdrawalCancelled": "0xd523e46ff00e99354cd600fed716e4d5ed6346a3b5ff71e771307cac571b479e",
+    # Market events
     "MarketCreated": "0xad5d762f1fc581b3e684cf095d93d3a2c10754f60124b09bec8bf3d76473baaf",
     "MarketPoolValueUpdated": "0x86834cf1ac14941d42cff9b14d28a052d57693ca16f3c3fc8a22efc050f96d97",
+    # Oracle events
     "OraclePriceUpdated": "0xff32d64cc9a3a5a5937e62070e14f4cba3be96a7365d2d9e855df902f3c9c7f6",
+    # Funding events
     "ClaimableFundingUpdated": "0x915eebf8297cc3f559ded968b9b253a3f043b1e6da5075ac2111083dc2c456fe",
     "FundingFeesClaimed": "0x7e7d869368a1c2fca23506342a50d40fcc45d39d44486d9319780252e3b66b2e",
-    # Keeper settlement occurs asynchronously after createOrder. GMX splits the
-    # executionFee escrow into the consumed keeper fee and any account refund.
+    # Keeper execution-fee settlement. Emitted by the KEEPER transaction, not by
+    # ours: GMX escrows ``executionFee`` (our ``msg.value``) in the OrderVault at
+    # createOrder, then on execution ``GasUtils.payExecutionFee`` pays the keeper
+    # and refunds the unspent remainder to the order's account. The escrow splits
+    # EXACTLY — ``KeeperExecutionFee.executionFeeAmount`` is the portion we
+    # actually consumed, and it is what the Cost Stack books as the venue
+    # execution fee. Verified on Arbitrum mainnet keeper receipts:
+    # 117808422544000 + 39858593456000 = 157667016000000 wei escrowed (open leg).
     "KeeperExecutionFee": "0x57f0018c9e19829fa2f55e53969d49e96f7bc3936cd7453806b7cd0eaf5593ca",
     "ExecutionFeeRefund": "0xe6db92bfa9c5428bfb1001511cc8b0376a77baf28e4b374949b9770bbbb799a0",
 }
 
+# Reverse lookup: topic -> event name
 TOPIC_TO_EVENT: dict[str, str] = {v: k for k, v in EVENT_TOPICS.items()}
 
 # EventEmitter's non-indexed payload is ``(msgSender, eventName, eventData)``.
@@ -125,21 +149,28 @@ _EVENT_LOG_DATA_ABI_TYPE = (
     ")"
 )
 
+# =============================================================================
+# Enums
+# =============================================================================
+
 
 class GMXv2EventType(Enum):
     """GMX v2 event types."""
 
+    # Order events
     ORDER_CREATED = "ORDER_CREATED"
     ORDER_EXECUTED = "ORDER_EXECUTED"
     ORDER_CANCELLED = "ORDER_CANCELLED"
     ORDER_FROZEN = "ORDER_FROZEN"
     ORDER_UPDATED = "ORDER_UPDATED"
 
+    # Position events
     POSITION_INCREASE = "POSITION_INCREASE"
     POSITION_DECREASE = "POSITION_DECREASE"
     POSITION_FEES_INFO = "POSITION_FEES_INFO"
     POSITION_FEES_COLLECTED = "POSITION_FEES_COLLECTED"
 
+    # Deposit/Withdrawal events
     DEPOSIT_CREATED = "DEPOSIT_CREATED"
     DEPOSIT_EXECUTED = "DEPOSIT_EXECUTED"
     DEPOSIT_CANCELLED = "DEPOSIT_CANCELLED"
@@ -147,20 +178,26 @@ class GMXv2EventType(Enum):
     WITHDRAWAL_EXECUTED = "WITHDRAWAL_EXECUTED"
     WITHDRAWAL_CANCELLED = "WITHDRAWAL_CANCELLED"
 
+    # Market events
     MARKET_CREATED = "MARKET_CREATED"
     MARKET_POOL_VALUE_UPDATED = "MARKET_POOL_VALUE_UPDATED"
 
+    # Oracle events
     ORACLE_PRICE_UPDATED = "ORACLE_PRICE_UPDATED"
 
+    # Funding events
     CLAIMABLE_FUNDING_UPDATED = "CLAIMABLE_FUNDING_UPDATED"
     FUNDING_FEES_CLAIMED = "FUNDING_FEES_CLAIMED"
 
+    # Keeper execution-fee settlement events (keeper transaction)
     KEEPER_EXECUTION_FEE = "KEEPER_EXECUTION_FEE"
     EXECUTION_FEE_REFUND = "EXECUTION_FEE_REFUND"
 
+    # Unknown
     UNKNOWN = "UNKNOWN"
 
 
+# Mapping from event name to event type
 EVENT_NAME_TO_TYPE: dict[str, GMXv2EventType] = {
     "OrderCreated": GMXv2EventType.ORDER_CREATED,
     "OrderExecuted": GMXv2EventType.ORDER_EXECUTED,
@@ -186,11 +223,20 @@ EVENT_NAME_TO_TYPE: dict[str, GMXv2EventType] = {
     "ExecutionFeeRefund": GMXv2EventType.EXECUTION_FEE_REFUND,
 }
 
+# VIB-6061 — the three keeper-receipt events the execution-fee settlement is read
+# from, mapped to the EventUtils payload name each decodes under. A dict rather
+# than a branch chain keeps the decode loop one shape per event kind, which is
+# what took ``_select_execution_fee_events`` back under the complexity gate.
 _EXECUTION_FEE_EVENT_NAMES: dict[GMXv2EventType, str] = {
     GMXv2EventType.ORDER_EXECUTED: "OrderExecuted",
     GMXv2EventType.KEEPER_EXECUTION_FEE: "KeeperExecutionFee",
     GMXv2EventType.EXECUTION_FEE_REFUND: "ExecutionFeeRefund",
 }
+
+
+# =============================================================================
+# Data Classes
+# =============================================================================
 
 
 @dataclass
@@ -239,6 +285,7 @@ class GMXv2Event:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "GMXv2Event":
         """Create from dictionary."""
+        # Parse and normalize timestamp to UTC
         if "timestamp" in data:
             timestamp = _normalize_datetime_to_utc(datetime.fromisoformat(data["timestamp"]))
         else:
@@ -284,8 +331,12 @@ def _async_order_kind(intent_type: str | None, raw_order_type: Any) -> AsyncOrde
     return _RAW_ASYNC_ORDER_KINDS.get(raw_order_type, AsyncOrderKind.UNKNOWN)
 
 
-# GMX Order.Type ends at 7 (Liquidation). A larger value means a dynamic
-# EventUtils payload was misread positionally, usually as an ABI offset.
+# GMX V2 ``Order.Type`` enum tops out at 7 (Liquidation). A decoded order type
+# above this bound is not a real order kind — it is the fingerprint of the
+# VIB-3873 misread class, where a fixed-word decode reads a dynamic-struct ABI
+# offset (e.g. 32, 160) or an unrelated field as ``orderType``. The keyed
+# EventUtils decode reads ``orderType`` BY NAME, so a real production payload
+# can never exceed the bound; a value that does means the decode is wrong.
 GMX_MAX_ORDER_TYPE = 7
 
 
@@ -677,6 +728,7 @@ class PerpFillData:
     borrowing_fee_usd: Decimal | None = None
     keeper_tx_hash: str | None = None
     block_number: int | None = None
+    # VIB-6061 — native-wei execution-fee settlement (see class docstring).
     keeper_execution_fee_wei: int | None = None
     execution_fee_refund_wei: int | None = None
 
@@ -748,6 +800,11 @@ class ParseResult:
         }
 
 
+# =============================================================================
+# Receipt Parser
+# =============================================================================
+
+
 class GMXv2ReceiptParser(FailClosedExtractMixin):
     """Parser for GMX v2 transaction receipts.
 
@@ -784,12 +841,22 @@ class GMXv2ReceiptParser(FailClosedExtractMixin):
             "realized_pnl",
             "exit_price",
             "fees_paid",
-            # PositionDecrease collateral delta, not the net wallet payout.
+            # PERP_CLOSE — collateral withdrawn from the position, decoded from
+            # the PositionDecrease event's collateral_delta_amount. See
+            # extract_collateral_returned for the exact semantics (this is the
+            # event's collateral delta, NOT the net wallet payout).
             "collateral_returned",
+            # VIB-3204 — placeholder extract_protocol_fees returning None;
+            # real perp-fee extraction lives in follow-up VIB-3211.
             "protocol_fees",
-            # Keyed fee amount valued with its event-local collateral price.
+            # VIB-3497 / VIB-3873 (WI-1) — funding fee USD at close, decoded from
+            # the PositionFeesCollected keyed EventUtils payload and converted to
+            # USD via the event's own collateralTokenPrice (decimals-free). Flows
+            # to PerpData.funding_fee_usd -> attribution_json -> funding_pnl_usd.
             "funding_fee_usd",
-            # Correlated position and fee economics from the keeper receipt.
+            # VIB-3872 (WI-1) — typed PerpFillData built from PositionIncrease /
+            # PositionDecrease + PositionFeesCollected keyed decodes (the WI-2
+            # settlement verdict payload).
             "perp_fill",
         }
     )
@@ -877,6 +944,7 @@ class GMXv2ReceiptParser(FailClosedExtractMixin):
                 if parsed_event:
                     events.append(parsed_event)
 
+                    # Extract typed data based on event type
                     if parsed_event.event_type == GMXv2EventType.POSITION_INCREASE:
                         increase_data = self._parse_position_increase(parsed_event)
                         if increase_data:
@@ -897,6 +965,7 @@ class GMXv2ReceiptParser(FailClosedExtractMixin):
                         if order_data:
                             order_events.append(order_data)
 
+            # Log parsed receipt with user-friendly formatting
             tx_fmt = format_tx_hash(tx_hash)
             gas_fmt = format_gas_cost(receipt.get("gasUsed"))
 
@@ -977,10 +1046,16 @@ class GMXv2ReceiptParser(FailClosedExtractMixin):
             if not topics:
                 return None
 
-            # EventEmitter logs identify protocol events by topic[1]; standard
-            # logs use topic[0]. Unrecognized logs, including transfers, are ignored.
+            # GMX V2 uses the EventEmitter contract which emits all protocol events
+            # via EventLog/EventLog1/EventLog2. The event structure is:
+            #   topic[0] = EventLog/EventLog1/EventLog2 signature (shared across all events)
+            #   topic[1] = keccak256 of event name string (indexed eventNameHash)
+            # We match on topic[1] to identify the specific GMX V2 event type.
+            # For non-EventEmitter logs (e.g., ERC20 Transfer), topic[1] won't match
+            # any known GMX event name hash, so they're correctly skipped.
             event_name = None
 
+            # Try topic[1] first (GMX V2 EventEmitter pattern)
             if len(topics) >= 2:
                 second_topic = topics[1]
                 if isinstance(second_topic, bytes):
@@ -990,6 +1065,7 @@ class GMXv2ReceiptParser(FailClosedExtractMixin):
                 second_topic = second_topic.lower()
                 event_name = self.registry.get_event_name(second_topic)
 
+            # Fall back to topic[0] for standard event matching
             if event_name is None:
                 first_topic = topics[0]
                 if isinstance(first_topic, bytes):
@@ -1000,20 +1076,24 @@ class GMXv2ReceiptParser(FailClosedExtractMixin):
                 event_name = self.registry.get_event_name(first_topic)
 
             if event_name is None:
+                # Unknown event, skip
                 return None
 
             event_type = self.registry.get_event_type(event_name) or GMXv2EventType.UNKNOWN
 
+            # Get raw data
             data = log.get("data", "")
             if isinstance(data, bytes):
                 data = "0x" + data.hex()
 
+            # Parse log data
             parsed_data = self._decode_log_data(event_name, topics, data)
 
             contract_address = log.get("address", "")
             if isinstance(contract_address, bytes):
                 contract_address = "0x" + contract_address.hex()
 
+            # Convert topics to strings
             topics_str = []
             for topic in topics:
                 if isinstance(topic, bytes):
@@ -1034,8 +1114,9 @@ class GMXv2ReceiptParser(FailClosedExtractMixin):
             )
 
         except GMXOrderTypeError:
-            # An out-of-range order type proves a positional ABI misread; propagate
-            # it so the receipt fails closed rather than dropping a money event.
+            # VIB-3873 tripwire: a decoded order_type above the enum bound is a
+            # misread, not a parseable event. Propagate loudly so parse_receipt
+            # fails closed instead of dropping the event as an unparseable log.
             raise
         except Exception as e:
             logger.warning(f"Failed to parse log: {e}")
@@ -1057,8 +1138,12 @@ class GMXv2ReceiptParser(FailClosedExtractMixin):
         Returns:
             Decoded event data dict
         """
+        # Remove 0x prefix if present
         if data.startswith("0x"):
             data = data[2:]
+
+        # Decode based on event type
+        # Note: This is simplified - production would use proper ABI decoding
 
         if event_name == "PositionIncrease":
             return self._decode_position_increase_data(topics, data)
@@ -1067,6 +1152,7 @@ class GMXv2ReceiptParser(FailClosedExtractMixin):
         elif event_name in ("OrderCreated", "OrderExecuted", "OrderCancelled", "OrderFrozen"):
             return self._decode_order_data(topics, data, event_name)
         else:
+            # Return raw data for unknown events
             return {"raw_data": data}
 
     def _decode_position_increase_data(
@@ -1084,12 +1170,20 @@ class GMXv2ReceiptParser(FailClosedExtractMixin):
         if event_utils is not None:
             return event_utils
 
+        # Simplified decoding - production would use proper ABI decoding
         try:
-            # Legacy flat fixtures use 30-decimal USD and 18-decimal token values.
+            # GMX uses 10**30 for USD values and 10**18 for token values
             usd_scale = Decimal(10**30)
             token_scale = Decimal(10**18)
 
-            # EventEmitter uses topic[2] for the key; flat fixtures use topic[1].
+            # Parse key fields from PositionIncrease event data.
+            # Layout (32 bytes each): account, market, collateral_token, is_long,
+            # size_in_usd, size_in_tokens, collateral_amount, execution_price,
+            # size_delta_usd, collateral_delta_amount, index_token_price_max,
+            # index_token_price_min, collateral_token_price_max, collateral_token_price_min,
+            # price_impact_usd, order_type, order_key
+            # EventEmitter pattern: topic[0]=EventLog sig, topic[1]=eventNameHash,
+            # topic[2]=indexed key. Fall back to topic[1] for legacy format.
             key_topic = topics[2] if len(topics) > 2 else (topics[1] if len(topics) > 1 else None)
             key_str = HexDecoder.topic_to_bytes32(key_topic) if key_topic else "0x" + "00" * 32
 
@@ -1182,7 +1276,11 @@ class GMXv2ReceiptParser(FailClosedExtractMixin):
             return None
         decimals = index_token_decimals_override
         if decimals is None and self.chain and market:
-            # The catalog is only a fallback; unknown chain/market pairs remain unmeasured.
+            # Address-first: the bundle-carried override (stamped at compile
+            # time from the verified record) is the primary source; the
+            # process catalog covers fills whose bundle predates the stamp.
+            # No static table — an unknown market (or an absent chain/market
+            # reference) stays unmeasured (None), never wrongly scaled.
             decimals = market_catalog.index_decimals(self.chain, market)
         if decimals is None:
             return None
@@ -1246,10 +1344,12 @@ class GMXv2ReceiptParser(FailClosedExtractMixin):
             "order_key": self._bytes32_hex(bytes32_items["orderKey"]) if "orderKey" in bytes32_items else "",
             "position_key": self._bytes32_hex(bytes32_items["positionKey"]) if "positionKey" in bytes32_items else "",
             "order_type": order_type,
+            # Raw GMX integers preserved exactly for PerpFillData.
             "execution_price_raw": uints.get("executionPrice"),
             "size_delta_usd_raw": uints.get("sizeDeltaUsd"),
             "size_delta_in_tokens_raw": uints.get("sizeDeltaInTokens"),
-            # Increase collateral and price impact are signed intItems.
+            # PositionIncrease carries collateralDeltaAmount / price impact in the
+            # SIGNED intItems group (int256), unlike PositionDecrease.
             "collateral_delta_amount_raw": ints.get("collateralDeltaAmount"),
             "price_impact_usd_raw": ints.get("pendingPriceImpactUsd", ints.get("priceImpactUsd")),
         }
@@ -1333,7 +1433,8 @@ class GMXv2ReceiptParser(FailClosedExtractMixin):
             "acceptable_price": _usd("acceptablePrice"),
             "execution_fee": uints.get("executionFee", 0) if isinstance(uints.get("executionFee"), int) else 0,
             "min_output_amount": _tokens("minOutputAmount"),
-            # GMX renamed updatedAtBlock to updatedAtTime; retain the public field name.
+            # GMX renamed updatedAtBlock -> updatedAtTime; expose under the
+            # existing OrderEventData field name for consumer compatibility.
             "updated_at_block": (
                 uints.get("updatedAtTime", uints.get("updatedAtBlock", 0))
                 if isinstance(uints.get("updatedAtTime", uints.get("updatedAtBlock")), int)
@@ -1409,7 +1510,9 @@ class GMXv2ReceiptParser(FailClosedExtractMixin):
             "order_key": self._bytes32_hex(bytes32_items["orderKey"]),
             "position_key": self._bytes32_hex(bytes32_items["positionKey"]),
             "order_type": order_type,
-            # Decrease collateral is uintItems; price impact and PnL are signed intItems.
+            # Raw GMX integers preserved exactly for PerpFillData. For
+            # PositionDecrease, collateralDeltaAmount is UNSIGNED (uintItems) and
+            # priceImpactUsd / basePnlUsd are SIGNED (intItems).
             "execution_price_raw": uints.get("executionPrice"),
             "size_delta_usd_raw": uints.get("sizeDeltaUsd"),
             "size_delta_in_tokens_raw": uints.get("sizeDeltaInTokens"),
@@ -1434,11 +1537,16 @@ class GMXv2ReceiptParser(FailClosedExtractMixin):
             return event_utils
 
         try:
-            # Legacy flat fixtures use 30-decimal USD and 18-decimal token values.
+            # GMX uses 10**30 for USD values and 10**18 for token values
             usd_scale = Decimal(10**30)
             token_scale = Decimal(10**18)
 
-            # EventEmitter uses topic[2] for the key; flat fixtures use topic[1].
+            # Layout (32 bytes each): account, market, collateral_token, is_long,
+            # size_in_usd, size_in_tokens, collateral_amount, execution_price,
+            # size_delta_usd, collateral_delta_amount, index_token_price_max,
+            # index_token_price_min, collateral_token_price_max, collateral_token_price_min,
+            # price_impact_usd, realized_pnl
+            # EventEmitter pattern: topic[2] has the indexed key
             key_topic = topics[2] if len(topics) > 2 else (topics[1] if len(topics) > 1 else None)
             key_str = HexDecoder.topic_to_bytes32(key_topic) if key_topic else "0x" + "00" * 32
 
@@ -1488,11 +1596,18 @@ class GMXv2ReceiptParser(FailClosedExtractMixin):
             return event_utils
 
         try:
-            # Legacy flat fixtures use 30-decimal USD and 18-decimal token values.
+            # GMX uses 10**30 for USD values and 10**18 for token values
             usd_scale = Decimal(10**30)
             token_scale = Decimal(10**18)
 
-            # A missing indexed key stays missing; topic[1] is the event-name hash.
+            # Layout (32 bytes each): account, receiver, market, initial_collateral_token,
+            # order_type, decrease_position_swap_type, is_long, size_delta_usd,
+            # initial_collateral_delta_amount, trigger_price, acceptable_price,
+            # execution_fee, min_output_amount, updated_at_block
+            # EventEmitter pattern: topic[2] has the indexed key. A missing
+            # topic[2] must stay missing rather than falling back to the event
+            # name hash in topic[1], which is itself bytes32-shaped but is not
+            # an order identifier.
             key_str = self._strict_indexed_order_key(topics, event_name)
 
             result: dict[str, Any] = {
@@ -1514,10 +1629,11 @@ class GMXv2ReceiptParser(FailClosedExtractMixin):
                 "event_name": event_name,
             }
 
+            # Add event-specific fields
             if event_name == "OrderCancelled":
-                result["cancelled_reason"] = "User cancelled"
+                result["cancelled_reason"] = "User cancelled"  # Would decode from data
             elif event_name == "OrderFrozen":
-                result["frozen_reason"] = "Execution failed"
+                result["frozen_reason"] = "Execution failed"  # Would decode from data
                 result["is_frozen"] = True
 
             return result
@@ -1561,7 +1677,11 @@ class GMXv2ReceiptParser(FailClosedExtractMixin):
         try:
             data = event.data
             if data.get("_event_utils_payload"):
-                # Keyed payload economics must not enter the legacy positional builder.
+                # Production keyed payload: fill economics are exposed via
+                # PerpFillData (extract_perp_fill), NOT re-derived positionally
+                # here. Returning None keeps the legacy positional builder from
+                # fabricating garbage price/PnL fields from a keyed payload — the
+                # VIB-3873 misread class. (Mirrors _parse_position_decrease.)
                 return None
             return PositionIncreaseData(
                 key=data.get("key", ""),
@@ -1592,7 +1712,9 @@ class GMXv2ReceiptParser(FailClosedExtractMixin):
         try:
             data = event.data
             if data.get("_event_utils_payload"):
-                # Keyed payload economics must not enter the legacy positional builder.
+                # This slice decodes exact collateral-returned semantics only.
+                # Do not fabricate typed price/PnL fields from GMX's differently
+                # scaled EventUtils values; their dedicated decoder is separate.
                 return None
             return PositionDecreaseData(
                 key=data.get("key", ""),
@@ -1680,6 +1802,14 @@ class GMXv2ReceiptParser(FailClosedExtractMixin):
             topic = "0x" + topic
         topic = topic.lower()
         return self.registry.get_event_type_from_topic(topic) or GMXv2EventType.UNKNOWN
+
+    # =========================================================================
+    # Extraction Methods for Result Enrichment
+    # =========================================================================
+
+    # ---- VIB-3159: tagged-variant wrappers ----------------------------------
+    # See uniswap_v3/receipt_parser.py for rationale. The legacy raw methods
+    # below keep their return types for direct callers.
 
     def extract_swap_amounts_result(self, receipt: dict[str, Any]) -> ExtractResult[Any]:
         """Fail-closed variant of :meth:`extract_swap_amounts` — see VIB-3159."""
@@ -1799,16 +1929,20 @@ class GMXv2ReceiptParser(FailClosedExtractMixin):
 
         try:
             result = self.parse_receipt(receipt)
+            # Look for swap-related order events
             for order in result.order_events:
-                # GMX order type 0 represents a swap.
+                # Order type 0 is typically a swap in GMX
                 if order.order_type == 0:
+                    # Values are already decoded decimals from _decode_order_data
+                    # (divided by 1e18 for tokens, 1e30 for USD)
                     amount_in_decimal = order.initial_collateral_delta_amount
                     amount_out_decimal = order.size_delta_usd
 
-                    # SwapAmounts carries raw 18-decimal collateral and 30-decimal USD size.
+                    # Reconstruct raw integer amounts for SwapAmounts compatibility
                     amount_in = int(amount_in_decimal * Decimal(10**18))
                     amount_out = int(amount_out_decimal * Decimal(10**30))
 
+                    # Effective price is the leverage ratio for GMX
                     effective_price = amount_out_decimal / amount_in_decimal if amount_in_decimal > 0 else Decimal(0)
 
                     return SwapAmounts(
@@ -1817,9 +1951,16 @@ class GMXv2ReceiptParser(FailClosedExtractMixin):
                         amount_in_decimal=amount_in_decimal,
                         amount_out_decimal=amount_out_decimal,
                         effective_price=effective_price,
-                        # Perp collateral-to-size is not realized-to-quoted swap output.
+                        # VIB-3203: slippage_bps and expected_out_decimal are
+                        # INTENTIONALLY unset for GMX V2 — perp orders compare
+                        # collateral vs size_usd (not realized vs quoted swap
+                        # output), so forwarding the VIB-3203 signal here would
+                        # persist a misleading value. The kwarg is accepted at
+                        # the signature level for interface parity and then
+                        # ignored. Don't "fix" this asymmetry without also
+                        # redesigning perp slippage semantics.
                         slippage_bps=None,
-                        token_in=None,
+                        token_in=None,  # GMX swaps don't have simple token in/out
                         token_out=None,
                     )
             return None
@@ -1827,10 +1968,35 @@ class GMXv2ReceiptParser(FailClosedExtractMixin):
             logger.warning(f"Failed to extract swap amounts: {e}")
             return None
 
-    # These legacy extractors assume at most one strategy order per receipt.
-    # createOrder receipts contain no position fill; settlement arrives later in
-    # keeper receipts. Keeper-receipt callers must correlate by order_key as
-    # extract_perp_fill does before using these first-match extractors.
+    # =========================================================================
+    # Single-fill extractors — LOAD-BEARING INVARIANT (VIB-6110)
+    #
+    # Every extractor below takes the FIRST matching position / fee event in the
+    # receipt (``position_increases[0]``, first PositionFeesCollected, or a sum
+    # across all PositionDecrease events). That is only correct while the receipt
+    # they are handed carries at most ONE of the strategy's orders.
+    #
+    # Today that holds by two INCIDENTAL properties, not by any enforcement:
+    #   1. On GMX V2 the strategy's own tx is ``createOrder`` and emits only
+    #      OrderCreated — the position / fee events land later, in the keeper tx.
+    #      These extractors are reached by ``ResultEnricher`` dynamic dispatch
+    #      (EXTRACTION_SPECS["PERP_CLOSE"]) on the OWN-tx receipt, where they
+    #      therefore find nothing.
+    #   2. The one lane that does feed keeper receipts to the enricher
+    #      (``additional_receipts``, gated on ``_require_terminal_async_settlement``,
+    #      set only by the CLI test lifecycle) uses the Anvil order executor, which
+    #      submits ONE executeOrder tx per order key → one order per receipt.
+    #
+    # The production keeper-receipt path does NOT come through here: it goes
+    # ``perp_settlement.py`` → :meth:`extract_perp_fill`, which IS correlated by
+    # ``order_key`` precisely because a real keeper tx may batch several orders.
+    #
+    # If anyone batches the Anvil executor, enables terminal async settlement in
+    # production, or routes a keeper receipt through ResultEnricher, every
+    # extractor below becomes a live money-path defect at once. Correlate them by
+    # ``order_key`` (same pattern as ``extract_perp_fill``) before doing any of
+    # those. Follow-up: VIB-6152.
+    # =========================================================================
 
     def extract_position_id(self, receipt: dict[str, Any]) -> str | None:
         """Extract position ID (key) from transaction receipt.
@@ -1843,8 +2009,10 @@ class GMXv2ReceiptParser(FailClosedExtractMixin):
         """
         try:
             result = self.parse_receipt(receipt)
+            # Check position increases first (opening)
             if result.position_increases:
                 return result.position_increases[0].key
+            # Then check decreases (closing/reducing)
             if result.position_decreases:
                 return result.position_decreases[0].key
             return None
@@ -1925,6 +2093,7 @@ class GMXv2ReceiptParser(FailClosedExtractMixin):
             result = self.parse_receipt(receipt)
             if result.position_increases:
                 pos = result.position_increases[0]
+                # Use collateral token price to convert collateral to USD
                 if pos.collateral_amount > 0 and pos.collateral_token_price_max > 0:
                     collateral_value_usd = pos.collateral_amount * pos.collateral_token_price_max
                     return pos.size_in_usd / collateral_value_usd
@@ -2013,7 +2182,8 @@ class GMXv2ReceiptParser(FailClosedExtractMixin):
                     continue
                 raw = event.data.get("collateral_delta_amount_raw")
                 if raw is None:
-                    # Missing raw collateral is unmeasured, not zero.
+                    # EventUtils or legacy fixture decoding did not produce the
+                    # raw field. Skip rather than fabricate a zero.
                     continue
                 total += Decimal(raw)
                 found = True
@@ -2079,6 +2249,10 @@ class GMXv2ReceiptParser(FailClosedExtractMixin):
             if fees is not None and fees.get("funding_fee_usd") is not None:
                 return fees["funding_fee_usd"]
         return None
+
+    # =========================================================================
+    # Perp fill economics (VIB-3873 / VIB-3872 WI-1)
+    # =========================================================================
 
     def _event_emitter_address(self) -> str | None:
         """Canonical GMX ``EventEmitter`` for this parser's chain, lowercased.
@@ -2153,7 +2327,7 @@ class GMXv2ReceiptParser(FailClosedExtractMixin):
             if decoder is None or found.get(event.event_type) is not None:
                 continue
             if emitter is not None and str(getattr(event, "contract_address", "") or "").lower() != emitter:
-                continue
+                continue  # not the canonical EventEmitter — unattributable is not authentic
             candidate = decoder(str(event.raw_data or "").removeprefix("0x"))
             if self._order_key_matches(candidate, wanted):
                 found[event.event_type] = candidate
@@ -2185,7 +2359,7 @@ class GMXv2ReceiptParser(FailClosedExtractMixin):
         executed_accounts: list[str] = []
         for event in events:
             if emitter is not None and str(getattr(event, "contract_address", "") or "").lower() != emitter:
-                continue
+                continue  # not the canonical EventEmitter — unattributable is not authentic
             name = _EXECUTION_FEE_EVENT_NAMES.get(event.event_type)
             if name is None:
                 continue
@@ -2256,12 +2430,24 @@ class GMXv2ReceiptParser(FailClosedExtractMixin):
             return (None, None)
         fees, refunds, executed_accounts = self._collect_execution_fee_events(events, emitter)
 
+        # Exactly one fee, always. See the batching argument above.
         if len(fees) != 1:
             return (None, None)
 
-        # KeeperExecutionFee precedes refund calculation; fully consumed escrow
-        # returns before ExecutionFeeRefund. OrderExecuted.account then proves
-        # ownership, and refund zero is measured rather than unmeasured.
+        # A FULLY CONSUMED ESCROW EMITS NO REFUND EVENT — and that is the LARGEST
+        # fee there is. ``GasUtils.payExecutionFee`` emits ``KeeperExecutionFee``,
+        # then computes ``refundFeeAmount = executionFee - executionFeeForKeeper``
+        # and RETURNS EARLY when it is zero, before ``emitExecutionFeeRefund``.
+        # Requiring the refund event would therefore drop precisely the worst-case
+        # cost and render it "not measured" — this ticket's own defect, inverted.
+        #
+        # Ownership still has to be proven, and without a refund receiver the anchor
+        # is ``OrderExecuted.account``, which names the order's owner directly (on
+        # the standard path it IS the refund receiver; verified equal on both
+        # mainnet fixture legs). Still exactly-one, for the same batching reason.
+        #
+        # The returned zero is a MEASURED zero — the chain proved the whole escrow
+        # was consumed — not an unmeasured ``None``.
         if not refunds:
             if len(executed_accounts) != 1 or executed_accounts[0] != wanted_account:
                 return (None, None)
@@ -2289,7 +2475,8 @@ class GMXv2ReceiptParser(FailClosedExtractMixin):
         """
         emitter = self._event_emitter_address()
         if emitter is None:
-            # Without a canonical EventEmitter, fee attribution is unauthenticated.
+            # An unknown chain cannot authenticate the emitter, and an unauthenticated
+            # fee is a number an arbitrary contract can write. Refuse it.
             logger.warning(
                 "gmx_v2_execution_fee_emitter_unresolved: no known EventEmitter for chain %r — "
                 "keeper execution fee unmeasured",
@@ -2423,7 +2610,11 @@ class GMXv2ReceiptParser(FailClosedExtractMixin):
             return None
         is_open = increase_raw is not None
 
-        # Fee events lack order keys, so canonical-emitter authentication is mandatory.
+        # VIB-6061 — the keeper execution fee rides on the same receipt. Scoped to
+        # the canonical emitter even on the uncorrelated (``order_key=None``) path:
+        # unlike the fill events there is no order key to correlate on, so the
+        # emitter is the ONLY authentication available and dropping it here would
+        # let any contract in the transaction write this number.
         fee_emitter = emitter if emitter is not None else self._event_emitter_address()
         keeper_fee_wei, refund_wei = (
             self._select_execution_fee_events(result.events, fee_emitter, account)
@@ -2431,7 +2622,7 @@ class GMXv2ReceiptParser(FailClosedExtractMixin):
             else (None, None)
         )
 
-        # collateralDeltaAmount is signed for increases and unsigned for decreases.
+        # collateralDeltaAmount lives in intItems (increase) vs uintItems (decrease).
         collateral_delta = position.get("collateral_delta_amount_raw")
         if not is_open:
             collateral_delta = position.get("collateral_delta_amount_raw_int")
@@ -2479,6 +2670,10 @@ class GMXv2ReceiptParser(FailClosedExtractMixin):
             execution_fee_refund_wei=refund_wei,
         )
 
+    # =============================================================================
+    # Protocol Fee Extraction (VIB-3204)
+    # =============================================================================
+
     def extract_protocol_fees(self, _receipt: dict[str, Any]) -> None:
         """Placeholder for GMX V2 perp-fee extraction (VIB-3204).
 
@@ -2493,6 +2688,10 @@ class GMXv2ReceiptParser(FailClosedExtractMixin):
         """
         return None
 
+
+# =============================================================================
+# Exports
+# =============================================================================
 
 __all__ = [
     "GMXv2ReceiptParser",

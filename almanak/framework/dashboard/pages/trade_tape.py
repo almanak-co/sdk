@@ -86,14 +86,12 @@ _CONFIDENCE_BADGES = {
 def _short_hash(h: str) -> str:
     if not h or len(h) < 12:
         return h
-
     return f"{h[:8]}…{h[-6:]}"
 
 
 def _safe_decimal(s: str | None) -> Decimal:
     if not s:
         return Decimal("0")
-
     try:
         return Decimal(s)
     except (ValueError, TypeError):
@@ -159,19 +157,17 @@ def _format_lp_ledger_amount(amount: str, symbol: str, chain: str) -> str:
     """
     if amount in (None, "", "—"):
         return "—"
-
     try:
         d = Decimal(str(amount))
     except (ArithmeticError, ValueError, TypeError):
         return format_token_amount(amount, symbol, chain)
-
-    # Ledger fallbacks may contain raw 8-decimal dust; keep that heuristic
-    # scoped to LP rows so ordinary token formatting is unchanged.
+    # LP-fallback context: enables the new 8-dec dust branch in
+    # _should_scale_raw_amount. See that helper's docstring for why this
+    # gate exists (SWAP / SUPPLY / etc. rows go through format_token_amount
+    # WITHOUT the flag and only ever fire the legacy >=10**6 branch).
     decimals = _should_scale_raw_amount(d, symbol, chain, lp_fallback_context=True)
-
     if decimals is None:
         return format_token_amount(amount, symbol, chain)
-
     return _format_human_amount(d / (Decimal(10) ** decimals))
 
 
@@ -185,42 +181,35 @@ def _format_native_gas(gas_usd: Decimal, chain: str | None, price_inputs_json: s
     """
     if gas_usd <= 0 or not chain or not price_inputs_json:
         return ""
-
     symbol = native_token_for_chain(chain)
-
     if not symbol:
         return ""
-
     try:
         prices = json.loads(price_inputs_json)
     except (json.JSONDecodeError, TypeError):
         return ""
-
     if not isinstance(prices, dict):
         return ""
-
+    # Case-insensitive lookup so casings like ``Eth`` / ``WETH`` / ``weth``
+    # all resolve — gemini medium on PR #2290.
     symbol_lower = symbol.lower()
     info = next(
         (v for k, v in prices.items() if isinstance(k, str) and k.lower() == symbol_lower),
         None,
     )
-
     if not isinstance(info, dict):
         return ""
-
     raw_price = info.get("price_usd") or info.get("price")
-
     native_price = _safe_decimal(str(raw_price) if raw_price is not None else None)
     if native_price <= 0:
         return ""
-
     native_amount = gas_usd / native_price
-
+    # Format: 4 sig figs for sub-1 values, 6dp for ≥1 — gas is almost
+    # always sub-1 native, so the 4 sig-fig branch is the common path.
     if abs(native_amount) >= Decimal("1"):
         amount_str = f"{native_amount:,.6f}"
     else:
         amount_str = f"{native_amount:.4g}"
-
     return f"{amount_str} {symbol}"
 
 
@@ -240,23 +229,17 @@ def _format_human_amount(amount: Any) -> str:
     """
     if amount in (None, "", "—"):
         return "—"
-
     try:
         d = Decimal(str(amount))
     except (ArithmeticError, ValueError, TypeError):
         return str(amount)
-
     if not d.is_finite():
         return str(amount)
-
     abs_d = abs(d)
-
     if abs_d == 0:
         return "0"
-
     if abs_d >= Decimal("1"):
         return f"{d:,.2f}"
-
     return f"{d:.4g}"
 
 
@@ -282,21 +265,24 @@ def render_trade_tape(deployment_id: str, *, limit: int = 50) -> None:
 
     st.markdown(f"**{len(response.rows)} intent(s)** · newest first · click any row for the receipt-parsed expander.")
 
+    # Top-level filters. Operators told us Status / Confidence selectors
+    # added clutter without changing the read of the tape (success ✓/✗
+    # and the confidence chip are already on every row), so only the
+    # Action multiselect and the Show-approvals toggle stay.
     col1, col2 = st.columns([4, 1])
-
     with col1:
         intent_types = sorted({row.intent_type for row in response.rows if row.intent_type})
-
         selected_intents = st.multiselect(
             "Action",
             intent_types,
             default=intent_types,
             key=f"tape_intents_{deployment_id}",
         )
-
     with col2:
-        # Approvals are hidden on screen by default but remain in CSV exports
-        # so audit artifacts always contain every submitted leg.
+        # VIB-4046 — approvals are noise for the operator-facing read of
+        # the tape. Default off; flip on when auditing a bundle end-to-end.
+        # Only affects the sub-tx expander; CSV export is always full
+        # (per the ticket — spreadsheet auditors need every row).
         show_approvals = st.toggle(
             "Show approvals",
             value=False,
@@ -314,25 +300,26 @@ def render_trade_tape(deployment_id: str, *, limit: int = 50) -> None:
         st.info("No rows match the current filters.")
         return
 
-    # Export only filtered intents; each export still includes every sub-tx,
-    # including approvals, for a complete audit trail.
+    # VIB-3928 — CSV export of the filtered tape. Tax / audit ask the
+    # team has had open since April; the tape carries everything a
+    # quant needs (token amounts, USD value, gas, slippage, oracle
+    # source, position id) so a single CSV download replaces a manual
+    # SQL pull from sqlite. Only the currently-filtered rows are
+    # exported so the operator can scope the file before downloading.
     _render_csv_export(rows, deployment_id)
 
+    # Group by date for scannability
     last_date = None
     for row in rows:
         ts = row.timestamp
-
         date_str = ts.strftime("%Y-%m-%d") if ts else "—"
-
         if date_str != last_date:
             st.markdown(
                 f"<div style='color:#888;font-size:0.85rem;margin:0.75rem 0 0.25rem 0;'>"
                 f"📅 <strong>{date_str}</strong></div>",
                 unsafe_allow_html=True,
             )
-
             last_date = date_str
-
         _render_tape_row(row, show_approvals=show_approvals)
 
 
@@ -357,9 +344,7 @@ def _rows_to_csv(rows: list[TradeTapeRow]) -> tuple[str, int]:
     import io
 
     buf = io.StringIO()
-
     writer = _csv.writer(buf, quoting=_csv.QUOTE_MINIMAL)
-
     writer.writerow(
         [
             "timestamp",
@@ -398,9 +383,24 @@ def _rows_to_csv(rows: list[TradeTapeRow]) -> tuple[str, int]:
     sub_tx_count = 0
     for r in rows:
         sub_txs = _resolve_legs(r)
-
-        # ``tx_success`` records on-chain status, independently of the framework
-        # verdict in ``intent_success``; a synthesized no-op stays unmeasured.
+        # Single-tx intents (no ``all_tx_results``) are exported as a
+        # one-leg bundle so the schema is uniform.
+        # The synthesized leg's ``success`` feeds the ``tx_success`` column,
+        # which means ON-CHAIN leg status — not ``intent_success``, the
+        # framework verdict, which is exported separately below. Filling it from
+        # the raw ``r.success`` conflated the two: a degraded row (VIB-6043) or a
+        # slippage/reconciliation downgrade (ALM-2759) landed on-chain but
+        # carries ``success=False``, so the export claimed the transaction
+        # FAILED for a trade that executed — in the artifact this function's own
+        # docstring says auditors work from.
+        #
+        # ``ledger_guard.landed`` is the canonical rule (``success == 1``, or the
+        # degradation marker BACKED BY A TX HASH); reached through
+        # ``_synthesized_leg_status``, which adds the third value the export
+        # already understands — ``None`` for a no-op, whose on-chain status was
+        # never measured at all. Called via the shared helpers rather than
+        # re-spelled locally, the same seam discipline as
+        # ``_resolve_onchain_display_status``.
         legs = (
             sub_txs
             if sub_txs
@@ -412,34 +412,39 @@ def _rows_to_csv(rows: list[TradeTapeRow]) -> tuple[str, int]:
                 }
             ]
         )
-
         action = pick_action_tx(sub_txs, r.intent_type) if len(sub_txs) > 1 else None
-
         action_hash = (action or {}).get("tx_hash") if action else (r.tx_hash or "")
 
         for idx, tx in enumerate(legs, start=1):
             tx_hash = tx.get("tx_hash") or ""
-
-            # Receipt ``status`` outranks legacy ``success``; absent evidence is
-            # unmeasured, so the audit export leaves ``tx_success`` blank.
+            # ``_leg_landed`` checks ``status`` FIRST, then ``success``.
+            # This read used to be ``tx.get("success", True)``, which is a key
+            # ``sub_transactions`` entries do not have — they carry
+            # ``status: "success"/"failure"`` (observability/ledger.py). Once the
+            # export started resolving legs via ``_resolve_legs`` (which returns
+            # ``sub_transactions`` for essentially every executed row), every leg
+            # defaulted to ``True`` — including ones whose receipt says REVERTED.
+            # That exported "this transaction landed" for a transaction that did
+            # not, on every row in the tape, not just degraded ones.
+            #
+            # Empty != Zero on the unmeasured case: a leg with neither key is
+            # NOT landed and NOT failed, so it exports "" rather than being
+            # collapsed to either. A blank cell is honest; a 1 is a claim.
             leg_landed = _leg_landed(tx)
-
             tx_success_cell = "" if leg_landed is None else ("1" if leg_landed else "0")
-
             tx_gas = _coerce_gas(tx.get("gas_used"))
-
             selector = tx.get("function_selector") or ""
-
-            # The sole leg is the action, never an approval, so non-approval
-            # action filters cannot discard it from the audit export.
+            # Single-leg bundle (synthesized OR a real one-entry
+            # ``all_tx_results``): the only leg IS the action by
+            # definition. Force ``is_approval=False`` too — otherwise a
+            # single-tx supply on a low-gas L2 (e.g. ~70k Aave supply)
+            # would be flagged ``is_action=1`` AND ``is_approval=1``,
+            # silently dropping the row from any spreadsheet filter
+            # that selects on ``is_approval=0`` to find actions.
             is_single_leg = len(legs) == 1
-
             is_action = True if is_single_leg else (bool(action_hash) and tx_hash == action_hash)
-
             is_approval = False if is_single_leg else is_approval_tx(tx)
-
             sub_tx_count += 1
-
             writer.writerow(
                 [
                     r.timestamp.isoformat() if r.timestamp else "",
@@ -481,11 +486,8 @@ def _rows_to_csv(rows: list[TradeTapeRow]) -> tuple[str, int]:
 def _render_csv_export(rows: list[TradeTapeRow], deployment_id: str) -> None:
     """Render a single download button for the filtered tape."""
     csv_text, sub_tx_count = _rows_to_csv(rows)
-
     csv_bytes = csv_text.encode("utf-8")
-
     fname = f"trade_tape_{deployment_id[:32]}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-
     st.download_button(
         label=f"⬇️ Export {sub_tx_count} sub-tx row(s) from {len(rows)} intent(s) as CSV",
         data=csv_bytes,
@@ -510,10 +512,8 @@ def _coerce_gas(value: object) -> int:
     one bad row deletes the whole tape — exactly the failure surface
     the operator is here to investigate. Fail closed to 0 instead.
     """
-
     if value is None:
         return 0
-
     try:
         return int(value)  # type: ignore[call-overload]
     except (TypeError, ValueError):
@@ -581,7 +581,9 @@ def _leg_landed(tx: dict) -> bool | None:
     return None
 
 
-# Degradation reasons are extensible; unknown tokens need an honest fallback.
+#: Operator-facing label per ``LedgerDegradationReason`` value. Keyed on the enum
+#: VALUE (the token that appears in the marker), with a generic fallback so a
+#: newly-added reason degrades to an honest label rather than a wrong one.
 _DEGRADED_REASON_LABELS: dict[str, str] = {
     "amounts_unmeasured": "books degraded (amounts unmeasured)",
 }
@@ -627,14 +629,29 @@ def _submitted_nothing(row: TradeTapeRow) -> bool:
     if (row.tx_hash or "").strip():
         return False
 
-    # Hashless pre-broadcast failures must stay failures. Successful or degraded
-    # hashless rows are no-ops, and a degraded no-op may carry ``success=0``.
+    # A no-op is a SUCCESSFUL nothing. A row that failed BEFORE broadcast —
+    # compile failure, validation failure, retries exhausted — also has no hash
+    # and no legs, and without this it took the no-op path: neutral glyph, grey
+    # border, tooltip literally reading "(no-op) — nothing to grade", and the
+    # error string not rendered at all. That hides a genuine failure on the
+    # surface an operator opens to investigate one, and it is this delta's own
+    # misreport class turned onto failures. Pre-PR those rows rendered red with
+    # the full error.
+    #
+    # The marked no-op is the exception that makes this a three-way test rather
+    # than `row.success`: an LP_CLOSE against an empty position is stamped
+    # degraded and carries success=0, so keying on success alone would push it
+    # back to the red cross VIB-6173 exists to remove.
     if not row.success and not degraded(row.error):
         return False
 
     legs = _resolve_legs(row)
-    # A leg hash proves submission even when receipt status is unmeasured;
-    # schema-skewed legs may legitimately omit a status.
+    # A leg carrying a hash PROVES submission even when its status is
+    # unmeasured. Keying only on measured statuses read "we have no receipt"
+    # as "nothing was sent" and blanked a row that did submit — the same
+    # misreport inverted. Today's writer always stamps `status`, so this needs
+    # a legacy or schema-skewed blob to reach; `_resolve_legs` deliberately
+    # tolerates foreign-schema legs, so it is not unreachable.
     for leg in legs:
         if isinstance(leg, dict) and str(leg.get("tx_hash") or "").strip():
             return False
@@ -672,8 +689,21 @@ def _synthesized_leg_status(row: TradeTapeRow) -> bool | None:
     column would be.
     """
 
-    # Check submission before canonical landed semantics: clean no-ops can have
-    # ``success=True``, while degraded no-ops can have ``success=False``.
+    # A blank tx_hash means NO TRANSACTION WAS SUBMITTED — nothing to grade —
+    # regardless of intent type. Checked BEFORE either arm.
+    #
+    # The degraded arm's hash gate only fires for intent types in
+    # REQUIRED_MONEY_SLOTS (SWAP / LP_OPEN / LP_CLOSE). A no-op of any OTHER
+    # type is never marked, so `landed()`'s clean arm — deliberately blind to
+    # the hash — answers True and the row exported `tx_success=1` with an empty
+    # tx_hash column. Reachable: a Compound V3 `withdraw_all` against zero
+    # collateral returns SUCCESS with transactions=[] and no_op=True
+    # (`_strategy_base/base/lending/aave_helpers.py`), which the runner writes
+    # as success=True, tx_hash="". A routine lending teardown.
+    #
+    # That is the same misreport this delta was written to close, surviving on
+    # the sibling lane: a row claiming a transaction landed when none was
+    # submitted, persisted into the audit artifact. (VIB-6043 review.)
     if not (row.tx_hash or "").strip():
         return None
 
@@ -682,6 +712,7 @@ def _synthesized_leg_status(row: TradeTapeRow) -> bool | None:
     if _ledger_landed(row):
         return True
     if degraded(row.error):
+        # Marker present but the landed rule refused it => no hash => no-op.
         return None
     return False
 
@@ -711,7 +742,7 @@ def _marker_asserts_landed(row: TradeTapeRow) -> bool:
     """
     from almanak.framework.accounting.ledger_guard import landed
 
-    # Force the canonical predicate through its degraded arm.
+    # ``success=0``: not a claim about the row, a way to disable the clean arm.
     return landed(0, row.error, row.tx_hash)
 
 
@@ -745,10 +776,16 @@ def _classify_downgrade_reason(error: str | None) -> str:
     from almanak.framework.accounting.ledger_guard import degraded
 
     text = (error or "").lower()
-    # Classify degradation first because its detail may contain the later
-    # slippage or reconciliation keywords.
+    # VIB-6043 leg 2: the write-time Empty != Zero guard is the THIRD path that
+    # writes ``success=False`` on a tx that landed. Bucket it first — its marker
+    # text can contain arbitrary detail, so a later keyword match could
+    # mis-attribute it to slippage or reconciliation.
     if degraded(error):
-        # Parse the extensible reason token instead of assuming one kind.
+        # Parse the reason token rather than hardcoding one string.
+        # ``LedgerDegradationReason`` is a StrEnum modelled as extensible, and the
+        # marker format is ``{PREFIX}{reason.value}: {detail}`` — so the day a
+        # second reason lands, a hardcoded label would mislabel every such row to
+        # the operator with no test failing.
         from almanak.framework.accounting.ledger_guard import DEGRADED_PREFIX
 
         token = str(error or "")[len(DEGRADED_PREFIX) :].split(":", 1)[0].strip()
@@ -806,17 +843,64 @@ def _resolve_onchain_display_status(row: TradeTapeRow) -> tuple[bool | None, str
     row_is_degraded = degraded(row.error)
 
     if not measured:
-        # Without receipts, only a degradation marker backed by a transaction
-        # hash supports landed-but-flagged; undegraded rows remain unknown and
-        # fall back to the framework verdict. A hash is necessary, not sufficient
-        # evidence because gateway callers can persist markers without validating
-        # receipts, and the marker's ``chain_success`` is asserted by construction.
+        # No per-leg receipt data. A degraded row still carries a positive
+        # on-chain statement from the writer, so it is landed-but-flagged, not
+        # unknown. Anything else stays ``None`` => caller falls back to the
+        # framework verdict rather than inventing a green tick.
+        # ``row.tx_hash`` is REQUIRED, not decoration. The degradation marker's
+        # ``chain_success: True`` is asserted by construction — ``apply_degradation``
+        # never consults a receipt — so it cannot be trusted as on-chain evidence
+        # on its own. A NO-OP bundle satisfies every condition without a single
+        # transaction ever being submitted: an ``LP_CLOSE`` against an
+        # already-empty position compiles to ``transactions=[]`` with
+        # ``metadata["no_op"]=True`` (uniswap_v3 / curve / aerodrome compilers),
+        # the orchestrator marks ``result.success=True``, the runner writes
+        # ``success=True`` with ``tx_hash=""``, and the absent receipt leaves both
+        # money slots unmeasured — so the guard stamps the marker.
+        #
+        # Without this gate that renders a green tick reading "the trade executed,
+        # we just lost the numbers" for a routine idempotent teardown where
+        # NOTHING happened. Pre-delta it rendered red, which is wrong but benign;
+        # green-for-nothing-happened is the same misreport class this fix exists
+        # to prevent, inverted. Found by adversarial review of #3441.
+        #
+        # The lane the guard exists for (a Safe/bundle whose parser yields neither
+        # amounts nor receipts) always carries a tx hash, so the gate costs it
+        # nothing.
+        #
+        # WHAT THE HASH DOES AND DOES NOT PROVE — the full argument is in
+        # ``ledger_guard.landed``'s docstring; the part that matters for what
+        # this branch RENDERS is that a hash is NECESSARY, not SUFFICIENT.
+        #
+        # It excludes the no-op. It does not establish confirmation, because the
+        # marker has two producers: the in-process commit path (where the
+        # orchestrator's early return on any reverted leg does imply every leg
+        # confirmed) and the gateway's ``SaveLedgerEntry`` /
+        # ``SaveLedgerAndRegistry`` RPCs, which take the caller's ``success`` /
+        # amounts / ``tx_hash`` verbatim and stamp the marker without validating
+        # any receipt — by design, since the gateway must not assume its caller
+        # ran the guard. An older or replaying gRPC client can therefore produce
+        # a marker over a submitted-but-reverted hash, and this branch would
+        # show amber "landed but flagged". ``apply_degradation`` writing
+        # ``chain_success: True`` corroborates nothing: it is stamped by
+        # construction for both producers.
+        #
+        # This branch is only reached when there is NO measured per-leg receipt
+        # data at all, so amber-with-a-caveat is the best available answer;
+        # anything stronger needs receipt evidence at the gateway boundary,
+        # which is a producer-side fix, not a reader-side predicate.
+        #
+        # Called through the helper rather than re-spelled as
+        # ``row_is_degraded and row.tx_hash``: the inline form was equivalent
+        # today and would have drifted tomorrow (the canonical rule strips
+        # whitespace; raw truthiness does not).
         if _marker_asserts_landed(row):
             return True, _classify_downgrade_reason(row.error)
         return None, None
 
     landed = all(measured)
-    # A measured failed leg outranks the degradation marker and must stay red.
+    # A measured FAILED leg outranks the marker: the guard asserts the books are
+    # degraded, not that every leg succeeded, and a real revert must stay red.
     flagged_reason = _classify_downgrade_reason(row.error) if landed and (row_is_degraded or not row.success) else None
     return landed, flagged_reason
 
@@ -893,8 +977,12 @@ def _format_ncoin_lp_direction(row: TradeTapeRow, *, is_close: bool) -> str | No
         amounts: list[Any] = [lp.get("amount0_collected"), lp.get("amount1_collected")]
     else:
         amounts = [lp.get("amount0"), lp.get("amount1")]
-    # Additional amounts follow pool-coin order. Require exactly indices 2..N-1;
-    # gaps are malformed payloads, not intentionally unmeasured values.
+    # Coins 2+ live in ``additional_amounts`` keyed by pool-coin index. Require
+    # the index set to be EXACTLY 2..N-1 (values may be None = unmeasured):
+    # a missing or gappy index set is a malformed/misaligned payload, and
+    # rendering its absent legs as "—" would dress incomplete receipt data up
+    # as intentionally-unmeasured — fall through to the canonical 2-slot path
+    # instead (CodeRabbit on PR #3329).
     additional = lp.get("additional_amounts")
     if not isinstance(additional, dict):
         return None
@@ -914,8 +1002,9 @@ def _format_ncoin_lp_direction(row: TradeTapeRow, *, is_close: bool) -> str | No
         if raw is None:
             amt_str = "—"
         else:
-            # Preserve raw integers when decimals are unknown rather than
-            # guessing display units.
+            # ``_scale_lp_amount`` returns None when decimals can't be
+            # resolved — render the raw integer then (honest, if ugly)
+            # rather than guess a scale.
             amt_str = _scale_lp_amount(raw, symbol, chain) or str(raw)
         parts.append(f"<code>{_e(amt_str)}</code> {_e(symbol)}")
     return " + ".join(parts)
@@ -934,15 +1023,20 @@ def _format_lp_direction(row: TradeTapeRow, *, is_close: bool) -> tuple[str, str
     """
     ncoin = _format_ncoin_lp_direction(row, is_close=is_close)
     if ncoin:
-        # N-coin close fees are bundled into returned amounts, not separable.
+        # N-coin fungible closes carry no separable per-coin fee fields
+        # (fees are BUNDLED into the returned amounts), so no fee sub-line.
         return ncoin, ""
 
     payload = _parse_accounting_payload(row)
     token0 = payload.get("token0") or row.token_in or ""
     token1 = payload.get("token1") or row.token_out or ""
 
-    # Accounting payload amounts are human units; ledger fallbacks may be raw
-    # integers, so only the latter use the magnitude heuristic.
+    # Payload values are already-decoded human Decimals → use the human
+    # formatter. Ledger fallback values (``row.amount_in/out``) are EITHER
+    # ``LPOpenData.amount0/1`` raw integers (post-receipt) OR the intent's
+    # human ``Decimal`` (intent fallback) per ``_extract_from_lp_open``;
+    # ``_format_lp_ledger_amount`` uses the ``>= 10⁶`` heuristic to
+    # disambiguate.
     if payload.get("amount0") is not None:
         amt0_str = _format_human_amount(payload["amount0"])
     else:
@@ -996,6 +1090,13 @@ def _format_lp_direction(row: TradeTapeRow, *, is_close: bool) -> tuple[str, str
     )
 
 
+# Multi-position strategies (``lp_dual`` / ``lp_triple``) stamp an explicit
+# handle (``leg_narrow`` / ``leg_wide``) on every accounting event so the
+# operator can tell which leg an LP_OPEN belongs to. Surfacing it on the
+# headline (Bug 6) replaces "row 1" / "row 2" guesswork with the strategy's
+# own naming. The parser moved to ``dashboard.utils`` so the LP template's
+# multi-position leg labels share the exact same provenance (VIB-5073);
+# the private alias keeps this module's call sites and tests stable.
 _registry_handle_from_payload = registry_handle_from_payload
 
 
@@ -1005,17 +1106,39 @@ def _render_tape_row(row: TradeTapeRow, *, show_approvals: bool) -> None:
     chain_color = get_chain_color(row.chain) if row.chain else "#888888"
     chain_badge = format_chain_badge(row.chain, chain_color) if row.chain else ""
 
-    # Headline status follows receipts, not the framework verdict, which may be
-    # downgraded after landing. Unmeasured rows fall back to that verdict.
+    # ALM-2759 — headline ✓/✗ reflects on-chain LANDED status, not the
+    # framework verdict. A slippage-breach / reconciliation-downgraded
+    # iteration writes ``ledger.success=False`` even though the tx landed;
+    # rendering that as a red ✗ misreports an executed trade as failed.
+    # ``landed is None`` => no per-leg receipt data (older/unmeasured rows)
+    # => fall back to the framework verdict (today's behaviour) rather than
+    # invent a green ✓ for a genuinely unknown on-chain status.
     landed, flagged_reason = _resolve_onchain_display_status(row)
 
-    # ``None`` means nothing was submitted; unknown receipt status has already
-    # fallen back to the framework verdict.
+    # THREE-valued, and it must stay a single expression assigned on every
+    # path. An earlier version of this bound ``onchain_ok`` inside the else arm
+    # only, while three sites below read it unconditionally — so every no-op row
+    # raised UnboundLocalError and killed the row loop, blanking the tape. The
+    # crash shipped behind a test that called the predicate but never the
+    # renderer. ``None`` here means "nothing was submitted", NOT "unknown":
+    # ``landed is None`` already means unknown and still falls back to the
+    # framework verdict.
     onchain_ok: bool | None = None if _submitted_nothing(row) else (row.success if landed is None else landed)
 
     if onchain_ok is None:
-        # A no-op has no transaction to grade. The UI uses its missing-value
-        # glyph while CSV expresses the same status as an empty cell.
+        # Neither ✓ nor ✗ — both would be claims about a transaction that does
+        # not exist. An em-dash is this MODULE's own "no value here" rendering:
+        # ``_format_lp_ledger_amount`` (:159) and ``_format_human_amount``
+        # (:231) both return "—" for a blank amount. The CSV lane does NOT
+        # export this glyph — it exports an empty cell; the two agree in
+        # MEANING, not in bytes.
+        #
+        # Two earlier versions of this comment cited functions that do not
+        # exist: ``_fmt_amount`` (nothing of that name in the repo) and then
+        # ``format_token_amount`` / ``_human_amount``, which DO exist but return
+        # "N/A" and take a different signature. Both were plausible and both
+        # were wrong. Function names in comments are executable claims — resolve
+        # them before writing them.
         success_marker = (
             "<span style='color:#888888;' title='No transaction was submitted (no-op) — nothing to grade'>—</span>"
         )
@@ -1026,18 +1149,39 @@ def _render_tape_row(row: TradeTapeRow, *, show_approvals: bool) -> None:
     confidence_color, confidence_label = _CONFIDENCE_BADGES.get(row.confidence, ("#888888", _e(row.confidence) or ""))
     registry_handle = _registry_handle_from_payload(row.accounting_payload_json)
 
-    # Resolve legs once for UI and CSV. A bundle's ledger hash may be a trailing
-    # approval reset, so both surfaces identify the action leg explicitly.
+    # VIB-4046 — multi-tx bundle awareness. ``all_tx_results`` is already
+    # populated by ``observability.ledger._build_extracted_data_json``
+    # for every multi-tx intent; the ledger row's ``tx_hash`` is the
+    # last tx, which is frequently a trailing approval-reset rather
+    # than the action. The headline link picks the action tx; the
+    # expander surfaces the full bundle.
+    # ``_resolve_legs``, NOT ``_get_all_tx_results``: the CSV export already
+    # reads the resolved array, and the two schemas carry different fields, so
+    # reading different arrays made the headline and the export name DIFFERENT
+    # transactions as the action for one intent (``is_approval_tx`` fell back to
+    # the gas heuristic on ``all_tx_results`` and to the exact selector on
+    # ``sub_transactions``). An auditor filtering the CSV on ``is_action_tx=1``
+    # got a hash the dashboard never links to. One array, one classifier.
     sub_txs = _resolve_legs(row)
     is_bundle = len(sub_txs) > 1
     action_tx = pick_action_tx(sub_txs, row.intent_type) if is_bundle else None
     headline_hash = (action_tx or {}).get("tx_hash") or row.tx_hash
     approvals_hidden = sum(1 for tx in sub_txs if is_approval_tx(tx)) if is_bundle else 0
 
-    # Headlines normalize display units; raw amounts remain in receipt details.
-    # LP legs move together, so ``+`` avoids implying a swap between them.
+    # Direction line: token_in → token_out (when applicable).
+    # VIB-3890: ``format_token_amount`` normalises raw on-chain integers
+    # (LP_OPEN amount0/1 in 18-dec / 6-dec) and full-precision Decimals
+    # (SWAP amount_out 0.000868768309352546) into a Quant-readable
+    # headline. Raw audit-grade amounts remain in the receipt-parsed
+    # expander block.
+    #
+    # LP intents are dual-asset and use ``+`` instead of ``→`` — both legs
+    # move the same direction (deposited on OPEN, received on CLOSE), so an
+    # arrow misreads as a swap. LP_CLOSE additionally surfaces fees
+    # collected on a sub-line when the accounting payload reports them.
     direction, lp_fee_line = _format_direction(row)
 
+    # Cost line
     cost_bits = []
     if row.gas_usd:
         gas_d = _safe_decimal(row.gas_usd)
@@ -1051,7 +1195,10 @@ def _render_tape_row(row: TradeTapeRow, *, show_approvals: bool) -> None:
         cost_bits.append(f"slip {row.slippage_bps:.1f} bps")
     cost_line = " · ".join(cost_bits) if cost_bits else ""
 
-    # Escape explorer URLs and isolate the new tab from the dashboard origin.
+    # tx hash link — escape href + add rel="noopener noreferrer" so the
+    # block-explorer link can't be hijacked into a same-origin window.
+    # ``headline_hash`` already accounts for multi-tx bundles (action tx
+    # picked above, today's last-tx behavior preserved for single-tx).
     tx_link = ""
     if headline_hash:
         url = get_block_explorer_url(row.chain or "ethereum", headline_hash)
@@ -1061,6 +1208,9 @@ def _render_tape_row(row: TradeTapeRow, *, show_approvals: bool) -> None:
             f"{_e(_short_hash(headline_hash))} ↗</a>"
         )
 
+    # Count badge: "3 txs" by default; "1 of 3 (2 approvals hidden)"
+    # when the toggle hides approvals from the expander. Single-tx
+    # intents render exactly as today — no badge.
     count_badge = ""
     if is_bundle:
         if not show_approvals and approvals_hidden:
@@ -1076,12 +1226,20 @@ def _render_tape_row(row: TradeTapeRow, *, show_approvals: bool) -> None:
             f"padding:1px 6px;font-size:0.72rem;margin-left:0.5rem;'>{_e(label)}</span>"
         )
 
+    # Time
     time_str = row.timestamp.strftime("%H:%M:%S") if row.timestamp else ""
 
-    # Border color follows on-chain status; no-ops stay neutral, not false.
+    # Headline card — left-border colour tracks on-chain LANDED status
+    # (ALM-2759), matching the headline ✓/✗ above. A landed-but-flagged
+    # row stays green; only a genuinely failed tx (no leg landed) is red.
+    # Grey, not red: `not None` is True, so a bare truthiness test painted a
+    # no-op with the failure colour while the glyph beside it said "—".
     intent_color = "#888888" if onchain_ok is None else ("#00c853" if onchain_ok else "#f44336")
     confidence_chip = ""
     if confidence_label:
+        # confidence_color comes from a hardcoded map; confidence_label
+        # is either a map-looked-up label or the gateway-supplied
+        # confidence string fallback (already escaped above).
         confidence_chip = (
             f"<span style='background:{confidence_color}22;color:{confidence_color};"
             f"border-radius:4px;padding:1px 6px;font-size:0.72rem;margin-left:0.5rem;'>"
@@ -1094,8 +1252,18 @@ def _render_tape_row(row: TradeTapeRow, *, show_approvals: bool) -> None:
             f"<div style='color:#ff9800;font-size:0.78rem;margin-top:0.2rem;'>⚠️ {_e(row.unavailable_reason)}</div>"
         )
 
-    # Amber means the transaction landed but the framework downgraded it; red
-    # means receipt failure. The tooltip retains the full ledger error.
+    # Error reason — surface ledger ``error`` so the operator sees the
+    # revert/raise-string without opening the expander. ``title`` carries
+    # the full message for hover when truncated.
+    #
+    # ALM-2759 — two visually distinct chips, depending on whether the tx
+    # LANDED on-chain:
+    #  * ``flagged_reason`` set => the tx landed but the framework
+    #    downgraded the iteration (slippage circuit-breaker /
+    #    reconciliation incident). Render an AMBER "landed but flagged"
+    #    chip — never a red ⛔ — so this row no longer looks identical to
+    #    a hard revert. Full ledger error stays in the hover ``title``.
+    #  * genuine failure (no leg landed) => the existing red ⛔ chip.
     error_chip = ""
     if flagged_reason:
         full = (row.error or "").strip()
@@ -1104,8 +1272,18 @@ def _render_tape_row(row: TradeTapeRow, *, show_approvals: bool) -> None:
             f"font-family:monospace;word-break:break-word;' title='{_e(full)}'>"
             f"<span style='font-family:inherit;'>⚠</span> landed on-chain · flagged: {_e(flagged_reason)}</div>"
         )
-    # Exclude the no-op sentinel explicitly while accepting bool-like false
-    # values such as protobuf integer 0.
+    # Must exclude None (the no-op) WITHOUT using `is False`. A bare
+    # `not onchain_ok` would render a failure chip on a no-op, whose
+    # `row.error` carries the degradation marker. But `is False` is
+    # identity-sensitive, and `0 is False` is False in Python — so a row whose
+    # `success` arrived as the integer 0 rather than a bool would silently lose
+    # its error chip, which is the failure this branch exists to show.
+    #
+    # Both feeds are genuine bools today (the proto field coerces; `_leg_landed`
+    # wraps in `bool()`), so `is False` would work — but that couples this line
+    # to a guarantee made two layers up and not enforced here, and
+    # `ledger_guard.landed` deliberately accepts the integer 1 for exactly this
+    # reason. The explicit-None form is correct under both.
     elif onchain_ok is not None and not onchain_ok and row.error:
         full = row.error.strip()
         short = full if len(full) <= 200 else full[:197] + "…"
@@ -1115,9 +1293,18 @@ def _render_tape_row(row: TradeTapeRow, *, show_approvals: bool) -> None:
             f"<span style='font-family:inherit;'>⛔</span> {_e(short)}</div>"
         )
 
-    # Keep one concatenated HTML block: CommonMark terminates raw HTML at
-    # whitespace-only lines created by empty interpolations.
-    # Registry handles distinguish multiple LP positions in one strategy.
+    # Build the headline card as a single concatenated HTML string. We
+    # used to emit an indented multi-line f-string here, but Streamlit's
+    # CommonMark parser treats whitespace-only lines as blank lines that
+    # terminate an HTML block — and any empty interpolation
+    # (``count_badge``, ``lp_fee_line``, ``error_chip`` …) collapses its
+    # line to pure whitespace, which then re-opened the *following*
+    # indented HTML as a 4-space code block ("</div>" rendered as
+    # literal text below the BORROW/SUPPLY headlines).
+    # Bug 6 — surface the strategy-stamped registry_handle (e.g.
+    # ``leg_wide`` / ``leg_narrow``) next to the protocol name so a
+    # multi-position LP strategy renders identifiable rows instead of
+    # five indistinguishable LP_OPEN cards.
     handle_chip = ""
     if registry_handle:
         handle_chip = (
@@ -1157,7 +1344,9 @@ def _render_tape_row(row: TradeTapeRow, *, show_approvals: bool) -> None:
     ]
     st.markdown("".join(p for p in parts if p), unsafe_allow_html=True)
 
-    # Streamlit expander labels are Markdown, so backticks provide monospace.
+    # Expander with the four data blocks. ``st.expander`` renders its label
+    # as Markdown, not raw HTML — use backticks for inline code formatting
+    # so the cycle id renders monospace instead of as the literal text.
     with st.expander(
         f"▸ details · cycle `{row.cycle_id[:16]}…`" if row.cycle_id else "▸ details",
         expanded=False,
@@ -1172,12 +1361,17 @@ def _render_expander_blocks(
     show_approvals: bool,
 ) -> None:
     """Render the sub-blocks of the trade tape expander."""
+    # Block 0 — Sub-transactions (VIB-4046). For multi-tx bundles
+    # surface every leg above the existing receipt-parsed kv block.
+    # Single-tx intents skip this block entirely.
     if len(sub_txs) > 1:
         _render_sub_tx_block(row, sub_txs, show_approvals=show_approvals)
 
+    # Block 1 — Receipt-parsed extracted data (full width).
     st.markdown("**Receipt-parsed data**")
     _render_receipt_block(row.extracted_data_json)
 
+    # Block 2 — Oracle quotes used (full width).
     st.markdown("**Oracle quotes used (price_inputs_json)**")
     if row.price_inputs_json:
         try:
@@ -1191,6 +1385,7 @@ def _render_expander_blocks(
             unsafe_allow_html=True,
         )
 
+    # Block 3 — Accounting payload (full width)
     st.markdown("**Typed accounting payload**")
     if row.accounting_payload_json:
         try:
@@ -1219,6 +1414,7 @@ def _render_expander_blocks(
             unsafe_allow_html=True,
         )
 
+    # Block 4 — Pre/post on-chain state (two columns)
     pre_col, post_col = st.columns(2)
     with pre_col:
         st.markdown("**Pre-state (on-chain, before TX)**")
@@ -1227,6 +1423,7 @@ def _render_expander_blocks(
         st.markdown("**Post-state (on-chain, after TX)**")
         _render_state_block(row.post_state_json)
 
+    # Block 5 — Linked position event (LP/PERP only)
     if row.position_event_json and row.position_event_type:
         st.markdown(
             f"**Linked position event** &nbsp;"
@@ -1285,6 +1482,12 @@ def _render_sub_tx_block(
             continue
         tx_hash = tx.get("tx_hash") or ""
         gas_used = _coerce_gas(tx.get("gas_used"))
+        # ``_leg_landed``, NOT ``tx.get("success", True)``. This block is fed
+        # ``_resolve_legs``, which returns ``sub_transactions`` for essentially
+        # every executed row — and those entries carry ``status:
+        # "success"/"failure"`` with NO ``success`` key, so the defaulting read
+        # painted a green ✓ on every leg whose receipt says REVERTED. Identical
+        # defect to the one the CSV export had, one function over.
         leg_landed = _leg_landed(tx)
         selector = tx.get("function_selector") or ""
         label = decode_selector(selector) if selector else ("approve" if is_approval_tx(tx) else "action")
@@ -1297,7 +1500,8 @@ def _render_sub_tx_block(
                 f"style='color:#2196f3;text-decoration:none;font-family:monospace;'>"
                 f"{_e(_short_hash(tx_hash))} ↗</a>"
             )
-        # Missing receipt status is unmeasured, not failed.
+        # Empty != Zero on screen: a leg with neither ``status`` nor ``success``
+        # is UNMEASURED, not failed. A red ✗ there is a claim we cannot back.
         if leg_landed is None:
             status_html = "<span style='color:#888;' title='on-chain status not measured'>–</span>"
         elif leg_landed:
@@ -1333,8 +1537,12 @@ def _render_sub_tx_block(
     )
 
 
-# Position events share one LP/PERP schema; omit inapplicable NULL fields so
-# they are not mistaken for unmeasured values.
+# Field schemas for the per-row "Linked position event" panel. The
+# ``position_events`` table is unified for LP and PERP, with one set of
+# columns NULL on each row depending on ``position_type``. Without a
+# type-aware filter, an LP row renders five blank PERP fields
+# (``leverage`` / ``entry_price`` / ``mark_price`` / ``unrealized_pnl`` /
+# ``is_long``) — visual noise that confuses operators.
 _POSITION_EVENT_LP_FIELDS: frozenset[str] = frozenset(
     {
         "token0",
@@ -1376,13 +1584,20 @@ _POSITION_EVENT_SHARED_FIELDS: frozenset[str] = frozenset(
         "protocol_fees_usd",
         "attribution_json",
         "attribution_version",
-        # Execution mode distinguishes live, paper, and dry-run audit records.
+        # ``execution_mode`` distinguishes ``live`` / ``paper`` / ``dry_run``
+        # (VIB-2837 on ``PositionEvent``). Operators rely on this to tell
+        # whether a position came from a real run or paper-trading; dropping
+        # it from the panel would erode the same trust signal this PR is
+        # trying to strengthen.
         "execution_mode",
     }
 )
 
-# Position-event LP amounts are raw integers; each field maps to the token
-# whose decimals determine display units.
+# Raw-on-chain integer fields in the position-event payload that the
+# dashboard scales to human units via the token resolver (Bug 5 — same
+# screen no longer mixes raw and scaled representations of the same
+# logical value). Keys → token-side ("token0" / "token1" / "native") that
+# decides which symbol drives the decimals lookup.
 _LP_AMOUNT_FIELDS_TOKEN0: frozenset[str] = frozenset(
     {
         "amount0",
@@ -1398,8 +1613,9 @@ _LP_AMOUNT_FIELDS_TOKEN1: frozenset[str] = frozenset(
     }
 )
 
-# These events cannot produce protocol fees; hide empty fields rather than
-# implying a measured zero.
+# Event types that do not produce ``protocol_fees_usd`` by definition.
+# Empty cells for these are correct but noisy — hide them rather than
+# render ``""`` (which the operator misreads as "fee = 0").
 _NO_PROTOCOL_FEES_EVENT_TYPES: frozenset[str] = frozenset(
     {
         "OPEN",
@@ -1451,7 +1667,8 @@ def _filter_position_event_fields(pe: dict[str, Any]) -> dict[str, Any]:
     elif position_type == "PERP":
         kept = _POSITION_EVENT_SHARED_FIELDS | _POSITION_EVENT_PERP_FIELDS
     else:
-        # Unknown types retain all fields to avoid dropping future schema data.
+        # Unknown position_type — keep everything; the column noise is
+        # better than dropping legitimate fields the gateway evolves.
         return pe
     return {k: v for k, v in pe.items() if k in kept}
 
@@ -1568,6 +1785,10 @@ def _render_kv_block(
                 unsafe_allow_html=True,
             )
 
+        # Bug 7 — nested dict/list values get their own expand/collapse
+        # widget. Renders below the scalar block; visually grouped by a
+        # leading key label so the operator knows which field the JSON
+        # belongs to.
         for k, v in nested_items:
             st.markdown(
                 f"<div style='font-family:monospace;font-size:0.84rem;color:#888;margin-top:0.25rem;'>{_e(k)}:</div>",
@@ -1627,6 +1848,9 @@ def _prettify_iso_datetime(s: str) -> str | None:
     Returns ``None`` when the string is not a parseable ISO timestamp,
     so the caller falls back to the generic str path.
     """
+    # Cheap pre-filter: ISO timestamps are 19+ chars, contain ``T`` or
+    # ``-`` near the start, and never contain spaces. Anything else
+    # short-circuits before the costlier ``fromisoformat`` parse.
     if not (19 <= len(s) <= 40) or "T" not in s[:11] or " " in s:
         return None
     try:
@@ -1694,8 +1918,11 @@ def _render_receipt_block(extracted_data_json: str) -> None:
     except (json.JSONDecodeError, TypeError):
         st.code(extracted_data_json or "—", language="text")
         return
-    # Remove duplicated bundle details only when the sub-tx table renders them;
-    # retain a single leg in the raw receipt view.
+    # Only strip ``all_tx_results`` from the raw kv view when the
+    # sub-tx table above is actually rendering it (i.e. multi-tx
+    # bundle). For a single-item ``all_tx_results``, the bundle is
+    # not rendered as a separate table — keep the field in the kv
+    # view so the operator can still see the lone leg.
     if isinstance(data, dict):
         legs = data.get("all_tx_results")
         if isinstance(legs, list) and len(legs) > 1:
