@@ -65,10 +65,9 @@ from typing import Any
 
 from almanak.core.chains import ChainRegistry
 
-# VIB-6167 — module level, not function level: a lazy import is a deferred
-# module-body execution, so an import-time fault lands one frame ABOVE the
-# seam's own guards, on an accounting write path. At module scope it is a
-# boot failure instead.
+# Keep this import at module scope: a deferred import would place an
+# import-time fault outside the accounting write-path guards, turning
+# a boot failure into a write-path failure.
 from almanak.framework.data.tokens.best_effort import (
     resolve_token_best_effort,
     resolve_token_decimals_best_effort,
@@ -123,9 +122,9 @@ class LedgerEntry:
     success: bool = True
     error: str = ""
     extracted_data_json: str = ""
-    price_inputs_json: str = ""  # token prices at execution time — enables audit-grade replay (VIB-3480)
-    pre_state_json: str = ""  # on-chain state before execution (VIB-3480)
-    post_state_json: str = ""  # on-chain state after execution (VIB-3480)
+    price_inputs_json: str = ""  # token prices at execution time
+    pre_state_json: str = ""  # on-chain state before execution
+    post_state_json: str = ""  # on-chain state after execution
 
     def __post_init__(self) -> None:
         self.execution_mode = RunMode.parse_optional(self.execution_mode)
@@ -237,9 +236,9 @@ class LedgerQuantStats:
     with_pre_post_state: int = 0
     with_positive_gas_usd: int = 0
     gas_usd_sum: Decimal = Decimal("0")
-    # Wallet USD value at the strategy's first action (VIB-3914 anchor).
-    # Computed from the bounded anchor-candidate walk, not from the
-    # aggregate query; ``None`` = no ledger row carries a usable anchor.
+    # Wallet USD value at the strategy's first action, from the bounded
+    # anchor walk rather than the aggregate query. ``None`` means no
+    # usable anchor and triggers the fallback instead of zero.
     first_action_wallet_value_usd: Decimal | None = None
 
 
@@ -255,9 +254,6 @@ def _extract_intent_type(intent: Any) -> str:
     return it.value if hasattr(it, "value") else str(it)
 
 
-# Tuple returned by the token/amount phase -- kept as a plain tuple to avoid
-# another tiny dataclass and to match the positional assignment style in
-# the final LedgerEntry(...) constructor.
 _TokensAndAmounts = tuple[str, str, str, str, str, float | None]
 
 
@@ -327,16 +323,13 @@ def _extract_from_swap_amounts(swap_amounts: Any, intent: Any) -> _TokensAndAmou
     amt_out = getattr(swap_amounts, "amount_out_decimal", None)
     amt_in_resolved = getattr(swap_amounts, "amount_in_decimal_resolved", True)
     amt_out_resolved = getattr(swap_amounts, "amount_out_decimal_resolved", True)
-    # An unresolved-decimals leg is UNMEASURED (Empty != Zero): pass ``None`` so
-    # the sanctioned conversion records ``""`` rather than a measured value.
+    # An unresolved-decimals leg is unmeasured: pass ``None`` so the
+    # conversion records ``""`` rather than a measured value.
     amount_in = _measured_amount_to_row(amt_in if amt_in_resolved else None)
     amount_out = _measured_amount_to_row(amt_out if amt_out_resolved else None)
-    # ``effective_price`` mirrors ``amount_in`` / ``amount_out``: an
-    # unresolved input-decimals row carries ``effective_price=None`` from
-    # the parser, but we also gate on ``amt_in_resolved`` so any future
-    # parser that emits a non-None ``effective_price`` while
-    # ``amount_in_decimal_resolved=False`` still falls through to ``""``
-    # (the "Empty != zero" invariant — issue #1778).
+    # ``effective_price`` mirrors the amount legs and stays ``""``
+    # when input decimals are unresolved, preserving unmeasured
+    # rather than booking a value.
     if swap_amounts.effective_price is not None and amt_in_resolved:
         effective_price = str(swap_amounts.effective_price)
     else:
@@ -402,8 +395,7 @@ def _record_intent_fallback_money_row(intent_type: str, token_in: str, amount_in
         token_in or "<empty>",
         amount_in or "<empty>",
     )
-    # Lazy import (house style — mirrors decimal_guards' record_raw_wei_suspected
-    # call site) so the observability module's import graph stays unchanged.
+    # Lazy import keeps the observability import graph unchanged.
     from almanak.framework.observability.metrics import record_ledger_intent_fallback
 
     record_ledger_intent_fallback(intent_type=intent_type)
@@ -439,24 +431,19 @@ def _extract_from_intent_fallback(intent: Any, *, intent_type: str = "") -> _Tok
     """
     token_in = _intent_fallback_token_in(intent)
     token_out = getattr(intent, "to_token", "") or ""
-    # First NON-None link wins — ``or``-truthiness would collapse a measured
-    # ``Decimal("0")`` into the unmeasured ``""`` sentinel (Empty != Zero;
-    # the same measured-zero preservation the swap_amounts path got in
-    # issue #1768).
+    # First non-None link wins; truthiness would collapse a measured
+    # ``Decimal("0")`` into the unmeasured ``""`` sentinel.
     amt = None
     for attr in ("amount", "borrow_amount", "supply_amount"):
         value = getattr(intent, attr, None)
         if value is not None:
             amt = value
             break
-    # VIB-5214 — route through the sanctioned MeasuredMoney conversion so an
-    # unresolved amount (``None``, ``""``, or a non-numeric placeholder) is
-    # recorded as UNMEASURED/ABSENT (``""``) and can NEVER be laundered into a
-    # value-bearing string or a measured ``Decimal("0")``. A real ``Decimal``
-    # (incl. measured zero) still serializes to its canonical string.
+    # Route through the sanctioned conversion so unresolved amounts record
+    # as unmeasured ``""`` and never as a value-bearing string or a
+    # measured zero. Real decimals still serialize canonically.
     amount_in = _measured_amount_to_row(amt)
-    # VIB-5218 — only a money-bearing row counts: an all-empty fallback (a truly
-    # money-less intent) is not the patch-hub signal we track.
+    # Only a money-bearing row is tracked; an all-empty fallback is not.
     if token_in or amount_in:
         _record_intent_fallback_money_row(intent_type, token_in, amount_in)
     return (token_in, token_out, amount_in, "", "", None)
@@ -486,13 +473,9 @@ def _lp_amount_to_human(raw: Any, token: str, chain: str) -> str | None:
         return "0"
     if not token or not chain:
         return None
-    # VIB-6100 — routed through the shared seam, which is TOTAL: it returns
-    # ``None`` for every failure and never raises. An unresolvable token is the
-    # intended fallback (DEBUG); a signature/shape DEFECT returns the same value
-    # but is recorded at ERROR with a traceback and reported to the defect
-    # observer, so it can no longer masquerade as an ordinary resolver miss.
-    # The seam also pins ``skip_gateway``/``log_errors``: this is the accounting
-    # write hot path and must never risk a gateway round-trip stall.
+    # The shared resolver seam never raises and returns ``None`` on failure.
+    # Unresolvable tokens fall back while defects are reported separately.
+    # This accounting hot path must never risk a gateway round-trip stall.
     decimals = resolve_token_decimals_best_effort(token, chain, context="ledger LP_OPEN")
     if decimals is None:
         return None
@@ -548,26 +531,16 @@ def _extract_from_lp_open(intent: Any, result: Any, chain: str = "") -> _TokensA
     never written; on a decimals-resolve miss we prefer the intent's human
     amount, else leave ``""`` (Empty != Zero).
     """
-    # Prefer on-chain actuals from LPOpenData; fall back to intent amounts.
     extracted_data = getattr(result, "extracted_data", None) or {} if result else {}
     lp_open_data = extracted_data.get("lp_open_data") if isinstance(extracted_data, dict) else None
 
-    # VIB-6053 — resolve the leg symbols from the SAME layer the amounts come from.
-    #
-    # This helper reads ``LPOpenData.amount0``/``amount1`` — the venue's canonical
-    # slot order (V3-family pool ``token0()``/``token1()``, address-sorted) — but
-    # historically took its symbols from ``intent.token0``/``token1`` and the pool
-    # LABEL, which is the user's ordering and may be the exact opposite. Pairing
-    # across the two layers transposes the row AND scales each leg by the other
-    # token's decimals: on ethereum/optimism/polygon WETH/USDC that recorded a $100
-    # deposit as a $26.5bn ledger row.
-    #
-    # The parser now stamps ``currency0``/``currency1`` index-aligned with the
-    # amounts it decoded, so the symbol can be resolved FROM THE ADDRESS — the same
-    # by-address discipline ``_resolve_lp_close_tokens`` already applies on the
-    # close side. The intent / pool-label fallback survives PER LEG, only where
-    # that leg has no identity, so a connector that emits nothing behaves exactly
-    # as before (this branch is strictly additive).
+    # Resolve leg symbols from the same layer as the amounts. Venue slot
+    # order is address-sorted while intent and pool labels are user-ordered
+    # and may be opposite; cross-layer pairing transposes rows and scales
+    # each leg by the wrong token decimals.
+    # Parser-stamped currencies are index-aligned with amounts, so symbols
+    # resolve from the address. Intent and label fallback applies per leg
+    # only where that leg has no identity.
     token_in, token_out = _resolve_lp_close_tokens(
         intent,
         getattr(lp_open_data, "currency0", None),
@@ -575,8 +548,7 @@ def _extract_from_lp_open(intent: Any, result: Any, chain: str = "") -> _TokensA
         chain,
         getattr(lp_open_data, "coin_symbols", None),
     )
-    # VIB-6053 residual-surface observability: a real LPOpenData that carries NO
-    # per-leg identity resolved its symbols from intent/pool LABEL order (see helper).
+    # Without per-leg identity the symbols came from label order; record it.
     if (
         lp_open_data is not None
         and getattr(lp_open_data, "currency0", None) is None
@@ -586,10 +558,9 @@ def _extract_from_lp_open(intent: Any, result: Any, chain: str = "") -> _TokensA
         _record_lp_leg_identity_missing("LP_OPEN", getattr(intent, "protocol", "") or "", chain)
 
     if lp_open_data is not None:
-        # On-chain actuals are raw integers (smallest unit) -> scale to human.
-        # Per-side fallback to the intent's (already-human) amount when the
-        # on-chain actual is absent OR its decimals cannot be resolved, so a
-        # raw integer is never persisted (VIB-5036).
+        # On-chain actuals are raw integers; scale to human units. Fall back
+        # per side to the intent human amount when absent or unresolvable,
+        # so a raw integer is never persisted.
         raw0 = getattr(lp_open_data, "amount0", None)
         raw1 = getattr(lp_open_data, "amount1", None)
         amount_in = _lp_amount_to_human(raw0, token_in, chain)
@@ -636,14 +607,10 @@ def _resolve_lp_close_symbol(currency: Any, chain: str) -> str:
         return native_token_for_chain(chain) or ""
     if not chain:
         return ""
-    # VIB-6100 — routed through the shared seam (total; never raises). An
-    # unresolvable currency falls open to the intent fallback exactly as before;
-    # a signature/shape defect returns the same value but is logged at ERROR with
-    # a traceback and reported to the defect observer instead of masquerading as
-    # an ordinary miss.
-    # ``cur`` (normalised lowercase str, not the raw ``currency`` which may be
-    # ``HexBytes``) is passed so the resolver's address handling never trips on
-    # a missing ``.startswith`` (Gemini).
+    # The shared seam never raises; unresolvable currencies fall back while
+    # defects are reported separately.
+    # Pass the normalized lowercase string so resolver address handling
+    # stays safe across provider encodings.
     token_info = resolve_token_best_effort(cur, chain, context="ledger LP_CLOSE")
     return getattr(token_info, "symbol", "") or ""
 
@@ -697,20 +664,16 @@ def _resolve_lp_close_tokens(
     pool_parts = [p.strip() for p in (getattr(intent, "pool", "") or "").strip().split("/")]
     if len(pool_parts) <= 1:
         pool_parts = []
-    # Per-leg resolution (written once for both legs to keep it auditable): the
-    # PoolKey-sorted index ``idx`` ties the symbol to the same-index collected
-    # amount. ``_resolve_lp_close_symbol`` returns "" for an absent (``None``)
-    # currency, so ``currency is None`` is exactly the leg that may take the
-    # user-ordered intent / pool fallback; a present-but-unresolved leg keeps "".
+    # The PoolKey-sorted index ties each symbol to its same-index amount.
+    # Only an absent-currency leg may use the user-ordered fallback; a
+    # present-but-unresolved leg stays unmeasured.
     resolved: list[str] = []
     legs = ((currency0, ("token0", "from_token"), 0), (currency1, ("token1", "to_token"), 1))
     for currency, intent_attrs, idx in legs:
         symbol = _resolve_lp_close_symbol(currency, chain)
         if currency is None and not symbol:
-            # VIB-6051 — the parser-stamped, pool-coin-ordered ``coin_symbols``
-            # carrier outranks the user-ordered intent / pool-string fallback: it
-            # is index-aligned with the collected amounts BY CONTRACT, while the
-            # intent order is the user's label order and may be the opposite.
+            # Parser-stamped coin symbols are index-aligned with amounts and
+            # outrank the user-ordered fallback.
             symbol = _coin_symbol_at(coin_symbols, idx)
         if currency is None and not symbol:
             for attr in intent_attrs:
@@ -759,18 +722,15 @@ def _extract_from_lp_close(intent: Any, result: Any, chain: str = "") -> _Tokens
     if lp_close_data is None:
         return None
 
-    # Address-aligned symbol resolution (see ``_resolve_lp_close_tokens``): a V4
-    # PoolKey currency resolves FROM ITS ADDRESS (amounts are PoolKey-sorted); the
-    # user-ordered intent / pool fallback is used only for a currency-ABSENT leg.
+    # A PoolKey currency resolves from its address; user-ordered fallback
+    # applies only to a currency-absent leg.
     currency0 = getattr(lp_close_data, "currency0", None)
     currency1 = getattr(lp_close_data, "currency1", None)
-    # VIB-6051 — pass the N-coin ``coin_symbols`` carrier so a Curve-style close
-    # (registry-nickname pool id, no intent token0/token1) resolves its legs from
-    # chain truth instead of persisting four empty money columns.
+    # Pass the N-coin carrier so closes without intent tokens still resolve
+    # legs from chain truth instead of staying empty.
     coin_symbols = getattr(lp_close_data, "coin_symbols", None)
     token_in, token_out = _resolve_lp_close_tokens(intent, currency0, currency1, chain, coin_symbols)
-    # VIB-6053 residual-surface observability (see ``_record_lp_leg_identity_missing``):
-    # an LPCloseData with no per-leg identity resolved symbols from intent/pool LABEL order.
+    # Without per-leg identity the symbols came from label order; record it.
     if currency0 is None and currency1 is None and not coin_symbols:
         _record_lp_leg_identity_missing("LP_CLOSE", getattr(intent, "protocol", "") or "", chain)
 
@@ -785,7 +745,6 @@ def _extract_from_lp_close(intent: Any, result: Any, chain: str = "") -> _Tokens
     amount_in = _measured_amount_to_row(_lp_amount_to_human(raw0, token_in, chain))
     amount_out = _measured_amount_to_row(_lp_amount_to_human(raw1, token_out, chain))
 
-    # Yielded nothing usable -> let the caller take the intent-attr fallback.
     if not any((token_in, token_out, amount_in, amount_out)):
         return None
     return (token_in, token_out, amount_in, amount_out, "", None)
@@ -832,9 +791,7 @@ def _extract_from_lending(
     extracted = getattr(result, "extracted_data", None) if result else None
     raw: Any = None
     if isinstance(extracted, dict):
-        # DELEVERAGE is structurally a repay — the receipt parser writes
-        # ``repay_amount``, not a separate ``deleverage_amount`` (Codex X2
-        # 2026-05-04 review). Mirror lending_handler's intent → key map.
+        # Deleverage maps to the repay amount key.
         key = "withdraw_amount" if intent_type == "WITHDRAW" else "repay_amount"
         raw = extracted.get(key)
 
@@ -844,32 +801,22 @@ def _extract_from_lending(
     try:
         raw_int = int(raw)
     except (TypeError, ValueError):
-        # Receipt produced a non-int value (shouldn't happen for these
-        # extractors, but fail-open to the intent-attr path rather than
-        # pretending we have a value). Empty != zero, so don't substitute.
+        # A non-int receipt value falls back to the intent path; never
+        # substitute a value for unmeasured.
         return _extract_from_intent_fallback(intent, intent_type=intent_type)
 
-    # CodeRabbit 2026-05-04: reuse the existing intent-attr precedence chain
-    # (``from_token`` > ``borrow_token`` > ``supply_token`` > ``token``) so
-    # connectors that name the lending asset under ``borrow_token`` /
-    # ``supply_token`` (rather than the generic ``token``) still get
-    # decimals resolved. VIB-5218 — call the PURE precedence helper, not
-    # ``_extract_from_intent_fallback``: the lending lane (not the fallback
-    # guesser) is producing this row, so it must NOT trip the fallback's
-    # WARN+metric observability.
+    # Reuse the pure token precedence (from_token, borrow_token,
+    # supply_token, token) so alternate namings still resolve. The lending
+    # lane produces this row, so it must not trip fallback observability.
     token_in = _intent_fallback_token_in(intent)
 
-    # Convert raw on-chain integer to human units. Without a chain or a
-    # resolvable token we can't scale safely — Empty != zero, so leave
-    # ``amount_in=""`` rather than write the unscaled raw int (which
-    # would be 18 orders of magnitude wrong for a 6-decimal stablecoin).
+    # Convert raw integers to human units. Without a chain or resolvable
+    # token leave the amount unmeasured rather than writing unscaled raw.
     if not token_in or not chain:
         return (token_in, "", "", "", "", None)
 
-    # VIB-6100 — route through the shared seam (total; never raises). Historical
-    # shape was bare ``except Exception`` around ``resolver.resolve``: a defect
-    # was laundered into empty amount_in at DEBUG. Gateway stays allowed —
-    # main resolved without ``skip_gateway`` here (receipt-scale REPAY/WITHDRAW).
+    # The shared seam never raises. Gateway stays allowed for receipt-scale
+    # lending amounts.
     decimals = resolve_token_decimals_best_effort(
         token_in,
         chain,
@@ -882,14 +829,8 @@ def _extract_from_lending(
     return (token_in, "", _measured_amount_to_row(scaled), "", "", None)
 
 
-# VIB-5218 — the reserved ``result.extracted_data`` key (and forward-compatible
-# typed attribute name) a connector uses to DECLARE its money legs for the ledger.
-# Connectors deposit a ``PrimitiveMoneyLegs`` here from their extraction path
-# (blueprint 05 §7) the same way they deposit ``lp_open_data`` / ``lp_close_data``;
-# the dispatcher prefers it over the legacy guesser when present. No connector
-# populates it yet (US-010 / US-011 migrate the first ones), so the prefer-if-
-# present gate is a no-op for every canonical protocol today — their ledger rows
-# stay byte-identical.
+# Reserved result key where connectors declare money legs. The dispatcher
+# prefers declared legs when present, otherwise the legacy dispatch runs.
 _PRIMITIVE_MONEY_LEGS_KEY = "primitive_money_legs"
 
 
@@ -919,8 +860,7 @@ def _declared_money_legs(result: Any) -> Any:
             legs = extracted.get(_PRIMITIVE_MONEY_LEGS_KEY)
     if legs is None:
         return None
-    # Deferred import: connector value types must never load at module import
-    # (the framework -> connector boundary; mirrors ``_fungible_lp_protocols``).
+    # Deferred import keeps connector types out of module import.
     from almanak.connectors._strategy_base.primitive_money_leg import PrimitiveMoneyLegs
 
     if isinstance(legs, PrimitiveMoneyLegs):
@@ -993,10 +933,8 @@ def _extract_from_declared_legs(legs: Any) -> _TokensAndAmounts:
     else:
         in_leg = out_leg = None
 
-    # Observability: surface any money-bearing leg the 2-slot projection could not
-    # carry (e.g. an INPUT + OUTPUT + PRINCIPAL declaration) rather than dropping
-    # it silently. ``in_leg`` / ``out_leg`` are the two assigned legs; any other
-    # leg is dropped. Identity comparison so duplicate-valued legs are not masked.
+    # Warn on money-bearing legs that do not fit the two-slot projection
+    # rather than dropping them silently.
     assigned = [leg for leg in (in_leg, out_leg) if leg is not None]
     dropped = [leg for leg in legs.legs if all(leg is not a for a in assigned)]
     if dropped:
@@ -1063,12 +1001,10 @@ def _extract_tokens_and_amounts(
     if intent_type == "LP_OPEN":
         return _extract_from_lp_open(intent, result, chain)
     if intent_type == "LP_CLOSE":
-        # VIB-5132 — a V4 native close emits no ERC-20 Transfer for its ETH leg,
-        # so there is no ``swap_amounts`` (handled above) and the row used to fall
-        # through to the intent-attr fallback (amount_in/out=""). Read the measured
-        # proceeds off ``LPCloseData`` instead; fall back only when it yields
-        # nothing (no LPCloseData / no token or amount). MUST run after the
-        # ``swap_amounts`` short-circuit so V3 ERC-20 closes are untouched.
+        # A native close emits no Transfer for its native leg, so read the
+        # measured proceeds from close data instead. Fall back only when it
+        # yields nothing; run after the swap_amounts branch so ERC-20
+        # closes stay untouched.
         lp_close = _extract_from_lp_close(intent, result, chain)
         if lp_close is not None:
             return lp_close
@@ -1077,12 +1013,8 @@ def _extract_tokens_and_amounts(
         amount_in = _measured_amount_to_row(getattr(intent, "collateral_amount", None))
         return (token_in, "", amount_in, "", "", None)
     if intent_type in ("REPAY", "WITHDRAW", "DELEVERAGE"):
-        # DELEVERAGE is structurally a repay (closes borrow exposure) — the
-        # writer routes it through the same lending receipt path, so the
-        # ledger row must too. Without DELEVERAGE here, ``Intent.deleverage(
-        # repay_full=True)``'s default ``Decimal("0")`` falls through to the
-        # intent-attr fallback and lands ``amount_in=""`` despite the receipt
-        # carrying the resolved repaid amount.
+        # Deleverage closes borrow exposure, so it uses the lending receipt
+        # path to capture resolved repaid amounts.
         return _extract_from_lending(intent, result, intent_type, chain)
     return _extract_from_intent_fallback(intent, intent_type=intent_type)
 
@@ -1120,14 +1052,9 @@ def _extract_tx_and_gas(
     tx_hash = ""
     tx_results = getattr(result, "transaction_results", None)
     if tx_results:
-        # VIB-4087 — parent ``transaction_ledger.tx_hash`` MUST point at
-        # the ACTION transaction, not an APPROVAL or INCIDENTAL leg.
-        # Pre-fix the writer always picked tx_results[0], which for a
-        # SUPPLY = approve+supply bundle pointed at the approval — making
-        # the parent tx_hash useless for "what was the action?" audits.
-        # ``_classify_sub_tx_role`` uses the same Approval-event-signature
-        # heuristic ``_build_sub_transactions`` does, so the parent and
-        # the sub_transactions[role=ACTION] entry are guaranteed to agree.
+        # The parent tx_hash must point at the ACTION leg, not an approval
+        # or incidental leg. Classify with the same heuristic as the
+        # sub-transactions so parent and ACTION entry agree.
         action_tx = next(
             (tr for tr in tx_results if _classify_sub_tx_role(tr) == "ACTION"),
             None,
@@ -1142,20 +1069,14 @@ def _extract_tx_and_gas(
 
     gas_used = getattr(result, "total_gas_used", 0) or 0
 
-    # 1. Honour a pre-computed gas_cost_usd if the upstream writer set one
-    #    (today: ResultEnricher's prediction-handler path; tomorrow: any
-    #    enricher that has its own price source). This preserves backward
-    #    compatibility for the small set of intent types that already had
-    #    gas_usd populated, AND lets the universal swap/LP path below take
-    #    over for everyone else.
+    # Honour an upstream pre-computed gas USD value when present; otherwise
+    # compute universally below.
     gas_cost_usd_attr = getattr(result, "gas_cost_usd", None)
     if gas_cost_usd_attr is not None:
         return (tx_hash, gas_used, str(gas_cost_usd_attr))
 
-    # 2. Universal path: compute gas_usd from total_gas_cost_wei × native USD
-    #    price. We import lazily so the observability module stays free of
-    #    the accounting package as a hard import-time dependency (the layers
-    #    are siblings; cycles here are easy to introduce by accident).
+    # Universal path computes gas USD from wei and native price. Import
+    # lazily to avoid a hard accounting dependency and import cycles.
     from almanak.framework.accounting.gas_pricing import compute_gas_usd
 
     gas_cost_wei = getattr(result, "total_gas_cost_wei", None)
@@ -1180,10 +1101,8 @@ def _coalesce_error(success: bool, error: str, result: Any) -> str:
     return error
 
 
-# VIB-4087 — ERC20 Approval event topic (`keccak("Approval(address,address,uint256)")`).
-# A receipt that emits this is an APPROVAL transaction; non-Approval-emitting
-# receipts are classified as ACTION. INCIDENTAL is reserved for future
-# heuristic refinement (e.g. nonce-bump-only transactions).
+# Approval event topic marks approval transactions; receipts without one
+# are actions. Incidental is reserved for future refinement.
 _ERC20_APPROVAL_TOPIC = "0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925"
 
 
@@ -1254,11 +1173,7 @@ def _classify_sub_tx_role(tx_result: Any) -> str:
         else:
             saw_other = True
 
-    # Only-Approval ⇒ pure ERC20 / ERC721 approve() call ⇒ APPROVAL.
-    # Approval-plus-other or other-only ⇒ ACTION. This correctly classifies:
-    #   - approve(WETH, router) → only Approval ⇒ APPROVAL
-    #   - mint NFT (emits Transfer + Approval(0x0,owner,tokenId)) ⇒ ACTION
-    #   - swap (emits Swap + Approval reset) ⇒ ACTION
+    # Only-approval implies approval; any other event implies action.
     if saw_approval and not saw_other:
         return "APPROVAL"
     return "ACTION"
@@ -1334,30 +1249,22 @@ def _build_extracted_data_json(result: Any) -> str:
     extracted_data_json = serialize_extracted_data(extracted) if extracted else ""
 
     if not tx_results:
-        # No tx receipts (e.g., a value-transfer or compile-failure path that
-        # set extracted_data without executing) — return what we have.
+        # Without receipts return whatever payload exists.
         return extracted_data_json
 
-    # VIB-4087 — always emit sub_transactions when tx_results exist, even on
-    # rows where the connector didn't populate extracted_data. Operators
-    # rely on the key being present to distinguish "single tx" from
-    # "missing data," so a payload-less successful row must still get the
-    # sub_transactions array (otherwise the audit trail loses the
-    # APPROVAL/ACTION/INCIDENTAL leg breakdown for that intent class).
+    # Always emit sub-transactions when transactions exist, even single-leg
+    # or payload-less rows, so consumers distinguish single from missing.
     try:
         parsed = json.loads(extracted_data_json) if extracted_data_json else {}
     except (json.JSONDecodeError, TypeError):
         return extracted_data_json  # keep existing serialization on failure
 
     if not isinstance(parsed, dict):
-        # Defensive: serialize_extracted_data should always produce a dict
-        # but if a stub returned a list/scalar, fall through without
-        # augmentation rather than crashing.
+        # Non-dict payloads skip augmentation rather than crashing.
         return extracted_data_json
 
     parsed["sub_transactions"] = _build_sub_transactions(tx_results)
-    # Back-compat: keep ``all_tx_results`` for any reader still on the
-    # pre-VIB-4087 schema. Strictly cheaper than coordinating a removal.
+    # Keep ``all_tx_results`` for multi-leg rows for backward compatibility.
     if len(tx_results) > 1:
         parsed["all_tx_results"] = [
             {
@@ -1420,8 +1327,8 @@ def _stamp_lp_close_discriminator(intent: Any, result: Any, intent_type: str, pr
     if (protocol or "").lower() in _fungible_lp_protocols():
         return
     raw = getattr(intent, "position_id", None)
-    # Uniformly ignore the degenerate 0 / "0" id across stamp + both resolvers:
-    # never stamp a discriminator the resolver will discard (gemini review on #2459).
+    # Ignore degenerate zero ids; never stamp a discriminator the resolver
+    # discards.
     if raw is None or raw == "" or raw == 0 or str(raw).strip() == "0":
         return
     extracted = getattr(result, "extracted_data", None) if result else None
@@ -1439,8 +1346,8 @@ def _stamp_lp_close_discriminator(intent: Any, result: Any, intent_type: str, pr
     try:
         extracted["lp_close_data"] = dataclasses.replace(close_data, position_id=str(raw))
     except (TypeError, ValueError):
-        # Defensive: a non-dataclass duck-typed close-data stub (tests) — leave
-        # it untouched rather than raise on the ledger-write path.
+        # Leave non-dataclass stubs untouched rather than raising on the
+        # write path.
         return
 
 
@@ -1498,16 +1405,11 @@ def _stamp_v4_lp_close_fees(
     extracted = getattr(result, "extracted_data", None) if result else None
     if not isinstance(extracted, dict):
         return
-    # Re-read AFTER ``_stamp_lp_close_discriminator`` (which also replaces
-    # ``extracted["lp_close_data"]``) so this stamp operates on the latest copy.
+    # Re-read close data so this stamp operates on the latest copy.
     close_data = extracted.get("lp_close_data")
     if close_data is None or not hasattr(close_data, "fees0"):
         return
-    # Capability-gate on the V4 PoolKey data shape rather than a hard-coded
-    # protocol string (blueprint 22 / scan-coupling): only the V4 receipt parser
-    # populates ``currency0``/``currency1`` on ``LPCloseData`` (V3 leaves them
-    # None), and the ``(tokens_owed0, tokens_owed1)`` pair only exists for a V4
-    # position — so currency0 presence is the precise "this is a V4 close" signal.
+    # Gate on PoolKey data shape via currency presence, not protocol string.
     if getattr(close_data, "currency0", None) is None:
         return
     # Preserve a parser-measured fee pair (Empty ≠ Zero — do not clobber a real
@@ -1518,13 +1420,8 @@ def _stamp_v4_lp_close_fees(
     import dataclasses
 
     try:
-        # Reset the fee taxonomy to the ``"UNKNOWN"`` sentinel alongside the new
-        # fee pair so ``__post_init__`` RE-DERIVES it: the parser stamped
-        # ``BUNDLED`` (its honest "couldn't separate" verdict) when it emitted
-        # ``fees0=None``, and ``replace`` would otherwise carry that stale
-        # ``BUNDLED`` forward. The gateway-measured fees ARE separated and exact,
-        # so re-deriving correctly yields ``SEPARATE`` / ``EXACT`` — the honest
-        # taxonomy for an on-chain ``tokens_owed`` read.
+        # Reset fee taxonomy alongside the new pair so replacement re-derives
+        # it for the measured fees.
         extracted["lp_close_data"] = dataclasses.replace(
             close_data,
             fees0=int(raw0),
@@ -1533,8 +1430,8 @@ def _stamp_v4_lp_close_fees(
             fee_confidence="UNKNOWN",
         )
     except (TypeError, ValueError):
-        # Defensive: a non-dataclass duck-typed close-data stub (tests) — leave
-        # it untouched rather than raise on the ledger-write path.
+        # Leave non-dataclass stubs untouched rather than raising on the
+        # write path.
         return
 
 
@@ -1592,9 +1489,7 @@ def _stamp_lp_open_native_amounts(
     open_data = extracted.get("lp_open_data")
     if open_data is None or not hasattr(open_data, "amount0"):
         return
-    # Capability-gate on the by-address data shape (currency0/currency1 populated
-    # by parsers that resolve legs by address — V4, fluid_dex_lp) rather than a
-    # hard-coded protocol string.
+    # Gate on by-address data shape, not protocol string.
     if getattr(open_data, "currency0", None) is None:
         return
 
@@ -1618,22 +1513,16 @@ def _stamp_lp_open_native_amounts(
     try:
         extracted["lp_open_data"] = dataclasses.replace(open_data, amount0=new0, amount1=new1)
     except (TypeError, ValueError):
-        # Defensive: a non-dataclass duck-typed open-data stub (tests) — leave it
-        # untouched rather than raise on the ledger-write path.
+        # Leave non-dataclass stubs untouched rather than raising on the
+        # write path.
         return
 
 
-# The V4 native-currency sentinel (the zero address) — the same value the
-# connector parser and the runner's open-side eligibility gate use. Kept as a
-# local plain-string constant (not a connector import) to honour the framework →
-# connector boundary; it is the well-known zero address, not connector logic.
+# Local zero-address native sentinel, kept local to preserve the
+# framework-connector boundary.
 _V4_NATIVE_CURRENCY = "0x" + "0" * 40
 
-# The ERC-7528 / Fluid SmartLending native sentinel — the non-V4 native marker
-# the fungible-LP close stamp (VIB-5121) recognizes. Framework-owned (no connector
-# import), mirrors ``strategy_runner._ERC7528_NATIVE_SENTINEL``. Written in EIP-55
-# checksum form (the production-address checksum gate requires it) and lowercased
-# for the comparison (currencies are compared ``.lower()``-ed below).
+# Local non-V4 native sentinel in checksum form, compared lowercased.
 _ERC7528_NATIVE_CURRENCY = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE".lower()
 
 
@@ -1688,27 +1577,19 @@ def _stamp_v4_lp_close_native_principal(
     extracted = getattr(result, "extracted_data", None) if result else None
     if not isinstance(extracted, dict):
         return
-    # Re-read AFTER ``_stamp_lp_close_discriminator`` / ``_stamp_v4_lp_close_fees``
-    # (which also replace ``extracted["lp_close_data"]``) so this stamp operates on
-    # the latest copy.
+    # Re-read close data so this stamp operates on the latest copy.
     close_data = extracted.get("lp_close_data")
     if close_data is None or not hasattr(close_data, "amount0_collected"):
         return
-    # Capability-gate on the V4 PoolKey data shape (currency0/currency1 populated
-    # only by the V4 parser) rather than a hard-coded protocol string.
+    # Gate on PoolKey data shape via currency presence, not protocol string.
     if getattr(close_data, "currency0", None) is None:
         return
 
     raw0, raw1 = amounts
     # Fill only the legs the parser left unmeasured (``None``). A measured leg
     # (the ERC-20 side, or a genuine measured ``0``) is preserved — never clobber.
-    # Defense-in-depth (mirrors the open-side ``_native_v4_open_eligible`` rigor):
-    # gate the derived fill on the leg's currency being the native sentinel. The
-    # V4 parser leaves a leg ``None`` ONLY for the native currency (an unobserved
-    # ERC-20 leg is a measured ``0``), so today every ``None`` leg here is already
-    # native — but checking the currency keeps this correct-by-construction should
-    # a future parser change ever emit a ``None`` ERC-20 leg: a derived value must
-    # never land on an ERC-20 leg whose true amount comes from its Transfer.
+    # Gate the fill on native currency so derived values never land on
+    # ERC-20 legs whose amounts come from Transfers.
     cur0 = (getattr(close_data, "currency0", None) or "").lower()
     cur1 = (getattr(close_data, "currency1", None) or "").lower()
     new0 = getattr(close_data, "amount0_collected", None)
@@ -1728,8 +1609,8 @@ def _stamp_v4_lp_close_native_principal(
     try:
         extracted["lp_close_data"] = dataclasses.replace(close_data, amount0_collected=new0, amount1_collected=new1)
     except (TypeError, ValueError):
-        # Defensive: a non-dataclass duck-typed close-data stub (tests) — leave it
-        # untouched rather than raise on the ledger-write path.
+        # Leave non-dataclass stubs untouched rather than raising on the
+        # write path.
         return
 
 
@@ -1782,9 +1663,7 @@ def _stamp_lp_close_native_amounts(
     extracted = getattr(result, "extracted_data", None) if result else None
     if not isinstance(extracted, dict):
         return
-    # Re-read AFTER any earlier ``lp_close_data`` replace (discriminator / close
-    # fees / the V4 native-principal stamp) so this stamp operates on the latest
-    # copy.
+    # Re-read close data so this stamp operates on the latest copy.
     close_data = extracted.get("lp_close_data")
     if close_data is None or not hasattr(close_data, "amount0_collected"):
         return
@@ -1792,11 +1671,8 @@ def _stamp_lp_close_native_amounts(
         return
 
     raw0, raw1 = amounts
-    # NARROW to the FUNGIBLE native case: fill a ``None`` leg ONLY when its
-    # currency is a non-V4 native sentinel. A V4 native leg (``0x0``) is the V4
-    # stamp's responsibility (measured from position state); never stamp it here
-    # from a balance bracket. Mirrors the V4 stamp's defense-in-depth currency
-    # gate (rule-of-three: per-connector measurement, no cross-claim).
+    # Fill only non-V4 native legs here; V4 legs belong to the
+    # position-state stamp and never use a balance bracket.
     cur0 = (getattr(close_data, "currency0", None) or "").lower()
     cur1 = (getattr(close_data, "currency1", None) or "").lower()
     new0 = getattr(close_data, "amount0_collected", None)
@@ -1816,7 +1692,7 @@ def _stamp_lp_close_native_amounts(
     try:
         extracted["lp_close_data"] = dataclasses.replace(close_data, amount0_collected=new0, amount1_collected=new1)
     except (TypeError, ValueError):
-        # Defensive: a non-dataclass duck-typed close-data stub (tests).
+        # Leave non-dataclass stubs untouched on the write path.
         return
 
 
@@ -1833,11 +1709,7 @@ def build_ledger_entry(
     pre_state: dict[str, Any] | None = None,
     post_state: dict[str, Any] | None = None,
     v4_lp_close_fees: tuple[int, int] | None = None,
-    # Native-leg open fill. ``lp_open_native_amounts`` is the connector-merged
-    # OPEN result (V4 position-state OR Fluid balance-bracket — the runner picks
-    # per connector and threads ONE value). VIB-5117's V4-close principal stays
-    # its own param; VIB-5121 adds the Fluid-close balance-bracket param. Per
-    # connector measurement (rule-of-three — unify at the 3rd connector, VIB-5135).
+    # Connector-merged open result; close principals stay separate params.
     lp_open_native_amounts: tuple[int | None, int | None] | None = None,
     v4_lp_close_native_principal: tuple[int | None, int | None] | None = None,
     lp_close_native_amounts: tuple[int | None, int | None] | None = None,
@@ -1872,15 +1744,8 @@ def build_ledger_entry(
     ``oracle_source`` field on each priced asset is required (G12).
     """
     intent_type = _extract_intent_type(intent)
-    # VIB-5132 — token/amount extraction is DEFERRED to after the LP-close native
-    # stamps below. ``_extract_from_lp_close`` reads ``LPCloseData.amount{0,1}_
-    # collected``, and the native-ETH legs are populated by
-    # ``_stamp_v4_lp_close_native_principal`` / ``_stamp_lp_close_native_amounts``
-    # (VIB-5117 / VIB-5121). Extracting here (the historical position) would read
-    # the PRE-stamp ``None`` legs and re-emit empty amount_in/out. Nothing between
-    # this point and the deferred call consumes the extraction tuple (verified:
-    # tx/gas, the gas WARN, error coalescing, and the stamps depend only on
-    # ``result`` / ``intent`` / ``intent_type``).
+    # Defer token and amount extraction until after the native stamps below,
+    # so closes read stamped amounts instead of empty pre-stamp legs.
     tx_hash, gas_used, gas_usd = _extract_tx_and_gas(
         result,
         chain=chain,
@@ -1892,16 +1757,9 @@ def build_ledger_entry(
         and (getattr(result, "total_gas_cost_wei", None) or 0) > 0
         and price_oracle is not None
     ):
-        # Conversion is empty even though the oracle was supplied. Two
-        # paths reach here today:
-        #   (a) the native token's USD price genuinely isn't in the oracle —
-        #       the original case this WARN was added for;
-        #   (b) the chain is non-EVM (``solana``) — the helper fails closed
-        #       on lamport vs wei unit mismatch by design.
-        # The original WARN message named (a) as the cause; emitting it on
-        # (b) would mislead operators ("missing SOL price" when the SOL
-        # price IS in the oracle but the unit conversion path isn't yet
-        # supported). Gate the WARN on (a) only.
+        # Warn only when the native price is missing from the oracle.
+        # Non-EVM unit mismatch fails closed by design and must not warn
+        # as a missing price.
         from almanak.framework.accounting.gas_pricing import native_token_for_chain
         from almanak.framework.market.price_store import lookup_price
 
@@ -1917,46 +1775,23 @@ def build_ledger_entry(
                 cycle_id,
             )
     final_error = _coalesce_error(success, error, result)
-    # VIB-4275 — stamp the close intent's per-position discriminator onto
-    # ``lp_close_data`` BEFORE serialization. The close RECEIPT cannot carry the
-    # token id (a Burn emits no NFT id), but the close INTENT
-    # (``LPCloseIntent.position_id``) knows exactly which NFT is being closed.
-    # The close-side accounting resolver reads this back off ``extracted_data_json``
-    # to attribute a co-pool close to its OWN prior open.
+    # Stamp the intent position id onto close data before serialization;
+    # receipts carry no NFT id while intents name the closed position.
     protocol = getattr(intent, "protocol", "") or ""
     _stamp_lp_close_discriminator(intent, result, intent_type, protocol)
-    # VIB-4482 (P-V1-A) — stamp PRE-close-measured V4 uncollected fees onto
-    # ``lp_close_data`` so the LP accounting handler emits measured fees instead
-    # of the receipt-parser's honest-but-blank ``None`` (V4 bundles fees into the
-    # withdrawal Transfer; they are unrecoverable from the receipt). The runner
-    # reads them on-chain before the burn submits and threads the raw-int pair.
+    # Stamp pre-close-measured uncollected fees; receipts bundle fees into
+    # the withdrawal and cannot separate them.
     _stamp_v4_lp_close_fees(result, intent_type, v4_lp_close_fees)
-    # VIB-4483 (V4) / VIB-5121 (fungible) — stamp the runner-measured native-ETH
-    # OPEN leg amount onto ``lp_open_data``. A native leg deposits via msg.value
-    # (no ERC-20 Transfer), so the receipt parser left it None. The runner
-    # measures it after the tx lands per connector (V4: post-mint position-state
-    # read + CL math; Fluid + any fungible native-leg LP: a block-pinned wallet
-    # native-balance bracket, gas-separated) and threads the merged result here;
-    # this stamp fills only the unmeasured native leg (never clobbers a measured
-    # ERC-20 leg).
+    # Stamp the runner-measured native open leg; native deposits emit no
+    # Transfer so receipts leave them unmeasured. Fill only unmeasured legs.
     _stamp_lp_open_native_amounts(result, intent_type, lp_open_native_amounts)
-    # VIB-5117 — V4 close: stamp the PRE-burn-measured native-ETH PRINCIPAL onto
-    # ``lp_close_data``. A native-ETH V4 LP_CLOSE returns its ETH leg as raw ETH
-    # (no ERC-20 Transfer), so the receipt parser left ``amount{0,1}_collected``
-    # None. The runner reads pre-burn position state + CL math (V4-specific
-    # measurement — kept exactly per VIB-5117). Without it the close records 0
-    # proceeds and understates realized PnL by the full native principal.
+    # Stamp the pre-burn-measured native principal; native closes return
+    # raw native with no Transfer.
     _stamp_v4_lp_close_native_principal(result, intent_type, v4_lp_close_native_principal)
-    # VIB-5121 — Fluid/fungible close twin: stamp the runner-measured native-ETH
-    # RETURNED leg (measured from a balance bracket, gated to the non-V4 native
-    # sentinel) onto ``lp_close_data``. Distinct from the V4 stamp above by
-    # currency gate — per-connector measurement (rule-of-three, VIB-5135).
+    # Stamp the fungible native returned leg, distinguished from the
+    # position-state stamp by currency gate.
     _stamp_lp_close_native_amounts(result, intent_type, lp_close_native_amounts)
-    # VIB-5132 — extract tokens/amounts NOW, after the LP-close native stamps, so
-    # ``_extract_from_lp_close`` reads the POST-stamp ``LPCloseData.amount{0,1}_
-    # collected`` (the native ETH leg is filled by the stamps above). For every
-    # non-LP-close intent type this is behaviourally identical to extracting at
-    # the top of the function (the stamps are no-ops outside LP_CLOSE).
+    # Extract now, after the native stamps, so closes read stamped amounts.
     (
         token_in,
         token_out,
@@ -1967,33 +1802,19 @@ def build_ledger_entry(
     ) = _extract_tokens_and_amounts(intent, result, chain=chain)
     extracted_data_json = _build_extracted_data_json(result)
 
-    # ─── VIB-3480 columns finally populated (Accounting-AttemptNo17 §3 D3) ──
-    # Until this PR, pre_state_json / post_state_json / price_inputs_json
-    # were declared on the dataclass + DDL but no writer ever filled them.
-    # That's the canonical leaf-fix anti-pattern §0 names. The runner is the
-    # single capture point — see docs/internal/connector-pre-post-audit.md.
-
     def _safe_json(d: dict[str, Any] | None) -> str:
-        # ``None`` = no state was captured (callers default to passing
-        # ``None`` when pre/post capture didn't run). ``{}`` = the runner
-        # captured an explicitly empty snapshot — e.g. "wallet had nothing
-        # of interest after the close" — and we want that recorded as the
-        # JSON object ``{}``, not collapsed to ``""`` which is
-        # indistinguishable from the unmeasured case downstream.
+        # ``None`` means uncaptured; ``{}`` means explicitly empty and
+        # serializes as ``{}``, distinct from unmeasured ``""``.
         if d is None:
             return ""
         try:
-            # Decimals + datetimes need a default — match serialize_extracted_data.
             return json.dumps(d, default=str)
         except (TypeError, ValueError):
             return ""
 
     price_inputs_json = ""
     if price_oracle:
-        # Shape per AttemptNo17 §1.2 G12: {symbol: {price_usd, oracle_source,
-        # observed_at, fetched_at, confidence, raw_confidence, stale}}. The
-        # runner may pass the new shape directly OR the legacy flat
-        # {symbol: price} shape. Normalize to the new shape.
+        # Normalize flat or detailed oracle shapes to the detailed form.
         normalised: dict[str, Any] = {}
         for sym, val in price_oracle.items():
             if isinstance(val, dict) and "price_usd" in val:
@@ -2036,14 +1857,9 @@ def build_ledger_entry(
         post_state_json=post_state_json,
     )
 
-    # W1-5 decimal-unit soft-fail guard (VIB-4780).  Runs after the entry is
-    # fully constructed so amount_in/amount_out are resolved.  Soft-fail only:
-    # logs a WARNING, never raises, never mutates the entry.
-    #
-    # Token decimals are resolved LAZILY — only when at least one of the
-    # guarded fields is integer-shaped (the raw-wei tell).  This keeps the
-    # happy path (legitimate Decimal strings like ``"0.001130"``) free of
-    # any resolver init cost or noise.
+    # Soft-fail guard runs after construction when amounts are resolved.
+    # It logs without raising or mutating the entry. Decimals resolve
+    # lazily only for integer-shaped amounts.
     from almanak.framework.accounting.decimal_guards import (
         _check_decimal_unit_soft_fail,
         _is_integer_shaped,
@@ -2056,8 +1872,7 @@ def build_ledger_entry(
     needs_decimals_lookup = any(_is_integer_shaped(v) for v in (entry.amount_in, entry.amount_out))
 
     if needs_decimals_lookup:
-        # VIB-6100 — seam is total; no try needed. Soft-fail guard only uses
-        # decimals when present; miss → rule runs without them.
+        # Missing decimals simply run the rule without them.
         for side, sym in (("in", token_in), ("out", token_out)):
             if not sym:
                 continue
@@ -2168,14 +1983,10 @@ def _reconstruct_tagged_value(type_name: str, val: dict[str, Any], type_map: dic
     if type_name == "datetime":
         return datetime.fromisoformat(val["value"])
     if type_name == "Enum":
-        return val  # Return as dict; caller knows the enum type
+        return val
     if type_name == "PrimitiveMoneyLegs":
-        # The connector-DECLARED money legs (US-009): serialize_extracted_data
-        # writes them via to_dict()+_type, but PrimitiveMoneyLegs is not a flat
-        # dataclass (nested legs + MeasuredMoney) so it needs its own typed
-        # round-trip rather than _reconstruct_dataclass. Without this branch the
-        # legs come back as a raw dict and typed readers (e.g. the Pendle redeem
-        # accounting handler, which reads the persisted blob) silently miss them.
+        # Nested money legs need a dedicated round-trip; otherwise they return
+        # as raw dicts and typed readers miss them.
         try:
             from almanak.connectors._strategy_base.primitive_money_leg import PrimitiveMoneyLegs
 
@@ -2185,7 +1996,6 @@ def _reconstruct_tagged_value(type_name: str, val: dict[str, Any], type_map: dic
             return val
     if type_name in type_map:
         try:
-            # Convert string values back to appropriate types.
             return _reconstruct_dataclass(type_map[type_name], val)
         except (TypeError, ValueError):
             val["_type"] = type_name
@@ -2215,7 +2025,6 @@ def _reconstruct_dataclass(cls: type, data: dict[str, Any]) -> Any:
         if f is None:
             continue
 
-        # Infer type from field annotation string
         ann = str(f.type)
         if "Decimal" in ann:
             kwargs[name] = Decimal(val)
@@ -2237,18 +2046,14 @@ def _reconstruct_dataclass(cls: type, data: dict[str, Any]) -> Any:
             else:
                 kwargs[name] = bool(val)
         elif "SlippageSource" in ann:
-            # VIB-4087 — string round-trip back to the StrEnum so consumers
-            # that compare ``swap_amounts.slippage_source == SlippageSource.RECEIPT_DECODED``
-            # see the typed instance, not a bare string.
+            # Round-trip slippage strings back to typed enum values.
             from almanak.framework.execution.extracted_data import SlippageSource
 
             try:
                 kwargs[name] = SlippageSource(val) if isinstance(val, str) else val
             except ValueError:
-                # Unknown enum value (older serialised payload, hand-crafted
-                # JSON, etc.) — degrade to NONE rather than raise. The
-                # contract is "slippage_source is always a known value at
-                # read time"; rejecting would break replay of older DBs.
+                # Unknown values degrade to NONE rather than raising, so older
+                # rows still replay.
                 kwargs[name] = SlippageSource.NONE
         else:
             kwargs[name] = val
