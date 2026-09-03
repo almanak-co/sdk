@@ -22,10 +22,6 @@ from almanak.framework.utils.log_formatters import format_gas_cost, format_tx_ha
 logger = logging.getLogger(__name__)
 
 
-# =============================================================================
-# Event Topic Signatures
-# =============================================================================
-
 EVENT_TOPICS: dict[str, str] = {
     # DepositedToBins(address,address,uint256[],bytes32[])
     "DepositedToBins": "0x87f1f9dcf5e8089a3e00811b6a008d8f30293a3da878cb1fe8c90ca376402f8a",
@@ -38,7 +34,6 @@ EVENT_TOPICS: dict[str, str] = {
     # Approval(address,address,uint256) - ERC20
     "Approval": "0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925",
     # ClaimedFees(address indexed sender, address indexed to, uint256[] ids, bytes32[] amounts)
-    # This event is emitted by LBPair.collectFees()
     "ClaimedFees": "0xdf71cf7e8bfaf5953702c2be6d726b8f61d37bf9d90fda35b7bbb3981264e24d",
     # Deposit(address,uint256) - WAVAX wrap
     "Deposit": "0xe1fffcc4923d04b559f4d29a8bfc6cda04eb5b0d3c460751c2402c5c5cc9109c",
@@ -48,14 +43,8 @@ EVENT_TOPICS: dict[str, str] = {
 
 TOPIC_TO_EVENT: dict[str, str] = {v: k for k, v in EVENT_TOPICS.items()}
 
-# Individual topic constants for backward compatibility
 DEPOSITED_TO_BINS_TOPIC = EVENT_TOPICS["DepositedToBins"]
 WITHDRAWN_FROM_BINS_TOPIC = EVENT_TOPICS["WithdrawnFromBins"]
-
-
-# =============================================================================
-# Enums
-# =============================================================================
 
 
 class TraderJoeV2EventType(Enum):
@@ -82,11 +71,6 @@ EVENT_NAME_TO_TYPE: dict[str, TraderJoeV2EventType] = {
     "Deposit": TraderJoeV2EventType.DEPOSIT,
     "Withdrawal": TraderJoeV2EventType.WITHDRAWAL,
 }
-
-
-# =============================================================================
-# Data Classes
-# =============================================================================
 
 
 @dataclass
@@ -197,11 +181,6 @@ class ParseResult:
     error: str | None = None
 
 
-# =============================================================================
-# Parser Class
-# =============================================================================
-
-
 class TraderJoeV2ReceiptParser:
     """Parser for TraderJoe V2 transaction receipts.
 
@@ -219,7 +198,7 @@ class TraderJoeV2ReceiptParser:
                 instead of assuming 18 for all tokens.
             **kwargs: Additional arguments (ignored for compatibility)
         """
-        _ = kwargs  # Explicitly unused for forward compatibility
+        _ = kwargs
         self._chain = chain
         self.registry = EventRegistry(EVENT_TOPICS, EVENT_NAME_TO_TYPE)
 
@@ -233,7 +212,6 @@ class TraderJoeV2ReceiptParser:
             ParseResult with extracted data
         """
         try:
-            # Normalize transaction hash
             tx_hash_raw = receipt.get("transactionHash", "")
             if isinstance(tx_hash_raw, bytes):
                 tx_hash = "0x" + tx_hash_raw.hex()
@@ -246,10 +224,8 @@ class TraderJoeV2ReceiptParser:
             gas_used = receipt.get("gasUsed", 0)
             logs = receipt.get("logs", [])
 
-            # Parse all events
             events = self._parse_logs(logs, tx_hash, block_number)
 
-            # Check transaction status
             status = receipt.get("status", 1)
             if status != 1:
                 return ParseResult(
@@ -261,13 +237,10 @@ class TraderJoeV2ReceiptParser:
                     error="Transaction reverted",
                 )
 
-            # Try to extract swap result
             swap_result = self._extract_swap_result(events, gas_used, block_number)
 
-            # Try to extract liquidity result
             liquidity_result = self._extract_liquidity_result(events, gas_used, block_number)
 
-            # Log parsed receipt with user-friendly formatting
             tx_fmt = format_tx_hash(tx_hash)
             gas_fmt = format_gas_cost(receipt.get("gasUsed"))
 
@@ -319,34 +292,28 @@ class TraderJoeV2ReceiptParser:
             if not topics:
                 continue
 
-            # Normalize first topic (event signature)
             first_topic = topics[0]
             if isinstance(first_topic, bytes):
                 first_topic = "0x" + first_topic.hex()
             elif not first_topic.startswith("0x"):
                 first_topic = "0x" + first_topic
 
-            # Look up event name
             event_name = self.registry.get_event_name(first_topic.lower())
             if event_name is None:
                 continue
 
             event_type = self.registry.get_event_type(event_name) or TraderJoeV2EventType.UNKNOWN
 
-            # Get contract address
             address = log.get("address", "")
             if isinstance(address, bytes):
                 address = "0x" + address.hex()
 
-            # Parse event data based on type
             data = self._parse_event_data(event_type, log)
 
-            # Get raw data
             raw_data = log.get("data", "")
             if isinstance(raw_data, bytes):
                 raw_data = "0x" + raw_data.hex()
 
-            # Get raw topics
             raw_topics = []
             for topic in topics:
                 if isinstance(topic, bytes):
@@ -378,7 +345,6 @@ class TraderJoeV2ReceiptParser:
         topics = log.get("topics", [])
         data = log.get("data", "")
 
-        # Normalize data to hex string
         data_hex = HexDecoder.normalize_hex(data)
 
         result: dict[str, Any] = {}
@@ -403,8 +369,7 @@ class TraderJoeV2ReceiptParser:
                 if len(topics) >= 3:
                     result["sender"] = HexDecoder.topic_to_address(topics[1])
                     result["to"] = HexDecoder.topic_to_address(topics[2])
-                # ids and amounts are dynamic arrays (complex to parse)
-                # Store raw_data for now, matching original behavior
+                # Dynamic arrays remain raw for the offset-based decoder.
                 result["raw_data"] = data_hex
 
             elif event_type == TraderJoeV2EventType.WITHDRAWN_FROM_BINS:
@@ -412,8 +377,7 @@ class TraderJoeV2ReceiptParser:
                 if len(topics) >= 3:
                     result["sender"] = HexDecoder.topic_to_address(topics[1])
                     result["to"] = HexDecoder.topic_to_address(topics[2])
-                # ids and amounts are dynamic arrays (complex to parse)
-                # Store raw_data for now, matching original behavior
+                # Dynamic arrays remain raw for the offset-based decoder.
                 result["raw_data"] = data_hex
 
             elif event_type == TraderJoeV2EventType.CLAIMED_FEES:
@@ -447,14 +411,12 @@ class TraderJoeV2ReceiptParser:
         block_number: int,
     ) -> ParsedSwapResult | None:
         """Extract swap result from Transfer events."""
-        # Get all Transfer events
         transfers = [e for e in events if e.event_type == TraderJoeV2EventType.TRANSFER]
 
         if len(transfers) < 2:
             return None
 
-        # First transfer: user -> pool (token in)
-        # Last transfer: pool -> user (token out)
+        # Router emission order puts the input first and output last.
         transfer_in = transfers[0]
         transfer_out = transfers[-1]
 
@@ -465,7 +427,6 @@ class TraderJoeV2ReceiptParser:
             if amount_in <= 0 or amount_out <= 0:
                 return None
 
-            # Calculate price
             price = Decimal(amount_out) / Decimal(amount_in) if amount_in > 0 else Decimal(0)
 
             return ParsedSwapResult(
@@ -490,7 +451,6 @@ class TraderJoeV2ReceiptParser:
         block_number: int,
     ) -> ParsedLiquidityResult | None:
         """Extract liquidity result from DepositedToBins or WithdrawnFromBins events."""
-        # Look for deposit or withdrawal events
         deposit_events = [e for e in events if e.event_type == TraderJoeV2EventType.DEPOSITED_TO_BINS]
         withdraw_events = [e for e in events if e.event_type == TraderJoeV2EventType.WITHDRAWN_FROM_BINS]
 
@@ -552,9 +512,7 @@ class TraderJoeV2ReceiptParser:
             return transfers
         key = "to" if to_pool else "from"
         filtered = [e for e in transfers if str(e.data.get(key, "")).lower() == pool]
-        # Fall back to the unfiltered list if filtering finds nothing — a
-        # connector variant that routes principal through an intermediary
-        # would otherwise silently drop the amounts (Empty ≠ Zero).
+        # Preserve amounts for variants that route principal through an intermediary.
         return filtered or transfers
 
     @staticmethod
@@ -648,16 +606,12 @@ class TraderJoeV2ReceiptParser:
                     token_out=result.swap_result.token_out or "",
                     amount_in=result.swap_result.amount_in or 0,
                     amount_out=result.swap_result.amount_out or 0,
-                    sender="",  # Not available from basic parsing
+                    sender="",
                     recipient="",
                 )
             )
 
         return swaps
-
-    # =============================================================================
-    # Extraction Methods (for Result Enrichment)
-    # =============================================================================
 
     def _resolve_token_decimals(self, token_address: str | None) -> int | None:
         """Resolve token decimals from address using the token resolver.
@@ -723,7 +677,7 @@ class TraderJoeV2ReceiptParser:
             amount_in = sr.amount_in or 0
             amount_out = sr.amount_out or 0
 
-            # Resolve actual token decimals (avoids VIB-593 wrong amount_in_decimal for USDC)
+            # Unknown decimals remain unmeasured; they are never defaulted to 18.
             token_in_decimals = self._resolve_token_decimals(sr.token_in)
             token_out_decimals = self._resolve_token_decimals(sr.token_out)
             if token_in_decimals is None or token_out_decimals is None:
@@ -733,7 +687,6 @@ class TraderJoeV2ReceiptParser:
             amount_out_decimal = Decimal(str(amount_out)) / Decimal(10**token_out_decimals)
             effective_price = amount_out_decimal / amount_in_decimal if amount_in_decimal > 0 else Decimal(0)
 
-            # VIB-3203 Phase B: realized slippage when enricher supplies a quote.
             slippage_bps: int | None = None
             if (
                 expected_out is not None
@@ -776,13 +729,11 @@ class TraderJoeV2ReceiptParser:
         try:
             result = self.parse_receipt(receipt)
 
-            # Look for deposit or withdrawal events
             for event in result.events:
                 if event.event_type in (
                     TraderJoeV2EventType.DEPOSITED_TO_BINS,
                     TraderJoeV2EventType.WITHDRAWN_FROM_BINS,
                 ):
-                    # Try to parse bin IDs from raw_data
                     raw_data = event.data.get("raw_data", "")
                     if raw_data:
                         bin_ids = self._parse_bin_ids_from_data(raw_data)
@@ -806,19 +757,16 @@ class TraderJoeV2ReceiptParser:
         """
         try:
             data_hex = HexDecoder.normalize_hex(data)
-            if len(data_hex) < 128:  # At least 64 bytes (two 32-byte offsets)
+            if len(data_hex) < 128:  # Two 32-byte ABI offsets.
                 return None
 
-            # Get offset to ids array (first 32 bytes of data)
             ids_offset = HexDecoder.decode_uint256(data_hex, 0)
 
-            # Read ids array length at offset
             ids_length = HexDecoder.decode_uint256(data_hex, ids_offset)
 
-            if ids_length == 0 or ids_length > 1000:  # Sanity check
+            if ids_length == 0 or ids_length > 1000:  # Bound malformed array work.
                 return None
 
-            # Read each bin ID
             bin_ids = []
             for i in range(ids_length):
                 bin_id = HexDecoder.decode_uint256(data_hex, ids_offset + 32 + (i * 32))
@@ -849,14 +797,11 @@ class TraderJoeV2ReceiptParser:
         try:
             result = self.parse_receipt(receipt)
 
-            # TraderJoe V2 uses DepositedToBins/WithdrawnFromBins events, not Transfer
-            # The amounts are encoded as bytes32 arrays - returning None until decoded
             for event in result.events:
                 if event.event_type in (
                     TraderJoeV2EventType.DEPOSITED_TO_BINS,
                     TraderJoeV2EventType.WITHDRAWN_FROM_BINS,
                 ):
-                    # Event detected but amount decoding not implemented
                     logger.debug("TraderJoe V2 liquidity event detected, amount decoding not implemented")
                     return None
 
@@ -883,7 +828,6 @@ class TraderJoeV2ReceiptParser:
             gas_used = receipt.get("gasUsed", 0)
             block_number = receipt.get("blockNumber", 0)
 
-            # Look for ClaimedFees events first (V2.1)
             claimed_events = [e for e in result.events if e.event_type == TraderJoeV2EventType.CLAIMED_FEES]
             if claimed_events:
                 event = claimed_events[0]
@@ -892,7 +836,6 @@ class TraderJoeV2ReceiptParser:
                 if raw_data:
                     bin_ids = self._parse_bin_ids_from_data(raw_data) or []
 
-                # Get fee amounts from Transfer events
                 fees_x = 0
                 fees_y = 0
                 transfers = [e for e in result.events if e.event_type == TraderJoeV2EventType.TRANSFER]
@@ -938,11 +881,7 @@ class TraderJoeV2ReceiptParser:
         """
         from almanak.framework.execution.extracted_data import ProtocolFees
 
-        # VIB-3495: TJ V2 fee amounts are available as raw token units in
-        # ClaimedFees + Transfer events, but USD conversion requires a price
-        # oracle that is not available at the receipt-parser layer. The fee
-        # exists (TJ V2 always charges a non-zero LP fee on swaps) but we
-        # cannot report total_usd without a price source.
+        # Receipt-level fees are raw token units; USD value requires an unavailable price source.
         return ProtocolFees(
             total_usd=None,
             unavailable_reason="protocol_fee_not_emitted_in_receipt",
@@ -1018,21 +957,11 @@ class TraderJoeV2ReceiptParser:
             if not result.liquidity_result or not result.liquidity_result.is_add:
                 return None
 
-            # The DepositedToBins emitter is the LBPair — chain-truth pool addr.
-            # Lowercase it: a real RPC returns a checksummed (mixed-case)
-            # log address, but the LP handler's _clean_pool_address_candidate
-            # only accepts lowercase 0x-hex (matches the Uniswap V3 path).
+            # RPC log addresses may be checksummed; the accounting resolver requires lowercase hex.
             pool_address = (result.liquidity_result.pool_address or "").lower()
 
-            # Token-X / token-Y deposit amounts come from the ERC-20 Transfer
-            # legs into the LBPair (wallet → LBPair). Filter to transfers whose
-            # destination IS the LBPair so unrelated legs (native-token wrap,
-            # router hops, refunds) can't corrupt the amounts (gemini HIGH on
-            # PR #2607). Emission order is preserved — the LBRouter transfers
-            # tokenX then tokenY, matching the bin-pair (amount0=X, amount1=Y)
-            # convention the accounting handler resolves; do NOT sort by
-            # address (canonical lower-address-first ordering would swap the
-            # legs whenever tokenX's address > tokenY's, mis-scaling amounts).
+            # Principal uses LBPair-bound ERC-20 legs in tokenX/tokenY emission order;
+            # Liquidity Book pairs are not address-sorted.
             deposit_transfers = self._lbpair_transfers(result.events, pool_address, to_pool=True)
             amount_x = 0
             amount_y = 0
@@ -1043,18 +972,14 @@ class TraderJoeV2ReceiptParser:
             currency0, currency1 = self._leg_currency_pair(deposit_transfers)
 
             return LPOpenData(
-                # Liquidity Book is fungible (ERC-1155), not an NFT — there is
-                # no per-position token id. ``0`` is the documented
-                # "no discriminator" sentinel (LPOpenData.position_id is typed
-                # ``int``); the accounting handler's
-                # ``_resolve_lp_open_discriminator`` maps ``0`` → ``None``.
+                # ERC-1155 bin liquidity is fungible; zero means no position discriminator.
                 position_id=0,
                 amount0=amount_x,
                 amount1=amount_y,
-                # VIB-6383 — bind each amount to the contract it came from.
+                # Bind each amount to its emitting ERC-20 contract.
                 currency0=currency0,
                 currency1=currency1,
-                # Bin model has no tick bracket — leave None, do NOT fabricate.
+                # Bin liquidity has no tick bracket.
                 tick_lower=None,
                 tick_upper=None,
                 liquidity=None,
@@ -1091,46 +1016,27 @@ class TraderJoeV2ReceiptParser:
             result = self.parse_receipt(receipt)
 
             if not result.liquidity_result or result.liquidity_result.is_add:
-                # VIB-4634 — LP_COLLECT_FEES path. A fee harvest emits
-                # ``ClaimedFees`` (no WithdrawnFromBins), so the principal
-                # withdrawal branch above does not fire. The Liquidity Book
-                # keeps principal on-chain on a collect, so the collected
-                # principal is a measured zero; the fee amounts live on the
-                # separate ``fees0`` / ``fees1`` extraction. We still emit an
-                # ``LPCloseData`` here solely to carry the canonical LBPair
-                # ``pool_address`` (the ``ClaimedFees`` emitter) so the LP
-                # accounting handler can book the LP_COLLECT_FEES event
-                # instead of dropping it (the ``tokenX/tokenY/<binStep>``
-                # position-key descriptor is rejected as a V3 fee tier).
+                # Fee collection emits ClaimedFees without withdrawing principal.
                 fees = self.extract_collected_fees(receipt)
                 if fees is not None and fees.success and fees.pool_address:
                     return LPCloseData(
-                        # Principal stays on-chain on a collect — measured zero,
-                        # NOT unmeasured. Fees ship via fees0/fees1 separately.
+                        # Principal remains on-chain, so zero is measured.
                         amount0_collected=0,
                         amount1_collected=0,
-                        # VIB-4470 — TraderJoe doesn't separate fees in the
-                        # withdrawal events; fees are unmeasured here (Empty ≠
-                        # Zero). The dedicated extract_fees0/1 path carries them.
+                        # Fees are unmeasured here and supplied by extract_fees0/1.
                         fees0=None,
                         fees1=None,
                         liquidity_removed=None,
-                        # Lowercase — a real RPC log address is checksummed and
-                        # the LP handler only accepts lowercase 0x-hex.
-                        pool_address=fees.pool_address.lower(),  # VIB-4634 — LBPair
+                        # RPC log addresses may be checksummed; the accounting resolver requires lowercase hex.
+                        pool_address=fees.pool_address.lower(),
                     )
                 return None
 
-            # The WithdrawnFromBins emitter is the LBPair — chain-truth pool addr.
-            # Lowercase it (real RPC log addresses are checksummed; the LP
-            # handler only accepts lowercase 0x-hex).
+            # RPC log addresses may be checksummed; the accounting resolver requires lowercase hex.
             pool_address = (result.liquidity_result.pool_address or "").lower()
 
-            # Get amounts from the LBPair → wallet withdrawal Transfer legs.
-            # Filter to transfers FROM the LBPair so unrelated legs (unwrap,
-            # router hops) can't corrupt the amounts (gemini HIGH on PR #2607).
-            # Emission order preserved (tokenX then tokenY); not sorted by
-            # address — see _lbpair_transfers / extract_lp_open_data.
+            # Principal uses LBPair-origin ERC-20 legs in tokenX/tokenY emission order;
+            # Liquidity Book pairs are not address-sorted.
             amount_x = 0
             amount_y = 0
             withdraw_transfers = self._lbpair_transfers(result.events, pool_address, to_pool=False)
@@ -1144,15 +1050,14 @@ class TraderJoeV2ReceiptParser:
                 return LPCloseData(
                     amount0_collected=amount_x,
                     amount1_collected=amount_y,
-                    # VIB-6383 — bind each amount to the contract it came from.
+                    # Bind each amount to its emitting ERC-20 contract.
                     currency0=currency0,
                     currency1=currency1,
-                    # VIB-4470 — TraderJoe doesn't separate fees in events;
-                    # fees are unmeasured (Empty ≠ Zero) rather than zero.
+                    # Withdrawal events do not separate fees, so they remain unmeasured.
                     fees0=None,
                     fees1=None,
                     liquidity_removed=None,
-                    pool_address=pool_address,  # VIB-4634 — LBPair address
+                    pool_address=pool_address,
                 )
 
             return None
@@ -1188,9 +1093,7 @@ class TraderJoeV2ReceiptParser:
         if token_address and self._chain:
             try:
                 resolver = get_token_resolver()
-                # skip_gateway/log_errors: accounting write hot path — resolve the
-                # symbol AND decimals from the static registry without risking a
-                # gateway round-trip stall (mirrors ledger ``_lp_amount_to_human``).
+                # Keep accounting extraction local; resolution failure remains unmeasured.
                 info = resolver.resolve(token_address, self._chain, log_errors=False, skip_gateway=True)
                 symbol = getattr(info, "symbol", "") or ""
                 decimals = getattr(info, "decimals", None)
@@ -1250,9 +1153,7 @@ class TraderJoeV2ReceiptParser:
         if token_address and self._chain:
             try:
                 resolver = get_token_resolver()
-                # skip_gateway/log_errors: accounting write hot path — resolve the
-                # symbol AND decimals from the static registry without risking a
-                # gateway round-trip stall (mirrors ledger ``_lp_amount_to_human``).
+                # Keep accounting extraction local; resolution failure remains unmeasured.
                 info = resolver.resolve(token_address, self._chain, log_errors=False, skip_gateway=True)
                 symbol = getattr(info, "symbol", "") or ""
                 decimals = getattr(info, "decimals", None)
@@ -1321,17 +1222,12 @@ class TraderJoeV2ReceiptParser:
 
         try:
             result = self.parse_receipt(receipt)
-            # A missing ``liquidity_result`` (a fees-only ClaimedFees collect —
-            # principal stays on-chain) carries no money legs.
             if not result.liquidity_result:
                 return None
-            # The DepositedToBins / WithdrawnFromBins emitter IS the LBPair —
-            # chain-truth pool addr (lowercased to match the LP handler's resolver).
+            # Liquidity events are emitted by the canonical LBPair.
             pool_address = (result.liquidity_result.pool_address or "").lower()
 
-            # Only declare legs for a REAL on-chain move (≥1 positive Transfer). A
-            # zero-amount event returns None so the byte-for-byte legacy fallback
-            # (→ intent fallback, amount="") is preserved for that degenerate case.
+            # Zero-only events use the legacy unmeasured fallback instead of declared legs.
             def _positive(transfer: Any) -> bool:
                 try:
                     return int(transfer.data.get("value", 0)) > 0
@@ -1339,7 +1235,6 @@ class TraderJoeV2ReceiptParser:
                     return False
 
             if result.liquidity_result.is_add:
-                # LP_OPEN — INPUT legs from the wallet → LBPair deposit Transfers.
                 deposit_transfers = self._lbpair_transfers(result.events, pool_address, to_pool=True)
                 if not any(_positive(t) for t in deposit_transfers):
                     return None
@@ -1349,7 +1244,6 @@ class TraderJoeV2ReceiptParser:
                 ]
                 return PrimitiveMoneyLegs.of(*legs)
 
-            # LP_CLOSE — OUTPUT legs from the LBPair → wallet withdrawal Transfers.
             withdraw_transfers = self._lbpair_transfers(result.events, pool_address, to_pool=False)
             if not any(_positive(t) for t in withdraw_transfers):
                 return None
