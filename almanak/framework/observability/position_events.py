@@ -75,20 +75,9 @@ from almanak.framework.primitives.taxonomy import (  # noqa: F401 — taxonomy d
 logger = logging.getLogger(__name__)
 
 
-# VIB-5036: the W1-5 decimal-unit soft-fail guard is intentionally NOT wired
-# over position_events.  Its sibling on ``transaction_ledger``
-# (``build_ledger_entry``) guards a HUMAN-units column and remains in place.
-# But ``position_events`` ``amount0`` / ``amount1`` / ``fees_token0`` /
-# ``fees_token1`` are RAW-by-contract (smallest unit): NAV valuation
-# (``portfolio_valuer`` ``amount0_wei``), post-restart hydration
-# (``_run_loop_helpers`` "amount0/amount1 (wei)"), and the attribution lane
-# (``pnl_attributor`` "raw token-denominated") all read them as raw and scale
-# at point-of-use.  Running the human-form guard here therefore produced a
-# guaranteed FALSE WARNING on every LP fee write (the original field report on
-# deployment a9e54a85), eroding the guard's signal.  The fix for that report
-# is the writer-side ``transaction_ledger`` normalization (LP_OPEN amount_in)
-# plus scaling the raw columns at their genuine consumers (IL, display) — not
-# flagging the raw-by-contract columns as suspect.
+# position_events amount and fee columns are raw-by-contract (smallest unit).
+# Consumers scale at point-of-use; the human-units guard stays on
+# transaction_ledger only, where it does not false-positive.
 
 
 class PositionEventType(StrEnum):
@@ -98,10 +87,8 @@ class PositionEventType(StrEnum):
     CLOSE = "CLOSE"
     COLLECT_FEES = "COLLECT_FEES"
     SNAPSHOT = "SNAPSHOT"
-    # VIB-4085 — lending lifecycle is non-monotonic (a loop adds collateral
-    # and debt repeatedly before unwinding), so OPEN/CLOSE alone don't tell
-    # the dashboard whether the leg is being grown or shrunk. INCREASE /
-    # DECREASE record additive / subtractive actions on an already-open leg.
+    # Lending legs grow and shrink repeatedly, so OPEN and CLOSE alone cannot
+    # tell growth from shrinkage; INCREASE and DECREASE record actions on an open leg.
     INCREASE = "INCREASE"
     DECREASE = "DECREASE"
 
@@ -111,16 +98,12 @@ class PositionType(StrEnum):
 
     LP = "LP"
     PERP = "PERP"
-    # VIB-4085 — fungible lending legs. Both share the same FIFO-keyed
-    # ``position_id`` shape (`lending:<chain>:<protocol>:<wallet>:<asset>`)
-    # but are tracked as separate position types so the dashboard can
-    # render the collateral leg and the debt leg side-by-side without
-    # joining on intent_type.
+    # Both lending legs share the FIFO-keyed position_id shape but stay separate
+    # types so collateral and debt render side-by-side without joining on intent.
     LENDING_COLLATERAL = "LENDING_COLLATERAL"
     LENDING_DEBT = "LENDING_DEBT"
-    # Pendle PT (VIB-52xx) — kept in sync with ``primitives.PositionKind`` so
-    # the taxonomy can declare ``position_type=PENDLE_PT`` on the PT rows. A PT
-    # buy seeds OPEN, a sell/redeem seeds CLOSE on the same ``position_id``.
+    # Pendle PT stays in sync with primitives.PositionKind; a buy seeds OPEN and
+    # a sell or redeem seeds CLOSE on the same position_id.
     PENDLE_PT = "PENDLE_PT"
 
 
@@ -187,10 +170,6 @@ def _persisted_text(row: Mapping[str, Any], key: str, default: str = "") -> str:
 
 
 # Intent types that map to position events.
-# VIB-4085 — lending intents (SUPPLY/BORROW/REPAY/WITHDRAW) now produce
-# events as well; the static dispatch below maps them to OPEN / CLOSE
-# defaults that ``_apply_lending`` refines into INCREASE / DECREASE
-# based on lifecycle state read from the ledger row's ``post_state``.
 INTENT_TO_EVENT_TYPE: dict[str, PositionEventType] = {
     "LP_OPEN": PositionEventType.OPEN,
     "LP_CLOSE": PositionEventType.CLOSE,
@@ -205,13 +184,6 @@ INTENT_TO_EVENT_TYPE: dict[str, PositionEventType] = {
     "DELEVERAGE": PositionEventType.CLOSE,  # mirrors REPAY refinement
 }
 
-# VIB-4162 (T2): the legacy ``INTENT_TO_POSITION_TYPE`` dict is gone.
-# Position-type resolution delegates to :func:`_resolve_position_type`,
-# which is a strict wrapper around
-# :func:`almanak.framework.primitives.taxonomy.record_for`. The previous
-# implementation silently fell back to ``PositionType.LP`` on an unknown
-# intent string — the canonical class-of-bug T2 exists to fix.
-
 
 def _resolve_position_type(intent_type: str) -> PositionType:
     """Strict lookup — raises ``UnknownIntentTypeError`` if no taxonomy row.
@@ -220,17 +192,15 @@ def _resolve_position_type(intent_type: str) -> PositionType:
     confirmed the intent is position-producing, so a missing taxonomy row
     is a genuine inconsistency that must surface.
     """
-    record = record_for(intent_type)  # raises UnknownIntentTypeError on miss
+    record = record_for(intent_type)
     pk = record.position_type
     if pk is None:
         raise UnknownIntentTypeError(intent_type)
     return PositionType(pk.value)
 
 
-# VIB-4085 — dust threshold for lending CLOSE detection. A leg with
-# remaining value <= this threshold is treated as fully closed. Aave V3
-# accrues sub-cent residuals from interest indices; treating exact-zero
-# as the only close signal would fragment the lifecycle.
+# A leg at or below this residual value counts as closed; exact-zero would
+# fragment the lifecycle on dust left by interest accrual.
 LENDING_CLOSE_DUST_USD = "0.01"
 
 
@@ -282,7 +252,7 @@ class PositionEvent:
 
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     deployment_id: str = ""
-    cycle_id: str = ""  # Phase 4: correlation to iteration (VIB-2835)
+    cycle_id: str = ""  # Correlation to iteration.
     execution_mode: RunModeStamp = ""
     position_id: str = ""
     position_type: PositionType | None = None
@@ -291,14 +261,12 @@ class PositionEvent:
     protocol: str = ""
     chain: str = ""
 
-    # Token amounts
     token0: str = ""
     token1: str = ""
     amount0: str = ""
     amount1: str = ""
     value_usd: str = ""
 
-    # LP-specific
     tick_lower: int | None = None
     tick_upper: int | None = None
     liquidity: str = ""
@@ -306,36 +274,26 @@ class PositionEvent:
     fees_token0: str = ""
     fees_token1: str = ""
 
-    # Perp-specific
     leverage: str = ""
     entry_price: str = ""
     mark_price: str = ""
     unrealized_pnl: str = ""
     is_long: bool | None = None
 
-    # Execution details
     tx_hash: str = ""
     gas_usd: str = ""
     ledger_entry_id: str = ""
 
-    # Protocol fees (VIB-3205): USD cost captured by the protocol on this tx.
-    # Sourced from ``result.extracted_data["protocol_fees"].total_usd`` (the
-    # ProtocolFees dataclass shipped by VIB-3204). A parser that does not yet
-    # emit ``protocol_fees`` leaves this empty string — attribution must treat
-    # empty as "unknown", distinct from a measured zero ("0").
+    # Protocol fee in USD; empty means unknown, distinct from measured zero.
+    # Sourced from extracted protocol_fees.total_usd when the parser emits it.
     protocol_fees_usd: str = ""
 
-    # Attribution
     attribution_json: str = "{}"
     attribution_version: int = 0
 
-    # VIB-5896 — pool-coin-ordered universe for N-coin fungible pools (Curve,
-    # Balancer), stamped by ``_apply_lp_open`` from ``lp_open_data.coin_symbols``.
-    # IN-MEMORY ONLY: the position_events row schema is 2-slot and this field is
-    # deliberately NOT persisted (``save_position_event`` maps columns
-    # explicitly); its one consumer is ``stamp_entry_state_on_open``, which
-    # carries it into the OPEN row's ``attribution_json["entry_state"]`` so
-    # CLOSE-time IL can fail closed on >2-coin pools. ``None`` for 2-coin venues.
+    # Pool-coin universe for N-coin fungible pools, stamped on open.
+    # In-memory only: the row schema is 2-slot, so this is never persisted;
+    # the open carries it into attribution entry_state for fail-closed IL.
     coin_symbols: list[str] | None = None
 
     def __post_init__(self) -> None:
@@ -438,28 +396,13 @@ class IntentEventContext:
     chain: str
     ledger_entry_id: str
     price_oracle: dict | None = None
-    # VIB-4085 — lending lifecycle decisions read post-state (collateral,
-    # debt, HF, LTV, APR) to refine OPEN→INCREASE / CLOSE→DECREASE. The
-    # runner computes ``post_state`` already (it's persisted to
-    # ``transaction_ledger.post_state_json``); threading it through the
-    # context lets the position_event seeder reuse the same data without
-    # round-tripping back through the gateway.
+    # Post-state values refine OPEN and CLOSE into INCREASE and DECREASE without re-reading state.
     post_state: dict[str, Any] | None = None
-    # VIB-4493 — pre_state is needed for CLOSE event value_usd: post-state
-    # leg value is 0 by definition when refined to CLOSE (that's WHY it's
-    # CLOSE), so stamping post-state would write ``0E-8`` and the dashboard
-    # cannot tell "how much was closed". pre_state's leg value IS the
-    # closed amount. Same dict shape / resolver as ``post_state``.
+    # Pre-state leg value sizes the close; post-state is zero by definition on CLOSE.
     pre_state: dict[str, Any] | None = None
-    # VIB-4085 — wallet address scopes the lending position_id so two
-    # strategies on different wallets don't collide on the same chain +
-    # protocol + asset.
+    # Wallet scopes the lending position_id across strategies.
     wallet_address: str = ""
-    # VIB-4085 — the runner's in-memory recent-open cache (populated by
-    # ``_update_recent_open_events_cache`` on every successful save) is
-    # the authority on whether a SUPPLY/BORROW is the FIRST action on a
-    # position (→ OPEN) or a subsequent action (→ INCREASE). Pre-fix
-    # there was no signal at all and lending events weren't emitted.
+    # In-memory recent opens decide OPEN versus INCREASE for supply and borrow.
     recent_open_events: dict | None = None
 
 
@@ -485,8 +428,7 @@ def _redeem_pt_symbol_from_legs(extracted: Any) -> str:
     legs = extracted.get("primitive_money_legs")
     if legs is None:
         return ""
-    # Deferred import: connector value types must never load at module import
-    # (framework → connector boundary; mirrors the ledger dispatcher's resolver).
+    # Deferred import: connector types must not load at module import.
     from almanak.connectors._strategy_base.primitive_money_leg import PrimitiveMoneyLegs
 
     if not isinstance(legs, PrimitiveMoneyLegs):
@@ -529,10 +471,7 @@ def _pendle_pt_event(
     swaps (YT / SY ↔ underlying) — so the generic path is unchanged.
     """
     protocol = (getattr(intent, "protocol", "") or "").lower()
-    # tech-debt VIB-5292: this framework-side protocol-name gate is the position-
-    # events analogue of the accounting AccountingTreatmentRegistry de-coupling —
-    # tracked for migration to a connector-owned position-event classifier
-    # (blueprint 22). Baselined in the chain/protocol coupling ratchet meanwhile.
+    # Framework-side protocol gate until the classifier moves to connectors.
     if "pendle" not in protocol:
         return None
     from_token = (getattr(intent, "from_token", "") or "").strip()
@@ -541,39 +480,23 @@ def _pendle_pt_event(
     to_u = to_token.upper()
     if intent_type == "SWAP":
         if to_u.startswith("PT-"):
-            event_type = PositionEventType.OPEN  # buy PT
+            event_type = PositionEventType.OPEN
             pt_symbol = to_token
         elif from_u.startswith("PT-"):
-            event_type = PositionEventType.CLOSE  # sell PT
+            event_type = PositionEventType.CLOSE
             pt_symbol = from_token
         else:
             return None  # YT / SY swap — not a PT position action
     elif intent_type == "WITHDRAW":
-        # A PT redeem's symbol lives on the DECLARED INPUT leg (the redeem intent
-        # itself carries the underlying out token / YT address, never the PT). No
-        # resolvable PT symbol → a non-PT Pendle withdraw (YT redeem) → generic
-        # path. This guards the prior bug where a non-PT withdraw produced a bogus
-        # ``pendle_pt:...:<underlying>`` id, and the bug where a real redeem (no
-        # from/to PT token) produced an empty position_id and seeded no CLOSE.
+        # No resolvable PT symbol means a non-PT withdraw; take the generic path.
         pt_symbol = redeem_pt_symbol.strip()
         if not pt_symbol.upper().startswith("PT-"):
             return None
-        event_type = PositionEventType.CLOSE  # redeem at/after maturity
+        event_type = PositionEventType.CLOSE
     else:
         return None
-    # Identity is the normalized maturity-bearing PT symbol (e.g.
-    # "pt-wsteth-25jun2026") — the ONLY identifier present in BOTH the intent
-    # (here) and the persisted ledger row (the accounting treatment's
-    # ``_pt_context`` reads ``token_in``/``token_out``). A Pendle ``SwapIntent``
-    # carries no pool/market, and the resolved market address is never persisted
-    # on the ledger row, so a market-derived key is empty in practice. Keying on
-    # the PT symbol makes this ``position_id`` byte-identical to the
-    # ``accounting_events`` ``position_key``
-    # (connectors/pendle/accounting_spec.py:_pt_context) — the surface the
-    # dashboard joins on — and the maturity-bearing symbol uniquely identifies
-    # the PT (one symbol ⇔ one market ⇔ one maturity). Upstream (the G-PT0
-    # receipt parser + the demo config) guarantees the canonical symbol is used
-    # on every leg so OPEN (buy) and CLOSE (sell/redeem) collapse onto one key.
+    # Identity is the normalized PT symbol; it is present in both the intent
+    # and the ledger row, so OPEN and CLOSE collapse onto one key.
     pt_key = pt_symbol.strip().lower()
     position_id = f"pendle_pt:{chain.lower()}:{wallet.lower()}:{pt_key}" if pt_key else ""
     return event_type, position_id
@@ -607,10 +530,6 @@ def _resolve_event_and_position_type(
     event_type = INTENT_TO_EVENT_TYPE.get(intent_type)
     if event_type is None:
         return None
-    # VIB-4162: strict resolution — raises UnknownIntentTypeError if the intent
-    # passed the INTENT_TO_EVENT_TYPE gate but the taxonomy has no record. The
-    # pre-T2 silent-LP fallback at this site is the canonical class-of-bug T2
-    # fixes (see module commit history).
     return event_type, _resolve_position_type(intent_type), ""
 
 
@@ -632,16 +551,9 @@ def _tx_and_gas_details(ctx: IntentEventContext, result: Any) -> tuple[str, str]
     if not result:
         return tx_hash, gas_usd
     if hasattr(result, "transaction_results") and result.transaction_results:
-        # VIB-5066 — ``position_events.tx_hash`` MUST point at the ACTION
-        # transaction, not an APPROVAL leg. The pre-fix code always took
-        # ``transaction_results[0]``, which for an approve+action bundle
-        # (e.g. SUPPLY = approve + supply) pointed at the approval, making
-        # the recorded tx_hash useless for "what was the action?" audits.
-        # Reuse ``ledger._classify_sub_tx_role`` (the same Approval-event
-        # heuristic the ledger writer uses for ``transaction_ledger.tx_hash``
-        # per VIB-4087) so the position_events row and the ledger row agree
-        # on the ACTION leg. Fall back to ``[0]`` only when no ACTION leg is
-        # found — never silently keep the approval over an available action.
+        # tx_hash must point at the ACTION leg, not an approval; reuse the ledger
+        # classifier so both rows agree, falling back to the first leg only
+        # when no ACTION leg exists.
         from almanak.framework.observability.ledger import _classify_sub_tx_role
 
         tx_results = result.transaction_results
@@ -687,8 +599,6 @@ def _seed_event(ctx: IntentEventContext) -> PositionEvent | None:
     event_type, position_type, pendle_position_id_override = resolved
     protocol = getattr(intent, "protocol", "") or ""
 
-    # Position id: a Pendle-PT market-derived key (continuity across buy→redeem)
-    # takes precedence; otherwise result.position_id over intent.position_id.
     position_id = pendle_position_id_override
     result = ctx.result
     if position_id:
@@ -698,45 +608,21 @@ def _seed_event(ctx: IntentEventContext) -> PositionEvent | None:
     elif hasattr(intent, "position_id") and intent.position_id:
         position_id = str(intent.position_id)
 
-    # VIB-5941: perps carry no venue NFT/position id (GMX V2 keys a position on
-    # market + side, not a token id, and ``PerpOpenIntent`` has no position_id
-    # field). Without a stable id the θ final-guard drops EVERY perp OPEN/CLOSE
-    # event → 0 rows in position_events → P1 XFAIL and no lifecycle. Derive a
-    # deterministic id (mirroring the lending
-    # ``<primitive>:<chain>:<protocol>:<wallet>:<key>`` shape) so OPEN and CLOSE
-    # on the SAME position share an id and the lifecycle pairs. Intent-known,
-    # receipt-independent.
-    #
-    # The discriminator is (market, side, collateral_token) — all REQUIRED on
-    # BOTH ``PerpOpenIntent`` and ``PerpCloseIntent`` (``market: str``,
-    # ``is_long: bool``, ``collateral_token: str``), so an OPEN and its CLOSE mint
-    # the SAME id and the lifecycle pairs deterministically. Market alone would
-    # collapse a long and a short in the same market (or two positions on the same
-    # market backed by different collateral) into ONE lifecycle, netting distinct
-    # positions. GMX V2 itself keys a position on (market, collateralToken,
-    # isLong), so this mirrors the venue's identity.
-    #
-    # NOT the accounting ``position_key`` (``perp_accounting.py`` →
-    # ``perp:{protocol}:{chain}:{wallet}:{market}``): the segment ORDER differs
-    # (protocol/chain swapped) and the accounting key is market-only, so the two
-    # are DIFFERENT namespaces and must never be equality-joined. Re-keying the
-    # accounting key to include side/collateral is a lot-matching contract change
-    # (matching_policy_version bump + historical-row join semantics) tracked
-    # separately in VIB-5946.
+    # Perps carry no venue position id, so derive a deterministic one from
+    # market, side, and collateral; OPEN and CLOSE on the same position share it.
+    # Market alone would collapse distinct positions sharing a market.
+    # This id is a different namespace from the accounting position_key and
+    # must never be equality-joined with it.
     if not position_id and position_type == PositionType.PERP:
-        # strip THEN replace: " BTC-USD " must normalize to "btc-usd", not
-        # "_btc-usd_", so whitespace-differing payloads can't mint distinct ids.
-        # VIB-6412: canonicalise separators first — GMX V2 accepts several
-        # spellings of one market (ALM-3094), which would otherwise mint a
-        # distinct position_id per spelling for one on-chain position.
+        # Normalize whitespace before separators so equivalent payloads share an id.
+        # Canonicalise market separators; one on-chain position has many spellings.
         canonical_market = perp_market_identity_key(getattr(intent, "market", ""))
         market_key = canonical_market.strip().lower().replace(" ", "_")
         if market_key and protocol and ctx.chain:
             is_long = getattr(intent, "is_long", None)
             side = "long" if is_long else "short" if is_long is not None else "na"
             collateral = str(getattr(intent, "collateral_token", "") or "").strip().lower()
-            # ``wallet_address`` defaults to "" but a caller may pass None; guard
-            # so the id build never AttributeErrors on ``.lower()`` (CodeRabbit).
+            # Wallet may be None; never fail id construction on it.
             wallet = (ctx.wallet_address or "").lower()
             position_id = f"perp:{ctx.chain.lower()}:{protocol.lower()}:{wallet}:{market_key}:{side}:{collateral}"
 
@@ -837,8 +723,7 @@ def _pair_tokens_from_declared_legs(extracted: Any, *, opening: bool = False) ->
     legs = extracted.get("primitive_money_legs")
     if legs is None:
         return (None, None)
-    # Deferred import: connector value types must never load at module import
-    # (framework → connector boundary; mirrors the ledger dispatcher's resolver).
+    # Deferred import: connector types must not load at module import.
     from almanak.connectors._strategy_base.primitive_money_leg import PrimitiveMoneyLegs
 
     if not isinstance(legs, PrimitiveMoneyLegs):
@@ -907,10 +792,7 @@ def _pair_tokens_from_parser_currencies(lp_data: Any, chain: str) -> tuple[str, 
     if not (cur0 and cur1):
         return None
 
-    # Reuse the ledger's address->symbol resolver so BOTH producers map an address to
-    # a symbol identically (native sentinels included) — two implementations would be
-    # a fresh drift seam. Lazy import mirrors this module's ``_classify_sub_tx_role``
-    # borrow (framework-internal, no import cycle).
+    # Reuse the ledger resolver so both producers map addresses identically.
     from almanak.framework.observability.ledger import _resolve_lp_close_symbol
 
     sym0 = _resolve_lp_close_symbol(cur0, chain)
@@ -928,15 +810,8 @@ def _pair_tokens_from_parser_currencies(lp_data: Any, chain: str) -> tuple[str, 
     return ("", "")
 
 
-# Rationale for the allowlist immediately below. This function is a PRECEDENCE LADDER:
-#     currencies-resolved  >  declared-legs  >  label-order
-# with the address sort unreachable after ANY observation. Extracting each arm into a
-# helper would raise every individual arm's readability while hiding the one thing that
-# matters — the order — behind call sites. Getting that order wrong IS the defect class
-# (VIB-5851 / VIB-6383) that booked $228,032,393,195.42 on a $2.80 position. And this is
-# not a refactor deferral: VIB-6104 (Move C) DELETES this ladder rather than decomposing
-# it, so decomposing now would spread the ordering across helpers Move C must re-collapse.
-#
+# Precedence ladder: currencies-resolved, then declared-legs, then label-order.
+# The order is the property; keep arms inline so misordering stays visible.
 # crap-allowlist: VIB-6475 — precedence ladder; the ORDER is the property, and VIB-6104
 # Move C deletes this function rather than decomposing it. Retire when Move C lands.
 def _realign_event_lp_pair_if_needed(event: PositionEvent, ctx: IntentEventContext, *, opening: bool) -> None:
@@ -993,38 +868,19 @@ def _realign_event_lp_pair_if_needed(event: PositionEvent, ctx: IntentEventConte
 
     extracted = ctx.extracted if isinstance(ctx.extracted, dict) else {}
 
-    # N-coin fungible path (Curve / Balancer) — coin order is pool index.
-    # Checked before the declared-legs branch: an N-coin connector also stamps
-    # legs, and its coin universe (not a 2-slot pair) owns the ordering.
+    # N-coin pools order by pool index; their coin universe owns the ordering.
     if event.coin_symbols:
         return
     lp_data = extracted.get("lp_open_data") or extracted.get("lp_close_data")
     if _lp_data_attr(lp_data, "coin_symbols"):
         return
-    # VIB-5988 — second, drift-proof N-coin signal. ``coin_symbols`` and legs are
-    # resolved from live pool metadata; a future partial metadata result carrying one
-    # and not the other would silently re-open the mis-pairing this guard
-    # exists to prevent. ``additional_amounts`` comes off the receipt itself
-    # (Curve stamps it whenever the pool has >2 coins), so it cannot drift from
-    # live metadata. Curve is the one connector whose legs are per-FUNDED-coin
-    # while amount0/amount1 are per-POOL-INDEX, so leg index does NOT align
-    # with amount slot there — the declared-legs branch must never run for it.
+    # additional_amounts comes off the receipt, so it cannot drift from live
+    # metadata; per-funded-coin leg index does not align with amount slots there.
     if _lp_data_attr(lp_data, "additional_amounts"):
         return
 
-    # VIB-6053 — PARSER-EMITTED IDENTITY OUTRANKS EVERY DERIVATION BELOW.
-    #
-    # ``currency0``/``currency1`` are stamped by the receipt parser index-aligned
-    # with the very ``amount0``/``amount1`` it decoded, so they are a DIRECT
-    # observation of which token holds which slot. Everything below this point
-    # *infers* that pairing — the declared-legs branch from a second carrier with
-    # its own ordering, the address sort from resolving label symbols against the
-    # static registry. An inference must never override an observation.
-    #
-    # This is also what makes the Layer-3 (position_events) and Layer-1
-    # (transaction_ledger) producers agree: both now read the same stamped
-    # identity, so the cross-producer divergence VIB-5988 surfaced cannot recur by
-    # one lane re-deriving while the other adopts.
+    # Parser-emitted currencies are observed identity and outrank every
+    # derivation below; both ledger and position rows read the same stamp.
     parser_pair = _pair_tokens_from_parser_currencies(lp_data, ctx.chain or event.chain)
     currencies_observed = parser_pair is not None
     if parser_pair is not None:
@@ -1043,28 +899,8 @@ def _realign_event_lp_pair_if_needed(event: PositionEvent, ctx: IntentEventConte
                 )
                 event.token0, event.token1 = s0, s1
             return
-        # VIB-6383 — currencies were OBSERVED but did not resolve, so there is no
-        # observation to honour: fall through to the declared-legs branch ONLY.
-        #
-        # This completes VIB-6053's rule rather than overturning it. That rule's
-        # justification names the offending inference twice, and both times it is
-        # the ADDRESS SORT ("falling through to an address-sort derivation would
-        # let a weaker signal override a stronger one"). Declared money legs are
-        # not an address sort — they are parser-stamped, per-leg, from the SAME
-        # receipt as the amounts, so they are a strictly better stand-in for an
-        # observation that failed to materialise than the pool label is. The
-        # resulting order is a monotone degradation:
-        #
-        #     currencies-resolved  >  declared-legs  >  label-order
-        #
-        # with the address sort unreachable after ANY observation (the guard
-        # below). Label order is the guess tier and belongs last, not second.
-        #
-        # VIB-6053 could not have had this case in view: currencies existed only
-        # for V4, which declares no money legs, so no connector carried both
-        # carriers until TraderJoe Liquidity Book. See VIB-6104 (bind LP
-        # money-leg identity once at evidence production) for the eventual
-        # retirement of this ladder.
+        # Observed but unresolved currencies fall through to declared legs only;
+        # the address sort stays unreachable and label order is last resort.
 
     if extracted.get("primitive_money_legs") is not None:
         d0, d1 = _pair_tokens_from_declared_legs(extracted, opening=opening)
@@ -1084,10 +920,7 @@ def _realign_event_lp_pair_if_needed(event: PositionEvent, ctx: IntentEventConte
                 event.token0 = d0
                 event.token1 = d1
             return
-        # Legs present but unusable for this stage (single-sided add, unknown
-        # leg identity, or a non-LP leg shape such as Pendle's PT input+output).
-        # The connector owns an ordering convention we cannot read here, so an
-        # address sort would be a guess on a money path — keep label order.
+        # Unusable legs mean the connector ordering cannot be read; keep label order.
         logger.warning(
             "VIB-5988: declared money legs present but no usable %s pair for LP position_events "
             "%s/%s (chain=%s position_id=%s event_type=%s); keeping label order — value_usd may be "
@@ -1101,14 +934,8 @@ def _realign_event_lp_pair_if_needed(event: PositionEvent, ctx: IntentEventConte
         )
         return
 
-    # VIB-6383 — an OBSERVATION was made and could not be resolved, and no usable
-    # declared legs stood in for it. Keep label order; the address sort must stay
-    # unreachable. This is the one path where the fall-through above could
-    # otherwise have reached it: the declared-legs branch returns in BOTH of its
-    # arms, so a connector that declares legs never gets here. Retained anyway —
-    # "it cannot happen today" is a property of the current branch shapes, not an
-    # invariant, and the whole point of this guard is that a future edit to those
-    # shapes must not silently re-open an address sort on a money path.
+    # Keep label order here; future branch-shape edits must not reopen an
+    # address sort on a money path.
     if currencies_observed:
         logger.warning(
             "VIB-6383: parser observed LP currencies on %s but they did not resolve, and no "
@@ -1160,27 +987,13 @@ def _apply_lp_open(event: PositionEvent, ctx: IntentEventContext) -> None:
     """
     lp_open = ctx.extracted.get("lp_open_data")
 
-    # VIB-6162 — minted liquidity, from whichever field the connector populated.
-    # This is deliberately OUTSIDE the ``lp_open_data`` guard below, because the
-    # column was empty for every LP connector in the corpus and each missed it a
-    # different way:
-    #
-    #   * Aerodrome emits NO ``lp_open_data`` at all, so the early return fired
-    #     and the assignment was never reached.
-    #   * Curve emits ``lp_open_data`` but with ``liquidity=None``, so the
-    #     assignment ran and wrote "".
-    #
-    # The TOP-LEVEL ``extracted["liquidity"]`` is populated on both (Curve: a
-    # ``{"_type": "Decimal"}`` envelope in token units; Aerodrome: a bare int in
-    # raw units — see each connector's ``fungible_lp_close`` manifest entry,
-    # which is why the reader declares units per connector rather than
-    # inferring them from the JSON shape). The
-    # nested field stays authoritative where it carries a value; this only fills
-    # the gap. Empty ≠ Zero is preserved: an absent quantity stays "".
+    # Minted liquidity may live only on the top-level extracted field when the
+    # connector emits no usable lp_open_data; nested stays authoritative.
+    # Units vary by connector; absent stays empty, distinct from zero.
     minted = getattr(lp_open, "liquidity", None) if lp_open is not None else None
     if minted in (None, ""):
         minted = ctx.extracted.get("liquidity")
-    if isinstance(minted, dict):  # {"_type": "Decimal", "value": "3.91"}
+    if isinstance(minted, dict):
         minted = minted.get("value")
     if minted not in (None, ""):
         event.liquidity = str(minted)
@@ -1188,51 +1001,33 @@ def _apply_lp_open(event: PositionEvent, ctx: IntentEventContext) -> None:
     if not (lp_open and hasattr(lp_open, "position_id")):
         return
 
-    # Only override when non-zero: protocols without an NFT tokenId (e.g. Pendle)
-    # set position_id=0 so that extract_position_id() (which returns the canonical
-    # hex market address) remains authoritative via _seed_event.
+    # Only a non-zero id overrides; a zero leaves the seeded market key in place.
     if lp_open.position_id:
         event.position_id = str(lp_open.position_id)
     event.tick_lower = getattr(lp_open, "tick_lower", None)
     event.tick_upper = getattr(lp_open, "tick_upper", None)
-    # VIB-3887 — in_range derivation from gateway-supplied current_tick.
+    # Derive in-range from the receipt-parser current_tick when available.
     current_tick = getattr(lp_open, "current_tick", None)
     if current_tick is not None and event.tick_lower is not None and event.tick_upper is not None:
-        # Uniswap V3 / TraderJoe / aerodrome convention: position is in
-        # range when tick_lower <= current_tick < tick_upper. Equality on
-        # the upper bound is exclusive.
+        # In-range is tick_lower <= current_tick < tick_upper; upper bound exclusive.
         event.in_range = event.tick_lower <= current_tick < event.tick_upper
-    # VIB-3205 audit fix (Codex P1, pr-auditor Blocker #1): populate
-    # amount0/amount1 + token0/token1 from the extracted LP open data.
-    # Without these, `compute_impermanent_loss` short-circuits to None
-    # because the entry-state builder reads amount0/amount1 off the
-    # PositionEvent. Previously this block only copied position_id /
-    # liquidity / ticks, leaving the IL pipeline as dead code in
-    # production.
+    # Entry amounts feed the IL entry-state builder.
     amount0 = getattr(lp_open, "amount0", None)
     amount1 = getattr(lp_open, "amount1", None)
     if amount0 is not None:
         event.amount0 = str(amount0)
     if amount1 is not None:
         event.amount1 = str(amount1)
-    # VIB-5896 — carry the N-coin pool universe (when the connector stamped it
-    # on lp_open_data) so ``stamp_entry_state_on_open`` can persist it into
-    # entry_state and CLOSE-time IL fails closed on >2-coin pools instead of
-    # computing a subset-HODL off the 2-slot amounts above. Transient field —
-    # never persisted as a column (see the PositionEvent field comment).
+    # Carry the N-coin universe for fail-closed IL on pools with more than two coins; transient only.
     raw_coins = getattr(lp_open, "coin_symbols", None)
     if isinstance(raw_coins, list | tuple) and raw_coins:
         event.coin_symbols = [str(c) for c in raw_coins]
-    # Token symbols: LPOpenData doesn't carry them directly. Resolve from the
-    # intent attrs / pool descriptor (e.g. "WETH/USDC/3000", "USDC/DAI/stable").
     t0, t1 = _pair_tokens_from_intent(ctx.intent)
     if t0:
         event.token0 = t0
     if t1:
         event.token1 = t1
-    # VIB-5983 — amount0/amount1 above are on-chain address order; re-pair
-    # label-ordered symbols before ι stamps value_usd. opening=True: this
-    # function only runs with lp_open_data present (guard at the top).
+    # Amounts are on-chain order; re-pair label-ordered symbols before pricing.
     _realign_event_lp_pair_if_needed(event, ctx, opening=True)
 
 
@@ -1255,12 +1050,8 @@ def _apply_lp_close(event: PositionEvent, ctx: IntentEventContext) -> None:
     if not lp_close:
         return
 
-    # CR #1751 (CodeRabbit): do NOT coerce with `or ""` — an explicit
-    # measured zero ("0" / 0) is a legitimate value that must reach
-    # persistence. Truthiness coercion would drop it. Use `is not None`
-    # instead so only genuinely missing values fall through.
-    # Accept both naming conventions: amount0_received (legacy) and
-    # amount0_collected (LPCloseData standard used by Uniswap V3, Pendle, etc.)
+    # Measured zero must reach persistence; only missing values fall through.
+    # Accept both legacy and canonical close-amount names.
     amount0_received = getattr(lp_close, "amount0_received", None)
     if amount0_received is None:
         amount0_received = getattr(lp_close, "amount0_collected", None)
@@ -1268,14 +1059,7 @@ def _apply_lp_close(event: PositionEvent, ctx: IntentEventContext) -> None:
     if amount1_received is None:
         amount1_received = getattr(lp_close, "amount1_collected", None)
 
-    # Mutual-exclusivity check — log whenever BOTH payloads coexist on the
-    # same intent, regardless of whether lp_open already wrote amount0/
-    # amount1. CR #1751 round 2 (CodeRabbit): keying this off event.amount0/
-    # amount1 hid the collision whenever lp_open_data was present but
-    # carried missing / None amounts (payload corruption, parser regression,
-    # genuinely zero-deposit edge cases). The collision itself is the
-    # operator-visible anomaly; the preservation logic below handles value
-    # writes independently.
+    # Log when open and close payloads coexist; fill empty amount slots only.
     lp_open_present = ctx.extracted.get("lp_open_data") is not None
     if lp_open_present:
         logger.warning(
@@ -1291,9 +1075,7 @@ def _apply_lp_close(event: PositionEvent, ctx: IntentEventContext) -> None:
         event.amount0 = str(amount0_received)
     if not event.amount1 and amount1_received is not None:
         event.amount1 = str(amount1_received)
-    # Attribute name priority: fees0/fees1 (LPCloseData canonical, e.g. Curve),
-    # fees_token0/fees_token1 (legacy), fee0/fee1 (older aliases).
-    # ``is not None`` guard preserves measured-zero (fees0=0 is meaningful).
+    # Fee names in canonical, legacy, then alias priority; missing only skips.
     for fee_attr in ("fees0", "fees_token0", "fee0"):
         fee = getattr(lp_close, fee_attr, None)
         if fee is not None:
@@ -1392,19 +1174,13 @@ def _apply_perp(event: PositionEvent, ctx: IntentEventContext) -> None:
     """
     perp = ctx.extracted.get("perp_data")
 
-    # VIB-3497: ``funding_fee_usd`` arrives as a top-level extracted_data
-    # key for PERP_CLOSE (from the ResultEnricher PERP_CLOSE spec), not
-    # inside a ``perp_data`` struct. Read it separately so it works even
-    # when ``perp_data`` is absent (the common case for GMX V2 where each
-    # field is extracted individually, not wrapped in a PerpData object).
+    # Funding fee may arrive top-level, not inside perp_data; read both.
     raw_funding = ctx.extracted.get("funding_fee_usd")
     if raw_funding is None and perp is not None:
         raw_funding = getattr(perp, "funding_fee_usd", None)
 
-    # Persist funding_fee_usd in attribution_json sidecar so
-    # run_attribution_on_close / attribute_perp can read it without a DB
-    # schema change. Only write when a value (including measured zero) is
-    # present — None means "unknown" and must not be silently promoted to 0.
+    # Persist it in the attribution sidecar without a schema change;
+    # missing stays unknown, never promoted to zero.
     if raw_funding is not None and event.event_type == PositionEventType.CLOSE:
         try:
             existing = json.loads(event.attribution_json or "{}")
@@ -1468,7 +1244,6 @@ def _apply_collect_fees(event: PositionEvent, ctx: IntentEventContext) -> None:
     if not lp_close:
         return
 
-    # Received amounts (principal + fees in a collect-only TX)
     amount0_received = getattr(lp_close, "amount0_received", None)
     if amount0_received is None:
         amount0_received = getattr(lp_close, "amount0_collected", None)
@@ -1481,10 +1256,7 @@ def _apply_collect_fees(event: PositionEvent, ctx: IntentEventContext) -> None:
     if not event.amount1 and amount1_received is not None:
         event.amount1 = str(amount1_received)
 
-    # Fee-specific fields (may be zero when protocol doesn't separate them).
-    # Attribute name priority matches LPCloseData (fees0/fees1), legacy
-    # parser names (fees_token0/fees_token1), and older aliases (fee0/fee1).
-    # ``is not None`` guard preserves measured-zero (fees0=0 is meaningful).
+    # Same fee-name priority; measured zero preserved.
     for fee_attr in ("fees0", "fees_token0", "fee0"):
         fee = getattr(lp_close, fee_attr, None)
         if fee is not None:
@@ -1514,18 +1286,12 @@ def _apply_protocol_fees(event: PositionEvent, ctx: IntentEventContext) -> None:
     protocol_fees = ctx.extracted.get("protocol_fees")
     if protocol_fees is None or not hasattr(protocol_fees, "total_usd"):
         return
-    # VIB-3495: explicit "known-unknown" — fee exists but receipt data is
-    # insufficient to measure it. Leave protocol_fees_usd as "" (unknown).
+    # Known-unavailable fees stay unknown, never zero.
     if getattr(protocol_fees, "is_unavailable", False):
         return
     total_usd = getattr(protocol_fees, "total_usd", None)
     if total_usd is not None:
         event.protocol_fees_usd = str(total_usd)
-
-
-# ──────────────────────────────────────────────────────────────────────────
-# VIB-4085 — lending lifecycle helpers
-# ──────────────────────────────────────────────────────────────────────────
 
 
 def lending_position_id(*, chain: str, protocol: str, wallet: str, asset: str, market_id: str | None = None) -> str:
@@ -1587,8 +1353,6 @@ def _lending_amount(intent: Any, extracted: dict[str, Any], intent_type: str) ->
     }
     for key in field_map.get(intent_type, ()):
         v = extracted.get(key)
-        # SupplyAmounts / BorrowAmounts dataclasses expose ``.amount`` or are
-        # the raw int themselves; tolerate both.
         if v is not None:
             inner = getattr(v, "amount", None)
             if inner is not None:
@@ -1623,20 +1387,14 @@ def _resolve_lending_post_state(post_state: dict | None) -> dict[str, Any]:
     if not isinstance(post_state, dict):
         return {}
 
-    # Start from the root-level fields; promoting nested protocol-keyed values
-    # must NOT drop sibling root keys like ``health_factor`` / APR / liquidation
-    # metadata that the connector may emit at the outer scope.
+    # Promote nested protocol-keyed values without dropping sibling root keys.
     out: dict[str, Any] = dict(post_state)
     if not any(k in post_state for k in _LENDING_FLAT_KEYS):
         for v in post_state.values():
             if isinstance(v, dict) and any(k in v for k in _LENDING_FLAT_KEYS):
-                # Merge nested into root, preferring nested for overlapping keys
-                # (the wrapping protocol dict is the more specific source).
+                # Nested wins on overlap.
                 for k, val in v.items():
                     out.setdefault(k, val)
-                # Promote nested overrides for the canonical lending keys we
-                # branch on below — root-level proxies (if any) should not
-                # win over the protocol-scoped value.
                 for k in _LENDING_FLAT_KEYS:
                     if k in v:
                         out[k] = v[k]
@@ -1678,10 +1436,7 @@ def _refine_lending_event_type(
             event.position_id,
         )
         return
-    # NaN/Infinity round-trip cleanly through Decimal(str(...)) but break the
-    # ``<= dust`` comparison: NaN raises InvalidOperation, +/-Infinity returns
-    # False. Either misroute would silently misclassify the lifecycle event,
-    # so reject non-finite values the same way we handle a missing leg_value.
+    # Non-finite leg values cannot be compared; treat as missing.
     try:
         value_d = Decimal(str(leg_value))
         if not value_d.is_finite():
@@ -1842,12 +1597,8 @@ def _apply_lending(event: PositionEvent, ctx: IntentEventContext) -> None:
         intent_type_raw = it.value if hasattr(it, "value") else str(it)
     intent_type = (intent_type_raw or "").upper()
 
-    # Resolution order is position-type-aware because lending intents have
-    # asymmetric field names: BorrowIntent / RepayIntent identify the debt
-    # leg via ``borrow_token``; SupplyIntent / WithdrawIntent identify the
-    # collateral leg via ``token``. A naive single-field resolver would
-    # populate LENDING_DEBT with the (collateral) ``token`` if the intent
-    # carried both — semantically wrong for the debt-leg event.
+    # Debt and collateral legs use different intent fields; a single-field
+    # resolver would attribute the wrong leg.
     if event.position_type == PositionType.LENDING_DEBT:
         asset = (
             getattr(intent, "borrow_token", None)
@@ -1867,25 +1618,11 @@ def _apply_lending(event: PositionEvent, ctx: IntentEventContext) -> None:
         )
     asset = str(asset or "").upper()
 
-    # VIB-4981 — isolated lending (Morpho Blue & friends) scopes positions by
-    # market_id. L5 (_derive_position_key) inserts it between wallet and asset;
-    # the L3 key must do the same or the (position_key == position_id) join in
-    # AccountingProcessor._backfill_lending_position_pnl silently misses every
-    # market-scoped close. ``market_id`` is the canonical intent field on every
-    # lending intent (BorrowIntent/SupplyIntent/RepayIntent/WithdrawIntent —
-    # lending_intents.py); it is the SAME source L5 reads via _intent_market_id.
-    # Absent (Aave-style) ⇒ None ⇒ no extra segment ⇒ key unchanged.
+    # Market-scoped lending inserts market_id between wallet and asset so the
+    # join key matches; absent leaves Aave-style keys unchanged.
     market_id = getattr(intent, "market_id", None)
 
-    # VIB-5030 — canonicalize lending-scoped protocol aliases (the platform
-    # spec's ``"fluid_lending"`` → ``fluid``) before deriving the L3 join key.
-    # ``event.protocol`` carries the RAW intent string (``_seed_event``), and
-    # this writer does NOT flow through ``lending_accounting``, so without
-    # this call the L3 ``position_id`` would diverge from the L5
-    # ``position_key`` (canonicalized inside ``_derive_position_key``) and
-    # the ``_backfill_lending_position_pnl`` join would silently miss
-    # (VIB-4981 class). Deferred import: registry dispatch must not run at
-    # module import (same idiom as the lending_accounting consumers).
+    # Normalize the protocol before deriving the join key or rows diverge.
     from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
 
     raw_protocol = event.protocol or getattr(intent, "protocol", "") or ""
@@ -1973,7 +1710,6 @@ def _compute_lending_action_delta(
     try:
         delta = abs(Decimal(str(pre_leg_value)) - Decimal(str(leg_value)))
     except (InvalidOperation, ValueError, TypeError):
-        # Non-finite or unparseable pre/post → keep post-state stamp.
         return None
     if not delta.is_finite():
         return None
@@ -2046,63 +1782,36 @@ def build_position_event_from_intent(
         recent_open_events=recent_open_events,
     )
 
-    # α + β — dispatch + seed.
     event = _seed_event(ctx)
     if event is None:
         return None
 
-    # Short-circuit: without extracted_data AND no post_state we can't
-    # enrich. Lending events specifically need post_state, not extracted,
-    # so don't short-circuit purely on missing extracted_data when this
-    # is a lending intent.
+    # Lending needs post_state, not extracted_data, so skip the empty guard for it.
     is_lending = event.position_type in (PositionType.LENDING_COLLATERAL, PositionType.LENDING_DEBT)
     if not extracted and not is_lending:
         return event if event.position_id else None
 
-    # γ → δ → δ-alt → ε → ζ → η → φ (ordering load-bearing).
     _apply_lp_open(event, ctx)
     _apply_lp_close(event, ctx)
-    _apply_collect_fees(event, ctx)  # VIB-3494: COLLECT_FEES enrichment
+    _apply_collect_fees(event, ctx)
     _apply_swap_fallback(event, ctx)
     _apply_perp(event, ctx)
     _apply_protocol_fees(event, ctx)
-    _apply_lending(event, ctx)  # VIB-4085: lending lifecycle refinement
+    _apply_lending(event, ctx)
 
-    # ι — VIB-3883: populate value_usd for LP_OPEN so deployed_capital_usd
-    # on portfolio_snapshots reflects the deployed position size. Must run
-    # AFTER _apply_lp_open populates amount0/amount1.
-    # VIB-5540 (Seam B): an N-coin fungible open (single-sided Curve deposit)
-    # funds one coin only, so the 2-coin path fails closed and leaves
-    # principal_deposited at zero. Prefer the N-complete coin-leg valuation when
-    # the connector stamped ``coin_symbols``; that path OWNS the open (no
-    # misleading 2-coin fallback). Concentrated-liquidity venues fall through to
-    # the canonical 2-coin path unchanged.
+    # Populate value_usd after amounts exist; the N-coin path owns its opens.
     if price_oracle:
         if not _apply_lp_open_value_usd_ncoin(event, ctx, price_oracle):
             _apply_lp_open_value_usd(event, price_oracle, chain=chain)
 
-    # κ — VIB-3919: LP_CLOSE column symmetry. The CLOSE event's
-    # tick_lower/tick_upper/liquidity/in_range come from the matching
-    # OPEN event (the bracket is immutable across the position
-    # lifecycle); value_usd at CLOSE = sum of received amounts × prices.
-    # Pre-fix the CLOSE row landed with all six columns empty even when
-    # the OPEN had populated them, breaking dashboard symmetry and the
-    # G5 ship gate. The runner threads ``recent_open_events`` (an
-    # in-memory cache keyed by ``(position_id, position_type)`` populated
-    # on every save_position_event success) so we can hydrate without
-    # a state-manager round-trip.
+    # CLOSE carries the immutable bracket forward from the cached OPEN and
+    # prices received amounts without a state round-trip.
     if event.event_type == PositionEventType.CLOSE and event.position_type == PositionType.LP:
         _apply_lp_close_columns(event, ctx, recent_open_events, price_oracle)
 
-    # θ — final guard: drop events that never acquired a position_id.
     if not event.position_id:
         return None
 
-    # VIB-5036: the W1-5 decimal-unit soft-fail guard is deliberately NOT run
-    # here — position_events amount/fee columns are raw-by-contract, so the
-    # human-form guard only produced false warnings (see the module note above
-    # the removed ``_decimal_unit_soft_fail`` helper). The guard stays active
-    # on the human-units ``transaction_ledger`` via ``build_ledger_entry``.
     return event
 
 
@@ -2136,40 +1845,18 @@ def _apply_lp_close_columns(
                 event.tick_upper = tu
             if not event.liquidity and liq is not None:
                 event.liquidity = str(liq)
-            # VIB-4086 — pair tokens are also immutable across the
-            # position lifecycle. Carry them forward so
-            # ``_apply_lp_close_value_usd`` below can resolve decimals
-            # and look up close-time prices, and so the CLOSE row's
-            # token columns are populated for dashboard / Accountant Test
-            # reads. Pre-fix the close row landed with token0='' /
-            # token1='' even though the OPEN had them.
+            # Pair tokens are immutable; carry them forward for decimals and pricing.
             t0 = cached.get("token0")
             t1 = cached.get("token1")
             if not event.token0 and t0:
                 event.token0 = str(t0)
             if not event.token1 and t1:
                 event.token1 = str(t1)
-    # VIB-5195 — self-describing fallback when the cache carry-forward above
-    # leaves a token slot empty. The cache (and its durable-store sibling,
-    # VIB-4839) is keyed by ``position_id``, so it misses whenever the CLOSE's
-    # ``position_id`` differs from the OPEN leg's — the TraderJoe V2 fungible-LP
-    # demos close under a synthetic id (``traderjoe_*_lp_0``) while the OPEN
-    # cached under the pool descriptor — or on a cross-process teardown / resume
-    # where the cache is empty. The LP_CLOSE intent carries the pair via its
-    # ``pool`` descriptor ("TOKEN_X/TOKEN_Y/<bin_step|fee>"), so resolve the
-    # symbols from it. Without this the close lands with token0=''/token1='' and
-    # ``_apply_lp_close_value_usd`` below fails closed (missing_tokens_or_amounts
-    # have_token0=False), leaving the close-leg USD value unattributed (Empty ≠
-    # Zero — unmeasured, not a fabricated zero). Fills empty slots only, so the
-    # cache stays authoritative for every path that already resolves it.
+    # The cache misses when CLOSE and OPEN ids differ or on resume; resolve
+    # missing tokens from the intent pool descriptor, filling empty slots only.
+    # Unresolved stays unmeasured, never zero; the cache stays authoritative.
     if not event.token0 or not event.token1:
-        # VIB-5221 — prefer the connector-DECLARED PrimitiveMoneyLegs (the typed
-        # contract) over the #2894 intent-pool-descriptor threading. For a
-        # migrated connector (TraderJoe V2) the close pair comes from the OUTPUT
-        # legs built off the on-chain withdrawal; ``_pair_tokens_from_intent``
-        # stays the fallback for not-yet-migrated connectors and for any slot the
-        # contract leaves unknown. Fills empty slots only — the cache carry-
-        # forward above stays authoritative for every path that already resolved.
+        # Prefer declared money legs over the pool descriptor; the cache still wins.
         t0, t1 = _pair_tokens_from_declared_legs(ctx.extracted)
         if not t0 or not t1:
             it0, it1 = _pair_tokens_from_intent(ctx.intent)
@@ -2179,28 +1866,12 @@ def _apply_lp_close_columns(
             event.token0 = t0
         if not event.token1 and t1:
             event.token1 = t1
-    # VIB-5983 — re-pair before value_usd. Cache may carry a pre-fix OPEN's
-    # label-order symbols; intent fallback is also label-order. Amounts on the
-    # close event are on-chain address order. opening=False: this function is
-    # gated on event_type == "CLOSE" by its caller.
+    # Re-pair label-ordered symbols to on-chain order before pricing the close.
     _realign_event_lp_pair_if_needed(event, ctx, opening=False)
-    # in_range is unambiguously False post-close (NFT burned / liquidity
-    # withdrawn). The dashboard reads ``in_range=None`` as "unknown" and
-    # ``False`` as "out of range". Either is honest; False is more
-    # informative for the closed lifecycle stage.
+    # Closed positions are out of range; False is more informative than unknown.
     if event.in_range is None:
         event.in_range = False
-    # Compute value_usd from the close-time received amounts when prices are
-    # available. VIB-5540 (Seam B) — an N-coin fungible close (Curve StableSwap /
-    # CryptoSwap, Balancer) returns ALL N pool coins, so the 2-coin
-    # token0/token1 × amount0/amount1 product structurally misses coins 3..N and
-    # (for a single-sided Curve deposit with no close direction) leaves value_usd
-    # unmeasured — which then zeroes principal_recovered in attribute_lp / LP5.
-    # When the connector stamped the pool-coin-ordered ``coin_symbols`` universe,
-    # value the close N-completely over every coin leg; that path OWNS the close
-    # (no misleading 2-coin fallback). Otherwise keep the canonical 2-coin path
-    # for concentrated-liquidity venues. Primitive-agnostic — no per-protocol
-    # branch.
+    # N-coin closes value every coin leg; the two-coin product would miss coins.
     if not event.value_usd and price_oracle:
         if not _apply_lp_close_value_usd_ncoin(event, ctx, price_oracle):
             _apply_lp_close_value_usd(event, price_oracle, chain=ctx.chain)
@@ -2277,13 +1948,7 @@ def compute_lp_close_value_usd(
         from almanak.framework.data.tokens.resolver import get_token_resolver
 
         resolver = get_token_resolver()
-        # ``resolver.resolve`` raises ``TokenNotFoundError`` (etc.) on miss —
-        # it never returns ``None``.  Catch the specific resolver-failure
-        # shape here so the operator gets the precise
-        # ``token_decimals_unresolved`` reason rather than the generic
-        # ``arithmetic_or_resolver_error`` tail at the bottom of this
-        # function. (Gemini code-assist on PR #2490 caught the original
-        # ``is None`` check as dead code.)
+        # The resolver raises on miss; map that to the unresolved-decimals reason.
         try:
             ti0 = resolver.resolve(token0, chain=chain, log_errors=False)
             ti1 = resolver.resolve(token1, chain=chain, log_errors=False)
@@ -2323,9 +1988,7 @@ def compute_lp_close_value_usd(
             price1=p1,
         )
     except Exception:  # noqa: BLE001 — best-effort enrichment
-        # VIB-4839 — escalate from debug to warning. A swallowed exception
-        # here is observationally indistinguishable from the silent missing-
-        # token early-return that hid the lp_triple bug, so it must surface.
+        # Surface swallowed errors; silent empties hid past mispricings.
         logger.warning(
             "lp_close_value_usd.skipped reason=arithmetic_or_resolver_error position_id=%s chain=%s",
             position_id,
@@ -2387,9 +2050,7 @@ def compute_lp_ncoin_value_usd(
         for sym, raw_amount in zip(coin_symbols, all_amounts, strict=True):
             symbol = str(sym or "").strip()
             if not symbol or raw_amount is None:
-                # Empty ≠ Zero — an unmeasured leg (or an unknown coin) poisons
-                # the whole close value; a partial sum would understate recovered
-                # principal. A measured 0 raw_amount is NOT None and passes here.
+                # One unmeasured leg poisons the whole value; measured zero still counts.
                 logger.warning(
                     "lp_ncoin_value_usd.skipped reason=unmeasured_or_unknown_leg "
                     "position_id=%s chain=%s symbol=%s have_amount=%s",
@@ -2485,9 +2146,7 @@ def _apply_lp_close_value_usd_ncoin(event: PositionEvent, ctx: "IntentEventConte
         return False
     all_amounts = getattr(lp_close, "all_amounts", None)
     if not all_amounts or len(coin_symbols) != len(all_amounts):
-        # coin_symbols present but the leg vector doesn't line up — still an
-        # N-coin close (do not emit a partial 2-coin value), but nothing safe to
-        # measure. Own the close with an unmeasured value_usd.
+        # Mismatched coin and amount vectors own the close as unmeasured.
         return True
     value_usd = compute_lp_ncoin_value_usd(
         list(coin_symbols),
@@ -2526,7 +2185,6 @@ def _apply_lp_close_value_usd(event: PositionEvent, price_oracle: dict, chain: s
     if not result.value_usd:
         return
     event.value_usd = result.value_usd
-    # decimals + prices are always populated alongside a non-empty value_usd.
     if (
         result.decimals0 is not None
         and result.decimals1 is not None
@@ -2624,7 +2282,7 @@ def _apply_lp_open_value_usd(event: PositionEvent, price_oracle: dict, chain: st
     if event.event_type != PositionEventType.OPEN or event.position_type != PositionType.LP:
         return
     if event.value_usd:
-        return  # already set by something upstream — don't overwrite
+        return
     amount0_str = event.amount0
     amount1_str = event.amount1
     token0 = str(event.token0 or "").strip()
@@ -2637,16 +2295,11 @@ def _apply_lp_open_value_usd(event: PositionEvent, price_oracle: dict, chain: st
     if p0 is None or p1 is None:
         return
 
-    # Resolve token decimals to scale raw on-chain integers. Without this
-    # ``Decimal("891556839636852") * Decimal("2301.69")`` writes 2e18 —
-    # the H2 production bug.
+    # Scale raw integers by token decimals before pricing.
     chain_lc = (chain or "").lower()
     dec0 = _resolve_token_decimals(token0, chain_lc)
     dec1 = _resolve_token_decimals(token1, chain_lc)
     if dec0 is None or dec1 is None:
-        # Decimals unknown — fail closed rather than emit a wildly
-        # mis-scaled USD. lp_handler.py uses the same fail-closed
-        # contract on the cost_basis_usd path.
         return
 
     try:
@@ -2694,8 +2347,6 @@ def _scale_to_human(raw_str: str, decimals: int) -> Decimal | None:
     if not d.is_finite():
         return None
     if d == d.to_integral_value():
-        # Pure integer → assume raw on-chain units; scale down.
         scale = Decimal(10) ** decimals
         return d / scale
-    # Already a fractional Decimal → assume human-readable, return as-is.
     return d

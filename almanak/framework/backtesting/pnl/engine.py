@@ -884,6 +884,15 @@ def create_market_snapshot_from_state(
         "run's lending config (set_lending_rate) are served, and a live gateway read would leak "
         "today's rate into a historical tick"
     )
+    # reference_price has no timestamped provider behind it in backtest:
+    # neither a historical plane nor a safe live fallback exists, since a
+    # reachable sidecar would answer a HISTORICAL tick with TODAY's price.
+    # Stamping this turns the per-tick transport error into a typed
+    # backtest_no_historical_plane blocker naming the unsupported lane.
+    snapshot._reference_price_refusal_detail = (
+        "no historical reference-price plane in this backtest snapshot: reference-price "
+        "strategies run on the live/deployed surface, not historical backtest"
+    )
     # Views that refuse must land their refusals in THIS tick's
     # decision-input ledger (the snapshot is fresh per tick).
     for view in (pool_price_view, pool_reader, slippage_view):
