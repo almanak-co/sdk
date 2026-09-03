@@ -741,7 +741,7 @@ def _make_strategy():
                 "min_collateral_usd": "100",
                 "partial_repay_pct": "0.25",
                 "lending_protocol": "aave_v3",
-                "lending_market": "",
+                "lending_market_id": "",
                 "collateral_token": "WETH",
                 "borrow_token": "USDC",
             }
@@ -761,7 +761,7 @@ def _make_strategy():
     strat.min_collateral_usd = Decimal("100")
     strat.partial_repay_pct = Decimal("0.25")
     strat.lending_protocol = "aave_v3"
-    strat.lending_market = ""
+    strat.lending_market_id = ""
     strat.collateral_token = "WETH"
     strat.borrow_token = "USDC"
     strat._loop_state = "idle"
@@ -992,7 +992,7 @@ def _make_strategy_live_decide():
     strat.min_collateral_usd = Decimal("100")
     strat.partial_repay_pct = Decimal("0.25")
     strat.lending_protocol = "aave_v3"
-    strat.lending_market = ""
+    strat.lending_market_id = ""
     strat.collateral_token = "WETH"
     strat.borrow_token = "USDC"
     strat._loop_state = "idle"
@@ -1099,7 +1099,7 @@ def test_lending_loop_hf_guard_dormant_when_no_borrows() -> None:
 
 
 def test_lending_loop_hf_uses_configured_protocol() -> None:
-    """HF guard passes self.lending_protocol / self.lending_market to market.position_health."""
+    """HF guard passes self.lending_protocol / self.lending_market_id to market.position_health."""
     recorded = {}
 
     class _RecordingMarket(_HFMarket):
@@ -1110,7 +1110,7 @@ def test_lending_loop_hf_uses_configured_protocol() -> None:
 
     strat = _make_strategy_live_decide()
     strat.lending_protocol = "morpho_blue"
-    strat.lending_market = "0xdeadbeef"
+    strat.lending_market_id = "0xdeadbeef"
     strat._loop_state = "monitoring"
     strat._loop_count = 2
     market = _RecordingMarket(hf="2.0")
@@ -1124,11 +1124,11 @@ def test_lending_loop_supply_uses_configured_protocol() -> None:
     """Supply intent must use self.lending_protocol, not hardcoded aave_v3.
 
     Morpho Blue requires market_id for isolated markets, so we also verify
-    self.lending_market is threaded through.
+    self.lending_market_id is threaded through.
     """
     strat = _make_strategy_live_decide()
     strat.lending_protocol = "morpho_blue"
-    strat.lending_market = "0xb323495f7e4148be5643a4ea4a8221eef163e4bccfdedc2a6f4696baacbc86cc"
+    strat.lending_market_id = "0xb323495f7e4148be5643a4ea4a8221eef163e4bccfdedc2a6f4696baacbc86cc"
     strat._loop_state = "idle"
     strat._loop_count = 0
     market = _HFMarket(hf="2.0", borrow_balance="0")
@@ -1137,14 +1137,14 @@ def test_lending_loop_supply_uses_configured_protocol() -> None:
     assert intent is not None
     assert intent.intent_type.value == "SUPPLY"
     assert intent.protocol == "morpho_blue"  # not hardcoded aave_v3
-    assert intent.market_id == strat.lending_market
+    assert intent.market_id == strat.lending_market_id
 
 
 def test_lending_loop_borrow_uses_configured_protocol() -> None:
     """Borrow intent must use self.lending_protocol, not hardcoded aave_v3."""
     strat = _make_strategy_live_decide()
     strat.lending_protocol = "compound_v3"
-    strat.lending_market = "usdc"
+    strat.lending_market_id = "usdc"
     strat._loop_state = "supplied"
     strat._loop_count = 0
     market = _HFMarket(hf="2.0", borrow_balance="0")
@@ -1153,6 +1153,7 @@ def test_lending_loop_borrow_uses_configured_protocol() -> None:
     assert intent is not None
     assert intent.intent_type.value == "BORROW"
     assert intent.protocol == "compound_v3"
+    assert intent.market_id == "usdc"
 
 
 def test_lending_loop_partial_repay_sized_from_debt_not_wallet() -> None:
@@ -3750,3 +3751,96 @@ def test_scaffold_v3_lp_protocol_allowlist_is_executable_manifest_intersection()
     assert _scaffold_v3_lp_protocols() == frozenset(
         {"aerodrome_slipstream", "pancakeswap_v3", "sushiswap_v3", "uniswap_v3"}
     )
+
+
+def test_lending_loop_config_emits_market_id_for_morpho() -> None:
+    """morpho_blue declares requires_market_id=True -- the key must be present
+    (even empty, for the market-identity scanner to catch) under its new name."""
+    cfg = json.loads(generate_config_json("Morpho Probe", StrategyTemplate.LENDING_LOOP, "base", "morpho_blue"))
+    assert cfg["lending_market_id"] == ""
+    assert "lending_market" not in cfg
+
+
+def test_lending_loop_config_omits_market_id_for_aave() -> None:
+    """aave_v3 does not declare requires_market_id -- the scaffold must omit the
+    key entirely (not emit it empty), matching the scanner's "absent is clean"
+    contract and the runtime's informational-only semantics for this protocol."""
+    cfg = json.loads(generate_config_json("Aave Probe", StrategyTemplate.LENDING_LOOP, "arbitrum", "aave_v3"))
+    assert "lending_market_id" not in cfg
+    assert "lending_market" not in cfg
+
+
+def test_new_strategy_aborts_on_unresolved_morpho_market_id(tmp_path: Path) -> None:
+    """A morpho_blue lending_loop scaffold must fail loud instead of printing
+    "ready to run" over an empty market id -- but the scaffold files must
+    remain on disk to edit, not be deleted."""
+    import os
+
+    from click.testing import CliRunner
+
+    from almanak.framework.cli.new_strategy import new_strategy
+
+    runner = CliRunner()
+    target = tmp_path / "alm3498_morpho"
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        os.chdir(tmp_path)
+        result = runner.invoke(
+            new_strategy,
+            [
+                "--template",
+                "lending_loop",
+                "--protocol",
+                "morpho_blue",
+                "--chain",
+                "base",
+                "--name",
+                "alm3498_morpho",
+                "--output-dir",
+                str(target),
+            ],
+            env={"CI": ""},
+        )
+
+    assert result.exit_code != 0
+    assert "Market identity unresolved" in result.output
+    assert "lending-reserves" in result.output
+    assert "lending-market" in result.output
+    # The scaffold must survive -- this is guidance to edit config.json, not a
+    # failed generation. click.Abort must bypass the generic cleanup path.
+    assert (target / "config.json").exists()
+    assert (target / "strategy.py").exists()
+
+
+def test_new_strategy_aave_default_unaffected(tmp_path: Path) -> None:
+    """Control case: the default (aave_v3) lending_loop scaffold must still
+    succeed cleanly -- no false positive from the new market-identity check."""
+    import os
+
+    from click.testing import CliRunner
+
+    from almanak.framework.cli.new_strategy import new_strategy
+
+    runner = CliRunner()
+    target = tmp_path / "alm3498_aave_control"
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        os.chdir(tmp_path)
+        result = runner.invoke(
+            new_strategy,
+            [
+                "--template",
+                "lending_loop",
+                "--chain",
+                "arbitrum",
+                "--name",
+                "alm3498_aave_control",
+                "--output-dir",
+                str(target),
+            ],
+            env={"CI": ""},
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "Market identity unresolved" not in result.output
+    assert "Next steps:" in result.output
+    cfg = json.loads((target / "config.json").read_text())
+    assert "lending_market_id" not in cfg

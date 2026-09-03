@@ -652,6 +652,10 @@ def instantiate_strategy_with_state(
     # before for those.
     from ._strategy_config import coerce_strategy_config
 
+    # enforce_market_identity intentionally omitted (stays False): a position
+    # already opened must still be closeable even if its market id was later
+    # blanked by a hosted override -- a risk-reducing intent must never be
+    # blocked by a config-identity check.
     config_obj = coerce_strategy_config(strategy_class, config_dict)
 
     try:

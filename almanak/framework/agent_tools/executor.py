@@ -315,18 +315,25 @@ _IDENTITY_SWEEP_DEADLINE_S = 25.0
 _UNKNOWN_SENTINEL: Any = object()
 
 
-def _error_payload(code: AgentErrorCode, message: str, *, recoverable: bool = False) -> ToolErrorPayload:
+def _error_payload(
+    code: AgentErrorCode, message: str, *, recoverable: bool = False, suggestion: str | None = None
+) -> ToolErrorPayload:
     """Build a standardized error payload for ToolResponse envelopes.
 
     Includes ``error_code``, ``message``, ``recoverable``, and ``error_category``
     so LLM agents can reliably pattern-match on error types and decide
-    retry vs abort vs escalate.
+    retry vs abort vs escalate. ``suggestion`` is optional machine-readable
+    guidance (e.g. a caveat that a validation error was against an
+    incomplete data source) that callers should act on differently from a
+    definitive failure -- kept out of ``message`` so it stays a separate,
+    typed field on the wire contract instead of prose a caller has to parse.
     """
     return ToolErrorPayload(
         error_code=code,
         message=message,
         recoverable=recoverable,
         error_category=get_error_category(code),
+        suggestion=suggestion,
     )
 
 
@@ -3482,7 +3489,15 @@ class ToolExecutor:
         # asset that sorts past the cap boundary on a huge reserve set isn't
         # wrongly reported as not-active (semantics in _filter_reserve_entries).
         entries, filter_error = self._filter_reserve_entries(
-            entries, protocol, chain, asset_filter, collateral_filter, loan_filter
+            entries,
+            protocol,
+            chain,
+            asset_filter,
+            collateral_filter,
+            loan_filter,
+            # plan.enumeration_call is None => static/curated catalog (mirrors
+            # the enumeration_source flag on the success payload just below).
+            catalog_sourced=plan.enumeration_call is None,
         )
         if filter_error is not None:
             return filter_error
@@ -3566,6 +3581,8 @@ class ToolExecutor:
         asset: str,
         collateral: str,
         loan: str,
+        *,
+        catalog_sourced: bool = False,
     ) -> tuple[list[Any], ToolResponse | None]:
         """Apply the optional reserve filters, returning ``(entries, error)``.
 
@@ -3578,6 +3595,13 @@ class ToolExecutor:
         nothing returns an error listing the full enumerated symbol set —
         pre-config-read we only know a symbol is listed, not that it is
         active. Empty filters return ``entries`` unchanged.
+
+        ``catalog_sourced``: when the enumeration came from the connector's
+        curated catalog rather than a live on-chain read, a zero-match error
+        carries a ``suggestion`` caveat — the same honesty distinction the
+        success payload already carries via ``enumeration_source`` — so a
+        caller (human or agent) never reads "no candidate in our catalog"
+        as "confirmed absent on-chain".
         """
         if (collateral or loan) and not any("/" in e.symbol for e in entries):
             return entries, ToolResponse(
@@ -3608,6 +3632,13 @@ class ToolExecutor:
                     AgentErrorCode.VALIDATION_ERROR,
                     f"Asset filter ({requested}) is not a listed reserve on {protocol} {chain}. "
                     f"Listed reserves: {known}",
+                    suggestion=(
+                        f"{protocol} reserves on {chain} are enumerated from a curated catalog, not a "
+                        "live on-chain scan -- absence here does not prove the pair is unsupported "
+                        "on-chain. Do not treat this as authoritative non-existence."
+                        if catalog_sourced
+                        else None
+                    ),
                 ),
             )
         return filtered, None

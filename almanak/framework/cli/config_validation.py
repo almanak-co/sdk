@@ -261,6 +261,37 @@ def enforce_config_model(strategy_class: type, config: Mapping[str, Any] | None)
     )
 
 
+def enforce_market_identity(config: Mapping[str, Any] | None) -> None:
+    """Raising form of the market-identity scans, for the boot path.
+
+    Raises ``ConfigValidationError`` on any present-but-empty ``market_id`` /
+    ``*_market_id`` key, or on a config naming an isolated-market lending
+    protocol that omits its market id entirely -- an empty or missing market
+    identity can never trade, so this is a boot failure, not a HOLD.
+    Deliberately opt-in per call site
+    (``coerce_strategy_config(..., enforce_market_identity=True)``) rather
+    than default-on: these are structural heuristics, not a per-strategy
+    contract, so only surfaces proven safe against every checked-in config
+    -- ``strat run`` / ``strat backtest`` boot -- enable it. Teardown must
+    NOT: a config whose market id was blanked by a hosted override must
+    still be able to close the position it already opened (blueprint 14 --
+    accounting/config failures are loud but never block the next
+    risk-reducing intent).
+    """
+    findings = market_identity_findings(config)
+    errors = [f for f in findings if f.severity == "error"]
+    if not errors:
+        return
+
+    from ..strategies.exceptions import ConfigValidationError
+
+    detail = "; ".join(f"{f.field or '<config>'}: {f.message}" for f in errors)
+    raise ConfigValidationError(
+        f"Market identity validation failed ({len(errors)} violation(s)): {detail}",
+        field=errors[0].field,
+    )
+
+
 # =============================================================================
 # Structural placeholder scan for market-identity keys (the incident class)
 # =============================================================================
@@ -342,6 +373,91 @@ def scan_market_identity_findings(config: Mapping[str, Any] | None) -> list[Conf
     return findings
 
 
+def _protocol_declared_requires_market_id(protocol: str) -> bool:
+    """Read the authoritative per-connector capability, not a hardcoded protocol list."""
+    from almanak.connectors._strategy_base.capabilities_registry import get_protocol_capabilities
+
+    return bool(get_protocol_capabilities(protocol).get("requires_market_id"))
+
+
+def scan_lending_protocol_market_identity_findings(config: Mapping[str, Any] | None) -> list[ConfigFinding]:
+    """Flag a lending config whose protocol requires a market id it never declares.
+
+    ``scan_market_identity_findings`` above is a pure structural heuristic:
+    it flags a key that IS present but empty, and by design cannot know
+    whether any given config even needs one -- that's precisely what keeps
+    it safe for pooled-reserve protocols (Aave) that legitimately omit the
+    key. That symmetry has a blind spot: a config that names an
+    isolated-market protocol (``lending_protocol``) but drops
+    ``lending_market_id`` entirely -- a typo, a hand-edit, or a generator
+    that predates this key -- sails through untouched, because there is no
+    key there to flag as empty. This scan closes exactly that gap using the
+    same connector-capability authority the scaffold generator already
+    reads, rather than a second blind key-name heuristic.
+
+    Also accepts the pre-rename ``lending_market`` key as satisfying the
+    requirement: a strategy scaffolded before the rename, hand-configured
+    with a genuinely valid id under the old name, must keep booting. This
+    fallback is safe here specifically -- unlike in the protocol-blind
+    structural scanner above -- because this function only ever runs once
+    the protocol is already confirmed to require an id; a pooled-reserve
+    protocol's legitimately-blank ``lending_market`` is never evaluated.
+    """
+    if not isinstance(config, Mapping):
+        return []
+    protocol = config.get("lending_protocol")
+    if not isinstance(protocol, str) or not protocol or not _protocol_declared_requires_market_id(protocol):
+        return []
+    value = config.get("lending_market_id")
+    legacy_value = config.get("lending_market")
+    if (isinstance(value, str) and value.strip()) or (isinstance(legacy_value, str) and legacy_value.strip()):
+        return []
+    return [
+        ConfigFinding(
+            severity="error",
+            code=CODE_EMPTY_MARKET_IDENTITY,
+            message=(
+                f"lending_protocol={protocol!r} is an isolated-market protocol that requires a "
+                "market id, but 'lending_market_id' is missing or empty. Resolve a candidate "
+                "(`ax lending-reserves`) and verify it on-chain (`ax lending-market`) before "
+                "pinning it here."
+            ),
+            field="lending_market_id",
+        )
+    ]
+
+
+def market_identity_findings(config: Mapping[str, Any] | None) -> list[ConfigFinding]:
+    """The reconciled market-identity findings: structural scan + protocol-aware
+    absent-key scan, in agreement with each other.
+
+    The two scans above are independent by design, but a legacy
+    ``lending_market`` value that satisfies
+    ``scan_lending_protocol_market_identity_findings``'s fallback does not
+    stop the protocol-blind structural scanner from separately flagging the
+    new, present-but-empty ``lending_market_id`` key -- the two would
+    disagree about the exact same field on the exact same config. Every
+    caller (``enforce_market_identity`` for boot, ``strat check`` for its
+    findings report, the scaffold's post-write check) must see one
+    consistent verdict, so this is the single place that reconciles them
+    rather than each caller merging the raw scans itself.
+    """
+    structural = scan_market_identity_findings(config)
+    protocol_findings = scan_lending_protocol_market_identity_findings(config)
+    if isinstance(config, Mapping) and not protocol_findings:
+        protocol = config.get("lending_protocol")
+        legacy_value = config.get("lending_market")
+        if (
+            isinstance(protocol, str)
+            and protocol
+            and _protocol_declared_requires_market_id(protocol)
+            and isinstance(legacy_value, str)
+            and legacy_value.strip()
+        ):
+            structural = [f for f in structural if f.field != "lending_market_id"]
+    return structural + protocol_findings
+
+
 __all__ = [
     "CODE_CONFIG_MODEL_VIOLATION",
     "CODE_CONFIG_OVERRIDE_INVALID",
@@ -353,6 +469,9 @@ __all__ = [
     "ConfigFinding",
     "config_model_findings",
     "enforce_config_model",
+    "enforce_market_identity",
     "load_effective_config",
+    "market_identity_findings",
+    "scan_lending_protocol_market_identity_findings",
     "scan_market_identity_findings",
 ]

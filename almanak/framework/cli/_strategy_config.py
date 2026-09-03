@@ -113,12 +113,40 @@ def _accepts_decimal(field_type: Any) -> bool:
     return False
 
 
+def _run_boot_contracts(
+    strategy_class: type,
+    strategy_config: dict[str, Any],
+    *,
+    enforce_config_model: bool,
+    enforce_market_identity: bool,
+) -> None:
+    """Run the two independent, separately opt-in boot-time contracts.
+
+    Split out of :func:`coerce_strategy_config` purely to keep that
+    function's branch count under the CRAP gate -- both checks stay
+    independently gated exactly as before (see that function's docstring
+    for what each flag means and why it defaults the way it does).
+    """
+    if enforce_config_model:
+        # Lazy import: this module must stay lightweight at import time
+        # (stdlib + click only); the engine pulls pydantic lazily itself.
+        from .config_validation import enforce_config_model as _enforce
+
+        _enforce(strategy_class, strategy_config)
+
+    if enforce_market_identity:
+        from .config_validation import enforce_market_identity as _enforce_identity
+
+        _enforce_identity(strategy_config)
+
+
 def coerce_strategy_config(
     strategy_class: type,
     strategy_config: dict[str, Any],
     *,
     echo: bool = True,
     enforce_config_model: bool = True,
+    enforce_market_identity: bool = False,
 ) -> Any:
     """Coerce a raw config dict into the strategy's declared config type.
 
@@ -153,6 +181,13 @@ def coerce_strategy_config(
         enforce_config_model: Run the ``CONFIG_MODEL`` contract. ``strat
             check`` passes ``False`` because it already surfaced the same
             violations as findings and must not duplicate them.
+        enforce_market_identity: Run the structural market-identity scan
+            (a present-but-empty or missing-when-required ``market_id`` /
+            ``*_market_id`` key can never trade). Defaults to ``False`` —
+            opt in only at the boot surfaces this has been verified safe for
+            (``strat run`` / ``strat backtest``). Teardown must never pass
+            ``True``: closing an already-open position must not be blocked
+            by a config-identity check (AGENTS.md Teardown).
 
     Returns:
         A config dataclass instance, or a ``DictConfigWrapper`` around the
@@ -160,14 +195,16 @@ def coerce_strategy_config(
 
     Raises:
         ConfigValidationError: When ``enforce_config_model`` is true and the
-            strategy declares a ``CONFIG_MODEL`` the config violates.
+            strategy declares a ``CONFIG_MODEL`` the config violates, or when
+            ``enforce_market_identity`` is true and the config carries a
+            present-but-empty market identity key.
     """
-    if enforce_config_model:
-        # Lazy import: this module must stay lightweight at import time
-        # (stdlib + click only); the engine pulls pydantic lazily itself.
-        from .config_validation import enforce_config_model as _enforce
-
-        _enforce(strategy_class, strategy_config)
+    _run_boot_contracts(
+        strategy_class,
+        strategy_config,
+        enforce_config_model=enforce_config_model,
+        enforce_market_identity=enforce_market_identity,
+    )
 
     config_instance: Any = strategy_config
     try:

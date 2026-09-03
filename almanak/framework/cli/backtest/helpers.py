@@ -86,7 +86,10 @@ def _create_backtest_strategy(
         An instantiated strategy object.
     """
     if isinstance(strategy_class, type) and issubclass(strategy_class, IntentStrategy):
-        config_instance = coerce_strategy_config(strategy_class, config)
+        # enforce_market_identity=True: boot is the proven-safe surface for
+        # the structural market-id scan -- a backtest against an empty
+        # market id is meaningless, not a HOLD.
+        config_instance = coerce_strategy_config(strategy_class, config, enforce_market_identity=True)
         return strategy_class(config_instance, chain, _BACKTEST_WALLET)
 
     # 1. Try IntentStrategy-shaped signature: (config, chain, wallet_address)

@@ -37,6 +37,7 @@ from almanak.framework.cli.config_validation import (
     CONFIG_VALIDATION_FAILED,
     STRATEGY_INIT_FAILED,
     config_model_findings,
+    enforce_market_identity,
     load_effective_config,
     scan_market_identity_findings,
 )
@@ -112,6 +113,18 @@ class TestIncidentConfigFailsCheck:
         assert CODE_EMPTY_MARKET_IDENTITY not in codes
         assert CODE_ZERO_RISK_PARAMETER not in codes
 
+    def test_lending_market_id_dropped_entirely_still_fails_check(self, tmp_path: Path) -> None:
+        """A hand-edited config that drops lending_market_id (not just blanks
+        it) must still fail -- the structural scan alone can't see this
+        (nothing present to flag), so this exercises the protocol-aware
+        absence check specifically."""
+        config = {"chain": "base", "lending_protocol": "morpho_blue", "collateral_token": "wstETH"}
+        strategy_dir = _write_fixture(tmp_path, config)
+        report = run_checks(strategy_dir)
+        assert report.has_errors()
+        empty_findings = [f for f in report.findings if f.code == CODE_EMPTY_MARKET_IDENTITY]
+        assert empty_findings and empty_findings[0].field == "lending_market_id"
+
 
 class TestMarketIdentityScanUnit:
     def test_null_market_id_flagged(self) -> None:
@@ -138,6 +151,107 @@ class TestMarketIdentityScanUnit:
 
     def test_nonzero_lltv_and_absent_keys_clean(self) -> None:
         assert scan_market_identity_findings({"morpho_lltv_bps": 9150, "size_usd": 100}) == []
+
+
+class TestEnforceMarketIdentity:
+    """Raising form of the scan -- the boot-gate call itself."""
+
+    def test_present_but_empty_market_id_raises(self) -> None:
+        with pytest.raises(ConfigValidationError, match="lending_market_id"):
+            enforce_market_identity({"lending_market_id": ""})
+
+    def test_clean_config_does_not_raise(self) -> None:
+        enforce_market_identity({"lending_market_id": VALID_MARKET_ID})
+        enforce_market_identity({"lending_protocol": "aave_v3"})  # key omitted entirely
+        enforce_market_identity(None)
+
+    def test_isolated_market_protocol_with_key_entirely_absent_raises(self) -> None:
+        # The structural scan above can't catch this (nothing to flag as
+        # "empty") -- this is scan_lending_protocol_market_identity_findings,
+        # which knows morpho_blue requires the key via its connector
+        # capability, independent of whether the key is present at all.
+        with pytest.raises(ConfigValidationError, match="lending_market_id"):
+            enforce_market_identity({"lending_protocol": "morpho_blue"})
+
+    def test_pooled_reserve_protocol_with_key_entirely_absent_does_not_raise(self) -> None:
+        enforce_market_identity({"lending_protocol": "aave_v3"})
+
+    def test_legacy_key_with_valid_value_does_not_raise(self) -> None:
+        # A strategy scaffolded before the lending_market -> lending_market_id
+        # rename, hand-configured with a genuinely valid id under the old
+        # name, must keep booting -- the rename must not regress it.
+        enforce_market_identity({"lending_protocol": "morpho_blue", "lending_market": VALID_MARKET_ID})
+
+    def test_legacy_key_with_empty_value_still_raises(self) -> None:
+        # The fallback accepts the legacy key as a source of truth, but only
+        # when it actually resolves to something -- an empty legacy value is
+        # exactly as unresolved as an empty new one.
+        with pytest.raises(ConfigValidationError, match="lending_market_id"):
+            enforce_market_identity({"lending_protocol": "morpho_blue", "lending_market": ""})
+
+    def test_both_keys_present_new_empty_legacy_valid_does_not_raise(self) -> None:
+        # A config carrying BOTH the empty new key and a valid legacy value
+        # (e.g. a config regenerated against a newer template without
+        # dropping the old key) must not fail: the structural scanner's
+        # independent complaint about the empty lending_market_id has to
+        # defer to the protocol-aware check's fallback resolution, not stack
+        # an unrelated error on top of a config that IS actually resolved.
+        enforce_market_identity(
+            {"lending_protocol": "morpho_blue", "lending_market_id": "", "lending_market": VALID_MARKET_ID}
+        )
+
+    def test_both_keys_present_new_empty_legacy_empty_still_raises(self) -> None:
+        with pytest.raises(ConfigValidationError, match="lending_market_id"):
+            enforce_market_identity({"lending_protocol": "morpho_blue", "lending_market_id": "", "lending_market": ""})
+
+    def test_pooled_reserve_protocol_legacy_blank_value_does_not_raise(self) -> None:
+        # Aave's legacy lending_market: "" is legitimate and informational --
+        # confirms the legacy-key fallback never runs for a protocol that
+        # doesn't require an id at all.
+        enforce_market_identity({"lending_protocol": "aave_v3", "lending_market": ""})
+
+    def test_isolated_market_protocol_with_garbage_value_does_not_raise(self) -> None:
+        # Identity PRESENCE, not verification -- a non-empty but unverified
+        # or wrong market id is a separate, deferred concern.
+        enforce_market_identity({"lending_protocol": "morpho_blue", "lending_market_id": "not-a-market"})
+
+
+class _BareStrategy:
+    """No CONFIG_MODEL, no dataclass generic -- coerce_strategy_config must still run
+    the market-identity scan against it (the scan doesn't need a declared contract)."""
+
+
+class TestMarketIdentityBootGate:
+    """coerce_strategy_config(..., enforce_market_identity=...).
+
+    Mirrors TestConfigModelFindings' raising-form coverage, but for the
+    structural scanner rather than the optional CONFIG_MODEL contract, and
+    exercises the actual opt-in flag boot/backtest pass and teardown must not.
+    """
+
+    def test_enforced_raises_on_empty_market_id(self) -> None:
+        with pytest.raises(ConfigValidationError, match="lending_market_id"):
+            coerce_strategy_config(_BareStrategy, {"lending_market_id": ""}, echo=False, enforce_market_identity=True)
+
+    def test_not_enforced_by_default_lets_teardown_proceed(self) -> None:
+        # Default enforce_market_identity=False -- this is the exact call shape
+        # teardown_helpers.py uses, and it must never raise on a blanked id.
+        config_instance = coerce_strategy_config(_BareStrategy, {"lending_market_id": ""}, echo=False)
+        assert config_instance["lending_market_id"] == ""
+
+    def test_enforced_passes_on_resolved_market_id(self) -> None:
+        config_instance = coerce_strategy_config(
+            _BareStrategy,
+            {"lending_market_id": VALID_MARKET_ID},
+            echo=False,
+            enforce_market_identity=True,
+        )
+        assert config_instance["lending_market_id"] == VALID_MARKET_ID
+
+    def test_enforced_passes_when_key_is_omitted(self) -> None:
+        # Aave-style: the scaffold omits the key entirely rather than
+        # emitting it empty -- the scanner's contract is "absent is clean".
+        coerce_strategy_config(_BareStrategy, {"lending_protocol": "aave_v3"}, echo=False, enforce_market_identity=True)
 
 
 # =============================================================================
@@ -171,9 +285,7 @@ class TestEffectiveConfigParity:
         report = run_checks(strategy_dir)
         assert any(f.code == CODE_EMPTY_MARKET_IDENTITY for f in report.findings)
 
-    def test_load_effective_config_merges_override(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_load_effective_config_merges_override(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         strategy_dir = _write_fixture(tmp_path, {"chain": "ethereum", "size_usd": 5})
         monkeypatch.setenv("ALMANAK_STRATEGY_CONFIG", json.dumps({"size_usd": 9}))
         config, config_path, findings = load_effective_config(strategy_dir)

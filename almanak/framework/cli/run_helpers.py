@@ -232,7 +232,10 @@ def _instantiate_strategy(  # noqa: C901
 
             # Resolve the dataclass config type (or DictConfigWrapper fallback)
             # through the coercion path shared with `strat backtest`.
-            config_instance = coerce_strategy_config(strategy_class, strategy_config)
+            # enforce_market_identity=True: boot is the proven-safe surface
+            # for the structural market-id scan -- never HOLD forever on a
+            # market a strategy can never trade.
+            config_instance = coerce_strategy_config(strategy_class, strategy_config, enforce_market_identity=True)
 
             # Resolve wallet for strategy construction
             strat_wallet = runtime_config.execution_address

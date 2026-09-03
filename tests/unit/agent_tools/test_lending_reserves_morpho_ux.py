@@ -147,6 +147,11 @@ async def test_morpho_unknown_filter_lists_known_markets() -> None:
     assert result.status == "error"
     assert "not a listed reserve" in result.error["message"]
     assert "sUSDe/USDC" in result.error["message"]
+    # A catalog-sourced zero-match must carry the honesty caveat so a
+    # caller never reads "not in our catalog" as "confirmed absent on-chain".
+    assert result.error["suggestion"] is not None
+    assert "curated catalog" in result.error["suggestion"]
+    assert "does not prove" in result.error["suggestion"]
 
 
 # ---------------------------------------------------------------------------
@@ -229,6 +234,22 @@ async def test_exact_symbol_filter_still_works_on_aave() -> None:
     assert result.status == "success", result.error
     assert result.data["count"] == 1
     assert result.data["reserves"][0]["symbol"] == "WMATIC"
+
+
+@pytest.mark.asyncio
+async def test_live_enumeration_zero_match_carries_no_catalog_suggestion() -> None:
+    """The honesty caveat is catalog-specific -- a live on-chain enumeration
+    miss IS authoritative, so no suggestion should be attached."""
+    executor = _make_aave_executor([("WMATIC", _WMATIC), ("USDC", _USDC)])
+    result = await executor.execute(
+        "list_lending_reserves",
+        {"chain": "polygon", "protocol": "aave_v3", "asset": "NOTLISTED"},
+    )
+    assert result.status == "error"
+    assert "not a listed reserve" in result.error["message"]
+    # __getitem__ excludes None fields from its dict-style view (SDK-compat
+    # shape) -- assert absence via the typed attribute instead.
+    assert result.error.suggestion is None
 
 
 # ---------------------------------------------------------------------------

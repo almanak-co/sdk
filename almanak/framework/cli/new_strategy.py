@@ -894,7 +894,7 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                 try:
                     hf_health = market.position_health(
                         protocol=self.lending_protocol,
-                        market_id=self.lending_market,
+                        market_id=self.lending_market_id,
                     )
                     hf = hf_health.health_factor
                     debt_usd = getattr(hf_health, "debt_value_usd", Decimal("0")) or Decimal("0")
@@ -963,8 +963,8 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                             "token": self.borrow_token,
                             "repay_full": True,
                         }
-                        if self.lending_market:
-                            repay_kwargs["market_id"] = self.lending_market
+                        if self.lending_market_id:
+                            repay_kwargs["market_id"] = self.lending_market_id
                         return Intent.repay(**repay_kwargs)
 
                     if hf < self.min_health_factor:
@@ -1016,8 +1016,8 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                             "token": self.borrow_token,
                             "amount": repay_amt,
                         }
-                        if self.lending_market:
-                            partial_kwargs["market_id"] = self.lending_market
+                        if self.lending_market_id:
+                            partial_kwargs["market_id"] = self.lending_market_id
                         return Intent.repay(**partial_kwargs)
                 except Exception as e:
                     logger.warning(f"Health factor unavailable, continuing loop: {e}")
@@ -1049,8 +1049,8 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                     "amount": amount,
                     "use_as_collateral": True,
                 }
-                if self.lending_market:
-                    supply_kwargs["market_id"] = self.lending_market
+                if self.lending_market_id:
+                    supply_kwargs["market_id"] = self.lending_market_id
                 return Intent.supply(**supply_kwargs)
 
             elif self._loop_state == LendingLoopState.SUPPLIED:
@@ -1070,7 +1070,7 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                 try:
                     pre = market.position_health(
                         protocol=self.lending_protocol,
-                        market_id=self.lending_market,
+                        market_id=self.lending_market_id,
                     )
                     borrow_price = market.price(self.borrow_token)
                     if borrow_price and borrow_price > 0 and pre.collateral_value_usd > 0:
@@ -1103,8 +1103,8 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                     "borrow_token": self.borrow_token,
                     "borrow_amount": borrow_amount,
                 }
-                if self.lending_market:
-                    borrow_kwargs["market_id"] = self.lending_market
+                if self.lending_market_id:
+                    borrow_kwargs["market_id"] = self.lending_market_id
                 return Intent.borrow(**borrow_kwargs)
 
             elif self._loop_state == LendingLoopState.BORROWED:
@@ -1931,7 +1931,7 @@ def _get_template_teardown(
         health = None
         try:
             health = self.create_market_snapshot().position_health(
-                self.lending_protocol, self.lending_market
+                self.lending_protocol, self.lending_market_id
             )
             if getattr(health, "price_source", "") == PRICE_SOURCE_SAME_ASSET_UNIT:
                 raise RuntimeError(
@@ -1950,7 +1950,7 @@ def _get_template_teardown(
             borrow_details = {{
                 "borrow_token": self.borrow_token,
                 "loop_count": self._loop_count,
-                "market_id": self.lending_market,
+                "market_id": self.lending_market_id,
             }}
             if health is None:
                 borrow_details["valuation_status"] = "no_path"
@@ -2000,7 +2000,7 @@ def _get_template_teardown(
             supply_details = {{
                 "collateral_token": self.collateral_token,
                 "supply_amount": str(self.supply_amount),
-                "market_id": self.lending_market,
+                "market_id": self.lending_market_id,
             }}
             if health is None:
                 supply_details["valuation_status"] = "no_path"
@@ -2043,7 +2043,7 @@ def _get_template_teardown(
             protocol=self.lending_protocol,
             collateral_token=self.collateral_token,
             borrow_token=self.borrow_token,
-            market_id=self.lending_market or None,
+            market_id=self.lending_market_id or None,
             chain=self.chain,
             mode=mode,
         )
@@ -3028,10 +3028,12 @@ def _get_template_init_params(
         self.partial_repay_pct = Decimal(str(get_config("partial_repay_pct", "0.25")))
 
         # Protocol / market for health-factor dispatch.
-        # For aave_v3 market_id is informational; for morpho_blue set the bytes32 market id;
-        # for compound_v3 set the Comet market key (e.g. "usdc", "weth").
+        # For aave_v3 market_id is informational (omitted from config.json by
+        # the scaffold); for morpho_blue set the bytes32 market id, verified
+        # via `ax lending-market` -- never leave this empty, it can never
+        # trade; for compound_v3 set the Comet market key (e.g. "usdc", "weth").
         self.lending_protocol = get_config("lending_protocol", "__SCAFFOLD_PROTOCOL__")
-        self.lending_market = get_config("lending_market", "")
+        self.lending_market_id = get_config("lending_market_id", "")
 
         # Token configuration
         self.collateral_token = get_config("collateral_token", "WETH")
@@ -4289,6 +4291,20 @@ def generate_strategy_file(
     return _build_strategy_content(name, template, chain, output_dir, protocol)
 
 
+def _protocol_requires_market_id(protocol: str) -> bool:
+    """True when ``protocol`` declares ``requires_market_id=True`` (isolated markets).
+
+    Reads the authoritative per-connector ``capabilities.py`` registry (the
+    same source ``ax.py`` and the agent-tool schema layer use) so this stays
+    in sync with the intent-layer validator instead of hardcoding a protocol
+    name here. Lazy import: this module is imported by lightweight CLI entry
+    points and must not eagerly pull the connector registry.
+    """
+    from almanak.connectors._strategy_base.capabilities_registry import get_protocol_capabilities
+
+    return bool(get_protocol_capabilities(protocol).get("requires_market_id"))
+
+
 def generate_config_json(
     name: str,
     template: StrategyTemplate,
@@ -4370,12 +4386,24 @@ def generate_config_json(
                 "emergency_threshold": "1.2",
                 "partial_repay_pct": "0.25",
                 "lending_protocol": protocol,
-                # Morpho Blue: set the bytes32 market id here; Compound V3: set
-                # the Comet market key (e.g. "usdc", "weth"); Aave V3: leave blank.
-                "lending_market": "",
                 "min_collateral_usd": "100",
             }
         )
+        # Isolated-market protocols (Morpho Blue and others declaring
+        # requires_market_id=True in their connector capabilities.py -- the
+        # connector manifest is the single source of truth) can never trade
+        # without a verified market id, so the key is always emitted (even
+        # empty) for the market-identity scanner (scan_market_identity_findings)
+        # to catch at `strat check` / boot. Pooled-reserve protocols like
+        # Aave V3 have no such identity -- the scanner's contract is "authors
+        # who don't use the field omit it" (config_validation.py), so the
+        # key is omitted entirely rather than emitted empty.
+        if _protocol_requires_market_id(protocol):
+            # Deliberately left for the human/agent to fill in -- resolve a
+            # candidate with `ax lending-reserves`, then verify it on-chain
+            # with `ax lending-market` before pinning it here. The tool
+            # lists candidates; the caller always chooses, never an auto-pick.
+            data["lending_market_id"] = ""
     elif template == StrategyTemplate.BASIS_TRADE:
         data.update(
             {
@@ -6468,6 +6496,56 @@ def list_strategies() -> list[str]:
             fh.write(content)
 
 
+def _check_market_identity_or_abort(
+    config_json_content: str,
+    *,
+    chain: str,
+    protocol: str | None,
+    template_enum: "StrategyTemplate",
+    strategy_dir: Path,
+) -> None:
+    """Report + abort (without deleting the scaffold) on an unresolved market id.
+
+    Split out of :func:`new_strategy` purely to keep that function's branch
+    count under the CRAP gate. Raises ``click.Abort`` — the caller must let
+    that propagate past its generic ``except Exception`` cleanup (which
+    deletes a newly created directory) rather than swallowing it, since the
+    scaffold is a legitimate starting point that just needs one more
+    manual edit, not a failed generation.
+    """
+    from typing import Any
+
+    from .config_validation import market_identity_findings
+
+    try:
+        parsed_config: dict[str, Any] | None = json.loads(config_json_content)
+    except (json.JSONDecodeError, TypeError):
+        parsed_config = None
+    identity_errors = [f for f in market_identity_findings(parsed_config) if f.severity == "error"]
+    if not identity_errors:
+        return
+
+    resolved_protocol = protocol or TEMPLATE_CONFIGS[template_enum].default_protocol
+    click.echo("Market identity unresolved -- this strategy CANNOT trade yet:", err=True)
+    for finding in identity_errors:
+        click.echo(f"  {finding.field or '<config>'}: {finding.message}", err=True)
+    click.echo(err=True)
+    click.echo("Resolve and verify before running:", err=True)
+    click.echo(
+        f"  almanak ax --chain {chain} lending-reserves --protocol {resolved_protocol} "
+        "--collateral <token> --loan <token>",
+        err=True,
+    )
+    click.echo(
+        f"  almanak ax --chain {chain} lending-market --protocol {resolved_protocol} --market-id <candidate id>",
+        err=True,
+    )
+    click.echo("  Then set the verified id in config.json before running.", err=True)
+    click.echo()
+    click.echo(f"Scaffold written to {strategy_dir} (edit config.json, then retry).")
+    raise click.Abort()
+
+
 @click.command("new-strategy")
 @click.option(
     "--template",
@@ -6745,6 +6823,19 @@ def new_strategy(
         dashboard_metadata_file.write_text(generate_dashboard_metadata(name), encoding="utf-8")
         files_created.append("dashboard/metadata.json")
 
+        # Structural market-identity check: a scaffold that ships a
+        # present-but-empty market_id/*_market_id key can never trade.
+        # `strat check` / boot enforce the same scan
+        # (config_validation.enforce_market_identity) -- this just surfaces
+        # it immediately instead of implying the scaffold is ready to run.
+        # Raises click.Abort() (caught below, without deleting the scaffold)
+        # when the config is unresolved. Runs BEFORE the success banner so a
+        # caller keying off "Created strategy" text rather than the exit
+        # code can never read a market-less scaffold as ready.
+        _check_market_identity_or_abort(
+            config_json_content, chain=chain, protocol=protocol, template_enum=template_enum, strategy_dir=strategy_dir
+        )
+
         # Print success message
         click.echo()
         click.echo(f"Created strategy '{snake_name}' in {strategy_dir}")
@@ -6763,6 +6854,8 @@ def new_strategy(
         click.echo(f"  cd {strategy_dir}")
         click.echo("  almanak strat run --once --dry-run")
 
+    except click.Abort:
+        raise
     except Exception as e:
         click.echo(f"Error creating strategy: {e}", err=True)
         # Clean up on failure — only rmtree if we created the directory.

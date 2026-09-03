@@ -235,9 +235,9 @@ def _apply_engine_config_findings(
     report: CheckReport,
 ) -> None:
     """CONFIG_MODEL contract + market-identity placeholder scan (shared engine)."""
-    from .config_validation import config_model_findings, scan_market_identity_findings
+    from .config_validation import config_model_findings, market_identity_findings
 
-    engine_findings = list(scan_market_identity_findings(config))
+    engine_findings = list(market_identity_findings(config))
     if strategy_class is not None:
         engine_findings.extend(config_model_findings(strategy_class, config))
 
@@ -381,12 +381,15 @@ def _instantiate_strategy(
         # validated a different config type than the runtime was the drift
         # class VIB-5986 closes. ``enforce_config_model=False`` because the
         # CONFIG_MODEL contract already ran as its own findings pass; letting
-        # coercion re-raise the same violations would duplicate them.
+        # coercion re-raise the same violations would duplicate them. Same
+        # reasoning for enforce_market_identity=False: scan_market_identity_findings()
+        # already ran as its own findings pass below.
         config_instance = coerce_strategy_config(
             strategy_class,
             dict(config) if isinstance(config, dict) else {},
             echo=False,
             enforce_config_model=False,
+            enforce_market_identity=False,
         )
 
         base_kwargs: dict[str, Any] = {
