@@ -615,10 +615,21 @@ class TokenCacheManager:
             self._stats["misses"] += 1
             return None
 
-    def put(self, token: ResolvedToken) -> None:
+    def put(self, token: ResolvedToken, *, bind_address: bool = True) -> None:
         """Store a token in memory, and on disk when the disk view is loaded.
 
-        Creates cache entries for both address and symbol lookups.
+        Always creates the symbol-keyed cache entry. Creates the address-keyed
+        entry too when ``bind_address`` is True (the default).
+
+        The address-keyed slot and the symbol-keyed slot are independent
+        views that can legitimately disagree: the address slot answers "what
+        is this address's canonical symbol", the symbol slot answers "what
+        does this symbol resolve to". Two symbols can share one address
+        without the address slot's occupant changing every time a caller
+        writes the other one. This cache holds no naming policy of its own —
+        the caller passes ``bind_address=False`` when a write should update
+        only the symbol view, leaving the address view's current occupant in
+        place.
 
         The memory write always happens. The disk write is skipped while the
         disk view has not loaded — `_write_disk_cache` will not persist from a
@@ -634,6 +645,8 @@ class TokenCacheManager:
 
         Args:
             token: ResolvedToken to cache
+            bind_address: Also write the address-keyed slot. Defaults to
+                True, preserving every pre-existing caller's behavior.
 
         Example:
             cache.put(resolved_usdc_token)
@@ -646,17 +659,16 @@ class TokenCacheManager:
 
             token_dict = token.to_dict()
 
-            self._evict_if_needed()
-            self._memory[address_key] = token
-            self._memory.move_to_end(address_key)
+            if bind_address:
+                self._evict_if_needed()
+                self._memory[address_key] = token
+                self._memory.move_to_end(address_key)
+                self._disk_cache[address_key] = token_dict
 
             if symbol_key != address_key:
                 self._evict_if_needed()
                 self._memory[symbol_key] = token
                 self._memory.move_to_end(symbol_key)
-
-            self._disk_cache[address_key] = token_dict
-            if symbol_key != address_key:
                 self._disk_cache[symbol_key] = token_dict
 
             self._write_disk_cache()
@@ -803,16 +815,17 @@ class TokenCacheManager:
             loop = asyncio.get_event_loop()
             return await loop.run_in_executor(None, lambda: self.get(chain, address=address, symbol=symbol))
 
-    async def put_async(self, token: ResolvedToken) -> None:
+    async def put_async(self, token: ResolvedToken, *, bind_address: bool = True) -> None:
         """Async-safe version of put().
 
         Args:
             token: ResolvedToken to cache
+            bind_address: Also write the address-keyed slot. See ``put()``.
         """
         lock = await self._get_async_lock()
         async with lock:
             loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, lambda: self.put(token))
+            await loop.run_in_executor(None, lambda: self.put(token, bind_address=bind_address))
 
     async def remove_async(self, chain: str, *, address: str | None = None, symbol: str | None = None) -> bool:
         """Async-safe version of remove().

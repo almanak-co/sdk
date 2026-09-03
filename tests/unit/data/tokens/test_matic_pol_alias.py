@@ -18,6 +18,7 @@ These tests pin the contract:
 
 from __future__ import annotations
 
+import json
 import tempfile
 from pathlib import Path
 
@@ -137,3 +138,104 @@ class TestOtherNativesUnaffected:
         assert token.symbol == symbol
         assert token.is_native is True
         assert token.coingecko_id == expected_coingecko_id
+
+
+class TestAddressCanonSurvivesLaterSymbolResolve:
+    """Regression guard: a later symbol resolve must not demote the address canon.
+
+    ``TokenCacheManager.put()`` used to bind the address-keyed and
+    symbol-keyed cache slots to the same ``ResolvedToken`` object, so
+    resolving the non-preferred symbol ("MATIC") after the address had
+    already been resolved silently demoted the address slot's canonical
+    occupant from POL back to MATIC for the rest of the process (and, once
+    persisted, the disk cache too). One resolver instance must not lose the
+    address->POL canon no matter what order callers resolve symbols in.
+    """
+
+    def test_address_canon_survives_matic_then_address_again(self, temp_cache_file):
+        resolver = TokenResolver(cache_file=temp_cache_file)
+        native_sentinel = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+
+        first = resolver.resolve(native_sentinel, "polygon")
+        assert first.symbol == "POL"
+
+        matic = resolver.resolve("MATIC", "polygon")
+        assert matic.symbol == "MATIC", "resolve('MATIC', ...) must keep returning MATIC"
+
+        second = resolver.resolve(native_sentinel, "polygon")
+        assert second.symbol == "POL", "resolving MATIC must not demote the address-keyed cache row's canonical symbol"
+
+    def test_matic_resolve_first_does_not_poison_address_canon(self, temp_cache_file):
+        """Same invariant, opposite arrival order — MATIC resolved before the address."""
+        resolver = TokenResolver(cache_file=temp_cache_file)
+        native_sentinel = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+
+        matic = resolver.resolve("MATIC", "polygon")
+        assert matic.symbol == "MATIC"
+
+        address_lookup = resolver.resolve(native_sentinel, "polygon")
+        assert address_lookup.symbol == "POL"
+
+    def test_disk_row_for_address_stays_pol_after_matic_resolve(self, temp_cache_file):
+        """The persisted address-keyed row must not be reduced to MATIC.
+
+        Reading this back through a fresh ``TokenResolver`` would mask a
+        persistence bug: construction always re-asserts the canonical row via
+        ``_refresh_canonical_address_cache_entries()``, regardless of what was
+        actually written to disk. Inspect the raw JSON cache file so this test
+        exercises what ``put()`` actually persisted, not the self-heal.
+        """
+        native_sentinel = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+
+        resolver = TokenResolver(cache_file=temp_cache_file)
+        resolver.resolve(native_sentinel, "polygon")
+        resolver.resolve("MATIC", "polygon")
+
+        with open(temp_cache_file) as f:
+            disk = json.load(f)
+
+        address_key = f"polygon:{native_sentinel}"
+        assert disk["tokens"][address_key]["symbol"] == "POL"
+        assert disk["tokens"]["polygon:MATIC"]["symbol"] == "MATIC"
+
+    def test_both_symbol_views_and_address_canon_survive_disk_reload(self, temp_cache_file):
+        """End-to-end: a fresh process reading the same cache file sees the same invariant."""
+        native_sentinel = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+
+        resolver = TokenResolver(cache_file=temp_cache_file)
+        resolver.resolve(native_sentinel, "polygon")
+        resolver.resolve("MATIC", "polygon")
+
+        TokenResolver.reset_instance()
+        reloaded = TokenResolver(cache_file=temp_cache_file)
+
+        assert reloaded.resolve(native_sentinel, "polygon").symbol == "POL"
+        assert reloaded.resolve("MATIC", "polygon").symbol == "MATIC"
+        assert reloaded.resolve("POL", "polygon").symbol == "POL"
+
+    def test_stale_address_row_self_heals_on_next_read(self, temp_cache_file):
+        """A cache row that predates the ``_put_resolved`` gate must not be trusted.
+
+        Simulates a write path that bypasses ``_put_resolved`` (a pre-fix warm
+        cache, or a future call site nobody remembered to route through it):
+        the address-keyed slot is poisoned directly with a MATIC-symbol token.
+        The next address resolve must detect the mismatch against the
+        canonical-symbol table and fall through to the static index rather
+        than serve the stale row.
+        """
+        native_sentinel = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        resolver = TokenResolver(cache_file=temp_cache_file)
+
+        matic_token = resolver.resolve("MATIC", "polygon")
+        assert matic_token.symbol == "MATIC"
+
+        # Bypass _put_resolved to poison the address-keyed slot directly.
+        resolver._cache.put(matic_token, bind_address=True)
+        poisoned = resolver._cache.get("polygon", address=native_sentinel)
+        assert poisoned.symbol == "MATIC", "test setup must actually poison the row"
+
+        healed = resolver.resolve(native_sentinel, "polygon")
+        assert healed.symbol == "POL", "resolve() must self-heal a stale address-keyed row"
+        assert resolver._cache.get("polygon", address=native_sentinel).symbol == "POL", (
+            "the self-heal must rewrite the cache, not just return a one-off corrected value"
+        )

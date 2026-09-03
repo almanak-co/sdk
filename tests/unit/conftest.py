@@ -44,11 +44,19 @@ the unit suite.
 Regression pin: ``tests/unit/strategies/test_ambient_gateway_hermeticity.py``
 binds a live rate-serving gRPC server on the default port and asserts the
 no-injection paths still raise.
+
+``_isolate_token_resolver`` applies the same whole-tree hermeticity pattern to
+``TokenResolver``, a second process-wide singleton. Without it, whichever test
+resolves a token first in a given pytest-split shard silently seeds every
+later test in that shard with its cache state, including canonical-symbol
+rows a later, unrelated resolve can demote.
 """
 
 import pytest
 
 import almanak.framework.gateway_client as _gateway_client_module
+from almanak.framework.data.tokens.cache import TokenCacheManager
+from almanak.framework.data.tokens.resolver import TokenResolver
 from almanak.framework.gateway_client import GatewayClientConfig
 
 # Port 1 (tcpmux) needs root to bind and is never in service on a dev or CI
@@ -89,3 +97,33 @@ def _hermetic_ambient_gateway(monkeypatch: pytest.MonkeyPatch) -> None:
     # ambient dial inside this test constructs a client from the pinned
     # config; monkeypatch restores the previous singleton afterwards.
     monkeypatch.setattr(_gateway_client_module, "_default_client", None)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_token_resolver(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reset the process-wide ``TokenResolver`` singleton between every unit test.
+
+    ``get_token_resolver()`` / ``TokenResolver.get_instance()`` return one
+    object for the life of the process. Without this fixture, whichever test
+    resolves a token first in a given pytest-split shard silently seeds every
+    later test in that shard with its cache state — including canonical-
+    symbol rows that a later, unrelated resolve can demote. Function-scoped,
+    not module-scoped: the reproduced failure was ~20 test methods in ONE
+    file polluting a later method in the same class.
+
+    ``reset_instance()`` alone would not isolate: the next construction
+    reloads the real ``~/.almanak/token_cache.json`` from disk, so tests could
+    still cross-pollute through the filesystem. Redirect the default cache
+    path to a per-test temp file too — mirroring what
+    ``tests/unit/data/tokens/test_matic_pol_alias.py`` already does
+    individually (its own ``temp_cache_file`` fixture plus a local
+    ``reset_singleton`` fixture).
+
+    Cross-test persistence of this singleton is not a legitimate unit-test
+    contract. A test that needs to observe singleton identity or persistence
+    establishes and verifies it within itself, as those two files do.
+    """
+    monkeypatch.setattr(TokenCacheManager, "DEFAULT_CACHE_FILE", str(tmp_path / "token_cache.json"))
+    TokenResolver.reset_instance()
+    yield
+    TokenResolver.reset_instance()

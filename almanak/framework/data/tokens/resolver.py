@@ -650,20 +650,68 @@ class TokenResolver:
                     metadata.symbol,
                 )
 
+    def _put_resolved(self, token: ResolvedToken) -> None:
+        """Write a resolved token through to the cache.
+
+        Callers are responsible for thread-safety exactly as they were for a
+        direct ``self._cache.put(...)`` call: hold ``self._lock`` when called
+        after construction (matching every other write call site in this
+        class); no lock is needed from ``__init__``, which runs before the
+        instance is published to other threads.
+
+        Every ``self._cache.put(...)`` call site in this class routes through
+        here so ``_STATIC_ADDRESS_CANONICAL_SYMBOLS`` cannot be bypassed by a
+        future write path.
+
+        The cache's address-keyed and symbol-keyed slots are independent
+        views: the address slot answers "what is this address's canonical
+        symbol", the symbol slot answers "what does this symbol resolve to".
+        Writing a non-preferred symbol (``resolve("MATIC", "polygon")``) must
+        keep returning ``symbol == "MATIC"`` for the symbol view — that dual
+        canon is pinned by ``test_matic_pol_alias.py`` and the gas/price side
+        of ``test_polygon_native_symbol_parity.py`` — without demoting the
+        address view's canonical occupant.
+        """
+        chain_lower = token.chain.lower()
+        preferred_symbol = _STATIC_ADDRESS_CANONICAL_SYMBOLS.get(
+            (chain_lower, normalize_address(token.address, chain_lower))
+        )
+        bind_address = preferred_symbol is None or token.symbol.upper() == preferred_symbol.upper()
+        self._cache.put(token, bind_address=bind_address)
+
     def _refresh_canonical_address_cache_entries(self) -> None:
-        """Overwrite stale cache rows for address->symbol canonical overrides.
+        """Assert cache rows for address->symbol canonical overrides.
 
         Address lookups hit cache before the static registry. When the preferred
         symbol for a known address changes but the address itself stays stable,
         old disk-cache rows would otherwise pin the pre-migration symbol.
+
+        This is the one-shot assertion at construction time; ``_put_resolved``
+        is what keeps the invariant holding across every later cache write.
+
+        Fails loudly on a misconfigured table entry rather than silently
+        skipping it — a silent skip would let a typo'd or stale table row
+        quietly disable the canonical-symbol invariant it exists to enforce.
         """
-        for (chain_lower, _addr_key), preferred_symbol in _STATIC_ADDRESS_CANONICAL_SYMBOLS.items():
+        for (chain_lower, addr_key), preferred_symbol in _STATIC_ADDRESS_CANONICAL_SYMBOLS.items():
             token = self._static_registry.get(chain_lower, {}).get(preferred_symbol.upper())
             if token is None:
-                continue
+                raise ValueError(
+                    f"_STATIC_ADDRESS_CANONICAL_SYMBOLS entry ({chain_lower!r}, {addr_key!r}) -> "
+                    f"{preferred_symbol!r} names a symbol not present in the {chain_lower!r} static "
+                    "registry; fix the table entry or register the token."
+                )
 
             resolved = self._token_to_resolved(token, chain_lower, source="static")
-            self._cache.put(resolved)
+            resolved_addr_key = normalize_address(resolved.address, chain_lower)
+            if resolved_addr_key != addr_key:
+                raise ValueError(
+                    f"_STATIC_ADDRESS_CANONICAL_SYMBOLS entry ({chain_lower!r}, {addr_key!r}) -> "
+                    f"{preferred_symbol!r} resolves to address {resolved_addr_key!r}, which does not "
+                    "match the table's own key; fix the table entry."
+                )
+
+            self._put_resolved(resolved)
 
     @classmethod
     def get_instance(
@@ -911,7 +959,7 @@ class TokenResolver:
                 if resolved:
                     # Write back to cache (under lock)
                     with self._lock:
-                        self._cache.put(resolved)
+                        self._put_resolved(resolved)
                     self._record_resolution_success(token, chain_lower, resolved, start_time)
                     return resolved
 
@@ -995,13 +1043,29 @@ class TokenResolver:
         # 1. Check cache (memory + disk)
         cached = self._cache.get(chain_lower, address=addr_key)
         if cached:
-            self._stats["cache_hits"] += 1
+            preferred_symbol = _STATIC_ADDRESS_CANONICAL_SYMBOLS.get((chain_lower, addr_key))
+            if preferred_symbol is None or cached.symbol.upper() == preferred_symbol.upper():
+                self._stats["cache_hits"] += 1
+                logger.debug(
+                    "token_cache_hit",
+                    extra={"token": address, "chain": chain_lower, "cache_type": "memory"},
+                )
+                _try_record_metric("record_token_resolution_cache_hit", chain_lower, "memory")
+                return cached
+            # Stale row: cached symbol disagrees with the table's preference,
+            # e.g. a warm disk cache or a write path that missed
+            # ``_put_resolved``. Fall through to the static index below,
+            # which already prefers ``preferred_symbol`` on address collision,
+            # and let the resulting ``_put_resolved`` self-heal the row.
             logger.debug(
-                "token_cache_hit",
-                extra={"token": address, "chain": chain_lower, "cache_type": "memory"},
+                "token_cache_stale_canonical_symbol",
+                extra={
+                    "address": address,
+                    "chain": chain_lower,
+                    "cached_symbol": cached.symbol,
+                    "preferred_symbol": preferred_symbol,
+                },
             )
-            _try_record_metric("record_token_resolution_cache_hit", chain_lower, "memory")
-            return cached
 
         # 2. Check static registry address index
         chain_index = self._static_address_index.get(chain_lower, {})
@@ -1010,7 +1074,7 @@ class TokenResolver:
         if static_token:
             self._stats["static_hits"] += 1
             resolved = self._token_to_resolved(static_token, chain_lower, source="static")
-            self._cache.put(resolved)
+            self._put_resolved(resolved)
             logger.debug(
                 "token_cache_miss",
                 extra={"token": address, "chain": chain_lower, "resolved_via": "static"},
@@ -1069,7 +1133,7 @@ class TokenResolver:
             self._stats["static_hits"] += 1
             resolved = self._token_to_resolved(static_token, chain_lower, source="static")
             # Cache for future lookups
-            self._cache.put(resolved)
+            self._put_resolved(resolved)
             logger.debug(
                 "token_cache_miss",
                 extra={"token": symbol, "chain": chain_lower, "resolved_via": "static"},
@@ -2054,7 +2118,7 @@ class TokenResolver:
         # says it's missing" -- that would let a stale miss short-
         # circuit a resolve for a token that has just been registered.
         with self._lock:
-            self._cache.put(token)
+            self._put_resolved(token)
             self._negative_cache.pop((chain_lower, normalize_address(token.symbol, chain_lower)), None)
             self._negative_cache.pop((chain_lower, token.symbol.upper()), None)
             self._negative_cache.pop((chain_lower, normalize_address(token.address, chain_lower)), None)
