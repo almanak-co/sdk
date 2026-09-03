@@ -1911,6 +1911,186 @@ def lending_reserves(ctx, protocol, asset, collateral, loan):
         sys.exit(1)
 
 
+_LENDING_MARKET_INCONCLUSIVE_HINT = (
+    "Inconclusive: the market may still exist on-chain. Retry when the gateway is "
+    "reachable (or check gateway logs); report this as 'could not verify', never "
+    "as 'this market does not exist'."
+)
+
+_LENDING_MARKET_KIND_LABELS = {
+    1: "pooled_reserve",  # LENDING_MARKET_KIND_POOLED_RESERVE (Aave-style)
+    2: "isolated_pair",  # LENDING_MARKET_KIND_ISOLATED_PAIR (Morpho-style)
+    3: "lending_vault",  # LENDING_MARKET_KIND_LENDING_VAULT (MetaMorpho-style)
+}
+
+
+@ax.command(name="lending-market")
+@click.option("--protocol", required=True, help="Lending protocol (e.g. 'morpho_blue').")
+@click.option("--market-id", required=True, help="Exact 0x-prefixed bytes32 market id to verify on-chain.")
+@_chain_option
+@click.pass_context
+def lending_market(ctx, protocol, market_id):
+    """Verify one exact lending market id on-chain (`GetLendingMarket`).
+
+    `ax lending-reserves` returns unverified CANDIDATES from the connector's
+    curated catalog (`enumeration_source: curated_catalog`) — enough to
+    discover a market, never enough to promote its `market_id` into a
+    strategy config. This command is the promotion step: it reads
+    `idToMarketParams(market_id)` on-chain, RECOMPUTES the market id from the
+    returned params (the protocol's own keccak of the params tuple), and
+    compares it to the requested id. Only a match returns `verified: true` —
+    a mismatch or non-existent market is a hard error, never a fabricated
+    record. This is the ONLY supported path from a discovered candidate to a
+    market_id you can safely pin in config (e.g. `morpho_market_id`).
+
+    \b
+    Examples:
+        almanak ax --chain base lending-market --protocol morpho_blue \\
+            --market-id 0x13c42741a359ac4a8aa8287d2be109dcf28344484f91185f9a79bd5a805a55ae
+        almanak ax --chain base --json lending-market --protocol morpho_blue \\
+            --market-id 0x13c42741a359ac4a8aa8287d2be109dcf28344484f91185f9a79bd5a805a55ae
+
+    \b
+    Exit codes:
+        0 -- market verified on-chain (record printed, verified=true).
+        1 -- market does not exist on-chain (authoritative NOT_FOUND).
+        2 -- invalid input: bad protocol/chain/market_id, or a recompute
+             MISMATCH (the id you passed does not hash to its own on-chain
+             params — never promote it into a config).
+        4 -- could not verify: gateway unavailable. NOT evidence the market
+             does not exist.
+    """
+    import json as _json
+
+    from almanak.framework.cli.ax_render import render_error
+
+    json_output = ctx.obj["json_output"]
+    chain = ctx.obj["chain"]
+
+    def _emit_failure(status: str, error: str, exit_code: int, hint: str | None = None) -> NoReturn:
+        if json_output:
+            payload: dict = {
+                "status": status,
+                "protocol": protocol,
+                "chain": chain,
+                "market_id": market_id,
+                "error": error,
+            }
+            if hint:
+                payload["hint"] = hint
+            click.echo(_json.dumps(payload, indent=2))
+        else:
+            render_error(f"{status}: {error}", json_output=False)
+            if hint:
+                click.echo(hint, err=True)
+        sys.exit(exit_code)
+
+    try:
+        channel, error_note = _acquire_gateway_channel(ctx)
+    except Exception as exc:
+        _emit_failure(
+            "unavailable",
+            f"unexpected CLI failure: {exc}",
+            4,
+            hint=_LENDING_MARKET_INCONCLUSIVE_HINT,
+        )
+    if channel is None:
+        _emit_failure(
+            "unavailable",
+            error_note or "gateway unavailable",
+            4,
+            hint=_LENDING_MARKET_INCONCLUSIVE_HINT,
+        )
+
+    import grpc
+
+    from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
+
+    try:
+        try:
+            stub = gateway_pb2_grpc.MarketServiceStub(channel)
+            response = stub.GetLendingMarket(
+                gateway_pb2.GetLendingMarketRequest(
+                    protocol=protocol,
+                    chain=chain,
+                    market_id=market_id,
+                ),
+                timeout=30.0,
+            )
+        except grpc.RpcError as exc:
+            code = exc.code()
+            details = exc.details() or str(exc)
+            if code is grpc.StatusCode.NOT_FOUND:
+                _emit_failure("not_found", details, 1)
+            if code is grpc.StatusCode.INVALID_ARGUMENT:
+                # Covers both bad input AND a recompute mismatch — either way
+                # this market_id must never be promoted into a config.
+                _emit_failure("invalid", details, 2)
+            _emit_failure("unavailable", details, 4, hint=_LENDING_MARKET_INCONCLUSIVE_HINT)
+        except Exception as exc:
+            # Never let a local CLI fault (stub construction, proto encoding,
+            # interceptor failure) escape as Click's default exit 1 — that
+            # exit code is reserved for the authoritative on-chain NOT_FOUND.
+            _emit_failure(
+                "unavailable",
+                f"unexpected CLI failure: {exc}",
+                4,
+                hint=_LENDING_MARKET_INCONCLUSIVE_HINT,
+            )
+        if not response.success or not response.market.verified:
+            # Defensive: the gateway's contract is to fail closed via gRPC
+            # status codes, so a non-success OK response is unexpected.
+            _emit_failure(
+                "unverified",
+                response.error or "gateway returned an unverified lending-market record",
+                4,
+                hint=_LENDING_MARKET_INCONCLUSIVE_HINT,
+            )
+    finally:
+        _close_channel(channel)
+
+    item = response.market
+    kind_label = _LENDING_MARKET_KIND_LABELS.get(int(item.kind), "unspecified")
+
+    if json_output:
+        click.echo(
+            _json.dumps(
+                {
+                    "status": "found",
+                    "protocol": item.protocol,
+                    "chain": item.chain,
+                    "kind": kind_label,
+                    "market_id": item.market_id,
+                    "collateral_token": item.collateral_token or None,
+                    "collateral_symbol": item.collateral_symbol or None,
+                    "loan_token": item.loan_token or None,
+                    "loan_symbol": item.loan_symbol or None,
+                    "lltv_bps": item.lltv_bps,
+                    "oracle": item.oracle or None,
+                    "irm": item.irm or None,
+                    "verified": item.verified,
+                },
+                indent=2,
+            )
+        )
+    else:
+        _render_lending_market_human(item, kind_label)
+
+
+def _render_lending_market_human(item, kind_label: str) -> None:
+    """Human-readable record for `ax lending-market`."""
+    click.echo(f"{item.market_id} on {item.protocol} ({item.chain}) — verified on-chain [{kind_label}]")
+    if item.collateral_symbol or item.collateral_token:
+        click.echo(f"  collateral    {item.collateral_symbol or '?'} ({item.collateral_token})")
+    if item.loan_symbol or item.loan_token:
+        click.echo(f"  loan          {item.loan_symbol or '?'} ({item.loan_token})")
+    click.echo(f"  lltv          {item.lltv_bps / 100:.2f}%")
+    if item.oracle:
+        click.echo(f"  oracle        {item.oracle}")
+    if item.irm:
+        click.echo(f"  irm           {item.irm}")
+
+
 def _render_reserves_table(response, *, protocol: str, chain: str) -> None:
     """Human-readable column table for `ax lending-reserves` (VIB-4925).
 

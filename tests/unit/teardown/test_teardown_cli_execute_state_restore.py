@@ -62,6 +62,236 @@ def test_build_deployment_id_candidates_deduplicates_while_preserving_order() ->
     assert candidates == ["demo_aerodrome_lp"]
 
 
+def test_build_deployment_id_candidates_adds_self_resolved_wallet_chain_fallback() -> None:
+    """ALM-3473 sibling bug: a cold ``teardown execute`` invocation with NO
+    explicit config ``deployment_id`` and NO id already stamped onto the
+    strategy previously produced an EMPTY candidate list — state restore was
+    skipped entirely, ``get_open_positions()`` read the strategy's still-empty
+    in-memory state, and teardown silently reported "nothing to close" on a
+    REAL open position. The ``--discover`` (Plan-B) lane already trusts the
+    deterministic ``deployment:{sha256(wallet:chain)[:12]}`` self-resolution
+    (blueprint 29 §2) via ``_resolve_teardown_deployment_id`` — this must be
+    tried here too, as a THIRD candidate, whenever a wallet/chain is available."""
+    from almanak.framework.runner.identity import resolve_deployment_id
+
+    class DummyStrategy:
+        deployment_id = ""
+
+    expected = resolve_deployment_id(wallet_address="0xabc", chain="base")
+
+    candidates = teardown_cli_module._build_deployment_id_candidates(
+        DummyStrategy(),
+        {},  # no explicit config deployment_id
+        strategy_class=DummyStrategy,
+        wallet_address="0xabc",
+        chain="base",
+    )
+
+    assert candidates == [expected]
+
+
+def test_build_deployment_id_candidates_prefers_explicit_over_self_resolved() -> None:
+    """An explicit config/strategy deployment_id must still win — the
+    self-resolved wallet+chain id is a fallback candidate, never a
+    replacement for an already-known id."""
+
+    class DummyStrategy:
+        deployment_id = ""
+
+    candidates = teardown_cli_module._build_deployment_id_candidates(
+        DummyStrategy(),
+        {"deployment_id": "configured:run"},
+        strategy_class=DummyStrategy,
+        wallet_address="0xabc",
+        chain="base",
+    )
+
+    assert candidates[0] == "configured:run"
+    assert len(candidates) == 2  # explicit id, then the self-resolved fallback
+
+
+def test_build_deployment_id_candidates_without_wallet_chain_unchanged() -> None:
+    """Omitting wallet_address/chain (existing callers, e.g. the pre-fix unit
+    tests above) must not change behaviour — no self-resolve attempt is made,
+    matching the pre-fix candidate set exactly."""
+
+    class DummyStrategy:
+        deployment_id = ""
+
+    candidates = teardown_cli_module._build_deployment_id_candidates(DummyStrategy(), {})
+    assert candidates == []
+
+
+def test_build_deployment_id_candidates_hashes_the_multi_chain_signature_not_the_scalar_chain() -> None:
+    """Codex review of PR #3838: for a genuine multi-chain strategy
+    (config["chains"] with >1 entries), the runner's own boot-time identity
+    resolution (`_run_setup.py:_resolve_identity`) hashes the SORTED,
+    COMMA-JOINED chain list — not the single `chain` value this candidate
+    builder used to pass straight through. Reproduces the exact reported
+    hashes: `resolve_deployment_id(wallet, chain="base")` (the old, wrong
+    behavior) produces `deployment:4c0c744c61dc`; the runner's real identity
+    for `["base", "arbitrum"]` is `deployment:d59e81b06d68`. A cold
+    multi-chain `teardown execute` must self-resolve to the SECOND one, or it
+    silently misses the persisted deployment and reports "nothing to close"
+    while positions remain open — the exact ALM-3473 sibling bug, just for
+    multi-chain strategies instead of the missing-candidate case."""
+    from almanak.framework.runner.identity import resolve_deployment_id
+
+    class MultiChainDummyStrategy:
+        deployment_id = ""
+        SUPPORTED_CHAINS = ["base", "arbitrum"]  # >1 entries is the multi-chain signal
+
+    wrong_id = resolve_deployment_id(wallet_address="0xabc", chain="base")
+    correct_id = resolve_deployment_id(wallet_address="0xabc", chain="arbitrum,base")
+    assert wrong_id != correct_id, "the test fixture must reproduce genuinely different hashes, or it proves nothing"
+
+    candidates = teardown_cli_module._build_deployment_id_candidates(
+        MultiChainDummyStrategy(),
+        {"chains": ["base", "arbitrum"]},  # config["chains"] is the primary multi-chain signal
+        strategy_class=MultiChainDummyStrategy,
+        wallet_address="0xabc",
+        chain="base",  # the (wrong, single-chain) value a CLI --chain resolution would pass
+    )
+
+    assert candidates == [correct_id], (
+        f"must self-resolve to the multi-chain identity {correct_id!r} (matching the runner's own "
+        f"boot-time resolution), not the single-chain {wrong_id!r} — got {candidates!r}"
+    )
+
+
+def test_execute_teardown_self_resolves_deployment_id_when_config_has_none(
+    cli_runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """End-to-end: with NO ``deployment_id`` in config.json and none already
+    stamped on the strategy (the cold ``teardown execute`` case), state must
+    still be restored — via the self-resolved wallet+chain id — before
+    ``get_open_positions()`` is read. Before the fix this strategy's real
+    open LP position would have been silently reported as "nothing to close"."""
+    from almanak.framework.runner.identity import resolve_deployment_id
+
+    wallet_address = "0x0000000000000000000000000000000000000001"
+    chain = "base"
+    expected_id = resolve_deployment_id(wallet_address=wallet_address, chain=chain)
+
+    class FakeGatewayClient:
+        def __init__(self, _config) -> None:
+            self.connected = False
+            self.channel = None
+
+        def connect(self) -> None:
+            self.connected = True
+
+        def health_check(self) -> bool:
+            return True
+
+        def disconnect(self) -> None:
+            self.connected = False
+
+    class FakeStrategy:
+        STRATEGY_NAME = "demo_aerodrome_lp"
+        last_instance: FakeStrategy | None = None
+
+        def __init__(self, config, chain: str, wallet_address: str) -> None:
+            self.config = config
+            self.chain = chain
+            self.wallet_address = wallet_address
+            self._has_position = False
+            self.deployment_id = ""  # cold: nothing stamped yet, matches production
+            self.events: list[str] = []
+            self.state_manager_deployment_ids: list[str] = []
+            type(self).last_instance = self
+
+        def set_state_manager(self, _state_manager, deployment_id: str) -> None:
+            self.events.append(f"set_state_manager:{deployment_id}")
+            self.state_manager_deployment_ids.append(deployment_id)
+            self.deployment_id = deployment_id
+
+        def load_state(self) -> bool:
+            self.events.append(f"load_state:{self.deployment_id}")
+            # Only the SELF-RESOLVED id has persisted state — proves this
+            # specific candidate was actually tried, not just any candidate.
+            if self.deployment_id == expected_id:
+                self._has_position = True
+                return True
+            return False
+
+        def get_open_positions(self):
+            self.events.append("get_open_positions")
+            positions = []
+            if self._has_position:
+                positions.append(
+                    SimpleNamespace(
+                        position_type=SimpleNamespace(value="lp"),
+                        protocol="aerodrome",
+                        chain=self.chain,
+                        position_id="aerodrome-lp-WETH/USDC-base",
+                        value_usd=Decimal("1.23"),
+                        health_factor=None,
+                    )
+                )
+            return SimpleNamespace(positions=positions)
+
+        def create_market_snapshot(self):
+            self.events.append("create_market_snapshot")
+            return SimpleNamespace(get_price_oracle_dict=lambda: {})
+
+        def generate_teardown_intents(self, _mode, market=None):
+            self.events.append(f"generate_teardown_intents:{'with_market' if market is not None else 'without_market'}")
+            return [SimpleNamespace(intent_type=SimpleNamespace(value="LP_CLOSE"))]
+
+    strategy_file = tmp_path / "strategy.py"
+    strategy_file.write_text("# placeholder\n")
+
+    config_file = tmp_path / "config.json"
+    config_file.write_text(
+        json.dumps(
+            {
+                "chain": chain,
+                "wallet_address": wallet_address,
+                # Deliberately NO "deployment_id" key — the cold-execute case.
+            }
+        )
+    )
+
+    monkeypatch.setattr(teardown_cli_module, "load_strategy_from_file", lambda _path: (FakeStrategy, None))
+    monkeypatch.setattr("almanak.framework.gateway_client.GatewayClient", FakeGatewayClient)
+    monkeypatch.setattr(
+        "almanak.framework.data.tokens.resolver.TokenResolver.set_gateway_channel",
+        lambda _self, _channel: None,
+    )
+
+    result = cli_runner.invoke(
+        teardown_cli_module.teardown,
+        [
+            "execute",
+            "-d",
+            str(tmp_path),
+            "-c",
+            str(config_file),
+            "--no-gateway",
+            "--preview",
+            "--force",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "No open positions found. Nothing to teardown." not in result.output, (
+        "ALM-3473 sibling bug: a real open position must not be silently reported as "
+        "'nothing to close' just because config.json has no explicit deployment_id"
+    )
+    assert "Teardown Steps (1):" in result.output
+
+    instance = FakeStrategy.last_instance
+    assert instance is not None
+    assert expected_id in instance.state_manager_deployment_ids
+    assert instance.events.index(f"set_state_manager:{expected_id}") < instance.events.index(
+        f"load_state:{expected_id}"
+    )
+    assert instance.events.index(f"load_state:{expected_id}") < instance.events.index("get_open_positions")
+
+
 def test_execute_teardown_restores_state_before_position_detection(
     cli_runner: CliRunner,
     monkeypatch: pytest.MonkeyPatch,

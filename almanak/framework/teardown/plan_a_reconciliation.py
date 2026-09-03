@@ -415,6 +415,38 @@ def _lending_market_id(position: PositionInfo) -> str:
     return str(position.position_id)
 
 
+def _lending_market_id_is_resolved(position: PositionInfo) -> bool:
+    """True iff the raw balance read is safe to attempt for this position:
+    either the protocol's reader is WHOLE-ACCOUNT (the Aave family — Aave V3,
+    Spark) and structurally ignores ``market_id`` entirely, so an unresolved
+    one is harmless; or :func:`_lending_market_id` resolved from a REAL market
+    key (``details['market_id']``/``details['market']``, or the VIB-5795
+    synthetic resolver) rather than falling through to the ``position_id``
+    last-resort.
+
+    A PER-MARKET protocol's raw reader (Morpho Blue's ``position(marketId,
+    wallet)``) must never be trusted with an unresolved id: unlike
+    ``position_health``, which fails closed with a raised "market not found"
+    for a bad id, Morpho's read has no such fail-closed behavior — an unknown
+    market key returns a silent all-zero struct (no revert), which would make
+    the raw-authority path confidently report a genuinely-open position as
+    ``DIVERGED_CLOSED``. Whole-account protocols have no such failure mode
+    (their reader ignores the id outright — verified against
+    ``AaveV3BalanceReader``), so gating them the same way as Morpho would
+    wrongly disable the raw-authority fix for the Aave family entirely, whose
+    real ``PositionInfo`` shape (e.g. Spark's ``details={"asset": ...}``)
+    never carries a market key at all.
+    """
+    from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
+
+    if LendingReadRegistry.whole_account_read(str(position.protocol or "")):
+        return True
+    details = position.details if isinstance(position.details, dict) else {}
+    if details.get("market_id") or details.get("market"):
+        return True
+    return _resolve_synthetic_market_id(position, details) is not None
+
+
 def _resolve_synthetic_market_id(position: PositionInfo, details: dict[str, Any]) -> str | None:
     """Reconstruct a synthetic-market id from a single-leg lending position (VIB-5795).
 
@@ -565,37 +597,84 @@ async def _reconcile_lp(
     )
 
 
+def _raw_lending_leg_balance(
+    *, market: MarketSnapshot, protocol: str, token: str, market_id: str, chain: str, is_borrow: bool
+) -> int | None:
+    """This leg's own price-independent raw on-chain balance (ALM-3473), or
+    ``None`` when unmeasured (no reader for this protocol, unresolvable token,
+    or a read failure) — never a fabricated zero. Mirrors
+    ``lending_unwind_guard._read_reserve_balances``'s calling convention."""
+    if not token or not hasattr(market, "lending_position_balances"):
+        return None
+    try:
+        supply, debt = market.lending_position_balances(
+            protocol, token, market_id=market_id or None, chain=chain or None
+        )
+    except Exception:  # noqa: BLE001 — unmeasured, never a fabricated zero
+        return None
+    return debt if is_borrow else supply
+
+
 def _reconcile_lending(*, position: PositionInfo, market: MarketSnapshot | None) -> tuple[ReconciliationVerdict, str]:
-    """Protocol-scoped lending reconciliation via the gateway-routed TD-05 read."""
+    """Protocol-scoped lending reconciliation (ALM-3473).
+
+    PRIMARY authority is a price-independent raw on-chain balance read for
+    this leg's own reserve (``MarketSnapshot.lending_position_balances`` —
+    the same read ``lending_unwind_guard`` already trusts pre-execution).
+    This sidesteps ``position_health()``'s USD-valuation caveats entirely: a
+    stale/memoized valuation, and the account-level aggregate reading zero
+    for a real LTV=0/isolation/non-collateral supply. Falls back to
+    ``position_health()`` only when the raw read is unmeasured (no reader
+    registered for this protocol, unresolvable token, or a transient
+    failure) — Empty != Zero, an unmeasured raw leg is never treated as a
+    confident open OR closed verdict on its own.
+    """
     if market is None:
         return ReconciliationVerdict.UNVERIFIABLE, "no market snapshot to read position_health"
     from almanak.framework.teardown.live_position_reads import redrive_lending_position
 
     details = position.details if isinstance(position.details, dict) else {}
-    # Same detail-key-convention gap as _lending_market_id (VIB-5518): registry
-    # rows carry "asset_symbol", but strategy-owned lending PositionInfo (Compound
-    # V3, Aave, Benqi, ...) stores the token under "asset". Resolve either. The
-    # symbol only feeds the best-effort USD->token-amount conversion inside
-    # redrive_lending_position, which the CHECK never reads — but an empty symbol
-    # makes market.price("") fire a doomed lookup that can block 15-30s per leg
-    # before failing. Resolving the real symbol keeps the price lookup cheap;
-    # leaving it empty is still correct (amounts unused), just slow.
-    symbol = str(details.get("asset_symbol") or details.get("asset") or "")
+    # Registry rows carry "asset_symbol"; strategy-owned single-asset lending
+    # PositionInfo (Compound V3, Aave, Benqi, ...) stores the token under
+    # "asset"; cross-asset lending PositionInfo (Morpho Blue) stores it under
+    # "collateral_token" / "borrow_token" — the same convention
+    # generate_lending_unwind() takes. Resolve each leg's own key first,
+    # falling back to the single-asset keys.
+    collateral_symbol = str(
+        details.get("collateral_token") or details.get("asset_symbol") or details.get("asset") or ""
+    )
+    borrow_symbol = str(details.get("borrow_token") or details.get("asset_symbol") or details.get("asset") or "")
+    is_borrow = position.position_type == PositionType.BORROW
+    leg = "debt" if is_borrow else "collateral"
+    market_id = _lending_market_id(position)
+
+    raw_leg_value = (
+        _raw_lending_leg_balance(
+            market=market,
+            protocol=position.protocol,
+            token=borrow_symbol if is_borrow else collateral_symbol,
+            market_id=market_id,
+            chain=position.chain,
+            is_borrow=is_borrow,
+        )
+        if _lending_market_id_is_resolved(position)
+        else None
+    )
+    if raw_leg_value is not None:
+        if raw_leg_value == 0:
+            return ReconciliationVerdict.DIVERGED_CLOSED, f"{leg} raw on-chain balance is zero (closed)"
+        return ReconciliationVerdict.CONFIRMED_OPEN, f"{leg} raw on-chain balance {raw_leg_value} (open)"
+
     live = redrive_lending_position(
         market=market,
         protocol=position.protocol,
-        market_id=_lending_market_id(position),
-        collateral_token=symbol,
-        borrow_token=symbol,
+        market_id=market_id,
+        collateral_token=collateral_symbol,
+        borrow_token=borrow_symbol,
     )
     if live is None:
         return ReconciliationVerdict.UNVERIFIABLE, "position_health unavailable (unmeasured)"
-    if position.position_type is PositionType.BORROW:
-        leg_value = live.debt_value_usd
-        leg = "debt"
-    else:  # SUPPLY (collateral)
-        leg_value = live.collateral_value_usd
-        leg = "collateral"
+    leg_value = live.debt_value_usd if is_borrow else live.collateral_value_usd
     if leg_value > _DUST_USD:
         return ReconciliationVerdict.CONFIRMED_OPEN, f"{leg} value ${leg_value} on-chain"
     return ReconciliationVerdict.DIVERGED_CLOSED, f"{leg} value ${leg_value} at/under dust (closed)"

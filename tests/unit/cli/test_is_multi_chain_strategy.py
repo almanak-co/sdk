@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from almanak.framework.cli.run import is_multi_chain_strategy
+from almanak.framework.cli.run import is_multi_chain_strategy, resolve_identity_chain
 
 
 class TestIsMultiChainStrategy:
@@ -129,3 +129,61 @@ class TestIsMultiChainStrategy:
 
         assert is_multi_chain_strategy(FakeStrategy, config={"chains": "arbitrum"}) is False
         assert is_multi_chain_strategy(FakeStrategy, config={"chains": 42}) is False
+
+
+class TestResolveIdentityChain:
+    """Codex review of PR #3838: a scalar `chain` is the WRONG identity input
+    for a multi-chain strategy — `_run_setup.py:_resolve_identity()` hashes
+    the sorted comma-joined `config["chains"]` list instead. This is the
+    single canonical helper both the runner's own boot-time resolution and
+    any independent recomputation (teardown execute's cold-state
+    self-resolution) must share, so they can never diverge."""
+
+    def test_single_chain_strategy_returns_the_scalar_chain_unchanged(self):
+        class FakeStrategy:
+            pass
+
+        assert resolve_identity_chain(strategy_class=FakeStrategy, config={}, chain="base") == "base"
+
+    def test_multi_chain_via_config_returns_sorted_lowercased_joined_chains(self):
+        class FakeStrategy:
+            pass
+
+        config = {"chains": ["Base", "Arbitrum"]}
+        # Sorted, lower-cased — matching _resolve_identity()'s exact contract.
+        assert resolve_identity_chain(strategy_class=FakeStrategy, config=config, chain="base") == "arbitrum,base"
+
+    def test_multi_chain_via_config_is_order_independent(self):
+        class FakeStrategy:
+            pass
+
+        forward = resolve_identity_chain(strategy_class=FakeStrategy, config={"chains": ["base", "arbitrum"]}, chain="")
+        reverse = resolve_identity_chain(strategy_class=FakeStrategy, config={"chains": ["arbitrum", "base"]}, chain="")
+        assert forward == reverse == "arbitrum,base"
+
+    def test_multi_chain_via_legacy_supported_chains_when_config_has_no_chains_list(self):
+        """A multi-chain strategy declared via the legacy SUPPORTED_CHAINS
+        attribute (no config["chains"]) still resolves via its declared
+        chains, not the scalar `chain` passed in."""
+
+        class FakeStrategy:
+            SUPPORTED_CHAINS = ["base", "arbitrum"]
+
+        assert resolve_identity_chain(strategy_class=FakeStrategy, config={}, chain="base") == "arbitrum,base"
+
+    def test_matches_resolve_deployment_id_hash_exactly(self):
+        """End-to-end: the identity chain this function produces must hash
+        to the SAME deployment_id the runner's own boot-time resolution
+        would produce for the same strategy+config — reproduces the exact
+        hashes reported in review (`deployment:4c0c744c61dc` for the WRONG
+        single-chain hash, `deployment:d59e81b06d68` for the correct one)."""
+        from almanak.framework.runner.identity import resolve_deployment_id
+
+        class FakeStrategy:
+            pass
+
+        config = {"chains": ["base", "arbitrum"]}
+        identity_chain = resolve_identity_chain(strategy_class=FakeStrategy, config=config, chain="base")
+
+        assert resolve_deployment_id(wallet_address="0xabc", chain=identity_chain) == "deployment:d59e81b06d68"
+        assert resolve_deployment_id(wallet_address="0xabc", chain="base") == "deployment:4c0c744c61dc"

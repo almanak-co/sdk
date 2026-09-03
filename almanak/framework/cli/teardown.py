@@ -41,6 +41,7 @@ import sys
 import time
 from datetime import datetime
 from decimal import Decimal
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -437,7 +438,14 @@ def load_strategy_from_file(file_path: Path) -> tuple[type | None, str | None]:
         return None, f"Error loading strategy: {str(e)}"
 
 
-def _build_deployment_id_candidates(strategy: Any, config_dict: dict[str, Any]) -> list[str]:
+def _build_deployment_id_candidates(
+    strategy: Any,
+    config_dict: dict[str, Any],
+    *,
+    strategy_class: type | None = None,
+    wallet_address: str | None = None,
+    chain: str | None = None,
+) -> list[str]:
     """Build deployment_id candidates for state restore."""
     candidates: list[str] = []
 
@@ -449,6 +457,25 @@ def _build_deployment_id_candidates(strategy: Any, config_dict: dict[str, Any]) 
 
     _add_candidate(config_dict.get("deployment_id"))
     _add_candidate(getattr(strategy, "deployment_id", ""))
+
+    # A cold `teardown execute` with no persisted/explicit deployment_id must
+    # self-resolve the same deterministic id `--discover` already trusts, or
+    # state restore below is skipped and teardown reports "nothing to close"
+    # on a real open position. For a multi-chain strategy, hash the same
+    # sorted comma-joined chain signature the runner's boot-time identity
+    # resolution uses (`resolve_identity_chain()`) — a bare scalar `chain`
+    # recomputes a different, wrong deployment_id.
+    if strategy_class is not None and (wallet_address or chain):
+        try:
+            from ..runner.identity import resolve_deployment_id
+            from .run import resolve_identity_chain
+
+            identity_chain = resolve_identity_chain(
+                strategy_class=strategy_class, config=config_dict, chain=chain or ""
+            )
+            _add_candidate(resolve_deployment_id(wallet_address=wallet_address or "", chain=identity_chain))
+        except Exception:  # noqa: BLE001 — a candidate, never a hard requirement
+            logger.debug("Could not self-resolve a deployment_id candidate from wallet+chain", exc_info=True)
 
     seen: set[str] = set()
     unique_candidates: list[str] = []
@@ -464,6 +491,9 @@ def _restore_strategy_state_for_teardown(
     strategy_class: type,
     config_dict: dict[str, Any],
     gateway_client: Any,
+    *,
+    wallet_address: str | None = None,
+    chain: str | None = None,
 ) -> None:
     """Restore strategy state before computing teardown positions."""
     if not hasattr(strategy, "set_state_manager"):
@@ -472,7 +502,9 @@ def _restore_strategy_state_for_teardown(
 
     from ..state.gateway_state_manager import GatewayStateManager
 
-    candidates = _build_deployment_id_candidates(strategy, config_dict)
+    candidates = _build_deployment_id_candidates(
+        strategy, config_dict, strategy_class=strategy_class, wallet_address=wallet_address, chain=chain
+    )
     if not candidates:
         logger.info("No deployment_id candidates available for teardown state restore")
         return
@@ -852,7 +884,9 @@ def execute_teardown(  # noqa: C901
             wallet_address=wallet_address,
             gateway_client=gateway_client,
             inject_balance_provider=_inject_balance_provider,
-            restore_strategy_state=_restore_strategy_state_for_teardown,
+            restore_strategy_state=partial(
+                _restore_strategy_state_for_teardown, wallet_address=wallet_address, chain=chain
+            ),
         )
 
         click.echo(f"Strategy: {strategy_class.__name__}")
@@ -1105,7 +1139,7 @@ def request(
     asset_policy_enum = policy_map[asset_policy]
 
     # Map mode
-    mode_enum = TeardownMode.SOFT if mode == "graceful" else TeardownMode.HARD
+    mode_enum = TeardownMode.from_cli_string(mode)
 
     # Show confirmation
     click.echo()

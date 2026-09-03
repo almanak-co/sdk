@@ -53,6 +53,33 @@ class TeardownMode(StrEnum):
     SOFT = "SOFT"  # Graceful: 15-30 minutes, minimize costs
     HARD = "HARD"  # Emergency: 1-3 minutes, prioritize speed
 
+    @classmethod
+    def from_cli_string(cls, mode: str) -> "TeardownMode":
+        """Map the CLI-facing ``--mode`` value (``"graceful"`` / ``"emergency"``)
+        to this internal enum.
+
+        The bare ``TeardownMode(mode)`` constructor only accepts
+        ``"SOFT"``/``"HARD"`` and raises on the CLI's own strings — every
+        CLI-facing caller must convert through this one function instead of
+        re-deriving the mapping inline.
+
+        Raises ``ValueError`` on anything else — a caller passing an
+        unrecognized string is a bug that should fail loud, not silently
+        default to HARD/emergency (the wrong direction to guess wrong in).
+        """
+        try:
+            return _CLI_MODE_TO_TEARDOWN_MODE[mode]
+        except KeyError:
+            raise ValueError(
+                f"unknown teardown mode {mode!r}; expected one of {sorted(_CLI_MODE_TO_TEARDOWN_MODE)}"
+            ) from None
+
+
+_CLI_MODE_TO_TEARDOWN_MODE: dict[str, TeardownMode] = {
+    "graceful": TeardownMode.SOFT,
+    "emergency": TeardownMode.HARD,
+}
+
 
 class TeardownPhase(StrEnum):
     """Phases of the teardown pipeline.

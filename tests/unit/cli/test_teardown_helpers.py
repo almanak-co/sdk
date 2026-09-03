@@ -937,19 +937,16 @@ class TestDisplayTeardownResult:
 
 class TestUpdateTeardownRequestsLifecycle:
     def test_creates_request_when_none_exists(self):
-        # NOTE: passes mode="SOFT" (the valid TeardownMode enum value), NOT
-        # the CLI-facing "graceful" / "emergency". See
-        # ``test_create_path_swallows_invalid_mode_value`` for the
-        # pre-existing bug that makes the create path always fail when the
-        # CLI's mode string flows in unchanged.
-        from almanak.framework.teardown import TeardownStatus
+        # The real CLI-facing value (see test_create_path_accepts_cli_facing_mode_value
+        # for the regression pin on the mode-string bug this used to trip).
+        from almanak.framework.teardown import TeardownMode, TeardownStatus
 
         tsm = MagicMock()
         tsm.get_active_request.return_value = None
 
         th.update_teardown_requests_lifecycle(
             deployment_id="my-strat",
-            mode="SOFT",
+            mode="graceful",
             result=_result(success=True, intents_total=3, intents_succeeded=3),
             state_manager_provider=lambda: tsm,
         )
@@ -957,6 +954,7 @@ class TestUpdateTeardownRequestsLifecycle:
         tsm.create_request.assert_called_once()
         created = tsm.create_request.call_args.args[0]
         assert created.deployment_id == "my-strat"
+        assert created.mode is TeardownMode.SOFT
         assert created.requested_by == "cli-execute"
         # VIB-5727: the execute lane surfaces no asset-routing knobs, so it has
         # no operator preference to record — it mirrors the request-lane default,
@@ -974,31 +972,59 @@ class TestUpdateTeardownRequestsLifecycle:
         assert updated.status == TeardownStatus.COMPLETED
         assert updated.positions_closed == 3
 
-    def test_create_path_swallows_invalid_mode_value(self, caplog):
-        """Documents the pre-existing VIB-3920 bug: ``TeardownMode`` enum
-        values are ``SOFT`` / ``HARD``, but the CLI passes the user-facing
-        ``"graceful"`` / ``"emergency"`` mode string. ``_TM(mode)`` on the
-        create-path raises ``ValueError`` and the function's blanket
-        ``try/except Exception`` swallows it — silently. The result: no
-        ``teardown_requests`` row ever exists for execute-lane teardowns
-        unless the request lane created one first.
+    def test_create_path_accepts_cli_facing_mode_value(self, caplog):
+        """Regression pin for the VIB-3920 follow-up bug found during the
+        ALM-3473 investigation: ``TeardownMode`` enum values are ``SOFT`` /
+        ``HARD``, but the CLI passes the user-facing ``"graceful"`` /
+        ``"emergency"`` mode string. The bare ``TeardownMode(mode)``
+        constructor this used to call only accepts ``"SOFT"``/``"HARD"``, so
+        it raised ``ValueError`` on every single execute-lane invocation —
+        silently swallowed by this function's own blanket ``try/except``. No
+        ``teardown_requests`` row was EVER written for a direct `teardown
+        execute` run.
 
-        Pinned here so a future ``mode`` normalization (or a fix to this
-        bug) is a deliberate, traceable change rather than an accidental
-        side effect of touching the helper.
+        Fixed via ``TeardownMode.from_cli_string`` (see
+        ``tests/unit/teardown/test_teardown_mode_from_cli_string.py`` for the
+        general contract) — this test pins that the create path actually
+        persists the row for a real CLI-facing mode string, not just that the
+        conversion function itself works in isolation.
         """
+        from almanak.framework.teardown import TeardownMode
+
         tsm = MagicMock()
         tsm.get_active_request.return_value = None
 
         with caplog.at_level("DEBUG", logger="almanak.framework.cli.teardown_helpers"):
             th.update_teardown_requests_lifecycle(
                 deployment_id="my-strat",
-                mode="graceful",  # CLI value — not a valid TeardownMode
+                mode="graceful",  # the real CLI-facing value
                 result=_result(),
                 state_manager_provider=lambda: tsm,
             )
 
-        # Create was attempted but the row was never persisted.
+        tsm.create_request.assert_called_once()
+        created = tsm.create_request.call_args.args[0]
+        assert created.mode is TeardownMode.SOFT
+        tsm.update_request.assert_called_once()
+        assert not any("failed to update teardown_requests" in r.message for r in caplog.records)
+
+    def test_create_path_still_fails_loud_on_a_genuinely_unrecognized_mode(self, caplog):
+        """The blanket try/except must still degrade gracefully (never crash
+        the CLI exit code) for a TRULY unrecognized mode string — this is
+        different from the fixed bug above, which was a valid CLI value
+        being rejected. A bogus value should still fail to persist, loudly
+        logged, not silently succeed with a guessed mode."""
+        tsm = MagicMock()
+        tsm.get_active_request.return_value = None
+
+        with caplog.at_level("DEBUG", logger="almanak.framework.cli.teardown_helpers"):
+            th.update_teardown_requests_lifecycle(
+                deployment_id="my-strat",
+                mode="not-a-real-mode",
+                result=_result(),
+                state_manager_provider=lambda: tsm,
+            )
+
         tsm.create_request.assert_not_called()
         tsm.update_request.assert_not_called()
         assert any("failed to update teardown_requests" in r.message for r in caplog.records)

@@ -725,7 +725,7 @@ class TeardownManager:
         Returns:
             TeardownPreview with all details for user confirmation
         """
-        internal_mode = TeardownMode.SOFT if mode == "graceful" else TeardownMode.HARD
+        internal_mode = TeardownMode.from_cli_string(mode)
 
         # Get positions from strategy
         positions = strategy.get_open_positions()
@@ -826,7 +826,7 @@ class TeardownManager:
         Returns:
             TeardownResult with complete execution details
         """
-        internal_mode = TeardownMode.SOFT if mode == "graceful" else TeardownMode.HARD
+        internal_mode = TeardownMode.from_cli_string(mode)
         started_at = datetime.now(UTC)
         if teardown_id is None:
             teardown_id = f"td_{uuid.uuid4().hex[:12]}"
@@ -3805,23 +3805,49 @@ class TeardownManager:
 
     @staticmethod
     def _fresh_post_execution_market(strategy: Any, fallback: Any | None) -> Any | None:
-        """Return a FRESH market snapshot for the POST-teardown chain re-read (VIB-5523).
+        """Return a FRESH market snapshot for the POST-teardown chain re-read.
 
         The pre-execution snapshot memoizes ``position_health`` AND wallet
         ``balance``, so reusing it to verify post-closure state returns stale
         (pre-unwind) values and falsely reports a zeroed position still open.
-        Build a fresh snapshot from the strategy so the read reflects live
-        on-chain state. When a fresh snapshot cannot be built, fall back to
-        EVICTING the stale memos on the reused snapshot — BOTH the health memo
-        and the wallet-balance memos — so the post read still re-queries the
-        chain rather than serving any pre-execution value. Never raises —
+        ``strategy.create_market_snapshot()`` is itself memoized per iteration
+        token, and only a live ``StrategyRunner`` rotates that token between
+        teardown phases — the no-runner CLI ``teardown execute`` lane never
+        does, so stamp a dedicated, always-unique token first to force a cold
+        rebuild regardless of which lane is calling. When a fresh snapshot
+        cannot be built, fall back to EVICTING the stale memos (both health
+        and wallet-balance) on the reused snapshot instead. Never raises —
         verification must never fault the teardown lane.
         """
+        # Trust create_market_snapshot()'s result as genuinely fresh when
+        # EITHER the iteration token was rotated first (memoized
+        # implementations are then guaranteed to rebuild), OR the result is a
+        # DIFFERENT object than `fallback` (a strategy with no memoization at
+        # all — nothing to rotate — still legitimately returns a fresh
+        # instance every time). Never trust a call that had no confirmed
+        # rotation AND returned the exact same instance as `fallback` — that
+        # is indistinguishable from a memoized implementation silently
+        # serving its stale cache. Fall through to eviction in that case.
+        begin_iteration = getattr(strategy, "begin_market_snapshot_iteration", None)
+        token_stamped = False
+        if callable(begin_iteration):
+            try:
+                begin_iteration(f"td15-post-execution:{uuid.uuid4()}")
+                token_stamped = True
+            except Exception:  # noqa: BLE001 — not stamped; creator() below is untrusted on faith
+                logger.warning(
+                    "TD-15: begin_market_snapshot_iteration failed for %s — "
+                    "create_market_snapshot() cannot be trusted as fresh purely on "
+                    "faith; will still accept it if it returns a genuinely different "
+                    "instance, otherwise evicting the stale health cache instead",
+                    getattr(strategy, "deployment_id", ""),
+                    exc_info=True,
+                )
         creator = getattr(strategy, "create_market_snapshot", None)
         if callable(creator):
             try:
                 fresh = creator()
-                if fresh is not None:
+                if fresh is not None and (token_stamped or fresh is not fallback):
                     return fresh
             except Exception:  # noqa: BLE001 — fall back to cache eviction below
                 logger.warning(

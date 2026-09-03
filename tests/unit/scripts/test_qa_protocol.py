@@ -564,6 +564,61 @@ def test_declared_protocol_test_sources_exist(protocol_module: ModuleType) -> No
                 assert (protocol_module.REPO_ROOT / source).is_file(), (protocol["name"], source)
 
 
+def test_declared_ax_runners_are_registered_cli_commands(protocol_module: ModuleType) -> None:
+    """Codex review of PR #3838: an obligation's ``runner="ax <command>"``
+    string is a bare label — nothing previously checked it names a command
+    that actually exists. If the CLI command were ever renamed or removed
+    without updating this string, the QA catalog would keep reporting the
+    obligation's pipeline as "ready" for a capability with no real
+    entrypoint — silently reopening exactly the ALM-3474 gap this obligation
+    exists to close, invisibly. Verify every ``"ax ..."`` runner claim, for
+    every protocol's obligations (not just morpho_blue's), against the REAL,
+    currently-registered `ax` Click command tree."""
+    from almanak.framework.cli.ax import ax as ax_cli
+
+    catalog = protocol_module.build_protocol_catalog()
+    checked_ax_runners: list[tuple[str, str, str]] = []
+    for protocol in catalog["protocols"]:
+        for obligation in protocol["contract"]["custom_obligations"]:
+            runner = obligation.get("runner")
+            if not runner or not runner.startswith("ax "):
+                continue
+            command_name = runner.removeprefix("ax ").strip()
+            checked_ax_runners.append((protocol["name"], obligation["id"], command_name))
+            assert command_name in ax_cli.commands, (
+                f"{protocol['name']}'s obligation {obligation['id']!r} declares "
+                f"runner={runner!r}, but 'ax {command_name}' is not a registered CLI "
+                f"command — either the command was renamed/removed without updating "
+                f"this string (fix the string), or it never existed (fix the command)"
+            )
+    assert checked_ax_runners, (
+        "expected at least one 'ax ...' runner to validate (morpho_blue's "
+        "lending-market, ALM-3474) — this test would be vacuous if none exist; "
+        "did the obligation get removed or its runner string changed format?"
+    )
+
+
+def test_morpho_blue_market_identity_obligation_has_a_runner_alm3474(protocol_module: ModuleType) -> None:
+    """ALM-3474: `GetLendingMarket` (on-chain market-id verification) existed as
+    a gateway RPC with no CLI/planner entrypoint — this obligation's own
+    computed ``pipeline`` was ``"missing"`` on every chain morpho_blue declares,
+    Base included, even though `ax lending-reserves` (candidate enumeration)
+    was fully wired. `ax lending-market` is the missing promotion path; this
+    pins its obligation permanently "ready" so a future removal of the runner
+    (or its wiring) regresses loudly instead of silently reopening the gap."""
+    catalog = protocol_module.build_protocol_catalog()
+    rows = {row["name"]: row for row in catalog["protocols"]}
+    obligations = {o["id"]: o for o in rows["morpho_blue"]["contract"]["custom_obligations"]}
+
+    obligation = obligations["market_params_hash_identity"]
+    assert obligation["runner"] == "ax lending-market"
+    assert obligation["pipeline"] == "ready"
+    assert obligation["pipeline_by_chain"].get("base") == "ready"
+    # Every declared chain gets the runner, not just Base — the obligation is
+    # protocol-owned, not chain-scoped.
+    assert set(obligation["pipeline_by_chain"].values()) == {"ready"}
+
+
 def test_gmx_offline_probe_seals_exact_resource_evidence(
     protocol_module: ModuleType,
     tmp_path: Path,

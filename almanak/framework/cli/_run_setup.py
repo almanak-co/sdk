@@ -659,15 +659,16 @@ def _resolve_identity(
     Returns:
         IdentityInfo snapshotting (deployment_id, run_id, strategy_name).
     """
+    from almanak.framework.cli.run import join_identity_chain_signature
     from almanak.framework.runner.identity import generate_run_id, resolve_deployment_id
 
     # Resolve deployment_id now that wallet + chain are known
     # (resolution runs AFTER _apply_strategy_config_wallet — blueprint 29 §2.2).
-    # For multi-chain strategies, hash all chains so different chain combinations
-    # produce distinct deployment_ids (e.g., [arbitrum,base] vs [arbitrum,optimism]).
-    identity_chain = str(strategy_config.get("chain", ""))
-    if multi_chain and strategy_chains:
-        identity_chain = ",".join(sorted(str(c).lower() for c in strategy_chains))
+    # Shares its chain-signature join with any cold recomputation of this same
+    # identity, so the two can never hash a different chain string apart.
+    identity_chain = join_identity_chain_signature(
+        chain=str(strategy_config.get("chain", "")), multi_chain=multi_chain, strategy_chains=strategy_chains
+    )
     deployment_id = resolve_deployment_id(
         wallet_address=strategy_config.get("wallet_address", ""),
         chain=identity_chain,

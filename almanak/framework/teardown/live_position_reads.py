@@ -155,7 +155,16 @@ class LiveLendingPosition:
 
 
 def _safe_price(market: MarketSnapshot, token: str) -> Decimal | None:
-    """Best-effort positive USD price for ``token``; ``None`` on any failure."""
+    """Best-effort positive USD price for ``token``; ``None`` on any failure.
+
+    An empty/blank ``token`` is unpriceable by construction — never call
+    ``market.price``. Both legs below are priced unconditionally regardless
+    of which one the caller needs, so guarding here (not at the caller) covers
+    every leg shape, including a single-leg position that never sets the
+    other leg's detail key.
+    """
+    if not token or not token.strip():
+        return None
     try:
         raw = market.price(token)
     except Exception:  # noqa: BLE001 — re-derivation must never fault the teardown lane

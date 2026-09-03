@@ -1126,6 +1126,36 @@ def get_strategy_chains(strategy_class: type) -> list[str]:
     return getattr(strategy_class, "SUPPORTED_CHAINS", [DEFAULT_CHAIN])
 
 
+def join_identity_chain_signature(*, chain: str, multi_chain: bool, strategy_chains: list[str]) -> str:
+    """The exact chain signature `resolve_deployment_id()` must hash: a
+    single chain for a portable/single-chain strategy, or the sorted,
+    lower-cased, comma-joined chain list for a genuine multi-chain strategy.
+    Both boot (`_run_setup.py:_resolve_identity()`) and any cold
+    recomputation (`resolve_identity_chain()` below) must call this same
+    function — a re-inlined copy that later drifts recomputes a different
+    identity and silently misses the persisted deployment.
+    """
+    if not multi_chain or not strategy_chains:
+        return str(chain or "")
+    return ",".join(sorted(str(c).lower() for c in strategy_chains))
+
+
+def resolve_identity_chain(*, strategy_class: type, config: dict[str, Any], chain: str) -> str:
+    """Derive `multi_chain` / `strategy_chains` from `strategy_class` and
+    `config` alone (for a cold caller that has no already-resolved
+    `StrategyBootstrap`), then hash via the same
+    :func:`join_identity_chain_signature` boot uses.
+    """
+    multi_chain = is_multi_chain_strategy(strategy_class, config=config)
+    config_chains = config.get("chains")
+    strategy_chains = (
+        config_chains
+        if isinstance(config_chains, list) and len(config_chains) > 1
+        else get_strategy_chains(strategy_class)
+    )
+    return join_identity_chain_signature(chain=chain, multi_chain=multi_chain, strategy_chains=strategy_chains or [])
+
+
 def get_strategy_protocols(strategy_class: type) -> dict[str, list[str]]:
     """Get the protocols per chain for a strategy.
 

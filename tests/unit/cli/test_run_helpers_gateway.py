@@ -1125,9 +1125,42 @@ class TestResolveIdentity:
         # Chains are lowercased and sorted before joining.
         assert captured[0]["chain"] == "arbitrum,base,optimism"
 
-    def test_no_cli_id_kwarg_passed_to_resolver(
+    def test_multi_chain_join_is_genuinely_shared_with_resolve_identity_chain(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
+        """Grok review of PR #3838: `_resolve_identity` must actually CALL the
+        same join `resolve_identity_chain()` uses for teardown's cold
+        self-resolution -- not maintain its own inline copy that happens to
+        currently agree. Proven here by monkeypatching
+        `join_identity_chain_signature` itself and asserting `_resolve_identity`
+        routes through it (a re-inlined duplicate would not call the patched
+        function, and this test would fail)."""
+        monkeypatch.chdir(tmp_path)
+        _install_identity_fakes(monkeypatch, deployment_id="deployment:hash")
+        from almanak.framework.cli import run as run_mod
+
+        calls: list[dict[str, Any]] = []
+        real_join = run_mod.join_identity_chain_signature
+
+        def spy_join(**kwargs: Any) -> str:
+            calls.append(kwargs)
+            return real_join(**kwargs)
+
+        monkeypatch.setattr(run_mod, "join_identity_chain_signature", spy_join)
+        strategy_config: dict[str, Any] = {"chain": "arbitrum", "wallet_address": "0xabc"}
+        run_helpers._resolve_identity(
+            strategy_config=strategy_config,
+            fresh=False,
+            multi_chain=True,
+            strategy_chains=["base", "Arbitrum", "optimism"],
+            config_display_name="my_strat",
+            gateway_network="mainnet",
+        )
+        assert calls == [
+            {"chain": "arbitrum", "multi_chain": True, "strategy_chains": ["base", "Arbitrum", "optimism"]}
+        ]
+
+    def test_no_cli_id_kwarg_passed_to_resolver(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """VIB-4722 removed --id: the resolver gets only wallet + chain."""
         monkeypatch.chdir(tmp_path)
         captured = _install_identity_fakes(monkeypatch, deployment_id="deployment:hash")

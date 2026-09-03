@@ -1161,7 +1161,10 @@ class MorphoLoopingStrategy(IntentStrategy):
                         value_usd=live.collateral_value_usd,
                         details={
                             "market_id": self.market_id,
-                            "asset": self.collateral_token,
+                            # Cross-asset convention (collateral_token / borrow_token):
+                            # the legacy "asset" key would resolve empty here.
+                            "collateral_token": self.collateral_token,
+                            "borrow_token": self.borrow_token,
                             "amount": str(collateral_amount),
                             "source": "chain",
                         },
@@ -1178,7 +1181,8 @@ class MorphoLoopingStrategy(IntentStrategy):
                         health_factor=health_factor,
                         details={
                             "market_id": self.market_id,
-                            "asset": self.borrow_token,
+                            "collateral_token": self.collateral_token,
+                            "borrow_token": self.borrow_token,
                             "amount": str(borrow_amount),
                             "source": "chain",
                         },
@@ -1205,7 +1209,8 @@ class MorphoLoopingStrategy(IntentStrategy):
                         value_usd=collateral_value,
                         details={
                             "market_id": self.market_id,
-                            "asset": self.collateral_token,
+                            "collateral_token": self.collateral_token,
+                            "borrow_token": self.borrow_token,
                             "amount": str(self._total_collateral),
                             "source": "cache",
                         },
@@ -1222,7 +1227,8 @@ class MorphoLoopingStrategy(IntentStrategy):
                         health_factor=self._current_health_factor,
                         details={
                             "market_id": self.market_id,
-                            "asset": self.borrow_token,
+                            "collateral_token": self.collateral_token,
+                            "borrow_token": self.borrow_token,
                             "amount": str(self._total_borrowed),
                             "source": "cache",
                         },

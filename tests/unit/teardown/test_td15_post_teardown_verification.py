@@ -18,9 +18,11 @@ reconciliation (TD-08) and the PRE-teardown reconciliation report. The contract:
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -249,6 +251,176 @@ async def test_post_exec_fallback_also_evicts_balances_VIB_5523():
     )
     assert evicted["health"] is True
     assert evicted["balances"] is True
+    assert out.all_closed is True
+
+
+class _MemoizingMarket(_Market):
+    """Models the REAL ``MarketSnapshot.position_health`` cache: keyed by
+    ``(protocol, market_id)``, memoized after the FIRST call, never
+    invalidated except by ``invalidate_position_health``. The ``_Market``
+    fixture above re-evaluates ``self._health`` fresh on every call — it
+    cannot model staleness at all. This class can, which is exactly what
+    :func:`test_post_exec_memoized_strategy_snapshot_still_serves_stale_health_ALM_3473`
+    below needs."""
+
+    def __init__(self, health):
+        super().__init__(health)
+        self._cache: dict[tuple[str, str], Any] = {}
+
+    def position_health(self, protocol, market_id, *, collateral_price_usd=None, debt_price_usd=None):
+        key = (protocol, market_id)
+        if key not in self._cache:
+            self._cache[key] = self._health
+        return self._cache[key]
+
+
+class _StrategyMemoized(_Strategy):
+    """Faithfully mimics ``IntentStrategy``'s REAL per-iteration-token
+    ``MarketSnapshot`` memo (VIB-4843) — not a hardcoded stand-in.
+    ``create_market_snapshot()`` returns the cached instance until
+    ``begin_market_snapshot_iteration()`` is called with a token different
+    from the currently-stamped one (initially ``None`` — no runner has EVER
+    stamped a token, matching the no-runner CLI ``teardown execute`` lane),
+    exactly mirroring ``IntentStrategy.create_market_snapshot`` /
+    ``begin_market_snapshot_iteration``'s real contract (``intent_strategy.py``).
+    This is what makes the test below able to tell a real fix (which must
+    call ``begin_market_snapshot_iteration`` with a genuinely new token
+    before rebuilding) from a fake one (a fix that merely calls
+    ``create_market_snapshot()`` again, unconditionally, would still hit this
+    fake's memo and fail the test)."""
+
+    def __init__(self, *, stale_instance: Any, fresh_builder: Callable[[], Any]) -> None:
+        self._cached_market_snapshot: Any = stale_instance
+        self._cached_market_snapshot_token: object | None = None
+        self._fresh_builder = fresh_builder
+
+    def begin_market_snapshot_iteration(self, token: object) -> None:
+        if token is not None and token == self._cached_market_snapshot_token:
+            return
+        self._cached_market_snapshot = None
+        self._cached_market_snapshot_token = token
+
+    def create_market_snapshot(self) -> Any:
+        if self._cached_market_snapshot is None:
+            self._cached_market_snapshot = self._fresh_builder()
+        return self._cached_market_snapshot
+
+
+@pytest.mark.asyncio
+async def test_post_exec_memoized_strategy_snapshot_still_serves_stale_health_ALM_3473():
+    """ALM-3473 (sibling of VIB-5523 above): ``IntentStrategy.create_market_snapshot()``
+    is ITSELF memoized per-iteration-token (VIB-4843) — only the live
+    ``StrategyRunner`` ever rotates that token between teardown phases (via
+    ``_begin_market_snapshot_iteration``). The no-runner ``almanak strat
+    teardown execute`` CLI lane never rotates it, so a strategy's own
+    ``create_market_snapshot()`` can hand back the EXACT SAME
+    ``MarketSnapshot`` instance the PRE-teardown reconciliation already used
+    — cache intact — silently defeating VIB-5523's "read fresh" fix from the
+    INSIDE, not by omitting ``create_market_snapshot`` (that fallback path is
+    already covered above) but by HAVING one that lies about freshness.
+
+    Unlike ``test_post_exec_reads_fresh_snapshot_not_stale_market_VIB_5523``
+    (which models ``create_market_snapshot()`` returning a genuinely
+    DIFFERENT, already-clean object unconditionally — the case where the fix
+    already works trivially), this models the REAL failure mode: a
+    strategy whose "fresh" call is memoized JUST LIKE THE REAL
+    ``IntentStrategy`` and only actually rebuilds when something calls
+    ``begin_market_snapshot_iteration`` with a genuinely new token first —
+    proving the FIX itself (not just a permissive test double).
+    """
+    stale_market = _MemoizingMarket(_Health(Decimal("500"), Decimal("500")))  # PRE-teardown: OPEN
+
+    # Simulate the PRE-teardown reconciliation (TeardownManager.execute(),
+    # ``_pre_teardown_reconciliation``) reading this market BEFORE the closing
+    # intent fires — this is what seeds the cache with the pre-withdrawal
+    # value in production.
+    stale_market.position_health("aave_v3", "0xmkt")
+
+    # The on-chain REPAY/WITHDRAW then genuinely succeeds. A truly fresh
+    # rebuild would see this; the STALE instance's cache would not.
+    fresh_market = _MemoizingMarket(_Health(Decimal("0"), Decimal("0")))
+
+    strategy = _StrategyMemoized(stale_instance=stale_market, fresh_builder=lambda: fresh_market)
+
+    out = await _mgr().verify_closure_against_chain(
+        strategy,
+        verification=_verified(VerificationStatus.UNVERIFIED),
+        pre_execution_positions=_summary(_lending_position(PositionType.BORROW)),
+        market=stale_market,
+    )
+    assert out.all_closed is True, (
+        "ALM-3473: _fresh_post_execution_market must not trust "
+        "strategy.create_market_snapshot() as genuinely fresh on faith — it can "
+        "return the SAME memoized instance whose position_health cache still "
+        "holds the pre-withdrawal value on the no-runner teardown-execute CLI lane"
+    )
+    assert out.verification_status is not VerificationStatus.FAILED
+
+
+@pytest.mark.asyncio
+async def test_post_exec_does_not_trust_creator_when_iteration_hook_missing():
+    """A strategy shape without ``begin_market_snapshot_iteration`` at all (not
+    the real ``IntentStrategy`` — a hand-rolled or legacy strategy that only
+    implements ``create_market_snapshot``) must NOT have that method's output
+    trusted as fresh — there is no way to know its memo, if any, was ever
+    invalidated. Trusting it on faith is the exact original bug, reachable
+    through this fallback door instead of the documented one. Must degrade to
+    the eviction path instead, exactly like the "no create_market_snapshot at
+    all" case already does."""
+    evicted = {"called": False}
+
+    class _CachingMarket(_Market):
+        def invalidate_position_health(self, protocol=None, market_id=None):
+            evicted["called"] = True
+            self._health = _Health(Decimal("0"), Decimal("0"))
+
+    stale_market = _CachingMarket(_Health(Decimal("0"), Decimal("500")))  # stale: debt still open
+
+    class _StrategyNoIterationHook(_Strategy):
+        # Deliberately HAS create_market_snapshot but NOT
+        # begin_market_snapshot_iteration.
+        def create_market_snapshot(self):
+            return stale_market  # same stale instance — "looks" fresh, isn't
+
+    out = await _mgr().verify_closure_against_chain(
+        _StrategyNoIterationHook(),
+        verification=_verified(VerificationStatus.UNVERIFIED),
+        pre_execution_positions=_summary(_lending_position(PositionType.BORROW)),
+        market=stale_market,
+    )
+    assert evicted["called"] is True, "must fall back to cache eviction, not trust an unstamped creator() blindly"
+    assert out.all_closed is True
+
+
+@pytest.mark.asyncio
+async def test_post_exec_does_not_trust_creator_when_iteration_hook_throws():
+    """Same failure mode, different trigger: begin_market_snapshot_iteration
+    EXISTS but raises. Must degrade to the eviction path exactly like the
+    missing-hook case above — never fall through to trusting creator()
+    just because it happened not to raise."""
+    evicted = {"called": False}
+
+    class _CachingMarket(_Market):
+        def invalidate_position_health(self, protocol=None, market_id=None):
+            evicted["called"] = True
+            self._health = _Health(Decimal("0"), Decimal("0"))
+
+    stale_market = _CachingMarket(_Health(Decimal("0"), Decimal("500")))
+
+    class _StrategyBrokenIterationHook(_Strategy):
+        def begin_market_snapshot_iteration(self, token):
+            raise RuntimeError("broken override")
+
+        def create_market_snapshot(self):
+            return stale_market
+
+    out = await _mgr().verify_closure_against_chain(
+        _StrategyBrokenIterationHook(),
+        verification=_verified(VerificationStatus.UNVERIFIED),
+        pre_execution_positions=_summary(_lending_position(PositionType.BORROW)),
+        market=stale_market,
+    )
+    assert evicted["called"] is True, "must fall back to cache eviction when the iteration-token stamp raises"
     assert out.all_closed is True
 
 

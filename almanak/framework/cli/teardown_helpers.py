@@ -1265,7 +1265,7 @@ def generate_teardown_intents_for_cli(
     """
     from ..teardown import TeardownMode
 
-    internal_mode = TeardownMode.SOFT if mode_str == "graceful" else TeardownMode.HARD
+    internal_mode = TeardownMode.from_cli_string(mode_str)
     if discover:
         collect_fees_default = internal_mode == TeardownMode.SOFT
         intents = _synthesize_discovered_lp_close_intents(positions, collect_fees_default)
@@ -1707,7 +1707,11 @@ def update_teardown_requests_lifecycle(
             # lane DEFAULTS.
             existing = _TR(
                 deployment_id=deployment_id,
-                mode=_TM(mode),
+                # The bare ``_TM(mode)`` constructor only accepts "SOFT"/"HARD",
+                # but `mode` here is always the CLI-facing "graceful"/"emergency"
+                # string — `from_cli_string` is the single canonical conversion
+                # every teardown-mode call site shares, so this never raises.
+                mode=_TM.from_cli_string(mode),
                 asset_policy=_TAP.TARGET_TOKEN,
                 # Mirrors the request-lane default, which is now the "no
                 # preference" sentinel resolved per-chain (VIB-5727) — the

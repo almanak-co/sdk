@@ -19,6 +19,7 @@ import pytest
 
 from almanak.framework.teardown.live_position_reads import (
     LiveLendingPosition,
+    _safe_price,
     chain_verify_lp_open,
     redrive_lending_position,
 )
@@ -51,9 +52,69 @@ class _FakeMarket:
         return self._prices[token]
 
 
+class _SpyMarket(_FakeMarket):
+    """Records every token ``price()`` is called with — lets a test assert
+    a lookup for a given (e.g. empty) token never fired at all, not merely
+    that it failed harmlessly."""
+
+    def __init__(self, *, health=None, prices=None):
+        super().__init__(health=health, prices=prices)
+        self.priced_tokens: list[str] = []
+
+    def price(self, token):
+        self.priced_tokens.append(token)
+        return super().price(token)
+
+
+def test_safe_price_never_calls_market_price_for_empty_token() -> None:
+    """ALM-3473: an empty/blank token symbol must short-circuit before ever
+    reaching ``market.price()`` — the doomed lookup this guards against
+    ("Gateway price request failed for /USD@base", a real, reproduced
+    symptom) happens at THIS call, not just in ``redrive_lending_position``'s
+    own resolution. Any current or future caller that reaches here with an
+    unresolved symbol is protected, not just the ones this ticket touched."""
+    market = _SpyMarket(prices={"wstETH": Decimal("1")})
+
+    assert _safe_price(market, "") is None
+    assert _safe_price(market, "   ") is None
+    assert market.priced_tokens == [], (
+        f"market.price() must never be called for an empty token, got {market.priced_tokens!r}"
+    )
+
+    # Sanity: a real token still resolves normally through the same function.
+    assert _safe_price(market, "wstETH") == Decimal("1")
+    assert market.priced_tokens == ["wstETH"]
+
+
 # ---------------------------------------------------------------------------
 # redrive_lending_position
 # ---------------------------------------------------------------------------
+
+
+def test_redrive_never_prices_an_unresolved_leg_symbol() -> None:
+    """ALM-3473's ACTUAL repro shape: a debt-free SUPPLY-only position whose
+    ``PositionInfo.details`` sets ONLY ``collateral_token`` — no
+    ``borrow_token`` key at all (the ticket's own minimal reproduction, and
+    what real generated single-leg strategies emit). Even after the caller
+    resolves the collateral leg correctly, ``redrive_lending_position`` prices
+    BOTH legs unconditionally — the empty borrow leg must not reach
+    ``market.price()``, regardless of whether the caller happened to also
+    have a borrow_token to resolve."""
+    market = _SpyMarket(
+        health=_Health(Decimal("148"), Decimal("0"), None),
+        prices={"wstETH": Decimal("3400")},
+    )
+    live = redrive_lending_position(
+        market=market,
+        protocol="morpho_blue",
+        market_id="0xMARKET",
+        collateral_token="wstETH",
+        borrow_token="",  # never set by this SUPPLY-only strategy's details dict
+    )
+    assert live is not None
+    assert "" not in market.priced_tokens, f"empty borrow leg must not be priced, got {market.priced_tokens!r}"
+    assert live.debt_amount is None  # unmeasured (no price), never a fabricated zero
+    assert live.collateral_amount == Decimal("148") / Decimal("3400")  # the resolved leg still works
 
 
 def test_redrive_returns_live_values_and_token_amounts() -> None:
