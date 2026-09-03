@@ -36,8 +36,7 @@ def _parse_decimal(value: Any) -> Decimal | None:
         parsed = Decimal(str(value))
     except Exception:  # noqa: BLE001
         return None
-    # Reject NaN and Infinity — downstream comparisons (e.g. <= 0) raise
-    # InvalidOperation for NaN and produce wrong results for infinities.
+    # Non-finite values either break ordering comparisons or corrupt arithmetic.
     return parsed if parsed.is_finite() else None
 
 
@@ -68,11 +67,8 @@ class _ReplayContext:
     timestamp: datetime | None
     swap_wallet_key: str
     ledger_entry_id: str | None
-    # VIB-4487 audit Fold B: the row's chain (lowercased), used by
-    # ``_replay_swap`` to canonicalize a persisted address-shaped token to
-    # its symbol on read so OLD address-keyed acquisition lots match NEW
-    # symbol-keyed disposals after a runner restart. Empty string when the
-    # row carries no chain (resolution then no-ops and the raw value is used).
+    # The lowercased chain canonicalizes address-shaped replay tokens to symbols.
+    # Missing chain leaves the persisted token identity unchanged.
     chain: str = ""
 
 
@@ -112,14 +108,8 @@ class FIFOBasisStore:
 
     def __init__(self) -> None:
         self._lots: dict[str, list[dict[str, Any]]] = {}
-        # VIB-5865 PR-2: token symbols whose wallet delta a replay handler
-        # encountered but could NOT measure (an LP leg with a token identity but
-        # an absent/unparseable amount; a Curve N-coin leg at index >= 2, whose
-        # amount the LP payload does not persist). Empty ≠ Zero: these are
-        # UNPROVABLE totals, not zero ones, so the teardown clamp's tracked map
-        # poisons them to ``None`` (visible degraded refusal) exactly as a
-        # ``WalletDeltaLane.UNMEASURED`` row does. Read via
-        # :meth:`iter_unmeasured_tokens`.
+        # A known token with an unmeasurable wallet delta has an unprovable total,
+        # not zero. Poisoning it to None makes teardown refuse visibly.
         self._unmeasured_tokens: set[str] = set()
 
     def reconstruct_from_events(self, events: list[dict[str, Any]]) -> int:
@@ -143,13 +133,11 @@ class FIFOBasisStore:
         _log = _logging.getLogger(__name__)
 
         self._lots.clear()
-        # VIB-5865 PR-2: the unmeasured-token set is replay-scoped, exactly like
-        # ``_lots`` — a fresh reconstruction must not inherit a prior replay's
-        # poison (that would strand a token this history proves is measured).
+        # Unmeasured state is replay-scoped; stale poison would strand measured inventory.
         self._unmeasured_tokens.clear()
 
         replayed = 0
-        v1_skipped: dict[str, int] = {}  # event_type → count, for aggregated warning at end
+        v1_skipped: dict[str, int] = {}
 
         for row in events:
             ctx = self._row_context(row)
@@ -185,44 +173,24 @@ class FIFOBasisStore:
         event_type = row.get("event_type", "")
         position_key = row.get("position_key", "")
         deployment_id = row.get("deployment_id", "")
-        # Rows without a deployment identity cannot be keyed into the lot store.
         if not deployment_id:
             return None
 
         try:
             payload = _json.loads(row.get("payload_json") or "{}")
-            # A non-object payload (JSON number/string/list) would raise
-            # AttributeError at every ``payload.get`` below — treat it like
-            # an unparseable payload and skip the row (Gemini review).
             if not isinstance(payload, dict):
                 return None
         except Exception:  # noqa: BLE001
             return None
 
-        # VIB-3964: derive the swap-key the BORROW / WITHDRAW credit was minted
-        # under. The accounting_events row carries `chain` and `wallet_address`
-        # at the top level, so the key is reconstructible without re-encoding it
-        # in the payload.
+        # Lending wallet lots use the same row-derived key as fungible swap inventory.
         chain_norm = (row.get("chain") or "").lower().strip()
         wallet_norm = (row.get("wallet_address") or "").lower().strip()
         swap_wallet_key = f"swap:{chain_norm}:{wallet_norm}" if chain_norm and wallet_norm else ""
 
-        # VIB-5010: the lot key is not always the row-level position_key.
-        # SWAP events are persisted with position_key='' (a swap has no lasting
-        # position — its FIFO key lives in payload.swap_position_key) and
-        # prediction events may carry payload.position_key. Requiring the row
-        # key here silently dropped every SWAP row, so no swap acquisition lot
-        # survived a runner restart and post-restart disposals booked
-        # realized_pnl=None / fully unmatched.
-        #
-        # The admission criterion mirrors each replay handler's ACTUAL key
-        # source (pr-auditor: a gate broader than the handlers would let a
-        # keyless lending/PT row through to ``record_borrow(position_key="")``
-        # and mint a lot under the empty key):
-        #   * SWAP         → payload.swap_position_key, else row key, else the
-        #                    row-derivable swap:{chain}:{wallet}.
-        #   * PREDICTION_* → payload.position_key, else row key.
-        #   * everything else (lending / PT) → row position_key ONLY.
+        # Event families persist matching keys differently: swaps may use their
+        # payload or wallet key, predictions may use their payload key, and
+        # lending/PT events require a row key to avoid unrelated empty-key lots.
         if not position_key:
             if event_type == "SWAP":
                 if not payload.get("swap_position_key") and not swap_wallet_key:
@@ -235,13 +203,11 @@ class FIFOBasisStore:
 
         timestamp_str = row.get("timestamp")
         try:
-            # Normalise UTC offset — Python <3.11 fromisoformat cannot parse trailing "Z"
             ts_norm = timestamp_str.replace("Z", "+00:00") if timestamp_str else None
             ts: datetime | None = datetime.fromisoformat(ts_norm) if ts_norm else None
         except (ValueError, TypeError):
             ts = None
 
-        # ledger_entry_id links a lot back to the on-chain transaction (VIB-3468).
         ledger_entry_id: str | None = row.get("ledger_entry_id") or None
 
         return _ReplayContext(
@@ -259,8 +225,8 @@ class FIFOBasisStore:
         raw_amount_token = ctx.payload.get("amount_token")
         amount_token = _parse_decimal(raw_amount_token)
         asset = ctx.payload.get("asset", "")
-        # amount_token key absent → policy v1 event (pre-VIB-3484); count for summary.
-        # amount_token present but non-positive → v2 extraction bug; skip silently (debug).
+        # Missing amounts are skipped and warned in aggregate; present invalid
+        # values are skipped with debug context.
         if raw_amount_token is None:
             v1_skipped["BORROW"] = v1_skipped.get("BORROW", 0) + 1
             return 0
@@ -273,10 +239,8 @@ class FIFOBasisStore:
             return 0
         if not asset:
             return 0
-        # Derive principal_usd from payload so the swap-key replay lot has
-        # the same cost basis as the live-write path. Falls back to None
-        # when the payload predates VIB-3964 — the lot still mints, just
-        # without basis (downstream disposals will return cost_basis=None).
+        # Replay must mint the same USD basis as live writes. Payloads without a
+        # USD value still mint a quantity lot with unmeasured basis.
         borrowed_amount_usd = _first_parsed_decimal(
             ctx.payload, "borrowed_amount_usd", "amount_usd", "principal_delta_usd"
         )
@@ -289,9 +253,7 @@ class FIFOBasisStore:
             timestamp=ctx.timestamp,
             source_ledger_entry_id=ctx.ledger_entry_id,
         )
-        # VIB-3964: the borrowed token also lands in the wallet — mint a
-        # swap-key acquisition lot so a SWAP that disposes the borrowed
-        # token can compute realized PnL instead of returning null.
+        # Borrowed wallet inventory joins the fungible swap-key pool.
         if ctx.swap_wallet_key:
             self.record_swap_acquisition(
                 deployment_id=ctx.deployment_id,
@@ -305,28 +267,14 @@ class FIFOBasisStore:
         return 1
 
     def _replay_withdraw(self, ctx: _ReplayContext, v1_skipped: dict[str, int], log: Any) -> int:
-        # VIB-3964: WITHDRAW credits the wallet with collateral (principal +
-        # accrued supply interest). Two basis-store effects:
-        #   1. Mirror it as a swap-key acquisition lot so a follow-up SWAP
-        #      that disposes the withdrawn token (e.g. the USDC→USDT
-        #      swap-back leg of a teardown) gets a non-null basis.
-        #   2. Match against the supply-key principal lots so interest
-        #      accrued (withdraw - principal) is reconstructable on restart.
+        # A withdrawal credits wallet inventory and consumes FIFO supply principal.
         raw_amount_token = ctx.payload.get("amount_token") or ctx.payload.get("amount")
         amount_token = _parse_decimal(raw_amount_token)
         asset = ctx.payload.get("asset", "")
         if amount_token is None or amount_token <= 0 or not asset:
             return 0
-        # CodeRabbit 2026-05-04: the live writer (lending_handler.py)
-        # mints the wallet-basis lot at the FULL withdraw USD value,
-        # not just the matched-principal portion (which becomes
-        # ``principal_delta_usd`` after the split fix above). Replay
-        # must use the same total or a SWAP that disposes the
-        # withdrawn token after a runner restart computes a different
-        # ``realized_pnl_usd`` than the live path. Read ``amount_usd``
-        # if present (preferred); otherwise reconstruct the total as
-        # ``principal_delta_usd + interest_delta_usd`` so post-split
-        # payloads still replay correctly.
+        # Wallet basis uses the full withdrawal value, not only matched principal.
+        # Split payloads reconstruct that total so live and replay disposal basis agree.
         withdraw_amount_usd = _parse_decimal(ctx.payload.get("amount_usd"))
         if withdraw_amount_usd is None:
             principal_usd = _parse_decimal(ctx.payload.get("principal_delta_usd"))
@@ -343,7 +291,6 @@ class FIFOBasisStore:
                 timestamp=ctx.timestamp,
                 source="WITHDRAW",
             )
-        # Symmetric to BORROW/REPAY: drain the supply-key principal lots.
         self.match_repay(
             deployment_id=ctx.deployment_id,
             position_key=f"supply:{ctx.position_key}",
@@ -353,12 +300,7 @@ class FIFOBasisStore:
         return 1
 
     def _replay_supply(self, ctx: _ReplayContext, v1_skipped: dict[str, int], log: Any) -> int:
-        # VIB-3964: SUPPLY removes wallet inventory (the supplied token
-        # leaves the wallet for the lending pool). Two basis-store effects:
-        #   1. Dispose the swap-key acquisition lot so phantom inventory
-        #      doesn't bleed into a later WITHDRAW-then-SWAP.
-        #   2. Record a principal lot under supply:<position_key> so a
-        #      future WITHDRAW can FIFO-match and surface accrued interest.
+        # Supply consumes wallet inventory and opens FIFO supply principal.
         raw_amount_token = ctx.payload.get("amount_token") or ctx.payload.get("amount")
         amount_token = _parse_decimal(raw_amount_token)
         asset = ctx.payload.get("asset", "")
@@ -384,7 +326,7 @@ class FIFOBasisStore:
         return 1
 
     def _replay_repay(self, ctx: _ReplayContext, v1_skipped: dict[str, int], log: Any) -> int:
-        # DELEVERAGE is structurally a repay — it reduces an open borrow lot.
+        # DELEVERAGE follows REPAY matching because it reduces an open borrow lot.
         raw_amount_token = ctx.payload.get("amount_token")
         amount_token = _parse_decimal(raw_amount_token)
         asset = ctx.payload.get("asset", "")
@@ -407,9 +349,7 @@ class FIFOBasisStore:
             token=asset,
             repay_amount=amount_token,
         )
-        # VIB-3964: REPAY also drains wallet inventory of the repaid
-        # token. Dispose the swap-key acquisition lot so the wallet basis
-        # pool stays consistent with actual on-chain wallet balance.
+        # Repayment also consumes the repaid token from wallet inventory.
         if ctx.swap_wallet_key:
             self.match_swap_disposal(
                 deployment_id=ctx.deployment_id,
@@ -423,19 +363,15 @@ class FIFOBasisStore:
         pt_token = ctx.payload.get("pt_token", "")
         if not pt_token:
             return 0
-        # PT_BUY stores HUMAN amounts (the uniform PT payload convention) — read
-        # directly, no /1e18 (the builder converts raw→human before persisting).
+        # PT payload amounts are human-unit decimals; do not apply 18-decimal scaling.
         pt_human = _parse_decimal(ctx.payload.get("pt_amount"))
         sy_human = _parse_decimal(ctx.payload.get("sy_amount"))
         if pt_human is None or sy_human is None:
             return 0
         if pt_human <= 0:
             return 0
-        # VIB-5316: the buy-time underlying/USD price (``sy_price`` on the PendleAccountingEvent
-        # payload) anchors the USD cost basis of the held PT. ``None`` for pre-fix
-        # persisted lots (the field was always-None before this fix) → the lot carries
-        # no buy-time price and its USD cost stays unmeasured (Empty ≠ Zero). NEVER
-        # re-marked at the current underlying price.
+        # PT USD cost is anchored to the buy-time underlying price. Missing price
+        # leaves USD basis unmeasured; never substitute the current price.
         sy_price = _parse_decimal(ctx.payload.get("sy_price"))
         self.record_pt_buy(
             deployment_id=ctx.deployment_id,
@@ -450,8 +386,7 @@ class FIFOBasisStore:
         return 1
 
     def _replay_pt_sell(self, ctx: _ReplayContext, v1_skipped: dict[str, int], log: Any) -> int:
-        # PT_SELL stores HUMAN amounts (the uniform PT payload convention, same as
-        # PT_BUY / PT_REDEEM) — read directly, no /1e18.
+        # PT payload amounts are human units, not raw 18-decimal integers.
         pt_token = ctx.payload.get("pt_token", "")
         if not pt_token:
             return 0
@@ -459,8 +394,7 @@ class FIFOBasisStore:
         if pt_human is None or pt_human <= 0:
             return 0
         sy_human = _parse_decimal(ctx.payload.get("sy_amount"))
-        # sy_amount is required for PT_SELL: it's the actual market proceeds.
-        # Defaulting to pt_amount (1:1 assumption) would invent cost-basis data.
+        # Market proceeds are required; a 1:1 PT fallback would fabricate yield.
         if sy_human is None or sy_human <= 0:
             return 0
         self.match_pt_redeem(
@@ -476,10 +410,8 @@ class FIFOBasisStore:
         pt_token = ctx.payload.get("pt_token", "")
         if not pt_token:
             return 0
-        # PT_REDEEM stores HUMAN amounts (the uniform PT payload convention, same
-        # as PT_BUY / PT_SELL) — read directly, no /1e18. When py_redeemed was
-        # missing from the receipt, pt_amount is None and the builder fell back to
-        # sy_amount — mirror that fallback here.
+        # PT redemption amounts are human units. When PT amount is absent, the
+        # persisted SY amount is the defined quantity fallback.
         pt_raw = _parse_decimal(ctx.payload.get("pt_amount"))
         sy_raw = _parse_decimal(ctx.payload.get("sy_amount"))
         if pt_raw is not None:
@@ -501,36 +433,15 @@ class FIFOBasisStore:
         return 1
 
     def _replay_swap(self, ctx: _ReplayContext, v1_skipped: dict[str, int], log: Any) -> int:
-        # Position key for swap lots is stored in the payload (swap:<chain>:<wallet>).
-        # Fall back to row position_key for events written before VIB-3473, then
-        # to the row-derived swap-wallet key (VIB-5010): by construction the
-        # live write path keys swap lots under swap:{chain}:{wallet}, which is
-        # exactly ctx.swap_wallet_key, so a row whose payload predates
-        # swap_position_key still replays under the correct key.
         swap_position_key = ctx.payload.get("swap_position_key") or ctx.position_key or ctx.swap_wallet_key
         if not swap_position_key:
             return 0
 
-        # VIB-4487 audit Fold B — retroactive FIFO-key healing.
-        #
-        # Pre-VIB-4487 the 4 address-emitting connectors persisted a raw
-        # contract address in the SWAP payload's ``token_in`` / ``token_out``.
-        # Replaying those verbatim keys the lot under the address (lowercased
-        # by ``_key``), so a NEW symbol-keyed disposal written post-upgrade
-        # would orphan it (unmatched basis → realized_pnl None). Run the SAME
-        # canonical resolution the live path now uses on the persisted token
-        # before keying, so an OLD address-keyed acquisition lot resolves to
-        # its symbol on read and matches the new symbol-keyed disposal — the
-        # fix becomes retroactive and the upgrade transition window vanishes.
-        #
-        # The resolver fast path is cache + static registry (``skip_gateway``
-        # inside the helper), so this works offline at boot. A payload already
-        # carrying a symbol passes through unchanged (idempotent); a row with
-        # no chain no-ops back to the raw value (no regression vs. today).
+        # Canonicalize address-shaped persisted tokens before FIFO keying so they
+        # match symbol-keyed lots after restart. Resolution is offline and
+        # best-effort; existing symbols and identities without a chain pass through.
         from almanak.connectors._strategy_base.base import resolve_swap_token_symbol
 
-        # 1. Replay disposal of token_in to consume any prior acquisition lots,
-        #    keeping the FIFO store consistent with the state before this swap.
         token_in_r = resolve_swap_token_symbol(ctx.payload.get("token_in", ""), ctx.chain) or ""
         amount_in_r = _parse_decimal(ctx.payload.get("amount_in"))
         if token_in_r and amount_in_r is not None and amount_in_r > 0:
@@ -541,7 +452,6 @@ class FIFOBasisStore:
                 amount=amount_in_r,
             )
 
-        # 2. Replay acquisition lot for token_out so future disposals can match it.
         token_out = resolve_swap_token_symbol(ctx.payload.get("token_out", ""), ctx.chain) or ""
         if not token_out:
             return 0
@@ -603,12 +513,8 @@ class FIFOBasisStore:
         from almanak.connectors._strategy_base.base import resolve_swap_token_symbol
 
         coin_symbols = ctx.payload.get("coin_symbols")
-        # list | tuple for the same reason as ``_extra_payload_tokens`` (#3349
-        # review deferral): an in-process caller may hand ``coin_symbols`` in as
-        # a tuple, and missing it here would drop every Curve N-coin leg.
-        # Non-string entries become "" IN PLACE — filtering would shift the
-        # positional coin↔leg mapping (an idx-2 extra coin masquerading as
-        # token1's identity is the over-credit direction).
+        # Accept tuples from in-process callers. Preserve positions rather than
+        # filtering invalid entries because each index identifies a pool leg.
         coins: list[str] = (
             [c if isinstance(c, str) else "" for c in coin_symbols] if isinstance(coin_symbols, list | tuple) else []
         )
@@ -623,7 +529,7 @@ class FIFOBasisStore:
                 continue
             legs.append((token, _parse_decimal(ctx.payload.get(amount_key)), _parse_decimal(ctx.payload.get(fees_key))))
 
-        # N-coin tail (index >= 2): identity known, amount never persisted.
+        # Tail coin identities have no persisted amounts and remain unmeasured.
         for extra in coins[2:]:
             token = resolve_swap_token_symbol(extra, ctx.chain) or ""
             if token:
@@ -672,10 +578,8 @@ class FIFOBasisStore:
         the lot stays out of the SWAP-only dashboard tile while still counting in
         the source-agnostic :meth:`iter_open_wallet_basis_lots` the clamp sums.
         """
-        # LP lots live in the fungible wallet pool, NOT under the row's
-        # ``lp:...`` position key — the same ``swap:{chain}:{wallet}`` key the
-        # live hook builds. Without chain+wallet the key is unresolvable, so the
-        # legs stay untracked (the safe under-sweep direction).
+        # LP legs share the fungible wallet pool. Missing chain or wallet cannot
+        # be keyed safely, so replay leaves them untracked.
         swap_position_key = ctx.swap_wallet_key
         if not swap_position_key:
             return 0
@@ -690,9 +594,7 @@ class FIFOBasisStore:
         acted = 0
         for token, amount, fees in legs:
             if is_open:
-                # DRAIN: the disposal amount is the consumed input; fees do not
-                # apply to an open. Unmeasurable amount → poison (an undrained
-                # debit is the OVER-sweep direction); measured zero → idle.
+                # An unmeasured debit poisons the token; measured zero is idle.
                 if amount is None:
                     self._mark_token_unmeasured(token)
                 elif amount > 0:
@@ -705,9 +607,8 @@ class FIFOBasisStore:
                     acted = 1
                 continue
 
-            # CREDIT (close / collect): convention-robust ``max(amount, fees)``.
-            # Inline the ``is not None`` guards (not the ``*_measured`` bools) so the
-            # type-checker narrows each operand to ``Decimal`` inside ``max``.
+            # max(amount, fees) supports both fee-inclusive and fee-separate payloads.
+            # Explicit None guards also narrow both Decimal operands for max().
             a_measured = amount is not None
             f_measured = fees is not None
             credit = max(
@@ -727,16 +628,10 @@ class FIFOBasisStore:
                 acted = 1
                 continue
 
-            # credit == 0. Distinguish a MEASURED idle leg from an UNMEASURED one
-            # (Empty ≠ Zero). Poison when the component that would carry the
-            # credit was absent rather than measured-zero:
-            #   * principal unmeasured (``amount is None``) — could be any size; OR
-            #   * a fee-only collect whose fee is unmeasured (``fees is None``) —
-            #     traderjoe_v2 / uniswap_v4 emit ``amount == 0`` and ship the real
-            #     fee on a separate rail this payload may not carry.
+            # Zero credit is idle only when every relevant component was measured.
+            # Fee-only collects require a measured fee even when principal is zero.
             if not a_measured or (is_collect and not f_measured):
                 self._mark_token_unmeasured(token)
-            # else: both relevant components measured zero → genuinely idle, skip.
         return acted
 
     def _replay_wallet_movement(self, ctx: _ReplayContext, v1_skipped: dict[str, int], log: Any) -> int:
@@ -775,9 +670,6 @@ class FIFOBasisStore:
             return 0
 
         acted = 0
-        # 1. Dispose token_in so a NO_ACCOUNTING disposal (UNSTAKE/UNWRAP) drains
-        #    prior acquisition lots (real or synthetic) in FIFO timestamp order —
-        #    source-agnostic, identical to a real SWAP's disposal leg.
         token_in_r = resolve_swap_token_symbol(ctx.payload.get("token_in", ""), ctx.chain) or ""
         amount_in_r = _parse_decimal(ctx.payload.get("amount_in"))
         if token_in_r and amount_in_r is not None and amount_in_r > 0:
@@ -789,8 +681,6 @@ class FIFOBasisStore:
             )
             acted = 1
 
-        # 2. Acquire token_out so the held NO_ACCOUNTING token is TRACKED inventory
-        #    the clamp may swap back (and a later disposal can FIFO-match).
         token_out = resolve_swap_token_symbol(ctx.payload.get("token_out", ""), ctx.chain) or ""
         if token_out:
             amount_out = _parse_decimal(ctx.payload.get("amount_out"))
@@ -808,16 +698,8 @@ class FIFOBasisStore:
         return acted
 
     def _replay_prediction(self, ctx: _ReplayContext, v1_skipped: dict[str, int], log: Any) -> int:
-        # Replay prediction-market aggregate from the post-trade
-        # snapshot stored on the event (position_size_after,
-        # position_basis_after). We assign the snapshot directly
-        # rather than re-applying record_prediction_buy /
-        # match_prediction_sell because:
-        #   1. Events are processed in timestamp ASC order — the
-        #      latest event for a (market, outcome) wins.
-        #   2. A snapshot-based replay survives missed intermediate
-        #      events (e.g. policy-v1 records) without compounding
-        #      drift from re-derivation.
+        # Replay post-trade snapshots directly: timestamp order makes the latest
+        # snapshot authoritative and avoids drift from missing intermediate events.
         pos_key = ctx.payload.get("position_key") or ctx.position_key
         if not pos_key:
             return 0
@@ -825,16 +707,10 @@ class FIFOBasisStore:
         basis_after = _parse_decimal(ctx.payload.get("position_basis_after"))
         if size_after is None or basis_after is None:
             return 0
-        # #2146: restore the VIB-3710 loaded-extras accumulator from the
-        # post-trade snapshot. Without it, a cross-restart SELL/REDEEM prices
-        # realized PnL against bare basis and overstates it by Σ loaded_extras.
-        # Legacy payloads (pre-field) parse as None -> treated as zero extras,
-        # preserving their prior arithmetic.
+        # Missing loaded extras default to zero to preserve the recorded basis.
         extras_after = _parse_decimal(ctx.payload.get("position_loaded_extras_after")) or Decimal("0")
         k = self._prediction_key(ctx.deployment_id, pos_key)
-        # Position closed (zero size) — drop the row entirely so
-        # match_prediction_sell on a closed position correctly
-        # returns "no prior basis" rather than a stale zero row.
+        # Remove closed positions so future sells report no prior basis.
         if size_after <= Decimal("0"):
             self._lots.pop(k, None)
         else:
@@ -927,11 +803,8 @@ class FIFOBasisStore:
                 LotMatch(lot_id=lot["lot_id"], consumed_quantity=consume, consumed_basis_usd=consumed_basis_usd)
             )
 
-        # interest = excess of repayment over total outstanding principal consumed.
-        # If repay_amount <= total outstanding principal, interest = 0 (partial repay).
-        # If repay_amount > total outstanding principal, excess = interest paid.
-        # If principal_consumed == 0 (all lots exhausted), treat as unmatched —
-        # interest cannot be attributed without a consumed principal basis.
+        # Repayment above consumed principal is interest only when principal matched;
+        # otherwise the full amount is unmatched and interest is unavailable.
         interest = max(Decimal("0"), repay_amount - principal_consumed) if principal_consumed > 0 else Decimal("0")
         unmatched = repay_amount if principal_consumed == 0 else Decimal("0")
         return MatchResult(
@@ -960,23 +833,13 @@ class FIFOBasisStore:
         self._lots[key].append(
             {
                 "lot_id": lot_id,
-                # ``pt_token`` (the PT symbol) is stamped on the lot so the
-                # read-only inventory accessor (:meth:`iter_open_pt_lots`,
-                # VIB-5316) can yield the symbol — the identity + join +
-                # FIFO-match key (spine §3.1) — WITHOUT colon-splitting the
-                # composite store key (whose ``deployment_id`` segment itself
-                # contains a colon, making the split ambiguous). Preserves the
-                # original case for display.
+                # Store the display symbol explicitly because deployment IDs may
+                # contain colons, making recovery from the composite key ambiguous.
                 "pt_token": pt_token,
                 "pt_amount": pt_amount,
                 "sy_cost": sy_cost,
-                # VIB-5316: the underlying/USD price captured AT BUY TIME (the
-                # PendleAccountingEvent ``sy_price``). The held-PT USD cost basis is
-                # ``cost_per_pt × remaining_pt × underlying_price_at_buy`` — anchored to
-                # this price, NOT re-marked at the current underlying (which sign-flips
-                # unrealized PnL for volatile underlyings). ``None`` = unmeasured buy
-                # price (pre-fix lot or missing ``price_inputs_json``) → USD cost stays
-                # unmeasured downstream (Empty ≠ Zero); never substitute the current price.
+                # USD cost stays anchored to the buy-time underlying price. None is
+                # unmeasured, not zero; current prices cannot replace acquisition data.
                 "underlying_price_at_buy": sy_price,
                 "remaining_pt": pt_amount,
                 "cost_per_pt": sy_cost / pt_amount if pt_amount else Decimal("0"),
@@ -1045,18 +908,14 @@ class FIFOBasisStore:
                 except (ValueError, TypeError):
                     pass
 
-        # Matched PT quantity = disposed − unmatched. Pro-rate the disposal's
-        # proceeds to the matched fraction so a partial disposal books yield only
-        # on the lots it actually consumed (VIB-5377). For a full match
-        # (``remaining == 0``) ``proceeds_for_matched == sy_received`` exactly, so
-        # this is a no-op on the existing full-disposal path.
+        # Pro-rate proceeds to matched quantity; unmatched PT must not contribute
+        # realized yield against the consumed lots.
         matched_pt = pt_redeemed - remaining
         if matched_pt > 0 and pt_redeemed > 0:
             proceeds_for_matched = sy_received * (matched_pt / pt_redeemed)
             realized_yield = proceeds_for_matched - original_cost
         else:
-            # Nothing matched: yield is unmeasured (Empty ≠ Zero). ``lot_matches``
-            # is empty, so the consumer never surfaces this value.
+            # Empty lot_matches tells consumers that yield is unmeasured, not zero.
             realized_yield = Decimal("0")
         return MatchResult(
             repaid_principal=original_cost,
@@ -1187,24 +1046,13 @@ class FIFOBasisStore:
             if not sym:
                 continue
             balance = _parse_decimal(row.get("balance"))
-            # Empty ≠ Zero: a missing / unparseable / non-positive balance is no
-            # seedable inventory (a measured zero balance is likewise nothing).
+            # Missing balance is unmeasured; measured zero has no inventory to seed.
             if balance is None or balance <= 0:
                 continue
 
-            # Same-boot idempotency de-dup: never re-seed quantity already
-            # represented by a PRIOR OPENING_BALANCE seed of this same boot
-            # snapshot. Only ``source == OPENING_BALANCE`` lots are counted —
-            # NOT replayed SWAP/BORROW/WITHDRAW lots. Those are post-boot deltas
-            # orthogonal to the immutable boot balance: a SWAP that ACQUIRED
-            # more of the token is additive (it must not suppress opening basis),
-            # and a SWAP that DISPOSED opening inventory already consumed lots
-            # during replay (its effect lives in the on-chain balance, not in a
-            # duplicate of the snapshot). De-duping against ALL lots conflated
-            # those post-boot deltas with a re-run of the seed and under-/over-
-            # seeded the opening balance. The runner calls
-            # ``reconstruct_lending_basis_store`` on every boot, so this guard
-            # makes a repeated seed of the same snapshot a no-op.
+            # Deduplicate only prior opening-balance lots from this immutable
+            # snapshot. Replayed acquisitions are additive, while replayed
+            # disposals have already consumed opening lots.
             key = self._key(deployment_id, swap_position_key, sym)
             already_open = Decimal("0")
             for lot in self._lots.get(key, []):
@@ -1232,22 +1080,6 @@ class FIFOBasisStore:
             )
             seeded += 1
         return seeded
-
-    # ──────────────────────────────────────────────────────────────────────
-    # Prediction-market aggregation (VIB-3707)
-    #
-    # Unlike FIFO lot tracking used for BORROW/REPAY/PT/SWAP, prediction-market
-    # positions are aggregated weighted-average per (market_id, outcome). Repeat
-    # BUYs combine into one running aggregate (size, basis); SELLs and REDEEMs
-    # consume that aggregate proportionally.
-    #
-    # The same `_lots` dict is reused as the in-memory backing store. A
-    # prediction key holds at most ONE row representing the current aggregate
-    # — not a list of lots — distinguished by the row dict keys
-    # ("size" / "basis" / "kind"="prediction"). Persistence backend is
-    # untouched: rows are reconstructed from PREDICTION_* accounting events
-    # on startup via reconstruct_from_events.
-    # ──────────────────────────────────────────────────────────────────────
 
     def _prediction_key(self, deployment_id: str, position_key: str) -> str:
         """Composite key for the prediction aggregate row.
@@ -1314,8 +1146,7 @@ class FIFOBasisStore:
             idx = composite_key.find(marker)
             if idx < 0:
                 continue
-            # position_key starts just after the deployment_id + ':' boundary.
-            remainder = composite_key[idx + 1 :]  # "swap:<chain>:<wallet>:<token>"
+            remainder = composite_key[idx + 1 :]
             last_colon = remainder.rfind(":")
             if last_colon <= 0:
                 continue
@@ -1324,11 +1155,8 @@ class FIFOBasisStore:
             if not position_key.startswith("swap:") or not token:
                 continue
             for lot in lots:
-                # Scope to directional swap inventory only (VIB-4984). The
-                # swap-keyed pool is fungible across SWAP/BORROW/WITHDRAW
-                # sources (VIB-3964); borrowed/withdrawn-then-held tokens are
-                # excluded here so their MTM is not mislabeled as swap PnL.
-                # Broadening to the full wallet-basis pool → VIB-4997.
+                # This valuation view excludes lending-source wallet lots whose
+                # mark-to-market is not directional swap PnL.
                 if lot.get("source") != "SWAP":
                     continue
                 remaining = lot.get("remaining")
@@ -1375,7 +1203,7 @@ class FIFOBasisStore:
             idx = composite_key.find(marker)
             if idx < 0:
                 continue
-            remainder = composite_key[idx + 1 :]  # "swap:<chain>:<wallet>:<token>"
+            remainder = composite_key[idx + 1 :]
             last_colon = remainder.rfind(":")
             if last_colon <= 0:
                 continue
@@ -1384,8 +1212,6 @@ class FIFOBasisStore:
             if not position_key.startswith("swap:") or not token:
                 continue
             for lot in lots:
-                # No source filter (ALM-2766) — SWAP / BORROW / WITHDRAW lots
-                # all count as tracked wallet inventory.
                 remaining = lot.get("remaining")
                 if not isinstance(remaining, Decimal):
                     remaining = _parse_decimal(remaining)
@@ -1445,9 +1271,6 @@ class FIFOBasisStore:
         """
         for composite_key, lots in self._lots.items():
             for lot in lots:
-                # Shape gate: only PT lots carry ``remaining_pt``. Borrow lots
-                # use ``remaining`` / ``principal``; swap lots ``remaining`` /
-                # ``amount``; prediction rows ``kind == "prediction"``.
                 if "remaining_pt" not in lot:
                     continue
                 remaining = lot.get("remaining_pt")
@@ -1457,9 +1280,6 @@ class FIFOBasisStore:
                     continue
                 pt_token = lot.get("pt_token") or ""
                 if not pt_token:
-                    # Defensive: a lot recorded before the ``pt_token`` stamp —
-                    # recover the symbol from the composite key's final
-                    # colon-segment (``{deployment_id}:{position_key}:{token}``).
                     last_colon = composite_key.rfind(":")
                     pt_token = composite_key[last_colon + 1 :] if last_colon >= 0 else composite_key
                 if not pt_token:
@@ -1470,8 +1290,7 @@ class FIFOBasisStore:
                 if cost_per_pt is not None and not isinstance(cost_per_pt, Decimal):
                     cost_per_pt = _parse_decimal(cost_per_pt)
                 sy_cost_for_remaining = cost_per_pt * remaining if cost_per_pt is not None else None
-                # VIB-5316: buy-time-anchored USD cost. None if EITHER leg unmeasured
-                # (Empty ≠ Zero); never the current underlying price.
+                # USD basis needs both acquisition legs; never re-mark missing cost.
                 underlying_at_buy: Decimal | None = lot.get("underlying_price_at_buy")
                 if underlying_at_buy is not None and not isinstance(underlying_at_buy, Decimal):
                     underlying_at_buy = _parse_decimal(underlying_at_buy)
@@ -1510,8 +1329,7 @@ class FIFOBasisStore:
         unchanged. None / negative values are clamped to 0 to keep the
         invariant that fully_loaded_basis ≥ basis.
         """
-        # Clamp non-positive extras to zero so a buggy upstream measurement
-        # cannot silently subtract from realized PnL.
+        # Negative extras cannot reduce fully loaded basis.
         if gas_cost_usd is None or gas_cost_usd < 0:
             gas_cost_usd = Decimal("0")
         if fee_pusd is None or fee_pusd < 0:
@@ -1526,13 +1344,8 @@ class FIFOBasisStore:
                     "kind": "prediction",
                     "size": shares,
                     "basis": cost_basis_usd,
-                    # VIB-3710: gas + fees accumulated separately from the
-                    # headline pUSD basis. SELL/REDEEM consumes both
-                    # proportionally so realized PnL reflects the truly
-                    # fully-loaded cost. Average-up sums these alongside
-                    # basis (NOT a weighted-average — adding the cost of
-                    # the second BUY's setup-txs to the position is the
-                    # actually-incurred spend, not a "blend").
+                    # Gas and fees remain separate from headline basis but are
+                    # consumed proportionally; averaging up adds incurred costs.
                     "loaded_extras": loaded_extras_delta,
                 }
             ]
@@ -1624,18 +1437,15 @@ class FIFOBasisStore:
             old_extras = Decimal(str(old_extras))
 
         if old_size <= 0:
-            # Stale zero row — treat as no prior basis.
+            # A stale zero row has no usable prior basis.
             self._lots.pop(key, None)
             return None, Decimal("0"), Decimal("0"), True
 
-        # Clamp shares_sold to old_size: an over-sell (e.g. SELL "all" mismatch)
-        # consumes the whole basis rather than producing negative size or a
-        # cost-consumed > basis.
+        # Over-sells consume at most the full basis and never create negative size.
         consumed_shares = min(shares_sold, old_size)
         share_fraction = consumed_shares / old_size
-        # VIB-3710: realized PnL must be measured against the fully-loaded
-        # basis. Both legs are consumed proportionally so partial-then-full
-        # sells produce the same total realized PnL as a single full sell.
+        # Basis and loaded extras use the same fraction so split sales realize
+        # the same total PnL as one full sale.
         fully_loaded_basis = old_basis + old_extras
         cost_consumed = share_fraction * fully_loaded_basis
         realized_pnl = proceeds_usd - cost_consumed
@@ -1644,9 +1454,7 @@ class FIFOBasisStore:
         new_basis = old_basis - (share_fraction * old_basis)
         new_extras = old_extras - (share_fraction * old_extras)
 
-        # Decimal epsilon — anything within 1e-9 share is considered zero.
-        # Prediction-market share counts are USDC-tick aware (4-decimal),
-        # so 1e-9 is comfortably below any real residual.
+        # This epsilon is below the market's four-decimal share precision.
         epsilon = Decimal("1e-9")
         if new_size <= epsilon:
             self._lots.pop(key, None)
@@ -1682,7 +1490,6 @@ class FIFOBasisStore:
         key = self._key(deployment_id, position_key, token)
         lots = self._lots.get(key)
 
-        # No lots at all for this token — cannot compute realized PnL.
         if lots is None:
             return None, amount
 
@@ -1701,7 +1508,6 @@ class FIFOBasisStore:
             remaining -= consume
             lot_cost_usd: Decimal | None = lot.get("cost_usd")
             if lot_cost_usd is not None and lot["amount"] > 0:
-                # Pro-rate the lot's cost by the fraction consumed.
                 cost_consumed += lot_cost_usd * (consume / lot["amount"])
             else:
                 _has_unknown_basis = True
@@ -1724,13 +1530,8 @@ def canonical_symbol(symbol: Any) -> str:
     return str(symbol or "").strip().upper()
 
 
-# Maturity grammar for principal-token (PT) symbols, e.g. the ``-25JUN2026`` in
-# ``PT-wstETH-25JUN2026``. Duplicated (deliberately, to keep this framework layer
-# free of any connector-name coupling — the framework→connector ratchet
-# ``scripts/ci/scan_chain_protocol_coupling.py`` forbids naming a protocol here)
-# from the connector-side parser; keep the two in sync if the PT symbol grammar
-# ever changes:
-#   almanak/connectors/pendle/accounting_spec.py:_parse_pt_maturity
+# Keep this duplicate grammar aligned with the connector parser; importing
+# connector code here would invert the framework dependency boundary.
 _PT_MATURITY_RE = re.compile(r"[-_](\d{1,2})([A-Z]{3})(\d{4})(?:$|[-_])")
 
 
@@ -1813,14 +1614,11 @@ def _declared_wallet_delta_lane(intent_or_event_type: Any) -> WalletDeltaLane | 
     which every caller treats as "not my lane" — the safe under-sweep direction,
     and byte-identical to the pre-VIB-5865 handling of unknown types.
     """
-    # Function-level import to avoid any module-load cycle (basis is a low layer).
+    # Function-local import avoids a low-layer module cycle.
     from almanak.framework.primitives.taxonomy import record_for
 
-    # #3349 review deferral (Gemini): the ``str()`` / truthiness conversion lives
-    # INSIDE the guard. A payload value whose ``__str__`` / ``__bool__`` raises is
-    # attacker- or corruption-shaped input on a fund-safety path; letting it
-    # escape would abort the whole tracked read instead of degrading this one row
-    # to "no declared lane" (the safe under-sweep direction).
+    # Keep conversion inside the guard: malformed objects degrade this row to no
+    # declared lane rather than aborting the fund-safety read.
     try:
         text = str(intent_or_event_type or "")
         if not text:
@@ -1923,34 +1721,28 @@ def synthetic_wallet_movement_events(
     These events are EPHEMERAL — emitted only for the clamp's tracked read, never
     persisted. ``synthetic=True`` is stamped for forensic clarity.
     """
-    # Function-level import to avoid any module-load cycle (basis is a low layer).
+    # Function-local import avoids a low-layer module cycle.
     import json as _json
 
     chain_norm = (chain or "").lower().strip()
     wallet_norm = (wallet_address or "").lower().strip()
     if not chain_norm or not wallet_norm:
-        # Without the deployment's chain+wallet we cannot key the synthetic lot
-        # into the same pool as real swaps — emit nothing (the clamp then has no
-        # NO_ACCOUNTING lane and strands, the safe under-sweep direction).
+        # Without chain and wallet the synthetic lot cannot join the real pool;
+        # returning nothing preserves the safer under-sweep bias.
         return []
     swap_position_key = f"swap:{chain_norm}:{wallet_norm}"
 
     out: list[dict[str, Any]] = []
     for row in ledger_rows or []:
-        # Shared classification seam (:func:`_is_ledger_projected_row`): only a
-        # SUCCESSFUL row whose ``intent_type`` DECLARES ``WalletDeltaLane.
-        # LEDGER_PROJECTION`` is projected. SWAP/BORROW/WITHDRAW/PT rows declare
-        # EVENT_REPLAY and already replay through their own dispatch entries (the
-        # lanes are disjoint by declaration, so no lot is double-counted); an
-        # unknown/typo'd intent is skipped so it can't over-count a token the
-        # deployment never acquired.
+        # Only successful LEDGER_PROJECTION rows belong here. EVENT_REPLAY rows
+        # use accounting events; unknown intents are skipped to prevent over-counting.
         if not _is_ledger_projected_row(row):
             continue
         token_in = str(_ledger_field(row, "token_in") or "")
         token_out = str(_ledger_field(row, "token_out") or "")
         amount_in = _ledger_field(row, "amount_in")
         amount_out = _ledger_field(row, "amount_out")
-        # Nothing measurable to project (Empty ≠ Zero: empty legs contribute no lot).
+        # Empty legs are unmeasured and contribute no synthetic lot.
         has_in = bool(token_in) and amount_in not in (None, "")
         has_out = bool(token_out) and amount_out not in (None, "")
         if not has_in and not has_out:
@@ -2023,33 +1815,15 @@ def _merge_events_by_timestamp(
         except (ValueError, TypeError, OverflowError, OSError):
             return unmeasured_bias
 
-    # Secondary key: synthetic (acquisition-bearing) events before real events on a
-    # timestamp tie, so a synthetic acquisition is drained by a same-timestamp real
-    # disposal rather than orphaned (the over-sweep direction).
+    # On ties, acquisition-bearing synthetic events run first so same-timestamp
+    # real disposals can drain them.
     return sorted([*real_events, *synthetic_events], key=lambda ev: (_sortkey(ev), 0 if ev.get("synthetic") else 1))
 
 
-# VIB-5865 — payload keys that name a token symbol on UNMEASURED-lane events but
-# are NOT part of the shared ``sweep_warning._PAYLOAD_TOKEN_KEYS`` scan (whose key
-# set is shaped by the SWAP / lending payloads it was written for). Verified
-# against real persisted payloads: an LP_OPEN / LP_CLOSE row keys its legs
-# ``token0`` / ``token1`` (Curve N-coin additionally carries a ``coin_symbols``
-# LIST — and a Curve *proportional* close leaves ``token0``/``token1`` EMPTY, so
-# the list is the only identity there), VAULT_* / SETTLE_* key theirs
-# ``asset_token``, and the perp writer keys its collateral ``collateral_token``.
-# ``asset`` (lending / TRANSFER) and ``token_in`` / ``token_out`` (SWAP) are
-# already in the shared scan.
-#
-# Deliberately kept LOCAL to the poison fold rather than widened into
-# ``sweep_warning``: that helper also feeds the teardown consolidation token
-# universe, and broadening it there would change a second fund-safety lane in a
-# PR whose contract is "no measured-lane behaviour change".
-#
-# NOT every UNMEASURED payload names a wallet token — a PERP_OPEN names a
-# ``market``, not the collateral token, and PENDLE_LP rows name none at all.
-# Those are covered by the ledger leg scan (:func:`_unmeasured_ledger_token_footprint`,
-# where LP/perp/vault rows do carry ``token_in`` / ``token_out``) and WARN when
-# neither source can attribute a symbol.
+# Additional token fields used only by the UNMEASURED poison fold. coin_symbols
+# preserves N-coin identities when token0/token1 are absent; the other fields
+# cover settlement and collateral payloads. Keep this local because widening
+# the shared teardown footprint would also change consolidation behavior.
 _UNMEASURED_EXTRA_TOKEN_KEYS: tuple[str, ...] = (
     "token0",
     "token1",
@@ -2082,11 +1856,7 @@ def _extra_payload_tokens(event: dict[str, Any]) -> set[str]:
         if isinstance(val, str) and val:
             tokens.add(val)
         elif isinstance(val, list | tuple):
-            # #3349 review deferral (Gemini): accept a TUPLE as well as a list.
-            # ``coin_symbols`` is persisted as a JSON array (always a list after a
-            # round-trip) but is passed as a tuple by in-process callers that hand
-            # a payload dict straight in — a list-only check would silently miss
-            # every Curve N-coin leg on that path.
+            # Persisted JSON supplies lists; in-process callers may supply tuples.
             tokens |= {v for v in val if isinstance(v, str) and v}
     return tokens
 
@@ -2193,9 +1963,8 @@ def _poison_unmeasured_tokens(
     ]
     poisoned = _unmeasured_event_token_footprint(unmeasured_events)
     poisoned |= _unmeasured_ledger_token_footprint(ledger_rows or [])
-    # VIB-5865 PR-2: a token an EVENT_REPLAY handler admitted but could not
-    # measure (LP leg with an absent amount; Curve N-coin index >= 2) is just as
-    # unprovable as an UNMEASURED-lane row — same poison, same visible refusal.
+    # Replay handlers can discover unmeasured legs independently of taxonomy;
+    # they poison the same token totals.
     poisoned |= replay_unmeasured or set()
     for raw in poisoned:
         sym = canonical_pt_symbol(raw)
@@ -2282,22 +2051,20 @@ def sum_open_wallet_basis_by_token(
         if not sym:
             continue
         by_token[sym] = (by_token.get(sym) or Decimal("0")) + remaining
-    # VIB-5353: fold held-PT inventory into the same tracked map (maturity-less
-    # canonical key) so a swap-acquired PT's teardown swap-back is clamped, not
-    # stranded as untracked. iter_open_pt_lots yields the open PT_BUY residual.
+    # Held PT inventory uses the same maturity-insensitive tracked map as wallet
+    # lots so teardown can clamp its swap-back quantity.
     for _position_key, pt_token, remaining_pt, _sy_cost, _usd_cost in store.iter_open_pt_lots():
         sym = canonical_pt_symbol(pt_token)
         if not sym:
             continue
         by_token[sym] = (by_token.get(sym) or Decimal("0")) + remaining_pt
-    # VIB-5865: LAST, so the poison overrides every measured quantity above.
+    # Apply poison last so unmeasured evidence overrides measured lower bounds.
     _poison_unmeasured_tokens(by_token, scoped, ledger_rows, store.iter_unmeasured_tokens())
     return by_token
 
 
-# Per-event-type dispatch table for reconstruct_from_events. Unknown types
-# fall through (silently skipped) so that future event types added in
-# newer schema versions don't break older runners replaying mixed history.
+# Unknown event types are skipped so mixed histories remain replayable across
+# schema versions.
 _ReplayCallable = Callable[["FIFOBasisStore", _ReplayContext, dict[str, int], Any], int]
 _REPLAY_DISPATCH: dict[str, _ReplayCallable] = {
     "BORROW": FIFOBasisStore._replay_borrow,
@@ -2309,20 +2076,13 @@ _REPLAY_DISPATCH: dict[str, _ReplayCallable] = {
     "PT_SELL": FIFOBasisStore._replay_pt_sell,
     "PT_REDEEM": FIFOBasisStore._replay_pt_redeem,
     "SWAP": FIFOBasisStore._replay_swap,
-    # VIB-5865 PR-2: the LP family folds into the fungible wallet pool —
-    # LP_OPEN drains its consumed legs, LP_CLOSE / LP_COLLECT_FEES credit the
-    # fee-INCLUSIVE collected legs. Mirrors the live
-    # ``lp_handler._apply_lp_wallet_basis_hooks`` so a runner restart
-    # reconstructs the identical wallet pool. Applied globally (not clamp-only,
-    # no flag) because the same blindness also produced post-restart
-    # realized-PnL drift on any SWAP disposing LP proceeds.
+    # LP open drains wallet legs; close and fee collection credit them using
+    # live-handler conventions to preserve restart parity.
     "LP_OPEN": FIFOBasisStore._replay_lp,
     "LP_CLOSE": FIFOBasisStore._replay_lp,
     "LP_COLLECT_FEES": FIFOBasisStore._replay_lp,
-    # VIB-5416: synthetic event type emitted ONLY by the teardown clamp's
-    # tracked-inventory read (synthetic_wallet_movement_events) — never persisted
-    # to accounting_events. Replays a NO_ACCOUNTING ledger row into the wallet-basis
-    # pool so STAKE/WRAP/MINT inventory is clamp-visible.
+    # Synthetic wallet movements are ephemeral teardown inputs, never persisted.
+    # They project ledger-only inventory into the fungible wallet pool.
     "WALLET_MOVEMENT": FIFOBasisStore._replay_wallet_movement,
     "PREDICTION_OPEN": FIFOBasisStore._replay_prediction,
     "PREDICTION_INCREASE": FIFOBasisStore._replay_prediction,
