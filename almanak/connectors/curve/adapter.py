@@ -60,11 +60,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# =============================================================================
-# Constants
-# =============================================================================
-
-# Curve contract addresses per chain
 CURVE_ADDRESSES: dict[str, dict[str, str]] = {
     "ethereum": {
         "router": "0x16C6521Dff6baB339122a0FE25a9116693265353",
@@ -82,105 +77,60 @@ CURVE_ADDRESSES: dict[str, dict[str, str]] = {
         "tricrypto_factory": "0xbC0797015fcFc47d9C1856639CaE50D0e69FbEE8",
     },
     "base": {
-        "router": "0xd6681e74eEA20d196c15038C580f721EF2aB6320",  # CurveRouterNG on Base
-        "address_provider": "0x5ffe7FB82894076ECB99A30D6A32e969e6e35E98",  # Same across all EVM chains
-        "stableswap_factory": "0x3093f9B57A428F3EB6285a589cb35bEA6e78c336",  # StableswapFactory NG
-        "twocrypto_factory": "0xc9FE0c63AF9a39402E8a5514F9c21af076813f1b",  # TwocryptoFactory NG
-        "tricrypto_factory": "0xa5961898d4539B95e3B8571c74f86D5E5b48DB25",  # TricryptoFactory NG
+        "router": "0xd6681e74eEA20d196c15038C580f721EF2aB6320",
+        "address_provider": "0x5ffe7FB82894076ECB99A30D6A32e969e6e35E98",
+        "stableswap_factory": "0x3093f9B57A428F3EB6285a589cb35bEA6e78c336",
+        "twocrypto_factory": "0xc9FE0c63AF9a39402E8a5514F9c21af076813f1b",
+        "tricrypto_factory": "0xa5961898d4539B95e3B8571c74f86D5E5b48DB25",
     },
     "optimism": {
-        "router": "0xF0d4c12A5768D806021F80a262B4d39d26C58b8D",  # CurveRouterNG on Optimism
-        "address_provider": "0x5ffe7FB82894076ECB99A30D6A32e969e6e35E98",  # Universal
+        "router": "0xF0d4c12A5768D806021F80a262B4d39d26C58b8D",
+        "address_provider": "0x5ffe7FB82894076ECB99A30D6A32e969e6e35E98",
         "stableswap_factory": "0xA9B52d3CfB60073b7cC3D53dD3f25a8C619Afd78",
     },
     "polygon": {
-        "address_provider": "0x5ffe7FB82894076ECB99A30D6A32e969e6e35E98",  # Universal across EVM chains
-        "stableswap_factory": "0x722272D36ef0Da72FF51c5A65Db7b870E2e8D4ee",  # Polygon StableSwap factory
+        "address_provider": "0x5ffe7FB82894076ECB99A30D6A32e969e6e35E98",
+        "stableswap_factory": "0x722272D36ef0Da72FF51c5A65Db7b870E2e8D4ee",
     },
 }
 
-# Conservative static gas FLOORS for Curve operations.
-#
-# These are FALLBACKS, not the primary source: ``_resolve_gas`` seeds each op's
-# limit from a live ``eth_estimateGas`` against the pool's actual shape and only
-# falls back to the value here when the estimate is unavailable (no transport,
-# RPC error, or a revert under pre-approval state). The live estimate is
-# gateway-only (``eth_estimate_gas`` returns ``None`` with no connected gateway,
-# rather than opening a direct-RPC bypass), so a bare no-gateway context relies
-# ENTIRELY on these floors — another reason they must stay conservatively high.
-# A gas LIMIT is not gas SPENT —
-# unused gas is refunded — so these are deliberately sized HIGH to never OOG a
-# 4-coin / native-ETH / aave-type op when the live estimate cannot run (VIB-5440).
+# Conservative fallback floors when live gateway gas estimation is unavailable.
+# Limits are deliberately high because unused gas is refunded and under-sizing can OOG.
 CURVE_GAS_ESTIMATES: dict[str, int] = {
-    "approve": 65000,  # 65K to accommodate proxy tokens (USDC FiatTokenProxy ~56-65K)
+    "approve": 65000,  # Accommodates proxy tokens such as USDC FiatTokenProxy.
     "exchange": 500000,
-    # Aave-type exchange_underlying wraps/unwraps aTokens around the swap, so it
-    # is HEAVIER than a plain exchange — the prior 300K floor was below the plain
-    # 500K and under-sized these paths. Floor at 500K (>= exchange) (VIB-5440).
+    # Aave-style exchange_underlying wraps and unwraps interest-bearing tokens.
     "exchange_underlying": 500000,
-    # Metapool exchange_underlying routes a leg through the BASE pool (two pools,
-    # extra SLOADs/SSTOREs), so it costs more than a flat aave-type
-    # exchange_underlying — measured ~284K on FRAX/3CRV. 300K is too tight a
-    # limit for the orchestrator's cap; 600K gives safe headroom (VIB-5419).
+    # Metapool underlying swaps execute through both the metapool and base pool.
     "exchange_underlying_metapool": 600000,
-    # Metapool zap add/remove deposit into the base pool AND the metapool, so
-    # they cost more than a single flat add/remove. 700K headroom.
+    # Metapool zaps execute liquidity changes in both component pools.
     "metapool_zap_add_liquidity": 700000,
     "metapool_zap_remove_liquidity": 600000,
-    # StableSwap floors — pool_type-scoped. StableSwap pools never run the
-    # CryptoSwap ``tweak_price`` rebalance, and ``_resolve_gas`` clamps even a
-    # successful live estimate with ``max(buffered, static_gas)``, so an
-    # inflated shared floor over-reserves gas for 3pool-style adds and can trip
-    # the orchestrator's per-tx gas-COST cap at high gwei. Keep the measured
-    # StableSwap floors here; volatile pools use the ``_crypto`` keys below.
+    # StableSwap excludes the CryptoSwap price-scale rebalance surcharge.
     "add_liquidity_2": 250000,
     "add_liquidity_3": 350000,
-    # CryptoSwap/Tricrypto pools run a state-dependent price_scale rebalance
-    # inside ``tweak_price`` (newton_D + extra SSTOREs) whenever accrued profit
-    # crosses ``allowed_extra_profit`` — the FIRST liquidity op after the gate
-    # opens pays ~75-95K extra gas. Measured on tricrypto2 @ eth block
-    # 25,570,573: add_liquidity_3 needed 425K (vs 329K with the gate closed at
-    # block 25,520,000); the old 350K floor (x1.1 orchestrator buffer = 385K
-    # limit) died out-of-gas with empty revert data. Floors sized to cover the
-    # rebalance path with headroom; this is a LIMIT, not a spend.
+    # CryptoSwap may run a state-dependent price-scale rebalance on liquidity changes.
+    # These floors include the extra invariant work and storage writes to avoid OOG.
     "add_liquidity_2_crypto": 450000,
     "add_liquidity_3_crypto": 600000,
-    # A 4-coin add — especially aave-type, which wraps each underlying into an
-    # aToken — was under-sized at 450K. 600K conservative floor (VIB-5440).
+    # Four-coin Aave-style adds may wrap every underlying token.
     "add_liquidity_4": 600000,
-    # Proportional ``remove_liquidity`` returns ALL N coins (N transfers + LP
-    # burn + invariant recompute), so cost scales with coin count. The prior
-    # single 200K floor was applied regardless of N and under-sized 3/4-coin
-    # exits. Keyed by coin count now; ``remove_liquidity`` is the generic
-    # fallback for callers that do not pass n_coins (VIB-5440).
+    # Proportional removal returns every coin, so its floor scales with N.
     "remove_liquidity": 250000,
     "remove_liquidity_2": 250000,
     "remove_liquidity_3": 350000,
     "remove_liquidity_4": 450000,
-    # Single-coin exit recomputes the invariant — heavier than the prior 250K
-    # floor (VIB-5440). StableSwap-scoped; volatile pools use the key below.
+    # Single-coin exits recompute the invariant; volatile pools also update price scale.
     "remove_liquidity_one_coin": 350000,
-    # CryptoSwap/Tricrypto single-coin exit also recomputes the price scale.
-    # Measured 349,838 on tricrypto2 @ eth block 25,570,573 with the rebalance
-    # gate open — one hair under the old 350K x1.1 = 385K limit. Same
-    # state-dependent exposure as the ``_crypto`` add floors above; 500K headroom.
     "remove_liquidity_one_coin_crypto": 500000,
-    # Imbalanced 4-coin exit is the heaviest withdrawal shape (VIB-5440).
+    # Imbalanced four-coin exits are the heaviest withdrawal shape.
     "remove_liquidity_imbalance": 450000,
     "router_exchange": 400000,
 }
 
-# Safety buffer applied to a live ``eth_estimateGas`` result before it becomes
-# the gas LIMIT. ``eth_estimateGas`` binary-searches the minimum gas for the
-# CURRENT state; branchy / storage-heavy Curve ops (per-coin loops, virtual-price
-# and oracle-EMA writes) can cost more once state drifts between the estimate and
-# execution (a preceding approve warms/cools storage, first trade of a block
-# writes the oracle, etc.). 1.20x covers that drift without grossly overshooting;
-# the execution orchestrator layers its own per-chain buffer on top, so this only
-# needs to be a SAFE seed, never the final word (VIB-5440).
+# Live estimates need headroom for state-dependent loops, oracle writes, and storage warmth.
 CURVE_GAS_ESTIMATE_BUFFER: float = 1.20
 
-# Function selectors
 EXCHANGE_SELECTOR = "0x3df02124"  # exchange(int128,int128,uint256,uint256) - StableSwap
 EXCHANGE_UINT256_SELECTOR = "0x5b41b908"  # exchange(uint256,uint256,uint256,uint256) - CryptoSwap/Tricrypto
 EXCHANGE_UNDERLYING_SELECTOR = "0xa6417ed6"  # exchange_underlying(int128,int128,uint256,uint256)
@@ -193,40 +143,22 @@ REMOVE_LIQUIDITY_3_SELECTOR = "0xecb586a5"  # remove_liquidity(uint256,uint256[3
 REMOVE_LIQUIDITY_4_SELECTOR = "0x7d49d875"  # remove_liquidity(uint256,uint256[4])
 REMOVE_LIQUIDITY_DYN_SELECTOR = "0xd40ddb8c"  # remove_liquidity(uint256,uint256[]) — StableSwap NG
 REMOVE_LIQUIDITY_ONE_SELECTOR = "0x1a4d01d2"  # remove_liquidity_one_coin(uint256,int128,uint256) — StableSwap
-# CryptoSwap/Tricrypto encode the coin index as ``uint256`` (not ``int128``), so
-# their single-sided exit has a DISTINCT selector. Dispatched by pool family in
-# ``_build_remove_liquidity_one_tx`` (VIB-5437). Verified on-chain 2026-06-29:
-# tricrypto2 (eth) answers 0xf1dc3cc9 and reverts the int128 form, while 3pool
-# answers the int128 form and not this one.
+# CryptoSwap single-coin exits use a uint256 index and a distinct selector.
 REMOVE_LIQUIDITY_ONE_CRYPTO_SELECTOR = "0xf1dc3cc9"  # remove_liquidity_one_coin(uint256,uint256,uint256) — CryptoSwap
-# ``calc_withdraw_one_coin`` single-sided-withdraw quote, used to derive a real
-# (non-flat) min-out floor for single-sided LP_CLOSE (VIB-5437, audit P0-4/P2-3).
-# Same int128-vs-uint256 split as the remove selectors above; verified on-chain
-# 2026-06-29 against 3pool (StableSwap, 0xcc2b27d7) and tricrypto2 (CryptoSwap,
-# 0x4fb08c5e) — each pool reverts/empties the other family's selector.
+# Quote selectors follow the same StableSwap int128 versus CryptoSwap uint256 split.
 CALC_WITHDRAW_ONE_COIN_STABLE_SELECTOR = "0xcc2b27d7"  # calc_withdraw_one_coin(uint256,int128) — StableSwap
 CALC_WITHDRAW_ONE_COIN_CRYPTO_SELECTOR = "0x4fb08c5e"  # calc_withdraw_one_coin(uint256,uint256) — CryptoSwap
-# Imbalanced withdrawal: remove_liquidity_imbalance(uint256[N] amounts, uint256
-# max_burn_amount) — StableSwap-family ONLY (CryptoSwap/Tricrypto pools have no
-# imbalanced exit). You name the EXACT per-coin amounts OUT and the pool burns
-# however much LP is needed, capped at ``max_burn_amount`` (the inverse of a
-# min-out: the floor here is a MAX-BURN CEILING — VIB-5438, audit P0-4). Keyed
-# by coin count for the fixed-array ABI; the NG variant is a dynamic ``uint256[]``.
-# Verified on-chain 2026-06-29 against 3pool (0xbEbc44…): the [3] selector
-# executes the withdrawal body (a too-tight max_burn reverts "Slippage screwed
-# you"), and an adequate max_burn returns success.
+# Imbalanced withdrawal is StableSwap-only: amounts are exact outputs and
+# max_burn_amount is the LP-spend ceiling. Legacy selectors are keyed by N;
+# StableSwap NG uses a dynamic array.
 REMOVE_LIQUIDITY_IMBALANCE_SELECTORS: dict[int, str] = {
     2: "0xe3103273",  # remove_liquidity_imbalance(uint256[2],uint256)
     3: "0x9fdaea0c",  # remove_liquidity_imbalance(uint256[3],uint256)
     4: "0x18a7bd76",  # remove_liquidity_imbalance(uint256[4],uint256)
 }
 REMOVE_LIQUIDITY_IMBALANCE_DYN_SELECTOR = "0x7706db75"  # remove_liquidity_imbalance(uint256[],uint256) — StableSwap NG
-# ``calc_token_amount(uint256[N], bool is_deposit)`` for the StableSwap fixed-array
-# ABI, keyed by coin count. Called with ``is_deposit=False`` to quote the LP that
-# the requested imbalanced withdrawal would BURN, which seeds the max-burn ceiling
-# fail-closed (VIB-5438). Signature-derived, so identical to the CryptoSwap
-# bool-carrying selectors — but the imbalanced path is StableSwap-only. The NG
-# dynamic-array variant reuses ``NG_CALC_TOKEN_AMOUNT_SELECTOR`` (uint256[],bool).
+# StableSwap fixed-array quote selectors are keyed by N. is_deposit=False quotes
+# the LP burn used for the fail-closed max-burn ceiling.
 STABLE_CALC_TOKEN_AMOUNT_SELECTORS: dict[int, str] = {
     2: "0xed8e84f3",  # calc_token_amount(uint256[2],bool)
     3: "0x3883e119",  # calc_token_amount(uint256[3],bool)
@@ -237,51 +169,29 @@ GET_DY_UINT256_SELECTOR = "0x556d6e9f"  # get_dy(uint256,uint256,uint256)
 GET_DY_UNDERLYING_SELECTOR = "0x07211ef7"  # get_dy_underlying(int128,int128,uint256)
 ERC20_DECIMALS_SELECTOR = "0x313ce567"  # decimals() -> uint8
 
-# Pool-state read selectors for the refresh-on-read registry (VIB-5423 / VIB-5424).
-# These let ``get_pool_info`` reconcile a deployment binding against
-# live chain truth — discharging the TECH_DEBT(VIB-581) note above — using the
-# gateway-first ``eth_call`` seam already wired in this file. A wrong ``is_ng`` picks
-# the wrong add/remove ABI encoder (malformed calldata / silent revert); a reversed
-# coin order breaks approve/exchange; a frozen ``virtual_price`` drifts NAV.
+# Live pool reads protect calldata coin order, ABI-family dispatch, decimals, and NAV.
 COINS_UINT256_SELECTOR = "0xc6610657"  # coins(uint256) -> address (factory/NG/newer pools)
 COINS_INT128_SELECTOR = "0x23746eb8"  # coins(int128) -> address (older Vyper pools, e.g. 3pool)
 BALANCES_UINT256_SELECTOR = "0x4903b0d1"  # balances(uint256) -> uint256 (factory/NG/newer pools)
 BALANCES_INT128_SELECTOR = "0x065a80d8"  # balances(int128) -> uint256 (older Vyper pools, e.g. 3pool)
 GET_VIRTUAL_PRICE_SELECTOR = "0xbb7b8b80"  # get_virtual_price() -> uint256 (1e18-scaled)
-# calc_token_amount(uint256[],bool) — present ONLY on StableSwap-NG pools (dynamic
-# array ABI). A clean (non-None) return is an NG-ABI fingerprint; a revert / empty
-# return means the pool speaks the legacy fixed-size ABI. Same selector the NG
-# add-liquidity quote path already uses (see _query_calc_token_amount_ng_onchain).
+# A successful dynamic-array quote fingerprints the StableSwap NG ABI.
 NG_CALC_TOKEN_AMOUNT_SELECTOR = "0x3db06dd8"
 
-# Metapool generic-zap selectors (VIB-5419 — Tier B underlying routing).
-# The generic 3CRV DepositZap takes the POOL address as the FIRST argument, so
-# its add/remove/calc selectors differ from the pool-direct ones above. The
-# `_deposit_amounts` / `_min_amounts` arrays span the COMBINED coin space
-# (index 0 = meta coin, 1..N = base-pool coins). N_COINS+1 is the array length;
-# the FRAX/3CRV zap is fixed at uint256[4] (1 meta + 3 base coins).
+# DepositZap selectors take the pool first and use combined ordering:
+# index 0 is the meta coin; indices 1..N are base-pool coins.
 ZAP_ADD_LIQUIDITY_4_SELECTOR = "0x384e03db"  # add_liquidity(address,uint256[4],uint256)
 ZAP_REMOVE_LIQUIDITY_4_SELECTOR = "0xad5cc918"  # remove_liquidity(address,uint256,uint256[4])
 ZAP_CALC_TOKEN_AMOUNT_4_SELECTOR = "0x861cdef0"  # calc_token_amount(address,uint256[4],bool)
 ZAP_GET_DY_UNDERLYING_SELECTOR = "0x07211ef7"  # exchange_underlying lives on the metapool itself
 
-# CryptoSwap / Tricrypto ``calc_token_amount`` selectors, keyed by coin count.
-# Crypto pools split on version: crypto-NG / Tricrypto-2 carry the ``bool deposit``
-# flag, while the older twocrypto pools (e.g. Base WETH/cbETH) are deposit-only and
-# omit it. The deposit array is a FIXED-size ``uint256[N]`` (encoded inline, no
-# offset/length — unlike the StableSwap-NG dynamic ``uint256[]``). We probe
-# bool-first then no-bool at call time rather than hard-code a per-pool version
-# flag (cf. M0 dynamic resolution, VIB-5424). Selectors + encoding verified
-# on-chain 2026-06-27: tricrypto2 (eth) + tricrypto (arb) answer ``[3],bool``;
-# weth_cbeth (base) answers ``[2]`` (no bool).
+# Crypto pool versions differ: newer pools include the deposit bool while older
+# twocrypto pools omit it. Both use inline fixed-size arrays, unlike StableSwap NG.
+# Probe bool-first, then no-bool, instead of trusting static version metadata.
 CRYPTO_CALC_TOKEN_AMOUNT_SELECTORS: dict[int, tuple[str, str]] = {
     2: ("0xed8e84f3", "0x8d8ea727"),  # calc_token_amount(uint256[2],bool) | (uint256[2])
     3: ("0x3883e119", "0x5b6f1b5a"),  # calc_token_amount(uint256[3],bool) | (uint256[3])
 }
-
-# =============================================================================
-# Enums
-# =============================================================================
 
 
 class PoolType(Enum):
@@ -290,11 +200,6 @@ class PoolType(Enum):
     STABLESWAP = "stableswap"
     CRYPTOSWAP = "cryptoswap"
     TRICRYPTO = "tricrypto"
-
-
-# =============================================================================
-# Data Classes
-# =============================================================================
 
 
 @dataclass
@@ -319,31 +224,12 @@ class CurveConfig:
     deadline_seconds: int = 300
     rpc_url: str | None = None  # DEPRECATED — use gateway_client
     gateway_client: "GatewayClient | None" = field(default=None, repr=False, compare=False)
-    # --- Permission-discovery only. NEVER set on a funds-moving path. -------
-    # Both flags exist so an ahead-of-time Zodiac manifest can be derived
-    # OFFLINE and DETERMINISTICALLY (VIB-6046 D5). They are set from
-    # ``ctx.permission_discovery`` in ``CurveCompiler``, which is itself only
-    # true for compilers built by ``framework/permissions/discovery.py``.
-    #
-    # ``permission_discovery`` substitutes synthetic, positive slippage bounds
-    # for the on-chain quotes the fail-closed guards require. This is safe ONLY
-    # because discovery never signs or submits: it harvests ``(target,
-    # selector)`` pairs from the calldata and throws the calldata away. The
-    # guards themselves are UNCHANGED — they still refuse a non-positive
-    # bound; the substitution happens at the quote seam, upstream of them.
-    #
-    # ``force_is_ng`` pins the ABI variant instead of taking the pool's
-    # registry value, so discovery can compile the same vector under BOTH the
-    # StableSwap-NG dynamic-array ABI and the legacy fixed-size ABI. The two
-    # emit DIFFERENT 4-byte selectors, and ``_refresh_pool_info_from_chain``
-    # can override the static ``is_ng`` from a live probe at execution time —
-    # so a manifest pinned to one variant reverts *unauthorized* at
-    # ``execTransactionWithRole`` if the strategy emits the other.
+    # Discovery never signs or submits. Synthetic positive quotes preserve the
+    # fail-closed guards while allowing deterministic selector extraction.
+    # force_is_ng compiles both StableSwap ABI variants for permission manifests.
     permission_discovery: bool = False
     force_is_ng: bool | None = None
-    # Connector-internal, deployment-scoped pool descriptions used while
-    # compiling permission vectors. Runtime exact-address pools resolve live;
-    # there is deliberately no process-global pool catalog.
+    # Permission overrides are deployment-scoped; runtime exact addresses resolve live.
     permission_pool_overrides: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -393,32 +279,18 @@ class PoolInfo:
     name: str = ""
     virtual_price: Decimal = field(default_factory=lambda: Decimal("1.0"))
     use_underlying: bool = False  # When True, use exchange_underlying() (aave-type pools)
-    # StableSwap NG pools encode add_liquidity / remove_liquidity with a dynamic
-    # `uint256[]` array regardless of n_coins, instead of the legacy fixed-size
-    # `uint256[N_COINS]` ABI. exchange / remove_liquidity_one_coin selectors are
-    # unchanged. See VIB-4836 for the diagnostic; pool bytecode probe of the
-    # Optimism crvUSD/USDC pool (0x03771e24…) on 2026-05-26 confirmed only the
-    # dynamic-array selectors are present.
+    # StableSwap NG liquidity calls use dynamic arrays; legacy pools use fixed-size arrays.
     is_ng: bool = False
     # Per-coin decimals, positionally aligned with ``coins`` / ``coin_addresses``.
-    # ``None`` (cold-start) means "not chain-read" — callers resolve decimals via
-    # the TokenResolver. The refresh-on-read path (VIB-5423) populates this from a
-    # live ``decimals()`` read so calldata math uses chain truth, not a literal.
+    # None means unread, so callers fall back to token resolution rather than zero.
     coin_decimals: list[int] | None = None
-    # Metapool support (VIB-5419). A Curve metapool is NATIVELY a 2-coin pool
-    # `[meta coin, base-pool LP token]` (coins[1] is itself an LP token like
-    # 3CRV). All native operations (`add_liquidity([meta, baseLP])`,
-    # `exchange(0, 1)`, `remove_liquidity`) reuse the flat 2-coin paths
-    # unchanged (Tier A). The fields below describe the UNDERLYING / combined
-    # coin space (index 0 = meta coin, 1..N = base-pool coins) reached through
-    # the generic deposit zap and the metapool's own `exchange_underlying`
-    # (Tier B). All additive — non-meta pools keep `is_metapool=False` and
-    # ignore the rest.
+    # Metapools natively pair [meta coin, base LP]. Underlying zap routing uses
+    # combined order [meta coin, *base-pool coins].
     is_metapool: bool = False
-    base_pool: str | None = None  # base-pool contract address (e.g. 3pool)
-    base_pool_coins: list[str] | None = None  # underlying symbols, combined index 1..N
-    base_pool_coin_addresses: list[str] | None = None  # underlying addresses, combined index 1..N
-    zap_address: str | None = None  # generic deposit zap (pool is first arg)
+    base_pool: str | None = None
+    base_pool_coins: list[str] | None = None
+    base_pool_coin_addresses: list[str] | None = None
+    zap_address: str | None = None
 
     @staticmethod
     def _match_coin(coin: str, symbols: list[str], addresses: list[str]) -> int | None:
@@ -448,9 +320,6 @@ class PoolInfo:
         """
         if not self.is_metapool:
             return None
-        # Combined coin space = [meta coin, *base-pool coins], so combined index 0
-        # is coins[0] and base coin k lands at k+1 — preserved by ordering the
-        # meta coin first in both parallel lists.
         combined_syms = [self.coins[0], *(self.base_pool_coins or [])]
         combined_addrs = [self.coin_addresses[0], *(self.base_pool_coin_addresses or [])]
         return self._match_coin(coin, combined_syms, combined_addrs)
@@ -467,12 +336,10 @@ class PoolInfo:
         Raises:
             ValueError: If coin not found in pool
         """
-        # Check by symbol
         for i, c in enumerate(self.coins):
             if c.upper() == coin.upper():
                 return i
 
-        # Check by address
         for i, addr in enumerate(self.coin_addresses):
             if addr.lower() == coin.lower():
                 return i
@@ -554,7 +421,7 @@ class SwapResult:
     pool_address: str = ""
     amount_in: int = 0
     amount_out_minimum: int = 0
-    amount_out_estimate: int = 0  # VIB-3203 Phase B — pre-slippage quote (wei)
+    amount_out_estimate: int = 0  # Pre-slippage quote in raw output units.
     token_out_decimals: int = 18  # decimal-policy-exempt: display fallback only; measured value overwrites on success
     token_in: str = ""
     token_out: str = ""
@@ -616,11 +483,6 @@ class LiquidityResult:
         }
 
 
-# =============================================================================
-# Curve Adapter
-# =============================================================================
-
-
 class CurveAdapter:
     """Adapter for Curve Finance DEX protocol.
 
@@ -662,11 +524,9 @@ class CurveAdapter:
         self._permission_discovery = config.permission_discovery
         self._force_is_ng = config.force_is_ng
 
-        # Load contract addresses
         self.addresses = CURVE_ADDRESSES[self.chain]
         self.pools = dict(config.permission_pool_overrides)
 
-        # TokenResolver integration
         if token_resolver is not None:
             self._token_resolver = token_resolver
         else:
@@ -676,16 +536,10 @@ class CurveAdapter:
 
         self._allowance_cache = AllowanceCache(self.wallet_address)
 
-        # Refresh-on-read cache (VIB-5423): lowercased pool address -> PoolInfo
-        # reconciled against live chain state. A pool is read once per adapter
-        # lifetime so repeated resolves in one compile don't re-pay the RPC cost.
+        # Cache live metadata by lowercased pool address for one adapter lifetime.
         self._pool_refresh_cache: dict[str, PoolInfo] = {}
 
         logger.info(f"CurveAdapter initialized for chain={self.chain}, wallet={self.wallet_address[:10]}...")
-
-    # =========================================================================
-    # Pool Information
-    # =========================================================================
 
     @staticmethod
     def _build_cold_start_pool_info(name: str, pool_data: dict[str, Any]) -> PoolInfo:
@@ -740,11 +594,7 @@ class CurveAdapter:
         for name, pool_data in self.pools.items():
             if pool_data["address"].lower() == pool_address.lower():
                 return self._resolve_pool_info(self._build_cold_start_pool_info(name, pool_data), refresh=refresh)
-        # VIB-5628: exact-address miss -> resolve the pool from the on-chain
-        # MetaRegistry (gateway-first), so the adapter works without a catalog
-        # or deployment-local binding. Returns None (preserving the unknown-pool
-        # contract) when there is no read transport or the address is not a Curve
-        # pool.
+        # Exact addresses resolve through MetaRegistry; unresolved pools fail closed.
         if self._has_read_transport():
             return self._build_pool_info_from_metaregistry(pool_address, refresh=refresh)
         return None
@@ -863,13 +713,6 @@ class CurveAdapter:
             return pool_info
         return replace(pool_info, is_ng=self._force_is_ng)
 
-    # =========================================================================
-    # Refresh-on-read: reconcile cold-start metadata against live chain truth
-    # (VIB-5423 / VIB-5424) — discharges the TECH_DEBT(VIB-581) frozen-snapshot
-    # note. All reads route through the gateway-first ``eth_call`` seam already
-    # used in this file; no new egress path is introduced.
-    # =========================================================================
-
     def _has_read_transport(self) -> bool:
         """True when a connected gateway client or a direct RPC URL can serve reads."""
         gateway_client = self._gateway_client
@@ -877,23 +720,8 @@ class CurveAdapter:
             return True
         return bool(self._rpc_url)
 
-    # ------------------------------------------------------------------
-    # Permission-discovery synthetic quotes (VIB-6046 D5)
-    # ------------------------------------------------------------------
-    # Every fail-closed slippage guard in this adapter refuses when it cannot
-    # obtain an on-chain quote, because shipping ``min_lp=0`` / ``min_amount=0``
-    # / an unbounded ``max_burn`` on real funds is an MEV theft vector. That is
-    # correct for execution and WRONG for permission discovery, which compiles
-    # calldata solely to read its ``(target, selector)`` pairs and never signs
-    # or submits it. Before this seam existed, curve LP simply did not compile
-    # offline, so discovery reached for a public RPC and the resulting manifest
-    # became a function of rate-limit weather — three consecutive arbitrum runs
-    # produced 7/3/7 targets from identical inputs.
-    #
-    # The guards are deliberately NOT relaxed. They still refuse any
-    # non-positive bound. These helpers only supply a positive, deterministic
-    # stand-in for the quote the guards consume, and only when
-    # ``permission_discovery`` is set.
+    # Synthetic quotes are permission-discovery-only; funds-moving paths keep
+    # positive min-output and bounded max-burn requirements fail closed.
 
     def _synthetic_quote_scale(self, notional: int, *, floor: int = 10**6) -> int:
         """A positive, deterministic stand-in for an on-chain quote.
@@ -992,14 +820,8 @@ class CurveAdapter:
             refreshed = replace(pool_info)
             transport_healthy = False
 
-            # ``use_underlying`` (aave-type) pools intentionally track the
-            # UNDERLYING tokens (e.g. DAI/USDC.e/USDT) in explicit pool metadata,
-            # while on-chain ``coins(i)`` returns the pool's internal wrapped
-            # aTokens. Overwriting coin_addresses with the live aTokens would
-            # break approve / exchange_underlying / coin-index resolution, so the
-            # coin set is NOT refreshed for these pools — only virtual_price /
-            # is_ng (which are pool-level and unaffected). Decimals stay None so
-            # ``_coin_decimals`` resolves the underlying symbols via the resolver.
+            # Aave-style metadata tracks underlying tokens while coins(i) returns
+            # wrapped aTokens; refreshing that coin set would corrupt routing.
             if not pool_info.use_underlying:
                 live_addresses = self._read_pool_coins(pool_info)
                 if live_addresses is not None:
@@ -1024,11 +846,7 @@ class CurveAdapter:
                 try:
                     live_is_ng = self._probe_is_ng(pool_info)
                 except Exception as exc:  # noqa: BLE001
-                    # Transport error and contract revert are indistinguishable at
-                    # this seam (both raise). An ambiguous probe failure must NOT
-                    # downgrade a correctly-typed NG pool to legacy ABI — that would
-                    # pick the wrong add/remove encoder on real funds. Keep the
-                    # cold-start value; only a clean (non-raising) probe overrides it.
+                    # Ambiguous probe failures retain the cold-start ABI family.
                     logger.warning(
                         "Curve is_ng probe inconclusive for %s (%s); keeping cold-start is_ng=%s",
                         pool_info.name,
@@ -1195,10 +1013,6 @@ class CurveAdapter:
         )
         return result is not None
 
-    # =========================================================================
-    # Swap Operations
-    # =========================================================================
-
     def _swap_oracle_guard_error(
         self,
         *,
@@ -1311,19 +1125,14 @@ class CurveAdapter:
             default_tolerance = DEFAULT_STABLE_ORACLE_FLOOR_TOLERANCE_BPS
             residual_bps = DEFAULT_STABLE_ORACLE_FLOOR_RESIDUAL_BPS
 
-        # A per-intent override applies to BOTH the detection threshold and the
-        # executed-floor TOLERANCE so an operator has one knob — but never the
-        # residual: the residual guarantees fills against benign drift regardless
-        # of how tight the operator anchors, so it stays pool-type-fixed.
+        # The override changes tolerance, never the pool-family drift residual.
         tolerance_bps = oracle_guard_bps if oracle_guard_bps is not None else default_tolerance
 
         clamp = clamp_min_out_to_oracle(
             pool_floor_wei=pool_floor_wei,
             pool_quoted_out_wei=pool_quoted_out_wei,
             amount_in=amount_in,
-            # Empty ≠ Zero: a known-fake / placeholder price is unmeasured, so it
-            # must not fabricate a floor — pass None exactly as the detection
-            # guard does.
+            # Placeholder prices are unmeasured and must not fabricate an oracle floor.
             price_ratio=price_ratio if oracle_prices_real else None,
             token_out_decimals=token_out_decimals,
             tolerance_bps=tolerance_bps,
@@ -1343,8 +1152,7 @@ class CurveAdapter:
                 pool_info.pool_type.value,
             )
         elif clamp.reason == "oracle_config_invalid":
-            # A fat-fingered oracle_guard_bps override (outside (0, 10_000]) would
-            # otherwise silently disable the anchor via a negative floor. Fail LOUD.
+            # Invalid tolerance must be visible rather than silently weakening the floor.
             logger.warning(
                 "Curve executed-floor oracle anchor DISABLED for %s->%s on %s: invalid "
                 "tolerance %d bps / residual %d bps (must be in (0, 10000]); executed floor "
@@ -1415,7 +1223,6 @@ class CurveAdapter:
             slippage_bps = self.config.default_slippage_bps if slippage_bps is None else slippage_bps
             recipient = recipient or self.wallet_address
 
-            # Get pool info
             pool_info = self.get_pool_info(pool_address)
             if not pool_info:
                 return SwapResult(
@@ -1423,30 +1230,22 @@ class CurveAdapter:
                     error=f"Unknown pool: {pool_address}",
                 )
 
-            # Get coin indices
             try:
                 i = pool_info.get_coin_index(token_in)
                 j = pool_info.get_coin_index(token_out)
             except ValueError as e:
                 return SwapResult(success=False, error=str(e))
 
-            # Resolve token addresses
             token_in_address = pool_info.coin_addresses[i]
             token_out_address = pool_info.coin_addresses[j]
 
-            # Get token decimals — prefer the live ``decimals()`` captured by the
-            # refresh-on-read path so ``amount_in_wei`` (which feeds approvals and
-            # the quote) uses chain truth, symmetric with the output side below.
+            # Use refreshed decimals for raw-unit approvals and quoting.
             token_in_symbol = pool_info.coins[i]
             token_in_decimals = self._coin_decimals(pool_info, i)
 
-            # Convert amount to wei
             amount_in_wei = int(amount_in * Decimal(10**token_in_decimals))
 
-            # Estimate output for min_amount_out slippage protection.
-            # VIB-3203 Phase B: also surface this pre-slippage estimate on
-            # SwapResult so the IntentCompiler can persist it as
-            # ``expected_output_human`` for realized slippage tracking.
+            # Retain the pre-slippage raw quote for realized-slippage accounting.
             if self._gateway_client is not None or self._rpc_url:
                 try:
                     amount_out_estimate = self.quote_swap_output(
@@ -1478,11 +1277,7 @@ class CurveAdapter:
             amount_out_minimum = max(1, compute_min_amount_out_from_bps(amount_out_estimate, slippage_bps))
             token_out_decimals = self._coin_decimals(pool_info, j)
 
-            # P0-8 oracle/MEV min-out guard (VIB-5439): on a StableSwap pool,
-            # cross-check the quote against the independent oracle and fail closed
-            # on a displaced / depegged pool BEFORE building the tx. Volatile pools
-            # are skipped inside the helper (their execution rate legitimately
-            # diverges from oracle mid by real price impact).
+            # StableSwap quotes fail closed when materially below the independent oracle.
             guard_error = self._swap_oracle_guard_error(
                 pool_info=pool_info,
                 token_in_symbol=token_in_symbol,
@@ -1498,13 +1293,7 @@ class CurveAdapter:
             if guard_error is not None:
                 return SwapResult(success=False, error=guard_error)
 
-            # VIB-5490: anchor the EXECUTED floor to the independent oracle so an
-            # atomic same-block sandwich is bounded by the oracle tolerance, not
-            # the operator's (possibly wide) slippage. Applies to BOTH stable and
-            # volatile pools — volatile pools get no detection guard above, so
-            # this is their only oracle anchoring; the clamp is capped at
-            # pool_quote*(1-residual) so a legit high-impact swap keeps a benign-
-            # drift buffer and does not false-revert.
+            # Anchor execution to the oracle while retaining the family-specific drift buffer.
             amount_out_minimum = self._oracle_anchored_min_out(
                 pool_info=pool_info,
                 pool_floor_wei=amount_out_minimum,
@@ -1518,17 +1307,14 @@ class CurveAdapter:
                 token_out_symbol=pool_info.coins[j],
             )
 
-            # Build transactions
             transactions: list[TransactionData] = []
 
-            # Check if input is native ETH
             is_native_input = self._is_native_token(token_in_address)
 
-            # Build approve transaction if needed (skip for native token)
+            # Native input is routed as msg.value and requires no ERC-20 approval.
             if not is_native_input:
                 transactions.extend(self._build_approve_txs(token_in_address, pool_address, amount_in_wei))
 
-            # Build swap transaction
             swap_tx = self._build_exchange_tx(
                 pool_address=pool_address,
                 i=i,
@@ -1567,10 +1353,6 @@ class CurveAdapter:
             logger.exception(f"Failed to build Curve swap: {e}")
             return SwapResult(success=False, error=str(e))
 
-    # =========================================================================
-    # Liquidity Operations
-    # =========================================================================
-
     def add_liquidity(
         self,
         pool_address: str,
@@ -1601,7 +1383,6 @@ class CurveAdapter:
             slippage_bps = self.config.default_slippage_bps if slippage_bps is None else slippage_bps
             recipient = recipient or self.wallet_address
 
-            # Get pool info
             pool_info = self.get_pool_info(pool_address)
             if not pool_info:
                 return LiquidityResult(
@@ -1615,19 +1396,14 @@ class CurveAdapter:
                     error=f"Expected {pool_info.n_coins} amounts, got {len(amounts)}",
                 )
 
-            # Convert amounts to wei
             amounts_wei: list[int] = []
             for idx, amt in enumerate(amounts):
                 decimals = self._coin_decimals(pool_info, idx)
                 amounts_wei.append(int(amt * Decimal(10**decimals)))
 
-            # Estimate LP tokens (simplified)
             lp_quote = self._estimate_add_liquidity(pool_info, amounts_wei)
             min_lp_tokens = compute_min_amount_out_from_bps(lp_quote, slippage_bps)
-            # Fail closed (VIB-5441): a positive on-chain quote that rounds to <=0
-            # after integer slippage math (a tiny quote or a very wide slippage_bps)
-            # would re-introduce the unprotected min_lp=0 path this PR removes — an
-            # MEV/sandwich theft vector on volatile pools. Refuse rather than ship 0.
+            # Volatile deposits fail closed if slippage rounding removes the LP floor.
             if pool_info.pool_type in (PoolType.CRYPTOSWAP, PoolType.TRICRYPTO) and lp_quote > 0 and min_lp_tokens <= 0:
                 return LiquidityResult(
                     success=False,
@@ -1638,10 +1414,8 @@ class CurveAdapter:
                     ),
                 )
 
-            # Build transactions
             transactions: list[TransactionData] = []
 
-            # Build approve transactions for each non-zero amount
             native_value: int = 0
             for amount_wei, coin_addr in zip(amounts_wei, pool_info.coin_addresses, strict=False):
                 if amount_wei > 0:
@@ -1650,7 +1424,6 @@ class CurveAdapter:
                     else:
                         transactions.extend(self._build_approve_txs(coin_addr, pool_address, amount_wei))
 
-            # Build add_liquidity transaction
             add_liq_tx = self._build_add_liquidity_tx(
                 pool_address=pool_address,
                 amounts=amounts_wei,
@@ -1716,7 +1489,6 @@ class CurveAdapter:
             slippage_bps = self.config.default_slippage_bps if slippage_bps is None else slippage_bps
             recipient = recipient or self.wallet_address
 
-            # Get pool info
             pool_info = self.get_pool_info(pool_address)
             if not pool_info:
                 return LiquidityResult(
@@ -1724,19 +1496,14 @@ class CurveAdapter:
                     error=f"Unknown pool: {pool_address}",
                 )
 
-            # Convert LP amount to wei (18 decimals)
+            # Curve LP token amounts use 18 decimals.
             lp_amount_wei = int(lp_amount * Decimal(10**18))
 
-            # Estimate output amounts via on-chain query (or fallback to zeros)
             self._last_estimation_error: str | None = None
             min_amounts = self._estimate_remove_liquidity(pool_info, lp_amount_wei)
             min_amounts = [compute_min_amount_out_from_bps(a, slippage_bps) for a in min_amounts]
 
-            # Guard: fail closed when min_amounts are all zero — proceeding without slippage
-            # protection would expose the full withdrawal to sandwich attacks.
-            # This can happen when: (a) rpc_url is not configured and LP amount is very small
-            # (1% floor rounds to 0 via integer division), or (b) on-chain estimation fails
-            # and the fallback also rounds to 0. Either way, refusing is safer than proceeding.
+            # Never submit a proportional withdrawal without a non-zero slippage floor.
             if all(a == 0 for a in min_amounts):
                 reason = self._last_estimation_error or "unknown"
                 return LiquidityResult(
@@ -1748,13 +1515,10 @@ class CurveAdapter:
                     ),
                 )
 
-            # Build transactions
             transactions: list[TransactionData] = []
 
-            # Approve LP token if needed
             transactions.extend(self._build_approve_txs(pool_info.lp_token, pool_address, lp_amount_wei))
 
-            # Build remove_liquidity transaction
             remove_tx = self._build_remove_liquidity_tx(
                 pool_address=pool_address,
                 lp_amount=lp_amount_wei,
@@ -1805,14 +1569,11 @@ class CurveAdapter:
         """
         self.clear_planned_allowance_cache()
         try:
-            # Honor an explicit slippage_bps=0 (exact-quote request); only fall back
-            # to the config default when the caller passed None. `... or default`
-            # would silently re-introduce the default haircut for a 0 request.
+            # Zero means an exact quote; only None selects the configured default.
             if slippage_bps is None:
                 slippage_bps = self.config.default_slippage_bps
             recipient = recipient or self.wallet_address
 
-            # Get pool info
             pool_info = self.get_pool_info(pool_address)
             if not pool_info:
                 return LiquidityResult(
@@ -1826,26 +1587,16 @@ class CurveAdapter:
                     error=f"Invalid coin index: {coin_index}. Pool has {pool_info.n_coins} coins.",
                 )
 
-            # Convert LP amount to wei
+            # Curve LP token amounts use 18 decimals.
             lp_amount_wei = int(lp_amount * Decimal(10**18))
 
-            # Derive the min-out floor from the pool's on-chain calc_withdraw_one_coin
-            # (fail-closed: raises if unavailable, caught below as a failed result).
-            # ``used_cryptoswap`` is the family whose selector actually answered the
-            # quote — the remove tx MUST be built with the same family (a static
-            # mislabel would otherwise emit a valid quote but revert on execution).
+            # Build with the same ABI family whose on-chain quote selector succeeded.
             expected_out, used_cryptoswap = self._query_calc_withdraw_one_coin_onchain(
                 pool_info, lp_amount_wei, coin_index
             )
             min_amount = compute_min_amount_out_from_bps(expected_out, slippage_bps)
 
-            # Guard: fail closed when the floor is non-positive — proceeding with
-            # min_amount<=0 would expose the entire single-sided withdrawal to a
-            # sandwich attack. min_amount==0 happens when the LP amount and/or
-            # slippage are so small the (10000 - slippage_bps) scaling floors to 0;
-            # min_amount<0 only via a direct adapter caller passing slippage_bps>10000
-            # (the intent path validates max_slippage∈[0,1]), which would otherwise
-            # reach _pad_uint256 with a negative int and emit malformed calldata.
+            # A non-positive floor would make the withdrawal unprotected or malformed.
             if min_amount <= 0:
                 return LiquidityResult(
                     success=False,
@@ -1856,13 +1607,10 @@ class CurveAdapter:
                     ),
                 )
 
-            # Build transactions
             transactions: list[TransactionData] = []
 
-            # Approve LP token if needed
             transactions.extend(self._build_approve_txs(pool_info.lp_token, pool_address, lp_amount_wei))
 
-            # Build remove_liquidity_one_coin transaction
             remove_tx = self._build_remove_liquidity_one_tx(
                 pool_address=pool_address,
                 lp_amount=lp_amount_wei,
@@ -1881,7 +1629,6 @@ class CurveAdapter:
                 f"lp_amount={lp_amount}, coin={pool_info.coins[coin_index]}"
             )
 
-            # Build amounts list with only the withdrawn coin
             amounts = [0] * pool_info.n_coins
             amounts[coin_index] = min_amount
 
@@ -1944,15 +1691,10 @@ class CurveAdapter:
         """
         self.clear_planned_allowance_cache()
         try:
-            # Honor an explicit slippage_bps=0 (exact-quote request); only fall back
-            # to the config default when the caller passed None (cf. single-sided).
+            # Zero means an exact quote; only None selects the configured default.
             if slippage_bps is None:
                 slippage_bps = self.config.default_slippage_bps
-            # Bound slippage at the adapter boundary (CodeRabbit, defense-in-depth):
-            # this is a public method reachable by direct callers / config defaults,
-            # not only the intent path. An out-of-range slippage_bps would inflate
-            # max_burn until it is capped at the FULL held LP — weakening the
-            # fail-closed ceiling — or (if negative) make the ceiling too tight.
+            # Validate direct callers so the max-burn ceiling cannot be weakened.
             if slippage_bps < 0 or slippage_bps > 10_000:
                 return LiquidityResult(
                     success=False,
@@ -1967,9 +1709,7 @@ class CurveAdapter:
             if not pool_info:
                 return LiquidityResult(success=False, error=f"Unknown pool: {pool_address}")
 
-            # Imbalanced exit is a StableSwap-family primitive only — CryptoSwap /
-            # Tricrypto pools do not expose remove_liquidity_imbalance. Fail loud
-            # rather than emit calldata the pool will revert on.
+            # CryptoSwap families do not expose imbalanced withdrawal.
             if self._is_cryptoswap(pool_info):
                 return LiquidityResult(
                     success=False,
@@ -1979,7 +1719,7 @@ class CurveAdapter:
                     ),
                 )
 
-            # N must match the pool's coin count — the amounts vector is positional.
+            # The amounts vector is positional and must contain all N coins.
             if len(amounts) != pool_info.n_coins:
                 return LiquidityResult(
                     success=False,
@@ -1989,8 +1729,7 @@ class CurveAdapter:
                     ),
                 )
 
-            # Convert each requested amount to native wei; require at least one
-            # positive coin (an all-zero withdrawal is a no-op / nonsense request).
+            # Encode human-unit amounts with each coin's decimals, preserving pool order.
             amounts_wei: list[int] = []
             for i, amt in enumerate(amounts):
                 if amt < 0:
@@ -2006,8 +1745,7 @@ class CurveAdapter:
                     error="remove_liquidity_imbalance: all requested amounts are zero (nothing to withdraw).",
                 )
 
-            # Guard: requested amounts must not exceed the pool's on-chain balances
-            # (fail-closed; raises if the read is unavailable — never silently skip).
+            # Pool-balance bounds fail closed when reserves cannot be read.
             pool_balances = self._query_pool_balances_onchain(pool_info)
             for i, want in enumerate(amounts_wei):
                 if want > pool_balances[i]:
@@ -2019,20 +1757,13 @@ class CurveAdapter:
                         ),
                     )
 
-            # Derive the MAX-BURN ceiling from the on-chain calc_token_amount LP-burn
-            # quote (fail-closed: raises if unavailable, caught below). Pad UP by
-            # slippage (ceiling), the inverse of the single-sided min-out floor.
-            # NOTE: on a LEGACY (non-NG) StableSwap pool, calc_token_amount excludes
-            # the imbalance fee, so a slippage_bps of 0 yields a ceiling below the
-            # real burn and the on-chain tx ALWAYS reverts ("Slippage screwed you").
-            # That is fail-closed (no loss) but wastes gas — callers should leave
-            # max_slippage at the default or give it fee headroom. NG pools fold the
-            # fee into the quote, so 0 is exact there.
+            # Pad the quoted LP burn upward: this is a spend ceiling, not a min-out.
+            # Legacy StableSwap quotes exclude imbalance fees, so zero slippage may
+            # safely revert; NG quotes include the fee and can be exact.
             lp_burn_quote = self._query_calc_token_amount_withdraw_onchain(pool_info, amounts_wei)
             max_burn = int(lp_burn_quote * (10000 + slippage_bps) // 10000)
 
-            # Fail closed on a non-positive ceiling — an unbounded / zero max_burn
-            # would let the pool burn the entire LP balance (theft/sandwich vector).
+            # Never submit a non-positive or unbounded LP-burn ceiling.
             if max_burn <= 0:
                 return LiquidityResult(
                     success=False,
@@ -2043,10 +1774,7 @@ class CurveAdapter:
                     ),
                 )
 
-            # Cap the ceiling at the LP actually held: a max_burn above the position
-            # is meaningless (the pool can only burn what msg.sender holds) and a
-            # request whose quote already exceeds the position is under-funded — fail
-            # loud rather than emit a tx that reverts after spending gas.
+            # A request needing more LP than the position holds fails before spending gas.
             lp_held_wei = int(lp_amount * Decimal(10**CURVE_LP_TOKEN_DECIMALS))
             if lp_burn_quote > lp_held_wei:
                 return LiquidityResult(
@@ -2056,11 +1784,9 @@ class CurveAdapter:
                         f"position holds only {lp_held_wei} for {pool_info.name}; reduce the requested amounts."
                     ),
                 )
-            # Never approve / authorize burning more than the position holds.
             max_burn = min(max_burn, lp_held_wei)
 
             transactions: list[TransactionData] = []
-            # Approve the LP token (the pool burns msg.sender's LP) up to max_burn.
             transactions.extend(self._build_approve_txs(pool_info.lp_token, pool_address, max_burn))
 
             remove_tx = self._build_remove_liquidity_imbalance_tx(
@@ -2096,10 +1822,6 @@ class CurveAdapter:
         except Exception as e:
             logger.exception(f"Failed to build remove_liquidity_imbalance: {e}")
             return LiquidityResult(success=False, error=str(e))
-
-    # =========================================================================
-    # Metapool Underlying (Zap) Operations — Tier B (VIB-5419)
-    # =========================================================================
 
     def swap_underlying(
         self,
@@ -2164,19 +1886,13 @@ class CurveAdapter:
             token_in_decimals = self._get_token_decimals(token_in_symbol)
             amount_in_wei = int(amount_in * Decimal(10**token_in_decimals))
 
-            # Quote on-chain via get_dy_underlying when available; otherwise use
-            # the stable 1:1 decimal-adjusted estimate.
             amount_out_estimate = self._estimate_underlying_swap_output(
                 pool_info, i, j, amount_in_wei, token_in_symbol, token_out_symbol
             )
             amount_out_minimum = max(1, compute_min_amount_out_from_bps(amount_out_estimate, slippage_bps))
             token_out_decimals = self._get_token_decimals(token_out_symbol)
 
-            # P0-8 oracle/MEV min-out guard (VIB-5439). The combined coin space is
-            # all USD stables and the underlying estimate (get_dy_underlying or a
-            # 1:1 decimal-adjust) is independent of the oracle either way, so the
-            # cross-check always applies — it flags a depegged underlying / moved
-            # metapool before the tx is built.
+            # Stable metapool quotes fail closed when materially below the oracle.
             guard_error = self._swap_oracle_guard_error(
                 pool_info=pool_info,
                 token_in_symbol=token_in_symbol,
@@ -2192,10 +1908,7 @@ class CurveAdapter:
             if guard_error is not None:
                 return SwapResult(success=False, error=guard_error)
 
-            # VIB-5490: anchor the executed floor to the oracle (see swap()). The
-            # metapool combined space is all USD stables so the stable tolerance
-            # and residual apply; the clamp is capped at pool_quote*(1-residual),
-            # preserving a benign-drift buffer so a legit swap is not false-reverted.
+            # Anchor execution to the oracle while preserving a benign-drift residual.
             amount_out_minimum = self._oracle_anchored_min_out(
                 pool_info=pool_info,
                 pool_floor_wei=amount_out_minimum,
@@ -2400,8 +2113,7 @@ class CurveAdapter:
                 )
 
             transactions: list[TransactionData] = []
-            # The zap pulls the metapool LP from the caller, so approve the LP
-            # token (== metapool address) to the zap.
+            # The zap, not the pool, pulls the metapool LP token.
             transactions.extend(self._build_approve_txs(pool_info.lp_token, zap, lp_amount_wei))
 
             # remove_liquidity(address _pool, uint256 _amount, uint256[4] _min_amounts)
@@ -2444,8 +2156,6 @@ class CurveAdapter:
         except Exception as e:
             logger.exception(f"Failed to build metapool remove_liquidity_underlying: {e}")
             return LiquidityResult(success=False, error=str(e))
-
-    # ---- Metapool underlying helpers -------------------------------------
 
     @staticmethod
     def _require_metapool_zap(pool_info: PoolInfo) -> tuple[str, int]:
@@ -2506,7 +2216,7 @@ class CurveAdapter:
                     token_out_symbol,
                     exc,
                 )
-        # Combined coin space of a 3CRV/FRAX metapool is all USD stables -> 1:1.
+        # Combined 3CRV/FRAX coin space is USD-denominated, so use a 1:1 fallback.
         in_decimals = self._get_token_decimals(token_in_symbol)
         out_decimals = self._get_token_decimals(token_out_symbol)
         decimal_diff = out_decimals - in_decimals
@@ -2563,17 +2273,16 @@ class CurveAdapter:
         combined_len = 1 + len(pool_info.base_pool_coins or [])
         zero = [0] * combined_len
         if self._permission_discovery:
-            # Discovery only — positive stand-in, see CurveConfig.permission_discovery.
+            # Funds-moving paths never use synthetic withdrawal floors.
             return self._discovery_min_amounts(pool_info, lp_amount, length=combined_len)
         if self._gateway_client is None and not self._rpc_url:
             self._last_estimation_error = "gateway_client or rpc_url not configured"
             return zero
         try:
-            # 1. Native proportional split of the metapool: [meta, base-LP].
+            # Preserve combined ordering: meta coin first, then base-pool reserve order.
             native = self._query_proportional_amounts_onchain(pool_info, lp_amount)
             meta_amount = native[0]
             base_lp_amount = native[1]
-            # 2. Decompose the base-LP leg across the base pool's coins by reserves.
             base_amounts = self._query_base_pool_underlying_amounts(pool_info, base_lp_amount)
             return [meta_amount, *base_amounts]
         except Exception as e:  # noqa: BLE001
@@ -2596,12 +2305,10 @@ class CurveAdapter:
         """
         base_pool_addr = pool_info.base_pool or ""
         base_addrs = pool_info.base_pool_coin_addresses or []
-        # A metapool's native coins are [meta coin, base-LP token], so the base LP
-        # token is coins[1]. Guard the index access before reading it so a
-        # misconfigured pool fails loudly with a clear message, not an IndexError.
+        # Metapool native coin 1 is the base LP token; incomplete metadata fails loudly.
         if not base_pool_addr or not base_addrs or len(pool_info.coin_addresses) < 2:
             raise ValueError(f"metapool {pool_info.name} missing base-pool metadata")
-        base_lp_token = pool_info.coin_addresses[1]  # 3CRV is the metapool's coin 1
+        base_lp_token = pool_info.coin_addresses[1]
         base_info = PoolInfo(
             address=base_pool_addr,
             lp_token=base_lp_token,
@@ -2612,10 +2319,6 @@ class CurveAdapter:
             name=f"{pool_info.name}:base_pool",
         )
         return self._query_proportional_amounts_onchain(base_info, base_lp_amount)
-
-    # =========================================================================
-    # Transaction Building
-    # =========================================================================
 
     def _build_exchange_tx(
         self,
@@ -2637,15 +2340,14 @@ class CurveAdapter:
         Aave-type (underlying): exchange_underlying(int128 i, int128 j, uint256 dx, uint256 min_dy)
         """
         if use_underlying:
-            # Aave-type pools (e.g. Polygon am3pool): swap underlying tokens via exchange_underlying()
+            # Aave-style pools route underlying tokens with int128 indices.
             selector = EXCHANGE_UNDERLYING_SELECTOR
             pad_index = self._pad_int128
         elif pool_type in (PoolType.CRYPTOSWAP, PoolType.TRICRYPTO):
-            # CryptoSwap and Tricrypto pools use uint256 indices
+            # CryptoSwap families use uint256 indices; StableSwap uses int128.
             selector = EXCHANGE_UINT256_SELECTOR
             pad_index = self._pad_uint256
         else:
-            # StableSwap pools use int128 indices
             selector = EXCHANGE_SELECTOR
             pad_index = self._pad_int128
 
@@ -2693,8 +2395,7 @@ class CurveAdapter:
         )
 
         if is_ng:
-            # Dynamic-array ABI: head = [offset_to_amounts, min_mint]; tail = [length, *amounts]
-            # offset = 0x40 (two head slots × 32 bytes).
+            # Dynamic array data follows the two-word ABI head at offset 0x40.
             calldata = ADD_LIQUIDITY_DYN_SELECTOR
             calldata += self._pad_uint256(0x40)
             calldata += self._pad_uint256(min_lp_tokens)
@@ -2740,8 +2441,7 @@ class CurveAdapter:
         StableSwap NG: remove_liquidity(uint256 _amount, uint256[] min_amounts)
         """
         if is_ng:
-            # Dynamic-array ABI: head = [_amount, offset_to_min_amounts]; tail = [length, *min_amounts]
-            # offset = 0x40 (two head slots × 32 bytes).
+            # Dynamic array data follows the two-word ABI head at offset 0x40.
             calldata = REMOVE_LIQUIDITY_DYN_SELECTOR
             calldata += self._pad_uint256(lp_amount)
             calldata += self._pad_uint256(0x40)
@@ -2762,8 +2462,7 @@ class CurveAdapter:
             for min_amount in min_amounts:
                 calldata += self._pad_uint256(min_amount)
 
-        # Proportional remove returns ALL N coins — cost scales with coin count,
-        # so key the static floor by ``n_coins`` (VIB-5440).
+        # Proportional removal returns all N coins, so the gas floor scales with N.
         static_gas = CURVE_GAS_ESTIMATES.get(f"remove_liquidity_{n_coins}", CURVE_GAS_ESTIMATES["remove_liquidity_4"])
         return TransactionData(
             to=pool_address,
@@ -2793,9 +2492,7 @@ class CurveAdapter:
         family only — the caller guards against CryptoSwap/Tricrypto pools.
         """
         if is_ng:
-            # Dynamic-array ABI: head = [offset_to_amounts, max_burn]; tail = [length, *amounts].
-            # The array is the FIRST arg, so its data lives after the 2-word head:
-            # offset = 0x40 (two head slots × 32 bytes).
+            # Dynamic array data follows the two-word ABI head at offset 0x40.
             calldata = REMOVE_LIQUIDITY_IMBALANCE_DYN_SELECTOR
             calldata += self._pad_uint256(0x40)
             calldata += self._pad_uint256(max_burn)
@@ -2857,8 +2554,7 @@ class CurveAdapter:
                 to=pool_address,
                 data=calldata,
                 value=0,
-                # Family-scoped floor: only CryptoSwap/Tricrypto pay the
-                # price-scale rebalance surcharge on single-coin exits.
+                # Only CryptoSwap families pay the price-scale rebalance surcharge.
                 static_gas=CURVE_GAS_ESTIMATES[
                     "remove_liquidity_one_coin_crypto" if is_cryptoswap else "remove_liquidity_one_coin"
                 ],
@@ -2893,12 +2589,7 @@ class CurveAdapter:
             Zero, one, or two ``TransactionData`` (reset + approve) in order.
         """
         current = self._current_allowance(token_address, spender)
-        # Delegate the money-critical ordering (skip-if-sufficient, reset-before-
-        # approve, fail-safe on unconfirmed allowance) to the SHARED sequencing
-        # primitive (VIB-5492) so it can never drift from the framework compiler's
-        # copy. Curve's posture: reset on ANY non-zero OR unconfirmed allowance —
-        # the safest general rule, a superset of the framework's USDT-class
-        # allowlist — and always approve MAX.
+        # Unknown allowances fail safe through reset-before-approve ordering.
         txs = build_approval_sequence(
             amount=amount,
             current_allowance=current,
@@ -2943,12 +2634,11 @@ class CurveAdapter:
                     return onchain
             except Exception as exc:  # noqa: BLE001 — unknown allowance on any read failure
                 logger.debug("On-chain allowance read failed for %s: %s; treating as unknown", token_address, exc)
-        return None  # could not confirm allowance → caller resets to be safe
+        return None  # Unknown allowance requires reset-before-approve.
 
     def _single_approve_tx(self, token_address: str, spender: str, value: int) -> TransactionData:
         """Build one ERC-20 ``approve(spender, value)`` transaction."""
         calldata = encode_approve(spender, value)
-        # _get_token_symbol falls back to truncated address for unresolved tokens (e.g., 3CRV)
         token_symbol = self._get_token_symbol(token_address)
         action = "Reset approval for" if value == 0 else "Approve"
         return TransactionData(
@@ -2959,10 +2649,6 @@ class CurveAdapter:
             description=f"{action} {token_symbol} for Curve",
             tx_type="approve",
         )
-
-    # =========================================================================
-    # Estimation Methods
-    # =========================================================================
 
     def _estimate_swap_output(
         self,
@@ -2997,19 +2683,15 @@ class CurveAdapter:
         decimal_diff = out_decimals - in_decimals
 
         if pool_info.pool_type == PoolType.STABLESWAP:
-            # Stablecoins: assume 1:1, adjust for decimals only
+            # StableSwap fallback assumes parity and adjusts only for token decimals.
             if decimal_diff > 0:
                 return amount_in * (10**decimal_diff)
             elif decimal_diff < 0:
                 return amount_in // (10 ** abs(decimal_diff))
             return amount_in
 
-        # CryptoSwap / Tricrypto: volatile pairs need price-based estimation
         if price_ratio is not None:
-            # price_ratio = price_in / price_out
-            # expected_output_tokens = amount_in_tokens * price_ratio
-            # Convert: amount_in is in input wei, output must be in output wei
-            # amount_out_wei = amount_in_wei * price_ratio * 10^(out_decimals - in_decimals)
+            # Apply the oracle token-price ratio across raw token decimal scales.
             estimate = Decimal(amount_in) * price_ratio
             if decimal_diff > 0:
                 estimate = estimate * Decimal(10**decimal_diff)
@@ -3017,12 +2699,7 @@ class CurveAdapter:
                 estimate = estimate / Decimal(10 ** abs(decimal_diff))
             return int(estimate)
 
-        # Fail closed: CryptoSwap pools swap volatile assets with very different prices.
-        # Without price_ratio, decimal-only adjustment produces astronomically wrong
-        # min_amount_out values (e.g. 100 USDT -> WETH would set min_amount_out to
-        # 100*10^12 wei = ~100 billion WETH, guaranteeing a revert). The compiler
-        # always provides price_ratio from oracle prices; reaching this path means
-        # the price oracle was unavailable. Fail closed rather than execute unprotected.
+        # Decimal-only estimation is unsafe for volatile assets; missing oracle data fails closed.
         raise ValueError(
             f"CryptoSwap pool {pool_info.name} ({pool_info.coins[i]} -> {pool_info.coins[j]}): "
             "price_ratio is required for accurate slippage protection but was not provided. "
@@ -3043,13 +2720,7 @@ class CurveAdapter:
         if amount_in_wei <= 0:
             raise ValueError(f"amount_in_wei must be positive, got {amount_in_wei}")
 
-        # Read-only quote: opt out of the heavy reconcile (VIB-5423). ``get_dy``
-        # needs the live coin ORDER (for get_coin_index) but NOT is_ng /
-        # virtual_price / decimals. When called inside ``swap()`` the cache is
-        # already warm (its own ``refresh=True`` resolve); standalone slippage
-        # quotes resolve cold-start static then refresh the coin order only, so
-        # the quote stays lean (one ``get_dy`` eth_call_uint256) without the
-        # per-pool vp/is_ng amplification.
+        # get_dy needs live coin order but not the full ABI/valuation refresh.
         pool_info = self.get_pool_info(pool_address, refresh=False)
         if not pool_info:
             raise ValueError(f"Unknown Curve pool: {pool_address}")
@@ -3141,9 +2812,7 @@ class CurveAdapter:
         """
         if pool_info.pool_type in (PoolType.CRYPTOSWAP, PoolType.TRICRYPTO):
             if self._permission_discovery:
-                # Discovery only: a positive stand-in so the fail-closed guard
-                # below is satisfied without a network read. Never reached on a
-                # funds-moving path (see CurveConfig.permission_discovery).
+                # Funds-moving paths never use synthetic LP floors.
                 return self._synthetic_quote_scale(sum(amounts))
             if self._gateway_client is None and not self._rpc_url:
                 raise ValueError(
@@ -3151,7 +2820,7 @@ class CurveAdapter:
                     "gateway client or rpc_url; refusing to ship min_lp=0 (MEV theft vector). "
                     "Configure CurveConfig.gateway_client to enable the on-chain calc_token_amount quote."
                 )
-            # Propagates on query failure — the caller (add_liquidity) fails closed.
+            # Query failures propagate so add_liquidity fails closed.
             return self._query_calc_token_amount_crypto_onchain(pool_info, amounts)
 
         if pool_info.is_ng and (self._gateway_client is not None or self._rpc_url):
@@ -3167,11 +2836,10 @@ class CurveAdapter:
         total = 0
         for i, amount in enumerate(amounts):
             decimals = self._coin_decimals(pool_info, i)
-            # Normalize to 18 decimals
+            # Normalize deposits to 18-decimal LP-value units.
             normalized = amount * (10 ** (18 - decimals))
             total += normalized
 
-        # Adjust for virtual_price: each LP token is worth virtual_price underlying
         total = int(Decimal(total) / pool_info.virtual_price)
 
         return total
@@ -3191,9 +2859,7 @@ class CurveAdapter:
             raise ValueError(
                 f"No CryptoSwap calc_token_amount selector for {pool_info.n_coins}-coin pool {pool_info.name}"
             )
-        # Fail fast on a present-but-disconnected gateway: it would otherwise reach
-        # eth_call and surface a low-level RPC error instead of the clear fail-closed
-        # min_lp message. Drop to rpc_url when available, else refuse (never min_lp=0).
+        # A disconnected gateway falls back to rpc_url or fails closed before eth_call.
         gateway_client = self._gateway_client
         if gateway_client is not None and not getattr(gateway_client, "is_connected", False):
             if not self._rpc_url:
@@ -3263,16 +2929,16 @@ class CurveAdapter:
         than returning 0 (never ships an unbounded/zero ``max_burn``).
         """
         if self._permission_discovery:
-            # Discovery only — positive stand-in, see CurveConfig.permission_discovery.
+            # Funds-moving paths never use synthetic max-burn quotes.
             return self._synthetic_quote_scale(sum(amounts))
         gateway_client = self._resolve_onchain_gateway_client(pool_info, "imbalanced max_burn")
 
         if pool_info.is_ng:
-            # Dynamic-array: head = [offset_to_amounts, is_deposit]; tail = [length, *amounts].
+            # Dynamic array data follows the two-word ABI head at offset 0x40.
             calldata = (
                 NG_CALC_TOKEN_AMOUNT_SELECTOR
                 + self._pad_uint256(0x40)
-                + self._pad_uint256(0)  # is_deposit = False
+                + self._pad_uint256(0)
                 + self._pad_uint256(len(amounts))
                 + "".join(self._pad_uint256(a) for a in amounts)
             )
@@ -3282,7 +2948,6 @@ class CurveAdapter:
                 raise ValueError(
                     f"No StableSwap calc_token_amount selector for {pool_info.n_coins}-coin pool {pool_info.name}"
                 )
-            # Fixed-array: inline uint256[N] then bool is_deposit=False.
             calldata = selector + "".join(self._pad_uint256(a) for a in amounts) + self._pad_uint256(0)
 
         burned = eth_call_uint256(
@@ -3309,10 +2974,7 @@ class CurveAdapter:
         caller fails closed rather than skipping the bound check.
         """
         if self._permission_discovery:
-            # Discovery only — a reserve vector large enough that the caller's
-            # "requested more of a coin than the pool holds" bound is satisfied
-            # by the synthetic withdrawal vector. See
-            # CurveConfig.permission_discovery.
+            # Synthetic reserves exist only to extract permission selectors.
             return [self._synthetic_quote_scale(0, floor=10**24)] * pool_info.n_coins
         gateway_client = self._resolve_onchain_gateway_client(pool_info, "pool balances")
         balances: list[int] = []
@@ -3367,7 +3029,7 @@ class CurveAdapter:
         """
         zero_amounts = [0] * pool_info.n_coins
         if self._permission_discovery:
-            # Discovery only — positive stand-in, see CurveConfig.permission_discovery.
+            # Funds-moving paths never use synthetic withdrawal floors.
             return self._discovery_min_amounts(pool_info, lp_amount)
         if self._gateway_client is None and not self._rpc_url:
             logger.warning(
@@ -3414,7 +3076,6 @@ class CurveAdapter:
         """
         import json as _json
 
-        # ABI selectors
         TOTAL_SUPPLY_SELECTOR = "18160ddd"  # totalSupply() -> uint256
         BALANCES_UINT256_SELECTOR = "4903b0d1"  # balances(uint256) -> uint256 (factory/newer pools)
         BALANCES_INT128_SELECTOR = "065a80d8"  # balances(int128) -> uint256 (old Vyper pools, e.g. 3pool)
@@ -3446,7 +3107,7 @@ class CurveAdapter:
                     raise ValueError("eth_call returned empty result")
                 return self._decode_first_uint256_word(hex_result)
 
-            # Fallback: direct RPC (deprecated, ad-hoc use only)
+            # Direct RPC remains only for deprecated ad-hoc adapter usage.
             import httpx
 
             assert self._rpc_url is not None
@@ -3468,7 +3129,6 @@ class CurveAdapter:
                 raise ValueError("eth_call returned empty result")
             return self._decode_first_uint256_word(hex_result)
 
-        # 1. Query LP totalSupply
         total_supply = _eth_call(
             pool_info.lp_token,
             f"0x{TOTAL_SUPPLY_SELECTOR}",
@@ -3476,10 +3136,7 @@ class CurveAdapter:
         if total_supply == 0:
             raise ValueError(f"LP totalSupply is zero for pool {pool_info.name}")
 
-        # 2. Query balances for each coin
-        # Try balances(uint256) first (newer/factory pools), fall back to balances(int128)
-        # (old Vyper pools like Ethereum 3pool). We detect the correct selector on the
-        # first coin query and reuse it for the rest.
+        # Probe uint256 then legacy int128 balances and reuse the successful selector.
         amounts = []
         balances_selector = BALANCES_UINT256_SELECTOR
         for i in range(pool_info.n_coins):
@@ -3490,7 +3147,6 @@ class CurveAdapter:
                 )
             except (ValueError, Exception):
                 if i == 0 and balances_selector == BALANCES_UINT256_SELECTOR:
-                    # First call failed with uint256 selector, retry with int128
                     balances_selector = BALANCES_INT128_SELECTOR
                     balance_raw = _eth_call(
                         pool_info.address,
@@ -3498,7 +3154,6 @@ class CurveAdapter:
                     )
                 else:
                     raise
-            # Proportional share: balance * lp_amount / total_supply
             expected = balance_raw * lp_amount // total_supply
             amounts.append(expected)
 
@@ -3526,12 +3181,10 @@ class CurveAdapter:
         """
         import json as _json
 
-        # selector: calc_token_amount(uint256[],bool) → 0x3db06dd8
-        # head: [offset_to_amounts=0x40, is_deposit=1]
-        # tail: [length=n_coins, amounts...]
+        # Dynamic amounts follow the two-word head at offset 0x40.
         calldata = "0x3db06dd8"
         calldata += self._pad_uint256(0x40)
-        calldata += self._pad_uint256(1)  # is_deposit
+        calldata += self._pad_uint256(1)
         calldata += self._pad_uint256(pool_info.n_coins)
         for amount in amounts:
             calldata += self._pad_uint256(amount)
@@ -3586,8 +3239,7 @@ class CurveAdapter:
         """
         body = hex_result[2:] if hex_result.startswith("0x") else hex_result
         if len(body) < 64:
-            # Fewer than one full word — decode whatever is present (preserves
-            # the prior behaviour for short/edge responses).
+            # Accept short edge responses by decoding all available bytes.
             return int(body or "0", 16)
         return int(body[:64], 16)
 
@@ -3625,10 +3277,7 @@ class CurveAdapter:
         remove tx that would revert on execution.
         """
         if self._permission_discovery:
-            # Discovery only — positive stand-in, see CurveConfig.permission_discovery.
-            # ``used_cryptoswap`` follows the pool's declared family so the caller
-            # builds the matching ``remove_liquidity_one_coin`` selector, exactly as
-            # a live quote would.
+            # Preserve pool-family dispatch while extracting permission selectors.
             return self._synthetic_quote_scale(lp_amount), self._is_cryptoswap(pool_info)
         if self._gateway_client is None and not self._rpc_url:
             raise ValueError(
@@ -3636,9 +3285,7 @@ class CurveAdapter:
                 "gateway client or rpc_url; refusing to ship min_amount=0 (MEV theft vector). "
                 "Configure CurveConfig.gateway_client to enable the on-chain calc_withdraw_one_coin quote."
             )
-        # Fail fast on a present-but-disconnected gateway (it would otherwise reach
-        # eth_call and surface a low-level RPC error instead of the clear fail-closed
-        # message). Drop to rpc_url when available, else refuse (never min_amount=0).
+        # A disconnected gateway falls back to rpc_url or fails closed before eth_call.
         gateway_client = self._gateway_client
         if gateway_client is not None and not getattr(gateway_client, "is_connected", False):
             if not self._rpc_url:
@@ -3674,10 +3321,6 @@ class CurveAdapter:
             f"Curve calc_withdraw_one_coin returned no quote for {pool_info.name} "
             f"(coin {coin_index}); cannot derive single-sided min-out (last error: {last_error})"
         )
-
-    # =========================================================================
-    # Helper Methods
-    # =========================================================================
 
     def _resolve_token(self, token: str) -> str:
         """Resolve token symbol or address to address using TokenResolver."""
@@ -3759,13 +3402,9 @@ class CurveAdapter:
     def _pad_int128(value: int) -> str:
         """Pad int128 to 32 bytes (signed)."""
         if value < 0:
-            # Two's complement for negative values
+            # ABI signed integers use two's-complement padding.
             value = (1 << 256) + value
         return hex(value)[2:].zfill(64)
-
-    # =========================================================================
-    # State Management
-    # =========================================================================
 
     def set_allowance(self, token: str, spender: str, amount: int) -> None:
         """Set cached allowance (for testing).
@@ -3785,10 +3424,6 @@ class CurveAdapter:
         """Clear optimistic approvals emitted into the current bundle."""
         self._allowance_cache.clear_planned()
 
-
-# =============================================================================
-# Exports
-# =============================================================================
 
 __all__ = [
     "CurveAdapter",
