@@ -74,13 +74,11 @@ def stamp_trading_wallet(receipt: dict[str, Any], wallet: str) -> dict[str, Any]
     return _stamp(receipt, wallet)
 
 
-# Strictly-typed enriched fields that get a real top-level slot on
-# ``ExecutionResult`` (read directly by strategy callbacks) AND a mirror in
-# ``extracted_data``. Each entry is ``(result_attr, type_validator, type_label)``.
-# A value failing its validator is rejected with a warning and the enricher
-# keeps scanning the bundle (``return False``) rather than treating the
-# rejection as a terminal attach. ``primitive_money_legs`` / ``bin_ids`` slots
-# were the VIB-159 gap: declared / expected but never assigned to the result.
+# Typed fields are mirrored to top-level slots and ``extracted_data``.
+# Rejecting the wrong type must not end a multi-receipt scan:
+# a later receipt may contain a valid value.
+
+
 _STRICT_TYPED_FIELDS: dict[str, tuple[str, Callable[[Any], bool], str]] = {
     "lp_close_data": ("lp_close_data", lambda v: isinstance(v, LPCloseData), "LPCloseData"),
     "bridge_data": ("bridge_data", lambda v: isinstance(v, BridgeData), "BridgeData"),
@@ -92,17 +90,15 @@ _STRICT_TYPED_FIELDS: dict[str, tuple[str, Callable[[Any], bool], str]] = {
     ),
     "bin_ids": (
         "bin_ids",
-        # ``bool`` is an ``int`` subclass in Python, so an explicit
-        # ``not isinstance(b, bool)`` guard is required to keep ``[True]`` /
-        # ``[False]`` from masquerading as valid bin identifiers.
+        # ``bool`` is an ``int`` subclass, so exclude it from bin ids.
         lambda v: isinstance(v, list) and all(isinstance(b, int) and not isinstance(b, bool) for b in v),
         "list[int]",
     ),
     "primitive_money_legs": ("primitive_money_legs", _is_primitive_money_legs, "PrimitiveMoneyLegs"),
 }
 
-# Mapping from TransactionReceipt.to_dict() snake_case keys to web3-style camelCase keys.
-# All receipt parsers expect camelCase (transactionHash, gasUsed, blockNumber).
+# Receipt parsers consume web3-style camelCase keys.
+
 _SNAKE_TO_CAMEL = {
     "tx_hash": "transactionHash",
     "gas_used": "gasUsed",
@@ -114,41 +110,29 @@ _SNAKE_TO_CAMEL = {
     "effective_gas_price": "effectiveGasPrice",
 }
 
-# One-shot deprecation tracking for un-migrated parsers. Keyed by
-# (parser_class_name, field) so we warn exactly once per (parser, field) pair
-# instead of spamming on every receipt.
+# Warn once per parser and field to avoid receipt-level log spam.
+
+
 _LEGACY_WARNED: set[tuple[str, str]] = set()
 
 
-# VIB-4310 — Fields whose extraction must scan ALL receipts in a bundle and
-# select the preferred-``source``-tagged variant rather than returning on
-# first ExtractOk. Two-transaction protocol flows (e.g. Aerodrome Slipstream
-# ``decreaseLiquidity`` → ``collect``) emit complementary data across separate
-# receipts: receipt #1 carries DecreaseLiquidity (principal unlocked), receipt
-# #2 carries Collect (principal + accrued fees actually transferred).
-# First-match semantics return the decrease-sourced extraction and silently
-# drop accrued fees from the registry payload.
-#
-# The map's value is the ``source`` tag this aggregator prefers. Parser-side
-# producers (see ``AerodromeSlipstreamReceiptParser.extract_lp_close_data``)
-# stamp every emitted value with the source it was decoded from. Producers
-# that leave ``source=None`` (single-tx parsers) are unaffected — the picker
-# falls back to first-found semantics for un-tagged candidates.
+# Aggregate fields inspect every receipt before choosing a value.
+# Split liquidity closes emit principal on decrease and principal plus
+# fees on collect, so first-match semantics can lose accrued fees.
+# Tagged candidates prefer the configured source; untagged candidates
+# retain first-found semantics.
+
+
 _AGGREGATE_FIELDS: dict[str, str] = {
     "lp_close_data": "collect",
 }
 
-# VIB-5416 — fields whose extractor must see the UNION of all the intent's
-# transaction logs, not a single tx. A multi-transaction intent can split its
-# money legs across txs: a Lido wrapped STAKE submits ETH→stETH in tx 1 and wraps
-# stETH→wstETH in a later tx, so neither receipt alone carries BOTH the ETH input
-# leg AND the wstETH output leg. The per-receipt first-OK loop would attach the
-# tx-1 (ETH→stETH) legs and stop, mislabelling the ledger ``token_out`` as the
-# intermediate ``stETH`` while the wallet (and the teardown swap-back) actually
-# holds ``wstETH`` — which strands the teardown swap as ``untracked_token``
-# (VIB-5416). Extracting from the merged-logs receipt lets the parser declare the
-# true ETH→wstETH legs. Parsers filter logs by contract+topic, so the extra logs
-# from sibling txs are inert for single-tx intents.
+# Some money legs span transactions and must be parsed from the union
+# of their logs. This avoids treating an intermediate asset as the
+# intent output. Parsers filter by contract and topic, so sibling logs
+# remain inert for unrelated events.
+
+
 _MERGED_RECEIPT_FIELDS: frozenset[str] = frozenset({"primitive_money_legs"})
 
 
@@ -186,7 +170,7 @@ def _receipt_parser_kwarg_keys(kwarg_name: str) -> frozenset[str]:
     tuple — so test-side ``CONNECTOR_REGISTRY.clear()`` is honoured; a
     module-level cache here would serve stale sets after a registry reset.
     """
-    # Deferred import: connector discovery must never run at module import.
+    # Connector discovery must never run at module import.
     from almanak.connectors._connector import CONNECTOR_REGISTRY
 
     return frozenset(
@@ -251,20 +235,12 @@ class ResultEnricher:
         # Strategy can use result.position_id directly!
     """
 
-    # Extraction specifications per intent type
-    # Maps intent type to list of fields to extract
-    #
-    # VIB-3204: ``protocol_fees`` is added to every intent type that charges
-    # protocol-level fees (DEX fees, origination fees, perp open/close fees,
-    # vault fees). Parsers that don't implement the extractor simply yield
-    # ``None`` and the field is skipped — no warning is emitted for missing
-    # methods when the parser doesn't declare SUPPORTED_EXTRACTIONS.
+    # Protocol fees apply across money-bearing intents. Parsers that do not
+    # declare an extractor omit the field without a missing-method warning.
+
     EXTRACTION_SPECS: dict[str, list[str]] = {
-        # === DEX / AMM ===
         "SWAP": ["swap_amounts", "protocol_fees"],
-        # === Liquidity Providing ===
-        # NOTE: Do NOT re-add bin_ids here without first migrating LPOpenData per
-        # VIB-4320 follow-up. TJ V2 bin_ids is in EXTRACTION_SPECS_BY_PROTOCOL.
+        # Keep ``bin_ids`` protocol-specific until ``LPOpenData`` owns them.
         "LP_OPEN": ["position_id", "tick_lower", "tick_upper", "liquidity", "protocol_fees", "lp_open_data"],
         "LP_CLOSE": [
             "lp_close_data",
@@ -274,18 +250,12 @@ class ResultEnricher:
             "fees1",
             "protocol_fees",
         ],
-        # === LP Fee Collection ===
-        # NOTE: Do NOT re-add bin_ids here without first migrating LPOpenData per
-        # VIB-4320 follow-up. TJ V2 bin_ids is in EXTRACTION_SPECS_BY_PROTOCOL.
         "LP_COLLECT_FEES": ["fees0", "fees1", "protocol_fees"],
-        # === Lending ===
-        # Singular forms used by EVM parsers (Aave, Morpho, etc.)
-        # Plural forms used by Solana parsers (Jupiter Lend, Kamino)
+        # EVM parsers use singular amounts; Solana parsers use plural amounts.
         "BORROW": ["borrow_amount", "borrow_amounts", "borrow_rate", "debt_token", "protocol_fees"],
         "REPAY": ["repay_amount", "repay_amounts", "remaining_debt", "protocol_fees"],
         "SUPPLY": ["supply_amount", "supply_amounts", "a_token_received", "supply_rate", "protocol_fees"],
         "WITHDRAW": ["withdraw_amount", "withdraw_amounts", "a_token_burned", "protocol_fees", "redemption_amounts"],
-        # === Perpetuals ===
         "PERP_OPEN": [
             "position_id",
             "size_delta",
@@ -300,219 +270,86 @@ class ResultEnricher:
             "fees_paid",
             "collateral_returned",
             "protocol_fees",
-            # VIB-3497: funding fee USD at close. Parsers that implement
-            # extract_funding_fee_usd return a Decimal; those that don't
-            # (or return None) propagate as "unavailable" in attribution.
+            # Funding fees are USD Decimals; absent parser data stays unmeasured.
             "funding_fee_usd",
         ],
-        # === Staking ===
         "STAKE": ["stake_amount", "shares_received", "wsteth_received", "stake_token", "protocol_fees"],
         "UNSTAKE": ["unstake_amount", "underlying_received", "cooldown_end", "protocol_fees"],
-        # === Flash Loans ===
         "FLASH_LOAN": ["loan_amount", "fee_paid", "loan_token"],
-        # === Prediction Markets ===
         "PREDICTION_BUY": ["outcome_tokens_received", "cost_basis", "market_id"],
         "PREDICTION_SELL": ["outcome_tokens_sold", "proceeds", "market_id"],
         "PREDICTION_REDEEM": ["redemption_amount", "payout", "market_id"],
-        # === Cross-Chain ===
-        # VIB-3226: BRIDGE enrichment returns a typed ``BridgeData`` struct
-        # describing the *source-chain* deposit. Destination-chain settlement
-        # is observed asynchronously (``EnsoStateProvider``) — the enricher
-        # does not block on it. ``bridge_data`` carries the individual
-        # scalars (source_tx_hash, destination_chain, expected_amount_out)
-        # as typed fields; legacy scalar keys are intentionally NOT in the
-        # spec — no caller reads ``result.extracted_data["source_tx_hash"]``
-        # and the bridge parsers explicitly do not implement
-        # ``extract_source_tx_hash`` etc., so including them here would only
-        # generate spurious SUPPORTED_EXTRACTIONS warnings on every bridge
-        # execution.
+        # Bridge enrichment describes the source-chain deposit; destination
+        # settlement is asynchronous. Keep the individual values inside the
+        # typed ``BridgeData`` rather than requesting unsupported scalar fields.
         "BRIDGE": [
             "bridge_data",
         ],
         "ENSURE_BALANCE": ["amount_transferred", "source_chain"],
-        # === Vault Operations (MetaMorpho ERC-4626) ===
         "VAULT_DEPOSIT": ["deposit_data", "protocol_fees"],
         "VAULT_REDEEM": ["redeem_data", "protocol_fees"],
-        # === No-Op ===
-        "HOLD": [],  # No extraction needed
-        # PERP_CANCEL_ORDER (VIB-5568) — cancel a pending order, recover collateral.
-        # No position/PnL fields to extract: the OrderVault refund (committed
-        # collateral + unspent exec fee) is a wallet-balance delta captured by the
-        # portfolio snapshot, and the ORDER_CANCELLED event is surfaced by the GMX
-        # parser's order_events. Empty spec (like HOLD) → enrichment short-circuits.
+        "HOLD": [],
+        # Canceling a pending order is a cash movement captured by wallet
+        # balance deltas, not a position or PnL extraction.
         "PERP_CANCEL_ORDER": [],
-        # PERP_WITHDRAW (VIB-5617) — withdraw free margin off the venue's off-chain
-        # account back to L1 (Hyperliquid: a CoreWriter spotSend HyperCore→HyperEVM
-        # USDC bridge). A cash movement, not a trade: no position/PnL fields to
-        # extract. The credited amount (net of the ~$1 HyperCore withdraw fee) is a
-        # wallet-balance delta captured by the portfolio snapshot; the HyperCore
-        # settlement is async off-EVM (the EVM tx only emits RawAction). Empty spec
-        # (like HOLD / PERP_CANCEL_ORDER) → enrichment short-circuits.
+        # Withdrawing free venue margin is an asynchronous cash movement, not
+        # a trade; wallet balance deltas capture the settled amount and fees.
         "PERP_WITHDRAW": [],
     }
 
-    # VIB-4320 — Per-protocol overlay appended onto the generic ``EXTRACTION_SPECS``
-    # for protocol-specific fields that are not implemented by every parser. Keeps
-    # the generic spec protocol-neutral (no Uniswap-V3 / PancakeSwap-V3 warnings
-    # for ``bin_ids``) while preserving the flat ``extracted_data["bin_ids"]``
-    # contract for TraderJoe V2 consumers (LPPositionTracker + leveraged_lp demo).
-    #
-    # Overlay semantics: ``_merge_spec_with_overlay`` appends overlay fields at the
-    # tail of the base spec with order-preserving dedup. Base fields always come
-    # first; ``protocol=None`` returns the base spec unchanged.
-    #
-    # Follow-up VIB-4344 — Uniswap/PancakeSwap V3 ``LP_COLLECT_FEES`` still warns
-    # for ``fees0`` / ``fees1`` because those parsers do not implement
-    # ``extract_fees0`` / ``extract_fees1`` yet; the right fix is to implement
-    # them (not move them into per-protocol overlays). Out of scope for VIB-4320.
+    # Protocol overlays append fields after the generic spec with
+    # order-preserving deduplication. Base fields always run first, and
+    # ``protocol=None`` leaves the base spec unchanged.
+
     EXTRACTION_SPECS_BY_PROTOCOL: dict[str, dict[str, list[str]]] = {
         "traderjoe_v2": {
-            # VIB-4634 — ``lp_open_data`` / ``lp_close_data`` carry the
-            # canonical LBPair ``pool_address`` (stamped by the receipt parser
-            # from the DepositedToBins / WithdrawnFromBins / ClaimedFees
-            # emitter — the LBPair itself emits those events). Without it the
-            # LP accounting handler drops every TraderJoe V2 LP event because
-            # the ``tokenX/tokenY/<binStep>`` position-key descriptor is
-            # rejected as a Uniswap-V3 fee tier. ``lp_open_data`` is already in
-            # the base LP_OPEN spec; LP_CLOSE already carries ``lp_close_data``.
-            # LP_COLLECT_FEES has neither in the base spec, so the LBPair
-            # address must be added here for the fee-harvest path (the parser's
-            # ``extract_lp_close_data`` emits a principal-zero LPCloseData
-            # carrying only the pool_address for a ClaimedFees-only receipt).
-            # VIB-5414 — declare the LP_OPEN money legs too (the symmetric mirror of
-            # the LP_CLOSE entry below). ``extract_primitive_money_legs`` now returns
-            # two INPUT legs (the deposited token0/token1 notional) for a
-            # ``DepositedToBins`` receipt, so the LP handler can compute a MEASURED
-            # ``cost_basis_usd`` instead of ``0`` — which kept the gateway state
-            # manager degrading the snapshot HIGH→ESTIMATED for the whole hold (same
-            # class as the Uniswap-V3 ``deployed_capital=0`` family VIB-3883/3894).
-            # ``bin_ids`` stays for the LPPositionTracker / leveraged_lp consumers.
+            # TraderJoe positions need the canonical LBPair address carried by
+            # structured LP data; descriptor-shaped keys are not V3 fee tiers.
+            # Fee-only collections therefore request principal-zero close data.
+            # LP opens and closes also expose declared money legs so accounting
+            # records measured token notionals instead of a fabricated zero basis.
+            # ``bin_ids`` remains available to position-tracking consumers.
             "LP_OPEN": ["bin_ids", "primitive_money_legs"],
             "LP_COLLECT_FEES": ["bin_ids", "lp_close_data"],
-            # VIB-5221 (US-011) — declare the LP_CLOSE money legs as a typed
-            # ``PrimitiveMoneyLegs`` (``TraderJoeV2ReceiptParser.extract_primitive_money_legs``).
-            # The enricher's generic ``extracted_data[field] = value`` lands it at
-            # ``extracted_data["primitive_money_legs"]`` — the exact key the US-009
-            # ledger dispatcher (``_declared_money_legs``) already prefers over the
-            # legacy guesser. This makes TJ V2 LP_CLOSE's token0/token1 + amounts a
-            # property of the typed contract instead of the #2894 intent-pool-
-            # descriptor threading (blueprint 27 §6.6 / 05 §7). Additive overlay:
-            # the base LP_CLOSE spec (lp_close_data / fees / protocol_fees) is kept.
             "LP_CLOSE": ["primitive_money_legs"],
         },
-        # VIB-4637 — a Uniswap V4 fees-only ``LP_COLLECT_FEES`` compiles to
-        # ``DECREASE_LIQUIDITY(liquidity=0) + TAKE_PAIR``, so the PoolManager
-        # emits a zero-delta ``ModifyLiquidity`` and NO principal-removing
-        # burn. The base ``LP_COLLECT_FEES`` spec (``fees0`` / ``fees1`` /
-        # ``protocol_fees``) carries no ``pool_address``, so the LP accounting
-        # handler had nothing to resolve and dropped the event entirely (the
-        # ``tokenX/tokenY/<fee>`` V4 position-key tail is rejected as a V3
-        # fee-tier descriptor). Adding ``lp_close_data`` routes the receipt
-        # through ``UniswapV4ReceiptParser.extract_lp_close_data``, whose
-        # fees-only branch stamps the canonical 32-byte V4 PoolId on a
-        # principal-zero ``LPCloseData`` so the handler books the event.
-        # Mirrors the TraderJoe V2 collect overlay (VIB-4634).
-        # The overlay is additive (``_merge_spec_with_overlay``): the base
-        # ``LP_COLLECT_FEES`` fields (``fees0`` / ``fees1`` / ``protocol_fees``)
-        # are kept; only ``lp_close_data`` is appended.
+        # A V4 fee-only collection emits a zero-liquidity modification rather
+        # than a principal burn. Structured close data supplies the canonical
+        # PoolId while preserving the generic fee fields.
         "uniswap_v4": {
             "LP_COLLECT_FEES": ["lp_close_data"],
         },
-        # Morpho Blue isolated markets emit ``SupplyCollateral`` for the
-        # collateral leg of a market — a distinct on-chain event from the
-        # loan-side ``Supply``. The generic spec only asks for
-        # ``supply_amount`` (loan-side); collateral receipts return ``None``.
-        # This overlay surfaces the collateral amount so downstream
-        # lending-accounting can book the typed event with the true on-chain
-        # assets value. See MorphoMay15 §6.2 (F2). VIB-4635 wires the symmetric
-        # ``WITHDRAW`` leg: collateral withdrawals route through
-        # ``withdrawCollateral(...)`` and emit ``WithdrawCollateral`` (not the
-        # loan-side ``Withdraw``), so the generic ``withdraw_amount`` key is
-        # absent. The Morpho parser now exposes
-        # ``extract_withdraw_collateral_amount``, surfaced here as
-        # ``withdraw_collateral_amount`` so the lending handler can scale it.
+        # Morpho collateral events are distinct from loan-side supply and
+        # withdrawal events. Surface their exact on-chain asset amounts under
+        # collateral-specific fields for downstream scaling.
         "morpho_blue": {
             "SUPPLY": ["supply_collateral_amount"],
             "WITHDRAW": ["withdraw_collateral_amount"],
         },
-        # Compound V3 collateral supplies route through
-        # ``Comet.supplyCollateral(asset, amount)`` and emit ``SupplyCollateral``
-        # — a distinct on-chain event from the base-asset ``Supply``. The generic
-        # spec only asks for ``supply_amount`` (base-asset leg); a collateral
-        # receipt has no ``Supply`` event, so that extractor returns ``None`` and
-        # the persisted ``LendingAccountingEvent.amount_token`` came back ``None``
-        # even though the supplied amount is known exactly on-chain (VIB-4633
-        # Finding A). This overlay surfaces the collateral amount as
-        # ``supply_collateral_amount`` (via the Compound parser's
-        # ``extract_supply_collateral_amount``); the lending handler's existing
-        # ``_COLLATERAL_FALLBACK_BY_INTENT["SUPPLY"]`` then scales it. Mirrors the
-        # morpho_blue collateral overlay above. Base-asset ``Comet.supply()`` is
-        # unaffected — it still populates ``supply_amount``.
+        # Compound collateral supply is distinct from base-asset supply and
+        # needs its own amount field; base-asset receipts remain unchanged.
         "compound_v3": {
             "SUPPLY": ["supply_collateral_amount"],
         },
-        # VIB-5220 — Lido is the first connector migrated onto the
-        # ``PrimitiveMoneyLeg`` contract. Its parser's
-        # ``extract_primitive_money_legs`` returns a typed ``PrimitiveMoneyLegs``
-        # (INPUT=ETH staked, OUTPUT=stETH/wstETH minted); this overlay surfaces it
-        # under ``extracted_data["primitive_money_legs"]`` — the seam the US-009
-        # ledger dispatcher (``_extract_tokens_and_amounts``) prefers over the
-        # legacy intent-attribute guesser. Kept under the lido overlay (not the
-        # generic STAKE spec) so other staking connectors that have not yet
-        # migrated (ethena / gimo) emit no spurious SUPPORTED_EXTRACTIONS warning.
+        # Lido declares typed input and output money legs. Keep this overlay
+        # protocol-specific so unmigrated staking parsers do not warn.
         "lido": {
             "STAKE": ["primitive_money_legs"],
         },
-        # NOTE: prefer the connector-owned ``EXTRA_EXTRACTIONS_BY_INTENT`` parser
-        # attribute (merged generically by ``_with_parser_extra_extractions``) for
-        # NEW connector-specific extractions — it keeps the protocol name out of
-        # this framework file (guarded by ``test_connector_descriptor``). This
-        # per-protocol overlay table is the older, not-yet-migrated mechanism.
+        # New connector-specific fields belong in the parser's
+        # ``EXTRA_EXTRACTIONS_BY_INTENT`` declaration, not this legacy table.
     }
 
-    # VIB-4434 W2 — Per-protocol REMOVE table; companion to
-    # ``EXTRACTION_SPECS_BY_PROTOCOL``. Fields listed here are *removed* from
-    # the effective spec after the additive overlay is applied. Use this when
-    # a protocol legitimately does not expose a base field, so the SUPPORTED_
-    # EXTRACTIONS capability check inside ``_extract_field`` would otherwise
-    # emit a chronic info-warning on every receipt.
-    #
-    # Narrowing dimensions (Aerodrome Classic + Slipstream, Uniswap V3 forks,
-    # LP_OPEN and LP_CLOSE):
-    #
-    # * ``"aerodrome"`` — Classic V1 (Solidly fork) — fungible LP, no NFT, no
-    #   ticks, no structured ``lp_open_data`` and no standalone ``amount0_collected`` /
-    #   ``amount1_collected`` / ``fees0`` / ``fees1`` extractors (those collected
-    #   amounts live INSIDE ``lp_close_data`` only, on the Solidly burn path).
-    # * ``"aerodrome_slipstream"`` — CL — Slipstream DOES extract
-    #   ``lp_open_data`` (``AerodromeSlipstreamReceiptParser.extract_lp_open_data``)
-    #   and the ticks ship inside that struct. There is no standalone
-    #   ``extract_tick_lower`` / ``extract_tick_upper`` method, so without
-    #   narrowing those two flat fields would trigger false info-warnings on
-    #   every Slipstream LP_OPEN even though ticks are extracted via the
-    #   structured path. Keep ``lp_open_data`` (the V3-style struct). For
-    #   LP_CLOSE, the amounts ship via ``lp_close_data`` (not as standalone
-    #   ``amount0_collected`` / ``amount1_collected``), so those flat fields
-    #   are narrowed too. ``fees0`` / ``fees1`` remain in the Slipstream
-    #   SUPPORTED_EXTRACTIONS set (Slipstream-only standalone extractors).
-    # * ``"uniswap_v3"`` / ``"sushiswap_v3"`` / ``"pancakeswap_v3"`` — V3
-    #   concentrated-liquidity forks. LP_CLOSE data ships entirely via
-    #   ``lp_close_data`` (Burn + Collect path); the standalone flat fields
-    #   ``amount0_collected`` / ``amount1_collected`` / ``fees0`` / ``fees1``
-    #   are NOT declared in SUPPORTED_EXTRACTIONS for any of these parsers and
-    #   are NOT standalone ``extract_*`` methods — they live inside the
-    #   ``LPCloseData`` struct. Removing them from the effective spec silences
-    #   the chronic info-warnings on every LP_CLOSE without losing any data
-    #   (VIB-4805). Empty ≠ Zero — ``lp_close_data`` itself remains in the
-    #   spec and carries all fee/amount fields.
-    #
-    # Values are ``frozenset[str]`` rather than ``list[str]`` because
-    # ``_merge_spec_with_overlay`` only needs O(1) membership tests against
-    # the merged spec — storing as frozenset removes a per-call
-    # ``set(...)`` conversion that otherwise fires on every receipt
-    # enrichment (Gemini perf tip on PR #2331).
-    #
-    # Existing TraderJoe V2 additive overlay (``bin_ids``) is unchanged.
+    # Removals apply after additive overlays so structurally absent fields
+    # cannot produce recurring capability warnings.
+    # Aerodrome Classic is fungible and tickless; collected amounts and fees
+    # live inside structured close data. Slipstream carries ticks and close
+    # amounts in structured data but retains standalone fee extractors.
+    # V3 forks likewise carry all close amounts and fees in ``lp_close_data``.
+    # Keep structured close data: absent values remain unmeasured and must
+    # never be replaced with measured zero.
+    # Frozensets avoid rebuilding a membership set for every enrichment.
+
     EXTRACTION_SPECS_REMOVE_BY_PROTOCOL: dict[str, dict[str, frozenset[str]]] = {
         "aerodrome": {
             "LP_OPEN": frozenset({"lp_open_data", "tick_lower", "tick_upper"}),
@@ -522,10 +359,8 @@ class ResultEnricher:
             "LP_OPEN": frozenset({"tick_lower", "tick_upper"}),
             "LP_CLOSE": frozenset({"amount0_collected", "amount1_collected"}),
         },
-        # VIB-4805: V3 concentrated-liquidity forks — LP_CLOSE flat fields
-        # ship inside lp_close_data; no standalone extractors exist. Covers the
-        # full UNISWAP_V3_FORKS set (protocol_aliases.py) — each fork keeps its
-        # own protocol slug at overlay-lookup time, so each needs its own entry.
+        # Alias normalization occurs before lookup, so each canonical V3 fork
+        # needs its own removal entry.
         "uniswap_v3": {
             "LP_CLOSE": frozenset({"amount0_collected", "amount1_collected", "fees0", "fees1"}),
         },
@@ -583,8 +418,8 @@ class ResultEnricher:
             if field not in seen:
                 merged.append(field)
                 seen.add(field)
-        # ``EXTRACTION_SPECS_REMOVE_BY_PROTOCOL`` values are already ``frozenset[str]``
-        # (Gemini perf tip on PR #2331) so no per-call set conversion is needed.
+        # Removal values are already frozensets; avoid per-call conversion.
+
         removed = ResultEnricher.EXTRACTION_SPECS_REMOVE_BY_PROTOCOL.get(protocol, {}).get(intent_type)
         if removed:
             merged = [field for field in merged if field not in removed]
@@ -690,8 +525,7 @@ class ResultEnricher:
         self.live_mode = live_mode
         self._pool_key_lookup = pool_key_lookup
         self._pool_meta_lookup = pool_meta_lookup
-        # Counter for ExtractError occurrences in non-live mode. Exposed so
-        # monitoring / paper engines can surface the total.
+
         self.extract_error_count: int = 0
 
     def enrich(  # noqa: C901
@@ -742,71 +576,54 @@ class ResultEnricher:
             # result.position_id is now populated (if LP_OPEN)
             # result.swap_amounts is now populated (if SWAP)
         """
-        # Don't enrich failed executions
+
         if not result.success:
             logger.debug("Enrichment skipped: execution failed")
             return result
 
-        # Get intent type
         intent_type = self._get_intent_type(intent)
         if intent_type not in self.EXTRACTION_SPECS:
             logger.debug(f"Enrichment skipped: no extraction spec for intent type '{intent_type}'")
             return result
 
-        # Get extraction spec. The merged spec (base + per-protocol overlay) is
-        # computed once ``protocol`` is resolved below; for now we only need to
-        # short-circuit on the protocol-neutral HOLD case where base is empty.
+        # An empty base spec is intentionally terminal and skips all enrichment.
+
         base_spec = self.EXTRACTION_SPECS[intent_type]
         if not base_spec:
-            return result  # No fields to extract (e.g., HOLD)
+            return result
 
-        # VIB-3706: Off-chain extraction for Polymarket CLOB orders.
-        # PREDICTION_BUY / PREDICTION_SELL submit off-chain via the CLOB API
-        # — there are no on-chain receipts to parse. The fill data lives on
-        # ``result.prediction_fill`` (set by the runner's CLOB branch in
-        # _single_chain_execute_clob). We pull the spec fields from there
-        # plus ``bundle_metadata["market_id"]`` BEFORE the on-chain receipt
-        # collection runs, so a missing receipt cannot silently drop the
-        # enrichment data the strategy needs to book the position.
-        # PREDICTION_REDEEM stays on the on-chain CTF receipt path because
-        # redemption is an on-chain merge call.
+        # CLOB orders have no on-chain receipt. Attach their fill fields before
+        # receipt collection so missing receipts cannot discard authoritative
+        # off-chain data; redemptions remain on the on-chain path.
+
         offchain_extracted: set[str] = set()
         if intent_type in ("PREDICTION_BUY", "PREDICTION_SELL"):
             offchain_extracted = self._extract_offchain_prediction_fields(
                 result, intent, intent_type, bundle_metadata, context
             )
 
-        # Get protocol from intent, falling back to context (intent may be frozen with protocol=None)
         intent_protocol = self._get_protocol(intent)
         context_protocol = getattr(context, "protocol", None)
         protocol = intent_protocol or context_protocol
 
-        # VIB-3226: BridgeIntent does not carry a protocol — the adapter is
-        # selected by the compiler and recorded in ActionBundle.metadata as
-        # ``"bridge": "<Name>"``. Fall back to that when nothing else is set
-        # so BRIDGE enrichment works without requiring the runner to thread
-        # the bridge adapter name through ExecutionContext.
+        # Bridge intents obtain their compiler-selected adapter from metadata
+        # when neither the intent nor context identifies a protocol.
+
         if not protocol and intent_type == "BRIDGE" and bundle_metadata:
             bridge_name = bundle_metadata.get("bridge")
             if bridge_name:
                 protocol = str(bridge_name).lower()
 
-        # VIB-4320: canonicalise the protocol so the overlay lookup uses the
-        # same key ``ReceiptParserRegistry.get`` would resolve to. See
-        # ``_canonicalise_protocol`` for the alias-mapping rationale.
+        # Canonicalize before overlay lookup, then append overlay fields after
+        # base fields so extraction order remains stable.
+
         protocol = self._canonicalise_protocol(protocol, context)
 
-        # VIB-4320: merge generic spec with per-protocol overlay. Base fields
-        # always come first; overlay fields (e.g. TraderJoe V2 ``bin_ids``)
-        # are appended at the tail. ``protocol=None`` returns the base spec
-        # unchanged, preserving today's behaviour for unresolvable protocols.
         spec = self._merge_spec_with_overlay(intent_type, protocol)
 
-        # VIB-3706: When off-chain extraction has already populated some
-        # fields (PREDICTION_BUY/SELL CLOB path), we still want to fall
-        # through to the summary log even if the on-chain receipt path is
-        # unavailable (no protocol resolvable, no parser registered, no
-        # receipts). Track parser availability without short-circuiting.
+        # Off-chain fields still reach summary logging when no parser or receipt
+        # is available, so parser availability cannot short-circuit them.
+
         parser: Any = None
 
         if not protocol:
@@ -818,10 +635,9 @@ class ResultEnricher:
                 f"chain={context.chain}, fields={spec}"
             )
 
-            # VIB-2581: Skip enrichment for Solana chains when no Solana-specific parser
-            # exists. Without this guard, Solana TXs (with string instruction logs) get routed
-            # to EVM parsers (expecting dict logs with 'topics'), producing 40+ warnings like
-            # "Failed to parse log: 'str' object has no attribute 'get'".
+            # Never route Solana instruction-string logs through EVM parsers, which
+            # expect mapping logs with topics.
+
             chain_str = str(getattr(context, "chain", "")).lower()
             is_solana = is_solana_chain(chain_str)
 
@@ -835,7 +651,6 @@ class ResultEnricher:
                 parser = None
 
             if parser is not None:
-                # Guard: don't run EVM parsers on Solana receipts
                 parser_name = type(parser).__name__.lower()
                 solana_parsers = {
                     "jupiterreceiptparser",
@@ -854,14 +669,10 @@ class ResultEnricher:
                 else:
                     logger.debug(f"Enrichment: using parser {type(parser).__name__} for protocol={protocol}")
 
-        # Collect receipts and run the on-chain extraction pass when we have
-        # both a usable parser and at least one receipt. Off-chain enrichment
-        # (above) is already attached to ``result`` regardless.
         if parser is not None:
-            # VIB-6043: the effective trading wallet (the Safe under Safe /
-            # Zodiac execution, the EOA otherwise) is stamped onto every
-            # receipt so parsers stop inferring it from ``receipt["from"]``
-            # — which is the agent EOA, not the Safe, on the hosted path.
+            # Stamp the effective trading wallet on copies of every receipt. Under
+            # Safe execution, ``receipt['from']`` is the agent EOA, not the Safe.
+
             trading_wallet = str(getattr(context, "wallet_address", "") or "")
             receipts = self._collect_receipts(result, trading_wallet)
             receipts.extend(self._collect_additional_receipts(additional_receipts, trading_wallet))
@@ -875,28 +686,23 @@ class ResultEnricher:
             else:
                 logger.debug(f"Enrichment: found {len(receipts)} receipt(s) to process")
 
-                # Merge the resolved parser's connector-DECLARED per-intent extra
-                # extractions (e.g. the US-009 ``primitive_money_legs`` seam) — kept
-                # connector-side, not as a protocol-named overlay in this framework.
+                # Apply parser-declared additions before removals. Subtractive-last
+                # ordering matches the protocol overlay contract.
+
                 spec = self._with_parser_extra_extractions(spec, parser, intent_type)
-                # ...then its connector-DECLARED removals (VIB-5896: venue-shape
-                # fields that structurally don't exist, e.g. ticks on a tickless
-                # fungible pool). Subtractive last, mirroring _merge_spec_with_overlay.
+
                 spec = self._with_parser_extraction_removals(spec, parser, intent_type)
 
-                # On-chain extraction skips fields already populated off-chain so
-                # the CLOB-authoritative values are not overwritten by speculative
-                # log parsing. For non-prediction intents ``offchain_extracted`` is
-                # empty and the full spec runs as before.
+                # CLOB-authoritative fields must not be overwritten by speculative
+                # on-chain parsing.
+
                 onchain_spec = [f for f in spec if f not in offchain_extracted]
 
-                # Install a temporary parse_receipt cache to avoid redundant parsing.
-                # Without this, each extract_* method calls parse_receipt() independently,
-                # meaning the same receipt is parsed N times for N extraction fields
-                # (e.g., 5x for PERP_OPEN with position_id, size_delta, collateral, entry_price, leverage).
+                # Cache parsed receipts across field extractors; parsing once per field
+                # would repeatedly decode the same logs.
+
                 self._install_parse_cache(parser)
                 try:
-                    # Extract each field in the (possibly filtered) on-chain spec
                     for field in onchain_spec:
                         self._extract_field(
                             result, parser, receipts, field, intent_type, protocol, bundle_metadata=bundle_metadata
@@ -904,26 +710,16 @@ class ResultEnricher:
                 finally:
                     self._remove_parse_cache(parser)
         elif not offchain_extracted:
-            # No parser AND no off-chain extraction — nothing to log, return.
             return result
 
-        # VIB-4636 — V4 LP_OPEN current_tick fallback from compiler metadata.
-        # The V4 receipt parser reads current_tick from a Swap event in the
-        # mint receipt; pure NPM.mint receipts (the canonical PositionManager-
-        # mediated path) carry none, so the parser leaves current_tick=None
-        # and the persisted accounting_events payload would lose in_range.
-        # The V4 adapter stamps ``compile_time_current_tick`` from the same
-        # sqrtPriceX96 it sized liquidity against — the V4 mint itself never
-        # moves price, so the compile-time tick is correct for post-mint
-        # accounting unless an interleaving tx moves the pool. Use it as a
-        # fallback only; on-chain extraction always wins. Capability-gated,
-        # not protocol-name-gated: the helper no-ops unless the V4 adapter
-        # stamped ``compile_time_current_tick`` AND the parser left an
-        # ``LPOpenData.current_tick`` of None, so an unconditional call is
-        # safe for every intent type / protocol / paper-mode receipt.
+        # Pure V4 mints emit no Swap event, so use the compile-time tick only
+        # when the parser left it unmeasured. Receipt-derived values always win.
+        # The mint itself cannot move price, though an interleaving transaction
+        # can make the compile-time value stale. Capability gating keeps this
+        # fallback inert for other protocols and intent types.
+
         self._fill_v4_lp_open_current_tick_from_metadata(result, bundle_metadata)
 
-        # Log enrichment summary with actual extracted values
         extracted_parts = []
         missing_fields = []
         for f in spec:
@@ -1015,10 +811,7 @@ class ResultEnricher:
             caller so the on-chain receipt pass (if any) does not overwrite
             CLOB-authoritative values.
         """
-        # Resolve market_id with bundle_metadata-then-intent fallback. The
-        # adapter always writes market_id into metadata in the BUY/SELL
-        # compile paths, but be defensive in case a bespoke compile path
-        # ever omits it.
+
         market_id: str | None = None
         if bundle_metadata:
             raw_mid = bundle_metadata.get("market_id")
@@ -1031,19 +824,17 @@ class ResultEnricher:
 
         prediction_fill = getattr(result, "prediction_fill", None)
 
-        # Field labels per spec (BUY vs SELL). PREDICTION_REDEEM is not
-        # routed here — it stays on the on-chain CTF receipt path.
         if intent_type == "PREDICTION_BUY":
             shares_field = "outcome_tokens_received"
             value_field = "cost_basis"
-        else:  # PREDICTION_SELL
+        else:
             shares_field = "outcome_tokens_sold"
             value_field = "proceeds"
 
         extracted: set[str] = set()
 
-        # Always attach market_id when we can — even an unfilled order needs
-        # it for downstream identification.
+        # Retain market identity even when the order has no fill.
+
         if market_id is not None:
             result.extracted_data["market_id"] = market_id
             extracted.add("market_id")
@@ -1058,9 +849,6 @@ class ResultEnricher:
             result.extraction_warnings.append(warning)
             return extracted
 
-        # Build the OrderResponse-shaped dict the parser expects. Side is
-        # derived from intent_type so the parser receives a complete view
-        # even if the runner did not echo it back on PredictionFill.
         order_dict = self._build_clob_order_dict(
             intent_type=intent_type,
             prediction_fill=prediction_fill,
@@ -1068,17 +856,16 @@ class ResultEnricher:
             order_id_fallback=result.extracted_data.get("order_id"),
         )
 
-        # VIB-4989: route through the receipt-parser registry, keyed on the
-        # bundle's resolved protocol (the main path already does this) -- no
-        # direct connector import and no hardcoded venue name.
+        # Resolve the parser through the registry; connector imports do not
+        # belong at the framework boundary.
+
         offchain_protocol = (
             (bundle_metadata or {}).get("protocol")
             or self._get_protocol(intent)
             or getattr(context, "protocol", None)
             or ""
         )
-        # Try the parser-routed path. Failure handling is class-aware — see
-        # _parse_prediction_order_response for the (a/a'/b) classification.
+
         trade_result = self._parse_prediction_order_response(
             result=result,
             offchain_protocol=offchain_protocol,
@@ -1100,19 +887,13 @@ class ResultEnricher:
             )
             return extracted
 
-        # Map the parser's TradeResult onto the spec keys. The parser's
-        # ``filled_size`` and ``avg_price`` are the canonical post-parse
-        # values — derive shares + USD value from them so any future parser
-        # adjustment (e.g. fee-adjusted basis) flows here automatically.
         filled_shares = trade_result.filled_size
         avg_price = trade_result.avg_price
 
         if filled_shares <= 0:
-            # Zero-fill = order rejected (IOC unmatched) or resting (GTC live).
-            # Surface as a structured warning so the strategy / accounting
-            # cannot silently book a position from a no-op submission. The
-            # parser preserves the lifecycle status string so the warning
-            # carries the same diagnostics as the direct-read path.
+            # A zero fill is not a position. Surface it so accounting cannot book
+            # rejected, unmatched, or resting orders as completed trades.
+
             status = trade_result.status or "unknown"
             warning = (
                 f"Enrichment incomplete: {intent_type} prediction_fill has "
@@ -1122,14 +903,13 @@ class ResultEnricher:
             result.extraction_warnings.append(warning)
             return extracted
 
-        # Successful fill — populate shares + USD value fields.
         result.extracted_data[shares_field] = filled_shares
         extracted.add(shares_field)
 
         if avg_price is None or avg_price <= 0:
-            # Filled but no average price — should not happen for a
-            # non-zero fill that the parser successfully parsed, but treat
-            # as an accounting gap rather than fabricating $0.
+            # A filled order without a positive average price is unmeasured; never
+            # fabricate a zero-dollar value.
+
             warning = (
                 f"Enrichment incomplete: {intent_type} prediction_fill.filled_shares={filled_shares} "
                 f"but avg_fill_price is missing or zero — cannot compute {value_field}"
@@ -1138,19 +918,16 @@ class ResultEnricher:
             result.extraction_warnings.append(warning)
             return extracted
 
-        # cost_basis (BUY) / proceeds (SELL) = filled_shares * avg_price in
-        # USDC. Polymarket prices are 0.01 tick, sizes are share-count
-        # Decimals — straight Decimal multiplication preserves precision.
+        # Prices are USDC per share; Decimal multiplication preserves the
+        # 0.01 price tick and fractional share precision.
+
         usd_value = filled_shares * avg_price
         result.extracted_data[value_field] = usd_value
         extracted.add(value_field)
 
-        # VIB-3710: surface gateway-side setup_tx gas + operator fee_pusd onto
-        # extracted_data so the prediction handler can fold them into a
-        # fully-loaded cost basis. Only meaningful for BUY (the gateway never
-        # submits setup_txs on a SELL — allowances are already in place from
-        # the first BUY) but kept symmetric so a SELL that did wrap (rare
-        # edge case) still attributes its gas correctly.
+        # Gateway setup gas and operator fees belong in loaded cost basis. Keep
+        # the path symmetric for rare sells that also require setup.
+
         gas_extracted = self._extract_offchain_prediction_costs(
             result=result,
             intent_type=intent_type,
@@ -1235,9 +1012,9 @@ class ResultEnricher:
                 f"raised ({type(exc).__name__}: {exc}); falling back to direct prediction_fill read"
             )
             if self.live_mode:
-                # Fail closed: a crashing parser on a live fill means
-                # the framework cannot certify what it is about to
-                # book. Mirrors _handle_extract_error's live branch.
+                # Live fills fail closed when the parser crashes because the framework
+                # cannot certify the value it is about to book.
+
                 logger.error(message)
                 raise CriticalAccountingError(
                     message,
@@ -1287,8 +1064,6 @@ class ResultEnricher:
 
         setup_txs = getattr(prediction_fill, "setup_txs", None) or ()
         if setup_txs:
-            # setup_tx_count is measured independently of the per-tx cost
-            # fields — always stamp it.
             result.extracted_data["setup_tx_count"] = len(setup_txs)
             extracted.add("setup_tx_count")
 
@@ -1306,12 +1081,9 @@ class ResultEnricher:
                     break
 
             if malformed_index is not None:
-                # Empty != Zero (blueprint 27): a partial sum stamped as
-                # measured is worse than an honest unmeasured marker. One
-                # malformed entry makes the whole aggregate unmeasured -
-                # omit gas_cost_native_wei AND gas_cost_usd (same
-                # key-omission representation as the unresolvable-price
-                # branch below) and warn once naming the bad tx.
+                # A partial setup-gas sum is unmeasured, not zero. If any transaction
+                # cost is malformed, omit both native and USD aggregates.
+
                 bad_tx = setup_txs[malformed_index]
                 warning = (
                     f"Enrichment incomplete: {intent_type} setup_txs[{malformed_index}] "
@@ -1325,11 +1097,9 @@ class ResultEnricher:
                 result.extracted_data["gas_cost_native_wei"] = total_wei
                 extracted.add("gas_cost_native_wei")
 
-                # Resolve MATIC USD price from compiler bundle_metadata. Missing
-                # or unparseable price degrades gracefully — gas_cost_usd stays
-                # None, the basis row records gas_cost_usd=None, and the
-                # accounting handler can still record everything else without
-                # fabricating a USD figure from nothing.
+                # Missing or invalid native-token price leaves USD gas unmeasured while
+                # preserving independently measured cost fields.
+
                 matic_price: Decimal | None = None
                 if bundle_metadata:
                     raw_price = bundle_metadata.get("native_token_price_usd")
@@ -1346,9 +1116,8 @@ class ResultEnricher:
                     result.extracted_data["gas_cost_usd"] = gas_cost_usd
                     extracted.add("gas_cost_usd")
                 else:
-                    # None signals "unknown" — distinct from Decimal("0") (which
-                    # would mean "we measured zero gas"). The handler treats None
-                    # as gas_cost_usd=0 in the basis sum but logs the gap.
+                    # ``None`` means unknown; ``Decimal('0')`` means measured zero gas.
+
                     warning = (
                         f"Enrichment incomplete: {intent_type} setup_tx gas attributed "
                         f"to native units (gas_cost_native_wei={total_wei}) but "
@@ -1390,14 +1159,12 @@ class ResultEnricher:
         runner does not capture submission time on the fill struct (the
         parser handles a missing timestamp gracefully).
         """
-        # Order ID: prefer the value the runner stamped on extracted_data
-        # (set in StrategyRunner._single_chain_execute_clob from
-        # clob_result.order_id) and fall back to PredictionFill.order_id.
+
         order_id = order_id_fallback or getattr(prediction_fill, "order_id", None)
         side = "BUY" if intent_type == "PREDICTION_BUY" else "SELL"
 
-        # Numeric fields — pass through as strings so the parser can do its
-        # own Decimal coercion uniformly with real CLOB responses.
+        # Stringify numeric fields so the parser owns Decimal coercion.
+
         filled_shares_raw = getattr(prediction_fill, "filled_shares", Decimal("0"))
         requested_shares_raw = getattr(prediction_fill, "requested_shares", Decimal("0"))
         avg_fill_price_raw = getattr(prediction_fill, "avg_fill_price", None)
@@ -1407,18 +1174,13 @@ class ResultEnricher:
             "orderID": order_id,
             "status": status,
             "side": side,
-            # ``size`` is the *requested* size on a CLOB order; the parser
-            # does not currently use it for value derivation, but it is
-            # part of the documented shape — populate so edge cases that
-            # later read it (e.g. partial-fill detection) work.
+            # ``size`` is requested size, distinct from the measured fill size.
             "size": str(requested_shares_raw),
             "filledSize": str(filled_shares_raw),
         }
         if avg_fill_price_raw is not None:
             order_dict["avgPrice"] = str(avg_fill_price_raw)
-            # parse_order_response falls back to ``price`` when avgPrice is
-            # missing; mirror avgPrice here so the fallback path also
-            # produces the same value if avgPrice is ever stripped.
+
             order_dict["price"] = str(avg_fill_price_raw)
         if market_id is not None:
             order_dict["market"] = market_id
@@ -1526,7 +1288,6 @@ class ResultEnricher:
         method_name = f"extract_{field}"
         result_method_name = f"{method_name}_result"
 
-        # Check capability declaration if parser declares SUPPORTED_EXTRACTIONS
         supported = getattr(parser, "SUPPORTED_EXTRACTIONS", None)
         if isinstance(supported, list | tuple | set | frozenset) and field not in supported:
             warning = (
@@ -1536,12 +1297,9 @@ class ResultEnricher:
             result.extraction_warnings.append(warning)
             return
 
-        # Prefer the migrated tagged-variant method when present. This lets
-        # the raw public method keep its legacy return type for existing
-        # callers (strategies, tests) while the enricher gets the richer
-        # signal. We check the *class hierarchy* (not the instance) to avoid
-        # matching auto-generated attributes on unittest.mock.Mock() which
-        # would otherwise claim every ``extract_{field}_result`` exists.
+        # Inspect the class hierarchy for tagged extractors. Instance lookup
+        # would mistake dynamically generated Mock attributes for methods.
+
         if self._class_has_method(parser, result_method_name):
             extract_method = getattr(parser, result_method_name)
         elif hasattr(parser, method_name):
@@ -1553,16 +1311,11 @@ class ResultEnricher:
             )
             return
 
-        # Build field-specific extraction kwargs. VIB-3203: thread
-        # ``expected_out`` (human Decimal) from the compiler's ActionBundle
-        # metadata to swap_amounts extractors so parsers can compute realized
-        # slippage_bps. Parsers that do not accept the kwarg degrade to the
-        # legacy behavior (slippage_bps=None) via the TypeError fallback in
-        # _invoke_extract. Connector-owned parsers may add parser-specific
-        # kwargs through ``build_extract_kwargs`` without framework changes.
-        # A buggy hook is treated as ExtractError: these kwargs feed
-        # accounting-relevant extraction, so silently ignoring hook failures
-        # would hide parser-owned data loss.
+        # Framework metadata supplies human-unit expected output and other
+        # generic hints; parser hooks may add connector-specific kwargs.
+        # Hook failures are extraction errors because silently dropping their
+        # accounting inputs would hide data loss.
+
         try:
             extract_kwargs = self._build_extract_kwargs_for_parser(
                 parser,
@@ -1583,18 +1336,14 @@ class ResultEnricher:
             )
             return
 
-        # Iterate receipts. Remember any ExtractError and keep looking — the
-        # data might land in a later receipt (multi-tx bundle). Only escalate
-        # if no receipt produced Ok.
-        #
-        # For aggregate fields (see ``_AGGREGATE_FIELDS``), we collect every
-        # ExtractOk across receipts and select the preferred-``source``
-        # variant once the loop completes. VIB-4310.
+        # Continue after ExtractError because a later receipt may succeed; only
+        # escalate when none does. Aggregate fields collect every ExtractOk
+        # before applying preferred-source selection.
+
         aggregate_preferred = _AGGREGATE_FIELDS.get(field)
-        # VIB-5416 — holistic money-leg fields must see every tx's logs at once
-        # (the intent's input and output legs can land in different txs). Collapse
-        # the per-tx receipts into one merged-logs receipt so the extractor sees
-        # the whole intent. No-op for a single-tx intent.
+        # Fields whose legs span transactions receive one ordered union of logs
+        # instead of per-receipt extraction.
+
         if field in _MERGED_RECEIPT_FIELDS and len(receipts) > 1:
             receipts = [self._merge_receipt_logs(receipts)]
         candidates: list[Any] = []
@@ -1610,14 +1359,12 @@ class ResultEnricher:
                 if attached:
                     logger.debug(f"Enrichment: extracted {field}={type(variant.value).__name__} from receipt")
                     return
-                # Value rejected by type-check (see _attach_to_result). Keep
-                # scanning subsequent receipts — a later one may produce
-                # a valid value for this field.
+                # A rejected type is not terminal; a later receipt may be valid.
+
                 continue
             if isinstance(variant, ExtractError):
                 last_error = variant
                 continue
-            # ExtractMissing — benign, continue to next receipt.
 
         if aggregate_preferred is not None and candidates:
             chosen = self._select_preferred_aggregate(candidates, aggregate_preferred)
@@ -1709,10 +1456,10 @@ class ResultEnricher:
             None,
         )
         if decrease_sib is None:
-            # LP_COLLECT_FEES / no-liquidity-but-owed: parser's
-            # ``fees = collect_amount`` attribution is correct.
+            # Without a decrease sibling, collect-only fee attribution is
+            # authoritative; split closes must subtract principal below.
             return
-        # Split-tx LP_CLOSE: override parser's collect-only attribution.
+
         ResultEnricher._derive_one_fee(chosen, decrease_sib, "fees0", "amount0_collected")
         ResultEnricher._derive_one_fee(chosen, decrease_sib, "fees1", "amount1_collected")
 
@@ -1779,11 +1526,10 @@ class ResultEnricher:
         if chosen is None:
             chosen = candidates[0]
 
-        # LP_CLOSE fee derivation — see helper docstring.
         ResultEnricher._derive_lp_close_fees_from_siblings(chosen, candidates)
 
-        # Backfill ``None`` fields from siblings. Use replace() if the
-        # dataclass is frozen; otherwise direct attribute assignment is fine.
+        # Fill only empty fields from siblings; the preferred candidate remains
+        # authoritative for every populated value.
         siblings = [c for c in candidates if c is not chosen]
         if not siblings:
             return chosen
@@ -1807,17 +1553,14 @@ class ResultEnricher:
         if not backfills:
             return chosen
         try:
-            # ``is_dataclass`` returns True for both instances and the bare
-            # dataclass type; mypy can't narrow ``chosen: Any`` to "instance,
-            # not type", so silence the type-var complaint. The TypeError
-            # fallback below catches the runtime "applied to a type, not an
-            # instance" case.
+            # ``is_dataclass`` also accepts bare types, so replacement may fail at
+            # runtime even though the selected value is dynamically typed.
+
             return replace(chosen, **backfills)  # type: ignore[type-var]
         except TypeError:
-            # Non-frozen / non-replace-able dataclass: fall back to direct
-            # attribute assignment. Preserves the contract (chosen returned
-            # with backfills applied) without forcing the field model to
-            # be replace()-compatible.
+            # Mutable or non-replaceable dataclasses receive the same backfills
+            # through direct assignment.
+
             for name, value in backfills.items():
                 setattr(chosen, name, value)
             return chosen
@@ -1857,11 +1600,9 @@ class ResultEnricher:
         kwargs are appended by :meth:`_build_extract_kwargs_for_parser`.
         """
         if field == "async_orders" and intent_type:
-            # The intent is the authoritative order-kind source. Some async
-            # protocols emit the created identifier in an indexed topic while
-            # placing their order struct in a dynamically encoded event payload;
-            # a parser must not infer lifecycle semantics from a best-effort
-            # positional decode of that payload.
+            # Intent type is authoritative for async order kind; event payloads may
+            # be dynamically encoded and cannot safely define lifecycle semantics.
+
             return {"intent_type": intent_type}
         if not bundle_metadata:
             return {}
@@ -1879,19 +1620,16 @@ class ResultEnricher:
         if field == "protocol_fees":
             return ResultEnricher._build_protocol_fees_kwargs(bundle_metadata)
         if field == "bridge_data":
-            # VIB-3226: bridge receipts typically do not carry the user-facing
-            # symbol or canonical chain names — they encode chain IDs and token
-            # addresses. The bridge compiler writes the resolved intent shape into
-            # ``ActionBundle.metadata`` (see BridgeCompiler.compile_bridge), so we
-            # thread those hints into the parser to keep the typed output
-            # stable and avoid re-deriving them at parse time.
+            # Bridge receipts encode ids and addresses, not stable user-facing names.
+            # Thread compiler-resolved intent values rather than re-deriving them.
+
             bridge_kwargs: dict[str, Any] = {}
             for key in ("from_chain", "to_chain", "token", "amount", "bridge"):
                 val = bundle_metadata.get(key)
                 if val is not None and val != "":
                     bridge_kwargs[key] = val
-            # Expected output (post-fee) from the compiler quote — optional,
-            # parsers that do not accept it fall back via TypeError handling.
+            # Expected output is post-fee and optional for legacy parsers.
+
             out_amount = bundle_metadata.get("output_amount")
             if out_amount is not None:
                 bridge_kwargs["expected_amount_out"] = out_amount
@@ -1978,12 +1716,9 @@ class ResultEnricher:
             try:
                 fee_usd = Decimal(str(raw_fee_usd))
                 if fee_usd.is_finite():
-                    # Always thread the value through, including negatives.
-                    # The parser fail-fasts on negative (CodeRabbit pushback
-                    # on PR #2256): silently dropping a negative here would
-                    # let upstream sign corruption hide. End-to-end fail-fast
-                    # means the kwargs builder is a pure threader; the parser
-                    # is the validator.
+                    # Thread finite values including negatives. The parser validates sign,
+                    # so filtering here would conceal corrupted upstream data.
+
                     kwargs["protocol_fee_usd"] = fee_usd
             except (InvalidOperation, TypeError, ValueError):
                 logger.debug(
@@ -2018,11 +1753,9 @@ class ResultEnricher:
                 try:
                     raw = extract_method(receipt, **kwargs)
                 except TypeError as exc:
-                    # Parser signature doesn't accept the kwarg (yet). This is an
-                    # expected back-compat path — the ticket only wires 5 of the
-                    # swap parsers in Phase A; the rest keep the legacy
-                    # "slippage_bps=None" behavior. Distinguish this from a real
-                    # crash by checking the exception message mentions the kwarg.
+                    # Retry without optional kwargs only when the signature rejected their
+                    # names; an unrelated TypeError remains extraction-critical.
+
                     if any(k in str(exc) for k in kwargs):
                         raw = extract_method(receipt)
                     else:
@@ -2030,7 +1763,7 @@ class ResultEnricher:
             else:
                 raw = extract_method(receipt)
         except CriticalAccountingError:
-            # Never swallow a fail-closed signal raised by a nested enricher.
+            # Never swallow a nested fail-closed signal.
             raise
         except Exception as exc:  # noqa: BLE001 — crash is accounting-critical
             return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
@@ -2155,25 +1888,20 @@ class ResultEnricher:
             value: Extracted value
             intent_type: Type of intent
         """
-        # Core typed fields - set directly on result.
+
         if field == "position_id" and isinstance(value, int | str):
             if not self._attach_position_id(result, value):
-                # Non-finite / non-decimal string id: already mirrored into
-                # extracted_data by the helper; treat as accepted (return True)
-                # so the caller does not keep scanning. Skip the top-level slot.
+                # Invalid string ids remain in ``extracted_data`` but do not occupy the
+                # validated top-level slot or trigger redundant receipt scans.
+
                 return True
         elif field == "swap_amounts" and isinstance(value, SwapAmounts):
             self._attach_swap_amounts(result, value)
         elif field in _STRICT_TYPED_FIELDS:
-            # VIB-4310 / VIB-3226 / VIB-3204 / VIB-159 — strictly-typed slots
-            # (lp_close_data / bridge_data / protocol_fees / bin_ids /
-            # primitive_money_legs). Reject anything of the wrong type with a
-            # warning and ``return False`` so the enricher keeps scanning the
-            # remaining receipts in a multi-tx bundle, rather than treating the
-            # rejection as a terminal "attached". On a valid value, set the
-            # top-level attribute so the strategy callback can read it directly
-            # (the #159 fix: these previously fell through to extracted_data
-            # only, leaving ``result.bin_ids`` etc. unreachable / None).
+            # Strict typed slots reject invalid values and continue scanning later
+            # receipts. Accepted values are exposed both to callbacks and the
+            # generic extracted-data consumers.
+
             attr, validator, type_label = _STRICT_TYPED_FIELDS[field]
             if not validator(value):
                 logger.warning(
@@ -2183,9 +1911,9 @@ class ResultEnricher:
                 return False
             setattr(result, attr, value)
 
-        # Always add to extracted_data for full access. The ledger dispatcher's
-        # ``primitive_money_legs`` fallback (VIB-5212/5218) reads this entry, so
-        # it MUST remain even though the value now also has a top-level slot.
+        # Keep typed values mirrored for generic consumers such as declared
+        # money-leg dispatch.
+
         result.extracted_data[field] = value
         return True
 
@@ -2198,8 +1926,8 @@ class ResultEnricher:
         information is lost. Returns ``True`` once the top-level slot is set.
         """
         if isinstance(value, str):
-            # Accept hex addresses (40-char, e.g. Curve LP token addresses) and bytes32
-            # hashes (64-char, e.g. Aster Perps tradeHash) as valid position IDs.
+            # Pool addresses and bytes32 trade hashes are valid position ids.
+
             is_hex_address = bool(re.fullmatch(r"0x[a-fA-F0-9]{40}", value))
             is_bytes32 = bool(re.fullmatch(r"0x[a-fA-F0-9]{64}", value))
             if not (is_hex_address or is_bytes32):
@@ -2220,11 +1948,9 @@ class ResultEnricher:
     def _attach_swap_amounts(result: ExecutionResult, value: SwapAmounts) -> None:
         """Set ``result.swap_amounts`` and surface unresolved-decimal warnings."""
         result.swap_amounts = value
-        # VIB-3164 / Empty != Zero: a parser that could not resolve token
-        # decimals stamps the *_decimal_resolved flags False. Surface that
-        # on the result so operators see it without grepping parser logs.
-        # Non-fatal by design — ledger/sidecar already gate amounts on
-        # the flags and record the "parser didn't emit" sentinel.
+        # Unresolved decimals remain unmeasured even if a legacy 18-decimal
+        # display fallback exists; downstream money rows exclude those amounts.
+
         unresolved_sides = [
             side
             for side, ok in (
@@ -2250,7 +1976,7 @@ class ResultEnricher:
         Returns:
             True if field was extracted
         """
-        # Check core fields
+
         if field == "position_id":
             return result.position_id is not None
         if field == "swap_amounts":
@@ -2260,7 +1986,6 @@ class ResultEnricher:
         if field == "bridge_data":
             return getattr(result, "bridge_data", None) is not None
 
-        # Check extracted_data
         return field in result.extracted_data
 
     def _get_extracted_value(self, result: ExecutionResult, field: str) -> Any:
@@ -2277,10 +2002,8 @@ class ResultEnricher:
             return result.position_id
         if field == "swap_amounts" and result.swap_amounts:
             sa = result.swap_amounts
-            # ``amount_*_decimal`` may be None when the receipt parser could
-            # not resolve token decimals (Empty != zero invariant —
-            # docs/internal/blueprints/27-accounting.md). Render as "?" rather than the
-            # literal "None" to keep logs readable.
+            # Render unresolved decimal amounts as unknown, not measured zero.
+
             in_str = f"{sa.amount_in_decimal}" if sa.amount_in_decimal is not None else "?"
             out_str = f"{sa.amount_out_decimal}" if sa.amount_out_decimal is not None else "?"
             return f"{in_str} -> {out_str}"
@@ -2301,23 +2024,21 @@ class ResultEnricher:
         Returns:
             Intent type string (e.g., "SWAP", "LP_OPEN")
         """
-        # Try intent_type attribute (IntentType enum)
+
         if hasattr(intent, "intent_type"):
             intent_type = intent.intent_type
-            # Handle enum
+
             if hasattr(intent_type, "value"):
                 return str(intent_type.value).upper()
             return str(intent_type).upper()
 
-        # Fallback: derive from class name (e.g., SwapIntent -> SWAP)
         class_name = type(intent).__name__
         if class_name.endswith("Intent"):
-            class_name = class_name[:-6]  # Remove "Intent" suffix
+            class_name = class_name[:-6]
 
-        # Convert CamelCase to UPPER_SNAKE
-        # LPOpen -> LP_OPEN, PerpClose -> PERP_CLOSE
-        # Insert underscore only before capitals that start a new word (uppercase followed by lowercase)
-        # This keeps acronyms like "LP" together instead of splitting to "L_P"
+        # Split CamelCase only at new words so acronyms such as ``LP`` remain
+        # intact in upper-snake intent names.
+
         normalized = re.sub(r"(?<!^)(?=[A-Z][a-z])", "_", class_name)
         return normalized.upper()
 
@@ -2348,18 +2069,16 @@ class ResultEnricher:
             return
 
         original = parser.parse_receipt
-        # Guard against double-wrapping (e.g., if enrich() is called recursively)
+        # Recursive enrichment must not wrap the parser twice.
         if getattr(original, "_is_cached_wrapper", False):
             return
 
         cache: dict[tuple, Any] = {}
 
         def cached_parse_receipt(receipt: dict[str, Any], *args: Any, **kwargs: Any) -> Any:
-            # Use transactionHash + a deterministic kwargs signature as the
-            # key. Context kwargs MUST be part of the cache key. The receipt
-            # itself is identical for every extract_* call within one
-            # enrichment, but two extract_* calls may pass different kwargs,
-            # and we must not return the wrong cached result.
+            # Include positional and keyword context in the cache key. The same
+            # receipt can produce different parses under different extractor hints.
+
             tx_hash = receipt.get("transactionHash") or receipt.get("tx_hash")
             if tx_hash is None:
                 tx_hash = id(receipt)
@@ -2398,9 +2117,9 @@ class ResultEnricher:
         kwargs: dict[str, Any] = {"chain": chain}
         if self._pool_key_lookup is not None and protocol.lower() in _pool_key_lookup_protocols():
             kwargs["pool_key_lookup"] = self._pool_key_lookup
-        # VIB-5628: thread the Curve dynamic-pool-meta lookup into parsers whose
-        # connector declares it (the Curve parser). Same declare-only discipline
-        # as pool_key_lookup — other parsers' cache behaviour stays unchanged.
+        # Inject lookup callbacks only into connectors that declare them; kwargs
+        # bypass the registry's protocol-only cache.
+
         if self._pool_meta_lookup is not None and protocol.lower() in _pool_meta_lookup_protocols():
             kwargs["pool_meta_lookup"] = self._pool_meta_lookup
         return kwargs
@@ -2429,9 +2148,9 @@ class ResultEnricher:
         enrichment so caching still elides repeat parses of the merged receipt.
         """
         merged: dict[str, Any] = {}
-        # Preserve first-receipt scalar context (sender / status + aliases) so
-        # parsers that key on it (e.g. swap/wrap direction) behave as before.
-        # Defensive: guard against a None / non-dict first receipt.
+        # Preserve the first receipt's scalar context for parsers that infer
+        # direction from sender or status.
+
         if receipts and isinstance(receipts[0], dict):
             for key, value in receipts[0].items():
                 if key != "logs":
@@ -2447,8 +2166,8 @@ class ResultEnricher:
             tx_hash = receipt.get("transactionHash") or receipt.get("tx_hash")
             constituent_hashes.append(str(tx_hash) if tx_hash is not None else "")
         merged["logs"] = all_logs
-        # Override the inherited first-tx hash with a set-unique synthetic key so
-        # the parse cache never returns a stale per-tx result for the merged call.
+        # A set-unique synthetic hash prevents merged logs from reusing a stale
+        # single-receipt cache entry.
         synthetic_hash = "merged:" + "|".join(constituent_hashes)
         merged["transactionHash"] = synthetic_hash
         merged["tx_hash"] = synthetic_hash
@@ -2481,13 +2200,12 @@ class ResultEnricher:
 
             receipt = tx_result.receipt
 
-            # Convert to dict if needed
             receipt_dict: dict[str, Any]
             if hasattr(receipt, "to_dict"):
                 receipt_dict = receipt.to_dict()
             elif hasattr(receipt, "logs"):
-                # Receipt object with logs attribute — also propagate 'from' / 'from_address'
-                # for Transfer-event-based decimal resolution in extract_swap_amounts.
+                # Preserve sender data used for Transfer-based decimal resolution.
+
                 receipt_dict = {"logs": receipt.logs}
                 for attr in ("from_address", "status"):
                     if hasattr(receipt, attr):
@@ -2495,16 +2213,16 @@ class ResultEnricher:
             elif isinstance(receipt, dict):
                 receipt_dict = receipt
             else:
-                continue  # Unknown format
+                continue
 
-            # Add camelCase aliases so receipt parsers work regardless of
-            # which key convention (snake_case vs camelCase) the receipt uses.
+            # Supply camelCase aliases without overwriting parser-ready values.
+
             for snake_key, camel_key in _SNAKE_TO_CAMEL.items():
                 if snake_key in receipt_dict and camel_key not in receipt_dict:
                     receipt_dict[camel_key] = receipt_dict[snake_key]
 
-            # VIB-6043: stamp the effective trading wallet (copy — never mutate
-            # the receipt the ledger / persistence path also holds).
+            # Stamp a copy; the ledger and persistence path retain the receipt.
+
             receipts.append(stamp_trading_wallet(receipt_dict, trading_wallet))
 
         return receipts
@@ -2560,10 +2278,6 @@ class ResultEnricher:
                 collected.append(stamp_trading_wallet(receipt_dict, trading_wallet))
         return collected
 
-
-# =============================================================================
-# Module-level singleton for convenience
-# =============================================================================
 
 _default_enricher: ResultEnricher | None = None
 
@@ -2623,10 +2337,6 @@ def enrich_result(
     enricher = ResultEnricher(live_mode=live_mode)
     return enricher.enrich(result, intent, context, bundle_metadata=bundle_metadata)
 
-
-# =============================================================================
-# Exports
-# =============================================================================
 
 __all__ = [
     "CriticalAccountingError",
