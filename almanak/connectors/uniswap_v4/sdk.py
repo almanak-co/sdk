@@ -46,10 +46,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# =============================================================================
-# Constants
-# =============================================================================
-
 Q96 = cl_math.Q96
 Q128 = cl_math.Q128
 MIN_TICK = cl_math.MIN_TICK
@@ -61,38 +57,27 @@ MAX_TICK = cl_math.MAX_TICK
 MIN_SQRT_PRICE = 4295128739
 MAX_SQRT_PRICE = 1461446703485210103287273052203988822378723970342
 
-# Default tick spacing per fee tier in V4. Canonical map lives in
-# ``_strategy_base.v4_pool_abi`` (shared with the framework pool reader);
-# re-exported here so connector callers keep their import path.
+# Canonical map shared with the framework pool reader; re-exported for connector callers.
 TICK_SPACING: dict[int, int] = V4_DEFAULT_TICK_SPACING
 
 FEE_TIERS: list[int] = [100, 500, 3000, 10000]
 
-# Direct-RPC V4 quotes can be computation-heavy on forked nodes because the
-# Quoter simulates every crossed tick. Keep enough headroom for local Anvil and
-# other direct-RPC callers while preserving the adapter's fail-closed behavior.
-# Gateway-routed calls do not use this requests timeout.
+# Direct-RPC quotes simulate every crossed tick; keep headroom for forked nodes
+# while preserving fail-closed behavior. Gateway-routed calls ignore this timeout.
 V4_QUOTER_DIRECT_RPC_TIMEOUT_SECONDS = 30.0
 
 # Zero address represents native ETH in V4
 NATIVE_CURRENCY = "0x0000000000000000000000000000000000000000"
 
-# address(2) = ADDRESS_THIS in the UniversalRouter (used as intermediate recipient
-# when the router needs to hold tokens temporarily, e.g. for WRAP_ETH/SWEEP)
+# address(2) holds router funds temporarily for WRAP_ETH/SWEEP.
 ADDRESS_THIS = "0x0000000000000000000000000000000000000002"
 
 # Canonical Permit2 address (CREATE2, same on all EVM chains)
 PERMIT2_ADDRESS = "0x000000000022D473030F116dDEE9F6B43aC78BA3"
 
-# --- Function selectors ---
-
-# V4SwapRouter function selector (standalone router, NOT the UniversalRouter).
-# swap(PoolKey,IPoolManager.SwapParams,uint256,uint256,bytes)
-# NOTE: The v4_swap_router address in contracts.py needs on-chain verification.
-# The UniversalRouter is the canonical Uniswap-deployed swap entry point for V4.
+# V4SwapRouter.swap(PoolKey,SwapParams,uint256,uint256,bytes); UniversalRouter is the canonical V4 swap entry point.
 SWAP_SELECTOR = "0xf3cd914c"
 
-# PositionManager function selectors (canonical V4 periphery)
 # keccak256("modifyLiquidities(bytes,uint256)")[:4]
 MODIFY_LIQUIDITIES_SELECTOR = "0xdd46508f"
 # keccak256("modifyLiquiditiesWithoutUnlock(bytes,bytes[])")[:4]
@@ -107,35 +92,24 @@ PERMIT2_APPROVE_SELECTOR = "0x87517c45"
 # V4Quoter.quoteExactInputSingle(QuoteExactSingleParams)
 QUOTE_EXACT_INPUT_SINGLE_SELECTOR = "0xaa9d21cb"
 
-# UniversalRouter command bytes
-# Source: https://github.com/Uniswap/universal-router/blob/main/contracts/base/Dispatcher.sol
 PERMIT2_TRANSFER_FROM = 0x02  # abi.decode(inputs, (address token, address recipient, uint160 amount))
 _UR_SWEEP = 0x04  # sweep(address token, address recipient, uint256 amountMin)
 _UR_WRAP_ETH = 0x0B  # wrap ETH to WETH: abi.decode(inputs, (address recipient, uint256 amountMin))
 _UR_UNWRAP_WETH = 0x0C  # unwrap WETH to ETH: abi.decode(inputs, (address recipient, uint256 amountMin))
 V4_SWAP = 0x10  # V4 swap via two-layer encoding: abi.encode(bytes actions, bytes[] params)
-# Aliases for backward compat with existing code
 V4_SWAP_EXACT_IN_SINGLE = V4_SWAP
 V4_SWAP_EXACT_IN = V4_SWAP
 V4_SWAP_EXACT_OUT_SINGLE = V4_SWAP
 V4_SWAP_EXACT_OUT = V4_SWAP
 
-# --- V4 Action bytes (v4-periphery Actions.sol) ---
-# Shared between PositionManager and V4Router (same Actions.sol library).
-# Source: https://github.com/Uniswap/v4-periphery/blob/main/src/libraries/Actions.sol
-# Verified against on-chain transactions on Ethereum mainnet (2026-03-29).
-#
-# Liquidity actions
 PM_INCREASE_LIQUIDITY = 0x00
 PM_DECREASE_LIQUIDITY = 0x01
 PM_MINT_POSITION = 0x02
 PM_BURN_POSITION = 0x03
-# Swap actions (used inside V4_SWAP two-layer encoding)
 ACTION_SWAP_EXACT_IN_SINGLE = 0x06
 ACTION_SWAP_EXACT_IN = 0x07
 ACTION_SWAP_EXACT_OUT_SINGLE = 0x08
 ACTION_SWAP_EXACT_OUT = 0x09
-# Settlement actions
 ACTION_SETTLE = 0x0B
 ACTION_SETTLE_ALL = 0x0C
 ACTION_SETTLE_PAIR = 0x0D
@@ -146,7 +120,6 @@ ACTION_TAKE_PAIR = 0x11
 ACTION_CLOSE_CURRENCY = 0x12
 ACTION_CLEAR_OR_TAKE = 0x13
 ACTION_SWEEP = 0x14
-# Legacy aliases (deprecated -- use ACTION_* constants above)
 PM_CLOSE_CURRENCY = ACTION_CLOSE_CURRENCY
 PM_CLEAR_OR_TAKE = ACTION_CLEAR_OR_TAKE
 PM_SWEEP = ACTION_SWEEP
@@ -158,105 +131,46 @@ PM_TAKE_ALL = ACTION_TAKE_ALL
 PM_TAKE_PAIR = ACTION_TAKE_PAIR
 PM_TAKE_PORTION = ACTION_TAKE_PORTION
 
-# Gas estimates
 UNISWAP_V4_GAS_ESTIMATES = {
     "approve": 65_000,  # Must cover proxy ERC-20s (e.g. Ethereum USDC ~56K gas)
     "permit2_approve": 55_000,
-    "swap": 250_000,  # Floor only — see V4_SWAP_ROUTER_OVERHEAD_GAS (VIB-6413)
-    "swap_with_hooks": 400_000,  # Currently unread — wire or delete (VIB-6428)
-    "lp_mint": 450_000,  # Mint new LP position via PositionManager
-    "lp_decrease": 300_000,  # Decrease liquidity
-    "lp_burn": 200_000,  # Burn empty position NFT
-    "lp_collect_fees": 250_000,  # Collect fees only (decrease with 0 liquidity + take)
+    "swap": 250_000,  # Floor only; router overhead added separately.
+    "swap_with_hooks": 400_000,
+    "lp_mint": 450_000,
+    "lp_decrease": 300_000,
+    "lp_burn": 200_000,
+    "lp_collect_fees": 250_000,
 }
 
-# VIB-6413: everything a V4 swap tx costs OUTSIDE the pool-swap loop the Quoter
-# simulates — intrinsic gas + calldata, UniversalRouter dispatch, Permit2 pull,
-# SETTLE/TAKE, and the trailing SWEEP / WRAP_ETH / UNWRAP_WETH commands.
-#
-# The Quoter's ``gasEstimate`` covers only the swap through the pool, and that
-# part scales with the number of initialized ticks crossed — i.e. with live pool
-# depth. A single static budget therefore decalibrates as the pool moves, and
-# when it does the tx reverts with EMPTY revert data (``0x``) after burning the
-# whole limit, which reads as an unexplained failure rather than a gas problem.
-#
-# Measured as ``eth_estimateGas(swap) - quoter.gasEstimate``, which is stable
-# across chains and across all three UniversalRouter command shapes:
-#
-#   avalanche USDC -> native AVAX (SWEEP),      block 91315087:  136,213
-#   avalanche USDC -> native AVAX (SWEEP),      block 91880872:  136,213
-#   base      USDC -> WETH        (WRAP_ETH),   weekly pin:      135,922
-#   base      WETH -> USDC        (PERMIT2_TRANSFER_FROM+UNWRAP): 134,005
-#
-# 160k is the 136,213 ceiling rounded up with ~17% margin, on top of which the
-# chain's own ``GasProfile.buffer`` still applies. Note the sample shares one
-# blind spot: none of the four measurements is a swap whose recipient receives
-# the output ERC-20 for the first time, and that cold SSTORE costs up to ~20k
-# more — so the worst realistic overhead is nearer 156k than 136k. It still
-# clears 160k, but the true margin for that shape is a few percent, not 17%.
-#
-# Under-provisioning is a burnt, failed swap. Over-provisioning is NOT free
-# here, which is why the budget is bounded on both sides rather than simply
-# padded: the unused gas is refunded by the EVM, but two call sites key off the
-# LIMIT rather than the amount consumed —
-#
-#   * ``orchestrator._validate_gas_costs`` computes
-#     ``estimated_cost_wei = gas_limit * tx_gas_price``, so a strategy that sets
-#     ``max_gas_cost_native`` / ``max_gas_cost_usd`` tests the budget, not the
-#     spend (both default to 0.0 = no limit, so this is opt-in);
-#   * the node's own EIP-1559 admission rule is
-#     ``balance >= gas_limit * maxFeePerGas + value`` — see
-#     ``framework/execution/gas/fees.py`` (VIB-5673), where inflating the other
-#     factor in that same product rejected well-funded wallets with ``-32003``.
-#
-# Both fail safe (a refused submission, never a lost swap), and the durable fix
-# belongs in the execution pipeline rather than here — tracked as VIB-6427.
+# Fixed router overhead added to the Quoter pool-swap gasEstimate, measured as
+# eth_estimateGas(swap) minus quoter.gasEstimate and stable across command shapes.
+# The Quoter covers only the pool loop, which scales with crossed ticks; an
+# under-provisioned swap burns its limit and reverts with empty data.
+# 160k covers the ~136k measured ceiling with margin plus cold-SSTORE slack.
+# Over-provisioning is bounded because cost guards and EIP-1559 admission key off
+# the limit; both refuse safely as rejected submissions, never lost swaps.
 V4_SWAP_ROUTER_OVERHEAD_GAS = 160_000
 
-# VIB-6413: upper bound on a Quoter-derived swap budget. ``gas_estimate`` is an
-# arbitrary ``uint256`` decoded from the Quoter's ``eth_call`` return, so without
-# a clamp a misconfigured quoter address or an out-of-family pool reading would
-# propagate straight into a transaction gas limit — and per the note above, an
-# absurdly high limit is refused (block gas limit, the ``-32003`` admission
-# check, or a strategy's cost guard) rather than merely wasteful. 3,000,000 is
-# ~9x the deepest budget observed (335,922) and far under every supported
-# chain's block gas limit, so it cannot mask a genuine multi-tick swap; exceeding
-# it means the reading is wrong, and a named refusal beats an opaque one.
+# Upper bound for Quoter-derived swap budgets. The Quoter returns an arbitrary uint256,
+# so an out-of-family reading must not become a gas limit; absurd limits are refused
+# rather than wasteful. 3,000,000 sits far above observed multi-tick swaps and far below
+# block limits, so exceeding it means a wrong reading refused with a clear clamp.
 V4_SWAP_GAS_CEILING = 3_000_000
 
-# PoolManager addresses per chain
 POOL_MANAGER_ADDRESSES: dict[str, str] = {chain: addrs["pool_manager"] for chain, addrs in UNISWAP_V4.items()}
 
-# UniversalRouter addresses (canonical V4 swap entry point)
 ROUTER_ADDRESSES: dict[str, str] = {chain: addrs["universal_router"] for chain, addrs in UNISWAP_V4.items()}
 
 QUOTER_ADDRESSES: dict[str, str] = {chain: addrs["quoter"] for chain, addrs in UNISWAP_V4.items()}
 
-# PositionManager addresses per chain. The values here are the canonical
-# v4-periphery PositionManager deployments published at
-# https://docs.uniswap.org/contracts/v4/deployments and registered in
-# ``almanak.core.contracts.UNISWAP_V4``. The V4 receipt parser's
-# ``extract_lp_open_data`` allowlist treats these as the only acceptable
-# ``ModifyLiquidity.sender`` values for V0 -- non-PositionManager flows
-# (router/hook-initiated mints) are intentionally rejected until V1 lifts
-# the constraint (see VIB-4484 P-V1-C).
+# Canonical PositionManager deployments; the receipt parser allowlists only these senders.
 POSITION_MANAGER_ADDRESSES: dict[str, str] = {chain: addrs["position_manager"] for chain, addrs in UNISWAP_V4.items()}
 
-# Lowercase frozenset for O(1) cross-chain allowlist checks (V4 receipt parser
-# uses this to validate ``ModifyLiquidity.sender`` against ANY registered V4
-# PositionManager, not just the chain-bound one -- mirrors the
-# ``extract_position_id`` fallback that already accepts known V4 PMs).
+# Lowercase set for cross-chain PositionManager sender allowlist checks.
 POSITION_MANAGER_ADDRESS_SET: frozenset[str] = frozenset(addr.lower() for addr in POSITION_MANAGER_ADDRESSES.values())
 
-# Wrapped native token addresses per chain (for WETH <-> native ETH routing in V4).
-# V4's primary liquidity uses native ETH (address(0)), not WETH. When users swap
-# to/from WETH, we route through the native ETH pool and add WRAP/UNWRAP commands.
-# Imported from the canonical token defaults to avoid address duplication.
+# V4 pools use native ETH (address(0)); WETH routes through it with WRAP/UNWRAP commands.
 from almanak.framework.data.tokens.defaults import WRAPPED_NATIVE as WRAPPED_NATIVE_ADDRESSES
-
-# =============================================================================
-# Data Models
-# =============================================================================
 
 
 @dataclass
@@ -271,13 +185,12 @@ class PoolKey:
     currency1: str
     fee: int
     tick_spacing: int
-    hooks: str = NATIVE_CURRENCY  # Default: no hooks
+    hooks: str = NATIVE_CURRENCY
 
     def __post_init__(self) -> None:
         self.currency0 = self.currency0.lower()
         self.currency1 = self.currency1.lower()
         self.hooks = self.hooks.lower()
-        # Ensure sorted order
         if int(self.currency0, 16) > int(self.currency1, 16):
             self.currency0, self.currency1 = self.currency1, self.currency0
 
@@ -293,11 +206,7 @@ class SwapQuote:
     token_out: str
     sqrt_price_x96_after: int | None = None
     effective_price: Decimal | None = None
-    # VIB-6413 / Empty≠Zero: ``None`` means UNMEASURED (offline / local estimate),
-    # an int is the on-chain Quoter's own ``gasEstimate`` for the pool swap. The
-    # old default was the static ``UNISWAP_V4_GAS_ESTIMATES["swap"]``, which made
-    # a measured value indistinguishable from a never-measured one — so
-    # ``build_swap_tx`` could not tell whether it was allowed to scale the budget.
+    # None means unmeasured (offline estimate); an int is the Quoter pool-swap gasEstimate.
     gas_estimate: int | None = None
 
 
@@ -337,11 +246,6 @@ class LPDecreaseParams:
     hook_data: bytes = b""
 
 
-# =============================================================================
-# UniswapV4SDK
-# =============================================================================
-
-
 class UniswapV4SDK:
     """Uniswap V4 SDK for pool operations and swap encoding.
 
@@ -378,10 +282,6 @@ class UniswapV4SDK:
         self.router = self.addresses["universal_router"]
         self.quoter = self.addresses["quoter"]
 
-    # =========================================================================
-    # On-Chain Queries
-    # =========================================================================
-
     def get_position_liquidity(self, token_id: int, rpc_url: str | None = None) -> int:
         """Query on-chain liquidity for a V4 LP position via PositionManager.getPositionLiquidity(uint256).
 
@@ -396,7 +296,6 @@ class UniswapV4SDK:
             ValueError: If no RPC URL is available or the call fails.
         """
         # getPositionLiquidity(uint256) selector = 0x1efeed33
-        # Verified: keccak256("getPositionLiquidity(uint256)")[:4] == 0x1efeed33
         selector = "1efeed33"
         token_id_hex = format(token_id, "064x")
         calldata = "0x" + selector + token_id_hex
@@ -452,8 +351,7 @@ class UniswapV4SDK:
         Raises:
             ValueError: If no RPC URL/gateway is available or the call/decode fails.
         """
-        # getPoolAndPositionInfo(uint256) selector = 0x7ba03aad (validated against
-        # live positions in rpc_service.QueryV4PositionState).
+        # getPoolAndPositionInfo(uint256) selector = 0x7ba03aad
         selector = "7ba03aad"
         token_id_hex = format(token_id, "064x")
         calldata = "0x" + selector + token_id_hex
@@ -502,15 +400,8 @@ class UniswapV4SDK:
                 f"Malformed getPoolAndPositionInfo payload for position {token_id} on {self.chain}: {hex_result!r}"
             ) from e
 
-        # An invalid / non-existent / burned token id can decode to a degenerate
-        # PoolKey whose two currencies are IDENTICAL — most often all-zero
-        # (0x0…0 == 0x0…0), but any equal pair is invalid. Reject it loudly rather
-        # than building an unusable PoolKey. The check compares the two currencies
-        # for equality (here via int value, equivalent to ``currency0.lower() ==
-        # currency1.lower()`` for the canonical lowercase addresses decoded above),
-        # so it catches the identical-but-nonzero case too. Note currency0 == 0x0
-        # ALONE is valid — it is V4's native-ETH currency0 — so we only reject when
-        # both currencies are equal. VIB-5361.
+        # Reject degenerate keys with identical currencies (often all-zero for missing/burned
+        # positions). address(0) alone stays valid as native-ETH currency0; only equal pairs fail.
         if int(currency0, 16) == int(currency1, 16):
             raise ValueError(
                 f"getPoolAndPositionInfo returned a degenerate pool key "
@@ -523,7 +414,6 @@ class UniswapV4SDK:
         if tick_spacing >= (1 << 23):
             tick_spacing -= 1 << 24
 
-        # PoolKey.__post_init__ lowercases and enforces currency0 < currency1.
         pool_key = PoolKey(
             currency0=currency0,
             currency1=currency1,
@@ -556,13 +446,8 @@ class UniswapV4SDK:
         Returns:
             sqrtPriceX96 (int) if successful, None if query fails or no RPC available.
         """
-        # VIB-5052 — every return-None path below is a money-path on-chain read
-        # fallback: the caller (adapter.compile_lp_open_intent) substitutes an
-        # *estimated* sqrtPrice when this returns None, which is exactly how the
-        # VIB-5038 getSlot0 selector bug stayed invisible for ~2 months. Each
-        # fallback MUST be counted on ``onchain_read_fallback_total`` so an
-        # operator alert fires the day the read starts degrading, not when a
-        # downstream accounting drift report eventually surfaces it.
+        # Each None below falls back to an estimated sqrtPrice; every path records an
+        # on-chain-read fallback so degraded reads alert before downstream drift.
         from almanak.framework.observability.metrics import (
             OnchainReadFallbackReason,
             record_onchain_read_fallback,
@@ -810,22 +695,15 @@ class UniswapV4SDK:
             output_amount = decimal_adjusted_amount * price_ratio * (1 - fee_fraction)
             amount_out = int(output_amount * Decimal(10**token_out_decimals))
         elif token_in_decimals != token_out_decimals:
-            # VIB-3875: Without an oracle price_ratio, we cannot bridge token-decimal
-            # differences. Falling back to the same-decimal estimate would emit an
-            # ``amount_out_minimum`` scaled to ``token_in_decimals`` (e.g. 18) for an
-            # output token with fewer decimals (e.g. USDC=6), producing a minOut
-            # ~10**12x too high and reverting on-chain with V4TooLittleReceived.
-            # Raise a permanent error so the strategy halts/holds rather than burning
-            # gas on a guaranteed-revert swap. Message must contain a ``permanent_keywords``
-            # token (see state_machine._categorize_error) so it classifies as
-            # COMPILATION_PERMANENT and is treated as non-retryable.
+            # Without price_ratio, differing decimals would scale minOut ~10**12x too high
+            # and revert with V4TooLittleReceived; raise a permanent error to halt rather
+            # than burn gas on a guaranteed-revert swap.
             raise ValueError(
                 f"UniV4 offline quote not supported when price_ratio is unavailable "
                 f"and token decimals differ (in={token_in_decimals}, out={token_out_decimals}). "
                 f"Provide an oracle price_ratio or hold until both token prices resolve."
             )
         else:
-            # Same-decimal estimate (e.g., stablecoin pairs)
             amount_out = int(Decimal(amount_in) * (1 - fee_fraction))
 
         effective_price = None
@@ -894,7 +772,6 @@ class UniswapV4SDK:
             expiration = int(time.time()) + 30 * 86400  # 30 days
 
         # Permit2.approve(address token, address spender, uint160 amount, uint48 expiration)
-        # Clamp amount to uint160 max
         uint160_max = (1 << 160) - 1
         amount = min(amount, uint160_max)
 
@@ -948,7 +825,6 @@ class UniswapV4SDK:
         """
         amount_out_minimum = compute_min_amount_out_from_bps(quote.amount_out, slippage_bps)
 
-        # Detect WETH and substitute native ETH for the V4 pool
         weth_in = self._is_wrapped_native(quote.token_in)
         weth_out = self._is_wrapped_native(quote.token_out)
         if weth_in and weth_out:
@@ -960,9 +836,8 @@ class UniswapV4SDK:
         is_native_out = pool_token_out.lower() == NATIVE_CURRENCY
 
         if deadline == 0:
-            deadline = deadline_from_now(300)  # Direct SDK fallback.
+            deadline = deadline_from_now(300)
 
-        # Build a modified quote that uses native ETH for the pool key
         pool_quote = SwapQuote(
             token_in=pool_token_in,
             token_out=pool_token_out,
@@ -971,41 +846,32 @@ class UniswapV4SDK:
             fee_tier=quote.fee_tier,
         )
 
-        # 1. Encode the ExactInputSingleParams for the swap action
         swap_params = self._encode_exact_input_single_params(
             quote=pool_quote,
             amount_out_minimum=amount_out_minimum,
         )
 
-        # 2. Encode SETTLE params: (Currency currency, uint256 maxAmount, bool payerIsUser)
-        #    maxAmount=0 means "settle entire debt", payerIsUser=true for user-funded swaps
+        # SETTLE params: (Currency currency, uint256 maxAmount, bool payerIsUser); maxAmount=0 settles entire debt.
         settle_params = _pad_address(pool_token_in) + _pad_uint(0) + _pad_bool(True)
 
-        # 3. Encode TAKE params: (Currency currency, address recipient, uint256 amount)
-        #    For native ETH output: recipient = address(2) (ADDRESS_THIS = the UniversalRouter),
-        #    then use outer SWEEP/WRAP_ETH to forward to the actual recipient.
-        #    For ERC-20 output: recipient = actual wallet address.
-        #    amount=0 means "take all available".
+        # TAKE params: (Currency currency, address recipient, uint256 amount); amount=0 takes all.
+        # Native-ETH output uses address(2) with outer SWEEP/WRAP_ETH forwarding.
         take_recipient = ADDRESS_THIS if is_native_out else recipient
         take_params = _pad_address(pool_token_out) + _pad_address(take_recipient) + _pad_uint(0)
 
-        # 4. Build the two-layer V4_SWAP input: abi.encode(bytes actions, bytes[] params)
+        # V4_SWAP input: abi.encode(bytes actions, bytes[] params).
         inner_actions = bytes([ACTION_SWAP_EXACT_IN_SINGLE, ACTION_SETTLE, ACTION_TAKE])
         v4_swap_input = _encode_v4_actions(inner_actions, [swap_params, settle_params, take_params])
 
-        # 5. Build UniversalRouter commands with WETH wrap/unwrap if needed
         ur_commands_list: list[int] = []
         ur_inputs_list: list[str] = []
 
         if weth_in:
-            # WETH input: transfer WETH to router via Permit2, then unwrap to ETH.
-            # Step 1: PERMIT2_TRANSFER_FROM pulls WETH from user to router
-            # Step 2: UNWRAP_WETH converts WETH to ETH in the router
-            # The V4_SWAP's SETTLE then uses the router's ETH balance.
+            # WETH input moves via Permit2 transfer then UNWRAP_WETH; SETTLE uses the router ETH balance.
             transfer_params = (
-                _pad_address(quote.token_in)  # WETH address
-                + _pad_address(ADDRESS_THIS)  # recipient = ADDRESS_THIS
-                + _pad_uint(min(quote.amount_in, (1 << 160) - 1))  # uint160 amount
+                _pad_address(quote.token_in)
+                + _pad_address(ADDRESS_THIS)
+                + _pad_uint(min(quote.amount_in, (1 << 160) - 1))
             )
             ur_commands_list.append(PERMIT2_TRANSFER_FROM)
             ur_inputs_list.append(transfer_params)
@@ -1021,13 +887,11 @@ class UniswapV4SDK:
         ur_inputs_list.append(v4_swap_input)
 
         if is_native_out and weth_out:
-            # WETH output: ETH comes out of pool -> WRAP to WETH -> send to recipient
-            # WRAP_ETH params: (address recipient, uint256 amountMin)
+            # WRAP_ETH params: (address recipient, uint256 amountMin).
             wrap_params = _pad_address(recipient) + _pad_uint(amount_out_minimum)
             ur_commands_list.append(_UR_WRAP_ETH)
             ur_inputs_list.append(wrap_params)
         elif is_native_out and not weth_out:
-            # Pure native ETH output: SWEEP to forward ETH from router to recipient
             sweep_params = _pad_address(NATIVE_CURRENCY) + _pad_address(recipient) + _pad_uint(amount_out_minimum)
             ur_commands_list.append(_UR_SWEEP)
             ur_inputs_list.append(sweep_params)
@@ -1035,15 +899,13 @@ class UniswapV4SDK:
         ur_commands = bytes(ur_commands_list)
         ur_inputs = ur_inputs_list
 
-        # 6. Wrap in UniversalRouter.execute()
         calldata = _encode_execute(
             commands=ur_commands,
             inputs=ur_inputs,
             deadline=deadline,
         )
 
-        # Native ETH value: only when token_in is actually native ETH (not WETH)
-        # WETH-in uses Permit2 transfer (no ETH value needed)
+        # msg.value only for native-ETH input; WETH input uses Permit2 transfer instead.
         native_value = quote.amount_in if (is_native_in and not weth_in) else 0
 
         return SwapTransaction(
@@ -1141,8 +1003,7 @@ class UniswapV4SDK:
         amount_in = min(quote.amount_in, uint128_max)
         amount_out_min = min(amount_out_minimum, uint128_max)
 
-        # Inner struct head: 8 static fields + 1 offset for hookData = 9 words.
-        # hookData offset is measured from the start of the struct: 9 * 32 = 288 = 0x120.
+        # Inner struct head: 8 static fields + 1 hookData offset = 9 words (offset 0x120 from struct start).
         head = (
             _pad_address(pool_key.currency0)
             + _pad_address(pool_key.currency1)
@@ -1155,27 +1016,10 @@ class UniswapV4SDK:
             + _pad_uint(0x120)  # offset (within the struct) to hookData
         )
 
-        # Tail: hookData = empty bytes
-        tail = _pad_uint(0)  # hookData length = 0
+        tail = _pad_uint(0)
 
-        # VIB-4413: ExactInputSingleParams is a DYNAMIC tuple (it contains the
-        # dynamic ``bytes hookData`` field), so the action param must lead with an
-        # offset pointer to the struct. The deployed v4-periphery CalldataDecoder
-        # reads it as ``swapParams := add(params.offset, calldataload(params.offset))``
-        # — i.e. it takes the FIRST word as the struct offset. Without this 0x20
-        # prefix the decoder reads ``currency0`` as the offset: for an all-ERC20
-        # pair that is a huge value → out-of-bounds read → a zeroed poolKey whose
-        # ``currency0`` is ``address(0)`` (native) → the swap reverts reading the
-        # native currency delta. The bug was masked for any swap where a currency
-        # is the chain's native token (``currency0`` sorts to ``address(0) == 0``,
-        # so the missing-offset read evaluates to 0 and coincidentally points at the
-        # struct start) — which is why only all-ERC20 pairs (e.g. Polygon
-        # USDC<->WETH, where WETH is not native) surfaced it.
+        # ExactInputSingleParams is a dynamic tuple, so the action param leads with a 0x20 struct offset.
         return _pad_uint(0x20) + head + tail
-
-    # =========================================================================
-    # LP Methods — PositionManager encoding
-    # =========================================================================
 
     def build_mint_position_tx(
         self,
@@ -1200,28 +1044,18 @@ class UniswapV4SDK:
 
         position_manager = self.addresses["position_manager"]
 
-        # Encode MINT_POSITION params
         mint_params = self._encode_mint_position_params(params)
 
-        # Encode SETTLE_PAIR params: abi.encode(currency0, currency1)
+        # SETTLE_PAIR params: abi.encode(currency0, currency1).
         settle_params = _pad_address(params.pool_key.currency0) + _pad_address(params.pool_key.currency1)
 
         action_list = [PM_MINT_POSITION, PM_SETTLE_PAIR]
         params_list = [mint_params, settle_params]
 
-        # Native ETH (VIB-5145): when a currency is address(0) the full
-        # ``amount*_max`` is pre-sent as ``msg.value`` — native cannot be pulled
-        # via Permit2 the way an ERC-20 SETTLE_PAIR pulls exactly ``settled``. The
-        # MINT settles only what the minted ``liquidity`` requires (sized from the
-        # slippage-discounted budget, VIB-2180), so the unspent remainder
-        # (``amount*_max − settled``) is left in the PositionManager. A SWEEP action
-        # refunds that remainder to the owner; WITHOUT it the native ETH is
-        # stranded — a fund leak that scales with the slippage buffer and is worst
-        # for single-sided / out-of-range native mints (the whole buffer goes
-        # unspent). ERC-20-only pools need no SWEEP (nothing is ever over-sent), so
-        # their action set stays exactly [MINT_POSITION, SETTLE_PAIR].
-        # V4 ``Actions.SWEEP`` params = abi.encode(Currency currency, address to);
-        # it sweeps the router's full balance of ``currency`` to ``to``.
+        # Native ETH is pre-sent as msg.value and cannot be pulled via Permit2; MINT settles
+        # only the required liquidity, so SWEEP refunds the remainder or it strands in PositionManager.
+        # ERC-20-only pools stay [MINT_POSITION, SETTLE_PAIR].
+        # Actions.SWEEP params: abi.encode(Currency currency, address to).
         native_value = 0
         native_currency: str | None = None
         if params.pool_key.currency0 == NATIVE_CURRENCY:
@@ -1230,18 +1064,11 @@ class UniswapV4SDK:
         elif params.pool_key.currency1 == NATIVE_CURRENCY:
             native_value = params.amount1_max
             native_currency = params.pool_key.currency1
-        # Only SWEEP when native ETH is actually pre-sent as ``msg.value``
-        # (``native_value > 0``). A native pool whose native leg is 0 — e.g. a
-        # single-sided out-of-range mint that deposits only the ERC-20 leg —
-        # over-sends nothing, so a SWEEP would be a redundant 0-ETH action that
-        # just wastes gas. ERC-20-only pools (``native_currency is None``) never
-        # over-send either, so their action set stays exactly
-        # [MINT_POSITION, SETTLE_PAIR].
+        # Skip SWEEP when no native ETH is pre-sent; it would only waste gas.
         if native_value > 0 and native_currency is not None:
             action_list.append(PM_SWEEP)
             params_list.append(_pad_address(native_currency) + _pad_address(params.owner))
 
-        # Build modifyLiquidities calldata (SWEEP appended above for native pools)
         actions = bytes(action_list)
         calldata = _encode_modify_liquidities(actions, params_list, deadline)
 
@@ -1282,17 +1109,16 @@ class UniswapV4SDK:
 
         position_manager = self.addresses["position_manager"]
 
-        # Encode DECREASE_LIQUIDITY params
         decrease_params = self._encode_decrease_liquidity_params(params)
 
-        # Encode TAKE_PAIR params: abi.encode(currency0, currency1, address recipient)
+        # TAKE_PAIR params: abi.encode(currency0, currency1, address recipient).
         take_params = _pad_address(currency0) + _pad_address(currency1) + _pad_address(recipient)
 
         actions_list = [PM_DECREASE_LIQUIDITY, PM_TAKE_PAIR]
         params_list = [decrease_params, take_params]
 
         if burn:
-            # Encode BURN_POSITION params: abi.encode(uint256 tokenId, address owner, bytes hookData)
+            # BURN_POSITION params: abi.encode(uint256 tokenId, address owner, bytes hookData).
             burn_params = self._encode_burn_position_params(params.token_id, recipient, params.hook_data)
             actions_list.append(PM_BURN_POSITION)
             params_list.append(burn_params)
@@ -1337,12 +1163,10 @@ class UniswapV4SDK:
 
         position_manager = self.addresses["position_manager"]
 
-        # Decrease by 0 to trigger fee update
         decrease_params = self._encode_decrease_liquidity_params(
             LPDecreaseParams(token_id=token_id, liquidity=0, hook_data=hook_data)
         )
 
-        # Take the accrued fees
         take_params = _pad_address(currency0) + _pad_address(currency1) + _pad_address(recipient)
 
         actions = bytes([PM_DECREASE_LIQUIDITY, PM_TAKE_PAIR])
@@ -1355,10 +1179,6 @@ class UniswapV4SDK:
             gas_estimate=UNISWAP_V4_GAS_ESTIMATES["lp_collect_fees"],
             description=f"Uniswap V4 collect fees for position #{token_id}",
         )
-
-    # =========================================================================
-    # LP Encoding Helpers
-    # =========================================================================
 
     def _encode_mint_position_params(self, params: LPMintParams) -> str:
         """Encode MINT_POSITION action params.
@@ -1387,8 +1207,7 @@ class UniswapV4SDK:
             Hex string (no 0x prefix).
         """
         pk = params.pool_key
-        # 5 PoolKey fields + 6 more static + 1 offset for hookData = 12 words
-        # hookData offset = 12 * 32 = 384 = 0x180
+        # 12 words (5 PoolKey + 6 static + hookData offset); hookData at 0x180.
         hook_data_offset = 12 * 32
 
         head = (
@@ -1406,7 +1225,6 @@ class UniswapV4SDK:
             + _pad_uint(hook_data_offset)
         )
 
-        # hookData tail
         tail = _encode_bytes(params.hook_data)
 
         return head + tail
@@ -1424,7 +1242,6 @@ class UniswapV4SDK:
         Returns:
             Hex string (no 0x prefix).
         """
-        # 4 static fields + 1 offset = 5 words
         hook_data_offset = 5 * 32
 
         head = (
@@ -1493,17 +1310,14 @@ class UniswapV4SDK:
             sqrt_ratio_a, sqrt_ratio_b = sqrt_ratio_b, sqrt_ratio_a
 
         if sqrt_price_x96 <= sqrt_ratio_a:
-            # Current price below range — all token0
             if amount0 == 0:
                 return 0
             return _get_liquidity_for_amount0(sqrt_ratio_a, sqrt_ratio_b, amount0)
         elif sqrt_price_x96 >= sqrt_ratio_b:
-            # Current price above range — all token1
             if amount1 == 0:
                 return 0
             return _get_liquidity_for_amount1(sqrt_ratio_a, sqrt_ratio_b, amount1)
         else:
-            # Current price in range — use min
             liq0 = _get_liquidity_for_amount0(sqrt_price_x96, sqrt_ratio_b, amount0) if amount0 > 0 else 0
             liq1 = _get_liquidity_for_amount1(sqrt_ratio_a, sqrt_price_x96, amount1) if amount1 > 0 else 0
             if liq0 == 0:
@@ -1552,11 +1366,6 @@ class UniswapV4SDK:
         return cl_math.price_to_tick(price, decimals0=decimals0, decimals1=decimals1)
 
 
-# =============================================================================
-# ABI Encoding Helpers
-# =============================================================================
-
-
 def _pad_address(addr: str) -> str:
     """Pad an address to 32 bytes."""
     clean = addr.lower().replace("0x", "")
@@ -1589,7 +1398,6 @@ def _encode_bytes(data: bytes) -> str:
     """Encode a dynamic `bytes` value (length + padded data)."""
     length = len(data)
     hex_data = data.hex() if data else ""
-    # Pad to 32-byte boundary
     if len(hex_data) % 64 != 0:
         hex_data = hex_data + "0" * (64 - len(hex_data) % 64)
     if not hex_data:
@@ -1659,7 +1467,6 @@ def _encode_modify_liquidities(actions: bytes, params: list[str], deadline: int)
     """
     unlock_data_hex = _encode_v4_actions(actions, params)
 
-    # Now encode the outer call: modifyLiquidities(bytes unlockData, uint256 deadline)
     unlock_data_bytes_len = len(unlock_data_hex) // 2
     unlock_data_padded = unlock_data_hex
     if len(unlock_data_padded) % 64 != 0:
@@ -1724,13 +1531,8 @@ def sqrt_ratio_x96_to_tick(sqrt_ratio_x96: int) -> int | None:
         log_base = Decimal("1.0001").ln()
         candidate = int((Decimal(2) * log_ratio / log_base).to_integral_value(rounding=_decimal.ROUND_FLOOR))
 
-    # Clamp to the valid tick domain before correcting — out-of-range sqrt
-    # ratios (impossible from a live slot0, but defends against bogus input)
-    # otherwise spin the correction loop against the forward function.
+    # Clamp to the valid tick domain; out-of-range input would spin the correction loop.
     candidate = max(MIN_TICK, min(MAX_TICK, candidate))
-    # Pin to getTickAtSqrtRatio: walk up while the next tick still fits, then
-    # down while the current tick overshoots. The candidate is within ~1 tick
-    # of correct, so each loop runs at most a couple of iterations.
     while candidate < MAX_TICK and _tick_to_sqrt_ratio_x96(candidate + 1) <= sqrt_ratio_x96:
         candidate += 1
     while candidate > MIN_TICK and _tick_to_sqrt_ratio_x96(candidate) > sqrt_ratio_x96:
@@ -1769,17 +1571,14 @@ def _encode_execute(commands: bytes, inputs: list[str], deadline: int) -> str:
 
     # Commands section: length (32 bytes) + data (padded to 32 bytes)
     commands_hex = commands.hex()
-    commands_padded = commands_hex.ljust(64, "0")  # right-pad to 32 bytes
+    commands_padded = commands_hex.ljust(64, "0")
     commands_section = _pad_uint(len(commands)) + commands_padded
 
-    # Offset to inputs = 0x60 + len(commands_section in bytes)
-    # commands_section is 2 words = 64 bytes
-    offset_inputs = 0x60 + 64  # = 0xa0
+    # commands_section is 2 words = 64 bytes.
+    offset_inputs = 0x60 + 64
 
     # Inputs section: array length + offsets + elements
     num_inputs = len(inputs)
-    # After array length, there are num_inputs offset words
-    # First element data starts at num_inputs * 32 bytes after offsets start
     offsets_area_size = num_inputs * 32
     element_data = ""
     offsets = []
@@ -1790,18 +1589,16 @@ def _encode_execute(commands: bytes, inputs: list[str], deadline: int) -> str:
         # Each element: length (32 bytes) + data (padded to 32-byte boundary)
         byte_len = len(inp) // 2
         padded_data = inp
-        # Pad data to 32-byte boundary
         if len(padded_data) % 64 != 0:
             padded_data = padded_data + "0" * (64 - len(padded_data) % 64)
         element_data += _pad_uint(byte_len) + padded_data
-        current_offset += 32 + len(padded_data) // 2  # length word + data bytes
+        current_offset += 32 + len(padded_data) // 2
 
     inputs_section = _pad_uint(num_inputs)
     for off in offsets:
         inputs_section += _pad_uint(off)
     inputs_section += element_data
 
-    # Assemble
     head = _pad_uint(0x60) + _pad_uint(offset_inputs) + _pad_uint(deadline)
 
     return "0x" + UNIVERSAL_ROUTER_EXECUTE_SELECTOR[2:] + head + commands_section + inputs_section
