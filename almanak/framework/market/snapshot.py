@@ -666,6 +666,13 @@ class MarketSnapshot:
         # TODAY's rate (look-ahead bias). None on live snapshots keeps the
         # lazy gateway lane untouched. Read via ``_lazy_gateway_rate_monitor``.
         self._lending_rate_refusal_detail: str | None = None
+        # Historical backtest factories stamp a refusal detail so
+        # ``reference_price`` refuses under ``backtest_no_historical_plane``
+        # instead of reporting a missing gateway connection — there is no
+        # timestamped reference-price plane, and a reachable sidecar would
+        # answer a HISTORICAL tick with TODAY's price (look-ahead bias).
+        # None on live snapshots keeps the transport semantics.
+        self._reference_price_refusal_detail: str | None = None
 
         # Per-indicator caches (tuple keys for timeframe-aware caching)
         self._macd_cache: dict[tuple[str, OHLCVTimeframe, int, int, int], MACDData] = {}
@@ -1141,6 +1148,16 @@ class MarketSnapshot:
                 market_status_source=getattr(response, "market_status_source", ""),
                 reason=reason,
             )
+
+        # A stamped backtest snapshot refuses before consulting any client:
+        # a wired sidecar would answer a HISTORICAL tick with TODAY's
+        # reference price (look-ahead bias, same hazard as the lending-rate
+        # lane). The typed ledger key keeps the run blocker actionable.
+        backtest_detail = getattr(self, "_reference_price_refusal_detail", None)
+        if backtest_detail:
+            reason = f"reference_price refused for {instrument.strip().upper()}@{requested_chain}: {backtest_detail}"
+            self._record_critical_data_failure("reference_price", "backtest_no_historical_plane", reason)
+            return _unavailable(reason)
 
         if client is None or not getattr(client, "is_connected", False):
             reason = "reference_price unavailable: no connected GatewayClient"

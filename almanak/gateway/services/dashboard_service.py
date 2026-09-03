@@ -50,45 +50,21 @@ from almanak.integrations._base.gateway.portfolio_chain import PortfolioProvider
 logger = logging.getLogger(__name__)
 
 
-# Strategy categories in the filesystem
 STRATEGY_CATEGORIES = ["demo", "production", "incubating", "poster_child", "tests"]
 PORTFOLIO_STALE_THRESHOLD_SECONDS = 300
 
-# VIB-5059 Phase 1 (SQL half): the quant-input load pushes the LTD ledger
-# aggregation into the store (COUNT/SUM — see LedgerQuantStats), so the only
-# per-row ledger reads left are the bounded oldest-first batches the VIB-3914
-# first-action anchor walk consumes. Batch size keeps each fetch tiny (the
-# anchor normally resolves on the FIRST batch); the scan cap bounds the
-# pathological case where thousands of anchor-candidate rows all value to
-# zero — set to the legacy bulk-fetch cap so the walk never inspects more
-# rows than the old Python path could.
+# Bound the oldest-first anchor walk without restoring full ledger materialization.
 _QUANT_ANCHOR_BATCH_LIMIT = 64
 _QUANT_ANCHOR_BATCH_MAX = 4096
 _QUANT_ANCHOR_SCAN_ROW_CAP = 100_000
 
-# VIB-5059 Phase 1: one dashboard render fans out to GetPnLSummary +
-# GetCostStack + GetAuditPosture, each of which previously re-fetched the full
-# quant input set (the SQL-side ledger aggregates + every accounting event +
-# the recent snapshot window). The inputs change at snapshot/iteration cadence
-# (minutes), so this short TTL coalesces a render burst into ONE load without
-# any tile becoming observably stale. 0 disables the cache entirely
-# (sequential RPCs always reload).
+# Coalesce sibling quant RPCs within a render; zero disables sequential caching.
 _QUANT_INPUTS_CACHE_TTL_SECONDS = 5.0
 
-# VIB-5134: the lifetime-drawdown checkpoint refreshes its expensive full-history
-# NAV scan on a SEPARATE, longer cadence than the 5 s quant-input load. A lifetime
-# max-drawdown is slow-moving, so a 30 s full-scan TTL cuts that O(history) read
-# ~6× vs. the 5 s default; between full scans the checkpoint is advanced by a cheap
-# incremental "fetch since cursor" so current-drawdown stays render-fresh AND
-# correct (a new high-water mark after the last scan is folded before the
-# current-drawdown is computed). See docs/internal/dashboard/PRD-DashboardJune15.md §4.A.
+# Refresh the O(history) maximum every 30 seconds; fold new rows between scans.
 _LIFETIME_DRAWDOWN_TTL_SECONDS = 30.0
 
-# VIB-5134: after a full-scan FAILURE the checkpoint retries on this short backoff
-# instead of waiting the full slow-cadence TTL — a transient DB blip must not strand
-# the lifetime tile on the recent-window fallback for ~30 s. It is still bounded (not
-# every render) so a persistent outage does not hammer the backend. Matches the prior
-# VIB-5118 ~5 s degraded-retry cadence.
+# Retry failed full scans sooner, but not on every render.
 _LIFETIME_DRAWDOWN_RETRY_SECONDS = 5.0
 
 
@@ -112,16 +88,7 @@ class _LifetimeDrawdownCheckpoint:
     truncated: bool
 
 
-# Composite cursor-key encoding for ActivityFeed items (CodeRabbit review).
-# Format: "<priority>:<kind>:<id>" where priority = "1" for LEDGER, "0" for
-# TIMELINE. The leading priority digit forces LEDGER to sort before TIMELINE
-# at tied timestamps under lex-DESC ordering ("1:..." > "0:..."), which is
-# required by the page-incremental dedup in
-# `_select_page_with_incremental_dedup`: the ledger row IS the truth, so a
-# timeline row referencing it must see the ledger row before deciding to
-# drop itself. The kind letter ("L"/"T") inside the key is preserved for
-# human-readable debugging only — it has no effect on ordering since both
-# kinds sort under their priority digit first.
+# Lexicographic descending keys put the financial ledger truth before timeline duplicates.
 _ACTIVITY_FEED_KEY_LEDGER_PRIORITY = "1"
 _ACTIVITY_FEED_KEY_TIMELINE_PRIORITY = "0"
 
@@ -139,9 +106,7 @@ class _QuantPositionSummary:
         self.lp_positions: list[Any] = []
         self.health_factor = None
         self.leverage = None
-        # positions_json arrives in three shapes: a JSON string (SQLite text
-        # column), an already-deserialized list/dict (hosted JSONB), or the
-        # VIB-3923 envelope {"positions": [...], ...} in either encoding.
+        # SQLite returns JSON text; hosted JSONB may already be a list, dict, or envelope.
         pjson = getattr(snap, "positions_json", None) or "[]"
         if isinstance(pjson, str):
             try:
@@ -159,11 +124,7 @@ class _QuantPositionSummary:
                 ptype = (p.get("position_type") or "").upper()
                 if ptype == "LP":
                     lp = type("LP", (), {})()
-                    # Tri-state: keep None when the writer never
-                    # determined in_range (the very case VIB-3893
-                    # exists for). Defaulting to False renders
-                    # "in-range NO" with red — a false negative
-                    # on a money-decision surface.
+                    # Preserve unknown rather than rendering an unmeasured range as false.
                     raw = p.get("in_range")
                     lp.in_range = None if raw is None else bool(raw)
                     self.lp_positions.append(lp)
@@ -284,10 +245,6 @@ def _parse_trade_tape_payload_versions(payload_raw: str) -> tuple[str, int, int,
         except (TypeError, ValueError):
             return 0
 
-    # Coerce non-string truthy values (e.g. ``{"code": "x"}``) to "". Without
-    # this guard, the dict would slip through ``or ""`` (truthy, so the OR
-    # short-circuits) and into ``_build_trade_tape_row()``'s proto string field,
-    # which protobuf would reject — turning ``GetTradeTape`` into INTERNAL.
     raw_unavailable_reason = parsed.get("unavailable_reason")
     unavailable_reason = raw_unavailable_reason if isinstance(raw_unavailable_reason, str) else ""
     schema_v = _safe_int(parsed.get("schema_version"))
@@ -342,9 +299,7 @@ def _build_trade_tape_row(
     ts = getattr(entry, "timestamp", None)
     ts_unix = int(ts.timestamp()) if ts else 0
 
-    # Untrusted accounting-event fields can carry JSONB-shaped (dict/list) or
-    # other non-string values. Coerce to proto-safe strings so one corrupt row
-    # doesn't take ``GetTradeTape`` down with a proto type error.
+    # Treat persisted event payloads as untrusted at the protobuf boundary.
     payload_raw = _coerce_trade_tape_proto_string(row_event.get("payload_json") if row_event else None)
     confidence = _coerce_trade_tape_proto_string(row_event.get("confidence") if row_event else None)
     event_type = _coerce_trade_tape_proto_string(row_event.get("event_type") if row_event else None)
@@ -452,19 +407,11 @@ def _to_ledger_feed_item(entry: Any) -> tuple[gateway_pb2.ActivityFeedItem, str]
     )
 
 
-# ---------------------------------------------------------------------------
-# Paper-session discovery helpers (used by DashboardServiceServicer._discover_paper_sessions)
-# ---------------------------------------------------------------------------
-
-# File-status values that always mark a session inactive regardless of PID.
 _PAPER_INACTIVE_FILE_STATUSES = frozenset({"stopped", "stopped_clean", "error", "completed"})
 
-# A session whose PID is no longer alive AND whose last_save is older than this
-# is considered stale and reported as INACTIVE.
 _PAPER_STALE_THRESHOLD_SECONDS = 300
 
-# Cap on equity-curve points returned to the dashboard. The last point is
-# always preserved so the most recent value is never lost to downsampling.
+# Downsampling always preserves the latest equity point.
 _PAPER_EQUITY_CURVE_MAX_POINTS = 200
 
 
@@ -516,10 +463,6 @@ def _determine_paper_session_status(data: dict) -> str:
     PID is dead AND its last_save is missing/unparseable/older than the stale
     threshold. Otherwise it's reported as PAPER_TRADING.
     """
-    # Coerce to ``str`` before the set-membership check — a corrupt
-    # ``"status": []`` or ``"status": {}`` is unhashable and would raise
-    # ``TypeError`` on the ``in <set>`` test, aborting discovery for every
-    # paper session.
     raw_status = data.get("status", "unknown")
     status = raw_status if isinstance(raw_status, str) else "unknown"
     if status in _PAPER_INACTIVE_FILE_STATUSES:
@@ -553,9 +496,6 @@ def _compute_paper_equity_pnl(equity_curve: list) -> tuple[Decimal, Decimal, Dec
         initial = Decimal(str(equity_curve[0].get("value", "0")))
         current = Decimal(str(equity_curve[-1].get("value", "0")))
     except (IndexError, AttributeError, ValueError, ArithmeticError):
-        # Decimal(str("garbage")) raises decimal.InvalidOperation (subclass of
-        # ArithmeticError), not ValueError — a corrupt equity_curve endpoint must
-        # not bubble out of paper-session discovery and break dashboard reads.
         return Decimal("0"), Decimal("0"), Decimal("0")
     return initial, current, current - initial
 
@@ -591,10 +531,6 @@ def _build_paper_error_breakdown(persisted: Any, errors: list) -> dict:
     breakdown: dict = {}
     for error in errors:
         if isinstance(error, dict):
-            # Coerce ``error_type`` to a non-empty ``str`` before using as a
-            # dict key — a corrupt ``"error_type": []`` or ``{...}`` is
-            # unhashable and raises ``TypeError`` on the ``breakdown[etype]``
-            # lookup, aborting paper-session discovery.
             raw_etype = error.get("error_type", "unknown")
             etype = raw_etype if isinstance(raw_etype, str) and raw_etype else "unknown"
             breakdown[etype] = breakdown.get(etype, 0) + 1
@@ -701,24 +637,13 @@ def cost_stack_to_proto(cs: Any) -> gateway_pb2.CostStackInfo:
         funding_earned_usd=str(cs.funding_earned_usd),
         realized_pnl_usd=str(cs.realized_pnl_usd),
         il_usd=(str(cs.il_usd) if cs.il_any_measured else ""),
-        # Coverage travels BESIDE the value, never as an absence of it.
-        # PARTIAL = the bucket applies but some applicable event withheld its
-        # term. Not-applicable is already said by the ""-sentinel above, so it
-        # must not also raise this flag.
+        # Coverage qualifies a present value; "" alone means not applicable.
         fees_earned_partial=(cs.fees_earned_applicable and not cs.fees_earned_measured),
         il_partial=(cs.il_applicable and not cs.il_measured),
         inventory_unrealized_usd=("" if cs.inventory_unrealized_usd is None else str(cs.inventory_unrealized_usd)),
-        # VIB-6061 — gated on ``any_measured``, matching fees_earned / il above and
-        # NOT on the all-or-nothing ``measured`` meter. That distinction is the one
-        # this function's docstring records a real money loss over: a strategy with
-        # two settlements, one carrying a priced fee and one not, must still send
-        # the fee it DID measure. Sending "" there would delete real cost.
+        # Partial coverage must not erase measured settlement values.
         cost_venue_execution_fee_usd=(str(cs.venue_execution_fee_usd) if cs.venue_execution_fee_any_measured else ""),
         venue_execution_fee_partial=(cs.venue_execution_fee_applicable and not cs.venue_execution_fee_measured),
-        # VIB-6541 — gated on ``any_measured`` for the same reason as the two above:
-        # this bucket feeds the Strategy PnL headline, so sending "" for a strategy
-        # that measured SOME of its settlement fees would delete real cost from the
-        # headline, which is the exact failure mode this ticket exists to remove.
         cost_perp_settlement_fee_usd=(str(cs.perp_settlement_fee_usd) if cs.perp_settlement_fee_any_measured else ""),
         perp_settlement_fee_partial=(cs.perp_settlement_fee_applicable and not cs.perp_settlement_fee_measured),
     )
@@ -746,37 +671,19 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         self._state_manager: StateManager | None = None
         self._initialized = False
         self._strategies_root: Path | None = None
-        # In-memory cache of strategy positions reported via heartbeat
         self._cached_positions: dict[str, list[gateway_pb2.StrategyPosition]] = {}
-        # VIB-5059: per-deployment quant-input cache + single-flight locks.
-        # The constructor is authoritative; _get_quant_inputs keeps a lazy
-        # re-init guard only because unit tests build the servicer via
-        # __new__ (the established _make_servicer pattern).
         self._quant_inputs_cache: dict[str, tuple[float, Any]] = {}
         self._quant_inputs_locks: dict[str, asyncio.Lock] = {}
-        # VIB-5118/5134: PnL-only lifetime-drawdown checkpoint (separate from the
-        # shared quant-input load so GetCostStack/GetAuditPosture never pay the
-        # full-history NAV scan). The expensive full scan refreshes on the longer
-        # _LIFETIME_DRAWDOWN_TTL_SECONDS cadence; between scans the checkpoint is
-        # advanced by a cheap incremental fold (single-flight per deployment).
+        # Keep the full-history drawdown scan off cost and audit RPCs.
         self._lifetime_dd_ckpt: dict[str, _LifetimeDrawdownCheckpoint] = {}
         self._lifetime_dd_locks: dict[str, asyncio.Lock] = {}
         self._portfolio_chain: PortfolioProviderChain | None = None
 
-        # VIB-4493 Phase 1C/D: cross-servicer reference to PositionService for
-        # the reconciliation triad (Preview/Apply/Report) and
-        # RefreshRegistryFromChain. Wired by GatewayServer._register_services
-        # after both servicers exist (same pattern as PositionService's own
-        # cross-refs to rpc_servicer + state_servicer at server.py:482-484).
-        # Lazy-typed (forward import) to avoid a circular import at module load.
+        # Wired after construction to avoid a circular service import.
         self.position_servicer: Any = None
-        # In-memory caches + concurrency guards for the Phase 1C/D RPCs.
-        # Lazily constructed on first use so unit tests can patch easily.
         self._reconciliation_report_cache: Any = None
         self._preview_token_store: Any = None
-        # Per-strategy asyncio.Lock for RefreshRegistryFromChain. The
-        # underlying PositionService.Reconcile has zero concurrency guard
-        # (audit A2.8) so the lock has to live here.
+        # PositionService.Reconcile has no concurrency guard of its own.
         self._registry_refresh_locks: dict[str, Any] = {}
 
     async def _ensure_initialized(self) -> None:
@@ -784,10 +691,8 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         if self._initialized:
             return
 
-        # Find strategies directory (relative to gateway package)
-        # Try multiple possible locations
         possible_roots = [
-            Path(__file__).parent.parent.parent.parent / "strategies",  # From gateway/services/
+            Path(__file__).parent.parent.parent.parent / "strategies",
             Path.cwd() / "strategies",
             Path(__file__).parent.parent.parent.parent.parent / "strategies",
         ]
@@ -799,9 +704,8 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
 
         if self._strategies_root is None:
             logger.warning("Strategies directory not found")
-            self._strategies_root = Path.cwd() / "strategies"  # Default even if doesn't exist
+            self._strategies_root = Path.cwd() / "strategies"
 
-        # Initialize state manager for reading strategy state
         try:
             from almanak.framework.state.state_manager import (
                 StateManager,
@@ -870,12 +774,10 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                     deployment_id = config.get("deployment_id", strategy_dir.name)
                     strategy_name = config.get("strategy_name", strategy_dir.name)
 
-                    # Derive display name
                     display_name = strategy_name.replace("_", " ").title()
                     if category != "demo":
                         display_name += f" ({category.title()})"
 
-                    # Determine chain and protocol from config
                     raw_chain = config.get("chain")
                     chain = raw_chain if isinstance(raw_chain, str) and raw_chain else LEGACY_SERIALIZED_CHAIN
                     protocol = self._derive_protocol_from_config(config, deployment_id)
@@ -884,7 +786,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                         {
                             "deployment_id": deployment_id,
                             "name": display_name,
-                            "status": "PAUSED",  # Default - will be updated from state
+                            "status": "PAUSED",
                             "chain": chain,
                             "protocol": protocol,
                             "total_value_usd": "0",
@@ -930,11 +832,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
 
     def _build_paper_session(self, state_file: Path, data: dict) -> dict:
         """Assemble a single paper-session info dict from a parsed state file."""
-        # ``data.get("deployment_id", default)`` returns ``None`` when the key is
-        # *present-and-explicitly-null* (the default only fires on absent keys).
-        # Downstream we call ``deployment_id.replace(...)`` and pass it into
-        # ``_derive_protocol_from_config``, which would crash and abort discovery
-        # for *every* paper session. Guard with isinstance + non-empty check.
         raw_deployment_id = data.get("deployment_id")
         deployment_id = (
             raw_deployment_id
@@ -945,10 +842,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         config: dict = raw_config if isinstance(raw_config, dict) else {}
 
         status = _determine_paper_session_status(data)
-        # Untrusted JSON ``config["chain"]`` / ``config["protocol"]`` can be a
-        # dict, list, or other non-string. Downstream callers (``s["chain"].lower()``
-        # in ``ListStrategies``, proto string field population) would crash on
-        # one bad ``.state.json`` and take down the whole response path.
+        # Paper state is untrusted input; keep malformed values out of protobuf fields.
         raw_chain = config.get("chain")
         chain = raw_chain if isinstance(raw_chain, str) and raw_chain else LEGACY_SERIALIZED_CHAIN
         raw_protocol = config.get("protocol")
@@ -958,10 +852,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             else self._derive_protocol_from_config(config, deployment_id)
         )
 
-        # Filter list contents — not just the container type — so a single
-        # non-dict element (e.g. ``trades: [null, {...}]`` from a corrupt
-        # ``.state.json``) doesn't blow up ``_build_paper_metrics``
-        # (``trade.get(...)``) and abort discovery for every other paper session.
         raw_trades = data.get("trades")
         trades: list = [t for t in raw_trades if isinstance(t, dict)] if isinstance(raw_trades, list) else []
         raw_errors = data.get("errors")
@@ -971,9 +861,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             [p for p in raw_equity_curve if isinstance(p, dict)] if isinstance(raw_equity_curve, list) else []
         )
 
-        # PnL from portfolio state, not summed trade deltas (Fix #4).
-        # The equity curve tracks mark-to-market portfolio value including
-        # open positions. PnL = latest equity value - initial value.
+        # Equity endpoints include open-position mark-to-market; trade deltas do not.
         _, current_value, simulated_pnl = _compute_paper_equity_pnl(equity_curve)
 
         paper_metrics = _build_paper_metrics(
@@ -991,7 +879,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             "chain": chain,
             "protocol": protocol,
             "total_value_usd": str(current_value) if current_value else "0",
-            # Keep 0 to avoid contaminating portfolio 24h total; simulated PnL is in paper_metrics_json
+            # Paper PnL is isolated in paper_metrics_json from live 24-hour totals.
             "pnl_24h_usd": "0",
             "last_action_at": _compute_paper_last_action_ts(data.get("last_save")),
             "attention_required": status == "INACTIVE",
@@ -1020,8 +908,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         and let the connector registry (Phase 3) carry the protocol
         identity.
         """
-        # Same untrusted-JSON hazard as the caller: ``config["protocol"]`` could
-        # be a list / dict / None. Only honour a non-empty string.
         explicit = config.get("protocol")
         if isinstance(explicit, str) and explicit:
             return explicit
@@ -1071,14 +957,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         Returns:
             Tuple of (total_value_usd, pnl_usd) as strings.
         """
-        # Level 1 — PortfolioMetrics are always authoritative when available.
-        # They are framework-owned and updated by PortfolioValuer each iteration.
-        #
-        # ``total_value_usd`` may be ``None`` (unmeasured — Empty≠Zero, blueprint
-        # 27 §10.10 / VIB-2475): the metrics row exists but the latest snapshot's
-        # NAV could not be sourced. We must NOT treat that as authoritative — it
-        # is neither a real value (``str(None)`` would render "None") nor a
-        # measured zero. Fall through to the fresh-snapshot grace period instead.
+        # A metrics row with an unmeasured NAV is not a measured zero or an authoritative value.
         if self._state_manager is not None:
             try:
                 metrics = await self._state_manager.get_portfolio_metrics(deployment_id)
@@ -1088,13 +967,11 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             except Exception:
                 logger.debug("Failed to get portfolio metrics for %s", deployment_id, exc_info=True)
 
-        # Level 2 — Fresh snapshot (brief grace period for new strategies that
-        # haven't written PortfolioMetrics yet).
+        # Fresh snapshots bridge startup before PortfolioMetrics exists.
         latest_snapshot = await self._get_latest_snapshot(deployment_id)
         if latest_snapshot is not None and self._snapshot_is_fresh(latest_snapshot):
             return str(latest_snapshot.total_value_usd), "0"
 
-        # No data — don't mask write-side bugs with stale/external fallbacks.
         logger.info(
             "No portfolio data available for %s — neither metrics nor a fresh snapshot exist. "
             "The dashboard will show $0 until the strategy's PortfolioValuer writes data.",
@@ -1124,8 +1001,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             if snapshot_24h is not None and snapshot_24h.total_value_usd > 0:
                 return current_value - snapshot_24h.total_value_usd
 
-            # Strategy running < 24h: fall back to lifetime PnL.
-            # Gas is already reflected in current_value (wallet balance reduced).
+            # Current wallet value already includes gas expenditure.
             metrics = await self._state_manager.get_portfolio_metrics(deployment_id)
             if metrics is not None and metrics.initial_value_usd > 0:
                 return current_value - metrics.initial_value_usd
@@ -1199,27 +1075,12 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                 ts = snap.timestamp
                 if ts.tzinfo is None:
                     ts = ts.replace(tzinfo=UTC)
-                # Empty != Zero + crash-safety (gemini): an unmeasured NAV component
-                # (a legacy/partial typed snapshot with total_value_usd or
-                # available_cash_usd == None) makes wallet NAV unmeasured — SKIP it,
-                # never feed None into wallet_nav_usd (None − Decimal → TypeError).
-                # Mirrors the windowed builder's None/"" guard.
+                # Missing or non-finite NAV components are unmeasured, not zero.
                 if snap.total_value_usd is None or snap.available_cash_usd is None:
                     continue
-                # And, like the windowed path (CodeRabbit): a non-finite Decimal
-                # (NaN/Infinity) on a typed snapshot is unmeasured/corrupt — drop it
-                # rather than sum it into a garbage wallet-NAV magnitude.
                 if not snap.total_value_usd.is_finite() or not snap.available_cash_usd.is_finite():
                     continue
-                # VIB-5942: the chart NAV must be WALLET NAV = net position equity
-                # (total_value_usd − debt) + idle wallet cash, the SAME definition
-                # the "NAV now" tile (compute_pnl_summary) and the drawdown series
-                # (_wallet_navs_from_nav_text) use — one formula via wallet_nav_usd.
-                # Netting alone (the pre-VIB-5942 ``total − debt``) dropped cash, so
-                # a post-close snapshot (position 0, funds back in the wallet) read
-                # NAV 0 and collapsed the chart. Reads the TYPED
-                # PortfolioSnapshot.positions (a real snapshot has no positions_json
-                # attribute); non-leveraged snapshots net Decimal("0") debt.
+                # Chart, headline, and drawdown share wallet NAV: total - debt + idle cash.
                 _count, debt_mark, _debt_cost, _net_cost = net_debt_from_snapshot(snap)
                 net_value = wallet_nav_usd(snap.total_value_usd, debt_mark, snap.available_cash_usd)
                 pnl = net_value - initial_value if initial_value > 0 else Decimal("0")
@@ -1260,8 +1121,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         from almanak.gateway.proto import gateway_pb2
 
         if self._state_manager is None:
-            # Loud: a missing backend on an explicit windowed request must be told,
-            # not masked as "no history" (same contract as the trade-tape primary).
+            # Explicit historical requests fail loudly rather than claiming empty history.
             raise RuntimeError("StateManager unavailable for windowed PnL history")
 
         rows, truncated = await self._state_manager.get_snapshots_in_window(deployment_id, from_dt, to_dt)
@@ -1270,17 +1130,8 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
 
         points: list[NavPoint] = []
         dropped = 0
-        # value_confidence is carried in the store projection (the minimal chart
-        # column set) for forthcoming confidence-aware NAV rendering; PnLDataPoint
-        # has no confidence field yet, so it is intentionally unused here.
         for ts, value_text, cash_text, _confidence, positions_text in rows:
-            # Empty != Zero: an unmeasured NAV component (total_value OR the idle
-            # cash it must be summed with) makes the wallet-NAV point unmeasured —
-            # drop it, never coerce a missing column to a measured $0. Check None/""
-            # EXPLICITLY (gemini): a measured numeric 0 / "0" must be KEPT, so a bare
-            # ``not value_text`` (truthy-trap) would wrongly skip a measured zero.
-            # Spelled out as ``is None or == ""`` (not ``in (None, "")``) so mypy
-            # narrows value_text/cash_text to ``str`` for the Decimal() calls below.
+            # Explicit checks preserve measured "0" while dropping unmeasured components.
             if value_text is None or value_text == "" or cash_text is None or cash_text == "":
                 dropped += 1
                 continue
@@ -1290,19 +1141,9 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             except (InvalidOperation, ValueError, TypeError):
                 dropped += 1
                 continue
-            # VIB-5942 CodeRabbit: Decimal("NaN")/Decimal("Infinity") parse OK but are
-            # non-finite — a corrupt persisted NAV/cash must be treated as UNMEASURED
-            # (dropped), never summed into a garbage wallet-NAV magnitude on the chart.
             if not value.is_finite() or not cash.is_finite():
                 dropped += 1
                 continue
-            # VIB-5170: net the BORROW debt leg per point; VIB-5942: add idle cash so
-            # the windowed chart is WALLET NAV (total − debt + cash) — the SAME
-            # definition the "NAV now" tile and drawdown series use (via
-            # wallet_nav_usd), not net position equity alone (which dropped to 0 on a
-            # post-close snapshot and collapsed the chart). positions_json (raw text,
-            # projected by get_snapshots_in_window) is the debt-netting input;
-            # non-leveraged points net Decimal("0") debt.
             _count, debt_mark, _debt_cost = net_debt_from_positions_json(positions_text)
             value = wallet_nav_usd(value, debt_mark, cash)
             if ts.tzinfo is None:
@@ -1382,10 +1223,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                     "price_usd": None if price_usd is None else str(price_usd),
                 }
             )
-        # ``compute_inventory_revaluation`` reads marks exclusively from
-        # ``wallet_balances_json[].price_usd``; it never consumes ``token_prices_json``.
-        # Emitting only the field the calculation reads keeps this serializer aligned
-        # with the docstring's "only ... needed" contract.
         return {"wallet_balances_json": json.dumps(wallet_balances)}
 
     async def _get_reconciliation_endpoint_snapshots(
@@ -1449,7 +1286,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                 return "STALE"
         return instance.status
 
-    # Supported status_filter values for ListStrategies.
     _SOURCE_FILTERS = frozenset({"REGISTRY", "AVAILABLE", "ALL"})
     _STATUS_FILTERS = frozenset(
         {"RUNNING", "PAUSED", "ERROR", "STUCK", "STALE", "INACTIVE", "ARCHIVED", "PAPER_TRADING"}
@@ -1500,23 +1336,20 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         status_filter = request.status_filter.upper() if request.status_filter else "REGISTRY"
         chain_filter = request.chain_filter.lower() if request.chain_filter else ""
 
-        # Validate filter value
         if status_filter not in self._VALID_FILTERS:
             await context.abort(
                 grpc.StatusCode.INVALID_ARGUMENT,
                 f"Unknown status_filter '{request.status_filter}'. "
                 f"Valid values: {', '.join(sorted(self._VALID_FILTERS))}",
             )
-            return gateway_pb2.ListStrategiesResponse()  # unreachable; defensive
+            return gateway_pb2.ListStrategiesResponse()
 
         strategies: list[dict] = []
 
-        # --- Collect registry instances ---
         include_registry = status_filter != "AVAILABLE"
         registry_template_ids: set[str] = set()
 
         if include_registry or status_filter in ("AVAILABLE", "ALL"):
-            # We always need the registry to build the canonical ID set for dedupe
             try:
                 registry = get_instance_registry()
                 registered = registry.list_all(
@@ -1524,9 +1357,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                 )
 
                 for inst in registered:
-                    # Use strategy_name for dedupe — after ALMANAK_IS_HOSTED normalization,
-                    # deployment_id may be a platform UUID that won't match filesystem
-                    # template names.  strategy_name preserves the original template ID.
+                    # Hosted deployment IDs may differ from the filesystem template identity.
                     template_key = inst.strategy_name or self._canonical_template_id(inst.deployment_id)
                     registry_template_ids.add(template_key)
 
@@ -1534,7 +1365,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                         effective_status = self._compute_effective_status(inst)
                         strategy_info = build_registry_strategy_info(inst, effective_status)
 
-                        # Enrich with state + portfolio data
                         state = await self._get_strategy_state_data(inst.deployment_id)
                         total_value, pnl = await self._get_portfolio_value_and_pnl(
                             inst.deployment_id,
@@ -1554,7 +1384,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             except Exception as e:
                 logger.debug(f"Failed to get instances from registry: {e}")
 
-        # --- Collect filesystem templates (for AVAILABLE and ALL) ---
         if status_filter in ("AVAILABLE", "ALL"):
             for fs_strategy in self._discover_strategies_from_filesystem():
                 template_id = self._canonical_template_id(fs_strategy["deployment_id"])
@@ -1562,27 +1391,20 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                     continue
                 strategies.append(fs_strategy)
 
-        # --- Collect paper trading sessions ---
-        # Include paper sessions for REGISTRY (default), ALL, or any status
-        # filter that could match paper session statuses (PAPER_TRADING, INACTIVE).
         if status_filter not in ("AVAILABLE",):
             for paper_session in self._discover_paper_sessions():
                 strategies.append(paper_session)
 
-        # Apply status filter AFTER all sources are collected (Fix: consistent
-        # filtering for paper sessions — INACTIVE filter catches inactive paper
-        # sessions, PAPER_TRADING filter catches active ones).
+        # Filter only after merging registry and paper sources.
         if status_filter in self._STATUS_FILTERS:
             strategies = [s for s in strategies if s["status"] == status_filter]
 
-        # Apply chain filter
         filtered = []
         for s in strategies:
             if chain_filter and chain_filter not in s["chain"].lower():
                 continue
             filtered.append(s)
 
-        # Convert to proto messages
         summaries = [gateway_pb2.StrategySummary(**build_strategy_summary_kwargs(s)) for s in filtered]
 
         return gateway_pb2.ListStrategiesResponse(
@@ -1613,9 +1435,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             context.set_details(str(e))
             return gateway_pb2.StrategyDetails()
 
-        # One identity (blueprint 29 §4): the validated deployment_id is the
-        # canonical deployment_id; the gateway filters it directly.
-        # Resolve strategy source via registry → filesystem → paper cascade
+        # The validated deployment ID is the storage and registry identity; never translate it here.
         strategy_info = lookup_strategy_source(
             deployment_id=deployment_id,
             registry_getter=get_instance_registry,
@@ -1624,9 +1444,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             discover_paper_sessions=self._discover_paper_sessions,
         )
 
-        # State + latest snapshot from shared Postgres. Fetched up front
-        # because they feed both the hosted decoupled-dashboard fallback
-        # below and the enrichment / position build that follow.
         state = await self._get_strategy_state_data(deployment_id)
         try:
             latest_snap = await self._get_latest_snapshot(deployment_id)
@@ -1635,13 +1452,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             latest_snap = None
 
         if strategy_info is None:
-            # Decoupled hosted dashboard (ALM-2732): the dashboard pod's
-            # gateway has no local registry entry or on-disk source for this
-            # strategy — those live on the strategy pod — so the cascade above
-            # misses. Reconstruct from shared Postgres state/snapshots written
-            # by the strategy pod's gateway under the one canonical
-            # deployment_id (blueprint 29 §4), so the position/PnL panels still
-            # render instead of 404ing. Genuinely-unknown ids still 404.
+            # Hosted dashboard pods reconstruct remote strategies from shared state; unknown IDs still fail.
             strategy_info = build_state_only_strategy_info(deployment_id, state, latest_snap)
 
         if strategy_info is None:
@@ -1649,7 +1460,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             context.set_details(f"Strategy not found: {deployment_id}")
             return gateway_pb2.StrategyDetails()
 
-        # Enrich with state data
         total_value, pnl = await self._get_portfolio_value_and_pnl(deployment_id)
         pnl_metrics = await self._get_portfolio_metrics(deployment_id)
         enrich_strategy_info(
@@ -1661,17 +1471,15 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             preserve_status_precedence=True,
         )
 
-        # Build summary
         summary = gateway_pb2.StrategySummary(**build_strategy_summary_kwargs(strategy_info))
 
-        # Build position info — snapshot wins over state dict fallback
+        # Snapshot valuation wins over the state-dict fallback.
         position = build_position_proto(
             state=state,
             cached_positions=self._cached_positions.get(deployment_id),
             snapshot=latest_snap,
         )
 
-        # Get timeline events if requested
         timeline = []
         if request.include_timeline:
             limit = request.timeline_limit if request.timeline_limit > 0 else 20
@@ -1681,10 +1489,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             )
             timeline = list(timeline_response.events)
 
-        # Build PnL history time series from portfolio snapshots.
-        # Windowed mode (VIB-5059 P2) is selected by max_points > 0; it validates
-        # the window and decimates server-side, and is loud on bad input / backend
-        # failure. The legacy recent-window path (max_points <= 0) is unchanged.
         pnl_history = []
         if request.include_pnl_history:
             if request.max_points > 0:
@@ -1703,9 +1507,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                         deployment_id, from_dt=from_dt, to_dt=to_dt, max_points=request.max_points
                     )
                 except Exception:
-                    # Loud: an explicit windowed request that the backend cannot
-                    # serve must surface as non-OK, not an OK response with empty
-                    # history the operator would read as "no data".
                     logger.exception("Windowed PnL history failed for %s", deployment_id)
                     context.set_code(grpc.StatusCode.UNAVAILABLE)
                     context.set_details("Failed to load windowed PnL history")
@@ -1713,13 +1514,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             else:
                 pnl_history = await self._build_pnl_history(deployment_id)
 
-        # Derive chain health from strategy chains (stub — UNKNOWN until real probing wired)
-        # Fix (#1705): accept any Sequence[str] (tuples are valid). A strict
-        # isinstance(list) check previously coerced tuple chains to an empty
-        # list, producing "no chains" for multi-chain strategies whose producer
-        # happens to return a tuple. ``str`` / ``bytes`` are explicitly excluded
-        # because they ARE Sequences but iterating them yields characters, which
-        # is never what a chain list means.
+        # Strings are sequences but never valid chain collections.
         raw_chains = strategy_info.get("chains")
         if isinstance(raw_chains, Sequence) and not isinstance(raw_chains, str | bytes):
             chains: list[str] = [str(c) for c in raw_chains]
@@ -1776,8 +1571,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
 
         events = []
 
-        # Get events from TimelineStore (primary source)
-        # TimelineStore is initialized at server startup with persistent path if configured
         try:
             store = get_timeline_store()
             timeline_events = store.get_events(
@@ -1804,7 +1597,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         except Exception as e:
             logger.debug(f"Failed to get events from TimelineStore: {e}")
 
-        # Fallback: Try to load events from cache file if TimelineStore is empty
+        # Local cache and state history remain fallbacks when the timeline store is empty.
         if not events:
             cache_file = self._strategies_root.parent / ".dashboard_events.json" if self._strategies_root else None
             if cache_file and cache_file.exists():
@@ -1831,7 +1624,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                 except Exception as e:
                     logger.debug(f"Failed to load timeline events from cache: {e}")
 
-        # Also check state for execution history
         state = await self._get_strategy_state_data(deployment_id)
         if state and "execution_history" in state:
             for exec_record in state.get("execution_history", [])[:limit]:
@@ -1849,7 +1641,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                         )
                     )
 
-        # Sort by timestamp descending and limit
         events.sort(key=lambda e: e.timestamp, reverse=True)
         events = events[:limit]
 
@@ -1881,7 +1672,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             context.set_details(str(e))
             return gateway_pb2.StrategyConfigResponse()
 
-        # Try filesystem first (local development)
+        # Local gateways read files; hosted gateways fall back to registration-time config.
         if self._strategies_root is not None:
             for category in STRATEGY_CATEGORIES:
                 config_file = self._strategies_root / category / deployment_id / "config.json"
@@ -1900,7 +1691,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                         context.set_details("Failed to read strategy config")
                         return gateway_pb2.StrategyConfigResponse()
 
-        # Fallback to instance registry (deployed mode — config was stored at registration)
         try:
             registry = get_instance_registry()
             inst = registry.get(deployment_id)
@@ -1951,20 +1741,17 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             context.set_details(str(e))
             return gateway_pb2.StrategyStateResponse()
 
-        # One identity (blueprint 29 §4): no gateway-side translation.
         state = await self._get_strategy_state_data(deployment_id)
         if state is None:
             context.set_code(grpc.StatusCode.NOT_FOUND)
             context.set_details(f"State not found for strategy: {deployment_id}")
             return gateway_pb2.StrategyStateResponse()
 
-        # Filter fields if specified
         if request.fields:
             filtered_state = {k: v for k, v in state.items() if k in request.fields}
         else:
             filtered_state = state
 
-        # Get version from state manager
         version = 0
         updated_at = 0
         if self._state_manager:
@@ -2017,13 +1804,9 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
 
         action_id = str(uuid4())
 
-        # Log the action for audit
         logger.info(f"Dashboard action: {action} on {deployment_id}, reason: {reason}, action_id: {action_id}")
 
-        # Map dashboard actions to lifecycle commands.
-        # Instead of mutating state flags directly, we write a command to the
-        # LifecycleStore. The strategy runner's poll loop picks it up and
-        # transitions state atomically.
+        # Lifecycle commands are queued for the runner; dashboard RPCs never mutate state flags.
         try:
             command = require_enqueueable_command(parse_lifecycle_command(action))
         except LifecycleValueError:
@@ -2057,10 +1840,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                 action_id=action_id,
             )
 
-    # =========================================================================
-    # Instance Registry RPCs
-    # =========================================================================
-
     # crap-allowlist: VIB-4722 only unified deployment identity fields in the existing registry RPC.
     async def RegisterStrategyInstance(
         self,
@@ -2080,15 +1859,12 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             now = datetime.now(UTC)
 
             existing = registry.get(deployment_id)
-            # Read chains and chain_wallets from request
             chains_str = ",".join(request.chains) if request.chains else request.chain
             chain_wallets_str = ""
             if request.chain_wallets:
                 chain_wallets_str = json.dumps(dict(request.chain_wallets))
 
-            # Derive protocol from strategy name/ID if not provided.
-            # Use the original strategy_name or request.deployment_id for derivation,
-            # not the resolved deployment_id which may be a platform UUID/ALMANAK_IS_HOSTED.
+            # Derive from the caller identity, not a hosted-normalized deployment ID.
             protocol = request.protocol
             if not protocol:
                 config = {}
@@ -2155,7 +1931,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                     error=f"Instance not found: {deployment_id}",
                 )
 
-            # Cache strategy positions (clear stale data when none reported)
             if request.positions:
                 self._cached_positions[deployment_id] = list(request.positions)
             else:
@@ -2214,7 +1989,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         try:
             registry = get_instance_registry()
 
-            # Atomic delete of instance + events in single transaction
             success = registry.purge_with_events(deployment_id)
             if not success:
                 return gateway_pb2.PurgeInstanceResponse(
@@ -2222,7 +1996,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                     error=f"Instance not found: {deployment_id}",
                 )
 
-            # Also clear from timeline cache
             try:
                 store = get_timeline_store()
                 store.clear_events(deployment_id)
@@ -2303,10 +2076,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             has_more=has_more,
         )
 
-    # ----------------------------------------------------------------------
-    # Senior-Quant header + trade tape (dashboard redesign)
-    # ----------------------------------------------------------------------
-
     async def _first_action_wallet_value(self, deployment_id: str) -> Decimal | None:
         """Wallet USD value at the strategy's first action (VIB-3914 anchor).
 
@@ -2329,12 +2098,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         if self._state_manager is None:
             return None
         offset = 0
-        # Batch size doubles per round (64 → _QUANT_ANCHOR_BATCH_MAX). OFFSET
-        # pagination re-scans the skipped rows on every query, so fixed-size
-        # batches make the pathological all-candidates-valueless walk
-        # O(cap²/batch) row-visits on hosted Postgres; doubling keeps the
-        # walk's total row-visits at ~2× one full scan (≈ the legacy single
-        # bulk fetch) while the common case still reads just 64 rows.
+        # Geometric batches bound hosted OFFSET rescans while keeping the common fetch small.
         limit = _QUANT_ANCHOR_BATCH_LIMIT
         while offset < _QUANT_ANCHOR_SCAN_ROW_CAP:
             rows = await self._state_manager.get_ledger_anchor_candidates(deployment_id, limit=limit, offset=offset)
@@ -2392,13 +2156,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             except Exception:
                 logger.debug("get_portfolio_metrics failed for %s", deployment_id, exc_info=True)
             try:
-                # VIB-5026: the latest snapshot must be the *newest* row.
-                # ``get_snapshots_since(ASC, LIMIT 168)`` returns the OLDEST
-                # 168 rows once a deployment has >168 snapshots (~14h at the
-                # 5-min cadence), so ``compute_pnl_summary``'s ``snapshots[-1]``
-                # silently froze on a ~14h-old snapshot. ``get_recent_snapshots``
-                # returns the latest window (oldest-first), so ``[-1]`` is the
-                # true latest and ``_drawdowns`` runs over recent history.
+                # The store returns the latest window oldest-first; snapshots[-1] is current.
                 snapshots = await self._state_manager.get_recent_snapshots(deployment_id, limit=168)
             except Exception:
                 logger.debug("get_recent_snapshots failed for %s", deployment_id, exc_info=True)
@@ -2419,17 +2177,10 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             except Exception:
                 logger.debug("get_accounting_events_for_dashboard failed for %s", deployment_id, exc_info=True)
 
-        # Pull a position summary off the latest snapshot for the primary-risk gauge.
         latest_snapshot = await self._get_latest_snapshot(deployment_id)
         if latest_snapshot is not None:
             position_summary = _QuantPositionSummary(latest_snapshot)
 
-        # VIB-5118: lifetime drawdown is intentionally NOT loaded here. It is a
-        # PnL-surface-only concern (only GetPnLSummary surfaces drawdown), and
-        # the FULL-history ``get_nav_series`` scan it needs is expensive — folding
-        # it into this shared loader would make GetCostStack / GetAuditPosture pay
-        # for a scan they discard. It lives behind its own cached accessor
-        # (:meth:`_get_lifetime_drawdown`) called only by GetPnLSummary.
         return portfolio_metrics, snapshots, ledger_stats, accounting_events, position_summary
 
     async def _get_quant_inputs(
@@ -2449,10 +2200,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         doing so. A TTL of 0 disables caching for sequential calls (the
         kill-switch semantic pinned by tests).
         """
-        # Lazy attribute re-init guard: unit tests build the servicer via
-        # __new__ (skipping __init__) — mirror the established _make_servicer
-        # pattern rather than requiring every harness to know about cache
-        # internals. __init__ owns the authoritative (annotated) definitions.
         if not hasattr(self, "_quant_inputs_cache"):
             self._quant_inputs_cache = {}
             self._quant_inputs_locks = {}
@@ -2469,17 +2216,11 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                 return cached[1]
             inputs = await self._load_quant_inputs(deployment_id)
             now = time.monotonic()
-            # Evict expired entries so the cache cannot grow unbounded. With
-            # the 1 Gateway : 1 Strategy invariant this is a single-entry
-            # dict in practice; the sweep is O(deployments seen in the TTL).
             self._quant_inputs_cache = {
                 key: value for key, value in self._quant_inputs_cache.items() if now - value[0] < ttl
             }
             self._quant_inputs_cache[deployment_id] = (now, inputs)
-            # Prune locks alongside the cache so the lock dict cannot grow
-            # unbounded either. Never drop a lock that is currently held —
-            # a waiter would otherwise race a newcomer's fresh lock (worst
-            # case is reduced coalescing, but there is no reason to allow it).
+            # Retain held locks so waiters cannot race a replacement lock.
             self._quant_inputs_locks = {
                 key: existing
                 for key, existing in self._quant_inputs_locks.items()
@@ -2509,9 +2250,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         Returns ``None`` (→ ``compute_pnl_summary`` degrades to the recent-window
         drawdown) when there is no series or the backend read fails — never raises.
         """
-        # Lazy re-init guard: unit tests build the servicer via __new__ (the
-        # established _make_servicer pattern), so the constructor's attributes
-        # may be absent. The constructor owns the authoritative definitions.
         if not hasattr(self, "_lifetime_dd_ckpt"):
             self._lifetime_dd_ckpt = {}
             self._lifetime_dd_locks = {}
@@ -2524,17 +2262,13 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             now = time.monotonic()
             existing = self._lifetime_dd_ckpt.get(deployment_id)
             if existing is None or now - existing.full_scan_at >= full_ttl:
-                # First call, or the full-scan TTL elapsed: re-seed from a full scan.
                 ckpt = await self._full_scan_lifetime_drawdown(deployment_id, existing)
             else:
-                # Within TTL: keep current-drawdown live with a cheap incremental fold.
                 ckpt = await self._fold_lifetime_drawdown(deployment_id, existing)
             self._lifetime_dd_ckpt[deployment_id] = ckpt
 
-            # Re-read the clock: the full scan may have awaited for a while and the
-            # checkpoint stamps its OWN post-scan time, so prune against a fresh tick.
+            # Awaited scans stamp completion time, so prune against a fresh clock reading.
             now = time.monotonic()
-            # Prune abandoned entries/locks (1 Gateway : 1 Strategy → ~single entry).
             self._lifetime_dd_ckpt = {
                 key: value
                 for key, value in self._lifetime_dd_ckpt.items()
@@ -2547,7 +2281,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             }
 
             if ckpt.state.running_peak is None:
-                # No positive sample yet (empty history or backend failure) — degrade.
                 return None
             return ckpt.state.as_pcts()
 
@@ -2569,8 +2302,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         """
         from almanak.framework.dashboard.quant_aggregations import DrawdownState, fold_nav_text
 
-        # _get_lifetime_drawdown returns early when _state_manager is None, so it is
-        # guaranteed non-None here; assert to narrow the Optional for the type checker.
         assert self._state_manager is not None
         try:
             nav_rows, truncated = await self._state_manager.get_nav_series(deployment_id)
@@ -2579,7 +2310,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             full_ttl = getattr(self, "_lifetime_dd_ttl_seconds", _LIFETIME_DRAWDOWN_TTL_SECONDS)
             retry_at = time.monotonic() - max(0.0, full_ttl - _LIFETIME_DRAWDOWN_RETRY_SECONDS)
             if prior is not None and prior.state.running_peak is not None:
-                # Keep last-known-good lifetime; retry the full scan on the short backoff.
+                # Preserve last-known-good state across transient backend failures.
                 return _LifetimeDrawdownCheckpoint(
                     state=prior.state, cursor=prior.cursor, full_scan_at=retry_at, truncated=prior.truncated
                 )
@@ -2591,8 +2322,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         cursor: tuple[datetime, int] | None = None
         if nav_rows:
             state = fold_nav_text(state, nav_rows)
-            # VIB-5170: rows are (ts, total, cash, id, positions_json); slice the
-            # cursor fields so the trailing positions_json column is ignored here.
+            # Cursor fields precede the trailing positions JSON projection.
             last_ts, _total, _cash, last_id = nav_rows[-1][:4]
             cursor = (last_ts, last_id)
             if truncated:
@@ -2619,14 +2349,10 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         from almanak.framework.dashboard.quant_aggregations import fold_nav_text
 
         if ckpt.cursor is None:
-            # The last full scan saw an empty history; nothing to fold forward. The
-            # next full scan (after the TTL) seeds the cursor once snapshots exist.
             return ckpt
-        # _get_lifetime_drawdown returns early when _state_manager is None.
         assert self._state_manager is not None
         try:
-            # truncated here means "more new rows remain after scan_cap" — benign: we
-            # advance the cursor to the last folded row and catch up on the next call.
+            # A truncated incremental read advances the cursor and catches up next render.
             new_rows, _truncated = await self._state_manager.get_nav_series(deployment_id, since=ckpt.cursor)
         except Exception:
             logger.debug("get_nav_series (incremental) failed for %s", deployment_id, exc_info=True)
@@ -2634,7 +2360,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         if not new_rows:
             return ckpt
         state = fold_nav_text(ckpt.state, new_rows)
-        # VIB-5170: rows carry a trailing positions_json column — slice the cursor fields.
         last_ts, _total, _cash, last_id = new_rows[-1][:4]
         return _LifetimeDrawdownCheckpoint(
             state=state,
@@ -2670,11 +2395,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             ptype_str = ptype.value if hasattr(ptype, "value") else str(ptype)
             if ptype_str != "PERP":
                 continue
-            # Guard against a non-dict ``details`` (corrupt/legacy row, malformed JSON
-            # round-trip): an unguarded ``.get(...)`` would AttributeError and take
-            # down the whole GetPnLSummary RPC for this deployment (gateway = security
-            # boundary — no stack traces to clients). Degrade to {} → every field reads
-            # UNMEASURED, consistent with the section's Empty≠Zero rendering. CodeRabbit.
+            # Malformed persisted details degrade to unmeasured fields, never an RPC failure.
             raw_details = getattr(pos, "details", None)
             details = raw_details if isinstance(raw_details, dict) else {}
 
@@ -2689,8 +2410,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                 protocol=str(getattr(pos, "protocol", "") or ""),
                 chain=str(getattr(pos, "chain", "") or ""),
             )
-            # Direction: prefer the measured boolean; fall back to a measured
-            # ``side`` string; else leave "" (unmeasured — never default to LONG).
+            # Unknown direction remains empty; never default a money position to long.
             is_long = details.get("is_long")
             if isinstance(is_long, bool):
                 entry.is_long = is_long
@@ -2705,10 +2425,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         ts = getattr(snapshot, "timestamp", None)
         if ts is not None:
             if hasattr(ts, "isoformat"):
-                # Stamp naive timestamps as UTC before serializing (VIB-5942) — the
-                # NAV builders normalize tz the same way, and the original defect
-                # family was a time-axis lie; a naive "as of" the client reads in
-                # local time would be a subtler version of it.
+                # Persisted naive timestamps follow the UTC convention used by NAV builders.
                 if getattr(ts, "tzinfo", None) is None:
                     ts = ts.replace(tzinfo=UTC)
                 as_of = ts.isoformat()
@@ -2748,8 +2465,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             position_summary,
         ) = await self._get_quant_inputs(deployment_id)
 
-        # VIB-5118: lifetime drawdown over full history — PnL-surface-only, fetched
-        # behind its own cached accessor so the cost/audit surfaces don't pay for it.
         lifetime_drawdown = await self._get_lifetime_drawdown(deployment_id)
 
         pnl = compute_pnl_summary(
@@ -2761,7 +2476,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             lifetime_drawdown=lifetime_drawdown,
         )
 
-        # VIB-5942 (ALM-2977): snapshot-derived perp story from the LATEST snapshot.
         perp_positions, positions_as_of = self._perp_summaries_from_snapshot(snapshots[-1] if snapshots else None)
 
         return gateway_pb2.PnLSummary(
@@ -2769,15 +2483,9 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             nav_usd=str(pnl.nav_usd),
             perp_positions=perp_positions,
             positions_as_of=positions_as_of,
-            # VIB-6308: coverage travels beside the money it qualifies, so a
-            # client can never render Strategy PnL over a basis that covers only
-            # part of the NAV it is differenced against.
+            # Coverage travels beside the money it qualifies.
             cost_basis_partial=bool(pnl.cost_basis_partial),
-            # VIB-5866: a suppressed (None) metric goes on the wire as the
-            # empty string — the same presence-aware "" => unmeasured encoding
-            # CostStackInfo.inventory_unrealized_usd uses (VIB-4984), so no
-            # proto change is needed. str()/f"{:.2f}" on None would serialise
-            # the literal "None" / raise TypeError and kill the RPC.
+            # Empty strings encode unmeasured optional money values on the wire.
             lifetime_pnl_usd=("" if pnl.lifetime_pnl_usd is None else str(pnl.lifetime_pnl_usd)),
             lifetime_pnl_pct=("" if pnl.lifetime_pnl_pct is None else f"{pnl.lifetime_pnl_pct:.2f}"),
             net_apr_pct=("" if pnl.net_apr_pct is None else f"{pnl.net_apr_pct:.2f}"),
@@ -2785,8 +2493,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             current_drawdown_pct=f"{pnl.current_drawdown_pct:.2f}",
             value_confidence=serialize_value_confidence(pnl.value_confidence),
             age_days=pnl.age_days,
-            # VIB-6283: fractional age as a decimal string; the annualisation
-            # denominator. "" would mean unknown — we always have it here.
+            # Fractional days are the annualization denominator.
             age_days_exact=str(pnl.age_days_exact),
             deployed_capital_usd=str(pnl.deployed_capital_usd),
             available_cash_usd=str(pnl.available_cash_usd),
@@ -2828,28 +2535,8 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
 
         cs = compute_cost_stack(ledger_stats, accounting_events)
 
-        # VIB-4984: mark-to-market of held directional swap inventory. Pure
-        # computation over the already-loaded accounting_events + the latest
-        # snapshot's persisted token_prices — NO new network egress / live
-        # oracle call (gateway boundary preserved).
-        #
-        # VIB-5057: snapshots written by the swap-inventory classifier stamp
-        # ``snapshot_metadata["swap_inventory"]["status"] == "applied"`` —
-        # for those, the inventory's mark already flows through the dashboard's
-        # ``open_position_nav − deployed_capital_usd`` unrealized term (the
-        # writer moved the inventory from cash to deployed), so computing the
-        # legacy additive term too would double-count inventory MTM in
-        # Strategy PnL. Suppress it (None ⇒ "" on the wire — the documented
-        # "not measured here" sentinel). Legacy snapshots (no stamp) keep the
-        # VIB-4984 additive behaviour unchanged. Data-shape gate on the
-        # persisted stamp — version-tolerant across writer/reader rollouts.
-        #
-        # The suppression decision reads the SAME TTL-cached snapshot view the
-        # other quant tiles render from (``snapshots[-1]``), not a fresh
-        # ``_get_latest_snapshot`` — otherwise a classifier-stamped snapshot
-        # landing between RPCs could suppress the additive term here while
-        # GetPnLSummary still computes against the previous snapshot shape,
-        # under-reporting inventory MTM for that refresh.
+        # Use persisted marks only. The same cached snapshot must drive every quant tile.
+        # An applied inventory stamp means the mark is already in position NAV.
         latest_snapshot = snapshots[-1] if snapshots else None
         latest_token_prices = getattr(latest_snapshot, "token_prices", None) or {}
         snapshot_metadata = getattr(latest_snapshot, "snapshot_metadata", None)
@@ -2857,14 +2544,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         if isinstance(swap_inventory_stamp, dict) and swap_inventory_stamp.get("status") == "applied":
             cs.inventory_unrealized_usd = None
         else:
-            # VIB-6362: the writer backs a discovered TOKEN leg with its swap-lot
-            # basis on snapshots the classifier produced no row for
-            # (``capped_to_zero`` / ``dust_residual``) — i.e. exactly the ones
-            # that do NOT stamp "applied" and so still reach this branch. Those
-            # tokens' mark now flows through the leg; marking them again here
-            # would double-count them in Strategy PnL. Per-token, not
-            # whole-snapshot: a co-held token still classified as cash keeps its
-            # additive term.
+            # Exclude only token legs already carrying swap-lot basis; cash inventory remains additive.
             cs.inventory_unrealized_usd = compute_inventory_unrealized(
                 accounting_events,
                 deployment_id,
@@ -2913,13 +2593,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             position_summary,
         ) = await self._get_quant_inputs(deployment_id)
 
-        # Reconciliation needs deployed/NAV anchored the same way the PnL
-        # surface anchors them — so the dashboard and accountant test
-        # agree. Recompute the PnL slice (cheap; same inputs already
-        # loaded) rather than baking those values into a separate config.
-        # VIB-5118: no lifetime_drawdown here — AuditPosture carries no drawdown
-        # field (it only reads pnl.deployed_usd / pnl.nav_usd), so it must not
-        # trigger the full-history scan that GetPnLSummary's accessor does.
+        # Reconciliation shares PnL anchors but must not trigger the unused full-history scan.
         pnl = compute_pnl_summary(
             portfolio_metrics=portfolio_metrics,
             snapshots=snapshots,
@@ -3008,19 +2682,13 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         accounting_events: list[dict[str, Any]] = []
         position_events: list[Any] = []
         if self._state_manager is None:
-            # Same fail-loud contract as a backend exception — see GetTradeTape
-            # which catches and maps to gRPC UNAVAILABLE.
             raise RuntimeError("StateManager unavailable")
 
-        # Primary source — propagate to caller.
-        # Over-fetch by 1 to set has_more; push before_timestamp cursor into SQL
-        # so we never return an empty page when `limit` newer-than-cursor rows exist.
+        # Ledger is authoritative and over-fetched by one for has_more.
         ledger_entries = await self._state_manager.get_ledger_entries(
             deployment_id, since=since_ts, intent_type=None, limit=limit + 1, before=before_ts
         )
-        # Optional enrichment — swallow per-source errors.
         try:
-            # Async sibling — see GetQuantHeader for rationale (VIB-3933).
             accounting_events = await self._state_manager.get_accounting_events_for_dashboard(
                 deployment_id=deployment_id
             )
@@ -3054,16 +2722,11 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         await self._ensure_initialized()
 
         limit = request.limit if request.limit > 0 else 50
-        # Validate the cursor: ``datetime.fromtimestamp`` raises ``OverflowError``
-        # / ``OSError`` / ``ValueError`` on out-of-range epoch values (year > 9999,
-        # platform-specific bounds). Map to INVALID_ARGUMENT so callers can
-        # correct the request — same pattern used by ``GetActivityFeed``.
+        # Untrusted epoch values are caller errors, not internal gateway failures.
         try:
             before_ts = (
                 datetime.fromtimestamp(request.before_timestamp, tz=UTC) if request.before_timestamp > 0 else None
             )
-            # VIB-5059 P2: from_ts is the window lower bound so markers cover the
-            # same window as the NAV chart. 0 = open. Marker UI wiring: VIB-5114.
             from_dt = self._unix_to_dt(request.from_ts)
         except (OverflowError, OSError, ValueError) as e:
             logger.warning(
@@ -3079,17 +2742,12 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             )
             return gateway_pb2.GetTradeTapeResponse()
 
-        # Reject an inverted window loudly rather than returning a silent empty page.
         if from_dt is not None and before_ts is not None and from_dt >= before_ts:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details("inverted window: from_ts must be strictly before before_timestamp")
             return gateway_pb2.GetTradeTapeResponse()
 
-        # Inclusive lower bound: ``get_ledger_entries(since=...)`` filters
-        # ``timestamp > since`` (exclusive), but the NAV chart window includes
-        # ``from_ts`` (``timestamp >= from_ts``). Nudge back one microsecond — the
-        # stored-timestamp resolution — so a trade landing exactly at ``from_ts`` is
-        # kept, matching the chart window (Codex review). 0 → open (None).
+        # The ledger's exclusive lower bound is nudged one storage-resolution unit to match the chart.
         since_ts = (from_dt - timedelta(microseconds=1)) if from_dt is not None else None
 
         try:
@@ -3097,13 +2755,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                 deployment_id, limit, before_ts, since_ts
             )
         except Exception:
-            # Ledger backend failure on the primary source. ``GetTradeTapeResponse``
-            # has no error field, so we can't render an empty list without lying
-            # about what happened — surface UNAVAILABLE so callers can retry or
-            # degrade their UI rather than rendering "no trades" misleadingly.
-            # Stack trace is logged but not returned to the client (gateway is the
-            # security boundary — no implementation details leak across the gRPC
-            # response).
+            # Do not misreport an unavailable ledger as empty or leak backend details.
             logger.exception("get_ledger_entries failed for %s", deployment_id)
             context.set_code(grpc.StatusCode.UNAVAILABLE)
             context.set_details("Failed to load trade tape from ledger backend")
@@ -3126,22 +2778,9 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         has_more = len(ledger_entries) > len(rows)
         return gateway_pb2.GetTradeTapeResponse(rows=rows, has_more=has_more)
 
-    # ----------------------------------------------------------------------
-    # GetActivityFeed (VIB-4042 / PR3) — chronologically merged feed
-    # ----------------------------------------------------------------------
-    # Helpers for proto construction live at module level to keep
-    # ``GetActivityFeed``'s cyclomatic complexity within the project's CRAP
-    # gate (see ``scripts/ci/crap_diff_plugin.py``).
-
     _ACTIVITY_FEED_LIMIT_DEFAULT = 50
     _ACTIVITY_FEED_LIMIT_MAX = 200
-    # CodeRabbit: backfill loop bounds (see ``_gather_activity_feed_page``).
-    # Each attempt fetches ``limit * OVER_FETCH_FACTOR + 1`` per stream so the
-    # boundary filter and incremental dedup typically settle in one pass; the
-    # loop only re-fires when one of those drops a large enough fraction to
-    # leave the page short. ``MAX_BACKFILL_ATTEMPTS`` caps total backend
-    # round-trips so a malformed cursor or a saturated tie-second cannot fan
-    # out unbounded RPC.
+    # Bound backend fan-out when cursor filtering or dedup leaves a page short.
     _ACTIVITY_FEED_OVER_FETCH_FACTOR = 3
     _ACTIVITY_FEED_MAX_BACKFILL_ATTEMPTS = 3
 
@@ -3175,8 +2814,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             return gateway_pb2.GetActivityFeedResponse()
 
         await self._ensure_initialized()
-        # One identity (blueprint 29 §4): no gateway-side translation —
-        # the validated deployment_id IS the canonical deployment_id.
         resolved_id = deployment_id
 
         limit = min(
@@ -3184,12 +2821,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             self._ACTIVITY_FEED_LIMIT_MAX,
         )
         before_ts = request.before_timestamp if request.before_timestamp > 0 else None
-        # CodeRabbit: ``request.before_timestamp`` is an untrusted int64. Out-of-range
-        # values (year > 9999, OS-specific overflow boundaries) raise
-        # OverflowError/OSError/ValueError from ``datetime.fromtimestamp``, which would
-        # surface as gRPC INTERNAL — leak the implementation and prevent the client
-        # from correcting their cursor. Wrap with try/except and map to
-        # INVALID_ARGUMENT so a bad cursor is unambiguously a caller bug.
+        # Treat out-of-range client cursors as INVALID_ARGUMENT, not an internal failure.
         try:
             before_dt = datetime.fromtimestamp(before_ts, tz=UTC) if before_ts is not None else None
         except (OverflowError, OSError, ValueError) as exc:
@@ -3201,9 +2833,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             return gateway_pb2.GetActivityFeedResponse()
         before_id = request.before_id or ""
 
-        # Validate composite cursor (CodeRabbit review). `before_id` is
-        # gateway-emitted in the form "<priority>:<kind>:<item_id>"; reject
-        # malformed pairs upfront rather than silently corrupting pagination.
         cursor_error = self._validate_activity_feed_cursor(before_ts, before_id)
         if cursor_error is not None:
             logger.warning(f"Invalid GetActivityFeed cursor: {cursor_error}")
@@ -3213,16 +2842,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
 
         store_before = self._compute_store_before(before_dt, before_id)
 
-        # CodeRabbit (heavy lift): fetch with a bounded backfill loop instead
-        # of a single ``limit + 1`` over-fetch per stream. ``_apply_boundary_filter``
-        # and ``_select_page_with_incremental_dedup`` can both drop more than
-        # one candidate (dense tie-second at the cursor; duplicate-heavy
-        # timeline window), which used to leave short pages while older rows
-        # remained in the stores. The backfill loop advances per-stream
-        # cursors until the page fills or both streams exhaust. The third
-        # tuple element is the wire-level degradation signal — True only
-        # when MAX_ATTEMPTS was hit without filling AND at least one stream
-        # still has rows (saturated tie-second).
         page_pairs, has_more, backfill_truncated = await self._gather_activity_feed_page(
             resolved_id=resolved_id,
             limit=limit,
@@ -3312,9 +2931,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             new_items = self._apply_boundary_filter(new_items, initial_before_ts, initial_before_id)
             cumulative_items.extend(new_items)
 
-            # Two-stage stable sort: lex DESC on composite key, then numeric
-            # DESC on timestamp. Result: timestamp DESC primary, composite key
-            # DESC at ties.
+            # Stable sorts make timestamp primary and composite key the tie-breaker.
             cumulative_items.sort(key=lambda pair: pair[1], reverse=True)
             cumulative_items.sort(key=lambda pair: pair[0].timestamp, reverse=True)
             page_pairs, has_more = self._select_page_with_incremental_dedup(cumulative_items, limit)
@@ -3324,14 +2941,10 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             if timeline_exhausted and ledger_exhausted:
                 return page_pairs, has_more, False
 
-            # Advance per-stream cursors strictly before each batch's oldest
-            # item so the next over-fetch returns net-new rows. Each stream's
-            # cursor only moves when that stream returned items in this attempt.
+            # Each store uses a strict-before cursor, so advance to its oldest fetched item.
             timeline_cursor_dt = self._advance_stream_cursor(new_timeline_events, timeline_cursor_dt)
             ledger_cursor_dt = self._advance_stream_cursor(new_ledger_entries, ledger_cursor_dt)
 
-        # Exhausted MAX_ATTEMPTS without filling. Set the wire-level
-        # truncation signal AND log so an operator can spot the saturation.
         backfill_truncated = (
             attempts_used >= self._ACTIVITY_FEED_MAX_BACKFILL_ATTEMPTS
             and not (timeline_exhausted and ledger_exhausted)
@@ -3399,10 +3012,9 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         when it's valid (or absent).
         """
         if not before_id:
-            return None  # No tie-breaker — base ``before_timestamp`` cursor is fine alone.
+            return None
         if before_ts is None:
             return "before_id requires before_timestamp"
-        # Expected: "<priority>:<kind>:<id>" with at least three components.
         parts = before_id.split(":", 2)
         if len(parts) != 3:
             return f"before_id must be '<priority>:<kind>:<id>'; got {before_id!r}"
@@ -3416,7 +3028,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             return f"before_id kind must be 'L' or 'T'; got {kind!r}"
         if not item_id:
             return "before_id item_id may not be empty"
-        # Cross-check: priority "1" pairs with kind "L"; priority "0" pairs with "T".
         expected_kind = "L" if priority == _ACTIVITY_FEED_KEY_LEDGER_PRIORITY else "T"
         if kind != expected_kind:
             return f"before_id kind {kind!r} inconsistent with priority {priority!r}"
@@ -3484,9 +3095,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                 before=store_before,
             )
         except TypeError:
-            # Backend signature may not yet accept ``before`` (mock in a unit
-            # test). Production backends all do (see
-            # SQLiteStore.get_ledger_entries / StateManager.get_ledger_entries).
             return await self._load_ledger_fallback_no_before(
                 resolved_id, limit_plus_one, intent_type_filter, store_before
             )
@@ -3575,17 +3183,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         """
         page: list[tuple[gateway_pb2.ActivityFeedItem, str]] = []
         seen_ledger_ids: set[str] = set()
-        # CodeRabbit on PR #2117 round 5: a single ledger row can be referenced
-        # by MULTIPLE timeline events (e.g. an LP_OPEN with two UX cards — one
-        # for "position opened", one for "fee tier set" — both pointing back
-        # at the same execution row, or duplicate rows from a re-emit). The
-        # earlier ``dict[str, int]`` shape lost all but the last reference,
-        # so when the ledger landed only ONE timeline was popped and the
-        # others leaked into the response — a silent violation of the
-        # dedup-by-`related_ledger_entry_id` contract. Track a list per ref;
-        # pop all of them in descending order so the indices of remaining
-        # pending refs only need to be decremented by the count of removals
-        # below their position.
+        # One ledger row may replace multiple timeline events that reference it.
         pending_timeline_refs: dict[str, list[int]] = {}
         has_more = False
 
@@ -3596,40 +3194,30 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             indices = pending_timeline_refs.pop(lid, None)
             if not indices:
                 return
-            # Pop in descending order — popping a higher index does not
-            # invalidate lower indices.
+            # Descending pops preserve lower indices.
             removed_sorted = sorted(indices, reverse=True)
             for ridx in removed_sorted:
                 page.pop(ridx)
-            # Decrement any surviving pending index by the number of removed
-            # slots that sat below it.
             for ref, refs in list(pending_timeline_refs.items()):
                 pending_timeline_refs[ref] = [i - sum(1 for r in removed_sorted if r < i) for i in refs]
 
         for item, key in sorted_items:
             if len(page) >= limit:
-                # Strict page boundary — past-the-page ledgers do NOT promote.
+                # A ledger outside the page cannot evict a newer in-page timeline event.
                 has_more = True
                 break
 
             if item.kind == gateway_pb2.ActivityFeedItem.Kind.LEDGER_ENTRY:
                 lid = item.ledger_entry.id
                 if lid in seen_ledger_ids:
-                    # Duplicate ledger id (shouldn't happen — ids are unique).
                     continue
-                # Replace ALL pending timeline rows for this ledger id with
-                # the ledger row. The ledger sorts later than its timeline
-                # siblings (older ts), so appending after the pops preserves
-                # DESC order.
                 _drop_pending(lid)
                 seen_ledger_ids.add(lid)
                 page.append((item, key))
                 continue
 
-            # TIMELINE_EVENT
             ref = item.timeline_event.related_ledger_entry_id
             if ref and ref in seen_ledger_ids:
-                # Ledger already on page — drop the duplicate.
                 continue
             idx = len(page)
             page.append((item, key))
@@ -3663,23 +3251,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             ]
         return [(item, key) for (item, key) in items if item.timestamp < before_ts]
 
-    # =========================================================================
-    # VIB-4493 Phase 1 RPCs — Dashboard Production-Ready Rewrite
-    # =========================================================================
-    #
-    # Six new RPCs that replace SQLite-direct reads in framework/dashboard/**.
-    # Source-of-truth design doc: PortfolioManager/DashboardMay16.md v5.
-    # Parent epic: VIB-4492.
-    #
-    # Phase 1B (this commit) adds:
-    #   - GetPositions
-    #   - GetPositionRangeHistory
-    # Phase 1C / 1D land the reconciliation triad + RefreshRegistryFromChain.
-    #
-    # Pattern matches existing handlers (GetTransactionLedger, GetTradeTape):
-    # validate_deployment_id → _ensure_initialized →
-    # extract params → state_manager calls → build proto response.
-
     async def _build_snapshot_position_index(
         self,
         deployment_id: str,
@@ -3692,8 +3263,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         the project's CC=15 gate (VIB-4493 Phase 1 follow-up).
         """
         snapshot_by_id: dict[str, dict[str, Any]] = {}
-        # Callers (GetPositions) already short-circuit on `_state_manager is None`;
-        # the assert pins that contract for mypy without a runtime guard cost.
         assert self._state_manager is not None
         try:
             latest = await self._state_manager.get_latest_snapshot(deployment_id)
@@ -3709,9 +3278,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             elif isinstance(pos, dict):
                 pos_dict = dict(pos)
             else:
-                # Object with __dict__ (dataclass without to_dict); copy attrs.
-                # Slot-based classes have no __dict__ → vars() raises TypeError;
-                # skip rather than fail the whole RPC for one malformed row.
                 try:
                     pos_dict = dict(vars(pos))
                 except TypeError:
@@ -3746,7 +3312,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             derive_cutover_state,
         )
 
-        assert self._state_manager is not None  # caller (GetPositions) guards
+        assert self._state_manager is not None
         cutover_by_category: dict[str, CutoverDerivation] = {}
         for category in accounting_categories:
             if not category:
@@ -3828,8 +3394,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         await self._ensure_initialized()
 
         if self._state_manager is None:
-            # No backend — return empty response with a single PRE_BACKFILL
-            # cutover entry (handler is degraded but renderer can still paint).
             return gateway_pb2.GetPositionsResponse()
 
         chain_filter = (request.chain or "").strip() or None
@@ -3847,14 +3411,9 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             logger.warning("get_position_registry_open_rows failed in GetPositions: %s", e)
             registry_rows = []
 
-        # Snapshot index — used for valuation matching on the authoritative
-        # lane. Snapshot.positions[*] uses ``position_id`` as its primary key;
-        # registry rows use ``handle`` (display) or ``physical_identity_hash``
-        # (PK). The gateway-side LP backfill writes ``handle = position_id``
-        # today (cutover.py:69 / backfill.py:861), so a single dict suffices.
+        # Snapshot position_id matches the registry handle used by the backfill writer.
         snapshot_by_id, snapshot_taken_at_unix = await self._build_snapshot_position_index(deployment_id)
 
-        # Per-category cutover derivations.
         now_unix = int(datetime.now(tz=UTC).timestamp())
         accounting_categories = {row.get("accounting_category", "") for row in registry_rows}
         if accounting_category_filter:
@@ -3866,7 +3425,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             now_unix=now_unix,
         )
 
-        # Authoritative lane.
         positions = _build_authoritative_positions(
             registry_rows=registry_rows,
             cutover_by_category=cutover_by_category,
@@ -3874,16 +3432,12 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             snapshot_taken_at_unix=snapshot_taken_at_unix,
         )
 
-        # Build the cutover state entries for the response. Always returned —
-        # the renderer uses them to label per-category headers.
+        # Always return cutover state so renderers can label each category.
         cutover_entries = [
             build_cutover_state_entry(accounting_category=category, derivation=derivation)
             for category, derivation in cutover_by_category.items()
         ]
 
-        # Apply optional PositionStatus filter. OPEN only is supported in v1
-        # anyway (state-manager method constraint); request status_filter is
-        # honored for forward-compat.
         if request.status != gateway_pb2.POSITION_STATUS_UNSPECIFIED:
             positions = [p for p in positions if p.status == request.status]
 
@@ -3947,21 +3501,13 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
 
         primitive = infer_primitive_from_accounting_category(request.accounting_category)
 
-        # Source routing — non-LP/PERP primitives short-circuit to a stub
-        # message rather than empty entries, so renderers can show a
-        # purpose-built explanation instead of a blank table.
+        # Unsupported history sources return an explicit renderer-facing stub.
         if primitive == "lending":
             return gateway_pb2.GetPositionRangeHistoryResponse(stub_message=LENDING_RANGE_HISTORY_V1_STUB)
         if primitive == "swap":
             return gateway_pb2.GetPositionRangeHistoryResponse(stub_message=RANGE_HISTORY_NA_STUB)
 
-        # LP/PERP: resolve the wire identifier to the position_events
-        # `position_id` we can query with. The state manager's
-        # `get_position_history` only filters by (deployment_id, position_id),
-        # so we (a) translate physical_identity_hash → handle via the
-        # registry when needed, and (b) post-filter the events by chain
-        # and accounting_category to honor the wire contract — handles can
-        # collide across chains / categories (Codex review fix).
+        # Handles can collide across chains and categories, so resolve then post-filter.
         position_id = await self._resolve_position_history_key(
             deployment_id=deployment_id,
             chain=request.chain,
@@ -3970,9 +3516,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             physical_identity_hash=request.physical_identity_hash,
         )
         if not position_id:
-            # Hash supplied but no matching registry row (or registry lookup
-            # failed). Surface as "no events" rather than 500 — caller can
-            # decide to retry with a handle.
             return gateway_pb2.GetPositionRangeHistoryResponse(
                 stub_message=(
                     "no registry row matched the supplied identifier on this "
@@ -3982,9 +3525,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             )
 
         try:
-            # Positional args — base StateManager uses `deployment_id`, the runtime
-            # GatewayStateManager uses `deployment_id`. Positional binding works
-            # for both and keeps mypy from picking the base-class signature.
             events = await self._state_manager.get_position_history(
                 deployment_id,
                 position_id,
@@ -3993,14 +3533,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             logger.warning("get_position_history failed in GetPositionRangeHistory: %s", e)
             events = []
 
-        # Post-filter by chain + accounting_category since the state-manager
-        # method doesn't accept them. Without this, two positions sharing a
-        # handle across chains would have their lifecycles commingled.
-        # Permissive: an event missing chain / accounting_category (legacy
-        # schema, pre-typed cutover) is left in — we already constrained
-        # the position_id via the registry lookup above, so the remaining
-        # ambiguity is only "events with no chain stamp" which can't
-        # collide on the typed dimensions anyway.
+        # Legacy unstamped events remain eligible after registry-scoped identity resolution.
         def _matches(e: dict, key: str, expected: str) -> bool:
             if not expected:
                 return True
@@ -4053,7 +3586,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         if not physical_identity_hash:
             return handle
         if self._state_manager is None:
-            return handle  # degraded; let the caller try the raw input
+            return handle
         try:
             rows = await self._state_manager.get_position_registry_open_rows(
                 deployment_id,
@@ -4065,17 +3598,12 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                 "get_position_registry_open_rows failed in _resolve_position_history_key: %s",
                 e,
             )
-            return handle  # best effort fallback
+            return handle
         for row in rows:
             if row.get("physical_identity_hash") == physical_identity_hash:
                 resolved = row.get("handle") or row.get("physical_identity_hash") or ""
                 return str(resolved)
-        # No registry match — caller decides whether to fall back or stub.
         return ""
-
-    # =========================================================================
-    # VIB-4493 Phase 1C — Reconciliation triad
-    # =========================================================================
 
     async def _resolve_chain_and_wallet(self, deployment_id: str) -> tuple[str, str]:
         """Resolve (chain, wallet_address) for a reconciliation call.
@@ -4096,8 +3624,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             return ("", "")
         chain = getattr(snap, "chain", "") or ""
         wallet = ""
-        # PortfolioSnapshot may carry wallet_address directly or on the
-        # first wallet_balance entry (multi-chain snapshots vary). Try both.
+        # Multi-chain snapshots may place the wallet on their first balance.
         wallet = getattr(snap, "wallet_address", "") or ""
         if not wallet and getattr(snap, "wallet_balances", None):
             try:
@@ -4130,17 +3657,12 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             deployment_id=deployment_id,
             chain=chain,
             wallet_address=wallet_address,
-            primitives=["lp"],  # v1: LP-only; non-LP surface stubs
+            primitives=["lp"],
             apply=apply,
             operator_note=operator_note,
             trigger=trigger,
         )
-        # The in-process call uses a stub context — PositionService.Reconcile
-        # only uses context.set_code / set_details for INVALID_ARGUMENT paths,
-        # which surface as response-with-empty-buckets when we hand a
-        # MagicMock-equivalent. Use a minimal real context wrapper that
-        # logs but doesn't abort.
-        import grpc as _grpc  # local for type clarity
+        import grpc as _grpc
 
         class _PassthroughContext:
             """Minimal ServicerContext-like — captures set_code / set_details
@@ -4160,9 +3682,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                 pass
 
             async def abort(self, _code: Any, _details: str) -> None:
-                # PositionService.Reconcile shouldn't reach abort() but we
-                # implement it for safety — raise so the in-process caller
-                # sees the same failure shape as a real gRPC client would.
                 raise _grpc.RpcError(f"Reconcile aborted: {_details}")
 
         ctx = _PassthroughContext()
@@ -4204,9 +3723,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
 
         chain, wallet = await self._resolve_chain_and_wallet(deployment_id)
         if not chain or not wallet:
-            # No snapshot yet — return empty findings with a clear stub message
-            # via the primitive_stubs surface. The renderer's empty-state copy
-            # surfaces the "no data yet" case.
             return gateway_pb2.GetReconciliationReportResponse(
                 as_of=datetime.fromtimestamp(now_unix, tz=UTC).isoformat(),
             )
@@ -4259,7 +3775,8 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         """
         required = (self.settings.operator_token or "").strip()
         if not required:
-            return True  # opt-out: no operator token configured
+            # An unset second factor intentionally preserves local and single-user behavior.
+            return True
 
         metadata = dict(context.invocation_metadata() or [])
         provided = metadata.get("x-operator-token", "")
@@ -4308,7 +3825,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
 
         if self._preview_token_store is None:
             self._preview_token_store = PreviewTokenStore(default_ttl_seconds=300)
-        # Opportunistic GC to keep the store bounded.
         self._preview_token_store.gc_expired(now_unix_seconds=now_unix)
 
         chain, wallet = await self._resolve_chain_and_wallet(deployment_id)
@@ -4329,7 +3845,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             context.set_details("position_servicer unwired on this gateway instance")
             return gateway_pb2.PreviewReconcileResponse()
 
-        # Build the fingerprint that ApplyReconcile will re-validate against.
         registry_rows: list[dict[str, Any]] = []
         ledger_max_id = ""
         if self._state_manager is not None:
@@ -4417,8 +3932,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         now_unix = int(datetime.now(tz=UTC).timestamp())
 
         if self._preview_token_store is None:
-            # Token was never issued by this process — most likely a gateway
-            # restart between Preview and Apply. Surface clearly.
             self._preview_token_store = PreviewTokenStore(default_ttl_seconds=300)
 
         status, entry = self._preview_token_store.consume(
@@ -4445,31 +3958,8 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                 detail="chain/wallet resolution failed between preview and apply",
             )
 
-        # CRITICAL: detect drift BEFORE mutating. Earlier implementations
-        # called Reconcile(apply=True) and only checked the fingerprint
-        # afterwards — which meant STATE_DRIFT responses could lie about
-        # whether rows had already been written.
-        #
-        # Sequence:
-        #   1. Dry-run Reconcile (apply=False) to sample the current
-        #      source_block_number atomically with the diff buckets.
-        #   2. Read current registry + ledger state. Order matters: doing
-        #      the state reads AFTER the dry-run keeps all three fingerprint
-        #      inputs sampled in the same forward direction (block_number
-        #      → registry → ledger). Reading state first would let a write
-        #      that lands between the reads and the dry-run slip through
-        #      fingerprint equality (CodeRabbit TOCTOU finding).
-        #   3. Build the current fingerprint and compare to the token's.
-        #      Any mismatch → STATE_DRIFT, NO writes performed.
-        #   4. Only on match: invoke Reconcile(apply=True).
-        #
-        # There remains a small race window between step 3 and step 4
-        # (chain head can advance, another writer can fire); v1 accepts
-        # this. A future ticket can teach PositionService.Reconcile to
-        # take an expected source_block_number / fingerprint and reject
-        # atomically — that closes the window entirely. Today, any
-        # in-window drift surfaces as PARTIAL_SUCCESS / per-primitive
-        # errors from Reconcile rather than as silent corruption.
+        # Sample chain first, then registry and ledger; reject drift before any mutation.
+        # Reconcile reports drift that occurs in the remaining compare-to-apply race window.
         dry_run_response = await self._invoke_reconcile(
             deployment_id=deployment_id,
             chain=chain,
@@ -4516,8 +4006,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                 reconciliation_id=dry_run_response.reconciliation_id,
             )
 
-        # Fingerprint matches — safe to apply. The second Reconcile will
-        # write registry rows for any phantom_missing it still sees.
         reconcile_response = await self._invoke_reconcile(
             deployment_id=deployment_id,
             chain=chain,
@@ -4532,9 +4020,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                 detail="position_servicer unwired on this gateway instance",
             )
 
-        # The drift check already gated us here. fingerprint_matched=True
-        # is the contract for categorize_apply_result on the post-apply
-        # response.
         result_code, detail = categorize_apply_result(
             reconcile_response=reconcile_response,
             fingerprint_matched=True,
@@ -4547,10 +4032,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             primitive_errors=list(reconcile_response.primitive_errors),
             reconciliation_id=reconcile_response.reconciliation_id,
         )
-
-    # =========================================================================
-    # VIB-4493 Phase 1D — RefreshRegistryFromChain
-    # =========================================================================
 
     async def RefreshRegistryFromChain(
         self,
@@ -4589,8 +4070,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
 
         await self._ensure_initialized()
 
-        # Per-strategy lock construction is itself thread-safe in asyncio
-        # (single event loop) — no extra synchronization needed.
         lock = self._registry_refresh_locks.get(deployment_id)
         if lock is None:
             lock = _asyncio.Lock()
@@ -4624,9 +4103,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                     detail="position_servicer unwired on this gateway instance",
                 )
 
-            # positions_refreshed = matched + rebuilt (rows whose on_chain_verified_at
-            # was just updated). events_emitted = rebuilt_count (registry rows
-            # newly inserted, each emits a corresponding event in the writer path).
             positions_refreshed = int(reconcile_response.matched_count) + int(reconcile_response.rebuilt_count)
             events_emitted = int(reconcile_response.rebuilt_count)
 
