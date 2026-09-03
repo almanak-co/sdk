@@ -522,19 +522,51 @@ class V4PoolKeyCache:
                 self.known_pool_count(chain),
             )
 
+        # Targeted single-pool lookup. The broad scans ingest every pool's
+        # event within a bounded window. A lookup for one pool does not
+        # need that breadth: the event indexes the pool id as topics[1],
+        # so filtering on it over full history returns exactly the log
+        # that created this pool. The result is a single log, so no
+        # bisection is required. When it misses, the bounded historical
+        # scan below still runs.
+        if target_pool_id is not None:
+            if self._index.get(chain, {}).get(target_pool_id) is None:
+                found = await self._scan_for_target_pool_id(
+                    chain=chain,
+                    w3=w3,
+                    pool_manager=pool_manager,
+                    target_pool_id=target_pool_id,
+                    to_block=head,
+                )
+                if found:
+                    return
+
         # --- Pass 2: historical backward expansion ----------------------
-        # Only run when a specific lookup target is still missing AND there
-        # is unscanned history left below the configured floor.
+        await self._expand_historical_once(
+            chain=chain,
+            w3=w3,
+            pool_manager=pool_manager,
+            head=head,
+            target_pool_id=target_pool_id,
+        )
+
+    async def _expand_historical_once(
+        self,
+        *,
+        chain: str,
+        w3: AsyncWeb3,
+        pool_manager: str,
+        head: int,
+        target_pool_id: str | None,
+    ) -> None:
+        """Scan one bounded window below the earliest covered block."""
         if target_pool_id is None:
             return
         if self._index.get(chain, {}).get(target_pool_id) is not None:
             return
-
         earliest = self._earliest_scanned_block.get(chain)
         if earliest is None or earliest <= 0:
             return
-
-        # Per-process floor: don't expand below ``head - max_historical_blocks``.
         floor = max(0, head - self._max_historical_blocks)
         if earliest <= floor:
             logger.debug(
@@ -546,12 +578,10 @@ class V4PoolKeyCache:
                 target_pool_id,
             )
             return
-
         hist_to = earliest - 1
         hist_from = max(floor, earliest - self._historical_window)
         if hist_from > hist_to:
             return
-
         added = await self.populate_from_logs(
             chain=chain,
             w3=w3,
@@ -560,8 +590,7 @@ class V4PoolKeyCache:
             to_block=hist_to,
         )
         if added is None:
-            # RPC failure — preserve earliest watermark so next lookup retries.
-            # VIB-4426 P1 #2 — surface as UNAVAILABLE.
+            # Preserve watermark so the next lookup retries this range.
             raise PoolKeyCacheError(
                 f"eth_getLogs failed for chain={chain} range=[{hist_from}..{hist_to}] (historical)",
                 code="unavailable",
@@ -629,6 +658,52 @@ class V4PoolKeyCache:
                 idx[pid] = key
                 added += 1
         return added
+
+    async def _scan_for_target_pool_id(
+        self,
+        *,
+        chain: str,
+        w3: AsyncWeb3,
+        pool_manager: str,
+        target_pool_id: str,
+        to_block: int,
+    ) -> bool:
+        """Resolve one pool by filtering its indexed id over full history.
+
+        Returns True when the target is found and registered, False
+        otherwise. A scan failure logs and returns False so the bounded
+        historical pass still runs as fallback. Point lookup does not
+        advance range watermarks since it proves nothing about contiguous
+        coverage.
+        """
+        address = AsyncWeb3.to_checksum_address(pool_manager)
+        try:
+            raw_logs = await w3.eth.get_logs(
+                {
+                    "fromBlock": 0,
+                    "toBlock": to_block,
+                    "address": address,
+                    "topics": [INITIALIZE_EVENT_TOPIC, target_pool_id],
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "V4PoolKeyCache: targeted Initialize scan failed chain=%s pool_id=%s; "
+                "falling back to bounded historical scan: %s",
+                chain,
+                target_pool_id,
+                exc,
+            )
+            return False
+        chain_l = chain.lower()
+        idx = self._index.setdefault(chain_l, {})
+        for raw in raw_logs:
+            decoded = _decode_initialize_log(dict(raw))
+            if decoded is None:
+                continue
+            pid, key = decoded
+            idx.setdefault(pid, key)
+        return idx.get(target_pool_id) is not None
 
     async def _get_initialize_logs_chunked(
         self,

@@ -453,6 +453,10 @@ class TestV4PoolKeyCache:
 
         async def fake_get_logs(params: dict) -> list[dict]:
             ranges_called.append((params["fromBlock"], params["toBlock"]))
+            # Targeted single-pool scan misses so the historical-expansion
+            # fallback below is exercised.
+            if len(params.get("topics", [])) == 2:
+                return []
             # Forward tail returns the unrelated pool, historical returns target.
             if params["fromBlock"] >= 90:
                 return [forward_log]
@@ -505,9 +509,75 @@ class TestV4PoolKeyCache:
             result = await cache.lookup("base", _POOL_ID_BYTES)
 
         assert result is None
-        # get_logs is never called because the forward tail is empty (last+1 > head)
-        # AND the historical floor blocks the backward pass.
-        assert w3.eth.get_logs.await_count == 0
+        # Forward tail is empty (last+1 > head) and the historical floor
+        # blocks the backward pass. The single targeted point lookup still
+        # runs since it is one log, not a bounded range scan.
+        assert w3.eth.get_logs.await_count == 1
+        only_call = w3.eth.get_logs.await_args.args[0]
+        assert len(only_call.get("topics", [])) == 2
+
+    @pytest.mark.asyncio
+    async def test_targeted_scan_recovers_pool_beyond_historical_floor(self) -> None:
+        """Pools initialized before the bounded floor resolve via the
+        targeted point lookup filtering on the indexed pool id."""
+        cache = V4PoolKeyCache(historical_window=10, max_historical_blocks=20, backfill_blocks=10)
+        target_log = _make_initialize_log(pool_id_hex=_POOL_ID_HEX)
+        calls: list[dict] = []
+
+        async def fake_get_logs(params: dict) -> list[dict]:
+            calls.append(params)
+            if len(params.get("topics", [])) == 2:
+                assert params["fromBlock"] == 0
+                assert params["topics"][1] == "0x" + _POOL_ID_HEX
+                return [target_log]
+            return []
+
+        w3 = MagicMock()
+        w3.eth.block_number = _AwaitableInt(1_000_000)
+        w3.eth.get_logs = AsyncMock(side_effect=fake_get_logs)
+
+        with (
+            patch.object(cache, "_get_or_create_web3", return_value=w3),
+            patch(
+                "almanak.connectors.uniswap_v4.gateway.pool_key_cache.UNISWAP_V4",
+                {"base": {"pool_manager": "0x498581fF718922c3f8e6A244956aF099B2652b2b"}},
+            ),
+        ):
+            result = await cache.lookup("base", _POOL_ID_BYTES)
+
+        assert result is not None
+        assert result.fee == _FEE
+        assert ("0x" + _POOL_ID_HEX) in cache._index["base"]
+
+    @pytest.mark.asyncio
+    async def test_targeted_scan_failure_falls_back_to_bounded_scan(self) -> None:
+        """A targeted-scan RPC failure must not surface; the bounded
+        historical pass still runs as fallback."""
+        cache = V4PoolKeyCache(historical_window=10, max_historical_blocks=100, backfill_blocks=10)
+        target_log = _make_initialize_log(pool_id_hex=_POOL_ID_HEX)
+
+        async def fake_get_logs(params: dict) -> list[dict]:
+            if len(params.get("topics", [])) == 2:
+                raise RuntimeError("range too large for this provider")
+            if params["fromBlock"] >= 90:
+                return []
+            return [target_log]
+
+        w3 = MagicMock()
+        w3.eth.block_number = _AwaitableInt(100)
+        w3.eth.get_logs = AsyncMock(side_effect=fake_get_logs)
+
+        with (
+            patch.object(cache, "_get_or_create_web3", return_value=w3),
+            patch(
+                "almanak.connectors.uniswap_v4.gateway.pool_key_cache.UNISWAP_V4",
+                {"base": {"pool_manager": "0x498581fF718922c3f8e6A244956aF099B2652b2b"}},
+            ),
+        ):
+            result = await cache.lookup("base", _POOL_ID_BYTES)
+
+        assert result is not None
+        assert result.fee == _FEE
 
     @pytest.mark.asyncio
     async def test_refresh_chain_reuses_web3_client_across_calls(self) -> None:

@@ -119,34 +119,34 @@ def _safe_log(level: int, msg: str, *args: object, **kwargs: object) -> None:
         pass
 
 
-# Disk-cache schema version. Bump this whenever the static registry's view of
-# an already-cached token changes in a way that would silently serve wrong
-# values to anyone with a warm cache. v2 was introduced by PR #2505 because v1
-# could carry a stale ``bsc:WBTC`` / ``bsc:0x7130d2a1…`` entry recording
-# ``decimals=8`` (off-by-10^10 vs the on-chain BTCB contract's 18 decimals).
-# v3 makes address keys chain-family-aware: v2 lowercased Solana base58 mints,
-# so a differently-cased mint could hit metadata for another identity.
-# On load, a version mismatch drops the entire disk cache and forces a re-fill
-# from the corrected static registry. Cheap insurance — cache rebuilds itself
-# from registry hits within a single session.
+# Persisted token metadata is untrusted: decimals control powers-of-ten amount
+# scaling, so a stale value can silently change transaction quantities.
+# Schema mismatches invalidate the complete cache rather than migrating rows
+# whose semantic validity cannot be established from stored data alone.
+# The version covers authoritative metadata and cache-key normalization.
+# EVM address keys are case-insensitive; Solana base58 mint keys preserve case
+# because case changes asset identity. Any change that could let a warm cache
+# override current registry facts requires a version bump and cold rebuild.
+# Rebuilding from authoritative resolution is safer than retaining metadata
+# whose identity or decimal scale may no longer be valid.
 DISK_CACHE_SCHEMA_VERSION = 3
 
-#: Minimum gap between disk-cache read retries after a transient fault.
+# A cooldown keeps transient disk faults retryable without causing read storms.
 _DISK_RETRY_COOLDOWN_S = 30.0
 
-#: How often to re-report a persistent disk-cache read fault. Long enough not to
-#: spam, short enough that a permanent misconfiguration does not go silent.
+# Persistent disk faults remain visible without warning on every lookup;
+# the interval bounds hot-path log volume.
 _DISK_ERROR_REPORT_INTERVAL_S = 900.0
 
-#: Attempts to find an unused temp-file name before giving up.
+# Bound unique-name attempts so a hostile namespace cannot spin indefinitely.
 _TEMP_NAME_ATTEMPTS = 10
 
-#: Fallback cache directory, used when the user's home is not writable.
-#: A SHARED namespace (see ``_write_disk_cache``). The cache is created with the
-#: umask-derived mode there as everywhere else — NOT 0600. A restrictive mode was
-#: tried here and withdrawn: it removed self-healing and forced a rebuild hatch
-#: that destroyed good files. The exposure in this directory is DIRECTORY-level
-#: (VIB-6171) and is not defensible with a mode bit.
+# The fallback can be shared across users, so file mode alone cannot secure
+# its directory entry. Read access follows the process umask; writes create a
+# sibling inode owned by the writer. Symlink traversal is allowed only for
+# reads; writes replace the directory entry without following the target.
+# Following links on writes would enable CWE-59 arbitrary-file overwrite;
+# same-directory replacement confines writes to the cache namespace.
 _SHARED_FALLBACK_DIR = Path("/tmp/.almanak")
 
 
@@ -242,24 +242,18 @@ class TokenCacheManager:
         self._cache_file = self._resolve_cache_file(cache_file)
         self._max_size = max_size
 
-        # Memory cache using OrderedDict for LRU ordering
         self._memory: OrderedDict[str, ResolvedToken] = OrderedDict()
 
-        # Thread safety
         self._lock = threading.RLock()
         self._async_lock: asyncio.Lock | None = None
 
-        # Disk cache state
         self._disk_loaded = False
         self._disk_cache: dict[str, dict[str, Any]] = {}
-        #: Cooldown bookkeeping for transient read faults (see _ensure_disk_loaded).
         self._disk_retry_not_before: float | None = None
         self._disk_read_error_reported_at: float | None = None
         self._disk_write_error_reported_at: float | None = None
-        #: One-shot latch for the symlinked-cache-path warning.
         self._symlink_warned = False
 
-        # Performance tracking
         self._stats = {
             "memory_hits": 0,
             "disk_hits": 0,
@@ -318,49 +312,19 @@ class TokenCacheManager:
         if self._disk_loaded:
             return
         if self._disk_retry_not_before is not None and time.monotonic() < self._disk_retry_not_before:
-            # Inside the cooldown after a read fault: serve cold without another
-            # failed open(). Still NOT latched, so it recovers on its own.
+            # Preserve the unloaded state so transient read failures remain
+            # retryable after the cooldown.
             self._disk_cache = {}
             return
 
         try:
-            # THE READ DELIBERATELY FOLLOWS SYMLINKS; THE WRITE DELIBERATELY
-            # DOES NOT. The asymmetry is intentional — do not "fix" it by
-            # adding O_NOFOLLOW here to match ``_write_disk_cache``.
-            #
-            # The two sides are asymmetric because the CAPABILITIES are:
-            #
-            #   * Write-follows-symlink is an escape primitive. ``os.replace``
-            #     through a resolved path destroys a file OUTSIDE the cache
-            #     directory — an arbitrary-overwrite, which is why the write
-            #     side refuses (CWE-59, and there is a test proving it).
-            #   * Read-follows-symlink grants an attacker nothing new. Planting
-            #     the symlink already requires owning the cache directory, and
-            #     anyone who owns it can plant a poisoned REGULAR
-            #     ``token_cache.json`` for identical effect. There is no
-            #     information disclosure either: the parsed content is only
-            #     ever written back to the cache path, a bad row is evicted by
-            #     ``get()``, and no error path leaks file content — the log
-            #     lines emit ``type(x).__name__`` only, ``JSONDecodeError``
-            #     carries msg/line/col and ``UnicodeDecodeError`` the offending
-            #     byte.
-            #
-            # So refusing here would buy no security and would cost a retry
-            # loop: O_NOFOLLOW raises ELOOP, an OSError, which lands on the
-            # TRANSIENT arm and retries a condition that will never clear.
-            #
-            # The read-path exposure that IS real is a non-regular file at this
-            # path (a FIFO blocks ``open`` forever while holding ``self._lock``,
-            # wedging every resolve in the process). A symlink is not required
-            # to trigger it and O_NOFOLLOW does not prevent it — tracked
-            # separately, not defensible with a flag on this line.
+            # Reads may follow symlinks because directory control already permits
+            # equivalent cache poisoning. Writes refuse to follow them because
+            # write traversal would permit CWE-59 arbitrary-file overwrite.
             if self._cache_file.exists():
                 with self._cache_file.open("r") as f:
                     data = json.load(f)
                 if not isinstance(data, dict):
-                    # Valid JSON, not a cache document. Explicit because the
-                    # implicit version of this check was ``data.get(...)``
-                    # raising ``AttributeError`` out of the whole method.
                     raise ValueError(f"cache file root is {type(data).__name__}, expected object")
                 cached_version = data.get("version")
                 if cached_version != DISK_CACHE_SCHEMA_VERSION:
@@ -385,34 +349,11 @@ class TokenCacheManager:
             else:
                 self._disk_cache = {}
         except OSError as e:
-            # TRANSIENT vs STRUCTURAL — these need different recovery policies
-            # (VIB-6168).
-            #
-            # An ``OSError`` (EMFILE, EINTR, a transient permission or mount
-            # blip) says nothing about the file's CONTENT. Latching
-            # ``_disk_loaded = True`` here would be actively destructive: the
-            # process would never retry, and the first later ``put()`` would
-            # dump the now-empty in-memory view over a cache file that is still
-            # perfectly valid on disk — permanently deleting every dynamically
-            # discovered token in it. One transient blip would erase the cache.
-            #
-            # So: degrade for THIS call, but leave ``_disk_loaded`` False so the
-            # next lookup re-reads. The cost of retrying is one failed open per
-            # lookup; the cost of latching is silent data loss.
-            # Bounded retry. Not every OSError is transient — PermissionError
-            # (a mode-000 or foreign-uid cache file, routine in containers),
-            # IsADirectoryError and ENOTDIR are all OSError and none will fix
-            # themselves. Retrying per call on those costs a failed open() and a
-            # traceback-bearing WARNING on EVERY resolve, and token resolution
-            # runs per-leg per-iteration (backtests resolve hundreds of
-            # thousands of times). So: retry, but at most once per cooldown, and
-            # report once — the warn-once shape used by _try_record_metric.
+            # I/O failures leave the disk view unloaded: serve cold and retry
+            # rather than overwrite potentially valid data from an empty view.
             now = time.monotonic()
-            # Re-arm periodically. Reporting ONCE meant a permanent misconfiguration
-            # (a root-owned or foreign-uid cache file, a directory in its place)
-            # made the cache silently inert for the process lifetime after a single
-            # WARNING at boot — the disk layer simply gone, with nothing saying so.
-            # A fault that never self-heals should stay visible.
+            # Periodic reports keep persistent failures visible without logging
+            # every lookup on the hot path.
             first_report = (
                 self._disk_read_error_reported_at is None
                 or now - self._disk_read_error_reported_at >= _DISK_ERROR_REPORT_INTERVAL_S
@@ -435,10 +376,8 @@ class TokenCacheManager:
             self._disk_retry_not_before = now + _DISK_RETRY_COOLDOWN_S
             return
         except Exception as e:  # noqa: BLE001 — unreadable CONTENT is a COLD cache, never an error
-            # Structural corruption: bad JSON, wrong root type, malformed
-            # ``tokens``. Re-reading cannot help — the bytes will not change on
-            # their own — so this latches, which is what keeps a corrupt file
-            # from being re-parsed and re-raised on every single lookup.
+            # Structural corruption latches an empty view because retries cannot
+            # make malformed persisted content valid.
             _safe_log(
                 logging.WARNING,
                 "Failed to load disk cache from %s (%s: %s). Starting with an empty cache; "
@@ -450,8 +389,8 @@ class TokenCacheManager:
             )
             self._disk_cache = {}
 
-        # Reached on success and on structural corruption, but NOT on the
-        # transient-OSError path above, which returns early so it can retry.
+        # Only successful reads and structurally invalid content authorize a
+        # later write; transient I/O returns above with an unloaded view.
         self._disk_loaded = True
 
     def _write_disk_cache(self) -> None:
@@ -536,28 +475,8 @@ class TokenCacheManager:
         tmp_path: Path | None = None
         try:
             self._cache_file.parent.mkdir(parents=True, exist_ok=True)
-            # Do NOT follow a symlink at the cache path.
-            #
-            # This briefly did `dest = self._cache_file.resolve()` so a symlinked
-            # cache would be written THROUGH rather than replaced — matching
-            # `main`'s `open("w")`. That is an arbitrary-file overwrite: with a
-            # world-writable directory (the /tmp fallback) and `token_cache.json`
-            # symlinked at a victim-owned file, one put() destroys that file and
-            # replaces it with cache JSON, and the link survives so it re-fires
-            # on every write. Measured (CWE-59).
-            #
-            # The refusal stands on the CWE-59 measurement alone and needs no
-            # other justification. It was originally argued from "no shared
-            # volume exists" — a premise this file has since REPUDIATED (see
-            # the "IS /tmp/.almanak A SHARED NAMESPACE?" note below in
-            # ``_write_disk_cache``; the answer is yes), and
-            # which the 0600 withdrawal removed anyway. Recorded so the stale
-            # reasoning is not mistaken for live support.
-            #
-            # Replacing the link is safe: `os.replace` swaps the directory entry,
-            # so nothing outside this directory is ever touched. The cost is that
-            # a symlinked cache silently becomes a regular file, so we say so
-            # once rather than let it happen invisibly.
+            # Keep the unresolved path so replacement changes only the cache
+            # directory entry and never follows a symlink target (CWE-59).
             dest = self._cache_file
             if dest.is_symlink() and not self._symlink_warned:
                 self._symlink_warned = True
@@ -569,12 +488,7 @@ class TokenCacheManager:
                     dest,
                 )
             fd, tmp_path = _open_temp(dest)
-            # ``os.fdopen`` takes ownership of ``fd`` ONLY on success. If it
-            # raises, the descriptor is still open and nothing else will close
-            # it — the ``finally`` below unlinks the file but cannot reclaim the
-            # fd, so a repeated write fault would leak descriptors until EMFILE.
-            # Which is itself one of the faults this module now tolerates, so
-            # the leak would manufacture the condition it degrades on.
+            # os.fdopen owns the descriptor only after it succeeds.
             try:
                 handle = os.fdopen(fd, "w")
             except BaseException:
@@ -590,84 +504,21 @@ class TokenCacheManager:
                     f,
                     indent=2,
                 )
-                # Durability before visibility: without this the rename can
-                # commit before the bytes do, so a crash leaves an atomically
-                # renamed but truncated file.
+                # Flush and fsync before atomic publication so a crash cannot
+                # expose a renamed but truncated cache.
                 f.flush()
                 os.fsync(f.fileno())
 
-            # NO mode juggling: the temp file carries the kernel-applied umask
-            # and ``os.replace`` puts that on the destination. This is NOT mode
-            # parity with ``main`` — see ``_open_temp`` for the two divergences
-            # (narrower creation mode under a permissive umask; and an existing
-            # file's mode reset on every write, which ``main`` preserved).
-            #
-            # IS ``/tmp/.almanak`` A SHARED NAMESPACE? Yes. Settled here once,
-            # because two commits on this branch assumed opposite answers and
-            # that is what let a defect through.
-            #
-            # ``_resolve_cache_file`` falls back there when ``~/.almanak`` is not
-            # creatable, and ``/tmp`` is multi-uid by construction. Every claim
-            # in this file is now written against that answer.
-            #
-            # A file mode cannot make it safe, and trying made it worse. Pinning
-            # 0600 to "protect" the shared path removed the property that
-            # actually mattered — a foreign-owned cache stayed READABLE at 0644,
-            # so the load succeeded and the next ``put()`` took ownership, i.e.
-            # it SELF-HEALED. At 0600 it cannot, which forced a rebuild escape
-            # hatch, and that hatch then destroyed good files from a stale
-            # denial (measured: 6 tokens -> 2). In a group-writable ``/tmp``,
-            # 0600 plus a hatch is strictly worse than 0644 with none: uid A
-            # writes 0600, B cannot read it and rebuilds over A, A cannot read
-            # B's and rebuilds over B — mutual destruction.
-            #
-            # Qualification, measured: the self-heal needs a WRITABLE parent. In
-            # a foreign-owned ``/tmp/.almanak`` at the default 0755, a 0644 cache
-            # still LOADS (which is the property that matters — no lockout) but
-            # ``put()`` cannot take ownership. The file is left byte-identical
-            # and no temp file leaks, so the outcome is safe; it simply stays
-            # read-only for us rather than being adopted.
-            #
-            # The real exposure in that directory is DIRECTORY-level — an
-            # attacker who pre-creates ``/tmp/.almanak`` (``mkdir`` uses
-            # ``exist_ok=True``) owns the namespace whatever mode the file has.
-            # That is VIB-6171 and it is not defensible with a mode bit. The
-            # honest posture is main's mode — narrowed only to drop the
-            # group/world WRITE bit — plus a tracked directory fix, not a
-            # restrictive mode that buys nothing and costs self-healing.
-            # NB: "main's mode" here means the umask-derived mode, not the
-            # literal 0o666; do not widen the literal back to satisfy this
-            # sentence. See ``_open_temp`` for why 0o644 is the literal.
-
+            # The new inode retains the mode produced by os.open and the process
+            # umask; avoid process-global umask inspection and post-hoc chmod.
+            # Same-directory replacement atomically publishes the complete file.
             os.replace(tmp_path, dest)
             tmp_path = None
-            # Reset the throttle so the FIRST report of a new fault episode is a
-            # WARNING. The read arm gets away without this because a successful
-            # load latches ``_disk_loaded`` and it never reads again; the write
-            # arm has no such latch and sees multiple episodes, so a disk filling
-            # up minutes after an unrelated blip was invisible at default level
-            # for up to the interval — and the one line emitted said "still
-            # failing", which was the opposite of what happened.
+            # A successful write starts a new error-reporting episode.
             self._disk_write_error_reported_at = None
         except Exception as e:  # noqa: BLE001 — see below
-            # Deliberately broad, and symmetric with ``_ensure_disk_loaded``.
-            #
-            # This used to be ``except OSError`` while the atomic path tripled
-            # the syscall surface (``mkdir``, ``os.open``, ``fdopen``,
-            # ``json.dump``, ``fsync``, ``replace``). A non-OSError
-            # escaping here does NOT stay here: ``put()`` is called by
-            # ``resolve()`` on every static-registry hit, so a failure to
-            # PERSIST would surface as a failure to RESOLVE — downgrading an
-            # already-measured ``decimals`` to unmeasured on the accounting
-            # write path. A resolve that succeeded must never be lost because
-            # the cache could not be written.
-            # Type, path, traceback, and a throttle — the same shape as the read
-            # arm. The broad catch above is justified by "unknown exception
-            # shapes can reach here", and those are exactly the ones a bare
-            # message cannot diagnose: during review an entire write was silently
-            # skipped and this line was the only evidence. Unthrottled it also
-            # emitted 2000 identical WARNINGs against a permanent EROFS fault,
-            # where the read path emits one.
+            # Cache persistence is best-effort; a write failure must not turn
+            # successfully resolved metadata into a resolution failure.
             now = time.monotonic()
             if (
                 self._disk_write_error_reported_at is None
@@ -686,7 +537,6 @@ class TokenCacheManager:
                 _safe_log(logging.DEBUG, "Disk cache write still failing (%s: %s)", type(e).__name__, e)
         finally:
             if tmp_path is not None:
-                # Never leave a partial temp file behind next to the real cache.
                 try:
                     tmp_path.unlink()
                 except OSError:
@@ -695,7 +545,6 @@ class TokenCacheManager:
     def _evict_if_needed(self) -> None:
         """Evict oldest entries if cache exceeds max size. Must be called with lock held."""
         while len(self._memory) >= self._max_size:
-            # Pop oldest item (first item in OrderedDict)
             evicted_key, _ = self._memory.popitem(last=False)
             self._stats["evictions"] += 1
             _safe_log(logging.DEBUG, f"Evicted token from cache: {evicted_key}")
@@ -728,20 +577,16 @@ class TokenCacheManager:
         key = cache_key(chain, address=address, symbol=symbol)
 
         with self._lock:
-            # Check memory cache first
             if key in self._memory:
-                # Move to end for LRU ordering
                 self._memory.move_to_end(key)
                 self._stats["memory_hits"] += 1
                 return self._memory[key]
 
-            # Check disk cache
             self._ensure_disk_loaded()
             if key in self._disk_cache:
                 start_time = time.perf_counter()
                 try:
                     token = ResolvedToken.from_dict(self._disk_cache[key])
-                    # Promote to memory
                     self._evict_if_needed()
                     self._memory[key] = token
                     self._stats["disk_hits"] += 1
@@ -752,37 +597,9 @@ class TokenCacheManager:
 
                     return token
                 except Exception as e:  # noqa: BLE001 — see below
-                    # A cache row is UNTRUSTED PERSISTED DATA, so every way it can
-                    # fail to deserialize is the same outcome: corrupt row, treat
-                    # as a miss, evict so it self-heals.
-                    #
-                    # This used to catch only ``(KeyError, ValueError)``, which was
-                    # narrower than the ways ``from_dict`` actually fails
-                    # (VIB-6168):
-                    #   * ``TypeError``      — type drift, e.g. ``{"decimals": "6"}``;
-                    #     ``__post_init__`` does ``self.decimals < 0`` and str < int
-                    #     raises.
-                    #   * ``AttributeError`` — the row is not a mapping at all.
-                    # Both escaped. That matters far more than it looks: a cache
-                    # lookup is the FIRST step of every resolve, so one poisoned
-                    # row turned every resolve of that token into an exception
-                    # rather than a miss — including on accounting write paths,
-                    # where callers are written to tolerate a miss and not an
-                    # exception.
-                    #
-                    # Worse, the escape skipped the eviction below, so the poisoned
-                    # row NEVER self-healed: every later resolve of that token
-                    # raised identically until someone deleted the cache file by
-                    # hand. Evicting on every failure mode is the actual repair;
-                    # widening the catch is what lets the eviction be reached.
-                    #
-                    # Deliberately NOT re-raising: this is the same reasoning as
-                    # ``best_effort``'s non-string-token branch — a malformed
-                    # persisted payload is a DATA defect, not a call-signature
-                    # defect, and the correct response to bad data on a
-                    # best-effort read path is to drop it loudly, not to fail the
-                    # write. Evidence is kept (WARNING + type + traceback), which
-                    # is the property the fail-open originally destroyed.
+                    # Persisted token metadata is untrusted. Any deserialization
+                    # failure is a miss and eviction; decimals determine amount
+                    # scaling by powers of ten, so poisoned rows must not survive.
                     _safe_log(
                         logging.WARNING,
                         "Failed to deserialize cached token %s (%s: %s) — evicting the row; "
@@ -792,10 +609,6 @@ class TokenCacheManager:
                         e,
                         exc_info=True,
                     )
-                    # Remove corrupted entry. ``pop`` not ``del``: the row must be
-                    # gone whatever happened above. (Only the disk row can exist
-                    # here — ``from_dict`` raises before the memory promotion two
-                    # lines up, and a memory hit returned long before this point.)
                     self._disk_cache.pop(key, None)
                     return None
 
@@ -828,14 +641,11 @@ class TokenCacheManager:
         with self._lock:
             self._ensure_disk_loaded()
 
-            # Create keys for both address and symbol lookups
             address_key = cache_key(token.chain, address=token.address)
             symbol_key = cache_key(token.chain, symbol=token.symbol)
 
-            # Serialize token
             token_dict = token.to_dict()
 
-            # Store in memory (with LRU eviction)
             self._evict_if_needed()
             self._memory[address_key] = token
             self._memory.move_to_end(address_key)
@@ -845,12 +655,10 @@ class TokenCacheManager:
                 self._memory[symbol_key] = token
                 self._memory.move_to_end(symbol_key)
 
-            # Store in disk cache
             self._disk_cache[address_key] = token_dict
             if symbol_key != address_key:
                 self._disk_cache[symbol_key] = token_dict
 
-            # Write to disk
             self._write_disk_cache()
 
     def remove(self, chain: str, *, address: str | None = None, symbol: str | None = None) -> bool:
@@ -904,73 +712,19 @@ class TokenCacheManager:
         unknown), but "only if it can be loaded" would be the wrong summary.
         """
         with self._lock:
-            # Attempt a load first. Do not delete this call.
-            #
-            # The guard below decides whether we may overwrite the file, and it
-            # can only be as good as the information it reads. Without this call
-            # it reads state left over from earlier operations, and `clear()`
-            # never learns anything about the file it is about to replace.
-            #
-            # HISTORICAL NOTE, stated carefully because the earlier version of
-            # this comment got it wrong: the "authorises an overwrite of a file
-            # it never opened" failure belonged to the WIDER guard this branch
-            # used to have (`_disk_loaded or _disk_retry_not_before is None`),
-            # where a never-read instance took the `is None` arm. Measured
-            # against a `main` control at the time: a mode-000 cache went
-            # 1 token -> 0 and 0000 -> 0644, where `main` preserved it. That
-            # arm is gone. With today's `if self._disk_loaded:`, deleting this
-            # call makes a never-read `clear()` REFUSE instead — the opposite
-            # direction, caught by
-            # `test_clear_on_a_never_read_instance_with_no_fault_still_writes`.
-            #
-            # `main` was safe in that historical case only by accident: it wrote
-            # via `open("w")` on the destination, which raises PermissionError. The
-            # atomic `os.replace` path needs only a writable PARENT DIRECTORY,
-            # so the destination's own mode stopped being a barrier.
-            #
-            # NOTE what this call does and does not establish. It does NOT
-            # re-stat a cache that is already loaded — it returns immediately
-            # when `_disk_loaded` is True. So after a successful earlier load,
-            # `clear()` overwrites on the strength of THAT assessment, not a
-            # fresh one; a `chmod` landing in between is a TOCTOU window no
-            # pre-check can close, and `clear()` is an explicit destructive
-            # request from a caller that did successfully read the file. Whether
-            # it should re-measure at write time is a genuine design question,
-            # tracked in VIB-6183 — deliberately NOT settled by this comment.
+            # A destructive clear must first establish a disk view; initial
+            # unloaded state cannot authorize overwriting unknown contents.
             self._ensure_disk_loaded()
 
             self._memory.clear()
             self._disk_cache.clear()
-            # Only authorise the empty overwrite when the disk view is TRUSTED.
-            # Latching unconditionally both bypassed the write guard — truncating
-            # the file from a never-loaded view, the exact case the guard exists
-            # for — and permanently disarmed transient-fault recovery, since
-            # `_disk_loaded=True` means the cache never re-reads after the fault
-            # clears. `clear()` legitimately wants to write an empty document;
-            # it does not want to do so on top of a file it could not read.
-            #
-            # `_disk_loaded` alone is the whole condition. Every path out of
-            # `_ensure_disk_loaded` that leaves it False has recorded a read
-            # fault, so a second `_disk_retry_not_before is None` disjunct would
-            # be unreachable — and would silently re-authorise the overwrite if
-            # anyone later added an early return that skipped the fault record.
+            # Refuse writes from an unloaded view; a transient I/O failure must
+            # preserve unknown on-disk contents for a later retry.
             if self._disk_loaded:
                 self._write_disk_cache()
             else:
-                # The load above did not succeed: either it just failed on the
-                # transient arm, or a fault recorded within the last
-                # `_DISK_RETRY_COOLDOWN_S` short-circuited it without opening
-                # the file at all. Both are "we have no trusted view", which is
-                # what this branch turns on — do NOT phrase either as a
-                # just-taken measurement of the file (see `4cc321f1b4`).
-                #
-                # Also state the consequence, which is the part an operator
-                # needs: the entries are gone from THIS process, but the file
-                # survives, so once `_ensure_disk_loaded` next succeeds they
-                # come back. `clear()` is memory-only in this state. Failing
-                # safe (no data loss) is deliberate — the alternative is
-                # truncating a file we could not read, which is the destruction
-                # this module removed a rebuild hatch for.
+                # Memory is cleared, but preserved disk entries may reappear
+                # after a later successful load.
                 _safe_log(
                     logging.WARNING,
                     "clear(): a read fault is currently recorded for this cache (observed just now, "
@@ -1001,7 +755,6 @@ class TokenCacheManager:
         """
         with self._lock:
             self._ensure_disk_loaded()
-            # Sync all memory entries to disk
             for key, token in self._memory.items():
                 self._disk_cache[key] = token.to_dict()
             self._write_disk_cache()
@@ -1025,8 +778,6 @@ class TokenCacheManager:
         with self._lock:
             return dict(self._stats)
 
-    # Async-safe wrapper methods
-
     async def _get_async_lock(self) -> asyncio.Lock:
         """Get or create async lock. Lazy initialization for event loop compatibility."""
         if self._async_lock is None:
@@ -1048,7 +799,7 @@ class TokenCacheManager:
         """
         lock = await self._get_async_lock()
         async with lock:
-            # Run synchronous get in thread pool to avoid blocking event loop
+            # Keep synchronous disk I/O off the event loop.
             loop = asyncio.get_event_loop()
             return await loop.run_in_executor(None, lambda: self.get(chain, address=address, symbol=symbol))
 
