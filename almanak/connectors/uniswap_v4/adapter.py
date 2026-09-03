@@ -63,11 +63,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# =============================================================================
-# Exceptions
-# =============================================================================
-
-
 class UniswapV4FailLoudError(ValueError):
     """Base for V4 compile errors that must surface to the strategy author as a
     raised exception rather than a soft-error empty ActionBundle.
@@ -109,23 +104,11 @@ class UniswapV4EstimatedPriceWithoutOptInError(UniswapV4FailLoudError):
     """
 
 
-# =============================================================================
-# Module constants
-# =============================================================================
-
-# Slippage floor when sqrtPrice came from an on-chain StateView query — accurate,
-# so 5% covers normal price movement (pre-existing behaviour, VIB-2180).
+# On-chain sqrtPrice is accurate; a 5% floor covers normal price movement.
 ON_CHAIN_MIN_SLIPPAGE = Decimal("0.05")
-# Slippage floor when sqrtPrice is estimated (oracle / range midpoint). An estimate
-# can diverge from real pool state, so a wider buffer avoids PoolManager
-# MaximumAmountExceeded reverts. Was a silent 30% override; now a 10% floor gated
-# by an explicit opt-in for tight-slippage users (VIB-2180).
+# Estimated sqrtPrice can diverge from pool state, so a wider buffer avoids
+# PoolManager MaximumAmountExceeded reverts; tight-slippage users opt in explicitly.
 ESTIMATED_PRICE_MIN_SLIPPAGE = Decimal("0.10")
-
-
-# =============================================================================
-# Config
-# =============================================================================
 
 
 @dataclass
@@ -154,22 +137,12 @@ class UniswapV4Config:
     default_fee_tier: int = 3000
     default_slippage_bps: int = 50
     gateway_client: GatewayClient | None = field(default=None, repr=False, compare=False)
-    # APPEND-LAST, deliberately (ALM-3184 review): this is a plain @dataclass, so
-    # field order IS the positional ABI, and UniswapV4Config is exported from the
-    # connector package. Inserting ahead of gateway_client silently rebound
-    # ``UniswapV4Config(chain, wallet, rpc_url, 3000, 50, client)`` — the client
-    # landed in managed_fork, gateway_client stayed None, and the adapter quietly
-    # lost gateway routing. New fields go here, at the end.
+    # New fields go last: field order is the positional constructor order.
     managed_fork: bool | None = None
     default_deadline_seconds: int = 300
 
     def __post_init__(self) -> None:
         deadline_from_now(self.default_deadline_seconds, now_ts=0)
-
-
-# =============================================================================
-# Adapter
-# =============================================================================
 
 
 class UniswapV4Adapter:
@@ -304,18 +277,14 @@ class UniswapV4Adapter:
         slippage_bps = self.default_slippage_bps if slippage_bps is None else slippage_bps
         fee_tier = fee_tier or self.default_fee_tier
 
-        # Resolve tokens
         token_in_addr, token_in_dec = self._resolve_token(token_in)
         token_out_addr, token_out_dec = self._resolve_token(token_out)
 
-        # Convert to smallest units
+        # Human-readable amount to smallest units.
         amount_in_raw = int(amount_in * Decimal(10**token_in_dec))
 
-        # VIB-2058: executable-or-fail-closed quote selection (C1). A failed
-        # on-chain quote MUST NOT be silently replaced by a theoretical estimate
-        # that then backs a real ``amount_out_minimum`` — that is the iter-133
-        # silent-no-op class. Offline / permission-discovery compiles keep the
-        # local estimate because nothing is broadcast there.
+        # Never back a real minOut with a theoretical estimate; offline
+        # discovery may use the local estimate because nothing is broadcast.
         quote, quote_source = self._quote_for_swap(
             token_in_addr=token_in_addr,
             token_out_addr=token_out_addr,
@@ -338,12 +307,8 @@ class UniswapV4Adapter:
                 ),
             )
 
-        # VIB-2058: a zero-output executable quote is itself a silent-no-op signal —
-        # the on-chain Quoter returned a callable-but-degenerate result (e.g. an
-        # uninitialized pool that doesn't revert). Fail closed regardless of oracle
-        # availability rather than build a swap with amount_out_minimum=0. (When an
-        # oracle price_ratio IS present the C2 guard would already flag this as 100%
-        # impact; this covers the no-oracle corner the guard otherwise skips.)
+        # A zero-output on-chain quote is degenerate (e.g. uninitialized pool);
+        # fail closed rather than building a swap with zero minimum output.
         if quote_source == "onchain_quoter" and quote.amount_out <= 0:
             return SwapResult(
                 success=False,
@@ -355,8 +320,8 @@ class UniswapV4Adapter:
                 ),
             )
 
-        # VIB-2058: price-impact / liquidity guard (C2), parity with the V3 swap
-        # path. Only meaningful against an executable quote + a real oracle estimate.
+        # Price-impact guard is only meaningful against an executable quote
+        # plus a real oracle estimate.
         guard_failure = self._check_swap_price_impact(
             quote_source=quote_source,
             quoter_amount=quote.amount_out,
@@ -372,16 +337,11 @@ class UniswapV4Adapter:
         if guard_failure is not None:
             return guard_failure
 
-        # Build transactions
         transactions: list[SwapTransaction] = []
 
-        # For ERC-20 tokens, use Permit2 flow:
-        #   1. ERC-20 approve input token to Permit2
-        #   2. Permit2.approve(universalRouter, token, amount, expiration)
-        # Native ETH skips both (sent as msg.value)
+        # ERC-20 path needs approve then Permit2 grant; native ETH skips both as msg.value.
         is_native = token_in_addr.lower() == NATIVE_CURRENCY
         if not is_native:
-            # TX 1: Approve Permit2 to spend input token
             approve_tx = self._sdk.build_approve_tx(
                 token_address=token_in_addr,
                 spender=PERMIT2_ADDRESS,
@@ -389,7 +349,6 @@ class UniswapV4Adapter:
             )
             transactions.append(approve_tx)
 
-            # TX 2: Grant UniversalRouter allowance via Permit2
             permit2_tx = self._sdk.build_permit2_approve_tx(
                 token_address=token_in_addr,
                 spender=self.addresses["universal_router"],
@@ -397,14 +356,12 @@ class UniswapV4Adapter:
             )
             transactions.append(permit2_tx)
 
-        # Build swap tx
         if not self.wallet_address:
             raise ValueError(
                 "wallet_address must be set before building swap transactions. "
                 "Provide wallet_address via UniswapV4Config or set adapter.wallet_address."
             )
 
-        # Build swap tx
         swap_tx = self._sdk.build_swap_tx(
             quote=quote,
             recipient=self.wallet_address,
@@ -461,8 +418,7 @@ class UniswapV4Adapter:
         }
 
         if not connected:
-            # Physically offline (no gateway, no RPC): the oracle-derived local
-            # estimate is the designed path (unit tests, offline compilation).
+            # Offline with no gateway/RPC: the oracle-derived local estimate is the fallback.
             return self._sdk.get_quote_local(**local_kwargs), "local_estimate"
 
         try:
@@ -477,15 +433,13 @@ class UniswapV4Adapter:
             return quote, "onchain_quoter"
         except Exception as exc:
             if offline_mode:
-                # Permission-discovery / placeholder compile: nothing is broadcast,
-                # so degrade to the local estimate rather than blocking discovery.
+                # Non-broadcasting compiles degrade to the local estimate.
                 logger.warning(
                     "V4 executable quote failed in offline-mode compile; using local estimate: %s",
                     exc,
                 )
                 return self._sdk.get_quote_local(**local_kwargs), "local_estimate"
-            # C1: connected + online quote failed → fail closed. Do NOT substitute a
-            # theoretical estimate into a real swap (the iter-133 silent-no-op class).
+            # Connected quote failure fails closed; never substitute a theoretical estimate.
             logger.warning(
                 "V4 executable quote failed (gateway/RPC connected, online compile); failing closed: %s",
                 exc,
@@ -521,8 +475,7 @@ class UniswapV4Adapter:
         if quote_source != "onchain_quoter":
             return None
         if price_ratio is None:
-            # No oracle estimate to compare against (SKIPPED_NO_ORACLE). The
-            # executable quote already proved pool existence; depth is unguarded.
+            # Without an oracle estimate there is nothing to compare; depth stays unguarded.
             return None
 
         from almanak.framework.execution.fork_signal import resolve_managed_fork
@@ -594,7 +547,6 @@ class UniswapV4Adapter:
         if price_oracle is None:
             price_oracle = {}
 
-        # Determine swap amount
         if intent.amount is not None:
             if intent.amount == "all":
                 raise ValueError(
@@ -603,9 +555,7 @@ class UniswapV4Adapter:
                 )
             amount_in: Decimal = intent.amount  # type: ignore[assignment]
         elif intent.amount_usd is not None:
-            # Lenient lookup (VIB token-identity PR): the raw ``dict.get`` here
-            # broke for address-form legs and skipped the stablecoin fallback
-            # every funnel-path compiler has. Direct symbol keys still win.
+            # Lenient oracle lookup handles address-form legs; direct symbol keys win.
             from almanak.framework.intents.compiler_queries import lenient_oracle_price
 
             from_price = lenient_oracle_price(
@@ -622,7 +572,7 @@ class UniswapV4Adapter:
 
         slippage_bps = slippage_to_bps(intent.max_slippage)
 
-        # Compute price ratio for cross-decimal quote accuracy
+        # Price ratio keeps cross-decimal quotes accurate.
         from almanak.framework.intents.compiler_queries import lenient_oracle_price
 
         computed_price_ratio = None
@@ -653,8 +603,6 @@ class UniswapV4Adapter:
                 },
             )
 
-        # Resolve token metadata for orchestrator compatibility
-        # (orchestrator expects from_token/to_token as dicts with address, symbol, decimals, is_native)
         from_addr, from_dec = self._resolve_token(intent.from_token)
         to_addr, to_dec = self._resolve_token(intent.to_token)
 
@@ -686,8 +634,7 @@ class UniswapV4Adapter:
             "is_native": _check_native(intent.to_token),
         }
 
-        # VIB-3203: Human-readable pre-slippage quote so ResultEnricher can compute
-        # realized slippage_bps from on-chain amounts.
+        # Pre-slippage human-readable quote for realized-slippage computation.
         expected_output_human: str | None = None
         if result.amount_out_quoted and to_dec is not None:
             expected_output_human = str(Decimal(str(result.amount_out_quoted)) / Decimal(10**to_dec))
@@ -705,8 +652,7 @@ class UniswapV4Adapter:
             "pool_manager": self.addresses["pool_manager"],
             "gas_estimate": result.gas_estimate,
             "protocol_version": "v4",
-            # VIB-2058: provenance of the minOut basis (executable quote vs offline
-            # estimate) — the reader-trust half of the read-fallback contract.
+            # Whether minOut came from an executable quote or an offline estimate.
             "quote_source": result.quote_source,
         }
         if expected_output_human is not None:
@@ -760,10 +706,9 @@ class UniswapV4Adapter:
         warnings: list[str] = []
 
         try:
-            # Parse pool to get token pair and fee
             token0_symbol, token1_symbol, fee = self._parse_pool(intent.pool)
 
-            # Resolve tokens (for_v4_pool=True to use address(0) for native currency)
+            # Native symbols resolve to address(0) for V4 pools.
             token0_addr, token0_dec = self._resolve_token(token0_symbol, for_v4_pool=True)
             token1_addr, token1_dec = self._resolve_token(token1_symbol, for_v4_pool=True)
 
@@ -780,12 +725,11 @@ class UniswapV4Adapter:
                 amount0 = intent.amount0
                 amount1 = intent.amount1
 
-            # Convert amounts to wei
+            # Human-readable amounts to smallest units.
             amount0_wei = int(Decimal(str(amount0)) * Decimal(10**token0_dec))
             amount1_wei = int(Decimal(str(amount1)) * Decimal(10**token1_dec))
 
-            # Convert price range to ticks — invert range when pair was reordered
-            # If the pair was swapped, the caller's price is token1/token0 but V4 expects token0/token1
+            # Inverted range when the pair was reordered; V4 expects token0/token1 pricing.
             if pair_swapped:
                 range_lower = Decimal(1) / Decimal(str(intent.range_upper))
                 range_upper = Decimal(1) / Decimal(str(intent.range_lower))
@@ -795,7 +739,7 @@ class UniswapV4Adapter:
             tick_lower = self._sdk.price_to_tick(range_lower, token0_dec, token1_dec)
             tick_upper = self._sdk.price_to_tick(range_upper, token0_dec, token1_dec)
 
-            # Snap ticks to tick spacing
+            # Ticks must align to pool tick spacing.
             tick_spacing = intent.protocol_params.get("tick_spacing") if intent.protocol_params else None
             if tick_spacing is None:
                 from almanak.connectors.uniswap_v4.sdk import TICK_SPACING
@@ -806,15 +750,13 @@ class UniswapV4Adapter:
             if tick_lower == tick_upper:
                 tick_upper += tick_spacing
 
-            # Get sqrtPriceX96: prefer on-chain query, fall back to estimate
+            # Prefer on-chain sqrtPrice; fall back to an estimate.
             sqrt_price_x96 = None
             used_onchain_price = False
-            # VIB-2180: surface which source produced the sqrtPrice so strategy
-            # authors can tell an LP opened on an estimate vs real pool state.
-            # Exactly three labels: on_chain, oracle_estimate, range_midpoint_estimate.
+            # price_source is on_chain, oracle_estimate, or range_midpoint_estimate.
             price_source = "on_chain"
 
-            # Parse hook address early (needed for pool key in StateView query)
+            # Hook address is part of the pool key.
             hooks = NATIVE_CURRENCY  # default: no hooks
             hook_data = b""
             if intent.protocol_params:
@@ -823,7 +765,6 @@ class UniswapV4Adapter:
                 if hook_data_hex:
                     hook_data = bytes.fromhex(hook_data_hex.replace("0x", ""))
 
-            # Hook warning: pool has hooks but hookData is empty
             if hooks != NATIVE_CURRENCY:
                 hook_flags = HookFlags.from_address(hooks)
                 if hook_flags.has_any_liquidity_hooks and not hook_data:
@@ -835,31 +776,18 @@ class UniswapV4Adapter:
 
             pool_key = self._sdk.compute_pool_key(token0_addr, token1_addr, fee, tick_spacing, hooks)
 
-            # V0 scope guard (VIB-4475): reject pool shapes outside hookless ERC20-ERC20.
-            # Salt is NOT validated — per VIB-4426 §Q7, salt = bytes32(tokenId) is the
-            # canonical PositionManager._mint path (see v4-periphery _mint() source) and
-            # is the normal case for any minted position.
+            # Only hookless pools are supported; non-zero salt is the normal mint path.
             self._reject_unsupported_v0_pool(pool_key)
 
-            # VIB-5582: the V4 pool identity (`pool_id`) is fully determined by
-            # `pool_key` — a pure offline hash, no chain read needed — so it is
-            # available at COMPILE time, before signing/submission. Surfacing it
-            # on the ActionBundle metadata (below) lets the pre-execution
-            # registry-collision preflight (`registry_preflight.py`) reject a
-            # same-pool V4 reopen BEFORE minting a second NFT, exactly as the V3
-            # preflight uses the V3 pool address. Without this, the V4 identity
-            # is only ever known post-receipt (`ModifyLiquidity.pool_id`), so the
-            # preflight has nothing to key on and always allows.
+            # pool_id is a pure offline hash of pool_key, available at compile time.
             pool_id = compute_pool_id(pool_key)
 
-            # Try on-chain query via StateView.getSlot0()
             if self.rpc_url:
                 sqrt_price_x96 = self._sdk.get_pool_sqrt_price(pool_key, rpc_url=self.rpc_url)
                 if sqrt_price_x96:
                     used_onchain_price = True
                     logger.info("V4 LP_OPEN: using on-chain sqrtPriceX96=%d for liquidity computation", sqrt_price_x96)
 
-            # Fallback: estimate from oracle prices
             if sqrt_price_x96 is None:
                 from almanak.framework.intents.compiler_queries import lenient_oracle_price
 
@@ -877,28 +805,22 @@ class UniswapV4Adapter:
                     sqrt_price_x96 = self._sdk.estimate_sqrt_price_x96(mid_price, token0_dec, token1_dec)
                     logger.info("V4 LP_OPEN: using estimated sqrtPriceX96=%d from oracle prices", sqrt_price_x96)
                 else:
-                    # Last resort: arithmetic mean of range sqrt ratios — a range
-                    # midpoint in tick space, so labelled range_midpoint_estimate.
+                    # Fall back to the tick-range midpoint.
                     from almanak.connectors.uniswap_v4.sdk import _tick_to_sqrt_ratio_x96
 
                     sqrt_price_x96 = (_tick_to_sqrt_ratio_x96(tick_lower) + _tick_to_sqrt_ratio_x96(tick_upper)) // 2
                     price_source = "range_midpoint_estimate"
                     logger.info("V4 LP_OPEN: using tick-range midpoint sqrtPriceX96=%d", sqrt_price_x96)
 
-            # Preserve the intent's requested amount as the hard spend cap.
-            # When price estimates are uncertain, reduce liquidity instead of
-            # raising amount*_max above what the user asked to spend.
-            #
-            # VIB-2180: an on-chain sqrtPrice keeps the pre-existing 5% floor. An
-            # estimated sqrtPrice needs a wider buffer, but rather than silently
-            # bumping the user to a fixed 30% we refuse to widen their tolerance by
-            # more than 2x unless they explicitly opt in.
+            # Never raise amount_max above the requested spend; shrink liquidity instead.
+            # On-chain prices use the narrow floor; estimates need a wider buffer
+            # without widening tolerance more than 2x without opt-in.
             user_slippage = getattr(intent, "max_slippage", None)
             if user_slippage is None:
                 user_slippage = Decimal("0.005")
 
             if used_onchain_price:
-                # On-chain sqrtPrice is accurate; keep the pre-existing 5% floor.
+                # On-chain sqrtPrice is accurate; keep the narrow floor.
                 effective_slippage = max(user_slippage, ON_CHAIN_MIN_SLIPPAGE)
             else:
                 # Estimated sqrtPrice needs a wider buffer to avoid PoolManager
@@ -952,41 +874,27 @@ class UniswapV4Adapter:
                 hook_data=hook_data,
             )
 
-            # Build transactions
             transactions: list[SwapTransaction] = []
             position_manager = self.addresses["position_manager"]
 
-            # Approvals for both tokens via Permit2
+            # Approve both tokens via Permit2, skipping native currency.
             for token_addr, amount_max in [(token0_addr, amount0_max), (token1_addr, amount1_max)]:
                 if token_addr.lower() == NATIVE_CURRENCY:
                     continue
                 transactions.append(self._sdk.build_approve_tx(token_addr, PERMIT2_ADDRESS, amount_max))
                 transactions.append(self._sdk.build_permit2_approve_tx(token_addr, position_manager, amount_max))
 
-            # Mint position TX
             mint_tx = self._sdk.build_mint_position_tx(
                 mint_params,
                 deadline=deadline_from_now(self.default_deadline_seconds),
             )
             transactions.append(mint_tx)
 
-            # Build token metadata dicts
             token0_dict = {"symbol": token0_symbol, "address": token0_addr, "decimals": token0_dec}
             token1_dict = {"symbol": token1_symbol, "address": token1_addr, "decimals": token1_dec}
 
-            # VIB-4636 — derive a compile-time current tick from the
-            # sqrtPriceX96 the adapter just sized liquidity against. The V4
-            # mint itself never moves price, so this tick is correct for
-            # post-mint accounting as long as no other tx interleaves. The
-            # receipt parser leaves ``lp_open_data.current_tick`` None for
-            # pure-mint receipts (no in-receipt Swap event to read tick
-            # from); the enricher uses this metadata key as the fallback so
-            # the persisted ``accounting_events`` payload carries a real
-            # ``current_tick`` / ``in_range`` instead of NULL. Source-of-
-            # truth note: when ``used_onchain_price`` is True this is the
-            # actual on-chain tick at compile time; when False it is the
-            # oracle-derived estimate and inherits the same accuracy
-            # caveat the slippage cap is widened for.
+            # The mint itself never moves price, so this tick holds unless another tx
+            # interleaves; estimated prices inherit estimate accuracy.
             from almanak.connectors.uniswap_v4.sdk import sqrt_ratio_x96_to_tick
 
             compile_time_current_tick = sqrt_ratio_x96_to_tick(sqrt_price_x96)
@@ -1010,23 +918,11 @@ class UniswapV4Adapter:
                 "gas_estimate": sum(tx.gas_estimate for tx in transactions),
                 "protocol_version": "v4",
                 "effective_slippage_bps": slippage_bps,
-                # VIB-2180: surface the sqrtPrice provenance to the strategy author.
                 "price_source": price_source,
                 "estimated_sqrt_price_x96": (str(sqrt_price_x96) if price_source != "on_chain" else None),
                 "compile_time_current_tick": compile_time_current_tick,
                 "compile_time_current_tick_source": "onchain" if used_onchain_price else "estimated",
-                # VIB-5582: pool identity + protocol slug + registry_handle, in the
-                # SAME shape the V3 LP_OPEN compiler emits (`pool`/`protocol`/
-                # `registry_handle` in uniswap_v3/compiler.py), so the
-                # pre-execution registry-collision preflight
-                # (`accounting/registry_preflight.py`) can dispatch on `protocol`
-                # and key the V4 auto-mode collision check on `pool_id` — the
-                # SAME anchor `semantic_grouping_key_univ4` and the runtime
-                # registry-commit path (`strategy_runner._build_lp_v4_open_
-                # registry_row`) both use. `protocol` mirrors the intent's own
-                # field (falling back to this connector's slug) so the preflight
-                # dispatch agrees byte-for-byte with the commit-path dispatch
-                # (`_UNIV4_LP_PROTOCOLS` membership, keyed off `intent.protocol`).
+                # Expose pool identity and protocol for the registry-collision preflight.
                 "pool_id": pool_id,
                 "protocol": (getattr(intent, "protocol", None) or "uniswap_v4"),
                 "registry_handle": getattr(intent, "registry_handle", None),
@@ -1043,9 +939,7 @@ class UniswapV4Adapter:
         except SlippagePrecisionError:
             raise
         except UniswapV4FailLoudError:
-            # VIB-4475: V0 scope violations and VIB-2180: estimated-price-without-opt-in
-            # are fail-loud money-safety guards, not soft-error bundles. The strategy
-            # author needs to see an exception, not a silent empty bundle.
+            # Scope and estimated-price guards raise instead of returning an empty bundle.
             raise
         except Exception as e:
             logger.error("V4 LP_OPEN compilation failed: %s", e)
@@ -1083,14 +977,8 @@ class UniswapV4Adapter:
         if not self.wallet_address:
             raise ValueError("wallet_address must be set before building LP close transactions.")
 
-        # VIB-4483 (P-V1-B): native-ETH currency0 is supported on close. The
-        # TAKE_PAIR action returns the native leg directly to the recipient as raw
-        # ETH (no ERC-20 Transfer), so ``build_decrease_liquidity_tx`` encodes
-        # ``(currency0, currency1, recipient)`` verbatim with no native special-
-        # casing. The currency0 == NATIVE_CURRENCY rejection that previously lived
-        # here (VIB-4475 V0 scope guard) is intentionally gone. Salt is still not
-        # validated — per VIB-4426 §Q7, salt = bytes32(tokenId) is the canonical
-        # PositionManager._mint path.
+        # Native currency0 is supported on close; TAKE_PAIR returns raw ETH with
+        # no special-casing. Salt is not validated; non-zero salt is the normal mint path.
 
         try:
             token_id = int(intent.position_id)
@@ -1104,7 +992,6 @@ class UniswapV4Adapter:
                 metadata={"error": f"Invalid position ID: {intent.position_id}"},
             )
 
-        # Parse hook data and slippage minimums from protocol_params
         hook_data = b""
         amount0_min = 0
         amount1_min = 0
@@ -1124,10 +1011,8 @@ class UniswapV4Adapter:
             hook_data=hook_data,
         )
 
-        # burn=False: withdraw liquidity + collect fees without burning the NFT.
-        # The BURN_POSITION action encoding has a calldata boundary issue
-        # (SliceOutOfBounds) when combined with DECREASE_LIQUIDITY + TAKE_PAIR.
-        # The position NFT remains with 0 liquidity, which is harmless.
+        # Skip burning: BURN_POSITION encoding faults with DECREASE+TAKE;
+        # leaving a zero-liquidity NFT is harmless.
         close_tx = self._sdk.build_decrease_liquidity_tx(
             params=decrease_params,
             currency0=currency0,
@@ -1231,14 +1116,8 @@ class UniswapV4Adapter:
                 "V0 (VIB-4426) supports only hookless ERC20-ERC20 pools. "
                 "Hook support is tracked by VIB-4485 (P-V1-D)."
             )
-        # VIB-4483 (P-V1-B): native-ETH currency0 (currency0 == 0x0) is supported.
-        # The SDK threads the native leg as ``msg.value`` on ``modifyLiquidities``
-        # (build_mint_position_tx) and the runner stamps the native deposit amount
-        # onto ``LPOpenData`` from a post-mint ``QueryV4PositionState`` read (the
-        # native leg emits no ERC-20 Transfer, so the receipt alone cannot measure
-        # it — see runner ``_capture_v4_lp_open_native_amounts_safe`` /
-        # ledger ``_stamp_lp_open_native_amounts``). The currency0 ==
-        # NATIVE_CURRENCY rejection that previously lived here is intentionally gone.
+        # Native currency0 is supported; the native leg travels as msg.value and
+        # is measured post-mint, not from the receipt.
 
     @staticmethod
     def _parse_pool(pool: str) -> tuple[str, str, int]:
@@ -1263,15 +1142,11 @@ class UniswapV4Adapter:
         Returns:
             Tuple of (address, decimals).
         """
-        # Check for native token symbols — V4 supports the native currency as
-        # address(0). Per-chain set derived from ``ChainDescriptor.native``
-        # (VIB-4851 A1); the legacy chain-blind {ETH, AVAX, MATIC, BNB} remapped
-        # e.g. "MATIC" on ethereum — a real ERC-20 there — to address(0).
+        # V4 uses address(0) for the native currency; the symbol set is per-chain.
         if for_v4_pool and token.upper() in native_symbols_for(self.chain):
-            # Non-empty symbol set implies the chain is registered.
             return NATIVE_CURRENCY, ChainRegistry.resolve(self.chain).native.decimals
 
-        # If already an address, resolve decimals (never assume 18)
+        # Never assume 18 decimals for address-form tokens.
         if token.startswith("0x") and len(token) == 42:
             if self._token_resolver:
                 resolved = self._token_resolver.resolve(token, self.chain)
@@ -1283,44 +1158,14 @@ class UniswapV4Adapter:
                 suggestions=["Provide a token_resolver or use token symbols instead"],
             )
 
-        # Resolve by symbol
         if self._token_resolver:
             resolved = self._token_resolver.resolve_for_swap(token, self.chain)
             return resolved.address, resolved.decimals
 
-        # Fallback: no per-adapter ``token_resolver`` was injected. Route
-        # through the framework's connector-agnostic static token resolver
-        # rather than a sibling connector's private catalogue.
-        #
-        # Reading ``uniswap_v3.UNISWAP_V3_TOKENS`` here was a ``CONNECTOR_IMPORT``
-        # coupling site (blueprint 22 "Connector + Chain Self-Containment" →
-        # "Goal": *"every ``from almanak.connectors.<protocol> import …`` outside
-        # the connector itself — is debt"*; §"The ratchet gate" →
-        # "Interpreting a gate failure" gives the ``CONNECTOR_IMPORT`` fix
-        # archetype: replace with the relevant framework/strategy-side lookup).
-        # Neutral token addresses (ETH/WETH/USDC/…) are not owned by any one
-        # protocol, so they belong on the framework resolver, not on V3.
-        #
-        # ``skip_gateway=True`` keeps this the same offline static lookup the
-        # old dict was (no surprise gateway round-trip on the degraded path);
-        # ``resolve`` (not ``resolve_for_swap``) preserves the old fallback's
-        # no-auto-wrap behaviour (native symbols stay the native sentinel).
-        #
-        # An unresolvable symbol still fails closed: under ``skip_gateway=True``
-        # the resolver's symbol path can only raise ``TokenNotFoundError`` (the
-        # ``AmbiguousTokenError`` path is gateway-only and is skipped here), so
-        # we let that exception propagate untouched rather than wrapping it —
-        # this preserves the resolver's richer ``reason`` + ``suggestions``
-        # (e.g. "did you mean …") for the strategy author instead of flattening
-        # them to a generic message. The fail-closed contract (a
-        # ``TokenNotFoundError`` for unknown symbols) is unchanged. VIB-4866.
+        # Fall back to the framework static resolver, not a sibling catalogue;
+        # offline lookup with no auto-wrap, failing closed with the resolver error.
         resolved = get_token_resolver().resolve(token, self.chain, skip_gateway=True, log_errors=False)
         return resolved.address, resolved.decimals
-
-
-# =============================================================================
-# Result types
-# =============================================================================
 
 
 @dataclass
@@ -1331,17 +1176,11 @@ class SwapResult:
     transactions: list[SwapTransaction]
     amount_in: int = 0
     amount_out_minimum: int = 0
-    # VIB-3203: pre-slippage-discount expected output amount (raw units).
-    # Used by IntentCompiler to persist `expected_output_human` in ActionBundle.metadata
-    # so ResultEnricher can compute realized slippage_bps.
+    # Pre-slippage expected output in raw units for realized-slippage computation.
     amount_out_quoted: int = 0
     gas_estimate: int = 0
     error: str | None = None
-    # VIB-2058: provenance of the quote backing ``amount_out_minimum``. The
-    # reader-trust half of the VIB-5052 §7.10 read-fallback contract.
-    #   "onchain_quoter" — executable V4 Quoter quote (pool-existence verified).
-    #   "local_estimate" — offline oracle-derived estimate (no chain I/O).
-    #   ""               — not stamped (e.g. an early-return failure result).
+    # Whether minOut came from an executable quoter, an offline estimate, or is unstamped.
     quote_source: str = ""
 
 
