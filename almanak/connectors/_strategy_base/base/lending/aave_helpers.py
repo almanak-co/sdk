@@ -25,24 +25,17 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("almanak.framework.intents.compiler")
 
-# Re-export constants used throughout this module via compiler_constants module
-# reference so that mock patching works correctly.
+# Module aliases preserve the compiler_constants patch seam.
 AAVE_COMPATIBLE_PROTOCOLS = compiler_constants.AAVE_COMPATIBLE_PROTOCOLS
 AAVE_VARIABLE_RATE_MODE = compiler_constants.AAVE_VARIABLE_RATE_MODE
 MAX_UINT256 = compiler_constants.MAX_UINT256
 
-# Aave V3 PoolDataProvider.getReserveConfigurationData(address) selector.
-# keccak256("getReserveConfigurationData(address)")[:4]
 _AAVE_GET_RESERVE_CONFIG_SELECTOR = "0x3e150141"
 
-# Aave V3 PoolDataProvider.getAllReservesTokens() selector.
-# keccak256("getAllReservesTokens()")[:4] — returns TokenData[] { string symbol; address tokenAddress; }
 _AAVE_GET_ALL_RESERVES_TOKENS_SELECTOR = "0xb316ff89"
 
-# Hard sanity ceiling on the declared reserve-array length accepted from a
-# getAllReservesTokens() payload before the full eth_abi decode. Far above any
-# real Aave market (< 100 reserves); a backstop against an oversized/malformed
-# response, NOT the working cap (the agent tool caps actual reads separately).
+# Reject implausible reserve counts before dynamic ABI decoding to bound memory use.
+# This ceiling is a corruption guard, not a working reserve limit.
 MAX_DECODABLE_RESERVES = 4096
 
 
@@ -153,9 +146,6 @@ class PoolReserveFrozenError(ValueError):
     """
 
 
-# Decoded reserve configuration as returned by `getReserveConfigurationData`.
-# Used by the collateral-eligibility check, the frozen-reserve check, and the
-# VIB-3825 borrowable check.
 class _DecodedReserveConfig:
     __slots__ = (
         "ltv",
@@ -186,14 +176,9 @@ class _DecodedReserveConfig:
         self.borrowing_enabled = borrowing_enabled
         self.is_active = is_active
         self.is_frozen = is_frozen
-        # ``None`` = unmeasured (synthesised configs — revert / empty-payload
-        # paths below never read word 0). ``0`` = measured zero, which on Aave
-        # only ever happens for an asset that has no reserve. Empty != Zero.
+        # None means decimals were unmeasured; zero is a measured value used by absent reserves.
         self.decimals = decimals
-        # False ONLY when the payload proves the reserve is absent (VIB-5864).
-        # Synthesised configs default to True: a reverting or stubbed
-        # PoolDataProvider says nothing about whether the reserve was listed,
-        # and those paths deliberately mean "pool is broken -> treat as frozen".
+        # False requires a decoded all-zero reserve tuple. Read failures do not prove absence.
         self.exists = exists
 
 
@@ -231,25 +216,22 @@ def decode_reserve_configuration_data(raw_hex: str) -> _DecodedReserveConfig | N
     if len(raw) < 640:
         return None
     try:
-        decimals = int(raw[0:64], 16)  # word 0 — VIB-5864
+        decimals = int(raw[0:64], 16)
         ltv = int(raw[64:128], 16)
         liquidation_threshold = int(raw[2 * 64 : 3 * 64], 16)
         liquidation_bonus = int(raw[3 * 64 : 4 * 64], 16)
         reserve_factor = int(raw[4 * 64 : 5 * 64], 16)
         usage_as_collateral_enabled = int(raw[5 * 64 : 6 * 64], 16) != 0
-        borrowing_enabled = int(raw[6 * 64 : 7 * 64], 16) != 0  # word 6 — VIB-3825
+        borrowing_enabled = int(raw[6 * 64 : 7 * 64], 16) != 0
         stable_borrow_rate_enabled = int(raw[7 * 64 : 8 * 64], 16) != 0
         is_active = int(raw[8 * 64 : 9 * 64], 16) != 0
         is_frozen = int(raw[9 * 64 : 10 * 64], 16) != 0
     except ValueError:
         return None
 
-    # An unlisted asset yields an all-zero tuple — the empty-mapping read.
-    # Require EVERY word to be zero rather than keying off ``decimals == 0``
-    # alone: this is the conservative direction. A reserve that is listed but
-    # somehow reports zero decimals still keeps its real config words, so it
-    # stays on the existing frozen/inactive path instead of being mislabelled
-    # absent. Only a genuinely empty slot reaches ``exists=False``.
+    # Aave returns an all-zero tuple for an unlisted asset.
+    # Require every word to be zero so a listed zero-decimal reserve remains on the
+    # inactive or frozen path instead of being misclassified as absent.
     exists = any(
         (
             decimals,
@@ -302,12 +284,9 @@ def decode_all_reserves_tokens(raw_hex: str) -> list[tuple[str, str]] | None:
     if not raw:
         return None
 
-    # Bound the declared element count straight from the ABI head — reading the
-    # hex directly — BEFORE allocating the full payload via bytes.fromhex(), so
-    # a pathological / oversized response cannot exhaust memory ahead of the
-    # caller's reserve cap. Layout for a single ``T[]`` return: word[0] = byte
-    # offset to the array; word[offset] = element count. Each hex word is 64 chars.
-    if len(raw) < 128:  # need at least the offset word + a count word
+    # Read the dynamic-array count from the ABI head before allocating the full payload.
+    # The first word is the byte offset; the word at that offset is the element count.
+    if len(raw) < 128:
         return None
     try:
         array_offset = int(raw[:64], 16)
@@ -315,7 +294,7 @@ def decode_all_reserves_tokens(raw_hex: str) -> list[tuple[str, str]] | None:
         return None
     if array_offset % 32 != 0:
         return None
-    count_start = array_offset * 2  # byte offset -> hex char offset
+    count_start = array_offset * 2
     if count_start + 64 > len(raw):
         return None
     try:
@@ -324,9 +303,7 @@ def decode_all_reserves_tokens(raw_hex: str) -> list[tuple[str, str]] | None:
         return None
     if count > MAX_DECODABLE_RESERVES:
         return None
-    # Also cap the raw payload size itself, defending a small-count / huge-
-    # trailing-bytes input: a fully populated MAX_DECODABLE_RESERVES array of
-    # (string, address) tuples is comfortably under this hex-char ceiling.
+    # Bound trailing data independently so a small declared count cannot hide a huge payload.
     if len(raw) > MAX_DECODABLE_RESERVES * 16 * 64:
         return None
 
@@ -410,8 +387,7 @@ def _fetch_reserve_config(
             pre_flight_label=pre_flight_label,
         )
         if raw_hex is None:
-            # Reachable ONLY when the gateway-internal pre-flight is not
-            # configured — every failure of a configured pre-flight raises.
+            # None means the internal pre-flight was not configured; configured failures raise.
             _log_preflight_skipped(compiler, pre_flight_label, asset_symbol)
             return None
         decoded_config = _decode_reserve_config_payload(
@@ -421,10 +397,7 @@ def _fetch_reserve_config(
             pre_flight_label=pre_flight_label,
         )
         if decoded_config is None:
-            # The read succeeded but the payload was undecodable (short /
-            # malformed). On a configured pre-flight that is still "could not
-            # verify" — falling through to None here would fail open and re-open
-            # the VIB-6111 hole one layer below the eth_call itself.
+            # An undecodable response from a configured pre-flight is unverified, not fail-open.
             raise ReserveConfigUnverifiableError(
                 f"{pre_flight_label} pre-flight could not verify reserve risk parameters for "
                 f"{asset_symbol} on {compiler.chain}: the PoolDataProvider returned an "
@@ -455,13 +428,8 @@ def _fetch_reserve_config(
         return None
 
     if not response.success or not response.result:
-        # When the PoolDataProvider call reverts (as happens on a shut-down
-        # or exploited deployment whose proxy returns 0x for every method),
-        # treat that as a strong "pool is broken / shut down"
-        # signal and surface it as a frozen reserve. A healthy data provider
-        # never reverts on `getReserveConfigurationData`; only network errors
-        # or an RPC-level fault would otherwise reach this branch, and those
-        # already log a warning above.
+        # A revert from this normally total view indicates a broken or shut-down provider.
+        # Treat it as frozen; transport faults were already separated above.
         error_text = (response.error or "").lower()
         revert_signal = "revert" in error_text or "reverted" in error_text
         if revert_signal:
@@ -481,10 +449,7 @@ def _fetch_reserve_config(
         )
         return None
 
-    # gateway.rpc.Call wraps eth_call's hex result in json.dumps (see
-    # almanak/gateway/services/rpc_service.py), so response.result arrives as a
-    # JSON-encoded string like '"0x..."'. Decode before slicing or the ABI
-    # word offsets are off-by-one and the pre-flight silently fails-open.
+    # Gateway RPC results may contain a JSON-encoded hex string; decode it before ABI slicing.
     try:
         decoded = json.loads(response.result) if response.result.startswith('"') else response.result
     except (ValueError, json.JSONDecodeError):
@@ -543,15 +508,8 @@ def _preflight_eth_call_hex(
     "not configured" and would make the safety guards fail open on the one path
     production actually uses — the defect VIB-6111 exists to close.
     """
-    # ``is True`` — NOT truthiness. The flag is a real ``bool`` on
-    # ``BaseCompilerContext``, and "configured" must mean somebody explicitly
-    # set it. Duck-typed / MagicMock compilers (used widely in the unit suite
-    # and by the ``_CompilerLikeShim`` strategy path) auto-vivify ANY attribute
-    # as a truthy Mock, so a truthiness test would classify them as
-    # "gateway-internal pre-flight enabled" and then fail closed on a compiler
-    # that has no real eth_call seam at all — turning a deliberate fail-open
-    # into a spurious compile rejection. The codebase already guards this class
-    # of bug elsewhere in this file (see the ``isinstance(cache, dict)`` caches).
+    # Require the literal bool: duck-typed compilers may synthesize truthy attributes
+    # without providing the internal eth_call seam.
     if getattr(compiler, "_gateway_internal_preflight", False) is not True:
         return None
     chain = getattr(compiler, "chain", "?")
@@ -590,12 +548,8 @@ def _decode_reserve_config_payload(
     Shared by both transports so the "broken contract" and short-payload
     semantics cannot drift between the gateway path and the eth_call path.
     """
-    # Empty `0x` payload from a successful eth_call is a strong "broken
-    # contract" signal — a healthy PoolDataProvider always returns a
-    # 320-byte ABI-encoded tuple. Treat the same as an explicit revert.
-    # Without this branch a shut-down proxy that returns success=True with
-    # empty data falls through to the short-response warning and the
-    # pre-flight silently fails open. CodeRabbit follow-up.
+    # An empty successful response is a broken-provider signal; a healthy provider returns
+    # the full 320-byte tuple.
     if payload.lower() == "0x" or payload == "":
         return _DecodedReserveConfig(
             ltv=0,
@@ -606,9 +560,7 @@ def _decode_reserve_config_payload(
         )
     raw = payload.removeprefix("0x") if payload.startswith("0x") else payload
 
-    # getReserveConfigurationData returns 10 uint256/bool words (640 hex chars).
-    # A short payload is a strong "broken response" signal — log it with the
-    # asset/chain context the pure decoder can't see, then fail-open.
+    # Short responses are unmeasured and fail open only on the external transport path.
     if len(raw) < 640:
         logger.warning(
             "%s pre-flight: unexpected response length %d for asset=%s chain=%s",
@@ -683,8 +635,7 @@ def _fetch_all_reserves_tokens(compiler: Any, protocol: str) -> list[tuple[str, 
         return None
     tokens = decode_all_reserves_tokens(raw)
     if tokens is None:
-        # Read succeeded but the payload did not decode — still a data gap,
-        # still must not be cached.
+        # Do not cache decode failures; a later read may recover.
         return None
     cache[cache_key] = tokens
     return tokens
@@ -739,17 +690,9 @@ def _absent_reserve_reason(
         )
         return None
 
-    # Suggest the wrapped equivalent only when the pool actually lists it —
-    # a suggestion we cannot verify is worse than none. Matching on the
-    # enumeration's own symbols keeps this chain-agnostic (ETH->WETH,
-    # POL->WPOL, AVAX->WAVAX) without a curated table, and yields no
-    # suggestion at all for an ordinary unsupported ERC20.
-    #
-    # The `W` + symbol match identifies a plausible SUGGESTION, but it is NOT
-    # evidence of nativeness: stETH -> WSTETH matches a real listed reserve
-    # while stETH is not a native token. Any X/WX pair that isn't native hits
-    # this. Gate the native claim on the registry (`_is_native_asset`) and use
-    # neutral phrasing otherwise — the suggestion stays useful either way.
+    # Suggest a wrapped reserve only when the pool enumeration contains it.
+    # The W-prefixed symbol match is not proof that the input is native; use the chain
+    # registry to choose native-specific wording.
     suggestion = ""
     if reserves is not None:
         wrapped_symbol = f"W{asset_symbol.upper()}"
@@ -793,8 +736,6 @@ def _check_aave_v3_collateral_eligibility(compiler: Any, asset_address: str, ass
     if not AddressRegistry.addresses_for("aave_v3", compiler.chain):
         return None
 
-    # Use isinstance(dict) rather than `is None` so MagicMock-based test
-    # compilers (which return MagicMock for any attr access) re-init cleanly.
     cache = getattr(compiler, "_aave_collateral_eligibility_cache", None)
     if not isinstance(cache, dict):
         cache = {}
@@ -804,12 +745,8 @@ def _check_aave_v3_collateral_eligibility(compiler: Any, asset_address: str, ass
     if cache_key in cache:
         return cache[cache_key]
 
-    # ``ReserveConfigUnverifiableError`` PROPAGATES from all three guards
-    # (VIB-6111). The uniform rule is: a guard NEVER converts "could not verify"
-    # into a ``reason`` string, because a reason is indistinguishable from a
-    # measured protocol fact once a caller wraps it in a typed error — and one
-    # of those typed errors classifies COMPILATION_PERMANENT / non-retryable.
-    # Call sites convert it to a NEUTRAL CompilationResult instead.
+    # Unverifiable reserve reads propagate from all guards. Converting them to a reason
+    # would misreport a transient read failure as a measured protocol restriction.
     config = _fetch_reserve_config(
         compiler,
         asset_address,
@@ -818,14 +755,10 @@ def _check_aave_v3_collateral_eligibility(compiler: Any, asset_address: str, ass
         pre_flight_label="Aave V3 collateral",
     )
     if config is None:
-        # Fail-open: do NOT cache the miss. A transient gateway failure on
-        # iteration N must not permanently disable the pre-flight on iter N+1.
-        # Reachable only when no pre-flight was configured at all (offline /
-        # strategy-side compile), where no read was ever expected.
+        # An unconfigured pre-flight fails open but is not cached, allowing later reads to recover.
         return None
 
-    # VIB-5864: an absent reserve is all-zero, so it would otherwise read as
-    # "ltv=0 -> not collateral-eligible" and hide the real problem.
+    # Check absence before interpreting the all-zero tuple as zero LTV.
     absent_reason = _absent_reserve_reason(compiler, asset_address, asset_symbol, "aave_v3", config)
     if absent_reason is not None:
         cache[cache_key] = absent_reason
@@ -879,15 +812,8 @@ def _check_lending_reserve_borrowable(
     if cache_key in cache:
         return cache[cache_key]
 
-    # ``ReserveConfigUnverifiableError`` deliberately PROPAGATES from here
-    # (VIB-6111). Catching it and returning the message as a ``reason`` would
-    # let the caller wrap it in ``LendingBorrowNotEnabledError``, whose prefix
-    # is in ``error_keywords.permanent_keywords`` — so a transient RPC 429 on an
-    # uncredentialed gateway pod would be classified COMPILATION_PERMANENT and
-    # become NON-RETRYABLE, telling the strategy to HOLD until governance
-    # enables borrowing on an asset that is perfectly fine. That is the exact
-    # unmeasured-reported-as-measured conflation this ticket exists to close.
-    # The caller returns a neutral CompilationResult instead.
+    # Let unverifiable reads propagate so callers can return a neutral, retryable result
+    # instead of a permanent borrowing-disabled verdict.
     config = _fetch_reserve_config(
         compiler,
         asset_address,
@@ -896,12 +822,9 @@ def _check_lending_reserve_borrowable(
         pre_flight_label=f"{protocol} reserve-borrowable",
     )
     if config is None:
-        # Fail-open on an UNCONFIGURED pre-flight — do not cache the miss.
         return None
 
-    # VIB-5864: an absent reserve reads borrowingEnabled=False off the all-zero
-    # tuple, which would send the user waiting for governance to enable
-    # borrowing on a reserve that does not exist.
+    # Check absence before interpreting the all-zero tuple as borrowing disabled.
     absent_reason = _absent_reserve_reason(compiler, asset_address, asset_symbol, protocol, config)
     if absent_reason is not None:
         cache[cache_key] = absent_reason
@@ -955,12 +878,7 @@ def _check_lending_reserve_active(
     if cache_key in cache:
         return cache[cache_key]
 
-    # ``ReserveConfigUnverifiableError`` PROPAGATES (VIB-6111) — see
-    # ``_check_lending_reserve_borrowable``. Returning it as a ``reason`` would
-    # let ``assert_lending_reserve_active`` wrap it in
-    # ``PoolReserveFrozenError``, telling a strategy the reserve is frozen when
-    # in fact the read simply failed. Callers that want a compile failure
-    # convert it to a neutral CompilationResult themselves.
+    # Let unverifiable reads propagate so callers do not report a read failure as frozen.
     config = _fetch_reserve_config(
         compiler,
         asset_address,
@@ -969,13 +887,9 @@ def _check_lending_reserve_active(
         pre_flight_label=f"{protocol} reserve-active",
     )
     if config is None:
-        # Fail-open on an UNCONFIGURED pre-flight: do not cache.
         return None
 
-    # VIB-5864: this is the guard the user tickets landed on — an absent
-    # reserve reads isActive=False off the all-zero tuple and was reported as
-    # a governance pause on a reserve that will never exist (ALM-2911 ETH/base,
-    # ALM-2775 Case 2 POL/polygon). Check absence BEFORE the paused verdict.
+    # Check absence before interpreting the all-zero tuple as inactive.
     absent_reason = _absent_reserve_reason(compiler, asset_address, asset_symbol, protocol, config)
     if absent_reason is not None:
         cache[cache_key] = absent_reason
@@ -994,29 +908,16 @@ def _check_lending_reserve_active(
     return None
 
 
-# ─── Borrow capacity pre-flight (defense-in-depth) ────────────────────────────
-# Mainnet protocol enforcement is the primary safety net, but the on-chain
-# revert costs gas + a strategy iteration. The compile-time pre-flight here
-# catches over-borrows before tx submission so the runner's permanent-error
-# classifier can prevent a retry storm. Fail-open on RPC errors mirrors the
-# VIB-3825 borrowable check.
+# On-chain enforcement remains authoritative; capacity pre-flights avoid doomed
+# transactions and permanent retry loops.
 
-# Selectors for the borrow-capacity pre-flight reads.
-# keccak256("getUserAccountData(address)")[:4] — Aave V3 Pool.
 _AAVE_GET_USER_ACCOUNT_DATA_SELECTOR = "0xbf92857c"
-# keccak256("getAssetPrice(address)")[:4] — Aave V3 IAaveOracle.
 _AAVE_GET_ASSET_PRICE_SELECTOR = "0xb3596f07"
-# keccak256("getAccountLiquidity(address)")[:4] — Compound V2 Comptroller.
 _COMPV2_GET_ACCOUNT_LIQUIDITY_SELECTOR = "0x5ec88c79"
-# keccak256("oracle()")[:4] — Compound V2 Comptroller.
 _COMPV2_ORACLE_SELECTOR = "0x7dc0d1d0"
-# keccak256("getUnderlyingPrice(address)")[:4] — Compound V2 PriceOracle.
 _COMPV2_GET_UNDERLYING_PRICE_SELECTOR = "0xfc57d4df"
 
-# Default safety margin applied to the computed capacity ceiling.
-# A 1% headroom matches what VIB-3825 uses for governance-bit checks and
-# absorbs minor oracle drift between the pre-flight read and the on-chain
-# borrow execution. Applied as `available * (1 - margin)`.
+# Apply the margin as available * (1 - margin) to absorb oracle drift before execution.
 _BORROW_CAPACITY_SAFETY_MARGIN = Decimal("0.01")
 
 
@@ -1048,8 +949,6 @@ def _gateway_eth_call_raw(compiler: Any, to: str, data: str, label: str) -> str 
     """
     gateway = getattr(compiler, "_gateway_client", None)
     if gateway is None or not getattr(gateway, "is_connected", False):
-        # Gateway-internal compiler: same fallback as _fetch_reserve_config, but
-        # this helper's callers keep their documented fail-open contract above.
         try:
             raw = _preflight_eth_call_hex(compiler, to=to, call_data=data, pre_flight_label=label)
         except ReserveConfigUnverifiableError as exc:
@@ -1110,10 +1009,8 @@ def _decode_uint_word(hex_data: str, word_index: int) -> int | None:
         return None
 
 
-# ERC-4626 reads on a Silo V2 vault. The silo contract IS the share token for
-# Collateral (borrowable) deposits, so ``balanceOf(owner)`` = collateral shares
-# and ``maxRedeem(owner)`` = the liquidity-aware redeemable share count.
-_SILO_V2_MAX_REDEEM_SELECTOR = "0xd905777e"  # maxRedeem(address)
+# A Silo vault is its ERC-4626 share token; maxRedeem is the liquidity-aware share bound.
+_SILO_V2_MAX_REDEEM_SELECTOR = "0xd905777e"
 
 
 def _resolve_silo_v2_redeemable_shares(compiler: Any, silo_address: str, owner: str) -> tuple[int | None, bool]:
@@ -1151,29 +1048,22 @@ def _resolve_silo_v2_redeemable_shares(compiler: Any, silo_address: str, owner: 
     if max_redeem is not None and max_redeem > 0:
         return max_redeem, False
 
-    # maxRedeem is 0 or unreadable — read balanceOf ONLY to classify the failure as
-    # terminal (empty position) vs transient (shares exist but not currently
-    # redeemable, or a read gap). balanceOf is never redeemed directly.
+    # When maxRedeem is zero or unreadable, balanceOf distinguishes an empty position
+    # from an illiquid position or read gap. Never redeem balanceOf directly.
     balance = compiler._query_erc20_balance(silo_address, owner)
     if balance is None:
-        return None, True  # total read gap → retryable
+        return None, True
     if balance <= 0:
-        return None, False  # genuinely empty position → terminal
-    # Wallet holds shares but none are currently redeemable (maxRedeem == 0, silo
-    # illiquid) or the maxRedeem read was unavailable → retry when it recovers.
+        return None, False
+    # Existing shares with no redeemable amount are retryable, not terminal.
     return None, True
 
 
-# ERC-4626 reads on a Euler V2 EVault. The vault IS the share token, so
-# ``balanceOf(owner)`` = the owner's share balance.
-#
-# ``maxRedeem(owner)`` is a LIQUIDITY bound — but ONLY for an account with no controller
-# enabled. EVK short-circuits it to 0 for ANY controller-enabled account, with no debt
-# check and no health check (``Vault.sol``: ``if (max.isZero() || hasAnyControllerEnabled(owner))
-# return Shares.wrap(0)``). So for a borrower it carries no liquidity information at all
-# and must not be read as one — hence the EVC controller gate below (VIB-5801).
-_EULER_V2_MAX_REDEEM_SELECTOR = "0xd905777e"  # maxRedeem(address)
-_EVC_GET_CONTROLLERS_SELECTOR = "0xfd6046d7"  # getControllers(address) -> address[]
+# An Euler EVault is its ERC-4626 share token, but maxRedeem returns zero for every
+# controller-enabled account regardless of debt, health, or vault liquidity.
+# Only use maxRedeem as a liquidity bound after proving no controller is enabled.
+_EULER_V2_MAX_REDEEM_SELECTOR = "0xd905777e"
+_EVC_GET_CONTROLLERS_SELECTOR = "0xfd6046d7"
 
 
 def _euler_v2_has_controller(compiler: Any, owner: str) -> bool | None:
@@ -1198,7 +1088,7 @@ def _euler_v2_has_controller(compiler: Any, owner: str) -> bool | None:
     raw = eth_call(evc_address, _EVC_GET_CONTROLLERS_SELECTOR + owner_word)
     if not isinstance(raw, str):
         return None
-    # ABI: word 0 = array offset (0x20), word 1 = array length.
+    # Dynamic address array ABI: offset word, then length word.
     length = _decode_uint_word(raw, 1)
     if length is None:
         return None
@@ -1208,9 +1098,9 @@ def _euler_v2_has_controller(compiler: Any, owner: str) -> bool | None:
 class _EulerV2FullExitMode(str, Enum):  # noqa: UP042 — StrEnum changes str() semantics; migrate separately
     """How a Euler V2 ``withdraw_all`` should be encoded, decided at compile time."""
 
-    REDEEM_MAX = "redeem_max"  # redeem(MAX_UINT256) — caps to balance at broadcast time
-    TRANSIENT = "transient"  # cannot exit now; retry (never strand the leg)
-    EMPTY = "empty"  # proven-empty position; the requested terminal state already holds
+    REDEEM_MAX = "redeem_max"
+    TRANSIENT = "transient"
+    EMPTY = "empty"
 
 
 def _resolve_euler_v2_full_exit(compiler: Any, vault_address: str, owner: str) -> tuple[_EulerV2FullExitMode, str]:
@@ -1313,22 +1203,16 @@ def _resolve_euler_v2_full_exit(compiler: Any, vault_address: str, owner: str) -
 
     balance = compiler._query_erc20_balance(vault_address, owner)
 
-    # Empty != unmeasured: only a MEASURED zero balance is terminal. ``None`` means the
-    # read failed and must never be collapsed into "nothing to withdraw".
+    # Only a measured zero balance is terminal; None is an unmeasured, retryable read.
     if balance is not None and balance <= 0:
         return (
             _EulerV2FullExitMode.EMPTY,
             f"wallet {owner} holds no shares in vault {vault_address}",
         )
 
-    # CONTROLLER GATE (VIB-5801). EVK zeroes maxRedeem for ANY controller-enabled account
-    # — no debt check, no health check. A borrower's maxRedeem is therefore 0 even with
-    # zero debt and a fully liquid vault, while redeem(MAX) succeeds (measured). Reading
-    # that 0 as "illiquid" would classify every borrow teardown TRANSIENT and retry
-    # forever against a state that only disableController() can change — which this repo
-    # never calls. So when a controller is enabled (or we cannot tell), maxRedeem carries
-    # no liquidity information: fall back to redeem(MAX), which is exactly what shipped
-    # before this change and is verified to work in that state.
+    # Controller-enabled accounts make maxRedeem uninformative, so use redeem(MAX).
+    # MAX caps to the broadcast-time balance and avoids an unrecoverable retry loop on
+    # the controller state.
     has_controller = _euler_v2_has_controller(compiler, owner)
     if has_controller is not False:
         reason = (
@@ -1342,23 +1226,16 @@ def _resolve_euler_v2_full_exit(compiler: Any, vault_address: str, owner: str) -
         )
 
     if max_redeem is None:
-        # maxRedeem read gap. Fall back to redeem(MAX) — euler's proven default and
-        # byte-identical to the pre-VIB-5801 behaviour. Failing closed here would
-        # strand a full exit that succeeds fine on a liquid vault, which is the
-        # opposite of this fix's purpose; MAX cannot over-withdraw (it caps), so the
-        # worst case is the same revert we already ship today.
+        # If maxRedeem is unreadable, redeem(MAX) retains the safe balance cap; a liquidity
+        # shortfall reverts and remains retryable.
         return (
             _EulerV2FullExitMode.REDEEM_MAX,
             "maxRedeem read unavailable — falling back to redeem(MAX_UINT256)",
         )
 
     if max_redeem <= 0:
-        # No controller is enabled (gated above), so a 0 here is a genuine LIQUIDITY zero:
-        # the vault has no cash to give right now. Retryable — liquidity does return.
-        # NOTE: do NOT add "or the debt is repaid" to this reason. A controller-enabled
-        # account also reads 0, but that never clears by waiting (only disableController
-        # does) and is handled by the gate above — collapsing the two states here is what
-        # would wedge a borrow teardown forever (VIB-5801).
+        # With no controller enabled, measured maxRedeem == 0 is a genuine liquidity zero
+        # and must remain retryable.
         held = "an unreadable balance" if balance is None else f"{balance} shares"
         return (
             _EulerV2FullExitMode.TRANSIENT,
@@ -1369,25 +1246,19 @@ def _resolve_euler_v2_full_exit(compiler: Any, vault_address: str, owner: str) -
         )
 
     if balance is None:
-        # maxRedeem readable and positive, balance not. We cannot prove the vault can
-        # settle the whole position, but we also cannot prove it cannot. MAX is the
-        # proven default and cannot over-withdraw; if the vault turns out to be short
-        # it reverts and the leg retries, exactly as it does today.
+        # If maxRedeem is positive but balance is unmeasured, redeem(MAX) keeps the balance cap
+        # and lets any liquidity shortfall fail retryably on-chain.
         return (
             _EulerV2FullExitMode.REDEEM_MAX,
             "share balance unreadable — falling back to redeem(MAX_UINT256)",
         )
 
     if max_redeem >= balance:
-        # Fully liquid for this owner: MAX and maxRedeem resolve to the same share
-        # count, so prefer MAX for its broadcast-time drain (guarantees a flat exit).
+        # When maxRedeem covers the balance, MAX drains the broadcast-time balance.
         return (_EulerV2FullExitMode.REDEEM_MAX, "")
 
-    # 0 < maxRedeem < balance: the vault cannot settle the full balance right now, so
-    # redeem(MAX) WOULD revert E_InsufficientCash. Do not broadcast a doomed tx, and do
-    # NOT partially fill (see the docstring: a partial fill reports success and makes
-    # strategies abandon the residual). Retry when liquidity returns — the position is
-    # untouched and fully recoverable meanwhile.
+    # A positive maxRedeem below balance cannot settle a full exit. Do not partially fill:
+    # a partial success would strand the residual, so retry without touching the position.
     return (
         _EulerV2FullExitMode.TRANSIENT,
         (
@@ -1424,7 +1295,6 @@ def _check_lending_borrow_capacity_aave_v3(
     if not aave_v3_contracts:
         return None, None
 
-    # Cache: (chain, protocol, wallet, asset) → (reason, available)
     cache = getattr(compiler, "_lending_borrow_capacity_cache", None)
     if not isinstance(cache, dict):
         cache = {}
@@ -1433,22 +1303,18 @@ def _check_lending_borrow_capacity_aave_v3(
 
     if cache_key in cache:
         prev_reason, prev_available = cache[cache_key]
-        # Cache hit returns the prior verdict only when the new request would
-        # also fail (or we have no available number). When we previously had
-        # capacity for amount X but the new request asks for Y > X, recompute.
+        # Reuse a capacity verdict only when it also covers the new requested amount.
         if prev_available is None:
             return prev_reason, None
         if requested_amount_decimal <= prev_available:
             return None, prev_available
-        # Recompute below — a tighter request may now exceed.
 
     pool_address = aave_v3_contracts.get("pool")
     oracle_address = aave_v3_contracts.get("oracle")
     if not pool_address or not oracle_address:
         return None, None
 
-    # 1. Pool.getUserAccountData(wallet) → 6 uint256 words. Word 2 is
-    #    availableBorrowsBase (8-decimal USD on Aave V3).
+    # Aave availableBorrowsBase is an 8-decimal base-currency amount.
     user_calldata = _AAVE_GET_USER_ACCOUNT_DATA_SELECTOR + wallet_address.lower().replace("0x", "").zfill(64)
     user_resp = _gateway_eth_call_raw(compiler, pool_address, user_calldata, "aave_v3 borrow-capacity user")
     if user_resp is None:
@@ -1457,8 +1323,7 @@ def _check_lending_borrow_capacity_aave_v3(
     if available_borrows_base is None:
         return None, None
 
-    # 2. IAaveOracle.getAssetPrice(asset) → uint256 base-currency price
-    #    (8-decimal USD).
+    # Aave oracle prices use the same 8-decimal base currency.
     oracle_calldata = _AAVE_GET_ASSET_PRICE_SELECTOR + borrow_asset_address.lower().replace("0x", "").zfill(64)
     oracle_resp = _gateway_eth_call_raw(compiler, oracle_address, oracle_calldata, "aave_v3 borrow-capacity oracle")
     if oracle_resp is None:
@@ -1467,14 +1332,10 @@ def _check_lending_borrow_capacity_aave_v3(
     if asset_price_base is None or asset_price_base == 0:
         return None, None
 
-    # 3. Convert the USD-base capacity to underlying units of the borrow
-    #    asset. Both numerator and denominator are 8-decimal USD; the ratio is
-    #    a dimensionless number of borrow-asset units (in human / non-wei
-    #    terms — caller handles the decimals scale separately if it needs wei).
+    # Dividing base-currency capacity by base-currency price yields human borrow-asset units;
+    # callers apply token decimals when they need smallest units.
     available_in_underlying = Decimal(available_borrows_base) / Decimal(asset_price_base)
 
-    # Apply safety margin (1% default) — absorbs minor oracle drift between
-    # the pre-flight read and the borrow tx execution.
     cap = available_in_underlying * (Decimal("1") - safety_margin)
 
     if requested_amount_decimal > cap:
@@ -1589,13 +1450,11 @@ def _check_lending_borrow_capacity_benqi(
         return None, None
     err_code, liquidity, shortfall = liquidity_tuple
 
-    # Non-zero error code from getAccountLiquidity is a Comptroller fault —
-    # fail-open (the borrow tx will surface the same error on-chain).
+    # A nonzero Comptroller error code is unmeasured here and fails open.
     if err_code != 0:
         return None, None
 
-    # If the wallet is already underwater (shortfall > 0), capacity is zero —
-    # any borrow exceeds it.
+    # A measured account shortfall leaves zero additional borrow capacity.
     if shortfall > 0:
         reason = (
             f"BORROW request for {requested_amount_decimal} {borrow_asset_symbol} on "
@@ -1610,13 +1469,9 @@ def _check_lending_borrow_capacity_benqi(
     if underlying_price is None:
         return None, None
 
-    # Compound V2 conversion.
-    #   underlying_price = USD_per_unit * 1e(36 - decimals)
-    #   liquidity        = USD_amount * 1e18
-    # available_wei = liquidity * 1e18 / underlying_price
-    #                = (USD_amount / USD_per_unit) * 1e(decimals)
-    # We then divide by 10**decimals to compare against the human-decimal
-    # requested amount.
+    # Compound V2 prices scale as USD per unit * 10**(36 - decimals), while liquidity
+    # uses 18-decimal USD. Dividing liquidity * 1e18 by price yields smallest units;
+    # divide by token decimals for comparison with the human requested amount.
     available_wei = (Decimal(liquidity) * Decimal(10**18)) / Decimal(underlying_price)
     available_in_underlying = available_wei / Decimal(10**borrow_decimals)
     cap = available_in_underlying * (Decimal("1") - safety_margin)
@@ -1702,10 +1557,8 @@ def assert_lending_reserve_active(
     """
     target = compiler_or_strategy
 
-    # Detect the strategy path: strategies have `_gateway_client` but their
-    # `.compiler` property raises if `_compiler` is unset (the runner-path
-    # gap). If the caller has `chain` + `_gateway_client` we run directly;
-    # otherwise we treat it as a compiler-shaped object as before.
+    # Strategy-shaped callers expose the gateway directly; accessing their compiler property
+    # may raise before the runner initializes it.
     has_chain = hasattr(target, "chain")
     has_gateway = hasattr(target, "_gateway_client")
     if has_chain and has_gateway and not _looks_like_compiler(target):
@@ -1715,7 +1568,6 @@ def assert_lending_reserve_active(
             rpc_timeout=getattr(target, "rpc_timeout", 5.0),
             cache=getattr(target, "_lending_reserve_active_cache", None),
         )
-        # Stash the cache on the strategy so iteration N+1 hits it.
         if not isinstance(getattr(target, "_lending_reserve_active_cache", None), dict):
             target._lending_reserve_active_cache = shim._lending_reserve_active_cache
         else:
@@ -1772,8 +1624,6 @@ def _validate_curvance_market_tokens(
     return None
 
 
-# Public pre-flight helper aliases. The implementation keeps the historical
-# private names because tests and older internal imports still patch them.
 resolve_pool_data_provider = _resolve_pool_data_provider
 fetch_reserve_config = _fetch_reserve_config
 check_aave_v3_collateral_eligibility = _check_aave_v3_collateral_eligibility
@@ -1797,7 +1647,6 @@ def _compile_borrow_morpho_blue(
     transactions: list[TransactionData] = []
     warnings: list[str] = []
 
-    # Validate market_id is provided
     if not intent.market_id:
         return CompilationResult(
             status=CompilationStatus.FAILED,
@@ -1805,10 +1654,8 @@ def _compile_borrow_morpho_blue(
             intent_id=intent.intent_id,
         )
 
-    # Lazy import to avoid circular import
     from almanak.connectors.morpho_blue.adapter import MorphoBlueAdapter, MorphoBlueConfig
 
-    # Create Morpho adapter
     morpho_config = MorphoBlueConfig(
         chain=compiler.chain,
         wallet_address=compiler.wallet_address,
@@ -1816,9 +1663,7 @@ def _compile_borrow_morpho_blue(
     )
     morpho_adapter = MorphoBlueAdapter(morpho_config)
 
-    # If collateral > 0, first supply collateral
     if collateral_amount_decimal > 0:
-        # Build approve TX for Morpho Blue contract
         approve_txs = compiler._build_approve_tx(
             collateral_token.address,
             morpho_adapter.morpho_address,
@@ -1826,7 +1671,6 @@ def _compile_borrow_morpho_blue(
         )
         transactions.extend(approve_txs)
 
-        # Build supply collateral TX
         supply_result: Any = morpho_adapter.supply_collateral(
             market_id=intent.market_id,
             amount=collateral_amount_decimal,
@@ -1854,7 +1698,6 @@ def _compile_borrow_morpho_blue(
     else:
         warnings.append("No collateral supplied - borrowing against existing collateral")
 
-    # Build borrow TX
     borrow_result: Any = morpho_adapter.borrow(
         market_id=intent.market_id,
         amount=intent.borrow_amount,
@@ -1880,7 +1723,6 @@ def _compile_borrow_morpho_blue(
     )
     transactions.append(borrow_tx)
 
-    # Build ActionBundle for Morpho
     total_gas = sum(tx.gas_estimate for tx in transactions)
     action_bundle = ActionBundle(
         intent_type=IntentType.BORROW.value,
@@ -1953,7 +1795,6 @@ def _compile_borrow_curvance(
             intent_id=intent.intent_id,
         )
 
-    # Step A: If collateral_amount > 0, approve + depositAsCollateral on the collateral cToken.
     if collateral_amount_decimal > 0:
         supply_spender = curvance_adapter.get_supply_spender(intent.market_id)
         approve_txs = compiler._build_approve_tx(
@@ -1988,7 +1829,6 @@ def _compile_borrow_curvance(
     else:
         warnings.append("No collateral supplied - borrowing against existing collateral")
 
-    # Step B: borrow on the BorrowableCToken.
     curvance_borrow_result = curvance_adapter.borrow(
         market_id=intent.market_id,
         amount=intent.borrow_amount,
@@ -2076,12 +1916,8 @@ def _annotate_zero_ltv_collateral(
     if config is None or getattr(config, "ltv", None) != 0:
         return capacity_reason
     if getattr(config, "exists", True) is False:
-        # An ABSENT reserve decodes as the all-zero tuple, so it also reads
-        # ltv == 0. Annotating it would state two things that are false: that
-        # governance zeroed this reserve's LTV, and that "supplying without
-        # use_as_collateral still works" — there is no reserve to supply into.
-        # A measured zero on a reserve that exists is the only case this
-        # annotation may describe (VIB-6111; absent-reserve semantics VIB-5864).
+        # Annotate zero LTV only for an existing reserve; an absent reserve also decodes to zero
+        # but cannot be supplied.
         logger.debug(
             "zero-LTV cause annotation skipped: %s has no reserve on %s %s (all-zero read)",
             collateral_token.symbol,
@@ -2089,15 +1925,8 @@ def _annotate_zero_ltv_collateral(
             compiler.chain,
         )
         return capacity_reason
-    # Phrased CONDITIONALLY, on purpose. The capacity number this annotates is
-    # account-wide (``getUserAccountData``), while ``collateral_token`` is only
-    # the intent's metadata — when ``collateral_amount == 0`` nothing confirms
-    # that reserve is even supplied or enabled for this wallet. So the measured
-    # fact (this reserve has ltv=0) is stated as measured, and its relevance is
-    # offered rather than asserted: capacity can equally be exhausted by
-    # existing debt, or limited by a different collateral entirely. Declaring a
-    # single root cause from an account-wide read would be the same
-    # claim-exceeds-evidence error this ticket exists to remove.
+    # Borrow capacity is account-wide, so zero LTV on the intent's collateral is only a
+    # possible constraint, not proof of the account's capacity root cause.
     return (
         f"{capacity_reason} NOTE: the {collateral_token.symbol} reserve on "
         f"{protocol} {compiler.chain} has ltv=0 (measured), so it grants ZERO borrowing "
@@ -2129,7 +1958,6 @@ def _compile_borrow_aave_compatible(
 
     protocol_lower = intent.protocol.lower()
 
-    # Get lending adapter
     adapter = AaveV3Adapter(compiler.chain, protocol_lower)
     pool_address = adapter.get_pool_address()
 
@@ -2140,22 +1968,9 @@ def _compile_borrow_aave_compatible(
             intent_id=intent.intent_id,
         )
 
-    # VIB-3825: pre-flight the borrow asset's reserve state. Two governance bits
-    # gate a borrow on Aave-compatible pools, and they're independent —
-    # ``isActive``/``isFrozen`` (reserve-level pause) and ``borrowingEnabled``
-    # (per-asset toggle, code 11 = BORROWING_NOT_ENABLED). A frozen reserve can
-    # still report ``borrowingEnabled=true`` and a borrow against it will
-    # revert on-chain. Check active/frozen first (cheaper, hits the same
-    # ``getReserveConfigurationData`` cache as SUPPLY) so a paused or frozen
-    # reserve fails the compile before the borrowable check runs.
-    #
-    # Fail-open applies ONLY when no pre-flight is configured (VIB-6111) — an
-    # offline / placeholder-mode compile still produces calldata and the
-    # on-chain revert remains the final guard. A CONFIGURED pre-flight that
-    # cannot read raises ReserveConfigUnverifiableError, which the try/except
-    # below converts to a NEUTRAL compile failure. Do not delete that handler as
-    # redundant: this PR exists because a stale "fails open" description let an
-    # inert guard survive unnoticed.
+    # Aave reserve activity/freeze and borrowing-enabled bits are independent.
+    # Check activity first to preserve the measured governance reason and shared cache.
+    # Unconfigured pre-flights fail open; configured unreadable checks fail neutrally.
     try:
         frozen_reason = _check_lending_reserve_active(
             compiler,
@@ -2164,8 +1979,7 @@ def _compile_borrow_aave_compatible(
             protocol_lower,
         )
     except ReserveConfigUnverifiableError as exc:
-        # Unverifiable != frozen. Neutral failure, so the classifier does not
-        # read it as a governance fact (VIB-6111).
+        # Unverifiable is neutral and must not be reported as frozen.
         return CompilationResult(
             status=CompilationStatus.FAILED,
             error=str(exc),
@@ -2186,12 +2000,8 @@ def _compile_borrow_aave_compatible(
             protocol_lower,
         )
     except ReserveConfigUnverifiableError as exc:
-        # "Could not verify" is NOT "governance disabled borrowing" (VIB-6111).
-        # Returning a neutral CompilationResult keeps the failure unclassified
-        # (retryable) instead of laundering a transient RPC error into
-        # LendingBorrowNotEnabledError, whose prefix classifies
-        # COMPILATION_PERMANENT / non-retryable and would strand the strategy on
-        # a healthy asset.
+        # An unreadable reserve is not evidence that governance disabled borrowing; keep the
+        # result neutral and retryable.
         return CompilationResult(
             status=CompilationStatus.FAILED,
             error=str(exc),
@@ -2208,31 +2018,14 @@ def _compile_borrow_aave_compatible(
             reason=borrow_disabled_reason,
         )
 
-    # Borrow-capacity pre-flight — defense in depth on top of the on-chain
-    # protocol enforcement (Aave V3 ``executeBorrow`` → code 35
-    # COLLATERAL_CANNOT_COVER_NEW_BORROW). Reads ``getUserAccountData`` at
-    # ``latest`` to compute available borrow against current on-chain
-    # collateral. Fail-open on RPC errors keeps placeholder-mode compiles
-    # flowing.
-    #
-    # Compute the on-chain integer collateral amount up-front so the
-    # capacity-bypass check uses the same wei value the supply tx will emit.
-    # Comparing the raw Decimal would let dust amounts like ``1e-19`` WETH
-    # bypass the pre-flight while flooring to ``0`` wei downstream — the
-    # bundle would emit no supply tx but skip the capacity gate, so an
-    # over-capacity borrow could still compile.
+    # Capacity reads use latest on-chain collateral, while protocol execution remains the
+    # authoritative health-factor check.
+    # Scale collateral first so dust that floors to zero cannot bypass the capacity guard.
     collateral_amount = int(collateral_amount_decimal * Decimal(10**collateral_token.decimals))
     borrow_amount = int(intent.borrow_amount * Decimal(10**borrow_token.decimals))
 
-    # Same-bundle supply+borrow: when the intent supplies a non-zero
-    # collateral wei amount AND borrows against it in the same ActionBundle,
-    # the on-chain ``getUserAccountData`` does not yet see the pending
-    # supply. The capacity check would false-reject a valid bundle. Skip
-    # the gate when ``collateral_amount > 0`` (scaled wei, not raw Decimal)
-    # to avoid that false-negative; the on-chain protocol still enforces
-    # correctness if the supply turns out insufficient. Modeling pending
-    # collateral inside the helper is a follow-up enhancement (see linked
-    # GitHub issue in the PR).
+    # Skip the latest-state capacity check when the same bundle supplies nonzero collateral:
+    # the read cannot see pending supply. The protocol still enforces health at execution.
     if protocol_lower == "aave_v3" and collateral_amount == 0:
         capacity_reason, _capacity = _check_lending_borrow_capacity_aave_v3(
             compiler,
@@ -2260,7 +2053,6 @@ def _compile_borrow_aave_compatible(
                 ),
             )
 
-    # Build approve TX and supply TX for collateral (if collateral > 0)
     if collateral_amount > 0:
         actual_collateral_address = collateral_token.address
         supply_value = 0
@@ -2269,12 +2061,11 @@ def _compile_borrow_aave_compatible(
             weth_address = compiler._get_wrapped_native_address()
             if weth_address:
                 actual_collateral_address = weth_address
-                # Wrap native -> wrapped native (deposit() selector is the same
-                # across WETH/WAVAX/WBNB/etc.)
+                # Native collateral must be wrapped before approval because Aave pulls ERC-20 reserves.
                 wrap_tx = TransactionData(
                     to=weth_address,
                     value=collateral_amount,
-                    data="0xd0e30db0",  # wrapped-native deposit()
+                    data="0xd0e30db0",
                     gas_estimate=compiler_constants.get_gas_estimate(compiler.chain, "wrap_eth"),
                     description=(
                         f"Wrap {compiler._format_amount(collateral_amount, collateral_token.decimals)} "
@@ -2283,7 +2074,6 @@ def _compile_borrow_aave_compatible(
                     tx_type="wrap",
                 )
                 transactions.append(wrap_tx)
-                # Approve wrapped native for pool
                 approve_txs = compiler._build_approve_tx(
                     weth_address,
                     pool_address,
@@ -2328,12 +2118,10 @@ def _compile_borrow_aave_compatible(
     else:
         warnings.append("No collateral supplied - borrowing against existing collateral")
 
-    # Resolve interest rate mode: use intent value or default to variable
-    # Note: stable rate is deprecated on Aave V3, rejected at intent layer
+    # Aave V3 stable borrowing is rejected; debt uses variable mode.
     aave_borrow_rate_mode = AAVE_VARIABLE_RATE_MODE
     borrow_rate_mode_label = "variable"
 
-    # Build borrow TX
     borrow_calldata = adapter.get_borrow_calldata(
         asset=borrow_token.address,
         amount=borrow_amount,
@@ -2353,7 +2141,6 @@ def _compile_borrow_aave_compatible(
     )
     transactions.append(borrow_tx)
 
-    # Build ActionBundle
     total_gas = sum(tx.gas_estimate for tx in transactions)
 
     action_bundle = ActionBundle(
@@ -2424,7 +2211,6 @@ def _compile_borrow_spark(
     collateral_amount = int(collateral_amount_decimal * Decimal(10**collateral_token.decimals))
     borrow_amount = int(intent.borrow_amount * Decimal(10**borrow_token.decimals))
 
-    # Build approve TX and supply TX for collateral (if collateral > 0)
     if collateral_amount > 0:
         actual_collateral_address = collateral_token.address
         supply_value = 0
@@ -2433,12 +2219,11 @@ def _compile_borrow_spark(
             weth_address = compiler._get_wrapped_native_address()
             if weth_address:
                 actual_collateral_address = weth_address
-                # Wrap native -> wrapped native (deposit() selector is the same
-                # across WETH/WAVAX/WBNB/etc.)
+                # Native collateral must be wrapped before approval because Spark pulls ERC-20 reserves.
                 wrap_tx = TransactionData(
                     to=weth_address,
                     value=collateral_amount,
-                    data="0xd0e30db0",  # wrapped-native deposit()
+                    data="0xd0e30db0",
                     gas_estimate=compiler_constants.get_gas_estimate(compiler.chain, "wrap_eth"),
                     description=(
                         f"Wrap {compiler._format_amount(collateral_amount, collateral_token.decimals)} "
@@ -2447,7 +2232,6 @@ def _compile_borrow_spark(
                     tx_type="wrap",
                 )
                 transactions.append(wrap_tx)
-                # Approve wrapped native for pool
                 approve_txs = compiler._build_approve_tx(
                     weth_address,
                     pool_address,
@@ -2472,7 +2256,6 @@ def _compile_borrow_spark(
             )
             transactions.extend(approve_txs)
 
-        # Build supply TX via Spark adapter
         supply_result = spark_adapter.supply(
             asset=actual_collateral_address,
             amount=collateral_amount_decimal,
@@ -2507,12 +2290,10 @@ def _compile_borrow_spark(
     else:
         warnings.append("No collateral supplied - borrowing against existing collateral")
 
-    # Resolve interest rate mode: use intent value or default to variable
-    # Note: stable rate is deprecated on Spark, rejected at intent layer
+    # Spark stable borrowing is rejected; debt uses variable mode.
     spark_borrow_rate_mode = SPARK_VARIABLE_RATE_MODE
     spark_borrow_rate_label = "variable"
 
-    # Build borrow TX via Spark adapter
     borrow_result = spark_adapter.borrow(
         asset=borrow_token.address,
         amount=intent.borrow_amount,
@@ -2544,7 +2325,6 @@ def _compile_borrow_spark(
     )
     transactions.append(borrow_tx)
 
-    # Build ActionBundle
     total_gas = sum(tx.gas_estimate for tx in transactions)
 
     action_bundle = ActionBundle(
@@ -2611,10 +2391,7 @@ def _compile_borrow_compound_v3(
     )
     compound_adapter = CompoundV3Adapter(compound_config)
 
-    # Validate that the intent's borrow token matches the market's base asset.
-    # Compound V3 markets are single-asset: borrow() can only draw the base
-    # token. Calling comet.withdraw(non_base_address, amount) reverts on-chain
-    # with an opaque error, so we fail fast at compile time.
+    # Compound V3 markets borrow only their base asset; withdrawing another asset is not a borrow.
     base_token_address = compound_adapter.market_config.get("base_token_address")
     if not base_token_address:
         return CompilationResult(
@@ -2633,11 +2410,9 @@ def _compile_borrow_compound_v3(
             intent_id=intent.intent_id,
         )
 
-    # If collateral > 0, first supply collateral
     if collateral_amount_decimal > 0:
         collateral_amount_wei = int(collateral_amount_decimal * Decimal(10**collateral_token.decimals))
 
-        # Build approve TX for Comet contract (collateral token)
         approve_txs = compiler._build_approve_tx(
             collateral_token.address,
             compound_adapter.comet_address,
@@ -2645,8 +2420,6 @@ def _compile_borrow_compound_v3(
         )
         transactions.extend(approve_txs)
 
-        # Build supply collateral TX
-        # Determine collateral symbol for adapter
         collateral_symbol = collateral_token.symbol.upper()
         supply_result = compound_adapter.supply_collateral(
             asset=collateral_symbol,
@@ -2678,7 +2451,6 @@ def _compile_borrow_compound_v3(
     else:
         warnings.append("No collateral supplied - borrowing against existing collateral")
 
-    # Build borrow TX
     borrow_result = compound_adapter.borrow(amount=intent.borrow_amount)
 
     if not borrow_result.success:
@@ -2704,7 +2476,6 @@ def _compile_borrow_compound_v3(
     )
     transactions.append(borrow_tx)
 
-    # Build ActionBundle
     total_gas = sum(tx.gas_estimate for tx in transactions)
     action_bundle = ActionBundle(
         intent_type=IntentType.BORROW.value,
@@ -2777,13 +2548,9 @@ def _compile_borrow_benqi(
     )
     benqi_adapter = BenqiAdapter(benqi_config)
 
-    # Compute the on-chain integer collateral amount up-front so the
-    # capacity-bypass check below can use the same wei value the supply tx
-    # would emit. A dust Decimal like ``1e-19`` floors to ``0`` wei and
-    # must not skip the pre-flight (no actual supply tx would land).
+    # Scale collateral first so dust that floors to zero cannot bypass the capacity guard.
     collateral_amount_wei = int(collateral_amount_decimal * Decimal(10**collateral_token.decimals))
 
-    # If collateral > 0, first supply collateral + enterMarkets
     if collateral_amount_decimal > 0:
         collateral_symbol = collateral_token.symbol.upper()
         collateral_market = benqi_adapter.get_market_info(collateral_symbol)
@@ -2795,7 +2562,6 @@ def _compile_borrow_benqi(
                 intent_id=intent.intent_id,
             )
 
-        # Build approve TX for qiToken (skip for native AVAX)
         if not collateral_market.is_native:
             approve_txs = compiler._build_approve_tx(
                 collateral_token.address,
@@ -2804,7 +2570,6 @@ def _compile_borrow_benqi(
             )
             transactions.extend(approve_txs)
 
-        # Build supply (mint) TX
         supply_result = benqi_adapter.supply(
             asset=collateral_symbol,
             amount=collateral_amount_decimal,
@@ -2832,7 +2597,6 @@ def _compile_borrow_benqi(
         )
         transactions.append(supply_tx)
 
-        # Build enterMarkets TX to enable as collateral
         enter_result = benqi_adapter.enter_markets([collateral_symbol])
         if not enter_result.success:
             return CompilationResult(
@@ -2856,27 +2620,11 @@ def _compile_borrow_benqi(
     else:
         warnings.append("No collateral supplied - borrowing against existing collateral")
 
-    # Build borrow TX
     borrow_symbol = borrow_token.symbol.upper()
 
-    # Borrow-capacity pre-flight — defense in depth on top of the BENQI
-    # Comptroller's on-chain enforcement (``borrowAllowed`` → error code 4
-    # INSUFFICIENT_LIQUIDITY). The Anvil-fork harness has historically failed
-    # to enforce this reliably (oracle prices on the fork drift); this
-    # pre-flight makes the bound observable at compile-time. Mainnet
-    # behaviour is presumed correct — a follow-up probe verifies empirically.
-    #
-    # Same-bundle supply+enterMarkets+borrow: when the intent supplies new
-    # collateral (non-zero scaled wei) and enters its market in the same
-    # ActionBundle, ``getAccountLiquidity`` at ``latest`` does not yet see
-    # those side-effects, so the pre-flight would false-reject a valid
-    # bundle. Skip the gate in that case and rely on the on-chain
-    # Comptroller; modeling pending collateral inside the helper is a
-    # follow-up enhancement (see linked GitHub issue in the PR).
-    #
-    # Bypass is gated on ``collateral_amount_wei == 0`` (not the raw
-    # Decimal) so a dust amount that floors to 0 wei still runs the
-    # pre-flight — there's no actual supply tx to mask the false-negative.
+    # The Comptroller remains authoritative; this capacity check avoids a doomed borrow.
+    # Skip it when the same bundle supplies and enables nonzero collateral because latest state
+    # cannot observe those pending effects. Use scaled units so dust still runs the check.
     borrow_market_for_capacity = benqi_adapter.get_market_info(borrow_symbol)
     if borrow_market_for_capacity is not None and collateral_amount_wei == 0:
         capacity_reason, _capacity = _check_lending_borrow_capacity_benqi(
@@ -2924,7 +2672,6 @@ def _compile_borrow_benqi(
     )
     transactions.append(borrow_tx)
 
-    # Build ActionBundle
     total_gas = sum(tx.gas_estimate for tx in transactions)
     action_bundle = ActionBundle(
         intent_type=IntentType.BORROW.value,
@@ -2982,14 +2729,12 @@ def _compile_borrow_euler_v2(
     transactions: list[TransactionData] = []
     warnings: list[str] = []
 
-    # Chain validation is handled by EulerV2Config.__post_init__
     euler_config = EulerV2Config(
         chain=compiler.chain,
         wallet_address=compiler.wallet_address,
     )
     euler_adapter = EulerV2Adapter(euler_config)
 
-    # Find collateral vault
     collateral_vault = euler_adapter.find_vault_for_asset(collateral_token.symbol.upper())
     if not collateral_vault:
         return CompilationResult(
@@ -2998,11 +2743,9 @@ def _compile_borrow_euler_v2(
             intent_id=intent.intent_id,
         )
 
-    # If collateral > 0, first supply collateral
     if collateral_amount_decimal > 0:
         collateral_amount_wei = int(collateral_amount_decimal * Decimal(10**collateral_token.decimals))
 
-        # Build approve TX for vault
         approve_txs = compiler._build_approve_tx(
             collateral_token.address,
             collateral_vault.vault_address,
@@ -3010,7 +2753,6 @@ def _compile_borrow_euler_v2(
         )
         transactions.extend(approve_txs)
 
-        # Build supply (deposit) TX
         supply_result = euler_adapter.supply(
             asset=collateral_token.symbol.upper(),
             amount=collateral_amount_decimal,
@@ -3041,7 +2783,6 @@ def _compile_borrow_euler_v2(
     else:
         warnings.append("No collateral supplied - borrowing against existing collateral")
 
-    # Build borrow TX (includes EVC enableCollateral + enableController + borrow)
     borrow_result = euler_adapter.borrow(
         borrow_asset=borrow_token.symbol.upper(),
         borrow_amount=intent.borrow_amount,
@@ -3153,7 +2894,6 @@ def _compile_borrow_silo_v2(
             intent_id=intent.intent_id,
         )
 
-    # If collateral > 0, deposit into the collateral silo
     if collateral_amount_decimal > 0:
         collateral_amount_wei = int(collateral_amount_decimal * Decimal(10**collateral_token.decimals))
 
@@ -3292,28 +3032,23 @@ def _compile_repay_morpho_blue(
             intent_id=intent.intent_id,
         )
 
-    # Lazy import to avoid circular import
     from almanak.connectors.morpho_blue.adapter import MorphoBlueAdapter, MorphoBlueConfig
 
-    # Use _get_chain_rpc_url() (not compiler.rpc_url) so Anvil fork URL is detected via
-    # ANVIL_{CHAIN}_PORT env var when running on a fork. compiler.rpc_url is always None
-    # in gateway mode, which caused the SDK to use Alchemy mainnet RPC even on Anvil,
-    # returning borrow_shares=0 and breaking repay_full=True (VIB-587).
+    # Use the chain-aware RPC resolver so managed fork endpoints outrank upstream providers.
     morpho_rpc_url = compiler._get_chain_rpc_url()
 
     morpho_config = MorphoBlueConfig(
         chain=compiler.chain,
         wallet_address=compiler.wallet_address,
-        rpc_url=morpho_rpc_url,  # DEPRECATED — only used when gateway_client is None
+        rpc_url=morpho_rpc_url,
         gateway_client=compiler._gateway_client,
     )
     morpho_adapter = MorphoBlueAdapter(morpho_config)
 
-    # Build approve TX for Morpho Blue contract
     if repay_amount_decimal is not None:
         approve_amount = int(repay_amount_decimal * Decimal(10**repay_token.decimals))
     else:
-        approve_amount = MAX_UINT256  # Approve max for full repay
+        approve_amount = MAX_UINT256
 
     approve_txs = compiler._build_approve_tx(
         repay_token.address,
@@ -3322,7 +3057,6 @@ def _compile_repay_morpho_blue(
     )
     transactions.extend(approve_txs)
 
-    # Build repay TX
     repay_result: Any = morpho_adapter.repay(
         market_id=intent.market_id,
         amount=repay_amount_decimal if repay_amount_decimal else Decimal("0"),
@@ -3417,7 +3151,6 @@ def _compile_repay_curvance(
             intent_id=intent.intent_id,
         )
 
-    # Approve the BorrowableCToken to pull the repayment.
     approve_amount = (
         MAX_UINT256
         if intent.repay_full or repay_amount_decimal is None
@@ -3430,7 +3163,6 @@ def _compile_repay_curvance(
     )
     transactions.extend(approve_txs)
 
-    # Build the repay tx.
     curvance_repay_result = curvance_adapter.repay(
         market_id=intent.market_id,
         amount=repay_amount_decimal if repay_amount_decimal is not None else Decimal("0"),
@@ -3509,9 +3241,8 @@ def _compile_repay_aave_compatible(
         )
 
     if intent.repay_full:
-        # Query wallet balance to use as repay amount — avoids InsufficientFunds()
-        # when accrued interest causes debt to exceed the borrowed principal.
-        # Aave accepts any amount up to the debt; we repay as much as the wallet holds.
+        # Repay from the wallet balance because accrued interest can exceed the borrowed principal;
+        # Aave accepts any amount up to the outstanding debt.
         wallet_balance = compiler._query_erc20_balance(repay_token.address, compiler.wallet_address)
         if wallet_balance is None:
             repay_amount = MAX_UINT256
@@ -3552,8 +3283,7 @@ def _compile_repay_aave_compatible(
         if weth_address:
             actual_repay_address = weth_address
 
-    # Resolve interest rate mode: use intent value or default to variable
-    # Note: stable rate is deprecated on Aave V3, rejected at intent layer
+    # Aave V3 stable debt is unsupported; repayment uses variable mode.
     aave_rate_mode = AAVE_VARIABLE_RATE_MODE
     rate_mode_label = "variable"
 
@@ -3639,11 +3369,8 @@ def _compile_repay_spark(
     pool_address = spark_adapter.pool_address
 
     if intent.repay_full:
-        # repay_full on a native token is unsafe: we would wrap the wallet's
-        # entire native balance, leaving nothing to pay gas for the wrap tx
-        # itself (and the subsequent approve/repay txs). Reject at compile
-        # time and require the caller to supply an explicit amount that
-        # reserves gas.
+        # A full native-token repay would wrap the entire gas balance before later transactions.
+        # Require an explicit amount that leaves gas available.
         if repay_token.is_native:
             return CompilationResult(
                 status=CompilationStatus.FAILED,
@@ -3655,8 +3382,7 @@ def _compile_repay_spark(
                 intent_id=intent.intent_id,
             )
 
-        # Same as Aave path: query wallet balance to avoid InsufficientFunds()
-        # if accrued interest exceeds original principal in the wallet.
+        # Use the wallet balance because accrued interest can exceed the original principal.
         wallet_balance = compiler._query_erc20_balance(repay_token.address, compiler.wallet_address)
         if wallet_balance is None:
             repay_amount = MAX_UINT256
@@ -3684,20 +3410,14 @@ def _compile_repay_spark(
     else:
         weth_address = compiler._get_wrapped_native_address()
         if not weth_address:
-            # Fail fast: without a wrapped-native address we cannot approve or
-            # repay native ETH debt. Previously control fell through silently
-            # and a later _build_approve_tx call was built against the native
-            # sentinel address, producing invalid transactions.
             return CompilationResult(
                 status=CompilationStatus.FAILED,
                 error=(f"Wrapped native token address not available on {compiler.chain} for native repayment"),
                 intent_id=intent.intent_id,
             )
 
-        # Native debt requires wrapping ETH -> WETH before approve/repay.
-        # If repay_full fell back to MAX_UINT256 (wallet balance query failed),
-        # we cannot know how much ETH to wrap: fail fast with a clear error
-        # instead of emitting an unfundable wrap transaction.
+        # Native debt must be wrapped before approval. If the balance read failed, MAX gives no
+        # concrete wrap amount, so compilation must fail instead of emitting an unfundable wrap.
         if repay_amount == MAX_UINT256:
             return CompilationResult(
                 status=CompilationStatus.FAILED,
@@ -3711,12 +3431,10 @@ def _compile_repay_spark(
 
         actual_repay_address = weth_address
 
-        # Wrap native ETH -> WETH so the pool can pull WETH during repay.
-        # Matches the pattern used by _compile_supply_spark and _compile_borrow_spark.
         wrap_tx = TransactionData(
             to=weth_address,
             value=repay_amount,
-            data="0xd0e30db0",  # WETH.deposit()
+            data="0xd0e30db0",
             gas_estimate=compiler_constants.get_gas_estimate(compiler.chain, "wrap_eth"),
             description=(
                 f"Wrap {compiler._format_amount(repay_amount, repay_token.decimals)} {repay_token.symbol} to WETH"
@@ -3733,14 +3451,11 @@ def _compile_repay_spark(
         transactions.extend(approve_txs)
         warnings.append("Native token debt: wrapped to WETH for repayment")
 
-    # Resolve interest rate mode: use intent value or default to variable
-    # Note: stable rate is deprecated on Spark, rejected at intent layer
+    # Spark stable debt is unsupported; repayment uses variable mode.
     spark_repay_rate_mode = SPARK_VARIABLE_RATE_MODE
     spark_repay_rate_label = "variable"
 
-    # Build repay TX via Spark adapter.
-    # When we have a concrete wallet balance, pass repay_all=False so the
-    # adapter uses the exact amount instead of overriding with MAX_UINT256.
+    # Pass a measured wallet balance as an exact repayment so the adapter does not replace it with MAX.
     spark_use_repay_all = repay_amount == MAX_UINT256
     spark_amount = (
         Decimal(repay_amount) / Decimal(10**repay_token.decimals)
@@ -3841,10 +3556,7 @@ def _compile_repay_compound_v3(
     )
     compound_adapter = CompoundV3Adapter(compound_config)
 
-    # Validate that the intent's repay token matches the market's base asset.
-    # Compound V3 repay is implemented as comet.supply(baseToken, amount) which
-    # only accepts the base asset. Supplying any other token would either revert
-    # or be treated as collateral supply (not a repayment), so fail fast.
+    # Compound V3 repayment supplies the base asset; another token would be collateral, not debt repayment.
     base_token_address = compound_adapter.market_config.get("base_token_address")
     if not base_token_address:
         return CompilationResult(
@@ -3863,11 +3575,10 @@ def _compile_repay_compound_v3(
             intent_id=intent.intent_id,
         )
 
-    # Build approve TX for Comet contract (repay token -> Comet)
     if repay_amount_decimal is not None:
         approve_amount = int(repay_amount_decimal * Decimal(10**repay_token.decimals))
     else:
-        approve_amount = MAX_UINT256  # Approve max for full repay
+        approve_amount = MAX_UINT256
 
     approve_txs = compiler._build_approve_tx(
         repay_token.address,
@@ -3876,7 +3587,6 @@ def _compile_repay_compound_v3(
     )
     transactions.extend(approve_txs)
 
-    # Build repay TX via Compound V3 adapter
     repay_result = compound_adapter.repay(
         amount=repay_amount_decimal if repay_amount_decimal else Decimal("0"),
         on_behalf_of=compiler.wallet_address,
@@ -3978,7 +3688,6 @@ def _compile_repay_benqi(
             intent_id=intent.intent_id,
         )
 
-    # Build approve TX for qiToken (skip for native AVAX)
     if not repay_market.is_native and not intent.repay_full:
         if repay_amount_decimal is None:
             return CompilationResult(
@@ -3994,7 +3703,6 @@ def _compile_repay_benqi(
         )
         transactions.extend(approve_txs)
     elif not repay_market.is_native and intent.repay_full:
-        # For repay_full, approve MAX_UINT256
         from almanak.connectors.benqi.adapter import MAX_UINT256 as BENQI_MAX_UINT256
 
         approve_txs = compiler._build_approve_tx(
@@ -4004,7 +3712,6 @@ def _compile_repay_benqi(
         )
         transactions.extend(approve_txs)
 
-    # Build repay TX
     repay_result = benqi_adapter.repay(
         asset=repay_symbol,
         amount=repay_amount_decimal if repay_amount_decimal is not None else Decimal("0"),
@@ -4085,7 +3792,6 @@ def _compile_repay_euler_v2(
     transactions: list[TransactionData] = []
     warnings: list[str] = list(initial_warnings)
 
-    # Chain validation is handled by EulerV2Config.__post_init__
     euler_config = EulerV2Config(
         chain=compiler.chain,
         wallet_address=compiler.wallet_address,
@@ -4102,7 +3808,6 @@ def _compile_repay_euler_v2(
             intent_id=intent.intent_id,
         )
 
-    # Build approve TX for vault
     if not intent.repay_full:
         if repay_amount_decimal is None:
             return CompilationResult(
@@ -4118,7 +3823,6 @@ def _compile_repay_euler_v2(
         )
         transactions.extend(approve_txs)
     else:
-        # For repay_full, approve MAX_UINT256
         approve_txs = compiler._build_approve_tx(
             repay_token.address,
             repay_vault.vault_address,
@@ -4126,7 +3830,6 @@ def _compile_repay_euler_v2(
         )
         transactions.extend(approve_txs)
 
-    # Build repay TX
     repay_result = euler_adapter.repay(
         asset=repay_symbol,
         amount=repay_amount_decimal if repay_amount_decimal is not None else Decimal("0"),
@@ -4234,7 +3937,6 @@ def _compile_repay_silo_v2(
 
     sv2_market, silo_address, _ = sv2_silo_result
 
-    # Build approve TX for the silo
     if not intent.repay_full:
         if repay_amount_decimal is None:
             return CompilationResult(
@@ -4250,7 +3952,6 @@ def _compile_repay_silo_v2(
         )
         transactions.extend(approve_txs)
     else:
-        # For repay_full, approve MAX_UINT256
         approve_txs = compiler._build_approve_tx(
             repay_token.address,
             silo_address,
@@ -4258,7 +3959,6 @@ def _compile_repay_silo_v2(
         )
         transactions.extend(approve_txs)
 
-    # Build repay TX
     repay_result = silo_adapter.repay(
         asset=repay_symbol,
         amount=repay_amount_decimal if repay_amount_decimal is not None else Decimal("0"),
@@ -4331,7 +4031,6 @@ def _compile_supply_morpho_blue(
     transactions: list[TransactionData] = []
     warnings: list[str] = []
 
-    # Validate market_id is provided
     if not intent.market_id:
         return CompilationResult(
             status=CompilationStatus.FAILED,
@@ -4339,10 +4038,8 @@ def _compile_supply_morpho_blue(
             intent_id=intent.intent_id,
         )
 
-    # Lazy import to avoid circular import
     from almanak.connectors.morpho_blue.adapter import MorphoBlueAdapter, MorphoBlueConfig
 
-    # Create Morpho adapter
     morpho_config = MorphoBlueConfig(
         chain=compiler.chain,
         wallet_address=compiler.wallet_address,
@@ -4350,7 +4047,6 @@ def _compile_supply_morpho_blue(
     )
     morpho_adapter = MorphoBlueAdapter(morpho_config)
 
-    # Build approve TX for Morpho Blue contract
     approve_txs = compiler._build_approve_tx(
         supply_token.address,
         morpho_adapter.morpho_address,
@@ -4358,10 +4054,8 @@ def _compile_supply_morpho_blue(
     )
     transactions.extend(approve_txs)
 
-    # Morpho Blue has two supply paths:
-    # - supply() for loan-token deposits (lending to earn interest)
-    # - supply_collateral() for collateral deposits (to enable borrowing)
-    # Route based on use_as_collateral flag: True -> collateral, False -> loan-token
+    # Morpho loan-token supply earns interest, while supply_collateral enables borrowing.
+    # The collateral flag selects between these distinct accounting positions.
     if intent.use_as_collateral:
         tx_result = morpho_adapter.supply_collateral(
             market_id=intent.market_id,
@@ -4398,7 +4092,6 @@ def _compile_supply_morpho_blue(
     )
     transactions.append(supply_tx)
 
-    # Build ActionBundle for Morpho
     total_gas = sum(tx.gas_estimate for tx in transactions)
     action_bundle = ActionBundle(
         intent_type=IntentType.SUPPLY.value,
@@ -4467,10 +4160,8 @@ def _compile_supply_curvance(
             intent_id=intent.intent_id,
         )
 
-    # Curvance's depositAsCollateral is the primary supply path. Plain
-    # deposit() (lend-only, no collateral posting) is not wired yet, so
-    # honor the intent rather than silently routing through the
-    # collateral path.
+    # Curvance currently supports only collateral deposits; reject lend-only supply rather
+    # than silently changing the intent.
     if not intent.use_as_collateral:
         return CompilationResult(
             status=CompilationStatus.FAILED,
@@ -4551,7 +4242,6 @@ def _compile_supply_aave_compatible(
     warnings: list[str] = []
     protocol_lower = intent.protocol.lower()
 
-    # Get lending adapter
     adapter = AaveV3Adapter(compiler.chain, protocol_lower)
     pool_address = adapter.get_pool_address()
 
@@ -4569,7 +4259,6 @@ def _compile_supply_aave_compatible(
 
     supply_amount = int(amount_decimal * Decimal(10**supply_token.decimals))
 
-    # Handle native token vs ERC20
     actual_supply_address = supply_token.address
     supply_value = 0
 
@@ -4586,21 +4275,8 @@ def _compile_supply_aave_compatible(
             )
         actual_supply_address = weth_address
 
-    # Pre-flight: confirm the reserve for this asset is active and unfrozen on
-    # the target pool. Surfaces a typed `PoolReserveFrozenError` (relayed as a
-    # FAILED compilation result) instead of submitting a SUPPLY TX that will
-    # revert opaquely on-chain — covering any Aave V3 market
-    # whose governance has paused a reserve. Frozen / stubbed deployments
-    # are not exercised here: their LendingPool proxy reads are unreliable,
-    # so such chain entries are removed from
-    # ``LENDING_POOL_ADDRESSES`` and the supply path fails earlier on the
-    # zero-address guard above (issues #1842 / #1847 / #1889).
-    # VIB-3749 (extends VIB-3701 collateral pre-flight). Fails open when NO
-    # pre-flight is configured — offline / placeholder-mode compiles still
-    # produce calldata and the on-chain revert remains the final guard. A
-    # CONFIGURED pre-flight that cannot read raises
-    # ReserveConfigUnverifiableError and the try/except below turns it into a
-    # NEUTRAL compile failure (VIB-6111).
+    # Unconfigured checks fail open for offline compilation; configured unreadable checks
+    # fail neutrally rather than claiming a governance state.
     try:
         frozen_reason = _check_lending_reserve_active(
             compiler,
@@ -4609,7 +4285,7 @@ def _compile_supply_aave_compatible(
             protocol=protocol_lower,
         )
     except ReserveConfigUnverifiableError as exc:
-        # Unverifiable != frozen. Neutral failure (VIB-6111).
+        # Unverifiable is neutral and must not be reported as frozen.
         return CompilationResult(
             status=CompilationStatus.FAILED,
             error=str(exc),
@@ -4623,12 +4299,11 @@ def _compile_supply_aave_compatible(
         )
 
     if supply_token.is_native:
-        # Wrap native -> wrapped native (deposit() selector is the same
-        # across WETH/WAVAX/WBNB/etc.)
+        # Native assets are wrapped before approval because Aave supplies ERC-20 reserves.
         wrap_tx = TransactionData(
             to=actual_supply_address,
             value=supply_amount,
-            data="0xd0e30db0",  # wrapped-native deposit()
+            data="0xd0e30db0",
             gas_estimate=compiler_constants.get_gas_estimate(compiler.chain, "wrap_eth"),
             description=(
                 f"Wrap {compiler._format_amount(supply_amount, supply_token.decimals)} "
@@ -4637,7 +4312,6 @@ def _compile_supply_aave_compatible(
             tx_type="wrap",
         )
         transactions.append(wrap_tx)
-        # Approve wrapped native for pool
         approve_txs = compiler._build_approve_tx(
             actual_supply_address,
             pool_address,
@@ -4653,7 +4327,6 @@ def _compile_supply_aave_compatible(
         )
         transactions.extend(approve_txs)
 
-    # Build supply TX
     supply_calldata = adapter.get_supply_calldata(
         asset=actual_supply_address,
         amount=supply_amount,
@@ -4672,13 +4345,8 @@ def _compile_supply_aave_compatible(
     )
     transactions.append(supply_tx)
 
-    # Build setUserUseReserveAsCollateral TX if requested
     if intent.use_as_collateral:
-        # Pre-flight: confirm asset can actually be used as collateral on this
-        # market. Surfaces a typed error instead of the opaque on-chain
-        # 0xd0739dae (UnderlyingCannotBeUsedAsCollateral) / 0x21e5c4ae
-        # (UserHasAssetWithZeroLtv) revert. VIB-3701; selectors corrected in
-        # VIB-6111 (the previously documented 0x0cafc072 was keccak-wrong).
+        # Aave permits supply to a zero-LTV reserve but forbids enabling it as collateral.
         if protocol_lower == "aave_v3":
             try:
                 ineligible_reason = _check_aave_v3_collateral_eligibility(
@@ -4687,9 +4355,7 @@ def _compile_supply_aave_compatible(
                     asset_symbol=supply_token.symbol,
                 )
             except ReserveConfigUnverifiableError as exc:
-                # Fail CLOSED, but NEUTRALLY: the compile is refused because the
-                # guard could not verify, not because the asset is conclusively
-                # ineligible (VIB-6111).
+                # Unreadable eligibility fails closed but remains a neutral result.
                 return CompilationResult(
                     status=CompilationStatus.FAILED,
                     error=str(exc),
@@ -4717,7 +4383,6 @@ def _compile_supply_aave_compatible(
         )
         transactions.append(set_collateral_tx)
 
-    # Build ActionBundle
     total_gas = sum(tx.gas_estimate for tx in transactions)
 
     action_bundle = ActionBundle(
@@ -4739,7 +4404,6 @@ def _compile_supply_aave_compatible(
     result.total_gas_estimate = total_gas
     result.warnings = warnings
 
-    # Format amounts for user-friendly logging
     supply_fmt = format_token_amount(supply_amount, supply_token.symbol, supply_token.decimals)
     collateral_str = " (as collateral)" if intent.use_as_collateral else ""
 
@@ -4784,7 +4448,6 @@ def _compile_supply_spark(
 
     supply_amount = int(amount_decimal * Decimal(10**supply_token.decimals))
 
-    # Handle native token vs ERC20
     actual_supply_address = supply_token.address
     supply_value = 0
 
@@ -4792,12 +4455,11 @@ def _compile_supply_spark(
         weth_address = compiler._get_wrapped_native_address()
         if weth_address:
             actual_supply_address = weth_address
-            # Wrap native -> wrapped native (deposit() selector is the same
-            # across WETH/WAVAX/WBNB/etc.)
+            # Native assets are wrapped before approval because Spark supplies ERC-20 reserves.
             wrap_tx = TransactionData(
                 to=weth_address,
                 value=supply_amount,
-                data="0xd0e30db0",  # wrapped-native deposit()
+                data="0xd0e30db0",
                 gas_estimate=compiler_constants.get_gas_estimate(compiler.chain, "wrap_eth"),
                 description=(
                     f"Wrap {compiler._format_amount(supply_amount, supply_token.decimals)} "
@@ -4806,7 +4468,6 @@ def _compile_supply_spark(
                 tx_type="wrap",
             )
             transactions.append(wrap_tx)
-            # Approve wrapped native for pool
             approve_txs = compiler._build_approve_tx(
                 weth_address,
                 pool_address,
@@ -4831,7 +4492,6 @@ def _compile_supply_spark(
         )
         transactions.extend(approve_txs)
 
-    # Build supply TX via Spark adapter
     supply_result: Any = spark_adapter.supply(
         asset=actual_supply_address,
         amount=amount_decimal,
@@ -4863,7 +4523,6 @@ def _compile_supply_spark(
     )
     transactions.append(supply_tx)
 
-    # Build ActionBundle
     total_gas = sum(tx.gas_estimate for tx in transactions)
 
     action_bundle = ActionBundle(
@@ -4933,7 +4592,6 @@ def _compile_supply_compound_v3(
 
     supply_amount_wei = int(amount_decimal * Decimal(10**supply_token.decimals))
 
-    # Build approve TX for Comet contract
     approve_txs = compiler._build_approve_tx(
         supply_token.address,
         compound_adapter.comet_address,
@@ -4941,12 +4599,8 @@ def _compile_supply_compound_v3(
     )
     transactions.extend(approve_txs)
 
-    # Detect if the token is the base token or a collateral token.
-    # Compound V3 uses supply() for the base asset and supply_collateral()
-    # for collateral assets — they are different contract methods.
-    # Use address comparison (not symbol) for reliable matching.
-    # Fail closed if market_config is incomplete — we cannot safely route
-    # without knowing the base token address.
+    # Compound V3 routes base supply and collateral supply through different methods.
+    # Compare addresses, not symbols, and fail closed when the base address is unknown.
     base_token_address = compound_adapter.market_config.get("base_token_address", "")
     if not base_token_address:
         return CompilationResult(
@@ -4957,18 +4611,15 @@ def _compile_supply_compound_v3(
     is_base_token = supply_token.address.lower() == base_token_address.lower()
 
     if is_base_token:
-        # Supply base asset (earn interest)
         supply_result = compound_adapter.supply(amount=amount_decimal)
     else:
-        # In Compound V3, non-base tokens can ONLY be supplied as collateral.
-        # If the caller explicitly opted out of collateral, fail closed.
+        # Non-base assets can only be collateral; reject an explicit lend-only request.
         if not intent.use_as_collateral:
             return CompilationResult(
                 status=CompilationStatus.FAILED,
                 error=f"Cannot supply {supply_token.symbol} to Compound V3 {market} market with use_as_collateral=False — non-base tokens can only be supplied as collateral in Compound V3",
                 intent_id=intent.intent_id,
             )
-        # Supply collateral asset (enable borrowing)
         supply_result = compound_adapter.supply_collateral(
             asset=supply_token.symbol,
             amount=amount_decimal,
@@ -4996,7 +4647,6 @@ def _compile_supply_compound_v3(
     )
     transactions.append(supply_tx)
 
-    # Build ActionBundle
     total_gas = sum(tx.gas_estimate for tx in transactions)
 
     action_bundle = ActionBundle(
@@ -5071,7 +4721,6 @@ def _compile_supply_benqi(
 
     supply_amount_wei = int(amount_decimal * Decimal(10**supply_token.decimals))
 
-    # Build approve TX for qiToken (skip for native AVAX)
     if not supply_market.is_native:
         approve_txs = compiler._build_approve_tx(
             supply_token.address,
@@ -5080,7 +4729,6 @@ def _compile_supply_benqi(
         )
         transactions.extend(approve_txs)
 
-    # Build supply (mint) TX
     supply_result = benqi_adapter.supply(
         asset=supply_symbol,
         amount=amount_decimal,
@@ -5108,7 +4756,6 @@ def _compile_supply_benqi(
     )
     transactions.append(supply_tx)
 
-    # Optionally enable as collateral via enterMarkets
     if intent.use_as_collateral:
         enter_result = benqi_adapter.enter_markets([supply_symbol])
         if not enter_result.success:
@@ -5131,7 +4778,6 @@ def _compile_supply_benqi(
         )
         transactions.append(enter_tx)
 
-    # Build ActionBundle
     total_gas = sum(tx.gas_estimate for tx in transactions)
 
     action_bundle = ActionBundle(
@@ -5179,7 +4825,6 @@ def _compile_supply_euler_v2(
         EulerV2Config,
     )
 
-    # Chain validation is handled by EulerV2Config.__post_init__
     euler_config = EulerV2Config(
         chain=compiler.chain,
         wallet_address=compiler.wallet_address,
@@ -5198,7 +4843,6 @@ def _compile_supply_euler_v2(
 
     supply_amount_wei = int(amount_decimal * Decimal(10**supply_token.decimals))
 
-    # Build approve TX for vault
     approve_txs = compiler._build_approve_tx(
         supply_token.address,
         supply_vault.vault_address,
@@ -5206,7 +4850,6 @@ def _compile_supply_euler_v2(
     )
     transactions.extend(approve_txs)
 
-    # Build supply (deposit) TX
     supply_result = euler_adapter.supply(
         asset=supply_symbol,
         amount=amount_decimal,
@@ -5235,7 +4878,6 @@ def _compile_supply_euler_v2(
     )
     transactions.append(supply_tx)
 
-    # Build ActionBundle
     total_gas = sum(tx.gas_estimate for tx in transactions)
 
     action_bundle = ActionBundle(
@@ -5308,7 +4950,6 @@ def _compile_supply_silo_v2(
     sv2_market, silo_address, _ = sv2_silo_result
     supply_amount_wei = int(amount_decimal * Decimal(10**supply_token.decimals))
 
-    # Build approve TX for the silo
     approve_txs = compiler._build_approve_tx(
         supply_token.address,
         silo_address,
@@ -5316,7 +4957,6 @@ def _compile_supply_silo_v2(
     )
     transactions.extend(approve_txs)
 
-    # Build deposit TX
     sv2_supply_result = silo_adapter.supply(
         asset=supply_symbol,
         amount=amount_decimal,
@@ -5394,25 +5034,19 @@ def _compile_withdraw_morpho_blue(
             intent_id=intent.intent_id,
         )
 
-    # Lazy import to avoid circular import
     from almanak.connectors.morpho_blue.adapter import MorphoBlueAdapter, MorphoBlueConfig
 
-    # Resolve RPC URL with compiler's chain-aware fallback logic
-    # (explicit rpc_url -> managed Anvil fork -> configured provider)
     morpho_rpc_url = compiler._get_chain_rpc_url()
 
     morpho_config = MorphoBlueConfig(
         chain=compiler.chain,
         wallet_address=compiler.wallet_address,
-        rpc_url=morpho_rpc_url,  # DEPRECATED - only used when gateway_client is None
+        rpc_url=morpho_rpc_url,
         gateway_client=compiler._gateway_client,
     )
     morpho_adapter = MorphoBlueAdapter(morpho_config)
 
-    # Morpho Blue has two withdraw paths (mirrors supply):
-    # - withdraw_collateral() for collateral withdrawals
-    # - withdraw() for loan-token withdrawals (lender reclaiming supplied funds)
-    # Route based on is_collateral flag (default True for backward compat)
+    # Morpho collateral and loan-token positions use distinct withdrawal methods.
     amount_for_adapter = withdraw_amount_decimal if withdraw_amount_decimal else Decimal("0")
     if intent.is_collateral:
         withdraw_result: Any = morpho_adapter.withdraw_collateral(
@@ -5524,16 +5158,11 @@ def _compile_withdraw_curvance(
             intent_id=intent.intent_id,
         )
 
-    # Curvance-side asset amount. ChainedAmount (``"all"``) is already
-    # rejected upstream for lending intents; the else-branch is therefore
-    # a concrete Decimal.
     market_info = curvance_adapter.get_market(intent.market_id)
     share_balance: int | None = None
     if intent.withdraw_all:
         curvance_withdraw_amount = Decimal("0")
-        # withdraw_all calls redeemCollateral(shares, receiver, owner)
-        # which has no MAX_UINT256 sentinel - we MUST read the cToken
-        # share balance and pass it explicitly or the adapter raises.
+        # Curvance collateral redemption has no MAX sentinel; resolve and pass the share balance.
         share_balance = compiler._query_erc20_balance(
             market_info.collateral_ctoken,
             compiler.wallet_address,
@@ -5754,7 +5383,6 @@ def _compile_withdraw_spark(
                 intent_id=intent.intent_id,
             )
 
-    # Build withdraw TX via Spark adapter
     withdraw_result = spark_adapter.withdraw(
         asset=actual_withdraw_address,
         amount=withdraw_amount_decimal if withdraw_amount_decimal else Decimal("0"),
@@ -5852,10 +5480,8 @@ def _compile_withdraw_compound_v3(
     ):
         return binding_failure
 
-    # Detect if the token is the base token or a collateral token.
-    # Compound V3 uses withdraw() for the base asset and withdraw_collateral()
-    # for collateral assets - they are different contract methods.
-    # Compare by address (more robust than symbol, avoids alias ambiguity).
+    # Compound V3 routes base and collateral withdrawals through different methods; use
+    # addresses to avoid symbol-alias ambiguity.
     base_token_address = compound_adapter.market_config.get("base_token_address")
     if not base_token_address:
         return CompilationResult(
@@ -5868,18 +5494,14 @@ def _compile_withdraw_compound_v3(
     compound_withdraw_amount: Decimal = withdraw_amount_decimal if withdraw_amount_decimal is not None else Decimal("0")
 
     if is_base_token:
-        # Withdraw base asset (reduce lending position)
-        # Base token withdraw supports MAX_UINT256 for withdraw_all natively.
+        # Base-asset withdrawal supports MAX for a broadcast-time full exit.
         withdraw_result = compound_adapter.withdraw(
             amount=compound_withdraw_amount,
             withdraw_all=intent.withdraw_all,
         )
     else:
-        # Withdraw collateral asset.
-        # For withdraw_all: use the intent's original amount if available, since
-        # Compound V3 stores collateral as uint128 and MAX_UINT256 causes safe128() revert.
-        # The on-chain query in the adapter is the primary path; the intent amount is
-        # the fallback for when no RPC is available.
+        # Collateral balances are uint128, so MAX_UINT256 reverts. Query the balance and use the
+        # intent amount only as an offline fallback.
         collateral_amount = compound_withdraw_amount
         if intent.withdraw_all and collateral_amount == 0 and intent.amount not in (None, "all"):
             try:
@@ -5900,8 +5522,7 @@ def _compile_withdraw_compound_v3(
             intent_id=intent.intent_id,
         )
 
-    # No-op: withdraw_all on zero collateral returns success with no tx_data.
-    # Return a SUCCESS result with an empty ActionBundle so callers don't crash.
+    # A measured zero collateral balance is an idempotent successful no-op.
     if withdraw_result.tx_data is None:
         return CompilationResult(
             status=CompilationStatus.SUCCESS,
@@ -6016,13 +5637,9 @@ def _compile_withdraw_benqi(
             intent_id=intent.intent_id,
         )
 
-    # VIB-5404: "withdraw all" on a Compound-V2 fork is redeem(<full qiToken
-    # balance>) — the share count is STABLE under interest accrual (the exchange
-    # rate grows, not the balance), so a compile-time balance read is exact and
-    # race-free, and redeeming it strands zero accrued interest. The legacy
-    # redeemUnderlying(<tracked amount>) path strands every wei of interest
-    # accrued since the amount was tracked (and trips the VIB-5795 post-close
-    # residual check on an economically clean close).
+    # Compound V2 interest accrues through the exchange rate, not the share balance.
+    # Redeeming the full measured share balance therefore includes accrued interest without
+    # a compile-to-execution amount race.
     redeem_amount: int | None = None
     if intent.withdraw_all:
         qi_balance = compiler._query_erc20_balance(withdraw_market.qi_token_address, compiler.wallet_address)
@@ -6042,17 +5659,13 @@ def _compile_withdraw_benqi(
                 intent_id=intent.intent_id,
             )
         elif withdraw_amount_decimal is not None and withdraw_amount_decimal > 0:
-            # Read fault, but the caller supplied a tracked amount: fall back to
-            # the legacy redeemUnderlying(tracked) rather than stranding the
-            # whole unwind on a transient read failure. Loud, never silent.
+            # On a share-balance read fault, a tracked amount may fall back to redeemUnderlying
+            # rather than blocking the entire unwind.
             warnings.append(
                 "withdraw_all: qiToken balance read failed; falling back to redeemUnderlying of the "
                 "provided amount (may leave accrued-interest dust on-chain)"
             )
-        # else: no balance read and no amount — the adapter returns its explicit
-        # "withdraw_all requires redeem_amount" failure below (legacy error).
 
-    # Build withdraw (redeem) TX
     withdraw_result = benqi_adapter.withdraw(
         asset=withdraw_symbol,
         amount=withdraw_amount_decimal if withdraw_amount_decimal else Decimal("0"),
@@ -6131,7 +5744,6 @@ def _compile_withdraw_euler_v2(
     transactions: list[TransactionData] = []
     warnings: list[str] = list(initial_warnings)
 
-    # Chain validation is handled by EulerV2Config.__post_init__
     euler_config = EulerV2Config(
         chain=compiler.chain,
         wallet_address=compiler.wallet_address,
@@ -6148,20 +5760,16 @@ def _compile_withdraw_euler_v2(
             intent_id=intent.intent_id,
         )
 
-    # Build withdraw TX. A full exit needs a liquidity decision that redeem(MAX_UINT256)
-    # cannot express on its own: MAX caps to the owner's BALANCE, not to what the vault
-    # can currently settle, so a cash-short vault reverts E_InsufficientCash and strands
-    # the position. Resolve on-chain and redeem the liquidity-aware share count in that
-    # case only — the liquid path stays on MAX, which is proven and drains at broadcast
-    # time (VIB-5801). Explicit-amount withdraws are unchanged.
+    # Euler redeem(MAX) caps to owner balance, not vault liquidity. Use the controller-gated
+    # liquidity decision for full exits; keep MAX on liquid paths so it drains the
+    # broadcast-time balance.
     full_exit_mode: str | None = None
     if intent.withdraw_all:
         mode, note = _resolve_euler_v2_full_exit(compiler, withdraw_vault.vault_address, compiler.wallet_address)
         full_exit_mode = mode.value
 
         if mode is _EulerV2FullExitMode.TRANSIENT:
-            # Retryable — do NOT report terminal. Teardown must re-attempt when
-            # liquidity returns or the debt clears, rather than abandoning the leg.
+            # Liquidity failures are retryable so teardown does not abandon the leg.
             return CompilationResult(
                 status=CompilationStatus.FAILED,
                 error=f"Euler V2 withdraw_all cannot exit right now: {note}",
@@ -6170,10 +5778,7 @@ def _compile_withdraw_euler_v2(
             )
 
         if mode is _EulerV2FullExitMode.EMPTY:
-            # The requested terminal state ALREADY holds — there is nothing to withdraw.
-            # Report a no-op SUCCESS (the established idiom, cf. the Compound V3 branch
-            # above), not a failure: a stale or repeated teardown request must not count
-            # an already-flat leg as a failed one.
+            # An already-flat measured position is an idempotent successful no-op, not a failed exit.
             return CompilationResult(
                 status=CompilationStatus.SUCCESS,
                 action_bundle=ActionBundle(
@@ -6248,12 +5853,8 @@ def _compile_withdraw_euler_v2(
             "withdraw_token": withdraw_token.to_dict(),
             "withdraw_amount": amount_display,
             "withdraw_all": intent.withdraw_all,
-            # Provenance for the full-exit decision (VIB-5801). ``withdraw_all`` records
-            # what was ASKED; this records what was actually ENCODED. Today every
-            # tx-emitting full exit is ``redeem_max`` (a true full exit) and ``no_op``
-            # carries ``empty``, so the two never disagree — this exists so that if
-            # VIB-5806 ever adds a liquidity-bounded partial mode, readers have a signal
-            # that is not the flag.
+            # Record the encoded full-exit mode separately from the requested withdraw_all flag so
+            # downstream readers can distinguish a drain from an empty no-op.
             "full_exit_mode": full_exit_mode,
             "chain": compiler.chain,
         },
@@ -6318,20 +5919,13 @@ def _compile_withdraw_silo_v2(
 
     sv2_market, silo_address, _ = sv2_silo_result
 
-    # Build withdraw TX. A full exit (``withdraw_all``, no explicit amount) must
-    # redeem an EXPLICIT share count: Silo V2's redeem() reverts
-    # NotEnoughLiquidity() on ``MAX_UINT256`` (VIB-5800), so resolve the actual
-    # redeemable shares on-chain here — mirroring the Curvance redeemCollateral
-    # share-resolution — and redeem exactly that many. The withdraw path uses the
-    # Collateral (borrowable) share side, matching the deposit collateral_type.
+    # Silo redeem(MAX) reverts; full exits must resolve and encode the liquidity-aware
+    # redeemable share count for the collateral share side.
     if intent.withdraw_all:
         shares, is_transient = _resolve_silo_v2_redeemable_shares(compiler, silo_address, compiler.wallet_address)
         if shares is None:
             if is_transient:
-                # Reads failed, OR the wallet holds shares while maxRedeem == 0 (silo
-                # momentarily illiquid). Retryable — do NOT strand the leg by reporting
-                # a terminal failure; teardown will re-attempt when liquidity/the read
-                # recovers (VIB-5800).
+                # Read gaps and existing shares with zero redeemable liquidity are retryable.
                 return CompilationResult(
                     status=CompilationStatus.FAILED,
                     error=(
@@ -6342,7 +5936,7 @@ def _compile_withdraw_silo_v2(
                     intent_id=intent.intent_id,
                     is_transient=True,
                 )
-            # Genuinely empty position (balanceOf == 0): terminal, nothing to withdraw.
+            # A measured zero share balance is terminal and needs no transaction.
             return CompilationResult(
                 status=CompilationStatus.FAILED,
                 error=(
