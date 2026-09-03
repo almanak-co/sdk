@@ -6,6 +6,46 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.27.0] - 2026-09-03
+
+### Added
+
+- **Self-describing pool prices in agent tools.** `get_pool_state` / `ax pool`
+  now also return `price_token1_per_token0`, `price_token0_per_token1`, and a
+  unit-labeled `price_label` so price direction is never re-derived wrongly;
+  plus an ALMANAK ethereum registry entry pointing at the liquid market.
+  (#3813)
+- **On-chain lending market verification from the CLI.** New `ax
+  lending-market --protocol <p> --market-id <id>` command, modeled on `ax
+  perp-market`, wiring the previously unreachable `GetLendingMarket` RPC into
+  the planner and protocol tests. (#3838)
+- **Exact bare-address venues for Aerodrome and TraderJoe V2.**
+  Slipstream/Classic LP open/close and TraderJoe V2 LP accept bare pool
+  addresses authenticated on-chain through the registered factory, and
+  Aerodrome swaps now honor `swap_params={"pool"}` pinning. (#3828)
+
+### Changed
+
+- **Backtests sized for one year at 1h.** Hosted budget raised to 7200s with
+  adaptive page-splitting on slow archive pages, and feasibility
+  recommendations now respect the strategy's declared data cadence. (#3842)
+- **Almanak Code updated to v1.0.61.** Bundled agent bumps v1.0.58 through
+  v1.0.61. (#3815, #3816, #3821, #3823)
+
+### Fixed
+
+- **Lending teardown no longer false-fails.** Closure is judged from
+  price-independent raw on-chain balances first, teardown snapshots are
+  genuinely fresh on the no-runner CLI lane, and cold teardown resolves
+  deployment identity like the runner does. (#3838)
+- **Eight local backtest correctness fixes.** Closed a lending-rate look-ahead
+  leak, perp health no longer fabricates `Infinity`, Polygon native alias
+  folding, Optimism PoA sampling, GMX market-identity refusal, run-chain (not
+  implicit Arbitrum) lookups, and fill-before-tick ordering. (#3829)
+- **DexScreener prices respect pair orientation.** Tokens on a pair's quote
+  side are priced by inversion instead of returning the base token's price,
+  and on-demand gateways resolve token identity for pricing. (#3822)
+
 ## [2.26.2] - 2026-08-28
 
 ### Added
