@@ -88,11 +88,6 @@ LP_RANGE_UPPER = Decimal("20000")
 MORPHO_MARKET_NAME = "wstETH/USDC"
 
 
-# =============================================================================
-# Helpers
-# =============================================================================
-
-
 def _make_temp_store() -> tuple[SQLiteStore, str]:
     """Create a fresh SQLiteStore backed by a temp file. Caller must delete."""
     f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
@@ -179,11 +174,6 @@ def _advance_time(web3: Web3, seconds: int) -> None:
     web3.provider.make_request("evm_mine", [])  # type: ignore[attr-defined]
 
 
-# =============================================================================
-# Section 1: Unit Tests — No Anvil Required
-# =============================================================================
-
-
 class TestAccountingModels:
     """Prove the accounting model layer is correct: types, None discipline, round-trip."""
 
@@ -223,7 +213,6 @@ class TestAccountingModels:
         assert payload["health_factor_before"] is None, "None must not become '0' or 'None' string"
         assert payload["interest_delta_usd"] is None, "None must not become absent"
         assert payload["supply_apr_bps"] is None, "None int must survive"
-        # Real values must be exact strings
         assert payload["health_factor_after"] == "1.85"
         assert payload["borrow_apr_bps"] == 842
         assert payload["confidence"] == "HIGH"
@@ -304,7 +293,6 @@ class TestAccountingModels:
             ok = await store.save_accounting_event(event)
             assert ok, "save_accounting_event must return True"
 
-            # Query by deployment_id
             rows = await store.get_accounting_events("deploy-abc")
             assert len(rows) == 1, f"Expected 1 row, got {len(rows)}"
 
@@ -316,20 +304,17 @@ class TestAccountingModels:
             assert row["confidence"] == "HIGH"
             assert row["event_type"] == "BORROW"
 
-            # Query by event_type filter
             rows_borrow = await store.get_accounting_events("deploy-abc", event_type="BORROW")
             assert len(rows_borrow) == 1
             rows_repay = await store.get_accounting_events("deploy-abc", event_type="REPAY")
             assert len(rows_repay) == 0
 
-            # Query by position_key
             rows_pos = await store.get_accounting_events(
                 "deploy-abc",
                 position_key="lending:arbitrum:morpho:0xabc:market1:USDC",
             )
             assert len(rows_pos) == 1
 
-            # get_accounting_history returns in ascending order
             identity2 = _make_identity(deployment_id="deploy-abc")
             event2 = LendingAccountingEvent(
                 identity=identity2,
@@ -381,7 +366,6 @@ class TestAccountingModels:
         writer = AccountingWriter(bad_store)
 
         identity = _make_identity()
-        # Give identity the LIVE mode
         live_identity = AccountingIdentity(
             id=identity.id,
             deployment_id=identity.deployment_id,
@@ -419,10 +403,6 @@ class TestAccountingModels:
             confidence=AccountingConfidence.UNAVAILABLE,
         )
 
-        # AttemptNo17: writer raises ``AccountingPersistenceError`` (a typed
-        # ``Exception`` subclass introduced by VIB-3863) instead of the legacy
-        # bare ``RuntimeError``. The message still includes
-        # ``save_accounting_event`` so operators can grep for it.
         with pytest.raises(AccountingPersistenceError, match="save_accounting_event"):
             await writer.write(event)
 
@@ -453,7 +433,6 @@ class TestAccountingModels:
         )
         assert lot_id
 
-        # Repay principal + interest
         result = store.match_repay(
             deployment_id="d1",
             position_key="lending:arb:morpho:0xabc:market:USDC",
@@ -508,11 +487,6 @@ class TestAccountingModels:
         assert result.unmatched_amount == Decimal("0")
 
 
-# =============================================================================
-# Section 2: Pendle Topic Hash Proof (no Anvil needed)
-# =============================================================================
-
-
 class TestPendleTopicHashFix:
     """Prove that the old placeholder hashes were wrong and the new ones are correct.
 
@@ -529,7 +503,6 @@ class TestPendleTopicHashFix:
             "RedeemSY": "0x8b2e0c9d1f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9",
         }
 
-        # Try every plausible ABI signature — none should match the placeholder values
         candidate_sigs = [
             "RedeemPY(address,address,uint256,uint256)",
             "RedeemPY(address,uint256,uint256)",
@@ -618,11 +591,6 @@ class TestPendleTopicHashFix:
             )
 
 
-# =============================================================================
-# Section 3: LP E2E Accounting (requires Anvil)
-# =============================================================================
-
-
 @pytest.mark.arbitrum
 @pytest.mark.accounting_e2e
 class TestLPAccountingE2E:
@@ -659,11 +627,9 @@ class TestLPAccountingE2E:
         try:
             await store.initialize()
 
-            # Verify: no snapshots exist yet (simulating first iteration)
             snap = await store.get_latest_snapshot("test-deploy-lp")
             assert snap is None, "Store must have no snapshots for this test to prove the fix"
 
-            # Open LP position — record balances before to verify Layer 4 deltas
             token0_addr = (CHAIN_CONFIG.get("tokens", {}).get("WETH") or "").lower()
             token1_addr = (CHAIN_CONFIG.get("tokens", {}).get("USDC") or "").lower()
             token0_dec = get_token_decimals(web3, token0_addr)
@@ -692,7 +658,6 @@ class TestLPAccountingE2E:
             execution = await orchestrator.execute(result.action_bundle)
             assert execution.success, f"LP Open execution failed: {execution.error}"
 
-            # Layer 4: verify actual balance deltas (amounts are upper bounds, not exact)
             token0_after = get_token_balance(web3, token0_addr, funded_wallet)
             token1_after = get_token_balance(web3, token1_addr, funded_wallet)
             token0_spent = token0_before - token0_after
@@ -708,7 +673,6 @@ class TestLPAccountingE2E:
             actual_amount0 = str(Decimal(token0_spent) / Decimal(10**token0_dec))
             actual_amount1 = str(Decimal(token1_spent) / Decimal(10**token1_dec))
 
-            # Extract position ID from receipt
             parser = UniswapV3ReceiptParser(chain=CHAIN_NAME)
             position_id = None
             for tx in execution.transaction_results:
@@ -720,7 +684,6 @@ class TestLPAccountingE2E:
 
             assert position_id is not None, "Must extract position ID (token_id) from LP open receipt"
 
-            # Build PositionEvent using actual on-chain amounts (not intent maxima)
             weth_price = price_oracle.get("WETH", Decimal("3000"))
             usdc_price = price_oracle.get("USDC", Decimal("1"))
 
@@ -746,7 +709,6 @@ class TestLPAccountingE2E:
             )
             await store.save_position_event(open_event)
 
-            # Build a mock price oracle that can respond to get_aggregated_price
             class MockOracle:
                 def __init__(self, prices: dict[str, Decimal], observed_at: datetime) -> None:
                     self._prices = prices
@@ -754,7 +716,6 @@ class TestLPAccountingE2E:
 
                 async def get_aggregated_price(self, token: str, quote: str = "USD", **_: object) -> object:
                     token_upper = token.upper()
-                    # Match by symbol or address
                     for symbol, price in self._prices.items():
                         if symbol.upper() == token_upper:
                             return PriceResult(
@@ -763,7 +724,6 @@ class TestLPAccountingE2E:
                                 timestamp=self._observed_at,
                                 confidence=1.0,
                             )
-                    # Try address lookup
                     for sym, addr in CHAIN_CONFIG.get("tokens", {}).items():
                         if addr.lower() == token.lower() and sym in self._prices:
                             return PriceResult(
@@ -776,10 +736,8 @@ class TestLPAccountingE2E:
 
             oracle = MockOracle(price_oracle, open_event.timestamp)
 
-            # Call stamp_entry_state_on_open WITH oracle fallback (VIB-3420 fix)
             await stamp_entry_state_on_open(store, open_event, price_oracle=oracle)
 
-            # Reload the event to get the updated attribution_json
             # get_position_events returns list[dict], not list[PositionEvent]
             events = await store.get_position_events(
                 deployment_id="test-deploy-lp",
@@ -789,21 +747,18 @@ class TestLPAccountingE2E:
             updated = events[0]
             attr = json.loads(updated.get("attribution_json") or "{}")
 
-            # ASSERTION: entry_state must be populated
             assert "entry_state" in attr, (
                 "entry_state must be present in attribution_json after stamp_entry_state_on_open. "
                 "If missing, the oracle fallback did not run."
             )
             entry_state = attr["entry_state"]
 
-            # CRITICAL: prices must NOT be null (that's what the fix prevents)
             assert entry_state.get("price0") is not None, (
                 "price0 is None in entry_state — IL will be permanently null for this position. "
                 "This proves VIB-3420 (IL null on first iteration) is NOT fixed."
             )
             assert entry_state.get("price1") is not None, "price1 is None in entry_state — same as above."
 
-            # Amounts must also be present
             assert entry_state.get("amount0") is not None and entry_state["amount0"] != "0"
             assert entry_state.get("amount1") is not None
 
@@ -854,7 +809,6 @@ class TestLPAccountingE2E:
             )
             await store.save_portfolio_snapshot(snap)
 
-            # OPEN
             intent_open = LPOpenIntent(
                 pool=LP_POOL,
                 amount0=LP_AMOUNT_WETH,
@@ -873,7 +827,6 @@ class TestLPAccountingE2E:
             open_result = compiler.compile(intent_open)
             assert open_result.status.value == "SUCCESS"
 
-            # Record balances before open to derive actual minted amounts
             token0_dec = get_token_decimals(web3, token0_addr)
             token1_dec = get_token_decimals(web3, token1_addr)
             open_token0_before = get_token_balance(web3, token0_addr, funded_wallet)
@@ -934,7 +887,6 @@ class TestLPAccountingE2E:
             # separation; actual hold duration is irrelevant to attribution correctness.
             _mine_blocks(web3, 3)
 
-            # CLOSE
             intent_close = LPCloseIntent(
                 position_id=position_id,
                 protocol="uniswap_v3",
@@ -943,7 +895,6 @@ class TestLPAccountingE2E:
             close_result = compiler.compile(intent_close)
             assert close_result.status.value == "SUCCESS", f"LP Close compile failed: {close_result.error}"
 
-            # Record balances before close to compute real deltas
             token0_dec = get_token_decimals(web3, token0_addr)
             token1_dec = get_token_decimals(web3, token1_addr)
             token0_before = get_token_balance(web3, token0_addr, funded_wallet)
@@ -952,7 +903,6 @@ class TestLPAccountingE2E:
             close_exec = await orchestrator.execute(close_result.action_bundle)
             assert close_exec.success, f"LP Close failed: {close_exec.error}"
 
-            # Extract actual close amounts from on-chain balance deltas
             token0_after = get_token_balance(web3, token0_addr, funded_wallet)
             token1_after = get_token_balance(web3, token1_addr, funded_wallet)
             raw_delta0 = token0_after - token0_before
@@ -991,12 +941,8 @@ class TestLPAccountingE2E:
             )
             await store.save_portfolio_snapshot(snap2)
 
-            # Run attribution pipeline
             await run_attribution_on_close(store, close_event)
 
-            # Re-fetch close event to get updated attribution_json
-            # get_position_events returns list[dict]; attribution_json was updated by
-            # run_attribution_on_close via update_position_attribution
             close_events = await store.get_position_events(
                 deployment_id=deployment_id,
                 position_id=position_id,
@@ -1014,7 +960,6 @@ class TestLPAccountingE2E:
             print(f"  net_pnl_usd: {attribution.get('net_pnl_usd')}")
             print(f"  gas_usd: {attribution.get('gas_usd')}")
 
-            # ASSERTIONS
             # The attribution JSON uses "version" as the key (see CURRENT_VERSION in pnl_attributor.py)
             # The DB column attribution_version is updated separately by update_position_attribution.
             assert attribution.get("version") is not None, "attribution version must be set in JSON"
@@ -1037,11 +982,6 @@ class TestLPAccountingE2E:
 
         finally:
             os.unlink(db_path)
-
-
-# =============================================================================
-# Section 4: Lending E2E — Document Gaps Explicitly (requires Anvil)
-# =============================================================================
 
 
 @pytest.mark.arbitrum
@@ -1078,7 +1018,6 @@ class TestLendingAccountingE2E:
         try:
             await store.initialize()
 
-            # Find a Morpho market
             arb_markets = MORPHO_MARKETS.get("arbitrum", {})
             market_id = None
             for mid, info in arb_markets.items():
@@ -1090,15 +1029,9 @@ class TestLendingAccountingE2E:
                 pytest.skip(f"Morpho market '{MORPHO_MARKET_NAME}' not found on arbitrum")
 
             market_info = arb_markets[market_id]
-            # MORPHO_MARKETS records the symbols under ``loan_token`` /
-            # ``collateral_token`` (the ``*_symbol`` keys never existed, so the
-            # old defaults always fired). Read the real keys.
             loan_token = market_info["loan_token"]
             collateral_token = market_info["collateral_token"]
 
-            # Check wallet has tokens. CHAIN_CONFIG keys preserve source casing
-            # (e.g. "wstETH"), so resolve case-insensitively — ``.upper()`` here
-            # was the VIB-4833 masking bug ("WSTETH" != "wstETH" -> skip).
             collateral_addr = _lookup_ci(CHAIN_CONFIG.get("tokens", {}), collateral_token)
             loan_addr = _lookup_ci(CHAIN_CONFIG.get("tokens", {}), loan_token)
 
@@ -1109,8 +1042,8 @@ class TestLendingAccountingE2E:
             # fork block); borrow 5 USDC keeps LTV well under 30% (intent-test
             # rule #10) with headroom for price moves even at a conservative
             # wstETH valuation.
-            collateral_amount = Decimal("0.02")  # small wstETH collateral
-            borrow_amount = Decimal("5")  # small USDC borrow
+            collateral_amount = Decimal("0.02")
+            borrow_amount = Decimal("5")
             # Kept as supply_* for the downstream accounting-proof printout.
             supply_amount = collateral_amount
 
@@ -1121,7 +1054,6 @@ class TestLendingAccountingE2E:
                 supply_price = Decimal("3500")
             supply_usd = supply_amount * supply_price
 
-            # Skip if collateral balance insufficient
             col_bal = get_token_balance(web3, collateral_addr, funded_wallet)
             col_dec = get_token_decimals(web3, collateral_addr)
             col_bal_dec = Decimal(col_bal) / Decimal(10**col_dec)
@@ -1137,13 +1069,9 @@ class TestLendingAccountingE2E:
 
             loan_dec = get_token_decimals(web3, loan_addr)
 
-            # === SUPPLY-COLLATERAL then standalone BORROW (two-intent form) ===
-            # The bundled ``BorrowIntent(collateral_amount>0)`` is fail-closed at
-            # the intent validator (#2827): accounting writes one event per
-            # intent, so the supply leg would collapse into the single BORROW
-            # row. ``SupplyIntent(use_as_collateral=True)`` routes to Morpho's
-            # ``supplyCollateral`` (NOT loan-token lending liquidity), so the
-            # canonical flow is SUPPLY -> standalone BORROW.
+            # Accounting writes one event per intent, so the bundled borrow form
+            # would collapse its supply leg into the BORROW row. Morpho collateral
+            # uses supplyCollateral followed by a standalone borrow.
             col_before_borrow = get_token_balance(web3, collateral_addr, funded_wallet)
             loan_before_borrow = get_token_balance(web3, loan_addr, funded_wallet)
 
@@ -1177,7 +1105,6 @@ class TestLendingAccountingE2E:
             col_after_borrow = get_token_balance(web3, collateral_addr, funded_wallet)
             loan_after_borrow = get_token_balance(web3, loan_addr, funded_wallet)
 
-            # Layer 4: collateral must have decreased by exactly the supplied amount
             col_spent = col_before_borrow - col_after_borrow
             expected_col_wei = int(collateral_amount * Decimal(10**col_dec))
             assert col_spent == expected_col_wei, (
@@ -1185,7 +1112,6 @@ class TestLendingAccountingE2E:
                 f"Expected: {expected_col_wei}, Got: {col_spent}"
             )
 
-            # Layer 4: loan token must have increased by exactly the borrow amount
             loan_received = loan_after_borrow - loan_before_borrow
             expected_borrow_wei = int(borrow_amount * Decimal(10**loan_dec))
             assert loan_received == expected_borrow_wei, (
@@ -1193,10 +1119,6 @@ class TestLendingAccountingE2E:
                 f"Expected: {expected_borrow_wei}, Got: {loan_received}"
             )
 
-            # Layer 3: receipt parsing — the Morpho parser must extract the
-            # SupplyCollateral event from the supply leg and the Borrow event
-            # from the borrow leg, with assets matching the deltas. The
-            # standalone borrow leg must NOT carry a SupplyCollateral event.
             from almanak.connectors.morpho_blue.receipt_parser import (
                 MorphoBlueEventType,
                 MorphoBlueReceiptParser,
@@ -1235,23 +1157,19 @@ class TestLendingAccountingE2E:
                 "Parsed Borrow assets must equal borrowed amount"
             )
 
-            # Supply leg is approve(collateral) + supplyCollateral; borrow leg is
-            # the standalone borrow. Expose both tx hashes for the proof block.
             supply_tx_hash = supply_exec.transaction_results[-1].tx_hash or "0x"
             borrow_tx_hash = borrow_exec.transaction_results[-1].tx_hash or "0x"
             print(f"\n[SUPPLY-COLLATERAL] tx_hash={supply_tx_hash[:20]}...")
             print(f"[BORROW] tx_hash={borrow_tx_hash[:20]}...")
 
-            # === Forward time to accrue interest ===
             _mine_blocks(web3, 1000)
             _advance_time(web3, 86400)  # 1 day
             print("[TIME] Advanced 1 day, 1000 blocks")
 
-            # === REPAY (full debt) ===
             # repay_full=True sends shares-based MAX so Morpho takes exactly the
             # outstanding debt (principal + accrued interest). A fixed-asset repay
             # slightly above debt can revert in Morpho's accounting, so the
-            # canonical close is repay_full (matches test_morpho_blue_lending.py).
+            # canonical close is repay_full.
             repay_intent = RepayIntent(
                 protocol="morpho_blue",
                 chain=CHAIN_NAME,
@@ -1268,7 +1186,6 @@ class TestLendingAccountingE2E:
             assert repay_exec.success, f"Repay execution failed: {repay_exec.error}"
             loan_after_repay = get_token_balance(web3, loan_addr, funded_wallet)
 
-            # Layer 4: loan token must have decreased by ~the borrowed amount.
             # Full repay = principal + tiny interest after 1 day, so spend must be
             # >= borrow and within a small interest buffer (1%) above it.
             loan_spent_repay = loan_before_repay - loan_after_repay
@@ -1283,9 +1200,6 @@ class TestLendingAccountingE2E:
             repay_tx_hash = repay_exec.transaction_results[-1].tx_hash or "0x"
             print(f"[REPAY] tx_hash={repay_tx_hash[:20]}...")
 
-            # ================================================================
-            # WHAT IS TRACKED TODAY — Prove ledger traceability
-            # ================================================================
             print("\n[ACCOUNTING PROOF] What IS tracked today:")
             print(f"  SUPPLY tx_hash: {supply_tx_hash}")
             print(f"  BORROW tx_hash: {borrow_tx_hash}")
@@ -1297,35 +1211,26 @@ class TestLendingAccountingE2E:
             print(f"  Repay amount:      {repaid_human} {loan_token} (full debt: principal + interest)")
             print("  Balance deltas are traceable from the on-chain transaction hashes.")
 
-            # These tx_hashes prove the actions happened and are on-chain verifiable
             assert len(supply_tx_hash) > 10, "Supply tx_hash must be set"
             assert len(borrow_tx_hash) > 10, "Borrow tx_hash must be set"
             assert len(repay_tx_hash) > 10, "Repay tx_hash must be set"
 
-            # ================================================================
-            # GAPS — Explicitly document what is NOT tracked (VIB-3418)
-            # ================================================================
             print("\n[ACCOUNTING GAP REPORT] What is NOT tracked today (requires VIB-3418):")
 
-            # GAP 1: Health factor not persisted
             print("  GAP-1 [CRITICAL]: Health factor after BORROW/REPAY is NOT persisted.")
             print("         No HF field in transaction_ledger. No LendingAccountingEvent exists.")
             print("         If a liquidation occurs, we cannot reconstruct the HF timeline.")
             print("         Fix: implement VIB-3418 LendingAccountingEvent with HF read-after-action.")
 
-            # GAP 2: Interest accrual not computed
             print("  GAP-2 [CRITICAL]: Interest accrued (repay - principal) is NOT computed.")
             print(f"         Borrow: {borrow_amount} {loan_token}. Repay: {repaid_human} {loan_token}.")
             print("         Difference = interest paid. This is never explicitly recorded.")
             print("         Fix: VIB-3418 FIFO lot matching on REPAY → interest_delta_usd.")
 
-            # GAP 3: Borrow APR not captured
             print("  GAP-3 [HIGH]: Borrow APR at time of BORROW is queried live but not persisted.")
             print("         Cannot reconstruct expected carry without historical rate data.")
             print("         Fix: VIB-3418 capture borrow_apr_bps from adapter at execution time.")
 
-            # These assertions make the gaps explicit in CI — they MUST fail until fixed
-            # We use xfail-style markers to document intent without blocking CI
             print("\n  [NOTE] These gaps are tracked as VIB-3418 (P0 gate for looping > $100k)")
 
         finally:
@@ -1370,7 +1275,6 @@ class TestLendingAccountingE2E:
                 ledger_entry_id=str(uuid.uuid4()),
             )
 
-            # Simulate what VIB-3418 will write after a real BORROW
             position_key = f"lending:{CHAIN_NAME}:morpho_blue:{funded_wallet.lower()}:market1:USDC"
             event = LendingAccountingEvent(
                 identity=identity,
@@ -1384,12 +1288,12 @@ class TestLendingAccountingE2E:
                 debt_value_after_usd=Decimal("10000"),
                 net_equity_before_usd=Decimal("35000"),
                 net_equity_after_usd=Decimal("25000"),
-                health_factor_before=None,  # not yet fetched before action
-                health_factor_after=Decimal("3.20"),  # fetched after borrow via VIB-3418
+                health_factor_before=None,  # not fetched before action
+                health_factor_after=Decimal("3.20"),  # measured after borrow
                 liquidation_threshold=Decimal("0.915"),
                 lltv=Decimal("0.86"),
                 supply_apr_bps=None,
-                borrow_apr_bps=712,  # fetched from adapter at execution time
+                borrow_apr_bps=712,  # measured from adapter at execution time
                 principal_delta_usd=Decimal("10000"),
                 interest_delta_usd=None,  # first borrow — no interest yet
                 gas_usd=Decimal("3.20"),
@@ -1404,19 +1308,16 @@ class TestLendingAccountingE2E:
 
             payload = json.loads(rows[0]["payload_json"])
 
-            # None discipline
             assert payload["health_factor_before"] is None
             assert payload["interest_delta_usd"] is None
             assert payload["supply_apr_bps"] is None
 
-            # Real values
             assert payload["health_factor_after"] == "3.20"
             assert payload["borrow_apr_bps"] == 712
             assert payload["debt_value_before_usd"] == "0"
             assert payload["debt_value_after_usd"] == "10000"
             assert rows[0]["confidence"] == "HIGH"
 
-            # History query
             history = await store.get_accounting_history(deployment_id, position_key)
             assert len(history) == 1
             assert history[0]["event_type"] == "BORROW"
@@ -1430,11 +1331,6 @@ class TestLendingAccountingE2E:
 
         finally:
             os.unlink(db_path)
-
-
-# =============================================================================
-# Section 5: VIB-3418 — Lending Accounting Writer Tests
-# =============================================================================
 
 
 class _MockRpcResponse:
@@ -1496,8 +1392,6 @@ class TestLendingAccountingVIB3418:
        non-zero collateral after WETH supply.
     """
 
-    # ─── Pure unit helpers ────────────────────────────────────────────────────
-
     @staticmethod
     def _make_intent(intent_type: str, protocol: str = "aave_v3", asset: str = "USDC") -> object:
         """Build a minimal intent namespace without going through validation."""
@@ -1545,8 +1439,6 @@ class TestLendingAccountingVIB3418:
         if supply_rate is not None:
             extracted["supply_rate"] = supply_rate
         return SimpleNamespace(extracted_data=extracted, tx_hash=tx_hash, gas_cost_eth=None)
-
-    # ─── Unit tests (no Anvil) ────────────────────────────────────────────────
 
     @pytest.mark.intent(IntentType.SWAP)
     def test_build_event_returns_none_for_non_lending_intent(self):  # noqa: layers
@@ -1640,13 +1532,11 @@ class TestLendingAccountingVIB3418:
         assert event.event_type == LendingEventType.BORROW
         # interest is not known at borrow time — must be None, never zero
         assert event.interest_delta_usd is None
-        # FIFO lot must have been recorded — verify by inspecting the store directly
         position_key = f"lending:arbitrum:aave_v3:{TEST_WALLET.lower()}:usdc"
         key = f"test-deploy:{position_key}:usdc"
         assert key in basis_store._lots, "BORROW must record a FIFO lot in the basis store"
         assert len(basis_store._lots[key]) == 1
         assert basis_store._lots[key][0]["principal"] == Decimal("100")
-        # principal_delta_usd populated from lot amount
         assert event.principal_delta_usd is not None
         assert abs(event.principal_delta_usd - Decimal("100")) < Decimal("1")
 
@@ -1662,7 +1552,6 @@ class TestLendingAccountingVIB3418:
         basis_store = FIFOBasisStore()
         deployment_id = "d1"
 
-        # Manually seed a borrow lot (simulates a prior BORROW execution)
         # position_key for aave_v3, no market_id, asset USDC:
         #   lending:arbitrum:aave_v3:<wallet>:usdc
         position_key = f"lending:arbitrum:aave_v3:{TEST_WALLET.lower()}:usdc"
@@ -1673,10 +1562,8 @@ class TestLendingAccountingVIB3418:
             principal_amount=Decimal("100"),
         )
 
-        # Now execute a REPAY of 100.5 (principal + 0.5 interest)
         intent = self._make_intent("REPAY", protocol="aave_v3", asset="USDC")
-        # Simulate extracted_data.repay_amount = 100_500_000 (100.5 USDC in 6-dec units)
-        # Token resolver should decode USDC as 6 decimals on arbitrum
+        # 100_500_000 is 100.5 USDC at 6 decimals.
         result = self._make_result("REPAY", raw_amount=100_500_000)
 
         price_oracle = {"USDC": Decimal("1.00")}  # $1 per USDC
@@ -1786,7 +1673,6 @@ class TestLendingAccountingVIB3418:
         assert _decode_word(hex_data, 3) == liq_threshold
         assert _decode_word(hex_data, 5) == hf_raw
 
-        # Simulate what read_aave_account_state does
         from decimal import Decimal
 
         _AAVE_USD_SCALE = Decimal("1e8")
@@ -1828,8 +1714,6 @@ class TestLendingAccountingVIB3418:
         assert key_with_market == "lending:arbitrum:morpho_blue:0xabcd:0xdead:usdc"
         assert "ABCD" not in key_no_market, "Keys must be lowercased"
         assert "USDC" not in key_no_market, "Asset must be lowercased"
-
-    # ─── Anvil integration tests ──────────────────────────────────────────────
 
     @pytest.mark.intent(IntentType.SUPPLY)
     @pytest.mark.asyncio
@@ -1880,14 +1764,12 @@ class TestLendingAccountingVIB3418:
         assert result.success, f"Aave V3 USDC supply failed: {result.error}"
         usdc_after = get_token_balance(web3, USDC, funded_wallet)
 
-        # Layer 4: USDC balance must decrease by exactly the supply amount
         usdc_spent = usdc_before - usdc_after
         expected_usdc_spent = int(supply_amount * Decimal(10**6))  # 1000 USDC in 6-decimal units
         assert usdc_spent == expected_usdc_spent, (
             f"USDC spent must exactly equal supply amount. Expected: {expected_usdc_spent}, Got: {usdc_spent}"
         )
 
-        # Read Aave account state through the generic reader (via mock gateway wrapping Anvil web3)
         mock_gateway = _MockGatewayClient(web3)
         state = read_lending_account_state(
             protocol="aave_v3",
@@ -1965,7 +1847,6 @@ class TestLendingAccountingVIB3418:
         borrow_principal = Decimal("200")  # 200 USDC principal
         repay_total = Decimal("200.5")  # 200.5 USDC = principal + 0.5 interest
 
-        # ── USDC supply to create real Aave V3 state ──────────────────────────
         compiler = IntentCompiler(chain=CHAIN_NAME, wallet_address=funded_wallet, price_oracle=price_oracle)
         supply_intent = SupplyIntent(protocol="aave_v3", token="USDC", amount=Decimal("500"), chain=CHAIN_NAME)
         supply_compile = compiler.compile(supply_intent)
@@ -1974,7 +1855,6 @@ class TestLendingAccountingVIB3418:
         assert supply_exec.success, f"USDC supply failed: {supply_exec.error}"
         print(f"\n[SUPPLY] USDC supplied: tx={supply_exec.transaction_results[0].tx_hash[:20]}...")
 
-        # ── GAP-1: Read Aave HF via mock gateway against real chain state ──────
         mock_gateway = _MockGatewayClient(web3)
         state = read_lending_account_state(
             protocol="aave_v3",
@@ -1990,7 +1870,6 @@ class TestLendingAccountingVIB3418:
         )
         print(f"[GAP-1] HF capture via getUserAccountData: collateral=${state.collateral_usd:.2f}")
 
-        # ── Mock BORROW intent + result (Aave V3 borrow frozen on this fork) ──
         borrow_intent = self._make_intent("BORROW", protocol="aave_v3", asset="USDC")
         # 200 USDC in 6-decimal units = 200_000_000; add synthetic borrow_rate in ray
         # 5% APY in ray = 0.05 * 1e27 = 50_000_000_000_000_000_000_000_000
@@ -2020,7 +1899,6 @@ class TestLendingAccountingVIB3418:
         assert borrow_event is not None
         assert borrow_event.event_type == LendingEventType.BORROW
         assert borrow_event.interest_delta_usd is None, "No interest at borrow time"
-        # GAP-1: HF captured from real Aave V3 state (USDC supply makes HF = max)
         assert borrow_event.health_factor_after is not None, (
             "GAP-1: health_factor_after must be populated from getUserAccountData after BORROW"
         )
@@ -2028,7 +1906,6 @@ class TestLendingAccountingVIB3418:
             "HF must be max (no debt on chain, only USDC collateral)"
         )
         print(f"[GAP-1 CLOSED] HF after simulated BORROW = {borrow_event.health_factor_after}")
-        # GAP-3: borrow_apr_bps captured from synthetic borrow_rate (5% = 500 bps)
         assert borrow_event.borrow_apr_bps is not None, (
             "GAP-3: borrow_apr_bps must be populated from extracted_data borrow_rate"
         )
@@ -2036,13 +1913,11 @@ class TestLendingAccountingVIB3418:
             f"Expected ~500 bps for 5% APY. Got: {borrow_event.borrow_apr_bps}"
         )
         print(f"[GAP-3 CLOSED] borrow_apr_bps = {borrow_event.borrow_apr_bps}")
-        # principal_delta_usd should be ~$200 (200 USDC at $1)
         assert borrow_event.principal_delta_usd is not None, "principal_delta_usd must be populated for BORROW"
         assert abs(borrow_event.principal_delta_usd - Decimal("200")) < Decimal("1"), (
             f"principal_delta_usd should be ~$200. Got: {borrow_event.principal_delta_usd}"
         )
 
-        # ── Mock REPAY 200.5 USDC (principal + 0.5 interest) ──────────────────
         repay_intent = self._make_intent("REPAY", protocol="aave_v3", asset="USDC")
         repay_result = self._make_result(
             "REPAY",
@@ -2065,7 +1940,6 @@ class TestLendingAccountingVIB3418:
 
         assert repay_event is not None
         assert repay_event.event_type == LendingEventType.REPAY
-        # GAP-2: FIFO interest attribution — both fields must be populated
         assert repay_event.principal_delta_usd is not None, (
             "GAP-2: principal_delta_usd must be populated for REPAY with a prior BORROW lot"
         )
@@ -2081,7 +1955,6 @@ class TestLendingAccountingVIB3418:
         )
         print(f"[GAP-2 CLOSED] interest_delta_usd  = ${repay_event.interest_delta_usd:.4f}")
 
-        # ── Persist both events to SQLite ──────────────────────────────────────
         f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         f.close()
         db_path = f.name
@@ -2111,11 +1984,6 @@ class TestLendingAccountingVIB3418:
             os.unlink(db_path)
 
 
-# =============================================================================
-# Section 5: VIB-3424 — PortfolioValuer PnL field enrichment
-# =============================================================================
-
-
 class TestPositionPnLVIB3424:
     """VIB-3424 — cost_basis_usd, unrealized_pnl_usd, realized_pnl_usd,
     entry_timestamp, and ledger_entry_id populated from accounting_events.
@@ -2131,8 +1999,6 @@ class TestPositionPnLVIB3424:
     8. PortfolioValuer.set_accounting_context wires store; PositionValue gets PnL fields.
     9. SQLiteStore.get_accounting_events_sync returns saved events synchronously.
     """
-
-    # ─── Helpers ─────────────────────────────────────────────────────────────
 
     @staticmethod
     def _event_row(
@@ -2161,8 +2027,6 @@ class TestPositionPnLVIB3424:
             "ledger_entry_id": ledger_id,
             "payload_json": json.dumps(payload),
         }
-
-    # ─── Unit tests: compute_position_pnl ────────────────────────────────────
 
     @pytest.mark.intent(IntentType.SUPPLY)
     def test_empty_events_returns_none(self):  # noqa: layers
@@ -2281,8 +2145,6 @@ class TestPositionPnLVIB3424:
         assert pnl is not None
         assert pnl.cost_basis_usd == Decimal("500.00")
 
-    # ─── Unit test: position key derivation ──────────────────────────────────
-
     @pytest.mark.intent(IntentType.SUPPLY)
     def test_try_derive_lending_position_key_supply(self):  # noqa: layers
         from almanak.framework.teardown.models import PositionInfo, PositionType
@@ -2353,8 +2215,6 @@ class TestPositionPnLVIB3424:
         )
         assert PortfolioValuer._try_derive_lending_position_key(p, "arbitrum") is None
 
-    # ─── Integration: SQLiteStore.get_accounting_events_sync ─────────────────
-
     @pytest.mark.intent(IntentType.SUPPLY)
     @pytest.mark.asyncio
     async def test_sqlite_get_accounting_events_sync(self):  # noqa: layers
@@ -2372,7 +2232,6 @@ class TestPositionPnLVIB3424:
             basis_store = FIFOBasisStore()
             deploy_id = "dep-vib3424"
 
-            # Build and save a SUPPLY event
             from types import SimpleNamespace
 
             from almanak.framework.intents.vocabulary import IntentType
@@ -2405,17 +2264,14 @@ class TestPositionPnLVIB3424:
             writer = AccountingWriter(store)
             await writer.write(event)
 
-            # Sync query must find the event
             rows = store.get_accounting_events_sync(deploy_id)
             assert len(rows) == 1
             assert rows[0]["event_type"] == "SUPPLY"
 
-            # Sync query with position_key filter
             pk = event.position_key
             rows_filtered = store.get_accounting_events_sync(deploy_id, position_key=pk)
             assert len(rows_filtered) == 1
 
-            # Wrong position_key returns nothing
             rows_empty = store.get_accounting_events_sync(deploy_id, position_key="lending:wrong:key")
             assert rows_empty == []
 
@@ -2423,8 +2279,6 @@ class TestPositionPnLVIB3424:
             print(f"  position_key = {pk}")
         finally:
             os.unlink(db_path)
-
-    # ─── Integration: PortfolioValuer.set_accounting_context ─────────────────
 
     @pytest.mark.intent(IntentType.SUPPLY)
     @pytest.mark.asyncio
@@ -2454,7 +2308,6 @@ class TestPositionPnLVIB3424:
             chain = "arbitrum"
             protocol = "aave_v3"
 
-            # Write two SUPPLY events
             basis_store = FIFOBasisStore()
             from types import SimpleNamespace
 
@@ -2489,11 +2342,9 @@ class TestPositionPnLVIB3424:
                 writer = AccountingWriter(store)
                 await writer.write(ev)
 
-            # Verify two events are saved
             all_rows = store.get_accounting_events_sync(deploy_id)
             assert len(all_rows) == 2
 
-            # Build a mock PositionInfo matching the accounting position_key
             from almanak.framework.teardown.models import PositionInfo
 
             position_key = f"lending:{chain}:{protocol}:{wallet}:{asset.lower()}"
@@ -2509,7 +2360,6 @@ class TestPositionPnLVIB3424:
                 },
             )
 
-            # Build PositionValue and enrich via valuer
             from almanak.framework.teardown.models import PositionType as PT
 
             p_value = PositionValue(
@@ -2524,7 +2374,6 @@ class TestPositionPnLVIB3424:
             valuer.set_accounting_context(store, deploy_id)
             valuer._enrich_position_pnl(p_value, p_info, chain)
 
-            # Assertions: cost_basis and pnl must be populated
             assert p_value.cost_basis_usd == Decimal("750"), (
                 f"cost_basis_usd must be 500+250=$750. Got: {p_value.cost_basis_usd}"
             )
@@ -2571,14 +2420,11 @@ class TestPositionPnLVIB3424:
         valuer = PortfolioValuer()  # no accounting context set
         valuer._enrich_position_pnl(p_value, p_info, "arbitrum")
 
-        # All economic fields must remain at their defaults
         assert p_value.cost_basis_usd == Decimal("0")
         assert p_value.unrealized_pnl_usd == Decimal("0")
         assert p_value.realized_pnl_usd == Decimal("0")
         assert p_value.entry_timestamp == ""
         assert p_value.ledger_entry_id == ""
-
-    # ─── Regression tests for Codex P1 + P2 bugs ─────────────────────────────
 
     @pytest.mark.intent(IntentType.BORROW)
     def test_borrow_unrealized_pnl_uses_liability_semantics(self):  # noqa: layers
@@ -2594,7 +2440,6 @@ class TestPositionPnLVIB3424:
         from almanak.framework.teardown.models import PositionInfo, PositionType
         from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
 
-        # Build a minimal in-memory store with one BORROW event
         class _SyncStore:
             def get_accounting_events_sync(self, deployment_id, position_key=None):
                 return [
@@ -2669,7 +2514,6 @@ class TestPositionPnLVIB3424:
             protocol = "aave_v3"
             basis_store = FIFOBasisStore()
 
-            # Write a SUPPLY event (500 USDC supplied)
             supply_intent = SimpleNamespace(
                 intent_type=IntentType.SUPPLY,
                 protocol=protocol,
@@ -2697,7 +2541,6 @@ class TestPositionPnLVIB3424:
             assert supply_ev is not None
             await AccountingWriter(store).write(supply_ev)
 
-            # Write a BORROW event (200 USDC borrowed — same asset, same key)
             borrow_intent = SimpleNamespace(
                 intent_type=IntentType.BORROW,
                 protocol=protocol,
@@ -2725,13 +2568,11 @@ class TestPositionPnLVIB3424:
             assert borrow_ev is not None
             await AccountingWriter(store).write(borrow_ev)
 
-            # Both events share the same position_key
             assert supply_ev.position_key == borrow_ev.position_key, (
                 f"Expected same position_key for same wallet/protocol/asset. "
                 f"supply={supply_ev.position_key} borrow={borrow_ev.position_key}"
             )
 
-            # Now enrich a SUPPLY PositionValue — should only see SUPPLY events ($500)
             supply_p_info = PositionInfo(
                 position_type=PositionType.SUPPLY,
                 position_id="supply_xyz",
@@ -2755,7 +2596,6 @@ class TestPositionPnLVIB3424:
                 f"P2: SUPPLY cost_basis must be $500 (not contaminated by $200 BORROW). Got: {supply_p_value.cost_basis_usd}"
             )
 
-            # Now enrich a BORROW PositionValue — should only see BORROW events ($200)
             borrow_p_info = PositionInfo(
                 position_type=PositionType.BORROW,
                 position_id="borrow_xyz",
@@ -2789,11 +2629,6 @@ class TestPositionPnLVIB3424:
             os.unlink(db_path)
 
 
-# =============================================================================
-# Section N: VIB-3350 block-anchored balance reads — real Arbitrum Anvil fork
-# =============================================================================
-
-
 class TestBlockAnchoredBalanceReadsOnFork:
     """PROOF on a real fork: a block-pinned balance read returns HISTORICAL state.
 
@@ -2823,7 +2658,6 @@ class TestBlockAnchoredBalanceReadsOnFork:
             block_n = web3.eth.block_number
             before = await provider.get_native_balance(block=block_n)
 
-            # Mutate the wallet's native balance on-chain, then mine.
             new_wei = int(before.raw_balance) + 5 * 10**18
             web3.provider.make_request("anvil_setBalance", [funded_wallet, hex(new_wei)])  # type: ignore[attr-defined]
             _mine_blocks(web3, 1)
@@ -2831,7 +2665,6 @@ class TestBlockAnchoredBalanceReadsOnFork:
             latest = await provider.get_native_balance()
             pinned_again = await provider.get_native_balance(block=block_n)
 
-            # latest reflects the change; the pinned read at block N is HISTORICAL.
             assert latest.raw_balance == new_wei, "latest must reflect the on-chain change"
             assert pinned_again.raw_balance == before.raw_balance, (
                 "pinned read at block N must return the historical balance, not latest"
