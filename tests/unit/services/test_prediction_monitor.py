@@ -15,10 +15,6 @@ from almanak.framework.services.prediction_monitor import (
     PredictionPositionMonitor,
 )
 
-# =============================================================================
-# Fixtures
-# =============================================================================
-
 
 @pytest.fixture
 def monitor() -> PredictionPositionMonitor:
@@ -79,11 +75,6 @@ def basic_snapshot() -> PositionSnapshot:
     )
 
 
-# =============================================================================
-# Test MonitoredPosition
-# =============================================================================
-
-
 class TestMonitoredPosition:
     """Tests for MonitoredPosition dataclass."""
 
@@ -123,11 +114,6 @@ class TestMonitoredPosition:
         assert data["exit_conditions"]["take_profit_price"] == "0.85"
 
 
-# =============================================================================
-# Test PredictionExitConditions
-# =============================================================================
-
-
 class TestPredictionExitConditions:
     """Tests for PredictionExitConditions dataclass."""
 
@@ -154,11 +140,6 @@ class TestPredictionExitConditions:
         assert data["exit_before_resolution_hours"] is None
 
 
-# =============================================================================
-# Test PredictionPositionMonitor - Position Management
-# =============================================================================
-
-
 class TestPredictionPositionMonitorManagement:
     """Tests for position management methods."""
 
@@ -183,7 +164,6 @@ class TestPredictionPositionMonitorManagement:
 
         monitor.add_position(basic_position)
 
-        # highest_price should be set to entry_price
         assert basic_position.highest_price == basic_position.entry_price
 
     def test_remove_position(
@@ -256,11 +236,6 @@ class TestPredictionPositionMonitorManagement:
         assert len(monitor.positions) == 0
 
 
-# =============================================================================
-# Test PredictionPositionMonitor - Market Resolution
-# =============================================================================
-
-
 class TestMarketResolution:
     """Tests for market resolution detection."""
 
@@ -317,11 +292,6 @@ class TestMarketResolution:
         assert result.event is None
 
 
-# =============================================================================
-# Test PredictionPositionMonitor - Stop Loss
-# =============================================================================
-
-
 class TestStopLoss:
     """Tests for stop-loss detection."""
 
@@ -376,11 +346,6 @@ class TestStopLoss:
         assert result.event != PredictionEvent.STOP_LOSS_TRIGGERED
 
 
-# =============================================================================
-# Test PredictionPositionMonitor - Take Profit
-# =============================================================================
-
-
 class TestTakeProfit:
     """Tests for take-profit detection."""
 
@@ -416,11 +381,6 @@ class TestTakeProfit:
 
         assert result.triggered is True
         assert result.event == PredictionEvent.TAKE_PROFIT_TRIGGERED
-
-
-# =============================================================================
-# Test PredictionPositionMonitor - Trailing Stop
-# =============================================================================
 
 
 class TestTrailingStop:
@@ -484,11 +444,6 @@ class TestTrailingStop:
         assert position_with_conditions.highest_price == Decimal("0.80")
 
 
-# =============================================================================
-# Test PredictionPositionMonitor - Resolution Approaching
-# =============================================================================
-
-
 class TestResolutionApproaching:
     """Tests for resolution approaching detection."""
 
@@ -533,11 +488,6 @@ class TestResolutionApproaching:
         assert result.event != PredictionEvent.RESOLUTION_APPROACHING
 
 
-# =============================================================================
-# Test PredictionPositionMonitor - Liquidity Warning
-# =============================================================================
-
-
 class TestLiquidityWarning:
     """Tests for liquidity warning detection."""
 
@@ -574,11 +524,6 @@ class TestLiquidityWarning:
         result = monitor.check_position(position_with_conditions, snapshot)
 
         assert result.event != PredictionEvent.LOW_LIQUIDITY
-
-
-# =============================================================================
-# Test PredictionPositionMonitor - Spread Warning
-# =============================================================================
 
 
 class TestSpreadWarning:
@@ -621,11 +566,6 @@ class TestSpreadWarning:
         result = monitor.check_position(position_with_conditions, snapshot)
 
         assert result.event != PredictionEvent.SPREAD_TOO_WIDE
-
-
-# =============================================================================
-# Test PredictionPositionMonitor - check_positions
-# =============================================================================
 
 
 class TestCheckPositions:
@@ -682,14 +622,9 @@ class TestCheckPositions:
         """Test that missing snapshots are handled gracefully."""
         monitor.add_position(basic_position)
 
-        results = monitor.check_positions({})  # No snapshots provided
+        results = monitor.check_positions({})
 
         assert len(results) == 0
-
-
-# =============================================================================
-# Test PredictionPositionMonitor - Event Callback
-# =============================================================================
 
 
 class TestEventCallback:
@@ -765,11 +700,6 @@ class TestEventCallback:
         assert len(results) == 1
 
 
-# =============================================================================
-# Test PredictionPositionMonitor - Timeline Events
-# =============================================================================
-
-
 class TestTimelineEvents:
     """Tests for timeline event emission."""
 
@@ -839,11 +769,6 @@ class TestTimelineEvents:
             mock_add.assert_not_called()
 
 
-# =============================================================================
-# Test MonitoringResult
-# =============================================================================
-
-
 class TestMonitoringResult:
     """Tests for MonitoringResult dataclass."""
 
@@ -872,11 +797,6 @@ class TestMonitoringResult:
 
         assert data["event"] is None
         assert data["triggered"] is False
-
-
-# =============================================================================
-# Test generate_sell_intent (US-015)
-# =============================================================================
 
 
 class TestGenerateSellIntent:
@@ -1097,7 +1017,7 @@ class TestGenerateSellIntent:
             event=PredictionEvent.MARKET_RESOLVED,
             triggered=True,
             details={"winning_outcome": "YES"},
-            suggested_action="REDEEM",  # Not SELL
+            suggested_action="REDEEM",
         )
 
         sell_intent = monitor.generate_sell_intent(result)
@@ -1110,7 +1030,6 @@ class TestGenerateSellIntent:
     ) -> None:
         """Test that sell intent preserves the position's outcome."""
 
-        # Create a NO position
         no_position = MonitoredPosition(
             market_id="test-market",
             condition_id="0x1234",
@@ -1145,7 +1064,6 @@ class TestGenerateSellIntent:
         """Test generating sell intent when position has no exit conditions."""
         from almanak.framework.intents.vocabulary import PredictionSellIntent
 
-        # basic_position has no exit_conditions
         result = MonitoringResult(
             position=basic_position,
             event=PredictionEvent.RESOLUTION_APPROACHING,
@@ -1162,11 +1080,6 @@ class TestGenerateSellIntent:
         # the adapter's mandatory-anchor check passes.
         assert sell_intent.min_price == Decimal("0.01")
         assert sell_intent.order_type == "market"
-
-
-# =============================================================================
-# Test VIB-3217: Off-tick min_price snap
-# =============================================================================
 
 
 class TestOffTickMinPriceSnap:
@@ -1198,7 +1111,6 @@ class TestOffTickMinPriceSnap:
         sell_intent = monitor.generate_sell_intent(result)
         assert isinstance(sell_intent, PredictionSellIntent)
         assert sell_intent.min_price == Decimal("0.47")
-        # The whole point of the fix: min_price must be a clean 0.01 multiple.
         assert (sell_intent.min_price * Decimal("100")) % Decimal("1") == Decimal("0")
 
     def test_trailing_stop_snapped_to_fine_0_001_tick(
@@ -1234,7 +1146,6 @@ class TestOffTickMinPriceSnap:
         sell_intent = monitor.generate_sell_intent(result, snapshot=snapshot)
         assert isinstance(sell_intent, PredictionSellIntent)
         assert sell_intent.min_price == Decimal("0.641")
-        # Snapped price must be a clean 0.001 multiple.
         remainder = (sell_intent.min_price * Decimal("1000")) % Decimal("1")
         assert remainder == Decimal("0")
 
@@ -1266,14 +1177,12 @@ class TestOffTickMinPriceSnap:
         )
         sell_intent = monitor.generate_sell_intent(result, snapshot=snapshot)
         assert isinstance(sell_intent, PredictionSellIntent)
-        # 0.50 * 0.95 = 0.475 -> on 0.001 tick -> 0.475
         assert sell_intent.min_price == Decimal("0.475")
         remainder = (sell_intent.min_price * Decimal("1000")) % Decimal("1")
         assert remainder == Decimal("0")
 
     def test_snap_never_drops_below_clob_floor(self) -> None:
         """Floor to 0.01 even when the computed value would be below it."""
-        # Direct helper test: arbitrary tiny input should clamp to 0.01.
         snapped = PredictionPositionMonitor._snap_sell_min_price_to_tick(Decimal("0.002"), Decimal("0.01"))
         assert snapped == Decimal("0.01")
 
@@ -1322,11 +1231,6 @@ class TestOffTickMinPriceSnap:
         assert snapped == Decimal("0.47")
 
 
-# =============================================================================
-# Test Partial Exit Functionality (US-016)
-# =============================================================================
-
-
 class TestPartialExits:
     """Tests for partial exit functionality when liquidity is insufficient."""
 
@@ -1339,7 +1243,7 @@ class TestPartialExits:
         snapshot = PositionSnapshot(
             market_id="test-market",
             current_price=Decimal("0.70"),
-            orderbook_depth_shares=Decimal("200"),  # More than position size (100)
+            orderbook_depth_shares=Decimal("200"),
         )
 
         safe_size, is_constrained = monitor.calculate_safe_exit_size(basic_position, snapshot)
@@ -1357,7 +1261,7 @@ class TestPartialExits:
         snapshot = PositionSnapshot(
             market_id="test-market",
             current_price=Decimal("0.70"),
-            orderbook_depth_shares=Decimal("50"),  # Half of position size (100)
+            orderbook_depth_shares=Decimal("50"),
         )
 
         safe_size, is_constrained = monitor.calculate_safe_exit_size(basic_position, snapshot)
@@ -1394,7 +1298,7 @@ class TestPartialExits:
         snapshot = PositionSnapshot(
             market_id="test-market",
             current_price=Decimal("0.70"),
-            orderbook_depth_shares=None,  # No orderbook data
+            orderbook_depth_shares=None,
         )
 
         safe_size, is_constrained = monitor.calculate_safe_exit_size(basic_position, snapshot)
@@ -1414,7 +1318,7 @@ class TestPartialExits:
         snapshot = PositionSnapshot(
             market_id="test-market",
             current_price=Decimal("0.70"),
-            orderbook_depth_shares=Decimal("40"),  # 40% of position size
+            orderbook_depth_shares=Decimal("40"),
         )
 
         result = MonitoringResult(
@@ -1444,7 +1348,7 @@ class TestPartialExits:
         snapshot = PositionSnapshot(
             market_id="test-market",
             current_price=Decimal("0.70"),
-            orderbook_depth_shares=Decimal("500"),  # More than enough
+            orderbook_depth_shares=Decimal("500"),
         )
 
         result = MonitoringResult(
@@ -1483,7 +1387,6 @@ class TestPartialExits:
 
         sell_intent = monitor.generate_sell_intent(result, snapshot)
 
-        # Should return None when liquidity is too low
         assert sell_intent is None
 
     def test_partial_exits_disabled(self) -> None:
@@ -1509,7 +1412,7 @@ class TestPartialExits:
         snapshot = PositionSnapshot(
             market_id="test-market",
             current_price=Decimal("0.70"),
-            orderbook_depth_shares=Decimal("40"),  # Partial liquidity
+            orderbook_depth_shares=Decimal("40"),
         )
 
         result = MonitoringResult(
@@ -1528,11 +1431,6 @@ class TestPartialExits:
         assert sell_intent.shares == "all"
 
 
-# =============================================================================
-# Test Strategy-Level Defaults (US-016)
-# =============================================================================
-
-
 class TestStrategyLevelDefaults:
     """Tests for strategy-level configuration defaults."""
 
@@ -1544,7 +1442,6 @@ class TestStrategyLevelDefaults:
             default_exit_before_resolution_hours=24,
         )
 
-        # Position with NO exit_conditions
         position = MonitoredPosition(
             market_id="test-market",
             condition_id="0x1234",
@@ -1567,7 +1464,6 @@ class TestStrategyLevelDefaults:
 
         result = monitor.check_position(position, snapshot)
 
-        # Should trigger using strategy-level default
         assert result.triggered is True
         assert result.event == PredictionEvent.RESOLUTION_APPROACHING
         assert result.details["exit_before_hours"] == 24
@@ -1577,10 +1473,9 @@ class TestStrategyLevelDefaults:
         monitor = PredictionPositionMonitor(
             deployment_id="test-strategy",
             emit_events=False,
-            default_exit_before_resolution_hours=48,  # 48 hour default
+            default_exit_before_resolution_hours=48,
         )
 
-        # Position with its own exit condition (12 hours)
         position = MonitoredPosition(
             market_id="test-market",
             condition_id="0x1234",
@@ -1590,7 +1485,7 @@ class TestStrategyLevelDefaults:
             entry_price=Decimal("0.65"),
             entry_time=datetime.now(UTC),
             exit_conditions=PredictionExitConditions(
-                exit_before_resolution_hours=12,  # Position-specific setting
+                exit_before_resolution_hours=12,
             ),
         )
 
@@ -1607,8 +1502,6 @@ class TestStrategyLevelDefaults:
 
         result = monitor.check_position(position, snapshot)
 
-        # Should NOT trigger because position has 12hr setting
-        # and we're still 18 hours away
         assert result.triggered is False
         assert result.event is None
 
@@ -1617,10 +1510,9 @@ class TestStrategyLevelDefaults:
         monitor = PredictionPositionMonitor(
             deployment_id="test-strategy",
             emit_events=False,
-            default_exit_before_resolution_hours=None,  # No default
+            default_exit_before_resolution_hours=None,
         )
 
-        # Position with NO exit_conditions
         position = MonitoredPosition(
             market_id="test-market",
             condition_id="0x1234",
@@ -1646,11 +1538,6 @@ class TestStrategyLevelDefaults:
         # Should NOT trigger for RESOLUTION_APPROACHING
         # (might trigger other conditions, so just check this specific one)
         assert result.event != PredictionEvent.RESOLUTION_APPROACHING
-
-
-# =============================================================================
-# Test exit_before_resolution_seconds (VIB-3771)
-# =============================================================================
 
 
 class TestExitBeforeResolutionSeconds:
