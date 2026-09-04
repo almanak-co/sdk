@@ -50,25 +50,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger("almanak.framework.runner.strategy_runner")
 
 
-# =============================================================================
-# VIB-5746 — safety-guard-refusal loop back-off
-# =============================================================================
-
-# Upper bound on the extra idle time a refusal streak may add to the loop
-# cadence. A strategy stuck proposing an un-fillable swap (e.g. a recycle swap
-# refused every cycle by the price-impact guard on a shallow pool) must not
-# hot-loop, but it must also keep polling so it resumes automatically the moment
-# liquidity / prices change. Capping the back-off at 15 minutes keeps the
-# strategy monitoring (it re-evaluates ``decide()`` on every backed-off tick)
-# without burning CPU/RPC on a tight retry loop. Fixed constant, not a config
-# knob: the streak already scales the back-off from the deployment's own
-# interval, and the emergency circuit breaker is a SEPARATE safety layer.
+# Refusal backoff adds at most 15 minutes while preserving polling; the circuit breaker is independent.
 MAX_REFUSAL_BACKOFF_SECONDS: float = 900.0
 
-# A single, isolated refusal is not penalised — inputs (pool depth, price) may
-# well have changed by the next normal tick, so the first refusal keeps the
-# deployment's ordinary interval. Back-off engages from the SECOND consecutive
-# refusal onward, doubling each cycle up to the cap.
+# The first refusal keeps the normal cadence; later consecutive refusals double it.
 _REFUSAL_BACKOFF_GRACE = 1
 
 
@@ -126,16 +111,10 @@ def effective_iteration_wait_seconds(interval: float, guard_refusal_streak: int)
     """
     if guard_refusal_streak <= _REFUSAL_BACKOFF_GRACE or interval <= 0:
         return interval
-    # Exponential growth off the base interval; guard the exponent so a very long
-    # streak can't overflow before the min() cap clamps it.
+    # Bound the exponent before applying the backoff cap to avoid overflow.
     exponent = min(guard_refusal_streak - _REFUSAL_BACKOFF_GRACE, 20)
     backed_off = interval * float(2**exponent)
     return min(backed_off, interval + MAX_REFUSAL_BACKOFF_SECONDS)
-
-
-# =============================================================================
-# Cross-entry-point startup helpers
-# =============================================================================
 
 
 async def capture_boot_snapshot_with_accounting(
@@ -171,30 +150,15 @@ async def capture_boot_snapshot_with_accounting(
 
     from almanak.framework.observability.context import clear_cycle_id, get_cycle_id, set_cycle_id
 
-    # This is intentionally the runner_state persistence choke point, not
-    # capture_snapshot_with_accounting: boot has no IterationResult to rewrite
-    # as ACCOUNTING_FAILED, and that post-iteration wrapper does not force a
-    # snapshot when no trade flag exists yet.  The canonical capture function
-    # still enforces valuation, confidence, snapshot+metrics persistence, and
-    # typed AccountingPersistenceError semantics; this boundary adds the
-    # startup mode policy explicitly below.
+    # Boot has no IterationResult to rewrite, so it uses the lower-level capture with explicit mode handling.
     from .runner_state import capture_portfolio_snapshot
 
     boot_cycle_id = f"boot-{deployment_id}"
     saved_last_cycle_id = getattr(runner, "_last_cycle_id", "") or ""
     saved_ctx_cycle_id = get_cycle_id()
     try:
-        # A measured latest observation proves boot already established a
-        # usable endpoint, so preserve the long-standing fast path (and narrow
-        # state-manager adapters). An unmeasured latest row proves nothing
-        # about the opening, however: before recapturing, read the two oldest
-        # rows so a later diagnostic UNAVAILABLE cannot make restart write a
-        # mid-lifecycle row under the deterministic boot cycle id. A legacy
-        # diagnostic may legitimately precede the first strict boot retry, so
-        # "first row" alone is not the same thing as "opening endpoint".
-        # get_snapshots_since is already implemented by both local StateManager
-        # and hosted GatewayStateManager; the fallback keeps narrow test/legacy
-        # adapters that expose only get_first_snapshot working.
+        # A measured latest row proves the bracket exists; an unmeasured row does not.
+        # Inspect two opening rows because a diagnostic row may precede the measured boot endpoint.
         latest = await runner.state_manager.get_latest_snapshot(deployment_id)
         if is_measured_accounting_snapshot(latest):
             return latest
@@ -291,13 +255,7 @@ def reconstruct_lending_basis_store(
     if not runner.config.enable_state_persistence:
         return 0
 
-    # State-manager readiness gate (Claude pr-auditor 2026-05-04 review).
-    # ``initialize_run_loop`` only invokes this helper when its own
-    # ``state_manager_ready`` flag is True; the ``--once`` and
-    # ``_run_test_lifecycle`` CLI paths bypass that check, so the helper
-    # owns its own precondition. ``runner.state_manager is None`` is the
-    # observable shape when persistence is disabled or initialize() failed
-    # — early return matches the legacy "events=[] → no-op" path.
+    # Other entry points can call this without the run-loop readiness gate.
     if getattr(runner, "state_manager", None) is None:
         return 0
 
@@ -314,12 +272,7 @@ def reconstruct_lending_basis_store(
                 replayed,
                 deployment_id,
             )
-        # VIB-4394: seed pre-existing wallet inventory as OPENING_BALANCE lots
-        # AFTER replay (so the excess-over-open-lots de-dup sees the replayed
-        # lots), so the first disposal of opening inventory realizes against a
-        # basis instead of booking realized_pnl=None. Runs even when there are no
-        # accounting events yet — a wallet can hold pre-existing inventory before
-        # it has traded anything.
+        # Seed after replay so existing lots are deducted and opening inventory is not double-counted.
         _seed_opening_balance_lots(runner, strategy, deployment_id)
         return replayed
     except Exception as e:
@@ -352,10 +305,7 @@ def _seed_opening_balance_lots(
     the snapshot, wallet from the runner's runtime config (the snapshot does not
     carry the wallet address). Returns the number of lots seeded.
     """
-    # Guard the method's existence: a state manager without a sync first-snapshot
-    # reader (the hosted GatewayStateManager, an older backend, or a test mock)
-    # makes the seed a no-op rather than crashing boot — Empty ≠ Zero, the read
-    # is structurally absent, not "no inventory".
+    # A missing synchronous read surface means inventory is unavailable, not zero.
     reader = getattr(runner.state_manager, "get_first_snapshot_sync", None)
     if reader is None:
         return 0
@@ -492,13 +442,9 @@ async def _read_position_events_for_hydration(
     Both surfaces return rows in timestamp-ASC order, which
     ``_collect_open_positions`` relies on for last-write-wins.
     """
-    # Prefer the warm-tier dashboard getter first (present on the local
-    # SQLite-backed StateManager). It is unfiltered, so it cannot miss a
-    # position whose type is absent from the hydration vocabulary.
+    # Prefer the unfiltered read so new position types cannot be omitted from hydration.
     if hasattr(state_manager, "get_position_events_for_dashboard"):
         return await state_manager.get_position_events_for_dashboard(deployment_id)
-    # Hosted GatewayStateManager direct: filtered async read over the full
-    # position-type vocabulary.
     if hasattr(state_manager, "get_position_events_filtered"):
         return await state_manager.get_position_events_filtered(
             deployment_id=deployment_id,
@@ -534,25 +480,12 @@ async def hydrate_recent_open_events_cache(
     """
     state_manager = getattr(runner, "state_manager", None)
     if state_manager is None:
-        # Persistence disabled or ``initialize()`` failed — nothing to hydrate.
         return 0
 
     deployment_id = strategy.deployment_id
     if not deployment_id:
         return 0
 
-    # VIB-4894 — branch on the available async read surface so the hosted
-    # ``GatewayStateManager`` gets the SAME bulk pre-warm as the local
-    # backend. The prior code early-returned 0 on any backend lacking the
-    # SQLite-specific ``get_position_events_sync`` wedge, which silently
-    # disabled restart-mid-position continuity on every hosted runner.
-    # VIB-4839's lp_triple production evidence (4-day OPEN→teardown gap, 3
-    # positions, hosted strategy) disproved the "hosted runs without
-    # restart-mid-position semantics" assumption that justified the no-op.
-    # Without this bulk pre-warm, the per-CLOSE durable fallback (VIB-4839,
-    # ``_emit_position_event_for_intent``) still keeps the books correct but
-    # pays N separate ``get_position_history`` gRPC round-trips during the
-    # teardown loop instead of one bulk read at boot.
     try:
         all_events = await _read_position_events_for_hydration(state_manager, deployment_id)
     except Exception as e:  # noqa: BLE001 — best-effort startup hydration
@@ -560,11 +493,7 @@ async def hydrate_recent_open_events_cache(
         return 0
 
     if all_events is None:
-        # No usable async read surface (neither the warm-tier dashboard
-        # getter nor the filtered getter). We do NOT expand the SQLite sync
-        # wedge onto the GatewayStateManager (blueprint 06 keeps that bridge
-        # SQLite-specific) — surface the gap loudly instead of silently
-        # succeeding with an empty cache.
+        # Missing hydration support is distinct from a successful empty read.
         logger.warning(
             "recent_open_events hydration: state_manager %s exposes no "
             "get_position_events_for_dashboard / get_position_events_filtered "
@@ -591,11 +520,6 @@ async def hydrate_recent_open_events_cache(
     return populated
 
 
-# =============================================================================
-# Pre-loop initialization
-# =============================================================================
-
-
 # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
 async def initialize_run_loop(  # noqa: C901
     runner: StrategyRunner,
@@ -613,7 +537,6 @@ async def initialize_run_loop(  # noqa: C901
     Returns the resolved ``activity_provider`` (may be ``None``) so the
     caller can feed it to the success-branch copy-trading persist step.
     """
-    # Initialize state if enabled
     state_manager_ready = False
     if runner.config.enable_state_persistence:
         try:
@@ -625,57 +548,25 @@ async def initialize_run_loop(  # noqa: C901
                 raise RuntimeError(f"Failed to initialize state manager for {deployment_id}: {e}") from e
             logger.error(f"Failed to initialize state manager: {e}")
 
-    # VIB-5854: persist the true pre-trade wallet bracket before FIFO
-    # reconstruction seeds OPENING_BALANCE lots from the earliest snapshot.
+    # Capture the pre-trade bracket before deriving opening-balance lots from it.
     if state_manager_ready:
         await capture_boot_snapshot_with_accounting(runner, strategy, deployment_id)
 
-    # Reconstruct FIFO basis store from durable accounting_events so REPAY and
-    # PT_REDEEM attribution is correct after a runner restart (VIB-3484).
-    # Gate on state_manager_ready: an uninitialized backend returns [] silently,
-    # which would leave the FIFO store empty — the exact restart hole VIB-3484 fixes.
-    # Shared helper (VIB-3944) so the ``--once``/``test-lifecycle`` CLI paths,
-    # which bypass run_loop entirely, can reuse the same rebuild step.
+    # Never treat an uninitialized backend's empty read as an empty durable basis.
     if state_manager_ready:
         reconstruct_lending_basis_store(runner, strategy, deployment_id)
 
-    # VIB-4086 — hydrate the runner's ``_recent_open_events`` cache from
-    # disk so a process-restart between OPEN and CLOSE preserves
-    # lifecycle continuity. Without this, an LP_OPEN written in process A
-    # then closed in process B (the canonical operator-restart-mid-
-    # position scenario AND the harness's ``--once`` pattern) lands the
-    # CLOSE row with empty token0/token1/value_usd — the carry-forward
-    # path in ``_apply_lp_close_columns`` has no in-memory bracket to
-    # carry forward. Shared with VIB-4085's lending lifecycle: a SUPPLY
-    # after a process restart correctly emits INCREASE rather than a
-    # second OPEN when the prior open leg is on disk.
     if state_manager_ready:
         await hydrate_recent_open_events_cache(runner, strategy)
 
-    # VIB-4198 / T12 — registry-mode cutover boot guard + registry-lookup
-    # install. Both extracted into ``_run_cutover_boot_guard`` so they don't
-    # contribute to ``initialize_run_loop``'s already-D-rated cyclomatic
-    # complexity. See that helper's docstring for the contract.
     if state_manager_ready:
         await _run_cutover_boot_guard(runner, strategy, deployment_id)
 
-    # VIB-4614 — install the pre-execution LP registry-collision preflight on
-    # the (direct-mode) ExecutionOrchestrator. Wired from here because the
-    # orchestrator holds no StateManager (layering boundary); the runner does.
-    # No-op when the orchestrator is gateway-routed or lacks the hook.
     if state_manager_ready:
         _install_registry_preflight(runner, deployment_id)
 
-    # VIB-3951 — local-only crash watchdog: re-queue any teardown_requests row
-    # left at status='executing' by a dead/stale runner process back to
-    # 'pending' so the runner auto-re-enters teardown on boot and finishes the
-    # unwind (a stuck 'executing' row otherwise sits with residual on-chain
-    # risk and only an operator could re-trigger it). Local SQLite mechanism
-    # only — hosted Postgres teardown state is owned by the metrics-database
-    # repo and is NOT touched here.
     _sweep_stale_executing_teardowns(runner, deployment_id)
 
-    # VIB-3467: drain pending/failed outbox rows from the previous run.
     if runner.config.enable_state_persistence and state_manager_ready:
         try:
             processor = getattr(runner, "_accounting_processor", None)
@@ -690,7 +581,6 @@ async def initialize_run_loop(  # noqa: C901
                 raise RuntimeError(f"AccountingProcessor.drain_pending failed: {e}") from e
             logger.warning("AccountingProcessor.drain_pending failed on startup: %s", e)
 
-    # Recover incomplete sessions from previous runs
     try:
         recovered = await runner._recover_incomplete_sessions()
         if recovered > 0:
@@ -698,7 +588,6 @@ async def initialize_run_loop(  # noqa: C901
     except Exception as e:
         logger.error(f"Failed to recover incomplete sessions: {e}")
 
-    # Restore copy trading cursor state if configured
     from .runner_models import StatefulActivityProviderProtocol
 
     activity_provider = cast(
@@ -719,7 +608,6 @@ async def initialize_run_loop(  # noqa: C901
     runner._terminal_lifecycle_state = None
     runner._terminal_lifecycle_error_message = None
 
-    # Set up dual-write for timeline events (gateway persistence)
     gateway_client = runner._get_gateway_client()
     if gateway_client is not None:
         from ..api.timeline import set_event_gateway_client
@@ -727,47 +615,23 @@ async def initialize_run_loop(  # noqa: C901
         set_event_gateway_client(gateway_client)
         logger.debug("Enabled gateway dual-write for timeline events")
 
-    # VIB-5419 / A2a — boot-time on-chain strand detection. A runner killed in
-    # the window [tx confirmed on-chain -> ledger row written] leaves funds in a
-    # protocol with zero DB trace; --fresh/restart only checks wallet balance,
-    # not on-chain positions. This phase reads on-chain lending/perp positions
-    # for the connectors the strategy uses and diffs them against the DB; on
-    # drift it HALTS loudly (live mode) / logs ERROR + continues (paper/dry_run).
-    # Detect-and-halt ONLY -- no auto-writes (that is A2b). Runs after the
-    # gateway client is wired (needed for eth_call) and before the first
-    # iteration.
+    # Strand detection needs the gateway and must run before the first trade.
     if state_manager_ready and gateway_client is not None:
         from .boot_strand_detection import OnChainStrandError, enforce_no_boot_strands
 
         try:
             await enforce_no_boot_strands(runner, strategy, deployment_id)
         except OnChainStrandError:
-            # Live-mode halt: propagate so the runner aborts boot before it can
-            # trade on top of an unaccounted on-chain position.
+            # An accounted-state mismatch must halt before further live trading.
             raise
         except Exception as e:  # noqa: BLE001 - detection must never crash boot itself
-            # The detector is documented never-raise; this is belt-and-braces so
-            # an unforeseen fault in the scan degrades to "no detection this
-            # boot" rather than bricking an otherwise-healthy strategy.
             logger.warning("Boot strand detection skipped (unexpected error): %s", e)
 
-    # VIB-5887 — boot-time resume-into-terminal-state guard. deployment_id is a
-    # deterministic sha256(wallet:chain), so a redeploy onto the same wallet+chain
-    # RESUMES the prior run's persisted strategy_state (restored above, before
-    # run_loop). If that state was terminal (lifecycle complete / position fully
-    # unwound) and the wallet now holds fresh idle capital, decide() HOLDs forever
-    # and silently no-ops the run. Emit a loud, un-missable RESUMED-TERMINAL signal
-    # (WARNING + structured sentinel naming the idle capital). Warn-only: no halt,
-    # no auto-reinitialize (see resume_terminal_guard docstring). Runs after the
-    # gateway client is wired (needed for the balance read) and before the first
-    # iteration. Never raises.
+    # This gateway-backed advisory is best-effort and must precede the first iteration.
     if gateway_client is not None:
         try:
             from .resume_terminal_guard import warn_on_resume_into_terminal
 
-            # Resume signal: a prior run persisted state for this deployment. Uses the
-            # canonical StateManager read (backend-agnostic — local SQLite or the
-            # hosted gateway-proxied store), mirroring the CLI's _detect_state_resume.
             is_resume = False
             if state_manager_ready:
                 try:
@@ -779,13 +643,10 @@ async def initialize_run_loop(  # noqa: C901
         except Exception as e:  # noqa: BLE001 - a boot advisory must never crash boot
             logger.warning("Resume-into-terminal guard skipped (unexpected error): %s", e)
 
-    # Register this strategy instance with the gateway
     runner._register_with_gateway(strategy)
 
-    # Write RUNNING state to LifecycleStore
     runner._lifecycle_write_state(deployment_id, LifecycleState.RUNNING)
 
-    # Emit strategy started event
     start_event = TimelineEvent(
         timestamp=datetime.now(UTC),
         event_type=TimelineEventType.STRATEGY_STARTED,
@@ -801,11 +662,6 @@ async def initialize_run_loop(  # noqa: C901
     logger.debug(f"Emitted STRATEGY_STARTED event for {deployment_id}")
 
     return activity_provider
-
-
-# =============================================================================
-# Per-iteration helpers
-# =============================================================================
 
 
 def invoke_pre_iteration_callback(
@@ -827,25 +683,17 @@ def invoke_pre_iteration_callback(
     if pre_iteration_callback is None:
         return
 
-    # Local import to avoid circular dependency at module load time.
     from .runner_models import CriticalCallbackError
 
     try:
         pre_iteration_callback()
     except CriticalCallbackError:
-        # Fail-closed: safety-critical callbacks stop the loop
         raise
     except Exception as e:
         logger.error(f"Pre-iteration callback error: {e}")
 
 
-# VIB-5406: max wall-clock a post-execution/teardown snapshot waits for the
-# current unit's outbox drains to land before reading accounting_events. The
-# drain is local SQLite I/O (sub-ms typically); 5s is a generous ceiling that
-# never stalls the loop. On timeout we degrade (stamp inventory unmeasured),
-# never halt by themselves — the outbox row persists and drains later. A typed
-# mandatory live write failure is handled separately by the iteration lane;
-# teardown still degrades and continues because on-chain risk reduction wins.
+# Snapshot barriers wait at most 5 seconds; timeouts leave drains running and mark inventory unmeasured.
 _DRAIN_BARRIER_TIMEOUT_S = 5.0
 
 
@@ -958,14 +806,12 @@ async def await_drain_barrier(
     if pending_refs is None:
         pending_refs = set()
         runner._pending_drain_tasks = pending_refs
-    # De-duplicate a task present in more than one tracking collection.
     barrier_tasks = list(dict.fromkeys([*pending_refs, *tasks]))
     pending = [t for t in barrier_tasks if not t.done()]
     all_done = True
     accounting_failure: AccountingPersistenceError | None = None
     still_pending: set[asyncio.Task] = set()
-    # Tasks already finished before we awaited still need their RESULT inspected
-    # (see the loop below) — completion alone is not success.
+    # A completed task is successful only after its result has been inspected.
     completed: list[asyncio.Task] = [t for t in barrier_tasks if t.done()]
     if pending:
         _done, still_pending = await asyncio.wait(pending, timeout=timeout)
@@ -981,16 +827,7 @@ async def await_drain_barrier(
                 timeout,
                 getattr(runner, "deployment_id", "") or "",
             )
-    # A COMPLETED drain whose result is ``False`` (or that raised) means the
-    # disposal's accounting event was NOT persisted — the snapshot would replay a
-    # stale stream and surface the just-sold lot as still held, the exact bug this
-    # barrier closes. ``done()`` alone is not enough; treat a failed/raised drain
-    # exactly like a timeout so the caller degrades inventory to unmeasured rather
-    # than emitting the phantom lot. Reading ``.result()`` also consumes any
-    # exception (defensive: ``drain_one`` catches its own today, but a future raise
-    # must read as failure, not silent success) and clears the
-    # "exception never retrieved" warning. ``still_pending`` tasks are excluded
-    # from ``completed`` so we never call ``.result()`` on an unfinished task.
+    # Failed results make replay stale, so degrade inventory exactly as for a timeout.
     for t in completed:
         try:
             if t.result() is False:
@@ -1023,16 +860,10 @@ async def await_drain_barrier(
                 exc_info=True,
             )
         finally:
-            # Result (success or failure) has now been observed. Release the
-            # runner-level lifetime reference so completed tasks cannot accumulate.
+            # Release the strong reference only after observing the result or exception.
             pending_refs.discard(t)
-    # A timed-out task must survive a per-iteration or teardown-PRE batch reset.
-    # Carry it explicitly into the next barrier, where its eventual result (and
-    # especially a typed live failure) will be observed and propagated.
+    # Preserve timed-out tasks across batch resets so their eventual failures are observed.
     pending_refs.update(still_pending)
-    # The batch's purpose for this snapshot is fulfilled; clear it so the next
-    # unit starts clean. Stragglers remain referenced by the runner-level set,
-    # so clearing here cannot drop their eventual result.
     tasks.clear()
     if accounting_failure is not None:
         raise accounting_failure
@@ -1075,17 +906,12 @@ async def capture_snapshot_with_accounting(
     this iteration via ``_record_success`` before the snapshot phase
     ran.
     """
-    # Local import to avoid circular dependency at module load time.
     from .runner_models import IterationResult, IterationStatus
 
     persistence_enabled = runner.config.enable_state_persistence
     drain_failure: AccountingPersistenceError | None = None
     if persistence_enabled:
-        # VIB-5406: await THIS iteration's disposal drains before the snapshot
-        # reads accounting_events, so event-replay-derived inventory (PT, swap)
-        # reflects this iteration's disposals instead of racing a not-yet-drained
-        # event. On timeout the valuer stamps inventory unmeasured rather than
-        # emit a phantom lot. A typed live failure enters ACCOUNTING_FAILED below.
+        # Drain disposal accounting before snapshot replay; incomplete drains make inventory unmeasured.
         try:
             drain_ok = await await_drain_barrier(
                 runner,
@@ -1099,58 +925,16 @@ async def capture_snapshot_with_accounting(
         if valuer is not None and hasattr(valuer, "set_drain_barrier_incomplete"):
             valuer.set_drain_barrier_incomplete(not drain_ok)
     else:
-        # No snapshot means no barrier. Still consume every task that has
-        # already completed so its result/exception cannot accumulate until
-        # shutdown. A typed live failure uses the same ACCOUNTING_FAILED path.
+        # Without snapshots, consume completed drains non-blockingly and retain pending tasks for shutdown.
         _drain_ok, drain_failure = _consume_completed_drain_tasks(runner)
         if drain_failure is None or not runner._is_live_mode():
             return result
 
-    # VIB-4926: on trade iterations, re-open the per-iteration MarketSnapshot
-    # scope with a FRESH token before the post-execution snapshot capture so
-    # the balance cache rebuilds against POST-trade on-chain state. Without
-    # this, capture_portfolio_snapshot reads loose-wallet balances through the
-    # cache warmed during decide() (PRE-execution) while LP positions are
-    # re-priced fresh — the swapped tokens get counted in both lanes (mainnet
-    # repro: iter-1 NAV $31.40 vs true ~$25.4; corrupts G6 wallet PnL to
-    # exactly final − stale-snapshot1). This is the iteration-lane twin of the
-    # teardown fix (VIB-4906, see capture_teardown_snapshot_with_accounting).
-    #
-    # The gate is _iteration_had_trade ALONE — it must MATCH the force-snapshot
-    # condition (``_capture_portfolio_snapshot`` forces a snapshot on exactly
-    # this flag, strategy_runner.py:6852). Gating any stricter — e.g. also
-    # requiring ``result.execution_result is not None`` — would skip the
-    # re-stamp on a partially-executed multi-intent iteration where an earlier
-    # intent traded (flag set) but a later intent failed before producing an
-    # execution_result: the snapshot is STILL force-captured, so it would
-    # persist the stale pre-trade balances this fix exists to prevent. Idle
-    # iterations leave the flag False and keep VIB-4843's warm price cache (no
-    # needless re-fetch on cold forks). The :post-exec suffix guarantees a
-    # different token than the iteration-start stamp (strategy_runner.py:878,
-    # bare cycle_id) so begin_market_snapshot_iteration is not a no-op and
-    # genuinely rebuilds the cache.
-    #
-    # SCOPE: this covers the single-chain PortfolioValuer lane — the one the
-    # double-count was reproduced on. The multi-chain lane values via a
-    # different path (_value_via_strategy_fallback) and does not set
-    # _iteration_had_trade; whether it shares the staleness is tracked by
-    # VIB-4950.
-    #
-    # FRESHNESS DEPENDENCY: the rebuilt snapshot reads balances via
-    # MarketSnapshot.balance() WITHOUT force_refresh, so it relies on
-    # reconcile_post_execution_balances (strategy_runner.py:4783, force_refresh
-    # =True for the executed intent's tokens) having run earlier in the same
-    # iteration to bust the gateway's server-side balance cache. That ordering
-    # is structural today (reconcile during execution precedes this snapshot);
-    # if a refactor moves or guards it, the double-count can silently return.
+    # Match the force-snapshot trade gate exactly, including partially executed multi-intent iterations.
+    # Post-execution reconciliation must invalidate gateway balances before this local cache reset.
     if persistence_enabled and getattr(runner, "_iteration_had_trade", False):
         try:
-            # _last_cycle_id is set every iteration (strategy_runner.py:871)
-            # before execution, so it is always present when the trade flag is
-            # set in production; getattr keeps the call crash-safe under
-            # mocking / partially-constructed runners (consistent with the
-            # _iteration_had_trade getattr above). Any value still yields a
-            # token distinct from the bare iteration-start cycle_id.
+            # The suffix must differ from the iteration-start token to rebuild the balance cache.
             last_cycle_id = getattr(runner, "_last_cycle_id", None)
             runner._begin_market_snapshot_iteration(strategy, f"{last_cycle_id}:post-exec")
         except Exception:  # noqa: BLE001 — never propagate; degrade to stale snapshot
@@ -1180,37 +964,9 @@ async def capture_snapshot_with_accounting(
             iteration_number=runner._total_iterations,
         )
     except AccountingPersistenceError as acc_err:
-        # Mode-aware: only escalate to ACCOUNTING_FAILED in
-        # live mode, matching the contract used by
-        # _write_ledger_entry (live raises, paper/dry-run
-        # logs). In non-live modes, swallow + ERROR-log so
-        # pre-prod drift is visible without halting the loop.
+        # Live mode fails closed; paper and dry-run expose the gap without stopping the loop.
         if runner._is_live_mode():
-            # Capture the failure timestamp BEFORE any alert / logging
-            # side effects so ``duration_ms`` reflects only the
-            # iteration-body + snapshot-phase wall-clock. The alert
-            # hook (``_alert_accounting_failure``) performs network
-            # I/O for Slack / PagerDuty and can add noticeable
-            # latency; including that latency in the reported
-            # duration would skew operator dashboards and misrepresent
-            # the cost of the iteration + snapshot work that actually
-            # failed (Gemini / Codex review of PR #1786).
-            #
-            # Report the FULL wall-clock cost of the failed
-            # iteration, including the snapshot phase that
-            # actually failed. Issue #1770 fixed the obvious
-            # undercount (snapshot-only duration); issue
-            # #1782 finishes the job by also including the
-            # snapshot-phase time that elapsed between
-            # ``run_iteration`` returning and
-            # ``AccountingPersistenceError`` firing. When the
-            # caller passes ``iteration_start_monotonic``
-            # (the anchor captured at the top of the
-            # iteration body), we measure from that anchor
-            # through ``time.monotonic()`` now; otherwise we
-            # fall back to ``result.duration_ms`` so an
-            # external caller that hasn't been updated still
-            # gets the #1770 behaviour.
+            # Measure before alert I/O so duration covers only iteration and snapshot work.
             if iteration_start_monotonic is not None:
                 duration_ms = (time.monotonic() - iteration_start_monotonic) * 1000.0
             else:
@@ -1221,22 +977,7 @@ async def capture_snapshot_with_accounting(
                 acc_err.write_kind,
             )
             await runner._alert_accounting_failure(strategy, acc_err)
-            # Forensic metadata (``intent``,
-            # ``execution_result``, ``balance_reconciliation``)
-            # is carried across unchanged: the iteration
-            # succeeded on-chain and operators need the tx
-            # hash, gas metrics, and reconciliation context
-            # to diagnose what preceded the accounting
-            # failure.
-            #
-            # We still build the result directly rather
-            # than via ``_create_error_result`` -- that
-            # helper, post fix #1771, no longer mutates
-            # ``_consecutive_errors``, but it DOES still
-            # bump ``_total_iterations`` which would
-            # double-count this iteration (``run_iteration``
-            # already counted it via ``_record_success``
-            # before the snapshot phase ran).
+            # Build directly because run_iteration already accounted for this iteration.
             return IterationResult(
                 status=IterationStatus.ACCOUNTING_FAILED,
                 error=f"Accounting persistence failed ({acc_err.write_kind}): {acc_err}",
@@ -1297,8 +1038,7 @@ def _portfolio_snapshot_to_price_oracle(snapshot: Any | None) -> dict | None:
             val.get("confidence"),
             field_name=f"teardown token price {symbol}.confidence",
         )
-        # Last-write-wins on duplicate symbol across chains: teardown is
-        # single-chain so this collision is rare, but stamp determinism.
+        # Teardown is single-chain; last-write-wins keeps duplicate-symbol handling deterministic.
         oracle[str(symbol)] = {
             "price_usd": str(price_usd),
             "oracle_source": val.get("oracle_source") or "unknown",
@@ -1395,14 +1135,8 @@ async def _ensure_native_gas_in_teardown_oracle(
 
     entry = _price_result_to_oracle_entry(result)
     if entry is None:
-        # Empty != Zero: a missing native price stays missing — never fabricate.
-        # Returns the oracle untouched (``None`` stays ``None``).
+        # An unknown price stays absent rather than becoming a measured zero.
         return oracle
-    # Initialise the stash when it arrived empty / None AND we have a real
-    # native price to add (mutate-in-place when it already exists). Returning
-    # the initialised dict propagates to ``commit_teardown_intent``'s
-    # ``price_oracle=teardown_price_oracle`` so the ledger writer stamps both
-    # ``gas_usd`` and ``price_inputs_json`` on the teardown row.
     merged: dict = oracle if oracle else {}
     merged[native_symbol] = entry
     return merged
@@ -1456,11 +1190,9 @@ def _augment_intent_tokens_with_address_resolution(intent: Any, symbol_tokens: l
         looks_like_evm = s_lower.startswith("0x") and len(raw) == 42
         looks_like_solana = chain_is_solana and not s_lower.startswith("0x") and 32 <= len(raw) <= 44
         if not (looks_like_evm or looks_like_solana):
-            # Symbol-shaped — already covered by ``symbol_tokens``. Skip.
             continue
         if not chain_lower:
-            # Cross-chain disambiguation requires a chain. Empty ≠ Zero:
-            # drop rather than guess.
+            # Address resolution without a chain is ambiguous; do not guess.
             continue
         try:
             from almanak.framework.data.tokens import get_token_resolver
@@ -1474,8 +1206,6 @@ def _augment_intent_tokens_with_address_resolution(intent: Any, symbol_tokens: l
             continue
         resolved.append(info.symbol.upper())
 
-    # Dedupe preserving first-seen order; symbol_tokens already deduplicated
-    # upstream by ``extract_token_symbols``.
     return list(dict.fromkeys([*symbol_tokens, *resolved]))
 
 
@@ -1547,16 +1277,6 @@ async def _ensure_intent_tokens_in_teardown_oracle(
         from .runner_models import _extract_tokens_from_intent
 
         tokens = _extract_tokens_from_intent(intent)
-        # gemini review on PR #2260 (2026-05-13): ``_extract_tokens_from_intent``
-        # only returns symbol-shaped values — ``_is_symbol`` filters out
-        # contract addresses. Some connectors (Aerodrome confirmed; likely
-        # PancakeSwap, Sushi, Curve and others) populate intent token fields
-        # with addresses rather than symbols. Without address-to-symbol
-        # resolution those connectors silently skip the top-off and the
-        # VIB-4318 fix only covers symbol-based connectors. Mirror
-        # ``swap_handler._resolve_price_lookup_key`` (skip_gateway=True)
-        # so the address legs also land in ``price_inputs_json`` correctly
-        # keyed by canonical symbol.
         tokens = _augment_intent_tokens_with_address_resolution(intent, tokens, chain)
     except Exception as exc:  # noqa: BLE001 — best-effort
         logger.debug(
@@ -1569,18 +1289,8 @@ async def _ensure_intent_tokens_in_teardown_oracle(
     if not tokens:
         return oracle
 
-    # Initialise the stash if it was ``None`` AND we have at least one
-    # intent token to price. Mutate-in-place (matches
-    # :func:`_ensure_native_gas_in_teardown_oracle`); returning ``None``
-    # would propagate to ``commit_teardown_intent``'s
-    # ``price_oracle=teardown_price_oracle`` argument and the ledger writer
-    # would skip ``price_inputs_json`` entirely — defeating the fix.
     merged: dict = oracle if oracle is not None else {}
 
-    # Treat already-present symbols (case-insensitive) as authoritative —
-    # see method docstring on the collision-precedence rule. Matches the
-    # native-gas helper's case-insensitive membership probe at
-    # :func:`_ensure_native_gas_in_teardown_oracle`.
     def _already_present(sym: str) -> bool:
         return any(key in merged for key in (sym, sym.upper(), sym.lower()))
 
@@ -1601,7 +1311,6 @@ async def _ensure_intent_tokens_in_teardown_oracle(
 
         entry = _price_result_to_oracle_entry(result)
         if entry is None:
-            # Empty ≠ Zero: a missing price stays missing — never fabricate.
             continue
         merged[token] = entry
 
@@ -1679,9 +1388,7 @@ async def _ensure_receipt_legs_in_teardown_oracle(
         except Exception:  # noqa: BLE001 — best-effort
             continue
         symbol = (info.symbol or "").upper()
-        # Only the coingecko_id-null legs the by-symbol top-off genuinely cannot
-        # reach. A token WITH a coingecko_id that's still missing is an ordinary
-        # gap owned by the symbol path, not this defect.
+        # This lane covers only legs that cannot be priced through the symbol path.
         if not symbol or _already_present(symbol) or info.coingecko_id is not None:
             continue
         try:
@@ -1696,7 +1403,6 @@ async def _ensure_receipt_legs_in_teardown_oracle(
             )
             continue
         entry = _price_result_to_oracle_entry(agg)
-        # Empty≠Zero + fail-closed on invalid/≤ 0 prices or missing provenance.
         if entry is None:
             continue
         merged[symbol] = entry
@@ -1898,10 +1604,7 @@ async def capture_teardown_snapshot_with_accounting(
     phase = "pre" if pre_teardown else "post"
 
     if not runner.config.enable_state_persistence:
-        # Snapshot persistence is disabled, but ledger/outbox drains may still
-        # have been scheduled. Observe completed results without waiting so the
-        # teardown lane retains its never-halt contract and task references do
-        # not accumulate until shutdown.
+        # Ledger drains can exist without snapshots; observe completed tasks without delaying teardown.
         return _disabled_teardown_snapshot_outcome(runner, phase)
 
     saved_ctx_cycle_id = get_cycle_id()
@@ -1945,31 +1648,7 @@ async def capture_teardown_snapshot_with_accounting(
                 error,
             )
 
-    # VIB-4906 / F2: invalidate the strategy's per-iteration MarketSnapshot
-    # memo before the bracket so its ``_balance_cache`` is rebuilt against
-    # the current on-chain state.
-    #
-    # Why it matters — without this, the post-teardown bracket reuses the
-    # MarketSnapshot instance that was warmed during the preceding iteration
-    # (or pre-teardown bracket).  ``capture_portfolio_snapshot`` reads
-    # balances through that cache (via Track C / ``create_market_snapshot``),
-    # so the post-teardown ``portfolio_snapshots`` row carries the
-    # PRE-teardown wallet balances — byte-identical to the pre-bracket row
-    # even though the teardown SWAPs landed on chain in between.  That
-    # cache-staleness fingerprint is exactly what VIB-4907 / F4 suppresses;
-    # this fix is the structural complement.
-    #
-    # Token shape ``{teardown_cycle_id}:{phase}`` is unique against both
-    # the iteration's cycle id (no colon-suffix) and the sibling bracket,
-    # so each bracket builds a fresh snapshot.
-    #
-    # Defensive try/except: the runner's helper already wraps to
-    # never-raise (strategy_runner.py:6549-6552), but we wrap again at the
-    # call site so the teardown bracket's never-raise contract holds even
-    # if a future refactor loses that wrapping.  Failures degrade to "memo
-    # not invalidated" — the bracket still runs, the post-snapshot may be
-    # stale, F4 suppression then re-fires downstream.  Strictly safer than
-    # propagating.
+    # Distinct phase tokens force fresh pre/post balances; invalidation failure must not halt teardown.
     try:
         runner._begin_market_snapshot_iteration(strategy, f"{teardown_cycle_id}:{phase}")
     except Exception:  # noqa: BLE001 — never propagate from teardown bracket
@@ -1982,15 +1661,7 @@ async def capture_teardown_snapshot_with_accounting(
             exc_info=True,
         )
 
-    # VIB-5406: teardown disposal-drain handling around the snapshot bracket.
-    #   PRE  → open a fresh drain batch so the teardown disposals committed after
-    #          this bracket accumulate for the POST barrier (mirrors the
-    #          per-iteration reset at run_iteration top).
-    #   POST → await this teardown's disposal drains before the snapshot reads
-    #          accounting_events (teardown_commit.py fires the same fire-and-forget
-    #          drain), so held-PT / swap inventory reflects the unwind's disposals.
-    #          On timeout the valuer stamps inventory unmeasured; teardown never
-    #          halts (the unwind already removed on-chain risk).
+    # PRE starts the teardown batch; POST drains it before replaying accounting into the closing snapshot.
     if pre_teardown:
         runner._drain_batch = []
     else:
@@ -2002,8 +1673,7 @@ async def capture_teardown_snapshot_with_accounting(
                 propagate_accounting_failure=True,
             )
         except AccountingPersistenceError as exc:
-            # Teardown deliberately catches the typed failure: surface the
-            # accounting gap, but never strand a partially-unwound position.
+            # Accounting gaps are loud, but never stop the remaining risk-reducing work.
             drain_failure = exc
             drain_ok = False
         valuer = getattr(runner, "_portfolio_valuer", None)
@@ -2037,22 +1707,14 @@ async def capture_teardown_snapshot_with_accounting(
                 force_snapshot=True,
             )
             snapshot_captured = snapshot is not None
-            # G12 wiring: stash the per-cycle price oracle for the teardown
-            # commit pipeline. ``commit_teardown_intent`` reads
-            # ``runner._teardown_price_oracle`` and threads it into
-            # ``_write_ledger_entry`` so every teardown row carries
-            # ``price_inputs_json``. Set on the pre-bracket; cleared in the
-            # post-bracket below so an iteration after teardown never sees
-            # stale teardown prices.
+            # Keep pre-bracket prices through all teardown commits, then clear them after POST.
             if pre_teardown:
                 runner._teardown_price_oracle = _portfolio_snapshot_to_price_oracle(snapshot)
                 runner._teardown_price_oracle = await _ensure_native_gas_in_teardown_oracle(
                     runner, strategy, runner._teardown_price_oracle
                 )
             elif not getattr(runner, "_teardown_price_oracle", None):
-                # Fallback: pre-snapshot failed but post produced prices.
-                # Better to record post-teardown prices than to leave the
-                # row's price_inputs_json empty.
+                # A measured post bracket is preferable to an empty oracle when PRE failed.
                 runner._teardown_price_oracle = _portfolio_snapshot_to_price_oracle(snapshot)
                 runner._teardown_price_oracle = await _ensure_native_gas_in_teardown_oracle(
                     runner, strategy, runner._teardown_price_oracle
@@ -2094,12 +1756,7 @@ async def capture_teardown_snapshot_with_accounting(
         else:
             set_cycle_id(saved_ctx_cycle_id)
         runner._last_cycle_id = saved_last_cycle_id
-        # G12 teardown stash lifecycle (Accounting-AttemptNo17 §A4): the
-        # post-bracket clears the stash so the next iteration's lane
-        # never reads teardown prices that may be stale by then. If the
-        # post-bracket itself failed, the stash still lived through every
-        # commit_teardown_intent call (where it matters), so clearing
-        # here is safe regardless of accounting_degraded.
+        # Clear after every POST outcome; all teardown commits have already consumed the stash.
         if not pre_teardown:
             runner._teardown_price_oracle = None
 
@@ -2141,25 +1798,13 @@ async def handle_iteration_failure(
     if runner._first_error_at is None:
         runner._first_error_at = datetime.now(UTC)
 
-    # Record failure in circuit breaker (skip statuses that already
-    # recorded inline to avoid double-counting)
+    # Statuses recorded in decide() must not be charged to the breaker twice.
     if runner._circuit_breaker is not None and result.status not in (
         IterationStatus.CIRCUIT_BREAKER_OPEN,
-        IterationStatus.STRATEGY_TIMEOUT,  # already recorded in decide() handler
-        IterationStatus.STRATEGY_ERROR,  # already recorded in decide() handler
+        IterationStatus.STRATEGY_TIMEOUT,
+        IterationStatus.STRATEGY_ERROR,
     ):
-        # Classify the returned-result failure so a market-data DATA_ERROR is
-        # recorded as data-class (elevated threshold) rather than the default
-        # UNKNOWN/action-class fast-fail. The decide()-exception path classifies
-        # via classify_failure(); this path has no live exception, so map from
-        # the iteration status instead (VIB-3803 parity).
-        #
-        # VIB-5746: prefer a typed ``result.failure_kind`` when the pipeline
-        # already classified the failure (e.g. a pre-execution safety-guard
-        # refusal stamped GUARD_REFUSED in ``_single_chain_handle_failure``).
-        # This is a typed signal from the compilation result — never a match on
-        # the error string — so a correct guard refusal is recorded as neutral
-        # and cannot trip the breaker.
+        # Prefer the pipeline's typed classification so guard refusals stay neutral.
         from .failure_kind import kind_for_status
 
         recorded_kind = result.failure_kind or kind_for_status(result.status, result.error)
@@ -2168,19 +1813,11 @@ async def handle_iteration_failure(
             kind=recorded_kind,
         )
 
-    # Auto-trigger emergency stop if breaker just tripped to OPEN
-    # (checked after both inline and run_loop recording paths)
     if runner._circuit_breaker is not None:
         await runner._maybe_trigger_emergency(strategy, result)
 
     if runner._consecutive_errors >= runner.config.max_consecutive_errors:
-        # A data-class outage the breaker is deliberately tolerating (still
-        # CLOSED) must not flip the deployment to ERROR / alert at the generic
-        # streak threshold — that contradicts the elevated data-class tolerance
-        # and the "idle and recover" intent. Defer the ERROR write + alert until
-        # the breaker actually opens (data threshold hit) or a non-data failure
-        # occurs. Permanent data errors are action-class (not is_data_class), so
-        # a misconfigured strategy still surfaces immediately.
+        # A tolerated data outage remains CLOSED; only an open breaker or action failure writes ERROR.
         from ..execution.circuit_breaker import CircuitBreakerState
         from .failure_kind import kind_for_status
 
@@ -2211,13 +1848,7 @@ def handle_iteration_success(
     first-error timestamp, and resets the emergency trigger guard when
     the circuit breaker is not OPEN.
     """
-    # Recover lifecycle state if we were in an error streak before
-    # this iteration succeeded. The counter has already been reset to
-    # 0 inside `run_iteration` via `_record_success`, so we rely on the
-    # pre-iteration snapshot captured above. Skip the recovery write
-    # when the same iteration has already transitioned to a terminal
-    # state (e.g., teardown writes TERMINATED and requests shutdown) --
-    # otherwise we would clobber that terminal state with RUNNING.
+    # Never let recovery overwrite a terminal state written during the same iteration.
     if was_in_error_streak and not runner._shutdown_requested and runner._terminal_lifecycle_state is None:
         runner._lifecycle_write_state(deployment_id, LifecycleState.RUNNING)
         logger.info(
@@ -2232,7 +1863,7 @@ def handle_iteration_success(
         )
     runner._consecutive_errors = 0
     runner._first_error_at = None
-    # Reset emergency guard so a future HALF_OPEN->OPEN relapse can re-fire
+    # Reset only after leaving OPEN so a later relapse can trigger another emergency action.
     if runner._circuit_breaker is not None:
         from ..execution.circuit_breaker import CircuitBreakerState
 
@@ -2284,11 +1915,6 @@ async def handle_lifecycle_command(
             )
         case _ as unreachable:
             assert_never(unreachable)
-
-
-# =============================================================================
-# Post-loop finalization
-# =============================================================================
 
 
 def _log_shutdown_drain_result(
@@ -2348,8 +1974,7 @@ async def _drain_accounting_tasks_on_shutdown(runner: StrategyRunner, deployment
             )
             for task in pending:
                 task.cancel()
-            # Cancellation is asynchronous. Await every task so neither a late
-            # exception nor CancelledError remains unobserved before close().
+            # Cancellation is asynchronous; observe every result before closing state.
             cancelled_results = await asyncio.gather(*pending, return_exceptions=True)
             for result in cancelled_results:
                 _log_shutdown_drain_result(result, deployment_id, while_cancelling=True)
@@ -2371,17 +1996,14 @@ async def finalize_run_loop(
     ``flush_pending_saves`` (if provided), and the state manager
     ``close``.
     """
-    # Write final state to LifecycleStore (preserve ERROR if set by circuit breaker)
     runner._lifecycle_write_state(
         deployment_id,
         runner._terminal_lifecycle_state or LifecycleState.TERMINATED,
         error_message=runner._terminal_lifecycle_error_message,
     )
 
-    # Deregister from gateway (mark as INACTIVE)
     runner._deregister_from_gateway(deployment_id)
 
-    # Emit strategy stopped event
     stop_event = TimelineEvent(
         timestamp=datetime.now(UTC),
         event_type=TimelineEventType.STRATEGY_STOPPED,
@@ -2398,31 +2020,20 @@ async def finalize_run_loop(
 
     logger.info(f"Run loop ended for strategy {deployment_id}")
 
-    # Flush any pending state saves before cleanup
     if hasattr(strategy, "flush_pending_saves"):
         try:
             await strategy.flush_pending_saves()
         except Exception as e:
             logger.warning(f"Error flushing pending saves: {e}")
 
-    # Drain any in-flight accounting tasks before closing the state manager.
-    # The strong-ref set (self._pending_drain_tasks) prevents GC, but the tasks
-    # must complete before state_manager.close() so drain_one doesn't write to a
-    # closed backend.  5 s timeout: if tasks are still running after that, cancel
-    # them and log a warning rather than blocking shutdown indefinitely.
+    # Drain before closing state; after 5 seconds cancel and observe stragglers rather than hang shutdown.
     await _drain_accounting_tasks_on_shutdown(runner, deployment_id)
 
-    # Cleanup
     if runner.config.enable_state_persistence:
         try:
             await runner.state_manager.close()
         except Exception as e:
             logger.error(f"Error closing state manager: {e}")
-
-
-# =============================================================================
-# Registry-lookup installer (VIB-4198 / T12)
-# =============================================================================
 
 
 async def _run_cutover_boot_guard(
@@ -2497,8 +2108,6 @@ async def _run_cutover_boot_guard(
     try:
         await _install_registry_lookup_for_lp_tracker(runner, tracker, deployment_id)
     except RegistryLookupInstallError:
-        # Already-structured error — propagate AS-IS so the runner's
-        # outer error handler halts the strategy.
         raise
     except Exception as exc:  # noqa: BLE001 — convert to structured error
         if cutover_live:
@@ -2508,7 +2117,6 @@ async def _run_cutover_boot_guard(
                 cutover_key="lp",
                 cause=f"{type(exc).__name__}: {exc}",
             ) from exc
-        # Cutover not active — tracker fallback is the legacy contract.
         logger.warning(
             "Could not install registry lookup on LPPositionTracker "
             "(non-fatal — cutover not active for this build): %s",
@@ -2557,21 +2165,7 @@ async def _install_registry_lookup_for_lp_tracker(
 
     def _sync_lookup(*, protocol: str, chain: str, pool: str) -> str | None:
         try:
-            # Ask the runner for the registry rows. The cache here is the
-            # state manager's; calling the async accessor isn't possible
-            # in a sync hook, so we consult the runner's
-            # ``_lp_registry_id_cache`` (populated at boot via
-            # ``_refresh_lp_registry_id_cache`` and refreshed on every
-            # registry-mode write).
-            #
-            # VIB-4301: the cache value is the SET of open token_ids for this
-            # (protocol, chain, pool). Auto-injection is only safe when there is
-            # exactly ONE open NFT in the pool — return it. When there are zero
-            # or N>1 (a legitimate co-pool / delta-neutral position), return None
-            # WITHOUT warning: the strategy must (and does) supply ``position_id``
-            # on the close intent itself, and the tracker only injects when the
-            # caller did not. This eliminates the pre-fix cache-thrash + spurious
-            # multi-NFT warning that fired on every legitimate co-pool close.
+            # Auto-injection is safe only when the pool has exactly one open NFT.
             cache: dict[tuple[str, str, str], set[str]] = getattr(runner_ref, "_lp_registry_id_cache", {})
             token_ids = cache.get((protocol.lower(), chain.lower(), pool.lower()))
             if token_ids and len(token_ids) == 1:
@@ -2581,7 +2175,6 @@ async def _install_registry_lookup_for_lp_tracker(
             return None
 
     tracker.attach_registry_lookup(_sync_lookup)
-    # Prime the cache once at boot.
     runner_ref._lp_registry_id_cache = {}
     try:
         await _refresh_lp_registry_id_cache(runner_ref, deployment_id)
@@ -2600,12 +2193,7 @@ async def _install_registry_lookup_for_lp_tracker(
         )
 
 
-# UniV3-family protocol slugs the registry-id cache indexes under.
-# The registry doesn't carry ``protocol`` directly — UniV3 LP rows
-# are tagged primitive='lp', accounting_category='lp', and the NPM
-# address in the payload identifies the family. We index under every
-# UniV3 family slug so a strategy registered as ``uniswap_v3`` /
-# ``sushiswap_v3`` / etc. on the same NFT manager finds the same row.
+# Registry rows omit the protocol slug, so index each NPM row under every compatible V3-family slug.
 _UNIV3_FAMILY_PROTOCOL_SLUGS: tuple[str, ...] = (
     "uniswap_v3",
     "sushiswap_v3",
@@ -2692,8 +2280,6 @@ async def _refresh_lp_registry_id_cache(runner: StrategyRunner, deployment_id: s
         )
     except Exception as exc:  # noqa: BLE001
         if is_cutover_active(runner, Primitive.LP, "lp"):
-            # Re-raise — the installer wraps this as
-            # ``RegistryLookupInstallError`` so the runner halts loud.
             raise
         logger.debug(
             "Registry-id cache refresh failed for %s (non-fatal — cutover not active): %s",
