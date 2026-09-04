@@ -95,15 +95,10 @@ from almanak.framework.data.timeframes import OHLCVTimeframe, parse_ohlcv_timefr
 
 logger = logging.getLogger(__name__)
 
-# VIB-5737: the dashboard recomputes the indicator from OHLCV candles and MUST
-# use the SAME candle granularity the strategy decided on, or the rendered line
-# / signal banner is a different series than the one that fired the trade (the
-# field bug: RSI shown 70.6 vs lived ~64 because the dashboard defaulted to
-# "1h" while ``market.rsi()`` defaults an unset ``data_granularity`` to "4h").
-# Single source of truth for that default is ``market.snapshot.DEFAULT_TIMEFRAME``
-# — mirror it here so the two can never drift. Guarded import keeps the streamlit
-# process importable even if the market module can't load (falls back to the
-# same literal the framework uses).
+# The dashboard must use the strategy's candle granularity or its indicator line
+# can differ from the decision series. Keep the default aligned with
+# ``market.snapshot.DEFAULT_TIMEFRAME``; the fallback keeps the dashboard
+# subprocess importable when the market module cannot load.
 try:
     from almanak.framework.market.snapshot import DEFAULT_TIMEFRAME as _DEFAULT_TIMEFRAME
 except Exception:  # pragma: no cover - import guard for the dashboard subprocess
@@ -236,15 +231,9 @@ def multi_ta_config(primary: TADashboardConfig, *extras: TADashboardConfig) -> T
     return replace(primary, extra_indicators=list(extras))
 
 
-# Mirror of ``almanak.framework.data.indicators.rsi.RSI_DECISION_BUFFER`` (=20).
-# The strategy's RSI service fetches ``period + RSI_DECISION_BUFFER`` candles per
-# iteration and computes RSI from that *sliding* window (the Wilder seed is reset
-# this many candles before each decision). We re-declare the value here rather
-# than importing ``rsi`` so the dashboard import stays lean (see
-# ``tests/framework/dashboard/test_imports_lean.py`` — importing the indicator
-# stack would pull ``aiohttp`` + the OHLCV providers). A drift guard in
-# ``tests/unit/framework/dashboard/test_prepare_ta_session_state.py`` asserts
-# this equals the canonical constant so the two can never silently diverge.
+# RSI resets its Wilder seed over ``period + RSI_DECISION_BUFFER`` candles for
+# each decision. Keep this mirror at 20 without importing the provider-heavy
+# indicator stack; a drift guard checks it against the canonical constant.
 _RSI_DECISION_BUFFER = 20
 
 
@@ -352,7 +341,6 @@ def _macd_series_from_closes(closes: pd.Series, fast: int, slow: int, signal: in
     valid = macd_line.dropna()
     if len(valid) < signal:
         return empty
-    # Signal line is the EMA of the (contiguous) valid MACD values, realigned.
     signal_valid = _ema_sma_seeded(valid.reset_index(drop=True), signal)
     signal_line = pd.Series(float("nan"), index=macd_line.index, name="signal")
     signal_line.loc[valid.index] = signal_valid.to_numpy()
@@ -370,9 +358,8 @@ def _high_low_close(price_df: pd.DataFrame) -> tuple[pd.Series, pd.Series, pd.Se
     indicators still produce a (flattened) series instead of crashing.
     """
     close = price_df["price"].astype(float)
-    # A row can carry a valid close but a NaN high/low (bad/missing OHLC field
-    # coerced by ``pd.to_numeric(errors="coerce")``); fill those from the close
-    # so the NaN doesn't poison the rolling window and blank the chart.
+    # Missing high/low values fall back to close so one malformed OHLC field
+    # does not poison the rolling window and blank the chart.
     high = price_df["high"].astype(float).fillna(close) if "high" in price_df.columns else close
     low = price_df["low"].astype(float).fillna(close) if "low" in price_df.columns else close
     return high, low, close
@@ -632,13 +619,8 @@ def _earliest_signal_ts(buy_signals: pd.DataFrame, sell_signals: pd.DataFrame) -
     for frame in (buy_signals, sell_signals):
         if not (isinstance(frame, pd.DataFrame) and "time" in frame.columns and not frame.empty):
             continue
-        # Coerce to UTC-aware datetimes BEFORE reducing. ``errors="coerce"``
-        # turns an unparseable ``time`` value (e.g. a junk string from a custom
-        # dashboard / future caller) into ``NaT`` so it is dropped instead of
-        # raising and taking down the whole render; ``utc=True`` unifies tz-naive
-        # and tz-aware frames so the cross-frame ``min`` below cannot raise. For
-        # the production input (already-UTC datetimes from
-        # ``_trade_rows_to_signals``) this is an idempotent no-op.
+        # Coerce before reducing so malformed values are dropped and mixed
+        # timezone inputs cannot break the cross-frame minimum.
         col = pd.to_datetime(frame["time"], utc=True, errors="coerce").dropna()
         if col.empty:
             continue
@@ -743,7 +725,7 @@ def _trade_tape_rows(api_client: Any, *, from_ts: datetime | None = None) -> lis
             try:
                 tape = api_client.get_trade_tape(from_ts=from_ts)
             except TypeError:
-                # Client predates the windowed signature — fall back unbounded.
+                # Duck-typed clients may not accept ``from_ts``; fall back unbounded.
                 tape = api_client.get_trade_tape()
         else:
             tape = api_client.get_trade_tape()
@@ -752,7 +734,6 @@ def _trade_tape_rows(api_client: Any, *, from_ts: datetime | None = None) -> lis
         return []
     if tape is None:
         return []
-    # Typed dataclass with .rows attribute, OR a dict with "rows" key.
     rows = getattr(tape, "rows", None)
     if rows is None and isinstance(tape, dict):
         rows = tape.get("rows", [])
@@ -763,7 +744,6 @@ def _trade_tape_rows(api_client: Any, *, from_ts: datetime | None = None) -> lis
         if isinstance(r, dict):
             out.append(r)
             continue
-        # Dataclass-like: harvest the few fields we need by attribute.
         try:
             ts: Any = getattr(r, "timestamp", None)
             if ts is not None and hasattr(ts, "isoformat"):
@@ -945,9 +925,6 @@ def _apply_adx(result: dict[str, Any], price_df: pd.DataFrame, config: TADashboa
     result.setdefault("adx", result["adx_value"])
 
 
-# Indicator key (``config.indicator_name.lower()``) → series-compute handler.
-# Each handler populates ``result`` in place with a time-indexed series/frame
-# plus a latest scalar; the dispatcher wraps them in a single soft-fail guard.
 _INDICATOR_HANDLERS: dict[str, Callable[[dict[str, Any], pd.DataFrame, TADashboardConfig], None]] = {
     "rsi": _apply_rsi,
     "macd": _apply_macd,
@@ -1027,31 +1004,18 @@ def prepare_ta_session_state(
     quote_token = result.get("quote_token") or config.quote_token
     chain = result.get("chain") or config.chain
 
-    # Resolve the chart window once: the strategy's configured recent window by
-    # default, or the operator-selected NAV range when one is active (VIB-5114).
-    # ``deployment_id=None`` (legacy callers) always yields the legacy window.
+    # A bounded operator-selected NAV range overrides the configured recent
+    # window; callers without a deployment id retain the configured window.
     window = _resolve_chart_window(deployment_id, result, config.timeframe)
 
-    # OHLCV + price history (skip if caller already supplied).
     price_df: pd.DataFrame | None = None
     tape_rows: list[dict[str, Any]] | None = None
     if "price_history" not in result and api_client is not None:
-        # VIB-5156: before fetching candles, look at the trade tape's earliest
-        # still-displayed marker. The legacy recent-window limit is timeframe-only
-        # and never consults the tape, so after a redeploy an old marker can land
-        # outside the fetched candles (and, post-VIB-5058, gets clipped away).
-        # Fetch the tape once here, grow the window to cover its earliest signal,
-        # and reuse the rows for the marker step so the tape is fetched only once.
-        # A no-op when an operator range is active (``window.from_ts`` already set)
-        # or the earliest signal is already inside the window — back-compat-safe.
+        # An unbounded recent window must grow to include its oldest displayed
+        # trade marker. Operator-bounded windows remain authoritative.
         if window.from_ts is None and not _signals_already_supplied(result):
-            # Fetch the legacy newest-N tape page (``from_ts=None``, matching the
-            # VIB-5114 legacy marker contract). The dashboard tape is page-capped
-            # (gateway ``get_trade_tape(limit=50)``), so this is NOT an unbounded
-            # fetch — the earliest of the returned page is by construction the
-            # oldest marker that will ever plot, which is exactly what we grow the
-            # candle window to cover. Reuse these rows for the marker step below so
-            # the tape is fetched only once.
+            # The tape is page-capped, so its earliest pair marker is also the
+            # oldest marker that can plot. Reuse this page below.
             tape_rows = _trade_tape_rows(api_client)
             buys, sells = _trade_rows_to_signals(tape_rows, base_token, quote_token)
             window = extend_window_to_cover_signal(window, _earliest_signal_ts(buys, sells))
@@ -1073,16 +1037,10 @@ def prepare_ta_session_state(
         if isinstance(existing, pd.DataFrame):
             price_df = existing
 
-    # Indicator series — computed client-side from price history. The primary
-    # indicator plus any extras (multi-signal layout, VIB-4897) all share the
-    # same price_df; each handler is a no-op if its series is already present.
     if price_df is not None:
         _apply_indicator_series(result, price_df, config)
-        # Extras may repeat an indicator type (e.g. dual RSI with different
-        # periods). A bare-key apply would collide — _apply_indicator_series
-        # early-returns when ``<key>_*`` already exists — so same-type repeats
-        # are computed in isolation and stored under a disambiguated slot key
-        # (rsi_2, rsi_3, …). VIB-4897.
+        # Repeated indicator types are computed in isolation because their bare
+        # result keys collide; numbered slot keys retain each configured period.
         for slot, cfg in _multi_indicator_slots(config)[1:]:
             base = cfg.indicator_name.lower()
             if slot == base:
@@ -1093,12 +1051,8 @@ def prepare_ta_session_state(
                 for k, v in tmp.items():
                     result[k.replace(base, slot, 1)] = v
 
-    # Chart markers (buy/sell signals) + Performance "Trades" count, both
-    # derived from the trade tape (fetched once). ``window.from_ts`` bounds the
-    # markers to the same window as the candles (VIB-5114) so they never float
-    # outside the plotted price line. ``tape_rows`` is reused when the VIB-5156
-    # backfill already fetched the tape above (it fetches unbounded, then grows
-    # the candle window to cover the earliest signal — so no marker is clipped).
+    # Bound markers to the candle window and reuse any tape page read for
+    # signal backfill so marker and trade-count inputs stay identical.
     _populate_trade_tape_derived(api_client, result, base_token, quote_token, from_ts=window.from_ts, rows=tape_rows)
 
     if "strategy_start_time" not in result:
@@ -1106,9 +1060,6 @@ def prepare_ta_session_state(
         if start_time is not None:
             result["strategy_start_time"] = start_time
 
-    # Current Position section: balances + base price. Without this the
-    # section silently shows 0.0000 / $0.00 / $0.00 even when the wallet
-    # holds funds, because _render_position reads keys nothing else fills.
     _populate_position_balances(api_client, result, base_token, quote_token, chain)
 
     return result
@@ -1189,10 +1140,8 @@ def _populate_position_balances(
     try:
         position = api_client.get_position() or {}
         balances = position.get("token_balances") or []
-        # Coerce balances to non-None strings: a snapshot may carry an
-        # explicit ``None`` for an unmeasured field, and ``_render_position``
-        # does ``Decimal(str(...))`` — ``Decimal("None")`` would raise and
-        # trip the dashboard's error boundary instead of degrading to zeros.
+        # An unmeasured balance may be ``None``; coerce it to the section's zero
+        # fallback rather than passing ``Decimal("None")`` to the renderer.
         bal_map = {str(b.get("symbol", "")).upper(): b for b in balances if isinstance(b, dict)}
         base_entry = bal_map.get(base_token.upper())
         quote_entry = bal_map.get(quote_token.upper())
@@ -1204,7 +1153,8 @@ def _populate_position_balances(
 
         if "base_price" not in result:
             price: str | None = None
-            # Prefer the snapshot's own valuation (value_usd / balance).
+            # Prefer the strategy snapshot's valuation so the displayed total
+            # matches the position the strategy saw.
             if base_entry is not None:
                 try:
                     bal = Decimal(str(base_entry.get("balance") or "0"))
@@ -1250,7 +1200,6 @@ def render_ta_dashboard(
     else:
         st.title(f"{config.indicator_name} Strategy Dashboard")
 
-    # Extract config overrides
     base_token = strategy_config.get("base_token", config.base_token)
     quote_token = strategy_config.get("quote_token", config.quote_token)
     chain = strategy_config.get("chain", config.chain)
@@ -1261,17 +1210,15 @@ def render_ta_dashboard(
     st.markdown(f"**Pair:** {base_token}/{quote_token}")
     st.markdown(f"**Chain:** {chain} | **Protocol:** {protocol}")
 
-    # Eyeball — am I making or losing money?
+    # Lead with accounting-backed PnL and NAV for operator triage.
     render_pnl_section(deployment_id)
     render_nav_history_section(deployment_id)
 
-    # Charts section - Price with signals and indicator
     _render_charts_section(session_state, strategy_config, config, period)
 
     st.divider()
 
-    # Signal status — gated on lifecycle: a torn-down deployment shows a
-    # neutral notice, never a live BUY/SELL badge (VIB-5787).
+    # A terminal deployment must not advertise a signal it cannot execute.
     _render_signal_status(
         session_state,
         strategy_config,
@@ -1281,17 +1228,15 @@ def render_ta_dashboard(
 
     st.divider()
 
-    # Position section
     st.subheader("Current Position")
     _render_position(session_state, base_token, quote_token)
 
     st.divider()
 
-    # Performance section
     st.subheader("Performance")
     _render_performance(session_state)
 
-    # Audit — life-to-date costs + per-intent trade tape
+    # Follow with life-to-date costs and per-intent audit detail.
     render_cost_stack_section(deployment_id)
     render_trade_tape_section(deployment_id)
 
@@ -1362,8 +1307,7 @@ def _clip_signals_to_price_window(signals: pd.DataFrame | None, price_df: pd.Dat
     return clipped
 
 
-# A resolved visible x-axis range ``(start, end)``; ``None`` ⇒ leave the axis
-# auto-ranged (legacy full-fetched-span display).
+# ``None`` leaves the visible x-axis auto-ranged over the full fetched span.
 DisplayBounds = tuple[Any, Any]
 
 
@@ -1441,19 +1385,16 @@ def _render_charts_section(  # noqa: C901
     """Render price and indicator charts with buy/sell signals."""
     st.subheader("Price & Indicator Charts")
 
-    # Get price history
     price_history = session_state.get("price_history")
     if price_history is None or (isinstance(price_history, pd.DataFrame) and price_history.empty):
         st.info("Price history data not available")
         return
 
-    # Convert to DataFrame if it's a list
     if isinstance(price_history, list):
         price_df = pd.DataFrame(price_history, columns=["time", "price"])
     else:
         price_df = price_history.copy()
 
-    # Ensure time column is datetime
     if "time" in price_df.columns:
         if not pd.api.types.is_datetime64_any_dtype(price_df["time"]):
             price_df["time"] = pd.to_datetime(price_df["time"])
@@ -1465,14 +1406,11 @@ def _render_charts_section(  # noqa: C901
         st.warning("Price data missing time column")
         return
 
-    # Get buy/sell signals
     buy_signals = session_state.get("buy_signals")
     sell_signals = session_state.get("sell_signals")
 
-    # Convert signals to DataFrame if they're lists. Use ``is not None`` +
-    # explicit emptiness checks rather than ``if signals:`` — pandas raises
-    # ``ValueError: The truth value of a DataFrame is ambiguous`` on the
-    # truthiness gate.
+    # Avoid truth-testing pandas objects; explicit emptiness checks also handle
+    # caller-supplied list payloads consistently.
     def _coerce_signals(signals: Any) -> pd.DataFrame | None:
         if signals is None:
             return None
@@ -1494,20 +1432,14 @@ def _render_charts_section(  # noqa: C901
     sell_df = _clip_signals_to_price_window(_coerce_signals(sell_signals), price_df)
     strategy_start_time = session_state.get("strategy_start_time")
 
-    # Default visible window (VIB-5345): bound the plotted x-axis to ~1 day of
-    # recent history (config-overridable) without touching the wide FETCH that
-    # warms up the indicator. Resolved once and applied to every figure below so
-    # all price/indicator panels share the same window.
+    # Limit only the visible axis, not the wider series used to warm up the
+    # indicator, and apply one range to every price/indicator panel.
     display_bounds = _resolve_display_window(price_df, strategy_start_time, config)
 
-    # Multi-signal layout (VIB-4897): render price once, then one dedicated
-    # panel per configured indicator. The single-indicator path below is
-    # unchanged.
     if config.extra_indicators:
         _render_multi_indicator_charts(session_state, config, price_df, buy_df, sell_df, display_bounds)
         return
 
-    # Get indicator data
     indicator_key = config.indicator_name.lower()
     # Avoid ``a or b`` and ``and data`` truthiness on pandas objects — both
     # raise ``ValueError: The truth value of a Series/DataFrame is ambiguous``.
@@ -1524,9 +1456,7 @@ def _render_charts_section(  # noqa: C901
             return len(data) > 0
         return bool(data)
 
-    # For RSI specifically, create combined subplot
     if config.indicator_name.upper() == "RSI" and _has_indicator_data(indicator_data):
-        # Create subplot: price on top, RSI on bottom
         fig = make_subplots(
             rows=2,
             cols=1,
@@ -1539,7 +1469,6 @@ def _render_charts_section(  # noqa: C901
         config_plot = get_default_config()
         colors = config_plot.colors
 
-        # Add price line
         fig.add_trace(
             go.Scatter(
                 x=price_df["time"],
@@ -1552,7 +1481,6 @@ def _render_charts_section(  # noqa: C901
             col=1,
         )
 
-        # Add buy signals (green triangles up)
         if buy_df is not None and not buy_df.empty:
             for _, signal in buy_df.iterrows():
                 signal_time = signal["time"]
@@ -1580,7 +1508,6 @@ def _render_charts_section(  # noqa: C901
                     col=1,
                 )
 
-        # Add sell signals (red triangles down)
         if sell_df is not None and not sell_df.empty:
             for _, signal in sell_df.iterrows():
                 signal_time = signal["time"]
@@ -1608,15 +1535,9 @@ def _render_charts_section(  # noqa: C901
                     col=1,
                 )
 
-        # Resolve the Start line through _anchored_start_time UNCONDITIONALLY: it
-        # clamps a too-late reported start back onto the first trade (get_timeline
-        # truncation / relaunch re-emission would otherwise draw "Start" to the
-        # RIGHT of real markers) AND still anchors the line at the first trade when
-        # the reported start is missing entirely (None), rather than dropping it.
-        # It returns None only when there is neither a start nor a trade — the sole
-        # case that legitimately draws no line. Gating this on
-        # ``strategy_start_time is not None`` would silently drop the line whenever
-        # the timeline read came back empty but trades exist (VIB-5287).
+        # Resolve unconditionally: a missing or truncated timeline still anchors
+        # to the first trade, while a late reported start is clamped behind it.
+        # Only the absence of both a start and trades suppresses the line.
         start_time = _anchored_start_time(strategy_start_time, buy_df, sell_df)
         if start_time is not None:
             fig.add_trace(
@@ -1643,9 +1564,7 @@ def _render_charts_section(  # noqa: C901
                 col=1,
             )
 
-        # Add RSI indicator
         if isinstance(indicator_data, list):
-            # Convert list of tuples to Series
             rsi_times = [item[0] for item in indicator_data]
             rsi_values = [item[1] for item in indicator_data]
             rsi_series = pd.Series(rsi_values, index=pd.to_datetime(rsi_times))
@@ -1667,7 +1586,6 @@ def _render_charts_section(  # noqa: C901
             col=1,
         )
 
-        # Add RSI zones
         fig.add_hrect(
             y0=0,
             y1=oversold,
@@ -1689,12 +1607,10 @@ def _render_charts_section(  # noqa: C901
             col=1,
         )
 
-        # Add reference lines
         fig.add_hline(y=oversold, line_dash="dash", line_color=colors.success, row=2, col=1)
         fig.add_hline(y=50, line_dash="dash", line_color=colors.neutral, row=2, col=1)
         fig.add_hline(y=overbought, line_dash="dash", line_color=colors.danger, row=2, col=1)
 
-        # Update layout
         fig.update_xaxes(title_text="Time", row=2, col=1)
         fig.update_yaxes(title_text="Price", row=1, col=1)
         fig.update_yaxes(title_text="RSI", range=[0, 100], row=2, col=1)
@@ -1704,21 +1620,16 @@ def _render_charts_section(  # noqa: C901
             showlegend=True,
         )
 
-        # Cap BOTH subplots (price + RSI) to the default visible window (VIB-5345)
-        # — applied after layout so the explicit range wins.
+        # Apply after layout so the shared visible range wins.
         _apply_display_window(fig, display_bounds)
         st.plotly_chart(fig, use_container_width=True)
 
     elif _has_indicator_data(indicator_data) and config.indicator_name.upper() in _DEDICATED_RENDERERS:
-        # MACD/Bollinger/CCI/Stochastic/ATR/ADX each need a purpose-built chart
-        # (multi-line bands, oscillator zones, …), not the generic single line.
         _DEDICATED_RENDERERS[config.indicator_name.upper()](
             price_df, buy_df, sell_df, indicator_data, config, display_bounds
         )
 
     else:
-        # For other indicators, use separate charts
-        # Price chart with signals
         fig_price = plot_price_with_signals(
             price_data=price_df,
             buy_signals=buy_df,
@@ -1728,9 +1639,6 @@ def _render_charts_section(  # noqa: C901
         _apply_display_window(fig_price, display_bounds)
         st.plotly_chart(fig_price, use_container_width=True)
 
-        # Indicator chart if available (for non-RSI indicators)
-        # Note: RSI with indicator_data is handled in the if branch above (line 244),
-        # so this else branch only handles non-RSI indicators
         if _has_indicator_data(indicator_data):
             if isinstance(indicator_data, list):
                 indicator_times = [item[0] for item in indicator_data]
@@ -1739,7 +1647,6 @@ def _render_charts_section(  # noqa: C901
             else:
                 indicator_series = indicator_data
 
-            # Generic indicator line chart for non-RSI indicators
             fig_indicator = go.Figure()
             fig_indicator.add_trace(
                 go.Scatter(
@@ -1797,16 +1704,6 @@ def _indicator_present(data: Any) -> bool:
     if isinstance(data, list):
         return len(data) > 0
     return bool(data)
-
-
-# --- Indicator panels (the indicator chart only, no price line) ---
-# Shared by the single-indicator dedicated renderers and the multi-signal layout.
-# Each panel threads an optional ``target=(fig, row, col)`` to its plot helper:
-#   * ``target is None`` → the panel builds a standalone figure and renders it via
-#     ``st.plotly_chart`` (single-indicator path, unchanged).
-#   * ``target`` supplied → the panel ADDS its traces to that subplot row and does
-#     NOT call ``st.plotly_chart`` (the multi-indicator composite renders the one
-#     shared figure itself). See ``_render_multi_indicator_charts`` (VIB-4982).
 
 
 def _finalize_panel(fig: Any, target: "SubplotTarget | None", display_bounds: DisplayBounds | None) -> None:
@@ -1983,7 +1880,6 @@ def _panel_generic(
     _finalize_panel(fig, target, display_bounds)
 
 
-# Uppercased ``config.indicator_name`` → panel builder.
 _INDICATOR_PANELS: dict[str, Callable[..., None]] = {
     "RSI": _panel_rsi,
     "MACD": _panel_macd,
@@ -2076,7 +1972,6 @@ def _render_multi_indicator_charts(
     n_indicators = len(slots)
     total_rows = 1 + n_indicators
 
-    # Price row gets ~2x the height of each indicator row.
     row_heights = [2.0, *([1.0] * n_indicators)]
     subplot_titles = ["Price with Buy/Sell Signals", *[cfg.indicator_name for _, cfg in slots]]
 
@@ -2089,10 +1984,6 @@ def _render_multi_indicator_charts(
         subplot_titles=subplot_titles,
     )
 
-    # Row 1: price + buy/sell signals (shares the trace-builder with the
-    # single-indicator path via the ``target`` parameter). If the price frame is
-    # empty/malformed the helper adds no traces, so announce the gap in-row rather
-    # than leaving a blank price panel (mirrors the missing-indicator handling).
     if price_df.empty:
         _annotate_empty_row(fig, 1, "Price: no price data available")
     else:
@@ -2106,19 +1997,15 @@ def _render_multi_indicator_charts(
 
     for offset, (slot, cfg) in enumerate(slots):
         row = 2 + offset
-        # ``slot`` matches the disambiguated key prepare_ta_session_state wrote,
-        # so a second same-type indicator (rsi_2) reads its own series.
         data = _multi_indicator_panel_data(session_state, slot)
         if not _indicator_present(data):
-            # Keep the row (stable 1+N layout) and announce the gap in-place.
             _annotate_empty_row(fig, row, f"{cfg.indicator_name}: no indicator data available")
             continue
         panel = _INDICATOR_PANELS.get(cfg.indicator_name.upper(), _panel_generic)
         panel(price_df, data, cfg, (fig, row, 1))
 
-    # Apply the dashboard theme (dark template + grid/bg) so the composite figure
-    # matches every standalone plot, THEN set the dynamic per-row height (apply
-    # theme would otherwise stamp the single-figure default height).
+    # Set the dynamic row height after theming, which otherwise restores the
+    # single-figure default height.
     apply_theme(fig, get_default_config())
     fig.update_xaxes(title_text="Time", row=total_rows, col=1)
     fig.update_layout(
@@ -2126,7 +2013,6 @@ def _render_multi_indicator_charts(
         hovermode="x unified",
         showlegend=True,
     )
-    # Cap every row's shared time axis to the default visible window (VIB-5345).
     _apply_display_window(fig, display_bounds)
     st.plotly_chart(fig, use_container_width=True)
 
@@ -2151,9 +2037,6 @@ def _render_indicator_with_price(
     panel(price_df, data, config, display_bounds=display_bounds)
 
 
-# Uppercased ``config.indicator_name`` → dedicated chart renderer. RSI is handled
-# inline in ``_render_charts_section`` (combined price+RSI subplot); every entry
-# here renders a price+signals chart plus its dedicated indicator panel.
 _DEDICATED_RENDERERS: dict[
     str,
     Callable[
@@ -2162,10 +2045,8 @@ _DEDICATED_RENDERERS: dict[
 ] = dict.fromkeys(("MACD", "BOLLINGER", "CCI", "STOCHASTIC", "ATR", "ADX"), _render_indicator_with_price)
 
 
-# Lifecycle states in which the deployment is terminal — the strategy is no
-# longer evaluating signals or placing trades. A live BUY/SELL badge on a
-# torn-down deployment advertises intent that can never execute, so the badge
-# is gated on these (VIB-5787).
+# A terminal deployment no longer evaluates or executes signals, so showing a
+# live BUY/SELL badge would mislead the operator.
 _TERMINAL_STATUSES: frozenset[str] = frozenset({"INACTIVE", "ARCHIVED"})
 
 
@@ -2206,11 +2087,9 @@ def _render_signal_status(
         st.info("Strategy stopped — signal evaluation is inactive (deployment is torn down).")
         return
 
-    # Get indicator value
     indicator_key = config.indicator_name.lower()
     indicator_value = float(session_state.get(f"{indicator_key}_value", session_state.get(indicator_key, 50)))
 
-    # Use custom signal function if provided
     if config.custom_signal_fn is not None:
         signal = config.custom_signal_fn(session_state)
         if "buy" in signal.lower() or "bullish" in signal.lower():
@@ -2221,10 +2100,8 @@ def _render_signal_status(
             st.info(signal)
         return
 
-    # Default signal logic
     if config.upper_threshold is not None and config.lower_threshold is not None:
         if config.signal_type == "reversion":
-            # Reversion: buy on low values, sell on high values
             if indicator_value < config.lower_threshold:
                 st.success(
                     f"BUY SIGNAL: {config.indicator_name} ({indicator_value:.1f}) < {config.lower_threshold} (Oversold)"
@@ -2236,7 +2113,6 @@ def _render_signal_status(
             else:
                 st.info(f"NEUTRAL: {config.indicator_name} ({indicator_value:.1f}) in normal range")
         else:
-            # Momentum: buy on high values, sell on low values
             if indicator_value > config.upper_threshold:
                 st.success(
                     f"BUY SIGNAL: {config.indicator_name} ({indicator_value:.1f}) > {config.upper_threshold} (Strong momentum)"
@@ -2248,7 +2124,6 @@ def _render_signal_status(
             else:
                 st.info(f"NEUTRAL: {config.indicator_name} ({indicator_value:.1f}) in normal range")
     else:
-        # No thresholds - just display value
         st.info(f"Current {config.indicator_name}: {indicator_value:.1f}")
 
 
@@ -2261,7 +2136,6 @@ def _render_position(
     base_balance = Decimal(str(session_state.get("base_balance", "0")))
     quote_balance = Decimal(str(session_state.get("quote_balance", "0")))
 
-    # Get price from session state or use default
     base_price = Decimal(str(session_state.get("base_price", "1")))
     total_value = base_balance * base_price + quote_balance
 
@@ -2282,9 +2156,8 @@ def _render_performance(session_state: dict[str, Any]) -> None:
     contradictory same-page PnL surface tracked by VIB-5341.
     """
     trades = session_state.get("total_trades", 0)
-    # win_rate is None/absent unless a caller computed a real realized win rate.
-    # Previously this defaulted to "50", which rendered a fabricated 50% for
-    # every strategy. Show "N/A" instead of inventing a coin-flip stat.
+    # An absent win rate is unmeasured; a numeric default would fabricate
+    # strategy performance, so the operator sees "N/A".
     win_rate_raw = session_state.get("win_rate")
 
     col1, col2 = st.columns(2)
@@ -2299,9 +2172,6 @@ def _render_performance(session_state: dict[str, Any]) -> None:
             )
         else:
             st.metric("Win Rate", f"{float(Decimal(str(win_rate_raw))):.0f}%")
-
-
-# Pre-configured templates for common indicators
 
 
 def get_rsi_config(
