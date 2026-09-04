@@ -1244,13 +1244,7 @@ def _resolve_backtest_periods(
 
 @dataclass
 class _SweepRunContext:
-    """Bundle of validated config passed to sweep phase helpers.
-
-    Mirrors ``SweepBacktestContext`` in spirit but is sweep-local so that
-    phase helpers stay side-effect-compatible with the original inline
-    implementation without forcing premature consolidation. Kept private so
-    that callers still invoke the public CLI entry point.
-    """
+    """Bundle of validated config passed to sweep phase helpers."""
 
     strategy: str
     chain: str

@@ -1,15 +1,9 @@
-"""Dataclass contexts shared by backtest CLI commands.
-
-These contexts bundle the validated configuration used by `pnl_backtest` and
-`sweep_backtest` so that extracted helpers can accept a single typed argument
-rather than long positional argument lists. Phase 5B of the CLI CC reduction
-plan.
-"""
+"""Validated context shared by the PnL backtest CLI helpers."""
 
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -38,24 +32,3 @@ class PnLBacktestContext:
     start: datetime | None
     end: datetime | None
     interval: int
-
-
-@dataclass
-class SweepBacktestContext:
-    """Validated context for a single `sweep_backtest` invocation.
-
-    Wired in 5B.3; defined here so `run_helpers.py` and future sweep helpers
-    can import from a stable location without churning imports.
-    """
-
-    strategy: str
-    chain: str
-    token_list: list[str]
-    interval: int
-    output_path: Path | None
-    multi_period_mode: bool
-    # Populated in later phases; defaults keep the dataclass instantiable
-    # without forcing 5B.3 work into this PR.
-    backtest_periods: list = field(default_factory=list)
-    sweep_params: list = field(default_factory=list)
-    combinations: list = field(default_factory=list)

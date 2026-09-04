@@ -1,45 +1,13 @@
-"""Shared state carriers for `almanak strat run`.
+"""State carriers for `almanak strat run`.
 
-`RunContext` accumulates mutable runtime handles as the strategy-run bootstrap
-progresses. The frozen `IdentityInfo`, `ResumeInfo`, `StrategyBootstrap`, and
-`RuntimeBootstrap` dataclasses carry the immutable outputs of specific
-bootstrap decisions so the orchestrator can thread them without long tuples.
-
-Runtime-handle fields that carry protocol-specific types live in `Any = None`
-slots. Typed fields get explicit types. Keep this module focused on state
-carriers, not behavior.
+The frozen dataclasses carry immutable bootstrap decisions, while
+`ComponentBundle` collects runtime handles shared by execution modes.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
-
-
-@dataclass
-class RunContext:
-    """Mutable state carrier threaded through `run()` bootstrap helpers.
-
-    Populated progressively. Fields appear only as the helper that writes
-    them lands. Runtime-handle fields typed as `Any = None` because their
-    concrete types (`GatewayClient`, `ManagedGateway`, strategy class) pull
-    in heavy imports or create circular-import risk at the helper boundary.
-    """
-
-    # Gateway (populated by `_setup_gateway`)
-    gateway_client: Any = None
-    managed_gateway: Any = None
-    gateway_host: str = "localhost"
-    gateway_port: int = 50051
-    gateway_network: str = "mainnet"
-    session_auth_token: str | None = None
-    isolated_wallet_address: str | None = None
-
-    # Strategy (populated between phases in `run()`)
-    strategy_class: Any = None
-    strategy_config: dict[str, Any] = field(default_factory=dict)
-    strategy_chains: list[str] = field(default_factory=list)
-    multi_chain: bool = False
 
 
 @dataclass(frozen=True)
