@@ -1,1 +1,1 @@
-requires VIB-[0-9]+ or full GitHub issue URL
+requires VIB-[0-9]+, ALM-[0-9]+, or full GitHub issue URL

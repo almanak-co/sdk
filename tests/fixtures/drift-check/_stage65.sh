@@ -302,7 +302,14 @@ stage65_detect_untracked_followup() {
     fi
     while IFS= read -r bullet; do
         [ -z "$bullet" ] && continue
-        ticket=$(echo "$bullet" | grep -oE 'VIB-[0-9]+' | head -1 || true)
+        # Unguarded, `head -1` picks the first ticket-shaped substring in the
+        # bullet, so an unrelated word sharing the suffix (e.g. "REALM-3")
+        # can win over the bullet's real, later ticket.
+        # Unguarded, `head -1` picks the first ticket-shaped substring in the
+        # bullet, so an unrelated word sharing the suffix (e.g. "REALM-3") or
+        # a longer id sharing the prefix (e.g. "ALM-3558abc") can win over
+        # the bullet's real, later ticket.
+        ticket=$(echo "$bullet" | grep -oE '(^|[^A-Za-z0-9_])(VIB|ALM)-[0-9]+([^A-Za-z0-9_]|$)' | grep -oE '(VIB|ALM)-[0-9]+' | head -1 || true)
         gh_url=$(echo "$bullet" | grep -oE 'https?://github\.com/[^[:space:])\].,]+/issues/[0-9]+' | head -1 || true)
         if [ -n "$ticket" ]; then
             # Cross-bullet uniqueness check: each follow-up needs its own ticket.
@@ -342,8 +349,8 @@ stage65_detect_untracked_followup() {
                 missing=$((missing + 1)); continue
             fi
         else
-            # Bullet has neither a valid VIB-[0-9]+ nor a /issues/[0-9]+.
-            missing_bullets+=("$bullet [reason: requires VIB-[0-9]+ or full GitHub issue URL with numeric id]")
+            # Bullet has neither a valid VIB-[0-9]+/ALM-[0-9]+ nor a /issues/[0-9]+.
+            missing_bullets+=("$bullet [reason: requires VIB-[0-9]+, ALM-[0-9]+, or full GitHub issue URL with numeric id]")
             missing=$((missing + 1))
         fi
     done <<< "$bullets"
@@ -450,7 +457,7 @@ pr_merger_stage_65_check() {
             echo "Offending commits / lines:"; echo "$mechanical_evidence"
             ;;
         UNTRACKED_FOLLOWUP)
-            echo "PR body lists deferred follow-ups without tracked tickets. Required action: file the missing tickets via Linear MCP \`save_issue\` (or GitHub issue if Linear unavailable) and update the PR body to cite \`VIB-[0-9]+\` or full \`/issues/[0-9]+\` URL for each bullet."
+            echo "PR body lists deferred follow-ups without tracked tickets. Required action: file the missing tickets via Linear MCP \`save_issue\` (or GitHub issue if Linear unavailable) and update the PR body to cite \`VIB-[0-9]+\`, \`ALM-[0-9]+\`, or full \`/issues/[0-9]+\` URL for each bullet."
             echo
             echo "Untracked / malformed bullets:"; echo "$mechanical_evidence"
             ;;
