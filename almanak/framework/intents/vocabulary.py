@@ -40,25 +40,14 @@ from almanak.framework.models.base import (
     validate_decimal_safe,
 )
 
-# PredictionExitConditions is bound at runtime so ``typing.get_type_hints``
-# on ``Intent.prediction_buy`` resolves the annotation. The original eager
-# import surfaced a circular cycle (services.prediction_monitor ->
-# auto_redemption -> api.actions -> strategies.base -> ..intents); after the
-# lazy framework/api/__init__ + the function-local ``api.timeline`` deferrals
-# in services modules, that cycle is broken at the api layer and this import
-# is cheap (~50 MB resident, no pandas / connectors / strategies pulled).
+# This runtime binding lets get_type_hints(Intent.prediction_buy) resolve the annotation.
+# Its service dependencies stay lazy to keep the import cycle-free.
 from almanak.framework.services.prediction_monitor import PredictionExitConditions
 
-# BaseIntent (VIB-4192 / T06) — every concrete intent dataclass below
-# inherits from this rather than `AlmanakImmutableModel` directly so that
-# the reserved `registry_handle` field + strict TAXONOMY validator land on
-# every intent class via single-point inheritance (AC #3 forbids
-# per-primitive redeclaration).
+# BaseIntent applies the reserved registry_handle field and taxonomy validator uniformly.
 from .base import BaseIntent, assert_registry_handle_known  # noqa: E402
 
-# =============================================================================
-# Exceptions (re-exported from intent_errors for backward compatibility)
-# =============================================================================
+# Intent errors remain re-exported from this module for compatibility.
 from .intent_errors import (  # noqa: E402, F401
     BundledCollateralBorrowError,
     InvalidAmountError,
@@ -71,18 +60,9 @@ from .intent_errors import (  # noqa: E402, F401
 )
 from .min_out_guard import validate_max_slippage_fraction
 
-# =============================================================================
-# Type Aliases
-# =============================================================================
-
-# Amount type that supports chained outputs from previous steps
-# When amount="all", the intent will use the actual received amount from the
-# previous step in a sequence (post-slippage, post-fees).
 ChainedAmount = Decimal | Literal["all"]
 
-# Interest rate mode type for lending protocols like Aave
-# - 'variable': Interest rate fluctuates based on supply/demand
-# Note: 'stable' rate was deprecated on Aave V3 and Spark (most assets disabled)
+# Aave V3 and Spark no longer support stable-rate borrowing.
 InterestRateMode = Literal["variable"]
 
 _BPS_PER_UNIT = 10_000
@@ -146,29 +126,6 @@ def _lp_close_exit_selector_protocols() -> str:
     return ", ".join(f"'{n}'" for n in names) or "none"
 
 
-# =============================================================================
-# Protocol Capabilities
-# =============================================================================
-
-# ``PROTOCOL_CAPABILITIES`` is a read-through aggregated view over every
-# connector's ``capabilities.py`` module. The actual data lives next to each
-# connector (see ``almanak/connectors/<protocol>/capabilities.py``)
-# and is assembled by ``CapabilitiesRegistry``.
-#
-# The aggregator is resolved lazily via module-level ``__getattr__`` (PEP 562)
-# rather than eagerly at import time because the connector packages import
-# from this module (``IntentType``) -- eager aggregation would create an
-# import cycle on cold boot.
-#
-# Identity contract: every access returns the same aggregated dict instance,
-# and every value-dict is the connector module's own dict (not a copy). This
-# matches the long-standing semantics of the previous hand-written table:
-# tests that monkey-patch a single capability value (e.g.
-# ``PROTOCOL_CAPABILITIES["aave_v3"]["interest_rate_modes"] = [...]``) see the
-# change reflected in subsequent validator calls within the same process and
-# can restore the original value in ``finally``.
-
-
 def __getattr__(name: str) -> Any:
     """Lazy module-level attribute access (PEP 562) for ``PROTOCOL_CAPABILITIES``.
 
@@ -183,18 +140,14 @@ def __getattr__(name: str) -> Any:
             all_protocol_capabilities,
         )
 
+        # Cache the registry's connector-owned dicts by identity so process-local overrides remain visible.
         caps = all_protocol_capabilities()
         globals()["PROTOCOL_CAPABILITIES"] = caps
         return caps
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-# =============================================================================
-# Core Intent Data Classes (kept in vocabulary.py)
-# =============================================================================
-
-# Shape check for swap_params address keys; checksum casing is deliberately not
-# enforced here — connector compilers normalize case when resolving the pool.
+# Checksum casing is intentionally deferred to connector pool resolution.
 _EVM_ADDRESS_RE = re.compile(r"0x[0-9a-fA-F]{40}")
 
 
@@ -295,14 +248,8 @@ class SwapIntent(BaseIntent):
     intent_id: str = Field(default_factory=default_intent_id)
     created_at: datetime = Field(default_factory=default_timestamp)
 
-    # Centrally shape-validated ``swap_params`` keys (VIB-5548). Per-connector
-    # compilers own deeper semantics; this map only rejects structurally
-    # malformed values early so a typo'd escape hatch fails loudly at
-    # construction rather than being silently ignored downstream.
     _SWAP_PARAMS_BOOL_KEYS: frozenset[str] = frozenset({"classic", "stable", "strict_oracle_guard"})
     _SWAP_PARAMS_POSITIVE_INT_KEYS: frozenset[str] = frozenset({"tick_spacing", "oracle_guard_bps", "fee_tier"})
-    # ``pool`` is shared by Curve (pool disambiguation) and the V3 forks (pool
-    # pinning); both consume an EVM address, so the address shape is central.
     _SWAP_PARAMS_ADDRESS_KEYS: frozenset[str] = frozenset({"pool"})
 
     @model_validator(mode="after")
@@ -314,7 +261,6 @@ class SwapIntent(BaseIntent):
             raise ValueError("Only one of amount_usd or amount should be provided")
         if self.amount_usd is not None and self.amount_usd <= 0:
             raise ValueError("amount_usd must be positive")
-        # Validate amount - either positive Decimal or "all"
         if self.amount is not None:
             if isinstance(self.amount, Decimal) and self.amount <= 0:
                 raise ValueError("amount must be positive")
@@ -323,11 +269,9 @@ class SwapIntent(BaseIntent):
         validate_max_slippage_fraction(self.max_slippage)
         if self.max_price_impact is not None and (self.max_price_impact <= 0 or self.max_price_impact > 1):
             raise ValueError("max_price_impact must be between 0 (exclusive) and 1 (inclusive)")
-        # Cross-chain swaps require an aggregator protocol (Enso or LiFi)
         if self.is_cross_chain and self.protocol and self.protocol.lower() not in ("enso", "lifi"):
             raise ValueError("Cross-chain swaps require protocol='enso' or protocol='lifi'")
-        # Pool pinning is same-chain V3-fork semantics; an aggregator-routed
-        # cross-chain swap would silently ignore the pin, which defeats it.
+        # Aggregator-routed cross-chain swaps would silently ignore a pool pin.
         if self.is_cross_chain and self.swap_params and ({"fee_tier", "pool"} & self.swap_params.keys()):
             raise ValueError("swap_params fee_tier/pool pinning is not supported for cross-chain swaps")
         self._validate_swap_params()
@@ -353,8 +297,7 @@ class SwapIntent(BaseIntent):
         for key in self._SWAP_PARAMS_POSITIVE_INT_KEYS:
             if key in self.swap_params:
                 val = self.swap_params[key]
-                # bool is a subclass of int; reject it explicitly so
-                # swap_params={"tick_spacing": True} is not silently coerced.
+                # bool is an int subclass but never a valid routing parameter.
                 if isinstance(val, bool) or not isinstance(val, int) or val <= 0:
                     raise ValueError(f"swap_params.{key} must be a positive integer, got {val!r}")
         for key in self._SWAP_PARAMS_ADDRESS_KEYS:
@@ -385,7 +328,6 @@ class SwapIntent(BaseIntent):
         """
         data = self.model_dump(mode="json")
         data["type"] = self.intent_type.value
-        # Handle amount - preserve "all" as string (model_dump should do this)
         if self.amount == "all":
             data["amount"] = "all"
         return data
@@ -396,26 +338,15 @@ class SwapIntent(BaseIntent):
 
         Backward compatible with existing serialization format.
         """
-        # Remove "type" field as it's not part of the model
         clean_data = {k: v for k, v in data.items() if k != "type"}
 
-        # Handle created_at string -> datetime
         if "created_at" in clean_data and isinstance(clean_data["created_at"], str):
             clean_data["created_at"] = datetime.fromisoformat(clean_data["created_at"])
 
         return cls.model_validate(clean_data)
 
 
-# =============================================================================
-# RangeSpec — typed concentrated-liquidity range (VIB-5555 / FOUND-1)
-# =============================================================================
-
-# Protocols where the legacy ``range_lower``/``range_upper`` fields historically
-# carried raw tick values (signed integers) rather than price bounds (always
-# positive). Module-level so the backward-compat bridge below and the
-# ``LPOpenIntent`` validator share one source of truth. Mirrored onto the class
-# (``LPOpenIntent._TICK_BASED_LP_PROTOCOLS``) for callers / the backtest
-# extractor that read it off an intent instance.
+# Legacy Slipstream bounds may be signed ticks; other protocols interpret them as prices.
 _TICK_BASED_LP_PROTOCOLS: frozenset[str] = frozenset({"aerodrome_slipstream"})
 
 _RANGE_SPEC_TICK_DEPRECATION = (
@@ -469,7 +400,6 @@ class TickBand(AlmanakImmutableModel):
         return self
 
 
-# Discriminated union: ``kind`` selects the variant on (de)serialization.
 RangeSpec = Annotated[PriceBand | TickBand, Field(discriminator="kind")]
 
 
@@ -651,12 +581,7 @@ def _bridge_legacy_range(protocol: str, lower: Decimal, upper: Decimal) -> Price
             f"on-chain token decimals (see ALM-2901 / VIB-5867)."
         )
 
-    # classification == "ticks". Ticks are integers, and a non-integral tick-shaped
-    # bound (e.g. -1800.5) would be silently truncated by int() below, so the
-    # synthesised TickBand would no longer agree with the preserved legacy
-    # range_lower/range_upper and a later serialize()->deserialize() would trip
-    # the conflict check and fail to rehydrate. Reject fail-closed rather than
-    # truncate.
+    # Tick conversion must not truncate bounds that are also preserved in legacy fields.
     if lower != lower.to_integral_value() or upper != upper.to_integral_value():
         raise ValueError(f"tick-based legacy bounds for '{protocol}' must be integer-valued (got {lower}, {upper})")
     warnings.warn(_RANGE_SPEC_TICK_DEPRECATION, DeprecationWarning, stacklevel=3)
@@ -782,10 +707,6 @@ class LPOpenIntent(BaseIntent):
     intent_id: str = Field(default_factory=default_intent_id)
     created_at: datetime = Field(default_factory=default_timestamp)
 
-    # Protocols where range_lower/range_upper carry raw tick values (integers that may be
-    # negative) rather than price bounds (which are always positive).  The positivity
-    # guard below is skipped for these protocols. Sourced from the module-level
-    # constant so the backward-compat bridge and this class agree.
     _TICK_BASED_LP_PROTOCOLS: frozenset[str] = _TICK_BASED_LP_PROTOCOLS
 
     @model_validator(mode="before")
@@ -847,10 +768,7 @@ class LPOpenIntent(BaseIntent):
                 DeprecationWarning,
                 stacklevel=3,
             )
-            # Keep the legacy key serialized during the compatibility window:
-            # older gateways/receipt parsers still read it. Every current
-            # consumer uses the typed field first, so retaining it cannot
-            # reintroduce ambiguous fee arithmetic.
+            # Older gateways still read the retained key; current consumers prefer typed fields.
         return normalized
 
     @model_validator(mode="after")
@@ -867,28 +785,14 @@ class LPOpenIntent(BaseIntent):
         validate_max_slippage_fraction(self.max_slippage)
         if self.range_lower >= self.range_upper:
             raise ValueError("range_lower must be less than range_upper")
-        # Fail-closed gate (VIB-5555): a ``TickBand`` addresses raw protocol ticks
-        # directly, so it is only meaningful on a protocol whose compiler consumes
-        # ticks. On a price-based protocol the compilers read
-        # ``range_lower``/``range_upper`` as PRICES (e.g. ``uniswap_v3`` computes
-        # ``Decimal(1) / range_upper`` in its price->tick path), so a raw TickBand
-        # would be silently misexecuted as a price AND would bypass the
-        # price-positivity guard below. Reject until the compiler seam (VIB-5556)
-        # wires ``range_spec.kind`` into the price->tick conversion; that ticket
-        # relaxes this gate per protocol as each compiler learns to honor a
-        # TickBand. Legacy callers never reach here with a TickBand — the bridge
-        # only synthesises one for tick-based protocols, and after this check.
+        # Price-based compilers would misexecute raw ticks as prices, so reject TickBand there.
         if isinstance(self.range_spec, TickBand) and self.protocol not in self._TICK_BASED_LP_PROTOCOLS:
             raise ValueError(
                 "TickBand range_spec is only valid for tick-based protocols "
                 f"({sorted(self._TICK_BASED_LP_PROTOCOLS)}); protocol "
                 f"'{self.protocol}' interprets range bounds as prices"
             )
-        # Skip positivity check for raw-tick ranges: their values are Uniswap
-        # V3-style ticks (integers) which are legitimately negative for pools
-        # where the current price tick is below zero (e.g. WETH/USDC on Base).
-        # A ``TickBand`` range_spec is authoritative; the legacy protocol set is
-        # retained for the ``model_construct`` path where the bridge did not run.
+        # Raw ticks may be negative; the protocol check also covers unvalidated model_construct values.
         is_tick_range = isinstance(self.range_spec, TickBand) or self.protocol in self._TICK_BASED_LP_PROTOCOLS
         if not is_tick_range and self.range_lower <= 0:
             raise ValueError("range_lower must be positive")
@@ -899,12 +803,8 @@ class LPOpenIntent(BaseIntent):
                 br = self.protocol_params["bin_range"]
                 if isinstance(br, bool) or not isinstance(br, int) or br < 1 or br > 100:
                     raise ValueError(f"protocol_params.bin_range must be an integer between 1 and 100, got {br}")
-        # Backward-compat bridge (VIB-5555): synthesise the canonical typed
-        # range_spec from the now-validated legacy range_lower/range_upper so the
-        # field always round-trips. Runs after the legacy checks above so their
-        # error messages take precedence; ``object.__setattr__`` is used because
-        # the model is frozen. A model_construct'd instance is stored directly
-        # (not re-validated) so the legacy values pass through unchanged.
+        # Bridge only after legacy validation so its established errors retain precedence.
+        # model_construct preserves the validated legacy values without a second validation pass.
         if self.range_spec is None:
             object.__setattr__(
                 self,
@@ -918,18 +818,14 @@ class LPOpenIntent(BaseIntent):
 
         Only invoked when ``coin_amounts`` is not None.
         """
-        assert self.coin_amounts is not None  # narrowed by caller
-        # coin_amounts is consumed only by the Curve compiler. Any other LP
-        # protocol reads amount0/amount1 and would silently ignore it, opening a
-        # 0-liquidity position. Fail loudly instead of silently mis-funding.
+        assert self.coin_amounts is not None
+        # Other compilers would silently ignore this vector and may open zero liquidity.
         if self.protocol != "curve":
             raise ValueError(
                 "coin_amounts is only supported for the 'curve' protocol; "
                 f"protocol '{self.protocol}' uses amount0/amount1"
             )
-        # coin_amounts is the full pool-coin-aligned allocation vector, so
-        # amount0/amount1 are unused for this path. Reject mixing the two mappings
-        # rather than silently dropping amount0/amount1.
+        # Mixing allocation schemes would silently discard amount0/amount1.
         if self.amount0 != 0 or self.amount1 != 0:
             raise ValueError(
                 "Cannot provide both coin_amounts and amount0/amount1; coin_amounts is the full allocation vector"
@@ -949,8 +845,7 @@ class LPOpenIntent(BaseIntent):
     def serialize(self) -> dict[str, Any]:
         """Serialize the intent to a dictionary."""
         data = self.model_dump(mode="json")
-        # Preserve the pre-fee-typing wire shape for intents that do not use
-        # the additive fields; emit them only when explicitly populated.
+        # Omit unset additive fields to preserve the established wire shape.
         if self.fee_tier_units is None:
             data.pop("fee_tier_units", None)
         if self.fee_rate is None:
@@ -1098,41 +993,18 @@ class LPCloseIntent(BaseIntent):
         elif not isinstance(self.position_id, str) or not self.position_id:
             raise ValueError("position_id must be a non-empty string when amount is None")
         validate_max_slippage_fraction(self.max_slippage)
-        # coin_index opts into a single-sided close. Reject bool (a bool is an int
-        # subclass in Python, but `True`/`False` are never a valid coin index) and
-        # negatives. The connector validates the upper bound against the resolved
-        # pool's coin count, where n_coins is known.
+        # Unsupported compilers would silently ignore selectors; pool-specific bounds are
+        # validated by capable connectors after resolution.
         if self.coin_index is not None:
             if isinstance(self.coin_index, bool) or self.coin_index < 0:
                 raise ValueError("coin_index must be a non-negative integer when set")
-            # coin_index, like imbalanced_amounts, is compiled ONLY by connectors
-            # declaring the lp_close_exit_selectors capability; any other LP
-            # connector would silently ignore it. Fail fast rather than let a
-            # caller think a single-sided exit will happen on, e.g., the default
-            # uniswap_v3 protocol (CodeRabbit — applied to both exit selectors
-            # for a consistent contract).
             if not _supports_lp_close_exit_selectors(self.protocol):
                 raise ValueError(
                     f"coin_index is not supported by protocol '{self.protocol}'. "
                     f"Protocols supporting a single-sided LP close: "
                     f"{_lp_close_exit_selector_protocols()}."
                 )
-        # imbalanced_amounts opts into an imbalanced close (exact per-coin amounts
-        # OUT, capped by a derived max-burn). Mutually exclusive with the
-        # single-sided coin_index path AND with the close-all `amount` chaining
-        # marker (an exact-amounts withdrawal is not a close-all). Require a
-        # non-empty, non-negative vector with at least one positive entry (an
-        # all-zero withdrawal is a no-op). NaN/Infinity are already rejected by the
-        # SafeDecimal field schema (Pydantic's finite-number constraint). The
-        # connector validates the vector length against the resolved pool's coin
-        # count, where n_coins is known.
         if self.imbalanced_amounts is not None:
-            # imbalanced_amounts is compiled ONLY by connectors declaring the
-            # lp_close_exit_selectors capability; every other LP connector would
-            # silently ignore it. Fail fast rather than let a caller think an
-            # exact-amounts withdrawal will happen on, e.g., the default
-            # uniswap_v3 protocol (CodeRabbit). ``protocol`` is normalized
-            # case-insensitively to match the capability-registry keys.
             if not _supports_lp_close_exit_selectors(self.protocol):
                 raise ValueError(
                     f"imbalanced_amounts is not supported by protocol '{self.protocol}'. "
@@ -1165,8 +1037,6 @@ class LPCloseIntent(BaseIntent):
         """Serialize the intent to a dictionary."""
         data = self.model_dump(mode="json")
         data["type"] = self.intent_type.value
-        # Preserve the "all" marker as a string so it round-trips through
-        # deserialize (mirrors SwapIntent.serialize).
         if self.amount == "all":
             data["amount"] = "all"
         return data
@@ -1295,15 +1165,7 @@ class HoldIntent(BaseIntent):
         return cls.model_validate(clean_data)
 
 
-# =============================================================================
-# Imported Intent Classes (from sub-modules)
-# =============================================================================
-
-# WARNING: Circular import boundary — DO NOT move these imports above this point.
-# The sub-modules (lending_intents, advanced_intents, etc.) import IntentType,
-# PROTOCOL_CAPABILITIES, InterestRateMode, ChainedAmount, and error classes from
-# this module. All those symbols MUST be defined before these re-imports execute.
-# Moving any of them below this block will cause ImportError at startup.
+# These submodules import vocabulary symbols, so their re-exports must remain below those definitions.
 
 from .advanced_intents import (  # noqa: E402, F401
     FlashLoanCallbackIntent,
@@ -1338,13 +1200,7 @@ from .prediction_intents import (  # noqa: E402, F401
     PredictionTimeInForce,
 )
 
-# =============================================================================
-# Union Type for All Intents
-# =============================================================================
-
-# Note: BridgeIntent is defined in .bridge module to avoid circular imports
-# AnyIntent includes all base intents; BridgeIntent is handled dynamically
-# in deserialize() and can be accessed via Intent.bridge() factory method
+# BridgeIntent stays dynamic because importing it here would create a cycle.
 type AnyIntent = (
     SwapIntent
     | LPOpenIntent
@@ -1371,11 +1227,6 @@ type AnyIntent = (
     | WrapNativeIntent
     | UnwrapNativeIntent
 )
-
-
-# =============================================================================
-# Intent Sequence for Dependent Actions
-# =============================================================================
 
 
 @dataclass
@@ -1470,22 +1321,9 @@ class IntentSequence:
         )
 
 
-# Type for decide() return value: single intent, sequence, or list of parallel intents.
-#
-# CAVEAT: list returns are for genuinely independent intents (different chains,
-# different venues, different output tokens). For multiple positions sharing a
-# wallet basis-pool, pool/market state, or position-registry semantic group
-# (e.g. two LPs on the same pool, two SUPPLYs on the same Aave market), emit
-# one Intent per iteration via a phase or slot machine that advances only when
-# on_intent_executed observes a real position_id. See strategies/accounting/
-# lp_dual/ and lp_triple/ for reference, and blueprint 04 §Multi-position
-# dispatch for the contract.
+# List items execute independently. Positions sharing wallet basis, market state, or
+# registry identity must instead advance serially after observing a real position_id.
 type DecideResult = AnyIntent | IntentSequence | list[AnyIntent | IntentSequence] | None
-
-
-# =============================================================================
-# Intent Factory Class
-# =============================================================================
 
 
 class Intent:
@@ -1711,10 +1549,7 @@ class Intent:
                 chain="polygon",
             )
         """
-        # When no typed range_spec is supplied, fall back to the historical
-        # legacy-bound defaults (1 / 2). When a range_spec IS supplied, leave
-        # unsupplied bounds as None so the model derives them from the spec
-        # (rather than tripping the conflict check against the old defaults).
+        # Do not inject legacy defaults when a typed spec must derive the bounds.
         if range_spec is None:
             if range_lower is None:
                 range_lower = Decimal("1")
@@ -2441,8 +2276,6 @@ class Intent:
             # Sweep parked HyperCore USDC back to the Safe's HyperEVM wallet
             intent = Intent.perp_withdraw(amount=Decimal("6.99"), chain="hyperevm")
         """
-        # ``protocol=None`` defers to PerpWithdrawIntent's registry-resolved default
-        # (the sole PERP_WITHDRAW venue) — no hardcoded connector name here.
         fields: dict[str, Any] = {
             "amount": amount,
             "asset": asset,
@@ -2518,7 +2351,7 @@ class Intent:
                 preferred_bridge="across",  # Prefer Across for fast finality
             )
         """
-        # Import here to avoid circular import
+        # Local import avoids the vocabulary/bridge cycle.
         from .bridge import BridgeIntent
 
         return BridgeIntent(
@@ -2862,7 +2695,7 @@ class Intent:
                 # If resolved to BridgeIntent, execute the bridge first
                 return resolved_intent
         """
-        # Import here to avoid circular import
+        # Local import avoids the vocabulary/ensure_balance cycle.
         from .ensure_balance import EnsureBalanceIntent
 
         return EnsureBalanceIntent(
@@ -3224,13 +3057,11 @@ class Intent:
         if intent_type is None:
             raise ValueError("Missing 'type' field in intent data")
 
-        # Handle BridgeIntent separately to avoid circular import
         if intent_type == IntentType.BRIDGE.value:
             from .bridge import BridgeIntent
 
             return BridgeIntent.deserialize(data)
 
-        # Handle EnsureBalanceIntent separately to avoid circular import
         if intent_type == IntentType.ENSURE_BALANCE.value:
             from .ensure_balance import EnsureBalanceIntent
 
@@ -3317,27 +3148,22 @@ class Intent:
         if not configured_chains:
             raise ValueError("No chains configured for strategy")
 
-        # Normalize configured chains to lowercase
         normalized_chains = [c.lower() for c in configured_chains]
 
-        # Get chain from intent (all intent types have chain attribute now)
         intent_chain = getattr(intent, "chain", None)
 
         if intent_chain is not None:
-            # Validate the specified chain
             chain_lower = intent_chain.lower()
             if chain_lower not in normalized_chains:
                 raise InvalidChainError(intent_chain, configured_chains)
             return chain_lower
 
-        # No chain specified - use default
         if default_chain is not None:
             default_lower = default_chain.lower()
             if default_lower not in normalized_chains:
                 raise InvalidChainError(default_chain, configured_chains)
             return default_lower
 
-        # Fall back to first configured chain
         return normalized_chains[0]
 
     @staticmethod
@@ -3391,7 +3217,6 @@ class Intent:
             return [result]
         if isinstance(result, list):
             return result
-        # Single intent
         return [result]
 
     @staticmethod
@@ -3455,11 +3280,7 @@ class Intent:
             for item in result:
                 Intent._validate_registry_handles_for_emission(item)
             return
-        # Leaf intent — validate this intent's handle.
         assert_registry_handle_known(result)
-        # FlashLoanIntent ships nested intents in `callback_intents`. Recurse
-        # so a bypassed callback can't sneak past serialize_result via its
-        # parent.
         callback_intents = getattr(result, "callback_intents", None)
         if callback_intents is not None:
             for callback in callback_intents:
@@ -3487,10 +3308,6 @@ class Intent:
         if result is None:
             return None
 
-        # VIB-4192: emission-side strict re-validation of registry_handle
-        # before producing the dict. This catches handles bypassed via
-        # `model_construct` / `model_copy(update=..., validate=False)`.
-        # Walks single / list / sequence / nested-list result shapes.
         Intent._validate_registry_handles_for_emission(result)
 
         if isinstance(result, IntentSequence):
@@ -3504,7 +3321,6 @@ class Intent:
                 ],
             }
 
-        # Single intent
         return Intent.serialize(result)
 
     @staticmethod
@@ -3534,7 +3350,6 @@ class Intent:
                     items.append(Intent.deserialize(item_data))
             return items
 
-        # Single intent
         return Intent.deserialize(data)
 
     @staticmethod
@@ -3598,23 +3413,18 @@ class Intent:
         Returns:
             The amount value (Decimal or "all"), or None if not applicable
         """
-        # For BorrowIntent, the output is the borrow_amount (what was borrowed)
-        # NOT the collateral_amount (which may be 0 if already supplied)
         if hasattr(intent, "borrow_amount"):
             borrow_amount = intent.borrow_amount
             if borrow_amount is not None:
                 return borrow_amount
-        # Check standard amount field first (prefer non-None value)
         if hasattr(intent, "amount"):
             amount = intent.amount
             if amount is not None:
                 return amount
-        # Check amount_usd as fallback (for SwapIntent using USD amounts)
         if hasattr(intent, "amount_usd"):
             amount_usd = intent.amount_usd
             if amount_usd is not None:
                 return amount_usd
-        # Check collateral_amount for perp intents
         if hasattr(intent, "collateral_amount"):
             return intent.collateral_amount
         return None
@@ -3642,37 +3452,21 @@ class Intent:
         Note:
             This creates a new intent instance; it does not mutate the original.
         """
-        # Get the serialized form
         data = intent.serialize()
 
-        # VIB-5346: LP_CLOSE WEI lane. When the LP_CLOSE chaining marker is set,
-        # the resolved value is the prior LP_OPEN minted-LP wei (a fungible
-        # amount), and it lands on ``position_id`` — NOT on a generic ``amount``
-        # field. Clear the marker so the deserialized intent is a plain
-        # literal-position_id close (the compiler reads int(position_id) and
-        # never sees "all"). Guarded strictly on amount == "all" so literal
-        # closes are untouched. This branch must come BEFORE the generic
-        # ``amount`` rewrite below, otherwise the marker would be consumed there.
+        # LP_CLOSE routes minted LP wei into position_id before the generic amount branch.
         if data.get("type") == "LP_CLOSE" and data.get("amount") == "all":
-            # VIB-5346 defensive: a fungible LP-token amount is strictly positive
-            # wei. A zero/negative would produce a bogus ``position_id`` (e.g.
-            # "0" or "-1") that downstream ``int(position_id)`` would silently
-            # accept. The live path passes non-negative minted-LP wei; reject
-            # the degenerate case loudly rather than emit a poisoned identity.
+            # A non-positive minted amount would become a syntactically valid but bogus identity.
             if resolved_amount <= 0:
                 raise ValueError(
                     f"LP_CLOSE amount='all' resolved to a non-positive minted-LP wei "
                     f"value ({resolved_amount}); cannot form a valid position_id"
                 )
-            # Normalize to an integer string: int() strips any exponent/decimal
-            # point so int(position_id) parses cleanly downstream.
             data["position_id"] = str(int(resolved_amount))
             data["amount"] = None
-        # Update the appropriate amount field
         elif "amount" in data and data["amount"] == "all":
             data["amount"] = str(resolved_amount)
         elif "collateral_amount" in data and data["collateral_amount"] == "all":
             data["collateral_amount"] = str(resolved_amount)
 
-        # Deserialize back to an intent
         return Intent.deserialize(data)
