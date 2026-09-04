@@ -228,11 +228,8 @@ def _frozen_row_integrity_anomaly(row: sqlite3.Row) -> str | None:
         return "position_reference column is not valid JSON"
     payload_reference = payload.get("position_reference") if isinstance(payload, dict) else None
     if payload_reference is None:
-        # `_extract_position_reference_column` only ever populates the column
-        # FROM the payload key, so a populated column over a payload without
-        # the key cannot have been written by this module — same unknown-writer
-        # drift as a value mismatch, and overwriting it would launder the
-        # evidence (PR #3615 review).
+        # A populated column without the canonical payload key indicates an unknown writer; preserve the evidence.
+
         return "position_reference column carries a reference but payload_json lacks the position_reference key"
     if column != payload_reference:
         return "position_reference column disagrees with payload_json's position_reference key"
@@ -288,9 +285,8 @@ def _acquire_frozen_repair_lock(db_path: str) -> int | None:
 
     lock_fd = acquire_local_db_lock(Path(db_path))
     if _wal_sidecar_nonempty(Path(db_path)):
-        # Advisory only (mirrors repair_teardown_lp_close): the flock above is
-        # the hard guarantee; a non-empty WAL with the lock free usually means
-        # an unclean stop, which sqlite recovers.
+        # The flock is authoritative; a non-empty WAL without its owner usually indicates recoverable unclean shutdown.
+
         logger.warning(
             "frozen-book repair: %s has a non-empty WAL sidecar. No live "
             "writer holds the lock, so proceeding — but if a strategy is "
@@ -358,10 +354,8 @@ def _backfill_position_reference_legacy(conn: sqlite3.Connection) -> None:
     Per `CLAUDE.md` "Database schema ownership": this function only mutates
     the LOCAL SQLite DB. Hosted Postgres backfill is deferred to T19 / VIB-4205.
     """
-    # Lazy import — keeps the migration function callable from a fresh boot
-    # before the accounting package is fully imported, and avoids a circular
-    # import via ``almanak.framework.accounting.writer`` re-importing this
-    # module's exceptions at top-level.
+    # Delay accounting imports until migration execution to avoid the state/writer import cycle during boot.
+
     import json as _json
 
     from almanak.framework.accounting.position_reference import (
@@ -372,16 +366,12 @@ def _backfill_position_reference_legacy(conn: sqlite3.Connection) -> None:
         record_for,
     )
 
-    # Stream the read cursor instead of `.fetchall()` — `accounting_events`
-    # can accumulate tens of thousands of rows on long-running strategies, and
-    # this is one-shot boot-time code where streaming is strictly better.
-    # Flush UPDATEs in batches via `executemany` so we don't hold the full
-    # rendered list in memory either.
+    # Stream reads and batch updates so migration memory does not scale with accounting history.
+
     _BATCH_SIZE = 1000
     try:
         cursor = conn.execute("SELECT id, event_type FROM accounting_events WHERE position_reference IS NULL")
     except sqlite3.OperationalError:
-        # Table missing the column or absent entirely — nothing to backfill.
         return
 
     batch: list[tuple[str, str]] = []
@@ -408,7 +398,6 @@ def _backfill_position_reference_legacy(conn: sqlite3.Connection) -> None:
         try:
             ref = build_legacy_position_reference(record)
         except ValueError:
-            # Non-OPEN/CLOSE event_kind — column stays NULL.
             continue
         batch.append((_json.dumps(ref.to_dict(), sort_keys=True), row_id))
         if len(batch) >= _BATCH_SIZE:
@@ -427,49 +416,9 @@ def _backfill_position_reference_legacy(conn: sqlite3.Connection) -> None:
     )
 
 
-# ---------------------------------------------------------------------------
-# Deferred-identity join repair (VIB-6346)
-# ---------------------------------------------------------------------------
-#
-# Blueprint 27 §10.6a claims the registry-lookup augmentation closes L5_22
-# because "registry rows and augmented accounting events now reconcile BY
-# CONSTRUCTION AT WRITE TIME". That claim silently assumes the registry row
-# already exists when the accounting event is written. For a two-phase
-# (async-keeper) venue it does not:
-#
-#   t0  PERP_OPEN / PERP_CLOSE submitted. The venue position key is NOT yet
-#       knowable, so `StrategyRunner._maybe_save_ledger_with_registry_perp`
-#       logs "Registry-mode skip: perp … has no venue position key" and NO
-#       registry row is written.
-#   t1  The outbox drains and the Phase-1 accounting event is persisted. The
-#       registry lookup finds nothing -> source="legacy", phid=NULL.
-#   t2  The keeper settles. `perp_settlement_commit._complete_registry`
-#       performs "the perp registry write the submission path skipped"
-#       (VIB-3872 two-phase design) and the identity finally becomes
-#       measurable.
-#
-# Nothing ever revisited the t1 rows, so they stayed `source="legacy"` for the
-# life of the deployment and L5_22 reported an inverse orphan: a closed
-# registry row with no CLOSE accounting event carrying its hash. Measured on
-# the audited mainnet bundle 20260804-2310-gmxrt-vib6522-5513.
-#
-# The repair below closes the join from the OTHER side: whichever write learns
-# the identity LAST is the one that owns closing it. It runs inside the single
-# registry-writer transaction (blueprint 28 §4.1), so it covers every producer
-# — including ones nobody has enumerated. VIB-6287's ground-truth section is
-# explicit that producer censuses for exactly this row have been wrong twice,
-# and asks for "a check that fails when an unenumerated producer appears"
-# rather than a per-producer patch; a chokepoint repair is the write-side form
-# of that.
-#
-# It adds NO third key. The pointer it populates is the ratified
-# `position_reference` shape (blueprint 27 §3.6 / blueprint 28 §3.1), it is
-# resolved by the SAME resolver the write-time chokepoint uses
-# (`writer.restamp_position_reference` -> `_resolve_position_reference`), and it
-# is joined by the SAME predicate (`_build_registry_lookup_for_event`) — never a
-# hand-maintained translation table.
-#
-# The store-side half is `SQLiteStore._repair_position_references_for_registry_row`.
+# Deferred-settlement venues may persist accounting events before registry identity is known.
+# Repair at the registry-write chokepoint so whichever write learns identity last closes the join.
+# Reuse the canonical pointer writer and lookup predicate inside the registry transaction.
 
 
 def _backfill_pendle_registry_category(conn: sqlite3.Connection) -> None:
@@ -512,10 +461,8 @@ def _backfill_pendle_registry_category(conn: sqlite3.Connection) -> None:
         ).fetchone()[0]
         conn.execute("COMMIT")
         if leftover:
-            # A skipped row means a Pendle position collides with a generic lp/swap
-            # identity on a category-scoped unique index — an anomaly, since the Pendle
-            # partition is empty by construction. Boot is not stranded; surface it loudly
-            # so an operator can reconcile the duplicate identity.
+            # Preserve a colliding legacy row and surface the anomaly without stranding boot.
+
             logger.error(
                 "Migration: VIB-4931 — %d legacy pendle_lp/pendle_pt position_registry row(s) "
                 "could not be relabeled (would collide with an existing lp/swap identity on a "
@@ -569,7 +516,6 @@ def _convert_dual_identity_tables_to_deployment_id(conn: sqlite3.Connection) -> 
             conn.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
             logger.info("Migration: dropped dead %s.%s (VIB-4722)", table, column)
         except sqlite3.OperationalError:
-            # Column already absent (fresh / converted DB) — no-op.
             pass
 
     def _rename_column_if_present(table: str, old: str, new: str) -> None:
@@ -577,7 +523,6 @@ def _convert_dual_identity_tables_to_deployment_id(conn: sqlite3.Connection) -> 
             conn.execute(f"ALTER TABLE {table} RENAME COLUMN {old} TO {new}")
             logger.info("Migration: renamed %s.%s → %s (VIB-4722)", table, old, new)
         except sqlite3.OperationalError:
-            # Source column already absent (already converted) — no-op.
             pass
 
     def _columns(table: str) -> set[str]:
@@ -595,22 +540,15 @@ def _convert_dual_identity_tables_to_deployment_id(conn: sqlite3.Connection) -> 
             _drop_column_if_present(table, "deployment_id")
         _rename_column_if_present(table, "strategy_id", "deployment_id")
 
-    # Tables whose dead column is `deployment_id` and whose live identity
-    # column `strategy_id` must be renamed into its place.
     for table in ("portfolio_snapshots", "portfolio_metrics", "transaction_ledger"):
         _convert_strategy_key_table(table)
 
-    # position_state_snapshots: same shape, but the dead `deployment_id`
-    # column carries `idx_pss_position` — SQLite refuses DROP COLUMN on an
-    # indexed column, so drop the index first. SCHEMA_SQL's
-    # CREATE INDEX IF NOT EXISTS recreates it on the renamed canonical
-    # column (this helper runs before executescript()).
+    # SQLite requires dropping the dependent index before its legacy column; schema creation restores it.
+
     _convert_strategy_key_table("position_state_snapshots", drop_index="idx_pss_position")
 
-    # accounting_events / accounting_outbox: modern dual-identity DBs already
-    # use `deployment_id` as the live key and carry `strategy_id` only as a
-    # dead column. Very old DBs may have only `strategy_id`; rename those
-    # instead of dropping the only identity column.
+    # Preserve the only identity column on older databases; otherwise drop the dead legacy key.
+
     for table in ("accounting_events", "accounting_outbox"):
         if _table_exists(table):
             cols = _columns(table)
@@ -618,11 +556,6 @@ def _convert_dual_identity_tables_to_deployment_id(conn: sqlite3.Connection) -> 
                 _drop_column_if_present(table, "strategy_id")
             else:
                 _rename_column_if_present(table, "strategy_id", "deployment_id")
-
-
-# =============================================================================
-# EXCEPTIONS
-# =============================================================================
 
 
 class SQLiteBackendError(Exception):
@@ -643,11 +576,6 @@ class EventNotFoundError(SQLiteBackendError):
     def __init__(self, event_id: int, message: str | None = None) -> None:
         self.event_id = event_id
         super().__init__(message or f"Event not found: {event_id}")
-
-
-# =============================================================================
-# DATA CLASSES
-# =============================================================================
 
 
 @dataclass
@@ -681,14 +609,6 @@ class SQLiteConfig:
         if self.busy_timeout < 0:
             raise ValueError("busy_timeout must be non-negative")
 
-
-# NOTE (VIB-4044 / PR5): The SDK-side `TimelineEvent` dataclass is removed.
-# Gateway-side timeline events live in `almanak/gateway/timeline/store.py:TimelineEvent`.
-
-
-# =============================================================================
-# SQL SCHEMA
-# =============================================================================
 
 SCHEMA_SQL = """
 -- Strategy state table for local SQLite mode.
@@ -1168,11 +1088,6 @@ CREATE TABLE IF NOT EXISTS migration_state (
 """
 
 
-# =============================================================================
-# Custom SQL helpers (VIB-5059 Phase 1)
-# =============================================================================
-
-
 def _register_quant_sql_functions(conn: sqlite3.Connection) -> None:
     """Register the exact-decimal SQL helpers the quant aggregates use.
 
@@ -1205,9 +1120,8 @@ def _register_quant_sql_functions(conn: sqlite3.Connection) -> None:
         """Scalar ``almanak_decimal_positive(col)`` → 1 iff finite-parse > 0."""
         return 1 if lenient_ledger_decimal(value) > 0 else 0
 
-    # typeshed's _AggregateProtocol pins ``finalize() -> int``; sqlite3
-    # accepts any SQLite-storable value (we return the exact Decimal sum as
-    # TEXT) — typeshed false positive.
+    # Typeshed narrows aggregate results to int, but sqlite3 accepts the exact Decimal sum as TEXT.
+
     conn.create_aggregate("almanak_decimal_sum", 1, _LenientDecimalSum)  # type: ignore[arg-type]
     conn.create_function(
         "almanak_decimal_positive",
@@ -1215,11 +1129,6 @@ def _register_quant_sql_functions(conn: sqlite3.Connection) -> None:
         _lenient_decimal_positive,
         deterministic=True,
     )
-
-
-# =============================================================================
-# SQLITE STORE
-# =============================================================================
 
 
 class SQLiteStore:
@@ -1298,7 +1207,6 @@ class SQLiteStore:
         """Create database connection."""
 
         def _sync_connect() -> sqlite3.Connection:
-            # Create parent directory if needed
             if self._config.db_path != ":memory:":
                 path = Path(self._config.db_path)
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -1310,32 +1218,24 @@ class SQLiteStore:
                 check_same_thread=self._config.check_same_thread,
             )
 
-            # Enable row factory for dict-like access
             conn.row_factory = sqlite3.Row
 
-            # Configure connection
             conn.execute(f"PRAGMA busy_timeout = {self._config.busy_timeout}")
             conn.execute(f"PRAGMA cache_size = {self._config.cache_size}")
 
-            # Enable WAL mode for better concurrent reads
             if self._config.wal_mode:
                 conn.execute("PRAGMA journal_mode = WAL")
-                # synchronous=FULL guarantees each commit is fsync'd to disk
-                # before returning. This is required by the VIB-3156 durability
-                # invariant: save_state() either durably persists or raises.
-                # Without FULL, WAL can lose the last commit on crash, producing
-                # recovery states where the chain nonce is ahead of the cached
-                # state we reload.
+                # A successful financial-state commit must survive power loss; recovery cannot lag chain nonce.
+
                 conn.execute("PRAGMA synchronous = FULL")
-                # Auto-checkpoint WAL every 100 pages to prevent unbounded growth
-                # when multiple processes write concurrently
+                # Bound WAL growth for long-running multiprocess stores.
+
                 conn.execute("PRAGMA wal_autocheckpoint = 100")
             else:
                 conn.execute(f"PRAGMA journal_mode = {self._config.journal_mode}")
                 # Match WAL's strict durability for non-WAL journal modes too.
                 conn.execute("PRAGMA synchronous = FULL")
 
-            # Enable foreign keys
             conn.execute("PRAGMA foreign_keys = ON")
 
             _register_quant_sql_functions(conn)
@@ -1351,14 +1251,8 @@ class SQLiteStore:
             raise DatabaseInitializationError("Connection not established")
 
         def _sync_create_schema() -> None:
-            # VIB-4722: collapse the dual-identity tables to a single
-            # canonical `deployment_id` column BEFORE executescript() —
-            # SCHEMA_SQL creates indexes (idx_transaction_ledger_*,
-            # idx_portfolio_snapshots_*, idx_pss_position) on the
-            # deployment_id column, which would fail on a pre-rename DB
-            # whose tables still carry the old `deployment_id` identity
-            # column. Same ordering rationale as the gateway lifecycle
-            # store's legacy identity → deployment_id rename.
+            # Convert identity columns before schema creation rebuilds indexes against canonical `deployment_id`.
+
             _convert_dual_identity_tables_to_deployment_id(self._conn)  # type: ignore[arg-type]
             self._conn.executescript(SCHEMA_SQL)  # type: ignore[union-attr]
             self._run_migrations()
@@ -1401,48 +1295,35 @@ class SQLiteStore:
                 conn.execute(f"DROP TABLE IF EXISTS {table}")
                 logger.info(f"Migration: dropped legacy {table} table ({reason})")
 
-        # VIB-4044 / PR5: SDK-side `timeline_events` is removed. Existing
-        # local databases carry the table from earlier SDK versions; drop it
-        # here so an upgraded user converges to the new schema. Production
-        # timeline_events flow goes through the gateway-side store
-        # (almanak/gateway/timeline/store.py); the SDK-side table received
-        # zero writes (verified by the 3-demo PR1 inspection in
-        # docs/internal/TimelineScope-E2E-Findings.md), so dropping it on
-        # upgrade is safe — no user data lives in it.
+        # Timeline events are gateway-owned; remove the unused SDK table to avoid two persistence authorities.
+
         _drop_table_if_exists("timeline_events", "moved to gateway-side store")
 
-        # Phase 1a: total_value_usd, positions_json, cycle_id on portfolio_metrics (VIB-2765)
-        # VIB-5915: the sentinel is '', not '0'. SQLite's ``ALTER TABLE ADD
-        # COLUMN ... DEFAULT`` BACKFILLS every pre-existing row, so a '0'
-        # default hands legacy rows a *measured zero* NAV they never measured
-        # — the exact state VIB-5915 exists to prevent. '' reads back as
-        # ``None`` (unmeasured) via ``decode_optional_decimal_text``.
+        # ALTER TABLE backfills the default, so use '' to preserve unmeasured legacy NAV rather than claim zero.
+        # The decoder maps this sentinel back to None.
+
         _add_column_if_missing("portfolio_metrics", "total_value_usd", "TEXT DEFAULT ''")
         _add_column_if_missing("portfolio_metrics", "positions_json", "TEXT DEFAULT '[]'")
         _add_column_if_missing("portfolio_metrics", "cycle_id", "TEXT")
 
-        # Phase 1b: extracted_data_json on transaction_ledger
         _add_column_if_missing("transaction_ledger", "extracted_data_json", "TEXT DEFAULT ''")
 
-        # VIB-3480: price and state capture columns for audit-grade replay
         _add_column_if_missing("transaction_ledger", "price_inputs_json", "TEXT DEFAULT ''")
         _add_column_if_missing("transaction_ledger", "pre_state_json", "TEXT DEFAULT ''")
         _add_column_if_missing("transaction_ledger", "post_state_json", "TEXT DEFAULT ''")
 
-        # Phase 1c: token_prices_json and wallet_balances_json on portfolio_snapshots
         _add_column_if_missing("portfolio_snapshots", "token_prices_json", "TEXT DEFAULT '{}'")
         _add_column_if_missing("portfolio_snapshots", "wallet_balances_json", "TEXT DEFAULT '[]'")
 
-        # VIB-3614: strategy-scoped valuation columns — wrapped in an explicit
-        # transaction so the ALTER TABLE and backfill UPDATE are atomic.
-        # isolation_level=None means autocommit; without BEGIN/COMMIT a crash
-        # between ALTER and UPDATE leaves legacy rows permanently at '0'.
+        # Keep the column add and backfill atomic despite the connection's autocommit mode.
+        # Otherwise a crash can strand legacy rows at the migration default.
+
         conn.execute("BEGIN IMMEDIATE")
         try:
             _add_column_if_missing("portfolio_snapshots", "deployed_capital_usd", "TEXT DEFAULT '0'")
             if _add_column_if_missing("portfolio_snapshots", "wallet_total_value_usd", "TEXT DEFAULT '0'"):
-                # Backfill legacy rows: pre-VIB-3614 total_value_usd was the full wallet
-                # value, so it's the best available proxy for wallet_total_value_usd.
+                # Legacy total value is the best available wallet-value proxy.
+
                 conn.execute(
                     """
                     UPDATE portfolio_snapshots
@@ -1455,24 +1336,17 @@ class SQLiteStore:
             conn.execute("ROLLBACK")
             raise
 
-        # VIB-4722: strategy_state's identity column is renamed
-        # strategy_id → deployment_id (blueprint 29 §3 — one identity column,
-        # one name, both backends). Idempotent: the rename runs only when the
-        # legacy column is still present. SCHEMA_SQL's CREATE TABLE IF NOT
-        # EXISTS is a no-op on an upgraded DB, so this migration is the path
-        # that converges the column name.
+        # Existing tables require an explicit rename because CREATE TABLE IF NOT EXISTS cannot converge column names.
+
         if conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='strategy_state'").fetchone():
             ss_cols = {row["name"] for row in conn.execute("PRAGMA table_info(strategy_state)").fetchall()}
             if "strategy_id" in ss_cols and "deployment_id" not in ss_cols:
                 conn.execute("ALTER TABLE strategy_state RENAME COLUMN strategy_id TO deployment_id")
                 logger.info("Migration: renamed strategy_state.strategy_id → deployment_id")
 
-        # VIB-4722: clob_orders gains the canonical deployment_id identity
-        # column (blueprint 29 §3 — it previously had no identity column).
-        # The indexes are created here, after the column add, so an upgraded
-        # DB whose clob_orders predates the column does not trip "no such
-        # column" while SCHEMA_SQL runs (CREATE INDEX in SCHEMA_SQL would
-        # execute before this migration on an existing table).
+        # Add the CLOB identity before creating dependent indexes on an upgraded table.
+        # Schema DDL cannot safely create those indexes first when the existing table lacks the column.
+
         if conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='clob_orders'").fetchone():
             _add_column_if_missing("clob_orders", "deployment_id", "TEXT NOT NULL DEFAULT ''")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_clob_orders_deployment ON clob_orders (deployment_id)")
@@ -1481,13 +1355,8 @@ class SQLiteStore:
                 "ON clob_orders (deployment_id, order_id)"
             )
 
-        # Phase 4: cycle_id, execution_mode across all tables (VIB-2835, VIB-2837).
-        # The legacy `deployment_id TEXT DEFAULT ''` adds for portfolio_snapshots /
-        # portfolio_metrics / transaction_ledger were removed in VIB-4722 — that
-        # column was the abandoned dead identity column; the canonical
-        # deployment_id is now the renamed live key, converged by
-        # _convert_dual_identity_tables_to_deployment_id (run in
-        # _create_schema, before executescript()).
+        # These tables already received canonical identity from the pre-schema conversion.
+
         _add_column_if_missing("portfolio_snapshots", "cycle_id", "TEXT DEFAULT ''")
         _add_column_if_missing("portfolio_snapshots", "execution_mode", "TEXT DEFAULT ''")
         _add_column_if_missing("portfolio_metrics", "execution_mode", "TEXT DEFAULT ''")
@@ -1496,36 +1365,20 @@ class SQLiteStore:
         _add_column_if_missing("position_events", "cycle_id", "TEXT DEFAULT ''")
         _add_column_if_missing("position_events", "execution_mode", "TEXT DEFAULT ''")
 
-        # VIB-3205: protocol_fees_usd captured from ProtocolFees.total_usd at
-        # event time so attribution can attribute real fee PnL (not the v1
-        # placeholder of 0). Empty string remains the "unknown" sentinel.
+        # Empty string preserves unknown protocol fees; zero means measured zero.
+
         _add_column_if_missing("position_events", "protocol_fees_usd", "TEXT DEFAULT ''")
 
-        # VIB-3467: wallet_address, position_key, market_id on accounting_outbox.
-        # Guard: pre-VIB-3480 databases don't have this table yet — skip the ALTER
-        # when the table is absent (the CREATE TABLE IF NOT EXISTS in the DDL block
-        # will create it with the correct schema for new and old-schema databases).
+        # Older databases may not have the outbox yet; schema creation handles the absent-table case.
+
         if conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='accounting_outbox'").fetchone():
             _add_column_if_missing("accounting_outbox", "wallet_address", "TEXT NOT NULL DEFAULT ''")
             _add_column_if_missing("accounting_outbox", "position_key", "TEXT NOT NULL DEFAULT ''")
             _add_column_if_missing("accounting_outbox", "market_id", "TEXT NOT NULL DEFAULT ''")
 
-        # VIB-4196 / T10: position_reference JSON pointer on accounting_events.
-        # Forward-compat shape between accounting_events and the (T11-shipped)
-        # position_registry; cutover tickets (T12 / T16 / T23 / T28) flip per
-        # primitive without rebasing the accounting schema. Backfill OPEN/CLOSE
-        # rows with `source="legacy"` derived from the canonical taxonomy
-        # `record_for(event_type)` so historical rows are byte-comparable to
-        # rows written under T10's writer chokepoint. Non-OPEN/CLOSE rows
-        # (event_kind in {ADJUST, COLLECT, TRANSFER, NONE}) and rows whose
-        # event_type has no taxonomy row stay NULL — same contract as the
-        # writer's runtime path.
-        #
-        # Atomicity contract: ALTER TABLE + backfill UPDATE wrapped in
-        # BEGIN IMMEDIATE / COMMIT — same pattern as the VIB-3614 migration
-        # at line ~909 above. Without this, a crash between the column-add
-        # and the backfill leaves rows permanently NULL because the next boot
-        # sees the column already present and skips the backfill branch.
+        # Backfill OPEN/CLOSE references from canonical taxonomy; unsupported event kinds remain NULL.
+        # Add and backfill atomically so a crash cannot leave a present column with permanently missing references.
+
         if conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='accounting_events'").fetchone():
             conn.execute("BEGIN IMMEDIATE")
             try:
@@ -1536,13 +1389,9 @@ class SQLiteStore:
                 conn.execute("ROLLBACK")
                 raise
 
-        # VIB-4931: migrate any legacy pendle_lp/pendle_pt position_registry categories
-        # to the generic lp/swap (see the function for the empty-partition rationale).
-        _backfill_pendle_registry_category(conn)
+        # Converge legacy Pendle registry categories before matching new generic categories.
 
-    # -------------------------------------------------------------------------
-    # State Operations
-    # -------------------------------------------------------------------------
+        _backfill_pendle_registry_category(conn)
 
     async def close(self) -> None:
         """Close database connection."""
@@ -1600,7 +1449,7 @@ class SQLiteStore:
                 schema_version=row["schema_version"],
                 checksum=row["checksum"] or "",
                 created_at=created_at,
-                loaded_from=StateTier.WARM,  # SQLite acts as WARM tier
+                loaded_from=StateTier.WARM,
             )
 
         loop = asyncio.get_event_loop()
@@ -1637,15 +1486,12 @@ class SQLiteStore:
         if not self._initialized:
             await self.initialize()
 
-        # Calculate checksum from state_data. The stored checksum must be a
-        # function of state_json alone so that a post-crash reader can
-        # re-derive it; that is the check gating recovery.
+        # Recovery can re-derive the checksum because it covers only canonical state JSON.
+
         state_json = json.dumps(state.state, sort_keys=True, default=str)
         checksum = hashlib.sha256(state_json.encode()).hexdigest()
-        # Verify: re-hash state_json and confirm it equals the checksum we are
-        # about to commit. This is the pre-commit equivalent of "verify before
-        # rename" for file-atomic writes -- it catches any checksum drift
-        # (e.g. non-deterministic serialization) BEFORE a version bump lands.
+        # Reject checksum drift before committing the corresponding version bump.
+
         if hashlib.sha256(state_json.encode()).hexdigest() != checksum:
             raise SQLiteBackendError(
                 f"Pre-commit checksum verification failed for {state.deployment_id}; refusing to write torn state"
@@ -1656,13 +1502,12 @@ class SQLiteStore:
             conn = self._conn
             assert conn is not None
 
-            # Serialize concurrent writers and open an immediate write
-            # transaction so the version read and write are atomic.
+            # Serialize writers so the version read and write form one atomic CAS.
+
             with self._db_lock:
                 conn.execute("BEGIN IMMEDIATE")
                 try:
                     if expected_version is not None:
-                        # CAS update -- version must match
                         cursor = conn.execute(
                             """
                             UPDATE strategy_state
@@ -1676,9 +1521,8 @@ class SQLiteStore:
                             (state_json, state.schema_version, checksum, now, state.deployment_id, expected_version),
                         )
                         if cursor.rowcount == 0:
-                            # Read actual version while still inside the
-                            # transaction so the error is consistent with what
-                            # the CAS saw.
+                            # Report the version from the same transaction snapshot that observed the conflict.
+
                             row = conn.execute(
                                 "SELECT version FROM strategy_state WHERE deployment_id = ?",
                                 (state.deployment_id,),
@@ -1690,7 +1534,6 @@ class SQLiteStore:
                                 actual_version=row["version"] if row else 0,
                             )
                     else:
-                        # UPSERT: insert or update with version increment
                         conn.execute(
                             """
                             INSERT INTO strategy_state
@@ -1717,7 +1560,6 @@ class SQLiteStore:
                         )
                     conn.execute("COMMIT")
                 except StateConflictError:
-                    # Already rolled back above.
                     raise
                 except Exception:
                     conn.execute("ROLLBACK")
@@ -1768,19 +1610,6 @@ class SQLiteStore:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _sync_get_ids)
 
-    # -------------------------------------------------------------------------
-    # Timeline Event Operations
-    # -------------------------------------------------------------------------
-    #
-    # VIB-4044 / PR5: removed. The SDK-side `timeline_events` table never
-    # received writes in production runs (verified empirically across 3 demos
-    # in PR1's TimelineScope-E2E-Findings.md). Gateway-side timeline events
-    # are owned by `almanak.gateway.timeline.store.TimelineStore`.
-
-    # -------------------------------------------------------------------------
-    # Maintenance Operations
-    # -------------------------------------------------------------------------
-
     async def vacuum(self) -> None:
         """Reclaim disk space by running VACUUM.
 
@@ -1826,18 +1655,16 @@ class SQLiteStore:
                 "wal_mode": self._config.wal_mode,
             }
 
-            # Count states (single row per agent)
             cursor = self._conn.execute(  # type: ignore[union-attr]
                 "SELECT COUNT(*) as count FROM strategy_state"
             )
             row = cursor.fetchone()
             stats["active_states"] = row["count"] if row else 0
 
-            # VIB-4044 / PR5: timeline_events removed; total_events kept
-            # in the stats payload for back-compat but is now always 0.
+            # Preserve the stats payload after timeline storage moved gateway-side.
+
             stats["total_events"] = 0
 
-            # Get page count and page size
             cursor = self._conn.execute("PRAGMA page_count")  # type: ignore[union-attr]
             row = cursor.fetchone()
             page_count = row[0] if row else 0
@@ -1854,10 +1681,6 @@ class SQLiteStore:
 
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _sync_get_stats)
-
-    # -------------------------------------------------------------------------
-    # CLOB Order Operations
-    # -------------------------------------------------------------------------
 
     async def save_clob_order(self, order: "ClobOrderState") -> bool:
         """Save or update a CLOB order state.
@@ -1881,11 +1704,8 @@ class SQLiteStore:
             order. The transaction also makes the write atomic with
             respect to readers and crash-durable on ``synchronous=FULL``.
         """
-        # clob_orders is a deployment-scoped table (blueprint 29 §3): refuse
-        # to persist a row under a blank identity. The caller must stamp the
-        # order's deployment_id before it reaches persistence. (The CLOB
-        # execution path does not yet wire this call — the guard makes the
-        # latent empty-id footgun fail loudly if/when that wiring lands.)
+        # Blank deployment IDs would violate deployment-scoped CLOB ownership.
+
         order_deployment_id = _require_deployment_id(order.deployment_id, operation="save_clob_order")
         if not self._initialized:
             await self.initialize()
@@ -1975,9 +1795,8 @@ class SQLiteStore:
                     conn.execute("COMMIT")
                     return True
                 except Exception:
-                    # Wrap ROLLBACK so a failure here (e.g. BEGIN IMMEDIATE
-                    # itself failed and there is no active transaction)
-                    # cannot mask the original exception (gemini-code-assist).
+                    # A rollback failure must not mask the original write error.
+
                     try:
                         conn.execute("ROLLBACK")
                     except Exception:
@@ -2100,7 +1919,6 @@ class SQLiteStore:
         now = datetime.now(UTC).isoformat()
 
         def _sync_update() -> bool:
-            # Build dynamic update query
             updates = ["status = ?", "updated_at = ?"]
             params: list[Any] = [status.value, now]
 
@@ -2200,7 +2018,7 @@ class SQLiteStore:
         Returns:
             ClobOrderState instance.
         """
-        # Import here to avoid circular imports
+        # Keep execution imports local to avoid a state/execution module cycle.
         from decimal import Decimal
 
         from almanak.framework.execution.clob_handler import (
@@ -2209,7 +2027,6 @@ class SQLiteStore:
             ClobOrderStatus,
         )
 
-        # Parse fills JSON
         fills_data = row["fills"]
         if isinstance(fills_data, str):
             fills_data = json.loads(fills_data)
@@ -2226,12 +2043,10 @@ class SQLiteStore:
             for f in fills_data
         ]
 
-        # Parse metadata JSON
         metadata = row["metadata"]
         if isinstance(metadata, str):
             metadata = json.loads(metadata)
 
-        # Parse timestamps
         submitted_at = row["submitted_at"]
         if isinstance(submitted_at, str):
             submitted_at = datetime.fromisoformat(submitted_at)
@@ -2259,10 +2074,6 @@ class SQLiteStore:
             error=row["error"],
             metadata=metadata,
         )
-
-    # =========================================================================
-    # Portfolio Snapshot Methods
-    # =========================================================================
 
     async def save_portfolio_snapshot(self, snapshot: "PortfolioSnapshot") -> int:
         """Save a portfolio snapshot for value tracking.
@@ -2296,24 +2107,9 @@ class SQLiteStore:
             with self._db_lock:
                 conn.execute("BEGIN IMMEDIATE")
                 try:
-                    # Use INSERT...ON CONFLICT DO UPDATE rather than
-                    # INSERT OR REPLACE: the latter deletes the old row
-                    # and reinserts, which silently resets phase-4
-                    # identity columns (deployment_id, cycle_id,
-                    # execution_mode) — written by save_snapshot_and_metrics
-                    # — to their TEXT '' defaults. The DO UPDATE clause
-                    # only overwrites the columns this method actually
-                    # provides, preserving phase-4 metadata on conflict
-                    # (CodeRabbit review).
-                    # VIB-4096 (3.5) — Phase 4 identity columns are now read
-                    # off the snapshot itself (real fields after VIB-4092 /
-                    # 3.1). The runner stamps them at capture time
-                    # (VIB-4099 / 3.8); this writer carries them onto the
-                    # row. ON CONFLICT preserves any existing non-empty
-                    # identity (asymmetric: writing "" over a real id MUST
-                    # keep the real id; writing a real id over "" MUST take
-                    # the real id) so a late re-save by a less-stamped
-                    # caller cannot blank out a previously-stamped row.
+                    # Avoid INSERT OR REPLACE: delete/reinsert would reset persisted identity metadata.
+                    # Preserve existing non-empty cycle and mode values when a less-stamped retry conflicts.
+
                     cursor = conn.execute(
                         """
                         INSERT INTO portfolio_snapshots (
@@ -2379,18 +2175,15 @@ class SQLiteStore:
                             snapshot.execution_mode or "",
                         ),
                     )
-                    # `RETURNING id` makes the row id unambiguous on both
-                    # the INSERT and the ON CONFLICT DO UPDATE path
-                    # (cursor.lastrowid is not updated when a conflict
-                    # took the UPDATE branch).
+                    # RETURNING is reliable on both insert and conflict-update paths; lastrowid is not.
+
                     returned = cursor.fetchone()
                     row_id = returned[0] if returned else (cursor.lastrowid or 0)
                     conn.execute("COMMIT")
                     return row_id
                 except Exception:
-                    # Wrap ROLLBACK so a failure here (e.g. BEGIN IMMEDIATE
-                    # itself failed and there is no active transaction)
-                    # cannot mask the original exception (gemini-code-assist).
+                    # A rollback failure must not mask the original write error.
+
                     try:
                         conn.execute("ROLLBACK")
                     except Exception:
@@ -2428,8 +2221,8 @@ class SQLiteStore:
             conn = self._conn
             assert conn is not None
 
-            # Acquire _db_lock to serialize concurrent callers, then BEGIN
-            # IMMEDIATE for the SQLite write lock.
+            # Serialize local writers before acquiring SQLite's immediate write lock.
+
             with self._db_lock:
                 conn.execute("BEGIN IMMEDIATE")
                 try:
@@ -2440,19 +2233,10 @@ class SQLiteStore:
                     deployment_id = snapshot.deployment_id or metrics.deployment_id
                     metrics_positions_json = _validated_metrics_positions_json(conn, metrics)
 
-                    # 1. Save snapshot via INSERT ... ON CONFLICT DO UPDATE
-                    # mirroring save_portfolio_snapshot (CodeRabbit). The
-                    # legacy INSERT OR REPLACE deleted-and-reinserted on
-                    # conflict, which (a) blanked any previously-stamped
-                    # identity to TEXT '' on a less-stamped retry and
-                    # (b) cascade-deleted any position_state_snapshots
-                    # tied to the original snapshot id. The asymmetric
-                    # CASE preserves an existing non-empty identity:
-                    # writing "" over a real id MUST keep the real id;
-                    # writing a real id over "" MUST take the real id.
-                    # RETURNING id makes the row id unambiguous on both
-                    # the INSERT and the DO UPDATE branch (lastrowid is
-                    # not updated when ON CONFLICT takes the UPDATE path).
+                    # Avoid INSERT OR REPLACE: delete/reinsert would reset identity and cascade-delete child state.
+                    # Preserve existing non-empty identity on less-stamped retries.
+                    # RETURNING is reliable on both insert and conflict-update paths; lastrowid is not.
+
                     cursor = conn.execute(
                         """
                         INSERT INTO portfolio_snapshots (
@@ -2521,7 +2305,6 @@ class SQLiteStore:
                     returned = cursor.fetchone()
                     snapshot_id = returned[0] if returned else (cursor.lastrowid or 0)
 
-                    # 2. Save metrics in the same transaction
                     conn.execute(
                         """
                         INSERT OR REPLACE INTO portfolio_metrics (
@@ -2535,9 +2318,7 @@ class SQLiteStore:
                             _canonical_deployment_id(metrics),
                             str(metrics.initial_value_usd),
                             metrics.timestamp.isoformat(),
-                            # Empty≠Zero: an unmeasured flow persists as '' (the
-                            # TEXT column's unmeasured sentinel), never the
-                            # literal "None" (VIB-5866).
+                            # Persist unmeasured flows as the empty sentinel, never literal "None".
                             encode_optional_flow(metrics.deposits_usd),
                             encode_optional_flow(metrics.withdrawals_usd),
                             str(metrics.gas_spent_usd),
@@ -2555,8 +2336,8 @@ class SQLiteStore:
                     conn.execute("COMMIT")
                     return snapshot_id
                 except Exception:
-                    # Preserve the original persistence/provenance failure if
-                    # SQLite has already aborted the transaction.
+                    # Preserve the original failure if SQLite already aborted the transaction.
+
                     with contextlib.suppress(sqlite3.Error):
                         conn.execute("ROLLBACK")
                     raise
@@ -2673,7 +2454,7 @@ class SQLiteStore:
                 """,
                 (deployment_id, limit),
             )
-            # SELECT DESC then reverse, so the caller gets oldest-first.
+
             return list(reversed([self._row_to_portfolio_snapshot(row) for row in cursor.fetchall()]))
 
         loop = asyncio.get_event_loop()
@@ -2789,12 +2570,10 @@ class SQLiteStore:
             fetched = cursor.fetchall()
             truncated = len(fetched) > scan_cap
             if truncated:
-                # Keep the newest scan_cap rows; the DESC order already places
-                # them first, so the surplus (oldest) tail is dropped.
                 fetched = fetched[:scan_cap]
 
             rows: list[tuple[datetime, str | None, str | None, ValueConfidence | None, str | None]] = []
-            for row in reversed(fetched):  # DESC fetch -> emit oldest-first
+            for row in reversed(fetched):
                 ts = row["timestamp"]
                 if isinstance(ts, str):
                     ts = datetime.fromisoformat(ts)
@@ -2880,31 +2659,19 @@ class SQLiteStore:
             where = "deployment_id = ?"
             if since is not None:
                 since_ts, since_id = since
-                # (timestamp, id) composite cursor: rows strictly after it, so
-                # identical-timestamp / replay rows neither skip nor double-fold.
-                # The TEXT timestamp column compares against .isoformat() exactly
-                # as the existing ORDER BY's lexicographic ISO-8601 ordering does
-                # (same precedent as get_snapshot_at / get_snapshots_in_window).
-                # Snapshots are ALWAYS written via ``snapshot.timestamp.isoformat()``
-                # (see save_portfolio_snapshot / save_snapshot_and_metrics), so the
-                # stored text is itself an isoformat() product and the
-                # parse-then-reserialize round-trip on the cursor is byte-idempotent
-                # — the boundary row is matched exactly, never skipped/double-folded.
+                # A composite cursor prevents equal-timestamp rows from being skipped or folded twice.
+                # Stored timestamps are canonical isoformat text, so cursor serialization is byte-stable.
+
                 where += " AND (timestamp > ? OR (timestamp = ? AND id > ?))"
                 params.extend([since_ts.isoformat(), since_ts.isoformat(), since_id])
             params.append(scan_cap + 1)
-            # Full scan keeps the newest cap (DESC) then reverses to oldest-first;
-            # the incremental scan must keep the OLDEST cap after the cursor so the
-            # fold has no gap, so it orders ASC (already oldest-first).
+            # Full scans retain newest rows; incremental scans retain contiguous oldest rows after the cursor.
+            # This ordering prevents gaps while an incremental fold catches up.
+
             order = "ASC, id ASC" if since is not None else "DESC, id DESC"
-            # VIB-5134: serialize the read under _db_lock. Writers hold _db_lock
-            # across BEGIN IMMEDIATE … COMMIT on this single shared connection, and
-            # WAL gives snapshot isolation BETWEEN connections, not within one — so
-            # an unsynchronized read could observe a writer's uncommitted rows. For
-            # the incremental (since) cursor that is a correctness bug, not just a
-            # transient one: advancing the (timestamp, id) cursor past a row that
-            # later rolls back would permanently skip it. Taking the same lock the
-            # writers take makes the read see only committed state (CodeRabbit).
+            # Shared-connection readers need the writer lock because WAL isolation applies between connections.
+            # Advancing a cursor over an uncommitted row could otherwise skip data permanently after rollback.
+
             with self._db_lock:
                 cursor = self._conn.execute(  # type: ignore[union-attr]
                     f"""
@@ -2919,11 +2686,8 @@ class SQLiteStore:
                 fetched = cursor.fetchall()
             truncated = len(fetched) > scan_cap
             if truncated:
-                # Keep the first scan_cap rows: for the full scan (DESC) these are
-                # the newest; for the incremental scan (ASC) these are the oldest
-                # after the cursor (contiguous paging). The surplus tail is dropped.
                 fetched = fetched[:scan_cap]
-            # Incremental (ASC) is already oldest-first; full (DESC) is reversed.
+
             ordered = fetched if since is not None else list(reversed(fetched))
 
             rows: list[tuple[datetime, str | None, str | None, int, str | None, ValueConfidence | None]] = []
@@ -2931,16 +2695,8 @@ class SQLiteStore:
                 ts = row["timestamp"]
                 if isinstance(ts, str):
                     ts = datetime.fromisoformat(ts)
-                # VIB-5170: positions_json rides along (raw text, 5th element) so
-                # the lifetime-drawdown fold can debt-net the BORROW leg per row
-                # (the dashboard layer owns the parse + Empty≠Zero). Without it the
-                # lifetime drawdown — preferred over the recent window on the main
-                # PnL surface — overstates drawdown for a leverage loop whose NAV
-                # phantom-spikes at open and collapses at teardown.
-                # VIB-5408: value_confidence rides along (6th element) so the fold
-                # can skip an UNAVAILABLE (deflated) NAV — kept LAST so the existing
-                # ``len(row) > 4`` positions_json arity check and the row[1]/[2]/[4]
-                # positional reads stay byte-identical.
+                # Preserve tuple field order for existing positional consumers.
+
                 rows.append(
                     (
                         ts,
@@ -2980,7 +2736,6 @@ class SQLiteStore:
             await self.initialize()
 
         def _sync_get() -> "PortfolioSnapshot | None":
-            # Get closest snapshot at or before the timestamp
             cursor = self._conn.execute(  # type: ignore[union-attr]
                 """
                 SELECT timestamp, iteration_number, total_value_usd,
@@ -3085,10 +2840,6 @@ class SQLiteStore:
             }
         )
 
-    # =========================================================================
-    # Portfolio Metrics Methods (PnL Baseline)
-    # =========================================================================
-
     async def save_portfolio_metrics(self, metrics: "PortfolioMetrics") -> bool:
         """Save or update portfolio metrics for a strategy.
 
@@ -3108,10 +2859,9 @@ class SQLiteStore:
             conn = self._conn
             assert conn is not None
 
-            # The read that validates the immutable baseline and the write it
-            # authorizes are one serialized transaction. BEGIN IMMEDIATE also
-            # closes the race across distinct SQLiteStore instances, whose
-            # process-local locks cannot see one another.
+            # Validate the immutable baseline and write it in one transaction.
+            # BEGIN IMMEDIATE also serializes separate store instances beyond the process-local lock.
+
             with self._db_lock:
                 conn.execute("BEGIN IMMEDIATE")
                 try:
@@ -3129,7 +2879,7 @@ class SQLiteStore:
                             _canonical_deployment_id(metrics),
                             str(metrics.initial_value_usd),
                             metrics.timestamp.isoformat(),
-                            # Empty≠Zero: unmeasured flows persist as '' (VIB-5866).
+                            # Empty text preserves an unmeasured flow.
                             encode_optional_flow(metrics.deposits_usd),
                             encode_optional_flow(metrics.withdrawals_usd),
                             str(metrics.gas_spent_usd),
@@ -3146,8 +2896,8 @@ class SQLiteStore:
                     conn.execute("COMMIT")
                     return True
                 except Exception:
-                    # Preserve the original persistence/provenance failure if
-                    # SQLite has already aborted the transaction.
+                    # Preserve the original failure if SQLite already aborted the transaction.
+
                     with contextlib.suppress(sqlite3.Error):
                         conn.execute("ROLLBACK")
                     raise
@@ -3192,7 +2942,6 @@ class SQLiteStore:
             if not row:
                 return None
 
-            # Parse timestamp
             initial_timestamp = row["initial_timestamp"]
             if isinstance(initial_timestamp, str):
                 initial_timestamp = datetime.fromisoformat(initial_timestamp)
@@ -3201,7 +2950,6 @@ class SQLiteStore:
             if isinstance(updated_at, str):
                 updated_at = datetime.fromisoformat(updated_at)
 
-            # Read Phase 4 fields safely (may not exist in old DBs)
             row_deployment_id = ""
             execution_mode = ""
             is_complete = True
@@ -3220,28 +2968,17 @@ class SQLiteStore:
 
             return PortfolioMetrics(
                 timestamp=updated_at,
-                # Empty≠Zero: empty text, SQL NULL, and poisoned legacy values
-                # are unmeasured. Never turn absence/corruption into a measured
-                # zero (VIB-5915).
+                # Empty, NULL, and poisoned legacy NAV remain unmeasured rather than becoming zero.
                 total_value_usd=decode_optional_decimal_text(
                     row["total_value_usd"], field_name="portfolio total_value_usd"
                 ),
                 initial_value_usd=Decimal(row["initial_value_usd"]),
-                # Empty≠Zero: '' (the unmeasured sentinel) decodes to None;
-                # SQL NULL predates the sentinel (legacy row) and stays a
-                # measured zero, matching the Postgres reader; legacy '0'
-                # rows still decode to a measured zero. The unguarded
-                # Decimal(...) this replaces raised on ''/NULL (VIB-5866).
+                # Empty text is unmeasured; legacy SQL NULL and '0' remain measured zero for reader parity.
+                # This distinction preserves historical flow semantics across backends.
                 deposits_usd=decode_optional_flow("0" if row["deposits_usd"] is None else row["deposits_usd"]),
                 withdrawals_usd=decode_optional_flow("0" if row["withdrawals_usd"] is None else row["withdrawals_usd"]),
-                # VIB-5915 follow-up: a schema-permitted NULL/'' is legacy
-                # ABSENCE, not corruption — the same rule the Postgres reader
-                # applies via ``_required_decimal_from_row(..., legacy_default)``
-                # and both gateway readers apply via ``is_legacy_absent_text``.
-                # ``gas_spent_usd`` is ``TEXT DEFAULT '0'`` (a DEFAULT does not
-                # imply NOT NULL), and the bare ``Decimal(None)`` this replaces
-                # raised ``TypeError`` into the runner's broad
-                # ``except Exception`` — a WARNING and NO metrics row at all.
+                # Schema-permitted NULL or empty gas is legacy absence and defaults to zero across readers.
+                # The column default does not imply NOT NULL.
                 gas_spent_usd=Decimal("0" if is_legacy_absent_text(row["gas_spent_usd"]) else row["gas_spent_usd"]),
                 positions_json=row["positions_json"] or "[]",
                 cycle_id=row["cycle_id"],
@@ -3252,10 +2989,6 @@ class SQLiteStore:
 
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _sync_get)
-
-    # =========================================================================
-    # Position Events Methods (Phase 2, VIB-2774)
-    # =========================================================================
 
     async def save_position_event(self, event: "PositionEvent") -> bool:
         """Save a position lifecycle event.
@@ -3325,11 +3058,7 @@ class SQLiteStore:
                         event.tx_hash,
                         event.gas_usd,
                         event.ledger_entry_id,
-                        # VIB-3205: preserve measured-zero vs unknown.
-                        # ``getattr(..., "") or ""`` collapses a measured Decimal("0") to
-                        # the empty string because Decimal(0) is falsy, which would make
-                        # it indistinguishable from "parser did not emit protocol_fees"
-                        # at read time. Normalize only the None / missing-attr cases.
+                        # Decimal zero is measured; only a missing or None fee becomes the unknown sentinel.
                         ("" if getattr(event, "protocol_fees_usd", None) is None else str(event.protocol_fees_usd)),
                         event.attribution_json,
                         event.attribution_version,
@@ -3483,10 +3212,6 @@ class SQLiteStore:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _sync_cleanup)
 
-    # =========================================================================
-    # Position-state snapshots (Track C / AttemptNo17 §3 D4 / VIB-3891)
-    # =========================================================================
-
     async def save_position_state_snapshots(
         self,
         snapshot_id: int,
@@ -3514,9 +3239,6 @@ class SQLiteStore:
         if not self._initialized:
             await self.initialize()
 
-        # Materialize the value tuples eagerly while the caller still owns
-        # the dataclass references — avoids holding the GIL inside the
-        # executor longer than the actual sqlite write.
         captured_rows: list[tuple] = []
         for r in rows:
             captured_rows.append(
@@ -3528,8 +3250,7 @@ class SQLiteStore:
                     r.position_id,
                     r.position_type,
                     r.current_tick,
-                    # SQLite has no native bool — store 0/1, but preserve
-                    # the None case (unmeasured ≠ False).
+                    # Preserve None as unmeasured rather than coercing it to false.
                     None if r.in_range is None else int(bool(r.in_range)),
                     None if r.liquidity is None else str(r.liquidity),
                     None if r.sqrt_price_x96 is None else str(r.sqrt_price_x96),
@@ -3601,9 +3322,6 @@ class SQLiteStore:
                 where.append("snapshot_id = ?")
                 params.append(snapshot_id)
             if deployment_id is not None:
-                # SQL column is the canonical `deployment_id` (blueprint 29
-                # §3); the method parameter is still named `deployment_id`
-                # (VIB-4726).
                 where.append("deployment_id = ?")
                 params.append(deployment_id)
             if position_id is not None:
@@ -3619,10 +3337,6 @@ class SQLiteStore:
 
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _sync_get)
-
-    # =========================================================================
-    # Transaction Ledger (VIB-2402)
-    # =========================================================================
 
     async def save_ledger_entry(self, entry: "LedgerEntry") -> None:
         """Persist a transaction ledger entry.
@@ -3678,10 +3392,6 @@ class SQLiteStore:
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, _sync_save)
 
-    # =========================================================================
-    # Auto-mode collision preflight (VIB-4614)
-    # =========================================================================
-
     async def find_open_auto_mode_registry_row(
         self,
         *,
@@ -3714,19 +3424,13 @@ class SQLiteStore:
         :class:`RegistryAutoCollisionError`), or ``None`` when the group is
         free (no orphan risk; the open may proceed).
         """
-        # Init guard — mirror the sibling registry read
-        # ``get_position_registry_open_rows``: ensure the store is initialized
-        # so ``self._conn`` is established before the worker thread touches it.
+
         if not self._initialized:
             await self.initialize()
 
         def _sync_find() -> dict[str, str] | None:
-            # Controlled failure (matches ``get_position_registry_open_rows``'s
-            # ``if not self._conn: return []``): an unestablished connection
-            # means there is no registry to consult, so there is no collision —
-            # return ``None`` (allow the open) rather than dereferencing None.
-            # Fail-open is safe here: the commit-path unique-index INSERT is the
-            # authoritative backstop.
+            # Fail-open is safe because the commit-path unique index remains authoritative.
+
             if self._conn is None:
                 return None
             with self._db_lock:
@@ -3747,9 +3451,6 @@ class SQLiteStore:
                         chain,
                         accounting_category,
                         semantic_grouping_key,
-                        # status='open' AND handle IS NULL are inlined above
-                        # because they MUST exactly mirror the partial unique
-                        # index ix_registry_auto_mode WHERE clause (SCHEMA_SQL).
                     ),
                 )
                 row = cursor.fetchone()
@@ -3762,10 +3463,6 @@ class SQLiteStore:
 
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _sync_find)
-
-    # =========================================================================
-    # Atomic ledger + registry + handle commit (VIB-4197 / T11)
-    # =========================================================================
 
     async def save_ledger_and_registry_atomic(
         self,
@@ -3854,22 +3551,17 @@ class SQLiteStore:
         if not self._initialized:
             await self.initialize()
 
-        # Resolve canonical string forms. The RegistryRow accessors validate
-        # against the Primitive / AccountingCategory enums and raise on a typo
-        # — better to fail at the value-resolution site than to land an
-        # un-typed string in the DB.
+        # Resolve through typed accessors before entering the transaction.
+
         primitive_str = registry.primitive_value()
         category_str = registry.accounting_category_value()
         payload_json = registry.payload_json()
-        # Effective handle: prefer registry.handle; fall back to the
-        # standalone HandleMapping when present. Validation of the
-        # (deployment_id, accounting_category) alignment happened in
-        # commit.py:_validate_inputs.
+        # Prefer the registry's canonical handle while accepting the validated legacy mapping shape.
+
         effective_handle = (
             registry.handle if registry.handle is not None else (handle.handle if handle is not None else None)
         )
-        # Status priority for the monotone guard.
-        # open=0; closed=1; reorg_invalidated=1.
+
         new_status_priority = 0 if registry.status == "open" else 1
 
         behavior = ledger_registry_save_behavior(mode)
@@ -3877,27 +3569,14 @@ class SQLiteStore:
         def _sync_atomic_commit() -> None:
             with self._db_lock:
                 conn = self._conn
-                assert conn is not None  # _initialized=True implies _conn set
-                # Use IMMEDIATE so we acquire a RESERVED lock immediately.
-                # The default DEFERRED would let two writers race up to the
-                # first WRITE statement, which is the exact pattern we want
-                # to avoid for the atomic primitive — we MUST hold the lock
-                # for the entire ledger+registry+handle write.
+                assert conn is not None
+                # Acquire the write lock before any ledger, registry, or handle operation.
+                # A deferred transaction would permit writers to race before the first write.
+
                 conn.execute("BEGIN IMMEDIATE")
                 try:
-                    # 1) Ledger row.
-                    #
-                    # T24 / VIB-4210: in mode='registry_reconciliation' the
-                    # ledger insert is SKIPPED entirely. ADR §2.3 #1+#2
-                    # forbids Reconcile from writing transaction_ledger —
-                    # ledger is the immutable intent history, reconciliation
-                    # is a recovery path that discovers chain-only positions
-                    # (no corresponding intent ever existed). Synthesising
-                    # a fake ledger row would pollute the audit trail and
-                    # defeat the whole point of having a separate registry
-                    # surface. The skip is localised to ONE branch inside
-                    # the existing transaction (ADR §8.1 Option (c)) so
-                    # there is still a single registry writer path.
+                    # Reconciliation records discovered chain state without fabricating intent history.
+
                     if behavior.writes_ledger:
                         conn.execute(
                             """
@@ -3936,20 +3615,10 @@ class SQLiteStore:
                                 entry.post_state_json,
                             ),
                         )
-                    # 2a) Handle reuse after close (AccountingStrats.md D3 /
-                    # VIB-5051): a strategy that closes a handled position and
-                    # later reopens the SAME logical slot (e.g. an LP
-                    # rebalance) mints a NEW physical position, so the upsert's
-                    # physical-identity conflict key does not fire and the
-                    # plain INSERT would trip ``ix_registry_handle`` against
-                    # the old TERMINAL row still holding the handle. Release
-                    # the handle from terminal rows first — inside this same
-                    # transaction — so the handle always points at the CURRENT
-                    # physical position of the slot. A handle held by a row
-                    # that is still OPEN is NOT released: that collision is a
-                    # genuine strategy bug and must keep failing loud below.
-                    # The physical-identity guard keeps an idempotent retry of
-                    # the same row from clearing its own handle.
+                    # Release a logical handle from terminal physical positions before reusing it.
+                    # Never release an open row's handle; that collision is a strategy error.
+                    # Excluding the same physical identity keeps retries idempotent.
+
                     if effective_handle is not None:
                         conn.execute(
                             """
@@ -3968,22 +3637,8 @@ class SQLiteStore:
                                 registry.physical_identity_hash,
                             ),
                         )
-                    # 2) Registry row + handle column atomically.
-                    #
-                    # The ON CONFLICT clause's WHERE predicate enforces:
-                    #   a) Strict monotone status: status_priority of EXCLUDED
-                    #      must be > current row's. Equal terminal states
-                    #      (closed vs reorg_invalidated, both priority 1)
-                    #      do NOT overwrite each other.
-                    #   b) Idempotent retries: same-status retries pass the
-                    #      guard with strict > false, so the conflict
-                    #      clause's UPDATE doesn't run — but the row stays
-                    #      (DO NOTHING semantically for status).
-                    #
-                    # The CASE expression on `status` materializes the
-                    # priority inline because SQLite has no shorthand for
-                    # "lookup column priority via mapping." Mapping kept
-                    # in lock-step with blueprint 28 §4.3.
+                    # Strict status priority prevents retries or equal terminal states from overwriting one another.
+
                     conn.execute(
                         """
                         INSERT INTO position_registry
@@ -4041,26 +3696,14 @@ class SQLiteStore:
                             registry.matching_policy_version,
                         ),
                     )
-                    # NOTE on `new_status_priority`: it's computed pre-tx for
-                    # logging / debugging; the actual priority comparison
-                    # happens inline in the SQL above so the decision is
-                    # atomic with the row's existing status. We deliberately
-                    # do NOT pre-fetch the existing status and decide in
-                    # Python — that would race with concurrent writers and
-                    # re-introduce the very atomicity gap this primitive
-                    # closes.
+                    # SQL compares status atomically against the persisted row; a Python preflight would race.
+                    # Computing the value here still validates the status mapping before commit.
+
                     _ = new_status_priority
 
-                    # Same-status retry handle backfill (CodeRabbit PR #2207
-                    # finding). The priority-gated WHERE clause above skips
-                    # the entire DO UPDATE when status doesn't strictly
-                    # increase, so a row landed with handle=NULL stays NULL
-                    # forever even if a later same-status writer knows the
-                    # handle. Run a separate, idempotent UPDATE that backfills
-                    # ONLY when the existing handle is NULL — preserves the
-                    # priority-rejected-retry contract for every other column
-                    # (status, payload, anchors) since those are gated on
-                    # status-priority increase, not on handle presence.
+                    # A same-status retry may fill a missing handle without bypassing status priority for other fields.
+                    # Restricting the update to NULL handles preserves existing ownership.
+
                     if effective_handle is not None:
                         conn.execute(
                             """
@@ -4080,26 +3723,11 @@ class SQLiteStore:
                                 registry.physical_identity_hash,
                             ),
                         )
-                    # 3) Deferred-identity join repair (VIB-6346).
-                    #
-                    # Blueprint 27 §10.6a's "reconcile by construction at write
-                    # time" only holds when the registry row exists BEFORE the
-                    # accounting event is written. On a two-phase (async-keeper)
-                    # venue it does not: the venue position key is unknowable at
-                    # submission, so the Phase-1 PERP_OPEN / PERP_CLOSE rows land
-                    # with source="legacy" and the registry row arrives only when
-                    # the keeper settles. This step closes the join from the side
-                    # that learned the identity LAST.
-                    #
-                    # Deliberately NOT inside the try/except that rolls back:
-                    # this is a bookkeeping repair, and a failure here must never
-                    # cost us the registry row — that row is the durable record of
-                    # on-chain risk, and losing it is strictly worse than leaving a
-                    # legacy pointer. Same inversion the teardown lane ratified
-                    # (blueprint 14): accounting failures are loud, never blocking.
-                    # The repair is idempotent, so the next registry write for this
-                    # row (or an operator `ax positions reconcile --apply`) retries
-                    # it for free.
+                    # Deferred venues may persist the accounting event before registry identity exists.
+                    # Repair from whichever write learns identity last.
+                    # Repair failure must not discard the registry record of on-chain risk.
+                    # The idempotent repair is retried by later registry writes.
+
                     try:
                         repaired = self._repair_position_references_for_registry_row(
                             conn,
@@ -4121,28 +3749,10 @@ class SQLiteStore:
                                 primitive_str,
                             )
                     except Exception:  # noqa: BLE001 — a join repair must never block the registry write
-                        # Deliberate, named inversion of the VIB-3863 live-raises
-                        # rule. VIB-3863 governs the accounting WRITE ITSELF — a
-                        # dropped event is unrecoverable, so live must halt. This
-                        # is a retroactive pointer fix on an ALREADY-DURABLE row,
-                        # and its failure IS recoverable: the repair is idempotent,
-                        # so the next registry write for this position (or an
-                        # operator `ax positions reconcile --apply`, which re-enters
-                        # this same writer) retries it for free. Letting it raise
-                        # would roll the whole transaction back and lose the
-                        # registry row — recreating bug #2130 (blueprint 28 §1: a
-                        # landed on-chain position with no durable row) for a reason
-                        # that has nothing to do with #2130. The perp settlement
-                        # lane already ratified this inversion for its own registry
-                        # completion: "Registry completion + position_events
-                        # backfill are BEST-EFFORT (wrapped, never block the
-                        # settlement write)" (perp_settlement_commit module
-                        # docstring, VIB-3872 design §3 D2).
-                        #
-                        # ERROR, never WARNING: an unrepaired join is precisely the
-                        # L5_22 FAIL this code exists to prevent, and the message
-                        # carries deployment_id + phid so it is greppable in a
-                        # mainnet bundle.
+                        # This retroactive pointer repair is recoverable; the original event is already durable.
+                        # Raising would lose the registry row that records on-chain risk.
+                        # Log at error level with stable identity so operators can reconcile it.
+
                         logger.error(
                             "position_reference repair FAILED for registry row "
                             "(deployment_id=%s chain=%s primitive=%s phid=%s); the registry row "
@@ -4157,90 +3767,31 @@ class SQLiteStore:
                         )
                     conn.commit()
                 except sqlite3.IntegrityError as ie:
-                    # Roll back the transaction FIRST so the DB is in a
-                    # clean state regardless of how we classify the error.
-                    # The rollback must happen before the row-fetch SELECT
-                    # below so the SELECT cannot accidentally see rows in
-                    # an uncommitted-pending state on this connection.
+                    # Roll back before classification so follow-up reads cannot observe pending rows.
+
                     conn.rollback()
 
-                    # Distinguish the auto-mode-collision case
-                    # (ix_registry_auto_mode partial unique index) from
-                    # other IntegrityErrors (CHECK violations, handle
-                    # uniqueness via ix_registry_handle, NOT NULL, …).
-                    #
-                    # Detection contract (VIB-4200 / UAT card §D3.F1, F8,
-                    # F10):
-                    #   - The classifier is two-layered:
-                    #     (1) The IntegrityError MESSAGE PREFIX
-                    #         distinguishes the constraint TYPE: SQLite
-                    #         emits "UNIQUE constraint failed: ..." for
-                    #         unique-index violations and "CHECK constraint
-                    #         failed: ..." for CHECK violations. The
-                    #         constraint-type prefix IS reliable across
-                    #         SQLite versions even when the constraint
-                    #         NAME is not (UAT D3.F8). A CHECK violation
-                    #         is NEVER a collision regardless of whether
-                    #         a same-group row exists (UAT D3.F1
-                    #         over-broad-classifier guard).
-                    #     (2) Among UNIQUE-constraint violations, the
-                    #         row-existence check on the partial-index
-                    #         predicate distinguishes
-                    #         ``ix_registry_auto_mode`` (auto-mode
-                    #         collision) from ``ix_registry_handle``
-                    #         (duplicate handle, UAT D3.F10) and from the
-                    #         primary-key conflict (which the upstream
-                    #         ON CONFLICT clause already handles, so it
-                    #         shouldn't reach here).
-                    #   - Pre-INSERT SELECT-then-INSERT is forbidden (UAT
-                    #     D3.F7.b) because it races under concurrent
-                    #     writers; the check happens here, post-INSERT,
-                    #     post-rollback, in a fresh read.
-                    # Detect UNIQUE-constraint violation in two layers
-                    # (gemini-code-assist medium finding, PR #2222 review):
-                    # the ``sqlite3`` module exposes the extended errorcode
-                    # on ``IntegrityError.sqlite_errorcode`` (Python 3.11+,
-                    # and this repo requires 3.12+) as the authoritative,
-                    # locale- and SQLite-version-independent signal. The
-                    # canonical constant is
-                    # ``sqlite3.SQLITE_CONSTRAINT_UNIQUE`` (extended code
-                    # 2067). The string-prefix fallback covers the
-                    # (theoretical) case where ``sqlite_errorcode`` is
-                    # missing because the underlying SQLite library was
-                    # built without extended-errorcode support — falling
-                    # back to ``False`` in that case would silently
-                    # downgrade every UNIQUE violation to
-                    # ``AccountingPersistenceError``, which is SAFE (errs
-                    # on the generic-error side, NEVER silently swallows)
-                    # but loses the typed-collision signal.
+                    # Classify only UNIQUE violations as possible auto-mode collisions.
+                    # Extended error codes are authoritative; the message fallback supports builds without them.
+
                     sqlite_errorcode = getattr(ie, "sqlite_errorcode", None)
                     if sqlite_errorcode is not None:
                         is_unique_violation = sqlite_errorcode == sqlite3.SQLITE_CONSTRAINT_UNIQUE
                     else:
                         is_unique_violation = "unique constraint failed" in str(ie).lower()
                     if not is_unique_violation:
-                        # CHECK / NOT NULL / FOREIGN KEY etc. — never a
-                        # collision. Re-raise so the caller wraps as
-                        # AccountingPersistenceError.
+                        # Non-UNIQUE integrity failures belong to the generic accounting persistence boundary.
+
                         raise
 
-                    # CodeRabbit MAJOR finding (PR #2228 review): The
-                    # partial unique index ``ix_registry_auto_mode`` is
-                    # defined ``WHERE status = 'open' AND handle IS NULL``
-                    # — it CANNOT fire on an INSERT whose row carries a
-                    # handle. If the incoming row has a handle, the only
-                    # plausible UNIQUE-constraint source is
-                    # ``ix_registry_handle`` (duplicate handle, UAT D3.F10)
-                    # — and the row-existence check below could otherwise
-                    # mis-classify it as an auto-mode collision when an
-                    # unrelated handle-less open row happens to occupy the
-                    # same semantic group. Short-circuit here to preserve
-                    # the AccountingPersistenceError surface for that case.
+                    # A handled incoming row cannot violate the handle-less partial index.
+                    # Short-circuit to avoid misclassifying a duplicate handle as an auto-mode collision.
+
                     if effective_handle is not None:
                         raise
 
-                    # UNIQUE-constraint violation. Run the row-existence
-                    # check on the auto-mode partial-index predicate.
+                    # Re-check the partial-index predicate after rollback; a preflight SELECT would race.
+
                     cursor = conn.execute(
                         """
                         SELECT physical_identity_hash, opened_tx
@@ -4258,28 +3809,19 @@ class SQLiteStore:
                             registry.chain,
                             category_str,
                             registry.semantic_grouping_key,
-                            # status='open' AND handle IS NULL are inlined
-                            # because they MUST exactly mirror the partial
-                            # unique index's WHERE clause (sqlite.py:677).
+                            # Keep this predicate identical to the partial unique index.
                         ),
                     )
                     existing = cursor.fetchone()
 
                     if existing is not None:
-                        # The partial unique index group is occupied by an
-                        # open handle-less row, and the IntegrityError is a
-                        # UNIQUE-constraint violation — therefore the
-                        # offending index IS ix_registry_auto_mode.
-                        # Distinguish from the idempotent-retry path: if
-                        # the incoming row's PIH equals the existing row's
-                        # PIH, the upstream ON CONFLICT clause should have
-                        # handled it (so we shouldn't be here), but guard
-                        # defensively.
+                        # A different physical identity in the occupied handle-less group confirms auto-mode collision.
+                        # The same identity should already have been handled by ON CONFLICT.
+
                         existing_pih, existing_tx = existing
                         new_pih = registry.physical_identity_hash
                         if existing_pih != new_pih:
-                            # Auto-mode collision confirmed.
-                            from ..registry_errors import (  # local import: keep state.exceptions module lean
+                            from ..registry_errors import (
                                 RegistryAutoCollisionError,
                             )
 
@@ -4290,14 +3832,12 @@ class SQLiteStore:
                                 accounting_category=category_str,
                             ) from ie
 
-                    # UNIQUE violation but not the auto-mode collision —
-                    # most likely ix_registry_handle (duplicate handle,
-                    # UAT D3.F10). Re-raise so the caller wraps as
-                    # AccountingPersistenceError.
+                    # Other UNIQUE violations remain generic accounting persistence failures.
+
                     raise
                 except Exception:
-                    # Roll back to leave the DB unchanged. Re-raise so the
-                    # caller (StateManager) wraps in AccountingPersistenceError.
+                    # Leave the database unchanged and preserve the caller's error boundary.
+
                     conn.rollback()
                     raise
 
@@ -4330,8 +3870,6 @@ class SQLiteStore:
             await self.initialize()
 
         def _sync_get() -> list[LedgerEntry]:
-            # SQL column is the canonical `deployment_id` (blueprint 29 §3);
-            # the method parameter is still named `deployment_id` (VIB-4726).
             conditions = ["deployment_id = ?"]
             params: list[Any] = [deployment_id]
 
@@ -4416,13 +3954,8 @@ class SQLiteStore:
             await self.initialize()
 
         def _sync_sum() -> Decimal:
-            # pr-auditor finding #1: SUM(CAST(... AS REAL)) routes Decimal-as-
-            # TEXT through IEEE-754 double before re-wrapping in Decimal,
-            # silently violating the lossless-precision invariant the rest
-            # of the accounting stack maintains. Read raw rows and sum in
-            # Python with Decimal — preserves measurement semantics, keeps
-            # NULL/empty-as-zero coalescing (F5 pin), and stays well under
-            # the F6 perf budget (10k rows in <100ms).
+            # Sum Decimal text in Python because SQLite REAL would silently lose accounting precision.
+
             with self._db_lock:
                 cursor = self._conn.execute(  # type: ignore[union-attr]
                     """
@@ -4437,10 +3970,8 @@ class SQLiteStore:
             for row in rows:
                 raw = row["gas_usd"]
                 if raw is None or raw == "":
-                    # F5 pin: NULL / empty-string rows coalesce to zero
-                    # (parser-didn't-emit, not silent-drop signal). The row
-                    # is counted as measured-but-zero; the row itself is
-                    # preserved.
+                    # Missing gas contributes zero without dropping the ledger row.
+
                     continue
                 total += Decimal(str(raw))
             return total
@@ -4568,10 +4099,6 @@ class SQLiteStore:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _sync_get)
 
-    # -------------------------------------------------------------------------
-    # Typed accounting events (VIB-3417)
-    # -------------------------------------------------------------------------
-
     async def save_accounting_event(self, event: Any) -> bool:
         """Persist a typed accounting event (LendingAccountingEvent, PendleAccountingEvent, etc.).
 
@@ -4589,20 +4116,13 @@ class SQLiteStore:
             await self.initialize()
 
         identity = event.identity
-        # Augment payload with version stamps + lending aliases at the
-        # last possible moment, regardless of who called us. Mode-aware
-        # error contract (VIB-3863): live raises AccountingPersistenceError
-        # on a malformed payload so the runner halts; paper/dry-run logs
-        # ERROR and pass-throughs so the loop keeps moving.
+        # Augment at the persistence boundary so every local writer receives identical mode-aware validation.
+
         from ...accounting.writer import augment_accounting_payload
 
         is_live = getattr(identity, "execution_mode", "") == "live"
-        # VIB-4278: build a registry_lookup callable bound to this event's
-        # identity context so the augment chokepoint can stamp
-        # `source="registry"` on the position_reference shape when the
-        # position_registry has a matching row. The lookup runs inside the
-        # same _db_lock-held connection used for the INSERT below — see the
-        # design note in `_build_registry_lookup_for_event`.
+        # Resolve registry identity and insert under one lock against a stable local view.
+
         raw_event_payload = event.to_payload_json()
 
         def _sync_save() -> bool:
@@ -4617,13 +4137,9 @@ class SQLiteStore:
                     is_live=is_live,
                     registry_lookup=registry_lookup,
                 )
-                # VIB-4196 / T10: extract `position_reference` (when present)
-                # out of the augmented payload and persist it to the
-                # dedicated column. The column is a denormalized
-                # query-convenience copy — payload_json remains the canonical
-                # source. The augment chokepoint only emits the key for
-                # OPEN/CLOSE rows with a known event_type; non-OPEN/CLOSE
-                # rows + unknown-event-type fallback rows leave it NULL.
+                # Payload JSON is canonical; the position_reference column is a denormalized query copy.
+                # Unsupported event kinds and unknown event types remain NULL.
+
                 position_reference = _extract_position_reference_column(payload_json)
 
                 self._conn.execute(  # type: ignore[union-attr]
@@ -4705,33 +4221,16 @@ class SQLiteStore:
         the store ever being initialized (no boot migrations).
         """
         if not tx_hash:
-            # No tx_hash → no match possible. Legacy path keeps emitting
-            # ``source="legacy"`` and the event lands cleanly.
             return None
 
-        # Normalize the event's tx_hash to lowercase once. The registry
-        # stores ``opened_tx`` / ``closed_tx`` as supplied by the runner /
-        # backfill (mixed-case is possible on EVM chains — checksum-cased
-        # addresses, mixed-case hashes from some RPCs), but accounting
-        # event ``tx_hash`` can arrive in either case. A case-sensitive
-        # ``= ?`` comparison silently misses the row and stamps
-        # ``source="legacy"`` — see CodeRabbit review on PR #2236. We
-        # normalise on BOTH sides: lowercase the bind param here and wrap
-        # the column in ``LOWER(...)`` in the WHERE predicate. The
-        # expression indexes ``ix_registry_opened_tx_lookup`` /
-        # ``ix_registry_closed_tx_lookup`` defined alongside the table
-        # are built on ``LOWER(opened_tx)`` / ``LOWER(closed_tx)``, so
-        # the WHERE remains indexable.
+        # Normalize hashes on both sides because persisted RPC values may use mixed case.
+        # Matching expression indexes keep the normalized lookup indexable.
+
         normalized_tx_hash = tx_hash.lower()
         conn = conn if conn is not None else self._conn
         if conn is None:
             return None
 
-        # Columns selected from position_registry. Pulled out so the
-        # SELECT list stays in lock-step with what callers expect when
-        # they read keys off the returned dict
-        # (``build_registry_position_reference`` in
-        # ``accounting/position_reference.py``).
         _REGISTRY_LOOKUP_COLS = (
             "physical_identity_hash",
             "semantic_grouping_key",
@@ -4743,38 +4242,21 @@ class SQLiteStore:
         )
 
         def _lookup(primitive: str, event_kind: str, accounting_category: str) -> dict | None:
-            # OPEN events match opened_tx; CLOSE events match closed_tx.
-            # Filter by chain too so a tx_hash collision across forks
-            # (rare but possible with Anvil snapshots) cannot return the
-            # wrong row.
+            # Include chain so reused fork transaction hashes cannot cross-match registry rows.
+
             if event_kind == "open":
                 tx_col = "opened_tx"
             elif event_kind == "close":
                 tx_col = "closed_tx"
             else:
-                # _resolve_position_reference only calls us for OPEN/CLOSE;
-                # any other kind is a chokepoint bug. Fall through to
-                # legacy rather than raise (registry-mode is opt-in).
+                # Unknown kinds fall back to legacy rather than failing an opt-in registry lookup.
+
                 return None
 
-            # The ``{tx_col} IS NOT NULL`` predicate is technically
-            # redundant (``LOWER(NULL) = ?`` is false), but it lets
-            # SQLite's planner pick the partial index
-            # ``ix_registry_opened_tx_lookup`` /
-            # ``ix_registry_closed_tx_lookup`` (declared
-            # ``WHERE opened_tx IS NOT NULL``). Without the predicate the
-            # planner falls back to a table scan once the table is
-            # ANALYZE'd — verified locally on SQLite 3.49.
-            #
-            # ``accounting_category = ?`` was added in PR #2236 round 2
-            # (CodeRabbit). Multiple AccountingCategory values can share
-            # the same Primitive — UniV3 ``"lp"`` and Pendle
-            # ``"pendle_lp"`` both have ``Primitive="lp"`` — so a tx
-            # that touches positions in different categories would
-            # otherwise return multiple rows here, and stamping the
-            # wrong category's ``physical_identity_hash`` / ``handle``
-            # onto an accounting event loses the L5_22 join key
-            # silently.
+            # The explicit non-NULL predicate is required for SQLite to select the partial expression index.
+            # Category disambiguates primitives shared by multiple accounting position types.
+            # Omitting it could silently stamp the wrong physical identity in a batched transaction.
+
             sql = (
                 f"SELECT {', '.join(_REGISTRY_LOOKUP_COLS)} "
                 f"FROM position_registry "
@@ -4798,24 +4280,10 @@ class SQLiteStore:
             if not rows:
                 return None
             if len(rows) > 1:
-                # Ambiguity safeguard (CodeRabbit PR #2236 round 2): even
-                # with ``accounting_category`` in the join key, a single
-                # tx that opens multiple positions in the same
-                # (primitive, category) — e.g. a batched lp_open that
-                # mints two UniV3 NFTs in one transaction — would still
-                # land multiple rows here. Picking the first row by
-                # ``physical_identity_hash ASC`` would stamp ONE
-                # position's identity onto BOTH accounting events,
-                # silently losing the L5_22 join key. Return None
-                # instead: the augment chokepoint falls through to the
-                # legacy reference (null identity fields), which
-                # preserves the "Empty ≠ Zero" contract — better to
-                # admit "unmeasured" than to stamp a wrong hash.
-                #
-                # The durable fix is to thread ``registry_handle`` (when
-                # the strategy supplies one) into the lookup key so each
-                # leg of a multi-position tx joins to its own row; that
-                # is the follow-up tracked separately.
+                # Never guess when one transaction maps to multiple same-category positions.
+                # A null legacy pointer is safer than a wrong physical identity that cannot be reconciled reliably.
+                # Registry handle is the required disambiguator for multi-position transactions.
+
                 logger.warning(
                     "registry_lookup: %d rows matched for "
                     "(deployment_id=%s, chain=%s, primitive=%s, "
@@ -4942,8 +4410,6 @@ class SQLiteStore:
             (deployment_id, chain, primitive, physical_identity_hash),
         ).fetchone()
         if persisted is None:
-            # The INSERT raises before we get here if it was rejected outright,
-            # so this is defensive only.
             return 0
         anchors = dict(persisted)
 
@@ -4974,42 +4440,10 @@ class SQLiteStore:
 
             matching = [dict(c) for c in candidates if _belongs(dict(c).get("event_type"), event_kind)]
             if len(matching) > 1:
-                # Event-side ambiguity safeguard — the mirror of the registry-side
-                # one in `_build_registry_lookup_for_event`, and it closes a window
-                # that one cannot see.
-                #
-                # When ONE tx touches two positions of the same
-                # (primitive, accounting_category), their two registry rows are
-                # written by two separate calls to this writer. After the FIRST
-                # write only one row exists, so the registry-side lookup finds
-                # exactly one match and reports no ambiguity — yet there are two
-                # accounting events for that tx and nothing here says which event
-                # belongs to which position. Stamping both with the first row's
-                # identity would substitute a GUESS for an unmeasured value, and
-                # the no-downgrade rule in `restamp_position_reference` would then
-                # make that guess permanent: when the second registry row lands the
-                # registry-side safeguard returns None, so the wrong pointer is
-                # never revisited. (Codex, panel review of PR #3609.)
-                #
-                # Refuse instead. Per CLAUDE.md "Empty ≠ Zero" — and the identical
-                # reasoning already recorded on the registry-side safeguard — it is
-                # better to admit "unmeasured" than to stamp a wrong hash. Both
-                # events keep source="legacy", L5_22 reports them honestly as
-                # orphans, and the durable fix is the same one that safeguard
-                # names: thread `registry_handle` into the join so each leg
-                # resolves to its own row (VIB-6553).
-                #
-                # KNOWN over-refusal, deliberate: this also declines when both
-                # matching events belong to the SAME position, where stamping
-                # would have been correct. Reachability is low — event ids are
-                # deterministic over (deployment, cycle, event_type, tx, position_key)
-                # and the INSERT is OR REPLACE on id, so a same-cycle retry
-                # collapses to one row; only a cross-cycle re-book of one tx could
-                # produce two. Even then the trade is correct -> unmeasured, never
-                # correct -> wrong, which is the safe direction. `position_key`
-                # would discriminate that case, but it cannot discriminate the case
-                # this guard exists for (two positions, two keys, one tx), so it is
-                # not a substitute for the registry_handle fix.
+                # Registry rows for one transaction may arrive separately after multiple accounting events already exist.
+                # Do not stamp any event without a handle that proves which physical position it belongs to.
+                # Deliberate over-refusal preserves unmeasured identity instead of making an irreversible wrong guess.
+
                 logger.warning(
                     "position_reference repair: %d accounting events match "
                     "(deployment_id=%s chain=%s tx=%s primitive=%s category=%s kind=%s) but "
@@ -5090,12 +4524,9 @@ class SQLiteStore:
                 physical_identity_hash=phid,
             )
         except Exception as exc:  # noqa: BLE001 — one row's failure must not abort the book
-            # Guarded teardown: an error class that already aborted the
-            # ENCLOSING transaction (e.g. SQLITE_FULL) destroys the savepoint,
-            # and an unguarded ROLLBACK TO here would raise a NEW exception
-            # that replaces `exc` and escapes the per-row containment. Swallow
-            # only the teardown failure — the dead transaction itself still
-            # fails loudly at the outer COMMIT (CodeRabbit, PR #3615).
+            # A transaction-level failure may already have destroyed the savepoint.
+            # Suppress only teardown errors so they cannot replace the original failure.
+
             with contextlib.suppress(sqlite3.Error):
                 conn.execute("ROLLBACK TO frozen_row_repair")
                 conn.execute("RELEASE frozen_row_repair")
@@ -5184,12 +4615,9 @@ class SQLiteStore:
             raise FileNotFoundError(f"state DB not found: {db_path}")
 
         if self._conn is not None:
-            # The flock below is per-PROCESS: it cannot fence out this same
-            # process's own initialized store connection, which could then
-            # write between the counting pass and the committed pass and
-            # invalidate the integrity pre-scan. The repair is offline-only —
-            # construct a fresh, uninitialized store for it, as the CLI does
-            # (CodeRabbit, PR #3615).
+            # A process-scoped flock cannot fence this store's own active connection.
+            # Require an offline store so no write can invalidate the integrity scan.
+
             raise ValueError(
                 "repair_frozen_position_references requires an OFFLINE store: this "
                 "SQLiteStore already holds an active connection. Construct a fresh "
@@ -5204,8 +4632,8 @@ class SQLiteStore:
             if "accounting_events" not in tables:
                 raise ValueError(f"not a strategy state DB (no accounting_events table): {db_path}")
             if "position_registry" not in tables:
-                # Nothing to join against — a legacy book, not an error. The
-                # honest answer is "0 repairs", not a crash (card D3.F5).
+                # A registry-free legacy book has nothing to repair and is not malformed.
+
                 result.registry_absent = True
                 return result
 
@@ -5232,9 +4660,8 @@ class SQLiteStore:
                     repaired_total += self._repair_frozen_registry_row(conn, row, poisoned_txs, skips)
                 return repaired_total, skips
 
-            # Counting pass — real repair, rolled back. In dry-run mode this
-            # IS the result; in write mode it decides whether a backup (and a
-            # second, committed pass) is needed at all.
+            # Run the real repair under rollback so dry-run and write-mode counts cannot drift.
+
             conn.execute("BEGIN IMMEDIATE")
             try:
                 repaired, skips = _run_pass()
@@ -5253,9 +4680,8 @@ class SQLiteStore:
                 finally:
                     backup_conn.close()
             except BaseException:
-                # Remove the claimed placeholder so a failed backup (e.g. disk
-                # full) does not leave a 0-byte .bak- file that reads as a
-                # valid recovery point (CodeRabbit, PR #3615).
+                # Remove a failed backup placeholder so it cannot masquerade as a recovery point.
+
                 with contextlib.suppress(OSError):
                     os.unlink(backup_path)
                 raise
@@ -5272,9 +4698,8 @@ class SQLiteStore:
             result.skips = skips
             result.written = repaired > 0
             if repaired == 0:
-                # Cannot happen while the flock serializes writers (the
-                # counting pass just found work), so surface it rather than
-                # silently reporting a no-op with a fresh backup on disk.
+                # A serialized committed pass should agree with the counting pass; surface any drift.
+
                 logger.warning(
                     "frozen-book repair: counting pass found work but the "
                     "committed pass re-pointed 0 events on %s; backup %s kept",
@@ -5352,9 +4777,8 @@ class SQLiteStore:
             WHERE {" AND ".join(where)}
             ORDER BY timestamp ASC, rowid ASC
         """
-        # rowid tiebreak: FIFO lot replay (VIB-5057) assumes BUY precedes
-        # SELL; two events sharing an identical ISO timestamp must replay in
-        # insertion order, not scan order.
+        # Equal-timestamp events replay in insertion order to preserve FIFO lot semantics.
+
         with self._db_lock:
             cursor = self._conn.execute(sql, params)
             rows = cursor.fetchall()
@@ -5462,10 +4886,6 @@ class SQLiteStore:
         loop3 = asyncio.get_event_loop()
         return await loop3.run_in_executor(None, _sync_get_hist)
 
-    # -------------------------------------------------------------------------
-    # Accounting outbox (VIB-3467) — drained by AccountingProcessor
-    # -------------------------------------------------------------------------
-
     async def save_outbox_entry(
         self,
         outbox_id: str,
@@ -5481,11 +4901,7 @@ class SQLiteStore:
         """Write one row to accounting_outbox.  Called from the execution hot path via write_outbox_entry."""
         if not self._initialized:
             await self.initialize()
-        # Capture all args for the inner closure. VIB-4722 collapsed
-        # accounting_outbox to a single canonical `deployment_id` column
-        # (the dead `deployment_id` column was dropped), so the `deployment_id`
-        # method parameter (kept for the signature — VIB-4726) is no longer
-        # captured.
+
         _outbox_id, _dep_id, _cycle_id = outbox_id, deployment_id, cycle_id
         _led_id, _intent, _wallet, _pos, _mkt = ledger_entry_id, intent_type, wallet_address, position_key, market_id
         _created = created_at
@@ -5637,21 +5053,6 @@ class SQLiteStore:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _sync)
 
-    # =========================================================================
-    # Position-registry CRUD + migration_state CRUD — VIB-4198 / T12
-    # =========================================================================
-    #
-    # Per blueprint 28 §4.1 / cutover spec §2.1 / §3 — these accessors are
-    # the SDK-owned local-SQLite implementation of the position_registry +
-    # migration_state surfaces. Hosted Postgres equivalents land in T19
-    # (VIB-4205) via the metrics-database repo.
-    #
-    # The atomic primitive `save_ledger_and_registry_atomic` (T11, above)
-    # is the production write path for runtime LP_OPEN / LP_CLOSE. The
-    # backfill READ path uses `insert_position_registry_row_if_absent`
-    # (`INSERT … ON CONFLICT DO NOTHING`) so the backfill is idempotent
-    # under restart per cutover spec §3.4.
-
     async def get_position_registry_open_rows(
         self,
         deployment_id: str,
@@ -5699,10 +5100,8 @@ class SQLiteStore:
                 try:
                     parsed = json.loads(payload_raw)
                 except (TypeError, ValueError) as exc:
-                    # A corrupt payload row stays opaque rather than tripping
-                    # the iterator, but we surface a WARNING + structured
-                    # diagnostic field so corruption is visible to operators
-                    # rather than silently degrading to {}.
+                    # Keep corrupt payloads inspectable through structured diagnostics without failing the row iterator.
+
                     logger.warning(
                         "position_registry.payload JSON decode failed for "
                         "deployment_id=%s chain=%s primitive=%s "
@@ -5717,13 +5116,9 @@ class SQLiteStore:
                     d["payload_decode_error"] = str(exc)
                     d["payload"] = {}
                 else:
-                    # Audit m5 (CodeRabbit): the accessor's contract is
-                    # "parsed dict". ``json.loads`` accepts arrays /
-                    # strings / numbers too — those would slip through
-                    # the decode-error guard above and break callers
-                    # that do ``payload.get(...)``. Normalize non-dict
-                    # JSON to ``{}`` and surface a diagnostic field so
-                    # malformed-by-shape rows are observable.
+                    # Preserve the parsed-dict contract when valid JSON has the wrong shape.
+                    # Record diagnostics rather than exposing a value callers cannot safely query.
+
                     if isinstance(parsed, dict):
                         d["payload"] = parsed
                     else:
@@ -5898,11 +5293,9 @@ class SQLiteStore:
             notes = json.loads(raw.get("notes") or "{}")
         except (TypeError, ValueError):
             notes = {}
-        # Defensive: ``notes`` is contractually an object on the
-        # migration_state JSON column, but ``json.loads`` accepts arrays /
-        # strings / numbers too. ``MigrationStateRow.notes`` is typed
-        # ``dict[str, Any]``, so coerce non-dict shapes back to {} rather
-        # than letting a malformed row break downstream consumers.
+        # JSON decoding accepts scalars and arrays; preserve the typed notes-object contract.
+        # Malformed shapes degrade to an empty object rather than breaking migration consumers.
+
         if not isinstance(notes, dict):
             notes = {}
         return MigrationStateRow(
