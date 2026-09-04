@@ -32,38 +32,17 @@ if TYPE_CHECKING:
     from ..teardown import TeardownMode
     from .runner_models import IterationResult, StrategyProtocol
 
-# Use the original strategy_runner logger so existing log-capture tests and
-# log-filtering rules continue to work after the extraction.
+# Keep the established logger name for log filters and capture tests.
 logger = logging.getLogger("almanak.framework.runner.strategy_runner")
 
 
-# -------------------------------------------------------------------------
-# Approval callback for slippage escalation (VIB-2927)
-# -------------------------------------------------------------------------
-
-# Valid approval actions. Defensive against typos or legacy payloads.
-# "approve" and "continue" both mean "accept this level"; "wait_and_escalate"
-# advances to the next slippage level after a pause; "cancel" aborts.
 _VALID_APPROVAL_ACTIONS = {"approve", "continue", "wait_and_escalate", "cancel"}
 
-# Teardown request sources that imply a human operator is actively watching.
-# Everything else — including ``request=None`` and unknown future sources —
-# is treated as auto mode. Fail-closed: adding a new source requires an
-# explicit decision to put it on this list, so a new source cannot silently
-# start blocking on approvals no one will give. Tests import this constant
-# directly so the taxonomy cannot drift between runtime and test expectations.
+# Unknown request sources stay automatic so teardown cannot block on an
+# approval that no operator is present to provide.
 _MANUAL_TEARDOWN_REQUESTERS: frozenset[str] = frozenset({"cli", "dashboard", "dashboard_api"})
 
 
-# -------------------------------------------------------------------------
-# VIB-4587 / F5 — teardown sweep DX warning
-# -------------------------------------------------------------------------
-#
-# Logic lives in ``almanak/framework/teardown/sweep_warning.py`` so the
-# manager-driven teardown path (``teardown_manager.py``) and the inline
-# fallback (this module) can both invoke it. We re-export the public
-# name under the historical private name so existing unit tests keep
-# importing from this module unchanged.
 _warn_if_sweep_non_strategy_balance = warn_if_sweep_non_strategy_balance
 
 
@@ -84,18 +63,11 @@ def derive_teardown_auto_mode(request: Any) -> bool:
     return getattr(request, "requested_by", None) not in _MANUAL_TEARDOWN_REQUESTERS
 
 
-# Safe default when an approval payload is missing or malformed. Cancelling a
-# teardown on malformed input would be destructive (operator loses the chance
-# to approve). wait_and_escalate advances through the EscalatingSlippageManager
-# under auto-approve rules, which is the safe fallback.
+# Malformed approval data must not cancel teardown or fabricate approval.
 _SAFE_DEFAULT_APPROVAL_ACTION = "wait_and_escalate"
 
-# Poll interval for the approval SQLite channel. Short enough to feel responsive
-# to an operator click; long enough to avoid hammering SQLite.
 _APPROVAL_POLL_INTERVAL_S = 5.0
 
-# Fallback approval deadline when ApprovalRequest.expires_at is None. Matches
-# the typical escalation-level window in EscalatingSlippageManager.
 _APPROVAL_DEFAULT_TIMEOUT = timedelta(minutes=30)
 
 
@@ -148,9 +120,7 @@ def _parse_approval_response(response_json: str, teardown_id: str) -> Any:
             action=_SAFE_DEFAULT_APPROVAL_ACTION,
         )
 
-    # Parse `approved` explicitly so `{"approved": "false"}` does not collapse
-    # to True via bool() on a non-empty string. Accept bool / canonical string
-    # forms and reject everything else.
+    # Explicit parsing prevents a non-empty string such as "false" from becoming true.
     approved_raw = data.get("approved", False)
     if isinstance(approved_raw, bool):
         approved = approved_raw
@@ -161,9 +131,6 @@ def _parse_approval_response(response_json: str, teardown_id: str) -> Any:
     else:
         approved = False
 
-    # Parse approved_slippage defensively — an invalid Decimal string would
-    # have crashed the callback and fallen into the outer try/except of the
-    # approval loop. Fall back to safe-default action instead.
     approved_slippage: Decimal | None = None
     approved_slippage_raw = data.get("approved_slippage")
     if approved_slippage_raw is not None:
@@ -204,14 +171,10 @@ def _make_approval_callback(runner: Any, state_adapter: Any):
     """
 
     async def on_approval_needed(request):
-        # Expiry fallback: ApprovalRequest.expires_at is typed Optional, so don't
-        # crash if a future caller omits it.
         expires_at = request.expires_at or datetime.now(UTC) + _APPROVAL_DEFAULT_TIMEOUT
         timeout_s = max(0.0, (expires_at - datetime.now(UTC)).total_seconds())
         monotonic_deadline = time.monotonic() + timeout_s
 
-        # Persist the request. Include fields that let the operator make an
-        # informed decision (age of request, next-level slippage if declined).
         await asyncio.to_thread(
             state_adapter.create_approval_request,
             teardown_id=request.teardown_id,
@@ -238,8 +201,6 @@ def _make_approval_callback(runner: Any, state_adapter: Any):
             expires_at=expires_at.isoformat(),
         )
 
-        # Alert operator. Failure to alert is serious — without the alert, the
-        # operator may never know approval is waiting. Log as error with stack.
         if runner.alert_manager:
             try:
                 await runner.alert_manager.send_approval_needed(request)
@@ -259,7 +220,6 @@ def _make_approval_callback(runner: Any, state_adapter: Any):
             expires_at.isoformat(),
         )
 
-        # Poll the SQLite channel until response or monotonic timeout.
         while time.monotonic() < monotonic_deadline:
             response_json = await asyncio.to_thread(
                 state_adapter.get_approval_response,
@@ -270,12 +230,8 @@ def _make_approval_callback(runner: Any, state_adapter: Any):
                 return _parse_approval_response(response_json, request.teardown_id)
             await asyncio.sleep(_APPROVAL_POLL_INTERVAL_S)
 
-        # Timeout — try to mark the row resolved so a late API response
-        # doesn't land on this stale level. The UPDATE uses
-        # `WHERE response_json IS NULL`, so if an operator responded in the
-        # final sleep gap their response wins and our timeout write returns
-        # False. In that case, read the row back and honour the real response
-        # instead of auto-escalating.
+        # The conditional timeout write prevents a late response from being overwritten.
+        # If the operator won the race, read and honor that response.
         timeout_payload = json.dumps(
             {
                 "approved": False,
@@ -301,8 +257,6 @@ def _make_approval_callback(runner: Any, state_adapter: Any):
             )
 
         if wrote_timeout is False:
-            # Someone else wrote first — likely a just-in-time operator response.
-            # Read it back and honour it.
             try:
                 late_response = await asyncio.to_thread(
                     state_adapter.get_approval_response,
@@ -446,20 +400,9 @@ async def _check_no_intent_completeness(strategy: Any, request: Any = None) -> A
     noop_target = resolve_consolidation_noop_target(
         getattr(request, "asset_policy", None),
         getattr(request, "target_token", None),
-        # VIB-5727: the request may carry the "no preference" sentinel, so the
-        # gate needs the chain to credit the same token consolidation will
-        # target. No teardown plan exists yet at this gate, so the strategy is
-        # the only chain source available here.
+        # Resolve the no-preference target against the strategy chain before a plan exists.
         chain=getattr(strategy, "chain", None) or None,
     )
-    # VIB-6316 deliberately does NOT thread ``wallet_for_chain`` here (gate site
-    # G3). This call passes NO intents, and ``_position_is_covered`` returns
-    # ``False`` the moment its covering list is empty — before any identity
-    # comparison runs. The wallet is unreachable by construction, so passing a
-    # resolver would add a call per position that nothing ever reads, and would
-    # read to a future maintainer as load-bearing wiring. G1
-    # (``_teardown_helpers.py``) and G2 (``teardown_manager.py``) are the two
-    # sites that matter; this is the no-intents gate.
     return check_intent_coverage(positions, [], consolidation_target_token=noop_target)
 
 
@@ -566,8 +509,6 @@ async def _recover_orphaned_lp_intents(
     try:
         positions = strategy.get_open_positions()
     except Exception:
-        # Can't read positions → can't decide. Leave intents untouched; the
-        # downstream lane has its own positions/verify path.
         logger.debug(
             "Teardown LP recovery: get_open_positions failed for %s — skipping discovery fallback",
             deployment_id,
@@ -575,7 +516,6 @@ async def _recover_orphaned_lp_intents(
         )
         return teardown_intents, False, None
 
-    # Strategy still tracks its LP → its own close is authoritative; no scan.
     if strategy_reports_lp(positions):
         return teardown_intents, False, None
 
@@ -583,15 +523,11 @@ async def _recover_orphaned_lp_intents(
     if not helpers.has_lp_discovery:
         return teardown_intents, False, None
 
-    # ``has_lp_discovery`` guarantees both callables are wired; bind them to
-    # non-Optional locals so the type checker sees them as callable (mypy can't
-    # narrow Optional through the property).
     get_ownership = helpers.get_deployment_lp_ownership
     discover = helpers.discover_lp_positions
     assert get_ownership is not None and discover is not None  # noqa: S101 — narrowed by has_lp_discovery
 
-    # Ownership FIRST (cheap local read). Determines (a) which discovered NFTs we
-    # may close and (b) whether an incomplete scan is even relevant to us.
+    # Prove deployment ownership before any wallet-scoped scan can authorize a close.
     try:
         ownership = await get_ownership(strategy, chain)
     except Exception:  # noqa: BLE001 — ownership read must never block risk reduction
@@ -601,33 +537,22 @@ async def _recover_orphaned_lp_intents(
         )
         return teardown_intents, False, None
 
-    # No attribution source readable → ownership unprovable → never close.
     if not ownership.available:
         return teardown_intents, False, None
 
-    # This deployment owns no LP on this chain → nothing to recover, and an
-    # unrelated NPM blip during a scan must not block this benign teardown.
-    # Skip the gateway scan entirely (resolves the spurious-FAILED concern).
+    # Avoid making an unrelated discovery outage relevant to a deployment with no LP attribution.
     if not ownership.token_ids and not ownership.had_lp_open:
         return teardown_intents, False, None
 
     try:
-        # Pass the deployment's provable ownership set so the V4 verification
-        # pass (VIB-6109) can check each owned id against the V4 PositionManager —
-        # V4 is not ERC721Enumerable and cannot be wallet-enumerated like V3.
+        # V4 is not enumerable, so recovery can verify only proven owned token IDs.
         discovery = await discover(strategy, ownership.token_ids)
     except Exception:  # noqa: BLE001 — discovery must never block risk reduction
         logger.exception(
             "Teardown LP recovery: discovery helper raised for %s — continuing without recovery",
             deployment_id,
         )
-        # Honesty axis (Gemini HIGH): a RAISED scan is the same information loss
-        # as ``incomplete=True`` — we could not enumerate the wallet's NFTs. We
-        # only reach here past the guard above, so this deployment IS known to
-        # have an LP on this chain (token_ids and/or had_lp_open). Mirror the F2
-        # logic: degrade to incomplete=True (manual-check / loud) for an
-        # owned-LP deployment so teardown is NOT certified clean; a deployment
-        # with no LP attribution here would have skipped the scan already.
+        # A failed scan for a deployment with LP attribution cannot certify closure.
         owns_lp_here = bool(ownership.token_ids) or ownership.had_lp_open
         if owns_lp_here:
             warning = (
@@ -636,7 +561,6 @@ async def _recover_orphaned_lp_intents(
                 "verification required."
             )
             return teardown_intents, True, warning
-        # Defensive: no LP attribution → a raised scan is benign (WARNING only).
         logger.warning(
             "Teardown LP recovery: discovery raised for %s but this deployment has no LP "
             "attribution on this chain — degrading to a warning, not a block.",
@@ -736,18 +660,12 @@ async def _recover_pending_order_intents(
 
     deployment_id = getattr(strategy, "deployment_id", "")
 
-    # ``None`` means the read was unmeasured; an empty set means a measured
-    # empty pending-order book. The production resume lane uses this to clear
-    # only an incompleteness signal attributable to its exact accepted keys.
+    # None is unmeasured; an empty set is a measured-empty pending-order book.
     _record_teardown_pending_recovery_keys(runner, None)
     try:
         residuals = discover_teardown_residuals(strategy)
     except Exception as exc:  # noqa: BLE001 — discovery must never block risk reduction
-        # ``discover_teardown_residuals`` is contracted never-raise; if it DOES, we
-        # could not enumerate residuals, so fail CLOSED — do not certify clean (a
-        # strand may remain). This never blocks risk reduction (incomplete only
-        # degrades the post-execution result to manual-check) and is consistent with
-        # the post-discovery-crash branch below. (Gemini review.)
+        # An unmeasured residual set cannot certify closure, but does not block risk reduction.
         logger.exception(
             "Teardown pending-order recovery: residual discovery raised for %s — failing closed (manual check)",
             deployment_id,
@@ -763,33 +681,24 @@ async def _recover_pending_order_intents(
         _record_teardown_pending_recovery_keys(runner, frozenset())
         return teardown_intents, False, None
 
-    # Residuals were MEASURED — from here a crash must fail CLOSED (do not certify
-    # clean) rather than raise, since a strand may remain unrecovered. This makes
-    # the "never raises" guarantee structural, not incidental to the list-ops below.
+    # Once residuals are measured, later recovery faults fail closed through the result.
     try:
         if await _prepare_deferred_pending_orders(strategy, residuals):
-            # The connector changed the current managed session. Re-measure
-            # once, then build cancels only from the new authoritative state.
+            # Session preparation invalidates the prior measurement; cancel from one fresh read.
             residuals = remeasure_teardown_residuals(strategy, residuals)
 
-        # An UNMEASURED residual read (fail-closed sentinel) means we could NOT
-        # enumerate the OrderVault — a strand may remain, so do not certify clean.
+        # None preserves an unmeasured read; an empty set is measured-empty.
         pending_order_keys = _pending_order_keys(residuals)
         unmeasured = pending_order_keys is None
 
-        # Partition pending orders by the GMX cancel age-gate (VIB-5568). Only orders
-        # comfortably past REQUEST_EXPIRATION_TIME (~300s) carry ``cancellable=True``
-        # from residual discovery; a fresh order (or one whose age was unmeasured) is
-        # DEFERRED — cancelling it now would just revert (RequestNotYetCancellable) and
-        # burn the slippage-escalation ladder to FAILED.
+        # GMX rejects cancellation before its age gate. Defer fresh or unmeasured orders
+        # instead of exhausting the slippage ladder on a deterministic revert.
         pending = [p for p in residuals if (p.details or {}).get("kind") == "pending_order"]
         _record_teardown_pending_recovery_keys(runner, pending_order_keys)
         cancellable = [p for p in pending if (p.details or {}).get("cancellable")]
         deferred = [p for p in pending if not (p.details or {}).get("cancellable")]
 
-        # full_close_intents' PERP branch fail-closes any residual without a real
-        # bytes32 order key OR not marked cancellable to None, so a garbage key or a
-        # too-young order can never produce a mis-targeted / doomed cancel.
+        # The close planner also requires a valid bytes32 key before targeting a cancel.
         cancels = full_close_intents(cancellable) if cancellable else []
         if cancels:
             logger.warning(
@@ -800,9 +709,6 @@ async def _recover_pending_order_intents(
             )
             teardown_intents = list(teardown_intents) + list(cancels)
 
-        # Deferred (not-yet-cancellable) orders keep teardown from certifying clean
-        # and surface a precise "recoverable in ~Ns" message — the operator (or a
-        # later teardown) recovers them once the gate elapses.
         deferred_warning = None
         if deferred:
             waits = [(p.details or {}).get("seconds_until_cancellable") for p in deferred]
@@ -900,11 +806,6 @@ def _safe_mark(state_manager: Any, method_name: str, deployment_id: str, **kwarg
         )
 
 
-# -------------------------------------------------------------------------
-# Main teardown entry point
-# -------------------------------------------------------------------------
-
-
 def _apply_lending_unwind_guard(
     teardown_intents: list,
     teardown_market: Any,
@@ -942,8 +843,6 @@ def _apply_lending_unwind_guard(
 
     for reason in guarded.dropped:
         logger.info("🛑 %s lending guard dropped intent — %s", deployment_id, reason)
-        # VIB-5478: structured BLOCK decision — a stale/no-op lending intent the
-        # fresh-state guard refused to dispatch (TD-10).
         log_teardown_decision(
             deployment_id=deployment_id,
             teardown_id=teardown_id,
@@ -959,8 +858,6 @@ def _apply_lending_unwind_guard(
             deployment_id,
             ", ".join(guarded.synthesized_positions),
         )
-        # VIB-5478: structured REPAIR decision — the naive REPAY/WITHDRAW pair was
-        # REPLACED with the HF-safe unwind staircase (TD-09 / VIB-4466).
         log_teardown_decision(
             deployment_id=deployment_id,
             teardown_id=teardown_id,
@@ -982,8 +879,6 @@ def _apply_lending_unwind_guard(
             "kept risk-reducing intents only, suppressed any unconfirmed withdraw_all (VIB-5139)",
             deployment_id,
         )
-        # VIB-5478: structured BLOCK decision — an unmeasured fresh-exposure read
-        # forced the guard to fail closed (Empty ≠ Zero; degraded but continuing).
         log_teardown_decision(
             deployment_id=deployment_id,
             teardown_id=teardown_id,
@@ -997,10 +892,6 @@ def _apply_lending_unwind_guard(
 
 
 # crap-allowlist: VIB-4049 — pre-existing cc=21 teardown coordinator; lifecycle typing adds zero new branches.
-# Function is the canonical sequencer (market snapshot → intents → routing → manager/inline/fallback);
-# decomposing it requires the four-step SDK crap-refactor protocol (blueprint 14 + Plan agent +
-# test baseline) and is out of scope for a regression fix. The C901 exemption is already
-# in place for the same complexity. Refactor tracked separately.
 async def execute_teardown(  # noqa: C901
     runner: Any,
     strategy: StrategyProtocol,
@@ -1032,41 +923,14 @@ async def execute_teardown(  # noqa: C901
     from .runner_models import IterationResult, IterationStatus
 
     deployment_id = strategy.deployment_id
-    # TD-08 (VIB-5466): reset the Plan-A reconciliation signal at the very start
-    # so an early-exit path (no positions / all balances zero / generation
-    # failure) on a REUSED runner instance can never let a prior teardown's
-    # divergence report leak into this one. The post-enumeration CHECK below
-    # overwrites it on the lanes that reach it.
+    # A reused runner must not certify an early exit with evidence from a prior teardown.
     runner._teardown_reconciliation = None
-    # ALM-3109: same reset discipline for the composed closure verdict
-    # (``_teardown_helpers.closure_chain_evidence``). It is the ONLY signal that
-    # can turn a `strat test` teardown FAIL into a PASS, so a stale one leaking
-    # across teardowns on a reused runner would be a false success. Only the
-    # verify lane writes it; every early-exit and failure lane leaves it None,
-    # and None is refused by the consumer.
     runner._teardown_closure_verification = None
-    # Both modes have a real cross-process teardown channel: SQLite locally,
-    # gateway-backed in hosted mode. Any error here is a genuine
-    # misconfiguration and should propagate.
     manager: Any = get_teardown_state_manager_for_runtime(gateway_client=runner._get_gateway_client())
     request: Any = manager.get_active_request(deployment_id)
 
-    # Step T0.5 (VIB-6522): book any keeper-settled perp order BEFORE intent
-    # generation / enumeration / the completeness gate read the registry. The
-    # iteration lane's PERP_CLOSE cannot key the registry at submission time —
-    # the venue positionKey is MEASURED at keeper fill (two-phase design,
-    # VIB-3872 §3 D2) — so the registry open→closed transition is owned by the
-    # settlement reconciler's registry-completion write. That reconciler runs
-    # pre-decide (Step 1.7), and teardown routing (Step 0a) early-exits BEFORE
-    # it: a teardown requested inside the close-to-next-tick window finds the
-    # row still 'open', the fail-closed completeness gate refuses (correctly,
-    # on its own evidence), and the FAILED-teardown entry latch (VIB-5572)
-    # then starves Step 1.7 forever — permanently blocking teardown of a
-    # venue-flat deployment. One correlated reconcile tick here completes the
-    # designed Phase-2 write at the moment it matters (never parses
-    # uncorrelated keeper receipts — VIB-6152). Warn-only: on any failure the
-    # registry stays stale and the completeness gate stays fail-closed, which
-    # is exactly the pre-existing behaviour.
+    # Reconcile correlated async fills before enumeration so the registry reflects
+    # keeper settlement. Failure leaves the completeness gate fail-closed.
     pre_gate_cycle_id = str(getattr(runner, "_last_cycle_id", None) or deployment_id)
     pre_gate_degraded: str | None = None
     try:
@@ -1090,14 +954,7 @@ async def execute_teardown(  # noqa: C901
             exc_info=True,
         )
     if pre_gate_degraded:
-        # Inverted failure semantics (blueprint 14): degradation is LOUD and
-        # DURABLE but never blocks risk reduction. The reconciler reports most
-        # failures through its OUTCOME, not by raising (its internal
-        # AccountingPersistenceError catch boundary returns per-order degraded
-        # reasons), so the outcome must be read rather than discarded — an
-        # unbooked settlement that reaches a clean "no positions" completion
-        # would otherwise leave no ERROR, no deferred-write record, and no
-        # degradation signal anywhere (Codex review, PR #3608).
+        # Persist outcome-reported degradation without blocking later risk reduction.
         logger.error(
             "🛑 Teardown pre-gate perp settlement reconciliation degraded for %s "
             "(teardown continues; the durable watch set retries on any later tick): %s",
@@ -1117,7 +974,6 @@ async def execute_teardown(  # noqa: C901
             )
         )
 
-    # Step T1: Create market snapshot (SAME as normal decide() path)
     teardown_market = None
     try:
         teardown_market = strategy.create_market_snapshot()
@@ -1131,37 +987,19 @@ async def execute_teardown(  # noqa: C901
     except Exception as e:
         logger.warning(f"Failed to create market snapshot for teardown: {e}. Continuing without market data.")
 
-    # Step T2: Generate teardown intents WITH market (symmetric with decide(market))
     try:
         try:
             teardown_intents = strategy.generate_teardown_intents(teardown_mode, market=teardown_market)
         except TypeError as exc:
             if "unexpected keyword argument" not in str(exc):
                 raise
-            # Backward compat: old-style signature def generate_teardown_intents(self, mode)
             logger.debug(f"Strategy {deployment_id} uses old teardown signature (no market param), falling back")
             teardown_intents = strategy.generate_teardown_intents(teardown_mode)
     except Exception as e:
         logger.error(f"Failed to generate teardown intents for {deployment_id}: {e}")
         if request:
-            # VIB-5778: best-effort enumeration so the persisted failure carries
-            # honest position-level counts (nothing closed; the enumerable open
-            # positions all failed to close) instead of preserving the row's
-            # success-shaped 0-defaults. Enumeration is isolated inside
-            # ``_failure_position_counts`` so its own failure can never mask the
-            # original generation exception; when the set is unreadable it passes
-            # nothing (None) and the CLI's started_at-NULL "unknown" render covers it.
-            #
-            # Known limitation (deferred to VIB-5792): ``mark_failed`` cannot set
-            # ``positions_total`` (its proto / signature carries only closed +
-            # failed), so on this pre-``mark_started`` path ``positions_total``
-            # stays at its 0-default while ``positions_failed=N``. The HUMAN render
-            # is correct — ``counts_unmeasured`` (started_at IS NULL) shows
-            # "unknown" for all three — but ``--json`` / gateway consumers see a
-            # raw ``failed=N`` against ``total=0``. Making that row internally
-            # consistent requires persisting a measured ``positions_total`` on the
-            # failure path, which is a persisted-shape/proto change owned by
-            # VIB-5792 (persisted tri-state UNKNOWN counts). Out of scope here.
+            # Nothing executed; enumerate honest failure counts without masking the
+            # generation error. An unreadable count remains unset, never fabricated zero.
             closed, failed = await _failure_position_counts(strategy)
             _safe_mark(
                 manager,
@@ -1174,51 +1012,23 @@ async def execute_teardown(  # noqa: C901
         runner._request_teardown_failure_shutdown(str(e))
         return runner._create_error_result(deployment_id, IterationStatus.STRATEGY_ERROR, str(e), start_time)
 
-    # Step T2.4 (VIB-5138): auto-fallback to on-chain LP discovery when the
-    # strategy's state desynced (LP NFT live on-chain but ``_position_id``
-    # lost). Appends recovered LP_CLOSE intents and surfaces an incomplete flag
-    # when the bounded scan could not enumerate every position. Runs on the
-    # signal-driven runner lane only — the CLI ``teardown execute`` lane has the
-    # explicit ``--discover`` flag for the same recovery.
     teardown_intents, recovery_incomplete, recovery_warning = await _recover_orphaned_lp_intents(
         runner, strategy, teardown_intents, teardown_mode
     )
     lp_recovery_incomplete = recovery_incomplete
     lp_recovery_warning = recovery_warning
-    # Step T2.45 (VIB-5568): recover collateral from stranded pending (unfilled)
-    # perp orders. Residual discovery (VIB-5116) DETECTS them and #3130 fails the
-    # teardown loud on them; this RECOVERS them — turning each into a
-    # PERP_CANCEL_ORDER appended to teardown_intents so the OrderVault collateral is
-    # returned to the wallet and completeness then passes. Same commit pipeline; an
-    # UNMEASURED residual read degrades to incomplete (fail-closed, Empty ≠ Zero).
     teardown_intents, pending_incomplete, pending_warning = await _recover_pending_order_intents(
         runner, strategy, teardown_intents, teardown_mode
     )
     recovery_incomplete = recovery_incomplete or pending_incomplete
-    # Keep BOTH warnings when LP and pending-order recovery are each incomplete —
-    # ``or`` would drop the pending-order detail the operator needs.
+    # Preserve independent recovery failures instead of hiding one behind the other.
     recovery_warning = "; ".join(w for w in (recovery_warning, pending_warning) if w) or None
-    # F3 (VIB-5138): stash the incomplete signal on the runner so the
-    # intents-present path (multi-chain + TeardownManager lanes) can degrade the
-    # teardown lifecycle to manual-check after execution, instead of letting an
-    # unenumerated orphan sit inside a clean COMPLETED. Consumed + cleared by the
-    # completion-mark sites below / in execute_teardown_via_manager.
+    # Execution still proceeds, but incomplete recovery must prevent clean certification.
     runner._teardown_recovery_incomplete = recovery_incomplete
     runner._teardown_recovery_warning = recovery_warning
     runner._teardown_lp_recovery_incomplete = lp_recovery_incomplete
     runner._teardown_lp_recovery_warning = lp_recovery_warning
 
-    # Step T2.5 (VIB-5139): universal fresh-state guard for lending unwind.
-    # Strategies hand-roll REPAY/WITHDRAW teardown intents from cached exposure;
-    # stale state emits a REPAY 0, a withdraw_all when already flat, or a
-    # collateral withdraw before the debt repay — all of which revert
-    # (e.g. Aave HealthFactorLowerThanLiquidationThreshold) and strand the
-    # position. The guard does a FRESH on-chain exposure read (gateway-backed
-    # ``market.position_health``) and drops measured-zero actions, enforces
-    # repay-first, and degrades conservatively on an unmeasured read (Empty ≠
-    # Zero — never acts on a None as if it were zero). Pure list transform: the
-    # sanitised intents flow through the same dispatch funnel, so the per-intent
-    # commit pairing / anti-bypass guards are untouched.
     teardown_intents = _apply_lending_unwind_guard(
         teardown_intents,
         teardown_market,
@@ -1235,10 +1045,8 @@ async def execute_teardown(  # noqa: C901
             )
         accepted_state = accepted_lookup.state
         if accepted_state is not None:
-            # A keeper may have filled between ticks, causing the strategy to
-            # generate no new close. Preserve the persisted accepted plan so
-            # the manager can prove/book its terminal result; never let the
-            # generic no-positions fast path complete over a live marker.
+            # A keeper fill can remove fresh intents while its accepted plan still needs
+            # correlated settlement. Never complete through the no-positions fast path.
             persisted_plan = json.loads(accepted_state.pending_intents_json)
             teardown_intents = persisted_plan if isinstance(persisted_plan, list) else []
             logger.warning(
@@ -1247,22 +1055,10 @@ async def execute_teardown(  # noqa: C901
             )
 
     if not teardown_intents:
-        # TD-11 (VIB-5469): completeness enforcement at the no-intents gate. The
-        # strategy produced NO closing intents — but if the KNOWN open-position
-        # set (registry-reconciled enumeration, TD-01) still reports tracked-open
-        # positions, those would be silently stranded by a clean "no positions"
-        # success (VIB-5417: spark teardown returned []; ALM-2900: repaid but
-        # never withdrew). Fail loud instead. Uses the durable known set, never a
-        # wallet-wide sweep.
+        # No intents is a success only after measuring the durable known-position set.
         completeness = await _check_no_intent_completeness(strategy, request)
         if completeness is None:
-            # The KNOWN open-position set could not be read — strategy
-            # enumeration raised (``resolve_open_positions_with_registry``
-            # surfaces ``get_open_positions`` errors by design; the
-            # registry-unavailable case degrades cleanly to a summary, never to
-            # None). We CANNOT certify a clean "no positions" exit on an
-            # unreadable set, so fail loud rather than fall through to the
-            # success path and silently strand any open position (VIB-5469).
+            # An unreadable position set is not evidence that no positions remain.
             err = (
                 f"Teardown completeness: could not read the known open-position set for {deployment_id} "
                 "(strategy enumeration failed); refusing to certify a clean 'no positions' teardown. "
@@ -1281,8 +1077,6 @@ async def execute_teardown(  # noqa: C901
             runner._request_teardown_failure_shutdown(err)
             return runner._create_error_result(deployment_id, IterationStatus.STRATEGY_ERROR, err, start_time)
         if recovery_incomplete:
-            # Discovery could not confirm the wallet holds no LP — refusing to
-            # report a clean "no positions" success that might strand an orphan.
             err = recovery_warning or "On-chain LP discovery incomplete; manual check required."
             logger.error("🛑 %s teardown blocked: %s", deployment_id, err)
             if request:
@@ -1291,19 +1085,13 @@ async def execute_teardown(  # noqa: C901
             return runner._create_error_result(deployment_id, IterationStatus.STRATEGY_ERROR, err, start_time)
         logger.info(f"🛑 {deployment_id} teardown complete (no positions to close)")
         if request:
-            # Fold the pre-gate settlement degradation into the persisted
-            # completion record: a "no positions" success reached with an
-            # unbookable settlement (e.g. unmeasured watch set with no
-            # registered row) must not read as a clean exit (VIB-6522).
+            # A no-position result may still carry an unbooked settlement degradation.
             completion_result: dict[str, Any] = {"reason": "no_positions"}
             if pre_gate_degraded:
                 completion_result["accounting_degraded"] = True
                 completion_result["accounting_degraded_reason"] = pre_gate_degraded
             _safe_mark(manager, "mark_completed", deployment_id, result=completion_result)
         runner.request_shutdown()
-        # Match the adjacent all-balances-zero + TeardownManager-success paths —
-        # the lifecycle supervisor must see TERMINATED so it doesn't treat a
-        # teardown-with-no-positions as still running.
         runner._lifecycle_write_state(deployment_id, LifecycleState.TERMINATED)
         runner._record_success()
         return IterationResult(
@@ -1314,27 +1102,14 @@ async def execute_teardown(  # noqa: C901
         )
 
     logger.info(f"🛑 {deployment_id} entering TEARDOWN mode ({len(teardown_intents)} intents to execute)")
-    # VIB-4049: switch lifecycle state to TEARING_DOWN now that unwind work is
-    # actually starting. Platform maps this to live_agent_status.TEARDOWN_IN_PROGRESS
-    # so the dashboard / reconciler can distinguish "stopping cleanly" (SLA
-    # 5min) from "actively unwinding positions" (SLA 45min). The terminal
-    # TERMINATED / ERROR writes downstream are unchanged — they take over once
-    # the unwind completes (or fails).
     runner._lifecycle_write_state(deployment_id, LifecycleState.TEARING_DOWN)
-    # VIB-5085: record the open-position count (not the intent count) as the
-    # teardown's positions_total. ``None`` when unreadable — the mark_started
-    # denominator then degrades to the intent count (cosmetic; the completion
-    # mark is authoritative), but the completed ``positions_closed`` is NEVER
-    # fabricated from intents (see the multi-chain completion mark below).
+    # Lifecycle accounting counts positions, not the several intents one position may require.
+    # The intent count is only a start-time fallback when enumeration is unmeasured.
     open_positions_count = await _count_open_positions(strategy)
     total_positions = open_positions_count if open_positions_count is not None else len(teardown_intents)
     if request:
         _safe_mark(manager, "mark_started", deployment_id, total_positions=total_positions)
 
-    # VIB-5478: structured ENUMERATE decision — the KNOWN open positions the
-    # teardown will close (registry / TD-01 enumeration) and the number of
-    # closing intents generated for them. ``position_count`` is omitted when the
-    # count is unreadable (Empty ≠ Zero — open_positions_count is None then).
     log_teardown_decision(
         deployment_id=deployment_id,
         teardown_id=getattr(request, "teardown_id", None),
@@ -1345,28 +1120,17 @@ async def execute_teardown(  # noqa: C901
         intent_count=len(teardown_intents),
     )
 
-    # TD-08 (VIB-5466): Plan-A on-chain reconciliation CHECK. After ledger
-    # enumeration, a protocol-scoped chain read confirms each KNOWN position's
-    # live state and flags any divergence from the WARM ledger LOUDLY with a
-    # structured signal stashed on the runner for the TD-15 fail-closed verifier
-    # to consume (it composes with TD-14's verification_status). CHECK only:
-    # closes/sweeps nothing, emits no intent, and is position-scoped — never a
-    # wallet-wide sweep (that is Plan B). The attribute was reset to None at the
-    # top of this function, so the early-exit lanes leave no stale report behind.
     runner._teardown_reconciliation = await reconcile_known_positions(runner, strategy, teardown_market)
 
-    # Step T2.5: Pre-fetch prices for tokens in teardown intents
     if teardown_market is not None and hasattr(teardown_market, "price"):
         try:
             prefetch_teardown_prices(teardown_market, teardown_intents)
         except Exception as e:
             logger.warning(f"Failed to pre-fetch teardown prices: {e}")
 
-    # Note: amount="all" resolution is handled lazily inside _execute_intents
-    # (per-intent, just before execution) so staged exits work correctly
-    # (e.g., withdraw then swap uses tokens produced by the earlier step).
+    # Resolve chained "all" amounts immediately before each intent so earlier
+    # unwind legs can produce or consume the balance used by later legs.
 
-    # Step T2.7: If all intents were resolved away, teardown is complete
     if not teardown_intents:
         logger.info(f"🛑 {deployment_id} teardown complete (all positions already closed)")
         if request:
@@ -1381,9 +1145,7 @@ async def execute_teardown(  # noqa: C901
             duration_ms=runner._calculate_duration_ms(start_time),
         )
 
-    # Step T3: Execute teardown intents
     if runner._is_multi_chain:
-        # Multi-chain: use inline path (TeardownManager doesn't support multi-chain yet)
         logger.warning(
             "🛑 %s multi-chain teardown lane performs NO token consolidation "
             "(VIB-5011 known gap — see blueprint 14 §Token Consolidation): "
@@ -1402,25 +1164,16 @@ async def execute_teardown(  # noqa: C901
             runner.request_shutdown()
             if request:
                 if recovery_incomplete:
-                    # F3 (VIB-5138): execution succeeded but on-chain LP discovery
-                    # was incomplete for a deployment KNOWN to hold an LP here —
-                    # an orphan may remain. Mark FAILED (manual-check) rather than
-                    # a clean COMPLETED so the operator verifies on-chain.
+                    # Successful dispatch cannot certify an incompletely enumerated recovery.
                     err = recovery_warning or "On-chain LP discovery incomplete; manual check required."
                     logger.error("🛑 %s teardown degraded (recovery incomplete): %s", deployment_id, err)
                     _safe_mark(manager, "mark_failed", deployment_id, error=err)
-                    # VIB-5572 (defense-in-depth): this success-branch path persists
-                    # FAILED without going through _request_teardown_failure_shutdown.
-                    # request_shutdown() above already prevents same-process re-entry,
-                    # but latch the entry gate too so the invariant holds even if the
-                    # shutdown is somehow not honoured.
+                    # Latch entry as well as requesting shutdown so a failed teardown
+                    # cannot reopen risk if shutdown is delayed or ignored.
                     runner._teardown_entry_blocked = True
                     runner._teardown_entry_blocked_reason = f"teardown failed — {err}"
                 else:
-                    # VIB-5085: the multi-chain lane has no position verifier; a
-                    # fully-successful teardown closed every open position, so report
-                    # the pre-execution count when known (else omit positions_closed
-                    # so the lift falls back to the legacy ``intents`` key).
+                    # Without a verifier, report the pre-execution position count only when measured.
                     _safe_mark(
                         manager,
                         "mark_completed",
@@ -1428,10 +1181,6 @@ async def execute_teardown(  # noqa: C901
                         result=_positions_completion_result(open_positions_count, len(teardown_intents)),
                     )
         else:
-            # VIB-5470 (subsumes VIB-5152): decode lending / Safe-Roles revert
-            # selectors into an operator-clear message before persisting +
-            # surfacing the failure (the single-chain manager path annotates at
-            # its own source). No-op when no known selector is embedded.
             from ..teardown.revert_hints import annotate_teardown_error
 
             failure_error = annotate_teardown_error(result.error) or "multi-chain teardown execution failed"
@@ -1440,9 +1189,6 @@ async def execute_teardown(  # noqa: C901
             runner._request_teardown_failure_shutdown(failure_error)
         return result
     else:
-        # Single-chain: route through TeardownManager for safety guarantees
-        # Call through runner method (not standalone function) so instance-level
-        # mock patching in tests continues to work.
         return await runner._execute_teardown_via_manager(
             strategy=strategy,
             teardown_intents=teardown_intents,
@@ -1452,11 +1198,6 @@ async def execute_teardown(  # noqa: C901
             request=request,
             state_manager=manager,
         )
-
-
-# -------------------------------------------------------------------------
-# TeardownManager path (single-chain)
-# -------------------------------------------------------------------------
 
 
 def _load_pending_teardown_plan(state: Any) -> tuple[list[Any], int] | None:
@@ -1535,9 +1276,8 @@ async def _recover_accepted_async_marker_from_ledger(
     for ledger in inventory.rows:
         ledger_id = str(ledger.get("id") or "")
         protocol = str(ledger.get("protocol") or "").lower()
-        # The ledger proves which protocol/order settled, but it does not carry
-        # the teardown-plan index. Guessing between two same-protocol closes
-        # could suppress the wrong intent, so ambiguous recovery fails closed.
+        # A ledger row does not identify its plan index; ambiguous same-protocol
+        # matches must not suppress an arbitrary close.
         intent_index = _unique_pending_perp_close_index(plan, floor, protocol)
         if intent_index is None:
             return _recovery_blocked("the Phase-1 close ledger has no unique pending plan match")
@@ -1644,15 +1384,8 @@ async def _resolve_manager_execution_state(
             accepted_lookup.state.teardown_id,
         )
         return accepted_lookup.state, None
-    # VIB-6341: persist the DISPATCH plan, not the plan as built. The in-memory
-    # collapse in ``execute_and_verify`` protects only the first attempt; a
-    # process restart deserialises ``pending_intents_json`` and the non-stale
-    # resume path re-executes it without passing through that guard, so a
-    # persisted duplicate close survives every later resume and reaches the chain
-    # — the exact double-close this ticket exists to prevent (#3574 audit).
-    # Coverage is unaffected: ``execute_and_verify`` still receives the full
-    # pre-collapse list and derives ``for_coverage`` from it. The guard is pure
-    # and idempotent, so collapsing here and again there is a no-op.
+    # Persist the deduplicated dispatch plan so a restart cannot resurrect a
+    # duplicate perp close. Coverage still uses the original plan upstream.
     from ..teardown.single_close_guard import collapse_duplicate_perp_closes
 
     return await _h.run_cancel_window_and_persist(
@@ -1682,9 +1415,7 @@ def _clear_stale_pending_recovery_after_accepted_fill(
     pending_recovery_keys = getattr(runner, "_teardown_pending_recovery_keys", None)
     if pending_recovery_keys is None or not pending_recovery_keys.issubset(accepted_keys):
         return
-    # Residual discovery ran before the terminal resume check. Every deferred
-    # key was exactly the accepted set now proved EXECUTED; preserve only an
-    # independent LP-discovery failure.
+    # Exact terminal proof supersedes only the matching pending-order signal.
     runner._teardown_recovery_incomplete = bool(getattr(runner, "_teardown_lp_recovery_incomplete", False))
     runner._teardown_recovery_warning = getattr(runner, "_teardown_lp_recovery_warning", None)
 
@@ -1727,21 +1458,14 @@ async def execute_teardown_via_manager(
     deployment_id = strategy.deployment_id
     mode_str = "graceful" if teardown_mode == TeardownMode.SOFT else "emergency"
 
-    # Derive auto mode from teardown request source (VIB-2923). See
-    # ``derive_teardown_auto_mode`` at module level for the predicate —
-    # exposed there so tests exercise the real logic.
     is_auto_mode = derive_teardown_auto_mode(request)
 
-    # Phase 1: build compiler (or return early/fallback).
     compiler, early = await _h.resolve_compiler_or_fallback(
         runner, strategy, teardown_intents, teardown_market, start_time, request, state_manager
     )
     if compiler is None:
         return early  # type: ignore[return-value]
 
-    # Phase 2: construct TeardownManager + state adapter. The request threads
-    # asset_policy / target_token into the manager's TeardownConfig so the
-    # token-consolidation phase honours the operator's choice (VIB-5011).
     teardown_mgr, teardown_state_adapter = _h.build_teardown_manager(
         runner, compiler, state_manager, request, strategy=strategy
     )
@@ -1753,14 +1477,8 @@ async def execute_teardown_via_manager(
         f"🛑 Routing {deployment_id} teardown through TeardownManager (mode={mode_str}, intents={len(teardown_intents)})"
     )
 
-    # Outer try preserves the original exception contract: any failure in
-    # the execution/verify phases (including helpers) is caught here so we
-    # can reflect FAILED into both `state_manager` (teardown_requests) and
-    # the adapter row (teardown_execution_state). The helper handles both.
+    # One catch boundary reflects execution failures into both persistence surfaces.
     teardown_state = None
-    # VIB-3773: track cycle-id swap state so the ``finally`` clause restores
-    # the runner's surfaces even on the exception path. ``None`` sentinels
-    # mean "no swap performed yet" — we only restore what we set.
     saved_last_cycle_id: str | None = None
     saved_ctx_cycle_id: str | None = None
     cycle_id_swapped = False
@@ -1768,24 +1486,20 @@ async def execute_teardown_via_manager(
     post_bracket_outcome = None
 
     try:
-        # Phase 3: fetch positions (or return early/fallback).
         positions, early = await _h.fetch_positions_or_fallback(
             runner, strategy, teardown_intents, teardown_market, start_time, request, state_manager
         )
         if positions is None:
             return early  # type: ignore[return-value]
 
-        # Phase 4: safety validation (loss caps).
         safety_error = _h.validate_safety_or_error(
             runner, teardown_mgr, strategy, positions, teardown_mode, start_time, request, state_manager
         )
         if safety_error is not None:
             return safety_error
 
-        # Phase 5: persist state + cancel window (may short-circuit cancel).
-        # Production re-entry consumes the exact persisted order-key plan;
-        # unproven recovery defers without dispatch; only authoritative absence
-        # reaches fresh plan persistence.
+        # Resume only exact persisted order-key state; unproven recovery defers
+        # without dispatch, and only measured absence creates fresh state.
         teardown_state, cancel_short_circuit = await _resolve_manager_execution_state(
             runner,
             teardown_mgr,
@@ -1798,16 +1512,10 @@ async def execute_teardown_via_manager(
         )
         if cancel_short_circuit is not None:
             return cancel_short_circuit
-        # Contract: when cancel_short_circuit is None, run_cancel_window_and_persist
-        # returns a concrete TeardownState. The assertion narrows the type for
-        # mypy so downstream helpers can treat it as non-optional.
         assert teardown_state is not None
 
-        # VIB-3773: swap cycle id on BOTH surfaces (P1-4 — runner_state.py:486
-        # reads ``runner._last_cycle_id`` first, then falls back to the
-        # contextvar). Without updating ``_last_cycle_id`` the snapshot/metrics
-        # rows would be stamped with the iteration's cycle id, not the
-        # teardown's. Restored in the ``finally`` clause.
+        # Ledger, snapshot, and metrics writers consult both cycle-id surfaces.
+        # Swap both for the bracket and restore them together in finally.
         teardown_cycle_id = f"teardown-{teardown_state.teardown_id}"
         from ..observability.context import (
             get_cycle_id,
@@ -1820,15 +1528,10 @@ async def execute_teardown_via_manager(
         set_cycle_id(teardown_cycle_id)
         cycle_id_swapped = True
 
-        # Phase 6: price oracle resolution (pure helper).
         price_oracle = _h.resolve_price_oracle(teardown_market)
 
-        # VIB-3773 Phase 6.5: pre-teardown snapshot bracket. Fires once,
-        # before the first intent runs, so operators see "starting
-        # balances at teardown_t0" in ``portfolio_snapshots`` /
-        # ``portfolio_metrics``. Degraded-but-continue: a backend write
-        # failure here logs ERROR + appends to deferred-write log; the
-        # teardown still runs.
+        # Capture the accounting baseline before dispatch; write failures degrade
+        # accounting but never block the unwind.
         if teardown_mgr.runner_helpers.has_snapshot:
             pre_bracket_outcome = await teardown_mgr.runner_helpers.capture_snapshot(
                 strategy,
@@ -1842,7 +1545,6 @@ async def execute_teardown_via_manager(
                     pre_bracket_outcome.degraded_reason or "unknown",
                 )
 
-        # Phase 7: execute intents + post-execution verify.
         teardown_result = await _h.execute_and_verify(
             runner,
             teardown_mgr,
@@ -1867,23 +1569,12 @@ async def execute_teardown_via_manager(
             resume_accepted_async=resume_accepted_async,
         )
 
-        # VIB-5667 Phase 8a: vault-safe release. After the strategy's closing
-        # intents unwound the LP to underlying in the Safe (and consolidation ran),
-        # transition the vault Open->Closing->Closed so ALL depositors can redeem.
-        # Runs BEFORE the post-teardown snapshot bracket (audit #3) so ``close()``'s
-        # Safe->vault transfer and the manager self-redeem are reflected in the
-        # FINAL wallet snapshot that fund-NAV / dashboards read — otherwise the
-        # "final" row would predate the release fund movements. Delegated to a
-        # helper so this coordinator stays under the CRAP threshold.
+        # Release only after closure and before the final snapshot so depositor
+        # fund movements are included in terminal accounting.
         await _maybe_release_vault_after_teardown(
             runner, strategy, teardown_market, teardown_cycle_id, teardown_result, deployment_id
         )
 
-        # VIB-3773 Phase 7.5: post-teardown snapshot bracket. Fires after
-        # the unwind (and the verifier) — and the vault release above —
-        # completes so the SDK records final wallet state — the row that
-        # fund-NAV / dashboards actually need post-shutdown. Same
-        # degraded-but-continue contract.
         if teardown_mgr.runner_helpers.has_snapshot:
             post_bracket_outcome = await teardown_mgr.runner_helpers.capture_snapshot(
                 strategy,
@@ -1897,9 +1588,7 @@ async def execute_teardown_via_manager(
                     post_bracket_outcome.degraded_reason or "unknown",
                 )
 
-        # VIB-3773: fold the snapshot-bracket degraded signals into the
-        # TeardownResult. Per-intent commits already wrote their flags
-        # inside ``_execute_intents``; the brackets are additive.
+        # Snapshot degradation is additive to per-intent accounting degradation.
         bracket_failures = sum(
             1 for o in (pre_bracket_outcome, post_bracket_outcome) if o is not None and o.accounting_degraded
         )
@@ -1907,20 +1596,9 @@ async def execute_teardown_via_manager(
             teardown_result.accounting_degraded = True
             teardown_result.accounting_degraded_count += bracket_failures
 
-        # F3 (VIB-5138): if on-chain LP discovery was incomplete for a deployment
-        # KNOWN to hold an LP on this chain, a deployment-owned orphan may STILL
-        # be open even though every executed intent succeeded. Refuse to certify
-        # the teardown complete — degrade to a manual-check result regardless of
-        # whether intents were present. This runs AFTER execution + verify (we did
-        # all the risk reduction we could; we just don't certify it). Read off the
-        # runner attribute the recovery step stashed (cleared in finally).
+        # Apply all available risk reduction before refusing certification for an
+        # incompletely measured recovery.
         if getattr(runner, "_teardown_recovery_incomplete", False) and teardown_result.success:
-            # Source-agnostic: the incompleteness may come from LP orphan discovery
-            # (VIB-5138) OR pending-order recovery (VIB-5568, a deferred not-yet-
-            # cancellable order or an unmeasured OrderVault read). The specific reason
-            # is carried in ``warn`` (the recovery step's own message); keep the
-            # surrounding text + options generic so a pending-order defer is not
-            # mislabelled as "LP discovery".
             warn = (
                 getattr(runner, "_teardown_recovery_warning", None)
                 or "Teardown recovery incomplete; manual check required."
@@ -1940,7 +1618,6 @@ async def execute_teardown_via_manager(
                 ],
             )
 
-        # Phase 8: alert + cleanup (best effort, swallow exceptions).
         await _h.send_alert_and_cleanup(teardown_mgr, teardown_result, teardown_state.teardown_id)
 
     except Exception as e:
@@ -1955,9 +1632,6 @@ async def execute_teardown_via_manager(
             e,
         )
     finally:
-        # VIB-3773: restore both cycle-id surfaces no matter how we exit
-        # (success, return-early, or exception). Skipping this would leak
-        # ``teardown-...`` cycle ids onto subsequent iteration rows.
         if cycle_id_swapped:
             from ..observability.context import (
                 clear_cycle_id as _clear_cycle_id,
@@ -1971,21 +1645,13 @@ async def execute_teardown_via_manager(
                 _clear_cycle_id()
             else:
                 _set_cycle_id(saved_ctx_cycle_id)
-        # VIB-5138: clear the recovery-incomplete signal so it cannot leak into a
-        # subsequent teardown on the same runner.
         runner._teardown_recovery_incomplete = False
         runner._teardown_recovery_warning = None
         runner._teardown_lp_recovery_incomplete = False
         runner._teardown_lp_recovery_warning = None
         runner._teardown_pending_recovery_keys = None
 
-    # Phase 9: map TeardownResult -> IterationResult + terminal side effects.
     return _h.map_teardown_result(runner, strategy, start_time, teardown_result, teardown_mode, request, state_manager)
-
-
-# -------------------------------------------------------------------------
-# Vault-safe teardown — release depositor capital (VIB-5667)
-# -------------------------------------------------------------------------
 
 
 class _VaultReleaseIntent:
@@ -2006,7 +1672,6 @@ class _VaultReleaseIntent:
     def __init__(self, action_type: str, protocol: str, chain: str, vault_address: str) -> None:
         from types import SimpleNamespace
 
-        # ``.value`` mirrors an enum member — ``_intent_type_str`` / ledger reads it.
         self.intent_type = SimpleNamespace(value=action_type)
         self.protocol = protocol
         self.chain = chain
@@ -2047,8 +1712,7 @@ async def execute_vault_release(
     chain = getattr(strategy, "chain", "") or ""
 
     async def _commit(*, action_type: str, bundle: Any, execution_result: Any, signer: str) -> None:  # noqa: ARG001
-        # Pair every successful release execute with the teardown commit pipeline
-        # (enrich -> ledger -> outbox+fire -> sidecar) under the teardown cycle id.
+        # Every release execution uses the same teardown accounting commit boundary.
         intent = _VaultReleaseIntent(
             action_type=action_type,
             protocol=vault_protocol,
@@ -2151,11 +1815,6 @@ async def _maybe_release_vault_after_teardown(
         teardown_result.accounting_degraded_count += 1
 
 
-# -------------------------------------------------------------------------
-# Inline teardown fallback
-# -------------------------------------------------------------------------
-
-
 async def execute_teardown_inline(
     runner: Any,
     strategy: StrategyProtocol,
@@ -2198,25 +1857,12 @@ async def execute_teardown_inline(
 
     deployment_id = strategy.deployment_id
 
-    # VIB-6341: one physical perp position must be closed ONCE. Dispatch-adjacent,
-    # like every other site: this lane executes the plan itself and runs NO
-    # ``check_intent_coverage`` gate, so there is no ``for_coverage`` consumer here
-    # and the collapsed plan is simply what executes. Wiring it here rather than in
-    # ``execute_teardown``'s plan build is what keeps the manager route's G1 gate
-    # able to see the pre-collapse plan (#3574 audit).
+    # Deduplicate at dispatch so the manager's completeness check can still inspect
+    # the original plan while this fallback never submits two closes for one perp.
     teardown_intents = collapse_duplicate_perp_closes(teardown_intents).dispatch
 
-    # VIB-3773: dual cycle-id swap so ledger/outbox/snapshot rows carry the
-    # teardown's cycle id, not the iteration that triggered the inline path.
-    # Per blueprint 27 §teardown-cycle-id contract, every teardown row must
-    # carry ``cycle_id = f"teardown-{teardown_id}"`` (canonical format
-    # consumed by reconciliation queries). When the runner is invoked
-    # without a persisted ``TeardownRequest`` (no operator-initiated
-    # request, e.g. strategy-self-signalled hosted teardown), synthesize a
-    # UUID so the lane still produces a unique correlation id — but keep
-    # the ``teardown-`` prefix and avoid the ``-inline-`` infix that the
-    # earlier draft used; reconciliation walks ``cycle_id LIKE 'teardown-%'``
-    # and any divergence breaks correlation across the 5 accounting tables.
+    # All accounting surfaces require the canonical teardown cycle ID. Synthesize
+    # only the ID component when no persisted request exists.
     logger.warning(
         "🛑 %s inline-fallback teardown lane performs NO token consolidation "
         "(VIB-5011 known gap — see blueprint 14 §Token Consolidation): "
@@ -2231,7 +1877,6 @@ async def execute_teardown_inline(
     runner._last_cycle_id = teardown_cycle_id
     set_cycle_id(teardown_cycle_id)
 
-    # VIB-3773: snapshot bracket (degraded-but-continue, never raises).
     helpers = build_runner_helpers(runner)
     accounting_degraded_count = 0
 
@@ -2261,11 +1906,6 @@ async def execute_teardown_inline(
             teardown_cycle_id=teardown_cycle_id,
             deferred_append=_deferred_append_now,
         )
-        # ``_execute_teardown_inline_body`` returns its own IterationResult
-        # alongside the per-intent inline_degraded_count; we only need to
-        # fire the post-snapshot bracket and tally degraded counts.
-        # Capture-failures in the body are accumulated through the same
-        # channel as bracket failures.
         accounting_degraded_count += inline_degraded
 
         if helpers.has_snapshot:
@@ -2282,15 +1922,12 @@ async def execute_teardown_inline(
                     post_outcome.degraded_reason or "unknown",
                 )
         if accounting_degraded_count and getattr(result, "error", None) is None:
-            # Annotate the IterationResult so operators see the degraded
-            # signal without needing to grep the deferred log.
             result.error = (
                 f"accounting_degraded={accounting_degraded_count} (chain-side OK; "
                 "see accounting_deferred.jsonl for failed writes)"
             )
         return result
     finally:
-        # Restore both cycle-id surfaces no matter how we exit.
         runner._last_cycle_id = saved_last_cycle_id
         if saved_ctx_cycle_id is None:
             clear_cycle_id()
@@ -2336,9 +1973,7 @@ def _apply_inline_swap_clamp(
     except (InvalidOperation, TypeError, ValueError):
         live = None
 
-    # Multi-chain teardown: the intent's own chain wins over the strategy's
-    # default so inventory lookup and identity resolution key the SAME chain
-    # the balance was read on (CodeRabbit review, PR #3612).
+    # The intent chain must key both the live balance and tracked inventory.
     effective_chain = getattr(intent, "chain", None) or chain
 
     if live is None:
@@ -2359,8 +1994,6 @@ def _apply_inline_swap_clamp(
     if not decision.skip:
         return False, False, decision.amount
 
-    # Keep the VIB-4587 sweep WARNING firing as the operator signal (esp. the
-    # untracked-token / commingled case).
     warn_if_sweep_non_strategy_balance(
         state_manager=getattr(runner, "state_manager", None),
         deployment_id=deployment_id,
@@ -2409,10 +2042,8 @@ async def _execute_teardown_inline_body(  # noqa: C901
 
     deployment_id = strategy.deployment_id
 
-    # VIB-5085: capture the open-position count BEFORE the loop so a
-    # fully-successful inline teardown reports positions closed, not intents
-    # (this lane has no position verifier). ``None`` when unreadable — the
-    # completion mark then omits ``positions_closed`` rather than fabricate it.
+    # Count positions before dispatch; several intents may close one position.
+    # An unreadable count remains omitted from completion accounting.
     pre_exec_positions_total = await _count_open_positions(strategy)
 
     inline_degraded_count = 0
@@ -2421,9 +2052,6 @@ async def _execute_teardown_inline_body(  # noqa: C901
     for i, intent in enumerate(teardown_intents):
         logger.info(f"🛑 Executing teardown intent {i + 1}/{len(teardown_intents)}: {intent.intent_type.value}")
 
-        # Resolve amount="all" to actual wallet balance before execution.
-        # Only resolve for intents with a token balance field (e.g., SwapIntent.from_token).
-        # Intents like vault_redeem(shares="all") are handled natively by the compiler.
         intent_to_execute = intent
         if Intent.has_chained_amount(intent):
             balance_token = (
@@ -2432,15 +2060,8 @@ async def _execute_teardown_inline_body(  # noqa: C901
                 or getattr(intent, "token_in", None)
             )
             if balance_token and teardown_market is not None:
-                # VIB-5465: evict the plan-build balance memo before this LIVE
-                # read so the ``amount="all"`` exit resolves against current
-                # on-chain state. The teardown snapshot was built BEFORE these
-                # closing intents ran; an earlier intent (e.g. a REPAY/WITHDRAW
-                # staircase that moved the wallet) would otherwise leave a stale
-                # memoized balance and over-resolve this swap by exactly the
-                # amount the earlier intent consumed. Mirrors the manager lane
-                # (TeardownManager._execute_intents) and VIB-5074. No-op on
-                # paper/dry-run (no balance provider); best-effort otherwise.
+                # Invalidate the planning snapshot before resolving a chained amount;
+                # earlier unwind legs may have changed the live balance.
                 _invalidate = getattr(teardown_market, "invalidate_balance", None)
                 if callable(_invalidate):
                     try:
@@ -2451,7 +2072,6 @@ async def _execute_teardown_inline_body(  # noqa: C901
                             balance_token,
                             exc_info=True,
                         )
-                # Resolve balance — pass chain for multi-chain market snapshots
                 intent_chain = getattr(intent, "chain", None)
                 try:
                     if intent_chain:
@@ -2459,7 +2079,6 @@ async def _execute_teardown_inline_body(  # noqa: C901
                     else:
                         bal = teardown_market.balance(balance_token)
                 except TypeError:
-                    # Single-chain MarketSnapshot doesn't accept chain param
                     bal = teardown_market.balance(balance_token)
                 except Exception as e:  # noqa: BLE001
                     logger.error(
@@ -2475,18 +2094,10 @@ async def _execute_teardown_inline_body(  # noqa: C901
                         duration_ms=runner._calculate_duration_ms(start_time),
                     )
                     break
-                # MarketSnapshot.balance() returns Decimal; IntentStrategy.balance() returns TokenBalance
                 balance_value = bal.balance if hasattr(bal, "balance") else bal
                 if balance_value <= 0:
                     logger.info(f"🛑 Teardown intent {i + 1}: {balance_token} balance is 0, skipping (already closed)")
                     continue
-                # ALM-2766: clamp an amount='all' swap-back to the strategy's
-                # TRACKED quantity so a default teardown never sweeps commingled
-                # wallet funds. The decision is delegated to the SHARED
-                # ``decide_swap_clamp`` helper (same source as the manager lane,
-                # so the two lanes cannot drift) via ``_apply_inline_swap_clamp``;
-                # on a fail-closed skip the swap is bypassed (loud, degraded
-                # counted), else ``balance_value`` is set to ``min(tracked, live)``.
                 _skip, _degraded, balance_value = _apply_inline_swap_clamp(
                     runner,
                     intent,
@@ -2499,13 +2110,8 @@ async def _execute_teardown_inline_body(  # noqa: C901
                 if _skip:
                     inline_degraded_count += int(_degraded)
                     continue
-                # VIB-4587 / F5 — emit DX warning before sweeping when the
-                # from-token wasn't seen in this strategy's accounting history.
-                # NOTE: ``state_manager`` in this body is the teardown lifecycle
-                # SM (``TeardownStateManager``) — it tracks teardown requests,
-                # not accounting events. Hand the helper the runner's accounting
-                # ``StateManager`` instead, which exposes
-                # ``get_accounting_events_sync``.
+                # Sweep provenance belongs to the runner's accounting state manager,
+                # not the teardown-request state manager passed into this function.
                 warn_if_sweep_non_strategy_balance(
                     state_manager=getattr(runner, "state_manager", None),
                     deployment_id=deployment_id,
@@ -2516,13 +2122,11 @@ async def _execute_teardown_inline_body(  # noqa: C901
                 intent_to_execute = Intent.set_resolved_amount(intent, balance_value)
                 logger.info(f"🛑 Resolved amount='all' for {balance_token}: {balance_value}")
             elif balance_token and teardown_market is None:
-                # Have a token to resolve but no market — log warning, let compiler try
                 logger.warning(
                     f"🛑 Teardown intent {i + 1}: amount='all' for {balance_token} but no market context. "
                     f"Passing to compiler as-is — compilation may fail."
                 )
             else:
-                # No token field — let compiler handle natively (e.g., shares="all")
                 logger.debug(f"🛑 Teardown intent {i + 1}: no token field, passing to compiler as-is")
 
         try:
@@ -2534,10 +2138,8 @@ async def _execute_teardown_inline_body(  # noqa: C901
                 market=teardown_market,
             )
         except AccountingPersistenceError as acc_err:
-            # VIB-3773: iteration-lane writers raise on failure; teardown
-            # MUST continue. Convert into a synthetic success-shaped result
-            # (the chain-side TX already landed by the time the writer
-            # raised) and record into the deferred-write log.
+            # The transaction already landed, so accounting failure is recorded and
+            # treated as chain success to preserve the remaining risk-reducing intents.
             logger.error(
                 "🛑 Teardown intent %d/%d (inline) — accounting persistence failed but chain-side OK: %s",
                 i + 1,
@@ -2545,12 +2147,7 @@ async def _execute_teardown_inline_body(  # noqa: C901
                 acc_err,
             )
             inline_degraded_count += 1
-            # Deferred-log writes are the durable backstop, but the
-            # backstop itself can fail (disk full, log rotation race).
-            # Swallow that secondary failure too — halting the unwind
-            # because the *log* of the original failure could not be
-            # written would re-introduce the silent-failure shape we
-            # eliminated. Operators see the chain-side OK + ERROR log.
+            # Failure of the degradation log must not halt an unwind after chain success.
             try:
                 deferred_append(
                     kind=str(acc_err.write_kind) if acc_err.write_kind else "ledger",
@@ -2568,7 +2165,6 @@ async def _execute_teardown_inline_body(  # noqa: C901
                     len(teardown_intents),
                     acc_err,
                 )
-            # Synthetic success — the unwind continues.
             result = IterationResult(
                 status=IterationStatus.SUCCESS,
                 intent=intent_to_execute,
@@ -2579,17 +2175,10 @@ async def _execute_teardown_inline_body(  # noqa: C901
         if not result.success:
             all_success = False
             logger.error(f"🛑 Teardown intent {i + 1} failed: {result.error}")
-            break  # Stop on first chain-side failure
+            break
 
-    # VIB-5667 (audit #5): the inline fallback lane has NO vault-release path (only
-    # the TeardownManager lane calls ``_maybe_release_vault_after_teardown``). A
-    # vault strategy that reaches this lane has closed its positions but the vault
-    # is still OPEN — certifying a clean completion here would strand depositors
-    # (a deposit-only holder could never redeem with no manager running). Fail
-    # CLOSED: the operator restarts the runner and re-runs teardown, whose manager
-    # lane releases the vault (Class-B ``ax vault takeover`` is the future automated
-    # path, gated on VIB-5683+). Vault strategies normally never take this fallback;
-    # this guards the defensive case rather than silently mis-certifying.
+    # The inline lane cannot perform irreversible vault release. Never certify it
+    # for a vault strategy, even when every position-closing intent succeeded.
     if all_success and last_result is not None and getattr(runner, "_vault_lifecycle", None) is not None:
         all_success = False
         last_result.error = (
@@ -2609,9 +2198,6 @@ async def _execute_teardown_inline_body(  # noqa: C901
             runner._lifecycle_write_state(deployment_id, LifecycleState.TERMINATED)
             runner._record_success()
             if request:
-                # VIB-5085: report positions closed (= pre-execution count on a
-                # full success) when known, keeping the intent signal alongside;
-                # omit positions_closed when unknown (lift falls back to intents).
                 _safe_mark(
                     state_manager,
                     "mark_completed",
@@ -2625,12 +2211,7 @@ async def _execute_teardown_inline_body(  # noqa: C901
             runner._request_teardown_failure_shutdown(last_result.error or "inline teardown execution failed")
         return last_result, inline_degraded_count
 
-    # Edge case: no intents executed (all positions already closed).
-    # VIB-5667 (audit #3): a vault strategy reaching this no-intents branch on the
-    # inline lane STILL has an Open vault (this lane has no release path). Certifying
-    # a clean completion here would strand depositors just as the executed-intents
-    # case above would — ``last_result`` is None so the guard above was skipped, so
-    # fail closed here too rather than mark_completed + TERMINATED clean.
+    # The same vault-release refusal applies when no intent reached execution.
     if getattr(runner, "_vault_lifecycle", None) is not None:
         err = (
             "vault strategy reached the inline teardown fallback with no executed intents; the vault "
@@ -2667,11 +2248,6 @@ async def _execute_teardown_inline_body(  # noqa: C901
     return final_result, inline_degraded_count
 
 
-# -------------------------------------------------------------------------
-# Compiler / price helpers
-# -------------------------------------------------------------------------
-
-
 def build_teardown_compiler(
     runner: Any,
     strategy: StrategyProtocol,
@@ -2691,31 +2267,17 @@ def build_teardown_compiler(
     else:
         rpc_url = getattr(runner.execution_orchestrator, "rpc_url", None)
 
-    # Extract prices from market snapshot.
-    # IMPORTANT: do NOT convert {} to None via `or None` — an empty dict
-    # is distinct from None.  With None the compiler falls back to $1
-    # placeholder prices, producing wildly wrong slippage calculations
-    # and silent None action bundles on mainnet (VIB-1386..1391).
+    # Preserve the empty-dict measurement: None enables unsafe $1 placeholder prices.
     fetched: dict[str, Decimal] | None = None
     if market is not None and hasattr(market, "get_price_oracle_dict"):
         fetched = market.get_price_oracle_dict()
-    # Merge fallback prices (stablecoins + native/wrapped tokens) into the
-    # fetched oracle.  This ensures partially-populated caches (e.g. only USDC)
-    # still get WETH fallback prices instead of $1 placeholders.
     fallback = get_fallback_teardown_prices(market)
     merged = {**(fallback or {}), **(fetched if fetched is not None else {})}
     price_oracle = merged if merged else None
 
     has_prices = bool(price_oracle)
     if not has_prices:
-        # VIB-2928 HARD STOP: refuse to compile a teardown on placeholder
-        # ($1-for-every-token) prices. Proceeding on a fake number mis-sizes
-        # every swap's expected-out / slippage and could dump funds at an
-        # arbitrary rate. Abort LOUD by returning None — the caller
-        # (``resolve_compiler_or_fallback``) turns a None compiler into
-        # ``mark_failed`` + a teardown-failure shutdown in production
-        # (``allow_unsafe_teardown_fallback=False``), so the operator retries
-        # once the gateway/oracle recovers instead of unwinding blind.
+        # Refuse placeholder prices: they can mis-size expected output and slippage.
         logger.error(
             "🛑 Teardown HARD STOP (VIB-2928): no real token prices available "
             "for %s — refusing to compile teardown on placeholder ($1) prices "
@@ -2726,9 +2288,6 @@ def build_teardown_compiler(
         return None
 
     try:
-        # ``allow_placeholder_prices`` stays False unconditionally (VIB-2928):
-        # the no-price case already hard-stopped above, so the compiler must
-        # never silently substitute $1 for an unpriced token.
         compiler_config = IntentCompilerConfig(
             allow_placeholder_prices=False,
             managed_fork=is_managed_fork_network(getattr(strategy, "_gateway_network", None)),
@@ -2832,8 +2391,6 @@ def prefetch_teardown_prices(market: Any, intents: list) -> None:
     if not tokens:
         return
 
-    # Resolve addresses to symbols so market.price() can look them up.
-    # market.price() expects symbols (e.g. "ALMANAK"), not addresses.
     chain = getattr(market, "_chain", None) or getattr(market, "chain", None)
     address_to_symbol: dict[str, str] = {}
     if chain:
@@ -2853,7 +2410,6 @@ def prefetch_teardown_prices(market: Any, intents: list) -> None:
 
     fetched = []
     for token in sorted(tokens):
-        # Try the symbol if we resolved the address, otherwise try the raw value
         symbol = address_to_symbol.get(token, token)
         fetched_token = _prefetch_teardown_price(market, token, symbol, index_chains.get(token))
         if fetched_token is not None:
@@ -2863,16 +2419,8 @@ def prefetch_teardown_prices(market: Any, intents: list) -> None:
         logger.info(f"Pre-fetched {len(fetched)} teardown prices: {fetched}")
 
 
-# Per-chain bridged-stablecoin variants beyond the universal {USDC, USDT, DAI}
-# set. Adding a symbol here means the framework will treat it as a $1 fallback
-# *only* on the listed chains. Leaving it absent — as for ``bsc`` — keeps the
-# fallback dict from advertising tokens that don't exist on that chain, which
-# previously caused the swap-fee-tier heuristic and other downstream consumers
-# to probe the resolver for ``USDC.e`` on BSC and burn the 240s harness window
-# (VIB-3814 / BUG-30 residual).
-# Derived from ``ChainDescriptor.bridged_stablecoin_variants`` (VIB-4851
-# CS-6); membership and tuple order preserved verbatim, and absence stays
-# load-bearing exactly as described above.
+# A bridged stable receives a $1 fallback only on chains that declare it;
+# advertising phantom variants triggers slow resolver probes and unsafe routing inputs.
 _CHAIN_BRIDGED_STABLECOINS: Mapping[str, tuple[str, ...]] = bridged_stablecoin_map()
 
 
@@ -2901,23 +2449,18 @@ def get_fallback_teardown_prices(market: Any) -> dict[str, Decimal] | None:
     chain = getattr(market, "_chain", None) or getattr(market, "chain", None)
     chain_key = str(chain).lower() if chain else ""
 
-    # Universal stablecoins — present on every chain we support.
     fallback: dict[str, Decimal] = {
         "USDC": Decimal("1"),
         "USDT": Decimal("1"),
         "DAI": Decimal("1"),
     }
-    # Chain-specific bridged variants (added only where they actually exist).
     for symbol in _CHAIN_BRIDGED_STABLECOINS.get(chain_key, ()):
         fallback[symbol] = Decimal("1")
 
-    # Derive native + wrapped token symbols from the ChainRegistry
-    # so new chains are picked up automatically without code changes here.
     descriptor = ChainRegistry.try_resolve(chain_key) if chain else None
     native = descriptor.native.symbol if descriptor is not None else "ETH"
-    # No string-prefix fallback: chains like 0G break the ``W{native}`` rule
-    # (A0GI -> W0G, not WA0GI) and a phantom symbol burns a 15s gateway
-    # timeout per probe before silently returning None (VIB-3970).
+    # Wrapped-native symbols are declared data; deriving ``W{native}`` creates
+    # phantom assets on chains whose naming does not follow that convention.
     wrapped = _NATIVE_TO_WRAPPED.get(native)
     if wrapped is None:
         logger.warning(
@@ -2931,8 +2474,6 @@ def get_fallback_teardown_prices(market: Any) -> dict[str, Decimal] | None:
     else:
         tokens_to_fetch = (native, wrapped)
 
-    # Try to get real prices from the market one more time — the gateway
-    # may have recovered since the prefetch attempt.
     if market is not None and hasattr(market, "price"):
         for symbol in tokens_to_fetch:
             try:
@@ -2942,7 +2483,6 @@ def get_fallback_teardown_prices(market: Any) -> dict[str, Decimal] | None:
             except Exception as exc:
                 logger.warning("Could not fetch fallback teardown price for %s: %s", symbol, exc)
 
-    # If we only have stablecoins, still return — it's better than $1 for everything
     return fallback if fallback else None
 
 
@@ -2976,9 +2516,7 @@ def inject_simulated_balances(runner: Any, market: Any, strategy: Any) -> None:
 
     from almanak.framework.market import MultiChainMarketSnapshot, TokenBalance
 
-    # Skip injection when a real balance provider is active. MarketSnapshot.balance()
-    # prefers pre-populated balances over the provider, so injecting with a live
-    # gateway would silently override real on-chain data.
+    # Pre-populated balances outrank the provider, so never inject over live reads.
     if getattr(market, "_balance_provider", None) is not None:
         return
 
@@ -2986,7 +2524,6 @@ def inject_simulated_balances(runner: Any, market: Any, strategy: Any) -> None:
     try:
         simulated = strategy.get_config("simulated_balances")
     except AttributeError:
-        # Strategy does not implement get_config — skip silently.
         return
 
     if not simulated or not isinstance(simulated, dict):
@@ -3013,8 +2550,6 @@ def inject_simulated_balances(runner: Any, market: Any, strategy: Any) -> None:
         tb = TokenBalance(symbol=token, balance=amount, balance_usd=Decimal("0"))
         try:
             if is_multi_chain:
-                # MultiChainMarketSnapshot.set_balance and .price() both require an
-                # explicit chain argument — inject and price each chain separately.
                 for chain in market.chains:
                     balance_usd = Decimal("0")
                     try:
@@ -3025,9 +2560,6 @@ def inject_simulated_balances(runner: Any, market: Any, strategy: Any) -> None:
                     chain_tb = TokenBalance(symbol=token, balance=amount, balance_usd=balance_usd)
                     market.set_balance(token, chain, chain_tb)
             else:
-                # Best-effort USD valuation using the live price oracle.
-                # Silently falls back to 0 if price is unavailable (strategy still
-                # sees a non-zero balance, which is all that matters for gate checks).
                 try:
                     price = market.price(token)
                     tb = TokenBalance(symbol=token, balance=amount, balance_usd=amount * Decimal(str(price)))
@@ -3074,7 +2606,6 @@ def bridge_token_resolution_candidates(
     if token_symbol:
         candidates.append(token_symbol)
 
-    # Preserve first-seen ordering while de-duplicating
     seen: set[str] = set()
     deduped: list[str] = []
     for candidate in candidates:
