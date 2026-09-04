@@ -19,6 +19,7 @@ from almanak.framework.backtesting.pnl.error_handling import PreflightValidation
 from almanak.framework.backtesting.pnl.logging_utils import BacktestLogger
 from almanak.framework.backtesting.pnl.providers.pool_history_fallback import DailyPoolHistory
 from almanak.framework.backtesting.pnl.providers.snapshot_pool_analytics import HistoricalPoolAnalyticsTarget
+from almanak.framework.backtesting.pnl.providers.snapshot_pool_ohlcv import HistoricalPoolOHLCVTarget
 from almanak.framework.backtesting.pnl.providers.snapshot_pool_state import HistoricalPoolTVL
 from almanak.framework.data.models import DataClassification, DataEnvelope, DataMeta
 from almanak.framework.data.timeframes import OHLCVTimeframe
@@ -352,6 +353,115 @@ async def test_readiness_requires_complete_declared_funding_coverage(monkeypatch
     assert len(calls) == 2
     assert calls[0] == (True, (declared_target,))
     assert calls[1] == (False, (hint_target,))
+
+
+@pytest.mark.asyncio
+async def test_readiness_materializes_config_discoverable_exact_pool_ohlcv(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    strategy = _Strategy()
+    strategy.swap_pool = _ARBITRUM_POOL
+    strategy.protocol = "uniswap_v3"
+    strategy.STRATEGY_METADATA = SimpleNamespace(
+        tags=["swap"],
+        supported_protocols=["uniswap_v3"],
+        intent_types=["SWAP", "HOLD"],
+    )
+    strategy.config = {
+        **strategy.config,
+        "swap_pool": _ARBITRUM_POOL,
+        "protocol": "uniswap_v3",
+        "base_token": {"address": _ARBITRUM_WETH},
+        "quote_token": {"address": _ARBITRUM_USDC},
+        "data_granularity": "1h",
+    }
+    materialized = []
+    ohlcv_materialized = []
+
+    class _PoolStateSource:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        async def materialize_history(self, target: Any) -> int:
+            materialized.append(target)
+            return 2
+
+        def view_at(self, _timestamp: datetime) -> None:
+            return None
+
+    class _PoolOHLCVSource:
+        def __init__(self, pool_state_source: Any, **kwargs: Any) -> None:
+            assert isinstance(pool_state_source, _PoolStateSource)
+            assert kwargs["start_time"] == _config().start_time
+            assert kwargs["end_time"] == _config().end_time
+
+        async def materialize_history(self, target: Any) -> int:
+            ohlcv_materialized.append(target)
+            return 101
+
+    monkeypatch.setattr(
+        "almanak.framework.backtesting.pnl.providers.snapshot_pool_state.SnapshotPoolStateSource",
+        _PoolStateSource,
+    )
+    monkeypatch.setattr(
+        "almanak.framework.backtesting.pnl.providers.snapshot_pool_ohlcv.SnapshotExactPoolOHLCVSource",
+        _PoolOHLCVSource,
+    )
+
+    result = await _backtester(_Provider()).check_readiness(strategy, _config())
+
+    assert result.ready
+    assert [target.key for target in materialized] == [("arbitrum", "uniswap_v3", _ARBITRUM_POOL)]
+    assert [target.manifest_key for target in ohlcv_materialized] == [
+        f"pool:arbitrum:{_ARBITRUM_POOL}:{_ARBITRUM_WETH}/{_ARBITRUM_USDC}@1h"
+    ]
+    assert strategy.decide_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_readiness_rejects_exact_pool_ohlcv_gap_before_decide(monkeypatch: pytest.MonkeyPatch) -> None:
+    strategy = _Strategy()
+    strategy.backtest_pool_ohlcv_targets = (
+        HistoricalPoolOHLCVTarget(
+            "arbitrum",
+            "uniswap_v3",
+            _ARBITRUM_POOL,
+            _ARBITRUM_WETH,
+            _ARBITRUM_USDC,
+            OHLCVTimeframe.ONE_HOUR,
+            2,
+        ),
+    )
+
+    class _PoolStateSource:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        async def materialize_history(self, _target: Any) -> int:
+            return 2
+
+    class _PoolOHLCVSource:
+        def __init__(self, _pool_state_source: Any, **_kwargs: Any) -> None:
+            pass
+
+        async def materialize_history(self, _target: Any) -> int:
+            raise ValueError("provider page omitted candle 1767222000")
+
+    monkeypatch.setattr(
+        "almanak.framework.backtesting.pnl.providers.snapshot_pool_state.SnapshotPoolStateSource",
+        _PoolStateSource,
+    )
+    monkeypatch.setattr(
+        "almanak.framework.backtesting.pnl.providers.snapshot_pool_ohlcv.SnapshotExactPoolOHLCVSource",
+        _PoolOHLCVSource,
+    )
+
+    result = await _backtester(_Provider()).check_readiness(strategy, _config())
+
+    assert not result.ready
+    assert result.blockers[0]["failed_checks"] == ["historical_exact_pool_ohlcv"]
+    assert "omitted candle" in result.blockers[0]["message"]
+    assert strategy.decide_calls == 0
 
 
 @pytest.mark.asyncio

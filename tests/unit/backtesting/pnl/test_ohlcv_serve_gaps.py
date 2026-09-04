@@ -6,8 +6,8 @@ Pinned contracts:
 1. Symbol calls resolve through the offline token registry when the run's
    buffers are ADDRESS-keyed and the symbol is not config-declared (the
    ohlcv:WAVAX shape — the run held WAVAX prices yet refused every tick).
-2. The pool-proxy warn-once line fires only AFTER a successful serve — a run
-   whose every pool-scoped read refuses must not log "served as ... proxy".
+2. Pool-scoped reads without a verified exact-history capability refuse and
+   never log or return a generic price-series proxy.
 3. pool_analytics stays refused (no historical analytics plane to serve) but
    under the truthful ledger key `not_simulated` with a message that says
    what to gate on instead — only in backtest-built snapshots; live
@@ -91,35 +91,20 @@ class TestRegistryFallback:
             snapshot.ohlcv("WAVAX", timeframe="1h", limit=10)
 
 
-class TestProxyWarnOrdering:
+class TestPoolScopedRefusal:
     def test_refusing_pool_scoped_run_never_logs_proxy_served(self, caplog):
-        """A run whose pool-scoped reads all refuse must log NO
-        'served as ... proxy' line (it used to warn at startup and then
-        refuse every tick)."""
         engine = _engine_with_series("WETH", [3000.0 + i for i in range(30)])
         engine.set_data_granularity(86400, 3600)  # daily data under hourly ticks
         view = _view(engine)
         snapshot = _snapshot(view)
 
         with caplog.at_level(logging.WARNING):
-            with pytest.raises(ValueError, match="ALM-2957"):
+            with pytest.raises(ValueError, match="not declared and prewarmed"):
                 snapshot.ohlcv("WETH/USDC", timeframe="1h", limit=10, pool_address=BASE_WETH_USDC_POOL)
 
         assert not [r for r in caplog.records if "price-series proxy" in r.message]
-        assert ("ohlcv", "WETH/USDC:pool_scoped") in snapshot._critical_data_failures
-
-    def test_successful_pool_scoped_serve_warns_once(self, caplog):
-        engine = _engine_with_series("WETH", [3000.0 + i for i in range(30)])
-        view = _view(engine)
-
-        with caplog.at_level(logging.WARNING):
-            for _ in range(3):
-                snapshot = _snapshot(view)
-                df = snapshot.ohlcv("WETH/USDC", timeframe="1h", limit=10, pool_address=BASE_WETH_USDC_POOL)
-                assert df.attrs["source"].endswith(":pool_pair_proxy")
-
-        proxy_warnings = [r for r in caplog.records if "price-series proxy" in r.message]
-        assert len(proxy_warnings) == 1
+        key = f"pool:base:{BASE_WETH_USDC_POOL.lower()}:WETH/USDC@1h:pool_scoped"
+        assert ("ohlcv", key) in snapshot._critical_data_failures
 
 
 class TestPoolAnalyticsTruthfulRefusal:

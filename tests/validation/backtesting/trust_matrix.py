@@ -82,6 +82,7 @@ INVARIANT_ROWS: tuple[str, ...] = (
     "snapshot_price_case_insensitive",
     "historical_price_provenance",
     "historical_exact_pool_twap",
+    "historical_exact_pool_ohlcv",
     "historical_exact_pool_state",
     "exact_pool_first_use_discovery",
     "exact_pool_first_use_unprovable",
@@ -255,6 +256,13 @@ CELLS: tuple[TrustCell, ...] = (
         "An exact-pool TWAP dependency is prewarmed from archive observe() evidence, preserves its pool/window/"
         "block identity and actual observation time, and is never replaced by the funded tokens' USD ratio "
         "(ALM-3232).",
+    ),
+    _cell(
+        "historical_exact_pool_ohlcv",
+        "swap",
+        "An exact-pool OHLCV request uses its archive-authenticated address, ordered assets, and fee binding; "
+        "serves pool-native candles through the exact gateway lane; and never substitutes a static-registry or "
+        "token-price proxy (ALM-3522).",
     ),
     _cell(
         "historical_exact_pool_state",

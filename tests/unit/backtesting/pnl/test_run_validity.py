@@ -182,6 +182,62 @@ class TestClassifier:
         assert [warning.code for warning in verdict.warnings] == [INPUT_STARVED_LANE]
         assert terminal_errors(verdict) == []
 
+    def test_required_exact_pool_ohlcv_starvation_invalidates_a_traded_run(self):
+        failure = {
+            "source": "ohlcv",
+            "key": (
+                "pool:base:0x1111111111111111111111111111111111111111:"
+                "0x2222222222222222222222222222222222222222/"
+                "0x3333333333333333333333333333333333333333@1h:pool_scoped"
+            ),
+            "ticks": 9,
+            "detail": "exact-pool candles unavailable",
+            "pattern": "persistent",
+        }
+        verdict = _classify(
+            decision_summary=_summary(intent_ticks=2, fills=1),
+            decision_input_failures=[failure],
+            executed_fills=1,
+        )
+
+        assert verdict.validity is RunValidity.NOT_EVALUABLE
+        assert verdict.reason_codes == (INPUT_STARVED,)
+        assert verdict.warnings == ()
+        assert "1 fill(s) across 2 intent tick(s)" in verdict.reasons[0].message
+        assert terminal_errors(verdict)[0].startswith("BACKTEST_UNSUPPORTED_DATA: ")
+
+    def test_exact_pool_starvation_keeps_pool_orientation_and_timeframe_lanes_distinct(self):
+        pool_a = "0x1111111111111111111111111111111111111111"
+        pool_b = "0x4444444444444444444444444444444444444444"
+        token_a = "0x2222222222222222222222222222222222222222"
+        token_b = "0x3333333333333333333333333333333333333333"
+        lane_ids = (
+            (pool_a, f"{token_a}/{token_b}", "15m"),
+            (pool_b, f"{token_a}/{token_b}", "15m"),
+            (pool_a, f"{token_b}/{token_a}", "1h"),
+            (pool_a, f"{token_a}/{token_b}", "1h"),
+        )
+        failures = [
+            {
+                "source": "ohlcv",
+                "key": f"pool:base:{pool}:{orientation}@{timeframe}:pool_scoped",
+                "ticks": 9,
+                "detail": "lane unavailable",
+                "pattern": "persistent",
+            }
+            for pool, orientation, timeframe in lane_ids
+        ]
+
+        verdict = _classify(decision_input_failures=failures)
+
+        assert verdict.validity is RunValidity.NOT_EVALUABLE
+        inputs = verdict.reasons[0].details["inputs"]
+        assert [entry["key"] for entry in inputs] == [failure["key"] for failure in failures]
+        error = terminal_errors(verdict)[0]
+        assert pool_b in error
+        assert f"{token_b}/{token_a}" in error
+        assert "@1h:pool_scoped" in error
+
     def test_most_severe_reason_wins_and_all_are_kept(self):
         summary = _summary(intent_ticks=0)
         verdict = _classify(

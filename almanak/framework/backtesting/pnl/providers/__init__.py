@@ -151,6 +151,7 @@ from .rate_limiter import (
 )
 from .registry import ProviderMetadata, ProviderRegistry
 from .snapshot_pool_analytics import HistoricalPoolAnalyticsTarget
+from .snapshot_pool_ohlcv import HistoricalPoolOHLCVTarget, SnapshotExactPoolOHLCVSource
 from .snapshot_pool_state import HistoricalPoolStateTarget, SnapshotPoolStateSource, SnapshotPoolStateView
 from .snapshot_twap import HistoricalTWAPTarget, SnapshotTWAPSource, SnapshotTWAPView
 from .subgraph_client import (
@@ -193,6 +194,8 @@ __all__ = [
     "SnapshotTWAPSource",
     "SnapshotTWAPView",
     "HistoricalPoolAnalyticsTarget",
+    "HistoricalPoolOHLCVTarget",
+    "SnapshotExactPoolOHLCVSource",
     "HistoricalPoolStateTarget",
     "SnapshotPoolStateSource",
     "SnapshotPoolStateView",

@@ -146,6 +146,7 @@ def test_snapshot_serves_execution_grade_pool_price_and_reserves() -> None:
     assert descriptor.provenance == "historical:on_chain_archive"
     assert descriptor.factory == "0x1f98431c8ad98523631ae4a59f267346ea31f984"
     assert source.descriptors() == (descriptor,)
+    assert source.verification_block("POLYGON", "Uniswap-V3", POOL.upper()) == 100
     view = source.view_at(END)
 
     price = view.read_pool_price(POOL, "polygon")

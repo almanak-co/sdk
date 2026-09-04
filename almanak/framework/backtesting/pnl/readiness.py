@@ -134,8 +134,10 @@ async def check_backtest_readiness(
     """Validate every discoverable data dependency without calling ``decide``.
 
     This deliberately shares the runner's canonical discovery and provider
-    preparation functions. Runner-side strict preflight remains authoritative
-    in case provider state changes between this check and execution.
+    preparation functions. Declared and generated/config-shaped exact-pool OHLCV
+    dependencies are authenticated and range-validated before tick 1. Runner-side
+    strict preflight remains authoritative in case provider state changes between
+    this check and execution.
     """
     from almanak.framework.backtesting.pnl import _engine_helpers
     from almanak.framework.backtesting.pnl.data_broker import data_broker_scope
@@ -222,6 +224,13 @@ async def check_backtest_readiness(
                     state.strategy_config,
                     readiness_config,
                     state.data_broker.manifest,
+                )
+                await _engine_helpers._prepare_declared_historical_pool_ohlcv(
+                    strategy,
+                    state.strategy_config,
+                    readiness_config,
+                    pool_state_source,
+                    token_addresses=token_addresses,
                 )
                 analytics_targets = _engine_helpers._declared_historical_pool_analytics(
                     strategy,

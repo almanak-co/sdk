@@ -15,23 +15,30 @@ from almanak.framework.backtesting.pnl.data_provider import HistoricalDataCapabi
 from almanak.framework.backtesting.pnl.error_handling import PreflightValidationError
 from almanak.framework.backtesting.pnl.feasibility import (
     ENV_BUDGET_SECONDS,
+    ENV_OHLCV_PAGE_LATENCY_SECONDS,
     ENV_PAGE_LATENCY_SECONDS,
     ENV_SAFETY_MARGIN,
     ENV_TICKS_PER_SECOND,
     BacktestWindowTooLongError,
+    ExactPoolOHLCVCost,
     FeasibilityKnobs,
     enforce_window_feasibility,
+    estimate_config_cost,
     estimate_cost,
+    expected_ohlcv_pages,
     expected_pages,
     expected_points,
     max_feasible_ticks,
 )
 from almanak.framework.backtesting.pnl.providers import snapshot_pool_state
+from almanak.framework.backtesting.pnl.providers.snapshot_pool_analytics import HistoricalPoolAnalyticsTarget
+from almanak.framework.backtesting.pnl.providers.snapshot_pool_ohlcv import HistoricalPoolOHLCVTarget
 from almanak.framework.backtesting.pnl.providers.snapshot_pool_state import (
     _MAX_POINTS_PER_REQUEST,
     HistoricalPoolStatePoint,
     HistoricalPoolStateTarget,
 )
+from almanak.framework.data.timeframes import OHLCVTimeframe
 from tests.backtesting_funding import pnl_token_funding
 
 _POOL = "0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640"
@@ -77,6 +84,23 @@ class _Strategy:
 
     def decide(self, market: Any) -> None:
         return None
+
+
+_OHLCV_TARGET = HistoricalPoolOHLCVTarget(
+    "arbitrum",
+    "uniswap_v3",
+    _POOL,
+    _TOKEN0,
+    _TOKEN1,
+    OHLCVTimeframe.FIFTEEN_MINUTES,
+    100,
+)
+_OHLCV_COST = ExactPoolOHLCVCost(
+    lane_key=_OHLCV_TARGET.manifest_key,
+    timeframe=_OHLCV_TARGET.timeframe,
+    lookback_candles=_OHLCV_TARGET.lookback_candles,
+)
+_ANALYTICS_TARGET = HistoricalPoolAnalyticsTarget("arbitrum", "uniswap_v3", _POOL)
 
 
 class _ReadinessProvider:
@@ -189,16 +213,57 @@ def test_coarser_interval_reduces_pages_and_ticks() -> None:
     assert daily.total_seconds < hourly.total_seconds
 
 
+def test_exact_pool_ohlcv_cost_uses_bounded_pages_not_ticks() -> None:
+    duration = 32 * _DAY
+    costs = (_OHLCV_COST,)
+
+    estimate = estimate_cost(
+        duration_seconds=duration,
+        interval_seconds=15 * 60,
+        target_count=1,
+        exact_pool_ohlcv_costs=costs,
+        knobs=_knobs(),
+    )
+
+    assert expected_ohlcv_pages(duration, costs) == 4
+    assert estimate.exact_pool_ohlcv_pages == 4
+    assert estimate.exact_pool_ohlcv_targets == 1
+    assert estimate.exact_pool_ohlcv_data_seconds == 40
+
+
+def test_config_cost_matches_floor_aligned_materialization_at_page_boundary() -> None:
+    duration = (30_000 - _OHLCV_TARGET.lookback_candles) * _OHLCV_TARGET.timeframe.seconds + 1
+    config = _config(duration / _DAY, interval_seconds=15 * 60)
+
+    estimate = estimate_config_cost(
+        config,
+        target_count=1,
+        exact_pool_ohlcv_costs=(_OHLCV_COST,),
+        knobs=_knobs(budget_seconds=100_000),
+    )
+
+    assert expected_ohlcv_pages(duration, (_OHLCV_COST,)) == 31
+    assert estimate.exact_pool_ohlcv_pages == 30
+    assert estimate.feasible
+
+
 # --- env knobs --------------------------------------------------------------
 
 
 def test_knobs_default_to_documented_values(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in (ENV_PAGE_LATENCY_SECONDS, ENV_TICKS_PER_SECOND, ENV_BUDGET_SECONDS, ENV_SAFETY_MARGIN):
+    for name in (
+        ENV_PAGE_LATENCY_SECONDS,
+        ENV_OHLCV_PAGE_LATENCY_SECONDS,
+        ENV_TICKS_PER_SECOND,
+        ENV_BUDGET_SECONDS,
+        ENV_SAFETY_MARGIN,
+    ):
         monkeypatch.delenv(name, raising=False)
 
     knobs = FeasibilityKnobs.from_env()
 
     assert knobs.page_latency_seconds == 20.0
+    assert knobs.ohlcv_page_latency_seconds == 10.0
     assert knobs.ticks_per_second == 3.5
     assert knobs.budget_seconds == 7200.0
     assert knobs.safety_margin == 0.8
@@ -206,13 +271,14 @@ def test_knobs_default_to_documented_values(monkeypatch: pytest.MonkeyPatch) -> 
 
 def test_env_overrides_every_knob(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(ENV_PAGE_LATENCY_SECONDS, "5")
+    monkeypatch.setenv(ENV_OHLCV_PAGE_LATENCY_SECONDS, "2")
     monkeypatch.setenv(ENV_TICKS_PER_SECOND, "100")
     monkeypatch.setenv(ENV_BUDGET_SECONDS, "3600")
     monkeypatch.setenv(ENV_SAFETY_MARGIN, "0.5")
 
     knobs = FeasibilityKnobs.from_env()
 
-    assert (knobs.page_latency_seconds, knobs.ticks_per_second) == (5.0, 100.0)
+    assert (knobs.page_latency_seconds, knobs.ohlcv_page_latency_seconds, knobs.ticks_per_second) == (5.0, 2.0, 100.0)
     assert (knobs.budget_seconds, knobs.safety_margin) == (3600.0, 0.5)
     assert knobs.usable_budget_seconds == pytest.approx(1800.0)
 
@@ -226,7 +292,13 @@ def test_unusable_env_values_fall_back_to_defaults(monkeypatch: pytest.MonkeyPat
 
 def test_default_budget_admits_one_year_at_one_hour(monkeypatch: pytest.MonkeyPatch) -> None:
     """The product promise: a year-long hourly single-pool window runs on the default budget."""
-    for name in (ENV_PAGE_LATENCY_SECONDS, ENV_TICKS_PER_SECOND, ENV_BUDGET_SECONDS, ENV_SAFETY_MARGIN):
+    for name in (
+        ENV_PAGE_LATENCY_SECONDS,
+        ENV_OHLCV_PAGE_LATENCY_SECONDS,
+        ENV_TICKS_PER_SECOND,
+        ENV_BUDGET_SECONDS,
+        ENV_SAFETY_MARGIN,
+    ):
         monkeypatch.delenv(name, raising=False)
 
     for targets in (1, 2):
@@ -236,7 +308,13 @@ def test_default_budget_admits_one_year_at_one_hour(monkeypatch: pytest.MonkeyPa
 
 def test_env_budget_can_admit_a_window_the_default_rejects(monkeypatch: pytest.MonkeyPatch) -> None:
     config = _config(3 * 365)
-    for name in (ENV_PAGE_LATENCY_SECONDS, ENV_TICKS_PER_SECOND, ENV_BUDGET_SECONDS, ENV_SAFETY_MARGIN):
+    for name in (
+        ENV_PAGE_LATENCY_SECONDS,
+        ENV_OHLCV_PAGE_LATENCY_SECONDS,
+        ENV_TICKS_PER_SECOND,
+        ENV_BUDGET_SECONDS,
+        ENV_SAFETY_MARGIN,
+    ):
         monkeypatch.delenv(name, raising=False)
     with pytest.raises(BacktestWindowTooLongError):
         enforce_window_feasibility(config, target_count=1)
@@ -312,6 +390,7 @@ def test_details_carry_operator_knob_env_vars() -> None:
         ENV_BUDGET_SECONDS: 900.0,
         ENV_SAFETY_MARGIN: 0.8,
         ENV_PAGE_LATENCY_SECONDS: 20.0,
+        ENV_OHLCV_PAGE_LATENCY_SECONDS: 10.0,
         ENV_TICKS_PER_SECOND: 3.5,
     }
 
@@ -410,6 +489,29 @@ def test_gate_makes_no_network_call(monkeypatch: pytest.MonkeyPatch) -> None:
         enforce_window_feasibility(_config(180), target_count=1, knobs=_knobs())
 
 
+def test_exact_pool_ohlcv_burst_limit_rejects_before_pool_state_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(snapshot_pool_state, "fetch_historical_pool_state_points", _spy_fetcher(calls))
+
+    class OhlcvStrategy(_Strategy):
+        backtest_pool_ohlcv_targets = (_OHLCV_TARGET,)
+
+    with pytest.raises(BacktestWindowTooLongError) as excinfo:
+        asyncio.run(
+            _engine_helpers._prepare_declared_historical_pool_state(
+                OhlcvStrategy(),
+                OhlcvStrategy.config,
+                _config(365, interval_seconds=15 * 60),
+                None,
+            )
+        )
+
+    assert calls == []
+    assert excinfo.value.details["exact_pool_ohlcv_pages"] == 36
+    assert excinfo.value.details["exact_pool_ohlcv_request_limit"] == 30
+    assert "provider materialization limit: 30 requests" in str(excinfo.value)
+
+
 # --- engine seam ------------------------------------------------------------
 
 
@@ -449,6 +551,62 @@ def test_engine_seam_materializes_feasible_window(monkeypatch: pytest.MonkeyPatc
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize(
+    ("state_targets", "ohlcv_targets", "analytics_targets", "failed_check", "lane"),
+    [
+        (
+            _Strategy.backtest_pool_state_targets,
+            (_OHLCV_TARGET,),
+            (_ANALYTICS_TARGET,),
+            "historical_exact_pool_state",
+            "exact-pool state",
+        ),
+        ((), (_OHLCV_TARGET,), (_ANALYTICS_TARGET,), "historical_exact_pool_ohlcv", "exact-pool OHLCV identity"),
+        ((), (), (_ANALYTICS_TARGET,), "historical_pool_analytics", "pool-analytics state"),
+    ],
+)
+def test_pool_state_materialization_failure_attribution_precedence(
+    monkeypatch: pytest.MonkeyPatch,
+    state_targets: tuple[HistoricalPoolStateTarget, ...],
+    ohlcv_targets: tuple[HistoricalPoolOHLCVTarget, ...],
+    analytics_targets: tuple[HistoricalPoolAnalyticsTarget, ...],
+    failed_check: str,
+    lane: str,
+) -> None:
+    strategy = type(
+        "Strategy",
+        (),
+        {
+            "backtest_pool_state_targets": state_targets,
+            "backtest_pool_ohlcv_targets": ohlcv_targets,
+            "backtest_pool_analytics_targets": analytics_targets,
+        },
+    )()
+    cause = ValueError("archive fixture failure")
+
+    async def fail_materialization(_source: Any, _target: HistoricalPoolStateTarget) -> int:
+        raise cause
+
+    monkeypatch.setattr(snapshot_pool_state.SnapshotPoolStateSource, "materialize_history", fail_materialization)
+
+    with pytest.raises(PreflightValidationError) as excinfo:
+        asyncio.run(
+            _engine_helpers._prepare_declared_historical_pool_state(
+                strategy,
+                _Strategy.config,
+                _config(1, interval_seconds=15 * 60),
+                None,
+            )
+        )
+
+    assert excinfo.value.failed_checks == [failed_check]
+    assert (
+        excinfo.value.message
+        == f"Historical {lane} preflight failed for arbitrum:uniswap_v3:{_POOL}: archive fixture failure"
+    )
+    assert excinfo.value.__cause__ is cause
+
+
 @pytest.mark.asyncio
 async def test_readiness_reports_window_too_long_blocker(monkeypatch: pytest.MonkeyPatch) -> None:
     from almanak.framework.backtesting.pnl.engine import DefaultFeeModel, DefaultSlippageModel, PnLBacktester
@@ -467,6 +625,30 @@ async def test_readiness_reports_window_too_long_blocker(monkeypatch: pytest.Mon
     assert not result.ready
     assert [blocker["code"] for blocker in result.blockers] == ["WINDOW_TOO_LONG"]
     assert any("shorten the window to ~" in item for item in result.blockers[0]["recommendations"])
+
+
+@pytest.mark.asyncio
+async def test_readiness_reports_exact_pool_ohlcv_request_cost_before_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
+    from almanak.framework.backtesting.pnl.engine import DefaultFeeModel, DefaultSlippageModel, PnLBacktester
+
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(snapshot_pool_state, "fetch_historical_pool_state_points", _spy_fetcher(calls))
+
+    class OhlcvStrategy(_Strategy):
+        backtest_pool_ohlcv_targets = (_OHLCV_TARGET,)
+
+    backtester = PnLBacktester(
+        data_provider=_ReadinessProvider(),
+        fee_models={"default": DefaultFeeModel()},
+        slippage_models={"default": DefaultSlippageModel()},
+    )
+
+    result = await backtester.check_readiness(OhlcvStrategy(), _config(365, interval_seconds=15 * 60))
+
+    assert calls == []
+    assert not result.ready
+    assert result.blockers[0]["details"]["exact_pool_ohlcv_pages"] == 36
+    assert result.blockers[0]["details"]["exact_pool_ohlcv_request_limit"] == 30
 
 
 def test_engine_seam_skips_gate_without_declared_targets(monkeypatch: pytest.MonkeyPatch) -> None:

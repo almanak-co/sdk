@@ -161,7 +161,21 @@ def classify_run_validity(
         reasons.append(rejected)
 
     persistent = [failure for failure in decision_input_failures if failure.get("pattern") == "persistent"]
-    if persistent and executed_fills == 0 and intent_ticks == 0 and tick_count > 0:
+    required_exact_pool_ohlcv = [
+        failure
+        for failure in persistent
+        if failure.get("source") == "ohlcv" and str(failure.get("key", "")).endswith(":pool_scoped")
+    ]
+    if required_exact_pool_ohlcv and tick_count > 0:
+        reasons.append(
+            input_starved_reason(
+                required_exact_pool_ohlcv,
+                tick_count=tick_count,
+                intent_ticks=intent_ticks,
+                executed_fills=executed_fills,
+            )
+        )
+    elif persistent and executed_fills == 0 and intent_ticks == 0 and tick_count > 0:
         reasons.append(input_starved_reason(persistent, tick_count=tick_count))
     elif persistent and executed_fills > 0:
         warnings.append(
@@ -218,18 +232,30 @@ def family_all_rejected_reason(decision_summary: Mapping[str, Any]) -> RunValidi
     )
 
 
-def input_starved_reason(persistent: Sequence[Mapping[str, Any]], *, tick_count: int) -> RunValidityReason:
+def input_starved_reason(
+    persistent: Sequence[Mapping[str, Any]],
+    *,
+    tick_count: int,
+    intent_ticks: int = 0,
+    executed_fills: int = 0,
+) -> RunValidityReason:
     """Reason for a held run whose required inputs failed persistently."""
     blocking = "; ".join(
         f"{failure['source']}:{failure['key']} ({failure['ticks']}/{tick_count} ticks: {failure['detail']})"
         for failure in persistent[:3]
     )
+    if executed_fills or intent_ticks:
+        outcome = (
+            f"The run recorded {executed_fills} fill(s) across {intent_ticks} intent tick(s), but that activity "
+            "does not evaluate the signal path gated on these exact-pool inputs."
+        )
+    else:
+        outcome = "The strategy emitted zero intents, so no executable simulation was performed."
     return RunValidityReason(
         code=INPUT_STARVED,
         message=(
-            f"no executable simulation was performed. {len(persistent)} required decision input(s) were "
-            f"unavailable on nearly every one of {tick_count} tick(s), and the strategy emitted zero intents. "
-            f"Blocking input(s): {blocking}. {_METRICS_DISCLAIMER}"
+            f"{len(persistent)} required decision input(s) were unavailable on nearly every one of "
+            f"{tick_count} tick(s). {outcome} Blocking input(s): {blocking}. {_METRICS_DISCLAIMER}"
         ),
         details={"inputs": [_failure_ref(failure, tick_count) for failure in persistent[:5]]},
     )

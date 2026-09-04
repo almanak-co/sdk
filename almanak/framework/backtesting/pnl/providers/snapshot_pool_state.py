@@ -593,6 +593,14 @@ class SnapshotPoolStateSource:
             descriptor for key in sorted(self._series) if (descriptor := self.pool_descriptor(*key)) is not None
         )
 
+    def verification_block(self, chain: str, protocol: str, pool_address: str) -> int:
+        """Return the first archive block that authenticated a pool identity."""
+        key = (chain.strip().lower(), protocol.strip().lower().replace("-", "_"), pool_address.strip().lower())
+        series = self._series.get(key)
+        if series is None or not series.points:
+            raise ValueError(f"exact pool {':'.join(key)} was not materialized")
+        return series.points[0].block_number
+
     def view_at(self, timestamp: datetime, fallback: Any | None = None) -> SnapshotPoolStateView:
         return SnapshotPoolStateView(self, _unix_seconds(timestamp), fallback=fallback)
 

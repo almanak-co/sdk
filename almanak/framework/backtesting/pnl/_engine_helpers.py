@@ -87,7 +87,7 @@ from almanak.framework.backtesting.pnl.error_handling import (
     BacktestErrorHandler,
     PreflightValidationError,
 )
-from almanak.framework.backtesting.pnl.feasibility import enforce_window_feasibility
+from almanak.framework.backtesting.pnl.feasibility import ExactPoolOHLCVCost, enforce_window_feasibility
 from almanak.framework.backtesting.pnl.initial_portfolio import (
     TokenFundingInitializationError,
     active_token_funding_entries,
@@ -856,6 +856,44 @@ def _strategy_cadence_seconds(strategy_config: Mapping[str, Any] | None) -> int 
         return None
 
 
+async def _materialize_declared_historical_pool_state_target(
+    source: Any,
+    target: Any,
+    *,
+    state_target_keys: set[tuple[str, str, str]],
+    ohlcv_target_keys: set[tuple[str, str, str]],
+) -> int:
+    """Materialize one pool-state target with declaration-lane failure attribution."""
+    try:
+        return await source.materialize_history(target)
+    except (DataSourceError, ValueError) as exc:
+        analytics_only = target.key not in state_target_keys and target.key not in ohlcv_target_keys
+        ohlcv_only = target.key not in state_target_keys and not analytics_only
+        failed_check = (
+            "historical_exact_pool_ohlcv"
+            if ohlcv_only
+            else "historical_pool_analytics"
+            if analytics_only
+            else "historical_exact_pool_state"
+        )
+        lane = (
+            "exact-pool OHLCV identity"
+            if ohlcv_only
+            else "pool-analytics state"
+            if analytics_only
+            else "exact-pool state"
+        )
+        raise PreflightValidationError(
+            message=f"Historical {lane} preflight failed for {target.manifest_key}: {exc}",
+            failed_checks=[failed_check],
+            recommendations=[
+                "Verify the exact pool existed throughout the requested window and configure an archive-capable gateway RPC."
+            ],
+            error_count=1,
+            warning_count=0,
+        ) from exc
+
+
 def _first_use_feasibility(
     config: PnLBacktestConfig,
     strategy_config: Mapping[str, Any] | None,
@@ -879,6 +917,9 @@ async def _prepare_declared_historical_pool_state(
     from almanak.framework.backtesting.pnl.providers.snapshot_pool_analytics import (
         declared_historical_pool_analytics_targets,
     )
+    from almanak.framework.backtesting.pnl.providers.snapshot_pool_ohlcv import (
+        declared_historical_pool_ohlcv_targets,
+    )
     from almanak.framework.backtesting.pnl.providers.snapshot_pool_state import (
         HistoricalPoolStateTarget,
         SnapshotPoolStateSource,
@@ -896,6 +937,23 @@ async def _prepare_declared_historical_pool_state(
             message=f"Historical exact-pool state declaration is invalid: {exc}",
             failed_checks=["historical_exact_pool_state"],
             recommendations=["Declare exact HistoricalPoolStateTarget values for every required pool."],
+            error_count=1,
+            warning_count=0,
+        ) from exc
+    try:
+        ohlcv_targets = declared_historical_pool_ohlcv_targets(
+            strategy,
+            strategy_config,
+            default_chain=config.chain,
+        )
+    except (TypeError, ValueError) as exc:
+        raise PreflightValidationError(
+            message=f"Historical exact-pool OHLCV declaration is invalid: {exc}",
+            failed_checks=["historical_exact_pool_ohlcv"],
+            recommendations=[
+                "Declare HistoricalPoolOHLCVTarget values with an exact chain, protocol, pool, token "
+                "orientation, timeframe, and lookback."
+            ],
             error_count=1,
             warning_count=0,
         ) from exc
@@ -924,7 +982,17 @@ async def _prepare_declared_historical_pool_state(
     # measured DefiLlama history can be consulted (ALM-3328).
     state_backed_analytics_fields = frozenset({"tvl_usd"})
     state_target_keys = {target.key for target in state_targets}
+    ohlcv_target_keys = {(target.chain, target.protocol, target.pool_address) for target in ohlcv_targets}
     targets_by_key = {target.key: target for target in state_targets}
+    for ohlcv_target in ohlcv_targets:
+        targets_by_key.setdefault(
+            (ohlcv_target.chain, ohlcv_target.protocol, ohlcv_target.pool_address),
+            HistoricalPoolStateTarget(
+                ohlcv_target.chain,
+                ohlcv_target.protocol,
+                ohlcv_target.pool_address,
+            ),
+        )
     for analytics_target in analytics_targets:
         if not analytics_target.required_fields & state_backed_analytics_fields:
             continue
@@ -940,6 +1008,18 @@ async def _prepare_declared_historical_pool_state(
     if not targets:
         return await _prewarm_hinted_pool_state(strategy, strategy_config, config, manifest)
     run_chain = _canonical_run_chain(config)
+    mismatched_ohlcv = [target.chain for target in ohlcv_targets if target.chain != run_chain]
+    if mismatched_ohlcv:
+        raise PreflightValidationError(
+            message=(
+                f"Historical exact-pool OHLCV targets must use backtest chain {run_chain!r}: "
+                f"{sorted(set(mismatched_ohlcv))!r}"
+            ),
+            failed_checks=["historical_exact_pool_ohlcv"],
+            recommendations=["Run one chain per backtest or update the pool OHLCV target chain."],
+            error_count=1,
+            warning_count=0,
+        )
     mismatched = [target.chain for target in targets if target.chain != run_chain]
     if mismatched:
         raise PreflightValidationError(
@@ -956,6 +1036,14 @@ async def _prepare_declared_historical_pool_state(
         config,
         target_count=len(targets),
         strategy_cadence_seconds=_strategy_cadence_seconds(strategy_config),
+        exact_pool_ohlcv_costs=tuple(
+            ExactPoolOHLCVCost(
+                lane_key=target.manifest_key,
+                timeframe=target.timeframe,
+                lookback_candles=target.lookback_candles,
+            )
+            for target in ohlcv_targets
+        ),
     )
     source = SnapshotPoolStateSource(
         start_time=config.start_time,
@@ -965,22 +1053,12 @@ async def _prepare_declared_historical_pool_state(
         first_use_feasibility=_first_use_feasibility(config, strategy_config),
     )
     for target in targets:
-        try:
-            count = await source.materialize_history(target)
-        except (DataSourceError, ValueError) as exc:
-            analytics_only = target.key not in state_target_keys
-            raise PreflightValidationError(
-                message=(
-                    f"Historical {'pool-analytics state' if analytics_only else 'exact-pool state'} "
-                    f"preflight failed for {target.manifest_key}: {exc}"
-                ),
-                failed_checks=["historical_pool_analytics" if analytics_only else "historical_exact_pool_state"],
-                recommendations=[
-                    "Verify the exact pool existed throughout the requested window and configure an archive-capable gateway RPC."
-                ],
-                error_count=1,
-                warning_count=0,
-            ) from exc
+        count = await _materialize_declared_historical_pool_state_target(
+            source,
+            target,
+            state_target_keys=state_target_keys,
+            ohlcv_target_keys=ohlcv_target_keys,
+        )
         logger.info("Prewarmed %d exact-pool state observations for %s before tick 1", count, target.manifest_key)
     return source
 
@@ -1860,6 +1938,77 @@ def _exact_pool_view_at(pool_state_source: Any | None, timestamp: datetime, *, f
     return pool_state_source.view_at(timestamp, fallback=fallback)
 
 
+async def _prepare_declared_historical_pool_ohlcv(
+    strategy: BacktestableStrategy,
+    strategy_config: Mapping[str, Any],
+    config: PnLBacktestConfig,
+    pool_state_source: Any | None,
+    *,
+    token_addresses: Mapping[str, tuple[str, str]],
+) -> Any | None:
+    """Materialize every declared exact-pool candle lane before tick 1."""
+    from almanak.framework.backtesting.pnl.providers.snapshot_pool_ohlcv import (
+        SnapshotExactPoolOHLCVSource,
+        declared_historical_pool_ohlcv_targets,
+    )
+
+    try:
+        targets = declared_historical_pool_ohlcv_targets(
+            strategy,
+            strategy_config,
+            default_chain=config.chain,
+        )
+    except (TypeError, ValueError) as exc:
+        raise PreflightValidationError(
+            message=f"Historical exact-pool OHLCV declaration is invalid: {exc}",
+            failed_checks=["historical_exact_pool_ohlcv"],
+            recommendations=[
+                "Declare HistoricalPoolOHLCVTarget values with an exact chain, protocol, pool, token "
+                "orientation, timeframe, and lookback."
+            ],
+            error_count=1,
+            warning_count=0,
+        ) from exc
+    if not targets:
+        return None
+    if pool_state_source is None:
+        raise PreflightValidationError(
+            message="Historical exact-pool OHLCV requires an archive-authenticated pool descriptor",
+            failed_checks=["historical_exact_pool_ohlcv"],
+            recommendations=["Declare the exact pool and configure an archive-capable gateway RPC."],
+            error_count=1,
+            warning_count=0,
+        )
+
+    source = SnapshotExactPoolOHLCVSource(
+        pool_state_source,
+        start_time=config.start_time,
+        end_time=config.end_time,
+        token_addresses=token_addresses,
+    )
+    targets_by_lane: dict[tuple[Any, ...], Any] = {}
+    for target in targets:
+        previous = targets_by_lane.get(target.lane_key)
+        if previous is None or target.lookback_candles > previous.lookback_candles:
+            targets_by_lane[target.lane_key] = target
+    for target in targets_by_lane.values():
+        try:
+            count = await source.materialize_history(target)
+        except ValueError as exc:
+            raise PreflightValidationError(
+                message=f"Historical exact-pool OHLCV preflight failed for {target.manifest_key}: {exc}",
+                failed_checks=["historical_exact_pool_ohlcv"],
+                recommendations=[
+                    "Verify exact-pool candles cover the full requested range, shorten the backtest window, "
+                    "or choose a supported timeframe."
+                ],
+                error_count=1,
+                warning_count=0,
+            ) from exc
+        logger.info("Prewarmed %d exact-pool OHLCV candles for %s before tick 1", count, target.manifest_key)
+    return source
+
+
 async def execute_iteration_loop(
     backtester: PnLBacktester,
     strategy: BacktestableStrategy,
@@ -1930,6 +2079,16 @@ async def execute_iteration_loop(
     )
     twap_source = _ensure_run_twap_source(twap_source, config, state)
     pool_state_source = _bind_run_pool_state_source(backtester, pool_state_source, config, state)
+    # Stable for the whole run: provider registrations happen during
+    # initialize_backtest, before this loop starts.
+    token_addresses = _registered_token_addresses(backtester)
+    pool_ohlcv_source = await _prepare_declared_historical_pool_ohlcv(
+        strategy,
+        state.strategy_config,
+        config,
+        pool_state_source,
+        token_addresses=token_addresses,
+    )
     _bind_historical_pool_descriptors(
         backtester,
         pool_state_source,
@@ -1937,10 +2096,6 @@ async def execute_iteration_loop(
         chain=config.chain,
     )
     pool_analytics_targets = _declared_historical_pool_analytics(strategy, state.strategy_config, config)
-
-    # Stable for the whole run: provider registrations happen during
-    # initialize_backtest, before this loop starts.
-    token_addresses = _registered_token_addresses(backtester)
 
     # Credits must land on the funding identity plane (ALM-2960) — same map
     # the snapshot registers as symbol aliases.
@@ -1995,6 +2150,7 @@ async def execute_iteration_loop(
         token_addresses,
         manifest=run_manifest,
         chain=config.chain,
+        pool_ohlcv_source=pool_ohlcv_source,
     )
     # ALM-2943: pool_price / pool_price_by_pair as the labeled pair-ratio
     # proxy, estimate_slippage from the engine's own fill models, and

@@ -48,6 +48,7 @@ from almanak.connectors.gmx_v2.backtest_prices import (
     _GMXOracleMarketSource,
 )
 from almanak.connectors.uniswap_v3.addresses import UNISWAP_V3
+from almanak.core.asset_identity import AssetIdentity, AssetNamespace
 from almanak.core.models.quote_asset import QuoteAsset
 from almanak.framework.backtesting.adapters.lp_adapter import (
     LPBacktestAdapter,
@@ -65,6 +66,7 @@ from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
 from almanak.framework.backtesting.pnl.data_manifest import (
     CONSUMER_STRATEGY_DECISION,
     LANE_FUNDING,
+    LANE_OHLCV,
     LANE_POOL_STATE,
     LANE_PRICE,
     LANE_TWAP,
@@ -83,6 +85,7 @@ from almanak.framework.backtesting.pnl.metrics_calculator import (
 from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
 from almanak.framework.backtesting.pnl.position_models import PositionType, SimulatedPosition
 from almanak.framework.backtesting.pnl.providers.perp._gateway_history import FundingHistoryPoint
+from almanak.framework.backtesting.pnl.providers.snapshot_pool_ohlcv import HistoricalPoolOHLCVTarget
 from almanak.framework.backtesting.pnl.providers.snapshot_pool_state import (
     HistoricalPoolStatePoint,
     HistoricalPoolStateTarget,
@@ -90,7 +93,9 @@ from almanak.framework.backtesting.pnl.providers.snapshot_pool_state import (
 from almanak.framework.backtesting.pnl.providers.snapshot_twap import HistoricalTWAPTarget
 from almanak.framework.backtesting.pnl.providers.twap import HistoricalTWAPPoint
 from almanak.framework.backtesting.pnl.types import DataConfidence
+from almanak.framework.data.interfaces import OHLCVCandle
 from almanak.framework.data.models import DataClassification
+from almanak.framework.data.timeframes import OHLCVTimeframe
 from almanak.framework.intents.lending_intents import (
     BorrowIntent,
     RepayIntent,
@@ -98,6 +103,19 @@ from almanak.framework.intents.lending_intents import (
     WithdrawIntent,
 )
 from almanak.framework.intents.vocabulary import LPCloseIntent, LPOpenIntent
+from almanak.framework.primitives.types import Primitive
+from almanak.framework.venues import (
+    ExactVenueObservation,
+    VenueBindingComponent,
+    VenueDataProvenance,
+    VenueObservationAnchor,
+    VenueObservedFact,
+    VenueReferenceNamespace,
+    VenueTargetRef,
+    VenueTargetRole,
+    VenueVerificationEvidence,
+    build_verified_venue_binding,
+)
 from tests.validation.backtesting.trust_matrix import (
     CELLS_BY_ID,
     INITIAL_CAPITAL,
@@ -732,6 +750,216 @@ def test_historical_exact_pool_twap_reaches_unchanged_strategy_call(monkeypatch:
     assert entries[0]["ladder"] == ["archive_observe"]
     assert "window_seconds=1800" in entries[0]["detail"]
     assert "sample_interval_seconds=3600" in entries[0]["detail"]
+
+
+@pytest.mark.trust_cell("swap:historical_exact_pool_ohlcv")
+def test_historical_exact_pool_ohlcv_reaches_unchanged_strategy_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exact pool candles reach decide() without a registry or price proxy."""
+    token0 = "0x3f53de71c126bdabae20f9cd64848d317f6c3238"
+    token1 = "0x55d398326f99059ff775485246999027b3197955"
+    pool = "0x89001d846f7ca36ee089f73eefc25657e1798144"
+    router = "0x1111111111111111111111111111111111111111"
+    deployment_block = 113_161_920
+    start = datetime(2026, 8, 2, 12, tzinfo=START.tzinfo)
+    pool_state_fetch_calls = []
+    exact_requests = []
+    verified_blocks = []
+    gateway_client = object()
+
+    def archive_pool_state_fetch(**kwargs):
+        pool_state_fetch_calls.append(kwargs)
+        targets = range(kwargs["start_ts"], kwargs["end_ts"] + 1, kwargs["interval_secs"])
+        return [
+            HistoricalPoolStatePoint(
+                timestamp=target - 10,
+                block_number=deployment_block + index,
+                sqrt_price_x96=2**96,
+                tick=0,
+                liquidity=100_000,
+                token0=token0,
+                token1=token1,
+                token0_decimals=18,
+                token1_decimals=18,
+                fee_tier=3_000,
+                reserve0_raw=10**20,
+                reserve1_raw=10**20,
+                source="on_chain_archive",
+            )
+            for index, target in enumerate(targets)
+        ]
+
+    pool_ref = VenueTargetRef(VenueTargetRole.POOL, VenueReferenceNamespace.EVM_ADDRESS, pool)
+    router_ref = VenueTargetRef(VenueTargetRole.ROUTER, VenueReferenceNamespace.EVM_ADDRESS, router)
+    verified = build_verified_venue_binding(
+        chain="bsc",
+        protocol="pancakeswap_v3",
+        primitive=Primitive.SWAP,
+        identity_refs=(pool_ref,),
+        binding_components=(VenueBindingComponent("fee", "3000"),),
+        ordered_assets=(
+            AssetIdentity("bsc", AssetNamespace.ERC20, token0),
+            AssetIdentity("bsc", AssetNamespace.ERC20, token1),
+        ),
+        binding_policy_version=1,
+        operational_refs=(router_ref,),
+        evidence=VenueVerificationEvidence(
+            chain="bsc",
+            verifier_ref="almanak.connectors._strategy_base.v3_venue_verifier:V3VenueVerifier",
+            verifier_contract_version="v3_exact_pool.v1",
+            block_number=deployment_block,
+            block_hash="0x" + "44" * 32,
+            observed_facts=(VenueObservedFact("router", router, router_ref),),
+        ),
+    )
+
+    def verify_descriptor(descriptor, block_number):
+        assert descriptor.key == ("bsc", "pancakeswap_v3", pool)
+        assert descriptor.token0 == token0
+        assert descriptor.token1 == token1
+        assert descriptor.fee_tier_units == 3_000
+        verified_blocks.append(block_number)
+        return verified, gateway_client
+
+    def observe_exact(request, client):
+        assert client is gateway_client
+        exact_requests.append(request)
+        parameters = request.parameters
+        candles = tuple(
+            OHLCVCandle(
+                timestamp=datetime.fromtimestamp(timestamp, tz=START.tzinfo),
+                open=Decimal("7"),
+                high=Decimal("8"),
+                low=Decimal("6"),
+                close=Decimal("7.5"),
+                volume=Decimal("100"),
+            )
+            for timestamp in range(
+                int(parameters.start_at.timestamp()),
+                int(parameters.end_at.timestamp()),
+                parameters.timeframe.seconds,
+            )
+        )
+        return ExactVenueObservation.from_request(
+            request=request,
+            value=candles,
+            anchor=VenueObservationAnchor(observed_at=start, block_number=None, block_hash=None),
+            provenance=VenueDataProvenance(
+                provider_ref="tests.validation.backtesting.test_trust_matrix:ExactPoolOHLCVFixture",
+                provider_contract_version="v1",
+                source="coingecko_onchain.exact_pool",
+            ),
+        )
+
+    monkeypatch.setattr(
+        "almanak.framework.backtesting.pnl.providers.snapshot_pool_state.fetch_historical_pool_state_points",
+        archive_pool_state_fetch,
+    )
+    monkeypatch.setattr(
+        "almanak.framework.backtesting.pnl.providers.snapshot_pool_ohlcv._verify_descriptor",
+        verify_descriptor,
+    )
+    monkeypatch.setattr(
+        "almanak.framework.backtesting.pnl.providers.snapshot_pool_ohlcv.observe_exact_venue_data",
+        observe_exact,
+    )
+    monkeypatch.setattr(
+        "almanak.framework.data.pools.reader.known_pool_pair",
+        lambda *_args: pytest.fail("exact-pool OHLCV must not consult the static pool registry"),
+    )
+
+    class Provider:
+        provider_name = "synthetic"
+
+        async def iterate(self, config):
+            for hour in range(3):
+                timestamp = config.start_time + timedelta(hours=hour)
+                yield (
+                    timestamp,
+                    MarketState(
+                        timestamp=timestamp,
+                        prices={token0: Decimal("10"), token1: Decimal("2")},
+                        chain="bsc",
+                    ),
+                )
+
+    class ExactPoolOHLCVProbe:
+        deployment_id = "exact_pool_ohlcv_probe"
+        swap_pool = pool
+        protocol = "pancakeswap_v3"
+        config = {
+            "swap_pool": pool,
+            "protocol": "pancakeswap_v3",
+            "base_token": {"address": token0},
+            "quote_token": {"address": token1},
+        }
+        STRATEGY_METADATA = SimpleNamespace(
+            tags=["swap"], supported_protocols=["pancakeswap_v3"], intent_types=["SWAP", "HOLD"]
+        )
+        backtest_pool_ohlcv_targets = (
+            HistoricalPoolOHLCVTarget(
+                "bsc",
+                "pancakeswap_v3",
+                pool,
+                token0,
+                token1,
+                OHLCVTimeframe.ONE_HOUR,
+                2,
+            ),
+        )
+
+        def __init__(self) -> None:
+            self.frames = []
+
+        def decide(self, market):
+            self.frames.append(market.ohlcv(token0, timeframe="1h", limit=2, pool_address=self.swap_pool))
+            return None
+
+    config = PnLBacktestConfig(
+        start_time=start,
+        end_time=start + timedelta(hours=2),
+        interval_seconds=3_600,
+        chain="bsc",
+        tokens=[token0, token1],
+        token_funding=[
+            {"symbol": "GOOGLB", "address": token0, "chain": "bsc", "amount": "1", "amount_type": "token"},
+            {"symbol": "BSC-USD", "address": token1, "chain": "bsc", "amount": "1", "amount_type": "token"},
+        ],
+        include_gas_costs=False,
+        preflight_validation=False,
+        inclusion_delay_blocks=0,
+    )
+    strategy = ExactPoolOHLCVProbe()
+    result = asyncio.run(
+        PnLBacktester(
+            data_provider=Provider(),
+            fee_models={"default": DefaultFeeModel()},
+            slippage_models={"default": DefaultSlippageModel()},
+            token_addresses={"GOOGLB": ("bsc", token0), "BSC-USD": ("bsc", token1)},
+        ).backtest(strategy, config)
+    )
+
+    assert result.success
+    assert len(pool_state_fetch_calls) == 1
+    assert verified_blocks == [deployment_block]
+    assert len(exact_requests) == 1
+    assert all(request.binding_hash == verified.binding.binding_hash for request in exact_requests)
+    assert all(
+        (request.parameters.base_asset_index, request.parameters.quote_asset_index) == (0, 1)
+        for request in exact_requests
+    )
+    assert exact_requests[0].parameters.start_at == start - timedelta(hours=2)
+    assert exact_requests[0].parameters.end_at == start + timedelta(hours=2)
+    assert len(strategy.frames) == 3
+    assert all(list(frame["close"]) == [7.5, 7.5] for frame in strategy.frames)
+    assert all(frame.attrs["pool_address"] == pool for frame in strategy.frames)
+    assert all(frame.attrs["confidence"] == "exact_pool" for frame in strategy.frames)
+    assert Decimal("7.5") != Decimal("10") / Decimal("2")
+    assert result.data_manifest is not None
+    entries = [entry for entry in result.data_manifest["entries"] if entry["lane"] == LANE_OHLCV]
+    assert len(entries) == 1
+    assert entries[0]["count"] == 3
+    assert entries[0]["outcome"] == OUTCOME_SERVED
+    assert entries[0]["ladder"] == ["coingecko_onchain.exact_pool"]
 
 
 @pytest.mark.trust_cell("lp:historical_exact_pool_state")

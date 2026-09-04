@@ -6644,7 +6644,7 @@ class MarketSnapshot:
         token: str | Instrument,
         timeframe: OHLCVTimeframe = OHLCVTimeframe.ONE_HOUR,
         limit: int = 100,
-        quote: str = "USD",
+        quote: str | None = None,
         gap_strategy: GapStrategy = "nan",
         *,
         pool_address: str | None = None,
@@ -6658,7 +6658,8 @@ class MarketSnapshot:
             token: Token symbol, "BASE/QUOTE" string, or Instrument.
             timeframe: Candle timeframe (1m, 5m, 15m, 1h, 4h, 1d). Default "1h".
             limit: Maximum number of candles. Default 100.
-            quote: Quote currency. Default "USD".
+            quote: Explicit quote currency. Token-scoped reads default to USD;
+                pool-scoped reads default to the authenticated counter-asset.
             gap_strategy: "nan" / "ffill" / "drop". Default "nan".
             pool_address: Explicit pool address for DEX providers.
             data_source: Explicit provider override (e.g. ``"binance"``,
@@ -6682,12 +6683,13 @@ class MarketSnapshot:
         """
         timeframe = parse_ohlcv_timeframe(timeframe)
         token_str = token if isinstance(token, str) else token.pair
+        effective_quote = "USD" if quote is None else quote
 
         if self._ohlcv_router is not None:
             envelope = self._fetch_ohlcv_via_router(
-                token, timeframe, limit, pool_address, quote, token_str, data_source=data_source
+                token, timeframe, limit, pool_address, effective_quote, token_str, data_source=data_source
             )
-            return self._envelope_to_ohlcv_df(envelope, token, token_str, quote, timeframe, gap_strategy)
+            return self._envelope_to_ohlcv_df(envelope, token, token_str, effective_quote, timeframe, gap_strategy)
 
         if data_source is not None:
             # Legacy module path has no provider routing — dropping the
@@ -6704,28 +6706,39 @@ class MarketSnapshot:
         # Silently dropping ``pool_address`` would let a pool-scoped call
         # appear to succeed while returning candles for a different market —
         # the worst-class failure for an indicator-driven strategy. A module
-        # may opt in to an explicit pool serve (``get_pool_ohlcv`` — the
-        # backtest view resolves the pool to its pair and serves the pair's
-        # series with proxy provenance); otherwise fail loudly so the caller
-        # wires the OHLCV router instead.
+        # may opt in to an explicit pool serve (``get_pool_ohlcv``); otherwise
+        # fail loudly so the caller wires the OHLCV router instead.
         if pool_address is not None:
+            orientation = token_str
+            if "/" not in orientation:
+                orientation = f"{orientation}/{quote or '<pool-counter-asset>'}"
+            elif quote is not None:
+                orientation = f"{orientation}:quote={quote}"
+            failure_key = (
+                f"pool:{str(self._chain or '').strip().lower()}:{pool_address.strip().lower()}:"
+                f"{orientation}@{timeframe.value}:pool_scoped"
+            )
             pool_serve = getattr(self._ohlcv_module, "get_pool_ohlcv", None)
             if callable(pool_serve):
                 try:
-                    return pool_serve(
+                    frame = pool_serve(
                         pool_address=pool_address,
                         chain=self._chain,
                         timeframe=timeframe,
                         limit=limit,
                         gap_strategy=gap_strategy,
                         requested_symbol=token_str,
+                        requested_quote=quote,
                     )
+                    if str(getattr(frame, "attrs", {}).get("source", "")):
+                        self._critical_data_failures.pop(("ohlcv", failure_key), None)
+                    return frame
                 except ValueError as e:
-                    self._record_critical_data_failure("ohlcv", f"{token_str}:pool_scoped", str(e))
+                    self._record_critical_data_failure("ohlcv", failure_key, str(e))
                     raise
             self._record_critical_data_failure(
                 "ohlcv",
-                f"{token_str}:pool_scoped",
+                failure_key,
                 "ohlcv unavailable: pool-scoped candles need an OHLCV router; the configured "
                 "module is token-scoped only (pass pool_address=None for token candles)",
             )
@@ -6735,7 +6748,7 @@ class MarketSnapshot:
                 "pool-scoped candles. Wire ohlcv_router= on MarketSnapshot."
             )
 
-        return self._fetch_ohlcv_legacy(token, timeframe, limit, quote, gap_strategy)
+        return self._fetch_ohlcv_legacy(token, timeframe, limit, effective_quote, gap_strategy)
 
     def _fetch_ohlcv_via_router(
         self,

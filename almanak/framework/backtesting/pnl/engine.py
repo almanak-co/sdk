@@ -1071,6 +1071,24 @@ def build_backtest_lending_rates(
     return rates
 
 
+_EXACT_POOL_OHLCV_LADDER = ("coingecko_onchain.exact_pool",)
+
+
+def _pool_ohlcv_manifest_key(
+    chain: str,
+    pool_address: str,
+    timeframe: OHLCVTimeframe,
+    requested_symbol: str | None,
+    requested_quote: str | None,
+) -> str:
+    orientation = requested_symbol or "<pool-token0>"
+    if "/" not in orientation:
+        orientation = f"{orientation}/{requested_quote or '<pool-counter-asset>'}"
+    elif requested_quote is not None:
+        orientation = f"{orientation}:quote={requested_quote}"
+    return f"pool:{chain.strip().lower()}:{pool_address.strip().lower()}:{orientation}@{timeframe.value}"
+
+
 class BacktestOHLCVView:
     """Serves ``market.ohlcv()`` from the run's own price series (ALM-2962).
 
@@ -1089,9 +1107,9 @@ class BacktestOHLCVView:
     - **Timeframes** resample through the indicator engine's ``_series_for``
       (whole multiples of the tick interval; anything else refuses), which
       also inherits the measured-granularity refusal (ALM-2957) when present.
-    - ``pool_address`` reads refuse loudly via the accessor's existing legacy
-      guard — pool-scoped candles need historical pool data (the ALM-2943
-      broker), not this view.
+    - ``pool_address`` reads delegate only to a run-scoped exact-pool source
+      built from prewarmed, archive-authenticated pool descriptors. They never
+      substitute the generic token-price series.
 
     Bound per tick via :meth:`bind`.
     """
@@ -1104,6 +1122,7 @@ class BacktestOHLCVView:
         *,
         manifest: Any = None,
         chain: str | None = None,
+        pool_ohlcv_source: Any = None,
     ) -> None:
         self._engine = indicator_engine
         self._tick_seconds = int(tick_interval_seconds)
@@ -1113,9 +1132,9 @@ class BacktestOHLCVView:
         # threaded explicitly instead of via the ambient broker contextvar.
         self._manifest = manifest
         self._chain = str(chain) if chain else None
+        self._pool_ohlcv_source = pool_ohlcv_source
         self._timestamp: datetime | None = None
         self._truncation_warned: set[tuple[str, OHLCVTimeframe]] = set()
-        self._pool_proxy_warned: set[tuple[str, str]] = set()
 
     def register_token_addresses(self, token_addresses: Mapping[str, tuple[str, str]]) -> None:
         """Add verified symbol aliases discovered before or during the run."""
@@ -1132,7 +1151,14 @@ class BacktestOHLCVView:
                 )
             self._token_addresses[symbol_upper] = normalized
 
-    def _record_serve(self, key: str, source: str, outcome: str, detail: str = "") -> None:
+    def _record_serve(
+        self,
+        key: str,
+        source: str,
+        outcome: str,
+        detail: str = "",
+        ladder: tuple[str, ...] | None = None,
+    ) -> None:
         if self._manifest is None:
             return
         from almanak.framework.backtesting.pnl.data_manifest import LANE_OHLCV
@@ -1144,6 +1170,7 @@ class BacktestOHLCVView:
             outcome=outcome,
             at=self._timestamp,
             detail=detail,
+            ladder=ladder,
         )
 
     def bind(self, timestamp: datetime) -> None:
@@ -1326,90 +1353,55 @@ class BacktestOHLCVView:
         limit: int = 100,
         gap_strategy: str = "nan",
         requested_symbol: str | None = None,
+        requested_quote: str | None = None,
     ) -> Any:
-        """Serve a pool-scoped candle request as the pool PAIR's price series.
-
-        Registry-only pool→pair resolution; the served candles are the pair's
-        close series standing in for the pool's own prints, and the attrs say
-        so — never venue-specific data. Unknown pools raise (recorded by the
-        snapshot's existing refusal path).
-        """
-        from almanak.framework.data.pools.reader import known_pool_pair
-        from almanak.framework.data.tokens import TokenResolutionError, get_token_resolver
-
-        pair = known_pool_pair(chain, pool_address)
-        if pair is None:
-            # Pre-delegation refusals stamp with the POOL key; refusals in the
-            # delegated get_ohlcv stamp there with the pair key (no doubles).
+        """Serve candles measured from one prewarmed, verified exact pool."""
+        parsed_timeframe = parse_ohlcv_timeframe(timeframe, field_name="BacktestOHLCVView.timeframe")
+        manifest_key = _pool_ohlcv_manifest_key(
+            chain,
+            pool_address,
+            parsed_timeframe,
+            requested_symbol,
+            requested_quote,
+        )
+        try:
+            if self._timestamp is None:
+                raise ValueError("ohlcv unavailable: backtest OHLCV view is not bound to a tick")
+            if self._pool_ohlcv_source is None:
+                raise ValueError(
+                    f"ohlcv unavailable: exact pool {pool_address!r} on {chain!r} was not declared and prewarmed; "
+                    "include the generated exact-pool config shape or declare a HistoricalPoolOHLCVTarget"
+                )
+            frame = self._pool_ohlcv_source.get_pool_ohlcv(
+                pool_address=pool_address,
+                chain=chain,
+                timestamp=self._timestamp,
+                timeframe=parsed_timeframe,
+                limit=limit,
+                requested_symbol=requested_symbol,
+                requested_quote=requested_quote,
+            )
+        except ValueError as exc:
             self._record_serve(
-                key=f"pool:{chain}:{pool_address}@{timeframe}",
+                key=manifest_key,
                 source="",
                 outcome="refused",
-                detail="pool is not registry-known",
+                detail=str(exc)[:200],
+                ladder=_EXACT_POOL_OHLCV_LADDER,
             )
-            raise ValueError(
-                f"ohlcv unavailable: pool {pool_address!r} is not a registry-known pool on {chain!r}; "
-                "pass token-scoped candles (e.g. market.ohlcv('WETH')) or omit pool_address"
+            raise
+        source = str(frame.attrs.get("source", ""))
+        if source:
+            self._record_serve(
+                key=(
+                    f"pool:{frame.attrs['chain']}:{frame.attrs['pool_address']}:"
+                    f"{frame.attrs['base_asset']}/{frame.attrs['quote_asset']}@{parsed_timeframe.value}"
+                ),
+                source=source,
+                outcome="served",
+                ladder=_EXACT_POOL_OHLCV_LADDER,
             )
-        resolver = get_token_resolver()
-        symbols: list[str] = []
-        for token_address in pair:
-            try:
-                resolved = resolver.resolve(token_address, chain, log_errors=False, skip_gateway=True)
-            except TokenResolutionError:
-                resolved = None
-            if resolved is None or not getattr(resolved, "symbol", None):
-                self._record_serve(
-                    key=f"pool:{chain}:{pool_address}@{timeframe}",
-                    source="",
-                    outcome="refused",
-                    detail="pool token is not registry-resolvable",
-                )
-                raise ValueError(
-                    f"ohlcv unavailable: pool {pool_address!r} token {token_address!r} is not registry-resolvable"
-                )
-            symbols.append(str(resolved.symbol).upper())
-
-        # The registry key order is arbitrary (e.g. (USDC, WETH)); the
-        # REQUESTED orientation decides which side is base, or an inverted
-        # series would corrupt every downstream signal (~1/3000 vs ~3000).
-        base, quote = symbols[0], symbols[1]
-        if requested_symbol:
-            requested = str(requested_symbol).upper()
-            if "/" in requested:
-                req_base, req_quote = (part.strip() for part in requested.split("/", 1))
-                if {req_base, req_quote} != {base, quote}:
-                    raise ValueError(
-                        f"ohlcv unavailable: pool {pool_address!r} is a {base}/{quote} pool, "
-                        f"not {req_base}/{req_quote}; check the pool pin"
-                    )
-                base, quote = req_base, req_quote
-            elif requested.strip() in (base, quote):
-                if requested.strip() == quote:
-                    base, quote = quote, base
-            else:
-                raise ValueError(
-                    f"ohlcv unavailable: token {requested!r} is not in pool {pool_address!r} "
-                    f"({base}/{quote}); check the pool pin"
-                )
-
-        df = self.get_ohlcv(f"{base}/{quote}", timeframe=timeframe, limit=limit, gap_strategy=gap_strategy)
-        # Warn-once AFTER the serve succeeds: this line used to fire before
-        # get_ohlcv, so a run whose every pool-scoped read refused still
-        # logged "served as the ... proxy" at startup — a log claiming a
-        # serve that never happened.
-        pool_key = (pool_address.lower(), chain.lower())
-        if pool_key not in self._pool_proxy_warned:
-            self._pool_proxy_warned.add(pool_key)
-            logger.warning(
-                "market.ohlcv(pool_address=%s) served as the %s/%s price-series proxy — the run has no "
-                "venue-specific candle data; attrs.source marks the proxy",
-                pool_address,
-                base,
-                quote,
-            )
-        df.attrs = {**df.attrs, "pool_address": pool_address, "source": df.attrs["source"] + ":pool_pair_proxy"}
-        return df
+        return frame
 
 
 class SimulatedGasView:
