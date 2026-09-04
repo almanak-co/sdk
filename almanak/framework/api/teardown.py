@@ -806,7 +806,9 @@ def _build_approval_response(request: EscalationApprovalRequest) -> tuple[str, d
             {
                 "approved": True,
                 "action": "approve",
-                "approved_slippage": str(request.approved_slippage) if request.approved_slippage else None,
+                "approved_slippage": (
+                    str(request.approved_slippage) if request.approved_slippage is not None else None
+                ),
             },
         )
     if request.action == "wait_and_escalate":
@@ -830,7 +832,7 @@ def _update_approval_state(
     if request.action == "approve":
         in_memory_teardown["status"] = "executing"
         in_memory_teardown["approval_needed"] = None
-        if request.approved_slippage:
+        if request.approved_slippage is not None:
             in_memory_teardown["approved_slippage"] = request.approved_slippage
     elif request.action == "wait_and_escalate":
         in_memory_teardown["status"] = "waiting_retry"

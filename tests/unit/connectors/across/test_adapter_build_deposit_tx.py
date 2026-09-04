@@ -115,7 +115,6 @@ class TestGuards:
             ("output_amount_wei", "invalid"),
             ("timestamp", ""),
             ("fill_deadline", ""),
-            ("exclusivity_deadline", None),
         ],
     )
     def test_invalid_numeric_route_data_wrapped(self, adapter, field, value):
@@ -188,6 +187,13 @@ class TestHappyPath:
         assert decoded[7] == ZERO_ADDRESS
         assert decoded[8] == 1_800_000_000
         assert decoded[9] == 1_800_014_400
+        assert decoded[10] == 0
+
+    def test_null_exclusivity_deadline_disables_exclusivity(self, adapter):
+        route = _route_data(exclusivity_deadline=None)
+
+        decoded = _decode_calldata(adapter.build_deposit_tx(_quote(route_data=route), RECIPIENT))
+
         assert decoded[10] == 0
 
     def test_zero_timestamps_and_0x_relayer_use_defaults(self, adapter, monkeypatch):

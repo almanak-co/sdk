@@ -13,7 +13,7 @@ import json
 import logging
 import os
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -657,13 +657,20 @@ class _TimelineQuery:
     since: datetime | None
 
 
-def _validate_timeline_request(request: gateway_pb2.GetTimelineRequest) -> _TimelineQuery:
+def _validate_timeline_request(
+    request: gateway_pb2.GetTimelineRequest,
+    unix_to_dt: Callable[[int], datetime | None],
+) -> _TimelineQuery:
     deployment_id = validate_deployment_id(request.deployment_id)
+    try:
+        since = unix_to_dt(request.since_timestamp)
+    except ValueError as e:
+        raise ValidationError("since_timestamp", str(e)) from e
     return _TimelineQuery(
         deployment_id=deployment_id,
         limit=request.limit if request.limit > 0 else 50,
         event_type=request.event_type_filter or None,
-        since=datetime.fromtimestamp(request.since_timestamp, tz=UTC) if request.since_timestamp > 0 else None,
+        since=since,
     )
 
 
@@ -745,7 +752,9 @@ def _timeline_records_to_proto(
             continue
         try:
             raw_timestamp = record.get("timestamp", "")
-            timestamp = datetime.fromisoformat(raw_timestamp) if raw_timestamp else None
+            timestamp = _parse_iso_utc(raw_timestamp if isinstance(raw_timestamp, str) else None)
+            if raw_timestamp and timestamp is None:
+                raise ValueError("invalid timeline timestamp")
             event = _timeline_record_to_proto(
                 record,
                 timestamp,
@@ -1745,7 +1754,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         await self._ensure_initialized()
 
         try:
-            query = _validate_timeline_request(request)
+            query = _validate_timeline_request(request, self._unix_to_dt)
         except ValidationError as e:
             return _timeline_validation_error(context, e)
 

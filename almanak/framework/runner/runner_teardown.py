@@ -1078,8 +1078,18 @@ async def _restore_resumable_teardown_plan(
         )
     accepted_state = accepted_lookup.state
     if accepted_state is not None:
-        persisted_plan = json.loads(accepted_state.pending_intents_json)
-        teardown_intents = persisted_plan if isinstance(persisted_plan, list) else []
+        try:
+            persisted_plan = json.loads(accepted_state.pending_intents_json)
+        except (TypeError, ValueError):
+            persisted_plan = None
+        if not isinstance(persisted_plan, list):
+            return teardown_intents, _accepted_async_recovery_pending_result(
+                runner,
+                deployment_id,
+                start_time,
+                "the persisted teardown plan could not be parsed",
+            )
+        teardown_intents = persisted_plan
         logger.warning(
             "🛑 %s generated no teardown intents but owns accepted async state; routing correlated resume",
             deployment_id,
@@ -1194,30 +1204,6 @@ async def _prepare_teardown_dispatch(
         except Exception as exc:
             logger.warning(f"Failed to pre-fetch teardown prices: {exc}")
     return open_positions_count
-
-
-def _complete_already_closed_teardown(
-    runner: Any,
-    manager: Any,
-    request: Any,
-    deployment_id: str,
-    start_time: datetime,
-) -> IterationResult:
-    """Complete the retained Stage 2 all-balances-zero planning outcome."""
-    from .runner_models import IterationResult, IterationStatus
-
-    logger.info(f"🛑 {deployment_id} teardown complete (all positions already closed)")
-    if request:
-        _safe_mark(manager, "mark_completed", deployment_id, result={"reason": "all_balances_zero"})
-    runner.request_shutdown()
-    runner._lifecycle_write_state(deployment_id, LifecycleState.TERMINATED)
-    runner._record_success()
-    return IterationResult(
-        status=IterationStatus.TEARDOWN,
-        intent=None,
-        deployment_id=deployment_id,
-        duration_ms=runner._calculate_duration_ms(start_time),
-    )
 
 
 async def _execute_multichain_teardown(
@@ -1360,15 +1346,6 @@ async def execute_teardown(
         teardown_intents,
         teardown_market,
     )
-    if not teardown_intents:
-        return _complete_already_closed_teardown(
-            runner,
-            manager,
-            request,
-            deployment_id,
-            start_time,
-        )
-
     if runner._is_multi_chain:
         return await _execute_multichain_teardown(
             runner,

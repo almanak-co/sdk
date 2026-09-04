@@ -200,15 +200,18 @@ async def test_get_lp_position_short_payload_is_invalid_position() -> None:
     assert gateway.rpc.Call.call_count == 1
 
 
+@pytest.mark.parametrize("payload", ["not-json", "null", "{}"])
 @pytest.mark.asyncio
-async def test_get_lp_position_malformed_payload_remains_internal_error() -> None:
+async def test_get_lp_position_malformed_payload_is_recoverable_rpc_failure(payload: str) -> None:
     gateway = MagicMock()
-    gateway.rpc.Call.return_value = SimpleNamespace(success=True, result="not-json", error="")
+    gateway.rpc.Call.return_value = SimpleNamespace(success=True, result=payload, error="")
 
     result = await _executor(gateway).execute("get_lp_position", {"position_id": "42"})
 
     assert result.status == "error"
-    assert result.error["error_code"] == AgentErrorCode.INTERNAL_ERROR
+    assert result.error["error_code"] == AgentErrorCode.RPC_FAILED
+    assert result.error["message"] == "positions() returned a malformed result"
+    assert result.error["recoverable"] is True
     assert gateway.rpc.Call.call_count == 1
 
 
@@ -217,6 +220,10 @@ async def test_get_lp_position_malformed_payload_remains_internal_error() -> Non
     [
         pytest.param([], id="no-reviewed-factory"),
         pytest.param([_rpc_response(success=False, error="factory unavailable")], id="factory-rpc-failure"),
+        pytest.param(
+            [SimpleNamespace(success=True, result="not-json", error="")],
+            id="malformed-factory-payload",
+        ),
         pytest.param([_rpc_response(success=True, result="12")], id="short-factory-payload"),
         pytest.param([_rpc_response(success=True, result=_hex_word(0))], id="zero-pool"),
         pytest.param(
@@ -225,6 +232,13 @@ async def test_get_lp_position_malformed_payload_remains_internal_error() -> Non
                 _rpc_response(success=False, error="pool unavailable"),
             ],
             id="slot0-rpc-failure",
+        ),
+        pytest.param(
+            [
+                _rpc_response(success=True, result=_address_word(_POOL)),
+                SimpleNamespace(success=True, result="null", error=""),
+            ],
+            id="malformed-slot0-payload",
         ),
         pytest.param(
             [

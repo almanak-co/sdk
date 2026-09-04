@@ -457,7 +457,7 @@ class AcrossBridgeAdapter(BridgeAdapter):
             raise AcrossTransactionError("Missing token address in quote")
 
         fill_deadline = self._route_timestamp(route_data.get("fill_deadline"), default_offset=4 * 60 * 60)
-        exclusivity_deadline = int(route_data.get("exclusivity_deadline", 0))
+        exclusivity_deadline = int(route_data.get("exclusivity_deadline") or 0)
         exclusive_relayer = route_data.get("exclusive_relayer")
         if not exclusive_relayer or exclusive_relayer == "0x":
             exclusive_relayer = "0x0000000000000000000000000000000000000000"

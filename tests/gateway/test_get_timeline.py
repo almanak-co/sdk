@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import time
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -68,6 +70,23 @@ async def test_invalid_deployment_id_returns_invalid_argument_without_reads(serv
     assert response.has_more is False
     context.set_code.assert_called_once_with(grpc.StatusCode.INVALID_ARGUMENT)
     assert "deployment_id" in context.set_details.call_args.args[0]
+    store_getter.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_out_of_range_since_timestamp_returns_invalid_argument_without_reads(service, context) -> None:
+    with patch(_STORE_PATCH) as store_getter:
+        response = await service.GetTimeline(
+            gateway_pb2.GetTimelineRequest(
+                deployment_id="test-deployment",
+                since_timestamp=(1 << 63) - 1,
+            ),
+            context,
+        )
+
+    assert list(response.events) == []
+    context.set_code.assert_called_once_with(grpc.StatusCode.INVALID_ARGUMENT)
+    assert "since_timestamp" in context.set_details.call_args.args[0]
     store_getter.assert_not_called()
 
 
@@ -158,6 +177,43 @@ async def test_mixed_sources_preserve_fields_timestamps_order_and_full_page_cont
     state_info = response.events[0]
     assert (state_info.cycle_id, state_info.phase, state_info.related_ledger_entry_id) == ("", "", "")
     assert response.has_more is True
+
+
+@pytest.mark.skipif(not hasattr(time, "tzset"), reason="requires POSIX timezone control")
+@pytest.mark.asyncio
+async def test_naive_fallback_timestamp_is_interpreted_as_utc(service, context) -> None:
+    original_tz = os.environ.get("TZ")
+    os.environ["TZ"] = "GMT+8"
+    time.tzset()
+    try:
+        store = MagicMock()
+        store.get_events.return_value = []
+        _set_state(
+            service,
+            {
+                "execution_history": [
+                    {
+                        "timestamp": "2026-01-03T00:00:00",
+                        "event_type": "EXECUTION",
+                        "description": "naive-state",
+                    }
+                ]
+            },
+        )
+
+        with patch(_STORE_PATCH, return_value=store):
+            response = await service.GetTimeline(
+                gateway_pb2.GetTimelineRequest(deployment_id="test-deployment"),
+                context,
+            )
+    finally:
+        if original_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = original_tz
+        time.tzset()
+
+    assert response.events[0].timestamp == int(datetime(2026, 1, 3, tzinfo=UTC).timestamp())
 
 
 @pytest.mark.asyncio

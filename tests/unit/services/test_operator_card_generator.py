@@ -293,3 +293,21 @@ def test_unmeasured_position_value_does_not_infer_value_risk(
     severity = generator._calculate_severity(_state(), position, StuckReason.UNKNOWN)
 
     assert severity == Severity.LOW
+
+
+def test_unmeasured_position_value_is_rendered_without_currency_formatting(
+    generator: OperatorCardGenerator,
+) -> None:
+    position = PositionSummary(
+        total_value_usd=None,
+        available_balance_usd=None,
+    )
+
+    description = generator._generate_risk_description(
+        _state(),
+        position,
+        StuckReason.UNKNOWN,
+        Severity.LOW,
+    )
+
+    assert description == "Position at risk: unmeasured"

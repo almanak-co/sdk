@@ -88,7 +88,7 @@ def test_keyed_cache_hydrates_fields_legacy_types_filtering_and_order() -> None:
         tx_hash="0xabc",
         deployment_id="deployment:alpha",
         chain="arbitrum",
-        details={"legacy": True},
+        details={},
         cycle_id="cycle-1",
         phase="EXECUTE",
         related_ledger_entry_id="ledger-1",

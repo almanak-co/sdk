@@ -301,7 +301,7 @@ def _event_from_cached_data(event_data: Any, deployment_id: str) -> TimelineEven
         tx_hash=event_data.get("tx_hash"),
         deployment_id=event_deployment_id,
         chain=event_data.get("chain", ""),
-        details=event_data.get("details") or event_data.get("metadata", {}),
+        details=event_data["details"] if "details" in event_data else event_data.get("metadata", {}),
         cycle_id=event_data.get("cycle_id", ""),
         phase=event_data.get("phase", ""),
         related_ledger_entry_id=event_data.get("related_ledger_entry_id", ""),

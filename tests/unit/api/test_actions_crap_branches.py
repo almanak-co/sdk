@@ -284,6 +284,30 @@ def test_load_state_invalid_config_uses_defaults(
     assert state.config == actions.HotReloadableConfig()
 
 
+@pytest.mark.parametrize(
+    "config_data",
+    [
+        ["not", "a", "mapping"],
+        "not-a-mapping",
+        {"trading_parameters": []},
+        {"risk_parameters": "not-a-mapping"},
+    ],
+)
+def test_load_state_malformed_config_shapes_keep_existing_strategy(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    config_data: object,
+) -> None:
+    path = tmp_path / "state.db"
+    _create_state_db(path, [("deployment:test", {"config": config_data})])
+    _use_db(monkeypatch, path)
+
+    state = actions._load_strategy_state_from_db("deployment:test")
+
+    assert state is not None
+    assert state.config == actions.HotReloadableConfig()
+
+
 def test_load_state_malformed_json_logs_and_returns_none(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

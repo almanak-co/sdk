@@ -24,6 +24,7 @@ its half of the fix is reverted).
 
 from __future__ import annotations
 
+import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -31,9 +32,7 @@ import pytest
 # Env vars that steer local DB-path resolution — cleared in every test so the
 # fallback/auto-detect behavior under test is what actually runs, and so
 # `ALMANAK_IS_HOSTED` in a developer's shell/.env can't turn resolution into the
-# hosted-mode `LocalPathError`. `monkeypatch.delenv` here also guarantees these
-# are restored on teardown even when production code re-exports
-# `ALMANAK_STRATEGY_FOLDER` mid-test (no cross-test pollution).
+# hosted-mode `LocalPathError`.
 _DB_PATH_ENV_VARS = (
     "ALMANAK_STATE_DB",
     "ALMANAK_STRATEGY_FOLDER",
@@ -59,6 +58,16 @@ def base_ctx() -> dict:
         "max_trade_usd": 1000.0,
         "network": None,
     }
+
+
+@pytest.fixture(autouse=True)
+def _restore_exported_strategy_folder():
+    original = os.environ.get("ALMANAK_STRATEGY_FOLDER")
+    yield
+    if original is None:
+        os.environ.pop("ALMANAK_STRATEGY_FOLDER", None)
+    else:
+        os.environ["ALMANAK_STRATEGY_FOLDER"] = original
 
 
 def _clear_db_path_env(monkeypatch) -> None:

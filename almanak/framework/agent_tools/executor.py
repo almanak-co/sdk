@@ -435,8 +435,22 @@ def _resolve_lp_position_request(args: dict, default_chain: str) -> _ResolvedLPP
     )
 
 
+def _decode_rpc_hex_result(result: str) -> str | None:
+    try:
+        decoded = json.loads(result)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return decoded.removeprefix("0x") if isinstance(decoded, str) else None
+
+
 def _decode_lp_position_result(result: str, request: _ResolvedLPPositionRequest) -> _DecodedLPPosition | ToolResponse:
-    raw = json.loads(result).removeprefix("0x")
+    raw = _decode_rpc_hex_result(result)
+    if raw is None:
+        return _lp_position_error(
+            AgentErrorCode.RPC_FAILED,
+            "positions() returned a malformed result",
+            recoverable=True,
+        )
     if len(raw) < 768:  # 12 words * 64 hex chars
         return _lp_position_error(
             AgentErrorCode.INVALID_POSITION,
@@ -3129,7 +3143,9 @@ class ToolExecutor:
         if not pool_response.success:
             return None
 
-        raw_pool = json.loads(pool_response.result).removeprefix("0x")
+        raw_pool = _decode_rpc_hex_result(pool_response.result)
+        if raw_pool is None:
+            return None
         pool_address = "0x" + raw_pool[-40:] if len(raw_pool) >= 40 else None
         if not pool_address or pool_address == "0x" + "0" * 40:
             return None
@@ -3147,7 +3163,9 @@ class ToolExecutor:
         if not slot0_response.success:
             return None
 
-        slot0 = json.loads(slot0_response.result).removeprefix("0x")
+        slot0 = _decode_rpc_hex_result(slot0_response.result)
+        if slot0 is None:
+            return None
         return _decode_int24(slot0[64:128]) if len(slot0) >= 128 else None
 
     def _enrich_lp_position_fee_usd(

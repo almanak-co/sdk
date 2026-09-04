@@ -542,7 +542,10 @@ class OperatorCardGenerator:
         parts = []
 
         # Position at risk
-        parts.append(f"Position at risk: ${position_summary.total_value_usd:,.2f} USD")
+        if position_summary.total_value_usd is None:
+            parts.append("Position at risk: unmeasured")
+        else:
+            parts.append(f"Position at risk: ${position_summary.total_value_usd:,.2f} USD")
 
         # LP exposure
         if position_summary.lp_value_usd > 0:

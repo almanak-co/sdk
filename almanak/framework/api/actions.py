@@ -312,10 +312,12 @@ def _load_strategy_state_from_db(deployment_id: str) -> StrategyState | None:
         # Extract hot-reloadable config if present
         config = HotReloadableConfig()
         config_data = state_data.get("config", {})
-        if config_data:
+        if isinstance(config_data, dict) and config_data:
             try:
                 trading_config = config_data.get("trading_parameters", config_data)
                 risk_config = config_data.get("risk_parameters", config_data)
+                if not isinstance(trading_config, dict) or not isinstance(risk_config, dict):
+                    raise TypeError("config sections must be mappings")
                 config = HotReloadableConfig(
                     max_slippage=Decimal(str(trading_config.get("max_slippage", "0.005"))),
                     trade_size_usd=Decimal(str(trading_config.get("trade_size_usd", "1000"))),

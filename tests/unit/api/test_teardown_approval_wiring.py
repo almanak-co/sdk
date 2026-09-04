@@ -72,7 +72,7 @@ class TestApproveEscalationWritesToSqlite:
         # Runner-initiated: no in-memory dict entry exists.
         teardown_api._teardown_state.remove_teardown(deployment_id)
 
-        request = teardown_api.EscalationApprovalRequest(action="approve")
+        request = teardown_api.EscalationApprovalRequest(action="approve", approved_slippage=0.0)
         response = await teardown_api.approve_escalation(
             deployment_id=deployment_id,
             request=request,
@@ -86,6 +86,7 @@ class TestApproveEscalationWritesToSqlite:
         payload = json.loads(body)
         assert payload["approved"] is True
         assert payload["action"] == "approve"
+        assert payload["approved_slippage"] == "0.0"
 
     @pytest.mark.asyncio
     async def test_wait_and_escalate_action_writes_sqlite_response(self, tmp_adapter: TeardownStateAdapter) -> None:
@@ -206,6 +207,7 @@ class TestApproveEscalationWritesToSqlite:
         ("action", "approved_slippage", "expected_status", "expected_message"),
         [
             ("approve", 0.06, "executing", "Slippage approved. Continuing teardown."),
+            ("approve", 0.0, "executing", "Slippage approved. Continuing teardown."),
             (
                 "wait_and_escalate",
                 None,

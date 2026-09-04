@@ -104,7 +104,6 @@ def _patch_entry_stages(
         "restore": AsyncMock(side_effect=restore),
         "complete_empty": AsyncMock(return_value=sentinel.no_intents_result),
         "prepare": AsyncMock(side_effect=prepare),
-        "complete_closed": MagicMock(return_value=sentinel.already_closed_result),
         "multichain": AsyncMock(return_value=sentinel.multichain_result),
     }
     monkeypatch.setattr(rt, "_reset_teardown_verification_signals", mocks["reset"])
@@ -116,7 +115,6 @@ def _patch_entry_stages(
     monkeypatch.setattr(rt, "_restore_resumable_teardown_plan", mocks["restore"])
     monkeypatch.setattr(rt, "_complete_teardown_without_intents", mocks["complete_empty"])
     monkeypatch.setattr(rt, "_prepare_teardown_dispatch", mocks["prepare"])
-    monkeypatch.setattr(rt, "_complete_already_closed_teardown", mocks["complete_closed"])
     monkeypatch.setattr(rt, "_execute_multichain_teardown", mocks["multichain"])
     return {
         **mocks,
@@ -200,24 +198,6 @@ async def test_execute_teardown_routes_empty_plan_through_completeness(monkeypat
     assert result is sentinel.no_intents_result
     assert stages["complete_empty"].await_args.args[6:] == (True, "incomplete", "pre-gate-degraded")
     stages["prepare"].assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_execute_teardown_preserves_post_prepare_empty_plan_exit(monkeypatch: pytest.MonkeyPatch) -> None:
-    runner = _runner()
-    stages = _patch_entry_stages(monkeypatch, runner)
-
-    async def empty_during_prepare(*_args: Any) -> int:
-        stages["guarded"].clear()
-        return 1
-
-    stages["prepare"].side_effect = empty_during_prepare
-
-    result = await rt.execute_teardown(runner, _strategy(), TeardownMode.SOFT, datetime.now(UTC))
-
-    assert result is sentinel.already_closed_result
-    stages["complete_closed"].assert_called_once()
-    runner._execute_teardown_via_manager.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -353,6 +333,31 @@ async def test_restore_resumable_plan_returns_pending_result_when_lookup_is_unpr
     pending_result.assert_called_once_with(runner, "dep", started, "ledger read unmeasured")
 
 
+@pytest.mark.parametrize("persisted_plan", ["{invalid", "{}", "null"])
+@pytest.mark.asyncio
+async def test_restore_resumable_plan_defers_malformed_persisted_plan(
+    monkeypatch: pytest.MonkeyPatch,
+    persisted_plan: str,
+) -> None:
+    lookup = rt._AcceptedAsyncResumeLookup(state=SimpleNamespace(pending_intents_json=persisted_plan))
+    monkeypatch.setattr(rt, "_load_runtime_resumable_accepted_async_state", AsyncMock(return_value=lookup))
+    pending_result = MagicMock(return_value=sentinel.pending)
+    monkeypatch.setattr(rt, "_accepted_async_recovery_pending_result", pending_result)
+    runner = _runner()
+    started = datetime.now(UTC)
+
+    intents, result = await rt._restore_resumable_teardown_plan(runner, sentinel.manager, "dep", [], started)
+
+    assert intents == []
+    assert result is sentinel.pending
+    pending_result.assert_called_once_with(
+        runner,
+        "dep",
+        started,
+        "the persisted teardown plan could not be parsed",
+    )
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("completeness", "recovery_incomplete", "warning", "active_request", "error_fragment"),
@@ -448,35 +453,6 @@ async def test_prepare_dispatch_preserves_position_count_fallback_and_nonblockin
     assert decision_log.call_args.kwargs["position_count"] == position_count
     assert decision_log.call_args.kwargs["intent_count"] == len(intents)
     assert runner._teardown_reconciliation is sentinel.reconciliation
-
-
-@pytest.mark.parametrize("active_request", [sentinel.request, None])
-def test_complete_already_closed_teardown_preserves_lifecycle(active_request: Any) -> None:
-    runner = _runner()
-    manager = MagicMock()
-    started = datetime.now(UTC)
-
-    result = rt._complete_already_closed_teardown(
-        runner,
-        manager,
-        active_request,
-        "deployment:test",
-        started,
-    )
-
-    assert result.status == IterationStatus.TEARDOWN
-    assert result.deployment_id == "deployment:test"
-    assert result.duration_ms == 17
-    runner.request_shutdown.assert_called_once()
-    runner._lifecycle_write_state.assert_called_once_with("deployment:test", LifecycleState.TERMINATED)
-    runner._record_success.assert_called_once()
-    if active_request is None:
-        manager.mark_completed.assert_not_called()
-    else:
-        manager.mark_completed.assert_called_once_with(
-            "deployment:test",
-            result={"reason": "all_balances_zero"},
-        )
 
 
 def _multichain_result(success: bool, error: str | None = None) -> SimpleNamespace:
