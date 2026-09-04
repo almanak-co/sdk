@@ -78,7 +78,6 @@ def temp_cache_file():
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
         temp_path = f.name
     yield temp_path
-    # Cleanup
     Path(temp_path).unlink(missing_ok=True)
 
 
@@ -95,13 +94,12 @@ class TestHelperFunctions:
         """Test _is_address with invalid addresses."""
         assert not _is_address("USDC")
         assert not _is_address("0x")
-        assert not _is_address("0x123")  # Too short
-        assert not _is_address("af88d065e77c8cC2239327C5EDb3A432268e5831")  # No 0x prefix
-        assert not _is_address("0xGHIJ1234567890123456789012345678901234")  # Invalid hex
+        assert not _is_address("0x123")
+        assert not _is_address("af88d065e77c8cC2239327C5EDb3A432268e5831")
+        assert not _is_address("0xGHIJ1234567890123456789012345678901234")
 
     def test_validate_address_valid(self):
         """Test _validate_address with valid addresses."""
-        # Should not raise
         _validate_address("0xaf88d065e77c8cC2239327C5EDb3A432268e5831", "arbitrum")
         _validate_address("0x0000000000000000000000000000000000000000", "ethereum")
 
@@ -190,7 +188,7 @@ class TestSymbolInputNormalization:
         — they aren't CG IDs and the downstream cascade handles them."""
         assert _normalize_symbol_input("USDC") == "USDC"
         assert _normalize_symbol_input("WETH") == "WETH"
-        assert _normalize_symbol_input("stETH") == "stETH"  # mixed-case preserved
+        assert _normalize_symbol_input("stETH") == "stETH"  # Mixed-case symbols are preserved.
 
     def test_bridged_suffix_not_misinterpreted_as_cg_id(self):
         """``usdc.e`` is lowercase but contains ``.`` — it's a bridged symbol,
@@ -289,7 +287,7 @@ class TestTokenResolverBySymbol:
         """Test resolving symbol not on chain raises TokenNotFoundError."""
         resolver = TokenResolver(cache_file=temp_cache_file)
 
-        # GMX only exists on Arbitrum and Avalanche
+        # GMX is registered only on Arbitrum and Avalanche.
         with pytest.raises(TokenNotFoundError):
             resolver.resolve("GMX", "ethereum")
 
@@ -370,7 +368,7 @@ class TestTokenResolverByAddress:
         """Test resolving invalid address raises InvalidTokenAddressError."""
         resolver = TokenResolver(cache_file=temp_cache_file)
 
-        # 42-char address with invalid hex characters (G is not valid hex)
+        # Valid length isolates the non-hex-character failure.
         with pytest.raises(InvalidTokenAddressError):
             resolver.resolve("0xGHIJ567890123456789012345678901234567890", "arbitrum")
 
@@ -462,7 +460,6 @@ class TestTokenResolverRegister:
         )
         resolver.register(custom)
 
-        # Resolve by symbol
         token = resolver.resolve("CUSTOM", "arbitrum")
         assert token.symbol == "CUSTOM"
         assert token.decimals == 9
@@ -477,7 +474,6 @@ class TestTokenResolverRegister:
         )
         resolver1.register(custom)
 
-        # Create new resolver with same cache file
         resolver2 = TokenResolver(cache_file=temp_cache_file)
         token = resolver2.resolve("CACHED", "arbitrum")
         assert token.symbol == "CACHED"
@@ -490,10 +486,8 @@ class TestTokenResolverCaching:
         """Test cache is used on second resolve."""
         resolver = TokenResolver(cache_file=temp_cache_file)
 
-        # First resolve - static registry
         resolver.resolve("USDC", "arbitrum")
 
-        # Second resolve - should be from cache
         resolver.resolve("USDC", "arbitrum")
 
         stats = resolver.stats()
@@ -524,15 +518,13 @@ class TestTokenResolverThreadSafety:
             except Exception as e:
                 errors.append(e)
 
-        # Start multiple threads
         threads = []
         symbols = ["USDC", "WETH", "DAI", "WBTC", "ARB"]
-        for symbol in symbols * 10:  # 50 threads
+        for symbol in symbols * 10:
             t = threading.Thread(target=resolve_token, args=(symbol, "arbitrum"))
             threads.append(t)
             t.start()
 
-        # Wait for all threads
         for t in threads:
             t.join()
 
@@ -554,14 +546,12 @@ class TestTokenResolverThreadSafety:
             except Exception as e:
                 errors.append(e)
 
-        # Start multiple threads
         threads = []
         for i in range(20):
             t = threading.Thread(target=register_token, args=(i,))
             threads.append(t)
             t.start()
 
-        # Wait for all threads
         for t in threads:
             t.join()
 
@@ -658,10 +648,8 @@ class TestTokenResolverPerformance:
         """Test cache hit is under 1ms target."""
         resolver = TokenResolver(cache_file=temp_cache_file)
 
-        # First resolve to populate cache
         resolver.resolve("USDC", "arbitrum")
 
-        # Measure cache hit time
         times = []
         for _ in range(100):
             start = time.perf_counter()
@@ -670,21 +658,17 @@ class TestTokenResolverPerformance:
             times.append(elapsed_ms)
 
         avg_time = sum(times) / len(times)
-        # Allow some slack for CI environments
-        assert avg_time < 5  # Should be well under 1ms in normal conditions
+        assert avg_time < 5  # CI headroom above the 1 ms target.
 
     def test_static_registry_under_5ms(self, temp_cache_file):
         """Test static registry lookup is under 5ms target."""
-        # Create new resolver with fresh cache
         resolver = TokenResolver(cache_file=temp_cache_file)
 
-        # Time first resolution (static registry)
         start = time.perf_counter()
         resolver.resolve("USDC", "arbitrum")
         elapsed_ms = (time.perf_counter() - start) * 1000
 
-        # Allow some slack for CI environments
-        assert elapsed_ms < 50  # Should be well under 5ms in normal conditions
+        assert elapsed_ms < 50  # CI headroom above the 5 ms target.
 
 
 class TestResolveForSwap:
@@ -823,7 +807,6 @@ class TestResolveForProtocol:
         """Test DEX protocols get wrapped native tokens."""
         resolver = TokenResolver(cache_file=temp_cache_file)
 
-        # Uniswap V3 should wrap ETH to WETH
         token = resolver.resolve_for_protocol("ETH", "arbitrum", "uniswap_v3")
         assert token.symbol == "WETH"
 
@@ -850,7 +833,6 @@ class TestResolveForProtocol:
         """Test lending protocols keep native tokens."""
         resolver = TokenResolver(cache_file=temp_cache_file)
 
-        # Aave V3 should keep ETH as native
         token = resolver.resolve_for_protocol("ETH", "ethereum", "aave_v3")
         assert token.symbol == "ETH"
         assert token.is_native is True
@@ -867,11 +849,9 @@ class TestResolveForProtocol:
         """Test non-native tokens unchanged regardless of protocol."""
         resolver = TokenResolver(cache_file=temp_cache_file)
 
-        # DEX protocol
         token = resolver.resolve_for_protocol("USDC", "arbitrum", "uniswap_v3")
         assert token.symbol == "USDC"
 
-        # Lending protocol
         token = resolver.resolve_for_protocol("USDC", "arbitrum", "aave_v3")
         assert token.symbol == "USDC"
 
@@ -899,10 +879,6 @@ class TestResolveForProtocol:
 class TestBridgedTokenAliases:
     """Tests for bridged token alias handling (USDC.e, USDbC, USDT.e, WETH.e)."""
 
-    # =========================================================================
-    # Arbitrum bridged tokens
-    # =========================================================================
-
     def test_usdc_e_resolves_on_arbitrum(self, temp_cache_file):
         """Test USDC.e resolves to bridged USDC on Arbitrum."""
         resolver = TokenResolver(cache_file=temp_cache_file)
@@ -918,7 +894,6 @@ class TestBridgedTokenAliases:
         """Test USDC.e resolution is case-insensitive."""
         resolver = TokenResolver(cache_file=temp_cache_file)
 
-        # All these should resolve to the same token
         token1 = resolver.resolve("USDC.e", "arbitrum")
         token2 = resolver.resolve("USDC.E", "arbitrum")
         token3 = resolver.resolve("usdc.e", "arbitrum")
@@ -930,15 +905,9 @@ class TestBridgedTokenAliases:
         resolver = TokenResolver(cache_file=temp_cache_file)
         token = resolver.resolve("USDC", "arbitrum")
 
-        # Should be native USDC, not bridged
         assert token.symbol == "USDC"
         assert token.decimals == 6
-        # Native USDC address on Arbitrum
         assert token.address.lower() == "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
-
-    # =========================================================================
-    # Optimism bridged tokens
-    # =========================================================================
 
     def test_usdc_e_resolves_on_optimism(self, temp_cache_file):
         """Test USDC.e resolves to bridged USDC on Optimism."""
@@ -956,12 +925,7 @@ class TestBridgedTokenAliases:
         token = resolver.resolve("USDC", "optimism")
 
         assert token.symbol == "USDC"
-        # Native USDC address on Optimism
         assert token.address.lower() == "0x0b2c639c533813f4aa9d7837caf62653d097ff85"
-
-    # =========================================================================
-    # Base bridged tokens
-    # =========================================================================
 
     def test_usdbc_resolves_on_base(self, temp_cache_file):
         """Test USDbC resolves to bridged USDC on Base."""
@@ -989,12 +953,7 @@ class TestBridgedTokenAliases:
         token = resolver.resolve("USDC", "base")
 
         assert token.symbol == "USDC"
-        # Native USDC address on Base
         assert token.address.lower() == "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
-
-    # =========================================================================
-    # Polygon bridged tokens
-    # =========================================================================
 
     def test_usdc_e_resolves_on_polygon(self, temp_cache_file):
         """Test USDC.e resolves to bridged USDC on Polygon."""
@@ -1012,12 +971,7 @@ class TestBridgedTokenAliases:
         token = resolver.resolve("USDC", "polygon")
 
         assert token.symbol == "USDC"
-        # Native USDC address on Polygon
         assert token.address.lower() == "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359"
-
-    # =========================================================================
-    # Avalanche bridged tokens
-    # =========================================================================
 
     def test_usdc_e_resolves_on_avalanche(self, temp_cache_file):
         """Test USDC.e resolves to bridged USDC on Avalanche."""
@@ -1055,7 +1009,6 @@ class TestBridgedTokenAliases:
         token = resolver.resolve("USDC", "avalanche")
 
         assert token.symbol == "USDC"
-        # Native USDC address on Avalanche
         assert token.address.lower() == "0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e"
 
     def test_btc_b_resolves_on_avalanche(self, temp_cache_file):
@@ -1088,17 +1041,8 @@ class TestBridgedTokenAliases:
         assert token.chain == "avalanche"
         assert token.address.lower() == "0x2b2c81e08f1af8835a78bb2a90ae924ace0ea4be"
 
-    # =========================================================================
-    # BSC BTCB (Binance-Peg BTC) — must report decimals=18, not 8.
-    #
-    # The contract at 0x7130d2A12B9BCbFAe4f2634d864A1Ee1Ce3Ead9c is BTCB
-    # (Binance-Peg BTC, 18 decimals on-chain), not WBTC (which is an
-    # Ethereum-native 8-decimal wrapper at a different address). Prior to this
-    # fix the registry recorded that address under WBTC with decimals=8,
-    # producing a 10^10 mis-scale for any BSC holder. BTC and WBTC remain
-    # accepted via bsc-scoped aliases for legacy callers, but they MUST route
-    # to the BTCB record with decimals=18.
-    # =========================================================================
+    # BSC's BTCB contract uses 18 decimals; chain-scoped BTC/WBTC aliases must
+    # not inherit WBTC's usual 8 decimals.
 
     def test_btcb_resolves_on_bsc_with_18_decimals(self, temp_cache_file):
         """BTCB on BSC must resolve at 18 decimals (on-chain truth)."""
@@ -1163,19 +1107,13 @@ class TestBridgedTokenAliases:
         assert token.chain == "avalanche"
         assert token.address.lower() == "0x152b9d0fdc40c096757f570a51e494bd4b943e50"
 
-    # =========================================================================
-    # Cross-chain consistency
-    # =========================================================================
-
     def test_usdc_e_not_found_on_chains_without_it(self, temp_cache_file):
         """Test USDC.e raises error on chains without bridged USDC."""
         resolver = TokenResolver(cache_file=temp_cache_file)
 
-        # Ethereum doesn't have USDC.e (it has native USDC)
         with pytest.raises(TokenNotFoundError):
             resolver.resolve("USDC.e", "ethereum")
 
-        # BSC doesn't have USDC.e
         with pytest.raises(TokenNotFoundError):
             resolver.resolve("USDC.e", "bsc")
 
@@ -1183,7 +1121,6 @@ class TestBridgedTokenAliases:
         """Test USDT.e raises error on chains without it."""
         resolver = TokenResolver(cache_file=temp_cache_file)
 
-        # Only Avalanche has USDT.e
         with pytest.raises(TokenNotFoundError):
             resolver.resolve("USDT.e", "arbitrum")
 
@@ -1194,7 +1131,6 @@ class TestBridgedTokenAliases:
         """Test WETH.e raises error on chains without it."""
         resolver = TokenResolver(cache_file=temp_cache_file)
 
-        # Only Avalanche has WETH.e
         with pytest.raises(TokenNotFoundError):
             resolver.resolve("WETH.e", "arbitrum")
 
@@ -1205,23 +1141,17 @@ class TestBridgedTokenAliases:
         """Test USDbC raises error on chains other than Base."""
         resolver = TokenResolver(cache_file=temp_cache_file)
 
-        # Only Base has USDbC
         with pytest.raises(TokenNotFoundError):
             resolver.resolve("USDbC", "arbitrum")
 
         with pytest.raises(TokenNotFoundError):
             resolver.resolve("USDbC", "ethereum")
 
-    # =========================================================================
-    # Integration with resolve_for_swap and resolve_for_protocol
-    # =========================================================================
-
     def test_bridged_usdc_works_with_resolve_for_swap(self, temp_cache_file):
         """Test bridged tokens work with resolve_for_swap."""
         resolver = TokenResolver(cache_file=temp_cache_file)
         token = resolver.resolve_for_swap("USDC.e", "arbitrum")
 
-        # Should resolve correctly (non-native, so unchanged)
         assert token.symbol == "USDC.E"
         assert token.decimals == 6
 
@@ -1243,12 +1173,10 @@ class TestResolveForSwapBalanceQueries:
         """Test ETH stays ETH for balance queries (using resolve, not resolve_for_swap)."""
         resolver = TokenResolver(cache_file=temp_cache_file)
 
-        # Regular resolve for balance queries
         token = resolver.resolve("ETH", "ethereum")
         assert token.symbol == "ETH"
         assert token.is_native is True
 
-        # resolve_for_swap for swap operations
         swap_token = resolver.resolve_for_swap("ETH", "ethereum")
         assert swap_token.symbol == "WETH"
 
@@ -1256,12 +1184,10 @@ class TestResolveForSwapBalanceQueries:
         """Test MATIC stays MATIC for balance queries."""
         resolver = TokenResolver(cache_file=temp_cache_file)
 
-        # Regular resolve for balance queries
         token = resolver.resolve("MATIC", "polygon")
         assert token.symbol == "MATIC"
         assert token.is_native is True
 
-        # resolve_for_swap for swap operations
         swap_token = resolver.resolve_for_swap("MATIC", "polygon")
         assert swap_token.symbol == "WMATIC"
 
@@ -1269,12 +1195,10 @@ class TestResolveForSwapBalanceQueries:
         """Test AVAX stays AVAX for balance queries."""
         resolver = TokenResolver(cache_file=temp_cache_file)
 
-        # Regular resolve
         token = resolver.resolve("AVAX", "avalanche")
         assert token.symbol == "AVAX"
         assert token.is_native is True
 
-        # resolve_for_swap
         swap_token = resolver.resolve_for_swap("AVAX", "avalanche")
         assert swap_token.symbol == "WAVAX"
 
@@ -1282,12 +1206,10 @@ class TestResolveForSwapBalanceQueries:
         """Test BNB stays BNB for balance queries."""
         resolver = TokenResolver(cache_file=temp_cache_file)
 
-        # Regular resolve
         token = resolver.resolve("BNB", "bsc")
         assert token.symbol == "BNB"
         assert token.is_native is True
 
-        # resolve_for_swap
         swap_token = resolver.resolve_for_swap("BNB", "bsc")
         assert swap_token.symbol == "WBNB"
 
@@ -1296,12 +1218,10 @@ class TestResolveForSwapBalanceQueries:
         """Test S stays S for balance queries."""
         resolver = TokenResolver(cache_file=temp_cache_file)
 
-        # Regular resolve
         token = resolver.resolve("S", "sonic")
         assert token.symbol == "S"
         assert token.is_native is True
 
-        # resolve_for_swap
         swap_token = resolver.resolve_for_swap("S", "sonic")
         assert swap_token.symbol == "WS"
 
@@ -1336,15 +1256,13 @@ class TestGatewayConnection:
         resolver = TokenResolver(cache_file=temp_cache_file)
         assert resolver.is_gateway_connected() is False
 
-        # Create a mock channel
         class MockChannel:
             pass
 
         mock_channel = MockChannel()
         resolver.set_gateway_channel(mock_channel)
 
-        # After setting channel, the resolver thinks it's connected
-        # (actual availability verified on use)
+        # A configured channel counts as connected; availability is checked on use.
         assert resolver._gateway_channel is mock_channel
 
     def test_set_gateway_channel_to_none_disconnects(self, temp_cache_file):
@@ -1363,7 +1281,6 @@ class TestGatewayConnection:
         """Test static resolution works when gateway is not available."""
         resolver = TokenResolver(cache_file=temp_cache_file)
 
-        # Should resolve from static registry without gateway
         token = resolver.resolve("USDC", "arbitrum")
 
         assert token.symbol == "USDC"
@@ -1374,11 +1291,9 @@ class TestGatewayConnection:
         """Test unknown addresses raise error when gateway not available."""
         resolver = TokenResolver(cache_file=temp_cache_file)
 
-        # Unknown address should raise TokenNotFoundError
         with pytest.raises(TokenNotFoundError) as exc_info:
             resolver.resolve("0x1234567890123456789012345678901234567890", "arbitrum")
 
-        # Error should suggest connecting to gateway
         assert "Connect to gateway" in str(exc_info.value)
 
     def test_stats_include_gateway_metrics(self, temp_cache_file):
@@ -1412,7 +1327,6 @@ class TestGatewayGracefulFallback:
 
     def test_static_resolution_unaffected_by_gateway_failure(self, temp_cache_file):
         """Test static resolution still works even if gateway configured but unavailable."""
-        # Create resolver with a channel that will fail
         class FailingChannel:
             pass
 
@@ -1421,7 +1335,6 @@ class TestGatewayGracefulFallback:
             gateway_channel=FailingChannel(),
         )
 
-        # Static resolution should work
         token = resolver.resolve("USDC", "arbitrum")
         assert token.symbol == "USDC"
         assert token.source == "static"
@@ -1437,13 +1350,11 @@ class TestGatewayGracefulFallback:
             gateway_channel=FailingChannel(),
         )
 
-        # Unknown address should raise error (not crash)
         with pytest.raises(TokenNotFoundError):
             resolver.resolve("0x1234567890123456789012345678901234567890", "arbitrum")
 
-        # Stats should show gateway lookup attempt
         stats = resolver.stats()
-        assert stats["gateway_lookups"] >= 0  # May or may not have attempted
+        assert stats["gateway_lookups"] >= 0
 
     def test_gateway_errors_logged_not_raised(self, temp_cache_file, caplog):
         """Test gateway errors are logged but don't crash resolution."""
@@ -1457,13 +1368,9 @@ class TestGatewayGracefulFallback:
             gateway_channel=FailingChannel(),
         )
 
-        # Set up logging capture
         with caplog.at_level(logging.DEBUG):
-            # Try to resolve unknown address - should fail gracefully
             with pytest.raises(TokenNotFoundError):
                 resolver.resolve("0x1234567890123456789012345678901234567890", "arbitrum")
-
-        # Resolution completed without crashing
 
 
 class TestGatewayMockedIntegration:
@@ -1473,7 +1380,6 @@ class TestGatewayMockedIntegration:
         """Test successful gateway resolution with mock response."""
         from unittest.mock import MagicMock
 
-        # Create mock channel and stub
         mock_channel = MagicMock()
         mock_response = MagicMock()
         mock_response.success = True
@@ -1489,13 +1395,11 @@ class TestGatewayMockedIntegration:
             gateway_channel=mock_channel,
         )
 
-        # Mock the stub creation and RPC call
         mock_stub = MagicMock()
         mock_stub.GetTokenMetadata.return_value = mock_response
         resolver._gateway_stub = mock_stub
         resolver._gateway_available = True
 
-        # Resolve the unknown address
         token = resolver.resolve("0x1234567890123456789012345678901234567890", "arbitrum")
 
         assert token.symbol == "MOCK"
@@ -1527,20 +1431,17 @@ class TestGatewayMockedIntegration:
         resolver._gateway_stub = mock_stub
         resolver._gateway_available = True
 
-        # First resolution
         token1 = resolver.resolve("0x2222222222222222222222222222222222222222", "arbitrum")
         assert token1.symbol == "CACHED"
 
-        # Reset the stub to ensure second call uses cache
+        # Disable gateway access so the second lookup can succeed only from cache.
         resolver._gateway_stub = None
         resolver._gateway_available = False
 
-        # Second resolution should use cache
         token2 = resolver.resolve("0x2222222222222222222222222222222222222222", "arbitrum")
         assert token2.symbol == "CACHED"
         assert token2.decimals == 6
 
-        # Verify cache was used
         stats = resolver.stats()
         assert stats["cache_hits"] > 0
 
@@ -1563,11 +1464,9 @@ class TestGatewayMockedIntegration:
         resolver._gateway_stub = mock_stub
         resolver._gateway_available = True
 
-        # Resolution should raise TokenNotFoundError (not crash)
         with pytest.raises(TokenNotFoundError):
             resolver.resolve("0x3333333333333333333333333333333333333333", "arbitrum")
 
-        # Gateway error should be tracked
         stats = resolver.stats()
         assert stats["gateway_errors"] > 0
 
@@ -1589,11 +1488,9 @@ class TestGatewayMockedIntegration:
         resolver._gateway_stub = mock_stub
         resolver._gateway_available = True
 
-        # Resolution should raise TokenNotFoundError (graceful fallback)
         with pytest.raises(TokenNotFoundError):
             resolver.resolve("0x4444444444444444444444444444444444444444", "arbitrum")
 
-        # Gateway error should be tracked
         stats = resolver.stats()
         assert stats["gateway_errors"] > 0
 
@@ -1613,11 +1510,9 @@ class TestGatewayMockedIntegration:
         resolver._gateway_stub = mock_stub
         resolver._gateway_available = True
 
-        # Resolution should fail gracefully
         with pytest.raises(TokenNotFoundError):
             resolver.resolve("0x5555555555555555555555555555555555555555", "arbitrum")
 
-        # Gateway should be marked as unavailable
         assert resolver._gateway_available is False
 
     def test_skip_gateway_avoids_slow_lookup(self, temp_cache_file):
@@ -1640,7 +1535,6 @@ class TestGatewayMockedIntegration:
         resolver._gateway_stub = mock_stub
         resolver._gateway_available = True
 
-        # With skip_gateway=True, resolution should fail fast without calling gateway
         with pytest.raises(TokenNotFoundError):
             resolver.resolve(
                 "0x6666666666666666666666666666666666666666",
@@ -1648,7 +1542,6 @@ class TestGatewayMockedIntegration:
                 skip_gateway=True,
             )
 
-        # Gateway should NOT have been called
         mock_stub.GetTokenMetadata.assert_not_called()
         stats = resolver.stats()
         assert stats["gateway_lookups"] == 0
@@ -1657,7 +1550,6 @@ class TestGatewayMockedIntegration:
         """Test skip_gateway=True still resolves tokens in cache/static registry."""
         resolver = TokenResolver(cache_file=temp_cache_file)
 
-        # USDC on Arbitrum is in the static registry - should resolve fine
         token = resolver.resolve("USDC", "arbitrum", skip_gateway=True)
         assert token.symbol == "USDC"
         assert token.decimals == 6
@@ -1666,7 +1558,6 @@ class TestGatewayMockedIntegration:
         """Test skip_gateway=True still resolves known addresses from static registry."""
         resolver = TokenResolver(cache_file=temp_cache_file)
 
-        # USDC address on Arbitrum is in the static registry
         token = resolver.resolve("0xaf88d065e77c8cC2239327C5EDb3A432268e5831", "arbitrum", skip_gateway=True)
         assert token.symbol == "USDC"
         assert token.decimals == 6
@@ -1684,7 +1575,6 @@ class TestResolverLockContention:
         mock_channel = MagicMock()
         resolver = TokenResolver(cache_file=temp_cache_file, gateway_channel=mock_channel)
 
-        # Set up a slow gateway stub (simulates a 500ms RPC call)
         mock_stub = MagicMock()
         gateway_call_started = threading.Event()
         gateway_call_proceed = threading.Event()
@@ -1692,7 +1582,6 @@ class TestResolverLockContention:
         def slow_gateway_call(*args, **kwargs):
             gateway_call_started.set()
             gateway_call_proceed.wait(timeout=5)
-            # Return failure so the resolve raises TokenNotFoundError
             mock_response = MagicMock()
             mock_response.success = False
             mock_response.error = "not found"
@@ -1702,34 +1591,29 @@ class TestResolverLockContention:
         resolver._gateway_stub = mock_stub
         resolver._gateway_available = True
 
-        # Thread 1: resolve an unknown address (will hit gateway, slow path)
         errors = []
 
         def resolve_unknown():
             try:
                 resolver.resolve("0x9999999999999999999999999999999999999999", "arbitrum")
             except TokenNotFoundError:
-                pass  # Expected
+                pass
             except Exception as e:
                 errors.append(e)
 
         t1 = threading.Thread(target=resolve_unknown)
         t1.start()
 
-        # Wait for the gateway call to start
         assert gateway_call_started.wait(timeout=5), "Gateway call did not start"
 
-        # Thread 2: resolve a cached token (should NOT be blocked by the gateway call)
         start = time.perf_counter()
         result = resolver.resolve("USDC", "arbitrum")
         elapsed_ms = (time.perf_counter() - start) * 1000
 
-        # Cached/static resolution should be very fast (<100ms), not blocked by gateway
         assert result.symbol == "USDC"
         assert result.decimals == 6
         assert elapsed_ms < 100, f"Cached resolve took {elapsed_ms:.1f}ms, expected <100ms (lock contention?)"
 
-        # Let the gateway call finish
         gateway_call_proceed.set()
         t1.join(timeout=5)
         assert not errors, f"Gateway thread had errors: {errors}"
@@ -1817,7 +1701,7 @@ class TestRegisterToken:
         )
 
         address = resolver.get_address("arbitrum", "MY-TOKEN")
-        # EVM addresses are normalized to lowercase
+        # Registered EVM addresses are normalized to lowercase.
         assert address == "0xdddddddddddddddddddddddddddddddddddddddd"
 
     def test_register_token_invalid_address_raises(self):
@@ -1917,13 +1801,12 @@ class TestGatewayIntegrityCheck:
         """If static registry says USDC=6 decimals, gateway returning 18 is rejected."""
         resolver = TokenResolver(cache_file=str(Path(tempfile.mkdtemp()) / "cache.json"))
 
-        # Get USDC address on arbitrum from static registry
         usdc_address = resolver.get_address("arbitrum", "USDC")
         assert usdc_address is not None
 
-        # Cross-check: gateway claims 18 decimals, static says 6
+        # A mismatch returns the authoritative static decimals.
         result = resolver._cross_check_decimals_with_static(usdc_address, "arbitrum", 18)
-        assert result == 6  # Returns the static decimals (indicating mismatch)
+        assert result == 6
 
     def test_cross_check_accepts_matching_decimals(self):
         """If gateway decimals match static registry, no rejection."""
@@ -1932,7 +1815,6 @@ class TestGatewayIntegrityCheck:
         usdc_address = resolver.get_address("arbitrum", "USDC")
         assert usdc_address is not None
 
-        # Cross-check: gateway says 6, static says 6 -> no conflict
         result = resolver._cross_check_decimals_with_static(usdc_address, "arbitrum", 6)
         assert result is None
 
@@ -1940,17 +1822,15 @@ class TestGatewayIntegrityCheck:
         """Unknown tokens not in static registry should pass cross-check."""
         resolver = TokenResolver(cache_file=str(Path(tempfile.mkdtemp()) / "cache.json"))
 
-        # Random address not in registry
         result = resolver._cross_check_decimals_with_static(
             "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "arbitrum", 18,
         )
-        assert result is None  # No conflict — token not in static registry
+        assert result is None
 
     def test_gateway_response_invalid_decimals_rejected(self):
         """Gateway responses with out-of-range decimals should be rejected."""
         resolver = TokenResolver(cache_file=str(Path(tempfile.mkdtemp()) / "cache.json"))
 
-        # Mock gateway stub + response with negative decimals
         mock_stub = MagicMock()
         mock_response = MagicMock()
         mock_response.success = True
@@ -1967,7 +1847,7 @@ class TestGatewayIntegrityCheck:
         result = resolver._resolve_via_gateway(
             "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "arbitrum",
         )
-        assert result is None  # Rejected due to invalid decimals
+        assert result is None
 
     def test_gateway_response_too_high_decimals_rejected(self):
         """Gateway responses with decimals > 77 should be rejected."""
@@ -2000,7 +1880,6 @@ class TestGatewayIntegrityCheck:
         mock_response.success = True
         mock_response.decimals = 18
         mock_response.symbol = "WRONG"
-        # Gateway returns a different address than what was requested
         mock_response.address = "0x1111111111111111111111111111111111111111"
         mock_response.name = "Wrong Token"
         mock_stub.GetTokenMetadata.return_value = mock_response
@@ -2012,7 +1891,7 @@ class TestGatewayIntegrityCheck:
         result = resolver._resolve_via_gateway(
             "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "arbitrum",
         )
-        assert result is None  # Rejected due to address mismatch
+        assert result is None
 
     def test_gateway_response_matching_address_accepted(self):
         """Gateway returning the same address (different case) should be accepted."""
@@ -2023,7 +1902,7 @@ class TestGatewayIntegrityCheck:
         mock_response.success = True
         mock_response.decimals = 18
         mock_response.symbol = "TEST"
-        # Same address, different case (EVM addresses are case-insensitive)
+        # EVM address matching is case-insensitive.
         mock_response.address = "0xDeadBeefDeadBeefDeadBeefDeadBeefDeadBeef"
         mock_response.name = "Test Token"
         mock_stub.GetTokenMetadata.return_value = mock_response
