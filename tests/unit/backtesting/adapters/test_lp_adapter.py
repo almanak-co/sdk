@@ -30,10 +30,6 @@ from almanak.framework.backtesting.pnl.portfolio import (
     SimulatedPosition,
 )
 
-# =============================================================================
-# Mock Classes
-# =============================================================================
-
 
 @dataclass
 class MockMarketState:
@@ -74,11 +70,6 @@ def create_lp_position(
         liquidity=liquidity,
         fee_tier=fee_tier,
     )
-
-
-# =============================================================================
-# LPBacktestConfig Tests
-# =============================================================================
 
 
 class TestLPBacktestConfig:
@@ -195,11 +186,6 @@ class TestLPBacktestConfig:
         assert restored.boundary_margin_pct == original.boundary_margin_pct
 
 
-# =============================================================================
-# Tick-to-Price Conversion Tests
-# =============================================================================
-
-
 class TestTickToPrice:
     """Tests for tick-to-price conversion."""
 
@@ -237,11 +223,6 @@ class TestTickToPrice:
         assert abs(product - Decimal("1")) < Decimal("0.0001")
 
 
-# =============================================================================
-# Range Status Tests
-# =============================================================================
-
-
 class TestGetRangeStatus:
     """Tests for get_range_status method."""
 
@@ -249,16 +230,13 @@ class TestGetRangeStatus:
         """Test detection of price within range."""
         adapter = LPBacktestAdapter()
 
-        # Create position with tick range that maps to price range ~0.5 to ~2.0
         # At tick=-7000: price ≈ 0.497, at tick=7000: price ≈ 2.013
         position = create_lp_position(
             tick_lower=-7000,
             tick_upper=7000,
         )
 
-        # ETH at $1000, USDC at $1 -> ratio = 1000
-        # But that's outside our tick range...
-        # Let's use a ratio within range: ETH at $1, USDC at $1 -> ratio = 1
+        # Equal token prices give a ratio of 1, within the ~0.5-2.0 tick range.
         market = MockMarketState(prices={"ETH": Decimal("1"), "USDC": Decimal("1")})
 
         result = adapter.get_range_status(position, market)
@@ -272,7 +250,6 @@ class TestGetRangeStatus:
         """Test detection of price below range."""
         adapter = LPBacktestAdapter()
 
-        # Position with narrow range around price ratio 1
         position = create_lp_position(
             tick_lower=-1000,  # price ≈ 0.905
             tick_upper=1000,  # price ≈ 1.105
@@ -292,7 +269,6 @@ class TestGetRangeStatus:
         """Test detection of price above range."""
         adapter = LPBacktestAdapter()
 
-        # Position with narrow range around price ratio 1
         position = create_lp_position(
             tick_lower=-1000,  # price ≈ 0.905
             tick_upper=1000,  # price ≈ 1.105
@@ -316,7 +292,6 @@ class TestGetRangeStatus:
         )
         adapter = LPBacktestAdapter(config)
 
-        # Position with range around price ratio 1
         position = create_lp_position(
             tick_lower=-1000,  # price ≈ 0.9048
             tick_upper=1000,  # price ≈ 1.1052
@@ -340,7 +315,6 @@ class TestGetRangeStatus:
         )
         adapter = LPBacktestAdapter(config)
 
-        # Position with range around price ratio 1
         position = create_lp_position(
             tick_lower=-1000,  # price ≈ 0.9048
             tick_upper=1000,  # price ≈ 1.1052
@@ -379,7 +353,7 @@ class TestGetRangeStatus:
         adapter = LPBacktestAdapter()
 
         position = create_lp_position()
-        position.tick_lower = None  # Remove tick bounds
+        position.tick_lower = None
 
         market = MockMarketState(prices={"ETH": Decimal("2000"), "USDC": Decimal("1")})
 
@@ -391,7 +365,7 @@ class TestGetRangeStatus:
         adapter = LPBacktestAdapter()
 
         position = create_lp_position()
-        market = MockMarketState(prices={})  # No prices
+        market = MockMarketState(prices={})
 
         result = adapter.get_range_status(position, market)
         assert result is None
@@ -431,11 +405,6 @@ class TestGetRangeStatus:
         assert d["is_approaching_boundary"] is False
 
 
-# =============================================================================
-# Should Rebalance Tests
-# =============================================================================
-
-
 class TestShouldRebalance:
     """Tests for should_rebalance method."""
 
@@ -449,7 +418,6 @@ class TestShouldRebalance:
         adapter = LPBacktestAdapter(config)
 
         position = create_lp_position(tick_lower=-1000, tick_upper=1000)
-        # Price well outside range
         market = MockMarketState(prices={"ETH": Decimal("0.1"), "USDC": Decimal("1")})
 
         result = adapter.should_rebalance(position, market)
@@ -464,7 +432,6 @@ class TestShouldRebalance:
         adapter = LPBacktestAdapter(config)
 
         position = create_lp_position(tick_lower=-1000, tick_upper=1000)
-        # Price below range
         market = MockMarketState(prices={"ETH": Decimal("0.5"), "USDC": Decimal("1")})
 
         result = adapter.should_rebalance(position, market)
@@ -479,7 +446,6 @@ class TestShouldRebalance:
         adapter = LPBacktestAdapter(config)
 
         position = create_lp_position(tick_lower=-1000, tick_upper=1000)
-        # Price within range
         market = MockMarketState(prices={"ETH": Decimal("1"), "USDC": Decimal("1")})
 
         result = adapter.should_rebalance(position, market)
@@ -496,7 +462,6 @@ class TestShouldRebalance:
         adapter = LPBacktestAdapter(config)
 
         position = create_lp_position(tick_lower=-1000, tick_upper=1000)
-        # Price approaching lower boundary
         market = MockMarketState(prices={"ETH": Decimal("0.93"), "USDC": Decimal("1")})
 
         result = adapter.should_rebalance(position, market)
@@ -513,16 +478,10 @@ class TestShouldRebalance:
         adapter = LPBacktestAdapter(config)
 
         position = create_lp_position(tick_lower=-1000, tick_upper=1000)
-        # Price approaching boundary but not out
         market = MockMarketState(prices={"ETH": Decimal("0.93"), "USDC": Decimal("1")})
 
         result = adapter.should_rebalance(position, market)
-        assert result is False  # Not out of range, partial exit disabled
-
-
-# =============================================================================
-# Integration Tests - LP Strategy Accuracy
-# =============================================================================
+        assert result is False
 
 
 class TestLPStrategyAccuracy:
@@ -538,7 +497,6 @@ class TestLPStrategyAccuracy:
             tick_upper=887272,
         )
 
-        # Test various price points
         for price in [Decimal("0.001"), Decimal("1"), Decimal("1000"), Decimal("1000000")]:
             market = MockMarketState(prices={"ETH": price, "USDC": Decimal("1")})
             result = adapter.get_range_status(position, market)
@@ -556,25 +514,21 @@ class TestLPStrategyAccuracy:
         )
         adapter = LPBacktestAdapter(config)
 
-        # Narrow range around price ratio 1 (roughly 0.95 to 1.05)
         position = create_lp_position(
             tick_lower=-500,  # price ≈ 0.9512
             tick_upper=500,  # price ≈ 1.0513
         )
 
-        # In range
         market = MockMarketState(prices={"ETH": Decimal("1"), "USDC": Decimal("1")})
         result = adapter.get_range_status(position, market)
         assert result is not None
         assert result.status == RangeStatus.IN_RANGE
 
-        # Below range
         market = MockMarketState(prices={"ETH": Decimal("0.9"), "USDC": Decimal("1")})
         result = adapter.get_range_status(position, market)
         assert result is not None
         assert result.status == RangeStatus.BELOW_RANGE
 
-        # Above range
         market = MockMarketState(prices={"ETH": Decimal("1.1"), "USDC": Decimal("1")})
         result = adapter.get_range_status(position, market)
         assert result is not None
@@ -593,14 +547,13 @@ class TestLPStrategyAccuracy:
             tick_upper=887272,
             liquidity=Decimal("1000000"),
         )
-        position.accumulated_fees_usd = Decimal("100")  # Pre-accumulated fees
+        position.accumulated_fees_usd = Decimal("100")
 
         market = MockMarketState(prices={"ETH": Decimal("2000"), "USDC": Decimal("1")})
 
         value = adapter.value_position(position, market)
 
-        # Value should include the accumulated fees
-        # The exact token amounts depend on IL calculation, but fees should be added
+        # Exact token amounts vary with IL, but accumulated fees must increase total value.
         assert value > Decimal("0")
 
     def test_value_position_strict_missing_token0_price_raises(self) -> None:
@@ -625,7 +578,7 @@ class TestLPStrategyAccuracy:
         config = LPBacktestConfig(
             strategy_type="lp",
             fee_tracking_enabled=True,
-            # VIB-4849: no subgraph/explicit volume here -> opt into the heuristic.
+            # This fixture has no measured volume source, so it opts into the heuristic.
             allow_volume_fallback=True,
         )
         adapter = LPBacktestAdapter(config)
@@ -635,16 +588,13 @@ class TestLPStrategyAccuracy:
 
         market = MockMarketState(prices={"ETH": Decimal("2000"), "USDC": Decimal("1")})
 
-        # Simulate 1 day of time passage
         adapter.update_position(position, market, elapsed_seconds=86400)
 
-        # Fees should have increased
         assert position.accumulated_fees_usd > initial_fees
 
     def test_update_position_updates_token_amounts(self) -> None:
         """Test that update_position updates token amounts based on price."""
-        # VIB-4849: this test checks token-amount math, not fees. Disable fee
-        # tracking so it does not require a volume source.
+        # Fee tracking is disabled so token-amount math does not require a volume source.
         adapter = LPBacktestAdapter(LPBacktestConfig(strategy_type="lp", fee_tracking_enabled=False))
 
         position = create_lp_position(
@@ -657,8 +607,6 @@ class TestLPStrategyAccuracy:
 
         adapter.update_position(position, market, elapsed_seconds=3600)
 
-        # Token amounts should have changed based on IL calculation
-        # With V3 math, the position composition shifts as price moves
         assert "ETH" in position.amounts
         assert "USDC" in position.amounts
 
@@ -677,7 +625,6 @@ class TestLPStrategyAccuracy:
 
         adapter.update_position(position, market, elapsed_seconds=86400)
 
-        # Fees should not have changed
         assert position.accumulated_fees_usd == initial_fees
 
     def test_stablecoin_pair_range(self) -> None:
@@ -689,7 +636,6 @@ class TestLPStrategyAccuracy:
         )
         adapter = LPBacktestAdapter(config)
 
-        # Stablecoin pair with very narrow range (0.999 to 1.001)
         position = create_lp_position(
             token0="USDC",
             token1="USDT",
@@ -698,13 +644,11 @@ class TestLPStrategyAccuracy:
             fee_tier=Decimal("0.0001"),  # 0.01% fee tier
         )
 
-        # Price at 1:1 - in range
         market = MockMarketState(prices={"USDC": Decimal("1"), "USDT": Decimal("1")})
         result = adapter.get_range_status(position, market)
         assert result is not None
         assert result.status == RangeStatus.IN_RANGE
 
-        # Slight depeg - might be out of range
         market = MockMarketState(prices={"USDC": Decimal("0.995"), "USDT": Decimal("1")})
         result = adapter.get_range_status(position, market)
         assert result is not None
@@ -714,7 +658,6 @@ class TestLPStrategyAccuracy:
         """Test LP position with volatile pair and wide range."""
         adapter = LPBacktestAdapter()
 
-        # ETH/BTC pair with wider range
         position = create_lp_position(
             token0="ETH",
             token1="BTC",
@@ -723,24 +666,16 @@ class TestLPStrategyAccuracy:
             fee_tier=Decimal("0.003"),  # 0.3% fee tier
         )
 
-        # Price at 0.05 (ETH worth 5% of BTC) - in range
         market = MockMarketState(prices={"ETH": Decimal("2000"), "BTC": Decimal("40000")})
         result = adapter.get_range_status(position, market)
-        # Price ratio is 0.05, but our range is 0.368 to 2.718
-        # So we're actually BELOW range
+        # ETH/BTC is 0.05, below the 0.368 lower bound.
         assert result is not None
         assert result.status == RangeStatus.BELOW_RANGE
 
-        # Price at 1.0 (ETH = BTC) - in range
         market = MockMarketState(prices={"ETH": Decimal("40000"), "BTC": Decimal("40000")})
         result = adapter.get_range_status(position, market)
         assert result is not None
         assert result.status == RangeStatus.IN_RANGE
-
-
-# =============================================================================
-# Edge Cases
-# =============================================================================
 
 
 class TestEdgeCases:
@@ -753,7 +688,6 @@ class TestEdgeCases:
         position = create_lp_position(liquidity=Decimal("0"))
         market = MockMarketState(prices={"ETH": Decimal("2000"), "USDC": Decimal("1")})
 
-        # Should not crash
         result = adapter.get_range_status(position, market)
         assert result is not None
 
@@ -761,13 +695,11 @@ class TestEdgeCases:
         """Test handling of negative tick range."""
         adapter = LPBacktestAdapter()
 
-        # Both ticks negative (price range < 1)
         position = create_lp_position(
             tick_lower=-5000,  # price ≈ 0.607
             tick_upper=-1000,  # price ≈ 0.905
         )
 
-        # Price at 0.75 - in range
         market = MockMarketState(prices={"ETH": Decimal("0.75"), "USDC": Decimal("1")})
         result = adapter.get_range_status(position, market)
         assert result is not None
@@ -777,13 +709,11 @@ class TestEdgeCases:
         """Test handling of positive tick range."""
         adapter = LPBacktestAdapter()
 
-        # Both ticks positive (price range > 1)
         position = create_lp_position(
             tick_lower=1000,  # price ≈ 1.105
             tick_upper=5000,  # price ≈ 1.649
         )
 
-        # Price at 1.3 - in range
         market = MockMarketState(prices={"ETH": Decimal("1.3"), "USDC": Decimal("1")})
         result = adapter.get_range_status(position, market)
         assert result is not None
@@ -794,7 +724,7 @@ class TestEdgeCases:
         adapter = LPBacktestAdapter()
 
         position = create_lp_position()
-        position.tokens = ["ETH"]  # Remove second token
+        position.tokens = ["ETH"]
 
         market = MockMarketState(prices={"ETH": Decimal("2000")})
 
@@ -810,7 +740,6 @@ class TestEdgeCases:
             tick_upper=1000,
         )
 
-        # Only ETH price available, USDC missing
         market = MockMarketState(prices={"ETH": Decimal("1")})
 
         result = adapter.get_range_status(position, market)
@@ -834,7 +763,6 @@ class TestEdgeCases:
         """Test handling of extreme tick values."""
         adapter = LPBacktestAdapter()
 
-        # Near max tick range
         position = create_lp_position(
             tick_lower=-800000,
             tick_upper=800000,
@@ -845,11 +773,6 @@ class TestEdgeCases:
         result = adapter.get_range_status(position, market)
         assert result is not None
         assert result.status == RangeStatus.IN_RANGE
-
-
-# =============================================================================
-# Execute Intent Tests - LP Open
-# =============================================================================
 
 
 @dataclass
@@ -976,8 +899,8 @@ class TestExecuteIntentLPOpen:
             pool="ETH/USDC",
             amount0=Decimal("1"),
             amount1=Decimal("2000"),
-            range_lower=Decimal("1"),  # Should give tick 0
-            range_upper=Decimal("2"),  # Should give tick ~6931
+            range_lower=Decimal("1"),
+            range_upper=Decimal("2"),
             protocol="uniswap_v3",
         )
 
@@ -1058,7 +981,6 @@ class TestExecuteIntentLPOpen:
         """Test that non-LP intents return None for default handling."""
         adapter = LPBacktestAdapter()
 
-        # Create a mock non-LP intent
         class MockSwapIntent:
             pass
 
@@ -1347,11 +1269,6 @@ class TestExecuteIntentLPOpen:
         assert tick == -887272
 
 
-# =============================================================================
-# Execute Intent Tests - LP Close
-# =============================================================================
-
-
 class TestExecuteIntentLPClose:
     """Tests for execute_intent method with LPCloseIntent."""
 
@@ -1361,7 +1278,6 @@ class TestExecuteIntentLPClose:
 
         adapter = LPBacktestAdapter()
 
-        # Create a position with known amounts
         position = create_lp_position(
             token0="ETH",
             token1="USDC",
@@ -1374,7 +1290,6 @@ class TestExecuteIntentLPClose:
         position.accumulated_fees_usd = Decimal("50")  # $50 in fees
         position.metadata["entry_amounts"] = {"ETH": "1", "USDC": "2000"}
 
-        # Create a mock portfolio with the position
         portfolio = MockPortfolio()
         portfolio.positions = [position]
 
@@ -1397,7 +1312,6 @@ class TestExecuteIntentLPClose:
         assert fill.position_close_id == position.position_id
         assert "ETH" in fill.tokens_in
         assert "USDC" in fill.tokens_in
-        # Tokens received should be positive
         assert fill.tokens_in["ETH"] > 0
         assert fill.tokens_in["USDC"] > 0
 
@@ -1408,7 +1322,7 @@ class TestExecuteIntentLPClose:
         adapter = LPBacktestAdapter()
 
         position = create_lp_position()
-        position.accumulated_fees_usd = Decimal("100")  # $100 in fees
+        position.accumulated_fees_usd = Decimal("100")
         position.metadata["entry_amounts"] = {"ETH": "1", "USDC": "2000"}
 
         portfolio = MockPortfolio()
@@ -1429,7 +1343,6 @@ class TestExecuteIntentLPClose:
 
         assert fill is not None
         assert fill.success is True
-        # Amount should include fees
         assert fill.amount_usd > Decimal("0")
         assert fill.metadata.get("fees_earned_usd") == "100"
         assert fill.metadata.get("collect_fees") is True
@@ -1447,7 +1360,6 @@ class TestExecuteIntentLPClose:
         portfolio = MockPortfolio()
         portfolio.positions = [position]
 
-        # Close with fees collected
         intent_with_fees = LPCloseIntent(
             position_id=position.position_id,
             collect_fees=True,
@@ -1462,7 +1374,6 @@ class TestExecuteIntentLPClose:
         fill_with_fees = adapter.execute_intent(intent_with_fees, portfolio, market)
         amount_with_fees = fill_with_fees.amount_usd
 
-        # Close without fees
         intent_no_fees = LPCloseIntent(
             position_id=position.position_id,
             collect_fees=False,
@@ -1472,7 +1383,6 @@ class TestExecuteIntentLPClose:
         fill_no_fees = adapter.execute_intent(intent_no_fees, portfolio, market)
         amount_no_fees = fill_no_fees.amount_usd
 
-        # Amount with fees should be higher
         assert amount_with_fees > amount_no_fees
         assert fill_no_fees.metadata.get("collect_fees") is False
 
@@ -1515,7 +1425,6 @@ class TestExecuteIntentLPClose:
 
         adapter = LPBacktestAdapter()
 
-        # Create position at entry price of 2000
         position = create_lp_position(
             entry_price=Decimal("2000"),
             liquidity=Decimal("4000"),
@@ -1540,10 +1449,8 @@ class TestExecuteIntentLPClose:
 
         assert fill is not None
         assert fill.success is True
-        # IL should be recorded in metadata
         assert "il_percentage" in fill.metadata
         assert "il_loss_usd" in fill.metadata
-        # IL should be non-zero when price changed
         il_pct = Decimal(fill.metadata["il_percentage"])
         assert il_pct != Decimal("0")
 
@@ -1557,7 +1464,7 @@ class TestExecuteIntentLPClose:
             entry_price=Decimal("2000"),
             liquidity=Decimal("4000"),
         )
-        position.accumulated_fees_usd = Decimal("200")  # Good fee earnings
+        position.accumulated_fees_usd = Decimal("200")
         position.metadata["entry_amounts"] = {"ETH": "1", "USDC": "2000"}
 
         portfolio = MockPortfolio()
@@ -1579,7 +1486,6 @@ class TestExecuteIntentLPClose:
         assert fill is not None
         assert fill.success is True
         assert "net_lp_pnl_usd" in fill.metadata
-        # Net PnL includes fees earned
         net_pnl = Decimal(fill.metadata["net_lp_pnl_usd"])
         # Should be positive when we earned fees and no IL (price unchanged)
         assert net_pnl >= Decimal("0")
@@ -1591,7 +1497,7 @@ class TestExecuteIntentLPClose:
         adapter = LPBacktestAdapter()
 
         portfolio = MockPortfolio()
-        portfolio.positions = []  # Empty portfolio
+        portfolio.positions = []
 
         intent = LPCloseIntent(
             position_id="nonexistent_position_id",
@@ -1636,7 +1542,6 @@ class TestExecuteIntentLPClose:
         fill = adapter.execute_intent(intent, portfolio, market)
 
         assert fill is not None
-        # Check all expected metadata fields
         assert "position_id" in fill.metadata
         assert "pool" in fill.metadata
         assert "current_price_ratio" in fill.metadata
@@ -1687,7 +1592,7 @@ class TestExecuteIntentLPClose:
             entry_price=Decimal("2000"),
             liquidity=Decimal("4000"),
         )
-        position.accumulated_fees_usd = Decimal("500")  # Significant fees
+        position.accumulated_fees_usd = Decimal("500")
         position.metadata["entry_amounts"] = {"ETH": "1", "USDC": "2000"}
 
         portfolio = MockPortfolio()
@@ -1709,10 +1614,8 @@ class TestExecuteIntentLPClose:
 
         assert fill is not None
         assert fill.success is True
-        # IL should be positive (represents a loss)
         il_pct = Decimal(fill.metadata["il_percentage"])
         assert il_pct > Decimal("0")
-        # But with high fees, net PnL could still be positive
         fees = Decimal(fill.metadata["fees_earned_usd"])
         assert fees == Decimal("500")
 
@@ -1748,14 +1651,8 @@ class TestExecuteIntentLPClose:
 
         assert fill is not None
         assert fill.success is True
-        # IL should be non-zero
         il_pct = Decimal(fill.metadata["il_percentage"])
         assert il_pct != Decimal("0")
-
-
-# =============================================================================
-# Historical Volume Integration Tests
-# =============================================================================
 
 
 class TestHistoricalVolumeIntegration:
@@ -1791,9 +1688,7 @@ class TestHistoricalVolumeIntegration:
 
         assert d["use_historical_volume"] is True
         assert d["chain"] == "base"
-        # The dead subgraph_api_key field was removed: the gateway DEX-volume
-        # lane needs no operator-side API key, and a serialized secret slot
-        # that nothing consumes is a footgun.
+        # Gateway-backed DEX volume needs no operator API key or serialized secret slot.
         assert "subgraph_api_key" not in d
 
     def test_config_deserialization_with_volume_settings(self) -> None:
@@ -1832,7 +1727,6 @@ class TestHistoricalVolumeIntegration:
         )
         adapter = LPBacktestAdapter(config)
 
-        # Ensure volume provider is not initialized
         provider = adapter._ensure_volume_provider()
         assert provider is None
 
@@ -1858,7 +1752,6 @@ class TestHistoricalVolumeIntegration:
             ]
         )
 
-        # Use address format pool (registry-known ethereum USDC/WETH 0.05% pool)
         intent = LPOpenIntent(
             pool="0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640",
             amount0=Decimal("1000"),
@@ -1930,7 +1823,6 @@ class TestHistoricalVolumeIntegration:
 
         adapter = LPBacktestAdapter()
 
-        # Use token pair format pool (not an address)
         intent = LPOpenIntent(
             pool="ETH/USDC",
             amount0=Decimal("1"),
@@ -1951,16 +1843,15 @@ class TestHistoricalVolumeIntegration:
         assert fill is not None
         assert fill.position_delta is not None
         assert "pool_address" in fill.position_delta.metadata
-        # Token pair format doesn't provide a pool address
         assert fill.position_delta.metadata["pool_address"] is None
 
     def test_fee_accrual_raises_without_volume_source_or_optin(self) -> None:
         """VIB-4849: no volume source + no opt-in must fail loud, not fabricate."""
         config = LPBacktestConfig(
             strategy_type="lp",
-            use_historical_volume=False,  # No historical volume
+            use_historical_volume=False,
             fee_tracking_enabled=True,
-            # allow_volume_fallback defaults to False -> must raise
+            # No fallback opt-in: missing volume must raise.
         )
         adapter = LPBacktestAdapter(config)
 
@@ -1973,14 +1864,11 @@ class TestHistoricalVolumeIntegration:
         with pytest.raises(NoAcceptableDataSourceError) as exc_info:
             adapter.update_position(position, market, elapsed_seconds=86400)
 
-        # Error must tell the user exactly what to provide.
         message = str(exc_info.value)
         assert "use_historical_volume" in message
         assert "explicit_pool_volume_usd_daily" in message
         assert "allow_volume_fallback" in message
-        # The historical path is gateway-backed (VIB-4851 Phase D); the removed
-        # subgraph_api_key field was never consumed, so recommending it would
-        # send users down a dead end.
+        # Historical volume is gateway-backed; subgraph_api_key is not a valid remedy.
         assert "subgraph_api_key" not in message
         # And it must NOT have fabricated any fees.
         assert position.accumulated_fees_usd == Decimal("0")
@@ -2035,7 +1923,7 @@ class TestHistoricalVolumeIntegration:
 
         config = LPBacktestConfig(
             strategy_type="lp",
-            use_historical_volume=False,  # No historical volume
+            use_historical_volume=False,
             fee_tracking_enabled=True,
             allow_volume_fallback=True,  # Explicit opt-in to the heuristic
         )
@@ -2051,7 +1939,6 @@ class TestHistoricalVolumeIntegration:
             adapter.update_position(position, market, elapsed_seconds=86400)
 
         assert position.accumulated_fees_usd > Decimal("0")
-        # Heuristic use must be loudly flagged.
         assert any("OPT-IN fallback volume multiplier" in r.message for r in caplog.records)
 
     def test_fee_accrual_raises_when_historical_lookup_fails_without_optin(self) -> None:
@@ -2093,7 +1980,6 @@ class TestHistoricalVolumeIntegration:
             timestamp=datetime.now(),
         )
 
-        # Should not raise; uses explicit volume directly.
         adapter.update_position(position, market, elapsed_seconds=86400)
         assert position.accumulated_fees_usd > Decimal("0")
         # Explicit volume is a trusted source -> not LOW confidence.
@@ -2152,7 +2038,6 @@ class TestHistoricalVolumeIntegration:
 
         result2_volume, result2_confidence = adapter._get_historical_volume(pool_address, timestamp)
 
-        # Both should have LOW confidence (cached failure or fallback result)
         # The volume value may be 0 (fallback) or None depending on provider behavior
         assert result1_confidence == DataConfidence.LOW
         assert result2_confidence == DataConfidence.LOW
@@ -2168,7 +2053,6 @@ class TestHistoricalVolumeIntegration:
 
         adapter = LPBacktestAdapter(volume_provider=mock_provider)
 
-        # Should use the provided provider
         assert adapter._volume_provider is mock_provider
         assert adapter._volume_provider_initialized is True
 
@@ -2250,7 +2134,7 @@ class TestValidateHeuristics:
             liquidity=Decimal("1000000"),
             fee_tier=Decimal("0.003"),
             elapsed_seconds=86400,
-            observed_fees_usd=Decimal("0"),  # placeholder; replaced below
+            observed_fees_usd=Decimal("0"),
             label="close-match",
         )
         # Make observed exactly equal to the heuristic estimate.
@@ -2333,7 +2217,6 @@ class TestMeasuredZeroVolume:
             timestamp=datetime.now(),
         )
 
-        # Must NOT raise: zero is a valid measured volume.
         adapter.update_position(position, market, elapsed_seconds=86400)
 
         # Zero volume -> zero fees, but the source is trusted (HIGH), not "low".
@@ -2699,11 +2582,6 @@ class TestVolumePolicyViaDataConfig:
         assert via_data_config != via_small_tvl
 
 
-# =============================================================================
-# Historical volume helper decomposition
-# =============================================================================
-
-
 class StubVolumeProvider:
     """Async volume provider stub that records calls and returns canned data."""
 
@@ -3032,16 +2910,13 @@ class TestGetHistoricalVolumeOrchestration:
         assert stub.calls == []
 
     def test_no_provider_ladder_refuses_to_block_inside_async_task(self, monkeypatch) -> None:
-        # CodeRabbit #3283: the no-primary-provider branch dials the ladder via a
-        # BLOCKING daily_history() call — inside the engine's async task it must
-        # refuse to block (not call the blocking ladder), mirroring
-        # _fetch_and_cache_volume's guard.
+        # The fallback daily_history() call is blocking, so it must not run in the engine's async task.
         import asyncio
 
         from almanak.framework.backtesting.pnl.types import DataConfidence
 
-        adapter = LPBacktestAdapter()  # use_historical_volume defaults True
-        adapter._volume_provider = None  # no primary provider
+        adapter = LPBacktestAdapter()
+        adapter._volume_provider = None
         adapter._volume_provider_initialized = True
         called: list[int] = []
         monkeypatch.setattr(adapter, "_pool_history_ladder_volume", lambda *a, **k: (called.append(1), None)[1])
@@ -3051,7 +2926,7 @@ class TestGetHistoricalVolumeOrchestration:
             return adapter._get_historical_volume("0xpool", ts)
 
         assert asyncio.run(lookup()) == (None, DataConfidence.LOW)
-        assert called == []  # the blocking ladder was NOT dialed inside the loop
+        assert called == []
 
     def test_refuses_to_block_inside_async_task_strict(self) -> None:
         import asyncio
@@ -3125,11 +3000,6 @@ class TestGetHistoricalVolumeOrchestration:
 
         assert adapter._get_historical_volume("0xpool", datetime(2024, 1, 15)) == (None, DataConfidence.LOW)
         assert stub.calls == []
-
-
-# =============================================================================
-# Historical liquidity helper decomposition
-# =============================================================================
 
 
 class StubLiquidityProvider:
@@ -3544,10 +3414,7 @@ class TestPrewarmHistory:
 
     @pytest.mark.asyncio
     async def test_prewarm_volume_survives_a_transient_mid_window_error(self):
-        # Regression: a single transient per-day fetch error must NOT abort the
-        # rest of the window — later days still prewarm so accrual keeps a warm
-        # cache instead of falling to the chain-default DEX miss path. Two
-        # CONSECUTIVE errors is the sticky-abort threshold; one is not.
+        # One transient per-day error must not abort the window; only two consecutive errors trigger a sticky abort.
         from datetime import UTC, date, datetime
         from decimal import Decimal
         from types import SimpleNamespace
@@ -3714,9 +3581,7 @@ class TestPrewarmHistory:
 
     @pytest.mark.asyncio
     async def test_prewarm_liquidity_survives_a_transient_mid_window_error(self):
-        # Regression (CodeRabbit #3271): the liquidity prewarm lane must handle
-        # a transient per-day error like the volume lane — one exception must
-        # NOT abort the rest of the window.
+        # One transient liquidity error must not abort the remaining window.
         from datetime import UTC, date, datetime
         from decimal import Decimal
         from types import SimpleNamespace
@@ -3836,7 +3701,7 @@ class TestPrewarmHistory:
             intent,
             chain="ethereum",
             start_time=datetime(2026, 6, 20, tzinfo=UTC),
-            end_time=datetime(2026, 6, 23, tzinfo=UTC),  # 4 days
+            end_time=datetime(2026, 6, 23, tzinfo=UTC),
         )
         assert liquidity_provider.get_liquidity_depth.await_count == 3  # aborted, never dialed day3
 
@@ -3949,7 +3814,7 @@ class TestRangeGatingScope:
         # The range verdict is decided from prices alone — strict runs must not
         # raise over volume data an out-of-range position does not need.
         adapter = LPBacktestAdapter()
-        position = self._position("uniswap_v3")  # in-range bounds 1..2, price ratio 1765 -> out
+        position = self._position("uniswap_v3")  # bounds 1..2, price ratio 1765 -> out
 
         def _boom(*_args, **_kwargs):
             raise AssertionError("no data lane may run for an out-of-range position")
@@ -3978,12 +3843,8 @@ class TestRangeGatingScope:
         assert result.fee_confidence == "high"
 
     def test_out_of_range_verdict_from_fallback_prices_is_not_high_confidence(self) -> None:
-        # A range verdict computed from FALLBACK prices (entry-price / $1
-        # substitutes for a missing market price) is not a measured verdict:
-        # the zero fee stands, but it must not read as high confidence and
-        # the provenance must name the fabricated input (CodeRabbit find,
-        # #3271: a WETH/WBTC pool missing its token1 price computes a wildly
-        # wrong ratio and could zero fees while claiming "high").
+        # Entry-price or $1 substitutes can produce a wrong ratio, so a fallback-price
+        # range verdict must expose its provenance and cannot claim high confidence.
         adapter = LPBacktestAdapter()
         position = self._position("uniswap_v3")  # bounds 1..2, ratio 1765 -> out
 
@@ -4042,7 +3903,7 @@ class TestRangeGatingScope:
             token0_price=Decimal("1.5"),
             token1_price=Decimal("1"),
         )
-        assert result.fees_usd == Decimal("10")  # accrues — never zeroed
+        assert result.fees_usd == Decimal("10")
         assert result.fee_confidence == "low"
         assert result.data_source == "subgraph:test:unknown_lp_family"
 
@@ -4635,7 +4496,7 @@ class TestProductAmbiguousResolution:
         adapter = LPBacktestAdapter()
         monkeypatch.setattr(
             adapter,
-            "_resolve_token_addresses_for_test",  # marker only; real seam below
+            "_resolve_token_addresses_for_test",
             None,
             raising=False,
         )
@@ -5000,7 +4861,7 @@ class TestPrewarmFeeTier:
         await adapter._prewarm_fee_tier("0xpool", "uniswap_v3", "ethereum")
 
         assert calls == []
-        assert adapter._resolved_fee_tiers[identity] == Decimal("0.003")  # untouched
+        assert adapter._resolved_fee_tiers[identity] == Decimal("0.003")
 
     @pytest.mark.asyncio
     async def test_non_v3_family_and_unknown_protocol_never_query(self):
@@ -5038,7 +4899,7 @@ class TestPrewarmFeeTier:
     async def test_query_failure_is_best_effort(self):
         adapter, _calls = self._adapter_with_client(exc=RuntimeError("subgraph down"))
 
-        await adapter._prewarm_fee_tier("0xpool", "uniswap_v3", "ethereum")  # must not raise
+        await adapter._prewarm_fee_tier("0xpool", "uniswap_v3", "ethereum")
 
         assert adapter._resolved_fee_tiers == {}
 
@@ -5073,7 +4934,7 @@ class TestFeeAccrualRoutesProtocol:
             tick_lower=0,
             tick_upper=6931,
             fee_tier=Decimal("0.0004"),
-            protocol="curve",  # a non-default DEX — the bug's blast radius
+            protocol="curve",  # non-default DEX exercises protocol routing
         )
         from almanak.framework.backtesting.adapters.lp_adapter import (
             _LPUpdateAmounts,
