@@ -21,10 +21,6 @@ from almanak.connectors.lido.adapter import (
     LidoConfig,
 )
 
-# =============================================================================
-# Fixtures
-# =============================================================================
-
 
 @pytest.fixture
 def config() -> LidoConfig:
@@ -54,11 +50,6 @@ def arbitrum_config() -> LidoConfig:
 def arbitrum_adapter(arbitrum_config: LidoConfig) -> LidoAdapter:
     """Create a test adapter instance for Arbitrum."""
     return LidoAdapter(arbitrum_config)
-
-
-# =============================================================================
-# Configuration Tests
-# =============================================================================
 
 
 class TestLidoConfigValidation:
@@ -138,11 +129,6 @@ class TestLidoConfigValidation:
             )
 
 
-# =============================================================================
-# Adapter Initialization Tests
-# =============================================================================
-
-
 class TestLidoAdapterInit:
     """Tests for LidoAdapter initialization."""
 
@@ -186,11 +172,6 @@ class TestLidoAdapterInit:
         assert adapter.wsteth_address == LIDO_ADDRESSES["polygon"]["wsteth"]
 
 
-# =============================================================================
-# Stake Transaction Tests
-# =============================================================================
-
-
 class TestStakeTransactionBuild:
     """Tests for stake transaction building."""
 
@@ -201,7 +182,7 @@ class TestStakeTransactionBuild:
         assert result.success is True
         assert result.tx_data is not None
         assert result.tx_data["to"] == LIDO_ADDRESSES["ethereum"]["steth"]
-        assert result.tx_data["value"] == 10**18  # 1 ETH in wei
+        assert result.tx_data["value"] == 10**18
         assert result.tx_data["data"].startswith(LIDO_STAKE_SELECTOR)
         assert "Stake 1.0 ETH" in result.description
         assert result.gas_estimate == DEFAULT_GAS_ESTIMATES["stake"]
@@ -213,7 +194,6 @@ class TestStakeTransactionBuild:
 
         assert result.success is True
         assert result.tx_data is not None
-        # Check that the referral address is in the calldata
         calldata = result.tx_data["data"]
         assert referral.lower().replace("0x", "") in calldata.lower()
 
@@ -224,7 +204,6 @@ class TestStakeTransactionBuild:
         assert result.success is True
         assert result.tx_data is not None
         calldata = result.tx_data["data"]
-        # Zero address should be padded in calldata
         assert "0000000000000000000000000000000000000000" in calldata
 
     def test_stake_calldata_structure(self, adapter: LidoAdapter) -> None:
@@ -235,10 +214,8 @@ class TestStakeTransactionBuild:
         assert result.tx_data is not None
         calldata = result.tx_data["data"]
 
-        # Calldata structure: selector (4 bytes) + referral address (32 bytes)
-        # Total: 4 + 32 = 36 bytes = 72 hex chars + 2 for "0x" prefix = 74 chars
         assert calldata.startswith(LIDO_STAKE_SELECTOR)
-        assert len(calldata) == 2 + 8 + 64  # 0x + selector + 1 param
+        assert len(calldata) == 2 + 8 + 64
 
     def test_stake_not_available_on_arbitrum(self, arbitrum_adapter: LidoAdapter) -> None:
         """Test that staking is not available on L2s."""
@@ -267,7 +244,7 @@ class TestStakeTransactionBuild:
 
         assert result.success is True
         assert result.tx_data is not None
-        assert result.tx_data["value"] == 10**15  # 0.001 ETH in wei
+        assert result.tx_data["value"] == 10**15
 
     def test_stake_large_amount(self, adapter: LidoAdapter) -> None:
         """Test stake with large amount."""
@@ -276,11 +253,6 @@ class TestStakeTransactionBuild:
         assert result.success is True
         assert result.tx_data is not None
         assert result.tx_data["value"] == 1000 * 10**18
-
-
-# =============================================================================
-# Wrap Transaction Tests
-# =============================================================================
 
 
 class TestWrapTransactionBuild:
@@ -293,7 +265,7 @@ class TestWrapTransactionBuild:
         assert result.success is True
         assert result.tx_data is not None
         assert result.tx_data["to"] == LIDO_ADDRESSES["ethereum"]["wsteth"]
-        assert result.tx_data["value"] == 0  # No ETH sent for wrap
+        assert result.tx_data["value"] == 0
         assert result.tx_data["data"].startswith(LIDO_WRAP_SELECTOR)
         assert "Wrap 1.0 stETH" in result.description
         assert result.gas_estimate == DEFAULT_GAS_ESTIMATES["wrap"]
@@ -306,10 +278,8 @@ class TestWrapTransactionBuild:
         assert result.tx_data is not None
         calldata = result.tx_data["data"]
 
-        # Calldata structure: selector (4 bytes) + amount (32 bytes)
-        # Total: 4 + 32 = 36 bytes = 72 hex chars + 2 for "0x" prefix = 74 chars
         assert calldata.startswith(LIDO_WRAP_SELECTOR)
-        assert len(calldata) == 2 + 8 + 64  # 0x + selector + 1 param
+        assert len(calldata) == 2 + 8 + 64
 
     def test_wrap_amount_encoding(self, adapter: LidoAdapter) -> None:
         """Test that wrap amount is correctly encoded."""
@@ -319,16 +289,15 @@ class TestWrapTransactionBuild:
         assert result.tx_data is not None
         calldata = result.tx_data["data"]
 
-        # Extract amount from calldata (after selector)
-        amount_hex = calldata[10:]  # Skip "0x" + 8 char selector
+        amount_hex = calldata[10:]
         amount_wei = int(amount_hex, 16)
         expected_wei = int(Decimal("2.5") * 10**18)
         assert amount_wei == expected_wei
 
     def test_wrap_on_arbitrum(self, arbitrum_adapter: LidoAdapter) -> None:
         """Test that wrap works on Arbitrum (has wstETH address)."""
-        # Note: On L2s, users would receive wstETH via bridge, but wrap still works
-        # if they somehow have stETH (e.g., bridged or transferred)
+        # L2 users normally receive bridged wstETH, but wrapping remains available
+        # for stETH acquired by other means.
         result = arbitrum_adapter.wrap(Decimal("1.0"))
 
         assert result.success is True
@@ -350,11 +319,6 @@ class TestWrapTransactionBuild:
         assert result.tx_data is not None
 
 
-# =============================================================================
-# Unwrap Transaction Tests
-# =============================================================================
-
-
 class TestUnwrapTransactionBuild:
     """Tests for unwrap transaction building."""
 
@@ -365,7 +329,7 @@ class TestUnwrapTransactionBuild:
         assert result.success is True
         assert result.tx_data is not None
         assert result.tx_data["to"] == LIDO_ADDRESSES["ethereum"]["wsteth"]
-        assert result.tx_data["value"] == 0  # No ETH sent for unwrap
+        assert result.tx_data["value"] == 0
         assert result.tx_data["data"].startswith(LIDO_UNWRAP_SELECTOR)
         assert "Unwrap 1.0 wstETH" in result.description
         assert result.gas_estimate == DEFAULT_GAS_ESTIMATES["unwrap"]
@@ -378,10 +342,8 @@ class TestUnwrapTransactionBuild:
         assert result.tx_data is not None
         calldata = result.tx_data["data"]
 
-        # Calldata structure: selector (4 bytes) + amount (32 bytes)
-        # Total: 4 + 32 = 36 bytes = 72 hex chars + 2 for "0x" prefix = 74 chars
         assert calldata.startswith(LIDO_UNWRAP_SELECTOR)
-        assert len(calldata) == 2 + 8 + 64  # 0x + selector + 1 param
+        assert len(calldata) == 2 + 8 + 64
 
     def test_unwrap_amount_encoding(self, adapter: LidoAdapter) -> None:
         """Test that unwrap amount is correctly encoded."""
@@ -391,8 +353,7 @@ class TestUnwrapTransactionBuild:
         assert result.tx_data is not None
         calldata = result.tx_data["data"]
 
-        # Extract amount from calldata (after selector)
-        amount_hex = calldata[10:]  # Skip "0x" + 8 char selector
+        amount_hex = calldata[10:]
         amount_wei = int(amount_hex, 16)
         expected_wei = int(Decimal("3.5") * 10**18)
         assert amount_wei == expected_wei
@@ -432,11 +393,6 @@ class TestUnwrapTransactionBuild:
         assert result.tx_data["to"] == LIDO_ADDRESSES["polygon"]["wsteth"]
 
 
-# =============================================================================
-# Edge Case Tests
-# =============================================================================
-
-
 class TestEdgeCases:
     """Tests for edge cases."""
 
@@ -461,21 +417,16 @@ class TestEdgeCases:
 
     def test_very_small_fractional_amount(self, adapter: LidoAdapter) -> None:
         """Test with very small fractional amount."""
-        result = adapter.stake(Decimal("0.000000000000000001"))  # 1 wei
+        result = adapter.stake(Decimal("0.000000000000000001"))
         assert result.success is True
         assert result.tx_data is not None
         assert result.tx_data["value"] == 1
 
     def test_large_amount_stake(self, adapter: LidoAdapter) -> None:
         """Test stake with very large amount."""
-        result = adapter.stake(Decimal("1000000"))  # 1 million ETH
+        result = adapter.stake(Decimal("1000000"))
         assert result.success is True
         assert result.tx_data is not None
-
-
-# =============================================================================
-# Utility Method Tests
-# =============================================================================
 
 
 class TestUtilityMethods:
@@ -514,7 +465,6 @@ class TestUtilityMethods:
         value = 10**18
         padded = LidoAdapter._pad_uint256(value)
         assert len(padded) == 64
-        # 1e18 = 0xde0b6b3a7640000
         assert padded == "0000000000000000000000000000000000000000000000000de0b6b3a7640000"
 
     def test_pad_uint256_zero(self) -> None:
@@ -523,11 +473,6 @@ class TestUtilityMethods:
         padded = LidoAdapter._pad_uint256(value)
         assert len(padded) == 64
         assert padded == "0" * 64
-
-
-# =============================================================================
-# Token Decimals Tests
-# =============================================================================
 
 
 class TestTokenDecimals:
@@ -564,11 +509,6 @@ class TestTokenDecimals:
         assert amount_wei == 10**18
 
 
-# =============================================================================
-# Request Withdrawal Transaction Tests
-# =============================================================================
-
-
 class TestRequestWithdrawalTransactionBuild:
     """Tests for request_withdrawal transaction building."""
 
@@ -596,7 +536,6 @@ class TestRequestWithdrawalTransactionBuild:
         assert result.tx_data["to"] == LIDO_ADDRESSES["ethereum"]["withdrawal_queue"]
         assert "Request withdrawal of 6.0 stETH" in result.description
         assert "(3 request(s))" in result.description
-        # Gas should increase for multiple requests
         expected_gas = DEFAULT_GAS_ESTIMATES["request_withdrawal"] + 2 * 30000
         assert result.gas_estimate == expected_gas
 
@@ -609,7 +548,6 @@ class TestRequestWithdrawalTransactionBuild:
         assert result.success is True
         assert result.tx_data is not None
         calldata = result.tx_data["data"]
-        # Owner address should be in the calldata (padded)
         assert custom_owner.lower().replace("0x", "") in calldata.lower()
 
     def test_request_withdrawal_uses_wallet_address_as_default_owner(self, adapter: LidoAdapter) -> None:
@@ -620,7 +558,6 @@ class TestRequestWithdrawalTransactionBuild:
         assert result.success is True
         assert result.tx_data is not None
         calldata = result.tx_data["data"]
-        # Wallet address should be in the calldata
         expected_addr = adapter.wallet_address.lower().replace("0x", "")
         assert expected_addr in calldata.lower()
 
@@ -633,14 +570,7 @@ class TestRequestWithdrawalTransactionBuild:
         assert result.tx_data is not None
         calldata = result.tx_data["data"]
 
-        # Calldata structure for requestWithdrawals(uint256[],address):
-        # - selector: 4 bytes (8 hex chars)
-        # - offset to amounts array: 32 bytes (64 hex chars)
-        # - owner: 32 bytes (64 hex chars)
-        # - array length: 32 bytes (64 hex chars)
-        # - array element: 32 bytes (64 hex chars)
-        # Total: 4 + 32 + 32 + 32 + 32 = 132 bytes = 264 hex chars
-        expected_len = 2 + 8 + 64 + 64 + 64 + 64  # 0x + selector + 4 params
+        expected_len = 2 + 8 + 64 + 64 + 64 + 64
         assert len(calldata) == expected_len
 
     def test_request_withdrawal_amount_encoding(self, adapter: LidoAdapter) -> None:
@@ -652,8 +582,6 @@ class TestRequestWithdrawalTransactionBuild:
         assert result.tx_data is not None
         calldata = result.tx_data["data"]
 
-        # Extract the amount from calldata
-        # Structure: selector(8) + offset(64) + owner(64) + length(64) + amount(64)
         amount_hex = calldata[2 + 8 + 64 + 64 + 64 :][:64]
         amount_wei = int(amount_hex, 16)
         expected_wei = int(Decimal("2.5") * 10**18)
@@ -709,11 +637,6 @@ class TestRequestWithdrawalTransactionBuild:
         assert result.tx_data is not None
 
 
-# =============================================================================
-# Claim Withdrawals Transaction Tests
-# =============================================================================
-
-
 class TestClaimWithdrawalsTransactionBuild:
     """Tests for claim_withdrawals transaction building."""
 
@@ -739,7 +662,6 @@ class TestClaimWithdrawalsTransactionBuild:
         assert result.tx_data is not None
         assert result.tx_data["to"] == LIDO_ADDRESSES["ethereum"]["withdrawal_queue"]
         assert "Claim 3 withdrawal request(s)" in result.description
-        # Gas should increase for multiple requests
         expected_gas = DEFAULT_GAS_ESTIMATES["claim_withdrawal"] + 2 * 20000
         assert result.gas_estimate == expected_gas
 
@@ -752,9 +674,6 @@ class TestClaimWithdrawalsTransactionBuild:
         assert result.success is True
         assert result.tx_data is not None
         calldata = result.tx_data["data"]
-        # Verify hints are encoded in calldata
-        # hints are encoded after requestIds array
-        # Hint value 5 = 0x05 and 6 = 0x06
         assert "0000000000000000000000000000000000000000000000000000000000000005" in calldata
         assert "0000000000000000000000000000000000000000000000000000000000000006" in calldata
 
@@ -765,7 +684,7 @@ class TestClaimWithdrawalsTransactionBuild:
 
         assert result.success is True
         assert result.tx_data is not None
-        # Should still have hints array with same length as request_ids
+        # Omitted hints are encoded as zeros with the same length as request_ids.
 
     def test_claim_withdrawals_calldata_structure(self, adapter: LidoAdapter) -> None:
         """Test that claim_withdrawals calldata has correct structure."""
@@ -777,16 +696,7 @@ class TestClaimWithdrawalsTransactionBuild:
         assert result.tx_data is not None
         calldata = result.tx_data["data"]
 
-        # Calldata structure for claimWithdrawals(uint256[],uint256[]):
-        # - selector: 4 bytes (8 hex chars)
-        # - offset to requestIds: 32 bytes (64 hex chars)
-        # - offset to hints: 32 bytes (64 hex chars)
-        # - requestIds array length: 32 bytes (64 hex chars)
-        # - requestIds element: 32 bytes (64 hex chars)
-        # - hints array length: 32 bytes (64 hex chars)
-        # - hints element: 32 bytes (64 hex chars)
-        # Total: 4 + 32*6 = 196 bytes = 392 hex chars + 2 for "0x"
-        expected_len = 2 + 8 + 64 * 6  # 0x + selector + 6 32-byte params
+        expected_len = 2 + 8 + 64 * 6
         assert len(calldata) == expected_len
 
     def test_claim_withdrawals_request_id_encoding(self, adapter: LidoAdapter) -> None:
@@ -798,8 +708,6 @@ class TestClaimWithdrawalsTransactionBuild:
         assert result.tx_data is not None
         calldata = result.tx_data["data"]
 
-        # Extract request ID from calldata
-        # Structure: selector(8) + offset1(64) + offset2(64) + len(64) + requestId(64)
         request_id_hex = calldata[2 + 8 + 64 + 64 + 64 :][:64]
         request_id = int(request_id_hex, 16)
         assert request_id == 12345
@@ -839,7 +747,7 @@ class TestClaimWithdrawalsTransactionBuild:
     def test_claim_withdrawals_mismatched_hints_length(self, adapter: LidoAdapter) -> None:
         """Test that claim_withdrawals fails when hints length doesn't match."""
         request_ids = [100, 200, 300]
-        hints = [5, 6]  # Only 2 hints for 3 request IDs
+        hints = [5, 6]
         result = adapter.claim_withdrawals(request_ids, hints=hints)
 
         assert result.success is False
@@ -853,11 +761,6 @@ class TestClaimWithdrawalsTransactionBuild:
 
         assert result.success is True
         assert result.tx_data is not None
-
-
-# =============================================================================
-# Compile Stake Intent Tests
-# =============================================================================
 
 
 class TestCompileStakeIntent:
@@ -876,31 +779,26 @@ class TestCompileStakeIntent:
         )
         bundle = adapter.compile_stake_intent(intent)
 
-        # Should have 3 transactions: stake + approve + wrap
         assert len(bundle.transactions) == 3
         assert bundle.intent_type == "STAKE"
 
-        # First transaction should be stake
         stake_tx = bundle.transactions[0]
         assert stake_tx["action_type"] == "stake"
         assert stake_tx["to"] == LIDO_ADDRESSES["ethereum"]["steth"]
-        assert stake_tx["value"] == 10**18  # 1 ETH in wei
+        assert stake_tx["value"] == 10**18
         assert stake_tx["data"].startswith(LIDO_STAKE_SELECTOR)
 
-        # Second transaction should be approve
         approve_tx = bundle.transactions[1]
         assert approve_tx["action_type"] == "approve"
         assert approve_tx["to"] == LIDO_ADDRESSES["ethereum"]["steth"]
         assert approve_tx["value"] == 0
 
-        # Third transaction should be wrap
         wrap_tx = bundle.transactions[2]
         assert wrap_tx["action_type"] == "wrap"
         assert wrap_tx["to"] == LIDO_ADDRESSES["ethereum"]["wsteth"]
         assert wrap_tx["value"] == 0
         assert wrap_tx["data"].startswith(LIDO_WRAP_SELECTOR)
 
-        # Check metadata
         assert bundle.metadata["protocol"] == "lido"
         assert bundle.metadata["output_token"] == "wstETH"
         assert bundle.metadata["receive_wrapped"] is True
@@ -922,18 +820,15 @@ class TestCompileStakeIntent:
         )
         bundle = adapter.compile_stake_intent(intent)
 
-        # Should have 1 transaction: stake only
         assert len(bundle.transactions) == 1
         assert bundle.intent_type == "STAKE"
 
-        # Transaction should be stake
         stake_tx = bundle.transactions[0]
         assert stake_tx["action_type"] == "stake"
         assert stake_tx["to"] == LIDO_ADDRESSES["ethereum"]["steth"]
         assert stake_tx["value"] == int(Decimal("2.5") * 10**18)
         assert stake_tx["data"].startswith(LIDO_STAKE_SELECTOR)
 
-        # Check metadata
         assert bundle.metadata["protocol"] == "lido"
         assert bundle.metadata["output_token"] == "stETH"
         assert bundle.metadata["receive_wrapped"] is False
@@ -967,7 +862,6 @@ class TestCompileStakeIntent:
         )
         bundle = arbitrum_adapter.compile_stake_intent(intent)
 
-        # Should have empty transactions and error in metadata
         assert len(bundle.transactions) == 0
         assert bundle.intent_type == "STAKE"
         assert "error" in bundle.metadata
@@ -986,8 +880,8 @@ class TestCompileStakeIntent:
         )
         bundle = adapter.compile_stake_intent(intent)
 
-        assert len(bundle.transactions) == 3  # stake + approve + wrap
-        assert bundle.transactions[0]["value"] == 10**15  # 0.001 ETH in wei
+        assert len(bundle.transactions) == 3
+        assert bundle.transactions[0]["value"] == 10**15
         assert bundle.metadata["amount"] == "0.001"
 
     def test_compile_stake_intent_large_amount(self, adapter: LidoAdapter) -> None:
@@ -1019,7 +913,6 @@ class TestCompileStakeIntent:
         )
         bundle = adapter.compile_stake_intent(intent)
 
-        # Check all expected metadata fields
         assert "intent_id" in bundle.metadata
         assert bundle.metadata["intent_id"] == intent.intent_id
         assert bundle.metadata["protocol"] == "lido"
@@ -1035,7 +928,6 @@ class TestCompileStakeIntent:
         """Test that compile_stake_intent calculates correct gas estimates."""
         from almanak.framework.intents.vocabulary import StakeIntent
 
-        # Test wrapped (stake + wrap)
         intent_wrapped = StakeIntent(
             protocol="lido",
             token_in="ETH",
@@ -1044,11 +936,9 @@ class TestCompileStakeIntent:
             chain="ethereum",
         )
         bundle_wrapped = adapter.compile_stake_intent(intent_wrapped)
-        # Wrapped: stake + approve (80K) + wrap
         expected_gas_wrapped = DEFAULT_GAS_ESTIMATES["stake"] + 80000 + DEFAULT_GAS_ESTIMATES["wrap"]
         assert bundle_wrapped.metadata["total_gas_estimate"] == expected_gas_wrapped
 
-        # Test unwrapped (stake only)
         intent_unwrapped = StakeIntent(
             protocol="lido",
             token_in="ETH",
@@ -1059,11 +949,6 @@ class TestCompileStakeIntent:
         bundle_unwrapped = adapter.compile_stake_intent(intent_unwrapped)
         expected_gas_unwrapped = DEFAULT_GAS_ESTIMATES["stake"]
         assert bundle_unwrapped.metadata["total_gas_estimate"] == expected_gas_unwrapped
-
-
-# =============================================================================
-# Compile Unstake Intent Tests
-# =============================================================================
 
 
 class TestCompileUnstakeIntent:
@@ -1081,25 +966,21 @@ class TestCompileUnstakeIntent:
         )
         bundle = adapter.compile_unstake_intent(intent)
 
-        # Should have 2 transactions: unwrap + request_withdrawal
         assert len(bundle.transactions) == 2
         assert bundle.intent_type == "UNSTAKE"
 
-        # First transaction should be unwrap
         unwrap_tx = bundle.transactions[0]
         assert unwrap_tx["action_type"] == "unwrap"
         assert unwrap_tx["to"] == LIDO_ADDRESSES["ethereum"]["wsteth"]
         assert unwrap_tx["value"] == 0
         assert unwrap_tx["data"].startswith(LIDO_UNWRAP_SELECTOR)
 
-        # Second transaction should be request_withdrawal
         withdrawal_tx = bundle.transactions[1]
         assert withdrawal_tx["action_type"] == "request_withdrawal"
         assert withdrawal_tx["to"] == LIDO_ADDRESSES["ethereum"]["withdrawal_queue"]
         assert withdrawal_tx["value"] == 0
         assert withdrawal_tx["data"].startswith(LIDO_REQUEST_WITHDRAWALS_SELECTOR)
 
-        # Check metadata
         assert bundle.metadata["protocol"] == "lido"
         assert bundle.metadata["token_in"] == "wstETH"
         assert bundle.metadata["output_token"] == "ETH"
@@ -1121,18 +1002,15 @@ class TestCompileUnstakeIntent:
         )
         bundle = adapter.compile_unstake_intent(intent)
 
-        # Should have 1 transaction: request_withdrawal only
         assert len(bundle.transactions) == 1
         assert bundle.intent_type == "UNSTAKE"
 
-        # Transaction should be request_withdrawal
         withdrawal_tx = bundle.transactions[0]
         assert withdrawal_tx["action_type"] == "request_withdrawal"
         assert withdrawal_tx["to"] == LIDO_ADDRESSES["ethereum"]["withdrawal_queue"]
         assert withdrawal_tx["value"] == 0
         assert withdrawal_tx["data"].startswith(LIDO_REQUEST_WITHDRAWALS_SELECTOR)
 
-        # Check metadata
         assert bundle.metadata["protocol"] == "lido"
         assert bundle.metadata["token_in"] == "stETH"
         assert bundle.metadata["output_token"] == "ETH"
@@ -1166,11 +1044,9 @@ class TestCompileUnstakeIntent:
         )
         bundle = arbitrum_adapter.compile_unstake_intent(intent)
 
-        # Should have empty transactions and error in metadata
         assert len(bundle.transactions) == 0
         assert bundle.intent_type == "UNSTAKE"
         assert "error" in bundle.metadata
-        # On L2, withdrawal queue is not available
         assert "not available on arbitrum" in bundle.metadata["error"].lower()
 
     def test_compile_unstake_intent_small_amount(self, adapter: LidoAdapter) -> None:
@@ -1200,7 +1076,6 @@ class TestCompileUnstakeIntent:
         )
         bundle = adapter.compile_unstake_intent(intent)
 
-        # Should have 2 transactions for wstETH
         assert len(bundle.transactions) == 2
         assert bundle.metadata["amount"] == "1000"
 
@@ -1216,7 +1091,6 @@ class TestCompileUnstakeIntent:
         )
         bundle = adapter.compile_unstake_intent(intent)
 
-        # Check all expected metadata fields
         assert "intent_id" in bundle.metadata
         assert bundle.metadata["intent_id"] == intent.intent_id
         assert bundle.metadata["protocol"] == "lido"
@@ -1234,7 +1108,6 @@ class TestCompileUnstakeIntent:
         """Test that compile_unstake_intent calculates correct gas estimates."""
         from almanak.framework.intents.vocabulary import UnstakeIntent
 
-        # Test wstETH (unwrap + withdrawal)
         intent_wrapped = UnstakeIntent(
             protocol="lido",
             token_in="wstETH",
@@ -1245,7 +1118,6 @@ class TestCompileUnstakeIntent:
         expected_gas_wrapped = DEFAULT_GAS_ESTIMATES["unwrap"] + DEFAULT_GAS_ESTIMATES["request_withdrawal"]
         assert bundle_wrapped.metadata["total_gas_estimate"] == expected_gas_wrapped
 
-        # Test stETH (withdrawal only)
         intent_steth = UnstakeIntent(
             protocol="lido",
             token_in="stETH",
@@ -1260,7 +1132,6 @@ class TestCompileUnstakeIntent:
         """Test that token_in matching is case-insensitive."""
         from almanak.framework.intents.vocabulary import UnstakeIntent
 
-        # Test lowercase wsteth
         intent_lower = UnstakeIntent(
             protocol="lido",
             token_in="wsteth",
@@ -1271,7 +1142,6 @@ class TestCompileUnstakeIntent:
         assert bundle_lower.metadata["requires_unwrap"] is True
         assert len(bundle_lower.transactions) == 2
 
-        # Test uppercase WSTETH
         intent_upper = UnstakeIntent(
             protocol="lido",
             token_in="WSTETH",
@@ -1294,9 +1164,7 @@ class TestCompileUnstakeIntent:
         )
         bundle = adapter.compile_unstake_intent(intent)
 
-        # Check that the wallet address is encoded in the withdrawal request
         withdrawal_tx = bundle.transactions[0]
         calldata = withdrawal_tx["data"]
-        # Wallet address should be in the calldata (padded)
         expected_addr = adapter.wallet_address.lower().replace("0x", "")
         assert expected_addr in calldata.lower()
