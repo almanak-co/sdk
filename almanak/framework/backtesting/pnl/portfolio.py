@@ -50,7 +50,7 @@ from almanak.framework.backtesting.pnl.data_provider import (
 )
 from almanak.framework.backtesting.pnl.money import TokenIdentity
 
-# Position models extracted to position_models.py for module size management
+# Public position-model re-exports
 from almanak.framework.backtesting.pnl.position_models import (  # noqa: F401
     PositionType,
     SimulatedFill,
@@ -65,21 +65,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-#: Stablecoins the portfolio holds as ``cash_usd`` at $1. Inflows of these
-#: are swept into ``cash_usd`` and outflows debit the token balance first,
-#: then ``cash_usd``. The engine exposes ``cash_usd`` to strategies under
-#: these same symbols (see ``engine.market_snapshot_from_state``).
-#: Deliberately narrower than :data:`almanak.core.constants.STABLECOINS`,
-#: which also lists yield-bearing tokens (sDAI, sUSDe, ...) whose price is
-#: not $1 -- treating those as cash would itself violate conservation.
+#: Stablecoins held as ``cash_usd`` at $1. This excludes yield-bearing tokens,
+#: whose variable price would violate conservation if treated as cash.
 CASH_EQUIVALENT_STABLECOIN_SYMBOLS: frozenset[str] = frozenset({"USDC", "USDT", "DAI"})
 CASH_EQUIVALENT_STABLECOINS: frozenset[str] = CASH_EQUIVALENT_STABLECOIN_SYMBOLS
 
 
-#: Relative shortfall below which a debit is treated as spend-all instead of
-#: failing the fill. Absorbs Decimal round-trip error from flow computations
-#: (``amount_usd / price`` on both legs) without permitting economically
-#: meaningful overdrafts.
+#: Absorbs Decimal round-trip error without permitting meaningful overdrafts.
 _DEBIT_DUST_RELATIVE_TOLERANCE = Decimal("1e-9")
 
 #: Intent types whose venue fee is already netted into the fill's token
@@ -87,13 +79,9 @@ _DEBIT_DUST_RELATIVE_TOLERANCE = Decimal("1e-9")
 #: slippage), so charging ``fee_usd`` against cash would double-count.
 _FEE_EMBEDDED_IN_FLOWS: frozenset[IntentType] = frozenset({IntentType.SWAP})
 
-#: Intent types whose source-token leg must be funded from the HELD balance
-#: only — never via the implicit cash-conversion fallback. SWAP because
-#: funding a sell from cash is short-from-nothing; WRAP/UNWRAP because
-#: ``weth.deposit()``/``withdraw()`` revert on-chain when the wallet lacks
-#: the native/wrapped amount; and token-collateralized PERP_OPEN because the
-#: venue deposit must come from the declared wallet asset. Silently converting
-#: cash would overstate capital efficiency vs live.
+#: Intents that require the declared wallet asset rather than implicit cash
+#: conversion. Otherwise sells mint inventory and wrap or collateral calls
+#: succeed when their live equivalents would revert.
 _STRICT_BALANCE_FUNDED_INTENTS: frozenset[IntentType] = frozenset(
     {IntentType.SWAP, IntentType.WRAP_NATIVE, IntentType.UNWRAP_NATIVE, IntentType.PERP_OPEN}
 )
@@ -106,9 +94,6 @@ _STRICT_BALANCE_FUNDED_INTENTS: frozenset[IntentType] = frozenset(
 _SLIPPAGE_EMBEDDED_IN_PRICE: frozenset[IntentType] = frozenset(
     {IntentType.SWAP, IntentType.PERP_OPEN, IntentType.PERP_CLOSE}
 )
-
-
-# PositionType, SimulatedPosition, and SimulatedFill are now imported from position_models.py above.
 
 
 @dataclass(frozen=True)
@@ -279,40 +264,28 @@ class SimulatedPortfolio:
     positions: list[SimulatedPosition] = field(default_factory=list)
     equity_curve: list[EquityPoint] = field(default_factory=list)
     trades: list[TradeRecord] = field(default_factory=list)
-    #: Per-tick token-price snapshots, one per equity point (captured by
-    #: ``mark_to_market`` from the tick's ``MarketState.prices``). Purely a
-    #: reporting/visualization export — never read back by the simulation.
+    #: Reporting-only price snapshots aligned one-to-one with equity points.
     price_series: list[PricePoint] = field(default_factory=list)
-    # Margin configuration
-    initial_margin_ratio: Decimal = Decimal("0.1")  # 10% default
-    maintenance_margin_ratio: Decimal = Decimal("0.05")  # 5% default
-    # Health factor configuration
+    initial_margin_ratio: Decimal = Decimal("0.1")
+    maintenance_margin_ratio: Decimal = Decimal("0.05")
     health_factor_warning_threshold: Decimal = Decimal("1.2")
-    # Lending liquidation configuration
-    liquidation_penalty: Decimal = Decimal("0.05")  # 5% default
-    # When True, raise instead of falling back to $1 stablecoin assumptions
+    liquidation_penalty: Decimal = Decimal("0.05")
     strict_reproducibility: bool = False
-    # Internal tracking
     _closed_positions: list[SimulatedPosition] = field(default_factory=list)
     _max_margin_utilization: Decimal = field(default=Decimal("0"))
     _min_health_factor: Decimal = field(default=Decimal("999"))
     _health_factor_warnings: int = field(default=0)
     _lending_liquidations: list[LendingLiquidationEvent] = field(default_factory=list)
     _perp_liquidations: list[LiquidationEvent] = field(default_factory=list)
-    # Realized/unrealized PnL tracking
     _realized_pnl: Decimal = field(default=Decimal("0"))
     _unrealized_pnl: Decimal = field(default=Decimal("0"))
     #: Weighted-average USD cost basis per unit of each spot token currently
-    #: held (VIB-5083). A SWAP that acquires a token raises its average cost;
+    #: held. A SWAP that acquires a token raises its average cost;
     #: a SWAP that disposes of a token realizes proceeds - units x avg_cost.
-    #: Keyed by the same token identities as ``tokens`` (cash-equivalent stablecoins are
-    #: never tracked here -- they live in ``cash_usd`` at $1 by definition).
+    #: Keys match ``tokens``; cash-equivalent stablecoins have no spot basis.
     _cost_basis: dict[TokenRef, Decimal] = field(default_factory=dict)
-    #: UPPERCASE symbol of the strategy's declared numeraire token (VIB-5127),
-    #: or ``None`` for the USD default. Set by the engine at boot
-    #: (``initialize_backtest``). When set, ``mark_to_market`` captures the
-    #: numeraire token's USD price onto each equity point for the reporting
-    #: projection; it never affects ``value_usd`` or the conservation core.
+    #: Uppercase reporting numeraire, or ``None`` for USD. This never affects
+    #: ``value_usd`` or the conservation core.
     _numeraire_symbol: str | None = field(default=None)
     #: Address-native token identity for the declared numeraire, when known.
     #: Non-USD provider states may be keyed by ``(chain, address)`` rather than
@@ -326,8 +299,7 @@ class SimulatedPortfolio:
 
     _STABLECOIN_SYMBOLS: frozenset[str] = STABLECOINS
     _cash_equivalent_token_keys: frozenset[TokenKey] = field(default_factory=frozenset, init=False)
-    # symbol (upper) -> typed identity; all balance-key decisions resolve
-    # through _resolve_key against this one table (ALM-2960).
+    # All balance-key decisions resolve through this identity table.
     _identity_table: dict[str, TokenIdentity] = field(default_factory=dict, init=False)
 
     def __post_init__(self) -> None:
@@ -506,10 +478,7 @@ class SimulatedPortfolio:
 
         self._embed_perp_close_venue_costs(fill)
 
-        # Aggregate cash check: planned stablecoin/conversion debits and
-        # perp-open collateral draw from the same cash_usd, so they must be
-        # validated as one sum (each passing individually could still
-        # overdraw) before any state mutation.
+        # Validate all draws together before mutation because they share cash_usd.
         self._absorb_perp_open_venue_costs(fill, cash_debit, token_debits)
         margin_failure = self._perp_open_post_fee_margin_failure(fill)
         if margin_failure is not None:
@@ -554,32 +523,20 @@ class SimulatedPortfolio:
         if fill.position_close_id:
             closed_position = self._close_position(fill.position_close_id, fill.timestamp)
         elif fill.position_collect_id:
-            # LP fee harvest: the fees moved to the wallet via tokens_in above;
-            # reset the position's uncollected counters so a later close pays
-            # only fees accrued SINCE (never double-pays). Position stays open.
+            # Reset harvested accrual so a later close cannot pay it again.
             self._collect_lp_position_fees(fill)
         elif fill.position_reduce_id:
-            # Partially reduce a position (validated in _position_reduce_failure).
-            # Accrue interest through the fill instant FIRST: pending intents
-            # execute before the per-tick adapter update / mark, so without
-            # this the interval since the previous mark would accrue on the
-            # post-reduction principal -- under-accruing the interest the
-            # withdrawn slice earned before the withdraw.
+            # Pending reductions precede the per-tick mark, so accrue on the
+            # pre-reduction principal through the fill instant.
             self._accrue_interest_through_fill(fill, market_state, adapter)
             self._reduce_position(fill.position_reduce_id, fill.position_reduce_amounts)
-            # Boundary repay/withdraw: the flow covered principal + part of the
-            # accrued interest. The principal left via _reduce_position; realize
-            # the covered interest now -- decrement it off the position so it
-            # stops counting in equity, exactly as a full close would
-            # (VIB-5098). An ordinary sub-principal partial carries no
-            # interest_usd and this is a no-op.
+            # Remove covered interest after principal so it stops contributing
+            # to equity, matching a full close.
             self._realize_reduce_interest(fill)
 
         if fill.position_delta:
-            # Explicit perp collateral already left through ``tokens_out``.
-            # Legacy perp intents have no flow and retain their cash-backed
-            # lifecycle; without one of these debits the open would mint its
-            # collateral value.
+            # Legacy perps without an explicit outflow remain cash-backed;
+            # every open must debit collateral exactly once.
             if fill.position_delta.is_perp and fill.success:
                 collateral_flow = self._perp_open_collateral_flow(fill)
                 if collateral_flow is None:
@@ -612,9 +569,7 @@ class SimulatedPortfolio:
             if (pnl_usd is None or pnl_usd == Decimal("0")) and net_lp_pnl_usd is not None:
                 pnl_usd = net_lp_pnl_usd
 
-        # LP fee harvest: surface the collected fees on the trade record's
-        # fees_earned_usd column (pnl_usd already carries them via
-        # _calculate_trade_pnl reading metadata["collected_fees_usd"]).
+        # ``pnl_usd`` already includes harvested fees; this is attribution only.
         if fill.intent_type == IntentType.LP_COLLECT_FEES and fill.position_collect_id and pnl_usd is not None:
             fees_earned_usd = pnl_usd
 
@@ -641,10 +596,8 @@ class SimulatedPortfolio:
         self._accumulate_realized_pnl(fill, components.pnl_usd)
 
     def _accumulate_realized_pnl(self, fill: SimulatedFill, pnl_usd: Decimal | None) -> None:
-        # Position closes lock in their PnL here (guarded by position_close_id).
-        # SWAP disposals carry realized PnL via metadata["realized_pnl_usd"].
-        # LP fee harvests realize the collected fees (the later close's
-        # realized PnL excludes them — the collect reset the accrual counters).
+        # Harvested fees realize here and are excluded from the later close by
+        # the accrual reset.
         realizes_pnl = (
             bool(fill.position_close_id) or bool(fill.position_collect_id) or fill.intent_type == IntentType.SWAP
         )
@@ -675,12 +628,9 @@ class SimulatedPortfolio:
         if fill.intent_type == IntentType.SWAP:
             self._record_swap_cost_basis(fill, token_debits, market_state)
 
-        # Non-cash perp collateral leaves the spot wallet here. Preserve its
-        # per-unit basis on the position before a full debit removes the
-        # wallet-level basis entry.
+        # Preserve collateral basis before a full debit removes the wallet entry.
         self._preserve_perp_collateral_cost_basis(fill)
 
-        # Update token balances - subtract tokens_out
         for token, debit in token_debits.items():
             new_amount = self.tokens.get(token, Decimal("0")) - debit
             if new_amount <= Decimal("0"):
@@ -690,22 +640,16 @@ class SimulatedPortfolio:
                 self.tokens[token] = new_amount
         self._debit_cash_like(cash_debit)
 
-        # Update token balances - add tokens_in. Credits resolve to the SAME
-        # key identity debits use: a close crediting plain "WETH" beside an
-        # address-keyed funding plane split-brains the portfolio — the
-        # balance seeding then judges the address form unheld and zero-seeds
-        # over the real balance, freezing re-entries (found via the CLMM
-        # 6-month run: WETH read 0 forever after the first close).
+        # Credits and debits must use one identity; parallel symbol and address
+        # balances can hide held inventory and break later re-entry.
         for token, amount in fill.tokens_in.items():
             credit_token = self._resolve_key(token)
             current = self.tokens.get(credit_token, Decimal("0"))
             self.tokens[credit_token] = current + amount
 
-        # Handle cash-equivalent stablecoins as cash.
         for token in list(self.tokens):
             if self._is_cash_equivalent(token):
                 self.cash_usd += self.tokens.pop(token)
-                # Swept to cash at $1: no spot basis to carry.
                 self._cost_basis.pop(token, None)
 
         # Gas draws from the operational tank; venue costs (fee/slippage)
@@ -745,12 +689,11 @@ class SimulatedPortfolio:
             if avg_cost is None:
                 continue
             if use_even_split:
-                # No single priced basis to weight by: split proceeds evenly so
-                # a single-leg sale still nets proceeds - cost exactly.
+                # Without prices, an even split preserves total proceeds.
                 proceeds = in_value / Decimal(str(len(disposed)))
             else:
                 unit_value = disposed_prices[token]
-                assert unit_value is not None  # use_even_split is False -> all priced
+                assert unit_value is not None
                 proceeds = in_value * (debit * unit_value / disposed_units_value)
             realized += proceeds - debit * avg_cost
             realized_any = True
@@ -762,11 +705,8 @@ class SimulatedPortfolio:
         out_value: Decimal,
         market_state: MarketState | None,
     ) -> None:
-        # Basis keys must match the balance-credit keys (ALM-2960): the sell
-        # side debits and realizes by the held identity, so a basis recorded
-        # under the raw fill key would never be found again. Pricing still
-        # tries the fill's own key form first — a symbol the market quotes
-        # directly must not degrade to the even-split fallback.
+        # Basis keys match balance keys, while pricing tries the fill identity
+        # first so directly quoted symbols do not degrade to an even split.
         acquired: dict[TokenRef, Decimal] = {}
         price_lookup: dict[TokenRef, TokenRef] = {}
         for token, amount in fill.tokens_in.items():
@@ -775,8 +715,7 @@ class SimulatedPortfolio:
             key = self._resolve_key(token)
             acquired[key] = acquired.get(key, Decimal("0")) + amount
             price_lookup.setdefault(key, token)
-        # _token_price returns None (never 0) when unavailable, so `or`
-        # short-circuits safely and each lookup evaluates once (review, #3310).
+        # ``_token_price`` returns ``None``, never zero, when unavailable.
         acquired_prices = {
             token: self._token_price(token, market_state) or self._token_price(price_lookup[token], market_state)
             for token in acquired
@@ -792,15 +731,10 @@ class SimulatedPortfolio:
 
         for token, amount in acquired.items():
             if out_value <= Decimal("0"):
-                # The paid leg could not be priced: seeding a zero cost basis
-                # would make a later sale realize the full proceeds as a
-                # fabricated gain. Leave the basis unset (unknown) instead
-                # (VIB-5083, CodeRabbit).
+                # Unknown paid value leaves basis unknown; zero would fabricate gain.
                 continue
             if use_even_split:
-                # No price to anchor a basis: fall back to the leg's own
-                # notional per unit so a later sale still nets to zero rather
-                # than fabricating a gain.
+                # An even split preserves paid notional when prices are unavailable.
                 share = out_value / Decimal(str(len(acquired)))
             else:
                 unit_value = acquired_prices[token]
@@ -839,33 +773,12 @@ class SimulatedPortfolio:
         out_value = self._leg_usd_value(fill.tokens_out, market_state)
         in_value = self._leg_usd_value(fill.tokens_in, market_state)
 
-        # Proceeds are unpriceable when the inflow leg has tokens to receive
-        # but none of them could be valued (in_value == 0 with a non-empty
-        # inflow). Booking ``proceeds - cost`` in that case fabricates a loss
-        # equal to the whole disposed cost -- not a measured outcome but
-        # missing data (Empty != Zero, blueprint 31 section 7). Leave
-        # ``realized_pnl_usd`` UNSET so _calculate_trade_pnl returns None and
-        # the trade is excluded from win/loss stats (VIB-5083, CodeRabbit).
         inflow_has_tokens = any(amount > Decimal("0") for amount in fill.tokens_in.values())
         proceeds_unpriceable = inflow_has_tokens and in_value <= Decimal("0")
 
-        # Disposed legs realize PnL against their average cost. Proceeds
-        # (``in_value``) are allocated pro-rata across the disposed tracked
-        # tokens by market value -- symmetric with the acquired-leg split
-        # below -- so a multi-token-out swap does not count the full proceeds
-        # once per disposed leg.
         disposed = self._swap_disposed_tokens(token_debits, proceeds_unpriceable)
-        # Pick ONE allocation mode for the whole disposed set so the per-leg
-        # shares always sum to in_value. Mixing modes (pro-rata for priced
-        # legs, even-split for unpriced ones) let priced tokens claim the full
-        # in_value by value while unpriced tokens also drew an even-split share,
-        # over-allocating proceeds (CodeRabbit PR #2805). Even-split when any
-        # disposed leg lacks a price or the set has no positive value;
-        # otherwise pro-rata by market value.
         realized = self._swap_realized_pnl(disposed, in_value, market_state)
 
-        # Acquired non-cash legs raise their weighted-average cost by the USD
-        # paid on the outflow leg (split pro-rata when multiple are acquired).
         self._record_acquired_swap_basis(fill, out_value, market_state)
 
         if realized is not None:
@@ -949,13 +862,10 @@ class SimulatedPortfolio:
             shortfall = amount - from_tokens
             token_debits[debit_token] = token_debits.get(debit_token, Decimal("0")) + from_tokens
             if shortfall <= amount * _DEBIT_DUST_RELATIVE_TOLERANCE:
-                continue  # Fully covered (spend-all within dust tolerance)
+                continue
             if self._is_cash_equivalent(token) or self._is_cash_equivalent(debit_token):
                 cash_needed += shortfall
             elif intent_type in _STRICT_BALANCE_FUNDED_INTENTS:
-                # Selling (SWAP) or converting (WRAP/UNWRAP_NATIVE) a token
-                # the portfolio does not hold is short-from-nothing; live
-                # execution reverts, so never fund these legs from cash.
                 return (*no_plan, f"insufficient {token} balance: required {amount}, held {held}")
             else:
                 price = self._conversion_price(token, market_state)
@@ -968,11 +878,8 @@ class SimulatedPortfolio:
                 cash_needed += shortfall * price
                 conversions[token] = shortfall
 
-        # Nothing to fund -> nothing to reject: a fill with zero cash need must
-        # not be blocked by already-negative cash-like (gas paid from a wallet
-        # holding no stables drives it negative) — that rejects every sell-all
-        # with "required 0, cash-like -0.001", and even blocks a cash-RAISING
-        # LP close (ALM-2936).
+        # Existing negative cash must not block fills that draw no cash,
+        # especially risk-reducing closes and cash-raising sells.
         if cash_needed <= Decimal("0"):
             return token_debits, Decimal("0"), conversions, None
 
@@ -985,7 +892,6 @@ class SimulatedPortfolio:
                     "insufficient cash for stablecoin outflow and implicit conversions: "
                     f"required {cash_needed}, cash-like {cash_available}",
                 )
-            # Spend-all within dust tolerance
             cash_needed = cash_available
 
         return token_debits, cash_needed, conversions, None
@@ -1035,8 +941,7 @@ class SimulatedPortfolio:
                 if not is_address_like(address):
                     continue
                 if chain != self.chain:
-                    # Foreign-chain entries never join this portfolio's key
-                    # plane (mirrors the snapshot's same-chain alias filter).
+                    # Foreign-chain identities cannot join this balance plane.
                     continue
                 self._identity_table[str(symbol).upper()] = TokenIdentity(
                     chain=chain, address=address, symbol=str(symbol)
@@ -1201,10 +1106,8 @@ class SimulatedPortfolio:
         if gross_collateral_usd > Decimal("0"):
             remaining_units *= position.collateral_usd / gross_collateral_usd
         position.metadata["perp_collateral_funding"] = "token"
-        # The descriptor can carry an address even when the authenticated
-        # wallet debit used a held symbol key (legacy fixtures and partially
-        # symbol-funded portfolios). Settlement must return to that exact
-        # debit identity or one asset splits across two balance planes.
+        # Settlement returns to the identity actually debited, even when the
+        # collateral descriptor also carries an equivalent address.
         position.metadata["perp_collateral_wallet_key"] = token_ref_display(wallet_key)
         position.metadata["perp_collateral_units"] = str(remaining_units)
         position.metadata["perp_collateral_entry_usd"] = str(position.collateral_usd)
@@ -1269,11 +1172,8 @@ class SimulatedPortfolio:
         flowed = sum((units for _, units in matched_flows), Decimal("0"))
         if flowed < amount and amount - flowed > amount * _DEBIT_DUST_RELATIVE_TOLERANCE:
             return None
-        # Return the flow's actual wallet key. The observation metadata may
-        # also carry a resolver-derived contract address while a direct unit
-        # test or legacy symbol-funded portfolio emits the equivalent symbol
-        # key. Returning the metadata address in that case makes the explicit
-        # outflow look absent and charges collateral a second time from cash.
+        # Use the actual flow key; a metadata alias would make the outflow look
+        # absent and charge collateral again from cash.
         return matched_flows[0][0], amount
 
     def _absorb_perp_open_venue_costs(
@@ -1323,9 +1223,9 @@ class SimulatedPortfolio:
         venue_costs = self._venue_cash_costs(fill)
         shortfall = required_cash + venue_costs - self._cash_like_available(token_debits)
         if shortfall <= Decimal("0"):
-            return  # headroom covers costs on top of the collateral
+            return
         if shortfall > venue_costs or shortfall >= delta.collateral_usd:
-            return  # collateral itself overdraws — let the funding gate reject
+            return
         delta.collateral_usd -= shortfall
         if delta.collateral_usd > Decimal("0") and delta.notional_usd > Decimal("0"):
             delta.leverage = delta.notional_usd / delta.collateral_usd
@@ -1349,8 +1249,7 @@ class SimulatedPortfolio:
         ):
             return None
 
-        # Lazy import avoids coupling the portfolio model's import surface to
-        # the calculator package (matching validate_margin_for_perp below).
+        # Keep calculator imports lazy to avoid widening this model's import cycle.
         from almanak.framework.backtesting.pnl.calculators.margin import MarginValidator
 
         validator = MarginValidator(
@@ -1558,8 +1457,7 @@ class SimulatedPortfolio:
         close instant.
         """
         if "realized_pnl_usd" in fill.metadata:
-            # str() round-trips Decimal losslessly, so no type branch is
-            # needed (and the VIB-4062 bifurcation guard forbids one).
+            # ``str`` round-trips Decimal values without a type-specific branch.
             return Decimal(str(fill.metadata["realized_pnl_usd"]))
 
         if position.entry_price <= Decimal("0") or fill.executed_price <= Decimal("0"):
@@ -1641,8 +1539,6 @@ class SimulatedPortfolio:
         position.accumulated_fees_usd = Decimal("0")
         position.fees_token0 = Decimal("0")
         position.fees_token1 = Decimal("0")
-        # str() round-trips Decimal losslessly; _calculate_trade_pnl reads this
-        # back as the trade's realized fee income.
         fill.metadata["collected_fees_usd"] = str(collected)
 
     @staticmethod
@@ -1753,14 +1649,8 @@ class SimulatedPortfolio:
         key_failure = self._reduction_key_failure(fill.position_reduce_id, tied, reduced, flow.label)
         if key_failure is not None:
             return key_failure
-        # A reduce may legitimately fall SHORT of the flow by exactly the
-        # realized-interest slice: a BOUNDARY repay/withdraw's flow covers
-        # principal + part of the accrued interest, but only the principal
-        # leaves the position -- the interest is realized as PnL, not removed as
-        # principal (VIB-5098). That slice in token units is
-        # |interest_usd| / executed_price (single-token lending position). Any
-        # OTHER shortfall -- and ANY excess (reduced > flow, the original
-        # minting class) -- is still rejected.
+        # A boundary flow may exceed reduced principal only by its realized
+        # interest. Any other mismatch can mint or destroy value.
         amount_failure = self._reduction_amount_tie_failure(fill, tied, reduced, flow.verb)
         if amount_failure is not None:
             return amount_failure
@@ -1835,13 +1725,8 @@ class SimulatedPortfolio:
             remaining = position.get_amount(token) - amount
             position.amounts[token] = remaining if remaining > Decimal("0") else Decimal("0")
         if position.total_amount <= Decimal("0"):
-            # Reached by a BOUNDARY reduce (amount covers all principal + part
-            # of the accrued interest -- VIB-5098) or a sub-dust clamp.
-            # Deliberately NOT auto-closed here: _close_position would drop the
-            # position's REMAINING accrued interest from equity without
-            # realizing it. The empty position stays open carrying that
-            # remainder; the next WITHDRAW/REPAY full-closes it (principal 0 +
-            # interest), which conserves value.
+            # Do not auto-close zero principal: remaining accrued interest must
+            # stay in equity until a full close realizes it.
             logger.warning(
                 "Partial reduce clamped position %s principal to zero; "
                 "position remains open until a full close realizes its accrued interest",
@@ -1892,8 +1777,6 @@ class SimulatedPortfolio:
             return
         interest_paid = min(abs(realized), position.interest_accrued)
         position.interest_accrued -= interest_paid
-        # Sign mirrors the close convention: REPAY realizes a LOSS, WITHDRAW a
-        # gain.
         signed_realized = -interest_paid if realized < Decimal("0") else interest_paid
         self._realized_pnl += signed_realized
         fill.metadata["interest_usd"] = str(signed_realized)
@@ -1925,7 +1808,7 @@ class SimulatedPortfolio:
             if not is_valid:
                 print(f"Cannot open position: {msg}")
         """
-        # Lazy import to avoid circular dependency
+        # Keep calculator imports lazy to avoid an import cycle.
         from almanak.framework.backtesting.pnl.calculators.margin import MarginValidator
 
         validator = MarginValidator(
@@ -1935,10 +1818,8 @@ class SimulatedPortfolio:
 
         required_ratio = margin_ratio or self.initial_margin_ratio
 
-        # Get current margin state
         current_margin_used = self._get_total_margin_used()
 
-        # Use the validator to check all conditions
         return validator.can_open_position(
             position_size=position_size,
             collateral=collateral,
@@ -2029,7 +1910,7 @@ class SimulatedPortfolio:
             try:
                 current_price = market_state.get_price(token)
             except KeyError:
-                # Fall back to entry price if current price unavailable
+                # Missing current price preserves the entry valuation.
                 current_price = position.entry_price
             entry_price = position.entry_price
             unrealized += (current_price - entry_price) * amount
@@ -2055,7 +1936,6 @@ class SimulatedPortfolio:
         token0 = position.tokens[0]
         token1 = position.tokens[1]
 
-        # Get current prices
         try:
             token0_price = market_state.get_price(token0)
         except KeyError:
@@ -2066,29 +1946,22 @@ class SimulatedPortfolio:
             logger.warning("Price unavailable for %s, falling back to entry_price in get_unrealized_pnl", token0)
             token0_price = position.entry_price
 
-        # token1 delegates to _stablecoin_fallback which allows $1 for known stablecoins
-        # even in strict mode -- token0 has no safe fallback so it raises unconditionally.
+        # Only token1 has the stablecoin-aware $1 fallback.
         try:
             token1_price = market_state.get_price(token1)
         except KeyError:
             token1_price = self._stablecoin_fallback(token1, "get_unrealized_pnl")
 
-        # Calculate current value
         current_token0 = position.amounts.get(token0, Decimal("0"))
         current_token1 = position.amounts.get(token1, Decimal("0"))
         current_value = current_token0 * token0_price + current_token1 * token1_price
 
-        # Calculate entry value using entry amounts stored in metadata or estimate
-        # Entry value is typically: entry_token0 * entry_price + entry_token1 * 1 (for stablecoin quote)
         entry_amounts = position.metadata.get("entry_amounts", {})
         if entry_amounts:
             entry_token0 = Decimal(str(entry_amounts.get(token0, entry_amounts.get(token_ref_display(token0), "0"))))
             entry_token1 = Decimal(str(entry_amounts.get(token1, entry_amounts.get(token_ref_display(token1), "0"))))
         else:
-            # Fallback: derive the entry token amounts from the position's V3
-            # liquidity units at the entry price (VIB-5096 — liquidity holds
-            # L-units, so amounts must come from the V3 math, never from
-            # treating liquidity as a USD figure).
+            # Liquidity stores V3 L-units, not USD; derive token amounts with V3 math.
             from almanak.framework.backtesting.pnl.calculators.impermanent_loss import (
                 ImpermanentLossCalculator,
             )
@@ -2100,18 +1973,13 @@ class SimulatedPortfolio:
                 tick_upper=position.tick_upper if position.tick_upper is not None else 887272,
                 liquidity=position.liquidity,
             )
-        # entry_price is the token0/token1 ratio, so the parenthesised sum is
-        # the entry composition in token1 units; one multiply by token1_price
-        # converts to USD. (Adding entry_token1 * token1_price to a token1-
-        # denominated term would mix units whenever token1 is not a $1 stable.)
+        # The parenthesized sum is in token1 units; multiply once by its USD price.
         entry_value = (entry_token0 * position.entry_price + entry_token1) * token1_price
 
-        # Include accumulated fees as part of unrealized gains
         fees_earned = position.accumulated_fees_usd
         if fees_earned == Decimal("0"):
             fees_earned = position.fees_earned
 
-        # Unrealized PnL = (current value + fees) - entry value
         return (current_value + fees_earned) - entry_value
 
     def _calculate_perp_unrealized_pnl(self, position: SimulatedPosition, market_state: MarketState) -> Decimal:
@@ -2144,18 +2012,13 @@ class SimulatedPortfolio:
         if entry_price == Decimal("0"):
             return Decimal("0")
 
-        # Calculate price movement PnL
         price_change_pct = (current_price - entry_price) / entry_price
 
         if position.position_type == PositionType.PERP_LONG:
-            # Long profits when price goes up
             price_pnl = position.notional_usd * price_change_pct
-        else:  # PERP_SHORT
-            # Short profits when price goes down
+        else:
             price_pnl = -position.notional_usd * price_change_pct
 
-        # Include accumulated funding (positive = received, negative = paid)
-        # Net funding = received - paid
         net_funding = position.cumulative_funding_received - position.cumulative_funding_paid
 
         collateral_pnl = Decimal("0")
@@ -2184,10 +2047,8 @@ class SimulatedPortfolio:
             Unrealized PnL in USD
         """
         if position.position_type == PositionType.SUPPLY:
-            # Interest earned is positive PnL
             return position.interest_accrued
-        else:  # BORROW
-            # Interest owed is negative PnL
+        else:
             return -position.interest_accrued
 
     def get_margin_utilization(self) -> Decimal:
@@ -2275,27 +2136,19 @@ class SimulatedPortfolio:
             trade realizes no PnL (an opening / inventory-building trade).
         """
         if fill.intent_type == IntentType.SWAP:
-            # A disposing swap stashed its realized PnL; an inventory-building
-            # buy stashed nothing -> unknown, not zero.
             if "realized_pnl_usd" not in fill.metadata:
                 return None
             return Decimal(str(fill.metadata["realized_pnl_usd"]))
 
-        # For position closes, check if we have metadata about the close
         if fill.intent_type in (IntentType.LP_CLOSE, IntentType.PERP_CLOSE):
             pnl_value = fill.metadata.get("realized_pnl_usd", Decimal("0"))
             return Decimal(str(pnl_value)) if not isinstance(pnl_value, Decimal) else pnl_value
 
-        # For lending operations, interest is typically in metadata.
-        # DELEVERAGE is REPAY's structural twin and realizes borrow interest
-        # through the identical metadata plane.
+        # DELEVERAGE shares REPAY's realized-interest metadata plane.
         if fill.intent_type in (IntentType.WITHDRAW, IntentType.REPAY, IntentType.DELEVERAGE):
             interest_value = fill.metadata.get("interest_usd", Decimal("0"))
             return Decimal(str(interest_value)) if not isinstance(interest_value, Decimal) else interest_value
 
-        # LP fee harvest: the collected fees are realized fee income
-        # (stamped by _collect_lp_position_fees during the position effects
-        # stage, which runs before this).
         if fill.intent_type == IntentType.LP_COLLECT_FEES:
             if "collected_fees_usd" not in fill.metadata:
                 return None
@@ -2451,12 +2304,9 @@ class SimulatedPortfolio:
         if is_token_key(token):
             return normalize_token_key(token[0], token[1])
 
-        # If token looks like an address (starts with 0x), try to resolve it
         if isinstance(token, str) and token.startswith("0x") and len(token) == 42:
             if chain_id is not None:
-                # Check if token is known in registry
                 if not is_token_known(chain_id, token):
-                    # Token is not in registry - it's unresolved
                     if data_tracker is not None:
                         data_tracker.record_unresolved_token(token, chain_id)
 
@@ -2466,26 +2316,21 @@ class SimulatedPortfolio:
                             f"to a symbol. Enable allow_unknown_tokens or add to registry."
                         )
                     else:
-                        # Log warning and use checksummed address
                         logger.warning(
                             f"Unknown token address {token} on chain {chain_id}, "
                             f"using address as fallback for price lookup"
                         )
                         return resolve_to_canonical_symbol(chain_id, token)
 
-                # Resolve to canonical symbol
                 return resolve_to_canonical_symbol(chain_id, token)
             else:
-                # No chain_id provided - cannot resolve addresses
                 if require_symbol_mapping:
                     raise ValueError(
                         f"Token address {token} cannot be resolved without chain_id. "
                         f"Provide chain_id for symbol resolution."
                     )
-                # Return token unchanged
                 return token
 
-        # Token is already a symbol (not an address)
         return token
 
     def _handle_missing_price(
@@ -2513,7 +2358,6 @@ class SimulatedPortfolio:
         Raises:
             ValueError: If strict_price_mode is True
         """
-        # Record missing price in tracker
         if data_tracker is not None:
             data_tracker.record_missing_price(
                 token=token_ref_display(token),
@@ -2521,11 +2365,9 @@ class SimulatedPortfolio:
                 chain_id=chain_id,
             )
 
-        # Stamp the run manifest (ALM-2943): strict mode is a price-lane
-        # REFUSAL, non-strict a degrade — both must be answerable post-run.
+        # Strict misses are refusals; non-strict misses are degraded serves.
         _record_missing_price_serve(token, simulation_timestamp, strict_price_mode, context)
 
-        # Log warning with context
         timestamp_str = simulation_timestamp.isoformat() if simulation_timestamp else "unknown"
         logger.warning(
             "Missing price for token %s at timestamp %s (chain_id=%s, context=%s). Using fallback value.",
@@ -2535,7 +2377,6 @@ class SimulatedPortfolio:
             context,
         )
 
-        # In strict mode, fail instead of using fallback
         if strict_price_mode:
             raise ValueError(
                 f"Missing price for token {token_ref_display(token)} at timestamp {timestamp_str} "
@@ -2580,24 +2421,19 @@ class SimulatedPortfolio:
         """
         total = self.cash_usd
 
-        # Value of token holdings
         for token, amount in self.tokens.items():
             try:
-                # Resolve token to symbol if needed
                 resolved_token = self._resolve_token_symbol(token, chain_id, require_symbol_mapping, data_tracker)
                 price = market_state.get_price(resolved_token)
                 total += amount * price
             except KeyError:
-                # Record missing price in tracker
                 if data_tracker is not None:
                     data_tracker.record_missing_price(
                         token=token_ref_display(token),
                         timestamp=simulation_timestamp,
                         chain_id=chain_id,
                     )
-                # Stamp the run manifest (ALM-2943), mirroring _handle_missing_price.
                 _record_missing_price_serve(token, simulation_timestamp, strict_price_mode, "portfolio valuation")
-                # Log warning with context
                 timestamp_str = simulation_timestamp.isoformat() if simulation_timestamp else "unknown"
                 logger.warning(
                     "Missing price for token %s at timestamp %s (chain_id=%s). Token skipped in portfolio valuation.",
@@ -2605,7 +2441,6 @@ class SimulatedPortfolio:
                     timestamp_str,
                     chain_id or "unknown",
                 )
-                # In strict mode, fail instead of skipping
                 if strict_price_mode:
                     raise ValueError(
                         f"Missing price for token {token_ref_display(token)} at timestamp {timestamp_str} "
@@ -2613,7 +2448,6 @@ class SimulatedPortfolio:
                         "Ensure price data is available or disable strict_price_mode."
                     ) from None
 
-        # Value of positions (basic calculation - mark_to_market handles complex cases)
         for position in self.positions:
             total += self._get_position_value(
                 position,
@@ -2661,14 +2495,12 @@ class SimulatedPortfolio:
                 or if strict_price_mode is True and any price is missing.
         """
         if position.is_spot:
-            # Simple spot position
             token = position.primary_token
             resolved_token = self._resolve_token_symbol(token, chain_id, require_symbol_mapping, data_tracker)
             try:
                 price = market_state.get_price(resolved_token)
                 return position.total_amount * price
             except KeyError:
-                # Record and log missing price
                 self._handle_missing_price(
                     token=token,
                     chain_id=chain_id,
@@ -2677,11 +2509,9 @@ class SimulatedPortfolio:
                     strict_price_mode=strict_price_mode,
                     context="SPOT position",
                 )
-                # Fall back to entry price if not in strict mode
                 return position.total_amount * position.entry_price
 
         elif position.is_lp:
-            # LP position: sum of token values + fees earned
             value = Decimal("0")
             for token, amount in position.amounts.items():
                 resolved_token = self._resolve_token_symbol(token, chain_id, require_symbol_mapping, data_tracker)
@@ -2689,7 +2519,6 @@ class SimulatedPortfolio:
                     price = market_state.get_price(resolved_token)
                     value += amount * price
                 except KeyError:
-                    # Record and log missing price
                     self._handle_missing_price(
                         token=token,
                         chain_id=chain_id,
@@ -2698,12 +2527,10 @@ class SimulatedPortfolio:
                         strict_price_mode=strict_price_mode,
                         context="LP position",
                     )
-            # Add accumulated fees
             value += position.fees_earned
             return value
 
         elif position.is_perp:
-            # Perp position: collateral + unrealized PnL
             if position.is_liquidated:
                 return position.collateral_usd
             token = position.primary_token
@@ -2711,7 +2538,6 @@ class SimulatedPortfolio:
             try:
                 current_price = market_state.get_price(resolved_token)
             except KeyError:
-                # Record and log missing price
                 self._handle_missing_price(
                     token=token,
                     chain_id=chain_id,
@@ -2722,10 +2548,9 @@ class SimulatedPortfolio:
                 )
                 current_price = position.entry_price
 
-            # Calculate unrealized PnL
             price_change = current_price - position.entry_price
             if position.position_type == PositionType.PERP_SHORT:
-                price_change = -price_change  # Short profits when price falls
+                price_change = -price_change
 
             unrealized_pnl = (price_change / position.entry_price) * position.notional_usd
 
@@ -2733,13 +2558,11 @@ class SimulatedPortfolio:
             return collateral_usd + unrealized_pnl + position.accumulated_funding
 
         elif position.is_lending:
-            # Lending position: principal + interest
             token = position.primary_token
             resolved_token = self._resolve_token_symbol(token, chain_id, require_symbol_mapping, data_tracker)
             try:
                 price = market_state.get_price(resolved_token)
             except KeyError:
-                # Record and log missing price
                 self._handle_missing_price(
                     token=token,
                     chain_id=chain_id,
@@ -2753,10 +2576,8 @@ class SimulatedPortfolio:
             principal_value = position.total_amount * price
 
             if position.position_type == PositionType.SUPPLY:
-                # Supply earns interest
                 return principal_value + position.interest_accrued
             else:
-                # Borrow owes interest (returns negative for debt value)
                 return -(principal_value + position.interest_accrued)
 
         return Decimal("0")
@@ -2772,57 +2593,42 @@ class SimulatedPortfolio:
         read off the portfolio's running trackers. See
         :class:`PositionMetricsAggregate` for why this is centralized.
         """
-        # Aggregate fees from LP positions (both open and closed)
         total_fees_earned = Decimal("0")
         fees_by_pool: dict[str, Decimal] = {}
         lp_fee_confidence_breakdown: dict[str, int] = {"high": 0, "medium": 0, "low": 0}
 
-        # Aggregate funding from perp positions (both open and closed)
         total_funding_paid = Decimal("0")
         total_funding_received = Decimal("0")
 
-        # Aggregate interest from lending positions (both open and closed)
         total_interest_earned = Decimal("0")
         total_interest_paid = Decimal("0")
 
         all_positions = list(self.positions) + list(self._closed_positions)
         for position in all_positions:
             if position.is_lp:
-                # Use the SAME fee source as the per-trade close reporter
-                # (_calculate_lp_pnl_breakdown), value_position, and
-                # _calculate_lp_unrealized_pnl: the detailed accumulator
-                # (accumulated_fees_usd) is primary, with fees_earned as the
-                # fallback. The two are kept in lockstep by both accrual lanes
-                # today, but matching the close reporter makes the fee-reporting
-                # tie-out robust by construction even if a lane only updates the
-                # detailed accumulator (CodeRabbit, PR #2852).
+                # Match close valuation: the detailed accumulator is primary,
+                # with the legacy aggregate as fallback.
                 lp_fees = position.accumulated_fees_usd
                 if lp_fees == Decimal("0"):
                     lp_fees = position.fees_earned
                 total_fees_earned += lp_fees
-                # Use position_id as pool identifier
                 pool_id = position.position_id
                 fees_by_pool[pool_id] = fees_by_pool.get(pool_id, Decimal("0")) + lp_fees
-                # Track fee confidence breakdown
                 if position.fee_confidence in lp_fee_confidence_breakdown:
                     lp_fee_confidence_breakdown[position.fee_confidence] += 1
                 elif position.fee_confidence is not None:
-                    # Unknown confidence level - treat as low
+                    # Unknown confidence degrades to the lowest bucket.
                     lp_fee_confidence_breakdown["low"] += 1
             elif position.is_perp:
                 total_funding_paid += position.cumulative_funding_paid
                 total_funding_received += position.cumulative_funding_received
             elif position.is_lending:
-                # SUPPLY positions earn interest, BORROW positions pay interest
                 if position.position_type == PositionType.SUPPLY:
                     total_interest_earned += position.interest_accrued
                 else:
                     total_interest_paid += position.interest_accrued
 
-        # Liquidation ledgers. Perp records an explicit loss_usd; lending records
-        # collateral_seized / debt_repaid, whose difference is the liquidation
-        # penalty (the borrower's loss) -- the simulator sets
-        # collateral_seized = debt_repaid * (1 + penalty).
+        # Lending loss is seized collateral less repaid debt; perp loss is explicit.
         perp_liquidation_losses = sum((liq.loss_usd for liq in self._perp_liquidations), Decimal("0"))
         lending_liquidation_losses = sum(
             (liq.collateral_seized - liq.debt_repaid for liq in self._lending_liquidations),
@@ -2912,19 +2718,13 @@ class SimulatedPortfolio:
         costs = self._execution_cost_totals()
         risk = self._risk_metrics(equity_values, equity.annualized_return)
 
-        # Trade statistics (VIB-5083): shared with calculate_metrics so the
-        # win/loss / realized-PnL discipline lives in one place. Lazy import
-        # avoids the metrics_calculator <-> portfolio import cycle.
+        # Keep trade statistics shared without creating an import cycle.
         from almanak.framework.backtesting.pnl.calculators.attribution import calculate_all_attributions
         from almanak.framework.backtesting.pnl.metrics_calculator import _compute_trade_statistics
 
         stats = _compute_trade_statistics(self.trades)
         pnl_by_protocol, pnl_by_intent_type, pnl_by_asset = calculate_all_attributions(self.trades)
 
-        # Position-derived metrics (LP fees, perp funding, lending interest,
-        # health/margin extrema, realized/unrealized PnL). Sourced from the same
-        # helper the engine-result path uses so the two can never drift -- see
-        # PositionMetricsAggregate.
         pos = self.aggregate_position_metrics()
 
         return BacktestMetrics(
@@ -2933,15 +2733,10 @@ class SimulatedPortfolio:
             sharpe_ratio=risk.sharpe,
             max_drawdown_pct=risk.max_drawdown * Decimal("100"),
             win_rate=stats.win_rate,
-            # Successful trades only -- rejected fills are reported separately
-            # as failed_trades and must stay out of the performance denominator
-            # (VIB-5083, CodeRabbit).
+            # Failed fills are reported separately from performance statistics.
             total_trades=len(self.trades) - stats.failed_trades,
             profit_factor=stats.profit_factor,
-            # VIB-2915: `*_return_pct` fields store actual percentages (e.g. 10 for 10%),
-            # not decimal ratios. Local `total_return`/`annualized_return` stay as ratios
-            # so the calmar calculation above (which divides by ratio-valued
-            # `max_drawdown`) stays correct.
+            # Public return fields are percentages; local risk math uses ratios.
             total_return_pct=equity.total_return * Decimal("100"),
             annualized_return_pct=equity.annualized_return * Decimal("100"),
             total_fees_usd=costs.fees,
@@ -3111,16 +2906,12 @@ class SimulatedPortfolio:
         if len(returns) < 2:
             return Decimal("0")
 
-        # Calculate mean
         mean = sum(returns) / Decimal(str(len(returns)))
 
-        # Calculate variance
         variance = sum((r - mean) ** 2 for r in returns) / Decimal(str(len(returns) - 1))
 
-        # Standard deviation (approximation for Decimal)
         std_dev = self._decimal_sqrt(variance)
 
-        # Annualize (assuming daily returns, 252 trading days)
         return std_dev * self._decimal_sqrt(Decimal("252"))
 
     def _calculate_sharpe(self, returns: list[Decimal], volatility: Decimal) -> Decimal:
@@ -3137,7 +2928,6 @@ class SimulatedPortfolio:
             return Decimal("0")
 
         mean_return = sum(returns) / Decimal(str(len(returns)))
-        # Annualize mean return (assuming daily)
         annualized_return = mean_return * Decimal("252")
 
         return annualized_return / volatility
@@ -3154,7 +2944,6 @@ class SimulatedPortfolio:
         if len(returns) < 2:
             return Decimal("0")
 
-        # Calculate downside deviation (only negative returns)
         negative_returns = [r for r in returns if r < 0]
         if not negative_returns:
             return Decimal("0")
@@ -3165,7 +2954,6 @@ class SimulatedPortfolio:
         if downside_dev == 0:
             return Decimal("0")
 
-        # Annualize
         annualized_downside = downside_dev * self._decimal_sqrt(Decimal("252"))
         mean_return = sum(returns) / Decimal(str(len(returns)))
         annualized_return = mean_return * Decimal("252")
@@ -3210,10 +2998,8 @@ class SimulatedPortfolio:
         if n == 0:
             return Decimal("0")
 
-        # Initial guess
         x = n
-        # Newton's method iterations
-        for _ in range(50):  # Max iterations
+        for _ in range(50):
             x_new = (x + n / x) / Decimal("2")
             if abs(x_new - x) < Decimal("1e-28"):
                 break
@@ -3226,9 +3012,7 @@ class SimulatedPortfolio:
             try:
                 value += amount * market_state.get_price(token)
             except KeyError:
-                # Provenance before the outcome either way: a strict run
-                # refuses, a non-strict run silently skips the token — both
-                # must land on the manifest as a valuation-time miss.
+                # Record provenance before either refusing or skipping the token.
                 _record_missing_price_serve(
                     token,
                     getattr(market_state, "timestamp", None),
@@ -3367,20 +3151,13 @@ class SimulatedPortfolio:
         for position in self.positions:
             total_value += self._mark_position_value(position, market_state, timestamp, adapter)
 
-        # Update health factors for lending positions after all values are calculated
         self._update_health_factors(market_state)
 
-        # Update unrealized PnL tracking at each mark_to_market
         self._unrealized_pnl = self.calculate_unrealized_pnl(market_state)
 
-        # Record the equity point. ``value_usd`` stays USD (the conservation
-        # core). For a non-USD numeraire (VIB-5127), capture the numeraire
-        # token's USD price at this timestamp so the reporting layer can divide
-        # value_usd by it; a missing price stays None and fails loud at metrics
-        # time rather than aborting an otherwise-valid USD run mid-loop.
+        # Keep conserved value in USD; numeraire price is a reporting projection.
+        # A missing projection price fails at metrics time, not during the USD run.
         self._record_equity_point(timestamp, total_value, self._numeraire_price_usd(market_state))
-        # Snapshot the prices this mark used (aligned 1:1 with equity_curve)
-        # for the result's visualization/audit price series.
         self._record_price_point(timestamp, market_state)
 
         return total_value
@@ -3429,8 +3206,7 @@ class SimulatedPortfolio:
                 price = market_state.get_price(token)
                 value += amount * price
             except KeyError:
-                # Fall back to entry price if current price unavailable —
-                # a degraded valuation the manifest must carry.
+                # Entry-price fallback is a degraded serve and must be recorded.
                 _record_missing_price_serve(
                     token, getattr(market_state, "timestamp", None), False, "spot position mark"
                 )
@@ -3459,7 +3235,7 @@ class SimulatedPortfolio:
             ValueError: If the position has fewer than 2 tokens, or a price is
                 missing under ``strict_reproducibility``.
         """
-        # Lazy import to avoid circular dependency
+        # Keep calculator imports lazy to avoid an import cycle.
         from almanak.framework.backtesting.pnl.calculators.impermanent_loss import (
             ImpermanentLossCalculator,
         )
@@ -3470,7 +3246,6 @@ class SimulatedPortfolio:
         token0 = position.tokens[0]
         token1 = position.tokens[1]
 
-        # Get current prices
         try:
             token0_price = market_state.get_price(token0)
         except KeyError:
@@ -3481,25 +3256,21 @@ class SimulatedPortfolio:
             logger.warning("Price unavailable for %s, falling back to entry_price in calculate_il", token0)
             token0_price = position.entry_price
 
-        # token1 delegates to _stablecoin_fallback which allows $1 for known stablecoins
-        # even in strict mode -- token0 has no safe fallback so it raises unconditionally.
+        # Only token1 has the stablecoin-aware $1 fallback.
         try:
             token1_price = market_state.get_price(token1)
         except KeyError:
             token1_price = self._stablecoin_fallback(token1, "calculate_il")
 
-        # Calculate the price ratio (token0 in terms of token1)
-        # This is what Uniswap V3 uses: price = token1/token0
+        # Uniswap V3 price is token1 units per token0.
         if token1_price > 0:
             current_price = token0_price / token1_price
         else:
             current_price = position.entry_price
 
-        # Ensure we have tick bounds for V3 calculations
         tick_lower = position.tick_lower if position.tick_lower is not None else -887272
         tick_upper = position.tick_upper if position.tick_upper is not None else 887272
 
-        # Use ImpermanentLossCalculator to get current token amounts
         il_calculator = ImpermanentLossCalculator()
 
         _il_pct, current_token0, current_token1 = il_calculator.calculate_il_v3(
@@ -3543,21 +3314,16 @@ class SimulatedPortfolio:
             position, market_state
         )
 
-        # Update position's current token amounts
         position.amounts[token0] = current_token0
         position.amounts[token1] = current_token1
 
-        # Calculate current position value (before fees)
         position_value = current_token0 * token0_price + current_token1 * token1_price
 
-        # Simulate fee accrual
         fees_to_add = self._simulate_lp_fee_accrual(position, position_value, timestamp)
         position.fees_earned += fees_to_add
 
-        # Update last_updated timestamp
         position.last_updated = timestamp
 
-        # Total value = token values + accumulated fees
         total_value = position_value + position.fees_earned
 
         return total_value
@@ -3570,9 +3336,8 @@ class SimulatedPortfolio:
 
     @staticmethod
     def _lp_liquidity_share(position_value_usd: Decimal) -> Decimal:
-        # The numerator must be the position's USD value -- position.liquidity
-        # holds V3 L-units (VIB-5096), not a USD figure. There is deliberately
-        # NO floor here: clamping tiny real shares to 10% minted LP fee value.
+        # Liquidity stores V3 L-units, not USD. Do not floor tiny shares because
+        # that would mint fee value.
         base_liquidity = Decimal("1000000")
         return min(Decimal("1"), position_value_usd / base_liquidity)
 
@@ -3726,7 +3491,7 @@ class SimulatedPortfolio:
         if position.is_liquidated:
             return position.collateral_usd
 
-        # Lazy imports to avoid circular dependency
+        # Keep calculator imports lazy to avoid an import cycle.
         from almanak.framework.backtesting.pnl.calculators.funding import FundingCalculator
         from almanak.framework.backtesting.pnl.calculators.liquidation import (
             LiquidationCalculator,
@@ -3735,30 +3500,22 @@ class SimulatedPortfolio:
         token = position.primary_token
         collateral_usd = self._mark_perp_collateral(position, market_state)
 
-        # Get current price
         try:
             current_price = market_state.get_price(token)
         except KeyError:
-            # Fall back to entry price if current price unavailable —
-            # a degraded valuation the manifest must carry.
+            # Entry-price fallback is a degraded serve and must be recorded.
             _record_missing_price_serve(token, getattr(market_state, "timestamp", None), False, "perp position mark")
             current_price = position.entry_price
 
-        # Calculate unrealized PnL based on price movement
-        # Price change as a ratio of entry price
         price_change_pct = (current_price - position.entry_price) / position.entry_price
 
         if position.position_type == PositionType.PERP_LONG:
-            # Long profits when price goes up
             unrealized_pnl = price_change_pct * position.notional_usd
         else:
-            # Short profits when price goes down
             unrealized_pnl = -price_change_pct * position.notional_usd
 
-        # Calculate funding payments using FundingCalculator
         funding_calculator = FundingCalculator()
 
-        # Calculate time elapsed since last update (or entry if first time)
         if position.last_updated:
             time_elapsed = timestamp - position.last_updated
         else:
@@ -3766,12 +3523,9 @@ class SimulatedPortfolio:
 
         hours_elapsed = Decimal(str(time_elapsed.total_seconds())) / Decimal("3600")
 
-        # Only apply funding if time has elapsed
         if hours_elapsed > Decimal("0"):
-            # Get protocol-specific funding rate
             funding_rate = funding_calculator.get_funding_rate_for_protocol(position.protocol)
 
-            # Calculate funding payment for this period
             try:
                 funding_result = funding_calculator.calculate_funding_payment(
                     position=position,
@@ -3779,38 +3533,26 @@ class SimulatedPortfolio:
                     time_delta_hours=hours_elapsed,
                 )
 
-                # Apply funding to position - updates accumulated_funding and cumulative fields
                 funding_calculator.apply_funding_to_position(position, funding_result)
 
             except ValueError:
-                # If position type is invalid, no funding
                 pass
 
-        # Update last_updated timestamp
         position.last_updated = timestamp
 
-        # Check liquidation proximity and emit warning if within threshold
         liq_calculator = LiquidationCalculator()
 
-        # Update liquidation price if not set
         if position.liquidation_price is None:
             liq_calculator.update_position_liquidation_price(position)
 
-        # Check if current price is near liquidation and emit warning
         liq_calculator.check_liquidation_proximity(
             position=position,
             current_price=current_price,
             emit_warning=True,
         )
 
-        # Total position value = collateral + unrealized PnL + accumulated funding
-        # Note: accumulated_funding is already signed correctly
-        # (negative if long pays, positive if short receives)
         total_value = collateral_usd + unrealized_pnl + position.accumulated_funding
 
-        # Ensure position value doesn't go below zero (liquidation would occur)
-        # For simulation purposes, we still return the calculated value
-        # The engine should handle liquidation logic separately
         return total_value
 
     def _mark_lending_position(
@@ -3850,52 +3592,41 @@ class SimulatedPortfolio:
             - Positive for SUPPLY (asset value + interest earned)
             - Negative for BORROW (debt = principal + interest owed)
         """
-        # Lazy import to avoid circular dependency
+        # Keep calculator imports lazy to avoid an import cycle.
         from almanak.framework.backtesting.pnl.calculators.interest import InterestCalculator
 
         token = position.primary_token
 
-        # Get current price
         try:
             current_price = market_state.get_price(token)
         except KeyError:
-            # Fall back to entry price if current price unavailable
+            # Missing current price preserves the entry valuation.
             current_price = position.entry_price
 
-        # Calculate principal value at current price
         principal_amount = position.total_amount
         principal_value_usd = principal_amount * current_price
 
-        # Calculate time elapsed since position entry or last update
         if position.last_updated:
             time_elapsed = timestamp - position.last_updated
         else:
             time_elapsed = timestamp - position.entry_time
 
-        # Convert to days for annual rate calculation
         days_elapsed = Decimal(str(time_elapsed.total_seconds())) / Decimal("86400")
 
-        # Calculate interest for this period using InterestCalculator
         if days_elapsed > Decimal("0"):
             interest_calculator = InterestCalculator()
 
-            # Determine the APY to use
-            # First, try to use position's APY at entry
-            # If not set or zero, fall back to protocol-specific APY
             if position.apy_at_entry > Decimal("0"):
                 apy = position.apy_at_entry
             else:
-                # Get protocol-specific APY based on position type
                 if position.position_type == PositionType.SUPPLY:
                     apy = interest_calculator.get_supply_apy_for_protocol(position.protocol)
                 else:
                     apy = interest_calculator.get_borrow_apy_for_protocol(position.protocol)
 
-            # Calculate interest on the principal value at entry
-            # Use entry price value to be consistent with lending protocol behavior
+            # Interest accrues on entry value, not the current mark.
             principal_at_entry = principal_amount * position.entry_price
 
-            # Calculate interest using compound interest (default behavior)
             result = interest_calculator.calculate_interest(
                 principal=principal_at_entry,
                 apy=apy,
@@ -3903,19 +3634,13 @@ class SimulatedPortfolio:
                 compound=True,
             )
 
-            # Add to accumulated interest
             position.interest_accrued += result.interest
 
-        # Update last_updated timestamp
         position.last_updated = timestamp
 
         if position.position_type == PositionType.SUPPLY:
-            # Supply position: asset value + interest earned (positive)
-            # Interest is in USD, add directly
             return principal_value_usd + position.interest_accrued
         else:
-            # Borrow position: debt = principal + interest owed (negative)
-            # Returns negative since this is a liability
             return -(principal_value_usd + position.interest_accrued)
 
     def _update_health_factors(self, market_state: MarketState) -> None:
@@ -4028,9 +3753,7 @@ class SimulatedPortfolio:
             "min_health_factor": str(self._min_health_factor),
             "health_factor_warnings": self._health_factor_warnings,
             "liquidation_penalty": str(self.liquidation_penalty),
-            # Realized PnL total is live attribution state: a portfolio resumed
-            # after realized SWAP/close trades must report the accumulated
-            # realized_pnl, not 0 until the next close (VIB-5083, CodeRabbit).
+            # Persist live attribution so resumed portfolios retain realized PnL.
             "realized_pnl": str(self._realized_pnl),
             "unrealized_pnl": str(self._unrealized_pnl),
             "gas_tank_budget_usd": str(self.gas_tank_budget_usd) if self.gas_tank_budget_usd is not None else None,
@@ -4040,12 +3763,9 @@ class SimulatedPortfolio:
             },
             "lending_liquidations": [ll.to_dict() for ll in self._lending_liquidations],
             "perp_liquidations": [pl.to_dict() for pl in self._perp_liquidations],
-            # Per-token average cost basis is live attribution state: without it
-            # a resumed portfolio forgets its average costs, so a later
-            # disposing sell would realize no PnL (VIB-5083, CodeRabbit).
+            # Later disposals need the pre-resume average cost.
             "cost_basis": {token_ref_display(k): str(v) for k, v in self._cost_basis.items()},
-            # Numeraire reporting context (VIB-5127): a resumed non-USD run must
-            # keep capturing/reporting against the same numeraire. None for USD.
+            # Resumed runs must retain their reporting numeraire; None means USD.
             "numeraire_symbol": self._numeraire_symbol,
             "numeraire_token": token_ref_display(self._numeraire_token) if self._numeraire_token is not None else None,
         }
@@ -4061,8 +3781,7 @@ class SimulatedPortfolio:
                 None if data.get("position_value_usd") is None else Decimal(str(data["position_value_usd"]))
             ),
             valuation_source=data.get("valuation_source", "simple"),
-            # Preserve the captured numeraire price (VIB-5127); absent /
-            # null round-trips to None (a USD point).
+            # Absent numeraire price means a USD equity point.
             numeraire_price_usd=(
                 None if data.get("numeraire_price_usd") is None else Decimal(str(data["numeraire_price_usd"]))
             ),
@@ -4077,9 +3796,7 @@ class SimulatedPortfolio:
             fee_usd=Decimal(data["fee_usd"]),
             slippage_usd=Decimal(data["slippage_usd"]),
             gas_cost_usd=Decimal(data["gas_cost_usd"]),
-            # pnl_usd is nullable (None = realized nothing yet, an opening /
-            # inventory-building trade); a bare Decimal(None) would crash on
-            # round-trip (VIB-5083, CodeRabbit).
+            # None means no realized outcome yet, not measured zero.
             pnl_usd=None if data.get("pnl_usd") is None else Decimal(str(data["pnl_usd"])),
             success=data["success"],
             amount_usd=Decimal(data.get("amount_usd", "0")),
@@ -4142,26 +3859,21 @@ class SimulatedPortfolio:
             LendingLiquidationEvent.from_dict(ll) for ll in data.get("lending_liquidations", [])
         ]
         portfolio._perp_liquidations = [LiquidationEvent.from_dict(pl) for pl in data.get("perp_liquidations", [])]
-        # Restore per-token average cost basis so a resumed portfolio still
-        # realizes PnL on later disposing sells (VIB-5083, CodeRabbit).
         portfolio._cost_basis = portfolio._normalize_amounts(
             {k: Decimal(str(v)) for k, v in data.get("cost_basis", {}).items()}
         )
-        # Restore the numeraire reporting context (VIB-5127); absent -> None (USD).
         portfolio._numeraire_symbol = data.get("numeraire_symbol")
         numeraire_token = data.get("numeraire_token")
         portfolio._numeraire_token = (
             normalize_token_ref(numeraire_token, portfolio.chain) if isinstance(numeraire_token, str) else None
         )
-        # Older artifacts predate realized_pnl; fall back to summing successful
-        # realized trades so resumed portfolios stay consistent.
+        # Older artifacts derive realized PnL from successful measured trades.
         portfolio._realized_pnl = cls._restored_realized_pnl(portfolio, data)
         portfolio._unrealized_pnl = Decimal(str(data.get("unrealized_pnl", "0")))
         budget = data.get("gas_tank_budget_usd")
         portfolio.gas_tank_budget_usd = Decimal(str(budget)) if budget is not None else None
         portfolio.gas_tank_spent_usd = Decimal(str(data.get("gas_tank_spent_usd", "0")))
-        # Restore the identity table: a resumed run must keep resolving
-        # symbol-shaped credits onto the registered plane (review, #3314).
+        # Resumed credits must resolve onto the original identity plane.
         identities = data.get("token_identities") or {}
         portfolio.register_token_identities(
             {symbol: (entry[0], entry[1]) for symbol, entry in identities.items() if len(entry) == 2}
