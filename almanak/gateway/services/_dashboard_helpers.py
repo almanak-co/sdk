@@ -232,9 +232,9 @@ def enrich_strategy_info(
     if state:
         if preserve_status_precedence:
             # Derive status from state, but never downgrade a registry-set
-            # PAUSED to ERROR. The runner explicitly sets PAUSED in the
-            # registry via _gateway_update_status(); that signal must take
-            # precedence over a stale last_iteration error status.
+            # PAUSED to ERROR. Runner status transitions use the lifecycle
+            # path, while shutdown marks the registry INACTIVE through
+            # _deregister_from_gateway().
             last_iteration = state.get("last_iteration", {})
             iteration_status = last_iteration.get("status", "")
             registry_status = info.get("status", "")

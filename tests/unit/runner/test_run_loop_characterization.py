@@ -118,7 +118,6 @@ def _make_runner(
     runner._register_with_gateway = MagicMock()
     runner._deregister_from_gateway = MagicMock()
     runner._gateway_heartbeat = MagicMock()
-    runner._gateway_update_status = MagicMock()
     runner._get_gateway_client = MagicMock(return_value=None)
     runner._recover_incomplete_sessions = AsyncMock(return_value=0)
     runner._lifecycle_write_state = MagicMock()

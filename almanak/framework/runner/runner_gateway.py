@@ -144,38 +144,8 @@ def deregister_from_gateway(runner: Any, deployment_id: str) -> None:
 
 
 # -------------------------------------------------------------------------
-# Gateway status / heartbeat
+# Gateway heartbeat
 # -------------------------------------------------------------------------
-
-
-def gateway_update_status(runner: Any, deployment_id: str, status: str) -> None:
-    """Update instance status in the gateway registry (non-heartbeat).
-
-    Used to flip status (e.g. INACTIVE on shutdown) so that
-    strat list / strat status reflects the correct state.
-    Non-fatal: catches all exceptions.
-    """
-    client = runner._get_gateway_client()
-    if client is None:
-        return
-    try:
-        from almanak.gateway.proto import gateway_pb2
-
-        request = gateway_pb2.UpdateInstanceStatusRequest(
-            deployment_id=deployment_id,
-            status=status,
-            heartbeat_only=False,
-        )
-        response = client.dashboard.UpdateStrategyInstanceStatus(request, timeout=5.0)
-        if not response.success:
-            logger.warning(
-                "Gateway rejected status update to %s for %s: %s",
-                status,
-                deployment_id,
-                response.error,
-            )
-    except Exception as e:
-        logger.debug(f"Failed to update gateway status to {status} (non-fatal): {e}")
 
 
 def gateway_heartbeat(runner: Any, deployment_id: str, positions: list | None = None) -> None:

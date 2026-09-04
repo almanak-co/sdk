@@ -1387,11 +1387,6 @@ class StrategyRunner:
 
         deregister_from_gateway(self, deployment_id)
 
-    def _gateway_update_status(self, deployment_id: str, status: str) -> None:
-        from .runner_gateway import gateway_update_status
-
-        gateway_update_status(self, deployment_id, status)
-
     def _gateway_heartbeat(self, deployment_id: str, positions: list | None = None) -> None:
         from .runner_gateway import gateway_heartbeat
 
@@ -7096,17 +7091,6 @@ class StrategyRunner:
             logger.debug("_compute_outbox_position_key failed", exc_info=True)
 
         return "", ""
-
-    def _accounting_context(self, strategy: "StrategyProtocol") -> tuple[str, str, str, str, str]:
-        """Return (deployment_id, cycle_id, execution_mode, chain, wallet_address) for accounting builders."""
-        from ..observability.context import get_cycle_id
-
-        deployment_id = strategy.deployment_id
-        cycle_id = get_cycle_id() or ""
-        execution_mode = self._derive_execution_mode()
-        chain = getattr(strategy, "chain", "") or getattr(self.config, "chain", "")
-        wallet_address = getattr(strategy, "wallet_address", "")
-        return deployment_id, cycle_id, execution_mode, chain, wallet_address
 
     def _maybe_warn_deleverage(self, intent: "AnyIntent", strategy: "StrategyProtocol") -> None:
         """Log WARNING when a DELEVERAGE intent was successfully executed.
@@ -12968,12 +12952,6 @@ class StrategyRunner:
             return None
 
     @staticmethod
-    def _bridge_token_resolution_candidates(token_symbol, bridge_status):
-        from .runner_teardown import bridge_token_resolution_candidates
-
-        return bridge_token_resolution_candidates(token_symbol, bridge_status)
-
-    @staticmethod
     def _normalize_bridge_balance_increase(balance_increase_wei, destination_chain, token_symbol, bridge_status):
         from .runner_teardown import normalize_bridge_balance_increase
 
@@ -13191,11 +13169,6 @@ class StrategyRunner:
                     logger.debug("Failed to record exposure on circuit breaker", exc_info=True)
         return result
 
-    async def _update_portfolio_metrics(self, deployment_id, snapshot):
-        from .runner_state import update_portfolio_metrics
-
-        await update_portfolio_metrics(self, deployment_id, snapshot)
-
     async def _handle_execution_error(
         self,
         strategy: StrategyProtocol,
@@ -13224,26 +13197,6 @@ class StrategyRunner:
         from .runner_recovery import recover_incomplete_sessions
 
         return await recover_incomplete_sessions(self)
-
-    async def _recover_session(self, session):
-        from .runner_recovery import recover_session
-
-        return await recover_session(self, session)
-
-    async def _recover_submitted_session(self, session):
-        from .runner_recovery import recover_submitted_session
-
-        return await recover_submitted_session(self, session)
-
-    async def _recover_early_phase_session(self, session):
-        from .runner_recovery import recover_early_phase_session
-
-        return await recover_early_phase_session(self, session)
-
-    async def _update_recovered_state(self, session):
-        from .runner_recovery import update_recovered_state
-
-        await update_recovered_state(self, session)
 
     def is_duplicate_transaction(self, tx_hash=None, nonce=None, deployment_id=None):
         from .runner_recovery import is_duplicate_transaction
