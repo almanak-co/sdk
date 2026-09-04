@@ -133,40 +133,13 @@ from almanak.integrations.dexscreener.gateway.price_source import DexScreenerPri
 logger = logging.getLogger(__name__)
 
 
-# =============================================================================
-# Token Decimal Registry
-# =============================================================================
-
-# Chain IDs (EIP-155)
 CHAIN_ID_ETHEREUM = 1
 CHAIN_ID_ARBITRUM = 42161
 CHAIN_ID_BASE = 8453
 
 
-# ``_chain_name_for_id`` is imported above from ``core.chains._helpers`` (VIB-4851
-# A2): the W9-era local copy was collapsed onto the shared registry-derived helper
-# (id -> name, None on an unregistered id) so there is one source of truth.
-
-
-# Paper-engine price-source allowlist: the chains for which the engine wires up
-# the on-chain Chainlink / DEX-TWAP price providers.
-#
-# This is a deliberate engine-level *subset*, not "every chain a provider could
-# serve": DEXTWAPDataProvider supports exactly these 6, while
-# ChainlinkDataProvider additionally has feeds for bsc/linea/sonic that the
-# engine intentionally does not enable here (enabling them would change
-# paper-mode price-source selection — and therefore PnL — on those chains).
-# VIB-4861 collapsed two duplicated inline identity-map dicts (one per provider)
-# into this single named constant; the membership semantics are byte-for-byte
-# the same as the former per-provider ``identity_map.get(config.chain)`` lookup.
-# Chains where BOTH paper-mode price sources exist: a Chainlink feed set
-# (ChainDescriptor.chainlink) AND a DEX TWAP pool table. The same set gates
-# the Chainlink provider, the TWAP provider, and the oracle-divergence
-# check — all of which need the two sources together — so membership is
-# the intersection, not a hand-kept list (VIB-4851 CS-7). This stays a
-# deliberate SUBSET of ChainlinkDataProvider._SUPPORTED_CHAINS: bsc/linea/
-# sonic have feeds but no TWAP pools, exactly as the legacy 6-chain
-# allowlist encoded.
+# Both on-chain paper-mode sources must support a chain. This keeps pricing and
+# divergence checks on the same provider set and excludes feed-only chains.
 _PRICE_SOURCE_CHAINS: frozenset[str] = frozenset(CHAINLINK_CATALOG.chains) & frozenset(UNISWAP_V3_POOLS)
 
 
@@ -300,7 +273,6 @@ def get_token_decimals(chain_id: int, token_address: str) -> int | None:
     """
     normalized_address = token_address.lower()
 
-    # Try TokenResolver first
     chain_name = _chain_name_for_id(chain_id)
     if chain_name:
         resolver = _get_resolver()
@@ -310,25 +282,20 @@ def get_token_decimals(chain_id: int, token_address: str) -> int | None:
             except Exception:
                 pass  # Fall through to measured cache
 
-    # Fallback only to values measured from ERC20 decimals() calls. A normal
-    # TOKEN_DECIMALS.get(...) read would invoke the resolver a second time.
+    # Avoid invoking the resolver twice; this fallback accepts only measured values.
     if isinstance(TOKEN_DECIMALS, _TokenDecimalsCache):
         return TOKEN_DECIMALS.get_measured((chain_id, normalized_address))
     return TOKEN_DECIMALS.get((chain_id, normalized_address))
 
 
-# Native ETH sentinel address (used in ERC-4626, Uniswap, etc.)
 NATIVE_ETH_ADDRESS = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 
-# Native gas token decimals. ETH (and EVM native tokens generally) are 18
-# decimals by chain invariant — this is a known protocol fact, not a silent
-# fallback for an arbitrary unmeasured token (VIB-3164).
+# Native-token precision is a chain invariant, not a fallback for unknown ERC-20s.
 NATIVE_TOKEN_DECIMALS = 18  # decimal-policy-exempt: native gas token is 18 by chain invariant (VIB-3164)
 
-# ERC20 decimals() function selector: keccak256("decimals()")[0:4]
+# keccak256("decimals()")[0:4]
 ERC20_DECIMALS_SELECTOR = "0x313ce567"
 
-# Default timeout for ERC20 decimals() calls (seconds)
 ERC20_DECIMALS_CALL_TIMEOUT = 2.0
 
 
@@ -371,9 +338,7 @@ async def _fetch_erc20_decimals(rpc_url: str, token_address: str) -> int | None:
 
                 result = result_data.get("result")
                 if result and result != "0x":
-                    # decimals() returns uint8, parse as hex
                     decimals = int(result, 16)
-                    # Validate: ERC20 decimals are typically 0-18, max 255
                     if 0 <= decimals <= 255:
                         return decimals
                     else:
@@ -430,12 +395,9 @@ async def get_token_decimals_with_fallback(
     """
     normalized_address = token_address.lower()
 
-    # 1. Check if it's native ETH (sentinel address). Native tokens are 18
-    #    decimals by chain invariant -- not an arbitrary-token guess.
     if normalized_address == NATIVE_ETH_ADDRESS:
         return 18
 
-    # 2. Try TokenResolver first (unified resolution)
     chain_name = _chain_name_for_id(chain_id)
     if chain_name:
         resolver = _get_resolver()
@@ -445,12 +407,10 @@ async def get_token_decimals_with_fallback(
             except Exception:
                 pass  # Fall through to measured cache and ERC20 fallback
 
-    # 3. Check runtime measured-decimals cache
     registry_result = TOKEN_DECIMALS.get((chain_id, normalized_address))
     if registry_result is not None:
         return registry_result
 
-    # 4. If no RPC URL provided, decimals are unmeasured -- return None.
     if rpc_url is None:
         logger.warning(
             f"Token {token_address[:10]}... not in registry and no RPC URL provided; "
@@ -458,17 +418,14 @@ async def get_token_decimals_with_fallback(
         )
         return None
 
-    # 5. Query ERC20 decimals() with timeout
     logger.debug(f"Querying ERC20 decimals() for unknown token {token_address[:10]}...")
     decimals = await _fetch_erc20_decimals(rpc_url, token_address)
 
     if decimals is not None:
-        # Cache measured result for future lookups in this process.
         TOKEN_DECIMALS[(chain_id, normalized_address)] = decimals
         logger.info(f"Cached decimals for {token_address[:10]}... on chain {chain_id}: {decimals}")
         return decimals
 
-    # 6. Unresolvable -- return None (Empty != Zero). Callers skip the token.
     logger.warning(f"Could not resolve decimals for {token_address[:10]}...; returning None (NOT defaulting to 18).")
     return None
 
@@ -491,11 +448,6 @@ def _safe_divergence_pct(expected: Any, actual: Any) -> Decimal | None:
     if expected_dec == 0:
         return Decimal("0") if actual_dec == 0 else Decimal("1")
     return abs(expected_dec - actual_dec) / abs(expected_dec)
-
-
-# =============================================================================
-# Protocol for Paper-Tradeable Strategies
-# =============================================================================
 
 
 @runtime_checkable
@@ -530,11 +482,6 @@ class PaperTradeableStrategy(Protocol):
         ...
 
 
-# =============================================================================
-# Event Types for Paper Trading
-# =============================================================================
-
-
 class PaperTradeEventType:
     """Event types emitted during paper trading."""
 
@@ -551,13 +498,7 @@ class PaperTradeEventType:
     ERROR = "error"
 
 
-# Event callback type
 PaperTradeEventCallback = Callable[[str, dict[str, Any]], None]
-
-
-# =============================================================================
-# Market Snapshot Factory for Fork State
-# =============================================================================
 
 
 def _normalized_snapshot_prices(token_prices: dict[str, Decimal] | None) -> dict[str, Decimal]:
@@ -720,9 +661,7 @@ async def create_market_snapshot_from_fork(
     Returns:
         MarketSnapshot populated with fork-based data
     """
-    # Create snapshot with current timestamp.
-    # Note: ``rsi_provider`` on ``MarketSnapshot`` is typed as a Callable; an
-    # ``RSICalculator`` is duck-compatible but mypy sees a structural mismatch.
+    # RSICalculator is structurally callable, but its type is not recognized as Callable.
     snapshot = MarketSnapshot(
         chain=chain,
         wallet_address=wallet_address,
@@ -732,7 +671,6 @@ async def create_market_snapshot_from_fork(
         runtime_surface="paper_fork",
     )
 
-    # Add metadata about fork state (VIB-1956: expose for on-chain reads)
     if fork_manager.is_running:
         snapshot._fork_block = fork_manager.current_block
         snapshot._fork_rpc_url = fork_manager.get_rpc_url()
@@ -740,11 +678,6 @@ async def create_market_snapshot_from_fork(
     _populate_tracker_balances(snapshot, portfolio_tracker, token_prices)
     _add_native_wrapped_balance_aliases(snapshot, chain)
     return snapshot
-
-
-# =============================================================================
-# Adapters
-# =============================================================================
 
 
 class _BinanceDataProviderAdapter:
@@ -781,8 +714,7 @@ class _BinanceDataProviderAdapter:
         limit = int(kwargs.get("limit", 100))  # type: ignore[call-overload]
 
         start = time.monotonic()
-        # fetch() is called by OHLCVRouter.get_ohlcv() which runs synchronously
-        # from a worker thread (no running event loop), so asyncio.run() is safe.
+        # The router invokes fetch() from a worker without a running event loop.
         try:
             candles = asyncio.run(self._provider.get_ohlcv(token=token, quote=quote, timeframe=timeframe, limit=limit))
             self._consecutive_failures = 0
@@ -801,8 +733,7 @@ class _BinanceDataProviderAdapter:
         latency_ms = int((time.monotonic() - start) * 1000)
         from datetime import UTC, datetime
 
-        # 0.9 = default CEX confidence; OHLCVRouter may clamp to 0.7
-        # for CEX-sourced DeFi pairs (basis risk adjustment)
+        # The router may discount CEX confidence for DeFi pairs with basis risk.
         meta = DataMeta(
             source="binance",
             observed_at=datetime.now(UTC),
@@ -818,11 +749,6 @@ class _BinanceDataProviderAdapter:
         if self._consecutive_failures >= 3:
             return {"status": "degraded", "provider": "binance", "consecutive_failures": self._consecutive_failures}
         return {"status": "healthy", "provider": "binance"}
-
-
-# =============================================================================
-# PaperTrader Engine
-# =============================================================================
 
 
 @dataclass
@@ -866,7 +792,6 @@ class PaperTrader:
     config: PaperTraderConfig
     event_callback: PaperTradeEventCallback | None = None
 
-    # Internal state
     _running: bool = field(default=False, init=False, repr=False)
     _current_strategy: PaperTradeableStrategy | None = field(default=None, init=False, repr=False)
     _orchestrator: ExecutionOrchestrator | None = field(default=None, init=False, repr=False)
@@ -895,41 +820,33 @@ class PaperTrader:
     _reconciler_discrepancies: list[Any] = field(default_factory=list, init=False, repr=False)
     _reconciler_checks: int = field(default=0, init=False, repr=False)
     _divergence_records: dict[str, DivergenceRecord] = field(default_factory=dict, init=False, repr=False)
-    #: Resolved numeraire token symbol (VIB-5127), or None for the USD default.
-    #: ``False`` is the "not yet resolved" sentinel; resolved lazily on the first
-    #: equity point from ``_current_strategy.quote_asset`` + config chain.
+    #: False is the unresolved sentinel; None is the resolved USD default.
     _numeraire_symbol: "str | None | bool" = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Validate configuration after initialization."""
-        # PaperTraderConfig is mutable. Revalidate the fork lifecycle at the
-        # engine boundary before any providers or execution machinery start.
+        # Config is mutable, so validate again at each execution boundary.
         validate_fork_lifecycle(self.config)
 
         if self.config.tick_interval_seconds <= 0:
             raise ValueError("tick_interval_seconds must be positive")
 
-        # Initialize fallback usage tracking
         self._fallback_usage = {
             "hardcoded_price": 0,
             "default_gas_price": 0,
             "default_usd_amount": 0,
         }
 
-        # Health telemetry counters (VIB-1957)
         self._ticks_with_fork: int = 0
         self._ticks_with_indicators: int = 0
         self._ticks_with_action: int = 0
         self._last_successful_decision_at: datetime | None = None
         self._last_trade_at: datetime | None = None
 
-        # Initialize price provider based on config
         self._init_price_provider()
 
-        # Initialize indicator calculators (RSI, MACD, BB, ATR all derive from OHLCV)
         self._init_indicator_calculators()
 
-        # Initialize YieldPoker for persistent fork mode (VIB-2632)
         if self.config.yield_poker_enabled:
             try:
                 from almanak.framework.backtesting.paper.yield_poker import YieldPoker
@@ -988,7 +905,6 @@ class PaperTrader:
         if not self._valuer_available:
             return
         try:
-            # Refresh prices so the snapshot values balances accurately.
             self._cached_prices = await self._get_portfolio_prices()
             wallet_address = self._orchestrator.signer.address if self._orchestrator else ""
             self._last_market_snapshot = await create_market_snapshot_from_fork(
@@ -1019,7 +935,6 @@ class PaperTrader:
         return strategy, market
 
     def _rich_snapshot_values(self, snapshot: Any) -> tuple[Decimal, Decimal, Decimal] | None:
-        # PortfolioSnapshot.is_valid is a boolean property, not a method.
         if not snapshot.is_valid:
             return None
         return snapshot.total_value_usd, snapshot.available_cash_usd, snapshot.position_value_usd
@@ -1110,10 +1025,7 @@ class PaperTrader:
         Do not inline the helpers back into this method without rerunning the
         characterization suite.
         """
-        # PaperTraderConfig remains mutable after engine construction. Enforce
-        # the lifecycle refusal again at the public execution boundary so a
-        # caller cannot mutate a validated rolling config into an unsupported
-        # persistent/non-resetting session before starting the fork.
+        # Reject lifecycle mutations made after construction before starting the fork.
         validate_fork_lifecycle(self.config)
 
         if self._running:
@@ -1147,7 +1059,7 @@ class PaperTrader:
         except (asyncio.CancelledError, Exception) as exc:
             error = _engine_helpers.classify_run_exception(self, exc)
         finally:
-            # Cache final value BEFORE cleanup clears valuer state.
+            # Valuation must precede cleanup, which clears the valuer state.
             final_valuation = await _engine_helpers.capture_final_portfolio_value(self)
             self._running = False
             self._current_strategy = None
@@ -1168,7 +1080,6 @@ class PaperTrader:
         metrics = self._calculate_metrics()
         trade_records = _engine_helpers.build_trade_records(self._trades)
 
-        # Config dict with optional error summary.
         config_dict = self.config.to_dict()
         error_summary = self._error_handler.get_error_summary() if self._error_handler else {}
         if error_summary:
@@ -1215,7 +1126,6 @@ class PaperTrader:
         if self._running:
             raise RuntimeError("PaperTrader is already running")
 
-        # Run with no duration limit (will run until stop() is called)
         asyncio.create_task(self.run(strategy, duration_seconds=float("inf")))
 
     async def stop(self) -> None:
@@ -1264,9 +1174,7 @@ class PaperTrader:
         if self.config.position_reconciler_enabled and self.config.fork_lifecycle == ForkLifecycle.PERSISTENT:
             await self._run_position_reconciler()
         elif self.config.position_reconciler_enabled:
-            # VIB-2634: when the fork resets to latest every tick there is no
-            # persistent state to drift, so reconciling against a fresh fork
-            # is meaningless — skip instead of producing noise.
+            # Fresh forks have no persistent state to reconcile for drift.
             logger.debug(
                 "[%s] Skipping PositionReconciler: fork_lifecycle=%s resets state every tick",
                 self._backtest_id,
@@ -1333,9 +1241,7 @@ class PaperTrader:
         except (asyncio.CancelledError, Exception) as e:
             _engine_helpers.handle_run_loop_exception(self, e)
         finally:
-            # VIB-2550: Refresh price cache for all portfolio tokens before PnL calc.
-            # Without this, _get_token_price_sync may miss tokens whose prices
-            # were never fetched (e.g., ETH used only for gas, not for trades).
+            # Teardown valuation needs prices for non-traded holdings such as gas ETH.
             cached = await _engine_helpers.cache_run_loop_teardown_valuation(self)
             await self.stop()
             await self._cleanup()
@@ -1357,17 +1263,14 @@ class PaperTrader:
             },
         )
 
-        # Build error summary
         error_summary: dict[str, int] = {}
         for error in self._errors:
             error_type_str = error.error_type.value
             error_summary[error_type_str] = error_summary.get(error_type_str, 0) + 1
 
-        # Calculate total gas
         total_gas_used = sum(t.gas_used for t in self._trades)
         total_gas_cost_usd = sum((t.gas_cost_usd for t in self._trades), Decimal("0"))
 
-        # Create summary (using cached values from before cleanup)
         summary = PaperTradingSummary(
             deployment_id=strategy.deployment_id,
             start_time=session_start,
@@ -1412,28 +1315,21 @@ class PaperTrader:
         except Exception:
             return None
 
-    # =========================================================================
-    # Internal Methods
-    # =========================================================================
-
     async def _initialize_fork(self) -> None:
         """Initialize the Anvil fork for paper trading."""
         logger.info(f"[{self._backtest_id}] Initializing Anvil fork for chain={self.config.chain}")
 
-        # Start fork at latest block
         await self.fork_manager.start()
 
         if self.fork_manager.is_running:
             logger.info(f"[{self._backtest_id}] Fork initialized at block {self.fork_manager.current_block}")
 
-            # Initialize portfolio tracker session with config balances
             initial_balances = self.config.get_initial_balances()
             self.portfolio_tracker.start_session(
                 initial_balances=initial_balances,
                 chain=self.config.chain,
             )
 
-            # Fund the on-chain wallet with initial balances (first startup)
             await self._sync_wallet_to_fork(use_initial=True)
 
     def _has_explicit_bootstrap_tokens(self) -> bool:
@@ -1554,12 +1450,10 @@ class PaperTrader:
         Args:
             use_initial: Force using config initial balances (for first startup).
         """
-        # TODO: Support custom private key via PaperTraderConfig
         wallet_address = ANVIL_DEFAULT_ADDRESS
         balances = self._sync_wallet_balances(use_initial=use_initial)
         token_balances = await self._fund_sync_wallet_balances(wallet_address, balances)
 
-        # Two-tier bootstrap validation (VIB-2377)
         if use_initial and token_balances:
             await self._validate_bootstrap(wallet_address, token_balances)
 
@@ -1668,21 +1562,15 @@ class PaperTrader:
         from almanak.framework.execution.simulator.direct import DirectSimulator
         from almanak.framework.execution.submitter.public import PublicMempoolSubmitter
 
-        # Get fork RPC URL
         fork_rpc = self.fork_manager.get_rpc_url()
 
-        # Create signer with test private key (for fork only)
-        # Note: This uses a deterministic test key for Anvil (first default Anvil account)
-        # TODO: Support custom private key via PaperTraderConfig for non-default Anvil wallets
+        # Paper mode signs only against the local fork with Anvil's deterministic test key.
         signer = LocalKeySigner(private_key=ANVIL_DEFAULT_PRIVATE_KEY)
 
-        # Create submitter connected to fork
         submitter = PublicMempoolSubmitter(rpc_url=fork_rpc)
 
-        # Create simulator
         simulator = DirectSimulator()
 
-        # Create orchestrator with default settings
         self._orchestrator = ExecutionOrchestrator(
             signer=signer,
             submitter=submitter,
@@ -1699,9 +1587,7 @@ class PaperTrader:
         VIB-2553: Close all long-lived providers and their HTTP sessions
         to prevent 'Event loop is closed' and 'Unclosed client session' warnings.
         """
-        # Close providers' HTTP sessions to prevent resource leaks.
-        # Note: providers are NOT nulled out so the PaperTrader instance
-        # remains reusable for another run() call if needed.
+        # Close sessions without clearing providers so the trader remains reusable.
         if self._rsi_calculator is not None:
             try:
                 await self._rsi_calculator.close()
@@ -1726,7 +1612,6 @@ class PaperTrader:
             except Exception as e:
                 logger.debug(f"[{self._backtest_id}] Error closing TWAP provider: {e}")
 
-        # Stop the fork
         try:
             await self.fork_manager.stop()
         except Exception as e:
@@ -1929,34 +1814,23 @@ class PaperTrader:
         )
 
         try:
-            # Check fork is running, attempt recovery if dead
             if not await self._ensure_tick_fork_ready():
                 return None
 
-            # Fetch prices for portfolio tokens (cached for IntentCompiler use)
             token_prices = await self._get_portfolio_prices()
             self._cached_prices = token_prices
 
-            # Create market snapshot from fork (with price oracle so strategies can call market.price())
             wallet_address = self._orchestrator.signer.address if self._orchestrator else ""
             snapshot = await self._create_tick_snapshot(wallet_address, token_prices)
 
-            # Pre-compute common indicators in async context for performance.
-            # _run_async() handles the nested-loop case via ThreadPoolExecutor, so
-            # uncached parameters won't deadlock -- but pre-computation avoids the
-            # thread overhead. Covers default timeframes:
-            #   - rsi() defaults to "4h"
-            #   - sma/ema/macd/bollinger_bands/atr default to "1h"
+            # Precompute default indicator windows to avoid the nested-loop thread fallback.
             await self._precompute_tick_indicators(snapshot, token_prices)
 
-            # Call strategy decide
             decide_result = self._decide_for_tick(strategy, snapshot)
 
-            # Extract intent
             intent = self._extract_intent(decide_result)
             self._emit_intent_decided(intent)
 
-            # Execute if not HOLD
             if intent is not None and not self._is_hold_intent(intent):
                 trade_result = await self._execute_action_intent_for_tick(
                     strategy,
@@ -1965,7 +1839,6 @@ class PaperTrader:
                     wallet_address,
                 )
 
-            # Record equity point
             await self._record_equity_point()
 
         except Exception as e:
@@ -2004,7 +1877,7 @@ class PaperTrader:
         )
 
         intent_dict = self._serialize_intent(intent)
-        # Reset so callback never sees stale data from a previous tick
+        # Clear stale data before any path that can invoke the callback.
         self._last_execution_result = None
 
         try:
@@ -2021,7 +1894,6 @@ class PaperTrader:
                 )
                 return None
 
-            # VIB-2550: Snapshot balances BEFORE execution for delta accounting
             wallet_address = self._orchestrator.signer.address if self._orchestrator else ""
             balances_before = await self._snapshot_balances(wallet_address, intent=intent)
 
@@ -2029,28 +1901,17 @@ class PaperTrader:
                 deployment_id=strategy.deployment_id,
                 chain=self.config.chain,
                 wallet_address=self._orchestrator.signer.address,
-                simulation_enabled=True,  # Always simulate on fork
+                simulation_enabled=True,
             )
 
             result = await self._orchestrator.execute(action_bundle, context)
 
-            # VIB-2918: Enrich result so on_intent_executed receives populated
-            # position_id / swap_amounts / extracted_data, matching StrategyRunner.
-            # Without this, stateful strategies that read result.position_id in
-            # their callback never advance their state machine and re-open
-            # positions every tick.
-            # VIB-3159: paper mode downgrades ExtractError to a structured
-            # warning + counter instead of raising CriticalAccountingError.
-            # Paper trading is an expected non-live surface (fork reorgs,
-            # mocked decimals) where halting the whole run on a single parse
-            # error would block research. The warning still surfaces on
-            # result.extraction_warnings for monitoring.
+            # Stateful callbacks require StrategyRunner-compatible enriched fields. Paper mode
+            # keeps fork-specific extraction failures as structured warnings instead of halting.
             if result.success:
-                # VIB-3203: pass compiler bundle metadata for realized slippage math.
                 bundle_meta = getattr(action_bundle, "metadata", None) if action_bundle else None
                 result = enrich_result(result, intent, context, live_mode=False, bundle_metadata=bundle_meta)
 
-            # Store for on_intent_executed callback (VIB-1951)
             self._last_execution_result = result
 
             execution_time_ms = int((datetime.now(UTC) - execution_start).total_seconds() * 1000)
@@ -2102,7 +1963,7 @@ class PaperTrader:
             result, fallback_block=self.fork_manager.current_block or 0
         )
 
-        # VIB-2550: Use balance deltas as primary accounting (ground truth).
+        # On-chain balance deltas are primary; receipt and intent extraction are fallbacks.
         balances_after = await self._snapshot_balances(wallet_address, intent=intent)
         tokens_in, tokens_out = await self._compute_balance_deltas(balances_before, balances_after, intent)
 
@@ -2241,17 +2102,10 @@ class PaperTrader:
         value to ensure newly acquired tokens have prices and to avoid using
         stale prices across ticks.
         """
-        # Refresh prices for all portfolio tokens to ensure cache is up-to-date
-        # This prevents issues with:
-        # 1. Empty cache on initial equity point
-        # 2. New tokens acquired during trades not having prices
-        # 3. Stale prices when strict_price_mode is enabled
         await self._get_portfolio_prices()
 
         now = datetime.now(UTC)
 
-        # Try rich valuation first (includes LP + lending positions)
-        # Persistent forks with use_rich_valuation strongly prefer this path
         rich = self._value_portfolio_rich()
         if rich is not None:
             value, spot_value, position_value = rich
@@ -2269,12 +2123,8 @@ class PaperTrader:
 
         eth_price = self._cached_prices.get("ETH") or self._cached_prices.get("WETH")
 
-        # Capture the numeraire token's USD price (VIB-5127). Fetched with the
-        # hardcoded fallback disabled: the numeraire rescales the whole
-        # portfolio, so a provider-backed (or stablecoin) price is required --
-        # an unpriceable numeraire is left None and fails loud at result
-        # assembly (compute_numeraire_metrics_paper), never silently fabricated.
-        # None for USD strategies -> value_usd stays USD, no projection.
+        # Numeraire prices rescale the entire portfolio and may not be fabricated.
+        # Leave missing prices unmeasured so result assembly fails loudly.
         numeraire_symbol = self._resolve_numeraire()
         numeraire_price: Decimal | None = None
         if numeraire_symbol:
@@ -2314,18 +2164,16 @@ class PaperTrader:
         Returns:
             True if fork should be refreshed
         """
-        # Persistent mode: never reset, only recover dead forks
         if self.config.fork_lifecycle == ForkLifecycle.PERSISTENT:
             return not self.fork_manager.is_running
 
-        # Rolling reset mode: reset every tick if configured
         if not self.config.reset_fork_every_tick:
             return False
 
         if not self.fork_manager.is_running:
             return True
 
-        return True  # Reset every tick if configured
+        return True
 
     async def _refresh_fork(self) -> None:
         """Refresh the Anvil fork to a more recent block.
@@ -2345,13 +2193,11 @@ class PaperTrader:
             },
         )
 
-        # Reset fork to latest block
         await self.fork_manager.reset_to_latest()
 
-        # Reinitialize orchestrator with refreshed fork
         await self._initialize_orchestrator()
 
-        # Re-fund wallet after fork reset (balances are wiped on reset)
+        # Resetting the fork wipes wallet balances.
         await self._sync_wallet_to_fork()
 
         if self.fork_manager.is_running:
@@ -2442,21 +2288,15 @@ class PaperTrader:
         try:
             from almanak.framework.backtesting.paper.position_reconciler import PositionReconciler
 
-            # Lazy-init the reconciler
             if self._position_reconciler is None:
                 self._position_reconciler = PositionReconciler(chain=self.config.chain)
 
-            # Reconciler needs web3 instance — create from fork RPC
             fork_rpc = self.fork_manager.get_rpc_url()
             if not fork_rpc:
                 return
 
             try:
-                # The position_queries readers used by reconcile() are async
-                # (``await web3.eth.call(...)``). A sync Web3 instance fails
-                # every query with "HexBytes can't be used in 'await'
-                # expression" and silently reports zero positions (found via
-                # the VIB-2634 on-chain smoke) — AsyncWeb3 is required here.
+                # Position readers await Web3 calls; a sync provider can silently look flat.
                 from web3 import AsyncHTTPProvider, AsyncWeb3
 
                 w3 = AsyncWeb3(AsyncHTTPProvider(fork_rpc))
@@ -2472,8 +2312,7 @@ class PaperTrader:
                 discrepancies = await self._position_reconciler.reconcile(w3, wallet, tolerance_percent=tolerance)
                 divergences = await self._sync_reconciler_baseline(discrepancies, w3, wallet)
             finally:
-                # AsyncHTTPProvider lazily opens an aiohttp session; close it
-                # so per-tick runs don't leak one session per reconcile.
+                # AsyncHTTPProvider opens a session lazily; close it on every tick.
                 try:
                     await w3.provider.disconnect()
                 except Exception:  # noqa: BLE001 - cleanup must never raise
@@ -2485,7 +2324,6 @@ class PaperTrader:
                     f"divergence(s) beyond {tolerance:.2%} tolerance "
                     f"(observe-only, no correction applied)"
                 )
-                # Store for inclusion in summary
                 self._reconciler_discrepancies.extend(divergences)
                 for d in divergences:
                     self._record_divergence(
@@ -2587,8 +2425,7 @@ class PaperTrader:
         try:
             positions = await query_gmx_positions(wallet=wallet, web3=w3, chain=self.config.chain)
         except GmxPositionReadUnavailable as exc:
-            # Adoption is best-effort baseline seeding: an UNMEASURED book skips
-            # it loudly rather than seeding from a false-flat read (Empty≠Zero).
+            # An unmeasured book must not seed a false-flat baseline.
             logger.warning("[%s] Perp adoption skipped — book unmeasured: %s", self._backtest_id, exc)
             return
         for perp in positions:
@@ -2662,9 +2499,7 @@ class PaperTrader:
             else:
                 tracked.debt_balance = int(discrepancy.actual)
         elif discrepancy.discrepancy_type == DiscrepancyType.TICK_RANGE_MISMATCH:
-            # Tick bounds are immutable on-chain, so a mismatch means the
-            # baseline itself is wrong. Drop it and re-adopt from a fresh
-            # on-chain read on the next tick.
+            # Tick bounds are immutable, so discard and re-adopt a mismatched baseline.
             recon.positions.pop(pid, None)
 
     async def _check_balance_divergence(self, wallet: str) -> None:
@@ -2692,10 +2527,10 @@ class PaperTrader:
 
         for symbol, expected in expected_balances.items():
             if symbol.upper() == "ETH":
-                continue  # gas drift from poke/maintenance txs is expected
+                continue
             raw = onchain.get(symbol)
             if raw is None:
-                continue  # unmeasurable this tick — skip, don't assume zero
+                continue
             token_address = self._resolve_token_address(symbol)
             if not token_address:
                 continue
@@ -2789,24 +2624,17 @@ class PaperTrader:
             except Exception as e:
                 logger.warning(f"[{self._backtest_id}] Event callback failed: {e}")
 
-    # =========================================================================
-    # Intent Processing Helpers
-    # =========================================================================
-
     def _extract_intent(self, decide_result: Any) -> Any:
         """Extract the intent from a decide() result."""
         if decide_result is None:
             return None
 
-        # Check if it's a DecideResult with an intent attribute
         if hasattr(decide_result, "intent"):
             return decide_result.intent
 
-        # Check if it's a DecideResult tuple-like (intent, context)
         if isinstance(decide_result, tuple) and len(decide_result) >= 1:
             return decide_result[0]
 
-        # Otherwise, assume it's an intent directly
         return decide_result
 
     def _is_hold_intent(self, intent: Any) -> bool:
@@ -2814,14 +2642,12 @@ class PaperTrader:
         if intent is None:
             return True
 
-        # Check intent_type attribute
         if hasattr(intent, "intent_type"):
             intent_type = intent.intent_type
             if hasattr(intent_type, "value"):
                 return intent_type.value == "HOLD"
             return str(intent_type) == "HOLD"
 
-        # Check class name
         if hasattr(intent, "__class__"):
             if intent.__class__.__name__ == "HoldIntent":
                 return True
@@ -2845,18 +2671,15 @@ class PaperTrader:
         Returns:
             ActionBundle or None if compilation fails
         """
-        # Check if intent has a compile method
         if hasattr(intent, "compile"):
             try:
                 return intent.compile()
             except Exception as e:
                 logger.warning(f"[{self._backtest_id}] Intent compile() failed: {e}")
 
-        # Try using IntentCompiler with current prices
         try:
             from almanak.framework.intents import IntentCompiler
 
-            # Build price oracle dict from cached portfolio prices
             price_dict = getattr(self, "_cached_prices", None)
 
             wallet_address = self._orchestrator.signer.address if self._orchestrator else ""
@@ -2876,7 +2699,6 @@ class PaperTrader:
 
     def _get_intent_amount_usd(self, intent: Any) -> Decimal:
         """Extract USD amount from an intent."""
-        # Check for direct USD amount
         for attr in ["amount_usd", "notional_usd", "value_usd", "collateral_usd"]:
             if hasattr(intent, attr):
                 value = getattr(intent, attr)
@@ -2893,10 +2715,8 @@ class PaperTrader:
         if not result.total_gas_cost_wei:
             return Decimal("0")
 
-        # Get ETH price from price provider (uses cache/fallback)
         eth_price = self._get_token_price_sync("ETH")
 
-        # Convert wei to ETH
         gas_cost_eth = Decimal(result.total_gas_cost_wei) / Decimal(10**18)
 
         return gas_cost_eth * eth_price
@@ -2937,7 +2757,6 @@ class PaperTrader:
         success = trade_result is not None
         callback_result: Any = self._last_execution_result
         if callback_result is None:
-            # Compilation failure — no ExecutionResult available
             from types import SimpleNamespace
 
             callback_result = SimpleNamespace(
@@ -2973,7 +2792,6 @@ class PaperTrader:
         if public_attrs is not None:
             return public_attrs
 
-        # Fallback to string representation
         return {"repr": str(intent)}
 
     def _serialize_intent_to_dict(self, intent: Any) -> dict[str, Any] | None:
@@ -3009,10 +2827,6 @@ class PaperTrader:
             return value.value
         return value
 
-    # =========================================================================
-    # Balance-delta accounting (VIB-2550)
-    # =========================================================================
-
     def _resolve_token_address(self, symbol: str) -> str | None:
         """Resolve a token symbol to its on-chain address for the current chain.
 
@@ -3024,7 +2838,6 @@ class PaperTrader:
         Returns:
             Checksummed address string, or None if unresolvable
         """
-        # Skip ETH — tracked via eth_getBalance, not ERC-20
         if symbol.upper() == "ETH":
             return None
 
@@ -3036,9 +2849,7 @@ class PaperTrader:
             except Exception as e:
                 logger.debug(f"[{self._backtest_id}] TokenResolver failed for {symbol} on {self.config.chain}: {e}")
 
-        # Fallback to static TOKEN_ADDRESSES table
         chain_tokens = TOKEN_ADDRESSES.get(self.config.chain, {})
-        # Case-insensitive lookup
         for key, addr in chain_tokens.items():
             if key.upper() == symbol.upper():
                 return addr
@@ -3098,12 +2909,10 @@ class PaperTrader:
         """
         balances: dict[str, int] = {}
 
-        # 1. Native ETH balance
         eth_balance = await self._snapshot_eth_balance(wallet_address)
         if eth_balance is not None:
             balances["ETH"] = eth_balance
 
-        # 2. ERC-20 balances for all tokens the portfolio currently tracks
         for symbol in self._tracked_balance_tokens(intent):
             raw_balance = await self._snapshot_erc20_balance(symbol, wallet_address)
             if raw_balance is not None:
@@ -3130,17 +2939,13 @@ class PaperTrader:
         Returns:
             Tuple of (tokens_in, tokens_out) with human-readable Decimal amounts
         """
-        # Collect all tokens that appear in either snapshot
         all_symbols = set(before.keys()) | set(after.keys())
 
-        # Augment with intent tokens that weren't tracked before (best-effort).
         await _engine_helpers.discover_intent_token_balances(self, intent, before, after, all_symbols)
 
         chain_id = self.fork_manager.chain_id
         rpc_url = self.fork_manager.get_rpc_url() if self.fork_manager.is_running else None
 
-        # Split symbol-keyed balance deltas into raw inflow/outflow legs by sign.
-        # Zero deltas don't move and are dropped.
         raw_in: dict[str, int] = {}
         raw_out: dict[str, int] = {}
         for symbol in all_symbols:
@@ -3151,26 +2956,19 @@ class PaperTrader:
                 raw_out[symbol] = abs(delta)
 
         async def _symbol_decimals(symbol: str) -> int | None:
-            # Native ETH is 18 decimals by chain invariant (not a guess).
             if symbol.upper() == "ETH":
                 return NATIVE_TOKEN_DECIMALS
             token_address = self._resolve_token_address(symbol)
             if not token_address:
-                # Cannot resolve address — token is unmeasurable (Empty != Zero).
+                # An unresolved address is unmeasured, not a zero balance.
                 return None
             return await get_token_decimals_with_fallback(chain_id, token_address, rpc_url)
 
         async def _identity_symbol(symbol: str) -> str:
             return symbol
 
-        # VIB-3164 (Empty != Zero, blueprint 27 §10.10): if ANY moving token has
-        # unresolved decimals or an unresolvable address, the trade is unmeasurable.
-        # _resolve_token_flows performs the atomic skip — recording only the
-        # resolvable legs would yield a ONE-SIDED flow (CodeRabbit critical) and
-        # record_trade would apply half the swap, corrupting balances/PnL. None ==
-        # abort the whole balance-delta extraction; the caller falls back to
-        # receipt/intent-based estimation. Never half-record, never assume a silent
-        # 18-decimal default (USDC=6, USDT=6, WBTC=8).
+        # Flow resolution is atomic: dropping unresolved legs would create one-sided
+        # accounting and corrupt balances and PnL. Never assume a default precision.
         resolved = await _engine_helpers.resolve_token_flows(
             raw_in,
             raw_out,
@@ -3209,26 +3007,16 @@ class PaperTrader:
         tokens_in: dict[str, Decimal] = {}
         tokens_out: dict[str, Decimal] = {}
 
-        # Try to extract actual token flows from receipt (VIB-1952: receipt parsing for PnL)
         if receipt is not None and wallet_address:
             try:
                 receipt_dict = receipt.to_dict()
                 log_count = len(receipt_dict.get("logs", []))
                 flows = extract_receipt_token_flows(receipt_dict, wallet_address)
 
-                # Get chain_id and RPC URL for decimal lookups
                 chain_id = self.fork_manager.chain_id
                 rpc_url = self.fork_manager.get_rpc_url() if self.fork_manager.is_running else None
 
-                # Convert from smallest unit to Decimal with correct token decimals.
-                # Use symbol mapping for human-readable portfolio keys (US-065c).
-                # VIB-3164 (Empty != Zero, blueprint 27 §10.10): if any leg's decimals
-                # are unresolved, the trade is unmeasurable. _resolve_token_flows
-                # performs the atomic skip — recording only the resolvable legs would
-                # yield a ONE-SIDED flow (CodeRabbit critical) and record_trade would
-                # apply half the swap, corrupting balances/PnL. None == abort the whole
-                # receipt-flow extraction; the caller falls back to intent-based
-                # estimation. Never half-record, never assume a silent 18-decimal default.
+                # Resolve every receipt leg atomically; partial flows corrupt accounting.
                 resolved = await _engine_helpers.resolve_token_flows(
                     dict(flows.tokens_in),
                     dict(flows.tokens_out),
@@ -3241,7 +3029,6 @@ class PaperTrader:
                     return {}, {}
                 tokens_in, tokens_out = resolved
 
-                # If we got flows from receipt, return them
                 if tokens_in or tokens_out:
                     logger.debug(
                         f"[{self._backtest_id}] Extracted token flows from receipt: "
@@ -3249,7 +3036,6 @@ class PaperTrader:
                     )
                     return tokens_in, tokens_out
 
-                # Receipt had logs but no wallet-relevant transfers
                 if log_count > 0:
                     logger.warning(
                         f"[{self._backtest_id}] Receipt had {log_count} logs but no Transfer events "
@@ -3261,7 +3047,6 @@ class PaperTrader:
                     "Falling back to intent-based estimation."
                 )
 
-        # Fallback: Extract expected flows from intent attributes
         intent_type = self._get_intent_type(intent)
         expected_out = self._get_expected_amount_out(intent) if intent_type == IntentType.SWAP else None
         return _engine_helpers.intent_fallback_token_flows(
@@ -3318,18 +3103,15 @@ class PaperTrader:
         if not tokens_in:
             return None
 
-        # For swaps, try to find the target token
         intent_type = self._get_intent_type(intent)
         if intent_type == IntentType.SWAP:
             to_token = getattr(intent, "to_token", None)
             if to_token:
                 to_token_upper = str(to_token).upper()
-                # Check both symbol and address forms
                 for token_key, amount in tokens_in.items():
                     if token_key.upper() == to_token_upper or to_token_upper in token_key.upper():
                         return amount
 
-        # Fallback: return sum of all tokens in
         if tokens_in:
             return sum(tokens_in.values(), Decimal("0"))
 
@@ -3354,7 +3136,6 @@ class PaperTrader:
             return None
 
         if expected == Decimal("0"):
-            # Cannot calculate slippage from zero expected
             return None
 
         slippage = (expected - actual) / expected * Decimal("10000")
@@ -3388,10 +3169,6 @@ class PaperTrader:
                 return value.lower()
 
         return "default"
-
-    # =========================================================================
-    # Price Provider Helpers
-    # =========================================================================
 
     def _price_source_order_for_config(self) -> list[str]:
         price_source = self.config.price_source
@@ -3521,7 +3298,7 @@ class PaperTrader:
                 self._twap_provider = DEXTWAPDataProvider(
                     chain=twap_chain,
                     rpc_url=self.config.rpc_url,
-                    twap_window_seconds=300,  # 5 minute TWAP window
+                    twap_window_seconds=300,
                     cache_ttl_seconds=60,
                 )
                 logger.info(
@@ -3609,14 +3386,11 @@ class PaperTrader:
 
             chain = self.config.chain.lower() if isinstance(self.config.chain, str) else str(self.config.chain).lower()
 
-            # Create router with providers
             router = OHLCVRouter(default_chain=chain)
 
-            # CoinGecko Onchain: DEX-native data, no API key needed
             gecko = CoinGeckoOnchainOHLCVProvider()
             router.register_provider(gecko)
 
-            # Binance: CEX data via DataProvider adapter
             binance = BinanceOHLCVProvider(cache_ttl=120)
             router.register_provider(_BinanceDataProviderAdapter(binance))
 
@@ -3938,7 +3712,6 @@ class PaperTrader:
         if cached_or_stable is not None:
             return cached_or_stable
 
-        # Map token symbols to supported ones
         lookup_token = self._price_lookup_token(token_upper)
 
         for source_index, source in enumerate(self._price_source_order):
@@ -3946,13 +3719,9 @@ class PaperTrader:
             if price is not None and provider_used is not None:
                 return self._cache_provider_price(token_upper, price, provider_used)
 
-        # All providers failed - fail instead of fabricating when strict price
-        # mode is enabled OR the caller forbids the hardcoded fallback (the
-        # numeraire token, VIB-5127).
         if self.config.strict_price_mode or not allow_hardcoded_fallback:
             self._raise_price_unavailable(token_upper, allow_hardcoded_fallback)
 
-        # Fallback prices for common tokens when all providers fail
         return self._hardcoded_token_price(token_upper)
 
     def _get_token_price_sync(self, token: str) -> Decimal:
@@ -3977,18 +3746,14 @@ class PaperTrader:
         """
         token_upper = token.upper()
 
-        # Check cache first (populated by async _get_token_price with fallback chain)
         if token_upper in self._price_cache:
             return self._price_cache[token_upper]
 
-        # Stablecoins always return $1
         stables = {"USDC", "USDT", "DAI", "FRAX", "LUSD", "BUSD", "USD", "USDC.E"}
         if token_upper in stables:
             return Decimal("1")
 
-        # Check if strict price mode is enabled
         if self.config.strict_price_mode:
-            # Strict mode: fail instead of using arbitrary prices
             error_msg = (
                 f"Price for {token_upper} not in cache on chain={self.config.chain} "
                 f"(chain_id={self.config.chain_id}) and strict_price_mode is enabled. "
@@ -3998,7 +3763,6 @@ class PaperTrader:
             logger.error("[%s] %s", self._backtest_id, error_msg)
             raise ValueError(error_msg)
 
-        # Fallback prices for common tokens (sync fallback when cache not populated)
         logger.warning(
             "[%s] Using hardcoded fallback price for %s on chain=%s in sync context. "
             "Set strict_price_mode=True for institutional-grade backtests.",
@@ -4020,7 +3784,6 @@ class PaperTrader:
         }
 
         price = fallback_prices.get(token_upper, Decimal("1"))
-        # Track that we used a hardcoded fallback for compliance reporting
         self._used_hardcoded_fallback = True
         self._track_fallback("hardcoded_price")
         return price
@@ -4038,7 +3801,6 @@ class PaperTrader:
         """
         prices: dict[str, Decimal] = {}
 
-        # Get all unique tokens from portfolio
         tokens_to_price = set()
         tokens_to_price.add("ETH")
         tokens_to_price.add("WETH")
@@ -4049,16 +3811,11 @@ class PaperTrader:
         for token in self.config.initial_tokens:
             tokens_to_price.add(token.upper())
 
-        # Fetch prices for each token
         for token in tokens_to_price:
             price = await self._get_token_price(token)
             prices[token] = price
 
         return prices
-
-    # =========================================================================
-    # Portfolio Value Helpers
-    # =========================================================================
 
     def _calculate_initial_capital(self) -> Decimal:
         """Calculate initial capital from config balances.
@@ -4071,11 +3828,9 @@ class PaperTrader:
         """
         initial = Decimal("0")
 
-        # ETH value using price provider
         eth_price = self._get_token_price_sync("ETH")
         initial += self.config.initial_eth * eth_price
 
-        # Token values from price provider
         for token, amount in self.config.initial_tokens.items():
             price = self._get_token_price_sync(token)
             initial += amount * price
@@ -4097,10 +3852,6 @@ class PaperTrader:
             total += amount * price
 
         return total
-
-    # =========================================================================
-    # Metrics Calculation
-    # =========================================================================
 
     def _metric_equity_values(self) -> list[Decimal]:
         return [point.value_usd for point in self._equity_curve]
@@ -4154,46 +3905,34 @@ class PaperTrader:
         if not self._equity_curve:
             return BacktestMetrics()
 
-        # Extract equity values
         initial_capital = self._calculate_initial_capital()
         equity_values = self._metric_equity_values()
         initial_value = equity_values[0] if equity_values else initial_capital
         final_value = equity_values[-1] if equity_values else initial_capital
 
-        # Total PnL
         total_pnl = final_value - initial_value
 
-        # Execution costs from trades (all _trades are successful executions)
-        total_fees = Decimal("0")  # Fees tracked in metadata if needed
-        total_slippage = Decimal("0")  # Slippage would be calculated from receipts
+        total_fees = Decimal("0")
+        total_slippage = Decimal("0")
         total_gas = sum((t.gas_cost_usd for t in self._trades), Decimal("0"))
 
-        # Net PnL
         net_pnl = total_pnl
 
-        # Total return (as ratio for internal use; convert to percentage when assigning to BacktestMetrics per VIB-2915)
         total_return = self._metric_total_return(initial_value, final_value)
 
-        # Calculate returns for risk metrics
         returns = calculate_returns(equity_values)
 
-        # Volatility and Sharpe ratio (simplified)
         volatility = calculate_volatility(returns)
         sharpe = calculate_sharpe_ratio(returns, volatility)
 
-        # Max drawdown
         max_drawdown = calculate_max_drawdown(equity_values)
 
-        # Trade statistics using per-trade PnL from net_pnl_usd (includes gas costs)
         total_trades_count = len(self._trades)
 
-        # Calculate win rate and profit factor from per-trade PnL (including gas)
         gross_profit, gross_loss, winning_trades_count, losing_trades_count = self._metric_trade_pnl_stats()
 
-        # Win rate = winning trades / total trades with non-zero PnL
         win_rate = self._metric_win_rate(winning_trades_count, losing_trades_count)
 
-        # Profit factor = gross profit / gross loss
         profit_factor = self._metric_profit_factor(gross_profit, gross_loss)
 
         return BacktestMetrics(
@@ -4246,11 +3985,6 @@ class PaperTrader:
         from .metrics_calculator import decimal_sqrt
 
         return decimal_sqrt(n)
-
-
-# =============================================================================
-# Exports
-# =============================================================================
 
 
 __all__ = [
