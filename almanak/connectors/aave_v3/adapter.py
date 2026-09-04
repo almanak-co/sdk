@@ -59,10 +59,6 @@ from .addresses import AAVE_V3
 logger = logging.getLogger(__name__)
 
 
-# =============================================================================
-# Constants
-# =============================================================================
-
 # Derive per-contract-type dicts from centralized registry for backward compatibility
 AAVE_V3_POOL_ADDRESSES: dict[str, str] = {chain: addrs["pool"] for chain, addrs in AAVE_V3.items()}
 AAVE_V3_POOL_DATA_PROVIDER_ADDRESSES: dict[str, str] = {
@@ -84,12 +80,11 @@ AAVE_LIQUIDATION_CALL_SELECTOR = "0x00a718a9"
 # ERC20 approve selector
 ERC20_APPROVE_SELECTOR = "0x095ea7b3"
 
-# Max values
 MAX_UINT256 = 2**256 - 1
 
 # Interest rate modes
 AAVE_STABLE_RATE_MODE = 1  # Being deprecated
-AAVE_VARIABLE_RATE_MODE = 2  # Most common
+AAVE_VARIABLE_RATE_MODE = 2
 
 # E-Mode categories (predefined by Aave governance)
 EMODE_CATEGORIES: dict[str, int] = {
@@ -115,16 +110,11 @@ DEFAULT_GAS_ESTIMATES: dict[str, int] = {
 }
 
 
-# =============================================================================
-# Enums
-# =============================================================================
-
-
 class AaveV3InterestRateMode(IntEnum):
     """Aave V3 interest rate modes."""
 
     STABLE = 1  # Being deprecated
-    VARIABLE = 2  # Most common
+    VARIABLE = 2
 
 
 class AaveV3EModeCategory(IntEnum):
@@ -133,11 +123,6 @@ class AaveV3EModeCategory(IntEnum):
     NONE = 0
     ETH_CORRELATED = 1
     STABLECOINS = 2
-
-
-# =============================================================================
-# Data Classes
-# =============================================================================
 
 
 @dataclass
@@ -497,16 +482,7 @@ class TransactionResult:
         }
 
 
-# =============================================================================
-# Type Aliases
-# =============================================================================
-
 PriceOracle = Callable[[str], Decimal]
-
-
-# =============================================================================
-# Adapter
-# =============================================================================
 
 
 class AaveV3Adapter:
@@ -560,12 +536,10 @@ class AaveV3Adapter:
         self.chain = config.chain
         self.wallet_address = config.wallet_address
 
-        # Contract addresses
         self.pool_address = AAVE_V3_POOL_ADDRESSES[config.chain]
         self.pool_data_provider_address = AAVE_V3_POOL_DATA_PROVIDER_ADDRESSES[config.chain]
         self.oracle_address = AAVE_V3_ORACLE_ADDRESSES[config.chain]
 
-        # TokenResolver integration
         if token_resolver is not None:
             self._token_resolver = token_resolver
         else:
@@ -573,7 +547,6 @@ class AaveV3Adapter:
 
             self._token_resolver = get_token_resolver()
 
-        # Price oracle - track if using real prices
         self._using_placeholder_prices = price_oracle is None
         if price_oracle is not None:
             self._price_oracle = price_oracle
@@ -586,7 +559,6 @@ class AaveV3Adapter:
             )
             self._price_oracle = self._default_price_oracle
         else:
-            # No oracle provided and placeholders not allowed
             raise ValueError(
                 "AaveV3Adapter requires a price_oracle for production use. "
                 "Health factor calculations need real market prices to prevent liquidations. "
@@ -596,19 +568,13 @@ class AaveV3Adapter:
                 "  3. For testing ONLY, set allow_placeholder_prices=True in config (UNSAFE FOR PRODUCTION)"
             )
 
-        # Reserve data cache
         self._reserve_data_cache: dict[str, AaveV3ReserveData] = {}
 
-        # Log initialization with price source info
         price_source = "real_oracle" if not self._using_placeholder_prices else "PLACEHOLDER"
         logger.info(
             f"AaveV3Adapter initialized for chain={config.chain}, "
             f"wallet={config.wallet_address[:10]}..., price_source={price_source}"
         )
-
-    # =========================================================================
-    # Supply Operations
-    # =========================================================================
 
     def supply(
         self,
@@ -715,10 +681,6 @@ class AaveV3Adapter:
         except Exception as e:
             logger.exception(f"Failed to build withdraw transaction: {e}")
             return TransactionResult(success=False, error=str(e))
-
-    # =========================================================================
-    # Borrow Operations
-    # =========================================================================
 
     def borrow(
         self,
@@ -833,10 +795,6 @@ class AaveV3Adapter:
             logger.exception(f"Failed to build repay transaction: {e}")
             return TransactionResult(success=False, error=str(e))
 
-    # =========================================================================
-    # Collateral Operations
-    # =========================================================================
-
     def set_user_use_reserve_as_collateral(
         self,
         asset: str,
@@ -881,10 +839,6 @@ class AaveV3Adapter:
         except Exception as e:
             logger.exception(f"Failed to build set collateral transaction: {e}")
             return TransactionResult(success=False, error=str(e))
-
-    # =========================================================================
-    # E-Mode Operations
-    # =========================================================================
 
     def set_user_emode(
         self,
@@ -969,10 +923,6 @@ class AaveV3Adapter:
 
         return emode_configs.get(category_id, emode_configs[0])
 
-    # =========================================================================
-    # Flash Loan Operations
-    # =========================================================================
-
     def flash_loan(
         self,
         receiver_address: str,
@@ -1010,7 +960,6 @@ class AaveV3Adapter:
                     error="Assets, amounts, and modes must have same length",
                 )
 
-            # Resolve asset addresses
             asset_addresses: list[str] = []
             amounts_wei: list[int] = []
 
@@ -1028,69 +977,38 @@ class AaveV3Adapter:
 
             recipient = on_behalf_of or self.wallet_address
 
-            # Build calldata for flashLoan
-            # flashLoan(
-            #   address receiverAddress,
-            #   address[] calldata assets,
-            #   uint256[] calldata amounts,
-            #   uint256[] calldata modes,
-            #   address onBehalfOf,
-            #   bytes calldata params,
-            #   uint16 referralCode
-            # )
-
-            # Encode dynamic arrays
-            # ABI encoding for dynamic arrays is complex - simplified here
-            # In production, would use proper ABI encoding library
-
-            # Calculate offsets for dynamic data
+            # ABI: flashLoan(address,address[],uint256[],uint256[],address,bytes,uint16).
             # Fixed params: receiverAddress(32) + arrays offset(32*3) + onBehalfOf(32) + params offset(32) + referralCode(32)
             # Arrays: each array needs length(32) + data(32*n)
 
             n_assets = len(asset_addresses)
 
-            # Build ABI-encoded params manually
-            # This is a simplified version - production would use eth-abi
-
-            # Header: receiver address
             encoded = self._pad_address(receiver_address)
 
-            # Offsets for arrays (each 32 bytes, pointing to data location)
-            # assets array offset (after fixed params)
             assets_offset = 7 * 32  # 7 fixed-size params before arrays
             encoded += self._pad_uint256(assets_offset)
 
-            # amounts array offset
             amounts_offset = assets_offset + 32 + n_assets * 32  # length + data
             encoded += self._pad_uint256(amounts_offset)
 
-            # modes array offset
             modes_offset = amounts_offset + 32 + n_assets * 32
             encoded += self._pad_uint256(modes_offset)
 
-            # onBehalfOf
             encoded += self._pad_address(recipient)
 
-            # params offset
             params_offset = modes_offset + 32 + n_assets * 32
             encoded += self._pad_uint256(params_offset)
 
-            # referralCode
             encoded += self._pad_uint16(0)
 
-            # Now encode the arrays
-
-            # assets array: length + addresses
             encoded += self._pad_uint256(n_assets)
             for addr in asset_addresses:
                 encoded += self._pad_address(addr)
 
-            # amounts array: length + amounts
             encoded += self._pad_uint256(n_assets)
             for amount_val in amounts_wei:
                 encoded += self._pad_uint256(amount_val)
 
-            # modes array: length + modes
             encoded += self._pad_uint256(n_assets)
             for mode in modes:
                 encoded += self._pad_uint256(mode)
@@ -1100,7 +1018,6 @@ class AaveV3Adapter:
             params_len = len(params)
             encoded += self._pad_uint256(params_len)
             if params_len > 0:
-                # Pad params to 32-byte boundary
                 padded_params = params_hex + "0" * ((64 - len(params_hex) % 64) % 64)
                 encoded += padded_params
 
@@ -1154,19 +1071,9 @@ class AaveV3Adapter:
             decimals = self._get_decimals(asset)
             amount_wei = int(amount * Decimal(10**decimals))
 
-            # Build calldata for flashLoanSimple
-            # flashLoanSimple(
-            #   address receiverAddress,
-            #   address asset,
-            #   uint256 amount,
-            #   bytes calldata params,
-            #   uint16 referralCode
-            # )
-
-            # Calculate params offset (after fixed params)
+            # ABI: flashLoanSimple(address,address,uint256,bytes,uint16).
             params_offset = 5 * 32  # 5 fixed params before dynamic params
 
-            # Encode params data
             params_hex = params.hex() if params else ""
             params_len = len(params)
 
@@ -1199,10 +1106,6 @@ class AaveV3Adapter:
         except Exception as e:
             logger.exception(f"Failed to build simple flash loan transaction: {e}")
             return TransactionResult(success=False, error=str(e))
-
-    # =========================================================================
-    # Liquidation Operations
-    # =========================================================================
 
     def liquidation_call(
         self,
@@ -1245,13 +1148,7 @@ class AaveV3Adapter:
             decimals = self._get_decimals(debt_asset)
             debt_to_cover_wei = int(debt_to_cover * Decimal(10**decimals))
 
-            # Build calldata: liquidationCall(
-            #   address collateralAsset,
-            #   address debtAsset,
-            #   address user,
-            #   uint256 debtToCover,
-            #   bool receiveAToken
-            # )
+            # ABI: liquidationCall(address collateralAsset, address debtAsset, address user, uint256 debtToCover, bool receiveAToken)
             calldata = (
                 AAVE_LIQUIDATION_CALL_SELECTOR
                 + self._pad_address(collateral_address)
@@ -1275,10 +1172,6 @@ class AaveV3Adapter:
         except Exception as e:
             logger.exception(f"Failed to build liquidation transaction: {e}")
             return TransactionResult(success=False, error=str(e))
-
-    # =========================================================================
-    # Health Factor Calculations
-    # =========================================================================
 
     def calculate_health_factor(
         self,
@@ -1313,7 +1206,6 @@ class AaveV3Adapter:
             asset = position.asset
             price = prices.get(asset) or self._price_oracle(asset)
 
-            # Skip if no price data
             if price <= 0:
                 logger.warning(f"No price data for {asset}, skipping")
                 continue
@@ -1323,7 +1215,6 @@ class AaveV3Adapter:
                 logger.warning(f"No reserve data for {asset}, using defaults")
                 reserve = AaveV3ReserveData(asset=asset, asset_address=position.asset_address)
 
-            # Calculate collateral value
             collateral_value = position.current_atoken_balance * price
             debt_value = position.total_debt * price
 
@@ -1351,18 +1242,14 @@ class AaveV3Adapter:
                 "is_collateral": position.usage_as_collateral_enabled,
             }
 
-        # Calculate weighted liquidation threshold
         weighted_lt = weighted_lt_sum / total_collateral_usd if total_collateral_usd > 0 else Decimal("0")
 
-        # Calculate health factor
-        # HF = (Collateral * Weighted LT) / Debt
         if total_debt_usd > 0:
             health_factor = (total_collateral_usd * weighted_lt) / total_debt_usd
         else:
             # No debt = infinite health factor (use very large number)
             health_factor = Decimal("999999")
 
-        # Calculate liquidation price (for single-collateral positions)
         liquidation_price = None
         if len(positions) == 1 and positions[0].has_supply and total_debt_usd > 0:
             position = positions[0]
@@ -1450,10 +1337,6 @@ class AaveV3Adapter:
 
         return (current_hf_calc.total_collateral_usd * current_hf_calc.weighted_liquidation_threshold) / new_debt
 
-    # =========================================================================
-    # Isolation Mode Support
-    # =========================================================================
-
     def get_isolation_mode_debt_ceiling(
         self,
         asset: str,
@@ -1484,10 +1367,6 @@ class AaveV3Adapter:
         """
         reserve = self._reserve_data_cache.get(asset)
         return reserve.is_isolated if reserve else False
-
-    # =========================================================================
-    # Utility Methods
-    # =========================================================================
 
     def build_approve_tx(
         self,
@@ -1613,33 +1492,29 @@ class AaveV3Adapter:
         Returns:
             Price in USD (PLACEHOLDER - NOT REAL MARKET PRICE)
         """
-        # These prices are from early 2024 and are SEVERELY OUTDATED
-        # ETH is ~$3,100+ (not $2,000)
-        # BTC is ~$100,000+ (not $45,000)
-        # Using these WILL cause incorrect health factor calculations
         default_prices: dict[str, Decimal] = {
-            "WETH": Decimal("2000"),  # OUTDATED - Real: ~$3,100+
-            "WETH.e": Decimal("2000"),  # OUTDATED
-            "WBTC": Decimal("45000"),  # OUTDATED - Real: ~$100,000+
-            "WBTC.e": Decimal("45000"),  # OUTDATED
-            "BTCB": Decimal("45000"),  # OUTDATED
+            "WETH": Decimal("2000"),
+            "WETH.e": Decimal("2000"),
+            "WBTC": Decimal("45000"),
+            "WBTC.e": Decimal("45000"),
+            "BTCB": Decimal("45000"),
             "USDC": Decimal("1"),
             "USDC.e": Decimal("1"),
             "USDT": Decimal("1"),
             "DAI": Decimal("1"),
             "DAI.e": Decimal("1"),
-            "LINK": Decimal("15"),  # OUTDATED
-            "LINK.e": Decimal("15"),  # OUTDATED
-            "AAVE": Decimal("100"),  # OUTDATED
-            "ARB": Decimal("1.2"),  # OUTDATED
-            "OP": Decimal("2.5"),  # OUTDATED
-            "WMATIC": Decimal("0.8"),  # OUTDATED
-            "WAVAX": Decimal("35"),  # OUTDATED
-            "WBNB": Decimal("300"),  # OUTDATED
-            "wstETH": Decimal("2300"),  # OUTDATED
-            "cbETH": Decimal("2100"),  # OUTDATED
-            "rETH": Decimal("2200"),  # OUTDATED
-            "sAVAX": Decimal("40"),  # OUTDATED
+            "LINK": Decimal("15"),
+            "LINK.e": Decimal("15"),
+            "AAVE": Decimal("100"),
+            "ARB": Decimal("1.2"),
+            "OP": Decimal("2.5"),
+            "WMATIC": Decimal("0.8"),
+            "WAVAX": Decimal("35"),
+            "WBNB": Decimal("300"),
+            "wstETH": Decimal("2300"),
+            "cbETH": Decimal("2100"),
+            "rETH": Decimal("2200"),
+            "sAVAX": Decimal("40"),
         }
 
         price = default_prices.get(asset) or default_prices.get(asset.upper())
@@ -1649,7 +1524,6 @@ class AaveV3Adapter:
                 "Pass a real price_oracle to the adapter for production use."
             )
 
-        # Log every time a placeholder price is used
         logger.warning(
             "PLACEHOLDER PRICE used for %s: $%s (NOT REAL MARKET PRICE). "
             "Health factor calculations may be INCORRECT. "
@@ -1675,11 +1549,6 @@ class AaveV3Adapter:
     def _pad_uint16(value: int) -> str:
         """Pad uint16 to 32 bytes."""
         return hex(value)[2:].zfill(64)
-
-
-# =============================================================================
-# Factory Functions
-# =============================================================================
 
 
 def create_adapter_with_prices(
@@ -1717,19 +1586,15 @@ def create_adapter_with_prices(
 
     def price_oracle(asset: str) -> Decimal:
         """Look up price from the provided dictionary."""
-        # Try exact match first
         if asset in prices:
             return prices[asset]
-        # Try uppercase
         if asset.upper() in prices:
             return prices[asset.upper()]
-        # Try common variations
         variations = [asset, asset.upper(), asset.lower()]
         for v in variations:
             if v in prices:
                 return prices[v]
 
-        # No price found - this is an error, not a fallback to placeholder
         raise KeyError(
             f"No price found for '{asset}'. Available prices: {list(prices.keys())}. "
             f"Ensure your price source includes all assets used in Aave positions."
@@ -1759,28 +1624,19 @@ def create_adapter_from_price_oracle_dict(
     return create_adapter_with_prices(config, price_oracle_dict)
 
 
-# =============================================================================
-# Exports
-# =============================================================================
-
 __all__ = [
-    # Adapter
     "AaveV3Adapter",
     "AaveV3Config",
-    # Factory functions
     "create_adapter_with_prices",
     "create_adapter_from_price_oracle_dict",
-    # Data classes
     "AaveV3ReserveData",
     "AaveV3UserAccountData",
     "AaveV3Position",
     "AaveV3FlashLoanParams",
     "AaveV3HealthFactorCalculation",
     "TransactionResult",
-    # Enums
     "AaveV3InterestRateMode",
     "AaveV3EModeCategory",
-    # Constants
     "AAVE_V3_POOL_ADDRESSES",
     "AAVE_V3_POOL_DATA_PROVIDER_ADDRESSES",
     "AAVE_V3_ORACLE_ADDRESSES",
