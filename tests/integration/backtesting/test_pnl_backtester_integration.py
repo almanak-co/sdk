@@ -34,10 +34,6 @@ from almanak.framework.backtesting.pnl.engine import (
 )
 from tests.backtesting_funding import pnl_token_funding, provider_symbol
 
-# =============================================================================
-# Mock Data Provider for Deterministic Results
-# =============================================================================
-
 
 class DeterministicDataProvider:
     """Data provider with pre-defined price series for deterministic testing.
@@ -70,7 +66,6 @@ class DeterministicDataProvider:
         if symbol not in self._price_series:
             raise ValueError(f"No price series for {symbol}")
 
-        # Calculate index from timestamp
         delta = timestamp - self._start_time
         index = int(delta.total_seconds() / self._interval_seconds)
         series = self._price_series[symbol]
@@ -78,9 +73,9 @@ class DeterministicDataProvider:
         if 0 <= index < len(series):
             return series[index]
         elif index >= len(series):
-            return series[-1]  # Use last price
+            return series[-1]
         else:
-            return series[0]  # Use first price
+            return series[0]
 
     async def get_ohlcv(
         self,
@@ -98,8 +93,8 @@ class DeterministicDataProvider:
                 OHLCV(
                     timestamp=current,
                     open=price,
-                    high=price * Decimal("1.005"),  # 0.5% high
-                    low=price * Decimal("0.995"),  # 0.5% low
+                    high=price * Decimal("1.005"),
+                    low=price * Decimal("0.995"),
                     close=price,
                     volume=Decimal("1000000"),
                 )
@@ -123,7 +118,6 @@ class DeterministicDataProvider:
                     else:
                         prices[symbol] = series[-1]
                 else:
-                    # Default stablecoin price
                     prices[symbol] = Decimal("1")
 
             market_state = MarketState(
@@ -160,11 +154,6 @@ class DeterministicDataProvider:
         if n_points <= 1:
             return self._start_time
         return self._start_time + timedelta(seconds=(n_points - 1) * self._interval_seconds)
-
-
-# =============================================================================
-# Mock Intents and Strategies
-# =============================================================================
 
 
 @dataclass
@@ -257,11 +246,6 @@ class DeterministicStrategy:
         return None
 
 
-# =============================================================================
-# Fixtures
-# =============================================================================
-
-
 @pytest.fixture
 def base_timestamp() -> datetime:
     """Fixed base timestamp for deterministic tests."""
@@ -285,7 +269,6 @@ def eth_downtrend_prices() -> list[Decimal]:
 @pytest.fixture
 def eth_volatile_prices() -> list[Decimal]:
     """ETH price series with high volatility."""
-    # Oscillating prices with 5% swings
     base = 3000
     return [Decimal(str(base + (50 if i % 2 == 0 else -50) * (i // 2 + 1))) for i in range(25)]
 
@@ -294,11 +277,6 @@ def eth_volatile_prices() -> list[Decimal]:
 def usdc_stable_prices() -> list[Decimal]:
     """USDC price series (stable at $1)."""
     return [Decimal("1")] * 25
-
-
-# =============================================================================
-# Integration Tests - Full Backtest Flow
-# =============================================================================
 
 
 class TestFullBacktestFlow:
@@ -312,7 +290,6 @@ class TestFullBacktestFlow:
         usdc_stable_prices: list[Decimal],
     ) -> None:
         """Test that hold-only strategy preserves initial capital."""
-        # Setup
         data_provider = DeterministicDataProvider(
             price_series={
                 "WETH": eth_uptrend_prices,
@@ -328,10 +305,10 @@ class TestFullBacktestFlow:
             token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
-            inclusion_delay_blocks=0,  # Immediate execution for simplicity
+            inclusion_delay_blocks=0,
         )
 
-        strategy = DeterministicStrategy(intents=[None] * 25)  # Always hold
+        strategy = DeterministicStrategy(intents=[None] * 25)
 
         backtester = PnLBacktester(
             data_provider=data_provider,
@@ -339,10 +316,8 @@ class TestFullBacktestFlow:
             slippage_models={"default": DefaultSlippageModel()},
         )
 
-        # Execute
         result = await backtester.backtest(strategy, config)
 
-        # Verify
         assert result.success
         assert result.engine == BacktestEngine.PNL
         assert result.error is None
@@ -359,7 +334,6 @@ class TestFullBacktestFlow:
         usdc_stable_prices: list[Decimal],
     ) -> None:
         """Test single swap execution with fees and slippage."""
-        # Setup
         data_provider = DeterministicDataProvider(
             price_series={
                 "WETH": eth_uptrend_prices,
@@ -379,7 +353,6 @@ class TestFullBacktestFlow:
             inclusion_delay_blocks=0,
         )
 
-        # Buy WETH on first tick
         swap_intent = MockSwapIntent(
             from_token="USDC",
             to_token="WETH",
@@ -393,18 +366,15 @@ class TestFullBacktestFlow:
             slippage_models={"default": DefaultSlippageModel(slippage_pct=Decimal("0.001"))},
         )
 
-        # Execute
         result = await backtester.backtest(strategy, config)
 
-        # Verify
         assert result.success
         assert result.metrics.total_trades == 1
         assert result.metrics.total_fees_usd > Decimal("0")
         assert result.metrics.total_slippage_usd > Decimal("0")
         assert result.metrics.total_gas_usd > Decimal("0")
 
-        # Execution costs should be reasonable for $5000 trade
-        # 0.3% fee = $15, 0.1% slippage = $5
+        # A $5,000 fill implies $15 in fees and $5 in slippage before gas.
         assert Decimal("10") < result.metrics.total_fees_usd < Decimal("20")
         assert Decimal("1") < result.metrics.total_slippage_usd < Decimal("10")
 
@@ -416,7 +386,6 @@ class TestFullBacktestFlow:
         usdc_stable_prices: list[Decimal],
     ) -> None:
         """Test multiple swaps accumulate fees, slippage, and gas costs."""
-        # Setup
         data_provider = DeterministicDataProvider(
             price_series={
                 "WETH": eth_volatile_prices,
@@ -436,13 +405,12 @@ class TestFullBacktestFlow:
             inclusion_delay_blocks=0,
         )
 
-        # Multiple swaps
         intents = [
-            MockSwapIntent(amount_usd=Decimal("2000")),  # Buy ETH
+            MockSwapIntent(amount_usd=Decimal("2000")),
             None,
-            MockSwapIntent(from_token="WETH", to_token="USDC", amount_usd=Decimal("1000")),  # Sell some
+            MockSwapIntent(from_token="WETH", to_token="USDC", amount_usd=Decimal("1000")),
             None,
-            MockSwapIntent(amount_usd=Decimal("1500")),  # Buy more
+            MockSwapIntent(amount_usd=Decimal("1500")),
         ]
         strategy = DeterministicStrategy(intents=intents + [None] * 6)
 
@@ -452,21 +420,17 @@ class TestFullBacktestFlow:
             slippage_models={"default": DefaultSlippageModel(slippage_pct=Decimal("0.001"))},
         )
 
-        # Execute
         result = await backtester.backtest(strategy, config)
 
-        # Verify
         assert result.success
         assert result.metrics.total_trades == 3
 
-        # Total traded volume: $2000 + $1000 + $1500 = $4500
-        # Expected fees: $4500 * 0.003 = $13.50
+        # $4,500 total notional at 0.3% implies $13.50 in fees.
         assert Decimal("10") < result.metrics.total_fees_usd < Decimal("20")
 
-        # Slippage: $4500 * 0.001 = $4.50
+        # The same notional at 0.1% implies $4.50 in slippage.
         assert Decimal("2") < result.metrics.total_slippage_usd < Decimal("10")
 
-        # Gas for 3 swaps
         assert result.metrics.total_gas_usd > Decimal("0")
 
 
@@ -480,8 +444,8 @@ class TestMetricsCalculation:
         usdc_stable_prices: list[Decimal],
     ) -> None:
         """Test return calculation when holding asset through uptrend."""
-        # ETH rises 10% over 24 hours
-        eth_prices = [Decimal(str(3000 + i * 12.5)) for i in range(25)]  # 3000 -> 3300
+        # Twenty-five hourly observations rise exactly 10%, from $3,000 to $3,300.
+        eth_prices = [Decimal(str(3000 + i * 12.5)) for i in range(25)]
 
         data_provider = DeterministicDataProvider(
             price_series={
@@ -501,7 +465,6 @@ class TestMetricsCalculation:
             inclusion_delay_blocks=0,
         )
 
-        # Buy ETH immediately
         swap_intent = MockSwapIntent(
             from_token="USDC",
             to_token="WETH",
@@ -511,13 +474,13 @@ class TestMetricsCalculation:
 
         backtester = PnLBacktester(
             data_provider=data_provider,
-            fee_models={"default": DefaultFeeModel(fee_pct=Decimal("0"))},  # No fees for pure return test
+            # Zero execution costs isolate mark-to-market return.
+            fee_models={"default": DefaultFeeModel(fee_pct=Decimal("0"))},
             slippage_models={"default": DefaultSlippageModel(slippage_pct=Decimal("0"))},
         )
 
         result = await backtester.backtest(strategy, config)
 
-        # Verify positive return from ETH appreciation
         assert result.success
         assert result.metrics.total_return_pct > Decimal("0")
         assert result.final_capital_usd > result.initial_portfolio_value_usd
@@ -529,17 +492,16 @@ class TestMetricsCalculation:
         usdc_stable_prices: list[Decimal],
     ) -> None:
         """Test max drawdown calculation with known price movement."""
-        # Price pattern designed to create ~20% drawdown from peak:
-        # 3000 -> 3600 (peak, +20%) -> 2880 (trough, -20% from peak)
+        # A $3,600 peak followed by $2,880 creates a 20% peak-to-trough drawdown.
         eth_prices = [
-            Decimal("3000"),  # Initial
-            Decimal("3300"),  # +10%
-            Decimal("3600"),  # Peak (+20% from initial)
-            Decimal("3240"),  # -10% from peak
-            Decimal("2880"),  # -20% from peak (trough)
-            Decimal("3100"),  # Recovery
-            Decimal("3200"),  # Recovery
-        ] + [Decimal("3200")] * 18  # Hold at 3200
+            Decimal("3000"),
+            Decimal("3300"),
+            Decimal("3600"),
+            Decimal("3240"),
+            Decimal("2880"),
+            Decimal("3100"),
+            Decimal("3200"),
+        ] + [Decimal("3200")] * 18
 
         data_provider = DeterministicDataProvider(
             price_series={
@@ -559,7 +521,6 @@ class TestMetricsCalculation:
             inclusion_delay_blocks=0,
         )
 
-        # Buy ETH and hold
         swap_intent = MockSwapIntent(
             from_token="USDC",
             to_token="WETH",
@@ -575,13 +536,9 @@ class TestMetricsCalculation:
 
         result = await backtester.backtest(strategy, config)
 
-        # Verify max drawdown is calculated and positive
         assert result.success
-        # Drawdown should be measured from peak - validate it's a meaningful value
-        # With the price pattern above, we expect ~20% drawdown from peak
-        # But because of how portfolio value is calculated and timing, we allow wide range
+        # Portfolio timing can shift the nominal 20% drawdown; bound it to a non-total loss.
         assert result.metrics.max_drawdown_pct > Decimal("0")
-        # The drawdown should be less than 100% (not a total loss)
         assert result.metrics.max_drawdown_pct < Decimal("100")
 
     @pytest.mark.asyncio
@@ -591,15 +548,14 @@ class TestMetricsCalculation:
         usdc_stable_prices: list[Decimal],
     ) -> None:
         """Test win rate calculation with mixed profitable/losing trades."""
-        # Set up prices to make some trades profitable and some not
-        # Price oscillates to create wins and losses
+        # Oscillating prices make the three exits span gains and losses.
         eth_prices = [
-            Decimal("3000"),  # t0: buy
-            Decimal("3100"),  # t1: win if sold
-            Decimal("3050"),  # t2: smaller win
-            Decimal("2900"),  # t3: loss if sold
-            Decimal("3000"),  # t4: breakeven
-            Decimal("3200"),  # t5: big win
+            Decimal("3000"),
+            Decimal("3100"),
+            Decimal("3050"),
+            Decimal("2900"),
+            Decimal("3000"),
+            Decimal("3200"),
         ] + [Decimal("3200")] * 19
 
         data_provider = DeterministicDataProvider(
@@ -620,14 +576,13 @@ class TestMetricsCalculation:
             inclusion_delay_blocks=0,
         )
 
-        # Multiple trades: some should be profitable, some not
         intents: list[Any | None] = [
-            MockSwapIntent(from_token="USDC", to_token="WETH", amount_usd=Decimal("3000")),  # Buy
-            MockSwapIntent(from_token="WETH", to_token="USDC", amount_usd=Decimal("1500")),  # Sell some (win)
-            None,  # Hold
-            MockSwapIntent(from_token="WETH", to_token="USDC", amount_usd=Decimal("500")),  # Sell at loss
-            None,  # Hold
-            MockSwapIntent(from_token="WETH", to_token="USDC", amount_usd=Decimal("500")),  # Sell at profit
+            MockSwapIntent(from_token="USDC", to_token="WETH", amount_usd=Decimal("3000")),
+            MockSwapIntent(from_token="WETH", to_token="USDC", amount_usd=Decimal("1500")),
+            None,
+            MockSwapIntent(from_token="WETH", to_token="USDC", amount_usd=Decimal("500")),
+            None,
+            MockSwapIntent(from_token="WETH", to_token="USDC", amount_usd=Decimal("500")),
         ]
         strategy = DeterministicStrategy(intents=intents + [None] * 19)
 
@@ -639,10 +594,8 @@ class TestMetricsCalculation:
 
         result = await backtester.backtest(strategy, config)
 
-        # Verify trades were tracked
         assert result.success
         assert result.metrics.total_trades > 0
-        # Win rate should be a valid percentage
         assert Decimal("0") <= result.metrics.win_rate <= Decimal("1")
 
     @pytest.mark.asyncio
@@ -652,8 +605,8 @@ class TestMetricsCalculation:
         usdc_stable_prices: list[Decimal],
     ) -> None:
         """Test Sharpe ratio is positive for consistent gains."""
-        # Consistent small uptrend
-        eth_prices = [Decimal(str(3000 + i * 5)) for i in range(25)]  # +$5 each hour
+        # A $5 increase per tick produces low-variance positive returns.
+        eth_prices = [Decimal(str(3000 + i * 5)) for i in range(25)]
 
         data_provider = DeterministicDataProvider(
             price_series={
@@ -671,10 +624,9 @@ class TestMetricsCalculation:
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
             inclusion_delay_blocks=0,
-            risk_free_rate=Decimal("0"),  # 0% risk-free rate for cleaner test
+            risk_free_rate=Decimal("0"),  # Zero isolates return consistency.
         )
 
-        # Buy and hold ETH
         swap_intent = MockSwapIntent(
             from_token="USDC",
             to_token="WETH",
@@ -690,7 +642,6 @@ class TestMetricsCalculation:
 
         result = await backtester.backtest(strategy, config)
 
-        # Sharpe should be positive for consistent gains
         assert result.success
         assert result.metrics.sharpe_ratio > Decimal("0")
 
@@ -713,7 +664,6 @@ class TestMetricsCalculation:
             inclusion_delay_blocks=0,
         )
 
-        # Buy and hold strategy
         swap_intent = MockSwapIntent(
             from_token="USDC",
             to_token="WETH",
@@ -728,7 +678,6 @@ class TestMetricsCalculation:
             deployment_id="volatile",
         )
 
-        # Run with stable uptrend
         data_provider_stable = DeterministicDataProvider(
             price_series={"WETH": eth_uptrend_prices, "USDC": usdc_stable_prices},
             start_time=base_timestamp,
@@ -740,7 +689,6 @@ class TestMetricsCalculation:
         )
         result_stable = await backtester_stable.backtest(strategy_stable, config)
 
-        # Run with volatile prices
         data_provider_volatile = DeterministicDataProvider(
             price_series={"WETH": eth_volatile_prices, "USDC": usdc_stable_prices},
             start_time=base_timestamp,
@@ -752,7 +700,6 @@ class TestMetricsCalculation:
         )
         result_volatile = await backtester_volatile.backtest(strategy_volatile, config)
 
-        # Volatility should be higher for volatile prices
         assert result_stable.success
         assert result_volatile.success
         assert result_volatile.metrics.volatility > result_stable.metrics.volatility
@@ -832,7 +779,6 @@ class TestEquityCurve:
 
         result = await backtester.backtest(strategy, config)
 
-        # Verify timestamps are sequential
         for i in range(1, len(result.equity_curve)):
             assert result.equity_curve[i].timestamp > result.equity_curve[i - 1].timestamp
 
@@ -862,7 +808,6 @@ class TestEquityCurve:
             inclusion_delay_blocks=0,
         )
 
-        # Buy ETH at the top
         swap_intent = MockSwapIntent(
             from_token="USDC",
             to_token="WETH",
@@ -878,7 +823,6 @@ class TestEquityCurve:
 
         result = await backtester.backtest(strategy, config)
 
-        # All equity values should be positive
         for point in result.equity_curve:
             assert point.value_usd > Decimal("0")
 
@@ -923,19 +867,15 @@ class TestBacktestResultSerialization:
 
         result = await backtester.backtest(strategy, config)
 
-        # Serialize
         result_dict = result.to_dict()
 
-        # Verify key fields are present
         assert "deployment_id" in result_dict
         assert "metrics" in result_dict
         assert "equity_curve" in result_dict
         assert "trades" in result_dict
 
-        # Deserialize
         restored = BacktestResult.from_dict(result_dict)
 
-        # Verify restoration
         assert restored.deployment_id == result.deployment_id
         assert restored.engine == result.engine
         assert restored.metrics.total_trades == result.metrics.total_trades
@@ -977,7 +917,6 @@ class TestBacktestResultSerialization:
         result = await backtester.backtest(strategy, config)
         summary = result.summary()
 
-        # Check summary contains key information
         assert "BACKTEST RESULTS" in summary or "SUMMARY" in summary.upper()
         assert "PNL" in summary.upper() or "RETURN" in summary.upper()
 
@@ -1012,7 +951,6 @@ class TestGasCostTracking:
             inclusion_delay_blocks=0,
         )
 
-        # 3 swaps
         intents: list[Any | None] = [
             MockSwapIntent(amount_usd=Decimal("2000")),
             None,
@@ -1030,13 +968,11 @@ class TestGasCostTracking:
 
         result = await backtester.backtest(strategy, config)
 
-        # Verify gas costs tracked
         assert result.metrics.total_gas_usd > Decimal("0")
         assert result.metrics.total_trades == 3
 
-        # Gas cost should be 3 * (150000 gas * 30 gwei * ~$3000 ETH price)
-        # = 3 * 0.00045 ETH * $3000 ≈ $4.05 per swap ≈ $12 total
-        # But prices vary, so check reasonable range
+        # Three 150,000-gas swaps at 30 gwei and roughly $3,000/ETH cost about $40.50.
+        # Price movement makes the assertion intentionally tolerant.
         assert Decimal("5") < result.metrics.total_gas_usd < Decimal("50")
 
     @pytest.mark.asyncio
@@ -1061,7 +997,7 @@ class TestGasCostTracking:
             interval_seconds=3600,
             token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
-            include_gas_costs=False,  # Disabled
+            include_gas_costs=False,
             inclusion_delay_blocks=0,
         )
 
@@ -1076,7 +1012,6 @@ class TestGasCostTracking:
 
         result = await backtester.backtest(strategy, config)
 
-        # No gas costs should be recorded
         assert result.metrics.total_gas_usd == Decimal("0")
 
 
@@ -1106,7 +1041,7 @@ class TestInclusionDelay:
             token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
-            inclusion_delay_blocks=0,  # No delay
+            inclusion_delay_blocks=0,
         )
 
         config_with_delay = PnLBacktestConfig(
@@ -1116,14 +1051,13 @@ class TestInclusionDelay:
             token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
-            inclusion_delay_blocks=2,  # 2 block delay
+            inclusion_delay_blocks=2,
         )
 
         swap_intent = MockSwapIntent(amount_usd=Decimal("5000"))
         strategy_no_delay = DeterministicStrategy(intents=[swap_intent] + [None] * 10)
         strategy_with_delay = DeterministicStrategy(intents=[swap_intent] + [None] * 10)
 
-        # Run without delay
         backtester = PnLBacktester(
             data_provider=data_provider,
             fee_models={"default": DefaultFeeModel(fee_pct=Decimal("0"))},
@@ -1131,7 +1065,7 @@ class TestInclusionDelay:
         )
         result_no_delay = await backtester.backtest(strategy_no_delay, config_no_delay)
 
-        # Run with delay - need new data provider and backtester
+        # A fresh provider and backtester isolate state between the two runs.
         data_provider_delay = DeterministicDataProvider(
             price_series={
                 "WETH": eth_uptrend_prices,
@@ -1146,14 +1080,8 @@ class TestInclusionDelay:
         )
         result_with_delay = await backtester_delay.backtest(strategy_with_delay, config_with_delay)
 
-        # Both should succeed
         assert result_no_delay.success
         assert result_with_delay.success
-
-        # With rising prices, executing later should result in different final value
-        # (buying at higher price = less ETH = different outcome)
-        # The difference may be small but results should generally differ
-        # For a comprehensive test, we verify both completed
 
 
 class TestConfigHash:
@@ -1201,7 +1129,7 @@ class TestConfigHash:
             start_time=base_timestamp,
             end_time=base_timestamp + timedelta(hours=24),
             interval_seconds=3600,
-            token_funding=pnl_token_funding(Decimal("20000")),  # Different capital
+            token_funding=pnl_token_funding(Decimal("20000")),
             tokens=["WETH", "USDC"],
         )
 
@@ -1241,15 +1169,9 @@ class TestConfigHash:
 
         result = await backtester.backtest(strategy, config)
 
-        # Result should have config hash
         assert result.config_hash is not None
         assert len(result.config_hash) == 64  # SHA-256 hex
         assert result.config_hash == config.calculate_config_hash()
-
-
-# =============================================================================
-# Adapter Integration Tests
-# =============================================================================
 
 
 class TestAdapterIntegration:
@@ -1276,7 +1198,6 @@ class TestAdapterIntegration:
         from almanak.framework.backtesting.pnl.portfolio import SimulatedPosition
         from almanak.framework.intents.vocabulary import HoldIntent, SwapIntent
 
-        # Create a tracking adapter that counts calls
         class TrackingAdapter(StrategyBacktestAdapter):
             """Adapter that tracks calls to its methods."""
 
@@ -1294,7 +1215,7 @@ class TestAdapterIntegration:
                 return self._config
 
             def execute_intent(self, intent, portfolio, market_state):
-                return None  # Let default execution handle it
+                return None  # Delegate to the engine's default execution path.
 
             def update_position(
                 self,
@@ -1310,7 +1231,6 @@ class TestAdapterIntegration:
                 market_state: MarketState,
             ) -> Decimal:
                 self.value_calls += 1
-                # Simple valuation: sum of token amounts * prices
                 total = Decimal("0")
                 for token, amount in position.amounts.items():
                     try:
@@ -1323,7 +1243,6 @@ class TestAdapterIntegration:
             def should_rebalance(self, position, market_state) -> bool:
                 return False
 
-        # Create strategy that does a swap to create a position
         class SwapStrategy:
             deployment_id = "test_tracking"
             name = "Tracking Strategy"
@@ -1339,7 +1258,6 @@ class TestAdapterIntegration:
                     )
                 return HoldIntent(reason="Holding")
 
-        # Set up data provider with WETH prices (matching swap token_out)
         data_provider = DeterministicDataProvider(
             price_series={
                 "WETH": eth_uptrend_prices,
@@ -1348,7 +1266,6 @@ class TestAdapterIntegration:
             start_time=base_timestamp,
         )
 
-        # Configure backtest with short duration
         config = PnLBacktestConfig(
             start_time=base_timestamp,
             end_time=base_timestamp + timedelta(hours=5),  # 6 ticks (0-5)
@@ -1359,36 +1276,22 @@ class TestAdapterIntegration:
             inclusion_delay_blocks=0,
         )
 
-        # Create tracking adapter
         tracking_adapter = TrackingAdapter()
 
-        # Run backtest
         backtester = PnLBacktester(
             data_provider=data_provider,
             fee_models={"default": DefaultFeeModel()},
             slippage_models={"default": DefaultSlippageModel()},
         )
 
-        # Set the adapter
         backtester._adapter = tracking_adapter
 
         strategy = SwapStrategy()
         result = await backtester.backtest(strategy, config)
 
-        # Verify backtest completed
         assert result.success
 
-        # Note: For this simple swap test, token balance changes go into
-        # portfolio.tokens (not portfolio.positions), so adapter.update_position
-        # and adapter.value_position are only called for LP, perp, or lending
-        # positions. This test verifies the adapter is properly set and
-        # no errors occur during execution.
-        #
-        # The adapter methods would be called if we had created an LP, perp,
-        # or lending position (which creates entries in portfolio.positions).
-        #
-        # The second test (test_adapter_value_position_used_in_mark_to_market)
-        # verifies the adapter is wired into the mark_to_market flow correctly.
+        # Spot swaps bypass position hooks; this only checks that an adapter does not disrupt default execution.
 
     @pytest.mark.asyncio
     async def test_adapter_value_position_used_in_mark_to_market(
@@ -1407,7 +1310,6 @@ class TestAdapterIntegration:
         from almanak.framework.backtesting.pnl.portfolio import SimulatedPosition
         from almanak.framework.intents.vocabulary import HoldIntent
 
-        # Create adapter that returns a known fixed value
         class FixedValueAdapter(StrategyBacktestAdapter):
             """Adapter that returns a fixed value for positions."""
 
@@ -1434,7 +1336,7 @@ class TestAdapterIntegration:
                 market_state: MarketState,
                 elapsed_seconds: float,
             ) -> None:
-                pass  # No updates needed
+                pass
 
             def value_position(
                 self,
@@ -1442,13 +1344,11 @@ class TestAdapterIntegration:
                 market_state: MarketState,
             ) -> Decimal:
                 self.value_calls += 1
-                # Return a fixed known value regardless of market state
                 return self.FIXED_VALUE
 
             def should_rebalance(self, position, market_state) -> bool:
                 return False
 
-        # Create strategy that holds only (no trades)
         class HoldStrategy:
             deployment_id = "test_hold"
             name = "Hold Strategy"
@@ -1456,7 +1356,6 @@ class TestAdapterIntegration:
             def decide(self, snapshot):
                 return HoldIntent(reason="Holding")
 
-        # Set up data provider
         data_provider = DeterministicDataProvider(
             price_series={
                 "WETH": eth_uptrend_prices,
@@ -1465,7 +1364,6 @@ class TestAdapterIntegration:
             start_time=base_timestamp,
         )
 
-        # Configure backtest
         config = PnLBacktestConfig(
             start_time=base_timestamp,
             end_time=base_timestamp + timedelta(hours=5),
@@ -1476,26 +1374,20 @@ class TestAdapterIntegration:
             inclusion_delay_blocks=0,
         )
 
-        # Create fixed value adapter
         fixed_adapter = FixedValueAdapter()
 
-        # Run backtest
         backtester = PnLBacktester(
             data_provider=data_provider,
             fee_models={"default": DefaultFeeModel()},
             slippage_models={"default": DefaultSlippageModel()},
         )
 
-        # Set the adapter
         backtester._adapter = fixed_adapter
 
         strategy = HoldStrategy()
         result = await backtester.backtest(strategy, config)
 
-        # Verify backtest completed
         assert result.success
 
-        # With a hold strategy and no positions, value_position is not called
-        # (only called for non-spot positions when adapter is set)
-        # The initial capital should be preserved
+        # Adapter valuation applies only to positions; an all-cash hold preserves initial capital.
         assert result.final_capital_usd == result.initial_portfolio_value_usd
