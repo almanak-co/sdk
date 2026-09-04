@@ -37,13 +37,6 @@ from almanak.framework.accounting.accountant_test import (
 _PRIMITIVE_CHOICES: tuple[str, ...] = tuple(sorted(SCORECARD_PROFILES))
 
 
-# crap-allowlist: Phase 5e (#2097) swaps four direct ``os.environ.<get|pop|set>``
-# calls (the prior save / restore-or-pop pattern around ALMANAK_STRATEGY_FOLDER)
-# for the typed :func:`push_strategy_folder` / :func:`pop_strategy_folder` helpers
-# in ``almanak.framework.local_paths``. The function's CC (9) is structural to the
-# resolution / validation ladder (explicit-db branch + folder-scoped branch + four
-# distinct file-shape error paths); targeted unit coverage is owned by the
-# accountant-test smoke harness rather than an isolated test class.
 def _resolve_db_path(strategy_folder: str | None, explicit_db: str | None) -> Path:
     """Resolve the sqlite DB path with the same rules as VIB-3835.
 

@@ -108,12 +108,67 @@ def _status_color(status: str) -> str:
     return click.style(status, fg=_STATUS_COLORS.get(status.upper(), "white"))
 
 
+def _strategy_list_json_row(strategy) -> dict:
+    """Build one JSON row for ``strat list``."""
+    return {
+        "deployment_id": strategy.deployment_id,
+        "name": strategy.name,
+        "status": strategy.status,
+        "chain": strategy.chain,
+        "chains": list(strategy.chains) if strategy.is_multi_chain else [strategy.chain],
+        "protocol": strategy.protocol,
+        "total_value_usd": strategy.total_value_usd,
+        "pnl_24h_usd": strategy.pnl_24h_usd,
+        "last_action_at": strategy.last_action_at,
+        "attention_required": strategy.attention_required,
+        "attention_reason": strategy.attention_reason,
+        "consecutive_errors": strategy.consecutive_errors,
+        "last_iteration_at": strategy.last_iteration_at,
+        "pnl_since_deploy_usd": strategy.pnl_since_deploy_usd or None,
+    }
+
+
+def _render_strategy_list_as_json(strategies) -> None:
+    """Emit strategies in the machine-readable list format."""
+    rows = [_strategy_list_json_row(strategy) for strategy in strategies]
+    click.echo(json.dumps(rows, indent=2))
+
+
+def _render_strategy_list_pretty(strategies) -> None:
+    """Emit the human-readable strategy summary table."""
+    click.echo()
+    click.echo(click.style(f"Strategies ({len(strategies)})", bold=True, fg="cyan"))
+    click.echo()
+
+    id_w = max(12, max((len(strategy.deployment_id) for strategy in strategies), default=12))
+    id_w = min(id_w, 35)
+    header = f"{'ID':<{id_w}}  {'STATUS':<10}  {'CHAIN':<12}  {'VALUE (USD)':>12}  {'PnL 24h':>10}  {'LAST ACTIVE':<14}"
+    click.echo(header)
+    click.echo("-" * len(header))
+
+    for strategy in strategies:
+        sid = strategy.deployment_id[:id_w] if len(strategy.deployment_id) > id_w else strategy.deployment_id
+        value = strategy.total_value_usd or "-"
+        pnl = strategy.pnl_24h_usd or "-"
+        chain_display = ",".join(strategy.chains) if strategy.is_multi_chain else (strategy.chain or "-")
+        colored_status = click.style(f"{strategy.status:<10}", fg=_STATUS_COLORS.get(strategy.status.upper(), "white"))
+        click.echo(
+            f"{sid:<{id_w}}  {colored_status}  {chain_display:<12}  "
+            f"{value:>12}  {pnl:>10}  {_format_relative_time(strategy.last_action_at):<14}"
+        )
+
+        if strategy.attention_required and strategy.attention_reason:
+            click.echo(f"  {click.style('!', fg='yellow', bold=True)} {strategy.attention_reason}")
+
+    click.echo()
+    click.echo(f"Total: {len(strategies)} strategies")
+
+
 # =============================================================================
 # strat list
 # =============================================================================
 
 
-# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
 @click.command("list")
 @click.option(
     "--status",
@@ -169,60 +224,10 @@ def list_strategies(status_filter, chain, as_json, gateway_host, gateway_port):
         return
 
     if as_json:
-        rows = []
-        for s in strategies:
-            rows.append(
-                {
-                    "deployment_id": s.deployment_id,
-                    "name": s.name,
-                    "status": s.status,
-                    "chain": s.chain,
-                    "chains": list(s.chains) if s.is_multi_chain else [s.chain],
-                    "protocol": s.protocol,
-                    "total_value_usd": s.total_value_usd,
-                    "pnl_24h_usd": s.pnl_24h_usd,
-                    "last_action_at": s.last_action_at,
-                    "attention_required": s.attention_required,
-                    "attention_reason": s.attention_reason,
-                    "consecutive_errors": s.consecutive_errors,
-                    "last_iteration_at": s.last_iteration_at,
-                    "pnl_since_deploy_usd": s.pnl_since_deploy_usd or None,
-                }
-            )
-        click.echo(json.dumps(rows, indent=2))
+        _render_strategy_list_as_json(strategies)
         return
 
-    # Table output
-    click.echo()
-    click.echo(click.style(f"Strategies ({len(strategies)})", bold=True, fg="cyan"))
-    click.echo()
-
-    # Column widths
-    id_w = max(12, max((len(s.deployment_id) for s in strategies), default=12))
-    id_w = min(id_w, 35)  # cap width
-
-    header = f"{'ID':<{id_w}}  {'STATUS':<10}  {'CHAIN':<12}  {'VALUE (USD)':>12}  {'PnL 24h':>10}  {'LAST ACTIVE':<14}"
-    click.echo(header)
-    click.echo("-" * len(header))
-
-    for s in strategies:
-        sid = s.deployment_id[:id_w] if len(s.deployment_id) > id_w else s.deployment_id
-        value = s.total_value_usd if s.total_value_usd is not None else "-"
-        pnl = s.pnl_24h_usd if s.pnl_24h_usd is not None else "-"
-        chain_display = ",".join(s.chains) if s.is_multi_chain else (s.chain or "-")
-
-        colored_status = click.style(f"{s.status:<10}", fg=_STATUS_COLORS.get(s.status.upper(), "white"))
-        line = (
-            f"{sid:<{id_w}}  {colored_status}  {chain_display:<12}  "
-            f"{value:>12}  {pnl:>10}  {_format_relative_time(s.last_action_at):<14}"
-        )
-        click.echo(line)
-
-        if s.attention_required and s.attention_reason:
-            click.echo(f"  {click.style('!', fg='yellow', bold=True)} {s.attention_reason}")
-
-    click.echo()
-    click.echo(f"Total: {len(strategies)} strategies")
+    _render_strategy_list_pretty(strategies)
 
 
 # =============================================================================
@@ -467,7 +472,6 @@ def strategy_logs(deployment_id, limit, event_type, since, as_json, gateway_host
 # =============================================================================
 
 
-# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
 @click.command("pause")
 @click.option("--deployment-id", "-s", required=True, help="Strategy instance ID.")
 @click.option("--reason", required=True, help="Reason for pause (required for audit trail).")

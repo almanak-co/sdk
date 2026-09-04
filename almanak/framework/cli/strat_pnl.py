@@ -32,6 +32,7 @@ import click
 
 from almanak.framework.accounting.lending_nav import compute_lending_nav
 from almanak.framework.accounting.reporting import (
+    AccountingData,
     build_data_quality,
     build_lending_report,
     build_lp_report,
@@ -1394,7 +1395,154 @@ def _emit_json_output(
     click.echo(json.dumps(out, indent=2))
 
 
-# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
+def _resolve_pnl_db_path(db_path: str | None, ledger_limit: int, position_limit: int) -> str:
+    """Validate command arguments and resolve the local SQLite path."""
+    if ledger_limit <= 0:
+        click.secho("--ledger-limit must be a positive integer.", fg="red", err=True)
+        sys.exit(1)
+    if position_limit <= 0:
+        click.secho("--position-limit must be a positive integer.", fg="red", err=True)
+        sys.exit(1)
+
+    resolved_db = db_path or _default_db_path()
+    if not Path(resolved_db).exists():
+        click.secho(
+            f"State DB not found at {resolved_db}. Run the strategy at least once (or pass --db).",
+            fg="red",
+            err=True,
+        )
+        sys.exit(1)
+    return resolved_db
+
+
+def _load_pnl_accounting_data(
+    resolved_db: str,
+    deployment_id: str,
+    ledger_limit: int,
+    position_limit: int,
+) -> tuple[AccountingData, bool, bool]:
+    """Load one probe row past each cap, then trim to the requested windows."""
+    try:
+        acct_data = asyncio.run(
+            load_accounting_data(
+                resolved_db,
+                deployment_id,
+                ledger_limit=ledger_limit + 1,
+                position_limit=position_limit + 1,
+            )
+        )
+    except Exception as exc:
+        click.secho(f"Failed to read state DB: {exc}", fg="red", err=True)
+        sys.exit(1)
+
+    position_events_truncated = len(acct_data.position_events) > position_limit
+    if position_events_truncated:
+        acct_data.position_events = acct_data.position_events[:position_limit]
+    ledger_entries_truncated = len(acct_data.ledger_entries) > ledger_limit
+    if ledger_entries_truncated:
+        acct_data.ledger_entries = acct_data.ledger_entries[:ledger_limit]
+    return acct_data, position_events_truncated, ledger_entries_truncated
+
+
+def _has_persisted_pnl_data(acct_data: AccountingData) -> bool:
+    """Return whether the loader found any data the report can surface."""
+    return any(
+        (
+            acct_data.metrics is not None,
+            bool(acct_data.ledger_entries),
+            bool(acct_data.position_events),
+            acct_data.snapshot is not None,
+            bool(acct_data.lending_events),
+            any(acct_data.connector_events.values()),
+            bool(acct_data.unavailable_records),
+            acct_data.parse_errors > 0,
+        )
+    )
+
+
+def _prepare_pnl_breakdown(
+    acct_data: AccountingData,
+    deployment_id: str,
+    resolved_db: str,
+    ledger_limit: int,
+    position_limit: int,
+    position_events_truncated: bool,
+    ledger_entries_truncated: bool,
+) -> PnLBreakdown:
+    """Build the generic report and attach fallback and truncation diagnostics."""
+    if not _has_persisted_pnl_data(acct_data):
+        click.secho(
+            f"No persisted data found for strategy '{deployment_id}' in {resolved_db}.",
+            fg="red",
+            err=True,
+        )
+        sys.exit(1)
+
+    breakdown = compute_pnl_breakdown(
+        deployment_id=deployment_id,
+        metrics=acct_data.metrics,
+        ledger_entries=acct_data.ledger_entries,
+        position_events=acct_data.position_events,
+        snapshot=acct_data.snapshot,
+    )
+
+    fallback_verdict = detect_stale_post_teardown_snapshot(
+        acct_data.recent_snapshots,
+        acct_data.ledger_entries,
+    )
+    if fallback_verdict.suppressed:
+        breakdown.headline_suppressed = True
+        breakdown.headline_suppression_reason = fallback_verdict.reason
+
+    if position_events_truncated:
+        breakdown.warnings.append(
+            f"Truncated to --position-limit ({position_limit}) position "
+            f"events; the strategy has emitted more. Position-derived "
+            f"stats (lifecycle counts, win rate, strategy-level LP gas, "
+            f"perp lifecycle PnL) are partial — re-run with a higher "
+            f"--position-limit to see the full window."
+        )
+    if ledger_entries_truncated:
+        breakdown.warnings.append(
+            f"Truncated to --ledger-limit ({ledger_limit}) ledger entries; "
+            f"the strategy has emitted more. Ledger-derived stats (gas "
+            f"total, slippage, trade count, avg trade size) are partial "
+            f"— re-run with a higher --ledger-limit to see the full window."
+        )
+    return breakdown
+
+
+def _emit_pnl_output(breakdown: PnLBreakdown, acct_data: AccountingData, as_json: bool) -> None:
+    """Build strategy-specific sections and emit the selected output format."""
+    lp_section = build_lp_report(acct_data)
+    lending_section = build_lending_report(acct_data)
+    connector_sections = _build_connector_report_sections(acct_data)
+    dq_section = build_data_quality(acct_data)
+
+    if as_json:
+        _emit_json_output(breakdown, acct_data, lp_section, lending_section, connector_sections, dq_section)
+        return
+
+    classes_label = ", ".join(sorted(str(c) for c in acct_data.strategy_classes))
+    click.echo(render_text(breakdown))
+    if classes_label and classes_label != "unknown":
+        click.echo(f"\nStrategy class: {classes_label}")
+
+    extra = "".join(
+        filter(
+            None,
+            [
+                render_lp_section(lp_section),
+                render_lending_section(lending_section, snapshot=acct_data.snapshot),
+                *(connector_section.render_text(acct_data) for connector_section in connector_sections),
+                render_data_quality_section(dq_section),
+            ],
+        )
+    )
+    if extra:
+        click.echo(extra)
+
+
 @click.command("pnl")
 @click.option(
     "--deployment-id",
@@ -1427,7 +1575,7 @@ def _emit_json_output(
     ),
 )
 @click.option("--json", "-j", "as_json", is_flag=True, help="Emit JSON instead of text.")
-def strat_pnl(  # noqa: C901
+def strat_pnl(
     deployment_id: str,
     db_path: str | None,
     ledger_limit: int,
@@ -1448,140 +1596,20 @@ def strat_pnl(  # noqa: C901
         almanak strat pnl -s uniswap_rsi:ab12cd34ef56 --json
         almanak strat pnl -s uniswap_rsi:ab12cd34ef56 --db ./state.db
     """
-    if ledger_limit <= 0:
-        click.secho("--ledger-limit must be a positive integer.", fg="red", err=True)
-        sys.exit(1)
-    if position_limit <= 0:
-        click.secho("--position-limit must be a positive integer.", fg="red", err=True)
-        sys.exit(1)
-
-    resolved_db = db_path or _default_db_path()
-    if not Path(resolved_db).exists():
-        click.secho(
-            f"State DB not found at {resolved_db}. Run the strategy at least once (or pass --db).",
-            fg="red",
-            err=True,
-        )
-        sys.exit(1)
-
-    try:
-        # Probe with one extra row (`limit + 1`) on every truncatable axis so
-        # we can distinguish "exactly N rows, no truncation" from "more than
-        # N, older rows dropped". Without the probe row the only signal is
-        # `len == limit`, which has a false-positive on the equality boundary.
-        acct_data = asyncio.run(
-            load_accounting_data(
-                resolved_db,
-                deployment_id,
-                ledger_limit=ledger_limit + 1,
-                position_limit=position_limit + 1,
-            )
-        )
-    except Exception as exc:
-        click.secho(f"Failed to read state DB: {exc}", fg="red", err=True)
-        sys.exit(1)
-
-    # Honour the user's caps downstream: trim each truncated list to the
-    # requested window so reports / counts agree with what the flags asked
-    # for. The truncation flags drive a single warning emitted later.
-    position_events_truncated = len(acct_data.position_events) > position_limit
-    if position_events_truncated:
-        acct_data.position_events = acct_data.position_events[:position_limit]
-    ledger_entries_truncated = len(acct_data.ledger_entries) > ledger_limit
-    if ledger_entries_truncated:
-        acct_data.ledger_entries = acct_data.ledger_entries[:ledger_limit]
-
-    metrics = acct_data.metrics
-    ledger_entries = acct_data.ledger_entries
-    position_events = acct_data.position_events
-    snapshot = acct_data.snapshot
-
-    # A strategy with no data at all = not found.
-    if (
-        metrics is None
-        and not ledger_entries
-        and not position_events
-        and snapshot is None
-        and not acct_data.lending_events
-        and not any(acct_data.connector_events.values())
-    ):
-        click.secho(
-            f"No persisted data found for strategy '{deployment_id}' in {resolved_db}.",
-            fg="red",
-            err=True,
-        )
-        sys.exit(1)
-
-    # Generic portfolio summary (unchanged from VIB-3206)
-    breakdown = compute_pnl_breakdown(
-        deployment_id=deployment_id,
-        metrics=metrics,
-        ledger_entries=ledger_entries,
-        position_events=position_events,
-        snapshot=snapshot,
+    resolved_db = _resolve_pnl_db_path(db_path, ledger_limit, position_limit)
+    acct_data, position_events_truncated, ledger_entries_truncated = _load_pnl_accounting_data(
+        resolved_db,
+        deployment_id,
+        ledger_limit,
+        position_limit,
     )
-
-    # VIB-4907 / F4: stamp the breakdown when the SWAP-class fallback pattern
-    # fires.  The renderer hides the gross/net/NAV lines and shows
-    # ``Headline PnL: unavailable`` + the detection reason instead.  Friction
-    # components (gas, slippage, fees, IL) are computed from the ledger /
-    # position events and remain accurate, so we still surface them.
-    fallback_verdict = detect_stale_post_teardown_snapshot(
-        acct_data.recent_snapshots,
-        ledger_entries,
+    breakdown = _prepare_pnl_breakdown(
+        acct_data,
+        deployment_id,
+        resolved_db,
+        ledger_limit,
+        position_limit,
+        position_events_truncated,
+        ledger_entries_truncated,
     )
-    if fallback_verdict.suppressed:
-        breakdown.headline_suppressed = True
-        breakdown.headline_suppression_reason = fallback_verdict.reason
-
-    # Surface truncation on either axis. The probe-row pattern above means
-    # these fire only when older rows were actually dropped — no false-
-    # positive at the equality boundary. Wording is class-agnostic so the
-    # message stays accurate for LP, perp, lending, and Pendle strategies
-    # (all consume `position_events` for lifecycle stats; `ledger_entries`
-    # back gas + slippage aggregation regardless of strategy class).
-    if position_events_truncated:
-        breakdown.warnings.append(
-            f"Truncated to --position-limit ({position_limit}) position "
-            f"events; the strategy has emitted more. Position-derived "
-            f"stats (lifecycle counts, win rate, strategy-level LP gas, "
-            f"perp lifecycle PnL) are partial — re-run with a higher "
-            f"--position-limit to see the full window."
-        )
-    if ledger_entries_truncated:
-        breakdown.warnings.append(
-            f"Truncated to --ledger-limit ({ledger_limit}) ledger entries; "
-            f"the strategy has emitted more. Ledger-derived stats (gas "
-            f"total, slippage, trade count, avg trade size) are partial "
-            f"— re-run with a higher --ledger-limit to see the full window."
-        )
-
-    # Strategy-class-specific sections
-    lp_section = build_lp_report(acct_data)
-    lending_section = build_lending_report(acct_data)
-    connector_sections = _build_connector_report_sections(acct_data)
-    dq_section = build_data_quality(acct_data)
-
-    if as_json:
-        _emit_json_output(breakdown, acct_data, lp_section, lending_section, connector_sections, dq_section)
-        return
-
-    # Text output
-    classes_label = ", ".join(sorted(str(c) for c in acct_data.strategy_classes))
-    click.echo(render_text(breakdown))
-    if classes_label and classes_label != "unknown":
-        click.echo(f"\nStrategy class: {classes_label}")
-
-    extra = "".join(
-        filter(
-            None,
-            [
-                render_lp_section(lp_section),
-                render_lending_section(lending_section, snapshot=acct_data.snapshot),
-                *(connector_section.render_text(acct_data) for connector_section in connector_sections),
-                render_data_quality_section(dq_section),
-            ],
-        )
-    )
-    if extra:
-        click.echo(extra)
+    _emit_pnl_output(breakdown, acct_data, as_json)

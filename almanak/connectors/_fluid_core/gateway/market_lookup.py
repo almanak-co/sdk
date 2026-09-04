@@ -96,9 +96,6 @@ class FluidMarketLookup(ProtocolTokenLookup):
             return False
         return any(isinstance(v, list) and v for v in data.values())
 
-    # crap-allowlist: byte-identical relocation from fluid/gateway/market_lookup.py (PR #2856);
-    # aiohttp network fetch is integration/intent-covered, not unit-covered (pre-existing). Unit
-    # coverage (aiohttp-mocked) tracked as a follow-up.
     async def _fetch_from_network(self) -> dict[str, list[dict[str, Any]]] | None:
         """Fetch Fluid markets for every supported chain in parallel.
 

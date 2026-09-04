@@ -435,9 +435,6 @@ def _assert_signer_matches_intended_wallet(private_key: str, intended_wallet: st
         )
 
 
-# crap-allowlist: Phase 1 (#2097) routes the existing GatewaySettings(...) construction
-# through gateway_config_from_env(...) — no complexity added. Function refactor is
-# tracked separately; allowlist is the documented escape hatch for no-op cutovers.
 def _start_managed_gateway(
     ctx: click.Context,
     host: str,

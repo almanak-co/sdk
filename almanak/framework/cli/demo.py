@@ -22,7 +22,6 @@ def _build_menu_entries(strategies: list[dict]) -> list[str]:
     return entries
 
 
-# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
 @click.command("demo")
 @click.option(
     "--name",
@@ -171,15 +170,13 @@ def _interactive_select(strategies: list[dict]) -> str | None:
     return strategies[index]["name"]
 
 
-# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
 def _rewrite_config(target: Path, strategy_name: str) -> None:
     """Clean up the copied config.json.
 
     Strips leftover identity/descriptive metadata (deployment_id, strategy_name,
-    description, protocol, network) that belongs in the @almanak_strategy
-    decorator. The top-level ``chain`` / ``chains`` field is preserved: it is
-    an explicit runtime override that sdk-planner and operators rely on to
-    see the target chain without importing the strategy module.
+    description, protocol) that belongs in the @almanak_strategy decorator.
+    Top-level ``chain`` / ``chains`` and ``network`` fields are runtime settings
+    and remain in the copy.
     """
     config_path = target / "config.json"
     if not config_path.is_file():
@@ -192,7 +189,7 @@ def _rewrite_config(target: Path, strategy_name: str) -> None:
             click.echo(f"Warning: could not parse config.json ({e}); skipping config rewrite.", err=True)
             return
 
-    metadata_keys = {"deployment_id", "strategy_name", "description", "protocol", "network"}
+    metadata_keys = {"deployment_id", "strategy_name", "description", "protocol"}
     removed = {k for k in metadata_keys if k in config}
     for k in removed:
         del config[k]

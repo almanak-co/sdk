@@ -284,7 +284,6 @@ def _get_teardown_adapter() -> TeardownStateAdapter:
     return _teardown_adapter
 
 
-# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
 def _get_strategy_data(deployment_id: str) -> dict[str, Any]:
     """Get strategy data from registry or raise 404.
 
@@ -356,7 +355,7 @@ def _get_strategy_data(deployment_id: str) -> dict[str, Any]:
         "protocol": getattr(strategy, "protocol", "unknown"),
         "positions": positions,
         "total_value_usd": float(position_summary.total_value_usd),
-        "health_factor": float(health_factor) if health_factor else None,
+        "health_factor": float(health_factor) if health_factor is not None else None,
     }
 
 
@@ -372,7 +371,7 @@ def _build_position_summary(strategy: dict[str, Any]) -> TeardownPositionSummary
                 protocol=pos["protocol"],
                 value_usd=Decimal(str(pos["value_usd"])),
                 liquidation_risk=pos.get("liquidation_risk", False),
-                health_factor=Decimal(str(pos["health_factor"])) if pos.get("health_factor") else None,
+                health_factor=(Decimal(str(pos["health_factor"])) if pos.get("health_factor") is not None else None),
                 details=pos.get("details", {}),
             )
         )
@@ -422,10 +421,10 @@ def _generate_warnings(strategy: dict, mode: str) -> list[str]:
     total_value = strategy.get("total_value_usd", 0)
     health_factor = strategy.get("health_factor")
 
-    if health_factor and health_factor < 1.5:
+    if health_factor is not None and health_factor < 1.5:
         warnings.append(f"Low health factor ({health_factor}). Position may be at liquidation risk.")
 
-    if mode == "emergency" and not health_factor:
+    if mode == "emergency" and health_factor is None:
         warnings.append(
             "Emergency mode selected but no immediate liquidation risk detected. "
             "Consider graceful mode for lower costs."
@@ -771,7 +770,78 @@ async def cancel_close(
     )
 
 
-# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
+def _get_pending_approval_request(
+    deployment_id: str,
+) -> tuple[TeardownStateAdapter, dict[str, Any] | None, dict[str, Any] | None]:
+    """Load and validate the approval request visible to the API."""
+    adapter = _get_teardown_adapter()
+    pending_sqlite = adapter.get_latest_pending_approval(deployment_id)
+    in_memory_teardown = _teardown_state.get_teardown(deployment_id)
+
+    if pending_sqlite is None and in_memory_teardown is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No active teardown for strategy {deployment_id}",
+        )
+
+    if in_memory_teardown is not None and in_memory_teardown["status"] != "paused":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Teardown is not paused (status: {in_memory_teardown['status']})",
+        )
+    if in_memory_teardown is not None and not in_memory_teardown.get("approval_needed"):
+        raise HTTPException(
+            status_code=400,
+            detail="No approval request pending",
+        )
+
+    return adapter, pending_sqlite, in_memory_teardown
+
+
+def _build_approval_response(request: EscalationApprovalRequest) -> tuple[str, dict[str, Any]]:
+    """Build the operator message and runner-channel response payload."""
+    if request.action == "approve":
+        return (
+            "Slippage approved. Continuing teardown.",
+            {
+                "approved": True,
+                "action": "approve",
+                "approved_slippage": str(request.approved_slippage) if request.approved_slippage else None,
+            },
+        )
+    if request.action == "wait_and_escalate":
+        return (
+            "Operator declined current level; advancing to next escalation level.",
+            {"approved": False, "action": "wait_and_escalate"},
+        )
+    return "Teardown cancelled by operator.", {"approved": False, "action": "cancel"}
+
+
+def _update_approval_state(
+    deployment_id: str,
+    request: EscalationApprovalRequest,
+    pending_sqlite: dict[str, Any] | None,
+    in_memory_teardown: dict[str, Any] | None,
+) -> str | None:
+    """Apply the operator action to API-owned lifecycle state."""
+    if in_memory_teardown is None:
+        return pending_sqlite["teardown_id"] if pending_sqlite else None
+
+    if request.action == "approve":
+        in_memory_teardown["status"] = "executing"
+        in_memory_teardown["approval_needed"] = None
+        if request.approved_slippage:
+            in_memory_teardown["approved_slippage"] = request.approved_slippage
+    elif request.action == "wait_and_escalate":
+        in_memory_teardown["status"] = "waiting_retry"
+    else:
+        in_memory_teardown["status"] = "cancelled"
+        in_memory_teardown["approval_needed"] = None
+
+    _teardown_state.set_teardown(deployment_id, in_memory_teardown)
+    return in_memory_teardown["teardown_id"]
+
+
 @router.post("/{deployment_id}/close/approve-escalation")
 async def approve_escalation(
     deployment_id: str,
@@ -791,64 +861,14 @@ async def approve_escalation(
     Returns:
         ApprovalResponseModel with result
     """
-    # Look up pending approval in the shared SQLite channel first — covers
-    # both runner-initiated teardowns (which never populate _teardown_state)
-    # and API-initiated teardowns (which populate both).
-    adapter = _get_teardown_adapter()
-    pending_sqlite = adapter.get_latest_pending_approval(deployment_id)
-    in_memory_teardown = _teardown_state.get_teardown(deployment_id)
-
-    if pending_sqlite is None and in_memory_teardown is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No active teardown for strategy {deployment_id}",
-        )
-
-    # If in-memory state exists, validate it's in the right state for approval.
-    if in_memory_teardown is not None:
-        if in_memory_teardown["status"] != "paused":
-            raise HTTPException(
-                status_code=400,
-                detail=f"Teardown is not paused (status: {in_memory_teardown['status']})",
-            )
-        if not in_memory_teardown.get("approval_needed"):
-            raise HTTPException(
-                status_code=400,
-                detail="No approval request pending",
-            )
-
-    # Handle the action — update in-memory (for API-initiated flows) and
-    # write to SQLite (for runner-initiated flows). Either path alone is
-    # sufficient; writing to both keeps them in sync.
-    if request.action == "approve":
-        message = "Slippage approved. Continuing teardown."
-        response_payload = {
-            "approved": True,
-            "action": "approve",
-            "approved_slippage": str(request.approved_slippage) if request.approved_slippage else None,
-        }
-    elif request.action == "wait_and_escalate":
-        message = "Operator declined current level; advancing to next escalation level."
-        response_payload = {"approved": False, "action": "wait_and_escalate"}
-    else:  # cancel
-        message = "Teardown cancelled by operator."
-        response_payload = {"approved": False, "action": "cancel"}
-
-    if in_memory_teardown is not None:
-        if request.action == "approve":
-            in_memory_teardown["status"] = "executing"
-            in_memory_teardown["approval_needed"] = None
-            if request.approved_slippage:
-                in_memory_teardown["approved_slippage"] = request.approved_slippage
-        elif request.action == "wait_and_escalate":
-            in_memory_teardown["status"] = "waiting_retry"
-        else:  # cancel
-            in_memory_teardown["status"] = "cancelled"
-            in_memory_teardown["approval_needed"] = None
-        _teardown_state.set_teardown(deployment_id, in_memory_teardown)
-        teardown_id_for_audit = in_memory_teardown["teardown_id"]
-    else:
-        teardown_id_for_audit = pending_sqlite["teardown_id"] if pending_sqlite else None
+    adapter, pending_sqlite, in_memory_teardown = _get_pending_approval_request(deployment_id)
+    message, response_payload = _build_approval_response(request)
+    teardown_id_for_audit = _update_approval_state(
+        deployment_id,
+        request,
+        pending_sqlite,
+        in_memory_teardown,
+    )
 
     # Write to the SQLite channel so a runner waiting on the approval wakes up.
     # This is the path that was broken before — runner's poll loop reads here.

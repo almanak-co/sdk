@@ -233,6 +233,34 @@ def test_registry_treatment_lp_equals_direct_handler():
     assert via_registry.to_payload_json() == direct.to_payload_json()
 
 
+@pytest.mark.parametrize(
+    ("intent_type", "protocol"),
+    [
+        ("LP_OPEN", "pendle"),
+        ("LP_CLOSE", "pendle_v2"),
+        ("SUPPLY", "pendle"),
+        ("LP_OPEN", "uniswap_v3"),
+    ],
+)
+def test_registry_treatment_lp_public_parity_table(intent_type: str, protocol: str) -> None:
+    extracted = json.dumps(
+        {
+            "lp_open_data": {"amount0": 0, "amount1": None},
+            "lp_close_data": {"amount0_collected": 2 * 10**18, "amount1_collected": 10**18},
+        }
+    )
+    ob = _outbox(intent_type)
+    led = _ledger(intent_type, protocol=protocol, extracted=extracted)
+
+    via_registry = AccountingTreatmentRegistry.treatment_for("pendle_lp")(_ctx(ob, led))
+    direct = handle_pendle_lp(ob, led)
+
+    assert via_registry == direct
+    if direct is not None:
+        assert via_registry is not None
+        assert via_registry.to_payload_json() == direct.to_payload_json()
+
+
 def test_registry_treatment_pt_equals_direct_handler():
     sy_in, pt_out = int(0.9 * 10**18), int(1.0 * 10**18)
     extracted = json.dumps({"swap_amounts": {"amount_in": sy_in, "amount_out": pt_out}})

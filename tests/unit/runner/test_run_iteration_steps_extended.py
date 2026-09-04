@@ -948,3 +948,207 @@ class TestRunSingleChainIntents:
         # Balance cache invalidated once after the full multi-intent sequence
         # so post-delta reads are fresh against the post-execution chain state.
         assert balance_provider.invalidate_cache.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_multi_intent_chains_output_in_order_and_records_once(self) -> None:
+        runner = _make_runner()
+        strategy = _make_strategy()
+        state = _make_state(strategy)
+        first = SwapIntent(from_token="USDC", to_token="WETH", amount=Decimal("10"))
+        second = SwapIntent(from_token="WETH", to_token="DAI", amount="all")
+        state.intents = [first, second]
+
+        first_result = IterationResult(
+            status=IterationStatus.SUCCESS,
+            intent=first,
+            execution_result=SimpleNamespace(
+                swap_amounts=SimpleNamespace(amount_out_decimal=Decimal("2.5")),
+                lp_open_data=None,
+            ),
+        )
+        final_result = IterationResult(
+            status=IterationStatus.SUCCESS,
+            intent=second,
+            execution_result=SimpleNamespace(swap_amounts=None, lp_open_data=None),
+        )
+
+        with (
+            patch.object(
+                runner, "_execute_single_chain", new=AsyncMock(side_effect=[first_result, final_result])
+            ) as execute,
+            patch.object(runner, "_record_success") as record_success,
+        ):
+            result = await runner._run_single_chain_intents(state)
+
+        assert result is final_result
+        assert [call.kwargs["intent"] for call in execute.await_args_list[:1]] == [first]
+        resolved_second = execute.await_args_list[1].kwargs["intent"]
+        assert resolved_second.amount == Decimal("2.5")
+        assert [call.kwargs["record_metrics"] for call in execute.await_args_list] == [False, False]
+        record_success.assert_called_once_with(execution_proved=True)
+
+    @pytest.mark.asyncio
+    async def test_single_intent_resolver_failure_owns_failure_metric(self) -> None:
+        runner = _make_runner()
+        strategy = _make_strategy()
+        state = _make_state(strategy)
+        intent = SwapIntent(from_token="USDC", to_token="WETH", amount="all")
+        state.intents = [intent]
+        state.market = MagicMock()
+        state.market.balance.return_value = Decimal("0")
+
+        with (
+            patch.object(runner, "_execute_single_chain", new=AsyncMock()) as execute,
+            patch.object(runner, "_record_failure") as record_failure,
+        ):
+            result = await runner._run_single_chain_intents(state)
+
+        assert result.status == IterationStatus.COMPILATION_FAILED
+        assert result.intent is intent
+        execute.assert_not_awaited()
+        record_failure.assert_called_once_with()
+
+    @pytest.mark.asyncio
+    async def test_dry_run_chained_shortcut_continues_and_records_once(self) -> None:
+        runner = _make_runner(dry_run=True)
+        strategy = _make_strategy()
+        state = _make_state(strategy)
+        first = SwapIntent(from_token="USDC", to_token="WETH", amount=Decimal("10"))
+        second = SwapIntent(from_token="WETH", to_token="DAI", amount="all")
+        state.intents = [first, second]
+        dry_run_result = IterationResult(status=IterationStatus.DRY_RUN, intent=first)
+
+        with (
+            patch.object(runner, "_execute_single_chain", new=AsyncMock(return_value=dry_run_result)) as execute,
+            patch.object(runner, "_record_success") as record_success,
+        ):
+            result = await runner._run_single_chain_intents(state)
+
+        assert result.status == IterationStatus.DRY_RUN
+        assert result.intent is second
+        execute.assert_awaited_once()
+        record_success.assert_called_once_with(execution_proved=False)
+
+    @pytest.mark.asyncio
+    async def test_execution_exception_propagates_without_post_stages(self) -> None:
+        balance_provider = MagicMock()
+        runner = _make_runner(balance_provider=balance_provider)
+        strategy = _make_strategy()
+        state = _make_state(strategy)
+        state.intents = [SwapIntent(from_token="USDC", to_token="WETH", amount=Decimal("10"))]
+        state.pre_balances = {"USDC": Decimal("10")}
+        state.intent_tokens = ["USDC"]
+        error = RuntimeError("commit boundary failed")
+
+        with (
+            patch.object(runner, "_execute_single_chain", new=AsyncMock(side_effect=error)),
+            patch.object(runner, "_record_success") as record_success,
+            patch.object(runner, "_record_failure") as record_failure,
+            pytest.raises(RuntimeError, match="commit boundary failed") as raised,
+        ):
+            await runner._run_single_chain_intents(state)
+
+        assert raised.value is error
+        record_success.assert_not_called()
+        record_failure.assert_not_called()
+        balance_provider.invalidate_cache.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_success_logs_only_measured_nonzero_balance_deltas(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        balance_provider = MagicMock()
+
+        async def _get_balance(token: str) -> SimpleNamespace:
+            if token == "WETH":
+                raise RuntimeError("unavailable")
+            balances = {"USDC": Decimal("8"), "DAI": Decimal("7")}
+            return SimpleNamespace(balance=balances[token])
+
+        balance_provider.get_balance = _get_balance
+        runner = _make_runner(balance_provider=balance_provider)
+        strategy = _make_strategy()
+        state = _make_state(strategy)
+        intent = SwapIntent(from_token="USDC", to_token="WETH", amount=Decimal("2"))
+        state.intents = [intent]
+        state.pre_balances = {"USDC": Decimal("10"), "WETH": Decimal("1")}
+        state.intent_tokens = ["USDC", "WETH", "DAI"]
+        success = IterationResult(
+            status=IterationStatus.SUCCESS,
+            intent=intent,
+            execution_result=SimpleNamespace(swap_amounts=None, lp_open_data=None),
+        )
+
+        with (
+            patch.object(runner, "_execute_single_chain", new=AsyncMock(return_value=success)),
+            caplog.at_level("INFO", logger="almanak.framework.runner.strategy_runner"),
+        ):
+            result = await runner._run_single_chain_intents(state)
+
+        assert result is success
+        balance_provider.invalidate_cache.assert_called_once_with()
+        delta_messages = [record.getMessage() for record in caplog.records if "Balance delta:" in record.getMessage()]
+        assert delta_messages == ["Balance delta: USDC: -2"]
+
+    @pytest.mark.asyncio
+    async def test_balance_delta_observation_failure_remains_nonfatal(self) -> None:
+        balance_provider = MagicMock()
+        balance_provider.invalidate_cache.side_effect = RuntimeError("cache unavailable")
+        runner = _make_runner(balance_provider=balance_provider)
+        strategy = _make_strategy()
+        state = _make_state(strategy)
+        intent = SwapIntent(from_token="USDC", to_token="WETH", amount=Decimal("2"))
+        state.intents = [intent]
+        state.pre_balances = {"USDC": Decimal("10")}
+        state.intent_tokens = ["USDC"]
+        success = IterationResult(status=IterationStatus.SUCCESS, intent=intent)
+
+        with patch.object(runner, "_execute_single_chain", new=AsyncMock(return_value=success)):
+            result = await runner._run_single_chain_intents(state)
+
+        assert result is success
+        balance_provider.invalidate_cache.assert_called_once_with()
+        balance_provider.get_balance.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_public_iteration_preserves_sequence_chaining_and_result(self) -> None:
+        runner = _make_runner()
+        strategy = _make_strategy()
+        first = SwapIntent(from_token="USDC", to_token="WETH", amount=Decimal("10"))
+        second = SwapIntent(from_token="WETH", to_token="DAI", amount="all")
+        strategy.decide.return_value = IntentSequence([first, second])
+        first_result = IterationResult(
+            status=IterationStatus.SUCCESS,
+            intent=first,
+            execution_result=SimpleNamespace(
+                swap_amounts=SimpleNamespace(amount_out_decimal=Decimal("2.5")),
+                lp_open_data=None,
+            ),
+        )
+        final_result = IterationResult(
+            status=IterationStatus.SUCCESS,
+            intent=second,
+            execution_result=SimpleNamespace(swap_amounts=None, lp_open_data=None),
+        )
+
+        with (
+            patch.object(runner, "_is_strategy_paused", new=AsyncMock(return_value=(False, None))),
+            patch.object(runner, "_check_teardown_requested", return_value=None),
+            patch.object(runner, "_step_periodic_hooks", new=AsyncMock()),
+            patch.object(runner, "_step_build_snapshot", new=AsyncMock(return_value=None)),
+            patch.object(runner, "_step_reconcile_resumed_state", new=AsyncMock()),
+            patch.object(runner, "_step_pump_fill_reconciliation", new=AsyncMock()),
+            patch.object(runner, "_step_reconcile_perp_settlement", new=AsyncMock()),
+            patch.object(runner, "_step_attach_lp_outstanding", new=AsyncMock()),
+            patch.object(runner, "_step_snapshot_pre_balances", new=AsyncMock()),
+            patch.object(
+                runner, "_execute_single_chain", new=AsyncMock(side_effect=[first_result, final_result])
+            ) as execute,
+        ):
+            result = await runner.run_iteration(strategy)
+
+        assert result is final_result
+        assert [call.kwargs["intent"].amount for call in execute.await_args_list] == [Decimal("10"), Decimal("2.5")]
+        assert runner._total_iterations == 1
+        assert runner._successful_iterations == 1

@@ -18,6 +18,7 @@ from typing import Any
 
 import pytest
 
+from almanak.framework.api import teardown as teardown_api
 from almanak.framework.api.teardown import (
     _STEP_DESCRIPTIONS,
     _generate_steps,
@@ -38,6 +39,36 @@ def _position(ptype: PositionType, value_usd: float = 1000.0) -> dict[str, Any]:
         "chain": "arbitrum",
         "protocol": "test_protocol",
         "value_usd": value_usd,
+    }
+
+
+@pytest.mark.asyncio
+async def test_preview_preserves_current_safety_info_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        teardown_api,
+        "_get_strategy_data",
+        lambda deployment_id: {
+            "deployment_id": deployment_id,
+            "name": "Test Strategy",
+            "positions": [],
+            "total_value_usd": 1000.0,
+            "health_factor": None,
+        },
+    )
+
+    response = await teardown_api.preview_close(
+        deployment_id="deployment:test",
+        mode="graceful",
+        api_key="test-key",
+    )
+
+    assert response.safety_info == {
+        "position_aware_cap": True,
+        "mev_protection": True,
+        "cancel_window_seconds": 10,
+        "simulation_required": True,
+        "atomic_bundling": True,
+        "post_verification": True,
     }
 
 
@@ -147,6 +178,13 @@ class TestGenerateWarnings:
         assert len(warnings) == 1
         assert "Low health factor (1.2)" in warnings[0]
         assert "liquidation risk" in warnings[0]
+
+    def test_zero_health_factor_is_measured_liquidation_risk(self) -> None:
+        strategy = {"total_value_usd": 1000, "health_factor": 0.0}
+
+        warnings = _generate_warnings(strategy, mode="emergency")
+
+        assert warnings == ["Low health factor (0.0). Position may be at liquidation risk."]
 
     def test_emergency_without_health_factor_suggests_graceful(self) -> None:
         strategy = {"total_value_usd": 1000, "health_factor": None}

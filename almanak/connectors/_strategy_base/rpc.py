@@ -53,6 +53,7 @@ def eth_call(
     data: str,
     rpc_url: str | None = None,
     gateway_client: GatewayClient | None = None,
+    gateway_raise_on_error: bool = False,
     timeout: float = 5.0,
 ) -> bytes | None:
     """Perform a gateway-first eth_call and return raw bytes."""
@@ -66,6 +67,7 @@ def eth_call(
         chain=chain,
         gateway_client=gateway_client,
         raise_errors=True,
+        gateway_raise_on_error=gateway_raise_on_error,
     )
 
 
@@ -76,6 +78,7 @@ def eth_call_hex(
     data: str,
     rpc_url: str | None = None,
     gateway_client: GatewayClient | None = None,
+    gateway_raise_on_error: bool = False,
     timeout: float = 5.0,
 ) -> str | None:
     """Perform eth_call and return a 0x-prefixed hex string."""
@@ -85,6 +88,7 @@ def eth_call_hex(
         data=data,
         rpc_url=rpc_url,
         gateway_client=gateway_client,
+        gateway_raise_on_error=gateway_raise_on_error,
         timeout=timeout,
     )
     if raw is None:

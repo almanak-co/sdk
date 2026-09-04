@@ -2649,7 +2649,6 @@ class StateManager:
             logger.error(f"Failed to save CLOB order: {e}")
             return False
 
-    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     async def get_clob_order(
         self,
         order_id: str,
@@ -2689,7 +2688,6 @@ class StateManager:
             logger.error(f"Failed to get CLOB order: {e}")
             return None
 
-    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     async def get_open_clob_orders(
         self,
         market_id: str | None = None,
@@ -2731,7 +2729,6 @@ class StateManager:
             logger.error(f"Failed to get open CLOB orders: {e}")
             return []
 
-    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     async def update_clob_order_status(
         self,
         order_id: str,
@@ -2793,7 +2790,6 @@ class StateManager:
     # Portfolio Snapshot Management
     # -------------------------------------------------------------------------
 
-    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     async def save_portfolio_snapshot(self, snapshot: "PortfolioSnapshot") -> int:
         """Save a portfolio snapshot.
 
@@ -3769,7 +3765,6 @@ class StateManager:
             position_types=position_types,
         )
 
-    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     async def get_ledger_entries(
         self,
         deployment_id: str,

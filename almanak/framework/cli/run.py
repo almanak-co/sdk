@@ -226,8 +226,6 @@ def _apply_env_strategy_config_override(config: dict[str, Any], *, echo: bool = 
     return validated.model_dump(mode="python", exclude_unset=True)
 
 
-# crap-allowlist: #2098/#2101 adds schema validation around the existing loader
-# without increasing its decision complexity.
 # Edit-distance threshold for "did you mean" config-key typo detection (#2098).
 # We use Optimal String Alignment distance (Levenshtein + adjacent transposition)
 # with a threshold of 1: a single fat-finger — one inserted/deleted/substituted
@@ -907,13 +905,6 @@ def create_balance_provider(
     )
 
 
-# crap-allowlist: #2097 replaces the legacy 5x ``os.environ.get(...) or os.environ.get(legacy)``
-# presence-check ladder with a typed :func:`gas_risk_override_presence` call.
-# CC stays at 7 (one branch per typed override + the max_value_usd parse) and the
-# function is exercised end-to-end by ``almanak strat run`` smokes; targeted unit
-# coverage can land alongside a refactor that consolidates the four presence
-# checks into a small helper, but the cyclomatic shape is structural to the
-# legacy contract rather than something the migration introduced.
 def _apply_runtime_gas_risk_overrides(
     tx_risk_config: Any,
     config: LocalRuntimeConfig,
@@ -1230,7 +1221,7 @@ def format_iteration_result(result: IterationResult) -> str:
 
 @click.command("run")
 @strategy_run_options
-def run(  # noqa: C901
+def run(
     working_dir: str,
     config_file: str | None,
     once: bool,
@@ -1520,7 +1511,6 @@ def _has_placeholder_vault_address(vault_raw: dict) -> bool:
     return addr.startswith("0x_") or "_DEPLOY_" in addr or "_SET_TO_" in addr
 
 
-# crap-allowlist: VIB-4835 - pre-existing CLI helper (cc=12, cov=2%) touched only by the vault capability construction rewrite. Refactor + coverage backfill tracked in VIB-4139.
 def _auto_deploy_lagoon_vault(
     vault_raw: dict,
     chain: str,

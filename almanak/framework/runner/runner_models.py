@@ -4,6 +4,7 @@ Extracted from strategy_runner.py for maintainability. All symbols are
 re-exported by strategy_runner.py so existing import paths keep working.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -54,8 +55,179 @@ def _extract_tokens_from_intent(intent: "AnyIntent", *, default_chain: str | Non
     return extract_token_symbols(intent, default_chain=default_chain)
 
 
-# crap-allowlist: VIB-4835 — pre-existing complexity (cc=38, cov=63%) touched only by ``almanak.connectors._strategy_base.protocol_aliases`` import rewrite (legacy ``almanak.framework.connectors.protocol_aliases`` → new ``_strategy_base`` path). Refactor tracked in VIB-4139.
-def _format_intent_for_log(intent: "AnyIntent", chain: str = "") -> str:  # noqa: C901
+def _display_protocol_for_log(protocol: str | None, chain: str) -> str:
+    if not protocol:
+        return ""
+    if not chain:
+        return protocol
+
+    from almanak.connectors._strategy_base.protocol_aliases import display_protocol
+
+    return display_protocol(chain, protocol)
+
+
+def _format_token_amount_for_log(amount: Any, token: Any) -> str:
+    if amount == "all":
+        return f"ALL {token}"
+    if amount:
+        return f"{amount} {token}"
+    return f"N/A {token}"
+
+
+_MISSING_INTENT_FIELD = object()
+
+
+def _format_swap_intent_for_log(intent: Any, emoji_type: str, chain: str) -> str:
+    from ..utils.log_formatters import format_percentage, format_usd
+
+    if hasattr(intent, "amount_usd") and intent.amount_usd:
+        amount_str = format_usd(intent.amount_usd)
+    elif hasattr(intent, "amount") and intent.amount:
+        amount_str = "ALL" if intent.amount == "all" else f"{intent.amount}"
+    else:
+        amount_str = "N/A"
+
+    slippage = getattr(intent, "max_slippage", None)
+    slippage_str = f" (slippage: {format_percentage(slippage)})" if slippage else ""
+    display_name = _display_protocol_for_log(getattr(intent, "protocol", None), chain)
+    protocol_str = f" via {display_name}" if display_name else ""
+    return f"{emoji_type}: {amount_str} {intent.from_token} → {intent.to_token}{slippage_str}{protocol_str}"
+
+
+def _format_supply_intent_for_log(intent: Any, emoji_type: str, chain: str) -> str:
+    from ..utils.log_formatters import format_usd
+
+    token = getattr(intent, "token", "")
+    amount = getattr(intent, "amount", None)
+    amount_usd = getattr(intent, "amount_usd", None)
+    protocol = _display_protocol_for_log(getattr(intent, "protocol", ""), chain)
+    if amount_usd:
+        amount_str = format_usd(amount_usd)
+    elif amount:
+        amount_str = f"{amount} {token}"
+    else:
+        amount_str = f"N/A {token}"
+
+    legacy_collateral = getattr(intent, "as_collateral", _MISSING_INTENT_FIELD)
+    collateral = (
+        getattr(intent, "use_as_collateral", True) if legacy_collateral is _MISSING_INTENT_FIELD else legacy_collateral
+    )
+    collateral_str = " (as collateral)" if collateral else ""
+    return f"{emoji_type}: {amount_str} to {protocol}{collateral_str}"
+
+
+def _format_borrow_intent_for_log(intent: Any, emoji_type: str, chain: str) -> str:
+    borrow_token = getattr(intent, "borrow_token", "")
+    borrow_amount = getattr(intent, "borrow_amount", None)
+    collateral_token = getattr(intent, "collateral_token", "")
+    collateral_amount = getattr(intent, "collateral_amount", None)
+    protocol = _display_protocol_for_log(getattr(intent, "protocol", ""), chain)
+    amount_str = f"{borrow_amount} {borrow_token}" if borrow_amount else f"N/A {borrow_token}"
+    if collateral_amount == "all":
+        collateral_str = f" (collateral: ALL {collateral_token})"
+    elif collateral_amount:
+        collateral_str = f" (collateral: {collateral_amount} {collateral_token})"
+    else:
+        collateral_str = ""
+    return f"{emoji_type}: {amount_str} from {protocol}{collateral_str}"
+
+
+def _format_withdraw_intent_for_log(intent: Any, emoji_type: str, chain: str) -> str:
+    token = getattr(intent, "token", "")
+    amount_str = _format_token_amount_for_log(getattr(intent, "amount", None), token)
+    protocol = _display_protocol_for_log(getattr(intent, "protocol", ""), chain)
+    return f"{emoji_type}: {amount_str} from {protocol}"
+
+
+def _format_repay_intent_for_log(intent: Any, emoji_type: str, chain: str) -> str:
+    token = getattr(intent, "token", "")
+    if getattr(intent, "repay_full", False):
+        amount_str = f"FULL {token}"
+    else:
+        amount_str = _format_token_amount_for_log(getattr(intent, "amount", None), token)
+    protocol = _display_protocol_for_log(getattr(intent, "protocol", ""), chain)
+    return f"{emoji_type}: {amount_str} to {protocol}"
+
+
+def _format_lp_open_intent_for_log(intent: Any, emoji_type: str, chain: str) -> str:
+    pool = getattr(intent, "pool", "")
+    amount0 = getattr(intent, "amount0", Decimal("0"))
+    amount1 = getattr(intent, "amount1", Decimal("0"))
+    range_lower = getattr(intent, "range_lower", None)
+    range_upper = getattr(intent, "range_upper", None)
+    protocol = _display_protocol_for_log(getattr(intent, "protocol", ""), chain)
+    range_str = f" [{range_lower:.0f} - {range_upper:.0f}]" if range_lower and range_upper else ""
+    return f"{emoji_type}: {pool} ({amount0}, {amount1}){range_str} via {protocol}"
+
+
+def _format_lp_close_intent_for_log(intent: Any, emoji_type: str, chain: str) -> str:
+    position_id = getattr(intent, "position_id", "")
+    protocol = _display_protocol_for_log(getattr(intent, "protocol", ""), chain)
+    return f"{emoji_type}: position {position_id[:8]}... via {protocol}"
+
+
+def _perp_direction_for_log(intent: Any) -> Any:
+    direction = getattr(intent, "direction", None)
+    if direction is not None:
+        return direction
+    if hasattr(intent, "is_long"):
+        return "LONG" if intent.is_long else "SHORT"
+    return ""
+
+
+def _format_perp_open_intent_for_log(intent: Any, emoji_type: str, chain: str) -> str:
+    from ..utils.log_formatters import format_usd
+
+    market = getattr(intent, "market", "")
+    direction = _perp_direction_for_log(intent)
+    size_usd = getattr(intent, "size_usd", None)
+    leverage = getattr(intent, "leverage", None)
+    protocol = _display_protocol_for_log(getattr(intent, "protocol", ""), chain)
+    size_str = format_usd(size_usd) if size_usd else "N/A"
+    leverage_str = f" ({leverage}x)" if leverage else ""
+    return f"{emoji_type}: {direction} {market} {size_str}{leverage_str} via {protocol}"
+
+
+def _format_perp_close_intent_for_log(intent: Any, emoji_type: str, chain: str) -> str:
+    market = getattr(intent, "market", "")
+    position_id = getattr(intent, "position_id", "")
+    protocol = _display_protocol_for_log(getattr(intent, "protocol", ""), chain)
+    return f"{emoji_type}: {market} position {position_id[:8] if position_id else 'N/A'}... via {protocol}"
+
+
+def _format_bridge_intent_for_log(intent: Any, emoji_type: str, _chain: str) -> str:
+    token = getattr(intent, "token", "")
+    amount_str = _format_token_amount_for_log(getattr(intent, "amount", None), token)
+    from_chain = getattr(intent, "from_chain", "")
+    to_chain = getattr(intent, "to_chain", "")
+    return f"{emoji_type}: {amount_str} {from_chain} → {to_chain}"
+
+
+def _format_hold_intent_for_log(intent: Any, emoji_type: str, _chain: str) -> str:
+    return f"{emoji_type}: {getattr(intent, 'reason', 'No action')}"
+
+
+type _IntentLogFormatter = Callable[[Any, str, str], str]
+
+_INTENT_LOG_FORMATTERS: dict[str, _IntentLogFormatter] = {
+    "SUPPLY": _format_supply_intent_for_log,
+    "BORROW": _format_borrow_intent_for_log,
+    "WITHDRAW": _format_withdraw_intent_for_log,
+    "REPAY": _format_repay_intent_for_log,
+    "LP_OPEN": _format_lp_open_intent_for_log,
+    "LP_CLOSE": _format_lp_close_intent_for_log,
+    "PERP_OPEN": _format_perp_open_intent_for_log,
+    "PERP_CLOSE": _format_perp_close_intent_for_log,
+    "BRIDGE": _format_bridge_intent_for_log,
+    "HOLD": _format_hold_intent_for_log,
+}
+
+
+def _intent_log_formatter(intent_type: Any) -> _IntentLogFormatter | None:
+    return next((formatter for name, formatter in _INTENT_LOG_FORMATTERS.items() if intent_type == name), None)
+
+
+def _format_intent_for_log(intent: "AnyIntent", chain: str = "") -> str:
     """Format an intent for user-friendly logging.
 
     Args:
@@ -65,183 +237,16 @@ def _format_intent_for_log(intent: "AnyIntent", chain: str = "") -> str:  # noqa
     Returns:
         Human-readable string describing the intent with amounts and tokens
     """
-    from almanak.connectors._strategy_base.protocol_aliases import display_protocol
-
-    from ..utils.log_formatters import (
-        format_intent_type_emoji,
-        format_percentage,
-        format_usd,
-    )
+    from ..utils.log_formatters import format_intent_type_emoji
 
     intent_type = intent.intent_type.value
     emoji_type = format_intent_type_emoji(intent_type)
-
-    def _display(protocol: str | None) -> str:
-        """Resolve protocol to display name if chain context is available."""
-        if not protocol:
-            return ""
-        return display_protocol(chain, protocol) if chain else protocol
-
-    # SwapIntent
     if hasattr(intent, "from_token") and hasattr(intent, "to_token"):
-        from_token = intent.from_token
-        to_token = intent.to_token
+        return _format_swap_intent_for_log(intent, emoji_type, chain)
 
-        if hasattr(intent, "amount_usd") and intent.amount_usd:
-            amount_str = format_usd(intent.amount_usd)
-        elif hasattr(intent, "amount") and intent.amount:
-            if intent.amount == "all":
-                amount_str = "ALL"
-            else:
-                amount_str = f"{intent.amount}"
-        else:
-            amount_str = "N/A"
-
-        slippage = getattr(intent, "max_slippage", None)
-        slippage_str = f" (slippage: {format_percentage(slippage)})" if slippage else ""
-
-        protocol = getattr(intent, "protocol", None)
-        display_name = _display(protocol)
-        protocol_str = f" via {display_name}" if display_name else ""
-
-        return f"{emoji_type}: {amount_str} {from_token} → {to_token}{slippage_str}{protocol_str}"
-
-    # SupplyIntent
-    if intent_type == "SUPPLY":
-        token = getattr(intent, "token", "")
-        amount = getattr(intent, "amount", None)
-        amount_usd = getattr(intent, "amount_usd", None)
-        protocol = _display(getattr(intent, "protocol", ""))
-
-        if amount_usd:
-            amount_str = format_usd(amount_usd)
-        elif amount:
-            amount_str = f"{amount} {token}"
-        else:
-            amount_str = f"N/A {token}"
-
-        collateral = getattr(intent, "as_collateral", True)
-        collateral_str = " (as collateral)" if collateral else ""
-
-        return f"{emoji_type}: {amount_str} to {protocol}{collateral_str}"
-
-    # BorrowIntent
-    if intent_type == "BORROW":
-        borrow_token = getattr(intent, "borrow_token", "")
-        borrow_amount = getattr(intent, "borrow_amount", None)
-        collateral_token = getattr(intent, "collateral_token", "")
-        collateral_amount = getattr(intent, "collateral_amount", None)
-        protocol = _display(getattr(intent, "protocol", ""))
-
-        if borrow_amount:
-            amount_str = f"{borrow_amount} {borrow_token}"
-        else:
-            amount_str = f"N/A {borrow_token}"
-
-        collateral_str = ""
-        if collateral_amount == "all":
-            collateral_str = f" (collateral: ALL {collateral_token})"
-        elif collateral_amount:
-            collateral_str = f" (collateral: {collateral_amount} {collateral_token})"
-
-        return f"{emoji_type}: {amount_str} from {protocol}{collateral_str}"
-
-    # WithdrawIntent
-    if intent_type == "WITHDRAW":
-        token = getattr(intent, "token", "")
-        amount = getattr(intent, "amount", None)
-        protocol = _display(getattr(intent, "protocol", ""))
-
-        if amount == "all":
-            amount_str = f"ALL {token}"
-        elif amount:
-            amount_str = f"{amount} {token}"
-        else:
-            amount_str = f"N/A {token}"
-
-        return f"{emoji_type}: {amount_str} from {protocol}"
-
-    # RepayIntent
-    if intent_type == "REPAY":
-        token = getattr(intent, "token", "")
-        amount = getattr(intent, "amount", None)
-        repay_full = getattr(intent, "repay_full", False)
-        protocol = _display(getattr(intent, "protocol", ""))
-
-        if repay_full:
-            amount_str = f"FULL {token}"
-        elif amount == "all":
-            amount_str = f"ALL {token}"
-        elif amount:
-            amount_str = f"{amount} {token}"
-        else:
-            amount_str = f"N/A {token}"
-
-        return f"{emoji_type}: {amount_str} to {protocol}"
-
-    # LPOpenIntent
-    if intent_type == "LP_OPEN":
-        pool = getattr(intent, "pool", "")
-        amount0 = getattr(intent, "amount0", Decimal("0"))
-        amount1 = getattr(intent, "amount1", Decimal("0"))
-        range_lower = getattr(intent, "range_lower", None)
-        range_upper = getattr(intent, "range_upper", None)
-        protocol = _display(getattr(intent, "protocol", ""))
-
-        range_str = ""
-        if range_lower and range_upper:
-            range_str = f" [{range_lower:.0f} - {range_upper:.0f}]"
-
-        return f"{emoji_type}: {pool} ({amount0}, {amount1}){range_str} via {protocol}"
-
-    # LPCloseIntent
-    if intent_type == "LP_CLOSE":
-        position_id = getattr(intent, "position_id", "")
-        protocol = _display(getattr(intent, "protocol", ""))
-        return f"{emoji_type}: position {position_id[:8]}... via {protocol}"
-
-    # PerpOpenIntent
-    if intent_type == "PERP_OPEN":
-        market = getattr(intent, "market", "")
-        direction = getattr(intent, "direction", "")
-        size_usd = getattr(intent, "size_usd", None)
-        leverage = getattr(intent, "leverage", None)
-        protocol = _display(getattr(intent, "protocol", ""))
-
-        size_str = format_usd(size_usd) if size_usd else "N/A"
-        leverage_str = f" ({leverage}x)" if leverage else ""
-
-        return f"{emoji_type}: {direction} {market} {size_str}{leverage_str} via {protocol}"
-
-    # PerpCloseIntent
-    if intent_type == "PERP_CLOSE":
-        market = getattr(intent, "market", "")
-        position_id = getattr(intent, "position_id", "")
-        protocol = _display(getattr(intent, "protocol", ""))
-        return f"{emoji_type}: {market} position {position_id[:8] if position_id else 'N/A'}... via {protocol}"
-
-    # BridgeIntent
-    if intent_type == "BRIDGE":
-        token = getattr(intent, "token", "")
-        amount = getattr(intent, "amount", None)
-        from_chain = getattr(intent, "from_chain", "")
-        to_chain = getattr(intent, "to_chain", "")
-
-        if amount == "all":
-            amount_str = f"ALL {token}"
-        elif amount:
-            amount_str = f"{amount} {token}"
-        else:
-            amount_str = f"N/A {token}"
-
-        return f"{emoji_type}: {amount_str} {from_chain} → {to_chain}"
-
-    # HoldIntent
-    if intent_type == "HOLD":
-        reason = getattr(intent, "reason", "No action")
-        return f"{emoji_type}: {reason}"
-
-    # Default fallback
+    formatter = _intent_log_formatter(intent_type)
+    if formatter is not None:
+        return formatter(intent, emoji_type, chain)
     return f"{emoji_type} (id={intent.intent_id[:8]}...)"
 
 

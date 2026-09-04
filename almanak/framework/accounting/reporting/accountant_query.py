@@ -204,8 +204,114 @@ def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {row[1] for row in cur.fetchall()}
 
 
-# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
-def _filtered_rows(  # noqa: C901
+def _query_table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    prior_factory = conn.row_factory
+    conn.row_factory = None
+    try:
+        return _table_columns(conn, table)
+    finally:
+        conn.row_factory = prior_factory
+
+
+def _append_scalar_predicate(
+    where: list[str],
+    params: list[Any],
+    columns: dict[str, str],
+    live_columns: set[str],
+    dimension: str,
+    value: Any,
+) -> bool:
+    if not value or dimension not in columns:
+        return True
+    column = columns[dimension]
+    if column not in live_columns:
+        return False
+    where.append(f"{column} = ?")
+    params.append(value)
+    return True
+
+
+def _append_membership_predicate(
+    where: list[str],
+    params: list[Any],
+    columns: dict[str, str],
+    live_columns: set[str],
+    dimension: str,
+    values: tuple[str, ...] | None,
+) -> bool:
+    if values is None or dimension not in columns:
+        return True
+    column = columns[dimension]
+    if column not in live_columns or len(values) == 0:
+        return False
+    placeholders = ",".join("?" for _ in values)
+    where.append(f"{column} IN ({placeholders})")
+    params.extend(values)
+    return True
+
+
+def _append_window_predicates(
+    where: list[str],
+    params: list[Any],
+    columns: dict[str, str],
+    live_columns: set[str],
+    since: datetime | None,
+    until: datetime | None,
+) -> bool:
+    if not (since or until) or "timestamp" not in columns:
+        return True
+    timestamp_column = columns["timestamp"]
+    if timestamp_column not in live_columns:
+        return False
+    if since:
+        where.append(f"{timestamp_column} >= ?")
+        params.append(since.isoformat())
+    if until:
+        where.append(f"{timestamp_column} < ?")
+        params.append(until.isoformat())
+    return True
+
+
+def _filter_predicates(
+    columns: dict[str, str],
+    live_columns: set[str],
+    filt: AccountingReportFilter,
+) -> tuple[list[str], list[Any]] | None:
+    where: list[str] = []
+    params: list[Any] = []
+    if not _append_scalar_predicate(where, params, columns, live_columns, "deployment_id", filt.deployment_id):
+        return None
+    if not _append_membership_predicate(where, params, columns, live_columns, "deployment_id", filt.deployment_ids):
+        return None
+    if not _append_membership_predicate(where, params, columns, live_columns, "cycle_id", filt.cycle_ids):
+        return None
+    since, until = filt.resolved_window()
+    if not _append_window_predicates(where, params, columns, live_columns, since, until):
+        return None
+    return where, params
+
+
+def _query_rows(
+    conn: sqlite3.Connection,
+    table: str,
+    where: list[str],
+    params: list[Any],
+) -> list[dict[str, Any]]:
+    sql = f"SELECT * FROM {table}"  # noqa: S608 - whitelisted identifier
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+
+    prior_factory = conn.row_factory
+    conn.row_factory = sqlite3.Row
+    try:
+        cur = conn.cursor()
+        cur.execute(sql, params)
+        return [dict(row) for row in cur.fetchall()]
+    finally:
+        conn.row_factory = prior_factory
+
+
+def _filtered_rows(
     conn: sqlite3.Connection,
     table: str,
     filt: AccountingReportFilter,
@@ -224,88 +330,17 @@ def _filtered_rows(  # noqa: C901
     if table not in _TABLE_FILTER_COLUMNS:
         raise ValueError(f"_filtered_rows: unknown table {table!r}")
     cols = _TABLE_FILTER_COLUMNS[table]
-    live_cols = _table_columns(conn, table)
+    live_cols = _query_table_columns(conn, table)
     # If the table doesn't exist at all, return empty. Matches the
     # existing _table_rows behaviour in accountant_test.py.
     if not live_cols:
         return []
 
-    where: list[str] = []
-    params: list[Any] = []
-
-    # CodeRabbit (2026-05-02): when the caller asks for a filter dimension
-    # that the live table doesn't carry, silently dropping the predicate
-    # would widen the read past the requested scope and contaminate the
-    # cell matrix. Return ``[]`` instead — "no rows match a filter we
-    # can't enforce" is the only safe answer.
-    if filt.deployment_id and "deployment_id" in cols:
-        if cols["deployment_id"] not in live_cols:
-            return []
-        where.append(f"{cols['deployment_id']} = ?")
-        params.append(filt.deployment_id)
-    # CodeRabbit (round 5, 2026-05-02): multi-value deployment_ids — used by
-    # the multi-deployment fallback in accountant_report_from_db when a
-    # strategy redeployed across multiple deployment_ids. Position_events
-    # already carries a deployment_id column so we use it directly instead
-    # of falling back to cycle_ids; safer because cycle_ids could overlap
-    # across deployments.
-    if filt.deployment_ids is not None and "deployment_id" in cols:
-        if cols["deployment_id"] not in live_cols:
-            return []
-        # Empty tuple → "match nothing", not "no filter" (CodeRabbit r5).
-        if len(filt.deployment_ids) == 0:
-            return []
-        placeholders = ",".join("?" for _ in filt.deployment_ids)
-        where.append(f"{cols['deployment_id']} IN ({placeholders})")
-        params.extend(filt.deployment_ids)
-    # CodeRabbit (round 5, 2026-05-02): explicit empty cycle_ids = ()
-    # MUST be treated as "match nothing", not "no filter". The previous
-    # truthy check dropped the predicate entirely on an empty tuple,
-    # widening the query back to all rows. Use ``is not None`` to keep
-    # the predicate active even when the caller deliberately passed [].
-    if filt.cycle_ids is not None and "cycle_id" in cols:
-        if cols["cycle_id"] not in live_cols:
-            return []
-        if len(filt.cycle_ids) == 0:
-            return []
-        # SQLite has a default 999 host-parameter limit; chunking would be
-        # over-engineering for "list of cycle_ids" sized inputs (typically
-        # tens to hundreds). If a caller hits this, they're probably
-        # better-served by a `since`/`until` filter anyway.
-        placeholders = ",".join("?" for _ in filt.cycle_ids)
-        where.append(f"{cols['cycle_id']} IN ({placeholders})")
-        params.extend(filt.cycle_ids)
-
-    since, until = filt.resolved_window()
-    if (since or until) and "timestamp" in cols:
-        if cols["timestamp"] not in live_cols:
-            # CodeRabbit (2026-05-02 round 4): caller requested a time
-            # window but the live table lacks a timestamp column. Return
-            # [] for symmetry with the deployment_id / deployment_id /
-            # cycle_ids paths above — silently widening to all rows would
-            # contaminate tax-period reports on older schemas.
-            return []
-        ts_col = cols["timestamp"]
-        if since:
-            where.append(f"{ts_col} >= ?")
-            params.append(since.isoformat())
-        if until:
-            where.append(f"{ts_col} < ?")
-            params.append(until.isoformat())
-
-    sql = f"SELECT * FROM {table}"  # noqa: S608 — whitelisted identifier
-    if where:
-        sql += " WHERE " + " AND ".join(where)
-
-    # Force `Row` factory so we can `dict(r)` consistently.
-    prior_factory = conn.row_factory
-    conn.row_factory = sqlite3.Row
-    try:
-        cur = conn.cursor()
-        cur.execute(sql, params)
-        return [dict(r) for r in cur.fetchall()]
-    finally:
-        conn.row_factory = prior_factory
+    predicates = _filter_predicates(cols, live_cols, filt)
+    if predicates is None:
+        return []
+    where, params = predicates
+    return _query_rows(conn, table, where, params)
 
 
 # ─── Public entrypoint ───────────────────────────────────────────────────

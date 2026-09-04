@@ -246,6 +246,12 @@ class LPDecreaseParams:
     hook_data: bytes = b""
 
 
+def _validate_slot0_response(data: str) -> None:
+    clean = data.removeprefix("0x")
+    if len(clean) < 4 * 64:
+        raise ValueError(f"getSlot0 response must contain four ABI words, got {len(clean)} hex chars")
+
+
 class UniswapV4SDK:
     """Uniswap V4 SDK for pool operations and swap encoding.
 
@@ -431,7 +437,6 @@ class UniswapV4SDK:
         )
         return pool_key
 
-    # crap-allowlist: VIB-4835 — pre-existing complexity (cc=16, cov=20%) relocated by Phase 2 fold from almanak/framework/connectors/uniswap_v4/sdk.py; function body unchanged by this PR. Refactor + coverage backfill tracked in VIB-4688.
     def get_pool_sqrt_price(
         self,
         pool_key: PoolKey,
@@ -475,6 +480,7 @@ class UniswapV4SDK:
                 data=calldata,
                 rpc_url=rpc_url or self.rpc_url,
                 gateway_client=self._gateway_client,
+                gateway_raise_on_error=True,
                 timeout=10.0,
             )
         except Exception as e:
@@ -505,6 +511,7 @@ class UniswapV4SDK:
             return None
 
         try:
+            _validate_slot0_response(hex_result)
             pool_state = decode_slot0_response(hex_result)
         except Exception:
             record_onchain_read_fallback(

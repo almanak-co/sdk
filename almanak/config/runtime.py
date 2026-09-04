@@ -512,12 +512,6 @@ def _create_safe_signer_from_env(
     )
 
 
-# crap-allowlist: bit-for-bit mirror of LocalRuntimeConfig._validate_and_derive_wallet
-# / MultiChainRuntimeConfig._validate_and_derive_wallet — splitting the gateway-wallets,
-# Zodiac, Solana, and EVM branches just to lower CC would diverge from the dataclass
-# methods the dataclass __post_init__ still calls when constructed directly. The legacy
-# branches are covered via the dataclass tests in tests/unit/cli/test_local_runtime_config.py
-# and tests/unit/execution/test_multichain_sidecar.py. (#2097, Phase 5a-2)
 def _derive_wallet_address(
     *,
     chain: str,
@@ -563,6 +557,8 @@ def _derive_wallet_address(
             reason="Private key must be 32 bytes (64 hex characters)",
         )
     try:
+        if int(key, 16) == 0:
+            raise ValueError("private key scalar cannot be zero")
         return Account.from_key(key).address
     except Exception:
         # Never expose key material in error messages.
@@ -1146,10 +1142,6 @@ def _build_multi_chain(  # noqa: PLR0913
     )
 
 
-# crap-allowlist: mirrors MultiChainRuntimeConfig._validate_chains — same chain
-# normalization/duplicate-detection branches the dataclass __post_init__ runs.
-# Covered by the dataclass tests in tests/unit/execution/test_multichain_sidecar.py.
-# (#2097, Phase 5a-2)
 def _normalise_multi_chains(chains: list[str]) -> tuple[list[str], dict[str, int]]:
     """Normalise + validate a multi-chain list; build the chain-id map.
 
@@ -1204,12 +1196,6 @@ def _normalise_multi_chains(chains: list[str]) -> tuple[list[str], dict[str, int
     return normalised, chain_ids
 
 
-# crap-allowlist: mirrors MultiChainRuntimeConfig._validate_protocols which is
-# covered by the dataclass __post_init__ tests in
-# tests/unit/cli/test_local_runtime_config.py and
-# tests/unit/execution/test_multichain_sidecar.py — splitting the validation
-# into branches just to lower CC would diverge from the legacy validator the
-# dataclass still calls when constructed directly. (#2097, Phase 5a-2)
 def _normalise_multi_protocols(chains: list[str], protocols: dict[str, list[str]]) -> dict[str, list[str]]:
     """Normalise + validate the multi-chain protocols mapping.
 

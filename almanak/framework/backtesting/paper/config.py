@@ -409,7 +409,6 @@ class PaperTraderConfig:
     Will be removed in a future version.
     """
 
-    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     def __post_init__(self) -> None:
         """Validate configuration after initialization."""
         # Chain validation

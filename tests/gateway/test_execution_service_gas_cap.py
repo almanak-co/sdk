@@ -4,10 +4,12 @@ import asyncio
 import json
 import time
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import grpc
 import pytest
 
+from almanak.framework.execution.submission import SubmissionProvenance
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2
 from almanak.gateway.services.execution_service import ExecutionServiceServicer
@@ -37,15 +39,16 @@ def _result() -> SimpleNamespace:
 
 
 class _SerializableReceipt:
-    def __init__(self, tx_hash: str) -> None:
+    def __init__(self, tx_hash: str, status: int = 1) -> None:
         self.tx_hash = tx_hash
+        self.status = status
 
     def to_dict(self) -> dict:
         return {
             "tx_hash": self.tx_hash,
             "block_number": 42,
             "block_hash": "0xblock",
-            "status": 1,
+            "status": self.status,
             "gas_used": 21_000,
             "effective_gas_price": 1,
             "logs": [],
@@ -131,6 +134,9 @@ async def test_execute_fails_closed_instead_of_skipping_one_unserializable_recei
             transaction_results=[
                 SimpleNamespace(tx_hash="0xaaa", receipt=_SerializableReceipt("0xaaa")),
                 SimpleNamespace(tx_hash="0xbbb", receipt=_BrokenReceipt()),
+                SimpleNamespace(tx_hash=None, receipt=None),
+                SimpleNamespace(tx_hash=" ", receipt=None),
+                SimpleNamespace(tx_hash=" 0xccc ", receipt=None),
             ],
             total_gas_used=42_000,
             correlation_id="cid",
@@ -145,7 +151,7 @@ async def test_execute_fails_closed_instead_of_skipping_one_unserializable_recei
     assert not response.success
     assert response.error_code == "RECEIPT_SET_INCOMPLETE"
     assert "deliberate receipt serialization failure" in response.error
-    assert list(response.tx_hashes) == ["0xaaa", "0xbbb"]
+    assert list(response.tx_hashes) == ["0xaaa", "0xbbb", "0xccc"]
     assert response.receipts == b""
     context.set_code.assert_not_called()
 
@@ -205,3 +211,124 @@ async def test_execute_fails_closed_on_mismatched_or_duplicate_receipt_identity(
 
     assert not response.success
     assert response.error_code == "RECEIPT_SET_INCOMPLETE"
+
+
+@pytest.mark.asyncio
+async def test_execute_anvil_forces_simulation_and_preserves_execution_identity():
+    service = ExecutionServiceServicer(GatewaySettings(network="anvil"))
+    service._ensure_initialized = AsyncMock()
+    orchestrator = MagicMock()
+    orchestrator.signer = object()
+    orchestrator.tx_risk_config = SimpleNamespace(max_gas_price_gwei=42)
+    orchestrator.execute = AsyncMock(return_value=_result())
+    service._get_orchestrator = AsyncMock(return_value=orchestrator)
+
+    response = await service.Execute(_request(0), MagicMock())
+
+    assert response.success
+    action_bundle, exec_context = orchestrator.execute.await_args.args
+    assert action_bundle.intent_type == "swap"
+    assert exec_context.deployment_id == "s1"
+    assert exec_context.intent_id == "i1"
+    assert exec_context.chain == "arbitrum"
+    assert exec_context.wallet_address == "0x1234567890123456789012345678901234567890"
+    assert exec_context.simulation_enabled is True
+    assert exec_context.dry_run is True
+
+
+@pytest.mark.asyncio
+async def test_execute_restores_gas_cap_when_orchestrator_raises():
+    service = ExecutionServiceServicer(GatewaySettings())
+    service._ensure_initialized = AsyncMock()
+    orchestrator = MagicMock()
+    orchestrator.tx_risk_config = SimpleNamespace(max_gas_price_gwei=42)
+    orchestrator.execute = AsyncMock(side_effect=RuntimeError("submission boundary failed"))
+    service._get_orchestrator = AsyncMock(return_value=orchestrator)
+    context = MagicMock()
+
+    response = await service.Execute(_request(5), context)
+
+    assert not response.success
+    assert response.error == "submission boundary failed"
+    assert response.error_code == "EXECUTION_FAILED"
+    assert response.submission_provenance == gateway_pb2.SUBMISSION_PROVENANCE_UNSPECIFIED
+    assert orchestrator.tx_risk_config.max_gas_price_gwei == 42
+    context.set_code.assert_called_once_with(grpc.StatusCode.INTERNAL)
+    context.set_details.assert_called_once_with("submission boundary failed")
+
+
+@pytest.mark.asyncio
+async def test_execute_serializes_proven_revert_without_losing_submission_evidence():
+    service = ExecutionServiceServicer(GatewaySettings())
+    service._ensure_initialized = AsyncMock()
+    orchestrator = MagicMock()
+    orchestrator.signer = object()
+    orchestrator.tx_risk_config = SimpleNamespace(max_gas_price_gwei=42)
+    orchestrator.execute = AsyncMock(
+        return_value=SimpleNamespace(
+            success=False,
+            transaction_results=[SimpleNamespace(tx_hash="0xaaa", receipt=_SerializableReceipt("0xaaa", status=0))],
+            total_gas_used=21_000,
+            correlation_id="cid",
+            error="transaction reverted",
+            submission_provenance=SubmissionProvenance.ATTEMPTED,
+        )
+    )
+    service._get_orchestrator = AsyncMock(return_value=orchestrator)
+
+    response = await service.Execute(_request(5), MagicMock())
+
+    assert not response.success
+    assert list(response.tx_hashes) == ["0xaaa"]
+    assert json.loads(response.receipts) == [_SerializableReceipt("0xaaa", status=0).to_dict()]
+    assert response.total_gas_used == 21_000
+    assert response.execution_id == "cid"
+    assert response.error == "transaction reverted"
+    assert response.error_code == ""
+    assert response.submission_provenance == gateway_pb2.SUBMISSION_PROVENANCE_ATTEMPTED
+
+
+@pytest.mark.asyncio
+async def test_execute_certifies_multitransaction_safe_as_one_atomic_action():
+    class SafeSignerMarker:
+        pass
+
+    service = ExecutionServiceServicer(GatewaySettings())
+    service._ensure_initialized = AsyncMock()
+    orchestrator = MagicMock()
+    orchestrator.signer = SafeSignerMarker()
+    orchestrator.tx_risk_config = SimpleNamespace(max_gas_price_gwei=42)
+    orchestrator.execute = AsyncMock(
+        return_value=SimpleNamespace(
+            success=True,
+            transaction_results=[SimpleNamespace(tx_hash="0xsafe", receipt=_SerializableReceipt("0xsafe"))],
+            total_gas_used=21_000,
+            correlation_id="cid",
+            error="",
+            submission_provenance=SubmissionProvenance.ATTEMPTED,
+        )
+    )
+    service._get_orchestrator = AsyncMock(return_value=orchestrator)
+    request = _request(5)
+    request.action_bundle = json.dumps(
+        {
+            "intent_type": "swap",
+            "transactions": [
+                {"tx_type": "approve", "data": "0x095ea7b3" + "0" * 128, "value": 0},
+                {"tx_type": "swap", "data": "0x1234", "value": 0},
+            ],
+        }
+    ).encode("utf-8")
+
+    with patch("almanak.framework.execution.signer.safe.base.SafeSigner", SafeSignerMarker):
+        response = await service.Execute(request, MagicMock())
+
+    assert response.success
+    submitted_bundle = orchestrator.execute.await_args.args[0]
+    assert [transaction["tx_type"] for transaction in submitted_bundle.transactions] == ["approve", "swap"]
+    assert list(response.tx_hashes) == ["0xsafe"]
+    assert len(response.submission_transactions) == 1
+    evidence = response.submission_transactions[0]
+    assert evidence.tx_id == "0xsafe"
+    assert evidence.role == gateway_pb2.EXECUTION_TRANSACTION_ROLE_ACTION
+    assert evidence.replay_policy == gateway_pb2.REPLAY_POLICY_NEVER

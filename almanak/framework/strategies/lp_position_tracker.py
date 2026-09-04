@@ -309,7 +309,6 @@ class LPPositionTracker:
             )
             return intent
 
-    # crap-allowlist: VIB-4198 — LPPositionTracker is the shadow path; T29 (VIB-4215) removes it after a stable cycle per blueprint 28 §5; investing test coverage here is wasted effort.
     def _maybe_inject(self, intent: Any, default_chain: str | None) -> Any:
         intent_type = self._intent_type(intent)
         if intent_type not in {"LP_CLOSE", "LP_COLLECT_FEES"}:
@@ -344,18 +343,12 @@ class LPPositionTracker:
                 new_params["bin_ids"] = list(tracked.bin_ids)
                 injected = True
 
-        # NFT position_id — registry first, tracker fallback. Only inject
-        # when caller did not supply (truthy).
-        if key.protocol in _NFT_BASED_PROTOCOLS:
-            existing_pid = new_params.get("position_id") or new_params.get("token_id")
-            if not existing_pid:
-                pid = registry_position_id
-                if not pid and tracked is not None and tracked.position_id is not None:
-                    pid = str(tracked.position_id)
-                if pid:
-                    new_params["position_id"] = pid
-                    injected = True
-
+        injected |= self._inject_nft_position_id(
+            key=key,
+            tracked=tracked,
+            registry_position_id=registry_position_id,
+            new_params=new_params,
+        )
         if not injected:
             return intent
 
@@ -381,6 +374,30 @@ class LPPositionTracker:
             key.pool,
         )
         return updated
+
+    @staticmethod
+    def _inject_nft_position_id(
+        *,
+        key: _PositionKey,
+        tracked: _TrackedPosition | None,
+        registry_position_id: str | None,
+        new_params: dict[str, Any],
+    ) -> bool:
+        if key.protocol not in _NFT_BASED_PROTOCOLS:
+            return False
+        # A truthy caller value wins; otherwise registry precedes tracker fallback.
+        existing_pid = new_params.get("position_id") or new_params.get("token_id")
+        if existing_pid:
+            return False
+
+        pid = registry_position_id
+        if not pid and tracked is not None and tracked.position_id is not None:
+            pid = str(tracked.position_id)
+        if not pid:
+            return False
+
+        new_params["position_id"] = pid
+        return True
 
     # ---------------------------------------------------------------------
     # Persistence

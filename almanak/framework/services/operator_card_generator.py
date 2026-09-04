@@ -359,20 +359,22 @@ class OperatorCardGenerator:
         - Baseline severity for certain critical reasons
         """
         # Calculate position at risk
-        position_at_risk = position_summary.total_value_usd
-        if position_summary.lp_value_usd > 0:
-            # LP positions have higher risk due to impermanent loss
-            position_at_risk = position_summary.total_value_usd * Decimal("1.2")
-        if position_summary.borrowed_value_usd > 0:
-            # Leveraged positions have even higher risk
-            position_at_risk = position_summary.total_value_usd * Decimal("1.5")
-
-        # Determine severity from position
         position_severity = Severity.LOW
-        for sev_level, pos_threshold in sorted(self.POSITION_RISK_THRESHOLDS.items(), key=lambda x: x[1], reverse=True):
-            if position_at_risk >= pos_threshold:
-                position_severity = sev_level
-                break
+        position_at_risk = position_summary.total_value_usd
+        if position_at_risk is not None:
+            if position_summary.lp_value_usd > 0:
+                # LP positions have higher risk due to impermanent loss
+                position_at_risk *= Decimal("1.2")
+            if position_summary.borrowed_value_usd > 0:
+                # Leveraged positions have even higher risk
+                position_at_risk *= Decimal("1.5")
+
+            for sev_level, pos_threshold in sorted(
+                self.POSITION_RISK_THRESHOLDS.items(), key=lambda x: x[1], reverse=True
+            ):
+                if position_at_risk >= pos_threshold:
+                    position_severity = sev_level
+                    break
 
         # Determine severity from time stuck
         time_severity = Severity.LOW

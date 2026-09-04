@@ -149,7 +149,6 @@ class SystemHealth:
         return self.features.get(feature, False)
 
 
-# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
 def _check_health_via_gateway(health: SystemHealth) -> SystemHealth:
     """Fall back to gateway instance registry to determine system health.
 
@@ -200,7 +199,6 @@ def _check_health_via_gateway(health: SystemHealth) -> SystemHealth:
     return health
 
 
-# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
 def check_system_health() -> SystemHealth:
     """Check overall system health by calling the health API.
 

@@ -550,7 +550,7 @@ def decode_slot0_response(data: str) -> PoolState:
     if len(clean) < 256:
         return PoolState(exists=False)
 
-    sqrt_price_x96 = HexDecoder.decode_uint256(clean[0:64])
+    sqrt_price_x96 = HexDecoder.decode_uint160(clean[0:64])
     tick = HexDecoder.decode_int24(clean[64:128])
     protocol_fee = HexDecoder.decode_uint256(clean[128:192])
     lp_fee = HexDecoder.decode_uint256(clean[192:256])

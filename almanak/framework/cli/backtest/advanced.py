@@ -1126,7 +1126,6 @@ def _run_monte_carlo_simulation(
         sys.exit(1)
 
 
-# crap-allowlist: VIB-4062 — pre-existing CC=17 in monte-carlo CLI; same import-only touch
 @backtest.command("monte-carlo")
 @click.option("--strategy", "-s", required=True, help="Name of the strategy to simulate")
 @click.option("--start", required=True, callback=parse_date, help="Start date for historical data (YYYY-MM-DD)")
@@ -1153,7 +1152,7 @@ def _run_monte_carlo_simulation(
 )
 @click.option("--dry-run", is_flag=True, default=False, help="Show configuration without running simulation")
 @click.option("--verbose", "-v", is_flag=True, default=False, help="Show progress during simulation")
-def monte_carlo_backtest(  # noqa: C901
+def monte_carlo_backtest(
     strategy: str,
     start: datetime,
     end: datetime,
@@ -1541,7 +1540,6 @@ def _maybe_add_normal_period_comparison(
         click.echo("Continuing with crisis results only...")
 
 
-# crap-allowlist: VIB-4062 — pre-existing CC=31 in scenario CLI; same import-only touch
 @backtest.command("scenario")
 @click.option("--strategy", "-s", required=False, default=None, help="Name of the strategy to backtest")
 @click.option(
@@ -1595,7 +1593,7 @@ def _maybe_add_normal_period_comparison(
 @click.option("--dry-run", is_flag=True, default=False, help="Show configuration without running backtest")
 @click.option("--list-scenarios", is_flag=True, default=False, help="List all available predefined scenarios")
 @click.option("--verbose", "-v", is_flag=True, default=False, help="Show detailed progress during backtest")
-def scenario_backtest(  # noqa: C901
+def scenario_backtest(
     strategy: str | None,
     scenario: str | None,
     start: datetime | None,

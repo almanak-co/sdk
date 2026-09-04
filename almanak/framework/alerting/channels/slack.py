@@ -12,6 +12,8 @@ from typing import Any
 
 import httpx
 
+from almanak.core.redaction import redact
+
 from ...models.operator_card import OperatorCard, Severity
 
 logger = logging.getLogger(__name__)
@@ -153,7 +155,6 @@ class SlackChannel:
         self._strategy_threads.clear()
         logger.debug("Cleared all thread contexts")
 
-    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     def _build_blocks(self, card: OperatorCard) -> list[dict[str, Any]]:
         """Build Slack Block Kit blocks for an OperatorCard.
 
@@ -356,6 +357,14 @@ class SlackChannel:
 
         return payload
 
+    def _redact_error(self, error: object) -> str:
+        """Remove the webhook credential and registered secrets from an error."""
+        message = str(error).replace(self.webhook_url, "<redacted webhook URL>")
+        webhook_secret = self.webhook_url.rstrip("/").rsplit("/", maxsplit=1)[-1]
+        if webhook_secret:
+            message = message.replace(webhook_secret, "***")
+        return redact(message)
+
     async def _send_payload(self, payload: dict[str, Any]) -> SlackSendResult:
         """Send a payload to the Slack webhook.
 
@@ -378,7 +387,10 @@ class SlackChannel:
 
                 # Check for rate limiting (429)
                 if response.status_code == 429:
-                    retry_after = int(response.headers.get("Retry-After", "60"))
+                    try:
+                        retry_after = int(response.headers.get("Retry-After", "60"))
+                    except (TypeError, ValueError):
+                        retry_after = 60
                     return SlackSendResult(
                         success=False,
                         error="Rate limited by Slack",
@@ -386,17 +398,17 @@ class SlackChannel:
                     )
 
                 # Other error
+                response_body = self._redact_error(response.text)[:200]
                 return SlackSendResult(
                     success=False,
-                    error=f"HTTP {response.status_code}: {response.text}",
+                    error=f"HTTP {response.status_code}: {response_body}",
                 )
 
             except httpx.TimeoutException:
                 return SlackSendResult(success=False, error="Request timeout")
             except httpx.RequestError as e:
-                return SlackSendResult(success=False, error=f"Request error: {e}")
+                return SlackSendResult(success=False, error=f"Request error: {self._redact_error(e)}")
 
-    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     async def send_alert(
         self,
         card: OperatorCard,
@@ -512,7 +524,6 @@ class SlackChannel:
         """
         self._set_thread_ts(deployment_id, thread_ts)
 
-    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     async def send_custom_message(
         self,
         deployment_id: str,

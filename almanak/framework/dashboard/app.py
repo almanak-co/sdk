@@ -64,7 +64,6 @@ except ImportError:
     create_mock_api_client = None  # type: ignore[assignment]
 
 
-# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
 def render_custom_dashboard_page(
     dashboard_name: str,
     custom_dashboards: list,

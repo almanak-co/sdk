@@ -408,9 +408,6 @@ def compile_example_intent(
         }
 
 
-# crap-allowlist: VIB-4851 CS-1 — single default-chain literal swap (DEFAULT_CHAIN) in
-# pre-existing high-CRAP CLI helper (cc=14, cov=3% on main); refactor + coverage backfill
-# tracked in VIB-4139.
 def inspect_strategy(
     file_path: Path,
     chain: str = DEFAULT_CHAIN,

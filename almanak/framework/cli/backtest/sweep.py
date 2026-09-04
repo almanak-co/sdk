@@ -966,10 +966,6 @@ def _sweep_result_from_backtest(task: _SweepTask, result: Any) -> SweepResult:
     return _sweep_result_from_metrics(task.params, result)
 
 
-# crap-allowlist: pre-existing sweep-worker body (cc=19 on main, unchanged by this PR); the only
-# addition is a build_token_address_map call + provider kwarg for dynamic coin-id resolution.
-# Score is coverage-driven (subprocess worker, no unit harness). Coverage backfill / decomposition
-# tracked as a follow-up (file under AGI - Strategist / VibeCoders).
 def _run_sweep_task_worker(task: _SweepTask) -> SweepResult:
     """Worker function to run a single sweep task in a subprocess.
 

@@ -177,6 +177,16 @@ def _serialize_evm_transaction_results(transaction_results: list[Any]) -> tuple[
     return tx_hashes, receipts_bytes
 
 
+def _known_evm_transaction_hashes(transaction_results: list[Any]) -> list[str]:
+    """Return every usable hash when the receipt set cannot be trusted."""
+    known_hashes: list[str] = []
+    for transaction_result in transaction_results:
+        raw_hash = getattr(transaction_result, "tx_hash", None)
+        if isinstance(raw_hash, str) and raw_hash.strip():
+            known_hashes.append(raw_hash.strip())
+    return known_hashes
+
+
 class _GatewaySolanaRouteRefresher:
     """Gateway-side Solana route refresher backed by connector capabilities."""
 
@@ -1249,7 +1259,6 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
                 submission_provenance=gateway_pb2.SUBMISSION_PROVENANCE_UNSPECIFIED,
             )
 
-    # crap-allowlist: VIB-4722 only renamed the execution context identity to deployment_id.
     async def _execute_evm(
         self,
         request: gateway_pb2.ExecuteRequest,
@@ -1328,11 +1337,7 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
                 # transport INTERNAL as permission to blindly resubmit the
                 # bundle. Partial receipts are omitted as a set: positional
                 # association is no longer trustworthy once one leg is missing.
-                known_hashes: list[str] = []
-                for transaction_result in transaction_results:
-                    raw_hash = getattr(transaction_result, "tx_hash", None)
-                    if isinstance(raw_hash, str) and raw_hash.strip():
-                        known_hashes.append(raw_hash.strip())
+                known_hashes = _known_evm_transaction_hashes(transaction_results)
                 logger.error("EVM receipt set incomplete after execution: %s", exc)
                 plan_hash = execution_plan_hash(action_bundle)
                 return gateway_pb2.ExecutionResult(

@@ -10,9 +10,10 @@ import hashlib
 import hmac
 import json
 import logging
+from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any, Protocol
 
 from fastapi import APIRouter, Depends, Header, HTTPException
@@ -219,7 +220,7 @@ class StrategyState:
     protocol: str
     current_gas_price_gwei: float
     pending_tx_hash: str | None = None
-    total_value_usd: Decimal = Decimal("10000")
+    total_value_usd: Decimal | None = None
     attention_required: bool = False
     stuck_reason: StuckReason | None = None
     config: HotReloadableConfig = field(default_factory=HotReloadableConfig)
@@ -237,7 +238,6 @@ _last_cache_refresh: float = 0.0
 CACHE_REFRESH_INTERVAL = 5.0  # Refresh every 5 seconds
 
 
-# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
 def _load_strategy_state_from_db(deployment_id: str) -> StrategyState | None:
     """Load strategy state from SQLite database.
 
@@ -260,17 +260,16 @@ def _load_strategy_state_from_db(deployment_id: str) -> StrategyState | None:
         return None
 
     try:
-        conn = sqlite3.connect(str(state_db))
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
+        with closing(sqlite3.connect(str(state_db))) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
 
-        # Query the strategy state by the unified deployment identity.
-        cursor.execute(
-            "SELECT deployment_id, state_data, updated_at FROM strategy_state WHERE deployment_id = ?",
-            (deployment_id,),
-        )
-        row = cursor.fetchone()
-        conn.close()
+            # Query the strategy state by the unified deployment identity.
+            cursor.execute(
+                "SELECT deployment_id, state_data, updated_at FROM strategy_state WHERE deployment_id = ?",
+                (deployment_id,),
+            )
+            row = cursor.fetchone()
 
         if not row:
             return None
@@ -300,14 +299,14 @@ def _load_strategy_state_from_db(deployment_id: str) -> StrategyState | None:
         protocol = state_data.get("protocol", "unknown")
 
         # Extract portfolio value
-        total_value_usd = Decimal("0")
+        total_value_usd = None
         value_keys = ["total_value_usd", "total_position_value_usd", "portfolio_value_usd"]
         for key in value_keys:
             if key in state_data:
                 try:
                     total_value_usd = Decimal(str(state_data[key]))
                     break
-                except (ValueError, TypeError):
+                except (InvalidOperation, ValueError, TypeError):
                     continue
 
         # Extract hot-reloadable config if present
@@ -315,15 +314,17 @@ def _load_strategy_state_from_db(deployment_id: str) -> StrategyState | None:
         config_data = state_data.get("config", {})
         if config_data:
             try:
+                trading_config = config_data.get("trading_parameters", config_data)
+                risk_config = config_data.get("risk_parameters", config_data)
                 config = HotReloadableConfig(
-                    max_slippage=Decimal(str(config_data.get("max_slippage", "0.005"))),
-                    trade_size_usd=Decimal(str(config_data.get("trade_size_usd", "1000"))),
-                    rebalance_threshold=Decimal(str(config_data.get("rebalance_threshold", "0.05"))),
-                    min_health_factor=Decimal(str(config_data.get("min_health_factor", "1.5"))),
-                    max_leverage=Decimal(str(config_data.get("max_leverage", "3"))),
-                    daily_loss_limit_usd=Decimal(str(config_data.get("daily_loss_limit_usd", "500"))),
+                    max_slippage=Decimal(str(trading_config.get("max_slippage", "0.005"))),
+                    trade_size_usd=Decimal(str(trading_config.get("trade_size_usd", "1000"))),
+                    rebalance_threshold=Decimal(str(trading_config.get("rebalance_threshold", "0.05"))),
+                    min_health_factor=Decimal(str(risk_config.get("min_health_factor", "1.5"))),
+                    max_leverage=Decimal(str(risk_config.get("max_leverage", "3"))),
+                    daily_loss_limit_usd=Decimal(str(risk_config.get("daily_loss_limit_usd", "500"))),
                 )
-            except (ValueError, TypeError):
+            except (InvalidOperation, ValueError, TypeError):
                 pass
 
         return StrategyState(
@@ -446,7 +447,6 @@ def emit_audit_event(
     add_event(event)
 
 
-# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
 def generate_operator_card(
     state: StrategyState,
     event_type: EventType,
@@ -521,6 +521,7 @@ def generate_operator_card(
             )
         )
 
+    total_value_at_risk = "unavailable" if state.total_value_usd is None else f"${state.total_value_usd:,.2f}"
     return OperatorCard(
         deployment_id=state.deployment_id,
         timestamp=datetime.now(UTC),
@@ -537,10 +538,12 @@ def generate_operator_card(
         severity=severity,
         position_summary=PositionSummary(
             total_value_usd=state.total_value_usd,
-            available_balance_usd=state.total_value_usd * Decimal("0.1"),
+            available_balance_usd=(
+                state.total_value_usd * Decimal("0.1") if state.total_value_usd is not None else None
+            ),
         ),
         risk_description=f"Strategy {state.deployment_id} is currently {state.status}. "
-        f"Total value at risk: ${state.total_value_usd:,.2f}",
+        f"Total value at risk: {total_value_at_risk}",
         suggested_actions=suggested_actions,
         available_actions=available_actions,
     )
@@ -841,7 +844,6 @@ async def cancel_transaction(
     return response.to_dict()
 
 
-# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
 @router.post("/{deployment_id}/config")
 async def update_config(
     deployment_id: str,

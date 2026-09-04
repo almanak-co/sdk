@@ -40,7 +40,6 @@ from almanak.connectors.uniswap_v4.hooks import (
 )
 from almanak.connectors.uniswap_v4.sdk import NATIVE_CURRENCY, PoolKey
 
-
 # =============================================================================
 # HookFlags Tests
 # =============================================================================
@@ -470,6 +469,11 @@ class TestStateViewCalldata:
         """Short response should return exists=False."""
         state = decode_slot0_response("0x")
         assert state.exists is False
+
+    def test_decode_slot0_response_rejects_uint160_overflow(self):
+        data = "0x" + format(1 << 160, "064x") + "0" * (3 * 64)
+        with pytest.raises(ValueError, match="uint160 overflow"):
+            decode_slot0_response(data)
 
     def test_pool_state_frozen(self):
         """PoolState should be immutable."""

@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import json
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import MagicMock
+
+import pytest
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -20,8 +23,12 @@ def _make_intent(intent_type_str: str, **kwargs):
     intent.pool = kwargs.get("pool", "USDC/DAI/0xpooladdr")
     intent.token0 = kwargs.get("token0", "USDC")
     intent.token1 = kwargs.get("token1", "DAI")
+    intent.token_a = kwargs.get("token_a")
+    intent.token_b = kwargs.get("token_b")
     intent.token0_decimals = kwargs.get("token0_decimals", 6)
     intent.token1_decimals = kwargs.get("token1_decimals", 18)
+    intent.token_a_decimals = kwargs.get("token_a_decimals")
+    intent.token_b_decimals = kwargs.get("token_b_decimals")
     intent.market = kwargs.get("market", "ETH/USD")
     intent.collateral_token = kwargs.get("collateral_token", "USDC")
     intent.size_usd = kwargs.get("size_usd", Decimal("1000"))
@@ -44,6 +51,8 @@ def _lp_data(**fields):
     data = MagicMock()
     data.currency0 = None
     data.currency1 = None
+    data.position_hash = None
+    data.position_id = None
     for key, value in fields.items():
         setattr(data, key, value)
     return data
@@ -104,6 +113,16 @@ class TestLPAccountingBuilder:
         assert event.amount1 == Decimal("100")  # 100e18 / 10^18
         assert "lp:" in event.position_key
 
+    def test_returns_none_when_pool_cannot_be_resolved(self, caplog) -> None:
+        from almanak.framework.accounting.lp_accounting import build_lp_accounting_event
+
+        intent = _make_intent("LP_OPEN", pool="")
+
+        event = build_lp_accounting_event(intent=intent, result=_make_result(), **_COMMON_KWARGS)
+
+        assert event is None
+        assert "cannot resolve pool address" in caplog.text
+
     def test_lp_close_event_built(self) -> None:
         from almanak.framework.accounting.lp_accounting import build_lp_accounting_event
 
@@ -144,6 +163,222 @@ class TestLPAccountingBuilder:
         assert event is not None
         assert event.identity.deployment_id == "strat-1"
         assert event.identity.chain == "base"
+
+    @pytest.mark.parametrize(
+        ("direct_hash", "fallback_hashes", "ledger_entry_id", "expected_hash"),
+        [
+            ("0xdirect", ["0xignored"], "ledger-1", "0xdirect"),
+            ("", ["", "0xfirst", "0xlast"], "ledger-1", "0xfirst"),
+            ("", [], "ledger-1", ""),
+            ("", [], None, ""),
+        ],
+    )
+    def test_transaction_hash_precedence(
+        self,
+        direct_hash: str,
+        fallback_hashes: list[str],
+        ledger_entry_id: str | None,
+        expected_hash: str,
+    ) -> None:
+        from almanak.framework.accounting.lp_accounting import build_lp_accounting_event
+
+        result = _make_result(tx_hash=direct_hash)
+        result.transaction_results = [SimpleNamespace(tx_hash=tx_hash) for tx_hash in fallback_hashes]
+
+        event = build_lp_accounting_event(
+            intent=_make_intent("LP_OPEN"),
+            result=result,
+            ledger_entry_id=ledger_entry_id,
+            **_COMMON_KWARGS,
+        )
+
+        assert event is not None
+        assert event.identity.tx_hash == expected_hash
+
+    @pytest.mark.parametrize(
+        ("pool", "resolved_pool", "token0", "token1", "token_a", "token_b", "expected"),
+        [
+            ("WETH (wrapped)/USDC bridged/3000/0xpool", None, None, None, None, None, ("WETH", "USDC")),
+            ("IGNORED/USDC/3000", None, "WETH", None, None, None, ("WETH", "USDC")),
+            ("IGNORED/PAIR/3000", None, None, None, "wbtc", "usdc", ("wbtc", "usdc")),
+            ("USDT/USDC/DAI", "3pool", None, None, None, None, ("", "")),
+            ("IGNORED/PAIR/3000", "ETH/stETH/stable", None, None, None, None, ("ETH", "STETH")),
+        ],
+    )
+    def test_token_resolution_precedence(
+        self,
+        pool: str,
+        resolved_pool: str | None,
+        token0: str | None,
+        token1: str | None,
+        token_a: str | None,
+        token_b: str | None,
+        expected: tuple[str, str],
+    ) -> None:
+        from almanak.framework.accounting.lp_accounting import build_lp_accounting_event
+
+        intent = _make_intent(
+            "LP_OPEN",
+            pool=pool,
+            token0=token0,
+            token1=token1,
+            token_a=token_a,
+            token_b=token_b,
+        )
+
+        event = build_lp_accounting_event(
+            intent=intent,
+            result=_make_result(),
+            resolved_pool=resolved_pool,
+            **_COMMON_KWARGS,
+        )
+
+        assert event is not None
+        assert (event.token0, event.token1) == expected
+
+    @pytest.mark.parametrize(
+        ("decimal_kwargs", "raw_amount0", "expected_amount0", "expected_confidence"),
+        [
+            ({"token0_decimals": 0, "token1_decimals": 0}, 7, Decimal("7"), "HIGH"),
+            (
+                {
+                    "token0_decimals": None,
+                    "token1_decimals": None,
+                    "token_a_decimals": 6,
+                    "token_b_decimals": 18,
+                },
+                1_000_000,
+                Decimal("1"),
+                "HIGH",
+            ),
+            (
+                {
+                    "token0_decimals": None,
+                    "token1_decimals": 18,
+                    "token_a_decimals": None,
+                },
+                1_000_000,
+                Decimal("0.000000000001"),
+                "ESTIMATED",
+            ),
+        ],
+    )
+    def test_decimal_resolution_preserves_zero_and_alias_fallbacks(
+        self,
+        decimal_kwargs: dict[str, int | None],
+        raw_amount0: int,
+        expected_amount0: Decimal,
+        expected_confidence: str,
+    ) -> None:
+        from almanak.framework.accounting.lp_accounting import build_lp_accounting_event
+
+        intent = _make_intent("LP_OPEN", **decimal_kwargs)
+        lp_open = _lp_data(amount0=raw_amount0, amount1=0)
+
+        event = build_lp_accounting_event(intent=intent, result=_make_result(lp_open_data=lp_open), **_COMMON_KWARGS)
+
+        assert event is not None
+        assert event.amount0 == expected_amount0
+        assert str(event.confidence) == expected_confidence
+
+    @pytest.mark.parametrize(
+        ("intent_type", "lp_data", "extracted", "expected"),
+        [
+            ("LP_OPEN", _lp_data(amount0=0, amount1=None), {}, (Decimal("0"), None, None, None)),
+            (
+                "LP_OPEN",
+                None,
+                {"amount0": 100, "amount1": 1_000},
+                (Decimal("1"), Decimal("1"), None, None),
+            ),
+            (
+                "LP_CLOSE",
+                _lp_data(amount0_collected=None, amount1_collected=0, fees0=0, fees1=None),
+                {},
+                (None, Decimal("0"), Decimal("0"), None),
+            ),
+            ("LP_CLOSE", None, {}, (None, None, None, None)),
+        ],
+    )
+    def test_amount_extraction_preserves_unmeasured_and_measured_zero(
+        self,
+        intent_type: str,
+        lp_data,
+        extracted: dict[str, int],
+        expected: tuple[Decimal | None, Decimal | None, Decimal | None, Decimal | None],
+    ) -> None:
+        from almanak.framework.accounting.lp_accounting import build_lp_accounting_event
+
+        intent = _make_intent(intent_type, token0_decimals=2, token1_decimals=3)
+        if intent_type == "LP_OPEN":
+            result = _make_result(lp_open_data=lp_data)
+        else:
+            result = _make_result(lp_close_data=lp_data)
+        result.extracted_data = extracted
+
+        event = build_lp_accounting_event(intent=intent, result=result, **_COMMON_KWARGS)
+
+        assert event is not None
+        assert (event.amount0, event.amount1, event.fees0_collected, event.fees1_collected) == expected
+
+    @pytest.mark.parametrize(
+        ("intent_type", "raw_position_id", "expected_position_id"),
+        [
+            ("LP_OPEN", 42, "42"),
+            ("LP_CLOSE", " 42 ", "42"),
+            ("LP_OPEN", 0, None),
+            ("LP_CLOSE", "0", None),
+            ("LP_OPEN", "", None),
+            ("LP_CLOSE", None, None),
+        ],
+    )
+    def test_position_id_is_threaded_to_lp_event(
+        self,
+        intent_type: str,
+        raw_position_id: int | str | None,
+        expected_position_id: str | None,
+    ) -> None:
+        from almanak.framework.accounting.lp_accounting import build_lp_accounting_event
+
+        if intent_type == "LP_OPEN":
+            lp_data = _lp_data(amount0=None, amount1=None, position_id=raw_position_id)
+            result = _make_result(lp_open_data=lp_data)
+        else:
+            lp_data = _lp_data(
+                amount0_collected=None,
+                amount1_collected=None,
+                fees0=None,
+                fees1=None,
+                position_id=raw_position_id,
+            )
+            result = _make_result(lp_close_data=lp_data)
+
+        event = build_lp_accounting_event(intent=_make_intent(intent_type), result=result, **_COMMON_KWARGS)
+
+        assert event is not None
+        assert event.position_id == expected_position_id
+        assert json.loads(event.to_payload_json())["position_id"] == expected_position_id
+
+    def test_v4_resolution_miss_preserves_intent_order(self, monkeypatch, caplog) -> None:
+        from almanak.framework.accounting import lp_accounting
+
+        monkeypatch.setattr(lp_accounting, "resolve_token_best_effort", lambda *args, **kwargs: None)
+        lp_open = _lp_data(
+            amount0=1_000_000,
+            amount1=10**18,
+            currency0="0x0000000000000000000000000000000000000001",
+            currency1="0x0000000000000000000000000000000000000002",
+        )
+
+        event = lp_accounting.build_lp_accounting_event(
+            intent=_make_intent("LP_OPEN", token0="USDC", token1="WETH"),
+            result=_make_result(lp_open_data=lp_open),
+            **_COMMON_KWARGS,
+        )
+
+        assert event is not None
+        assert (event.token0, event.token1) == ("USDC", "WETH")
+        assert "falling back to user-intent token order" in caplog.text
 
     def test_token0_token1_parsed_from_pool_string_when_bare_attrs_missing(self) -> None:
         """VIB-3584: token0/token1 are parsed from pool string when intent lacks bare attrs."""

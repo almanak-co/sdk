@@ -628,8 +628,156 @@ def _make_unavailable_snapshot(
     )
 
 
-# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
-async def _persist_position_state_snapshots(  # noqa: C901
+@dataclasses.dataclass(frozen=True)
+class _PositionStateSnapshotContext:
+    market: Any
+    prices: Any
+    deployment_id: str
+    cycle_id: str
+    timestamp: datetime
+
+
+def _position_state_is_live(runner: Any) -> bool:
+    from almanak.framework.runner.strategy_runner import derive_run_mode_from_config
+
+    try:
+        execution_mode = derive_run_mode_from_config(runner.config) if runner is not None else None
+    except Exception:  # noqa: BLE001
+        execution_mode = None
+    return bool(execution_mode and str(execution_mode).lower() == "live")
+
+
+def _position_state_snapshot_context(runner: Any, snapshot: PortfolioSnapshot) -> _PositionStateSnapshotContext:
+    market = None
+    try:
+        strategy = getattr(runner, "_current_strategy", None) or getattr(runner, "strategy", None)
+        if strategy is not None and hasattr(strategy, "create_market_snapshot"):
+            market = strategy.create_market_snapshot()
+    except Exception as error:  # noqa: BLE001
+        logger.debug("Track C: market snapshot fetch failed: %s", error)
+
+    prices = None
+    if market is not None:
+        try:
+            prices = getattr(market, "prices", None)
+        except Exception:  # noqa: BLE001
+            prices = None
+
+    return _PositionStateSnapshotContext(
+        market=market,
+        prices=prices,
+        deployment_id=getattr(runner, "deployment_id", "") or snapshot.deployment_id,
+        cycle_id=getattr(runner, "_last_cycle_id", "") or getattr(snapshot, "cycle_id", "") or "",
+        timestamp=snapshot.timestamp,
+    )
+
+
+def _handle_position_state_materialization_error(
+    position: Any,
+    error: Exception,
+    *,
+    is_live: bool,
+    deployment_id: str,
+) -> None:
+    if is_live:
+        raise AccountingPersistenceError(
+            AccountingWriteKind.SNAPSHOT,
+            deployment_id=deployment_id,
+            cause=error,
+        ) from error
+    logger.error(
+        "Track C: materialise_position_state failed for position %r: %s",
+        getattr(position, "label", "?"),
+        error,
+        exc_info=True,
+    )
+
+
+def _normalize_position_state_snapshot(
+    position: Any,
+    context: _PositionStateSnapshotContext,
+    *,
+    is_live: bool,
+    materialize: Callable[..., Any],
+) -> Any | None:
+    try:
+        return materialize(
+            position=position,
+            market=context.market,
+            prices=context.prices,
+            deployment_id=context.deployment_id,
+            cycle_id=context.cycle_id,
+            timestamp=context.timestamp,
+        )
+    except Exception as error:  # noqa: BLE001
+        _handle_position_state_materialization_error(
+            position,
+            error,
+            is_live=is_live,
+            deployment_id=context.deployment_id,
+        )
+        return None
+
+
+def _fold_position_state_snapshot_rows(
+    positions: list[Any],
+    context: _PositionStateSnapshotContext,
+    *,
+    is_live: bool,
+) -> list[Any]:
+    from almanak.framework.accounting.position_state import materialise_position_state
+
+    rows: list[Any] = []
+    for position in positions:
+        row = _normalize_position_state_snapshot(
+            position,
+            context,
+            is_live=is_live,
+            materialize=materialise_position_state,
+        )
+        if row is not None:
+            rows.append(row)
+    return rows
+
+
+async def _write_position_state_snapshot_rows(
+    state_manager: Any,
+    snapshot: PortfolioSnapshot,
+    snapshot_id: int,
+    rows: list[Any],
+    *,
+    is_live: bool,
+    deployment_id: str,
+) -> int:
+    try:
+        return await state_manager.save_position_state_snapshots(snapshot_id, rows)
+    except AccountingPersistenceError:
+        if is_live:
+            raise
+        logger.error(
+            "Track C: AccountingPersistenceError saving %d rows for %s (non-live, continuing)",
+            len(rows),
+            snapshot.deployment_id,
+            exc_info=True,
+        )
+    except Exception as error:  # noqa: BLE001
+        if is_live:
+            raise AccountingPersistenceError(
+                AccountingWriteKind.SNAPSHOT,
+                deployment_id=deployment_id,
+                cause=error,
+            ) from error
+        logger.error(
+            "Track C: failed to persist %d position_state_snapshot rows for %s: %s",
+            len(rows),
+            snapshot.deployment_id,
+            error,
+            exc_info=True,
+        )
+    return 0
+
+
+async def _persist_position_state_snapshots(
     runner: Any,
     snapshot: PortfolioSnapshot,
     snapshot_id: int,
@@ -645,11 +793,10 @@ async def _persist_position_state_snapshots(  # noqa: C901
     Returns the number of rows written (``0`` is a measured zero — the
     strategy had no open positions or no recognisable position types).
 
-    Failures here are **logged and swallowed** rather than re-raised:
-    the parent snapshot row is the durable PnL record, and a Track C
-    write failure should not regress the equity curve. The reverse path
-    (parent snapshot fails) is already handled by ``capture_portfolio_snapshot``'s
-    AccountingPersistenceError gate.
+    In live mode, failures raise ``AccountingPersistenceError`` so the
+    runner enters ``ACCOUNTING_FAILED``. Paper and dry-run log at ERROR and
+    continue; the already-persisted parent snapshot remains the durable PnL
+    record in every mode.
 
     Hosted-mode short-circuit lives inside ``materialise_position_state``
     itself per VIB-3866 / Codex Finding 2 — the materializer returns
@@ -658,20 +805,7 @@ async def _persist_position_state_snapshots(  # noqa: C901
     continuous-accrual unavailable. This caller is therefore a no-op in
     hosted mode (every materialize call returns None → nothing to save).
     """
-    # Mode-aware persistence (Codex P1 / CodeRabbit / Claude pr-auditor 2026-05-02):
-    # in live mode, a Track C write failure must surface as
-    # ``AccountingPersistenceError`` so the runner flips to ACCOUNTING_FAILED
-    # rather than silently masking the gap that G15/LP2/L2 are designed to
-    # detect. Paper and dry-run keep the loud-but-non-blocking semantics
-    # (log + continue) per the teardown lane pattern.
-    from almanak.framework.runner.strategy_runner import derive_run_mode_from_config
-    from almanak.framework.state.exceptions import AccountingWriteKind
-
-    try:
-        execution_mode = derive_run_mode_from_config(runner.config) if runner is not None else None
-    except Exception:  # noqa: BLE001
-        execution_mode = None
-    is_live = bool(execution_mode and str(execution_mode).lower() == "live")
+    is_live = _position_state_is_live(runner)
 
     state_manager = getattr(runner, "state_manager", None)
     if state_manager is None or not hasattr(state_manager, "save_position_state_snapshots"):
@@ -687,110 +821,19 @@ async def _persist_position_state_snapshots(  # noqa: C901
     if not positions:
         return 0
 
-    # Gateway client + market are needed by the materializer for
-    # protocol-specific re-reads. The materializer falls back to data
-    # already in ``position.details`` when those aren't passed (today's
-    # connector adapters land in-range / tick / HF / APR fields there
-    # before the snapshot is taken).
-    market = None
-    try:
-        # ``create_market_snapshot`` is the same hook ``_value_via_portfolio_valuer``
-        # uses; reusing it here keeps Track C reads in lockstep with the
-        # snapshot's pricing context. Strategy may not implement it
-        # (multi-chain shape) — that's a soft gap, not an error.
-        strategy = getattr(runner, "_current_strategy", None) or getattr(runner, "strategy", None)
-        if strategy is not None and hasattr(strategy, "create_market_snapshot"):
-            market = strategy.create_market_snapshot()
-    except Exception as e:  # noqa: BLE001
-        logger.debug("Track C: market snapshot fetch failed: %s", e)
-        market = None
-
-    prices = None
-    if market is not None and hasattr(market, "prices"):
-        try:
-            prices = market.prices
-        except Exception:  # noqa: BLE001
-            prices = None
-
-    deployment_id = getattr(runner, "deployment_id", "") or snapshot.deployment_id
-    cycle_id = getattr(runner, "_last_cycle_id", "") or getattr(snapshot, "cycle_id", "") or ""
-
-    from almanak.framework.accounting.position_state import materialise_position_state
-
-    rows: list = []
-    for position in positions:
-        try:
-            row = materialise_position_state(
-                position=position,
-                market=market,
-                prices=prices,
-                deployment_id=deployment_id,
-                cycle_id=cycle_id,
-                timestamp=snapshot.timestamp,
-            )
-        except Exception as e:  # noqa: BLE001
-            # CodeRabbit (2026-05-02): in live mode a per-position
-            # materialization regression is a coverage gap — fail closed
-            # so it surfaces as ACCOUNTING_FAILED instead of silently
-            # dropping a row that G15 / LP2 / L2 are designed to detect.
-            # Paper / dry-run keeps the loud-but-non-blocking semantics
-            # (Gemini 2026-05-02: log ERROR with exc_info so a programming
-            # error like AttributeError/TypeError still surfaces clearly).
-            if is_live:
-                raise AccountingPersistenceError(
-                    AccountingWriteKind.SNAPSHOT,
-                    deployment_id=deployment_id,
-                    cause=e,
-                ) from e
-            logger.error(
-                "Track C: materialise_position_state failed for position %r: %s",
-                getattr(position, "label", "?"),
-                e,
-                exc_info=True,
-            )
-            continue
-        if row is not None:
-            rows.append(row)
-
+    context = _position_state_snapshot_context(runner, snapshot)
+    rows = _fold_position_state_snapshot_rows(positions, context, is_live=is_live)
     if not rows:
         return 0
 
-    try:
-        return await state_manager.save_position_state_snapshots(snapshot_id, rows)
-    except AccountingPersistenceError:
-        # Already typed — propagate untouched in live mode.
-        if is_live:
-            raise
-        logger.error(
-            "Track C: AccountingPersistenceError saving %d rows for %s (non-live, continuing)",
-            len(rows),
-            snapshot.deployment_id,
-            exc_info=True,
-        )
-        return 0
-    except Exception as e:  # noqa: BLE001
-        # In live mode, an untyped exception (disk full, schema/FK issue,
-        # backend regression) MUST raise as AccountingPersistenceError so
-        # the runner flips to ACCOUNTING_FAILED. In paper/dry-run, log
-        # loud-but-non-blocking per teardown lane semantics.
-        if is_live:
-            raise AccountingPersistenceError(
-                AccountingWriteKind.SNAPSHOT,
-                deployment_id=deployment_id,
-                cause=e,
-            ) from e
-        # Per CLAUDE.md §A4: paper/dry-run modes "log ERROR and continue" —
-        # not WARNING. The earlier AccountingPersistenceError branch already
-        # uses logger.error; align the broad-exception branch with the
-        # contract.
-        logger.error(
-            "Track C: failed to persist %d position_state_snapshot rows for %s: %s",
-            len(rows),
-            snapshot.deployment_id,
-            e,
-            exc_info=True,
-        )
-        return 0
+    return await _write_position_state_snapshot_rows(
+        state_manager,
+        snapshot,
+        snapshot_id,
+        rows,
+        is_live=is_live,
+        deployment_id=context.deployment_id,
+    )
 
 
 async def _persist_snapshot_and_metrics(
@@ -1772,8 +1815,141 @@ async def _populate_capital_flows(
     _stamp_capital_flow_record(snapshot, record, detail)
 
 
-# crap-allowlist: VIB-4248 — function predates VIB-4225 (cc=24 on main); branches are mode-aware accounting-failure paths covered by test_portfolio_baseline.py + test_stamp_snapshot_identity.py + test_portfolio_metrics_gas_aggregator.py. Refactor protocol (.claude/rules/crap-refactor.md) requires fresh-context Plan agent; deferred to VIB-4248 alongside other test-quality follow-ups.
-async def _build_metrics_for_snapshot(  # noqa: C901
+@dataclasses.dataclass(frozen=True)
+class _MetricsSnapshotContext:
+    deployment_id: str
+    execution_mode: RunMode
+    cycle_id: str
+
+
+@dataclasses.dataclass(frozen=True)
+class _MetricsBaseline:
+    value: Decimal
+    source: str
+
+
+def _resolve_metrics_snapshot_context(
+    runner: Any,
+    deployment_id: str,
+    snapshot: PortfolioSnapshot,
+) -> _MetricsSnapshotContext:
+    from almanak.framework.runner.strategy_runner import derive_run_mode_from_config
+
+    execution_mode = derive_run_mode_from_config(runner.config)
+    cycle_id = getattr(runner, "_last_cycle_id", "") or ""
+    if not cycle_id:
+        try:
+            from almanak.framework.observability.context import get_cycle_id
+
+            cycle_id = get_cycle_id() or ""
+        except Exception as error:  # noqa: BLE001
+            logger.debug("cycle_id context fallback failed: %s", error)
+
+    resolved_deployment_id = getattr(runner, "deployment_id", "") or snapshot.deployment_id or deployment_id
+    return _MetricsSnapshotContext(
+        deployment_id=resolved_deployment_id,
+        execution_mode=execution_mode,
+        cycle_id=cycle_id,
+    )
+
+
+def _resolve_metrics_baseline(
+    strategy: Any | None,
+    snapshot: PortfolioSnapshot,
+    deployment_id: str,
+) -> _MetricsBaseline:
+    allocation = getattr(strategy, "allocation_usd", None) if strategy is not None else None
+    initial = None
+    source = ""
+    if allocation is not None:
+        try:
+            allocation_dec = Decimal(str(allocation))
+        except (ArithmeticError, ValueError, TypeError):
+            allocation_dec = None
+        if allocation_dec is not None and allocation_dec.is_finite() and allocation_dec > 0:
+            initial = allocation_dec
+            source = "strategy_allocation_usd"
+            logger.info(
+                "Portfolio baseline anchored to strategy.allocation_usd=$%.2f for %s (explicit allocation contract)",
+                initial,
+                deployment_id,
+            )
+
+    if initial is None:
+        if snapshot.total_value_usd:
+            initial = snapshot.total_value_usd
+            source = "snapshot_total_value_usd"
+        else:
+            initial = snapshot.available_cash_usd
+            source = "snapshot_available_cash_usd"
+
+    if initial == 0:
+        logger.warning(
+            "Portfolio baseline is zero for %s — both total_value_usd and available_cash_usd "
+            "are zero on the first snapshot. PnL will be computed relative to zero until "
+            "a non-zero snapshot is taken. Check that the wallet is funded before the "
+            "first strategy iteration.",
+            deployment_id,
+        )
+    return _MetricsBaseline(value=initial, source=source)
+
+
+def _new_portfolio_metrics(
+    snapshot: PortfolioSnapshot,
+    context: _MetricsSnapshotContext,
+    baseline: _MetricsBaseline,
+) -> PortfolioMetrics:
+    return PortfolioMetrics(
+        timestamp=snapshot.timestamp,
+        total_value_usd=baseline.value,
+        initial_value_usd=baseline.value,
+        deployment_id=context.deployment_id,
+        execution_mode=context.execution_mode,
+        cycle_id=context.cycle_id,
+        positions_json=encode_baseline_provenance(
+            BaselineProvenance(
+                source=baseline.source,
+                initial_value_usd=baseline.value,
+            )
+        ),
+    )
+
+
+def _refresh_portfolio_metrics(
+    metrics: PortfolioMetrics,
+    snapshot: PortfolioSnapshot,
+    context: _MetricsSnapshotContext,
+) -> None:
+    metrics.timestamp = snapshot.timestamp
+    metrics.total_value_usd = snapshot.total_value_usd or snapshot.available_cash_usd
+    metrics.execution_mode = context.execution_mode
+    metrics.cycle_id = context.cycle_id
+    if not metrics.deployment_id:
+        metrics.deployment_id = context.deployment_id
+
+
+async def _populate_metrics_aggregates(
+    runner: Any,
+    metrics: PortfolioMetrics,
+    snapshot: PortfolioSnapshot,
+    context: _MetricsSnapshotContext,
+) -> None:
+    await _populate_gas_spent_usd(
+        runner,
+        metrics,
+        snapshot,
+        deployment_id=context.deployment_id,
+        is_live=context.execution_mode is RunMode.LIVE,
+    )
+    await _populate_capital_flows(
+        runner,
+        metrics,
+        snapshot,
+        deployment_id=context.deployment_id,
+    )
+
+
+async def _build_metrics_for_snapshot(
     runner: Any,
     deployment_id: str,
     snapshot: PortfolioSnapshot,
@@ -1795,36 +1971,18 @@ async def _build_metrics_for_snapshot(  # noqa: C901
         be written (e.g., unavailable snapshot, unsupported state manager).
     """
     try:
-        if not hasattr(runner.state_manager, "get_portfolio_metrics"):
+        get_portfolio_metrics = getattr(runner.state_manager, "get_portfolio_metrics", None)
+        if not callable(get_portfolio_metrics):
             return None
 
         if snapshot.error or not snapshot.is_valid:
             logger.info(f"Skipping portfolio metrics for {deployment_id}: snapshot unavailable")
             return None
 
-        # Phase 4: derive deployment_id, execution_mode, and cycle_id from runner context.
-        # VIB-3157: shared helper keeps the tri-state mapping aligned with
-        # ledger entries (``StrategyRunner._derive_execution_mode``).
-        from almanak.framework.runner.strategy_runner import derive_run_mode_from_config
+        context = _resolve_metrics_snapshot_context(runner, deployment_id, snapshot)
+        metrics = await get_portfolio_metrics(context.deployment_id)
 
-        execution_mode = derive_run_mode_from_config(runner.config)
-
-        # Get cycle_id: prefer runner._last_cycle_id (survives clear_cycle_id in finally block)
-        # Fall back to observability context for non-runner callers
-        cycle_id = getattr(runner, "_last_cycle_id", "") or ""
-        if not cycle_id:
-            try:
-                from almanak.framework.observability.context import get_cycle_id
-
-                cycle_id = get_cycle_id() or ""
-            except Exception as e:
-                logger.debug("cycle_id context fallback failed: %s", e)
-
-        deployment_id = getattr(runner, "deployment_id", "") or snapshot.deployment_id or deployment_id
-
-        existing = await runner.state_manager.get_portfolio_metrics(deployment_id)
-
-        if existing is None:
+        if metrics is None:
             # VIB-3882 (H1): the strategy can declare its allocation
             # explicitly via ``StrategyBase.allocation_usd``; if it does,
             # that value is the baseline. This is the only path that
@@ -1840,83 +1998,14 @@ async def _build_metrics_for_snapshot(  # noqa: C901
             # Fall back to available_cash_usd so the baseline reflects
             # the strategy's starting capital rather than zero — a zero
             # baseline makes every future PnL computation return zero.
-            allocation = getattr(strategy, "allocation_usd", None) if strategy is not None else None
-            # Tolerant numeric guard: tests sometimes pass MagicMock strategies
-            # where ``MagicMock.allocation_usd`` is itself a Mock (comparing
-            # to 0 raises TypeError). Only honour the allocation when it
-            # parses to a positive finite Decimal.
-            initial = None
-            baseline_source = ""
-            if allocation is not None:
-                try:
-                    allocation_dec = Decimal(str(allocation))
-                except (ArithmeticError, ValueError, TypeError):
-                    allocation_dec = None
-                if allocation_dec is not None and allocation_dec.is_finite() and allocation_dec > 0:
-                    initial = allocation_dec
-                    baseline_source = "strategy_allocation_usd"
-                    logger.info(
-                        "Portfolio baseline anchored to strategy.allocation_usd=$%.2f for %s "
-                        "(explicit allocation contract)",
-                        initial,
-                        deployment_id,
-                    )
-            if initial is None:
-                if snapshot.total_value_usd:
-                    initial = snapshot.total_value_usd
-                    baseline_source = "snapshot_total_value_usd"
-                else:
-                    initial = snapshot.available_cash_usd
-                    baseline_source = "snapshot_available_cash_usd"
-            if initial == 0:
-                logger.warning(
-                    "Portfolio baseline is zero for %s — both total_value_usd and available_cash_usd "
-                    "are zero on the first snapshot. PnL will be computed relative to zero until "
-                    "a non-zero snapshot is taken. Check that the wallet is funded before the "
-                    "first strategy iteration.",
-                    deployment_id,
-                )
-            metrics = PortfolioMetrics(
-                timestamp=snapshot.timestamp,
-                total_value_usd=initial,
-                initial_value_usd=initial,
-                deployment_id=deployment_id,
-                execution_mode=execution_mode,
-                cycle_id=cycle_id,
-                positions_json=encode_baseline_provenance(
-                    BaselineProvenance(
-                        source=baseline_source,
-                        initial_value_usd=initial,
-                    )
-                ),
-            )
-            logger.info(f"Portfolio baseline established for {deployment_id}: ${initial:.2f}")
-            await _populate_gas_spent_usd(
-                runner,
-                metrics,
-                snapshot,
-                deployment_id=deployment_id,
-                is_live=execution_mode is RunMode.LIVE,
-            )
-            await _populate_capital_flows(runner, metrics, snapshot, deployment_id=deployment_id)
-            return metrics
+            baseline = _resolve_metrics_baseline(strategy, snapshot, context.deployment_id)
+            metrics = _new_portfolio_metrics(snapshot, context, baseline)
+            logger.info(f"Portfolio baseline established for {context.deployment_id}: ${baseline.value:.2f}")
+        else:
+            _refresh_portfolio_metrics(metrics, snapshot, context)
 
-        existing.timestamp = snapshot.timestamp
-        existing.total_value_usd = snapshot.total_value_usd or snapshot.available_cash_usd
-        # Phase 4: always refresh execution_mode, deployment_id, and cycle_id
-        existing.execution_mode = execution_mode
-        existing.cycle_id = cycle_id
-        if not existing.deployment_id:
-            existing.deployment_id = deployment_id
-        await _populate_gas_spent_usd(
-            runner,
-            existing,
-            snapshot,
-            deployment_id=deployment_id,
-            is_live=execution_mode is RunMode.LIVE,
-        )
-        await _populate_capital_flows(runner, existing, snapshot, deployment_id=deployment_id)
-        return existing
+        await _populate_metrics_aggregates(runner, metrics, snapshot, context)
+        return metrics
 
     except AccountingPersistenceError:
         # _populate_gas_spent_usd raised in live mode on a query_failed.
@@ -2720,7 +2809,6 @@ def calculate_duration_ms(runner: Any, start_time: datetime) -> float:
 # -------------------------------------------------------------------------
 
 
-# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
 async def detect_stuck_and_alert(runner: Any, strategy: StrategyProtocol, result: IterationResult) -> None:
     """Run stuck detection on a failed iteration and generate an OperatorCard if stuck.
 
@@ -2732,6 +2820,9 @@ async def detect_stuck_and_alert(runner: Any, strategy: StrategyProtocol, result
         strategy: The strategy that failed
         result: The failed iteration result
     """
+    if not runner.config.enable_alerting or not runner.alert_manager:
+        return
+
     try:
         # Lazy import and init to avoid overhead on the happy path
         if runner._stuck_detector is None:
@@ -2807,14 +2898,31 @@ async def detect_stuck_and_alert(runner: Any, strategy: StrategyProtocol, result
 # -------------------------------------------------------------------------
 
 
-# crap-allowlist: PR is pure string-content cleanup (chore: VIB removal); zero branches added, function was already over threshold on main. Refactor tracked in VIB-4139.
-def emit_iteration_summary(runner: Any, result: IterationResult, chain: str | None = None) -> None:  # noqa: C901
-    """Emit a structured iteration_summary log record for JSONL analysis.
+@dataclasses.dataclass(frozen=True)
+class _IterationIntentSummary:
+    intent_type: str | None
+    intents_serialized: list[dict[str, Any]]
+    hold_reason: str | None
+    hold_reason_code: str | None
 
-    This provides a single, machine-readable record per iteration containing
-    all key fields needed for post-hoc analysis by AI agents or dashboards.
-    """
-    # Extract intent info
+
+@dataclasses.dataclass(frozen=True)
+class _IterationExecutionSummary:
+    tx_hashes: list[str]
+    txs_planned: int
+    txs_sent: int
+    gas_used: int
+    order_id: str | None
+    clob_status: str | None
+
+
+@dataclasses.dataclass(frozen=True)
+class _IterationOutcome:
+    status: str
+    noop_reason: str | None
+
+
+def _extract_iteration_intent(result: IterationResult) -> _IterationIntentSummary:
     intent_type = None
     intents_serialized: list[dict[str, Any]] = []
     hold_reason_code: str | None = None
@@ -2830,133 +2938,166 @@ def emit_iteration_summary(runner: Any, result: IterationResult, chain: str | No
             hold_reason = result.intent.reason
             hold_reason_code = result.intent.reason_code
 
-    # Extract execution info
-    tx_hashes: list[str] = []
-    txs_planned = 0
-    txs_sent = 0
-    gas_used = 0
-    # VIB-3709: Off-chain CLOB orders (PREDICTION_BUY / PREDICTION_SELL on
-    # Polymarket) succeed without producing a tx_hash. Operators triaging
-    # from logs need the CLOB order_id + matcher status as the actionable
-    # identifier, so surface them on the iteration_summary when present.
-    # Additive only: omit the keys entirely for non-prediction intents and
-    # for predictions where extraction failed (graceful degradation).
-    order_id: str | None = None
-    clob_status: str | None = None
-    if result.execution_result:
-        er = result.execution_result
-        if hasattr(er, "transaction_results") and er.transaction_results:
-            tx_hashes = [tr.tx_hash for tr in er.transaction_results if hasattr(tr, "tx_hash") and tr.tx_hash]
-            txs_sent = len(tx_hashes)
-        if hasattr(er, "tx_hashes") and er.tx_hashes:
-            tx_hashes = tx_hashes or er.tx_hashes
-            txs_sent = txs_sent or len(er.tx_hashes)
-        # txs_planned: count from action bundle if available
-        if hasattr(er, "receipts"):
-            txs_planned = max(txs_planned, len(er.receipts))
-        txs_planned = max(txs_planned, txs_sent)
-        gas_used = getattr(er, "total_gas_used", 0) or 0
-        # Only consult extracted_data for off-chain prediction intents
-        # (PREDICTION_BUY / PREDICTION_SELL). PREDICTION_REDEEM is on-chain
-        # so tx_hashes already carries the actionable identifier; we don't
-        # surface order_id/clob_status for it.
-        if intent_type in ("PREDICTION_BUY", "PREDICTION_SELL"):
-            extracted = getattr(er, "extracted_data", None) or {}
-            order_id_value = extracted.get("order_id")
-            clob_status_value = extracted.get("clob_status")
-            if order_id_value:
-                order_id = str(order_id_value)
-            if clob_status_value:
-                clob_status = str(clob_status_value)
+    return _IterationIntentSummary(
+        intent_type=intent_type,
+        intents_serialized=intents_serialized,
+        hold_reason=hold_reason,
+        hold_reason_code=hold_reason_code,
+    )
 
-    # Extract reconciliation status (tri-state: None=unchecked, True=clean, False=mismatch)
-    # VIB-3158: a report is only "clean" when there is neither an incident
-    # NOR outstanding warnings — warning-only reports mean coverage was
-    # degraded (missing balance, stale cache, unenforceable intent type) and
-    # must not be summarized as OK.
+
+def _extract_transaction_hashes(execution_result: Any) -> list[str]:
+    tx_hashes: list[str] = []
+    if hasattr(execution_result, "transaction_results") and execution_result.transaction_results:
+        tx_hashes = [
+            transaction.tx_hash
+            for transaction in execution_result.transaction_results
+            if hasattr(transaction, "tx_hash") and transaction.tx_hash
+        ]
+    if hasattr(execution_result, "tx_hashes") and execution_result.tx_hashes:
+        tx_hashes = tx_hashes or execution_result.tx_hashes
+    return tx_hashes
+
+
+def _extract_clob_summary(execution_result: Any, intent_type: str | None) -> tuple[str | None, str | None]:
+    if intent_type not in ("PREDICTION_BUY", "PREDICTION_SELL"):
+        return None, None
+
+    extracted = getattr(execution_result, "extracted_data", None) or {}
+    order_id_value = extracted.get("order_id")
+    clob_status_value = extracted.get("clob_status")
+    order_id = str(order_id_value) if order_id_value else None
+    clob_status = str(clob_status_value) if clob_status_value else None
+    return order_id, clob_status
+
+
+def _extract_iteration_execution(
+    result: IterationResult,
+    intent_type: str | None,
+) -> _IterationExecutionSummary:
+    execution_result = result.execution_result
+    if not execution_result:
+        return _IterationExecutionSummary([], 0, 0, 0, None, None)
+
+    tx_hashes = _extract_transaction_hashes(execution_result)
+    txs_sent = len(tx_hashes)
+    txs_planned = 0
+    if hasattr(execution_result, "receipts"):
+        txs_planned = max(txs_planned, len(execution_result.receipts))
+    txs_planned = max(txs_planned, txs_sent)
+    gas_used = getattr(execution_result, "total_gas_used", 0) or 0
+    order_id, clob_status = _extract_clob_summary(execution_result, intent_type)
+    return _IterationExecutionSummary(
+        tx_hashes=tx_hashes,
+        txs_planned=txs_planned,
+        txs_sent=txs_sent,
+        gas_used=gas_used,
+        order_id=order_id,
+        clob_status=clob_status,
+    )
+
+
+def _classify_reconciliation(result: IterationResult) -> bool | None:
+    """Return None when unchecked, True when clean, and False when degraded."""
     reconciliation_ok: bool | None = None
     if result.balance_reconciliation is not None:
         recon = result.balance_reconciliation
         has_incident = bool(recon.get("incident", False))
         has_warnings = bool(recon.get("warnings"))
         reconciliation_ok = not has_incident and not has_warnings
+    return reconciliation_ok
 
-    # Build optional CLOB fields conditionally so non-prediction intents
-    # (and predictions where extraction failed) don't get empty keys.
-    optional_clob_fields: dict[str, str] = {}
-    if order_id is not None:
-        optional_clob_fields["order_id"] = order_id
-    if clob_status is not None:
-        optional_clob_fields["clob_status"] = clob_status
 
-    # VIB-3754: trade-effective gate. The runner returns IterationStatus.SUCCESS
-    # whenever the success path completes without raising — but several real
-    # failure modes reach that path with no tx_hash, no CLOB order_id, and no
-    # accounting write (e.g., a connector that swallows a sub-error, an empty
-    # action bundle slipping through, a dry-run masquerading as live). Those
-    # rows look identical to a healthy SUCCESS in dashboards, so operators
-    # silently accept "deployed_usd > 0 with 0 events" as real activity.
-    #
-    # Re-classify SUCCESS → EXECUTION_NOOP at the LOG layer when the
-    # iteration produced none of:
-    #   - on-chain transaction hash (txs_sent > 0)
-    #   - CLOB order_id (off-chain prediction order accepted by the matcher)
-    #
-    # Skip the gate for:
-    #   - dry_run (DRY_RUN runs intentionally produce no tx)
-    #   - HOLD intents (legitimately no-op)
-    #   - non-SUCCESS statuses (failure paths already classified correctly)
-    #   - missing/unknown intent_type (caller didn't compile an intent — usually
-    #     copy-trading or a no-action callback flow that doesn't intend to trade)
-    #
-    # IMPORTANT: this is a LOG-only re-classification. ``result.status`` is
-    # left untouched so circuit-breaker / metrics / state-persistence keep
-    # treating it as SUCCESS — the goal is operator visibility, not changing
-    # control flow.
+def _classify_iteration_outcome(
+    runner: Any,
+    result: IterationResult,
+    intent: _IterationIntentSummary,
+    execution: _IterationExecutionSummary,
+) -> _IterationOutcome:
     log_status = result.status.value
     noop_reason: str | None = None
     if (
         result.status == IterationStatus.SUCCESS
         and not runner.config.dry_run
-        and intent_type not in (None, "HOLD")
-        and txs_sent == 0
-        and order_id is None
+        and intent.intent_type not in (None, "HOLD")
+        and execution.txs_sent == 0
+        and execution.order_id is None
     ):
         log_status = IterationStatus.EXECUTION_NOOP.value
         noop_reason = (
             "SUCCESS reported but no on-chain tx_hash and no CLOB order_id "
             "captured — iteration produced no trade-effective output"
         )
-        logger.warning(
-            "Faux SUCCESS detected: re-classifying iteration_summary status to "
-            "EXECUTION_NOOP — deployment_id=%s decision=%s txs_sent=0",
-            result.deployment_id,
-            intent_type,
-        )
+    return _IterationOutcome(status=log_status, noop_reason=noop_reason)
 
-    optional_gate_fields: dict[str, str] = {}
-    if noop_reason is not None:
-        optional_gate_fields["noop_reason"] = noop_reason
 
-    logger.info(
-        "iteration_summary",
-        event_type="iteration_summary",
-        deployment_id=result.deployment_id,
-        chain=chain,
-        iteration=runner._total_iterations,
-        decision=intent_type,
-        intents=intents_serialized,
-        dry_run=runner.config.dry_run,
-        txs_planned=txs_planned,
-        txs_sent=txs_sent,
-        tx_hashes=tx_hashes,
-        gas_used=gas_used,
-        status=log_status,
-        duration_ms=round(result.duration_ms, 1),
-        hold_reason=hold_reason,
-        hold_reason_code=hold_reason_code,
-        reconciliation_ok=reconciliation_ok,
-        error=result.error,
-        **optional_clob_fields,
-        **optional_gate_fields,
+def _emit_iteration_noop_warning(
+    result: IterationResult,
+    intent: _IterationIntentSummary,
+    outcome: _IterationOutcome,
+) -> None:
+    if outcome.noop_reason is None:
+        return
+    logger.warning(
+        "Faux SUCCESS detected: re-classifying iteration_summary status to "
+        "EXECUTION_NOOP — deployment_id=%s decision=%s txs_sent=0",
+        result.deployment_id,
+        intent.intent_type,
     )
+
+
+def _build_iteration_summary_event(
+    runner: Any,
+    result: IterationResult,
+    chain: str | None,
+    intent: _IterationIntentSummary,
+    execution: _IterationExecutionSummary,
+    outcome: _IterationOutcome,
+    reconciliation_ok: bool | None,
+) -> dict[str, Any]:
+    event = {
+        "event_type": "iteration_summary",
+        "deployment_id": result.deployment_id,
+        "chain": chain,
+        "iteration": runner._total_iterations,
+        "decision": intent.intent_type,
+        "intents": intent.intents_serialized,
+        "dry_run": runner.config.dry_run,
+        "txs_planned": execution.txs_planned,
+        "txs_sent": execution.txs_sent,
+        "tx_hashes": execution.tx_hashes,
+        "gas_used": execution.gas_used,
+        "status": outcome.status,
+        "duration_ms": round(result.duration_ms, 1),
+        "hold_reason": intent.hold_reason,
+        "hold_reason_code": intent.hold_reason_code,
+        "reconciliation_ok": reconciliation_ok,
+        "error": result.error,
+    }
+    if execution.order_id is not None:
+        event["order_id"] = execution.order_id
+    if execution.clob_status is not None:
+        event["clob_status"] = execution.clob_status
+    if outcome.noop_reason is not None:
+        event["noop_reason"] = outcome.noop_reason
+    return event
+
+
+def emit_iteration_summary(runner: Any, result: IterationResult, chain: str | None = None) -> None:
+    """Emit one structured, machine-readable summary for an iteration."""
+    intent = _extract_iteration_intent(result)
+    execution = _extract_iteration_execution(result, intent.intent_type)
+    reconciliation_ok = _classify_reconciliation(result)
+    outcome = _classify_iteration_outcome(runner, result, intent, execution)
+
+    _emit_iteration_noop_warning(result, intent, outcome)
+    event = _build_iteration_summary_event(
+        runner,
+        result,
+        chain,
+        intent,
+        execution,
+        outcome,
+        reconciliation_ok,
+    )
+    logger.info("iteration_summary", **event)

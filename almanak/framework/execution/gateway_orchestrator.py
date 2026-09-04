@@ -59,6 +59,132 @@ def _submission_provenance_from_proto(response: Any) -> SubmissionProvenance:
     return SubmissionProvenance.UNSPECIFIED
 
 
+@dataclass(frozen=True)
+class _ExecutionRequestOptions:
+    deployment_id: str
+    intent_id: str
+    dry_run: bool
+    simulation_enabled: bool
+    wallet_address: str
+
+
+def _resolve_execution_options(
+    context: Any | None,
+    *,
+    deployment_id: str,
+    intent_id: str,
+    dry_run: bool,
+    simulation_enabled: bool,
+    wallet_address: str | None,
+    default_wallet_address: str | None,
+) -> _ExecutionRequestOptions:
+    if context is not None:
+        deployment_id = getattr(context, "deployment_id", "") or deployment_id
+        intent_id = getattr(context, "intent_id", "") or intent_id
+        dry_run = getattr(context, "dry_run", dry_run)
+        simulation_enabled = getattr(context, "simulation_enabled", simulation_enabled)
+        wallet_address = getattr(context, "wallet_address", None) or wallet_address
+
+    wallet = wallet_address or default_wallet_address
+    if not wallet:
+        raise ValueError("wallet_address is required")
+
+    return _ExecutionRequestOptions(
+        deployment_id=deployment_id,
+        intent_id=intent_id,
+        dry_run=dry_run,
+        simulation_enabled=simulation_enabled,
+        wallet_address=wallet,
+    )
+
+
+def _encode_action_bundle(action_bundle: Any) -> tuple[bytes, str]:
+    if hasattr(action_bundle, "to_dict"):
+        bundle_dict = action_bundle.to_dict()
+    elif hasattr(action_bundle, "model_dump"):
+        bundle_dict = action_bundle.model_dump()
+    else:
+        bundle_dict = action_bundle
+
+    expected_plan_hash = execution_plan_hash(action_bundle)
+    sensitive = getattr(action_bundle, "sensitive_data", None)
+    if sensitive:
+        bundle_dict = {**bundle_dict, "_sensitive_data": sensitive}
+
+    return json.dumps(bundle_dict).encode("utf-8"), expected_plan_hash
+
+
+def _submission_transactions_from_proto(
+    response: Any,
+    *,
+    plan_hash_matches: bool,
+) -> list[SubmissionTransactionEvidence]:
+    items = getattr(response, "submission_transactions", []) if plan_hash_matches else []
+    role_by_wire_value = {
+        gateway_pb2.EXECUTION_TRANSACTION_ROLE_SETUP_APPROVAL: TransactionRole.SETUP_APPROVAL,
+        gateway_pb2.EXECUTION_TRANSACTION_ROLE_ACTION: TransactionRole.ACTION,
+    }
+    return [
+        SubmissionTransactionEvidence(
+            tx_id=item.tx_id,
+            role=role_by_wire_value.get(item.role, TransactionRole.UNKNOWN),
+            replay_policy=(
+                ReplayPolicy.RECOMPILE_ONLY
+                if item.replay_policy == gateway_pb2.REPLAY_POLICY_RECOMPILE_ONLY
+                else ReplayPolicy.NEVER
+            ),
+        )
+        for item in items
+    ]
+
+
+def _execution_result_from_proto(
+    response: Any,
+    *,
+    chain: str,
+    expected_plan_hash: str,
+) -> "GatewayExecutionResult":
+    receipts = json.loads(response.receipts.decode("utf-8")) if response.receipts else []
+    extraction_warnings = list(getattr(response, "extraction_warnings", []))
+
+    from almanak.framework.chain_family import SvmFamily, family_for
+
+    is_solana = bool(chain) and isinstance(family_for(chain), SvmFamily)
+    tx_hashes = (
+        list(response.tx_hashes)
+        if is_solana
+        else [tx_hash if tx_hash.startswith("0x") else f"0x{tx_hash}" for tx_hash in response.tx_hashes]
+    )
+    response_plan_hash = getattr(response, "execution_plan_hash", "")
+    plan_hash_matches = isinstance(response_plan_hash, str) and response_plan_hash == expected_plan_hash
+
+    return GatewayExecutionResult(
+        success=response.success,
+        tx_hashes=tx_hashes,
+        total_gas_used=response.total_gas_used,
+        receipts=receipts,
+        execution_id=response.execution_id,
+        chain_family="SOLANA" if is_solana else "EVM",
+        error=response.error if response.error else None,
+        error_code=response.error_code if response.error_code else None,
+        extraction_warnings=extraction_warnings,
+        submission_provenance=_submission_provenance_from_proto(response),
+        execution_plan_hash=response_plan_hash if plan_hash_matches else "",
+        submission_transactions=_submission_transactions_from_proto(response, plan_hash_matches=plan_hash_matches),
+    )
+
+
+def _execution_error_result(error: Exception) -> "GatewayExecutionResult":
+    return GatewayExecutionResult(
+        success=False,
+        tx_hashes=[],
+        total_gas_used=0,
+        receipts=[],
+        execution_id="",
+        error=str(error),
+    )
+
+
 @dataclass
 class GatewayExecutionResult:
     """Result from gateway execution.
@@ -471,7 +597,6 @@ class GatewayExecutionOrchestrator:
             logger.error(f"Gateway compile intent failed: {e}")
             raise
 
-    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     async def execute(
         self,
         action_bundle: Any,
@@ -501,109 +626,48 @@ class GatewayExecutionOrchestrator:
         Raises:
             ExecutionError: If execution fails
         """
-        # Extract values from context if provided (interface compatibility)
-        if context is not None:
-            deployment_id = getattr(context, "deployment_id", "") or deployment_id
-            intent_id = getattr(context, "intent_id", "") or intent_id
-            dry_run = getattr(context, "dry_run", dry_run)
-            simulation_enabled = getattr(context, "simulation_enabled", simulation_enabled)
-            wallet_address = getattr(context, "wallet_address", None) or wallet_address
-
-        wallet = wallet_address or self._wallet_address
-        if not wallet:
-            raise ValueError("wallet_address is required")
+        options = _resolve_execution_options(
+            context,
+            deployment_id=deployment_id,
+            intent_id=intent_id,
+            dry_run=dry_run,
+            simulation_enabled=simulation_enabled,
+            wallet_address=wallet_address,
+            default_wallet_address=self._wallet_address,
+        )
 
         try:
-            # Serialize action bundle to JSON
-            if hasattr(action_bundle, "to_dict"):
-                bundle_dict = action_bundle.to_dict()
-            elif hasattr(action_bundle, "model_dump"):
-                bundle_dict = action_bundle.model_dump()
-            else:
-                bundle_dict = action_bundle
-
-            expected_plan_hash = execution_plan_hash(action_bundle)
-
-            # Include sensitive_data (e.g. Raydium NFT mint keypair) for the
-            # gateway roundtrip. The gateway extracts it on the Execute side
-            # to pass to SolanaExecutionPlanner for co-signing.
-            sensitive = getattr(action_bundle, "sensitive_data", None)
-            if sensitive:
-                bundle_dict["_sensitive_data"] = sensitive
-
-            bundle_bytes = json.dumps(bundle_dict).encode("utf-8")
-
-            request = gateway_pb2.ExecuteRequest(
-                action_bundle=bundle_bytes,
-                dry_run=dry_run,
-                simulation_enabled=simulation_enabled,
-                deployment_id=deployment_id,
-                intent_id=intent_id,
+            bundle_bytes, expected_plan_hash = _encode_action_bundle(action_bundle)
+            request = self._build_execute_request(bundle_bytes, options)
+            response = self._dispatch_execute(request)
+            return _execution_result_from_proto(
+                response,
                 chain=self._chain,
-                wallet_address=wallet,
-                max_gas_price_gwei=self._max_gas_price_gwei,
-            )
-            response = self._client.execution.Execute(request, timeout=self._execute_timeout)
-
-            # Deserialize receipts
-            receipts = []
-            if response.receipts:
-                receipts = json.loads(response.receipts.decode("utf-8"))
-
-            # Extract warnings if available (future-proofing for proto additions)
-            extraction_warnings = list(getattr(response, "extraction_warnings", []))
-
-            # Normalize tx_hashes: add 0x prefix for EVM, preserve base58 for Solana.
-            # VIB-4803: routes through the ChainFamily adapter.
-            from almanak.framework.chain_family import SvmFamily, family_for
-
-            if self._chain and isinstance(family_for(self._chain), SvmFamily):
-                tx_hashes = list(response.tx_hashes)
-            else:
-                tx_hashes = [h if h.startswith("0x") else f"0x{h}" for h in response.tx_hashes]
-
-            response_plan_hash = getattr(response, "execution_plan_hash", "")
-            plan_hash_matches = isinstance(response_plan_hash, str) and response_plan_hash == expected_plan_hash
-
-            return GatewayExecutionResult(
-                success=response.success,
-                tx_hashes=tx_hashes,
-                total_gas_used=response.total_gas_used,
-                receipts=receipts,
-                execution_id=response.execution_id,
-                chain_family="SOLANA" if isinstance(family_for(self._chain), SvmFamily) else "EVM",
-                error=response.error if response.error else None,
-                error_code=response.error_code if response.error_code else None,
-                extraction_warnings=extraction_warnings,
-                submission_provenance=_submission_provenance_from_proto(response),
-                execution_plan_hash=response_plan_hash if plan_hash_matches else "",
-                submission_transactions=[
-                    SubmissionTransactionEvidence(
-                        tx_id=item.tx_id,
-                        role={
-                            gateway_pb2.EXECUTION_TRANSACTION_ROLE_SETUP_APPROVAL: TransactionRole.SETUP_APPROVAL,
-                            gateway_pb2.EXECUTION_TRANSACTION_ROLE_ACTION: TransactionRole.ACTION,
-                        }.get(item.role, TransactionRole.UNKNOWN),
-                        replay_policy=(
-                            ReplayPolicy.RECOMPILE_ONLY
-                            if item.replay_policy == gateway_pb2.REPLAY_POLICY_RECOMPILE_ONLY
-                            else ReplayPolicy.NEVER
-                        ),
-                    )
-                    for item in (getattr(response, "submission_transactions", []) if plan_hash_matches else [])
-                ],
+                expected_plan_hash=expected_plan_hash,
             )
 
         except Exception as e:
             logger.error(f"Gateway execute failed: {e}")
-            return GatewayExecutionResult(
-                success=False,
-                tx_hashes=[],
-                total_gas_used=0,
-                receipts=[],
-                execution_id="",
-                error=str(e),
-            )
+            return _execution_error_result(e)
+
+    def _build_execute_request(
+        self,
+        action_bundle: bytes,
+        options: _ExecutionRequestOptions,
+    ) -> gateway_pb2.ExecuteRequest:
+        return gateway_pb2.ExecuteRequest(
+            action_bundle=action_bundle,
+            dry_run=options.dry_run,
+            simulation_enabled=options.simulation_enabled,
+            deployment_id=options.deployment_id,
+            intent_id=options.intent_id,
+            chain=self._chain,
+            wallet_address=options.wallet_address,
+            max_gas_price_gwei=self._max_gas_price_gwei,
+        )
+
+    def _dispatch_execute(self, request: gateway_pb2.ExecuteRequest) -> Any:
+        return self._client.execution.Execute(request, timeout=self._execute_timeout)
 
     async def get_transaction_status(self, tx_hash: str, chain: str | None = None) -> dict[str, Any]:
         """Get transaction status from gateway.

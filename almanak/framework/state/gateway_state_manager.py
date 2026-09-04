@@ -171,7 +171,6 @@ class GatewayStateManager:
             logger.error(f"Gateway load state failed for {deployment_id}: {error_msg}")
             raise
 
-    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     async def save_state(self, state: StateData, expected_version: int | None = None) -> StateData:
         """Save strategy state through gateway.
 
@@ -739,12 +738,11 @@ class GatewayStateManager:
 
         return PortfolioSnapshot.from_dict(snapshot_dict)
 
-    # crap-allowlist: VIB-4196 — public-contract chokepoint, gRPC-marshalling sibling of SQLiteStore.save_accounting_event; cc=6 cov=4% are structural per .claude/rules/crap-refactor.md "undecomposable public contract / hot-path budget".
     async def save_accounting_event(self, event: "LendingAccountingEvent | PendleAccountingEvent") -> bool:
         """Save a typed accounting event via gateway gRPC → SQLite / PostgreSQL.
 
         Mirrors :meth:`save_ledger_entry` in error handling: non-blocking in
-        non-live modes (logs warning, returns False); raises in live mode so the
+        non-live modes (logs an error, returns False); raises in live mode so the
         runner halts with ACCOUNTING_FAILED rather than silently dropping records.
 
         Args:
@@ -812,7 +810,7 @@ class GatewayStateManager:
             )
             response = self._client.state.SaveAccountingEvent(request, timeout=self._timeout)
             if not response.success:
-                logger.warning(
+                logger.error(
                     "SaveAccountingEvent failed: strategy=%s, id=%s, error=%s",
                     identity.deployment_id,
                     identity.id,
@@ -820,7 +818,7 @@ class GatewayStateManager:
                 )
                 if is_live:
                     raise AccountingPersistenceError(
-                        write_kind=AccountingWriteKind.LEDGER,
+                        write_kind=AccountingWriteKind.ACCOUNTING,
                         deployment_id=identity.deployment_id,
                         message=f"SaveAccountingEvent failed: {response.error}",
                     )
@@ -835,10 +833,10 @@ class GatewayStateManager:
         except AccountingPersistenceError:
             raise
         except Exception as e:
-            logger.warning("Failed to save accounting event via gateway: %s", e)
+            logger.error("Failed to save accounting event via gateway: %s", e)
             if is_live:
                 raise AccountingPersistenceError(
-                    write_kind=AccountingWriteKind.LEDGER,
+                    write_kind=AccountingWriteKind.ACCOUNTING,
                     deployment_id=getattr(identity, "deployment_id", ""),
                     cause=e,
                 ) from e

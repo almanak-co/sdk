@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
-from ..alerting import AlertManager, AlertSendResult
+from ..alerting import AlertChannel, AlertManager, AlertSendResult
 from ..api.timeline import TimelineEvent, TimelineEventType, add_event
 from ..models import (
     AvailableAction,
@@ -207,8 +207,8 @@ class FullPositionSummary:
                     "token0_amount": str(lp.token0_amount),
                     "token1_amount": str(lp.token1_amount),
                     "value_usd": str(lp.value_usd),
-                    "range_lower": str(lp.range_lower) if lp.range_lower else None,
-                    "range_upper": str(lp.range_upper) if lp.range_upper else None,
+                    "range_lower": str(lp.range_lower) if lp.range_lower is not None else None,
+                    "range_upper": str(lp.range_upper) if lp.range_upper is not None else None,
                     "fees_earned_usd": str(lp.fees_earned_usd),
                     "chain": lp.chain,
                 }
@@ -224,7 +224,7 @@ class FullPositionSummary:
                     "borrow_amount": str(b.borrow_amount),
                     "borrow_value_usd": str(b.borrow_value_usd),
                     "health_factor": str(b.health_factor),
-                    "liquidation_price": str(b.liquidation_price) if b.liquidation_price else None,
+                    "liquidation_price": str(b.liquidation_price) if b.liquidation_price is not None else None,
                     "chain": b.chain,
                 }
                 for b in self.borrow_positions
@@ -318,7 +318,6 @@ class EmergencyManager:
         self.position_callback = position_callback
         self.dashboard_base_url = dashboard_base_url
 
-    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     def emergency_stop(
         self,
         deployment_id: str,
@@ -417,7 +416,6 @@ class EmergencyManager:
 
         return result
 
-    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     async def emergency_stop_async(
         self,
         deployment_id: str,
@@ -571,7 +569,7 @@ class EmergencyManager:
         if position_summary.has_borrow_positions:
             context["borrow_positions_count"] = len(position_summary.borrow_positions)
             context["total_borrowed_usd"] = str(position_summary.total_borrowed_value_usd)
-            if position_summary.min_health_factor:
+            if position_summary.min_health_factor is not None:
                 context["min_health_factor"] = str(position_summary.min_health_factor)
 
         if trigger_context:
@@ -650,7 +648,7 @@ class EmergencyManager:
 
         if position_summary.has_borrow_positions:
             min_hf = position_summary.min_health_factor
-            hf_str = f", health factor: {min_hf:.2f}" if min_hf else ""
+            hf_str = f", health factor: {min_hf:.2f}" if min_hf is not None else ""
             parts.append(
                 f"Borrow positions: {len(position_summary.borrow_positions)} "
                 f"(${position_summary.total_borrowed_value_usd:,.2f} USD borrowed{hf_str}) - "
@@ -695,7 +693,6 @@ class EmergencyManager:
         add_event(event)
         logger.info(f"Emergency stop event emitted for {deployment_id}")
 
-    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     def _send_critical_alerts(
         self,
         operator_card: OperatorCard,
@@ -716,23 +713,25 @@ class EmergencyManager:
             # Send via both direct methods to bypass rule matching for emergency
             result = AlertSendResult(success=False)
 
-            # Try Telegram first
-            telegram_result = self.alert_manager.send_direct_telegram_alert_sync(operator_card)
-            if telegram_result.success:
-                result.success = True
-                result.channels_sent.extend(telegram_result.channels_sent)
-            else:
-                result.channels_failed.extend(telegram_result.channels_failed)
-                result.errors.update(telegram_result.errors)
+            channel_senders = (
+                (AlertChannel.TELEGRAM, self.alert_manager.send_direct_telegram_alert_sync),
+                (AlertChannel.SLACK, self.alert_manager.send_direct_slack_alert_sync),
+            )
+            for channel, send_alert in channel_senders:
+                try:
+                    channel_result = send_alert(operator_card)
+                except Exception as e:
+                    result.channels_failed.append(channel)
+                    result.errors[channel] = str(e)
+                    logger.exception(f"{channel.value.title()} alert exception: {e}")
+                    continue
 
-            # Try Slack
-            slack_result = self.alert_manager.send_direct_slack_alert_sync(operator_card)
-            if slack_result.success:
-                result.success = True
-                result.channels_sent.extend(slack_result.channels_sent)
-            else:
-                result.channels_failed.extend(slack_result.channels_failed)
-                result.errors.update(slack_result.errors)
+                if channel_result.success:
+                    result.success = True
+                    result.channels_sent.extend(channel_result.channels_sent)
+                else:
+                    result.channels_failed.extend(channel_result.channels_failed)
+                    result.errors.update(channel_result.errors)
 
             # Log result
             if result.success:
@@ -755,7 +754,6 @@ class EmergencyManager:
                 skipped_reason=str(e),
             )
 
-    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     async def _send_critical_alerts_async(
         self,
         operator_card: OperatorCard,
@@ -785,29 +783,21 @@ class EmergencyManager:
                 return_exceptions=True,
             )
 
-            # Process Telegram result
-            if isinstance(telegram_result, BaseException):
-                logger.error(f"Telegram alert exception: {telegram_result}")
-            else:
-                tg_result: AlertSendResult = telegram_result
-                if tg_result.success:
+            channel_results = (
+                (AlertChannel.TELEGRAM, telegram_result),
+                (AlertChannel.SLACK, slack_result),
+            )
+            for channel, channel_result in channel_results:
+                if isinstance(channel_result, BaseException):
+                    result.channels_failed.append(channel)
+                    result.errors[channel] = str(channel_result)
+                    logger.error(f"{channel.value.title()} alert exception: {channel_result}")
+                elif channel_result.success:
                     result.success = True
-                    result.channels_sent.extend(tg_result.channels_sent)
+                    result.channels_sent.extend(channel_result.channels_sent)
                 else:
-                    result.channels_failed.extend(tg_result.channels_failed)
-                    result.errors.update(tg_result.errors)
-
-            # Process Slack result
-            if isinstance(slack_result, BaseException):
-                logger.error(f"Slack alert exception: {slack_result}")
-            else:
-                sl_result: AlertSendResult = slack_result
-                if sl_result.success:
-                    result.success = True
-                    result.channels_sent.extend(sl_result.channels_sent)
-                else:
-                    result.channels_failed.extend(sl_result.channels_failed)
-                    result.errors.update(sl_result.errors)
+                    result.channels_failed.extend(channel_result.channels_failed)
+                    result.errors.update(channel_result.errors)
 
             # Log result
             if result.success:

@@ -237,6 +237,16 @@ class _SwapDecimals:
     decimals_out: int
 
 
+@dataclass(frozen=True, slots=True)
+class _LpOpenIncrease:
+    """Decoded money fields from one NPM ``IncreaseLiquidity`` log."""
+
+    token_id: int
+    liquidity: int
+    amount0: int
+    amount1: int
+
+
 class PancakeSwapV3ReceiptParser(V3ForkReceiptParser, BaseReceiptParser[SwapEventData, ParseResult]):
     """Parser for PancakeSwap V3 transaction receipts.
 
@@ -1047,8 +1057,76 @@ class PancakeSwapV3ReceiptParser(V3ForkReceiptParser, BaseReceiptParser[SwapEven
             logger.warning(f"Failed to extract lp_close_data: {e}")
             return None
 
-    # crap-allowlist: cc=29; leg-identity decomposition needs cross-parser real-fork validation.
-    def extract_lp_open_data(self, receipt: dict[str, Any]) -> "LPOpenData | None":  # noqa: C901
+    @classmethod
+    def _lp_open_log_fields(cls, log: Any) -> tuple[list[Any], str, Any]:
+        """Return topics, normalized emitter, and data for mapping/object logs."""
+        if hasattr(log, "get"):
+            topics = log.get("topics", [])
+            address = log.get("address", "")
+            data = log.get("data", "")
+        else:
+            topics = getattr(log, "topics", [])
+            address = getattr(log, "address", "")
+            data = getattr(log, "data", "")
+        return topics, cls._normalize_address(address), data
+
+    @staticmethod
+    def _decode_lp_open_increase(topics: list[Any], data: Any) -> _LpOpenIncrease | None:
+        """Decode one candidate NPM increase, preserving missing/error semantics."""
+        if len(topics) < 2:
+            return None
+        token_id_topic = V3ForkReceiptParser._normalize_topic(topics[1])
+        try:
+            token_id = int(token_id_topic, 16)
+        except (ValueError, TypeError):
+            return None
+
+        if isinstance(data, str) and data[:2].lower() == "0x":
+            normalized = data[2:]
+        else:
+            normalized = HexDecoder.normalize_hex(data)
+        if not normalized:
+            return None
+        # HexDecoder reads beyond truncated data as zero, so require all three ABI slots.
+        if len(normalized) < 3 * 64:
+            raise ValueError(f"Truncated IncreaseLiquidity payload: {len(normalized)} hex chars, expected >= 192")
+        try:
+            return _LpOpenIncrease(
+                token_id=token_id,
+                liquidity=HexDecoder.decode_uint128(normalized, 0),
+                amount0=HexDecoder.decode_uint256(normalized, 32),
+                amount1=HexDecoder.decode_uint256(normalized, 64),
+            )
+        except Exception as exc:
+            raise ValueError(f"Malformed IncreaseLiquidity payload at offset 0-96: {exc}") from exc
+
+    @classmethod
+    def _find_lp_open(
+        cls,
+        logs: list[Any],
+        position_manager: str,
+    ) -> tuple[_LpOpenIncrease, Any | None] | None:
+        """Pair the first usable NPM increase with its latest preceding NPM-owned Mint."""
+        mint_topic = EVENT_TOPICS["Mint"].lower()
+        increase_topic = EVENT_TOPICS["IncreaseLiquidity"].lower()
+        last_npm_mint: Any | None = None
+        for log in logs:
+            topics, address, data = cls._lp_open_log_fields(log)
+            if not topics:
+                continue
+            first_topic = cls._normalize_topic(topics[0])
+            if first_topic == mint_topic:
+                if len(topics) >= 4 and cls._mint_owner_matches_npm(topics, position_manager):
+                    last_npm_mint = log
+                continue
+            if address != position_manager or first_topic != increase_topic:
+                continue
+            increase = cls._decode_lp_open_increase(topics, data)
+            if increase is not None:
+                return increase, last_npm_mint
+        return None
+
+    def extract_lp_open_data(self, receipt: dict[str, Any]) -> "LPOpenData | None":
         """Extract LP open data from a PancakeSwap V3 mint receipt.
 
         Looks for ``IncreaseLiquidity`` events emitted by the PancakeSwap V3
@@ -1107,118 +1185,38 @@ class PancakeSwapV3ReceiptParser(V3ForkReceiptParser, BaseReceiptParser[SwapEven
             )
             return None
 
-        increase_topic = EVENT_TOPICS["IncreaseLiquidity"].lower()
-        mint_topic = EVENT_TOPICS["Mint"].lower()
+        match = self._find_lp_open(logs, position_manager)
+        if match is None:
+            return None
+        increase, pool_mint = match
+        tick_lower, tick_upper = self._ticks_from_pool_mint(pool_mint)
+        pool_address = self._lp_open_log_fields(pool_mint)[1] if pool_mint is not None else ""
+        current_tick = self._current_tick_from_swap_event(logs, pool_address)
 
-        # Pair IncreaseLiquidity with the latest preceding NPM-owned Mint.
-        last_npm_mint: dict[str, Any] | None = None
+        logger.info(
+            f"Extracted PancakeSwap V3 LP open data: tokenId={increase.token_id} "
+            f"liquidity={increase.liquidity} amount0={increase.amount0} amount1={increase.amount1} "
+            f"ticks=[{tick_lower}, {tick_upper}] current_tick={current_tick}"
+        )
+        # Transfer directions preserve pool-slot identity when user labels are reversed.
+        currency0, currency1 = currencies_for_amounts(
+            transfers_by_token(logs, chain=self.chain, to_address=pool_address) if pool_address else {},
+            increase.amount0,
+            increase.amount1,
+        )
 
-        for log in logs:
-            if hasattr(log, "get"):
-                topics = log.get("topics", [])
-                address = log.get("address", "")
-                data = log.get("data", "")
-            else:
-                topics = getattr(log, "topics", [])
-                address = getattr(log, "address", "")
-                data = getattr(log, "data", "")
-
-            if isinstance(address, bytes):
-                address = "0x" + address.hex()
-            address = str(address).lower()
-
-            if not topics:
-                continue
-
-            first_topic = topics[0]
-            if isinstance(first_topic, bytes):
-                first_topic = "0x" + first_topic.hex()
-            first_topic = str(first_topic).lower()
-            if not first_topic.startswith("0x"):
-                first_topic = "0x" + first_topic
-
-            if first_topic == mint_topic and len(topics) >= 4:
-                if self._mint_owner_matches_npm(topics, position_manager):
-                    last_npm_mint = log
-                continue
-
-            if address != position_manager:
-                continue
-
-            if len(topics) < 2:
-                continue
-
-            if first_topic != increase_topic:
-                continue
-
-            token_id_topic = topics[1]
-            if isinstance(token_id_topic, bytes):
-                token_id_topic = "0x" + token_id_topic.hex()
-            token_id_topic = str(token_id_topic)
-            if not token_id_topic.startswith("0x"):
-                token_id_topic = "0x" + token_id_topic
-
-            try:
-                token_id = int(token_id_topic, 16)
-            except (ValueError, TypeError):
-                continue
-
-            normalized = HexDecoder.normalize_hex(data)
-            if not normalized or normalized == "0x":
-                continue
-
-            # HexDecoder reads beyond truncated data as zero, so require all three ABI slots.
-            stripped = normalized[2:] if normalized.startswith("0x") else normalized
-            if len(stripped) < 3 * 64:
-                raise ValueError(f"Truncated IncreaseLiquidity payload: {len(stripped)} hex chars, expected >= 192")
-            try:
-                liquidity = HexDecoder.decode_uint128(normalized, 0)
-                amount0 = HexDecoder.decode_uint256(normalized, 32)
-                amount1 = HexDecoder.decode_uint256(normalized, 64)
-            except Exception as exc:
-                raise ValueError(f"Malformed IncreaseLiquidity payload at offset 0-96: {exc}") from exc
-
-            tick_lower, tick_upper = self._ticks_from_pool_mint(last_npm_mint)
-
-            pool_address = ""
-            if last_npm_mint is not None:
-                addr_attr = (
-                    last_npm_mint.get("address")
-                    if hasattr(last_npm_mint, "get")
-                    else getattr(last_npm_mint, "address", "")
-                )
-                if isinstance(addr_attr, bytes):
-                    addr_attr = "0x" + addr_attr.hex()
-                pool_address = str(addr_attr).lower()
-
-            current_tick = self._current_tick_from_swap_event(logs, pool_address)
-
-            logger.info(
-                f"Extracted PancakeSwap V3 LP open data: tokenId={token_id} "
-                f"liquidity={liquidity} amount0={amount0} amount1={amount1} "
-                f"ticks=[{tick_lower}, {tick_upper}] current_tick={current_tick}"
-            )
-            # Transfer directions preserve pool-slot identity when user labels are reversed.
-            currency0, currency1 = currencies_for_amounts(
-                transfers_by_token(logs, chain=self.chain, to_address=pool_address) if pool_address else {},
-                amount0,
-                amount1,
-            )
-
-            return LPOpenData(
-                position_id=token_id,
-                tick_lower=tick_lower,
-                tick_upper=tick_upper,
-                liquidity=liquidity,
-                amount0=amount0,
-                amount1=amount1,
-                current_tick=current_tick,
-                pool_address=pool_address,
-                currency0=currency0,
-                currency1=currency1,
-            )
-
-        return None
+        return LPOpenData(
+            position_id=increase.token_id,
+            tick_lower=tick_lower,
+            tick_upper=tick_upper,
+            liquidity=increase.liquidity,
+            amount0=increase.amount0,
+            amount1=increase.amount1,
+            current_tick=current_tick,
+            pool_address=pool_address,
+            currency0=currency0,
+            currency1=currency1,
+        )
 
     @staticmethod
     def _mint_owner_matches_npm(topics: list[Any], npm_address: str) -> bool:

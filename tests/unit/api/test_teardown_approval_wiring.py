@@ -11,8 +11,10 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
+from fastapi import HTTPException
 
 from almanak.framework.api import teardown as teardown_api
 from almanak.framework.teardown.models import EscalationLevel
@@ -45,6 +47,22 @@ def _seed_pending_approval(adapter: TeardownStateAdapter, deployment_id: str) ->
     return teardown_id
 
 
+def _seed_in_memory_teardown(
+    deployment_id: str,
+    *,
+    status: str = "paused",
+    approval_needed: dict | None = None,
+) -> dict:
+    teardown = {
+        "teardown_id": f"td_{deployment_id}",
+        "deployment_id": deployment_id,
+        "status": status,
+        "approval_needed": {"level": "LEVEL_3"} if approval_needed is None else approval_needed,
+    }
+    teardown_api._teardown_state.set_teardown(deployment_id, teardown)
+    return teardown
+
+
 class TestApproveEscalationWritesToSqlite:
     @pytest.mark.asyncio
     async def test_approve_action_writes_sqlite_response(self, tmp_adapter: TeardownStateAdapter) -> None:
@@ -70,9 +88,7 @@ class TestApproveEscalationWritesToSqlite:
         assert payload["action"] == "approve"
 
     @pytest.mark.asyncio
-    async def test_wait_and_escalate_action_writes_sqlite_response(
-        self, tmp_adapter: TeardownStateAdapter
-    ) -> None:
+    async def test_wait_and_escalate_action_writes_sqlite_response(self, tmp_adapter: TeardownStateAdapter) -> None:
         deployment_id = "runner_strat_wait"
         teardown_id = _seed_pending_approval(tmp_adapter, deployment_id)
         teardown_api._teardown_state.remove_teardown(deployment_id)
@@ -106,12 +122,8 @@ class TestApproveEscalationWritesToSqlite:
         assert json.loads(body)["action"] == "cancel"
 
     @pytest.mark.asyncio
-    async def test_404_when_no_pending_approval_on_either_channel(
-        self, tmp_adapter: TeardownStateAdapter
-    ) -> None:
+    async def test_404_when_no_pending_approval_on_either_channel(self, tmp_adapter: TeardownStateAdapter) -> None:
         """404 if NEITHER in-memory nor SQLite has a pending approval."""
-        from fastapi import HTTPException
-
         teardown_api._teardown_state.remove_teardown("ghost_strategy")
 
         with pytest.raises(HTTPException) as exc_info:
@@ -129,8 +141,6 @@ class TestApproveEscalationWritesToSqlite:
         """Simulate a race: get_latest_pending_approval succeeds but the row is
         gone by the time write_approval_response_by_strategy runs. Surface as
         409 rather than silently dropping the operator's decision."""
-        from fastapi import HTTPException
-
         deployment_id = "race_strat"
         teardown_api._teardown_state.remove_teardown(deployment_id)
 
@@ -161,3 +171,97 @@ class TestApproveEscalationWritesToSqlite:
                 api_key="test-key",
             )
         assert exc_info.value.status_code == 409
+
+    @pytest.mark.asyncio
+    async def test_rejects_in_memory_teardown_that_is_not_paused(self, tmp_adapter: TeardownStateAdapter) -> None:
+        deployment_id = "executing_strat"
+        _seed_in_memory_teardown(deployment_id, status="executing")
+
+        with pytest.raises(HTTPException) as exc_info:
+            await teardown_api.approve_escalation(
+                deployment_id=deployment_id,
+                request=teardown_api.EscalationApprovalRequest(action="approve"),
+                api_key="test-key",
+            )
+
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == "Teardown is not paused (status: executing)"
+
+    @pytest.mark.asyncio
+    async def test_rejects_in_memory_teardown_without_pending_request(self, tmp_adapter: TeardownStateAdapter) -> None:
+        deployment_id = "paused_without_request"
+        _seed_in_memory_teardown(deployment_id, approval_needed={})
+
+        with pytest.raises(HTTPException) as exc_info:
+            await teardown_api.approve_escalation(
+                deployment_id=deployment_id,
+                request=teardown_api.EscalationApprovalRequest(action="approve"),
+                api_key="test-key",
+            )
+
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == "No approval request pending"
+
+    @pytest.mark.parametrize(
+        ("action", "approved_slippage", "expected_status", "expected_message"),
+        [
+            ("approve", 0.06, "executing", "Slippage approved. Continuing teardown."),
+            (
+                "wait_and_escalate",
+                None,
+                "waiting_retry",
+                "Operator declined current level; advancing to next escalation level.",
+            ),
+            ("cancel", None, "cancelled", "Teardown cancelled by operator."),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_in_memory_actions_preserve_lifecycle_and_audit_contract(
+        self,
+        tmp_adapter: TeardownStateAdapter,
+        monkeypatch: pytest.MonkeyPatch,
+        action: str,
+        approved_slippage: float | None,
+        expected_status: str,
+        expected_message: str,
+    ) -> None:
+        deployment_id = f"api_{action}"
+        teardown = _seed_in_memory_teardown(deployment_id)
+        audit = MagicMock()
+        monkeypatch.setattr(teardown_api, "emit_audit_event", audit)
+
+        response = await teardown_api.approve_escalation(
+            deployment_id=deployment_id,
+            request=teardown_api.EscalationApprovalRequest(
+                action=action,
+                approved_slippage=approved_slippage,
+            ),
+            api_key="test-key",
+        )
+
+        assert response.model_dump() == {
+            "success": True,
+            "message": expected_message,
+            "teardown_id": teardown["teardown_id"],
+            "new_status": expected_status,
+        }
+        stored = teardown_api._teardown_state.get_teardown(deployment_id)
+        assert stored is teardown
+        assert stored["status"] == expected_status
+        if action in {"approve", "cancel"}:
+            assert stored["approval_needed"] is None
+        else:
+            assert stored["approval_needed"] == {"level": "LEVEL_3"}
+        if approved_slippage is not None:
+            assert stored["approved_slippage"] == approved_slippage
+        audit.assert_called_once_with(
+            deployment_id=deployment_id,
+            action="TEARDOWN_ESCALATION_RESPONSE",
+            details={
+                "teardown_id": teardown["teardown_id"],
+                "action": action,
+                "approved_slippage": approved_slippage,
+                "channel": "in_memory",
+            },
+            api_key="test-key",
+        )

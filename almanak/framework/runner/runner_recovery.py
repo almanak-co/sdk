@@ -86,7 +86,6 @@ async def recover_incomplete_sessions(runner: Any) -> int:
     return recovered_count
 
 
-# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
 async def recover_session(runner: Any, session: ExecutionSession) -> bool:
     """Recover a single incomplete execution session.
 
@@ -311,7 +310,6 @@ async def update_recovered_state(runner: Any, session: ExecutionSession) -> None
         )
 
 
-# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
 def is_duplicate_transaction(
     runner: Any,
     tx_hash: str | None = None,

@@ -806,6 +806,23 @@ class TestBackgroundPaperTrader:
 
         assert result is False
 
+    def test_stop_returns_false_for_stale_pid_file(self, tmp_path):
+        config = self.create_config()
+        bg_trader = BackgroundPaperTrader(
+            config=config,
+            state_dir=tmp_path,
+        )
+        bg_trader.pid_file_path.write_text("12345")
+
+        with (
+            patch.object(PIDFile, "_is_process_running", return_value=False),
+            patch("almanak.framework.backtesting.paper.background.os.kill") as kill_mock,
+        ):
+            result = bg_trader.stop()
+
+        assert result is False
+        kill_mock.assert_not_called()
+
     def test_stop_returns_true_after_graceful_sigterm(self, tmp_path):
         """stop() releases the PID file when SIGTERM is enough."""
         config = self.create_config()
@@ -815,14 +832,36 @@ class TestBackgroundPaperTrader:
         )
         bg_trader.pid_file_path.write_text(str(os.getpid()))
 
-        with patch.object(PIDFile, "_is_process_running", side_effect=[True, False]), patch(
-            "almanak.framework.backtesting.paper.background.os.kill"
-        ) as kill_mock, patch("almanak.framework.backtesting.paper.background.time.sleep") as sleep_mock:
+        with (
+            patch.object(PIDFile, "_is_process_running", side_effect=[True, False]),
+            patch("almanak.framework.backtesting.paper.background.os.kill") as kill_mock,
+            patch("almanak.framework.backtesting.paper.background.time.sleep") as sleep_mock,
+        ):
             result = bg_trader.stop(timeout=1)
 
         assert result is True
         kill_mock.assert_called_once_with(os.getpid(), signal.SIGTERM)
         sleep_mock.assert_not_called()
+        assert not bg_trader.pid_file_path.exists()
+
+    def test_stop_waits_for_graceful_sigterm(self, tmp_path):
+        config = self.create_config()
+        bg_trader = BackgroundPaperTrader(
+            config=config,
+            state_dir=tmp_path,
+        )
+        bg_trader.pid_file_path.write_text(str(os.getpid()))
+
+        with (
+            patch.object(PIDFile, "_is_process_running", side_effect=[True, True, False]),
+            patch("almanak.framework.backtesting.paper.background.os.kill") as kill_mock,
+            patch("almanak.framework.backtesting.paper.background.time.sleep") as sleep_mock,
+        ):
+            result = bg_trader.stop(timeout=1)
+
+        assert result is True
+        kill_mock.assert_called_once_with(os.getpid(), signal.SIGTERM)
+        sleep_mock.assert_called_once_with(0.5)
         assert not bg_trader.pid_file_path.exists()
 
     def test_stop_uses_sigkill_when_sigterm_times_out(self, tmp_path):
@@ -834,9 +873,11 @@ class TestBackgroundPaperTrader:
         )
         bg_trader.pid_file_path.write_text(str(os.getpid()))
 
-        with patch.object(PIDFile, "_is_process_running", side_effect=[True, False]), patch(
-            "almanak.framework.backtesting.paper.background.os.kill"
-        ) as kill_mock, patch("almanak.framework.backtesting.paper.background.time.sleep") as sleep_mock:
+        with (
+            patch.object(PIDFile, "_is_process_running", side_effect=[True, False]),
+            patch("almanak.framework.backtesting.paper.background.os.kill") as kill_mock,
+            patch("almanak.framework.backtesting.paper.background.time.sleep") as sleep_mock,
+        ):
             result = bg_trader.stop(timeout=0)
 
         assert result is True
@@ -845,6 +886,49 @@ class TestBackgroundPaperTrader:
             (os.getpid(), signal.SIGKILL),
         ]
         sleep_mock.assert_called_once_with(1)
+        assert not bg_trader.pid_file_path.exists()
+
+    def test_stop_returns_false_when_sigkill_does_not_stop_process(self, tmp_path):
+        config = self.create_config()
+        bg_trader = BackgroundPaperTrader(
+            config=config,
+            state_dir=tmp_path,
+        )
+        bg_trader.pid_file_path.write_text(str(os.getpid()))
+
+        with (
+            patch.object(PIDFile, "_is_process_running", side_effect=[True, True]),
+            patch("almanak.framework.backtesting.paper.background.os.kill") as kill_mock,
+            patch("almanak.framework.backtesting.paper.background.time.sleep") as sleep_mock,
+        ):
+            result = bg_trader.stop(timeout=0)
+
+        assert result is False
+        assert [call.args for call in kill_mock.call_args_list] == [
+            (os.getpid(), signal.SIGTERM),
+            (os.getpid(), signal.SIGKILL),
+        ]
+        sleep_mock.assert_called_once_with(1)
+        assert not bg_trader.pid_file_path.exists()
+
+    def test_stop_returns_false_when_signal_fails(self, tmp_path):
+        config = self.create_config()
+        bg_trader = BackgroundPaperTrader(
+            config=config,
+            state_dir=tmp_path,
+        )
+        bg_trader.pid_file_path.write_text(str(os.getpid()))
+
+        with (
+            patch.object(PIDFile, "_is_process_running", return_value=True),
+            patch(
+                "almanak.framework.backtesting.paper.background.os.kill",
+                side_effect=ProcessLookupError("process disappeared"),
+            ),
+        ):
+            result = bg_trader.stop()
+
+        assert result is False
         assert not bg_trader.pid_file_path.exists()
 
     def test_resume_raises_if_no_state(self, tmp_path):
@@ -987,19 +1071,23 @@ class TestBackgroundPaperTraderEntrypoint:
             async def _cleanup(self):
                 self.calls.append("cleanup")
 
-        with patch("almanak.config.backtest.apply_ssl_cert_file"), patch(
-            "almanak.config.backtest.backtest_config_from_env"
-        ), patch("almanak.framework.backtesting.paper.background.atexit.register"), patch(
-            "almanak.framework.backtesting.paper.background.signal.signal"
-        ), patch(
-            "almanak.framework.anvil.fork_manager.RollingForkManager",
-            FakeRollingForkManager,
-        ), patch(
-            "almanak.framework.backtesting.paper.portfolio_tracker.PaperPortfolioTracker",
-            FakePaperPortfolioTracker,
-        ), patch(
-            "almanak.framework.backtesting.paper.engine.PaperTrader",
-            FakePaperTrader,
+        with (
+            patch("almanak.config.backtest.apply_ssl_cert_file"),
+            patch("almanak.config.backtest.backtest_config_from_env"),
+            patch("almanak.framework.backtesting.paper.background.atexit.register"),
+            patch("almanak.framework.backtesting.paper.background.signal.signal"),
+            patch(
+                "almanak.framework.anvil.fork_manager.RollingForkManager",
+                FakeRollingForkManager,
+            ),
+            patch(
+                "almanak.framework.backtesting.paper.portfolio_tracker.PaperPortfolioTracker",
+                FakePaperPortfolioTracker,
+            ),
+            patch(
+                "almanak.framework.backtesting.paper.engine.PaperTrader",
+                FakePaperTrader,
+            ),
         ):
             _run_background_paper_trader(
                 config.to_dict(),

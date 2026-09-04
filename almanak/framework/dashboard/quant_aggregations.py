@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -1341,14 +1341,215 @@ def _detect_primitive(accounting_events: list[dict[str, Any]]) -> str:
     return "mixed"
 
 
-# crap-allowlist: this PR's diff against ``evaluate_posture`` is pure
-# docstring-content cleanup (Track C wording refinement); zero branches added,
-# function was already over the CRAP threshold on main (cc=55, cov=86%) and
-# carries an existing C901 exemption for the same reason. Mirror of PR #2163's
-# treatment of ``runner_state.emit_iteration_summary``. Refactor of
-# ``evaluate_posture`` should be tracked under its own ticket and is out of
-# scope for this misc cleanup PR.
-def evaluate_posture(  # noqa: C901
+def _posture_event_type(event: Any) -> str:
+    """Row-level accounting event type, upper-cased ("" when absent)."""
+    if not isinstance(event, dict):
+        return ""
+    return str(event.get("event_type") or "").upper()
+
+
+def _posture_has_event_type(accounting_events: list[Any], event_types: tuple[str, ...]) -> bool:
+    """Whether any dict event carries one of ``event_types``."""
+    return any(_posture_event_type(e) in event_types for e in accounting_events)
+
+
+def _posture_payload_positive(
+    accounting_events: list[Any],
+    event_types: tuple[str, ...],
+    keys: tuple[str, ...],
+) -> bool:
+    """Whether any event of ``event_types`` carries a positive USD term."""
+    for event in accounting_events:
+        if not isinstance(event, dict):
+            continue
+        if _posture_event_type(event) not in event_types:
+            continue
+        payload = _safe_payload_loads(event.get("payload_json"))
+        for key in keys:
+            if _payload_decimal(payload, key) > 0:
+                return True
+    return False
+
+
+def _posture_all_confident(accounting_events: list[Any]) -> bool:
+    """Whether every event carries a confidence mark (dict or object rows)."""
+    return all(
+        (e.get("confidence") if isinstance(e, dict) else getattr(e, "confidence", "")) for e in accounting_events
+    )
+
+
+def _posture_deployed_nav(portfolio_metrics: Any) -> tuple[Decimal, Decimal]:
+    """(deployed_capital, nav_now) from portfolio metrics, or zeros.
+
+    ``portfolio_metrics`` is ``None`` when the gateway RPC fails or the
+    strategy hasn't written its first snapshot yet — zeros keep the posture
+    evaluable on an empty / fresh DB.
+    """
+    if portfolio_metrics is None:
+        return (Decimal("0"), Decimal("0"))
+    return (
+        _to_decimal(getattr(portfolio_metrics, "initial_value_usd", "0")),
+        _to_decimal(getattr(portfolio_metrics, "total_value_usd", "0")),
+    )
+
+
+@dataclass(frozen=True)
+class _PostureContext:
+    """Normalised inputs every generic posture cell reads."""
+
+    ledger_stats: LedgerQuantStats
+    have_ledger: bool
+    have_events: bool
+    audit: AuditTrailStats
+    reconciliation: ReconciliationStatus
+    snapshots_len: int
+    deployed_capital: Decimal
+    nav_now: Decimal
+    confidence_ok: bool
+
+
+def _generic_posture_results(ctx: _PostureContext) -> dict[str, bool]:
+    """PASS/FAIL predicate per generic cell (G1–G15).
+
+    "Every ledger row carries X" is the non-empty-column count equalling the
+    row count. G14/G15 always read False here; they resolve to XFAIL via
+    ``_TRACK_C_DEPENDENT`` in the recording fold, never to FAIL.
+    """
+    return {
+        "G1": ctx.have_ledger and ctx.ledger_stats.with_tx_hash == ctx.ledger_stats.total,
+        "G2": ctx.have_ledger and ctx.audit.ledger_with_gas_usd == ctx.audit.ledger_total,
+        "G3": ctx.have_events,
+        "G4": ctx.deployed_capital > Decimal("0") or ctx.nav_now > Decimal("0"),
+        "G5": ctx.deployed_capital > Decimal("0") and ctx.nav_now > Decimal("0"),
+        "G6": ctx.reconciliation.has_data and ctx.reconciliation.passed,
+        "G7": ctx.have_ledger and ctx.ledger_stats.with_cycle_id == ctx.ledger_stats.total,
+        "G8": ctx.snapshots_len >= 2,
+        "G9": ctx.have_events and ctx.confidence_ok,
+        "G10": ctx.have_ledger,
+        "G11": True,
+        "G12": ctx.audit.ledger_total > 0 and ctx.audit.ledger_with_price_inputs == ctx.audit.ledger_total,
+        "G13": ctx.audit.events_total > 0 and ctx.audit.events_with_versions == ctx.audit.events_total,
+        "G14": False,
+        "G15": False,
+    }
+
+
+def _record_posture_cell(
+    posture: AccountantPosture,
+    cell: str,
+    passed: bool,
+    *,
+    structurally_xfail: bool = False,
+) -> None:
+    """Fold one cell predicate into ``posture`` (Track C always XFAILs)."""
+    if structurally_xfail or cell in _TRACK_C_DEPENDENT:
+        posture.cells_xfail += 1
+        posture.xfail.append(cell)
+        return
+    if passed:
+        posture.cells_passed += 1
+    else:
+        posture.cells_failed += 1
+        posture.failing.append(cell)
+
+
+def _lp_posture_results(accounting_events: list[Any], have_events: bool) -> tuple[dict[str, bool], set[str]]:
+    """LP cells: LP1 presence, LP3 fee split; the rest need Track C."""
+    return (
+        {
+            "LP1": _posture_has_event_type(accounting_events, ("LP_OPEN", "LP_CLOSE", "SNAPSHOT")),
+            "LP2": False,
+            "LP3": _posture_payload_positive(accounting_events, ("LP_CLOSE",), ("fees_total_usd",))
+            if have_events
+            else False,
+            "LP4": False,
+            "LP5": False,
+            "LP6": False,
+        },
+        set(),
+    )
+
+
+def _lending_l4_result(accounting_events: list[Any]) -> tuple[bool, bool]:
+    """(passed, structurally_xfail) for L4.
+
+    REPAY rows must carry principal_repaid_usd AND interest_paid_usd. No REPAY
+    ever: vacuous XFAIL. REPAY with NULLs: FAIL. A serialized "0" is present,
+    preserving Empty != Zero semantics.
+    """
+    repay_ok = False
+    for event in accounting_events:
+        if not isinstance(event, dict):
+            continue
+        if _posture_event_type(event) not in ("REPAY", "DELEVERAGE"):
+            continue
+        payload = _safe_payload_loads(event.get("payload_json"))
+        if payload.get("principal_repaid_usd") and payload.get("interest_paid_usd"):
+            repay_ok = True
+            break
+    has_repay = _posture_has_event_type(accounting_events, ("REPAY", "DELEVERAGE"))
+    if not has_repay:
+        return (False, True)
+    return (repay_ok, False)
+
+
+def _lending_posture_results(accounting_events: list[Any], _have_events: bool) -> tuple[dict[str, bool], set[str]]:
+    """Lending cells: L4 from REPAY payloads; the rest need Track C."""
+    l4_passed, l4_xfail = _lending_l4_result(accounting_events)
+    # Keep the Track-C cells before L4 in the reported xfail/failing order.
+    return (
+        {
+            "L1": False,
+            "L2": False,
+            "L3": False,
+            "L5": False,
+            "L6": False,
+            "L4": l4_passed,
+        },
+        {"L4"} if l4_xfail else set(),
+    )
+
+
+def _perp_posture_results(accounting_events: list[Any], have_events: bool) -> tuple[dict[str, bool], set[str]]:
+    """Perp cells: P1 presence, P3 fee separability; the rest need Track C."""
+    return (
+        {
+            "P1": _posture_has_event_type(accounting_events, ("PERP_OPEN", "PERP_CLOSE")),
+            "P2": False,
+            "P3": _posture_payload_positive(
+                accounting_events, ("PERP_OPEN", "PERP_CLOSE"), ("open_fee_usd", "close_fee_usd")
+            )
+            if have_events
+            else False,
+            "P4": False,
+            "P5": False,
+            "P6": False,
+        },
+        set(),
+    )
+
+
+_PRIMITIVE_POSTURE_CELLS: dict[str, tuple[str, ...]] = {
+    "lp": _LP_CELLS,
+    "lending": _LENDING_CELLS,
+    "perp": _PERP_CELLS,
+}
+
+_PRIMITIVE_POSTURE_FNS: dict[str, Callable[[list[Any], bool], tuple[dict[str, bool], set[str]]]] = {
+    "lp": _lp_posture_results,
+    "lending": _lending_posture_results,
+    "perp": _perp_posture_results,
+}
+
+
+def _posture_cells_for_primitive(primitive: str) -> list[str]:
+    """Generic 15 cells plus the primitive's 6 (mixed/swap: generic only)."""
+    cells = list(_GENERIC_CELLS)
+    cells.extend(_PRIMITIVE_POSTURE_CELLS.get(primitive, ()))
+    return cells
+
+
+def evaluate_posture(
     primitive: str,
     ledger_entries: list[Any] | LedgerQuantStats,
     accounting_events: list[dict[str, Any]],
@@ -1367,149 +1568,31 @@ def evaluate_posture(  # noqa: C901
     for Track-C PASS/FAIL.
     """
     posture = AccountantPosture(primitive=primitive)
-
-    cells = list(_GENERIC_CELLS)
-    if primitive == "lp":
-        cells.extend(_LP_CELLS)
-    elif primitive == "lending":
-        cells.extend(_LENDING_CELLS)
-    elif primitive == "perp":
-        cells.extend(_PERP_CELLS)
-    else:
-        pass
-    posture.cells_total = len(cells)
+    posture.cells_total = len(_posture_cells_for_primitive(primitive))
 
     ledger_stats = _ledger_stats(ledger_entries)
     have_ledger = ledger_stats.total > 0
     have_events = len(accounting_events) > 0
+    deployed_capital, nav_now = _posture_deployed_nav(portfolio_metrics)
+    ctx = _PostureContext(
+        ledger_stats=ledger_stats,
+        have_ledger=have_ledger,
+        have_events=have_events,
+        audit=audit,
+        reconciliation=reconciliation,
+        snapshots_len=len(snapshots),
+        deployed_capital=deployed_capital,
+        nav_now=nav_now,
+        confidence_ok=_posture_all_confident(accounting_events),
+    )
+    for cell, passed in _generic_posture_results(ctx).items():
+        _record_posture_cell(posture, cell, passed)
 
-    def _ev_status(cell: str, passed: bool, *, structurally_xfail: bool = False) -> None:
-        if structurally_xfail or cell in _TRACK_C_DEPENDENT:
-            posture.cells_xfail += 1
-            posture.xfail.append(cell)
-            return
-        if passed:
-            posture.cells_passed += 1
-        else:
-            posture.cells_failed += 1
-            posture.failing.append(cell)
-
-    _ev_status(
-        "G1",
-        have_ledger and ledger_stats.with_tx_hash == ledger_stats.total,
-    )
-    _ev_status(
-        "G2",
-        have_ledger and audit.ledger_with_gas_usd == audit.ledger_total,
-    )
-    _ev_status("G3", have_events)
-    # portfolio_metrics may be None on RPC failure or before the first snapshot;
-    # guard so posture stays evaluable on an empty DB.
-    if portfolio_metrics is not None:
-        deployed_capital = _to_decimal(getattr(portfolio_metrics, "initial_value_usd", "0"))
-        nav_now = _to_decimal(getattr(portfolio_metrics, "total_value_usd", "0"))
-    else:
-        deployed_capital = Decimal("0")
-        nav_now = Decimal("0")
-    _ev_status("G4", deployed_capital > Decimal("0") or nav_now > Decimal("0"))
-    _ev_status("G5", deployed_capital > Decimal("0") and nav_now > Decimal("0"))
-    _ev_status("G6", reconciliation.has_data and reconciliation.passed)
-    _ev_status(
-        "G7",
-        have_ledger and ledger_stats.with_cycle_id == ledger_stats.total,
-    )
-    _ev_status("G8", len(snapshots) >= 2)
-    _ev_status(
-        "G9",
-        have_events
-        and all(
-            (e.get("confidence") if isinstance(e, dict) else getattr(e, "confidence", "")) for e in accounting_events
-        ),
-    )
-    _ev_status("G10", have_ledger)  # 1:1 by ledger schema construction
-    _ev_status("G11", True)  # no failed intent contract — vacuously OK
-    _ev_status(
-        "G12",
-        audit.ledger_total > 0 and audit.ledger_with_price_inputs == audit.ledger_total,
-    )
-    _ev_status(
-        "G13",
-        audit.events_total > 0 and audit.events_with_versions == audit.events_total,
-    )
-    _ev_status("G14", False)  # XFAIL via _TRACK_C_DEPENDENT
-    _ev_status("G15", False)  # XFAIL via _TRACK_C_DEPENDENT
-
-    if primitive == "lp":
-        _ev_status(
-            "LP1",
-            any(
-                (e.get("event_type") or "").upper() in ("LP_OPEN", "LP_CLOSE", "SNAPSHOT")
-                for e in accounting_events
-                if isinstance(e, dict)
-            ),
-        )
-        for c in ("LP2", "LP4", "LP5", "LP6"):
-            _ev_status(c, False)  # XFAIL via _TRACK_C_DEPENDENT
-        _ev_status(
-            "LP3",
-            any(
-                _payload_decimal(_safe_payload_loads(e.get("payload_json")), "fees_total_usd") > 0
-                for e in accounting_events
-                if isinstance(e, dict) and (e.get("event_type") or "").upper() == "LP_CLOSE"
-            )
-            if have_events
-            else False,
-        )
-    elif primitive == "lending":
-        for c in ("L1", "L2", "L3", "L5", "L6"):
-            _ev_status(c, False)  # XFAIL via _TRACK_C_DEPENDENT
-        # L4 — REPAY rows must carry principal_repaid_usd ≠ NULL
-        repay_ok = False
-        for e in accounting_events:
-            if not isinstance(e, dict):
-                continue
-            if (e.get("event_type") or "").upper() not in ("REPAY", "DELEVERAGE"):
-                continue
-            p = _safe_payload_loads(e.get("payload_json"))
-            if p.get("principal_repaid_usd") and p.get("interest_paid_usd"):
-                repay_ok = True
-                break
-        # If no REPAY ever happened, vacuous XFAIL — but if REPAY exists with NULLs, FAIL.
-        has_repay = any(
-            (e.get("event_type") or "").upper() in ("REPAY", "DELEVERAGE")
-            for e in accounting_events
-            if isinstance(e, dict)
-        )
-        if not has_repay:
-            _ev_status("L4", False, structurally_xfail=True)
-        else:
-            _ev_status("L4", repay_ok)
-    elif primitive == "perp":
-        for c in ("P2", "P4", "P5", "P6"):
-            _ev_status(c, False)  # XFAIL via _TRACK_C_DEPENDENT
-        _ev_status(
-            "P1",
-            any(
-                (e.get("event_type") or "").upper() in ("PERP_OPEN", "PERP_CLOSE")
-                for e in accounting_events
-                if isinstance(e, dict)
-            ),
-        )
-        # P3: open/close fee separability
-        p3_ok = (
-            any(
-                isinstance(e, dict)
-                and (e.get("event_type") or "").upper() in ("PERP_OPEN", "PERP_CLOSE")
-                and (
-                    _payload_decimal(_safe_payload_loads(e.get("payload_json")), "open_fee_usd") > 0
-                    or _payload_decimal(_safe_payload_loads(e.get("payload_json")), "close_fee_usd") > 0
-                )
-                for e in accounting_events
-            )
-            if have_events
-            else False
-        )
-        _ev_status("P3", p3_ok)
+    primitive_fn = _PRIMITIVE_POSTURE_FNS.get(primitive)
+    if primitive_fn is not None:
+        primitive_results, structural_xfails = primitive_fn(accounting_events, have_events)
+        for cell, passed in primitive_results.items():
+            _record_posture_cell(posture, cell, passed, structurally_xfail=cell in structural_xfails)
 
     return posture
 

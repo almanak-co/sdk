@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+from enum import Enum
 from typing import TYPE_CHECKING
 
 from almanak.framework.agent_tools.catalog import ToolCatalog, get_default_catalog
@@ -103,7 +104,6 @@ class AlmanakMCPServer:
             },
         ]
 
-    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     def resources_read(self, uri: str) -> dict:
         """Read an MCP resource by URI."""
         from almanak.core.chains import ChainRegistry
@@ -148,7 +148,8 @@ class AlmanakMCPServer:
                 ):
                     policy_dict[k] = str(v)
                 elif isinstance(v, set):
-                    policy_dict[k] = sorted(v) if v else []
+                    values = [item.value if isinstance(item, Enum) else item for item in v]
+                    policy_dict[k] = sorted(values, key=str)
                 else:
                     policy_dict[k] = v
             return {

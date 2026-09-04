@@ -682,9 +682,161 @@ def docs_agent_skill(dump):
         sys.exit(1)
 
 
-# crap-allowlist: Phase 1 (#2097) routes the existing GatewaySettings(...) construction
-# through gateway_config_from_env(...) — no complexity added. Function refactor is
-# tracked separately; allowlist is the documented escape hatch for no-op cutovers.
+def _resolve_gateway_db_context(*, hosted: bool, standalone: bool) -> tuple[str | None, str | None, Path | None]:
+    """Resolve the gateway's local DB context or refuse an unanchored startup."""
+    from almanak.framework.local_paths import auto_detect_strategy_folder, state_db_env, strategy_folder_env
+
+    explicit_state_db = state_db_env()
+    explicit_strategy_folder = strategy_folder_env()
+    detected_folder = None
+    if not hosted:
+        detected_folder = auto_detect_strategy_folder()
+        if not standalone and not explicit_state_db and detected_folder is None and not explicit_strategy_folder:
+            click.echo(
+                click.style(
+                    "Refusing to start gateway: no strategy folder resolved.\n"
+                    "  Run `almanak gateway` from a strategy folder (one with config.json),\n"
+                    "  or set ALMANAK_STRATEGY_FOLDER / ALMANAK_STATE_DB,\n"
+                    "  or pass --standalone for ad-hoc utility-DB use (e.g. `almanak ax`).\n"
+                    "  Background: 1 strategy = 1 folder = 1 DB = 1 gateway.",
+                    fg="red",
+                    bold=True,
+                ),
+                err=True,
+            )
+            sys.exit(2)
+
+    return explicit_state_db, explicit_strategy_folder, detected_folder
+
+
+def _build_gateway_cli_settings(*, port, network, metrics, metrics_port, chains, insecure, standalone, hosted):
+    """Build gateway settings and configure the local authentication mode."""
+    from almanak.config.env import gateway_config_from_env
+
+    parsed_chains = [chain.strip().lower() for chain in chains.split(",") if chain.strip()] if chains else []
+    effective_network = network if network else "mainnet"
+    is_test_network = effective_network in ("anvil", "sepolia")
+    allow_insecure = is_test_network or insecure
+    settings = gateway_config_from_env(
+        grpc_port=port,
+        metrics_enabled=metrics,
+        metrics_port=metrics_port,
+        network=effective_network,
+        chains=parsed_chains,
+        allow_insecure=allow_insecure,
+        standalone=standalone,
+    )
+
+    session_auth_token = None
+    if not hosted and not settings.auth_token and not is_test_network and not insecure:
+        import uuid
+
+        session_auth_token = uuid.uuid4().hex
+        settings.auth_token = session_auth_token
+
+    if insecure and not is_test_network:
+        click.echo(
+            click.style(
+                f"SECURITY WARNING: Insecure mode is active on network '{effective_network}'. "
+                "Gateway authentication is DISABLED. Remove the --insecure flag "
+                "(or ALMANAK_GATEWAY_ALLOW_INSECURE env var) for production use.",
+                fg="red",
+                bold=True,
+            ),
+            err=True,
+        )
+
+    return settings, parsed_chains, session_auth_token
+
+
+def _emit_gateway_startup(
+    *,
+    settings,
+    port,
+    metrics,
+    metrics_port,
+    log_level,
+    parsed_chains,
+    standalone,
+    hosted,
+    explicit_state_db,
+    explicit_strategy_folder,
+    detected_folder,
+    session_auth_token,
+):
+    """Print the gateway startup context and hand off a generated local token."""
+    if explicit_state_db:
+        db_anchor = f"explicit (ALMANAK_STATE_DB={explicit_state_db})"
+    elif standalone:
+        db_anchor = "STANDALONE (utility DB)"
+    elif detected_folder is not None:
+        db_anchor = f"STRATEGY-PINNED ({detected_folder})"
+    elif explicit_strategy_folder:
+        db_anchor = f"STRATEGY-PINNED ({explicit_strategy_folder})"
+    elif hosted:
+        db_anchor = "HOSTED (Postgres)"
+    else:
+        db_anchor = "STRATEGY-PINNED (env)"
+
+    info_pairs = {
+        "gRPC Port": port,
+        "Network": settings.network,
+        "Chains": ", ".join(parsed_chains) if parsed_chains else "(on-demand)",
+        "Metrics": "enabled" if metrics else "disabled",
+        "Metrics Port": metrics_port if metrics else "N/A",
+        "Log Level": log_level,
+        "DB Anchor": db_anchor,
+    }
+    if session_auth_token:
+        info_pairs["Auth"] = "auto-generated session token (see below)"
+
+    format_output(
+        status="info",
+        title="Starting Almanak Gateway",
+        key_value_pairs=info_pairs,
+    )
+
+    if session_auth_token:
+        click.echo()
+        click.echo(
+            click.style("Session auth token (pass to clients via ALMANAK_GATEWAY_AUTH_TOKEN env var):", fg="yellow")
+        )
+        click.echo(f"  export ALMANAK_GATEWAY_AUTH_TOKEN={session_auth_token}")
+
+        from almanak.framework.local_paths import write_gateway_session_token
+
+        if write_gateway_session_token(session_auth_token) is not None:
+            click.echo(
+                click.style(
+                    "  (also written to a 0600 session file — `almanak dashboard` "
+                    "in this folder picks it up automatically)",
+                    fg="green",
+                )
+            )
+
+    click.echo()
+    click.echo("Press Ctrl+C to stop the gateway.")
+    click.echo()
+
+
+def _run_gateway_server(settings, session_auth_token):
+    """Run the gateway and remove any generated local token on shutdown."""
+    import asyncio
+
+    from almanak.gateway.server import serve
+
+    try:
+        asyncio.run(serve(settings))
+    except KeyboardInterrupt:
+        click.echo()
+        click.echo("Gateway stopped.")
+    finally:
+        if session_auth_token:
+            from almanak.framework.local_paths import clear_gateway_session_token
+
+            clear_gateway_session_token()
+
+
 @almanak.command()
 @click.option(
     "--port",
@@ -775,49 +927,16 @@ def gateway(port, network, metrics, metrics_port, log_level, chains, insecure, s
         # Start gateway on custom port
         almanak gateway --port 50052
     """
-    import asyncio
     import logging
-    import sys
 
-    from almanak.config.env import gateway_config_from_env
     from almanak.framework.deployment import is_hosted
 
-    # VIB-3761/-3835: anchor the gateway to a strategy folder before any
-    # downstream code resolves a local DB path. Without this, an
-    # ``almanak gateway`` started from inside ``strategies/foo/`` would
-    # silently write to ``~/.local/share/almanak/utility/almanak_state.db``
-    # while the runner writes to ``strategies/foo/almanak_state.db`` —
-    # the two-DB split that produced the May 2 dashboard miscount
-    # (NAV $35.62 / Lifetime PnL +14238% / Cash 195% of NAV).
-    #
-    # Hosted mode (ALMANAK_IS_HOSTED set) uses Postgres, so the local-path branch
-    # is skipped entirely.
-    from almanak.framework.local_paths import auto_detect_strategy_folder, state_db_env, strategy_folder_env
-    from almanak.gateway.server import serve
+    hosted = is_hosted()
+    explicit_state_db, explicit_strategy_folder, detected_folder = _resolve_gateway_db_context(
+        hosted=hosted,
+        standalone=standalone,
+    )
 
-    explicit_state_db = state_db_env()
-    explicit_strategy_folder = strategy_folder_env()
-    detected_folder = None
-    if not is_hosted():
-        # Auto-detect cwd if neither env var is set; the helper is a no-op
-        # when a folder is already exported.
-        detected_folder = auto_detect_strategy_folder()
-        if not standalone and not explicit_state_db and detected_folder is None and not explicit_strategy_folder:
-            click.echo(
-                click.style(
-                    "Refusing to start gateway: no strategy folder resolved.\n"
-                    "  Run `almanak gateway` from a strategy folder (one with config.json),\n"
-                    "  or set ALMANAK_STRATEGY_FOLDER / ALMANAK_STATE_DB,\n"
-                    "  or pass --standalone for ad-hoc utility-DB use (e.g. `almanak ax`).\n"
-                    "  Background: 1 strategy = 1 folder = 1 DB = 1 gateway.",
-                    fg="red",
-                    bold=True,
-                ),
-                err=True,
-            )
-            sys.exit(2)
-
-    # Configure logging
     log_level_map = {
         "debug": logging.DEBUG,
         "info": logging.INFO,
@@ -828,121 +947,33 @@ def gateway(port, network, metrics, metrics_port, log_level, chains, insecure, s
         level=log_level_map.get(log_level, logging.INFO),
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
-
-    # Install centralized secret redaction on all logging channels
     install_redaction()
 
-    # Parse chains list
-    parsed_chains = [c.strip().lower() for c in chains.split(",") if c.strip()] if chains else []
-
-    # Build settings
-    effective_network = network if network else "mainnet"
-    is_test_network = effective_network in ("anvil", "sepolia")
-    # allow_insecure: auto-enabled for anvil, or via --insecure flag / env var
-    allow_insecure = is_test_network or insecure
-
-    # Build settings via the config service so env-var fallbacks (unprefixed
-    # ALMANAK_* and Polymarket ladders) flow through the single boundary in
-    # almanak.config.env (Phase 1).
-    settings = gateway_config_from_env(
-        grpc_port=port,
-        metrics_enabled=metrics,
+    settings, parsed_chains, session_auth_token = _build_gateway_cli_settings(
+        port=port,
+        network=network,
+        metrics=metrics,
         metrics_port=metrics_port,
-        network=effective_network,
-        chains=parsed_chains,
-        allow_insecure=allow_insecure,
+        chains=chains,
+        insecure=insecure,
         standalone=standalone,
+        hosted=hosted,
     )
-
-    # Security: for non-test networks, auto-generate a session auth token when
-    # none is explicitly configured (mirrors the strat-run managed gateway pattern).
-    # For test networks, use allow_insecure for convenience.
-    session_auth_token = None
-    if not settings.auth_token and not is_test_network and not insecure:
-        import uuid
-
-        session_auth_token = uuid.uuid4().hex
-        settings.auth_token = session_auth_token
-
-    if insecure and not is_test_network:
-        click.echo(
-            click.style(
-                f"SECURITY WARNING: Insecure mode is active on network '{effective_network}'. "
-                "Gateway authentication is DISABLED. Remove the --insecure flag (or ALMANAK_GATEWAY_ALLOW_INSECURE env var) for production use.",
-                fg="red",
-                bold=True,
-            ),
-            err=True,
-        )
-
-    if explicit_state_db:
-        db_anchor = f"explicit (ALMANAK_STATE_DB={explicit_state_db})"
-    elif standalone:
-        db_anchor = "STANDALONE (utility DB)"
-    elif detected_folder is not None:
-        db_anchor = f"STRATEGY-PINNED ({detected_folder})"
-    elif explicit_strategy_folder:
-        db_anchor = f"STRATEGY-PINNED ({explicit_strategy_folder})"
-    elif is_hosted():
-        db_anchor = "HOSTED (Postgres)"
-    else:
-        db_anchor = "STRATEGY-PINNED (env)"
-
-    info_pairs = {
-        "gRPC Port": port,
-        "Network": settings.network,
-        "Chains": ", ".join(parsed_chains) if parsed_chains else "(on-demand)",
-        "Metrics": "enabled" if metrics else "disabled",
-        "Metrics Port": metrics_port if metrics else "N/A",
-        "Log Level": log_level,
-        "DB Anchor": db_anchor,
-    }
-    if session_auth_token:
-        info_pairs["Auth"] = "auto-generated session token (see below)"
-
-    format_output(
-        status="info",
-        title="Starting Almanak Gateway",
-        key_value_pairs=info_pairs,
+    _emit_gateway_startup(
+        settings=settings,
+        port=port,
+        metrics=metrics,
+        metrics_port=metrics_port,
+        log_level=log_level,
+        parsed_chains=parsed_chains,
+        standalone=standalone,
+        hosted=hosted,
+        explicit_state_db=explicit_state_db,
+        explicit_strategy_folder=explicit_strategy_folder,
+        detected_folder=detected_folder,
+        session_auth_token=session_auth_token,
     )
-
-    if session_auth_token:
-        click.echo()
-        click.echo(
-            click.style("Session auth token (pass to clients via ALMANAK_GATEWAY_AUTH_TOKEN env var):", fg="yellow")
-        )
-        click.echo(f"  export ALMANAK_GATEWAY_AUTH_TOKEN={session_auth_token}")
-        # VIB-4047: also persist to a 0600 file sibling to the folder-scoped DB
-        # so ``almanak dashboard`` launched from the same strategy folder
-        # authenticates without the operator copy-pasting the export line above.
-        # No-op in hosted mode or when no strategy folder resolves.
-        from almanak.framework.local_paths import write_gateway_session_token
-
-        if write_gateway_session_token(session_auth_token) is not None:
-            click.echo(
-                click.style(
-                    "  (also written to a 0600 session file — `almanak dashboard` "
-                    "in this folder picks it up automatically)",
-                    fg="green",
-                )
-            )
-
-    click.echo()
-    click.echo("Press Ctrl+C to stop the gateway.")
-    click.echo()
-
-    try:
-        asyncio.run(serve(settings))
-    except KeyboardInterrupt:
-        click.echo()
-        click.echo("Gateway stopped.")
-    finally:
-        # VIB-4047: clear the session-token file so a stopped gateway's token
-        # doesn't linger for the next unrelated dashboard launch. Best-effort.
-        if session_auth_token:
-            from almanak.framework.local_paths import clear_gateway_session_token
-
-            clear_gateway_session_token()
+    _run_gateway_server(settings, session_auth_token)
 
 
 @almanak.command("backtest-service")
@@ -992,13 +1023,6 @@ def backtest_service(host, port, workers, log_level):
     run_server(host=host, port=port, workers=workers, log_level=log_level)
 
 
-# crap-allowlist: Phase 5e (#2097) swaps the inline ``env = os.environ.copy() ;
-# env["GATEWAY_HOST"] = ...`` block for the typed
-# :func:`subprocess_env_with_overrides` boundary helper. CC (6) is structural —
-# gateway-readiness probe with three distinct error branches followed by the
-# subprocess invocation with two graceful-stop catch arms. Coverage is 3% because
-# the dashboard subprocess is exercised by integration tests outside the unit
-# suite; the migration touches only the env-mutation site, not the control flow.
 @almanak.command()
 @click.option(
     "--port",
@@ -1092,24 +1116,28 @@ def dashboard(port, gateway_host, gateway_port, no_browser):
     )
 
     try:
-        client.connect()
-        if not client.wait_for_ready(timeout=5.0):
-            format_output(
-                status="error",
-                title="Gateway Not Available",
-                key_value_pairs={
-                    "Error": "Cannot connect to gateway",
-                    "Solution": "Start gateway first with: almanak gateway",
-                },
-            )
-            sys.exit(1)
-        client.disconnect()
+        try:
+            client.connect()
+            gateway_ready = client.wait_for_ready(timeout=5.0)
+        finally:
+            client.disconnect()
     except Exception as e:
         format_output(
             status="error",
             title="Gateway Connection Failed",
             key_value_pairs={
                 "Error": str(e),
+                "Solution": "Start gateway first with: almanak gateway",
+            },
+        )
+        sys.exit(1)
+
+    if not gateway_ready:
+        format_output(
+            status="error",
+            title="Gateway Not Available",
+            key_value_pairs={
+                "Error": "Cannot connect to gateway",
                 "Solution": "Start gateway first with: almanak gateway",
             },
         )
@@ -1331,14 +1359,140 @@ def _strat_test_unstarted_coverage(actions: list[str], *, teardown: bool) -> dic
     }
 
 
-# crap-allowlist: Phase 5e (#2097) replaces the inline ``os.environ.get("ALMANAK_PRIVATE_KEY")``
-# probe + the strategy-local ``load_dotenv(env_file)`` call with the typed
-# ``load_config().gateway.private_key`` read and the ``_load_dotenv_once`` boundary
-# helper. CC (16) is structural — option parsing + skip-reason gating + JSON / human
-# output branches + ContextVar plumbing + exit-code propagation. Coverage (37%) is
-# limited because the production path drives a managed Anvil + gateway lifecycle that
-# isn't exercised by unit tests; integration coverage lives in the demo-strategy
-# smoke harness (``test-demo-quick``). The migration touches only the env-read sites.
+def _parse_strategy_test_inputs(actions: str, inject: str | None) -> tuple[list[str], object | None]:
+    """Parse and validate lifecycle actions and scenario injection."""
+    parsed_actions = [action.strip() for action in (actions or "").split(",") if action.strip()]
+    parsed_inject = None
+    if inject:
+        from almanak.framework.cli._scenario import ScenarioParseError, parse_scenario
+
+        try:
+            parsed_inject = parse_scenario(inject)
+        except ScenarioParseError as exc:
+            raise click.ClickException(str(exc)) from exc
+
+    if parsed_inject is not None and not parsed_actions:
+        # Empty force_action is the framework sentinel for a natural decide() iteration.
+        parsed_actions = [""]
+    return parsed_actions, parsed_inject
+
+
+def _prepare_strategy_test_runtime(ctx: click.Context, working_dir: str) -> str | None:
+    """Load strategy configuration and resolve the Anvil-only signing fallback."""
+    from almanak.config.env import _load_dotenv_once
+
+    env_file = Path(working_dir) / ".env"
+    if env_file.exists():
+        _load_dotenv_once(str(env_file))
+        click.echo(f"Loaded environment from: {env_file}")
+
+    boot_config = _prime_strategy_command_config(ctx)
+    test_runtime_private_key = None
+    if not boot_config.gateway.private_key:
+        from almanak.framework.cli.run import ANVIL_DEFAULT_PRIVATE_KEY
+
+        test_runtime_private_key = ANVIL_DEFAULT_PRIVATE_KEY
+        click.echo("ALMANAK_PRIVATE_KEY unset — using default Anvil account #0 (test-only)")
+
+    install_redaction()
+    return test_runtime_private_key
+
+
+def _emit_unstarted_strategy_test_result(
+    actions: list[str],
+    *,
+    teardown: bool,
+    json_output: bool,
+    skip_reason: str | None = None,
+    error: Exception | None = None,
+) -> int:
+    """Emit the result for a strategy test that never reached the framework runner."""
+    skipped = skip_reason is not None
+    summary: dict[str, object] = {
+        "all_passed": None if skipped else False,
+        "skipped": skipped,
+        "skip_reason": skip_reason,
+        "steps_run": 0,
+        "actions_passed": None if skipped else False,
+        "teardown_passed": None if skipped or not teardown else False,
+        "coverage": _strat_test_unstarted_coverage(actions, teardown=teardown),
+    }
+    if error is not None:
+        summary["error"] = str(error)
+
+    if json_output:
+        click.echo(json.dumps({"summary": summary, "steps": []}))
+    elif skipped:
+        click.echo(f"SKIP: {skip_reason}", err=True)
+    else:
+        format_output(
+            status="error",
+            title="Strategy test failed",
+            key_value_pairs={"Error": str(error)},
+        )
+    return 0 if skipped else 1
+
+
+def _invoke_strategy_test_runner(
+    ctx: click.Context,
+    *,
+    working_dir: str,
+    config_file: str | None,
+    actions: list[str],
+    teardown: bool,
+    asset_policy: str | None,
+    inject: object | None,
+    json_output: bool,
+    anvil_ports: tuple[str, ...],
+    gateway_host: str,
+    gateway_port: int,
+    no_gateway: bool,
+    runtime_private_key: str | None,
+) -> None:
+    """Invoke the framework runner with the fixed strategy-test runtime contract."""
+    from almanak.framework.cli.run_helpers import _runtime_private_key_override
+
+    runtime_key_token = _runtime_private_key_override.set(runtime_private_key) if runtime_private_key else None
+    try:
+        ctx.invoke(
+            framework_run_cmd,
+            config_file=config_file,
+            once=True,
+            interval=DEFAULT_STRAT_RUN_INTERVAL,
+            dry_run=False,
+            list_all=False,
+            verbose=False,
+            debug=False,
+            dashboard=False,
+            dashboard_port=8501,
+            simulate_tx=None,
+            network="anvil",
+            gateway_host=gateway_host,
+            gateway_port=gateway_port,
+            no_gateway=no_gateway,
+            # Let strategy config select shadow, replay, or live copy mode.
+            copy_mode=None,
+            copy_shadow=False,
+            copy_replay_file=None,
+            copy_strict=False,
+            wallet="default",
+            log_file=None,
+            reset_fork=False,
+            max_iterations=None,
+            teardown_after=teardown,
+            working_dir=working_dir,
+            anvil_ports=anvil_ports,
+            test_actions=actions,
+            test_json=json_output,
+            test_inject=inject,
+            test_asset_policy=asset_policy,
+            fresh=True,
+        )
+    finally:
+        if runtime_key_token is not None:
+            _runtime_private_key_override.reset(runtime_key_token)
+
+
 @strat.command("test")
 @click.option(
     "--working-dir",
@@ -1480,167 +1634,95 @@ def strategy_test(
         almanak strat test --inject '{"prices": {"USDC": "0.95"}}'            # stablecoin depeg
         almanak strat test --inject scenario.json --json                     # from a file
     """
-    parsed_actions = [a.strip() for a in (actions or "").split(",") if a.strip()]
-
-    parsed_inject = None
-    if inject:
-        from almanak.framework.cli._scenario import ScenarioParseError, parse_scenario
-
-        try:
-            parsed_inject = parse_scenario(inject)
-        except ScenarioParseError as e:
-            raise click.ClickException(str(e)) from e
+    parsed_actions, parsed_inject = _parse_strategy_test_inputs(actions, inject)
 
     if not parsed_actions and not teardown and parsed_inject is None:
         raise click.ClickException("strat test needs at least one of: --actions <csv>, --inject <json>, or --teardown")
 
-    # With --inject and no explicit --actions, run a single natural
-    # (force_action="") iteration so decide() executes its real condition
-    # branches against the injected snapshot (VIB-5529). "" is the established
-    # sentinel for "no forced action — run real decide()".
-    if parsed_inject is not None and not parsed_actions:
-        parsed_actions = [""]
-
-    # Match strategy_run() — load strategy-local .env through the boundary
-    # helper so test runs see the same environment overrides the production
-    # run path does.
-    from almanak.config.env import _load_dotenv_once
-
-    env_file = Path(working_dir) / ".env"
-    if env_file.exists():
-        _load_dotenv_once(str(env_file))
-        click.echo(f"Loaded environment from: {env_file}")
-
-    boot_config = _prime_strategy_command_config(ctx)
-
-    # `almanak strat test` always runs against a managed Anvil fork. If the user
-    # has no ALMANAK_PRIVATE_KEY set (fresh scaffolds ship with it empty),
-    # fall back to the well-known Anvil account #0 key so anvil_funding has a
-    # wallet to fund. Public test key — no security impact, only used here
-    # because this command is hardcoded to `--network anvil`.
-    # The typed ``GatewayConfig.private_key`` carries the ALMANAK_PRIVATE_KEY
-    # value via the Phase 1 env-fallback ladder; reading it here keeps the
-    # config-boundary lint clean.
-    test_runtime_private_key: str | None = None
-    if not boot_config.gateway.private_key:
-        from almanak.framework.cli.run import ANVIL_DEFAULT_PRIVATE_KEY
-
-        # Plumbed via the ``_runtime_private_key_override`` ContextVar below
-        # so we never mutate os.environ as a side-channel between calls (#2100)
-        # and never grow `run`'s parameter list (the click callback is on the
-        # CRAP gate's bubble — kwarg threading there flagged every wiring line).
-        test_runtime_private_key = ANVIL_DEFAULT_PRIVATE_KEY
-        click.echo("ALMANAK_PRIVATE_KEY unset — using default Anvil account #0 (test-only)")
-
-    install_redaction()
-
-    skip_reason = _strat_test_skip_reason(working_dir, config_file)
-    if skip_reason is not None:
-        if json_output:
-            click.echo(
-                json.dumps(
-                    {
-                        "summary": {
-                            "all_passed": None,
-                            "skipped": True,
-                            "skip_reason": skip_reason,
-                            "steps_run": 0,
-                            "actions_passed": None,
-                            "teardown_passed": None,
-                            "coverage": _strat_test_unstarted_coverage(parsed_actions, teardown=teardown),
-                        },
-                        "steps": [],
-                    }
-                )
+    try:
+        runtime_private_key = _prepare_strategy_test_runtime(ctx, working_dir)
+        skip_reason = _strat_test_skip_reason(working_dir, config_file)
+    except click.Abort:
+        raise
+    except Exception as exc:
+        if not json_output:
+            raise
+        sys.exit(
+            _emit_unstarted_strategy_test_result(
+                parsed_actions,
+                teardown=teardown,
+                json_output=True,
+                error=exc,
             )
-        else:
-            click.echo(f"SKIP: {skip_reason}", err=True)
-        sys.exit(0)
+        )
 
-    # Set the test-fallback signing key on the framework's contextvar so it
-    # reaches `_setup_gateway` / `_build_runtime_config` without growing
-    # `framework_run_cmd`'s parameter list. Reset deterministically in the
-    # finally branch so the value never leaks across `almanak strat test`
-    # invocations within the same Python process.
-    from almanak.framework.cli.run_helpers import _runtime_private_key_override as _rt_pk_var
-
-    _rt_pk_token = _rt_pk_var.set(test_runtime_private_key) if test_runtime_private_key else None
+    if skip_reason is not None:
+        sys.exit(
+            _emit_unstarted_strategy_test_result(
+                parsed_actions,
+                teardown=teardown,
+                json_output=json_output,
+                skip_reason=skip_reason,
+            )
+        )
 
     try:
-        ctx.invoke(
-            framework_run_cmd,
+        _invoke_strategy_test_runner(
+            ctx,
+            working_dir=working_dir,
             config_file=config_file,
-            once=True,
-            interval=DEFAULT_STRAT_RUN_INTERVAL,
-            dry_run=False,
-            list_all=False,
-            verbose=False,
-            debug=False,
-            dashboard=False,
-            dashboard_port=8501,
-            simulate_tx=None,
-            network="anvil",
+            actions=parsed_actions,
+            teardown=teardown,
+            asset_policy=asset_policy,
+            inject=parsed_inject,
+            json_output=json_output,
+            anvil_ports=anvil_ports,
             gateway_host=gateway_host,
             gateway_port=gateway_port,
             no_gateway=no_gateway,
-            # Don't override copy_mode — let it stay None so strategy config decides
-            # (shadow / replay / live). strat test exposes no copy-mode flag.
-            copy_mode=None,
-            copy_shadow=False,
-            copy_replay_file=None,
-            copy_strict=False,
-            wallet="default",
-            log_file=None,
-            reset_fork=False,
-            max_iterations=None,
-            teardown_after=teardown,
-            working_dir=working_dir,
-            anvil_ports=anvil_ports,
-            test_actions=parsed_actions,
-            test_json=json_output,
-            test_inject=parsed_inject,
-            test_asset_policy=asset_policy,
-            fresh=True,
+            runtime_private_key=runtime_private_key,
         )
     except click.Abort:
         sys.exit(1)
-    except Exception as e:
-        if json_output:
-            click.echo(
-                json.dumps(
-                    {
-                        "summary": {
-                            "all_passed": False,
-                            "skipped": False,
-                            "skip_reason": None,
-                            "steps_run": 0,
-                            "actions_passed": False,
-                            "teardown_passed": False if teardown else None,
-                            "coverage": _strat_test_unstarted_coverage(parsed_actions, teardown=teardown),
-                            "error": str(e),
-                        },
-                        "steps": [],
-                    }
-                )
+    except Exception as exc:
+        sys.exit(
+            _emit_unstarted_strategy_test_result(
+                parsed_actions,
+                teardown=teardown,
+                json_output=json_output,
+                error=exc,
             )
-        else:
-            format_output(
-                status="error",
-                title="Strategy test failed",
-                key_value_pairs={"Error": str(e)},
-            )
-        sys.exit(1)
-    finally:
-        if _rt_pk_token is not None:
-            _rt_pk_var.reset(_rt_pk_token)
+        )
 
 
-# crap-allowlist: Phase 5e (#2097) replaces the strategy-local ``load_dotenv(env_file)``
-# call with the typed :func:`_load_dotenv_once` boundary helper. CC (11) is structural
-# to the run-vs-test branch + auto-discover-config-file ladder + dashboard /
-# log-file / fresh / network plumbing; coverage (43%) is bounded by the same
-# managed-Anvil-required-for-end-to-end constraint that holds back ``strategy_test``.
-# The migration touches only the dotenv ingest site at the top of the function body.
+def _resolve_strategy_run_configuration(ctx, working_dir, config_file, interval):
+    """Resolve the strategy file and interval before framework startup."""
+    if config_file is None:
+        potential_configs = [
+            Path(working_dir) / "config.json",
+            Path(working_dir) / "config.yaml",
+            Path(working_dir) / "config.yml",
+        ]
+        for potential_config in potential_configs:
+            if potential_config.exists():
+                config_file = str(potential_config)
+                click.echo(f"Using config: {config_file}")
+                break
+
+    boot_config = _prime_strategy_command_config(ctx)
+    run_config = _load_pyproject_run_config(working_dir)
+    if interval is None:
+        interval = run_config.get("interval", DEFAULT_STRAT_RUN_INTERVAL)
+        if "interval" in run_config:
+            click.echo(f"Using interval from pyproject.toml: {interval}s")
+    elif interval < MIN_STRAT_RUN_INTERVAL or interval > MAX_STRAT_RUN_INTERVAL:
+        raise click.ClickException(
+            f"--interval must be between {MIN_STRAT_RUN_INTERVAL} and {MAX_STRAT_RUN_INTERVAL} seconds"
+        )
+
+    return config_file, interval, boot_config
+
+
 @strat.command("run")
 @strategy_run_options
 @click.pass_context
@@ -1734,30 +1816,12 @@ def strategy_run(
     if env_file.exists():
         click.echo(f"Loaded environment from: {env_file}")
 
-    # Look for config.json or config.yaml in working directory if not specified
-    if config_file is None:
-        potential_configs = [
-            Path(working_dir) / "config.json",
-            Path(working_dir) / "config.yaml",
-            Path(working_dir) / "config.yml",
-        ]
-        for potential_config in potential_configs:
-            if potential_config.exists():
-                config_file = str(potential_config)
-                click.echo(f"Using config: {config_file}")
-                break
-
-    boot_config = _prime_strategy_command_config(ctx)
-
-    run_config = _load_pyproject_run_config(working_dir)
-    if interval is None:
-        interval = run_config.get("interval", DEFAULT_STRAT_RUN_INTERVAL)
-        if "interval" in run_config:
-            click.echo(f"Using interval from pyproject.toml: {interval}s")
-    elif interval < MIN_STRAT_RUN_INTERVAL or interval > MAX_STRAT_RUN_INTERVAL:
-        raise click.ClickException(
-            f"--interval must be between {MIN_STRAT_RUN_INTERVAL} and {MAX_STRAT_RUN_INTERVAL} seconds"
-        )
+    config_file, interval, boot_config = _resolve_strategy_run_configuration(
+        ctx,
+        working_dir,
+        config_file,
+        interval,
+    )
 
     # Install secret redaction after env is loaded so all secrets are registered.
     # (The managed gateway also calls install_redaction(), but strat run may log

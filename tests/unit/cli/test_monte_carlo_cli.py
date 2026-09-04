@@ -9,8 +9,10 @@ Tests validate the CLI for Monte Carlo simulation:
 
 from __future__ import annotations
 
+import json
+from datetime import UTC, datetime
 from decimal import Decimal
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from click.testing import CliRunner
@@ -243,6 +245,133 @@ class TestMonteCarloDryRun:
             ])
         assert result.exit_code == 0
         assert "42" in result.output
+
+
+class TestMonteCarloExecution:
+    @pytest.mark.parametrize("verbose", [False, True], ids=["quiet", "verbose"])
+    def test_full_run_preserves_dates_provider_and_output_contract(
+        self,
+        cli_runner: CliRunner,
+        mock_monte_carlo_result: MagicMock,
+        tmp_path,
+        verbose: bool,
+    ) -> None:
+        class _Strategy:
+            pass
+
+        strategy_instance = object()
+        data_provider = MagicMock()
+        paths = MagicMock()
+        output_path = tmp_path / "monte-carlo.json"
+        args = [
+            "monte-carlo",
+            "--strategy",
+            "test",
+            "--start",
+            "2024-01-01",
+            "--end",
+            "2024-06-01",
+            "--method",
+            "bootstrap",
+            "--tokens",
+            "weth,usdc",
+            "--base-token",
+            "weth",
+            "--output",
+            str(output_path),
+        ]
+        if verbose:
+            args.append("--verbose")
+
+        with (
+            patch("almanak.framework.cli.backtest.advanced.list_strategies_fn", return_value=["test"]),
+            patch("almanak.framework.cli.backtest.advanced.get_strategy", return_value=_Strategy),
+            patch(
+                "almanak.framework.cli.backtest.advanced.load_strategy_config",
+                return_value={"token_funding": []},
+            ),
+            patch(
+                "almanak.framework.cli.backtest.advanced._create_backtest_strategy",
+                return_value=strategy_instance,
+            ),
+            patch(
+                "almanak.framework.cli.backtest.advanced.build_token_address_map",
+                return_value={"WETH": "0xweth", "USDC": "0xusdc"},
+            ) as build_token_map,
+            patch(
+                "almanak.framework.cli.backtest.advanced.CoinGeckoDataProvider",
+                return_value=data_provider,
+            ) as provider_factory,
+            patch(
+                "almanak.framework.cli.backtest.advanced._load_monte_carlo_historical_prices",
+                return_value=[Decimal("100"), Decimal("101")],
+            ) as load_prices,
+            patch(
+                "almanak.framework.cli.backtest.advanced._generate_monte_carlo_paths",
+                return_value=paths,
+            ),
+            patch(
+                "almanak.framework.backtesting.pnl.run_monte_carlo",
+                new=AsyncMock(return_value=mock_monte_carlo_result),
+            ) as run_monte_carlo,
+        ):
+            result = cli_runner.invoke(backtest, args)
+
+        assert result.exit_code == 0, result.output
+        build_token_map.assert_called_once_with(
+            strategy_config={"token_funding": []},
+            tracked_tokens=["WETH", "USDC"],
+            chain="arbitrum",
+        )
+        provider_factory.assert_called_once_with(token_addresses={"WETH": "0xweth", "USDC": "0xusdc"})
+        context = load_prices.call_args.args[1]
+        assert context.start == datetime(2024, 1, 1, tzinfo=UTC)
+        assert context.end == datetime(2024, 6, 1, tzinfo=UTC)
+        assert context.base_token == "WETH"
+        run_monte_carlo.assert_awaited_once()
+        run_call = run_monte_carlo.await_args.kwargs
+        assert run_call["strategy"] is strategy_instance
+        assert run_call["paths"] is paths
+        assert run_call["backtest_config"].start_time == context.start
+        assert run_call["backtest_config"].end_time == context.end
+        assert (run_call["mc_config"].progress_callback is not None) is verbose
+        assert json.loads(output_path.read_text()) == mock_monte_carlo_result.to_dict.return_value
+
+    def test_simulation_failure_exits_one_with_diagnostic(self, cli_runner: CliRunner) -> None:
+        with (
+            patch("almanak.framework.cli.backtest.advanced.list_strategies_fn", return_value=["test"]),
+            patch("almanak.framework.cli.backtest.advanced.get_strategy", return_value=object),
+            patch("almanak.framework.cli.backtest.advanced.load_strategy_config", return_value={}),
+            patch("almanak.framework.cli.backtest.advanced._create_backtest_strategy", return_value=object()),
+            patch("almanak.framework.cli.backtest.advanced._build_monte_carlo_pnl_config", return_value=object()),
+            patch("almanak.framework.cli.backtest.advanced.build_token_address_map", return_value={}),
+            patch("almanak.framework.cli.backtest.advanced.CoinGeckoDataProvider"),
+            patch(
+                "almanak.framework.cli.backtest.advanced._load_monte_carlo_historical_prices",
+                return_value=[Decimal("100"), Decimal("101")],
+            ),
+            patch("almanak.framework.cli.backtest.advanced._generate_monte_carlo_paths", return_value=object()),
+            patch("almanak.framework.cli.backtest.advanced._build_monte_carlo_config", return_value=object()),
+            patch(
+                "almanak.framework.backtesting.pnl.run_monte_carlo",
+                new=AsyncMock(side_effect=RuntimeError("simulation failed")),
+            ),
+        ):
+            result = cli_runner.invoke(
+                backtest,
+                [
+                    "monte-carlo",
+                    "--strategy",
+                    "test",
+                    "--start",
+                    "2024-01-01",
+                    "--end",
+                    "2024-06-01",
+                ],
+            )
+
+        assert result.exit_code == 1
+        assert "Error during Monte Carlo simulation: simulation failed" in result.output
 
 
 # =============================================================================

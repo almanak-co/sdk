@@ -1,0 +1,328 @@
+[
+  {
+    "name": "swap",
+    "primitive": "swap",
+    "intent_type": "swap",
+    "intent": {"protocol": "UNISWAP_V3"},
+    "chain": " ArBiTrUm ",
+    "wallet": " 0xWaLLeT ",
+    "expected": ["swap:arbitrum:0xwallet", ""]
+  },
+  {
+    "name": "lp",
+    "primitive": "lp",
+    "intent_type": "LP_OPEN",
+    "intent": {"protocol": "UNISWAP_V3", "pool": " WETH/USDC/0xAbC "},
+    "chain": "Arbitrum",
+    "wallet": "0xWaLLeT",
+    "expected": ["lp:uniswap_v3:arbitrum:0xwallet:0xabc", "0xabc"]
+  },
+  {
+    "name": "lp_v4",
+    "primitive": "lp_v4",
+    "intent_type": "LP_CLOSE",
+    "intent": {"protocol": "UNISWAP_V4", "pool": "0xPoolId"},
+    "chain": "Base",
+    "wallet": "0xWaLLeT",
+    "expected": ["lp:uniswap_v4:base:0xwallet:0xpoolid", "0xpoolid"]
+  },
+  {
+    "name": "lending",
+    "primitive": "lending",
+    "intent_type": "SUPPLY",
+    "intent": {"protocol": "AAVE_V3", "token": "USDC", "market_id": null},
+    "chain": "Arbitrum",
+    "wallet": "0xWaLLeT",
+    "expected": ["lending:arbitrum:aave_v3:0xwallet:usdc", ""]
+  },
+  {
+    "name": "cdp_placeholder",
+    "primitive": "cdp",
+    "intent_type": "OPEN_CDP",
+    "intent": {"protocol": "maker", "token": "WETH"},
+    "chain": "Ethereum",
+    "wallet": "0xWaLLeT",
+    "expected": ["", ""]
+  },
+  {
+    "name": "liquidation_placeholder",
+    "primitive": "liquidation",
+    "intent_type": "LIQUIDATE",
+    "intent": {"protocol": "aave_v3", "token": "USDC"},
+    "chain": "Arbitrum",
+    "wallet": "0xWaLLeT",
+    "expected": ["", ""]
+  },
+  {
+    "name": "perp",
+    "primitive": "perp",
+    "intent_type": "PERP_OPEN",
+    "intent": {"protocol": "GMX_V2", "market": " ETH-USD "},
+    "chain": "Arbitrum",
+    "wallet": "0xWaLLeT",
+    "expected": ["perp:gmx_v2:arbitrum:0xwallet:eth/usd", "eth/usd"]
+  },
+  {
+    "name": "vault",
+    "primitive": "vault",
+    "intent_type": "VAULT_REDEEM",
+    "intent": {"protocol": "MORPHO_VAULT", "vault_address": "0xAbC"},
+    "chain": "Ethereum",
+    "wallet": "0xWaLLeT",
+    "expected": ["vault:morpho_vault:ethereum:0xwallet:0xabc", "0xabc"]
+  },
+  {
+    "name": "settlement",
+    "primitive": "settlement",
+    "intent_type": "SETTLE_REDEEM",
+    "intent": {"protocol": "LAGOON", "vault_address": "0xAbC"},
+    "chain": "Base",
+    "wallet": "0xWaLLeT",
+    "expected": ["settlement:lagoon:base:0xwallet:0xabc", "0xabc"]
+  },
+  {
+    "name": "staking_has_no_outbox_key",
+    "primitive": "staking",
+    "intent_type": "STAKE",
+    "intent": {"protocol": "lido", "token": "WETH"},
+    "chain": "Ethereum",
+    "wallet": "0xWaLLeT",
+    "expected": ["", ""]
+  },
+  {
+    "name": "bridge",
+    "primitive": "bridge",
+    "intent_type": "BRIDGE",
+    "intent": {"from_chain": "Base", "to_chain": "Arbitrum", "token": "usdc"},
+    "chain": "Optimism",
+    "wallet": "0xWaLLeT",
+    "expected": ["bridge:base:arbitrum:USDC:0xwallet", ""]
+  },
+  {
+    "name": "prediction",
+    "primitive": "prediction",
+    "intent_type": "PREDICTION_BUY",
+    "intent": {"protocol": "POLYMARKET", "market_id": "Market-1", "outcome": "YES"},
+    "chain": "Polygon",
+    "wallet": "0xWaLLeT",
+    "expected": ["prediction:polymarket:polygon:0xwallet:Market-1:YES", "Market-1"]
+  },
+  {
+    "name": "flash_loan_has_no_outbox_key",
+    "primitive": "flash_loan",
+    "intent_type": "FLASH_LOAN",
+    "intent": {"protocol": "balancer", "token": "USDC"},
+    "chain": "Ethereum",
+    "wallet": "0xWaLLeT",
+    "expected": ["", ""]
+  },
+  {
+    "name": "utility_has_no_outbox_key",
+    "primitive": "utility",
+    "intent_type": "HOLD",
+    "intent": {},
+    "chain": "Ethereum",
+    "wallet": "0xWaLLeT",
+    "expected": ["", ""]
+  },
+  {
+    "name": "connector_key_precedes_generic_lp",
+    "primitive": "lp",
+    "intent_type": "LP_OPEN",
+    "intent": {"protocol": "PENDLE_V2", "pool": "TOKEN/0XMarket"},
+    "chain": "Arbitrum",
+    "wallet": "0xWaLLeT",
+    "expected": ["pendle_lp:arbitrum:0xwallet:0xmarket", "0xmarket"]
+  },
+  {
+    "name": "connector_key_precedes_generic_swap",
+    "primitive": "swap",
+    "intent_type": "SWAP",
+    "intent": {"protocol": "pendle_v2", "from_token": "WSTETH", "to_token": " PT-WSTETH-2026 ", "pool": ""},
+    "chain": "Arbitrum",
+    "wallet": "0xWaLLeT",
+    "expected": ["pendle_pt:arbitrum:0xwallet:pt-wsteth-2026", ""]
+  },
+  {
+    "name": "connector_owned_optional_pt_identity",
+    "primitive": "swap",
+    "intent_type": "WITHDRAW",
+    "intent": {"protocol": "pendle_v2", "token": "WSTETH", "market_id": "YT-Market"},
+    "chain": "Arbitrum",
+    "wallet": "0xWaLLeT",
+    "expected": ["", "yt-market"]
+  },
+  {
+    "name": "unclaimed_connector_event_uses_generic_lp",
+    "primitive": "lp",
+    "intent_type": "LP_COLLECT_FEES",
+    "intent": {"protocol": "pendle_v2", "pool": "0xMarket"},
+    "chain": "Arbitrum",
+    "wallet": "0xWaLLeT",
+    "expected": ["lp:pendle_v2:arbitrum:0xwallet:0xmarket", "0xmarket"]
+  },
+  {
+    "name": "lending_asset_and_market_precedence",
+    "primitive": "lending",
+    "intent_type": "BORROW",
+    "intent": {"protocol": " Custom-Lender ", "borrow_token": " WETH ", "token": "USDC", "market_id": " Market "},
+    "chain": " ArBiTrUm ",
+    "wallet": " 0xWaLLeT ",
+    "expected": ["lending: arbitrum :custom_lender: 0xwallet : market : weth ", " Market "]
+  },
+  {
+    "name": "lending_missing_asset_uses_legacy_unknown",
+    "primitive": "lending",
+    "intent_type": "REPAY",
+    "intent": {"protocol": null, "market_id": null},
+    "chain": "",
+    "wallet": "",
+    "expected": ["lending::::unknown", ""]
+  },
+  {
+    "name": "swap_requires_chain",
+    "primitive": "swap",
+    "intent_type": "SWAP",
+    "intent": {"protocol": "uniswap_v3"},
+    "chain": "",
+    "wallet": "0xWaLLeT",
+    "expected": ["", ""]
+  },
+  {
+    "name": "resolved_pool_precedes_raw_pool",
+    "primitive": "lp",
+    "intent_type": "LP_CLOSE",
+    "intent": {"protocol": " Curve ", "pool": "USDT/USDC/DAI"},
+    "chain": " ArBiTrUm ",
+    "wallet": " 0xWaLLeT ",
+    "resolved_pool": " 3Pool ",
+    "expected": ["lp: curve : arbitrum : 0xwallet :3pool", "3pool"]
+  },
+  {
+    "name": "blank_resolved_pool_falls_back_to_symbolic_pool",
+    "primitive": "lp",
+    "intent_type": "LP_OPEN",
+    "intent": {"protocol": "aerodrome", "pool": " USDC/DAI/STABLE "},
+    "chain": "Base",
+    "wallet": "0xWaLLeT",
+    "resolved_pool": "   ",
+    "expected": ["lp:aerodrome:base:0xwallet:usdc/dai/stable", "usdc/dai/stable"]
+  },
+  {
+    "name": "generic_lp_missing_pool",
+    "primitive": "lp",
+    "intent_type": "LP_OPEN",
+    "intent": {"protocol": "uniswap_v3"},
+    "chain": "Arbitrum",
+    "wallet": "0xWaLLeT",
+    "expected": ["", ""]
+  },
+  {
+    "name": "perp_preserves_legacy_component_whitespace",
+    "primitive": "perp",
+    "intent_type": "PERP_DECREASE",
+    "intent": {"protocol": " GMX_V2 ", "market": " ETH_USD "},
+    "chain": " ArBiTrUm ",
+    "wallet": " 0xWaLLeT ",
+    "expected": ["perp: gmx_v2 : arbitrum : 0xwallet :eth/usd", "eth/usd"]
+  },
+  {
+    "name": "perp_address_is_legacy_lowercased",
+    "primitive": "perp",
+    "intent_type": "PERP_LIQUIDATE",
+    "intent": {"protocol": "gmx_v2", "market": "0xAbC"},
+    "chain": "Arbitrum",
+    "wallet": "0xWaLLeT",
+    "expected": ["perp:gmx_v2:arbitrum:0xwallet:0xabc", "0xabc"]
+  },
+  {
+    "name": "perp_missing_market",
+    "primitive": "perp",
+    "intent_type": "PERP_CLOSE",
+    "intent": {"protocol": "gmx_v2", "market": null},
+    "chain": "Arbitrum",
+    "wallet": "0xWaLLeT",
+    "expected": ["", ""]
+  },
+  {
+    "name": "vault_whitespace_address_is_legacy_identity",
+    "primitive": "vault",
+    "intent_type": "VAULT_HARVEST",
+    "intent": {"protocol": " Vault ", "vault_address": " 0xAbC "},
+    "chain": " ArBiTrUm ",
+    "wallet": " 0xWaLLeT ",
+    "expected": ["vault: vault : arbitrum : 0xwallet : 0xabc ", " 0xabc "]
+  },
+  {
+    "name": "settlement_missing_vault",
+    "primitive": "settlement",
+    "intent_type": "SETTLE_DEPOSIT",
+    "intent": {"protocol": "lagoon"},
+    "chain": "Base",
+    "wallet": "0xWaLLeT",
+    "expected": ["", ""]
+  },
+  {
+    "name": "prediction_defaults_protocol_and_preserves_optional_market",
+    "primitive": "prediction",
+    "intent_type": "PREDICTION_REDEEM",
+    "intent": {"protocol": null, "market_id": " Market ", "outcome": null},
+    "chain": " ArBiTrUm ",
+    "wallet": " 0xWaLLeT ",
+    "expected": ["", " Market "]
+  },
+  {
+    "name": "prediction_numeric_zero_outcome_is_identity",
+    "primitive": "prediction",
+    "intent_type": "PREDICTION_SELL",
+    "intent": {"protocol": null, "market_id": "market", "outcome": 0},
+    "chain": "Polygon",
+    "wallet": "0xWaLLeT",
+    "expected": ["prediction:polymarket:polygon:0xwallet:market:0", "market"]
+  },
+  {
+    "name": "bridge_falls_back_to_chain_and_preserves_wallet_whitespace",
+    "primitive": "bridge",
+    "intent_type": "BRIDGE",
+    "intent": {"from_chain": null, "to_chain": " ARBITRUM ", "token": " usdc "},
+    "chain": " BASE ",
+    "wallet": " 0xWaLLeT ",
+    "expected": ["bridge:base:arbitrum:USDC: 0xwallet ", ""]
+  },
+  {
+    "name": "malformed_protocol_uses_error_fallback",
+    "primitive": "utility",
+    "intent_type": "SWAP",
+    "intent": {"protocol": ["invalid"]},
+    "chain": "Arbitrum",
+    "wallet": "0xWaLLeT",
+    "expected": ["", ""]
+  },
+  {
+    "name": "malformed_intent_type_uses_error_fallback",
+    "primitive": "utility",
+    "intent_type": 7,
+    "intent": {},
+    "chain": "Arbitrum",
+    "wallet": "0xWaLLeT",
+    "expected": ["", ""]
+  },
+  {
+    "name": "malformed_chain_uses_error_fallback",
+    "primitive": "vault",
+    "intent_type": "VAULT_DEPOSIT",
+    "intent": {"protocol": "morpho_vault", "vault_address": "0xAbC"},
+    "chain": null,
+    "wallet": "0xWaLLeT",
+    "expected": ["", ""]
+  },
+  {
+    "name": "unknown_intent_type",
+    "primitive": "utility",
+    "intent_type": "NOT_REAL",
+    "intent": {"protocol": "unknown"},
+    "chain": "Arbitrum",
+    "wallet": "0xWaLLeT",
+    "expected": ["", ""]
+  }
+]

@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
+from copy import deepcopy
 from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
@@ -38,21 +40,21 @@ from almanak.framework.models.stuck_reason import StuckReason
 T0 = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
 
 
-def _make_card(deployment_id: str = "strat-1") -> OperatorCard:
+def _make_card(**overrides: object) -> OperatorCard:
     """Build a minimal OperatorCard for webhook tests."""
-    return OperatorCard(
-        deployment_id=deployment_id,
-        timestamp=T0,
-        event_type=EventType.ALERT,
-        reason=StuckReason.RPC_FAILURE,
-        context={"err": "boom"},
-        severity=Severity.HIGH,
-        position_summary=PositionSummary(
+    values = {
+        "deployment_id": "strat-1",
+        "timestamp": T0,
+        "event_type": EventType.ALERT,
+        "reason": StuckReason.RPC_FAILURE,
+        "context": {"err": "boom"},
+        "severity": Severity.HIGH,
+        "position_summary": PositionSummary(
             total_value_usd=Decimal("1000"),
             available_balance_usd=Decimal("100"),
         ),
-        risk_description="Strategy cannot reach RPC",
-        suggested_actions=[
+        "risk_description": "Strategy cannot reach RPC",
+        "suggested_actions": [
             SuggestedAction(
                 action=AvailableAction.PAUSE,
                 description="Pause until RPC restored",
@@ -60,18 +62,22 @@ def _make_card(deployment_id: str = "strat-1") -> OperatorCard:
                 is_recommended=True,
             )
         ],
-        available_actions=[AvailableAction.PAUSE, AvailableAction.RESUME],
-    )
+        "available_actions": [AvailableAction.PAUSE, AvailableAction.RESUME],
+    }
+    values.update(overrides)
+    return OperatorCard(**values)  # type: ignore[arg-type]
 
 
 class _FakeResponse:
     """Async-context-manager response with scripted status/body."""
 
-    def __init__(self, status: int = 200, body: str = "ok") -> None:
+    def __init__(self, status: int = 200, body: str | Exception = "ok") -> None:
         self.status = status
         self._body = body
 
     async def text(self) -> str:
+        if isinstance(self._body, Exception):
+            raise self._body
         return self._body
 
     async def __aenter__(self) -> _FakeResponse:
@@ -133,6 +139,73 @@ class TestInit:
             WebhookChannel("")
 
 
+class TestFormatPayload:
+    def test_exact_payload_and_no_input_mutation(self) -> None:
+        channel = WebhookChannel("https://hooks.example/x")
+        card = _make_card()
+        original = deepcopy(card)
+
+        payload = channel._format_payload(card)
+
+        assert payload == {
+            "deployment_id": "strat-1",
+            "event_type": "ALERT",
+            "severity": "HIGH",
+            "reason": "RPC_FAILURE",
+            "risk_description": "Strategy cannot reach RPC",
+            "suggested_actions": [
+                {
+                    "action": "PAUSE",
+                    "description": "Pause until RPC restored",
+                }
+            ],
+            "timestamp": "2026-01-01T12:00:00+00:00",
+        }
+        assert card == original
+
+    def test_optional_and_non_enum_fields_use_documented_fallbacks(self) -> None:
+        card = _make_card(risk_description="")
+        card.event_type = "CUSTOM_EVENT"  # type: ignore[assignment]
+        card.severity = "CUSTOM_SEVERITY"  # type: ignore[assignment]
+        card.reason = "CUSTOM_REASON"  # type: ignore[assignment]
+        card.suggested_actions = []
+        card.timestamp = None  # type: ignore[assignment]
+
+        assert WebhookChannel("https://hooks.example/x")._format_payload(card) == {
+            "deployment_id": "strat-1",
+            "event_type": "CUSTOM_EVENT",
+            "severity": "CUSTOM_SEVERITY",
+            "reason": "CUSTOM_REASON",
+            "risk_description": "",
+            "suggested_actions": [],
+            "timestamp": "",
+        }
+
+    def test_payload_redacts_dynamic_text_without_mutating_card(self, monkeypatch) -> None:
+        card = _make_card(
+            deployment_id="deployment-registered-secret",
+            risk_description="failed with registered-secret",
+        )
+        card.suggested_actions[0].description = "remove registered-secret"
+        original = deepcopy(card)
+        monkeypatch.setattr(webhook_module, "redact", lambda value: value.replace("registered-secret", "***"))
+
+        payload = WebhookChannel("https://hooks.example/x")._format_payload(card)
+
+        assert payload["deployment_id"] == "deployment-***"
+        assert payload["risk_description"] == "failed with ***"
+        assert payload["suggested_actions"] == [{"action": "PAUSE", "description": "remove ***"}]
+        assert card == original
+
+    @pytest.mark.parametrize("severity", list(Severity))
+    def test_each_severity_is_serialized_exactly(self, severity: Severity) -> None:
+        card = _make_card(severity=severity)
+
+        payload = WebhookChannel("https://hooks.example/x")._format_payload(card)
+
+        assert payload["severity"] == severity.value
+
+
 class TestSendAlertAsync:
     def test_success_posts_formatted_payload(self, monkeypatch):
         result, fake, channel = _run_send(
@@ -162,6 +235,51 @@ class TestSendAlertAsync:
         assert len(result.error) <= len("HTTP 500: ") + 200
         assert len(fake.posts) == 1
 
+    def test_non_2xx_redacts_endpoint_headers_and_registered_secrets_before_truncating(self, monkeypatch) -> None:
+        url = "https://hooks.example/hook-secret"
+        headers = {"Authorization": "Bearer auth-secret"}
+        body = f"failed for {url}; Bearer auth-secret; registered-secret; " + "x" * 250
+        fake = _FakeAiohttp([_FakeResponse(500, body)])
+        monkeypatch.setattr(webhook_module, "aiohttp", fake)
+        monkeypatch.setattr(webhook_module, "redact", lambda value: value.replace("registered-secret", "***"))
+        channel = WebhookChannel(url, headers=headers, max_retries=0)
+
+        result = asyncio.run(channel.send_alert(_make_card()))
+
+        assert result.error.startswith("HTTP 500: failed for <redacted webhook URL>; ***; ***; ")
+        assert len(result.error.removeprefix("HTTP 500: ")) == 200
+        assert url not in result.error
+        assert "hook-secret" not in result.error
+        assert "auth-secret" not in result.error
+        assert "registered-secret" not in result.error
+
+    def test_success_does_not_mutate_card_or_caller_headers(self, monkeypatch) -> None:
+        headers = {"X-Auth": "auth-token"}
+        card = _make_card()
+        original_card = deepcopy(card)
+        original_headers = dict(headers)
+        fake = _FakeAiohttp([_FakeResponse(200, "ok")])
+        monkeypatch.setattr(webhook_module, "aiohttp", fake)
+        channel = WebhookChannel("https://hooks.example/x", headers=headers)
+
+        result = asyncio.run(channel.send_alert(card))
+
+        assert result.success
+        assert card == original_card
+        assert headers == original_headers
+
+    def test_success_response_body_is_redacted(self, monkeypatch) -> None:
+        url = "https://hooks.example/hook-secret"
+        body = f"accepted by {url} using auth-secret and registered-secret"
+        fake = _FakeAiohttp([_FakeResponse(200, body)])
+        monkeypatch.setattr(webhook_module, "aiohttp", fake)
+        monkeypatch.setattr(webhook_module, "redact", lambda value: value.replace("registered-secret", "***"))
+        channel = WebhookChannel(url, headers={"X-Auth": "auth-secret"})
+
+        result = asyncio.run(channel.send_alert(_make_card()))
+
+        assert result.response_body == "accepted by <redacted webhook URL> using *** and ***"
+
     def test_429_retries_then_succeeds(self, monkeypatch):
         result, fake, _ = _run_send(
             monkeypatch,
@@ -186,11 +304,39 @@ class TestSendAlertAsync:
         assert result.success
         assert len(fake.posts) == 2
 
+    def test_exception_retry_log_redacts_transport_credentials(self, monkeypatch, caplog) -> None:
+        url = "https://hooks.example/hook-secret"
+        raw_error = f"failure from {url} using auth-secret and registered-secret"
+        fake = _FakeAiohttp([RuntimeError(raw_error), _FakeResponse(200, "ok")])
+        monkeypatch.setattr(webhook_module, "aiohttp", fake)
+        monkeypatch.setattr(webhook_module, "redact", lambda value: value.replace("registered-secret", "***"))
+        channel = WebhookChannel(url, headers={"X-Auth": "auth-secret"}, max_retries=1, base_delay=0.0)
+
+        with caplog.at_level(logging.WARNING):
+            result = asyncio.run(channel.send_alert(_make_card()))
+
+        assert result.success
+        assert "failure from <redacted webhook URL> using *** and ***" in caplog.text
+        assert url not in caplog.text
+        assert "hook-secret" not in caplog.text
+        assert "auth-secret" not in caplog.text
+        assert "registered-secret" not in caplog.text
+
     def test_exception_on_final_attempt_is_failure(self, monkeypatch):
         result, fake, _ = _run_send(monkeypatch, [RuntimeError("conn reset")], max_retries=0)
         assert not result.success
         assert result.status_code == 0
         assert result.error == "conn reset"
+        assert len(fake.posts) == 1
+
+    def test_malformed_response_body_error_is_returned_without_escaping(self, monkeypatch) -> None:
+        result, fake, _ = _run_send(
+            monkeypatch,
+            [_FakeResponse(502, UnicodeError("response decode failed"))],
+            max_retries=0,
+        )
+
+        assert result.error == "response decode failed"
         assert len(fake.posts) == 1
 
     def test_negative_max_retries_reports_max_retries_exceeded(self, monkeypatch):
@@ -276,6 +422,40 @@ class TestSendAlertSync:
         assert result.error == "HTTP 500: boom"
         assert len(calls) == 1
 
+    def test_non_2xx_redacts_endpoint_headers_and_registered_secrets(self, monkeypatch) -> None:
+        url = "https://hooks.example/hook-secret"
+        body = f"failed for {url} using auth-secret and registered-secret"
+        monkeypatch.setattr(webhook_module, "redact", lambda value: value.replace("registered-secret", "***"))
+        monkeypatch.setattr("requests.post", lambda *args, **kwargs: _sync_response(500, body))
+        channel = WebhookChannel(url, headers={"X-Auth": "auth-secret"}, max_retries=0)
+
+        result = channel.send_alert_sync(_make_card())
+
+        assert result.error == "HTTP 500: failed for <redacted webhook URL> using *** and ***"
+        assert url not in result.error
+        assert "hook-secret" not in result.error
+        assert "auth-secret" not in result.error
+        assert "registered-secret" not in result.error
+
+    def test_non_string_response_body_has_stable_error(self, monkeypatch) -> None:
+        monkeypatch.setattr("requests.post", lambda *args, **kwargs: _sync_response(500, None))
+        channel = WebhookChannel("https://hooks.example/x", max_retries=0)
+
+        result = channel.send_alert_sync(_make_card())
+
+        assert result.error == "HTTP 500: None"
+
+    def test_success_response_body_is_redacted(self, monkeypatch) -> None:
+        url = "https://hooks.example/hook-secret"
+        body = f"accepted by {url} using auth-secret and registered-secret"
+        monkeypatch.setattr("requests.post", lambda *args, **kwargs: _sync_response(200, body))
+        monkeypatch.setattr(webhook_module, "redact", lambda value: value.replace("registered-secret", "***"))
+        channel = WebhookChannel(url, headers={"X-Auth": "auth-secret"})
+
+        result = channel.send_alert_sync(_make_card())
+
+        assert result.response_body == "accepted by <redacted webhook URL> using *** and ***"
+
     def test_429_retries_then_succeeds(self, monkeypatch):
         result, calls, _ = _run_sync(
             monkeypatch,
@@ -305,6 +485,25 @@ class TestSendAlertSync:
         assert not result.success
         assert result.error == "conn reset"
         assert len(calls) == 1
+
+    def test_exception_error_redacts_transport_credentials(self, monkeypatch) -> None:
+        url = "https://hooks.example/hook-secret"
+        raw_error = f"failure from {url} using auth-secret and registered-secret"
+
+        def _raise(*args, **kwargs):
+            raise RuntimeError(raw_error)
+
+        monkeypatch.setattr("requests.post", _raise)
+        monkeypatch.setattr(webhook_module, "redact", lambda value: value.replace("registered-secret", "***"))
+        channel = WebhookChannel(url, headers={"X-Auth": "auth-secret"}, max_retries=0)
+
+        result = channel.send_alert_sync(_make_card())
+
+        assert result.error == "failure from <redacted webhook URL> using *** and ***"
+        assert url not in result.error
+        assert "hook-secret" not in result.error
+        assert "auth-secret" not in result.error
+        assert "registered-secret" not in result.error
 
     def test_negative_max_retries_reports_max_retries_exceeded(self, monkeypatch):
         result, calls, _ = _run_sync(monkeypatch, [], max_retries=-1)

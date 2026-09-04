@@ -218,6 +218,12 @@ def _bridge_registry_protocol(intent: "BridgeIntent") -> str:
     return default
 
 
+@dataclass(frozen=True)
+class _PrimitiveCompilerRoute:
+    method_name: str
+    fixed_args: tuple[str, ...] = ()
+
+
 # =============================================================================
 # Extracted modules — re-exported for backward compatibility
 # (all symbols that were importable from this module remain importable)
@@ -432,6 +438,43 @@ class IntentCompiler:
             # Execute result.action_bundle
             pass
     """
+
+    _PRIMITIVE_COMPILER_ROUTES: ClassVar[Mapping[IntentType, _PrimitiveCompilerRoute]] = {
+        IntentType.SWAP: _PrimitiveCompilerRoute("_compile_swap"),
+        IntentType.LP_OPEN: _PrimitiveCompilerRoute("_compile_lp_open"),
+        IntentType.LP_CLOSE: _PrimitiveCompilerRoute("_compile_lp_close"),
+        IntentType.LP_COLLECT_FEES: _PrimitiveCompilerRoute("_compile_collect_fees"),
+        IntentType.BORROW: _PrimitiveCompilerRoute("_compile_borrow"),
+        IntentType.REPAY: _PrimitiveCompilerRoute("_compile_repay"),
+        IntentType.DELEVERAGE: _PrimitiveCompilerRoute("_compile_repay"),
+        IntentType.SUPPLY: _PrimitiveCompilerRoute("_compile_supply"),
+        IntentType.WITHDRAW: _PrimitiveCompilerRoute("_compile_withdraw"),
+        IntentType.PERP_OPEN: _PrimitiveCompilerRoute("_compile_perp_via_registry"),
+        IntentType.PERP_CLOSE: _PrimitiveCompilerRoute("_compile_perp_via_registry"),
+        IntentType.PERP_CANCEL_ORDER: _PrimitiveCompilerRoute("_compile_perp_via_registry"),
+        IntentType.PERP_WITHDRAW: _PrimitiveCompilerRoute("_compile_perp_via_registry"),
+        IntentType.HOLD: _PrimitiveCompilerRoute("_compile_hold"),
+        IntentType.FLASH_LOAN: _PrimitiveCompilerRoute("_compile_flash_loan"),
+        IntentType.STAKE: _PrimitiveCompilerRoute("_compile_staking_via_registry", ("STAKE",)),
+        IntentType.UNSTAKE: _PrimitiveCompilerRoute("_compile_staking_via_registry", ("UNSTAKE",)),
+        IntentType.PREDICTION_BUY: _PrimitiveCompilerRoute("_compile_prediction_via_registry"),
+        IntentType.PREDICTION_SELL: _PrimitiveCompilerRoute("_compile_prediction_via_registry"),
+        IntentType.PREDICTION_REDEEM: _PrimitiveCompilerRoute("_compile_prediction_via_registry"),
+        IntentType.BRIDGE: _PrimitiveCompilerRoute("_compile_bridge_via_registry"),
+        IntentType.VAULT_DEPOSIT: _PrimitiveCompilerRoute("_compile_vault_via_registry"),
+        IntentType.VAULT_REDEEM: _PrimitiveCompilerRoute("_compile_vault_via_registry"),
+        IntentType.ENSURE_BALANCE: _PrimitiveCompilerRoute("_compile_ensure_balance"),
+        IntentType.WRAP_NATIVE: _PrimitiveCompilerRoute("_compile_wrap_native"),
+        IntentType.UNWRAP_NATIVE: _PrimitiveCompilerRoute("_compile_unwrap_native"),
+    }
+    _PRICE_IRRELEVANT_INTENT_TYPES: ClassVar[tuple[IntentType, ...]] = (
+        IntentType.STAKE,
+        IntentType.UNSTAKE,
+        IntentType.HOLD,
+        IntentType.UNWRAP_NATIVE,
+        IntentType.VAULT_DEPOSIT,
+        IntentType.VAULT_REDEEM,
+    )
 
     @property
     def _queries(self) -> CompilerQueries:
@@ -1097,12 +1140,7 @@ class IntentCompiler:
             }
         return result
 
-    # crap-allowlist: VIB-4222 — pre-existing primitive-dispatch ladder
-    # (SWAP/LP_OPEN/LP_CLOSE/.../UNWRAP_NATIVE). ALM-3190 extracted the
-    # unchanged ladder from ``compile`` so the public boundary can stamp peg
-    # provenance; decomposing the dispatcher itself remains tracked by
-    # VIB-4222.
-    def _compile_intent(self, intent: AnyIntent) -> CompilationResult:  # noqa: C901
+    def _compile_intent(self, intent: AnyIntent) -> CompilationResult:
         """Compile an intent into an ActionBundle.
 
         This is the main entry point for compiling intents. It dispatches
@@ -1129,106 +1167,8 @@ class IntentCompiler:
             )
 
             intent_type = intent.intent_type
-
-            # Suppress placeholder price warning for intent types that don't use prices.
-            # STAKE/UNSTAKE amounts are in native units, not USD, so no price conversion needed.
-            # HOLD is a no-op with no transactions.
-            # VAULT_DEPOSIT/VAULT_REDEEM use ERC-4626 on-chain reads, no price oracle needed.
-            _price_irrelevant = intent_type in (
-                IntentType.STAKE,
-                IntentType.UNSTAKE,
-                IntentType.HOLD,
-                IntentType.UNWRAP_NATIVE,
-                IntentType.VAULT_DEPOSIT,
-                IntentType.VAULT_REDEEM,
-            )
-            if self._using_placeholders and not self._placeholder_warning_logged and not _price_irrelevant:
-                logger.warning(
-                    "IntentCompiler using PLACEHOLDER PRICES. Slippage calculations will be INCORRECT. "
-                    "This is only acceptable for unit tests."
-                )
-                self._placeholder_warning_logged = True
-
-            if intent_type == IntentType.SWAP:
-                return self._compile_swap(intent)  # type: ignore[arg-type]
-            elif intent_type == IntentType.LP_OPEN:
-                return self._compile_lp_open(intent)  # type: ignore[arg-type]
-            elif intent_type == IntentType.LP_CLOSE:
-                return self._compile_lp_close(intent)  # type: ignore[arg-type]
-            elif intent_type == IntentType.LP_COLLECT_FEES:
-                return self._compile_collect_fees(intent)  # type: ignore[arg-type]
-            elif intent_type == IntentType.BORROW:
-                return self._compile_borrow(intent)  # type: ignore[arg-type]
-            elif intent_type == IntentType.REPAY:
-                return self._compile_repay(intent)  # type: ignore[arg-type]
-            elif intent_type == IntentType.DELEVERAGE:
-                # DELEVERAGE is structurally identical to REPAY at the protocol level.
-                # The intent carries extra risk-event context (trigger_reason, observed_hf,
-                # target_hf) but the on-chain transaction is the same repay call.
-                return self._compile_repay(intent)  # type: ignore[arg-type]
-            elif intent_type == IntentType.SUPPLY:
-                return self._compile_supply(intent)  # type: ignore[arg-type]
-            elif intent_type == IntentType.WITHDRAW:
-                return self._compile_withdraw(intent)  # type: ignore[arg-type]
-            elif intent_type == IntentType.PERP_OPEN:
-                return self._compile_perp_via_registry(intent)  # type: ignore[arg-type]
-            elif intent_type == IntentType.PERP_CLOSE:
-                return self._compile_perp_via_registry(intent)  # type: ignore[arg-type]
-            elif intent_type == IntentType.PERP_CANCEL_ORDER:
-                # VIB-5568: cancel a pending order (recover collateral). Routes through
-                # the SAME connector-owned perp compiler as open/close. Both a strategy
-                # callback (ALM-3101) and teardown recovery reach compile_perp_cancel
-                # through this top-level dispatch.
-                return self._compile_perp_via_registry(intent)  # type: ignore[arg-type]
-            elif intent_type == IntentType.PERP_WITHDRAW:
-                # VIB-5617: withdraw free margin off the venue's off-chain account
-                # back to L1 (a cash movement, not a trade). Routes through the SAME
-                # connector-owned perp compiler as open/close/cancel — teardown reaches
-                # the connector's compile_perp_withdraw only via this top-level dispatch.
-                return self._compile_perp_via_registry(intent)  # type: ignore[arg-type]
-            elif intent_type == IntentType.HOLD:
-                return self._compile_hold(intent)  # type: ignore[arg-type]
-            elif intent_type == IntentType.FLASH_LOAN:
-                return self._compile_flash_loan(intent)  # type: ignore[arg-type]
-            elif intent_type == IntentType.STAKE:
-                return self._compile_staking_via_registry(intent, "STAKE")
-            elif intent_type == IntentType.UNSTAKE:
-                return self._compile_staking_via_registry(intent, "UNSTAKE")
-            elif intent_type == IntentType.PREDICTION_BUY:
-                return self._compile_prediction_via_registry(intent)
-            elif intent_type == IntentType.PREDICTION_SELL:
-                return self._compile_prediction_via_registry(intent)
-            elif intent_type == IntentType.PREDICTION_REDEEM:
-                return self._compile_prediction_via_registry(intent)
-            elif intent_type == IntentType.BRIDGE:
-                bridge_protocol = _bridge_registry_protocol(intent)  # type: ignore[arg-type]
-                connector_compiler = get_connector_compiler(bridge_protocol)
-                if connector_compiler is None:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"No connector compiler registered for bridge protocol {bridge_protocol}",
-                        intent_id=intent.intent_id,
-                    )
-                return connector_compiler.compile(
-                    self._build_compiler_context(bridge_protocol, connector_compiler),
-                    intent,
-                )
-            elif intent_type == IntentType.VAULT_DEPOSIT:
-                return self._compile_vault_via_registry(intent)
-            elif intent_type == IntentType.VAULT_REDEEM:
-                return self._compile_vault_via_registry(intent)
-            elif intent_type == IntentType.ENSURE_BALANCE:
-                return self._compile_ensure_balance(intent)
-            elif intent_type == IntentType.WRAP_NATIVE:
-                return self._compile_wrap_native(intent)  # type: ignore[arg-type]
-            elif intent_type == IntentType.UNWRAP_NATIVE:
-                return self._compile_unwrap_native(intent)  # type: ignore[arg-type]
-            else:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Intent type {intent_type.value} is not supported by the compiler",
-                    intent_id=intent.intent_id,
-                )
+            self._warn_if_placeholder_prices(intent_type)
+            return self._dispatch_primitive(intent)
 
         except grpc.RpcError as e:
             status_code = get_grpc_status_code(e)
@@ -1256,6 +1196,46 @@ class IntentCompiler:
                 error=str(e),
                 intent_id=intent.intent_id,
             )
+
+    def _warn_if_placeholder_prices(self, intent_type: IntentType) -> None:
+        if (
+            self._using_placeholders
+            and not self._placeholder_warning_logged
+            and intent_type not in self._PRICE_IRRELEVANT_INTENT_TYPES
+        ):
+            logger.warning(
+                "IntentCompiler using PLACEHOLDER PRICES. Slippage calculations will be INCORRECT. "
+                "This is only acceptable for unit tests."
+            )
+            self._placeholder_warning_logged = True
+
+    def _dispatch_primitive(self, intent: AnyIntent) -> CompilationResult:
+        try:
+            route = self._PRIMITIVE_COMPILER_ROUTES.get(intent.intent_type)
+        except TypeError:
+            route = None
+        if route is None:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"Intent type {intent.intent_type.value} is not supported by the compiler",
+                intent_id=intent.intent_id,
+            )
+        compiler = getattr(self, route.method_name)
+        return compiler(intent, *route.fixed_args)
+
+    def _compile_bridge_via_registry(self, intent: "BridgeIntent") -> CompilationResult:
+        bridge_protocol = _bridge_registry_protocol(intent)
+        connector_compiler = get_connector_compiler(bridge_protocol)
+        if connector_compiler is None:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"No connector compiler registered for bridge protocol {bridge_protocol}",
+                intent_id=intent.intent_id,
+            )
+        return connector_compiler.compile(
+            self._build_compiler_context(bridge_protocol, connector_compiler),
+            intent,
+        )
 
     # =========================================================================
     # ChainFamily dispatch (VIB-4803)
@@ -2153,7 +2133,6 @@ class IntentCompiler:
         """
         return self._family_compile_intent(intent)
 
-    # crap-allowlist: VIB-4688 — pre-existing method (cc=10, under threshold); coverage-driven score from docstring touch during phase-2 fold. Unit-coverage backfill tracked in VIB-4688.
     def _fetch_lp_pool_slot0(
         self,
         pool_check: "PoolValidationResult",
@@ -2183,6 +2162,11 @@ class IntentCompiler:
                 rpc_url,
                 gateway_client=self._gateway_client,
             )
+            if slot0_result is None:
+                return None
+            sqrt_price_x96, current_tick = slot0_result
+            if sqrt_price_x96 is None or sqrt_price_x96 <= 0 or current_tick is None:
+                return None
         except Exception as exc:
             logger.warning(
                 "LP slot0 lookup failed for pool %s; proceeding with oracle-derived amounts "
@@ -2192,16 +2176,6 @@ class IntentCompiler:
             )
             return None
 
-        if slot0_result is None:
-            return None
-        sqrt_price_x96, current_tick = slot0_result
-        # Guard against partial returns: downstream math (recompute, preflight)
-        # consumes both fields and would type-error on a None tick. The
-        # gateway/Web3 plumbing should always return both, but a defensive
-        # None-check keeps the return shape strictly matching the type hint
-        # (gemini-code-assist).
-        if sqrt_price_x96 is None or sqrt_price_x96 <= 0 or current_tick is None:
-            return None
         return sqrt_price_x96, current_tick
 
     def _compile_lp_close(self, intent: LPCloseIntent) -> CompilationResult:
@@ -2242,7 +2216,6 @@ class IntentCompiler:
         """
         return self._family_compile_intent(intent)
 
-    # crap-allowlist: PR is pure string-content cleanup (chore: VIB removal); zero branches added, function was already over threshold on main. Refactor tracked in VIB-4139.
     def _compile_collect_fees(self, intent: "CollectFeesIntent") -> CompilationResult:
         """Compile an LP_COLLECT_FEES intent into an ActionBundle.
 

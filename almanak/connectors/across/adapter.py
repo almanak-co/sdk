@@ -395,12 +395,6 @@ class AcrossBridgeAdapter(BridgeAdapter):
         except (KeyError, ValueError) as e:
             raise AcrossQuoteError(f"Failed to parse quote response: {e}") from e
 
-    # crap-allowlist: VIB-5939 — pre-existing cc=19 / 2%-cov function; VIB-5921's
-    # diff here is a single mechanical line (inline selector literal -> the
-    # DEPOSIT_V3_SELECTOR constant the Safe manifest single-sources). Decomposing
-    # a money-path bridge encoder with near-zero coverage inside a permissions PR
-    # is the regression risk the CRAP protocol warns about; the refactor + tests
-    # are tracked in VIB-5939 (dated 2026-07-20).
     def build_deposit_tx(
         self,
         quote: BridgeQuote,
@@ -426,109 +420,18 @@ class AcrossBridgeAdapter(BridgeAdapter):
         if not quote.route_data:
             raise AcrossTransactionError("Quote missing route data")
 
+        route_data = quote.route_data
         try:
-            # Extract route data
-            spoke_pool = quote.route_data.get("spoke_pool_address")
+            spoke_pool = route_data.get("spoke_pool_address")
             if not spoke_pool:
                 raise AcrossTransactionError("Missing spoke pool address in quote")
 
-            token_address: str = quote.route_data.get("token_address", "")
-            quote.route_data.get("from_chain_id", 0)
-            to_chain_id: int = quote.route_data.get("to_chain_id", 0)
-            amount_wei = int(quote.route_data.get("amount_wei", "0"))
-            output_amount_wei = int(quote.route_data.get("output_amount_wei", "0"))
-
-            if not token_address:
-                raise AcrossTransactionError("Missing token address in quote")
-
-            # Calculate fill deadline (quote expiry + buffer)
-            fill_deadline = quote.route_data.get("fill_deadline")
-            if fill_deadline is not None:
-                fill_deadline = int(fill_deadline)
-            if not fill_deadline:
-                # Default: 4 hours from now
-                fill_deadline = int(time.time()) + (4 * 60 * 60)
-
-            # Exclusivity settings
-            exclusivity_deadline = int(quote.route_data.get("exclusivity_deadline", 0))
-            exclusive_relayer = quote.route_data.get("exclusive_relayer")
-            if not exclusive_relayer or exclusive_relayer == "0x":
-                exclusive_relayer = "0x0000000000000000000000000000000000000000"
-
-            # Get output token address (same token on destination)
-            output_token: str = self._get_token_address(quote.token, to_chain_id) or token_address
-
-            # Build depositV3 calldata
-            # Function signature: depositV3(
-            #   address depositor,
-            #   address recipient,
-            #   address inputToken,
-            #   address outputToken,
-            #   uint256 inputAmount,
-            #   uint256 outputAmount,
-            #   uint256 destinationChainId,
-            #   address exclusiveRelayer,
-            #   uint32 quoteTimestamp,
-            #   uint32 fillDeadline,
-            #   uint32 exclusivityDeadline,
-            #   bytes message
-            # )
-            function_selector = DEPOSIT_V3_SELECTOR
-
-            # For quoteTimestamp, use current timestamp if not in route_data
-            quote_timestamp = quote.route_data.get("timestamp")
-            if quote_timestamp is not None:
-                quote_timestamp = int(quote_timestamp)
-            if not quote_timestamp:
-                quote_timestamp = int(time.time())
-
-            # Encode parameters
-            encoded_params = encode(
-                [
-                    "address",  # depositor (will be msg.sender)
-                    "address",  # recipient
-                    "address",  # inputToken
-                    "address",  # outputToken
-                    "uint256",  # inputAmount
-                    "uint256",  # outputAmount
-                    "uint256",  # destinationChainId
-                    "address",  # exclusiveRelayer
-                    "uint32",  # quoteTimestamp
-                    "uint32",  # fillDeadline
-                    "uint32",  # exclusivityDeadline
-                    "bytes",  # message (empty for simple transfers)
-                ],
-                [
-                    bytes.fromhex(recipient[2:]) if recipient.startswith("0x") else bytes.fromhex(recipient),
-                    bytes.fromhex(recipient[2:]) if recipient.startswith("0x") else bytes.fromhex(recipient),
-                    bytes.fromhex(token_address[2:])
-                    if token_address.startswith("0x")
-                    else bytes.fromhex(token_address),
-                    bytes.fromhex(output_token[2:]) if output_token.startswith("0x") else bytes.fromhex(output_token),
-                    amount_wei,
-                    output_amount_wei,
-                    to_chain_id,
-                    bytes.fromhex(exclusive_relayer[2:])
-                    if exclusive_relayer.startswith("0x")
-                    else bytes.fromhex(exclusive_relayer),
-                    quote_timestamp,
-                    fill_deadline,
-                    exclusivity_deadline,
-                    b"",  # Empty message for simple transfers
-                ],
-            )
-
-            calldata = function_selector + encoded_params
-
-            # Determine ETH value (if bridging native ETH)
-            value = 0
-            if quote.token.upper() in ("ETH", "WETH"):
-                # For ETH bridges, the contract wraps ETH automatically
-                value = amount_wei
+            amount_wei = int(route_data.get("amount_wei", "0"))
+            calldata = self._build_depositv3_calldata(quote, recipient, amount_wei)
 
             tx_data = {
                 "to": spoke_pool,
-                "value": value,
+                "value": amount_wei if quote.token.upper() == "ETH" else 0,
                 "data": "0x" + calldata.hex(),
             }
 
@@ -541,6 +444,63 @@ class AcrossBridgeAdapter(BridgeAdapter):
 
         except Exception as e:
             raise AcrossTransactionError(f"Failed to build deposit transaction: {e}") from e
+
+    def _build_depositv3_calldata(self, quote: BridgeQuote, recipient: str, amount_wei: int) -> bytes:
+        """Encode an Across SpokePool depositV3 call from quote route data."""
+        route_data = quote.route_data
+        token_address: str = route_data.get("token_address", "")
+        route_data.get("from_chain_id", 0)
+        to_chain_id: int = route_data.get("to_chain_id", 0)
+        output_amount_wei = int(route_data.get("output_amount_wei", "0"))
+
+        if not token_address:
+            raise AcrossTransactionError("Missing token address in quote")
+
+        fill_deadline = self._route_timestamp(route_data.get("fill_deadline"), default_offset=4 * 60 * 60)
+        exclusivity_deadline = int(route_data.get("exclusivity_deadline", 0))
+        exclusive_relayer = route_data.get("exclusive_relayer")
+        if not exclusive_relayer or exclusive_relayer == "0x":
+            exclusive_relayer = "0x0000000000000000000000000000000000000000"
+
+        output_token: str = self._get_token_address(quote.token, to_chain_id) or token_address
+        quote_timestamp = self._route_timestamp(route_data.get("timestamp"))
+
+        encoded_params = encode(
+            [
+                "address",  # depositor
+                "address",  # recipient
+                "address",  # inputToken
+                "address",  # outputToken
+                "uint256",  # inputAmount
+                "uint256",  # outputAmount
+                "uint256",  # destinationChainId
+                "address",  # exclusiveRelayer
+                "uint32",  # quoteTimestamp
+                "uint32",  # fillDeadline
+                "uint32",  # exclusivityDeadline
+                "bytes",  # message
+            ],
+            [
+                bytes.fromhex(recipient.removeprefix("0x")),
+                bytes.fromhex(recipient.removeprefix("0x")),
+                bytes.fromhex(token_address.removeprefix("0x")),
+                bytes.fromhex(output_token.removeprefix("0x")),
+                amount_wei,
+                output_amount_wei,
+                to_chain_id,
+                bytes.fromhex(exclusive_relayer.removeprefix("0x")),
+                quote_timestamp,
+                fill_deadline,
+                exclusivity_deadline,
+                b"",
+            ],
+        )
+        return DEPOSIT_V3_SELECTOR + encoded_params
+
+    @staticmethod
+    def _route_timestamp(value: Any, *, default_offset: int = 0) -> int:
+        timestamp = int(value) if value is not None else 0
+        return timestamp or int(time.time()) + default_offset
 
     def check_status(
         self,

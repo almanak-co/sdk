@@ -388,7 +388,6 @@ class PlanBuilder:
         return f"{type_str} on {chain_str}"
 
 
-# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
 def build_plan_from_decide_result(
     decide_result: AnyIntent | IntentSequence | list | None,
     deployment_id: str | None = None,

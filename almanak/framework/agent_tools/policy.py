@@ -992,7 +992,7 @@ class PolicyEngine:
         """
         if self.policy.allowed_execution_wallets is None:
             return
-        wallet = args.get("execution_wallet") or self._default_wallet
+        wallet = args.get("depositor_address") or args.get("execution_wallet") or self._default_wallet
         if not wallet:
             return
         allowed_lower = {w.lower() for w in self.policy.allowed_execution_wallets}

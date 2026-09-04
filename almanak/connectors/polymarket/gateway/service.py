@@ -1524,8 +1524,6 @@ class PolymarketServiceServicer(polymarket_pb2_grpc.PolymarketServiceServicer):
             raw_json=json.dumps(data, separators=(",", ":")),
         )
 
-    # crap-allowlist: VIB-4819 — proto-relocation PR touched imports here, not the
-    # function body. Underlying complexity is pre-existing; refactor tracked separately.
     async def GetMarket(
         self,
         request: polymarket_pb2.PolymarketGetMarketRequest,
@@ -1567,8 +1565,6 @@ class PolymarketServiceServicer(polymarket_pb2_grpc.PolymarketServiceServicer):
             return polymarket_pb2.PolymarketMarketResponse(success=False, error="Market not found")
         return self._market_response_from_gamma(items[0])
 
-    # crap-allowlist: VIB-4819 — proto-relocation PR touched imports here, not the
-    # function body. Underlying complexity is pre-existing; refactor tracked separately.
     async def GetMarkets(
         self,
         request: polymarket_pb2.PolymarketGetMarketsRequest,
@@ -1609,8 +1605,6 @@ class PolymarketServiceServicer(polymarket_pb2_grpc.PolymarketServiceServicer):
             success=True,
         )
 
-    # crap-allowlist: VIB-4819 — proto-relocation PR touched imports here, not the
-    # function body. Underlying complexity is pre-existing; refactor tracked separately.
     async def GetSimplifiedMarkets(
         self,
         request: polymarket_pb2.PolymarketGetSimplifiedMarketsRequest,
@@ -1784,8 +1778,6 @@ class PolymarketServiceServicer(polymarket_pb2_grpc.PolymarketServiceServicer):
     # Order Management RPCs
     # =========================================================================
 
-    # crap-allowlist: VIB-4819 — proto-relocation PR touched imports here, not the
-    # function body. Underlying complexity is pre-existing; refactor tracked separately.
     async def CreateAndPostOrder(
         self,
         request: polymarket_pb2.PolymarketCreateOrderRequest,
@@ -2081,8 +2073,6 @@ class PolymarketServiceServicer(polymarket_pb2_grpc.PolymarketServiceServicer):
             canceled=canceled, not_canceled=not_canceled, success=not not_canceled
         )
 
-    # crap-allowlist: VIB-4819 — proto-relocation PR touched imports here, not the
-    # function body. Underlying complexity is pre-existing; refactor tracked separately.
     async def CancelAll(
         self,
         request: polymarket_pb2.PolymarketCancelAllRequest,
@@ -2187,8 +2177,6 @@ class PolymarketServiceServicer(polymarket_pb2_grpc.PolymarketServiceServicer):
         ]
         return polymarket_pb2.PolymarketOpenOrdersResponse(orders=orders, success=True)
 
-    # crap-allowlist: VIB-4819 — proto-relocation PR touched imports here, not the
-    # function body. Underlying complexity is pre-existing; refactor tracked separately.
     async def GetTradesHistory(
         self,
         request: polymarket_pb2.PolymarketGetTradesRequest,
@@ -2415,8 +2403,6 @@ class PolymarketServiceServicer(polymarket_pb2_grpc.PolymarketServiceServicer):
     # Balance RPCs
     # =========================================================================
 
-    # crap-allowlist: VIB-4819 — proto-relocation PR touched imports here, not the
-    # function body. Underlying complexity is pre-existing; refactor tracked separately.
     async def GetBalanceAllowance(
         self,
         request: polymarket_pb2.PolymarketBalanceAllowanceRequest,

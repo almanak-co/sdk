@@ -18,6 +18,7 @@ from uuid import uuid4
 import aiohttp
 import grpc
 
+from almanak.core.redaction import redact
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
 from almanak.gateway.timeline.store import TimelineEvent, get_timeline_store
@@ -53,6 +54,16 @@ def escape_mrkdwn(text: str) -> str:
         Escaped text safe for mrkdwn
     """
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _redact_observe_error(error: object, settings: GatewaySettings) -> str:
+    """Keep gateway credentials out of client-visible integration errors."""
+    message = redact(str(error))
+    secrets = (settings.slack_webhook_url, settings.telegram_bot_token, settings.database_url)
+    for secret in secrets:
+        if secret and secret.strip():
+            message = message.replace(secret.strip(), "***")
+    return message
 
 
 class ObserveServiceServicer(gateway_pb2_grpc.ObserveServiceServicer):
@@ -147,7 +158,6 @@ class ObserveServiceServicer(gateway_pb2_grpc.ObserveServiceServicer):
 
         return gateway_pb2.Empty()
 
-    # crap-allowlist: VIB-4722 only renamed alert scoping to deployment_id.
     async def _send_slack_alert(
         self,
         message: str,
@@ -225,12 +235,12 @@ class ObserveServiceServicer(gateway_pb2_grpc.ObserveServiceServicer):
                 if response.status == 200:
                     return True, None
                 else:
-                    error_text = await response.text()
+                    error_text = _redact_observe_error(await response.text(), self.settings)
                     return False, f"Slack API error: HTTP {response.status}: {error_text[:200]}"
         except (TimeoutError, aiohttp.ClientError) as e:
-            return False, f"Slack request failed: {e}"
+            error = _redact_observe_error(e, self.settings)
+            return False, f"Slack request failed: {error}"
 
-    # crap-allowlist: VIB-4722 only renamed alert scoping to deployment_id.
     async def _send_telegram_alert(
         self,
         message: str,
@@ -280,12 +290,12 @@ class ObserveServiceServicer(gateway_pb2_grpc.ObserveServiceServicer):
                 if response.status == 200:
                     return True, None
                 else:
-                    error_text = await response.text()
+                    error_text = _redact_observe_error(await response.text(), self.settings)
                     return False, f"Telegram API error: HTTP {response.status}: {error_text[:200]}"
         except (TimeoutError, aiohttp.ClientError) as e:
-            return False, f"Telegram request failed: {e}"
+            error = _redact_observe_error(e, self.settings)
+            return False, f"Telegram request failed: {error}"
 
-    # crap-allowlist: VIB-4722 only renamed alert request identity to deployment_id.
     async def Alert(
         self,
         request: gateway_pb2.AlertRequest,
@@ -358,8 +368,8 @@ class ObserveServiceServicer(gateway_pb2_grpc.ObserveServiceServicer):
             )
 
         except Exception as e:
-            error_msg = str(e)
-            logger.exception("Alert failed: %s", error_msg)
+            error_msg = _redact_observe_error(e, self.settings)
+            logger.error("Alert failed: %s", error_msg)
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(error_msg)
             return gateway_pb2.AlertResponse(success=False, error=error_msg)
@@ -423,12 +433,6 @@ class ObserveServiceServicer(gateway_pb2_grpc.ObserveServiceServicer):
             # TODO: Export to metrics backend
             self._metrics_buffer.clear()
 
-    # crap-allowlist: pre-existing RPC surface; PR2 (VIB-4041) only added a
-    # one-line `related_ledger_entry_id` pass-through. CC=12 was already
-    # over-threshold against unit-test coverage (the RPC is exercised end-to-end
-    # via `tests/gateway/test_observe_service*.py` integration paths and the
-    # `RecordTimelineEvent` round-trip test in
-    # `tests/gateway/test_timeline_related_ledger.py::TestProtoSurface`).
     async def RecordTimelineEvent(
         self,
         request: gateway_pb2.RecordTimelineEventRequest,
@@ -532,7 +536,7 @@ class ObserveServiceServicer(gateway_pb2_grpc.ObserveServiceServicer):
             )
 
         except Exception as e:
-            error_msg = f"Failed to record timeline event: {e}"
+            error_msg = _redact_observe_error(f"Failed to record timeline event: {e}", self.settings)
             logger.error(error_msg)
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(error_msg)

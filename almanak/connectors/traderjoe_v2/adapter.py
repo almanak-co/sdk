@@ -901,6 +901,7 @@ class TraderJoeV2Adapter:
         token_x: str,
         token_y: str,
         bin_step: int = 20,
+        position: LiquidityPosition | None = None,
     ) -> TransactionData | None:
         """Build a transaction to collect fees from an LP position without closing it.
 
@@ -911,11 +912,14 @@ class TraderJoeV2Adapter:
             token_x: Token X symbol or address
             token_y: Token Y symbol or address
             bin_step: Bin step of the pool
+            position: Optional pre-fetched position. If provided, its exact
+                pool and bin IDs are used without a second position lookup.
 
         Returns:
             TransactionData if position exists, None otherwise
         """
-        position = self.get_position(token_x, token_y, bin_step)
+        if position is None:
+            position = self.get_position(token_x, token_y, bin_step)
         if not position or not position.bin_ids:
             return None
 

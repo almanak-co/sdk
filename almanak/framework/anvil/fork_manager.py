@@ -916,12 +916,6 @@ class RollingForkManager:
             logger.exception(f"Error funding wallet: {e}")
             return False
 
-    # crap-allowlist: 6-tier funding fallback — wrapped-native deposit() / whale
-    # impersonation / known balance slot / seeded balance key / anvil_dealERC20 /
-    # brute-force slot probe.
-    # Each tier exists to fund a class of token the prior tier can't handle safely.
-    # Branch-local gates stop unsafe fallthrough: whale-listed proxy tokens are
-    # transfer-funded or fail, while seeded-layout tokens may still use anvil_dealERC20.
     async def fund_tokens(
         self,
         address: str,

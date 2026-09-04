@@ -829,7 +829,6 @@ class BackgroundPaperTrader:
 
         return self._process.pid
 
-    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     def stop(self, timeout: float = 30.0) -> bool:
         """Stop the background Paper Trader process.
 

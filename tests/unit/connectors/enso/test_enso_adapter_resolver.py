@@ -57,32 +57,47 @@ class TestEnsoAdapterResolverInit:
     """Test EnsoAdapter initializes with TokenResolver."""
 
     def test_custom_resolver_injected(self, enso_config, mock_resolver):
-        """Test that a custom resolver is used when provided."""
-        adapter = _make_adapter(enso_config, token_resolver=mock_resolver)
+        prices = {"ETH": Decimal("2000"), "USDC": Decimal("1")}
+        with patch("almanak.connectors.enso.adapter.EnsoClient") as client_class:
+            adapter = EnsoAdapter(
+                enso_config,
+                use_safe_route_single=False,
+                price_provider=prices,
+                token_resolver=mock_resolver,
+            )
+
+        assert adapter.config is enso_config
+        assert adapter.client is client_class.return_value
+        assert adapter.chain == enso_config.chain
+        assert adapter.wallet_address == enso_config.wallet_address
+        assert adapter.use_safe_route_single is False
         assert adapter._token_resolver is mock_resolver
+        assert adapter._using_placeholders is False
+        assert adapter._price_provider is prices
+        client_class.assert_called_once_with(enso_config)
 
     def test_default_resolver_initialized(self, enso_config):
-        """Test that default singleton resolver is used when none provided."""
         mock_resolver_instance = MagicMock()
-        with patch(
-            "almanak.connectors.enso.adapter.EnsoAdapter.__init__",
-            lambda self, *a, **kw: None,
-        ):
-            # Simulate what __init__ does for default resolver
-            adapter = EnsoAdapter.__new__(EnsoAdapter)
-            with patch(
+        with (
+            patch("almanak.connectors.enso.adapter.EnsoClient"),
+            patch(
                 "almanak.framework.data.tokens.resolver.get_token_resolver",
                 return_value=mock_resolver_instance,
-            ):
-                from almanak.framework.data.tokens.resolver import get_token_resolver
+            ) as resolver_factory,
+        ):
+            adapter = EnsoAdapter(enso_config, allow_placeholder_prices=True)
 
-                adapter._token_resolver = get_token_resolver()
-            assert adapter._token_resolver is mock_resolver_instance
+        assert adapter._token_resolver is mock_resolver_instance
+        assert adapter._using_placeholders is True
+        assert adapter._price_provider == {}
+        resolver_factory.assert_called_once_with()
 
-    def test_resolver_none_when_init_fails(self, enso_config):
-        """Test that resolver is None when initialization fails."""
-        adapter = _make_adapter(enso_config, token_resolver=None)
-        assert adapter._token_resolver is None
+    def test_price_provider_required_for_production(self, enso_config, mock_resolver):
+        with patch("almanak.connectors.enso.adapter.EnsoClient") as client_class:
+            with pytest.raises(ValueError, match="requires price_provider"):
+                EnsoAdapter(enso_config, token_resolver=mock_resolver)
+
+        client_class.assert_not_called()
 
 
 class TestResolveTokenAddressWithResolver:

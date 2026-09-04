@@ -56,7 +56,7 @@ from almanak.gateway.validation import (
 )
 
 # Pattern for detecting EVM contract addresses in price requests.
-_EVM_ADDRESS_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
+_EVM_ADDRESS_RE = re.compile(r"^0[xX][a-fA-F0-9]{40}$")
 
 # VIB-5985 — a Morpho market id is ALWAYS a 32-byte bytes32 (exactly 64 hex
 # chars, 0x-prefixed). Validating the shape up front classifies a malformed id
@@ -148,6 +148,66 @@ def _native_price_alias_for(token: str, chain: str) -> str | None:
     if not _is_native_symbol(token, chain):
         return None
     return NATIVE_PRICE_ALIASES.get(token.upper())
+
+
+_STATIC_PRICING_RESOLUTION_FAILED = object()
+
+
+def _is_pricing_address(token: str, chain: str) -> bool:
+    """Return whether a pricing token is an address for the selected chain."""
+    if not is_solana_chain(chain):
+        return bool(_EVM_ADDRESS_RE.match(token))
+    try:
+        validate_address_for_chain(token, chain)
+    except ValidationError:
+        return False
+    return True
+
+
+def _resolve_static_token_for_pricing(token: str, chain: str, *, is_address: bool) -> Any:
+    """Resolve static pricing identity, retaining only addresses and pegged symbols."""
+    try:
+        from almanak.framework.data.tokens import SymbolTokenResolutionWarning, get_token_resolver
+        from almanak.framework.data.tokens.pegs import is_pegged
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", SymbolTokenResolutionWarning)
+            resolved = get_token_resolver().resolve(token, chain, log_errors=False, skip_gateway=True)
+        if is_address or is_pegged(resolved.token_ref) is not None:
+            return resolved
+        return None
+    except Exception as exc:
+        logger.debug(
+            "Static token price identity resolution failed for %s on %s: %s",
+            token,
+            chain,
+            exc,
+        )
+        return _STATIC_PRICING_RESOLUTION_FAILED
+
+
+def _build_onchain_pricing_token(
+    token: str,
+    metadata: Any,
+    chain_descriptor: Any,
+    resolved_token_type: Any,
+    chain_id_map: Mapping[str, int],
+) -> Any | None:
+    """Build a best-effort pricing identity from on-chain token metadata."""
+    try:
+        return resolved_token_type(
+            symbol=metadata.symbol,
+            address=metadata.address,
+            decimals=metadata.decimals,
+            chain=chain_descriptor.name,
+            chain_id=chain_id_map.get(chain_descriptor.name, 0),
+            name=metadata.name,
+            source="on_chain",
+            is_verified=False,
+        )
+    except Exception as exc:
+        logger.warning("Failed to build ResolvedToken from on-chain metadata for %s: %s", token, exc)
+        return None
 
 
 class _IntegrationPriceSources:
@@ -1035,7 +1095,72 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
                 self._onchain_lookups[chain] = OnChainLookup(rpc_url=rpc_url)
             return self._onchain_lookups[chain]
 
-    # crap-allowlist: VIB-4851 mechanical Chain-enum -> ChainRegistry swap in pre-existing high-CRAP function (cc=22, cov=60%).
+    def _resolve_pricing_chain(self, token: str, requested_chain: str, *, is_evm_address: bool) -> str | None:
+        """Resolve and enforce the chain used for pricing identity."""
+        settings = getattr(self, "settings", None)
+        settings_chains = getattr(settings, "chains", None) or []
+        chain = (requested_chain or "").lower()
+        if not chain:
+            configured = [c for c in settings_chains if c]
+            if len(configured) == 1:
+                chain = configured[0].lower()
+            elif len(configured) > 1 and is_evm_address:
+                raise MultiChainAmbiguousPriceRequest(token, configured)
+            elif len(configured) > 1 and getattr(self, "_primary_chain", _NO_CHAIN_KEY) != _NO_CHAIN_KEY:
+                chain = self._primary_chain
+            else:
+                return None
+
+        try:
+            chain = validate_chain(chain)
+        except ValidationError as e:
+            logger.info(
+                "Token price identity lookup for %s skipped: chain %r not allowed (%s)",
+                token,
+                requested_chain or chain,
+                e,
+            )
+            return None
+
+        if (config_error := self._chain_configuration_error(chain)) is not None:
+            logger.info(
+                "Token price identity lookup for %s on %s skipped: %s",
+                token,
+                chain,
+                config_error,
+            )
+            return None
+        return chain
+
+    async def _resolve_evm_address_for_pricing(self, token: str, chain: str) -> Any | None:
+        """Resolve an unknown EVM address from gateway-local on-chain metadata."""
+        try:
+            from almanak.core.chains import ChainRegistry
+            from almanak.framework.data.tokens import ResolvedToken
+            from almanak.framework.data.tokens.models import CHAIN_ID_MAP
+        except ImportError as e:
+            logger.debug("Cannot import token models for address resolution: %s", e)
+            return None
+
+        chain_descriptor = ChainRegistry.try_resolve(chain)
+        if chain_descriptor is None:
+            logger.debug("Cannot resolve %s to a registered chain for address resolution", chain)
+            return None
+
+        try:
+            lookup = await self._get_onchain_lookup(chain)
+            metadata = await asyncio.wait_for(
+                lookup.lookup(chain, token),
+                timeout=_ONCHAIN_LOOKUP_TIMEOUT_SECONDS,
+            )
+        except Exception as e:
+            logger.info("On-chain metadata lookup failed for %s on %s: %s", token, chain, e)
+            return None
+
+        if metadata is None:
+            return None
+        return _build_onchain_pricing_token(token, metadata, chain_descriptor, ResolvedToken, CHAIN_ID_MAP)
+
     async def _resolve_token_for_pricing(
         self,
         token: str,
@@ -1055,138 +1180,17 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         /simple/token_price/{platform} endpoint).
         """
         is_evm_address = bool(_EVM_ADDRESS_RE.match(token))
-
-        settings = getattr(self, "settings", None)
-        settings_chains = getattr(settings, "chains", None) or []
-        chain = (requested_chain or "").lower()
-        if not chain:
-            # No explicit chain. Only infer from settings if it is UNAMBIGUOUS —
-            # exactly one configured chain. A multi-chain gateway with no hint
-            # would otherwise silently query the wrong RPC for a token that
-            # lives on a secondary chain, returning either "not a contract" or
-            # (worse) a price from a same-address token on the wrong chain.
-            configured = [c for c in settings_chains if c]
-            if len(configured) == 1:
-                chain = configured[0].lower()
-            elif len(configured) > 1 and is_evm_address:
-                # Strict contract (Phase 2, VIB-3259): multi-chain gateway MUST
-                # receive an explicit chain for address-based lookups. Raise
-                # so GetPrice can translate to gRPC INVALID_ARGUMENT — silently
-                # skipping here would just cascade into a confusing "Unknown
-                # token" downstream with no hint at the real cause.
-                raise MultiChainAmbiguousPriceRequest(token, configured)
-            elif len(configured) > 1 and getattr(self, "_primary_chain", _NO_CHAIN_KEY) != _NO_CHAIN_KEY:
-                # Bare-symbol requests historically route through the primary
-                # chain's aggregator. Resolve against that same chain so the
-                # identity used for peg gating cannot drift from routing.
-                chain = self._primary_chain
-            else:
-                # Zero configured chains: nothing we can do. Fall through to
-                # symbol-based resolution (caller may still get a price from a
-                # chain-agnostic symbol source like CoinGecko's /simple/price).
-                return None
-
-        # Enforce the gateway's chain allowlist. Without this, a caller could
-        # pass any enum-valid chain name (e.g. a dev chain the operator never
-        # wired up) and make the gateway dial an RPC it wasn't meant to —
-        # crossing the trust boundary `GetBalance` already protects.
-        try:
-            chain = validate_chain(chain)
-        except ValidationError as e:
-            logger.info(
-                "Token price identity lookup for %s skipped: chain %r not allowed (%s)",
-                token,
-                requested_chain or chain,
-                e,
-            )
+        chain = self._resolve_pricing_chain(token, requested_chain, is_evm_address=is_evm_address)
+        if chain is None:
             return None
 
-        # Require the chain to be one this gateway serves, using the same
-        # predicate as GetPrice's own gate so an unconfigured gateway's
-        # on-demand mode applies here too. Gating on ``settings.chains``
-        # alone left every on-demand request without a ResolvedToken —
-        # no peg fast-path, no address-based source lookups (ALM-3147).
-        if (config_error := self._chain_configuration_error(chain)) is not None:
-            logger.info(
-                "Token price identity lookup for %s on %s skipped: %s",
-                token,
-                chain,
-                config_error,
-            )
+        is_address = _is_pricing_address(token, chain)
+        resolved = _resolve_static_token_for_pricing(token, chain, is_address=is_address)
+        if resolved is not _STATIC_PRICING_RESOLUTION_FAILED:
+            return resolved
+        if not is_evm_address or is_solana_chain(chain):
             return None
-
-        # The static registry is authoritative for peg metadata. Resolve it
-        # before any network lookup, including on Solana where no EVM metadata
-        # fallback exists. Suppress the public symbol-deprecation warning here:
-        # this is the legacy gRPC boundary translating a symbol into identity,
-        # not new strategy code persisting symbol identity.
-        try:
-            from almanak.framework.data.tokens import SymbolTokenResolutionWarning, get_token_resolver
-            from almanak.framework.data.tokens.pegs import is_pegged
-
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", SymbolTokenResolutionWarning)
-                resolved = get_token_resolver().resolve(token, chain, log_errors=False, skip_gateway=True)
-            # Preserve the measured bare-symbol path for ordinary assets. A
-            # symbol is resolved here only when the gateway needs an exact peg
-            # identity; address requests always retain their resolved identity.
-            if is_evm_address or is_pegged(resolved.token_ref) is not None:
-                return resolved
-            return None
-        except Exception as exc:
-            logger.debug(
-                "Static token price identity resolution failed for %s on %s: %s",
-                token,
-                chain,
-                exc,
-            )
-            if not is_evm_address or is_solana_chain(chain):
-                return None
-
-        try:
-            from almanak.core.chains import ChainRegistry
-            from almanak.framework.data.tokens import ResolvedToken
-            from almanak.framework.data.tokens.models import CHAIN_ID_MAP
-        except ImportError as e:
-            logger.debug("Cannot import token models for address resolution: %s", e)
-            return None
-
-        # Case-insensitive, alias-aware; None for unregistered chains keeps
-        # the historical debug-log-and-skip contract.
-        chain_descriptor = ChainRegistry.try_resolve(chain)
-        if chain_descriptor is None:
-            logger.debug("Cannot resolve %s to a registered chain for address resolution", chain)
-            return None
-
-        try:
-            lookup = await self._get_onchain_lookup(chain)
-            metadata = await asyncio.wait_for(
-                lookup.lookup(chain, token),
-                timeout=_ONCHAIN_LOOKUP_TIMEOUT_SECONDS,
-            )
-        except Exception as e:
-            logger.info("On-chain metadata lookup failed for %s on %s: %s", token, chain, e)
-            return None
-
-        if metadata is None:
-            return None
-
-        chain_id = CHAIN_ID_MAP.get(chain_descriptor.name, 0)
-
-        try:
-            return ResolvedToken(
-                symbol=metadata.symbol,
-                address=metadata.address,
-                decimals=metadata.decimals,
-                chain=chain_descriptor.name,
-                chain_id=chain_id,
-                name=metadata.name,
-                source="on_chain",
-                is_verified=False,
-            )
-        except Exception as e:  # Defensive: ResolvedToken.__post_init__ validates inputs
-            logger.warning("Failed to build ResolvedToken from on-chain metadata for %s: %s", token, e)
-            return None
+        return await self._resolve_evm_address_for_pricing(token, chain)
 
     async def GetPrice(
         self,

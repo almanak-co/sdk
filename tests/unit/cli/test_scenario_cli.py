@@ -11,8 +11,10 @@ Tests validate the CLI for crisis scenario backtesting:
 
 from __future__ import annotations
 
+import json
+from datetime import UTC, datetime
 from decimal import Decimal
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from click.testing import CliRunner
@@ -361,6 +363,121 @@ class TestScenarioDryRun:
             ])
         assert result.exit_code == 0
         assert "svb_collapse" in result.output
+
+
+class TestScenarioExecution:
+    def test_full_run_preserves_dates_provider_comparison_and_output_contract(
+        self,
+        cli_runner: CliRunner,
+        mock_crisis_backtest_result: MagicMock,
+        tmp_path,
+    ) -> None:
+        class _Strategy:
+            pass
+
+        strategy_instance = object()
+        data_provider = MagicMock()
+        backtester = MagicMock()
+        output_path = tmp_path / "scenario.json"
+
+        with (
+            patch("almanak.framework.cli.backtest.advanced.list_strategies_fn", return_value=["test"]),
+            patch("almanak.framework.cli.backtest.advanced.get_strategy", return_value=_Strategy),
+            patch("almanak.framework.cli.backtest.advanced.load_strategy_config", return_value={}),
+            patch(
+                "almanak.framework.cli.backtest.advanced._create_backtest_strategy",
+                return_value=strategy_instance,
+            ),
+            patch(
+                "almanak.framework.cli.backtest.advanced.build_token_address_map",
+                return_value={"WETH": "0xweth", "USDC": "0xusdc"},
+            ) as build_token_map,
+            patch(
+                "almanak.framework.cli.backtest.advanced.CoinGeckoDataProvider",
+                return_value=data_provider,
+            ) as provider_factory,
+            patch(
+                "almanak.framework.cli.backtest.advanced.PnLBacktester",
+                return_value=backtester,
+            ) as backtester_factory,
+            patch(
+                "almanak.framework.cli.backtest.advanced._run_crisis_scenario",
+                return_value=mock_crisis_backtest_result,
+            ) as run_scenario,
+            patch("almanak.framework.cli.backtest.advanced._maybe_add_normal_period_comparison") as compare_normal,
+        ):
+            result = cli_runner.invoke(
+                backtest,
+                [
+                    "scenario",
+                    "--strategy",
+                    "test",
+                    "--scenario",
+                    "custom",
+                    "--start",
+                    "2023-03-10",
+                    "--end",
+                    "2023-03-15",
+                    "--name",
+                    "bank_stress",
+                    "--description",
+                    "Banking stress window",
+                    "--tokens",
+                    "weth,usdc",
+                    "--compare-normal",
+                    "--normal-start",
+                    "2023-02-01",
+                    "--output",
+                    str(output_path),
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        build_token_map.assert_called_once_with(
+            strategy_config={},
+            tracked_tokens=["WETH", "USDC"],
+            chain="arbitrum",
+        )
+        provider_factory.assert_called_once_with(token_addresses={"WETH": "0xweth", "USDC": "0xusdc"})
+        backtester_factory.assert_called_once_with(data_provider=data_provider, fee_models={}, slippage_models={})
+        run_call = run_scenario.call_args.kwargs
+        context = run_call["ctx"]
+        assert context.crisis_scenario.start_date == datetime(2023, 3, 10, tzinfo=UTC)
+        assert context.crisis_scenario.end_date == datetime(2023, 3, 15, tzinfo=UTC)
+        assert context.normal_start == datetime(2023, 2, 1, tzinfo=UTC)
+        assert context.normal_end == datetime(2023, 2, 6, tzinfo=UTC)
+        assert run_call["strategy_instance"] is strategy_instance
+        assert run_call["backtester"] is backtester
+        compare_normal.assert_called_once()
+        assert compare_normal.call_args.kwargs["ctx"] is context
+        assert json.loads(output_path.read_text()) == mock_crisis_backtest_result.to_dict.return_value
+
+    def test_crisis_failure_exits_one_with_diagnostic(self, cli_runner: CliRunner) -> None:
+        with (
+            patch("almanak.framework.cli.backtest.advanced.list_strategies_fn", return_value=["test"]),
+            patch("almanak.framework.cli.backtest.advanced.get_strategy", return_value=object),
+            patch("almanak.framework.cli.backtest.advanced.load_strategy_config", return_value={}),
+            patch("almanak.framework.cli.backtest.advanced._create_backtest_strategy", return_value=object()),
+            patch("almanak.framework.cli.backtest.advanced._build_crisis_backtester", return_value=MagicMock()),
+            patch("almanak.framework.cli.backtest.advanced._build_crisis_config", return_value=MagicMock()),
+            patch(
+                "almanak.framework.cli.backtest.advanced.run_crisis_backtest",
+                new=AsyncMock(side_effect=RuntimeError("crisis failed")),
+            ),
+        ):
+            result = cli_runner.invoke(
+                backtest,
+                [
+                    "scenario",
+                    "--strategy",
+                    "test",
+                    "--scenario",
+                    "black_thursday",
+                ],
+            )
+
+        assert result.exit_code == 1
+        assert "Error during crisis backtest: crisis failed" in result.output
 
 
 # =============================================================================

@@ -5,7 +5,9 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from almanak.connectors.traderjoe_v2.compiler import TraderJoeV2Compiler
+import pytest
+
+from almanak.connectors.traderjoe_v2.compiler import TraderJoeV2Compiler, _TraderJoeV2CompileImpl
 from almanak.framework.intents.compiler import IntentCompiler, IntentCompilerConfig
 from almanak.framework.intents.vocabulary import Intent
 
@@ -16,6 +18,97 @@ def _compile_lp_close_traderjoe_v2(compiler: IntentCompiler, intent):
         compiler._build_compiler_context("traderjoe_v2", connector_compiler),
         intent,
     )
+
+
+def _compiler() -> IntentCompiler:
+    compiler = IntentCompiler(
+        chain="avalanche",
+        wallet_address="0x" + "1" * 40,
+        rpc_url="http://localhost:8545",
+        config=IntentCompilerConfig(allow_placeholder_prices=True),
+    )
+    compiler._resolve_token = MagicMock(
+        side_effect=[
+            SimpleNamespace(address="0x" + "2" * 40),
+            SimpleNamespace(address="0x" + "3" * 40),
+        ]
+    )
+    return compiler
+
+
+def _intent(protocol_params):
+    return Intent.lp_close(
+        position_id="WAVAX/USDC/20",
+        pool="WAVAX/USDC/20",
+        collect_fees=True,
+        protocol="traderjoe_v2",
+        protocol_params=protocol_params,
+    )
+
+
+@pytest.mark.parametrize(
+    ("protocol_params", "expected"),
+    [
+        (None, ([], False)),
+        ({}, ([], False)),
+        ({"bin_ids": None}, ([], False)),
+        ({"bin_ids": []}, ([], True)),
+        ({"bin_ids": [8388601, "8388600"]}, ([8388601, 8388600], True)),
+    ],
+)
+def test_traderjoe_lp_close_extracts_bin_id_params(protocol_params, expected) -> None:
+    assert _TraderJoeV2CompileImpl._extract_traderjoe_v2_close_bin_ids(_intent(protocol_params)) == expected
+
+
+@pytest.mark.parametrize("bin_ids", ["8388600", 8388600, {"8388600": 1}])
+def test_traderjoe_lp_close_rejects_non_list_bin_ids(bin_ids) -> None:
+    with pytest.raises(
+        ValueError,
+        match=r"TraderJoe V2 LP_CLOSE protocol_params\['bin_ids'\] must be a list",
+    ):
+        _TraderJoeV2CompileImpl._extract_traderjoe_v2_close_bin_ids(_intent({"bin_ids": bin_ids}))
+
+
+def test_traderjoe_lp_close_public_compile_rejects_string_bin_ids_before_adapter_work() -> None:
+    intent = _intent({"bin_ids": "8388600"})
+
+    with patch("almanak.connectors.traderjoe_v2.TraderJoeV2Adapter") as adapter_cls:
+        result = _compile_lp_close_traderjoe_v2(_compiler(), intent)
+
+    assert result.status.value == "FAILED"
+    assert result.error == "TraderJoe V2 LP_CLOSE protocol_params['bin_ids'] must be a list, got str"
+    adapter_cls.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("protocol_params", "expects_heuristic_warning"),
+    [
+        (None, True),
+        ({}, True),
+        ({"bin_ids": None}, True),
+        ({"bin_ids": []}, False),
+    ],
+)
+def test_traderjoe_lp_close_preserves_missing_bin_id_discovery_policy(
+    protocol_params,
+    expects_heuristic_warning: bool,
+) -> None:
+    adapter = MagicMock()
+    adapter.get_position.return_value = None
+
+    with (
+        patch("almanak.connectors.traderjoe_v2.TraderJoeV2Adapter", return_value=adapter),
+        patch("almanak.connectors.traderjoe_v2.compiler.logger.warning") as warning,
+    ):
+        result = _compile_lp_close_traderjoe_v2(_compiler(), _intent(protocol_params))
+
+    assert result.status.value == "SUCCESS"
+    assert result.transactions == []
+    assert result.warnings == ["No LP position found to close"]
+    assert result.action_bundle is not None
+    assert result.action_bundle.transactions == []
+    adapter.get_position.assert_called_once_with("0x" + "2" * 40, "0x" + "3" * 40, 20)
+    assert warning.called is expects_heuristic_warning
 
 
 def test_traderjoe_lp_close_uses_known_bin_ids_without_position_rediscovery() -> None:
@@ -227,8 +320,7 @@ def test_traderjoe_lp_close_pool_info_failure_does_not_block_compilation() -> No
         result = _compile_lp_close_traderjoe_v2(compiler, intent)
 
     assert result.status.value == "SUCCESS", (
-        "Compilation must NOT fail when get_pool_info reverts; got: "
-        f"{result.status.value} -- {result.error}"
+        f"Compilation must NOT fail when get_pool_info reverts; got: {result.status.value} -- {result.error}"
     )
     mock_adapter.build_remove_liquidity_transaction.assert_called_once()
     _, kwargs = mock_adapter.build_remove_liquidity_transaction.call_args
@@ -239,3 +331,89 @@ def test_traderjoe_lp_close_pool_info_failure_does_not_block_compilation() -> No
     assert position_passed.amount_x == 1000
     assert position_passed.amount_y == 2000
 
+
+def test_traderjoe_lp_close_preserves_targeted_balance_order() -> None:
+    adapter = MagicMock()
+    adapter.sdk.router_address = "0x" + "4" * 40
+    adapter.sdk.get_pool_address.return_value = "0x" + "5" * 40
+    adapter.sdk.get_position_balances_for_ids.return_value = {
+        8388601: 222,
+        8388600: 111,
+    }
+    adapter.sdk.get_total_position_value.return_value = (1000, 2000)
+    adapter.sdk.get_pool_info.return_value = SimpleNamespace(active_id=8388600)
+    adapter.sdk.build_approve_for_all_transaction.return_value = (
+        {"to": "0x" + "6" * 40, "data": b"\xaa", "value": 0},
+        12345,
+    )
+    adapter.build_remove_liquidity_transaction.return_value = SimpleNamespace(
+        to="0x" + "7" * 40,
+        data="0xbbbb",
+        value=0,
+        gas=0,
+    )
+
+    with patch("almanak.connectors.traderjoe_v2.TraderJoeV2Adapter", return_value=adapter):
+        result = _compile_lp_close_traderjoe_v2(
+            _compiler(),
+            _intent({"bin_ids": [8388600, 8388601]}),
+        )
+
+    assert result.status.value == "SUCCESS", result.error
+    position = adapter.build_remove_liquidity_transaction.call_args.kwargs["position"]
+    assert position.bin_ids == [8388601, 8388600]
+    assert list(position.balances.values()) == [222, 111]
+    assert [tx.tx_type for tx in result.transactions] == ["approve", "traderjoe_v2_remove_liquidity"]
+    assert result.transactions[0].data == "aa"
+    assert result.transactions[1].gas_estimate == 300000
+    assert result.total_gas_estimate == 312345
+    assert result.action_bundle is not None
+    assert result.action_bundle.metadata == {
+        "pool": "WAVAX/USDC/20",
+        "position_id": "WAVAX/USDC/20",
+        "collect_fees": True,
+        "protocol": "traderjoe_v2",
+        "chain": "avalanche",
+    }
+
+
+def test_traderjoe_lp_close_discards_approval_when_remove_builder_finds_no_position() -> None:
+    adapter = MagicMock()
+    adapter.get_position.return_value = SimpleNamespace(
+        pool_address="0x" + "5" * 40,
+        bin_ids=[8388600],
+        balances={8388600: 111},
+        amount_x=1000,
+        amount_y=2000,
+    )
+    adapter.sdk.router_address = "0x" + "4" * 40
+    adapter.sdk.build_approve_for_all_transaction.return_value = (
+        {"to": "0x" + "6" * 40, "data": "0xaaaa", "value": 0},
+        12345,
+    )
+    adapter.build_remove_liquidity_transaction.return_value = None
+
+    with patch("almanak.connectors.traderjoe_v2.TraderJoeV2Adapter", return_value=adapter):
+        result = _compile_lp_close_traderjoe_v2(_compiler(), _intent({"bin_ids": []}))
+
+    assert result.status.value == "SUCCESS", result.error
+    assert result.transactions == []
+    assert result.total_gas_estimate == 0
+    assert result.warnings == ["No LP position found to close"]
+    assert result.action_bundle is not None
+    assert result.action_bundle.transactions == []
+    adapter.sdk.build_approve_for_all_transaction.assert_called_once()
+    adapter.build_remove_liquidity_transaction.assert_called_once()
+
+
+def test_traderjoe_lp_close_contains_adapter_exceptions() -> None:
+    adapter = MagicMock()
+    adapter.get_position.side_effect = RuntimeError("position read failed")
+
+    with patch("almanak.connectors.traderjoe_v2.TraderJoeV2Adapter", return_value=adapter):
+        result = _compile_lp_close_traderjoe_v2(_compiler(), _intent({"bin_ids": []}))
+
+    assert result.status.value == "FAILED"
+    assert result.error == "position read failed"
+    assert result.action_bundle is None
+    assert result.transactions == []

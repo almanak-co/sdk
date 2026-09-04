@@ -32,6 +32,7 @@ Usage:
 import hashlib
 import logging
 from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -308,7 +309,6 @@ class VersionManager:
         """
         return self._versions.get(version_id)
 
-    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     def deploy_version(
         self,
         code_hash: str,
@@ -354,8 +354,8 @@ class VersionManager:
             deployment_id=self.deployment_id,
             code_hash=code_hash,
             code_version=code_version,
-            config_snapshot=config_snapshot,
-            connector_versions=connector_versions or {},
+            config_snapshot=deepcopy(config_snapshot),
+            connector_versions=deepcopy(connector_versions) if connector_versions is not None else {},
             created_at=created_at,
             created_by=created_by,
             is_active=True,
@@ -388,7 +388,6 @@ class VersionManager:
             previous_version_id=previous_version_id,
         )
 
-    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     def rollback(self, version_id: str, rolled_back_by: str = "system") -> DeploymentResult:
         """Rollback to a previous version.
 
@@ -434,8 +433,8 @@ class VersionManager:
             deployment_id=self.deployment_id,
             code_hash=target_version.code_hash,
             code_version=target_version.code_version,
-            config_snapshot=target_version.config_snapshot.copy(),
-            connector_versions=target_version.connector_versions.copy(),
+            config_snapshot=deepcopy(target_version.config_snapshot),
+            connector_versions=deepcopy(target_version.connector_versions),
             created_at=created_at,
             created_by=rolled_back_by,
             is_active=True,

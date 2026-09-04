@@ -92,6 +92,30 @@ class ExecutionResult:
         return sum(a.retry_count + 1 for a in self.attempts)
 
 
+@dataclass(frozen=True)
+class _EscalationPlan:
+    """Prepared ladder and auto-mode ceiling for one execution."""
+
+    levels: list[EscalationConfig]
+    auto_max_slippage: Decimal
+
+
+@dataclass(frozen=True)
+class _ApprovalDecision:
+    """Whether the current rung may execute or has a terminal result."""
+
+    execute_level: bool
+    result: ExecutionResult | None = None
+
+
+@dataclass(frozen=True)
+class _AttemptDecision:
+    """Folded outcome of an attempt and its retry disposition."""
+
+    disposition: str
+    result: ExecutionResult | None = None
+
+
 # Type alias for execution function
 ExecuteFunc = Callable[[Any, Decimal], Awaitable[ExecutionAttempt]]
 
@@ -148,8 +172,247 @@ class EscalatingSlippageManager:
 
         return EscalationConfig.default_levels()
 
-    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
-    async def execute_with_escalation(  # noqa: C901
+    def _prepare_escalation(self, intent_slippage: Decimal | None) -> _EscalationPlan:
+        """Copy the ladder, apply the intent ceiling, and derive the auto-mode cap."""
+        effective_levels = [
+            EscalationConfig(
+                level=level.level,
+                slippage=level.slippage,
+                auto_approve=level.auto_approve,
+                retries=level.retries,
+            )
+            for level in self.levels
+        ]
+        effective_auto_max = self.config.auto_max_slippage
+        if intent_slippage is None or intent_slippage <= Decimal("0"):
+            return _EscalationPlan(effective_levels, effective_auto_max)
+
+        if intent_slippage > self.config.absolute_max_slippage:
+            logger.warning(
+                "Intent slippage %.1f%% exceeds absolute max %.1f%%, clamping.",
+                float(intent_slippage * 100),
+                float(self.config.absolute_max_slippage * 100),
+            )
+            intent_slippage = self.config.absolute_max_slippage
+
+        if not any(level.slippage == intent_slippage for level in effective_levels):
+            injected_level = self.get_level_for_slippage(intent_slippage) or EscalationLevel.LEVEL_4
+            logger.info(
+                "Injecting auto-approve level at %.1f%% from strategy teardown config.",
+                float(intent_slippage * 100),
+            )
+            effective_levels.append(
+                EscalationConfig(
+                    level=injected_level,
+                    slippage=intent_slippage,
+                    auto_approve=True,
+                    retries=1,
+                )
+            )
+
+        for level in effective_levels:
+            if level.slippage <= intent_slippage and not level.auto_approve:
+                logger.info(
+                    "Overriding level at %.1f%% to auto-approve (at or below intent slippage %.1f%%).",
+                    float(level.slippage * 100),
+                    float(intent_slippage * 100),
+                )
+                level.auto_approve = True
+
+        effective_levels.sort(key=lambda level: level.slippage)
+        if intent_slippage > effective_auto_max:
+            effective_auto_max = min(intent_slippage, self.config.absolute_max_slippage)
+            logger.info(
+                "Raising auto-mode slippage cap from %.1f%% to %.1f%% (intent_slippage=%.1f%%).",
+                float(self.config.auto_max_slippage * 100),
+                float(effective_auto_max * 100),
+                float(intent_slippage * 100),
+            )
+
+        return _EscalationPlan(effective_levels, effective_auto_max)
+
+    async def _resolve_level_approval(
+        self,
+        *,
+        level_config: EscalationConfig,
+        max_loss_percent: Decimal,
+        position_value: Decimal,
+        attempts: list[ExecutionAttempt],
+        on_approval_needed: ApprovalCallback | None,
+        teardown_id: str,
+        deployment_id: str,
+    ) -> _ApprovalDecision:
+        """Apply the rung's human gate without changing its approved slippage."""
+        slippage = level_config.slippage
+        approval_required = not level_config.auto_approve and (
+            slippage > max_loss_percent or slippage > self.config.manual_approval_threshold
+        )
+        if not approval_required:
+            return _ApprovalDecision(execute_level=True)
+
+        approval_request = self._create_approval_request(
+            teardown_id=teardown_id,
+            deployment_id=deployment_id,
+            level=level_config.level,
+            slippage=slippage,
+            position_value=position_value,
+        )
+        if on_approval_needed is None:
+            return _ApprovalDecision(
+                execute_level=False,
+                result=ExecutionResult(
+                    success=False,
+                    final_slippage=slippage,
+                    status="paused_awaiting_approval",
+                    attempts=attempts,
+                    current_level=level_config.level,
+                    message=f"Approval required for {slippage:.1%} slippage",
+                    approval_request=approval_request,
+                ),
+            )
+
+        logger.info(
+            f"Requesting approval for {slippage:.1%} slippage (estimated loss: ${position_value * slippage:,.2f})"
+        )
+        approval_response = await on_approval_needed(approval_request)
+        if approval_response.approved:
+            return _ApprovalDecision(execute_level=True)
+
+        if approval_response.action == "wait_and_escalate":
+            logger.info(
+                "Operator declined level %s; sleeping %.1fs then escalating to next level",
+                level_config.level,
+                self.config.retry_delay_seconds * 2,
+            )
+            await asyncio.sleep(self.config.retry_delay_seconds * 2)
+            return _ApprovalDecision(execute_level=False)
+
+        return _ApprovalDecision(
+            execute_level=False,
+            result=ExecutionResult(
+                success=False,
+                final_slippage=slippage,
+                status="cancelled_by_user",
+                attempts=attempts,
+                current_level=level_config.level,
+                message=f"User declined approval for {slippage:.1%} slippage",
+            ),
+        )
+
+    def _fold_attempt_result(
+        self,
+        *,
+        attempt: ExecutionAttempt,
+        level_config: EscalationConfig,
+        retry: int,
+        attempts: list[ExecutionAttempt],
+    ) -> _AttemptDecision:
+        """Convert terminal attempt states into the public execution result contract."""
+        slippage = level_config.slippage
+        if attempt.success:
+            final_slippage = attempt.actual_slippage if attempt.actual_slippage is not None else slippage
+            return _AttemptDecision(
+                disposition="escalate",
+                result=ExecutionResult(
+                    success=True,
+                    final_slippage=final_slippage,
+                    status="completed",
+                    attempts=attempts,
+                    current_level=level_config.level,
+                    message=f"Executed successfully at {slippage:.1%} slippage",
+                ),
+            )
+
+        disposition = getattr(attempt, "disposition", "escalate")
+        if not attempt.retryable or disposition == "non_retryable":
+            logger.info(f"Non-retryable failure at {slippage:.1%}: {attempt.error}. Skipping further escalation.")
+            return _AttemptDecision(
+                disposition=disposition,
+                result=ExecutionResult(
+                    success=False,
+                    final_slippage=slippage,
+                    status="failed_non_retryable",
+                    attempts=attempts,
+                    current_level=level_config.level,
+                    message=f"Non-retryable error: {attempt.error}",
+                ),
+            )
+
+        if disposition == "retry_same_level" and retry == level_config.retries - 1:
+            logger.warning(
+                "Transport/RPC failure persisted after %d same-level retries; aborting without escalation: %s",
+                level_config.retries,
+                attempt.error,
+            )
+            return _AttemptDecision(
+                disposition=disposition,
+                result=ExecutionResult(
+                    success=False,
+                    final_slippage=slippage,
+                    status="failed_rpc_unreachable",
+                    attempts=attempts,
+                    current_level=level_config.level,
+                    message=f"Transport/RPC unreachable: {attempt.error}",
+                ),
+            )
+
+        return _AttemptDecision(disposition=disposition)
+
+    async def _dispatch_level(
+        self,
+        *,
+        intent: Any,
+        level_config: EscalationConfig,
+        execute_func: ExecuteFunc,
+        attempts: list[ExecutionAttempt],
+    ) -> ExecutionResult | None:
+        """Dispatch simulation/execution attempts sequentially for one ladder rung."""
+        slippage = level_config.slippage
+        for retry in range(level_config.retries):
+            logger.info(
+                f"Attempting execution at {slippage:.1%} slippage "
+                f"(level {level_config.level.value}, attempt {retry + 1}/{level_config.retries})"
+            )
+            attempt = await execute_func(intent, slippage)
+            attempt.retry_count = retry
+            attempts.append(attempt)
+
+            if not attempt.success:
+                logger.warning(f"Execution failed at {slippage:.1%}: {attempt.error}")
+            decision = self._fold_attempt_result(
+                attempt=attempt,
+                level_config=level_config,
+                retry=retry,
+                attempts=attempts,
+            )
+            if decision.result is not None:
+                return decision.result
+
+            if decision.disposition == "retry_same_level":
+                retry_delay = float(self.config.retry_delay_seconds)
+                if attempt.retry_after_seconds is not None:
+                    retry_delay = max(retry_delay, attempt.retry_after_seconds)
+                logger.info(
+                    "Transient transport failure at %.1f%%: %s. Retrying at the same level (%.2fs backoff).",
+                    slippage * 100,
+                    attempt.error,
+                    retry_delay,
+                )
+                await asyncio.sleep(retry_delay)
+            elif retry < level_config.retries - 1:
+                retry_delay = float(self.config.retry_delay_seconds)
+                if attempt.retry_after_seconds is not None:
+                    retry_delay = max(retry_delay, attempt.retry_after_seconds)
+                    logger.info("Retryable failure requested %.2fs backoff before retry.", retry_delay)
+                await asyncio.sleep(retry_delay)
+            elif attempt.retry_after_seconds is not None:
+                retry_delay = max(self.config.retry_delay_seconds, attempt.retry_after_seconds)
+                logger.info("Retryable failure requested %.2fs backoff before escalation.", retry_delay)
+                await asyncio.sleep(retry_delay)
+
+        return None
+
+    async def execute_with_escalation(
         self,
         intent: Any,
         position_value: Decimal,
@@ -188,248 +451,53 @@ class EscalatingSlippageManager:
         """
         attempts: list[ExecutionAttempt] = []
         max_loss_percent = calculate_max_acceptable_loss(position_value)
+        plan = self._prepare_escalation(intent_slippage)
 
-        # Build effective levels: if intent_slippage is provided, ensure all
-        # levels up to that slippage are auto-approved and the ladder remains
-        # monotonically increasing.  Deep-copy to avoid mutating self.levels.
-        effective_levels = [
-            EscalationConfig(
-                level=lc.level,
-                slippage=lc.slippage,
-                auto_approve=lc.auto_approve,
-                retries=lc.retries,
-            )
-            for lc in self.levels
-        ]
-        if intent_slippage is not None and intent_slippage > Decimal("0"):
-            # Clamp to absolute_max_slippage to prevent misconfigured strategies
-            # from auto-approving arbitrarily high slippage.
-            if intent_slippage > self.config.absolute_max_slippage:
-                logger.warning(
-                    "Intent slippage %.1f%% exceeds absolute max %.1f%%, clamping.",
-                    float(intent_slippage * 100),
-                    float(self.config.absolute_max_slippage * 100),
-                )
-                intent_slippage = self.config.absolute_max_slippage
-
-            # Inject a level at intent_slippage if one doesn't already exist
-            if not any(lc.slippage == intent_slippage for lc in effective_levels):
-                injected_level = self.get_level_for_slippage(intent_slippage) or EscalationLevel.LEVEL_4
-                logger.info(
-                    "Injecting auto-approve level at %.1f%% from strategy teardown config.",
-                    float(intent_slippage * 100),
-                )
-                effective_levels.append(
-                    EscalationConfig(
-                        level=injected_level,
-                        slippage=intent_slippage,
-                        auto_approve=True,
-                        retries=1,
-                    ),
-                )
-
-            # Auto-approve all levels at or below intent_slippage
-            for level in effective_levels:
-                if level.slippage <= intent_slippage and not level.auto_approve:
-                    logger.info(
-                        "Overriding level at %.1f%% to auto-approve (at or below intent slippage %.1f%%).",
-                        float(level.slippage * 100),
-                        float(intent_slippage * 100),
-                    )
-                    level.auto_approve = True
-
-            # Sort by slippage to maintain monotonic escalation
-            effective_levels.sort(key=lambda lc: lc.slippage)
-
-        # When the strategy explicitly requests higher slippage (e.g. Pendle YT
-        # with thin AMM liquidity), raise the auto-mode cap so the escalation
-        # ladder can reach the strategy-configured level.  Still bounded by the
-        # absolute max for safety.
-        effective_auto_max = self.config.auto_max_slippage
-        if intent_slippage is not None and intent_slippage > effective_auto_max:
-            effective_auto_max = min(intent_slippage, self.config.absolute_max_slippage)
-            logger.info(
-                "Raising auto-mode slippage cap from %.1f%% to %.1f%% (intent_slippage=%.1f%%).",
-                float(self.config.auto_max_slippage * 100),
-                float(effective_auto_max * 100),
-                float(intent_slippage * 100),
-            )
-
-        for level_config in effective_levels:
+        for level_config in plan.levels:
             slippage = level_config.slippage
-
-            # In auto mode, don't exceed effective max
-            if is_auto_mode and slippage > effective_auto_max:
+            if is_auto_mode and slippage > plan.auto_max_slippage:
                 logger.info(
-                    f"Auto mode: stopping at {effective_auto_max:.1%} "
+                    f"Auto mode: stopping at {plan.auto_max_slippage:.1%} "
                     f"(level {level_config.level.value} requires {slippage:.1%})"
                 )
                 return ExecutionResult(
                     success=False,
-                    final_slippage=effective_auto_max,
+                    final_slippage=plan.auto_max_slippage,
                     status="paused_auto_limit_reached",
                     attempts=attempts,
                     current_level=level_config.level,
-                    message=f"Auto-exit paused. Market requires {slippage:.1%} slippage but auto limit is {effective_auto_max:.1%}. Manual intervention needed.",
+                    message=(
+                        f"Auto-exit paused. Market requires {slippage:.1%} slippage but auto limit is "
+                        f"{plan.auto_max_slippage:.1%}. Manual intervention needed."
+                    ),
                 )
 
-            # Check if approval is needed
-            if not level_config.auto_approve:
-                # Check if slippage exceeds position-aware cap
-                if slippage > max_loss_percent or slippage > self.config.manual_approval_threshold:
-                    if on_approval_needed is None:
-                        # No approval callback - pause
-                        return ExecutionResult(
-                            success=False,
-                            final_slippage=slippage,
-                            status="paused_awaiting_approval",
-                            attempts=attempts,
-                            current_level=level_config.level,
-                            message=f"Approval required for {slippage:.1%} slippage",
-                            approval_request=self._create_approval_request(
-                                teardown_id=teardown_id,
-                                deployment_id=deployment_id,
-                                level=level_config.level,
-                                slippage=slippage,
-                                position_value=position_value,
-                            ),
-                        )
+            approval = await self._resolve_level_approval(
+                level_config=level_config,
+                max_loss_percent=max_loss_percent,
+                position_value=position_value,
+                attempts=attempts,
+                on_approval_needed=on_approval_needed,
+                teardown_id=teardown_id,
+                deployment_id=deployment_id,
+            )
+            if approval.result is not None:
+                return approval.result
+            if not approval.execute_level:
+                continue
 
-                    # Request approval
-                    approval_request = self._create_approval_request(
-                        teardown_id=teardown_id,
-                        deployment_id=deployment_id,
-                        level=level_config.level,
-                        slippage=slippage,
-                        position_value=position_value,
-                    )
+            execution_result = await self._dispatch_level(
+                intent=intent,
+                level_config=level_config,
+                execute_func=execute_func,
+                attempts=attempts,
+            )
+            if execution_result is not None:
+                return execution_result
 
-                    logger.info(
-                        f"Requesting approval for {slippage:.1%} slippage "
-                        f"(estimated loss: ${position_value * slippage:,.2f})"
-                    )
-
-                    approval_response = await on_approval_needed(approval_request)
-
-                    if not approval_response.approved:
-                        if approval_response.action == "wait_and_escalate":
-                            # Operator declined the current level. Sleep briefly
-                            # to let market conditions settle, then advance to
-                            # the next (higher-slippage) level. The CURRENT
-                            # level is not retried — the operator already
-                            # declined it. The outer for loop's next iteration
-                            # is the next escalation level.
-                            logger.info(
-                                "Operator declined level %s; sleeping %.1fs then escalating to next level",
-                                level_config.level,
-                                self.config.retry_delay_seconds * 2,
-                            )
-                            await asyncio.sleep(self.config.retry_delay_seconds * 2)
-                            continue
-                        else:
-                            # User cancelled or chose different action
-                            return ExecutionResult(
-                                success=False,
-                                final_slippage=slippage,
-                                status="cancelled_by_user",
-                                attempts=attempts,
-                                current_level=level_config.level,
-                                message=f"User declined approval for {slippage:.1%} slippage",
-                            )
-
-            # Try execution at this level
-            for retry in range(level_config.retries):
-                logger.info(
-                    f"Attempting execution at {slippage:.1%} slippage "
-                    f"(level {level_config.level.value}, attempt {retry + 1}/{level_config.retries})"
-                )
-
-                attempt = await execute_func(intent, slippage)
-                attempt.retry_count = retry
-
-                attempts.append(attempt)
-
-                if attempt.success:
-                    return ExecutionResult(
-                        success=True,
-                        final_slippage=attempt.actual_slippage or slippage,
-                        status="completed",
-                        attempts=attempts,
-                        current_level=level_config.level,
-                        message=f"Executed successfully at {slippage:.1%} slippage",
-                    )
-
-                # Failed - log and potentially retry
-                logger.warning(f"Execution failed at {slippage:.1%}: {attempt.error}")
-
-                # Classify how to react to this failure (VIB-4532 / VIB-4664 /
-                # VIB-4258). ``non_retryable`` short-circuits, ``retry_same_level``
-                # retries without escalating, ``escalate`` (default) keeps the
-                # historical ladder. ``retryable=False`` is the legacy spelling of
-                # ``non_retryable`` — permanent compile failures still set it.
-                disposition = getattr(attempt, "disposition", "escalate")
-
-                # Deterministic failure no slippage level can fix — surface now.
-                if not attempt.retryable or disposition == "non_retryable":
-                    logger.info(
-                        f"Non-retryable failure at {slippage:.1%}: {attempt.error}. Skipping further escalation."
-                    )
-                    return ExecutionResult(
-                        success=False,
-                        final_slippage=slippage,
-                        status="failed_non_retryable",
-                        attempts=attempts,
-                        current_level=level_config.level,
-                        message=f"Non-retryable error: {attempt.error}",
-                    )
-
-                # Transient transport/RPC failure (VIB-4258): retry at the SAME
-                # slippage level, never escalate — bumping slippage cannot fix a
-                # DNS/Fork transport error and an operator must never approve loss
-                # for a network blip. After this level's retries are exhausted we
-                # abort with a distinct status instead of advancing the ladder.
-                if disposition == "retry_same_level":
-                    if retry < level_config.retries - 1:
-                        transport_delay = float(self.config.retry_delay_seconds)
-                        if attempt.retry_after_seconds is not None:
-                            transport_delay = max(transport_delay, attempt.retry_after_seconds)
-                        logger.info(
-                            "Transient transport failure at %.1f%%: %s. Retrying at the same level (%.2fs backoff).",
-                            slippage * 100,
-                            attempt.error,
-                            transport_delay,
-                        )
-                        await asyncio.sleep(transport_delay)
-                        continue
-                    logger.warning(
-                        "Transport/RPC failure persisted after %d same-level retries; aborting without escalation: %s",
-                        level_config.retries,
-                        attempt.error,
-                    )
-                    return ExecutionResult(
-                        success=False,
-                        final_slippage=slippage,
-                        status="failed_rpc_unreachable",
-                        attempts=attempts,
-                        current_level=level_config.level,
-                        message=f"Transport/RPC unreachable: {attempt.error}",
-                    )
-
-                if retry < level_config.retries - 1:
-                    retry_delay: float = float(self.config.retry_delay_seconds)
-                    if attempt.retry_after_seconds is not None:
-                        retry_delay = max(retry_delay, attempt.retry_after_seconds)
-                        logger.info("Retryable failure requested %.2fs backoff before retry.", retry_delay)
-                    await asyncio.sleep(retry_delay)
-                elif attempt.retry_after_seconds is not None:
-                    retry_delay = max(self.config.retry_delay_seconds, attempt.retry_after_seconds)
-                    logger.info("Retryable failure requested %.2fs backoff before escalation.", retry_delay)
-                    await asyncio.sleep(retry_delay)
-
-        # All levels exhausted
         return ExecutionResult(
             success=False,
-            final_slippage=effective_levels[-1].slippage,
+            final_slippage=plan.levels[-1].slippage,
             status="failed_manual_intervention_required",
             attempts=attempts,
             current_level=EscalationLevel.LEVEL_5,

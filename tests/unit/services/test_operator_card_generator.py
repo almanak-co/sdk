@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from almanak.framework.models import StuckReason
+from almanak.framework.models import PositionSummary, Severity, StuckReason
 from almanak.framework.services.operator_card_generator import (
     ErrorContext,
     OperatorCardGenerator,
@@ -278,3 +278,18 @@ def test_reason_detection_defaults_to_unknown(
     card = generator.generate_card(_state())
 
     assert card.reason == StuckReason.UNKNOWN
+
+
+def test_unmeasured_position_value_does_not_infer_value_risk(
+    generator: OperatorCardGenerator,
+) -> None:
+    position = PositionSummary(
+        total_value_usd=None,
+        available_balance_usd=None,
+        lp_value_usd=Decimal("10000"),
+        borrowed_value_usd=Decimal("10000"),
+    )
+
+    severity = generator._calculate_severity(_state(), position, StuckReason.UNKNOWN)
+
+    assert severity == Severity.LOW

@@ -1608,16 +1608,108 @@ def _value_weighted_leg_basis(
     return per_leg_basis
 
 
-# crap-allowlist: VIB-4262 — _apply_lp_wallet_basis_hooks branches per
-# (intent_type × token leg × skip-condition) which is the irreducible shape
-# of LP semantics: LP_OPEN drains both tokens, LP_CLOSE / LP_COLLECT_FEES
-# record an active_legs loop with per-leg amount=principal+fees and
-# per-leg cost_basis split (gemini-code-assist 2026-05-11). cc=31 is per-
-# leg-branch cost; decomposing into 4-5 micro-helpers would add naming
-# overhead without architectural value (no shared abstraction emerges from
-# the per-leg branches). Anti-regression coverage: 6 tests in
-# tests/unit/framework/accounting/test_lp_perp_vault_handlers.py
-# (TestHandleLpWalletBasisHooks; 100% line coverage).
+def _lp_wallet_basis_key(chain: str, wallet_address: str) -> str | None:
+    """Return the fungible FIFO key shared by LP, SWAP, and lending flows."""
+    chain_norm = (chain or "").lower().strip()
+    wallet_norm = (wallet_address or "").lower().strip()
+    if not chain_norm or not wallet_norm:
+        return None
+    return f"swap:{chain_norm}:{wallet_norm}"
+
+
+def _drain_lp_open_wallet_basis(
+    *,
+    basis_store: FIFOBasisStore,
+    deployment_id: str,
+    swap_wallet_key: str,
+    token0: str,
+    token1: str,
+    amount0: Decimal | None,
+    amount1: Decimal | None,
+) -> None:
+    """Dispose receipt-confirmed LP inputs from the shared wallet FIFO pool."""
+    for token, amount in ((token0, amount0), (token1, amount1)):
+        if token and amount is not None and amount > 0:
+            basis_store.match_swap_disposal(
+                deployment_id=deployment_id,
+                position_key=swap_wallet_key,
+                token=token,
+                amount=amount,
+            )
+
+
+def _lp_returned_amount(amount: Decimal | None, fees: Decimal | None) -> Decimal:
+    """Resolve either supported LP writer convention without double-counting fees."""
+    return max(
+        amount if amount is not None else Decimal("0"),
+        fees if fees is not None else Decimal("0"),
+    )
+
+
+def _active_lp_return_legs(
+    *,
+    token0: str,
+    token1: str,
+    amount0: Decimal | None,
+    amount1: Decimal | None,
+    fees0: Decimal | None,
+    fees1: Decimal | None,
+) -> list[tuple[str, Decimal]]:
+    """Return positive close/collect wallet credits in canonical leg order."""
+    t0_total = _lp_returned_amount(amount0, fees0)
+    t1_total = _lp_returned_amount(amount1, fees1)
+    active_legs: list[tuple[str, Decimal]] = []
+    if token0 and t0_total > 0:
+        active_legs.append((token0, t0_total))
+    if token1 and t1_total > 0:
+        active_legs.append((token1, t1_total))
+    return active_legs
+
+
+def _lp_return_basis_usd(
+    amount0: Decimal | None,
+    amount1: Decimal | None,
+    cost_basis_usd: Decimal | None,
+    fees_total_usd: Decimal | None,
+) -> Decimal | None:
+    """Select the USD source that values the quantity credited to the wallet."""
+    principal_present = (amount0 is not None and amount0 > 0) or (amount1 is not None and amount1 > 0)
+    return cost_basis_usd if principal_present else fees_total_usd
+
+
+def _record_lp_return_wallet_basis(
+    *,
+    basis_store: FIFOBasisStore,
+    active_legs: list[tuple[str, Decimal]],
+    total_val_usd: Decimal | None,
+    price_oracle: dict[str, Decimal],
+    deployment_id: str,
+    cycle_id: str,
+    chain: str,
+    swap_wallet_key: str,
+    timestamp: datetime,
+    seed: str,
+    source: str,
+) -> None:
+    """Record LP returns as value-weighted wallet acquisition lots."""
+    per_leg_basis = _value_weighted_leg_basis(active_legs, total_val_usd, price_oracle, chain=chain)
+    for idx, (leg_token, leg_amount) in enumerate(active_legs):
+        basis_store.record_swap_acquisition(
+            deployment_id=deployment_id,
+            position_key=swap_wallet_key,
+            token=leg_token,
+            amount=leg_amount,
+            cost_usd=per_leg_basis[idx],
+            timestamp=timestamp,
+            lot_id=(
+                make_accounting_event_id(deployment_id, cycle_id, "LP_CLOSE_WALLET_LOT", seed, leg_token)
+                if seed
+                else ""
+            ),
+            source=source,
+        )
+
+
 def _apply_lp_wallet_basis_hooks(
     *,
     basis_store: FIFOBasisStore | None,
@@ -1663,165 +1755,48 @@ def _apply_lp_wallet_basis_hooks(
     """
     if basis_store is None:
         return
-    chain_norm = (chain or "").lower().strip()
-    wallet_norm = (wallet_address or "").lower().strip()
-    if not chain_norm or not wallet_norm:
+    swap_wallet_key = _lp_wallet_basis_key(chain, wallet_address)
+    if swap_wallet_key is None:
         return
-    swap_wallet_key = f"swap:{chain_norm}:{wallet_norm}"
     _seed = tx_hash or ledger_entry_id
 
     if intent_type_str == "LP_OPEN":
-        # LP_OPEN moves token0 + token1 OUT of the wallet into the LP NFT.
-        # Mirror as a wallet-basis disposal so the lots minted by prior SWAP /
-        # BORROW / WITHDRAW are drained correctly.
-        if token0 and amount0 is not None and amount0 > 0:
-            basis_store.match_swap_disposal(
-                deployment_id=deployment_id,
-                position_key=swap_wallet_key,
-                token=token0,
-                amount=amount0,
-            )
-        if token1 and amount1 is not None and amount1 > 0:
-            basis_store.match_swap_disposal(
-                deployment_id=deployment_id,
-                position_key=swap_wallet_key,
-                token=token1,
-                amount=amount1,
-            )
+        _drain_lp_open_wallet_basis(
+            basis_store=basis_store,
+            deployment_id=deployment_id,
+            swap_wallet_key=swap_wallet_key,
+            token0=token0,
+            token1=token1,
+            amount0=amount0,
+            amount1=amount1,
+        )
         return
 
-    # LP_CLOSE / LP_COLLECT_FEES return amount + accumulated fees per token.
-    # Mirror as wallet-basis acquisition so a follow-up SWAP that disposes
-    # the returned tokens has a basis lot to match against.
-    #
-    # Cost-basis distribution (gemini-code-assist 2026-05-11; VIB-4264):
-    #
-    # 1. Per-leg amount = principal + accumulated fees. LP_COLLECT_FEES has
-    #    amount0/amount1 == 0 by design; without summing fees the hook would
-    #    skip fee-only events entirely.
-    # 2. Total returned-USD = cost_basis_usd (principal MTM) + fees_total_usd.
-    #    Fees collected to the wallet have economic value and SHOULD anchor
-    #    the cost lot — without them, a follow-up SWAP that disposes the
-    #    fee portion mis-computes realized PnL.
-    # 3. Active legs only. Single-sided exits (one token amount==0) get the
-    #    full per-leg basis.
-    # 4. VIB-4264 — VALUE-WEIGHTED distribution. The whole-position
-    #    ``total_val_usd`` is split across legs in proportion to each leg's
-    #    USD value (leg_amount × close-time price), NOT equally by leg count.
-    #    The prior equal split over-based the smaller-value leg: a 100 USDC +
-    #    0.01 WETH close (USDC:1, WETH:2000 ⇒ $100 vs $20, total $120) stamped
-    #    $60 on EACH leg, over-basing WETH by +$40. That over-based lot
-    #    re-enters the swap FIFO pool and inflates the closing SWAP's
-    #    ``realized_pnl_usd_matched`` (= matched_proceeds − cost_basis_consumed
-    #    in ``swap_handler.py``). Mainnet repro: −$0.2507 vs true ≈ −$0.02.
-    #    The split keeps the Σ-invariant EXACTLY — the LAST leg takes the
-    #    residual (``total_val_usd − Σ(previous)``) so no basis is created or
-    #    destroyed to Decimal rounding, mirroring ``swap_handler._split_proceeds``.
-    #    Empty ≠ Zero (CLAUDE.md), Option (a) — whole-hook None: the weight is
-    #    a RATIO across legs, so a single missing/non-finite leg price makes the
-    #    denominator (Σ leg_value) unmeasurable for EVERY leg. Assigning a
-    #    concrete basis to the priced leg would fabricate that denominator, so
-    #    ALL legs fall back to ``cost_usd = None`` (lots still recorded; neither
-    #    leg dropped). Fail-closed (swap emits realized_pnl = None) beats
-    #    fail-wrong.
     if intent_type_str in {"LP_CLOSE", "LP_COLLECT_FEES"}:
-        # VIB-5865 PR-2 — CONVENTION-ROBUST WALLET CREDIT: ``max(amount, fees)``
-        # per leg (was ``amount + fees`` before this PR; then briefly ``amount``
-        # alone, which regressed the fees-separate writers — see the CI catch).
-        #
-        # ``amount0``/``amount1`` are ``LPCloseData.amount{0,1}_collected`` and
-        # ``fees0``/``fees1`` are ``LPCloseData.fees{0,1}``. Two writer
-        # conventions exist and ``max`` is correct for BOTH — proven by survey
-        # (``tests/reports/vib5865-pr2-fee-convention-survey.md``): NO LPCloseData
-        # writer emits ``amount_collected > 0`` AND a disjoint additive
-        # ``fees > 0``, so ``max`` never under-credits and never over-credits.
-        #   * FEE-INCLUSIVE (V3-family and every other conv-1 writer — full
-        #     per-connector list lives in the survey doc, not here):
-        #     ``amount_collected`` is the full wallet transfer, principal PLUS
-        #     fees; ``fees`` is a COMPONENT INSIDE it (V3: ``max(collect-burn,0)``;
-        #     ``LPCloseData.amount0_collected`` doc: "principal + fees") or
-        #     pool-retained-already-deducted (Curve). ``amount ≥ fees`` ⇒
-        #     ``max = amount``. Adding ``fees`` double-counted (100% on a fee-only
-        #     V3 harvest, where ``amount_collected == fees``).
-        #   * FEES-SEPARATE (traderjoe_v2 / uniswap_v4 fee-only collect):
-        #     ``amount_collected == 0``; the real fee ships on the separate
-        #     extract-fees rail and lands in ``fees{0,1}`` by the time this hook
-        #     runs (VIB-3494 shape). ``max(0, fees) = fees``. Crediting ``amount``
-        #     alone DROPPED the fee lot (the CI regression this restores).
-        #
-        # An over-credited wallet lot is a FUND-SAFETY defect, not just a PnL
-        # one: it inflates the teardown clamp's tracked inventory, letting the
-        # swap-back sweep more than the strategy actually owns. An under-credited
-        # one strands a real fee balance. The replay side
-        # (``basis.FIFOBasisStore._replay_lp``) applies the identical formula —
-        # they must agree or a restart re-bases the pool (restart-parity test).
-        t0_total = max(
-            amount0 if amount0 is not None else Decimal("0"),
-            fees0 if fees0 is not None else Decimal("0"),
+        active_legs = _active_lp_return_legs(
+            token0=token0,
+            token1=token1,
+            amount0=amount0,
+            amount1=amount1,
+            fees0=fees0,
+            fees1=fees1,
         )
-        t1_total = max(
-            amount1 if amount1 is not None else Decimal("0"),
-            fees1 if fees1 is not None else Decimal("0"),
-        )
-        active_legs: list[tuple[str, Decimal]] = []
-        if token0 and t0_total > 0:
-            active_legs.append((token0, t0_total))
-        if token1 and t1_total > 0:
-            active_legs.append((token1, t1_total))
         if not active_legs:
             return
-
-        # Empty ≠ zero (CLAUDE.md): only seed `cost_usd` when ALL economic
-        # components contributing to the lots are measured. If principal
-        # amounts are present but `cost_basis_usd is None`, OR fee amounts
-        # are present but `fees_total_usd is None`, leave `per_leg_basis = None`
-        # rather than substitute zeros and fabricate basis for the unmeasured
-        # component. CodeRabbit 2026-05-11 catch — without this guard, a
-        # close/collect with one fee leg unpriced would assign a concrete
-        # `per_leg_basis` to lots that include the fee amount and skew the
-        # next SWAP's `realized_pnl_usd`.
-        # VIB-5865 PR-2 — USD mirror of the convention-robust quantity credit
-        # above (was ``cost_basis_usd + fees_total_usd``, which double-counted the
-        # fee USD for the fee-INCLUSIVE convention). The USD basis must value the
-        # SAME quantity the credit booked:
-        #   * principal present (a fee-INCLUSIVE close: ``amount_collected`` is the
-        #     credit and already contains the fees) → ``cost_basis_usd``, which is
-        #     ``compute_lp_cost_basis(amount0, amount1, …)`` over those same
-        #     fee-inclusive amounts, so it already values the whole lot. Adding
-        #     ``fees_total_usd`` on top over-based every lot and inflated the next
-        #     SWAP's ``realized_pnl_usd_matched``.
-        #   * no principal (a FEES-SEPARATE / fee-only collect: the credit IS the
-        #     fee amount) → ``fees_total_usd``, the USD of that fee. Using
-        #     ``cost_basis_usd`` (principal-only ⇒ 0/None) here would strand the
-        #     fee lot's basis.
-        # This is safe precisely because no writer emits principal AND disjoint
-        # additive fees together (survey), so the two USD sources are never both
-        # needed for one leg.
-        #
-        # Empty ≠ Zero (unchanged contract): if the chosen source is unmeasured
-        # the per-leg basis stays ``None`` — lots are still recorded, neither leg
-        # dropped — rather than fabricating a zero basis.
-        principal_present = (amount0 is not None and amount0 > 0) or (amount1 is not None and amount1 > 0)
-        total_val_usd: Decimal | None = cost_basis_usd if principal_present else fees_total_usd
-        # VIB-4264: value-weight ``total_val_usd`` across legs by close-time
-        # USD value (see ``_value_weighted_leg_basis``). Keyed BY INDEX.
-        per_leg_basis = _value_weighted_leg_basis(active_legs, total_val_usd, price_oracle, chain=chain)
-
-        for idx, (leg_token, leg_amount) in enumerate(active_legs):
-            basis_store.record_swap_acquisition(
-                deployment_id=deployment_id,
-                position_key=swap_wallet_key,
-                token=leg_token,
-                amount=leg_amount,
-                cost_usd=per_leg_basis[idx],
-                timestamp=timestamp,
-                lot_id=(
-                    make_accounting_event_id(deployment_id, cycle_id, "LP_CLOSE_WALLET_LOT", _seed, leg_token)
-                    if _seed
-                    else ""
-                ),
-                source=intent_type_str,
-            )
+        total_val_usd = _lp_return_basis_usd(amount0, amount1, cost_basis_usd, fees_total_usd)
+        _record_lp_return_wallet_basis(
+            basis_store=basis_store,
+            active_legs=active_legs,
+            total_val_usd=total_val_usd,
+            price_oracle=price_oracle,
+            deployment_id=deployment_id,
+            cycle_id=cycle_id,
+            chain=chain,
+            swap_wallet_key=swap_wallet_key,
+            timestamp=timestamp,
+            seed=_seed,
+            source=intent_type_str,
+        )
 
 
 def handle_lp(

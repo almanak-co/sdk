@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import click
@@ -565,11 +566,324 @@ def _build_ohlcv_source_policy(
         raise click.ClickException(f"Invalid OHLCV source configuration: {exc}") from exc
 
 
-# crap-allowlist: #2097 replaces direct os.environ.get reads with the typed
-# cli_runtime_config_from_env() — no new branches, no new behaviour. Function refactor
-# is tracked separately; allowlist matches the documented escape hatch for this
-# config-boundary cutover.
-def _build_orchestrator_and_providers(  # noqa: C901
+@dataclass(frozen=True)
+class _BuiltProviders:
+    execution_orchestrator: Any
+    price_oracle: Any
+    balance_provider: Any
+    ohlcv_provider: Any = None
+
+
+@dataclass(frozen=True)
+class _ProviderFactories:
+    decimal: Any
+    balance_provider: Any
+    price_oracle: Any
+    create_ohlcv_stack: Any
+    multi_chain_orchestrator: Any
+    get_orca_pool_accounts: Any
+    init_prediction_provider: Any
+    wire_core_providers: Any
+    wire_indicators: Any
+
+
+def _wire_market_data_services(
+    *,
+    strategy_instance: Any,
+    strategy_config: dict[str, Any],
+    requirements: StrategyDataRequirements,
+    gateway_client: Any,
+    chain: str,
+    price_oracle: Any,
+    balance_provider: Any,
+    factories: _ProviderFactories,
+) -> Any:
+    """Wire the strategy-facing price, balance, OHLCV, and indicator providers."""
+    if requirements.indicators:
+        ohlcv_stack = factories.create_ohlcv_stack(
+            gateway_client=gateway_client,
+            chain=chain,
+            pool_address=strategy_config.get("pool_address") if strategy_config else None,
+            source_policy=_build_ohlcv_source_policy(strategy_instance, strategy_config, chain),
+        )
+        strategy_instance._ohlcv_router = ohlcv_stack.router
+        factories.wire_indicators(strategy_instance, ohlcv_stack.provider, price_oracle, balance_provider)
+        return ohlcv_stack.provider
+    if requirements.price or requirements.balance:
+        factories.wire_core_providers(strategy_instance, price_oracle, balance_provider)
+    return None
+
+
+def _wire_optional_data_services(
+    *,
+    strategy_instance: Any,
+    requirements: StrategyDataRequirements,
+    gateway_client: Any,
+    chain: str,
+    rpc_url_getter: Any,
+) -> None:
+    """Wire gateway access plus optional lending/funding providers and report them."""
+    strategy_instance._gateway_client = gateway_client
+
+    rate_monitor_wired = False
+    if requirements.lending_rates:
+        try:
+            from ..data.rates import RateMonitor
+
+            rate_monitor = RateMonitor(
+                chain=chain,
+                rpc_url=rpc_url_getter(),
+                gateway_client=gateway_client,
+                _internal=True,
+            )
+            strategy_instance._rate_monitor = rate_monitor
+            rate_monitor_wired = True
+        except Exception as e:
+            logger.debug(f"Rate monitor not available: {e}")
+
+    funding_wired = False
+    if requirements.funding_rates:
+        try:
+            from ..data.funding import GatewayFundingRateProvider
+
+            funding_provider = GatewayFundingRateProvider(gateway_client=gateway_client, chain=chain)
+            strategy_instance._funding_rate_provider = funding_provider
+            funding_wired = True
+        except (ImportError, ValueError, RuntimeError) as e:
+            logger.warning(
+                "Funding rate provider init failed for chain=%s: %s",
+                chain,
+                e,
+                exc_info=True,
+            )
+
+    wired = []
+    if getattr(strategy_instance, "_price_oracle", None) is not None:
+        wired.append("price")
+    if getattr(strategy_instance, "_balance_provider", None) is not None:
+        wired.append("balance")
+    if getattr(strategy_instance, "_indicator_provider", None) is not None:
+        wired.append("indicators")
+    if rate_monitor_wired:
+        wired.append("lending_rates")
+    if funding_wired:
+        wired.append("funding_rates")
+    click.echo(f"  Injected strategy data services: {', '.join(wired)}")
+
+
+def _solana_clone_accounts(strategy_config: dict[str, Any], get_orca_pool_accounts: Any) -> list[str]:
+    """Collect configured and Orca-derived accounts for a local Solana fork."""
+    clone_accounts: list[str] = []
+    if strategy_config and isinstance(strategy_config, dict):
+        for key in ("pool_address", "pool_a_address", "pool_b_address"):
+            address = strategy_config.get(key)
+            if address and isinstance(address, str):
+                clone_accounts.append(address)
+        orca_accounts = get_orca_pool_accounts(strategy_config)
+        if orca_accounts:
+            click.echo(f"  Pre-cloning {len(orca_accounts)} Orca pool accounts (vaults + tick arrays)")
+            clone_accounts.extend(orca_accounts)
+    return clone_accounts
+
+
+def _maybe_start_solana_fork(
+    *,
+    runtime_config: Any,
+    strategy_config: dict[str, Any],
+    resolved_network: str,
+    components: ComponentBundle,
+    factories: _ProviderFactories,
+) -> None:
+    """Start and fund solana-test-validator for a single-chain Anvil run."""
+    from almanak.framework.chain_family import SvmFamily as _SvmFamily
+    from almanak.framework.chain_family import family_for as _family_for
+
+    if not isinstance(_family_for(runtime_config.chain), _SvmFamily):
+        return
+    if resolved_network != "anvil":
+        return
+
+    from almanak.config import cli_runtime_config_from_env as _solana_cli_cfg
+
+    from ..anvil.solana_fork_manager import SolanaForkManager
+
+    solana_cli = _solana_cli_cfg()
+    clone_accounts = _solana_clone_accounts(strategy_config, factories.get_orca_pool_accounts)
+    if clone_accounts:
+        click.echo(f"  Cloning {len(clone_accounts)} account(s) from mainnet")
+    solana_fork_mgr = SolanaForkManager(
+        rpc_url=solana_cli.solana_rpc_url,
+        validator_port=solana_cli.solana_validator_port,
+        clone_accounts=clone_accounts,
+    )
+    click.echo("  Starting local solana-test-validator...")
+    import asyncio as _aio
+
+    started = _aio.get_event_loop().run_until_complete(solana_fork_mgr.start())
+    if not started:
+        raise click.ClickException(
+            "Failed to start solana-test-validator. "
+            "Ensure Solana CLI tools are installed: "
+            'sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"'
+        )
+    click.echo(f"  solana-test-validator running at {solana_fork_mgr.get_rpc_url()}")
+    _aio.get_event_loop().run_until_complete(
+        solana_fork_mgr.fund_wallet(runtime_config.wallet_address, factories.decimal("100"))
+    )
+    _aio.get_event_loop().run_until_complete(
+        solana_fork_mgr.fund_tokens(
+            runtime_config.wallet_address,
+            {"USDC": factories.decimal("10000"), "USDT": factories.decimal("10000")},
+        )
+    )
+    click.echo("  Wallet funded with 100 SOL + 10K USDC + 10K USDT")
+    components.solana_fork_mgr = solana_fork_mgr
+
+
+def _build_multi_chain_providers(
+    *,
+    runtime_config: Any,
+    strategy_chains: list[str],
+    strategy_config: dict[str, Any],
+    gateway_client: Any,
+    chain_wallets: dict[str, str],
+    strategy_instance: Any,
+    requirements: StrategyDataRequirements,
+    factories: _ProviderFactories,
+) -> _BuiltProviders:
+    """Build and wire gateway-backed providers for a multi-chain runtime."""
+    from ..data.balance.gateway_multichain import MultiChainGatewayBalanceProvider
+    from ..execution.gateway_orchestrator import GatewayExecutionOrchestrator  # noqa: F401
+
+    effective_wallet = runtime_config.execution_address
+    if chain_wallets:
+        effective_wallet = chain_wallets.get(strategy_chains[0], effective_wallet)
+    if not effective_wallet:
+        raise click.ClickException(
+            "No wallet address resolved for multi-chain execution. "
+            "Ensure ALMANAK_GATEWAY_WALLETS is configured correctly and the gateway is reachable."
+        )
+
+    primary_chain = strategy_chains[0]
+    click.echo("  Using gateway-backed providers for multi-chain...")
+    price_oracle = factories.price_oracle(gateway_client, default_chain=primary_chain)
+    balance_provider = factories.balance_provider(
+        client=gateway_client,
+        wallet_address=effective_wallet,
+        chain=primary_chain,
+    )
+    execution_orchestrator = factories.multi_chain_orchestrator.from_gateway(
+        gateway_client=gateway_client,
+        chains=strategy_chains,
+        wallet_address=effective_wallet,
+        max_gas_price_gwei=runtime_config.max_gas_price_gwei,
+        chain_wallets=chain_wallets or None,
+    )
+    multi_chain_balance_provider = MultiChainGatewayBalanceProvider(
+        client=gateway_client,
+        wallet_address=effective_wallet,
+        chains=strategy_chains,
+        chain_wallets=chain_wallets or None,
+    )
+    if hasattr(strategy_instance, "set_multi_chain_providers"):
+        strategy_instance.set_multi_chain_providers(
+            price_oracle=price_oracle,
+            balance_provider=multi_chain_balance_provider,
+        )
+        click.echo("  Multi-chain providers set on strategy")
+
+    ohlcv_provider = _wire_market_data_services(
+        strategy_instance=strategy_instance,
+        strategy_config=strategy_config,
+        requirements=requirements,
+        gateway_client=gateway_client,
+        chain=primary_chain,
+        price_oracle=price_oracle,
+        balance_provider=balance_provider,
+        factories=factories,
+    )
+    _wire_optional_data_services(
+        strategy_instance=strategy_instance,
+        requirements=requirements,
+        gateway_client=gateway_client,
+        chain=primary_chain,
+        rpc_url_getter=lambda: runtime_config.rpc_urls.get(primary_chain),
+    )
+    click.echo(f"  Multi-chain orchestrator created for {len(strategy_chains)} chains")
+    return _BuiltProviders(execution_orchestrator, price_oracle, balance_provider, ohlcv_provider)
+
+
+def _build_single_chain_providers(
+    *,
+    runtime_config: Any,
+    strategy_config: dict[str, Any],
+    resolved_network: str,
+    gateway_client: Any,
+    chain_wallets: dict[str, str],
+    strategy_instance: Any,
+    requirements: StrategyDataRequirements,
+    components: ComponentBundle,
+    factories: _ProviderFactories,
+) -> _BuiltProviders:
+    """Build and wire gateway-backed providers for a single-chain runtime."""
+    from ..execution.config import GatewayRuntimeConfig, LocalRuntimeConfig
+    from ..execution.gateway_orchestrator import GatewayExecutionOrchestrator
+
+    assert isinstance(runtime_config, LocalRuntimeConfig | GatewayRuntimeConfig)
+
+    effective_wallet = runtime_config.execution_address
+    if chain_wallets:
+        effective_wallet = chain_wallets.get(runtime_config.chain, effective_wallet)
+
+    click.echo("  Using gateway-backed providers...")
+    price_oracle = factories.price_oracle(gateway_client, default_chain=runtime_config.chain)
+    balance_provider = factories.balance_provider(
+        client=gateway_client,
+        wallet_address=effective_wallet,
+        chain=runtime_config.chain,
+    )
+    _maybe_start_solana_fork(
+        runtime_config=runtime_config,
+        strategy_config=strategy_config,
+        resolved_network=resolved_network,
+        components=components,
+        factories=factories,
+    )
+    execution_orchestrator = GatewayExecutionOrchestrator(
+        client=gateway_client,
+        chain=runtime_config.chain,
+        wallet_address=effective_wallet,
+        max_gas_price_gwei=runtime_config.max_gas_price_gwei,
+    )
+    click.echo("  Gateway-backed providers created")
+
+    ohlcv_provider = _wire_market_data_services(
+        strategy_instance=strategy_instance,
+        strategy_config=strategy_config,
+        requirements=requirements,
+        gateway_client=gateway_client,
+        chain=runtime_config.chain,
+        price_oracle=price_oracle,
+        balance_provider=balance_provider,
+        factories=factories,
+    )
+    if hasattr(strategy_instance, "_prediction_provider"):
+        factories.init_prediction_provider(
+            strategy_instance,
+            chain=runtime_config.chain,
+            gateway_client=gateway_client,
+        )
+    _wire_optional_data_services(
+        strategy_instance=strategy_instance,
+        requirements=requirements,
+        gateway_client=gateway_client,
+        chain=runtime_config.chain,
+        rpc_url_getter=lambda: getattr(runtime_config, "rpc_url", None),
+    )
+    return _BuiltProviders(execution_orchestrator, price_oracle, balance_provider, ohlcv_provider)
+
+
+def _build_orchestrator_and_providers(
     *,
     multi_chain: bool,
     runtime_config: Any,
@@ -606,332 +920,50 @@ def _build_orchestrator_and_providers(  # noqa: C901
     )
 
     requirements = _get_data_requirements(strategy_instance)
-    ohlcv_provider: Any = None
-
-    execution_orchestrator: Any
+    factories = _ProviderFactories(
+        decimal=Decimal,
+        balance_provider=GatewayBalanceProvider,
+        price_oracle=GatewayPriceOracle,
+        create_ohlcv_stack=create_ohlcv_stack,
+        multi_chain_orchestrator=MultiChainOrchestrator,
+        get_orca_pool_accounts=_get_orca_pool_accounts,
+        init_prediction_provider=_init_prediction_provider,
+        wire_core_providers=_wire_core_providers,
+        wire_indicators=_wire_indicators,
+    )
     if multi_chain:
-        from ..data.balance.gateway_multichain import MultiChainGatewayBalanceProvider
-        from ..execution.gateway_orchestrator import GatewayExecutionOrchestrator  # noqa: F401
-
-        # Resolve effective wallet address (from chain_wallets or runtime_config)
-        effective_wallet = runtime_config.execution_address
-        if chain_wallets:
-            effective_wallet = chain_wallets.get(strategy_chains[0], effective_wallet)
-
-        if not effective_wallet:
-            raise click.ClickException(
-                "No wallet address resolved for multi-chain execution. "
-                "Ensure ALMANAK_GATEWAY_WALLETS is configured correctly and the gateway is reachable."
-            )
-
-        click.echo("  Using gateway-backed providers for multi-chain...")
-        price_oracle = GatewayPriceOracle(gateway_client, default_chain=strategy_chains[0])
-        balance_provider = GatewayBalanceProvider(
-            client=gateway_client,
-            wallet_address=effective_wallet,
-            chain=strategy_chains[0],
-        )
-        execution_orchestrator = MultiChainOrchestrator.from_gateway(
+        built = _build_multi_chain_providers(
+            runtime_config=runtime_config,
+            strategy_chains=strategy_chains,
+            strategy_config=strategy_config,
             gateway_client=gateway_client,
-            chains=strategy_chains,
-            wallet_address=effective_wallet,
-            max_gas_price_gwei=runtime_config.max_gas_price_gwei,
-            chain_wallets=chain_wallets or None,
+            chain_wallets=chain_wallets,
+            strategy_instance=strategy_instance,
+            requirements=requirements,
+            factories=factories,
         )
-
-        # Create multi-chain balance provider for the strategy
-        multi_chain_balance_provider = MultiChainGatewayBalanceProvider(
-            client=gateway_client,
-            wallet_address=effective_wallet,
-            chains=strategy_chains,
-            chain_wallets=chain_wallets or None,
-        )
-
-        # Set multi-chain providers on strategy if it's an IntentStrategy.
-        # VIB-5663: wire the price oracle too — without it the multi-chain
-        # MarketSnapshot is built with price_oracle=None (builders.py) and every
-        # market.price(..., chain=...) raises "Cannot determine price", halting
-        # the runner on the accounting native-gas fold. GatewayPriceOracle.price
-        # is chain-aware and routes per-chain through the gateway.
-        if hasattr(strategy_instance, "set_multi_chain_providers"):
-            strategy_instance.set_multi_chain_providers(
-                price_oracle=price_oracle,
-                balance_provider=multi_chain_balance_provider,
-            )
-            click.echo("  Multi-chain providers set on strategy")
-
-        if requirements.indicators:
-            # NOTE: In multi-chain mode, OHLCV routing is bound to the first chain.
-            # For CEX-listed tokens this is fine (Binance data is chain-agnostic).
-            # For DeFi-native tokens on secondary chains, CoinGecko Onchain pool search
-            # may resolve to the wrong network. Per-chain providers would require
-            # passing chain context through the indicator callables, which is a larger change.
-            #
-            # ALM-3148 inherits that binding, with one consequence worth naming
-            # (ALM-3166): venue eligibility is resolved for `strategy_chains[0]`
-            # only. A multi-chain strategy that trades a native-candle venue on a
-            # SECONDARY chain resolves no venue, falls back to `auto`, and its
-            # perp symbols keep the pre-ALM-3148 routing — i.e. the bug this
-            # change fixes stays unfixed for that shape. It is not made worse:
-            # `auto` is exactly what those strategies get today. Fixing it means
-            # per-chain policies, which is the same larger change the note above
-            # defers, so it is tracked rather than attempted here.
-            ohlcv_stack = create_ohlcv_stack(
-                gateway_client=gateway_client,
-                chain=strategy_chains[0],
-                pool_address=strategy_config.get("pool_address") if strategy_config else None,
-                source_policy=_build_ohlcv_source_policy(strategy_instance, strategy_config, strategy_chains[0]),
-            )
-            ohlcv_provider = ohlcv_stack.provider
-            # VIB-4347: stamp the sync OHLCVRouter on the strategy so
-            # ``MarketSnapshot.ohlcv(...)`` resolves to the same routed gateway-backed
-            # pipes the indicator path already uses. Shared router instance = shared
-            # disk cache + TTL.
-            strategy_instance._ohlcv_router = ohlcv_stack.router
-            _wire_indicators(strategy_instance, ohlcv_provider, price_oracle, balance_provider)
-        elif requirements.price or requirements.balance:
-            # indicators=False: wire price/balance directly without OHLCV or indicator calculators
-            _wire_core_providers(strategy_instance, price_oracle, balance_provider)
-
-        # MarketSnapshot needs the gateway client to do gateway-routed eth_calls
-        # (e.g. position_health). Wire it unconditionally; methods that need it
-        # check for None at call time.
-        strategy_instance._gateway_client = gateway_client
-
-        rate_monitor_wired = False
-        if requirements.lending_rates:
-            try:
-                from ..data.rates import RateMonitor
-
-                primary_chain = strategy_chains[0]
-                chain_rpc_url = runtime_config.rpc_urls.get(primary_chain)
-                # _internal=True: framework wiring of the gateway-backed rate
-                # source onto MarketSnapshot is the canonical lending-rate lane,
-                # not a deprecated strategy-side bypass (VIB-4869).
-                # gateway_client=gateway_client (VIB-5824): thread the runner's
-                # REAL client (managed gateways bind a random port) so the rate
-                # lane reaches the gateway the runner actually started, instead
-                # of the default-port 50051 singleton that gets refused and
-                # silently fabricates a placeholder.
-                rate_monitor = RateMonitor(
-                    chain=primary_chain,
-                    rpc_url=chain_rpc_url,
-                    gateway_client=gateway_client,
-                    _internal=True,
-                )
-                strategy_instance._rate_monitor = rate_monitor
-                rate_monitor_wired = True
-            except Exception as e:
-                logger.debug(f"Rate monitor not available: {e}")
-
-        funding_wired = False
-        if requirements.funding_rates:
-            try:
-                from ..data.funding import GatewayFundingRateProvider
-
-                primary_chain = strategy_chains[0]
-                funding_provider = GatewayFundingRateProvider(gateway_client=gateway_client, chain=primary_chain)
-                strategy_instance._funding_rate_provider = funding_provider
-                funding_wired = True
-            except (ImportError, ValueError, RuntimeError) as e:
-                logger.warning(
-                    "Funding rate provider init failed for chain=%s: %s",
-                    strategy_chains[0],
-                    e,
-                    exc_info=True,
-                )
-
-        _wired = []
-        if getattr(strategy_instance, "_price_oracle", None) is not None:
-            _wired.append("price")
-        if getattr(strategy_instance, "_balance_provider", None) is not None:
-            _wired.append("balance")
-        if getattr(strategy_instance, "_indicator_provider", None) is not None:
-            _wired.append("indicators")
-        if rate_monitor_wired:
-            _wired.append("lending_rates")
-        if funding_wired:
-            _wired.append("funding_rates")
-        click.echo(f"  Injected strategy data services: {', '.join(_wired)}")
-        click.echo(f"  Multi-chain orchestrator created for {len(strategy_chains)} chains")
     else:
-        # Single-chain setup - always use gateway-backed providers
-        from ..execution.config import GatewayRuntimeConfig, LocalRuntimeConfig
-        from ..execution.gateway_orchestrator import GatewayExecutionOrchestrator
-
-        assert isinstance(runtime_config, LocalRuntimeConfig | GatewayRuntimeConfig)
-
-        # Resolve effective wallet address (from chain_wallets or runtime_config)
-        sc_effective_wallet = runtime_config.execution_address
-        if chain_wallets:
-            sc_effective_wallet = chain_wallets.get(runtime_config.chain, sc_effective_wallet)
-
-        click.echo("  Using gateway-backed providers...")
-        price_oracle = GatewayPriceOracle(gateway_client, default_chain=runtime_config.chain)
-        balance_provider = GatewayBalanceProvider(
-            client=gateway_client,
-            wallet_address=sc_effective_wallet,
-            chain=runtime_config.chain,
+        built = _build_single_chain_providers(
+            runtime_config=runtime_config,
+            strategy_config=strategy_config,
+            resolved_network=resolved_network,
+            gateway_client=gateway_client,
+            chain_wallets=chain_wallets,
+            strategy_instance=strategy_instance,
+            requirements=requirements,
+            components=components,
+            factories=factories,
         )
-
-        # For Solana + --network anvil, start local solana-test-validator.
-        # VIB-4803: route through the ChainFamily adapter.
-        from almanak.framework.chain_family import SvmFamily as _SvmFamily
-        from almanak.framework.chain_family import family_for as _family_for
-
-        if isinstance(_family_for(runtime_config.chain), _SvmFamily) and resolved_network == "anvil":
-            from almanak.config import cli_runtime_config_from_env as _solana_cli_cfg
-
-            from ..anvil.solana_fork_manager import SolanaForkManager
-
-            _solana_cli = _solana_cli_cfg()
-            solana_rpc_url = _solana_cli.solana_rpc_url
-            # Clone any pool/account addresses declared in the strategy config
-            _extra_clone = []
-            if strategy_config and isinstance(strategy_config, dict):
-                for _key in ("pool_address", "pool_a_address", "pool_b_address"):
-                    _addr = strategy_config.get(_key)
-                    if _addr and isinstance(_addr, str):
-                        _extra_clone.append(_addr)
-                # For Orca Whirlpool strategies, also pre-clone vault + tick array accounts
-                _orca_accounts = _get_orca_pool_accounts(strategy_config)
-                if _orca_accounts:
-                    click.echo(f"  Pre-cloning {len(_orca_accounts)} Orca pool accounts (vaults + tick arrays)")
-                    _extra_clone.extend(_orca_accounts)
-            if _extra_clone:
-                click.echo(f"  Cloning {len(_extra_clone)} account(s) from mainnet")
-            solana_fork_mgr = SolanaForkManager(
-                rpc_url=solana_rpc_url,
-                validator_port=_solana_cli.solana_validator_port,
-                clone_accounts=_extra_clone,
-            )
-            click.echo("  Starting local solana-test-validator...")
-            import asyncio as _aio
-
-            started = _aio.get_event_loop().run_until_complete(solana_fork_mgr.start())
-            if not started:
-                raise click.ClickException(
-                    "Failed to start solana-test-validator. "
-                    "Ensure Solana CLI tools are installed: "
-                    'sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"'
-                )
-            click.echo(f"  solana-test-validator running at {solana_fork_mgr.get_rpc_url()}")
-
-            # Fund the wallet
-            _aio.get_event_loop().run_until_complete(
-                solana_fork_mgr.fund_wallet(runtime_config.wallet_address, Decimal("100"))
-            )
-            _aio.get_event_loop().run_until_complete(
-                solana_fork_mgr.fund_tokens(
-                    runtime_config.wallet_address,
-                    {"USDC": Decimal("10000"), "USDT": Decimal("10000")},
-                )
-            )
-            click.echo("  Wallet funded with 100 SOL + 10K USDC + 10K USDT")
-            components.solana_fork_mgr = solana_fork_mgr
-
-        # All chains (including Solana) use GatewayExecutionOrchestrator
-        execution_orchestrator = GatewayExecutionOrchestrator(
-            client=gateway_client,
-            chain=runtime_config.chain,
-            wallet_address=sc_effective_wallet,
-            max_gas_price_gwei=runtime_config.max_gas_price_gwei,
-        )
-        click.echo("  Gateway-backed providers created")
-
-        if requirements.indicators:
-            # Create indicator calculators using routed OHLCV provider (CEX + DEX fallback)
-            ohlcv_stack = create_ohlcv_stack(
-                gateway_client=gateway_client,
-                chain=runtime_config.chain,
-                pool_address=strategy_config.get("pool_address") if strategy_config else None,
-                source_policy=_build_ohlcv_source_policy(strategy_instance, strategy_config, runtime_config.chain),
-            )
-            ohlcv_provider = ohlcv_stack.provider
-            # VIB-4347: stamp the sync OHLCVRouter on the strategy so
-            # ``MarketSnapshot.ohlcv(...)`` resolves to the same routed gateway-backed
-            # pipes the indicator path already uses. Shared router instance = shared
-            # disk cache + TTL.
-            strategy_instance._ohlcv_router = ohlcv_stack.router
-            _wire_indicators(strategy_instance, ohlcv_provider, price_oracle, balance_provider)
-        elif requirements.price or requirements.balance:
-            # indicators=False: wire price/balance directly without OHLCV or indicator calculators
-            _wire_core_providers(strategy_instance, price_oracle, balance_provider)
-
-        # Initialize prediction market provider for strategies that explicitly
-        # declare polymarket support. Non-polymarket strategies skip this
-        # entirely (including Polygon runs) to avoid irrelevant warnings.
-        if hasattr(strategy_instance, "_prediction_provider"):
-            _init_prediction_provider(strategy_instance, chain=runtime_config.chain, gateway_client=gateway_client)
-
-        # MarketSnapshot needs the gateway client to do gateway-routed eth_calls
-        # (e.g. position_health). Wire it unconditionally; methods that need it
-        # check for None at call time.
-        strategy_instance._gateway_client = gateway_client
-
-        rate_monitor_wired = False
-        if requirements.lending_rates:
-            try:
-                from ..data.rates import RateMonitor
-
-                rpc_url = getattr(runtime_config, "rpc_url", None)
-                # _internal=True: framework wiring of the gateway-backed rate
-                # source onto MarketSnapshot is the canonical lending-rate lane,
-                # not a deprecated strategy-side bypass (VIB-4869).
-                # gateway_client=gateway_client (VIB-5824): thread the runner's
-                # REAL client (managed gateways bind a random port) so the rate
-                # lane reaches the gateway the runner actually started, instead
-                # of the default-port 50051 singleton that gets refused and
-                # silently fabricates a placeholder.
-                rate_monitor = RateMonitor(
-                    chain=runtime_config.chain,
-                    rpc_url=rpc_url,
-                    gateway_client=gateway_client,
-                    _internal=True,
-                )
-                strategy_instance._rate_monitor = rate_monitor
-                rate_monitor_wired = True
-            except Exception as e:
-                logger.debug(f"Rate monitor not available: {e}")
-
-        funding_wired = False
-        if requirements.funding_rates:
-            try:
-                from ..data.funding import GatewayFundingRateProvider
-
-                funding_provider = GatewayFundingRateProvider(gateway_client=gateway_client, chain=runtime_config.chain)
-                strategy_instance._funding_rate_provider = funding_provider
-                funding_wired = True
-            except (ImportError, ValueError, RuntimeError) as e:
-                logger.warning(
-                    "Funding rate provider init failed for chain=%s: %s",
-                    runtime_config.chain,
-                    e,
-                    exc_info=True,
-                )
-
-        _wired = []
-        if getattr(strategy_instance, "_price_oracle", None) is not None:
-            _wired.append("price")
-        if getattr(strategy_instance, "_balance_provider", None) is not None:
-            _wired.append("balance")
-        if getattr(strategy_instance, "_indicator_provider", None) is not None:
-            _wired.append("indicators")
-        if rate_monitor_wired:
-            _wired.append("lending_rates")
-        if funding_wired:
-            _wired.append("funding_rates")
-        click.echo(f"  Injected strategy data services: {', '.join(_wired)}")
 
     # Preserve the resolved execution network on the strategy. Teardown and
     # async-settlement hooks need to distinguish a managed Anvil fork from a
     # live network without re-reading CLI or environment configuration.
     strategy_instance._gateway_network = resolved_network
 
-    components.execution_orchestrator = execution_orchestrator
-    components.price_oracle = price_oracle
-    components.balance_provider = balance_provider
-    components.ohlcv_provider = ohlcv_provider
+    components.execution_orchestrator = built.execution_orchestrator
+    components.price_oracle = built.price_oracle
+    components.balance_provider = built.balance_provider
+    components.ohlcv_provider = built.ohlcv_provider
 
 
 def _init_copy_trading(  # noqa: C901

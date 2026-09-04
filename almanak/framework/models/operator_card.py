@@ -39,8 +39,8 @@ class PositionSummary:
     """Summary of the strategy's current position and exposure."""
 
     # Current funds in USD
-    total_value_usd: Decimal
-    available_balance_usd: Decimal
+    total_value_usd: Decimal | None
+    available_balance_usd: Decimal | None
 
     # Exposure breakdown
     lp_value_usd: Decimal = Decimal("0")
@@ -144,17 +144,21 @@ class OperatorCard:
             "context": self.context,
             "severity": self.severity.value,
             "position_summary": {
-                "total_value_usd": str(self.position_summary.total_value_usd),
-                "available_balance_usd": str(self.position_summary.available_balance_usd),
+                "total_value_usd": str(self.position_summary.total_value_usd)
+                if self.position_summary.total_value_usd is not None
+                else None,
+                "available_balance_usd": str(self.position_summary.available_balance_usd)
+                if self.position_summary.available_balance_usd is not None
+                else None,
                 "lp_value_usd": str(self.position_summary.lp_value_usd),
                 "borrowed_value_usd": str(self.position_summary.borrowed_value_usd),
                 "collateral_value_usd": str(self.position_summary.collateral_value_usd),
                 "token_balances": {k: str(v) for k, v in self.position_summary.token_balances.items()},
                 "lp_positions": self.position_summary.lp_positions,
                 "health_factor": str(self.position_summary.health_factor)
-                if self.position_summary.health_factor
+                if self.position_summary.health_factor is not None
                 else None,
-                "leverage": str(self.position_summary.leverage) if self.position_summary.leverage else None,
+                "leverage": str(self.position_summary.leverage) if self.position_summary.leverage is not None else None,
             },
             "risk_description": self.risk_description,
             "suggested_actions": [

@@ -37,6 +37,7 @@ import json
 import logging
 import time
 import uuid
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
 import grpc
@@ -289,6 +290,42 @@ class _NoopContext:
 
     def set_details(self, details: str) -> None:  # pragma: no cover — diagnostic-only
         pass
+
+
+def _parse_token_id(raw: str | None) -> int | None:
+    """Parse an NPM token id, returning None for an unreadable slot."""
+    if not isinstance(raw, str) or raw == "0x":
+        return None
+    try:
+        return int(raw, 16)
+    except ValueError:
+        return None
+
+
+def _decode_lp_position_result(raw: str | None) -> dict[str, Any] | None:
+    """Decode the UniV3 NPM fields used by reconciliation."""
+    if not isinstance(raw, str) or raw == "0x":
+        return None
+
+    from almanak.framework.teardown.discovery import _decode_int24
+
+    raw_hex = raw[2:] if raw.startswith("0x") else raw
+    if len(raw_hex) < 64 * 12:
+        return None
+    try:
+        decoded = {
+            "token0": "0x" + raw_hex[64 * 2 + 24 : 64 * 3].lower(),
+            "token1": "0x" + raw_hex[64 * 3 + 24 : 64 * 4].lower(),
+            "fee": int(raw_hex[64 * 4 : 64 * 5], 16),
+            "tick_lower": _decode_int24(raw_hex[64 * 5 : 64 * 6]),
+            "tick_upper": _decode_int24(raw_hex[64 * 6 : 64 * 7]),
+            "liquidity": int(raw_hex[64 * 7 : 64 * 8], 16),
+        }
+    except ValueError:
+        return None
+    if decoded["liquidity"] == 0:
+        return None
+    return decoded
 
 
 async def _get_chain_head(
@@ -561,14 +598,6 @@ class PositionServiceServicer(gateway_pb2_grpc.PositionServiceServicer):
 
         return deployment_id, chain, wallet_address, primitives, page_size
 
-    # crap-allowlist: VIB-4210 — fail-closed security boundary structural
-    # cc=8 (5 error classes → 5 distinct gRPC status codes, one success
-    # case, plus the no-registry local-mode skip). CodeRabbit MAJOR round 2
-    # required per-class typed status mapping (see docstring). Decomposing
-    # into helpers loses the per-class status mapping or invents an internal
-    # error-enum, neither of which fits the gRPC "set_code-then-return-False"
-    # pattern used elsewhere on this servicer. Coverage rises once
-    # hosted-boot wires a real wallet_registry (T24+1).
     def _wallet_matches_registry(
         self,
         chain: str,
@@ -605,25 +634,8 @@ class PositionServiceServicer(gateway_pb2_grpc.PositionServiceServicer):
         """
         if self.wallet_registry is None:
             return True
-        try:
-            resolved = self.wallet_registry.resolve(chain)
-        except KeyError:
-            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
-            context.set_details(f"no registered wallet mapping for chain {chain!r}")
-            return False
-        except Exception as e:  # noqa: BLE001 — registry plugin contract is "anything"
-            logger.error("wallet_registry.resolve(%s) failed: %s", chain, e)
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details("wallet registry unavailable; cannot validate wallet ownership")
-            return False
-        if resolved is None:
-            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
-            context.set_details(f"no registered wallet mapping for chain {chain!r}")
-            return False
-        expected = (getattr(resolved, "account_address", "") or "").strip().lower()
-        if not expected:
-            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
-            context.set_details(f"registered wallet for chain {chain!r} has no address")
+        expected = self._registered_wallet_address(chain, context)
+        if expected is None:
             return False
         if expected == wallet_address.lower():
             return True
@@ -631,16 +643,38 @@ class PositionServiceServicer(gateway_pb2_grpc.PositionServiceServicer):
         context.set_details("wallet_address does not match the deployment's registered wallet for this chain")
         return False
 
+    def _registered_wallet_address(
+        self,
+        chain: str,
+        context: grpc.aio.ServicerContext,
+    ) -> str | None:
+        """Resolve and normalize the configured wallet, failing closed."""
+        try:
+            resolved = self.wallet_registry.resolve(chain)
+        except KeyError:
+            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+            context.set_details(f"no registered wallet mapping for chain {chain!r}")
+            return None
+        except Exception as e:  # noqa: BLE001 — registry plugin contract is "anything"
+            logger.error("wallet_registry.resolve(%s) failed: %s", chain, e)
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details("wallet registry unavailable; cannot validate wallet ownership")
+            return None
+        if resolved is None:
+            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+            context.set_details(f"no registered wallet mapping for chain {chain!r}")
+            return None
+        expected = (getattr(resolved, "account_address", "") or "").strip().lower()
+        if not expected:
+            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+            context.set_details(f"registered wallet for chain {chain!r} has no address")
+            return None
+        return expected
+
     # =========================================================================
     # Step 2: Chain head sampling + freshness check + cursor validation
     # =========================================================================
 
-    # crap-allowlist: VIB-4210 — gRPC handler structural cc=8 (rpc-not-wired
-    # guard + head-sample failure + page_cursor optional branch with malformed
-    # vs stale sub-branches + first-page anchor). Same "undecomposable gRPC
-    # handler boilerplate" carve-out as ``GetMigrationState`` /
-    # ``UpdateMigrationState`` in ``state_service.py``. Coverage rises once
-    # the hosted-boot trigger lands (T24+1).
     async def _resolve_source_block_number(
         self,
         request: gateway_pb2.ReconcileRequest,
@@ -665,41 +699,41 @@ class PositionServiceServicer(gateway_pb2_grpc.PositionServiceServicer):
             context.set_details(f"failed to sample chain head for {chain!r}")
             return None
 
-        # Optional cursor: if present, anchor on the cursor's block (so the
-        # entire paginated pass is consistent against ONE chain state). The
-        # gateway then checks the cursor isn't too stale relative to head.
         if request.page_cursor:
-            decoded = decode_cursor(request.page_cursor)
-            if decoded is None:
-                context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
-                context.set_details("page_cursor malformed or schema_version mismatch — restart from page 0")
-                return None
-            cursor_block = int(decoded["source_block_number"])
-            max_age = int(request.max_age_blocks or 0)
-            if max_age > 0 and (head - cursor_block) > max_age:
-                context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
-                context.set_details(
-                    f"stale cursor: head={head}, cursor_block={cursor_block}, "
-                    f"max_age_blocks={max_age} — restart from page 0"
-                )
-                return None
-            return cursor_block
+            return self._source_block_from_cursor(request, head, context)
+        return self._source_block_for_first_page(request, head, context)
 
-        # First page: anchor on current head.
-        #
-        # CodeRabbit MAJOR (round 2, PR #2240): in v1 we have ONE RPC
-        # source for both the observed head and the "reference head", so
-        # there is no independent freshness oracle to enforce
-        # ``max_age_blocks`` against on a first-page request. Silently
-        # accepting non-zero values would let a caller think the
-        # guardrail is active when it isn't — strictly worse than no
-        # guardrail. Reject explicitly with INVALID_ARGUMENT so the
-        # caller can either drop ``max_age_blocks`` or supply a
-        # ``page_cursor`` (which DOES anchor against the previously
-        # observed head and is enforced above). The freshness check
-        # against an independent reference RPC is reserved for T24+1.
+    @staticmethod
+    def _source_block_from_cursor(
+        request: gateway_pb2.ReconcileRequest,
+        head: int,
+        context: grpc.aio.ServicerContext,
+    ) -> int | None:
+        """Validate a cursor and retain its block pin across pages."""
+        decoded = decode_cursor(request.page_cursor)
+        if decoded is None:
+            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+            context.set_details("page_cursor malformed or schema_version mismatch — restart from page 0")
+            return None
+        cursor_block = int(decoded["source_block_number"])
         max_age = int(request.max_age_blocks or 0)
-        if max_age > 0:
+        if max_age > 0 and (head - cursor_block) > max_age:
+            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+            context.set_details(
+                f"stale cursor: head={head}, cursor_block={cursor_block}, "
+                f"max_age_blocks={max_age} — restart from page 0"
+            )
+            return None
+        return cursor_block
+
+    @staticmethod
+    def _source_block_for_first_page(
+        request: gateway_pb2.ReconcileRequest,
+        head: int,
+        context: grpc.aio.ServicerContext,
+    ) -> int | None:
+        """Anchor a first page, rejecting freshness without an independent head."""
+        if int(request.max_age_blocks or 0) > 0:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(
                 "max_age_blocks > 0 is not supported on first-page requests in v1 "
@@ -714,20 +748,6 @@ class PositionServiceServicer(gateway_pb2_grpc.PositionServiceServicer):
     # Step 3: On-chain LP enumeration (in-process via RpcServiceServicer)
     # =========================================================================
 
-    # crap-allowlist: VIB-4210 — fanned-RPC enumerator structural cc=18.
-    # The per-NPM + per-position loop is a strict mirror of
-    # ``almanak.framework.teardown.discovery.discover_lp_positions`` (see
-    # the docstring "Mirrors discover_lp_positions" comment) and inherits
-    # its 4-class fail-open-per-call topology: balanceOf-failed,
-    # balanceOf-unparsable, count-oversize, per-position-read-failed.
-    # Decomposing further would mean either inventing a different
-    # discovery contract from the teardown's or splitting fail-open
-    # branches across functions (loses the per-NPM error-grouping
-    # invariant ADR §5.1 depends on). Same "undecomposable
-    # public-contract / hot-path budget" carve-out as
-    # ``GatewayStateManager.save_accounting_event`` (VIB-4196). Coverage
-    # rises once the integration test covers the oversize + unparsable
-    # branches (T24 follow-up — UAT card D3.F1 only covers RPC_FANOUT_FAILED).
     async def _enumerate_lp_positions(
         self,
         *,
@@ -843,14 +863,6 @@ class PositionServiceServicer(gateway_pb2_grpc.PositionServiceServicer):
 
         return out, oversize, oversize_detail
 
-    # crap-allowlist: VIB-4210 — per-slot fail-open reader structural cc=11;
-    # strict mirror of ``discovery._read_position`` (see docstring). 5
-    # distinct early-return classes (tokenOfOwnerByIndex failure / unparsable
-    # hex, positions() failure, layout-too-short, zero-liquidity, hash-filter
-    # exclusion) maintain the per-slot fail-open invariant ADR §5.1 requires
-    # — decomposing splits these branches across functions and loses the
-    # per-slot dropping the enumerator depends on. Same "undecomposable
-    # public-contract mirror" carve-out as ``_enumerate_lp_positions`` above.
     async def _read_lp_position(
         self,
         *,
@@ -867,9 +879,8 @@ class PositionServiceServicer(gateway_pb2_grpc.PositionServiceServicer):
         Returns the position dict shape ``_enumerate_lp_positions`` appends
         to its output list, or ``None`` to skip this slot (RPC failure,
         unparsable hex, zero liquidity, or hash-filter exclusion). Pulled
-        out of the per-NPM loop to keep ``_enumerate_lp_positions``'s
-        cyclomatic complexity inside the C901 budget while preserving the
-        per-slot fail-open semantics ADR §5.1 specifies (each ``None``
+        out of the per-NPM loop while preserving the per-slot fail-open
+        semantics ADR §5.1 specifies (each ``None``
         return is silently dropped — partial failures don't abort the
         whole enumeration). Mirrors ``discovery._read_position`` in
         ``almanak/framework/teardown/discovery.py``.
@@ -880,7 +891,6 @@ class PositionServiceServicer(gateway_pb2_grpc.PositionServiceServicer):
         from almanak.framework.teardown.discovery import (
             _SELECTOR_POSITIONS,
             _SELECTOR_TOKEN_OF_OWNER_BY_INDEX,
-            _decode_int24,
             _pad_address,
             _pad_uint256,
         )
@@ -900,11 +910,8 @@ class PositionServiceServicer(gateway_pb2_grpc.PositionServiceServicer):
             data=_SELECTOR_TOKEN_OF_OWNER_BY_INDEX + _pad_address(wallet_address) + _pad_uint256(index),
             block_number=source_block_number,
         )
-        if token_id_raw is None or token_id_raw == "0x":
-            return None
-        try:
-            token_id = int(token_id_raw, 16)
-        except ValueError:
+        token_id = _parse_token_id(token_id_raw)
+        if token_id is None:
             return None
 
         position_raw = await _eth_call_in_process(
@@ -914,26 +921,8 @@ class PositionServiceServicer(gateway_pb2_grpc.PositionServiceServicer):
             data=_SELECTOR_POSITIONS + _pad_uint256(token_id),
             block_number=source_block_number,
         )
-        if position_raw is None or position_raw == "0x":
-            return None
-
-        # positions(tokenId) returns 12 fields per UniV3 NPM ABI; the
-        # layout we care about (matching discovery._read_position):
-        # token0[2], token1[3], fee[4], tickLower[5], tickUpper[6], liquidity[7].
-        # Each word is 64 hex chars (32 bytes). Strip the leading 0x.
-        raw_hex = position_raw[2:] if position_raw.startswith("0x") else position_raw
-        if len(raw_hex) < 64 * 12:
-            return None
-        token0 = "0x" + raw_hex[64 * 2 + 24 : 64 * 3].lower()
-        token1 = "0x" + raw_hex[64 * 3 + 24 : 64 * 4].lower()
-        fee = int(raw_hex[64 * 4 : 64 * 5], 16)
-        tick_lower = _decode_int24(raw_hex[64 * 5 : 64 * 6])
-        tick_upper = _decode_int24(raw_hex[64 * 6 : 64 * 7])
-        liquidity = int(raw_hex[64 * 7 : 64 * 8], 16)
-
-        if liquidity == 0:
-            # Skip burned / fully withdrawn positions — same default
-            # as discover_lp_positions(include_zero_liquidity=False).
+        decoded = _decode_lp_position_result(position_raw)
+        if decoded is None:
             return None
 
         # Canonical UniV3 LP physical_identity_hash — MUST match the helper
@@ -961,18 +950,18 @@ class PositionServiceServicer(gateway_pb2_grpc.PositionServiceServicer):
             "protocol": protocol,
             "token_id": token_id,
             "npm_address": npm,
-            "token0": token0,
-            "token1": token1,
-            "fee": fee,
-            "tick_lower": tick_lower,
-            "tick_upper": tick_upper,
-            "liquidity": str(liquidity),
+            "token0": decoded["token0"],
+            "token1": decoded["token1"],
+            "fee": decoded["fee"],
+            "tick_lower": decoded["tick_lower"],
+            "tick_upper": decoded["tick_upper"],
+            "liquidity": str(decoded["liquidity"]),
         }
         return {
             "physical_identity_hash": physical_identity_hash,
             "primitive": "lp",
             "accounting_category": "lp",
-            "semantic_grouping_key": f"{chain}:{token0}:{token1}:{fee}",
+            "semantic_grouping_key": f"{chain}:{decoded['token0']}:{decoded['token1']}:{decoded['fee']}",
             "payload": payload,
             "opened_at_block": 0,  # best-effort back-derivation deferred
             "opened_tx": "",
@@ -982,16 +971,6 @@ class PositionServiceServicer(gateway_pb2_grpc.PositionServiceServicer):
     # Step 4: Read registry rows
     # =========================================================================
 
-    # crap-allowlist: VIB-4210 — dual-backend registry reader structural
-    # cc=15 (state-servicer-not-wired guard + per-primitive loop +
-    # Postgres branch with per-row payload-JSON decode + SQLite branch
-    # with warm-backend capability check + try/except partial-failure
-    # surfacing + hash-filter post-pass). Mirrors the dual-backend
-    # dispatch pattern of ``StateServiceServicer.GetPositionRegistryOpenRows``
-    # (also crap-allowlisted; see ``state_service.py:3296``). Refactor
-    # target is collapsing the Postgres + SQLite branches into one
-    # backend-trait, planned as a sibling deliverable to the VIB-4297
-    # GetMigrationState collapse follow-up.
     async def _read_registry_rows(
         self,
         *,
@@ -1021,56 +1000,13 @@ class PositionServiceServicer(gateway_pb2_grpc.PositionServiceServicer):
         out: list[dict[str, Any]] = []
         for primitive in primitives:
             try:
-                # Reuse the existing GetPositionRegistryOpenRows handler shape.
-                # Since we're in-process, call StateManager directly via the
-                # state servicer's _ensure_initialized + warm backend accessor.
-                await self.state_servicer._ensure_snapshot_pool()
-                if self.state_servicer._snapshot_pool is not None:
-                    # Postgres path (T19 / VIB-4205).
-                    sql = (
-                        "SELECT deployment_id, chain, primitive, accounting_category, "
-                        "physical_identity_hash, semantic_grouping_key, "
-                        "grouping_policy_version, handle, status, "
-                        "payload::text AS payload_text, "
-                        "opened_at_block, opened_tx, "
-                        "closed_at_block, closed_tx, "
-                        "last_reconciled_at_block, matching_policy_version "
-                        "FROM position_registry "
-                        "WHERE deployment_id = $1 AND status = 'open' "
-                        "  AND chain = $2 AND primitive = $3 "
-                        "ORDER BY opened_at_block ASC NULLS FIRST, opened_tx ASC NULLS FIRST"
-                    )
-                    rows = await self.state_servicer._snapshot_fetch(sql, deployment_id, chain, primitive)
-                    for row in rows:
-                        row_dict = dict(row)
-                        payload_text = row_dict.pop("payload_text", None) or "{}"
-                        try:
-                            row_dict["payload"] = json.loads(payload_text)
-                        except (TypeError, ValueError):
-                            row_dict["payload"] = {}
-                        out.append(row_dict)
-                else:
-                    # SQLite path (T22 / VIB-4208).
-                    await self.state_servicer._ensure_initialized()
-                    assert self.state_servicer._state_manager is not None
-                    warm = self.state_servicer._state_manager.warm_backend
-                    if warm is None or not hasattr(warm, "get_position_registry_open_rows"):
-                        errors.add(
-                            primitive=primitive,
-                            chain=chain,
-                            code="BACKEND_TIMEOUT",
-                            message="warm backend lacks get_position_registry_open_rows",
-                            recoverable=False,
-                        )
-                        continue
-                    rows = await warm.get_position_registry_open_rows(
-                        deployment_id,
-                        chain=chain,
-                        primitive=primitive,
-                        accounting_category=None,
-                    )
-                    for row in rows:
-                        out.append(dict(row))
+                rows = await self._read_registry_rows_for_primitive(
+                    deployment_id=deployment_id,
+                    chain=chain,
+                    primitive=primitive,
+                    errors=errors,
+                )
+                out.extend(rows)
             except Exception as e:  # noqa: BLE001 — partial-failure semantics
                 logger.warning(
                     "PositionService.Reconcile read_registry_rows failed (primitive=%s): %s",
@@ -1090,16 +1026,79 @@ class PositionServiceServicer(gateway_pb2_grpc.PositionServiceServicer):
             out = [row for row in out if row.get("physical_identity_hash") in hash_filter]
         return out
 
+    async def _read_registry_rows_for_primitive(
+        self,
+        *,
+        deployment_id: str,
+        chain: str,
+        primitive: str,
+        errors: _PrimitiveErrorCollector,
+    ) -> Iterable[dict[str, Any]]:
+        """Read one primitive from the configured Postgres or SQLite backend."""
+        assert self.state_servicer is not None
+        await self.state_servicer._ensure_snapshot_pool()
+        if self.state_servicer._snapshot_pool is not None:
+            return await self._read_postgres_registry_rows(deployment_id, chain, primitive)
+
+        await self.state_servicer._ensure_initialized()
+        assert self.state_servicer._state_manager is not None
+        warm = self.state_servicer._state_manager.warm_backend
+        if warm is None or not hasattr(warm, "get_position_registry_open_rows"):
+            errors.add(
+                primitive=primitive,
+                chain=chain,
+                code="BACKEND_TIMEOUT",
+                message="warm backend lacks get_position_registry_open_rows",
+                recoverable=False,
+            )
+            return []
+        rows = await warm.get_position_registry_open_rows(
+            deployment_id,
+            chain=chain,
+            primitive=primitive,
+            accounting_category=None,
+        )
+        return (dict(row) for row in rows)
+
+    async def _read_postgres_registry_rows(
+        self,
+        deployment_id: str,
+        chain: str,
+        primitive: str,
+    ) -> Iterable[dict[str, Any]]:
+        """Read and normalize Postgres registry rows."""
+        assert self.state_servicer is not None
+        sql = (
+            "SELECT deployment_id, chain, primitive, accounting_category, "
+            "physical_identity_hash, semantic_grouping_key, "
+            "grouping_policy_version, handle, status, "
+            "payload::text AS payload_text, "
+            "opened_at_block, opened_tx, "
+            "closed_at_block, closed_tx, "
+            "last_reconciled_at_block, matching_policy_version "
+            "FROM position_registry "
+            "WHERE deployment_id = $1 AND status = 'open' "
+            "  AND chain = $2 AND primitive = $3 "
+            "ORDER BY opened_at_block ASC NULLS FIRST, opened_tx ASC NULLS FIRST"
+        )
+        rows = await self.state_servicer._snapshot_fetch(sql, deployment_id, chain, primitive)
+        return (self._normalize_postgres_registry_row(row) for row in rows)
+
+    @staticmethod
+    def _normalize_postgres_registry_row(row: Any) -> dict[str, Any]:
+        """Decode payload JSON while preserving the legacy empty-object fallback."""
+        row_dict = dict(row)
+        payload_text = row_dict.pop("payload_text", None) or "{}"
+        try:
+            row_dict["payload"] = json.loads(payload_text)
+        except (TypeError, ValueError):
+            row_dict["payload"] = {}
+        return row_dict
+
     # =========================================================================
     # Step 6: Apply path — write phantom-missing rows via mode='registry_reconciliation'
     # =========================================================================
 
-    # crap-allowlist: VIB-4210 — phantom-missing writer structural cc=10
-    # (no-phantoms shortcut + state-servicer guard + per-phantom loop +
-    # typed-collision vs generic-exception branching). The per-phantom
-    # error-class split is ADR §5.1's partial-failure contract — collapsing
-    # it loses the typed-collision surface UAT D3.F9 depends on. Coverage
-    # rises with the apply=true SQLite path test (T24+1 follow-up).
     async def _apply_phantom_missing(
         self,
         *,
@@ -1135,129 +1134,137 @@ class PositionServiceServicer(gateway_pb2_grpc.PositionServiceServicer):
             )
             return []
 
-        from datetime import UTC, datetime
-
-        from almanak.framework.accounting.commit import RegistryRow
-        from almanak.framework.observability.ledger import LedgerEntry
-        from almanak.framework.state.registry_errors import RegistryAutoCollisionError
-
         rebuilt: list[dict[str, Any]] = []
         await self.state_servicer._ensure_initialized()
         assert self.state_servicer._state_manager is not None
         state_manager = self.state_servicer._state_manager
 
         for phantom in phantoms:
-            payload = dict(phantom.get("payload") or {})
-            # Stamp provenance fields — distinguishes chain-derived rows
-            # from intent-derived rows downstream.
-            payload["source"] = "reconciliation_discovery"
-            payload["reconciliation_id"] = reconciliation_id
-
-            registry = RegistryRow(
+            rebuilt_row = await self._apply_one_phantom(
+                state_manager=state_manager,
                 deployment_id=deployment_id,
                 chain=chain,
-                primitive=phantom["primitive"],
-                accounting_category=phantom["accounting_category"],
-                physical_identity_hash=phantom["physical_identity_hash"],
-                semantic_grouping_key=phantom.get("semantic_grouping_key", ""),
-                grouping_policy_version="univ3_lp@v1",
-                status="open",
-                payload=payload,
-                matching_policy_version=1,
-                handle=None,
-                opened_at_block=phantom.get("opened_at_block") or None,
-                opened_tx=phantom.get("opened_tx") or None,
-                closed_at_block=None,
-                closed_tx=None,
-                last_reconciled_at_block=int(source_block_number),
+                source_block_number=source_block_number,
+                reconciliation_id=reconciliation_id,
+                phantom=phantom,
+                errors=errors,
             )
-            # The atomic primitive still requires a LedgerEntry argument for
-            # signature uniformity even though mode='registry_reconciliation'
-            # skips the ledger write. We construct a sentinel ledger that
-            # would fail if it were ever accidentally written (empty
-            # intent_type / tx_hash) — a defensive layer in case a future
-            # refactor regresses the skip behaviour.
-            sentinel_ledger = LedgerEntry(
-                id=f"reconciliation:{reconciliation_id}:{phantom['physical_identity_hash']}",
-                cycle_id=f"reconciliation:{reconciliation_id}",
-                deployment_id=deployment_id,
-                # This sentinel is deliberately never persisted; absence keeps
-                # the LedgerEntry inside the real RunMode domain while the
-                # atomic primitive's registry_reconciliation mode skips it.
-                execution_mode="",
-                timestamp=datetime.now(UTC),
-                intent_type="",
-                token_in="",
-                amount_in="",
-                token_out="",
-                amount_out="",
-                effective_price="",
-                slippage_bps=None,
-                gas_used=0,
-                gas_usd="",
-                tx_hash="",
-                chain=chain,
-                protocol=phantom.get("payload", {}).get("protocol", ""),
-                success=True,
-                error="",
-                extracted_data_json="",
-                price_inputs_json="",
-                pre_state_json="",
-                post_state_json="",
-            )
-            try:
-                await state_manager.save_ledger_and_registry(
-                    ledger=sentinel_ledger,
-                    registry=registry,
-                    handle=None,
-                    mode=LedgerRegistrySaveMode.REGISTRY_RECONCILIATION,
-                )
-            except RegistryAutoCollisionError as e:
-                # ADR §5.1 + UAT D3.F9: surface collision as a typed
-                # PrimitiveError but DO NOT fail the whole RPC. The existing
-                # handle-less open row is preserved; the operator must add
-                # a registry_handle to disambiguate before re-running.
-                errors.add(
-                    primitive="lp",
-                    chain=chain,
-                    code="REGISTRY_AUTO_COLLISION",
-                    message=(f"auto-mode collision for phantom_missing pih={phantom['physical_identity_hash']!r}: {e}"),
-                    recoverable=False,
-                )
-                continue
-            except Exception as e:  # noqa: BLE001 — wrap as primitive_error
-                logger.error(
-                    "PositionService.Reconcile apply failed for pih=%s: %s",
-                    phantom["physical_identity_hash"],
-                    e,
-                )
-                errors.add(
-                    primitive="lp",
-                    chain=chain,
-                    code="BACKEND_TIMEOUT",
-                    message=f"registry write failed: {e}",
-                    recoverable=True,
-                )
-                continue
-
-            rebuilt.append(
-                {
-                    "physical_identity_hash": phantom["physical_identity_hash"],
-                    "primitive": phantom["primitive"],
-                    "accounting_category": phantom["accounting_category"],
-                    "source": "reconciliation_discovery",
-                    "last_reconciled_at_block": int(source_block_number),
-                    "reconciliation_id": reconciliation_id,
-                    "registry_row": {
-                        "deployment_id": deployment_id,
-                        "chain": chain,
-                        "primitive": phantom["primitive"],
-                        "physical_identity_hash": phantom["physical_identity_hash"],
-                        "payload": payload,
-                    },
-                }
-            )
+            if rebuilt_row is not None:
+                rebuilt.append(rebuilt_row)
         return rebuilt
+
+    @staticmethod
+    async def _apply_one_phantom(
+        *,
+        state_manager: Any,
+        deployment_id: str,
+        chain: str,
+        source_block_number: int,
+        reconciliation_id: str,
+        phantom: dict[str, Any],
+        errors: _PrimitiveErrorCollector,
+    ) -> dict[str, Any] | None:
+        """Write one phantom row while isolating collision and backend failures."""
+        from datetime import UTC, datetime
+
+        from almanak.framework.accounting.commit import RegistryRow
+        from almanak.framework.accounting.policy import MatchingPolicy
+        from almanak.framework.observability.ledger import LedgerEntry
+        from almanak.framework.primitives.types import Primitive
+        from almanak.framework.state.registry_errors import RegistryAutoCollisionError
+
+        payload = dict(phantom.get("payload") or {})
+        payload["source"] = "reconciliation_discovery"
+        payload["reconciliation_id"] = reconciliation_id
+        registry = RegistryRow(
+            deployment_id=deployment_id,
+            chain=chain,
+            primitive=phantom["primitive"],
+            accounting_category=phantom["accounting_category"],
+            physical_identity_hash=phantom["physical_identity_hash"],
+            semantic_grouping_key=phantom.get("semantic_grouping_key", ""),
+            grouping_policy_version="univ3_lp@v1",
+            status="open",
+            payload=payload,
+            matching_policy_version=MatchingPolicy.for_primitive(Primitive.LP),
+            handle=None,
+            opened_at_block=phantom.get("opened_at_block") or None,
+            opened_tx=phantom.get("opened_tx") or None,
+            closed_at_block=None,
+            closed_tx=None,
+            last_reconciled_at_block=int(source_block_number),
+        )
+        sentinel_ledger = LedgerEntry(
+            id=f"reconciliation:{reconciliation_id}:{phantom['physical_identity_hash']}",
+            cycle_id=f"reconciliation:{reconciliation_id}",
+            deployment_id=deployment_id,
+            execution_mode="",
+            timestamp=datetime.now(UTC),
+            intent_type="",
+            token_in="",
+            amount_in="",
+            token_out="",
+            amount_out="",
+            effective_price="",
+            slippage_bps=None,
+            gas_used=0,
+            gas_usd="",
+            tx_hash="",
+            chain=chain,
+            protocol=phantom.get("payload", {}).get("protocol", ""),
+            success=True,
+            error="",
+            extracted_data_json="",
+            price_inputs_json="",
+            pre_state_json="",
+            post_state_json="",
+        )
+        try:
+            await state_manager.save_ledger_and_registry(
+                ledger=sentinel_ledger,
+                registry=registry,
+                handle=None,
+                mode=LedgerRegistrySaveMode.REGISTRY_RECONCILIATION,
+            )
+        except RegistryAutoCollisionError as e:
+            errors.add(
+                primitive="lp",
+                chain=chain,
+                code="REGISTRY_AUTO_COLLISION",
+                message=f"auto-mode collision for phantom_missing pih={phantom['physical_identity_hash']!r}: {e}",
+                recoverable=False,
+            )
+            return None
+        except Exception as e:  # noqa: BLE001 — wrap as primitive_error
+            logger.error(
+                "PositionService.Reconcile apply failed for pih=%s: %s",
+                phantom["physical_identity_hash"],
+                e,
+            )
+            errors.add(
+                primitive="lp",
+                chain=chain,
+                code="BACKEND_TIMEOUT",
+                message=f"registry write failed: {e}",
+                recoverable=True,
+            )
+            return None
+
+        return {
+            "physical_identity_hash": phantom["physical_identity_hash"],
+            "primitive": phantom["primitive"],
+            "accounting_category": phantom["accounting_category"],
+            "source": "reconciliation_discovery",
+            "last_reconciled_at_block": int(source_block_number),
+            "reconciliation_id": reconciliation_id,
+            "registry_row": {
+                "deployment_id": deployment_id,
+                "chain": chain,
+                "primitive": phantom["primitive"],
+                "physical_identity_hash": phantom["physical_identity_hash"],
+                "payload": payload,
+            },
+        }
 
     # =========================================================================
     # Step 7: Response construction

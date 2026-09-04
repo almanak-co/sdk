@@ -18,6 +18,7 @@ Contract under test:
 
 from __future__ import annotations
 
+import importlib
 import json
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -36,6 +37,8 @@ from almanak.framework.backtesting.models import (
 )
 from almanak.framework.cli.backtest import backtest
 from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
+
+pnl_cli = importlib.import_module("almanak.framework.cli.backtest.pnl")
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -120,6 +123,28 @@ def cli_runner() -> CliRunner:
 
 
 class TestPnLExitCodes:
+    def test_list_strategies_exits_before_loading_backtest_config(self, cli_runner: CliRunner) -> None:
+        with (
+            patch.object(pnl_cli, "_handle_list_strategies") as handle_list,
+            patch.object(pnl_cli, "_load_optional_result_config") as load_result_config,
+        ):
+            result = cli_runner.invoke(backtest, ["pnl", "--list-strategies"])
+
+        assert result.exit_code == 0
+        handle_list.assert_called_once_with()
+        load_result_config.assert_not_called()
+
+    def test_explicit_timeframe_is_normalized_at_command_boundary(self, cli_runner: CliRunner) -> None:
+        with patch.object(
+            pnl_cli,
+            "_validate_and_build_context",
+            wraps=pnl_cli._validate_and_build_context,
+        ) as validate_and_build:
+            result = _invoke_pnl(cli_runner, _make_result(), extra_args=["--timeframe", "1H"])
+
+        assert result.exit_code == 0, result.output
+        assert validate_and_build.call_args.kwargs["timeframe"] == "1h"
+
     def test_successful_result_exits_zero(self, cli_runner: CliRunner) -> None:
         result = _invoke_pnl(cli_runner, _make_result())
 

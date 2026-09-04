@@ -9,11 +9,13 @@ envelopes.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import time
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -52,6 +54,7 @@ from almanak.framework.agent_tools.schemas import ToolResponse, ToolResponseStat
 from almanak.framework.agent_tools.tracing import DecisionTracer, ToolExecutionTrace, sanitize_args
 
 if TYPE_CHECKING:
+    from almanak.connectors._strategy_base.agent_read_registry import AgentReadCapability
     from almanak.connectors._strategy_base.vault_tool_registry import VaultToolCapability
     from almanak.framework.agent_tools.approval import ApprovalNotifier
     from almanak.framework.gateway_client import GatewayClient
@@ -334,6 +337,214 @@ def _error_payload(
         recoverable=recoverable,
         error_category=get_error_category(code),
         suggestion=suggestion,
+    )
+
+
+_MAX_UINT256 = (1 << 256) - 1
+
+
+@dataclass(frozen=True)
+class _ResolvedLPPositionRequest:
+    chain: str
+    network: str
+    position_id: int
+    protocol: str
+    capability: AgentReadCapability
+    position_manager: str
+
+
+@dataclass(frozen=True)
+class _DecodedLPPosition:
+    token0: str
+    token1: str
+    fee: int
+    tick_lower: int
+    tick_upper: int
+    liquidity: int
+    tokens_owed_0: int
+    tokens_owed_1: int
+
+
+def _lp_position_error(code: AgentErrorCode, message: str, *, recoverable: bool = False) -> ToolResponse:
+    return ToolResponse(
+        status=ToolResponseStatus.ERROR,
+        error=_error_payload(code, message, recoverable=recoverable),
+    )
+
+
+def _resolve_lp_position_request(args: dict, default_chain: str) -> _ResolvedLPPositionRequest | ToolResponse:
+    """Resolve connector-owned, reviewed LP descriptors without performing I/O."""
+    from almanak.connectors._strategy_agent_tool_registry import STRATEGY_AGENT_READ_REGISTRY
+    from almanak.connectors._strategy_base.protocol_aliases import normalize_protocol
+
+    chain = args.get("chain", default_chain)
+    network = args.get("network", "")
+    raw_position_id = args["position_id"]
+    try:
+        position_id = int(raw_position_id)
+    except (TypeError, ValueError):
+        return _lp_position_error(
+            AgentErrorCode.VALIDATION_ERROR,
+            f"Invalid LP position ID '{raw_position_id}'; expected an unsigned 256-bit integer",
+        )
+    if not 0 <= position_id <= _MAX_UINT256:
+        return _lp_position_error(
+            AgentErrorCode.VALIDATION_ERROR,
+            f"Invalid LP position ID '{raw_position_id}'; expected an unsigned 256-bit integer",
+        )
+
+    protocol = normalize_protocol(chain, args.get("protocol", DEFAULT_LP_PROTOCOL))
+    capability = STRATEGY_AGENT_READ_REGISTRY.lookup(protocol)
+    if capability is None or "lp_position" not in capability.agent_read_keys():
+        supported = sorted(
+            candidate.protocol
+            for candidate in STRATEGY_AGENT_READ_REGISTRY.capabilities()
+            if "lp_position" in candidate.agent_read_keys()
+        )
+        return _lp_position_error(
+            AgentErrorCode.VALIDATION_ERROR,
+            f"Unsupported protocol '{protocol}' for LP position lookup. Supported: {supported}",
+            recoverable=True,
+        )
+
+    requested_manager = str(args.get("position_manager") or "").strip()
+    reviewed_managers = {address.lower(): address for address in capability.reviewed_position_manager_addresses(chain)}
+    if requested_manager:
+        position_manager = reviewed_managers.get(requested_manager.lower())
+        if position_manager is None:
+            return _lp_position_error(
+                AgentErrorCode.VALIDATION_ERROR,
+                f"Unreviewed position manager for {protocol} on {chain}",
+            )
+    else:
+        position_manager = capability.position_manager_address(chain)
+    if not position_manager:
+        return _lp_position_error(
+            AgentErrorCode.VALIDATION_ERROR,
+            f"No unambiguous position manager on {chain} for {protocol}; provide position_manager",
+            recoverable=True,
+        )
+
+    return _ResolvedLPPositionRequest(
+        chain=chain,
+        network=network,
+        position_id=position_id,
+        protocol=protocol,
+        capability=capability,
+        position_manager=position_manager,
+    )
+
+
+def _decode_lp_position_result(result: str, request: _ResolvedLPPositionRequest) -> _DecodedLPPosition | ToolResponse:
+    raw = json.loads(result).removeprefix("0x")
+    if len(raw) < 768:  # 12 words * 64 hex chars
+        return _lp_position_error(
+            AgentErrorCode.INVALID_POSITION,
+            f"Position {request.position_id} not found or burned",
+        )
+
+    words = [raw[i * 64 : (i + 1) * 64] for i in range(12)]
+    return _DecodedLPPosition(
+        token0="0x" + words[2][-40:],
+        token1="0x" + words[3][-40:],
+        fee=int(words[4], 16),
+        tick_lower=_decode_int24(words[5]),
+        tick_upper=_decode_int24(words[6]),
+        liquidity=int(words[7], 16),
+        tokens_owed_0=int(words[10], 16),
+        tokens_owed_1=int(words[11], 16),
+    )
+
+
+def _format_lp_position_data(
+    request: _ResolvedLPPositionRequest,
+    position: _DecodedLPPosition,
+    current_tick: int | None,
+) -> dict[str, Any]:
+    in_range = None
+    if current_tick is not None:
+        in_range = position.tick_lower <= current_tick < position.tick_upper
+    data: dict[str, Any] = {
+        "position_id": str(request.position_id),
+        "position_manager": request.position_manager,
+        "token_a": position.token0,
+        "token_b": position.token1,
+        "fee_tier": position.fee,
+        "tick_lower": position.tick_lower,
+        "tick_upper": position.tick_upper,
+        "liquidity": str(position.liquidity),
+        "tokens_owed_a": str(position.tokens_owed_0),
+        "tokens_owed_b": str(position.tokens_owed_1),
+        "in_range": in_range,
+    }
+    if current_tick is not None:
+        data["current_tick"] = current_tick
+    return data
+
+
+@dataclass(frozen=True)
+class _PortfolioRequest:
+    chain: str
+    network: str
+    wallet: str
+    tokens: tuple[str, ...]
+
+
+@dataclass
+class _PortfolioFold:
+    native_balance: str
+    native_symbol: str
+    token_balances: list[dict[str, Any]]
+    lp_positions: list[dict[str, Any]]
+    lending: dict[str, Any] | None
+    warnings: list[dict[str, str]]
+
+
+def _empty_portfolio_fold() -> _PortfolioFold:
+    return _PortfolioFold(
+        native_balance="",
+        native_symbol="",
+        token_balances=[],
+        lp_positions=[],
+        lending=None,
+        warnings=[],
+    )
+
+
+def _portfolio_warning(fold: _PortfolioFold, section: str, code: str, message: str) -> None:
+    logger.warning("portfolio %s failed (%s): %s", section, code, message)
+    fold.warnings.append({"section": section, "code": code, "message": message})
+
+
+def _portfolio_subtool_warning(
+    fold: _PortfolioFold,
+    section: str,
+    response: ToolResponse,
+    fallback_message: str,
+) -> None:
+    if response.error:
+        code = response.error.error_code.value
+        message = response.error.message
+    else:
+        code = "unknown"
+        message = fallback_message
+    _portfolio_warning(fold, section, code, message)
+
+
+def _portfolio_response(request: _PortfolioRequest, fold: _PortfolioFold) -> ToolResponse:
+    status = ToolResponseStatus.PARTIAL if fold.warnings else ToolResponseStatus.SUCCESS
+    return ToolResponse(
+        status=status,
+        data={
+            "chain": request.chain,
+            "wallet_address": request.wallet,
+            "native_balance": fold.native_balance,
+            "native_symbol": fold.native_symbol,
+            "token_balances": fold.token_balances,
+            "lp_positions": fold.lp_positions,
+            "lending": fold.lending,
+            "warnings": fold.warnings,
+        },
     )
 
 
@@ -944,161 +1155,168 @@ class ToolExecutor:
 
     # ── DATA TOOLS ──────────────────────────────────────────────────────
 
-    # crap-allowlist: mechanical tool-name router — one dispatch line per tool, so cc
-    # grows with the catalog; each branch is covered by its tool's own executor tests.
-    async def _dispatch_data(self, tool_name: str, args: dict) -> ToolResponse:  # noqa: C901
+    _DATA_TOOL_HANDLERS: ClassVar[dict[str, str]] = {
+        "get_price": "_execute_get_price",
+        "get_balance": "_execute_get_balance",
+        "batch_get_balances": "_execute_batch_get_balances",
+        "get_indicator": "_execute_get_indicator",
+        "get_pool_state": "_execute_get_pool_state",
+        "resolve_pool_address": "_execute_resolve_pool_address",
+        "get_lp_position": "_execute_get_lp_position",
+        "list_lp_positions": "_execute_list_lp_positions",
+        "list_lending_positions": "_execute_list_lending_positions",
+        "list_lending_reserves": "_execute_list_lending_reserves",
+        "list_token_pools": "_execute_list_token_pools",
+        "get_portfolio": "_execute_get_portfolio",
+        "resolve_token": "_execute_resolve_token",
+        "get_risk_metrics": "_execute_get_risk_metrics",
+        "get_vault_state": "_execute_get_vault_state",
+        "get_wallet_overview": "_execute_get_wallet_overview",
+        "check_protocol_support": "_execute_check_protocol_support",
+    }
+
+    async def _dispatch_data(self, tool_name: str, args: dict) -> ToolResponse:
+        handler_name = self._DATA_TOOL_HANDLERS.get(tool_name)
+        if handler_name is None:
+            raise ToolValidationError(f"Unknown data tool: {tool_name}", tool_name=tool_name)
+
+        result = getattr(self, handler_name)(args)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+
+    def _execute_get_price(self, args: dict) -> ToolResponse:
         from almanak.gateway.proto import gateway_pb2
 
-        if tool_name == "get_price":
-            try:
-                resp = self._client.market.GetPrice(
-                    gateway_pb2.PriceRequest(
-                        token=args["token"],
-                        quote="USD",
-                        chain=args.get("chain", self._default_chain),
-                    )
-                )
-                return ToolResponse(
-                    status=ToolResponseStatus.SUCCESS,
-                    data={
-                        "token": args["token"],
-                        "price_usd": float(resp.price),
-                        "source": resp.source,
-                        "timestamp": str(resp.timestamp),
-                    },
-                )
-            except Exception as e:
-                return ToolResponse(
-                    status=ToolResponseStatus.ERROR,
-                    error=_error_payload(
-                        AgentErrorCode.GATEWAY_ERROR,
-                        f"Price unavailable for {args['token']}: {e}",
-                        recoverable=True,
-                    ),
-                )
-
-        if tool_name == "get_balance":
-            wallet = args.get("wallet_address") or self._wallet_address
-            resp = self._client.market.GetBalance(
-                gateway_pb2.BalanceRequest(
+        try:
+            resp = self._client.market.GetPrice(
+                gateway_pb2.PriceRequest(
                     token=args["token"],
+                    quote="USD",
                     chain=args.get("chain", self._default_chain),
-                    wallet_address=wallet,
                 )
             )
             return ToolResponse(
                 status=ToolResponseStatus.SUCCESS,
                 data={
                     "token": args["token"],
-                    "balance": resp.balance,
-                    "balance_usd": resp.balance_usd,
+                    "price_usd": float(resp.price),
+                    "source": resp.source,
+                    "timestamp": str(resp.timestamp),
                 },
             )
-
-        if tool_name == "batch_get_balances":
-            chain = args.get("chain", self._default_chain)
-            tokens = args.get("tokens")
-
-            if not tokens:
-                return ToolResponse(
-                    status=ToolResponseStatus.ERROR,
-                    error=_error_payload(
-                        AgentErrorCode.VALIDATION_ERROR,
-                        "tokens list is required; pass explicit token symbols to query.",
-                        recoverable=True,
-                    ),
-                    explanation="Cannot enumerate all tokens automatically. "
-                    "Provide a list of token symbols (e.g. ['ETH', 'USDC']).",
-                )
-
-            wallet = args.get("wallet_address") or self._wallet_address
-            requests = [gateway_pb2.BalanceRequest(token=t, chain=chain, wallet_address=wallet) for t in tokens]
-            resp = self._client.market.BatchGetBalances(gateway_pb2.BatchBalanceRequest(requests=requests))
-            balances = [
-                {"token": tokens[i], "balance": r.balance, "balance_usd": r.balance_usd}
-                for i, r in enumerate(resp.responses)
-            ]
-            total_usd = sum(
-                Decimal(b["balance_usd"]) for b in balances if b.get("balance_usd") and b["balance_usd"] != ""
-            )
-
+        except Exception as e:
             return ToolResponse(
-                status=ToolResponseStatus.SUCCESS,
-                data={"balances": balances, "total_usd": str(total_usd)},
+                status=ToolResponseStatus.ERROR,
+                error=_error_payload(
+                    AgentErrorCode.GATEWAY_ERROR,
+                    f"Price unavailable for {args['token']}: {e}",
+                    recoverable=True,
+                ),
             )
 
-        if tool_name == "get_indicator":
-            resp = self._client.market.GetIndicator(
-                gateway_pb2.IndicatorRequest(
-                    indicator_type=args["indicator"].upper(),
-                    token=args["token"],
-                    quote="USD",
-                    params={"period": str(args.get("period", 14))},
-                )
+    def _execute_get_balance(self, args: dict) -> ToolResponse:
+        from almanak.gateway.proto import gateway_pb2
+
+        wallet = args.get("wallet_address") or self._wallet_address
+        resp = self._client.market.GetBalance(
+            gateway_pb2.BalanceRequest(
+                token=args["token"],
+                chain=args.get("chain", self._default_chain),
+                wallet_address=wallet,
             )
+        )
+        return ToolResponse(
+            status=ToolResponseStatus.SUCCESS,
+            data={
+                "token": args["token"],
+                "balance": resp.balance,
+                "balance_usd": resp.balance_usd,
+            },
+        )
+
+    def _execute_batch_get_balances(self, args: dict) -> ToolResponse:
+        from almanak.gateway.proto import gateway_pb2
+
+        chain = args.get("chain", self._default_chain)
+        tokens = args.get("tokens")
+
+        if not tokens:
             return ToolResponse(
-                status=ToolResponseStatus.SUCCESS,
-                data={
-                    "indicator": args["indicator"],
-                    "value": float(resp.value),
-                    "signal": resp.metadata.get("signal"),
-                    "extra": dict(resp.metadata) if resp.metadata else None,
-                },
+                status=ToolResponseStatus.ERROR,
+                error=_error_payload(
+                    AgentErrorCode.VALIDATION_ERROR,
+                    "tokens list is required; pass explicit token symbols to query.",
+                    recoverable=True,
+                ),
+                explanation="Cannot enumerate all tokens automatically. "
+                "Provide a list of token symbols (e.g. ['ETH', 'USDC']).",
             )
 
-        if tool_name == "get_pool_state":
-            return await self._execute_get_pool_state(args)
-
-        if tool_name == "resolve_pool_address":
-            return await self._execute_resolve_pool_address(args)
-
-        if tool_name == "get_lp_position":
-            return await self._execute_get_lp_position(args)
-
-        if tool_name == "list_lp_positions":
-            return await self._execute_list_lp_positions(args)
-
-        if tool_name == "list_lending_positions":
-            return await self._execute_list_lending_positions(args)
-
-        if tool_name == "list_lending_reserves":
-            return await self._execute_list_lending_reserves(args)
-
-        if tool_name == "list_token_pools":
-            return await self._execute_list_token_pools(args)
-
-        if tool_name == "get_portfolio":
-            return await self._execute_get_portfolio(args)
-
-        if tool_name == "resolve_token":
-            from almanak.framework.data.tokens import get_token_resolver
-
-            resolver = get_token_resolver()
-            token = resolver.resolve(args["token"], args.get("chain", self._default_chain))
+        wallet = args.get("wallet_address") or self._wallet_address
+        requests = [gateway_pb2.BalanceRequest(token=t, chain=chain, wallet_address=wallet) for t in tokens]
+        resp = self._client.market.BatchGetBalances(gateway_pb2.BatchBalanceRequest(requests=requests))
+        if len(resp.responses) != len(tokens):
             return ToolResponse(
-                status=ToolResponseStatus.SUCCESS,
-                data={
-                    "symbol": token.symbol,
-                    "address": token.address,
-                    "decimals": token.decimals,
-                    "chain": token.chain,
-                    "source": token.source,
-                },
+                status=ToolResponseStatus.ERROR,
+                error=_error_payload(
+                    AgentErrorCode.GATEWAY_ERROR,
+                    f"Gateway returned {len(resp.responses)} balance responses for {len(tokens)} requested tokens.",
+                    recoverable=True,
+                ),
             )
 
-        if tool_name == "get_risk_metrics":
-            return await self._execute_get_risk_metrics(args)
+        balances = [
+            {"token": token, "balance": response.balance, "balance_usd": response.balance_usd}
+            for token, response in zip(tokens, resp.responses, strict=True)
+        ]
+        total_usd = sum(
+            Decimal(balance["balance_usd"])
+            for balance in balances
+            if balance.get("balance_usd") and balance["balance_usd"] != ""
+        )
 
-        if tool_name == "get_vault_state":
-            return await self._execute_get_vault_state(args)
+        return ToolResponse(
+            status=ToolResponseStatus.SUCCESS,
+            data={"balances": balances, "total_usd": str(total_usd)},
+        )
 
-        if tool_name == "get_wallet_overview":
-            return self._execute_get_wallet_overview(args)
+    def _execute_get_indicator(self, args: dict) -> ToolResponse:
+        from almanak.gateway.proto import gateway_pb2
 
-        if tool_name == "check_protocol_support":
-            return self._execute_check_protocol_support(args)
+        resp = self._client.market.GetIndicator(
+            gateway_pb2.IndicatorRequest(
+                indicator_type=args["indicator"].upper(),
+                token=args["token"],
+                quote="USD",
+                params={"period": str(args.get("period", 14))},
+            )
+        )
+        return ToolResponse(
+            status=ToolResponseStatus.SUCCESS,
+            data={
+                "indicator": args["indicator"],
+                "value": float(resp.value),
+                "signal": resp.metadata.get("signal"),
+                "extra": dict(resp.metadata) if resp.metadata else None,
+            },
+        )
 
-        raise ToolValidationError(f"Unknown data tool: {tool_name}", tool_name=tool_name)
+    def _execute_resolve_token(self, args: dict) -> ToolResponse:
+        from almanak.framework.data.tokens import get_token_resolver
+
+        resolver = get_token_resolver()
+        token = resolver.resolve(args["token"], args.get("chain", self._default_chain))
+        return ToolResponse(
+            status=ToolResponseStatus.SUCCESS,
+            data={
+                "symbol": token.symbol,
+                "address": token.address,
+                "decimals": token.decimals,
+                "chain": token.chain,
+                "source": token.source,
+            },
+        )
 
     # ── PLANNING / SAFETY TOOLS ─────────────────────────────────────────
 
@@ -2879,193 +3097,128 @@ class ToolExecutor:
             },
         )
 
-    # crap-allowlist: pre-existing RPC surface complexity
-    async def _execute_get_lp_position(self, args: dict) -> ToolResponse:  # noqa: C901
-        """Read Uniswap V3 LP position via NonfungiblePositionManager.positions()."""
-        from almanak.connectors._strategy_agent_tool_registry import STRATEGY_AGENT_READ_REGISTRY
-        from almanak.connectors._strategy_base.protocol_aliases import normalize_protocol
+    def _read_lp_position_current_tick(
+        self,
+        request: _ResolvedLPPositionRequest,
+        position: _DecodedLPPosition,
+    ) -> int | None:
         from almanak.gateway.proto import gateway_pb2
 
-        chain = args.get("chain", self._default_chain)
-        # When called from the CLI (lp-info), the caller passes network="mainnet"
-        # explicitly so queries hit live chain state (VIB-1713). When called from
-        # internal executor paths (e.g., rebalance, teardown), network is omitted
-        # and we pass "" to let the gateway use its configured default.
-        network = args.get("network", "")
-        position_id = int(args["position_id"])
-        lp_protocol = normalize_protocol(chain, args.get("protocol", DEFAULT_LP_PROTOCOL))
+        # Use the connector-paired factory instead of CREATE2: V3 forks may
+        # differ in both init-code hash and getPool fee-key encoding.
+        factory_address = request.capability.factory_address_for_position_manager(
+            request.chain, request.position_manager
+        )
+        if not factory_address:
+            return None
 
-        # Resolve the connector's on-chain read descriptors (NFT position
-        # manager + factory address + getPool selector) from the strategy-side
-        # registry. The connector owns "which address / which selector"; the
-        # executor owns the positions()/getPool()/slot0() RPC + decode.
-        cap = STRATEGY_AGENT_READ_REGISTRY.lookup(lp_protocol)
-        if cap is None or "lp_position" not in cap.agent_read_keys():
-            supported = sorted(
-                c.protocol for c in STRATEGY_AGENT_READ_REGISTRY.capabilities() if "lp_position" in c.agent_read_keys()
-            )
-            return ToolResponse(
-                status=ToolResponseStatus.ERROR,
-                error=_error_payload(
-                    AgentErrorCode.VALIDATION_ERROR,
-                    f"Unsupported protocol '{lp_protocol}' for LP position lookup. Supported: {supported}",
-                    recoverable=True,
-                ),
-            )
-
-        requested_manager = str(args.get("position_manager") or "").strip()
-        reviewed_managers = {address.lower(): address for address in cap.reviewed_position_manager_addresses(chain)}
-        if requested_manager:
-            nft_manager = reviewed_managers.get(requested_manager.lower())
-            if nft_manager is None:
-                return ToolResponse(
-                    status=ToolResponseStatus.ERROR,
-                    error=_error_payload(
-                        AgentErrorCode.VALIDATION_ERROR,
-                        f"Unreviewed position manager for {lp_protocol} on {chain}",
-                    ),
-                )
-        else:
-            nft_manager = cap.position_manager_address(chain)
-        if not nft_manager:
-            return ToolResponse(
-                status=ToolResponseStatus.ERROR,
-                error=_error_payload(
-                    AgentErrorCode.VALIDATION_ERROR,
-                    f"No unambiguous position manager on {chain} for {lp_protocol}; provide position_manager",
-                    recoverable=True,
-                ),
-            )
-
-        # positions(uint256) selector = 0x99fbab88
-        calldata = "0x99fbab88" + hex(position_id)[2:].zfill(64)
-        resp = self._client.rpc.Call(
+        addr0_padded = position.token0.lower().removeprefix("0x").zfill(64)
+        addr1_padded = position.token1.lower().removeprefix("0x").zfill(64)
+        fee_hex_padded = hex(position.fee)[2:].zfill(64)
+        calldata = request.capability.get_pool_selector() + addr0_padded + addr1_padded + fee_hex_padded
+        pool_response = self._client.rpc.Call(
             gateway_pb2.RpcRequest(
-                chain=chain,
+                chain=request.chain,
                 method="eth_call",
-                params=json.dumps([{"to": nft_manager, "data": calldata}, "latest"]),
-                id="lp_position",
-                network=network,
+                params=json.dumps([{"to": factory_address, "data": calldata}, "latest"]),
+                id="lp_factory_get_pool",
+                network=request.network,
             ),
             timeout=30.0,
         )
-        if not resp.success:
-            return ToolResponse(
-                status=ToolResponseStatus.ERROR,
-                error=_error_payload(AgentErrorCode.RPC_FAILED, f"positions() failed: {resp.error}", recoverable=True),
-            )
+        if not pool_response.success:
+            return None
 
-        raw = json.loads(resp.result).removeprefix("0x")
-        if len(raw) < 768:  # 12 words * 64 hex chars
-            return ToolResponse(
-                status=ToolResponseStatus.ERROR,
-                error=_error_payload(AgentErrorCode.INVALID_POSITION, f"Position {position_id} not found or burned"),
-            )
+        raw_pool = json.loads(pool_response.result).removeprefix("0x")
+        pool_address = "0x" + raw_pool[-40:] if len(raw_pool) >= 40 else None
+        if not pool_address or pool_address == "0x" + "0" * 40:
+            return None
 
-        words = [raw[i * 64 : (i + 1) * 64] for i in range(12)]
-        token0 = "0x" + words[2][-40:]
-        token1 = "0x" + words[3][-40:]
-        fee = int(words[4], 16)
-        tick_lower = _decode_int24(words[5])
-        tick_upper = _decode_int24(words[6])
-        liquidity = int(words[7], 16)
-        tokens_owed_0 = int(words[10], 16)
-        tokens_owed_1 = int(words[11], 16)
+        slot0_response = self._client.rpc.Call(
+            gateway_pb2.RpcRequest(
+                chain=request.chain,
+                method="eth_call",
+                params=json.dumps([{"to": pool_address, "data": "0x3850c7bd"}, "latest"]),
+                id="lp_pool_slot0",
+                network=request.network,
+            ),
+            timeout=30.0,
+        )
+        if not slot0_response.success:
+            return None
 
-        # Read current tick to determine if in range.
-        # We need the pool address -- query factory.getPool() via gateway RPC to avoid
-        # CREATE2 derivation which breaks on forks with different init_code_hash (e.g., Agni on Mantle).
-        # The connector publishes its factory address + getPool selector (uint24
-        # fee for the v3 family, int24 tick-spacing for Slipstream).
-        lp_factory_address = cap.factory_address_for_position_manager(chain, nft_manager)
+        slot0 = json.loads(slot0_response.result).removeprefix("0x")
+        return _decode_int24(slot0[64:128]) if len(slot0) >= 128 else None
 
-        in_range: bool | None = None
-        pool_current_tick = None
-        if lp_factory_address:
-            get_pool_selector = cap.get_pool_selector()
-            addr0_padded = token0.lower().removeprefix("0x").zfill(64)
-            addr1_padded = token1.lower().removeprefix("0x").zfill(64)
-            fee_hex_padded = hex(fee)[2:].zfill(64)
-            get_pool_cd = get_pool_selector + addr0_padded + addr1_padded + fee_hex_padded
-            gp_resp = self._client.rpc.Call(
-                gateway_pb2.RpcRequest(
-                    chain=chain,
-                    method="eth_call",
-                    params=json.dumps([{"to": lp_factory_address, "data": get_pool_cd}, "latest"]),
-                    id="lp_factory_get_pool",
-                    network=network,
-                ),
-                timeout=30.0,
-            )
-            pool_addr: str | None = None
-            if gp_resp.success:
-                raw_gp = json.loads(gp_resp.result).removeprefix("0x")
-                candidate = "0x" + raw_gp[-40:] if len(raw_gp) >= 40 else None
-                if candidate and candidate != "0x" + "0" * 40:
-                    pool_addr = candidate
-            if pool_addr:
-                slot0_resp = self._client.rpc.Call(
-                    gateway_pb2.RpcRequest(
-                        chain=chain,
-                        method="eth_call",
-                        params=json.dumps([{"to": pool_addr, "data": "0x3850c7bd"}, "latest"]),
-                        id="lp_pool_slot0",
-                        network=network,
-                    ),
-                    timeout=30.0,
-                )
-                if slot0_resp.success:
-                    s0 = json.loads(slot0_resp.result).removeprefix("0x")
-                    if len(s0) >= 128:
-                        pool_current_tick = _decode_int24(s0[64:128])
-                        in_range = tick_lower <= pool_current_tick < tick_upper
+    def _enrich_lp_position_fee_usd(
+        self,
+        data: dict[str, Any],
+        request: _ResolvedLPPositionRequest,
+        position: _DecodedLPPosition,
+    ) -> None:
+        from almanak.gateway.proto import gateway_pb2
 
-        data: dict = {
-            "position_id": str(position_id),
-            "position_manager": nft_manager,
-            "token_a": token0,
-            "token_b": token1,
-            "fee_tier": fee,
-            "tick_lower": tick_lower,
-            "tick_upper": tick_upper,
-            "liquidity": str(liquidity),
-            "tokens_owed_a": str(tokens_owed_0),
-            "tokens_owed_b": str(tokens_owed_1),
-            "in_range": in_range,
-        }
-        if pool_current_tick is not None:
-            data["current_tick"] = pool_current_tick
-
-        # USD-denominate uncollected fees (fail-open per token)
         try:
-            from decimal import Decimal
-
             from almanak.framework.data.tokens import get_token_resolver
 
             resolver = get_token_resolver()
             for token_addr, tokens_owed_raw, fee_key in [
-                (token0, tokens_owed_0, "fees_a_usd"),
-                (token1, tokens_owed_1, "fees_b_usd"),
+                (position.token0, position.tokens_owed_0, "fees_a_usd"),
+                (position.token1, position.tokens_owed_1, "fees_b_usd"),
             ]:
                 if tokens_owed_raw <= 0:
                     continue
                 try:
-                    resolved = resolver.resolve(token_addr, chain)
-                    price_resp = self._client.market.GetPrice(
-                        gateway_pb2.PriceRequest(token=token_addr, quote="USD", chain=chain)
+                    resolved = resolver.resolve(token_addr, request.chain)
+                    price_response = self._client.market.GetPrice(
+                        gateway_pb2.PriceRequest(token=token_addr, quote="USD", chain=request.chain)
                     )
-                    token_price = Decimal(str(price_resp.price))
+                    token_price = Decimal(str(price_response.price))
                     if token_price > 0 and resolved:
                         fee_usd = Decimal(tokens_owed_raw) / Decimal(10**resolved.decimals) * token_price
                         data[fee_key] = float(round(fee_usd, 6))
                 except Exception as exc:
                     logger.debug("fee_usd enrichment failed for %s (%s): %s", fee_key, token_addr, exc)
-            # Compute total from whichever individual fees are available
-            partial = [Decimal(str(data[k])) for k in ("fees_a_usd", "fees_b_usd") if k in data]
+            partial = [Decimal(str(data[key])) for key in ("fees_a_usd", "fees_b_usd") if key in data]
             if partial:
                 data["total_fees_usd"] = float(round(sum(partial, Decimal(0)), 6))
         except Exception as exc:
             logger.warning("fee USD enrichment block failed, failing open: %s", exc)
+
+    async def _execute_get_lp_position(self, args: dict) -> ToolResponse:
+        """Read Uniswap V3 LP position via NonfungiblePositionManager.positions()."""
+        from almanak.gateway.proto import gateway_pb2
+
+        request = _resolve_lp_position_request(args, self._default_chain)
+        if isinstance(request, ToolResponse):
+            return request
+
+        # positions(uint256) selector = 0x99fbab88
+        calldata = "0x99fbab88" + hex(request.position_id)[2:].zfill(64)
+        resp = self._client.rpc.Call(
+            gateway_pb2.RpcRequest(
+                chain=request.chain,
+                method="eth_call",
+                params=json.dumps([{"to": request.position_manager, "data": calldata}, "latest"]),
+                id="lp_position",
+                network=request.network,
+            ),
+            timeout=30.0,
+        )
+        if not resp.success:
+            return _lp_position_error(
+                AgentErrorCode.RPC_FAILED,
+                f"positions() failed: {resp.error}",
+                recoverable=True,
+            )
+
+        position = _decode_lp_position_result(resp.result, request)
+        if isinstance(position, ToolResponse):
+            return position
+
+        current_tick = self._read_lp_position_current_tick(request, position)
+        data = _format_lp_position_data(request, position, current_tick)
+        self._enrich_lp_position_fee_usd(data, request, position)
 
         return ToolResponse(status=ToolResponseStatus.SUCCESS, data=data)
 
@@ -3920,8 +4073,160 @@ class ToolExecutor:
         self._multicall3_probe_cache[cache_key] = available
         return available
 
-    # crap-allowlist: VIB-4801 mechanical NATIVE_TOKEN_SYMBOLS -> ChainRegistry cutover in pre-existing high-CRAP function (cc preserved at 29 by extracting _native_symbol_for_chain). Function was already over threshold on main (CRAP=49 at cc=29 / cov=71%); refactor of the broader function tracked in VIB-4139.
-    async def _execute_get_portfolio(self, args: dict) -> ToolResponse:  # noqa: C901
+    def _normalize_portfolio_request(self, args: dict) -> _PortfolioRequest | ToolResponse:
+        wallet = self._resolve_wallet(args, tool_name="get_portfolio")
+        if not wallet:
+            return ToolResponse(
+                status=ToolResponseStatus.ERROR,
+                error=_error_payload(
+                    AgentErrorCode.VALIDATION_ERROR,
+                    "wallet_address is required (none passed and no default wallet configured)",
+                ),
+            )
+        return _PortfolioRequest(
+            chain=args.get("chain", self._default_chain),
+            network=args.get("network", ""),
+            wallet=wallet,
+            tokens=tuple(args.get("tokens") or ()),
+        )
+
+    def _fold_portfolio_native(self, request: _PortfolioRequest, fold: _PortfolioFold) -> None:
+        from almanak.gateway.proto import gateway_pb2
+
+        try:
+            response = self._client.rpc.Call(
+                gateway_pb2.RpcRequest(
+                    chain=request.chain,
+                    method="eth_getBalance",
+                    params=json.dumps([request.wallet, "latest"]),
+                    id="portfolio_eth_balance",
+                    network=request.network,
+                ),
+                timeout=30.0,
+            )
+            if not response.success:
+                _portfolio_warning(fold, "native_balance", "rpc_failed", response.error or "unknown rpc error")
+                return
+
+            raw_balance = json.loads(response.result)
+            if not isinstance(raw_balance, str):
+                _portfolio_warning(
+                    fold,
+                    "native_balance",
+                    "bad_response",
+                    f"eth_getBalance returned {type(raw_balance).__name__}",
+                )
+                return
+
+            native_wei = int(raw_balance, 16)
+            chain_key = request.chain.lower()
+            native_symbol = _native_symbol_for_chain(chain_key)
+            if not native_symbol:
+                _portfolio_warning(
+                    fold,
+                    "native_balance",
+                    "unknown_chain",
+                    f"chain={request.chain} not registered in ChainRegistry; "
+                    "add a descriptor under almanak/core/chains/ to get native balance",
+                )
+                return
+
+            native_decimals = _NATIVE_TOKEN_DECIMALS.get(chain_key, 18)
+            fold.native_balance = str(Decimal(native_wei) / Decimal(10**native_decimals))
+            fold.native_symbol = native_symbol
+        except Exception as exc:
+            _portfolio_warning(fold, "native_balance", "exception", str(exc))
+
+    def _fold_portfolio_token_balances(self, request: _PortfolioRequest, fold: _PortfolioFold) -> None:
+        if not request.tokens:
+            return
+
+        from almanak.framework.data.tokens import TokenNotFoundError, get_token_resolver
+
+        resolver = get_token_resolver()
+        wallet_padded = request.wallet.removeprefix("0x").zfill(64)
+        for symbol in request.tokens:
+            try:
+                resolved = resolver.resolve(symbol, request.chain)
+            except TokenNotFoundError as exc:
+                _portfolio_warning(fold, "token_balances", "unknown_token", f"{symbol}: {exc}")
+                continue
+            except Exception as exc:
+                _portfolio_warning(fold, "token_balances", "resolver_error", f"{symbol}: {exc}")
+                continue
+
+            ok, raw = self._rpc_call(
+                request.chain,
+                resolved.address,
+                self._SELECTOR_BALANCE_OF + wallet_padded,
+                f"portfolio_erc20_{symbol}",
+                request.network,
+            )
+            if not ok:
+                _portfolio_warning(fold, "token_balances", "rpc_failed", f"{symbol}: {raw}")
+                continue
+            try:
+                raw_units = int(raw, 16)
+                human = Decimal(raw_units) / Decimal(10**resolved.decimals)
+                fold.token_balances.append(
+                    {
+                        "token": symbol,
+                        "address": resolved.address,
+                        "balance": str(human),
+                        "raw_balance": str(raw_units),
+                        "decimals": resolved.decimals,
+                    }
+                )
+            except (ArithmeticError, ValueError) as exc:
+                _portfolio_warning(fold, "token_balances", "decode_error", f"{symbol}: {exc}")
+
+    async def _fold_portfolio_lp_positions(self, request: _PortfolioRequest, fold: _PortfolioFold) -> None:
+        from almanak.framework.teardown.discovery import _npms_for_chain
+
+        if not _npms_for_chain(request.chain):
+            return
+
+        response = await self._execute_list_lp_positions(
+            {"chain": request.chain, "wallet_address": request.wallet, "network": request.network}
+        )
+        if response.status == ToolResponseStatus.SUCCESS and response.data:
+            fold.lp_positions = response.data.get("positions", [])
+            return
+        _portfolio_subtool_warning(fold, "lp_positions", response, "list_lp_positions returned no data")
+
+    async def _fold_portfolio_lending(self, request: _PortfolioRequest, fold: _PortfolioFold) -> None:
+        from almanak.connectors._strategy_agent_tool_registry import STRATEGY_AGENT_READ_REGISTRY
+
+        capability = STRATEGY_AGENT_READ_REGISTRY.lookup(DEFAULT_LENDING_PROTOCOL)
+        if capability is None or not capability.lending_pool_address(request.chain):
+            return
+
+        response = await self._execute_list_lending_positions(
+            {"chain": request.chain, "wallet_address": request.wallet, "network": request.network}
+        )
+        if response.status != ToolResponseStatus.SUCCESS or not response.data:
+            _portfolio_subtool_warning(fold, "lending", response, "list_lending_positions returned no data")
+            return
+
+        total_debt = response.data.get("total_debt_usd", "")
+        total_collateral = response.data.get("total_collateral_usd", "")
+        try:
+            if Decimal(total_debt) > 0 or Decimal(total_collateral) > 0:
+                fold.lending = {
+                    "protocol": DEFAULT_LENDING_PROTOCOL,
+                    "total_collateral_usd": total_collateral,
+                    "total_debt_usd": total_debt,
+                    "health_factor": response.data.get("health_factor", ""),
+                }
+        except (ArithmeticError, TypeError, ValueError) as exc:
+            _portfolio_warning(
+                fold,
+                "lending",
+                "decode_error",
+                f"could not parse totals as Decimal: {exc}",
+            )
+
+    async def _execute_get_portfolio(self, args: dict) -> ToolResponse:
         """One-shot portfolio summary: native + ERC20 balances + LP + lending.
 
         Read-only aggregate. Every section is queried independently and any
@@ -3935,186 +4240,16 @@ class ToolExecutor:
         failures indistinguishable from "no positions" on a $10M treasury
         query.
         """
-        from almanak.connectors._strategy_agent_tool_registry import STRATEGY_AGENT_READ_REGISTRY
-        from almanak.framework.teardown.discovery import _npms_for_chain
-        from almanak.gateway.proto import gateway_pb2
+        request = self._normalize_portfolio_request(args)
+        if isinstance(request, ToolResponse):
+            return request
 
-        chain = args.get("chain", self._default_chain)
-        network = args.get("network", "")
-        wallet = self._resolve_wallet(args, tool_name="get_portfolio")
-        if not wallet:
-            return ToolResponse(
-                status=ToolResponseStatus.ERROR,
-                error=_error_payload(
-                    AgentErrorCode.VALIDATION_ERROR,
-                    "wallet_address is required (none passed and no default wallet configured)",
-                ),
-            )
-
-        warnings: list[dict] = []
-        summary: dict = {
-            "chain": chain,
-            "wallet_address": wallet,
-            "native_balance": "",
-            "native_symbol": "",
-            "token_balances": [],
-            "lp_positions": [],
-            "lending": None,
-        }
-
-        def _warn(section: str, code: str, message: str) -> None:
-            logger.warning("portfolio %s failed (%s): %s", section, code, message)
-            warnings.append({"section": section, "code": code, "message": message})
-
-        # Native balance (eth_getBalance)
-        try:
-            bal_resp = self._client.rpc.Call(
-                gateway_pb2.RpcRequest(
-                    chain=chain,
-                    method="eth_getBalance",
-                    params=json.dumps([wallet, "latest"]),
-                    id="portfolio_eth_balance",
-                    network=network,
-                ),
-                timeout=30.0,
-            )
-            if not bal_resp.success:
-                _warn("native_balance", "rpc_failed", bal_resp.error or "unknown rpc error")
-            else:
-                raw_bal = json.loads(bal_resp.result)
-                if not isinstance(raw_bal, str):
-                    _warn("native_balance", "bad_response", f"eth_getBalance returned {type(raw_bal).__name__}")
-                else:
-                    native_wei = int(raw_bal, 16)
-                    chain_key = chain.lower()
-                    native_symbol = _native_symbol_for_chain(chain_key)
-                    # Repo convention (VIB-2950): never silently default
-                    # decimals. If we don't know the native symbol for this
-                    # chain, we also don't know its decimals — surface the
-                    # gap via warnings rather than pretending 18. (CodeRabbit
-                    # PR #1536 round 3 major.)
-                    if not native_symbol:
-                        _warn(
-                            "native_balance",
-                            "unknown_chain",
-                            f"chain={chain} not registered in ChainRegistry; "
-                            f"add a descriptor under almanak/core/chains/ "
-                            f"to get native balance",
-                        )
-                    else:
-                        native_decimals = _NATIVE_TOKEN_DECIMALS.get(chain_key, 18)
-                        summary["native_balance"] = str(Decimal(native_wei) / Decimal(10**native_decimals))
-                        summary["native_symbol"] = native_symbol
-        except Exception as exc:
-            _warn("native_balance", "exception", str(exc))
-
-        # ERC20 balances: call balanceOf directly via eth_call so the
-        # ``network`` override is honored (BalanceRequest has no network
-        # field today) and we don't re-enter the policy engine for an
-        # already-approved portfolio read. (Codex PR #1536 P2 x2.)
-        tokens = list(args.get("tokens") or [])
-        if tokens:
-            from almanak.framework.data.tokens import TokenNotFoundError, get_token_resolver
-
-            resolver = get_token_resolver()
-            wallet_padded = wallet.removeprefix("0x").zfill(64)
-            token_balances: list[dict] = []
-            for sym in tokens:
-                try:
-                    resolved = resolver.resolve(sym, chain)
-                except TokenNotFoundError as exc:
-                    _warn("token_balances", "unknown_token", f"{sym}: {exc}")
-                    continue
-                except Exception as exc:
-                    _warn("token_balances", "resolver_error", f"{sym}: {exc}")
-                    continue
-
-                ok, raw = self._rpc_call(
-                    chain,
-                    resolved.address,
-                    self._SELECTOR_BALANCE_OF + wallet_padded,
-                    f"portfolio_erc20_{sym}",
-                    network,
-                )
-                if not ok:
-                    _warn("token_balances", "rpc_failed", f"{sym}: {raw}")
-                    continue
-                try:
-                    raw_units = int(raw, 16) if raw else 0
-                    human = Decimal(raw_units) / Decimal(10**resolved.decimals)
-                    token_balances.append(
-                        {
-                            "token": sym,
-                            "address": resolved.address,
-                            "balance": str(human),
-                            "raw_balance": str(raw_units),
-                            "decimals": resolved.decimals,
-                        }
-                    )
-                except (ArithmeticError, ValueError) as exc:
-                    _warn("token_balances", "decode_error", f"{sym}: {exc}")
-            summary["token_balances"] = token_balances
-
-        # LP positions: gate on the canonical discovery registry so we don't
-        # skip PancakeSwap V3 / SushiSwap V3 / Agni positions on chains where
-        # only those forks are registered (previously we checked only the
-        # Uniswap V3 receipt parser's POSITION_MANAGER_ADDRESSES — CodeRabbit
-        # PR #1536 round 3 major).
-        if _npms_for_chain(chain):
-            lp_resp = await self._execute_list_lp_positions(
-                {"chain": chain, "wallet_address": wallet, "network": network}
-            )
-            if lp_resp.status == ToolResponseStatus.SUCCESS and lp_resp.data:
-                summary["lp_positions"] = lp_resp.data.get("positions", [])
-            else:
-                error_code = lp_resp.error.error_code.value if lp_resp.error else "unknown"
-                error_message = lp_resp.error.message if lp_resp.error else "list_lp_positions returned no data"
-                _warn(
-                    "lp_positions",
-                    error_code,
-                    error_message,
-                )
-
-        # Lending (Aave V3 only for v1). Gate on the lending connector's own
-        # Pool-address descriptor (resolved from the read registry) instead of
-        # importing the connector's address table — byte-equivalent to the
-        # pre-W8 ``AAVE_V3_POOL_ADDRESSES.get(chain)`` check.
-        lending_cap = STRATEGY_AGENT_READ_REGISTRY.lookup(DEFAULT_LENDING_PROTOCOL)
-        if lending_cap is not None and lending_cap.lending_pool_address(chain):
-            lend_resp = await self._execute_list_lending_positions(
-                {"chain": chain, "wallet_address": wallet, "network": network}
-            )
-            if lend_resp.status == ToolResponseStatus.SUCCESS and lend_resp.data:
-                total_debt = lend_resp.data.get("total_debt_usd", "0")
-                total_collat = lend_resp.data.get("total_collateral_usd", "0")
-                try:
-                    if Decimal(total_debt) > 0 or Decimal(total_collat) > 0:
-                        summary["lending"] = {
-                            "protocol": DEFAULT_LENDING_PROTOCOL,
-                            "total_collateral_usd": total_collat,
-                            "total_debt_usd": total_debt,
-                            "health_factor": lend_resp.data.get("health_factor", ""),
-                        }
-                except (ArithmeticError, ValueError) as exc:
-                    # Keep the lending field shape consistent — leave as None
-                    # and surface the decode error via warnings rather than
-                    # returning the raw lend_resp.data with a different
-                    # schema. (Gemini PR #1536 high-priority review.)
-                    _warn("lending", "decode_error", f"could not parse totals as Decimal: {exc}")
-            else:
-                error_code = lend_resp.error.error_code.value if lend_resp.error else "unknown"
-                error_message = (
-                    lend_resp.error.message if lend_resp.error else "list_lending_positions returned no data"
-                )
-                _warn(
-                    "lending",
-                    error_code,
-                    error_message,
-                )
-
-        summary["warnings"] = warnings
-        status = ToolResponseStatus.PARTIAL if warnings else ToolResponseStatus.SUCCESS
-        return ToolResponse(status=status, data=summary)
+        fold = _empty_portfolio_fold()
+        self._fold_portfolio_native(request, fold)
+        self._fold_portfolio_token_balances(request, fold)
+        await self._fold_portfolio_lp_positions(request, fold)
+        await self._fold_portfolio_lending(request, fold)
+        return _portfolio_response(request, fold)
 
     async def _execute_compute_rebalance_candidate(self, args: dict) -> ToolResponse:
         """Deterministic economic viability check for LP rebalancing.
@@ -4217,11 +4352,6 @@ class ToolExecutor:
                 return list(descriptor.default_display_tokens)
         return cls._FALLBACK_TOKENS
 
-    # crap-allowlist: plan-027 mechanical _CHAIN_DEFAULT_TOKENS ->
-    # ChainDescriptor.default_display_tokens cutover in pre-existing
-    # high-CRAP function (cov 4% predates the change) — same class of
-    # exception as the VIB-4801/VIB-4722 cutovers above; broader RPC-surface
-    # refactor of this file's executors tracked in VIB-4139.
     def _execute_get_wallet_overview(self, args: dict) -> ToolResponse:
         """Get complete wallet balance overview in a single call."""
         from almanak.gateway.proto import gateway_pb2
@@ -4250,12 +4380,14 @@ class ToolExecutor:
         tokens = []
         total_usd = Decimal("0")
         for i, r in enumerate(resp.responses):
-            if r.error:
+            if r.error or not r.balance_usd:
                 continue
             try:
-                bal_usd = Decimal(r.balance_usd) if r.balance_usd else Decimal("0")
-            except Exception:
-                bal_usd = Decimal("0")
+                bal_usd = Decimal(r.balance_usd)
+            except (InvalidOperation, ValueError):
+                continue
+            if not bal_usd.is_finite():
+                continue
             if bal_usd < Decimal(str(min_usd)):
                 continue
             tokens.append(
@@ -5302,7 +5434,6 @@ class ToolExecutor:
             include_status_in_data=True,
         )
 
-    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     async def _execute_deposit_vault(self, args: dict) -> ToolResponse:
         """Deposit underlying tokens into a vault (approve + requestDeposit).
 
@@ -5343,10 +5474,24 @@ class ToolExecutor:
                 wallet_address=depositor,
             )
         )
-        if not approve_resp.success and not dry_run:
-            raise ExecutionFailedError(
-                f"Vault deposit approve failed: {approve_resp.error}",
-                tool_name="deposit_vault",
+        if not approve_resp.success:
+            if not dry_run:
+                raise ExecutionFailedError(
+                    f"Vault deposit approve failed: {approve_resp.error}",
+                    tool_name="deposit_vault",
+                )
+            return _action_result_response(
+                success=False,
+                dry_run=True,
+                data={
+                    "tx_hash": None,
+                    "approve_tx_hash": approve_resp.tx_hashes[-1] if approve_resp.tx_hashes else None,
+                    "amount_deposited": "0",
+                    "message": "Vault deposit approval simulation failed",
+                },
+                operation="Vault deposit approval",
+                failure_detail=approve_resp.error,
+                include_status_in_data=True,
             )
 
         # Step 2: Request deposit (depends on approve being committed).
@@ -5387,7 +5532,7 @@ class ToolExecutor:
             data={
                 "tx_hash": tx_hash,
                 "approve_tx_hash": approve_resp.tx_hashes[-1] if approve_resp.tx_hashes else None,
-                "amount_deposited": str(amount),
+                "amount_deposited": str(amount) if exec_resp.success else "0",
                 "message": f"Deposited {amount} into vault {vault_address[:10]}...",
             },
             operation="Vault deposit",

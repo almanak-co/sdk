@@ -13,7 +13,6 @@ import sys
 import click
 
 
-# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
 @click.command("export")
 @click.option("--deployment-id", "-s", required=True, help="Deployment ID to export data for.")
 @click.option(

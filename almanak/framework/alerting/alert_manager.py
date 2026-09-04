@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, time
 from decimal import Decimal
 
+from almanak.core.redaction import redact
+
 from ..models.operator_card import OperatorCard, Severity
 from ._alert_manager_helpers import (
     collect_channels_to_send,
@@ -287,7 +289,6 @@ class AlertManager:
 
         return True, None
 
-    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     def _format_telegram_message(
         self,
         card: OperatorCard,
@@ -356,7 +357,7 @@ class AlertManager:
         lines.append("")
         lines.append(f"<i>{card.timestamp.strftime('%Y-%m-%d %H:%M:%S UTC')}</i>")
 
-        return "\n".join(lines)
+        return redact("\n".join(lines))
 
     async def send_alert(
         self,
@@ -426,7 +427,6 @@ class AlertManager:
         """
         return asyncio.run(self.send_alert(card, metric_values))
 
-    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     async def send_direct_telegram_alert(
         self,
         card: OperatorCard,
@@ -469,12 +469,16 @@ class AlertManager:
                 )
             else:
                 result.channels_failed.append(AlertChannel.TELEGRAM)
-                result.errors[AlertChannel.TELEGRAM] = send_result.error or "Unknown error"
-                logger.error(f"Direct Telegram alert failed for {card.deployment_id}: {send_result.error}")
+                result.errors[AlertChannel.TELEGRAM] = redact(send_result.error or "Unknown error")
+                logger.error(f"Direct Telegram alert failed for {card.deployment_id}: {redact(str(send_result.error))}")
         except Exception as e:
+            safe_error = redact(str(e))
             result.channels_failed.append(AlertChannel.TELEGRAM)
-            result.errors[AlertChannel.TELEGRAM] = str(e)
-            logger.exception(f"Exception sending direct Telegram alert for {card.deployment_id}: {e}")
+            result.errors[AlertChannel.TELEGRAM] = safe_error
+            logger.exception(
+                f"Exception sending direct Telegram alert for {card.deployment_id}: {safe_error}",
+                exc_info=(type(e), Exception(safe_error), e.__traceback__),
+            )
 
         return result
 
@@ -492,7 +496,6 @@ class AlertManager:
         """
         return asyncio.run(self.send_direct_telegram_alert(card))
 
-    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     async def send_direct_slack_alert(
         self,
         card: OperatorCard,
@@ -540,12 +543,16 @@ class AlertManager:
                 )
             else:
                 result.channels_failed.append(AlertChannel.SLACK)
-                result.errors[AlertChannel.SLACK] = send_result.error or "Unknown error"
-                logger.error(f"Direct Slack alert failed for {card.deployment_id}: {send_result.error}")
+                result.errors[AlertChannel.SLACK] = redact(send_result.error or "Unknown error")
+                logger.error(f"Direct Slack alert failed for {card.deployment_id}: {redact(str(send_result.error))}")
         except Exception as e:
+            safe_error = redact(str(e))
             result.channels_failed.append(AlertChannel.SLACK)
-            result.errors[AlertChannel.SLACK] = str(e)
-            logger.exception(f"Exception sending direct Slack alert for {card.deployment_id}: {e}")
+            result.errors[AlertChannel.SLACK] = safe_error
+            logger.exception(
+                f"Exception sending direct Slack alert for {card.deployment_id}: {safe_error}",
+                exc_info=(type(e), Exception(safe_error), e.__traceback__),
+            )
 
         return result
 

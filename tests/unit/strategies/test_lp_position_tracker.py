@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -64,6 +65,9 @@ def _result_with_bin_ids(bin_ids: list[int]) -> SimpleNamespace:
         bin_ids=list(bin_ids),
         extracted_data={"bin_ids": list(bin_ids)},
     )
+
+
+_NO_REGISTRY_LOOKUP = object()
 
 
 # ---------------------------------------------------------------------------
@@ -124,9 +128,7 @@ class TestRecordIntentExecution:
             amount=Decimal("100"),
             chain="arbitrum",
         )
-        tracker.record_intent_execution(
-            swap, success=True, result=SimpleNamespace(), default_chain="arbitrum"
-        )
+        tracker.record_intent_execution(swap, success=True, result=SimpleNamespace(), default_chain="arbitrum")
         assert tracker.known_positions() == {}
 
     def test_ignores_unknown_protocols(self) -> None:
@@ -252,6 +254,265 @@ class TestMaybeInject:
         out = tracker.maybe_inject(other, default_chain="avalanche")
         assert out is other
 
+    @pytest.mark.parametrize(
+        ("existing_params", "expected_params", "expect_copy"),
+        [
+            (None, {"bin_ids": [10, 11]}, True),
+            ({"bin_ids": []}, {"bin_ids": [10, 11]}, True),
+            ({"bin_ids": [99]}, {"bin_ids": [99]}, False),
+            ({"slippage_bps": 25}, {"slippage_bps": 25, "bin_ids": [10, 11]}, True),
+        ],
+        ids=["missing", "explicit-falsy", "explicit-truthy", "preserve-other-params"],
+    )
+    def test_bin_id_injection_truth_table(
+        self,
+        existing_params: dict[str, Any] | None,
+        expected_params: dict[str, Any],
+        expect_copy: bool,
+    ) -> None:
+        tracker = LPPositionTracker()
+        tracker.record_intent_execution(
+            _open_intent(),
+            success=True,
+            result=_result_with_bin_ids([10, 11]),
+            default_chain="avalanche",
+        )
+        intent = _close_intent(protocol_params=existing_params)
+
+        result = tracker.maybe_inject(intent, default_chain="avalanche")
+
+        assert (result is not intent) is expect_copy
+        assert result.protocol_params == expected_params
+        assert intent.protocol_params == existing_params
+
+    @pytest.mark.parametrize(
+        ("registry_value", "tracked_value", "existing_params", "expected_params", "expect_copy"),
+        [
+            (_NO_REGISTRY_LOOKUP, None, None, None, False),
+            ("registry-7", None, None, {"position_id": "registry-7"}, True),
+            (_NO_REGISTRY_LOOKUP, "tracker-8", None, {"position_id": "tracker-8"}, True),
+            (None, "tracker-8", None, {"position_id": "tracker-8"}, True),
+            ("registry-7", "tracker-8", None, {"position_id": "registry-7"}, True),
+            ("registry-7", "tracker-8", {"position_id": "manual-9"}, {"position_id": "manual-9"}, False),
+            ("registry-7", "tracker-8", {"token_id": "manual-9"}, {"token_id": "manual-9"}, False),
+            (
+                "registry-7",
+                "tracker-8",
+                {"position_id": "", "token_id": ""},
+                {"position_id": "registry-7", "token_id": ""},
+                True,
+            ),
+            ("", None, None, None, False),
+            (0, None, None, {"position_id": "0"}, True),
+        ],
+        ids=[
+            "no-source",
+            "registry-only",
+            "tracker-only",
+            "registry-miss-falls-back",
+            "registry-wins",
+            "manual-position-id-wins",
+            "manual-token-id-wins",
+            "explicit-falsy-values-are-replaced",
+            "empty-registry-id-is-not-injected",
+            "integer-zero-registry-id-is-stringified",
+        ],
+    )
+    def test_nft_position_id_injection_truth_table(
+        self,
+        registry_value: object,
+        tracked_value: str | None,
+        existing_params: dict[str, Any] | None,
+        expected_params: dict[str, Any] | None,
+        expect_copy: bool,
+    ) -> None:
+        tracker = LPPositionTracker()
+        if tracked_value is not None:
+            tracker.record_intent_execution(
+                _open_intent(protocol="uniswap_v3"),
+                success=True,
+                result=SimpleNamespace(position_id=tracked_value),
+                default_chain="avalanche",
+            )
+        if registry_value is not _NO_REGISTRY_LOOKUP:
+            tracker.attach_registry_lookup(lambda **_: registry_value)
+        intent = _close_intent(protocol="uniswap_v3", protocol_params=existing_params)
+
+        result = tracker.maybe_inject(intent, default_chain="avalanche")
+
+        assert (result is not intent) is expect_copy
+        assert result.protocol_params == expected_params
+        assert intent.protocol_params == existing_params
+
+    @pytest.mark.parametrize(
+        "protocol",
+        [
+            "uniswap_v3",
+            "uniswap_v4",
+            "sushiswap_v3",
+            "pancakeswap_v3",
+            "aerodrome_slipstream",
+            "velodrome_slipstream",
+        ],
+    )
+    def test_registry_injection_supports_each_nft_protocol(self, protocol: str) -> None:
+        tracker = LPPositionTracker()
+        tracker.attach_registry_lookup(lambda **_: "registry-position")
+        intent = _close_intent(protocol=protocol)
+
+        result = tracker.maybe_inject(intent, default_chain="avalanche")
+
+        assert result is not intent
+        assert result.protocol_params == {"position_id": "registry-position"}
+
+    @pytest.mark.parametrize(
+        ("protocol", "chain", "pool", "default_chain"),
+        [
+            (None, "avalanche", "pool", "avalanche"),
+            ("traderjoe_v2", None, "pool", None),
+            ("traderjoe_v2", "avalanche", None, "avalanche"),
+        ],
+        ids=["missing-protocol", "missing-chain", "missing-pool"],
+    )
+    def test_missing_position_identity_is_noop(
+        self,
+        protocol: str | None,
+        chain: str | None,
+        pool: str | None,
+        default_chain: str | None,
+    ) -> None:
+        tracker = LPPositionTracker()
+        intent = SimpleNamespace(
+            intent_type="LP_CLOSE",
+            protocol=protocol,
+            chain=chain,
+            pool=pool,
+            protocol_params={},
+        )
+
+        result = tracker.maybe_inject(intent, default_chain=default_chain)
+
+        assert result is intent
+
+    def test_tracked_metadata_for_unknown_protocol_is_noop(self) -> None:
+        tracker = LPPositionTracker()
+        tracker.load_persistent_dict({"unknown|avalanche|pool": {"bin_ids": [1], "position_id": "2"}})
+        intent = _close_intent(pool="pool", protocol="unknown")
+
+        result = tracker.maybe_inject(intent, default_chain="avalanche")
+
+        assert result is intent
+
+    def test_registry_lookup_precedes_params_read_and_model_copy(self) -> None:
+        events: list[object] = []
+        tracker = LPPositionTracker()
+
+        def lookup(**kwargs: str) -> str:
+            events.append(("registry", kwargs))
+            return "registry-position"
+
+        class OrderedIntent:
+            intent_type = "LP_CLOSE"
+            protocol = "uniswap_v3"
+            chain = None
+            pool = " POOL "
+
+            @property
+            def protocol_params(self) -> dict[str, Any]:
+                events.append("protocol_params")
+                return {}
+
+            def model_copy(self, *, update: dict[str, Any]) -> SimpleNamespace:
+                events.append(("model_copy", update))
+                return SimpleNamespace(protocol_params=update["protocol_params"])
+
+        tracker.attach_registry_lookup(lookup)
+
+        result = tracker.maybe_inject(OrderedIntent(), default_chain="AVALANCHE")
+
+        assert result.protocol_params == {"position_id": "registry-position"}
+        assert events == [
+            (
+                "registry",
+                {"protocol": "uniswap_v3", "chain": "avalanche", "pool": "pool"},
+            ),
+            "protocol_params",
+            ("model_copy", {"protocol_params": {"position_id": "registry-position"}}),
+        ]
+
+    def test_legacy_model_reconstruction_injects_without_mutating_original(self) -> None:
+        tracker = LPPositionTracker()
+        tracker.load_persistent_dict({"traderjoe_v2|avalanche|pool": {"bin_ids": [1, 2]}})
+
+        class LegacyIntent:
+            intent_type = "LP_CLOSE"
+            protocol = "traderjoe_v2"
+            chain = "avalanche"
+            pool = "pool"
+
+            def __init__(self, protocol_params: dict[str, Any] | None = None) -> None:
+                self.protocol_params = protocol_params
+
+            def model_dump(self) -> dict[str, Any]:
+                return {"protocol_params": self.protocol_params}
+
+            @classmethod
+            def model_validate(cls, data: dict[str, Any]) -> LegacyIntent:
+                return cls(protocol_params=data["protocol_params"])
+
+        intent = LegacyIntent()
+
+        result = tracker.maybe_inject(intent, default_chain="avalanche")
+
+        assert result is not intent
+        assert result.protocol_params == {"bin_ids": [1, 2]}
+        assert intent.protocol_params is None
+
+    def test_failed_legacy_model_reconstruction_returns_original_without_warning(self, caplog) -> None:
+        tracker = LPPositionTracker()
+        tracker.load_persistent_dict({"traderjoe_v2|avalanche|pool": {"bin_ids": [1]}})
+
+        class InvalidLegacyIntent:
+            intent_type = "LP_CLOSE"
+            protocol = "traderjoe_v2"
+            chain = "avalanche"
+            pool = "pool"
+            protocol_params: dict[str, Any] = {}
+
+            def model_dump(self) -> dict[str, Any]:
+                raise ValueError("invalid legacy model")
+
+        intent = InvalidLegacyIntent()
+
+        with caplog.at_level("WARNING"):
+            result = tracker.maybe_inject(intent, default_chain="avalanche")
+
+        assert result is intent
+        assert not caplog.records
+
+    def test_registry_lookup_failure_logs_debug_and_uses_tracker(self, caplog) -> None:
+        tracker = LPPositionTracker()
+        tracker.record_intent_execution(
+            _open_intent(protocol="uniswap_v3"),
+            success=True,
+            result=SimpleNamespace(position_id="tracker-position"),
+            default_chain="avalanche",
+        )
+
+        def failing_lookup(**_: str) -> str:
+            raise RuntimeError("registry unavailable")
+
+        tracker.attach_registry_lookup(failing_lookup)
+
+        with caplog.at_level("DEBUG"):
+            result = tracker.maybe_inject(
+                _close_intent(protocol="uniswap_v3"),
+                default_chain="avalanche",
+            )
+
+        assert result.protocol_params == {"position_id": "tracker-position"}
+        assert "_lookup_registry_position_id failed (non-fatal)" in caplog.text
+
 
 # ---------------------------------------------------------------------------
 # Persistence
@@ -299,9 +560,10 @@ class TestPersistence:
 
 
 class TestDefensive:
-    def test_inject_never_raises(self) -> None:
+    def test_inject_never_raises(self, caplog) -> None:
         """A tracker fault must never block the strategy intent."""
         tracker = LPPositionTracker()
+        tracker.load_persistent_dict({"traderjoe_v2|avalanche|x/y/1": {"bin_ids": [1]}})
 
         # Force the internals into a state where injection might raise.
         class Broken:
@@ -314,9 +576,12 @@ class TestDefensive:
             def protocol_params(self) -> dict:
                 raise RuntimeError("explode")
 
-        out = tracker.maybe_inject(Broken(), default_chain="avalanche")
-        # Should return the original (or at least not raise).
-        assert out is not None
+        intent = Broken()
+        with caplog.at_level("WARNING"):
+            out = tracker.maybe_inject(intent, default_chain="avalanche")
+
+        assert out is intent
+        assert "LPPositionTracker.maybe_inject failed (non-fatal): explode" in caplog.text
 
     def test_record_swallows_errors(self) -> None:
         tracker = LPPositionTracker()
@@ -327,9 +592,7 @@ class TestDefensive:
                 raise RuntimeError("explode")
 
         # Must not raise.
-        tracker.record_intent_execution(
-            Broken(), success=True, result=SimpleNamespace(), default_chain="avalanche"
-        )
+        tracker.record_intent_execution(Broken(), success=True, result=SimpleNamespace(), default_chain="avalanche")
 
 
 # ---------------------------------------------------------------------------

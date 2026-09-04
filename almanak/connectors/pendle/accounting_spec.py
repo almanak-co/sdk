@@ -170,29 +170,43 @@ def _pt_symbol_from_ledger(ledger_row: dict[str, Any]) -> str:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-# crap-allowlist: VIB-4988 — verbatim relocation of a pre-existing cc=34 money-path
-# handler; cc>30 is not coverage-fixable, and decomposition is tracked separately under
-# the crap-refactor protocol (do not refactor it from this move PR).
-def handle_pendle_lp(
+_PENDLE_LP_EVENT_TYPES = {
+    "LP_OPEN": PendleEventType.PENDLE_LP_OPEN,
+    "LP_CLOSE": PendleEventType.PENDLE_LP_CLOSE,
+}
+
+_PENDLE_LP_AMOUNT_FIELDS = {
+    PendleEventType.PENDLE_LP_OPEN: ("lp_open_data", "amount0", "amount1"),
+    PendleEventType.PENDLE_LP_CLOSE: ("lp_close_data", "amount0_collected", "amount1_collected"),
+}
+
+
+@dataclass(frozen=True)
+class _PendleLPContext:
+    deployment_id: str
+    cycle_id: str
+    execution_mode: str
+    timestamp: datetime
+    chain: str
+    protocol: str
+    wallet_address: str
+    tx_hash: str
+    ledger_entry_id: str
+    position_key: str
+    extracted: dict[str, Any]
+
+
+def _pendle_lp_event_type(ledger_row: dict[str, Any]) -> PendleEventType | None:
+    intent_type = (ledger_row.get("intent_type") or "").upper()
+    return _PENDLE_LP_EVENT_TYPES.get(intent_type)
+
+
+def _pendle_lp_context(
     outbox_row: dict[str, Any],
     ledger_row: dict[str, Any],
-) -> PendleAccountingEvent | None:
-    """Build a PendleAccountingEvent(PENDLE_LP_OPEN|PENDLE_LP_CLOSE) from ledger row.
-
-    SY and PT amounts are read from deserialized extracted_data_json.
-    Position key is from the outbox_row (pre-computed by runner).
-    """
+    protocol: str,
+) -> _PendleLPContext:
     from almanak.framework.observability.ledger import deserialize_extracted_data
-
-    intent_type_str = (ledger_row.get("intent_type") or "").upper()
-    if intent_type_str not in ("LP_OPEN", "LP_CLOSE"):
-        return None
-
-    protocol = (ledger_row.get("protocol") or "").lower()
-    if "pendle" not in protocol:
-        return None
-
-    event_type = PendleEventType.PENDLE_LP_OPEN if intent_type_str == "LP_OPEN" else PendleEventType.PENDLE_LP_CLOSE
 
     deployment_id = ledger_row.get("deployment_id") or outbox_row.get("deployment_id") or ""
     cycle_id = ledger_row.get("cycle_id") or outbox_row.get("cycle_id") or ""
@@ -210,46 +224,77 @@ def handle_pendle_lp(
     except (ValueError, AttributeError):
         timestamp = datetime.now(UTC)
 
-    extracted = deserialize_extracted_data(ledger_row.get("extracted_data_json") or "")
-
-    sy_amount_raw: int | None = None
-    pt_amount_raw: int | None = None
-    market_address = ""
-
-    if intent_type_str == "LP_OPEN":
-        lp_open = extracted.get("lp_open_data")
-        if lp_open is not None:
-            sy_amount_raw = _get_field(lp_open, "amount0")
-            pt_amount_raw = _get_field(lp_open, "amount1")
-        # Derive market_address from position_key or outbox
-        market_address = outbox_row.get("market_id") or _market_from_position_key(position_key) or ""
-    else:
-        lp_close = extracted.get("lp_close_data")
-        if lp_close is not None:
-            sy_amount_raw = _get_field(lp_close, "amount0_collected")
-            pt_amount_raw = _get_field(lp_close, "amount1_collected")
-        market_address = outbox_row.get("market_id") or _market_from_position_key(position_key) or ""
-
-    sy_amount = Decimal(str(sy_amount_raw)) / _SCALE_18 if sy_amount_raw is not None else None
-    pt_amount = Decimal(str(pt_amount_raw)) / _SCALE_18 if pt_amount_raw is not None else None
-
-    if not position_key and market_address and wallet_address:
-        position_key = f"pendle_lp:{chain.lower()}:{wallet_address.lower()}:{market_address.lower()}"
-
-    _id_seed = tx_hash or ledger_entry_id or position_key
-    identity = AccountingIdentity(
-        id=make_accounting_event_id(deployment_id, cycle_id, event_type.value, _id_seed, position_key),
+    return _PendleLPContext(
         deployment_id=deployment_id,
         cycle_id=cycle_id,
-        execution_mode=RunMode.parse_optional(execution_mode),
+        execution_mode=execution_mode,
         timestamp=timestamp,
         chain=chain,
         protocol=protocol,
         wallet_address=wallet_address,
         tx_hash=tx_hash,
         ledger_entry_id=ledger_entry_id,
+        position_key=position_key,
+        extracted=deserialize_extracted_data(ledger_row.get("extracted_data_json") or ""),
     )
 
+
+def _pendle_lp_raw_amounts(
+    extracted: dict[str, Any],
+    event_type: PendleEventType,
+) -> tuple[int | None, int | None]:
+    data_key, sy_field, pt_field = _PENDLE_LP_AMOUNT_FIELDS[event_type]
+    lp_data = extracted.get(data_key)
+    if lp_data is None:
+        return None, None
+    return _get_field(lp_data, sy_field), _get_field(lp_data, pt_field)
+
+
+def _scale_pendle_lp_amounts(
+    sy_amount_raw: int | None,
+    pt_amount_raw: int | None,
+) -> tuple[Decimal | None, Decimal | None]:
+    sy_amount = Decimal(str(sy_amount_raw)) / _SCALE_18 if sy_amount_raw is not None else None
+    pt_amount = Decimal(str(pt_amount_raw)) / _SCALE_18 if pt_amount_raw is not None else None
+    return sy_amount, pt_amount
+
+
+def _pendle_lp_position(ctx: _PendleLPContext, outbox_row: dict[str, Any]) -> tuple[str, str]:
+    market_address = outbox_row.get("market_id") or _market_from_position_key(ctx.position_key) or ""
+    position_key = ctx.position_key
+    if not position_key and market_address and ctx.wallet_address:
+        position_key = f"pendle_lp:{ctx.chain.lower()}:{ctx.wallet_address.lower()}:{market_address.lower()}"
+    return position_key, market_address
+
+
+def _pendle_lp_identity(
+    ctx: _PendleLPContext,
+    event_type: PendleEventType,
+    position_key: str,
+) -> AccountingIdentity:
+    id_seed = ctx.tx_hash or ctx.ledger_entry_id or position_key
+    return AccountingIdentity(
+        id=make_accounting_event_id(ctx.deployment_id, ctx.cycle_id, event_type.value, id_seed, position_key),
+        deployment_id=ctx.deployment_id,
+        cycle_id=ctx.cycle_id,
+        execution_mode=RunMode.parse_optional(ctx.execution_mode),
+        timestamp=ctx.timestamp,
+        chain=ctx.chain,
+        protocol=ctx.protocol,
+        wallet_address=ctx.wallet_address,
+        tx_hash=ctx.tx_hash,
+        ledger_entry_id=ctx.ledger_entry_id,
+    )
+
+
+def _build_pendle_lp_event(
+    identity: AccountingIdentity,
+    event_type: PendleEventType,
+    position_key: str,
+    market_address: str,
+    sy_amount: Decimal | None,
+    pt_amount: Decimal | None,
+) -> PendleAccountingEvent:
     return PendleAccountingEvent(
         identity=identity,
         event_type=event_type,
@@ -266,6 +311,31 @@ def handle_pendle_lp(
         confidence=AccountingConfidence.ESTIMATED,
         unavailable_reason="SY/PT scaled by assumed 18-decimal precision; pt_token and USD price absent",
     )
+
+
+def handle_pendle_lp(
+    outbox_row: dict[str, Any],
+    ledger_row: dict[str, Any],
+) -> PendleAccountingEvent | None:
+    """Build a PendleAccountingEvent(PENDLE_LP_OPEN|PENDLE_LP_CLOSE) from ledger row.
+
+    SY and PT amounts are read from deserialized extracted_data_json.
+    Position key is from the outbox_row (pre-computed by runner).
+    """
+    event_type = _pendle_lp_event_type(ledger_row)
+    if event_type is None:
+        return None
+
+    protocol = (ledger_row.get("protocol") or "").lower()
+    if "pendle" not in protocol:
+        return None
+
+    ctx = _pendle_lp_context(outbox_row, ledger_row, protocol)
+    sy_amount_raw, pt_amount_raw = _pendle_lp_raw_amounts(ctx.extracted, event_type)
+    position_key, market_address = _pendle_lp_position(ctx, outbox_row)
+    sy_amount, pt_amount = _scale_pendle_lp_amounts(sy_amount_raw, pt_amount_raw)
+    identity = _pendle_lp_identity(ctx, event_type, position_key)
+    return _build_pendle_lp_event(identity, event_type, position_key, market_address, sy_amount, pt_amount)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

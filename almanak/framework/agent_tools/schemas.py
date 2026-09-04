@@ -299,6 +299,7 @@ class GetLPPositionRequest(BaseModel):
         default="",
         description="Exact reviewed NFT-manager address; required when a protocol has multiple manager generations.",
     )
+    network: str = Field(default="", description="'mainnet' or 'anvil'; empty means gateway default.")
 
 
 class GetLPPositionResponse(BaseModel):

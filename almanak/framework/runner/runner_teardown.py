@@ -891,8 +891,392 @@ def _apply_lending_unwind_guard(
     return guarded.intents
 
 
-# crap-allowlist: VIB-4049 — pre-existing cc=21 teardown coordinator; lifecycle typing adds zero new branches.
-async def execute_teardown(  # noqa: C901
+@dataclass(frozen=True)
+class _TeardownIntentGenerationOutcome:
+    intents: Any = None
+    failure_result: Any = None
+    failed: bool = False
+
+
+@dataclass(frozen=True)
+class _TeardownRecoveryOutcome:
+    intents: Any
+    incomplete: bool
+    warning: str | None
+
+
+def _reset_teardown_verification_signals(runner: Any) -> None:
+    """Reset the Blueprint 14a Stage 5 evidence owned by one teardown run."""
+    runner._teardown_reconciliation = None
+    runner._teardown_closure_verification = None
+
+
+async def _run_pre_teardown_settlement_accounting(
+    runner: Any,
+    strategy: Any,
+    deployment_id: str,
+) -> str | None:
+    """Run Blueprint 14's pre-enumeration settlement tick with Stage 6 semantics."""
+    pre_gate_cycle_id = str(getattr(runner, "_last_cycle_id", None) or deployment_id)
+    pre_gate_degraded: str | None = None
+    try:
+        from .perp_settlement_reconciler import reconcile_perp_settlements
+
+        pre_gate_reconciliation = await reconcile_perp_settlements(
+            runner,
+            strategy,
+            deployment_id=deployment_id,
+            cycle_id=pre_gate_cycle_id,
+            gateway_client=runner._get_gateway_client(),
+        )
+        if pre_gate_reconciliation.accounting_degraded:
+            pre_gate_degraded = (
+                "; ".join(pre_gate_reconciliation.degraded_reasons) or "pre-gate settlement reconciliation degraded"
+            )
+    except Exception as exc:  # noqa: BLE001 — settlement accounting must never block risk reduction
+        pre_gate_degraded = f"pre-gate settlement reconciliation raised: {exc.__class__.__name__}: {exc}"
+        logger.warning(
+            "Teardown pre-enumeration perp settlement reconciliation failed (non-blocking)",
+            exc_info=True,
+        )
+    if not pre_gate_degraded:
+        return None
+
+    logger.error(
+        "🛑 Teardown pre-gate perp settlement reconciliation degraded for %s "
+        "(teardown continues; the durable watch set retries on any later tick): %s",
+        deployment_id,
+        pre_gate_degraded,
+    )
+    from ..accounting.deferred_log import DeferredWrite
+    from ..accounting.deferred_log import append as deferred_append
+
+    try:
+        deferred_append(
+            DeferredWrite.now(
+                kind="perp_settlement",
+                deployment_id=deployment_id,
+                cycle_id=pre_gate_cycle_id,
+                intent_type="PERP_SETTLEMENT",
+                error=pre_gate_degraded,
+            )
+        )
+    except Exception:  # noqa: BLE001 - accounting failure must not block risk reduction
+        logger.exception(
+            "Could not persist teardown pre-gate settlement degradation for %s; teardown continues",
+            deployment_id,
+        )
+    return pre_gate_degraded
+
+
+def _create_teardown_market(strategy: Any) -> Any:
+    """Create the market input consumed by Blueprint 14a Stage 2 planning."""
+    try:
+        teardown_market = strategy.create_market_snapshot()
+        if hasattr(teardown_market, "get_price_oracle_dict"):
+            logger.debug(
+                f"Created market snapshot for teardown with prices: "
+                f"{list(teardown_market.get_price_oracle_dict().keys())}"
+            )
+        else:
+            logger.debug("Created multi-chain market snapshot for teardown")
+        return teardown_market
+    except Exception as exc:
+        logger.warning(f"Failed to create market snapshot for teardown: {exc}. Continuing without market data.")
+        return None
+
+
+async def _generate_teardown_plan(
+    runner: Any,
+    strategy: Any,
+    teardown_mode: TeardownMode,
+    teardown_market: Any,
+    request: Any,
+    manager: Any,
+    deployment_id: str,
+    start_time: datetime,
+) -> _TeardownIntentGenerationOutcome:
+    """Generate the primitive-specific closing plan from Blueprint 14a Stage 2."""
+    from .runner_models import IterationStatus
+
+    try:
+        try:
+            teardown_intents = strategy.generate_teardown_intents(teardown_mode, market=teardown_market)
+        except TypeError as exc:
+            if "unexpected keyword argument" not in str(exc):
+                raise
+            logger.debug(f"Strategy {deployment_id} uses old teardown signature (no market param), falling back")
+            teardown_intents = strategy.generate_teardown_intents(teardown_mode)
+    except Exception as exc:
+        logger.error(f"Failed to generate teardown intents for {deployment_id}: {exc}")
+        if request:
+            # Nothing executed; enumerate honest failure counts without masking the
+            # generation error. An unreadable count remains unset, never fabricated zero.
+            closed, failed = await _failure_position_counts(strategy)
+            _safe_mark(
+                manager,
+                "mark_failed",
+                deployment_id,
+                error=str(exc),
+                positions_closed=closed,
+                positions_failed=failed,
+            )
+        runner._request_teardown_failure_shutdown(str(exc))
+        return _TeardownIntentGenerationOutcome(
+            failure_result=runner._create_error_result(
+                deployment_id,
+                IterationStatus.STRATEGY_ERROR,
+                str(exc),
+                start_time,
+            ),
+            failed=True,
+        )
+    return _TeardownIntentGenerationOutcome(intents=teardown_intents)
+
+
+async def _recover_teardown_positions(
+    runner: Any,
+    strategy: Any,
+    teardown_intents: Any,
+    teardown_mode: TeardownMode,
+) -> _TeardownRecoveryOutcome:
+    """Add Blueprint 14a Stage 1 LP and pending-order recovery discoveries."""
+    teardown_intents, recovery_incomplete, recovery_warning = await _recover_orphaned_lp_intents(
+        runner, strategy, teardown_intents, teardown_mode
+    )
+    lp_recovery_incomplete = recovery_incomplete
+    lp_recovery_warning = recovery_warning
+    teardown_intents, pending_incomplete, pending_warning = await _recover_pending_order_intents(
+        runner, strategy, teardown_intents, teardown_mode
+    )
+    recovery_incomplete = recovery_incomplete or pending_incomplete
+    # Preserve independent recovery failures instead of hiding one behind the other.
+    recovery_warning = "; ".join(w for w in (recovery_warning, pending_warning) if w) or None
+    # Execution still proceeds, but incomplete recovery must prevent clean certification.
+    runner._teardown_recovery_incomplete = recovery_incomplete
+    runner._teardown_recovery_warning = recovery_warning
+    runner._teardown_lp_recovery_incomplete = lp_recovery_incomplete
+    runner._teardown_lp_recovery_warning = lp_recovery_warning
+    return _TeardownRecoveryOutcome(teardown_intents, recovery_incomplete, recovery_warning)
+
+
+async def _restore_resumable_teardown_plan(
+    runner: Any,
+    manager: Any,
+    deployment_id: str,
+    teardown_intents: Any,
+    start_time: datetime,
+) -> tuple[Any, Any | None]:
+    """Preserve accepted-order identity at Blueprint 14a's Stage 3 resume seam."""
+    if teardown_intents:
+        return teardown_intents, None
+
+    accepted_lookup = await _load_runtime_resumable_accepted_async_state(runner, manager, deployment_id)
+    if accepted_lookup.blocked_reason:
+        return teardown_intents, _accepted_async_recovery_pending_result(
+            runner, deployment_id, start_time, accepted_lookup.blocked_reason
+        )
+    accepted_state = accepted_lookup.state
+    if accepted_state is not None:
+        persisted_plan = json.loads(accepted_state.pending_intents_json)
+        teardown_intents = persisted_plan if isinstance(persisted_plan, list) else []
+        logger.warning(
+            "🛑 %s generated no teardown intents but owns accepted async state; routing correlated resume",
+            deployment_id,
+        )
+    return teardown_intents, None
+
+
+def _fail_teardown_before_execution(
+    runner: Any,
+    manager: Any,
+    request: Any,
+    deployment_id: str,
+    start_time: datetime,
+    error: str,
+) -> IterationResult:
+    """Fail a pre-dispatch Stage 5 gate without certifying closure."""
+    from .runner_models import IterationStatus
+
+    logger.error("🛑 %s teardown blocked: %s", deployment_id, error)
+    if request:
+        _safe_mark(manager, "mark_failed", deployment_id, error=error)
+    runner._request_teardown_failure_shutdown(error)
+    return runner._create_error_result(deployment_id, IterationStatus.STRATEGY_ERROR, error, start_time)
+
+
+async def _complete_teardown_without_intents(
+    runner: Any,
+    strategy: Any,
+    manager: Any,
+    request: Any,
+    deployment_id: str,
+    start_time: datetime,
+    recovery_incomplete: bool,
+    recovery_warning: str | None,
+    pre_gate_degraded: str | None,
+) -> IterationResult:
+    """Apply Blueprint 14's Stage 5 no-intent completeness gate before success."""
+    from .runner_models import IterationResult, IterationStatus
+
+    completeness = await _check_no_intent_completeness(strategy, request)
+    if completeness is None:
+        error = (
+            f"Teardown completeness: could not read the known open-position set for {deployment_id} "
+            "(strategy enumeration failed); refusing to certify a clean 'no positions' teardown. "
+            "Verify on-chain and re-run."
+        )
+        return _fail_teardown_before_execution(runner, manager, request, deployment_id, start_time, error)
+    if not completeness.complete:
+        return _fail_teardown_before_execution(
+            runner,
+            manager,
+            request,
+            deployment_id,
+            start_time,
+            completeness.error_message(),
+        )
+    if recovery_incomplete:
+        error = recovery_warning or "On-chain LP discovery incomplete; manual check required."
+        return _fail_teardown_before_execution(runner, manager, request, deployment_id, start_time, error)
+
+    logger.info(f"🛑 {deployment_id} teardown complete (no positions to close)")
+    if request:
+        completion_result: dict[str, Any] = {"reason": "no_positions"}
+        if pre_gate_degraded:
+            completion_result["accounting_degraded"] = True
+            completion_result["accounting_degraded_reason"] = pre_gate_degraded
+        _safe_mark(manager, "mark_completed", deployment_id, result=completion_result)
+    runner.request_shutdown()
+    runner._lifecycle_write_state(deployment_id, LifecycleState.TERMINATED)
+    runner._record_success()
+    return IterationResult(
+        status=IterationStatus.TEARDOWN,
+        intent=None,
+        deployment_id=deployment_id,
+        duration_ms=runner._calculate_duration_ms(start_time),
+    )
+
+
+async def _prepare_teardown_dispatch(
+    runner: Any,
+    strategy: Any,
+    manager: Any,
+    request: Any,
+    deployment_id: str,
+    teardown_intents: Any,
+    teardown_market: Any,
+) -> int | None:
+    """Record Stage 1 enumeration and Stage 5 pre-dispatch reconciliation."""
+    logger.info(f"🛑 {deployment_id} entering TEARDOWN mode ({len(teardown_intents)} intents to execute)")
+    runner._lifecycle_write_state(deployment_id, LifecycleState.TEARING_DOWN)
+    # Lifecycle accounting counts positions, not the several intents one position may require.
+    # The intent count is only a start-time fallback when enumeration is unmeasured.
+    open_positions_count = await _count_open_positions(strategy)
+    total_positions = open_positions_count if open_positions_count is not None else len(teardown_intents)
+    if request:
+        _safe_mark(manager, "mark_started", deployment_id, total_positions=total_positions)
+
+    log_teardown_decision(
+        deployment_id=deployment_id,
+        teardown_id=getattr(request, "teardown_id", None),
+        phase=TeardownDecisionPhase.ENUMERATE,
+        outcome="enumerated",
+        description=f"enumerated {total_positions} open position(s); {len(teardown_intents)} closing intent(s)",
+        position_count=open_positions_count,
+        intent_count=len(teardown_intents),
+    )
+    runner._teardown_reconciliation = await reconcile_known_positions(runner, strategy, teardown_market)
+
+    if teardown_market is not None and hasattr(teardown_market, "price"):
+        try:
+            prefetch_teardown_prices(teardown_market, teardown_intents)
+        except Exception as exc:
+            logger.warning(f"Failed to pre-fetch teardown prices: {exc}")
+    return open_positions_count
+
+
+def _complete_already_closed_teardown(
+    runner: Any,
+    manager: Any,
+    request: Any,
+    deployment_id: str,
+    start_time: datetime,
+) -> IterationResult:
+    """Complete the retained Stage 2 all-balances-zero planning outcome."""
+    from .runner_models import IterationResult, IterationStatus
+
+    logger.info(f"🛑 {deployment_id} teardown complete (all positions already closed)")
+    if request:
+        _safe_mark(manager, "mark_completed", deployment_id, result={"reason": "all_balances_zero"})
+    runner.request_shutdown()
+    runner._lifecycle_write_state(deployment_id, LifecycleState.TERMINATED)
+    runner._record_success()
+    return IterationResult(
+        status=IterationStatus.TEARDOWN,
+        intent=None,
+        deployment_id=deployment_id,
+        duration_ms=runner._calculate_duration_ms(start_time),
+    )
+
+
+async def _execute_multichain_teardown(
+    runner: Any,
+    strategy: Any,
+    teardown_intents: Any,
+    start_time: datetime,
+    teardown_market: Any,
+    manager: Any,
+    request: Any,
+    deployment_id: str,
+    recovery_incomplete: bool,
+    recovery_warning: str | None,
+    open_positions_count: int | None,
+) -> IterationResult:
+    """Route the Blueprint 14a Stage 3 multi-chain compatibility lane."""
+    from .runner_models import IterationStatus
+
+    logger.warning(
+        "🛑 %s multi-chain teardown lane performs NO token consolidation "
+        "(VIB-5011 known gap — see blueprint 14 §Token Consolidation): "
+        "residual non-target tokens stay in the wallet after closure.",
+        deployment_id,
+    )
+    result = await runner._execute_multi_chain(
+        strategy=strategy,
+        intents=teardown_intents,
+        start_time=start_time,
+        market=teardown_market,
+    )
+    if result.success:
+        result.status = IterationStatus.TEARDOWN
+        logger.info(f"🛑 {deployment_id} teardown complete - shutting down strategy runner")
+        runner.request_shutdown()
+        if request:
+            if recovery_incomplete:
+                error = recovery_warning or "On-chain LP discovery incomplete; manual check required."
+                logger.error("🛑 %s teardown degraded (recovery incomplete): %s", deployment_id, error)
+                _safe_mark(manager, "mark_failed", deployment_id, error=error)
+                runner._teardown_entry_blocked = True
+                runner._teardown_entry_blocked_reason = f"teardown failed — {error}"
+            else:
+                _safe_mark(
+                    manager,
+                    "mark_completed",
+                    deployment_id,
+                    result=_positions_completion_result(open_positions_count, len(teardown_intents)),
+                )
+    else:
+        from ..teardown.revert_hints import annotate_teardown_error
+
+        failure_error = annotate_teardown_error(result.error) or "multi-chain teardown execution failed"
+        if request:
+            _safe_mark(manager, "mark_failed", deployment_id, error=failure_error)
+        runner._request_teardown_failure_shutdown(failure_error)
+    return result
+
+
+async def execute_teardown(
     runner: Any,
     strategy: StrategyProtocol,
     teardown_mode: TeardownMode,
@@ -920,284 +1304,94 @@ async def execute_teardown(  # noqa: C901
         IterationResult with teardown status
     """
     from ..teardown import get_teardown_state_manager_for_runtime
-    from .runner_models import IterationResult, IterationStatus
 
     deployment_id = strategy.deployment_id
-    # A reused runner must not certify an early exit with evidence from a prior teardown.
-    runner._teardown_reconciliation = None
-    runner._teardown_closure_verification = None
+    _reset_teardown_verification_signals(runner)
     manager: Any = get_teardown_state_manager_for_runtime(gateway_client=runner._get_gateway_client())
     request: Any = manager.get_active_request(deployment_id)
 
-    # Reconcile correlated async fills before enumeration so the registry reflects
-    # keeper settlement. Failure leaves the completeness gate fail-closed.
-    pre_gate_cycle_id = str(getattr(runner, "_last_cycle_id", None) or deployment_id)
-    pre_gate_degraded: str | None = None
-    try:
-        from .perp_settlement_reconciler import reconcile_perp_settlements
-
-        pre_gate_reconciliation = await reconcile_perp_settlements(
-            runner,
-            strategy,
-            deployment_id=deployment_id,
-            cycle_id=pre_gate_cycle_id,
-            gateway_client=runner._get_gateway_client(),
-        )
-        if pre_gate_reconciliation.accounting_degraded:
-            pre_gate_degraded = (
-                "; ".join(pre_gate_reconciliation.degraded_reasons) or "pre-gate settlement reconciliation degraded"
-            )
-    except Exception as exc:  # noqa: BLE001 — settlement accounting must never block risk reduction
-        pre_gate_degraded = f"pre-gate settlement reconciliation raised: {exc.__class__.__name__}: {exc}"
-        logger.warning(
-            "Teardown pre-enumeration perp settlement reconciliation failed (non-blocking)",
-            exc_info=True,
-        )
-    if pre_gate_degraded:
-        # Persist outcome-reported degradation without blocking later risk reduction.
-        logger.error(
-            "🛑 Teardown pre-gate perp settlement reconciliation degraded for %s "
-            "(teardown continues; the durable watch set retries on any later tick): %s",
-            deployment_id,
-            pre_gate_degraded,
-        )
-        from ..accounting.deferred_log import DeferredWrite
-        from ..accounting.deferred_log import append as deferred_append
-
-        deferred_append(
-            DeferredWrite.now(
-                kind="perp_settlement",
-                deployment_id=deployment_id,
-                cycle_id=pre_gate_cycle_id,
-                intent_type="PERP_SETTLEMENT",
-                error=pre_gate_degraded,
-            )
-        )
-
-    teardown_market = None
-    try:
-        teardown_market = strategy.create_market_snapshot()
-        if hasattr(teardown_market, "get_price_oracle_dict"):
-            logger.debug(
-                f"Created market snapshot for teardown with prices: "
-                f"{list(teardown_market.get_price_oracle_dict().keys())}"
-            )
-        else:
-            logger.debug("Created multi-chain market snapshot for teardown")
-    except Exception as e:
-        logger.warning(f"Failed to create market snapshot for teardown: {e}. Continuing without market data.")
-
-    try:
-        try:
-            teardown_intents = strategy.generate_teardown_intents(teardown_mode, market=teardown_market)
-        except TypeError as exc:
-            if "unexpected keyword argument" not in str(exc):
-                raise
-            logger.debug(f"Strategy {deployment_id} uses old teardown signature (no market param), falling back")
-            teardown_intents = strategy.generate_teardown_intents(teardown_mode)
-    except Exception as e:
-        logger.error(f"Failed to generate teardown intents for {deployment_id}: {e}")
-        if request:
-            # Nothing executed; enumerate honest failure counts without masking the
-            # generation error. An unreadable count remains unset, never fabricated zero.
-            closed, failed = await _failure_position_counts(strategy)
-            _safe_mark(
-                manager,
-                "mark_failed",
-                deployment_id,
-                error=str(e),
-                positions_closed=closed,
-                positions_failed=failed,
-            )
-        runner._request_teardown_failure_shutdown(str(e))
-        return runner._create_error_result(deployment_id, IterationStatus.STRATEGY_ERROR, str(e), start_time)
-
-    teardown_intents, recovery_incomplete, recovery_warning = await _recover_orphaned_lp_intents(
-        runner, strategy, teardown_intents, teardown_mode
+    pre_gate_degraded = await _run_pre_teardown_settlement_accounting(runner, strategy, deployment_id)
+    teardown_market = _create_teardown_market(strategy)
+    generation = await _generate_teardown_plan(
+        runner,
+        strategy,
+        teardown_mode,
+        teardown_market,
+        request,
+        manager,
+        deployment_id,
+        start_time,
     )
-    lp_recovery_incomplete = recovery_incomplete
-    lp_recovery_warning = recovery_warning
-    teardown_intents, pending_incomplete, pending_warning = await _recover_pending_order_intents(
-        runner, strategy, teardown_intents, teardown_mode
-    )
-    recovery_incomplete = recovery_incomplete or pending_incomplete
-    # Preserve independent recovery failures instead of hiding one behind the other.
-    recovery_warning = "; ".join(w for w in (recovery_warning, pending_warning) if w) or None
-    # Execution still proceeds, but incomplete recovery must prevent clean certification.
-    runner._teardown_recovery_incomplete = recovery_incomplete
-    runner._teardown_recovery_warning = recovery_warning
-    runner._teardown_lp_recovery_incomplete = lp_recovery_incomplete
-    runner._teardown_lp_recovery_warning = lp_recovery_warning
+    if generation.failed:
+        return generation.failure_result
 
+    recovery = await _recover_teardown_positions(runner, strategy, generation.intents, teardown_mode)
     teardown_intents = _apply_lending_unwind_guard(
-        teardown_intents,
+        recovery.intents,
         teardown_market,
         deployment_id,
         teardown_mode,
         teardown_id=getattr(request, "teardown_id", None),
     )
-
-    if not teardown_intents:
-        accepted_lookup = await _load_runtime_resumable_accepted_async_state(runner, manager, deployment_id)
-        if accepted_lookup.blocked_reason:
-            return _accepted_async_recovery_pending_result(
-                runner, deployment_id, start_time, accepted_lookup.blocked_reason
-            )
-        accepted_state = accepted_lookup.state
-        if accepted_state is not None:
-            # A keeper fill can remove fresh intents while its accepted plan still needs
-            # correlated settlement. Never complete through the no-positions fast path.
-            persisted_plan = json.loads(accepted_state.pending_intents_json)
-            teardown_intents = persisted_plan if isinstance(persisted_plan, list) else []
-            logger.warning(
-                "🛑 %s generated no teardown intents but owns accepted async state; routing correlated resume",
-                deployment_id,
-            )
-
-    if not teardown_intents:
-        # No intents is a success only after measuring the durable known-position set.
-        completeness = await _check_no_intent_completeness(strategy, request)
-        if completeness is None:
-            # An unreadable position set is not evidence that no positions remain.
-            err = (
-                f"Teardown completeness: could not read the known open-position set for {deployment_id} "
-                "(strategy enumeration failed); refusing to certify a clean 'no positions' teardown. "
-                "Verify on-chain and re-run."
-            )
-            logger.error("🛑 %s teardown blocked: %s", deployment_id, err)
-            if request:
-                _safe_mark(manager, "mark_failed", deployment_id, error=err)
-            runner._request_teardown_failure_shutdown(err)
-            return runner._create_error_result(deployment_id, IterationStatus.STRATEGY_ERROR, err, start_time)
-        if not completeness.complete:
-            err = completeness.error_message()
-            logger.error("🛑 %s teardown blocked: %s", deployment_id, err)
-            if request:
-                _safe_mark(manager, "mark_failed", deployment_id, error=err)
-            runner._request_teardown_failure_shutdown(err)
-            return runner._create_error_result(deployment_id, IterationStatus.STRATEGY_ERROR, err, start_time)
-        if recovery_incomplete:
-            err = recovery_warning or "On-chain LP discovery incomplete; manual check required."
-            logger.error("🛑 %s teardown blocked: %s", deployment_id, err)
-            if request:
-                _safe_mark(manager, "mark_failed", deployment_id, error=err)
-            runner._request_teardown_failure_shutdown(err)
-            return runner._create_error_result(deployment_id, IterationStatus.STRATEGY_ERROR, err, start_time)
-        logger.info(f"🛑 {deployment_id} teardown complete (no positions to close)")
-        if request:
-            # A no-position result may still carry an unbooked settlement degradation.
-            completion_result: dict[str, Any] = {"reason": "no_positions"}
-            if pre_gate_degraded:
-                completion_result["accounting_degraded"] = True
-                completion_result["accounting_degraded_reason"] = pre_gate_degraded
-            _safe_mark(manager, "mark_completed", deployment_id, result=completion_result)
-        runner.request_shutdown()
-        runner._lifecycle_write_state(deployment_id, LifecycleState.TERMINATED)
-        runner._record_success()
-        return IterationResult(
-            status=IterationStatus.TEARDOWN,
-            intent=None,
-            deployment_id=deployment_id,
-            duration_ms=runner._calculate_duration_ms(start_time),
-        )
-
-    logger.info(f"🛑 {deployment_id} entering TEARDOWN mode ({len(teardown_intents)} intents to execute)")
-    runner._lifecycle_write_state(deployment_id, LifecycleState.TEARING_DOWN)
-    # Lifecycle accounting counts positions, not the several intents one position may require.
-    # The intent count is only a start-time fallback when enumeration is unmeasured.
-    open_positions_count = await _count_open_positions(strategy)
-    total_positions = open_positions_count if open_positions_count is not None else len(teardown_intents)
-    if request:
-        _safe_mark(manager, "mark_started", deployment_id, total_positions=total_positions)
-
-    log_teardown_decision(
-        deployment_id=deployment_id,
-        teardown_id=getattr(request, "teardown_id", None),
-        phase=TeardownDecisionPhase.ENUMERATE,
-        outcome="enumerated",
-        description=f"enumerated {total_positions} open position(s); {len(teardown_intents)} closing intent(s)",
-        position_count=open_positions_count,
-        intent_count=len(teardown_intents),
+    teardown_intents, recovery_pending_result = await _restore_resumable_teardown_plan(
+        runner, manager, deployment_id, teardown_intents, start_time
     )
-
-    runner._teardown_reconciliation = await reconcile_known_positions(runner, strategy, teardown_market)
-
-    if teardown_market is not None and hasattr(teardown_market, "price"):
-        try:
-            prefetch_teardown_prices(teardown_market, teardown_intents)
-        except Exception as e:
-            logger.warning(f"Failed to pre-fetch teardown prices: {e}")
-
-    # Resolve chained "all" amounts immediately before each intent so earlier
-    # unwind legs can produce or consume the balance used by later legs.
+    if recovery_pending_result is not None:
+        return recovery_pending_result
 
     if not teardown_intents:
-        logger.info(f"🛑 {deployment_id} teardown complete (all positions already closed)")
-        if request:
-            _safe_mark(manager, "mark_completed", deployment_id, result={"reason": "all_balances_zero"})
-        runner.request_shutdown()
-        runner._lifecycle_write_state(deployment_id, LifecycleState.TERMINATED)
-        runner._record_success()
-        return IterationResult(
-            status=IterationStatus.TEARDOWN,
-            intent=None,
-            deployment_id=deployment_id,
-            duration_ms=runner._calculate_duration_ms(start_time),
+        return await _complete_teardown_without_intents(
+            runner,
+            strategy,
+            manager,
+            request,
+            deployment_id,
+            start_time,
+            recovery.incomplete,
+            recovery.warning,
+            pre_gate_degraded,
+        )
+    open_positions_count = await _prepare_teardown_dispatch(
+        runner,
+        strategy,
+        manager,
+        request,
+        deployment_id,
+        teardown_intents,
+        teardown_market,
+    )
+    if not teardown_intents:
+        return _complete_already_closed_teardown(
+            runner,
+            manager,
+            request,
+            deployment_id,
+            start_time,
         )
 
     if runner._is_multi_chain:
-        logger.warning(
-            "🛑 %s multi-chain teardown lane performs NO token consolidation "
-            "(VIB-5011 known gap — see blueprint 14 §Token Consolidation): "
-            "residual non-target tokens stay in the wallet after closure.",
+        return await _execute_multichain_teardown(
+            runner,
+            strategy,
+            teardown_intents,
+            start_time,
+            teardown_market,
+            manager,
+            request,
             deployment_id,
+            recovery.incomplete,
+            recovery.warning,
+            open_positions_count,
         )
-        result = await runner._execute_multi_chain(
-            strategy=strategy,
-            intents=teardown_intents,
-            start_time=start_time,
-            market=teardown_market,
-        )
-        if result.success:
-            result.status = IterationStatus.TEARDOWN
-            logger.info(f"🛑 {deployment_id} teardown complete - shutting down strategy runner")
-            runner.request_shutdown()
-            if request:
-                if recovery_incomplete:
-                    # Successful dispatch cannot certify an incompletely enumerated recovery.
-                    err = recovery_warning or "On-chain LP discovery incomplete; manual check required."
-                    logger.error("🛑 %s teardown degraded (recovery incomplete): %s", deployment_id, err)
-                    _safe_mark(manager, "mark_failed", deployment_id, error=err)
-                    # Latch entry as well as requesting shutdown so a failed teardown
-                    # cannot reopen risk if shutdown is delayed or ignored.
-                    runner._teardown_entry_blocked = True
-                    runner._teardown_entry_blocked_reason = f"teardown failed — {err}"
-                else:
-                    # Without a verifier, report the pre-execution position count only when measured.
-                    _safe_mark(
-                        manager,
-                        "mark_completed",
-                        deployment_id,
-                        result=_positions_completion_result(open_positions_count, len(teardown_intents)),
-                    )
-        else:
-            from ..teardown.revert_hints import annotate_teardown_error
-
-            failure_error = annotate_teardown_error(result.error) or "multi-chain teardown execution failed"
-            if request:
-                _safe_mark(manager, "mark_failed", deployment_id, error=failure_error)
-            runner._request_teardown_failure_shutdown(failure_error)
-        return result
-    else:
-        return await runner._execute_teardown_via_manager(
-            strategy=strategy,
-            teardown_intents=teardown_intents,
-            teardown_mode=teardown_mode,
-            teardown_market=teardown_market,
-            start_time=start_time,
-            request=request,
-            state_manager=manager,
-        )
+    return await runner._execute_teardown_via_manager(
+        strategy=strategy,
+        teardown_intents=teardown_intents,
+        teardown_mode=teardown_mode,
+        teardown_market=teardown_market,
+        start_time=start_time,
+        request=request,
+        state_manager=manager,
+    )
 
 
 def _load_pending_teardown_plan(state: Any) -> tuple[list[Any], int] | None:
@@ -2011,171 +2205,258 @@ def _apply_inline_swap_clamp(
     return True, decision.degraded, None
 
 
-# crap-allowlist: VIB-5416 — pre-existing cc=28 inline-teardown coordinator; PR only threads two kwargs (chain/wallet_address) into the existing `_apply_inline_swap_clamp(...)` call so the NO_ACCOUNTING ledger lane keys correctly, adding ZERO new branches. Decomposition deferred to the standing inline-lane refactor; covering the fallback path needs a full inline-teardown integration harness.
-async def _execute_teardown_inline_body(  # noqa: C901
+@dataclass(frozen=True)
+class _InlinePreparedIntent:
+    intent: Any
+    skipped: bool = False
+    failure_result: Any = None
+    accounting_degraded: bool = False
+
+
+@dataclass(frozen=True)
+class _InlineDispatchOutcome:
+    last_result: Any = None
+    all_success: bool = True
+    accounting_degraded_count: int = 0
+
+
+def _read_inline_teardown_balance(
+    teardown_market: Any,
+    balance_token: str,
+    intent_chain: str | None,
+) -> tuple[Any, Exception | None]:
+    """Read the live Stage 2 amount while retaining single-chain fallback semantics."""
+    try:
+        if intent_chain:
+            return teardown_market.balance(balance_token, intent_chain), None
+        return teardown_market.balance(balance_token), None
+    except TypeError:
+        # A single-chain MarketSnapshot does not accept the chain argument.
+        try:
+            return teardown_market.balance(balance_token), None
+        except Exception as exc:  # noqa: BLE001
+            return None, exc
+    except Exception as exc:  # noqa: BLE001
+        return None, exc
+
+
+def _prepare_inline_teardown_intent(
     runner: Any,
-    strategy: StrategyProtocol,
-    teardown_intents: list,
+    strategy: Any,
+    intent: Any,
     teardown_market: Any | None,
     start_time: datetime,
-    request: Any | None,
-    state_manager: Any,
+    intent_index: int,
+) -> _InlinePreparedIntent:
+    """Resolve one Stage 2 live amount and apply the tracked-inventory clamp."""
+    from .runner_models import IterationResult, IterationStatus
+
+    if not Intent.has_chained_amount(intent):
+        return _InlinePreparedIntent(intent)
+
+    deployment_id = strategy.deployment_id
+    balance_token = (
+        getattr(intent, "from_token", None) or getattr(intent, "token", None) or getattr(intent, "token_in", None)
+    )
+    if balance_token and teardown_market is not None:
+        invalidate = getattr(teardown_market, "invalidate_balance", None)
+        if callable(invalidate):
+            try:
+                invalidate(balance_token)
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "invalidate_balance(%s) failed in inline lane; using cached balance",
+                    balance_token,
+                    exc_info=True,
+                )
+
+        balance, balance_error = _read_inline_teardown_balance(
+            teardown_market,
+            balance_token,
+            getattr(intent, "chain", None),
+        )
+        if balance_error is not None:
+            logger.error(
+                f"🛑 Teardown intent {intent_index + 1}: failed to resolve balance for {balance_token}: "
+                f"{balance_error}. Token may be missing from the registry. Position may remain open."
+            )
+            return _InlinePreparedIntent(
+                intent,
+                failure_result=IterationResult(
+                    status=IterationStatus.COMPILATION_FAILED,
+                    intent=intent,
+                    error=f"Cannot resolve amount='all' for {balance_token}: {balance_error}",
+                    deployment_id=deployment_id,
+                    duration_ms=runner._calculate_duration_ms(start_time),
+                ),
+            )
+
+        balance_value = balance.balance if hasattr(balance, "balance") else balance
+        if balance_value <= 0:
+            logger.info(
+                f"🛑 Teardown intent {intent_index + 1}: {balance_token} balance is 0, skipping (already closed)"
+            )
+            return _InlinePreparedIntent(intent, skipped=True)
+
+        skip, degraded, balance_value = _apply_inline_swap_clamp(
+            runner,
+            intent,
+            balance_token,
+            balance_value,
+            deployment_id,
+            chain=getattr(strategy, "chain", "") or "",
+            wallet_address=getattr(strategy, "wallet_address", "") or "",
+        )
+        if skip:
+            return _InlinePreparedIntent(intent, skipped=True, accounting_degraded=degraded)
+
+        warn_if_sweep_non_strategy_balance(
+            state_manager=getattr(runner, "state_manager", None),
+            deployment_id=deployment_id,
+            intent=intent,
+            balance_token=balance_token,
+            balance_value=balance_value,
+        )
+        resolved_intent = Intent.set_resolved_amount(intent, balance_value)
+        logger.info(f"🛑 Resolved amount='all' for {balance_token}: {balance_value}")
+        return _InlinePreparedIntent(resolved_intent)
+
+    if balance_token:
+        logger.warning(
+            f"🛑 Teardown intent {intent_index + 1}: amount='all' for {balance_token} but no market context. "
+            f"Passing to compiler as-is — compilation may fail."
+        )
+    else:
+        logger.debug(f"🛑 Teardown intent {intent_index + 1}: no token field, passing to compiler as-is")
+    return _InlinePreparedIntent(intent)
+
+
+async def _execute_inline_teardown_intent(
+    runner: Any,
+    strategy: Any,
+    intent: Any,
+    teardown_market: Any | None,
+    start_time: datetime,
     *,
+    intent_index: int,
+    intent_count: int,
     teardown_cycle_id: str,
     deferred_append: Any,
-) -> tuple[IterationResult, int]:
-    """Inner loop of the inline teardown — the body that the brackets wrap.
-
-    Catches per-intent ``AccountingPersistenceError`` so the chain-side
-    unwind continues even when the runner's iteration-lane writers raise
-    in live mode. The deferred-write log is the durable backstop;
-    operators reconcile via that + outbox tail (or a future
-    ``almanak ax accounting reconcile``).
-
-    Returns the iteration result paired with the per-intent
-    ``inline_degraded_count`` accumulated while looping. The bracket
-    caller adds this to the snapshot-bracket degraded count to produce
-    the final ``accounting_degraded_count`` for the inline lane.
-    """
+) -> tuple[Any, int]:
+    """Dispatch one Stage 3 intent and preserve Stage 4 inverted accounting semantics."""
     from ..state.exceptions import AccountingPersistenceError
     from .runner_models import IterationResult, IterationStatus
 
     deployment_id = strategy.deployment_id
-
-    # Count positions before dispatch; several intents may close one position.
-    # An unreadable count remains omitted from completion accounting.
-    pre_exec_positions_total = await _count_open_positions(strategy)
-
-    inline_degraded_count = 0
-    all_success = True
-    last_result: IterationResult | None = None
-    for i, intent in enumerate(teardown_intents):
-        logger.info(f"🛑 Executing teardown intent {i + 1}/{len(teardown_intents)}: {intent.intent_type.value}")
-
-        intent_to_execute = intent
-        if Intent.has_chained_amount(intent):
-            balance_token = (
-                getattr(intent, "from_token", None)
-                or getattr(intent, "token", None)
-                or getattr(intent, "token_in", None)
-            )
-            if balance_token and teardown_market is not None:
-                # Invalidate the planning snapshot before resolving a chained amount;
-                # earlier unwind legs may have changed the live balance.
-                _invalidate = getattr(teardown_market, "invalidate_balance", None)
-                if callable(_invalidate):
-                    try:
-                        _invalidate(balance_token)
-                    except Exception:  # noqa: BLE001
-                        logger.debug(
-                            "invalidate_balance(%s) failed in inline lane; using cached balance",
-                            balance_token,
-                            exc_info=True,
-                        )
-                intent_chain = getattr(intent, "chain", None)
-                try:
-                    if intent_chain:
-                        bal = teardown_market.balance(balance_token, intent_chain)
-                    else:
-                        bal = teardown_market.balance(balance_token)
-                except TypeError:
-                    bal = teardown_market.balance(balance_token)
-                except Exception as e:  # noqa: BLE001
-                    logger.error(
-                        f"🛑 Teardown intent {i + 1}: failed to resolve balance for {balance_token}: {e}. "
-                        f"Token may be missing from the registry. Position may remain open."
-                    )
-                    all_success = False
-                    last_result = IterationResult(
-                        status=IterationStatus.COMPILATION_FAILED,
-                        intent=intent,
-                        error=f"Cannot resolve amount='all' for {balance_token}: {e}",
-                        deployment_id=deployment_id,
-                        duration_ms=runner._calculate_duration_ms(start_time),
-                    )
-                    break
-                balance_value = bal.balance if hasattr(bal, "balance") else bal
-                if balance_value <= 0:
-                    logger.info(f"🛑 Teardown intent {i + 1}: {balance_token} balance is 0, skipping (already closed)")
-                    continue
-                _skip, _degraded, balance_value = _apply_inline_swap_clamp(
-                    runner,
-                    intent,
-                    balance_token,
-                    balance_value,
-                    deployment_id,
-                    chain=getattr(strategy, "chain", "") or "",
-                    wallet_address=getattr(strategy, "wallet_address", "") or "",
-                )
-                if _skip:
-                    inline_degraded_count += int(_degraded)
-                    continue
-                # Sweep provenance belongs to the runner's accounting state manager,
-                # not the teardown-request state manager passed into this function.
-                warn_if_sweep_non_strategy_balance(
-                    state_manager=getattr(runner, "state_manager", None),
-                    deployment_id=deployment_id,
-                    intent=intent,
-                    balance_token=balance_token,
-                    balance_value=balance_value,
-                )
-                intent_to_execute = Intent.set_resolved_amount(intent, balance_value)
-                logger.info(f"🛑 Resolved amount='all' for {balance_token}: {balance_value}")
-            elif balance_token and teardown_market is None:
-                logger.warning(
-                    f"🛑 Teardown intent {i + 1}: amount='all' for {balance_token} but no market context. "
-                    f"Passing to compiler as-is — compilation may fail."
-                )
-            else:
-                logger.debug(f"🛑 Teardown intent {i + 1}: no token field, passing to compiler as-is")
-
+    try:
+        result = await runner._execute_single_chain(
+            strategy=strategy,
+            intent=intent,
+            start_time=start_time,
+            total_intents=1,
+            market=teardown_market,
+        )
+    except AccountingPersistenceError as acc_err:
+        logger.error(
+            "🛑 Teardown intent %d/%d (inline) — accounting persistence failed but chain-side OK: %s",
+            intent_index + 1,
+            intent_count,
+            acc_err,
+        )
         try:
-            result = await runner._execute_single_chain(
-                strategy=strategy,
-                intent=intent_to_execute,
-                start_time=start_time,
-                total_intents=1,
-                market=teardown_market,
+            deferred_append(
+                kind=str(acc_err.write_kind) if acc_err.write_kind else "ledger",
+                deployment_id=deployment_id,
+                cycle_id=teardown_cycle_id,
+                intent_type=getattr(intent.intent_type, "value", str(intent.intent_type)),
+                error=str(acc_err),
+                extra={"phase": "inline-per-intent"},
             )
-        except AccountingPersistenceError as acc_err:
-            # The transaction already landed, so accounting failure is recorded and
-            # treated as chain success to preserve the remaining risk-reducing intents.
-            logger.error(
-                "🛑 Teardown intent %d/%d (inline) — accounting persistence failed but chain-side OK: %s",
-                i + 1,
-                len(teardown_intents),
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "🛑 Teardown intent %d/%d (inline) — deferred-write log append failed; "
+                "original error=%s; continuing teardown",
+                intent_index + 1,
+                intent_count,
                 acc_err,
             )
-            inline_degraded_count += 1
-            # Failure of the degradation log must not halt an unwind after chain success.
-            try:
-                deferred_append(
-                    kind=str(acc_err.write_kind) if acc_err.write_kind else "ledger",
-                    deployment_id=deployment_id,
-                    cycle_id=teardown_cycle_id,
-                    intent_type=getattr(intent_to_execute.intent_type, "value", str(intent_to_execute.intent_type)),
-                    error=str(acc_err),
-                    extra={"phase": "inline-per-intent"},
-                )
-            except Exception:  # noqa: BLE001 — never propagate
-                logger.exception(
-                    "🛑 Teardown intent %d/%d (inline) — deferred-write log append failed; "
-                    "original error=%s; continuing teardown",
-                    i + 1,
-                    len(teardown_intents),
-                    acc_err,
-                )
-            result = IterationResult(
-                status=IterationStatus.SUCCESS,
-                intent=intent_to_execute,
-                deployment_id=deployment_id,
-                duration_ms=runner._calculate_duration_ms(start_time),
-            )
+        result = IterationResult(
+            status=IterationStatus.SUCCESS,
+            intent=intent,
+            deployment_id=deployment_id,
+            duration_ms=runner._calculate_duration_ms(start_time),
+        )
+        return result, 1
+    return result, 0
+
+
+async def _dispatch_inline_teardown_intents(
+    runner: Any,
+    strategy: Any,
+    teardown_intents: list,
+    teardown_market: Any | None,
+    start_time: datetime,
+    *,
+    teardown_cycle_id: str,
+    deferred_append: Any,
+) -> _InlineDispatchOutcome:
+    """Run Blueprint 14a Stage 3 sequentially, stopping only on chain-side failure."""
+    accounting_degraded_count = 0
+    last_result = None
+    for intent_index, intent in enumerate(teardown_intents):
+        logger.info(
+            f"🛑 Executing teardown intent {intent_index + 1}/{len(teardown_intents)}: {intent.intent_type.value}"
+        )
+        prepared = _prepare_inline_teardown_intent(
+            runner,
+            strategy,
+            intent,
+            teardown_market,
+            start_time,
+            intent_index,
+        )
+        accounting_degraded_count += int(prepared.accounting_degraded)
+        if prepared.failure_result is not None:
+            return _InlineDispatchOutcome(prepared.failure_result, False, accounting_degraded_count)
+        if prepared.skipped:
+            continue
+
+        result, degraded_count = await _execute_inline_teardown_intent(
+            runner,
+            strategy,
+            prepared.intent,
+            teardown_market,
+            start_time,
+            intent_index=intent_index,
+            intent_count=len(teardown_intents),
+            teardown_cycle_id=teardown_cycle_id,
+            deferred_append=deferred_append,
+        )
+        accounting_degraded_count += degraded_count
         last_result = result
         if not result.success:
-            all_success = False
-            logger.error(f"🛑 Teardown intent {i + 1} failed: {result.error}")
-            break
+            logger.error(f"🛑 Teardown intent {intent_index + 1} failed: {result.error}")
+            return _InlineDispatchOutcome(last_result, False, accounting_degraded_count)
+
+    return _InlineDispatchOutcome(last_result, True, accounting_degraded_count)
+
+
+def _finalize_inline_teardown(
+    runner: Any,
+    strategy: Any,
+    teardown_intents: list,
+    start_time: datetime,
+    request: Any | None,
+    state_manager: Any,
+    pre_exec_positions_total: int | None,
+    dispatch: _InlineDispatchOutcome,
+) -> IterationResult:
+    """Apply the inline lane's terminal persistence and lifecycle semantics."""
+    from .runner_models import IterationResult, IterationStatus
+
+    deployment_id = strategy.deployment_id
+    last_result = dispatch.last_result
+    all_success = dispatch.all_success
 
     # The inline lane cannot perform irreversible vault release. Never certify it
     # for a vault strategy, even when every position-closing intent succeeded.
@@ -2209,28 +2490,27 @@ async def _execute_teardown_inline_body(  # noqa: C901
             if request:
                 _safe_mark(state_manager, "mark_failed", deployment_id, error=last_result.error or "execution failed")
             runner._request_teardown_failure_shutdown(last_result.error or "inline teardown execution failed")
-        return last_result, inline_degraded_count
+        return last_result
 
     # The same vault-release refusal applies when no intent reached execution.
     if getattr(runner, "_vault_lifecycle", None) is not None:
-        err = (
+        error = (
             "vault strategy reached the inline teardown fallback with no executed intents; the vault "
             "is still OPEN (depositors would be stranded). Restart the runner and re-run teardown so "
             "the manager lane releases depositor capital."
         )
-        logger.error("🛑 %s inline teardown (no intents) cannot release vault — failing closed: %s", deployment_id, err)
+        logger.error(
+            "🛑 %s inline teardown (no intents) cannot release vault — failing closed: %s", deployment_id, error
+        )
         if request:
-            _safe_mark(state_manager, "mark_failed", deployment_id, error=err)
-        runner._request_teardown_failure_shutdown(err)
-        return (
-            IterationResult(
-                status=IterationStatus.EXECUTION_FAILED,
-                intent=None,
-                error=err,
-                deployment_id=deployment_id,
-                duration_ms=runner._calculate_duration_ms(start_time),
-            ),
-            inline_degraded_count,
+            _safe_mark(state_manager, "mark_failed", deployment_id, error=error)
+        runner._request_teardown_failure_shutdown(error)
+        return IterationResult(
+            status=IterationStatus.EXECUTION_FAILED,
+            intent=None,
+            error=error,
+            deployment_id=deployment_id,
+            duration_ms=runner._calculate_duration_ms(start_time),
         )
 
     logger.info(f"🛑 {deployment_id} teardown: all positions already closed, shutting down")
@@ -2239,13 +2519,60 @@ async def _execute_teardown_inline_body(  # noqa: C901
     runner._record_success()
     if request:
         _safe_mark(state_manager, "mark_completed", deployment_id, result={"reason": "all_positions_already_closed"})
-    final_result = IterationResult(
+    return IterationResult(
         status=IterationStatus.TEARDOWN,
         intent=None,
         deployment_id=deployment_id,
         duration_ms=runner._calculate_duration_ms(start_time),
     )
-    return final_result, inline_degraded_count
+
+
+async def _execute_teardown_inline_body(
+    runner: Any,
+    strategy: StrategyProtocol,
+    teardown_intents: list,
+    teardown_market: Any | None,
+    start_time: datetime,
+    request: Any | None,
+    state_manager: Any,
+    *,
+    teardown_cycle_id: str,
+    deferred_append: Any,
+) -> tuple[IterationResult, int]:
+    """Inner loop of the inline teardown — the body that the brackets wrap.
+
+    Catches per-intent ``AccountingPersistenceError`` so the chain-side
+    unwind continues even when the runner's iteration-lane writers raise
+    in live mode. The deferred-write log is the durable backstop;
+    operators reconcile via that + outbox tail (or a future
+    ``almanak ax accounting reconcile``).
+
+    Returns the iteration result paired with the per-intent
+    ``inline_degraded_count`` accumulated while looping. The bracket
+    caller adds this to the snapshot-bracket degraded count to produce
+    the final ``accounting_degraded_count`` for the inline lane.
+    """
+    pre_exec_positions_total = await _count_open_positions(strategy)
+    dispatch = await _dispatch_inline_teardown_intents(
+        runner,
+        strategy,
+        teardown_intents,
+        teardown_market,
+        start_time,
+        teardown_cycle_id=teardown_cycle_id,
+        deferred_append=deferred_append,
+    )
+    result = _finalize_inline_teardown(
+        runner,
+        strategy,
+        teardown_intents,
+        start_time,
+        request,
+        state_manager,
+        pre_exec_positions_total,
+        dispatch,
+    )
+    return result, dispatch.accounting_degraded_count
 
 
 def build_teardown_compiler(

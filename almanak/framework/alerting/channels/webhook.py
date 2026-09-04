@@ -15,6 +15,7 @@ from typing import Any
 
 import aiohttp
 
+from almanak.core.redaction import redact
 from almanak.framework.services.operator_card_generator import OperatorCard
 
 logger = logging.getLogger(__name__)
@@ -63,20 +64,31 @@ class WebhookChannel:
         self._last_send_time: float = 0.0
         self._min_interval: float = 1.0  # 1s minimum between sends
 
-    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     def _format_payload(self, card: OperatorCard) -> dict[str, Any]:
         """Format an OperatorCard as a JSON-serializable webhook payload."""
         return {
-            "deployment_id": card.deployment_id,
-            "event_type": card.event_type.value if hasattr(card.event_type, "value") else str(card.event_type),
-            "severity": card.severity.value if hasattr(card.severity, "value") else str(card.severity),
-            "reason": card.reason.value if hasattr(card.reason, "value") else str(card.reason),
-            "risk_description": card.risk_description,
+            "deployment_id": redact(card.deployment_id),
+            "event_type": redact(card.event_type.value if hasattr(card.event_type, "value") else str(card.event_type)),
+            "severity": redact(card.severity.value if hasattr(card.severity, "value") else str(card.severity)),
+            "reason": redact(card.reason.value if hasattr(card.reason, "value") else str(card.reason)),
+            "risk_description": redact(card.risk_description),
             "suggested_actions": [
-                {"action": str(a.action), "description": a.description} for a in (card.suggested_actions or [])
+                {"action": redact(str(a.action)), "description": redact(a.description)}
+                for a in (card.suggested_actions or [])
             ],
             "timestamp": card.timestamp.isoformat() if card.timestamp else "",
         }
+
+    def _redact_error(self, error: object) -> str:
+        """Remove endpoint credentials and registered secrets from an error."""
+        message = str(error).replace(self.url, "<redacted webhook URL>")
+        webhook_secret = self.url.rstrip("/").rsplit("/", maxsplit=1)[-1]
+        if len(webhook_secret) >= 6:
+            message = message.replace(webhook_secret, "***")
+        for header_value in sorted(self.headers.values(), key=len, reverse=True):
+            if header_value:
+                message = message.replace(header_value, "***")
+        return redact(message)
 
     async def send_alert(self, card: OperatorCard) -> WebhookSendResult:
         """Send an alert to the webhook URL.
@@ -112,7 +124,7 @@ class WebhookChannel:
                             return WebhookSendResult(
                                 success=True,
                                 status_code=resp.status,
-                                response_body=body,
+                                response_body=self._redact_error(body),
                             )
                         elif resp.status == 429 and attempt < self.max_retries:
                             delay = self.base_delay * (2**attempt)
@@ -120,18 +132,20 @@ class WebhookChannel:
                             await asyncio.sleep(delay)
                             continue
                         else:
+                            safe_body = self._redact_error(body)[:200]
                             return WebhookSendResult(
                                 success=False,
                                 status_code=resp.status,
-                                error=f"HTTP {resp.status}: {body[:200]}",
+                                error=f"HTTP {resp.status}: {safe_body}",
                             )
             except Exception as e:
+                safe_error = self._redact_error(e)
                 if attempt < self.max_retries:
                     delay = self.base_delay * (2**attempt)
-                    logger.warning(f"Webhook send failed ({e}), retrying in {delay}s")
+                    logger.warning(f"Webhook send failed ({safe_error}), retrying in {delay}s")
                     await asyncio.sleep(delay)
                 else:
-                    return WebhookSendResult(success=False, error=str(e))
+                    return WebhookSendResult(success=False, error=safe_error)
 
         return WebhookSendResult(success=False, error="Max retries exceeded")
 
@@ -162,23 +176,25 @@ class WebhookChannel:
                     return WebhookSendResult(
                         success=True,
                         status_code=resp.status_code,
-                        response_body=resp.text,
+                        response_body=self._redact_error(resp.text),
                     )
                 elif resp.status_code == 429 and attempt < self.max_retries:
                     delay = self.base_delay * (2**attempt)
                     time.sleep(delay)
                     continue
                 else:
+                    safe_body = self._redact_error(resp.text)[:200]
                     return WebhookSendResult(
                         success=False,
                         status_code=resp.status_code,
-                        error=f"HTTP {resp.status_code}: {resp.text[:200]}",
+                        error=f"HTTP {resp.status_code}: {safe_body}",
                     )
             except Exception as e:
+                safe_error = self._redact_error(e)
                 if attempt < self.max_retries:
                     delay = self.base_delay * (2**attempt)
                     time.sleep(delay)
                 else:
-                    return WebhookSendResult(success=False, error=str(e))
+                    return WebhookSendResult(success=False, error=safe_error)
 
         return WebhookSendResult(success=False, error="Max retries exceeded")

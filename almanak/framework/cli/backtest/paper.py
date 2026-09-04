@@ -106,11 +106,6 @@ def paper() -> None:
     pass
 
 
-# crap-allowlist: Phase 5e (#2097) replaces direct os.environ.get reads with the typed
-# cli_runtime_config_from_env() and chain_rpc_url_from_env() helpers — no new branches,
-# no new behaviour. VIB-4062 codemod (legacy MarketSnapshot import → canonical) also
-# touches this function. Pre-existing CC=55 in the paper-start CLI; click-command
-# refactor is tracked separately.
 @paper.command("start")
 @click.option("--strategy", "-s", required=True, help="Name of the strategy to paper trade")
 @click.option(

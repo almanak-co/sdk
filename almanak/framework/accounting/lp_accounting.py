@@ -447,15 +447,116 @@ def compute_lp_cost_basis(
 _compute_cost_basis = compute_lp_cost_basis
 
 
-# crap-allowlist: VIB-4426 — build_lp_accounting_event is the canonical LP event
-# constructor. The high cc reflects the breadth of the LP payload (V3 + V4
-# branches, LP_OPEN vs LP_CLOSE, optional fees / IL / HODL value / position_hash
-# fields, fallback paths for older receipt parsers). Decomposing would shred
-# legibility for marginal cc gain — the function is already grouped by intent
-# direction (LP_OPEN vs LP_CLOSE) and field family. Coverage stays > 85%.
-# Refactor will be considered as part of a future accounting-writer rework
-# epic, NOT inside the VIB-4426 PR-1 scope.
-def build_lp_accounting_event(  # noqa: C901
+def _result_tx_hash(result: Any) -> str:
+    tx_hash = getattr(result, "tx_hash", None) or ""
+    if tx_hash:
+        return tx_hash
+    for transaction_result in getattr(result, "transaction_results", None) or []:
+        tx_hash = getattr(transaction_result, "tx_hash", None)
+        if tx_hash:
+            return tx_hash
+    return ""
+
+
+def _pool_token_symbols(intent: Any, resolved_pool: str | None) -> list[str]:
+    if resolved_pool and str(resolved_pool).strip():
+        pool_str = str(resolved_pool).strip()
+    else:
+        pool_str = (getattr(intent, "pool", "") or "").strip()
+    if "/" not in pool_str:
+        return []
+
+    parts = [part.strip() for part in pool_str.split("/") if part.strip()]
+    return [
+        part.split("(")[0].split(" ")[0].strip()
+        for part in parts
+        if not part.isdigit() and not part.lower().startswith("0x")
+    ]
+
+
+def _resolve_lp_tokens(intent: Any, resolved_pool: str | None) -> tuple[str, str]:
+    token0 = getattr(intent, "token0", None)
+    if not token0:
+        token0 = getattr(intent, "token_a", None)
+    token1 = getattr(intent, "token1", None)
+    if not token1:
+        token1 = getattr(intent, "token_b", None)
+    token0 = str(token0 or "")
+    token1 = str(token1 or "")
+    if token0 and token1:
+        return token0, token1
+
+    normalized = _pool_token_symbols(intent, resolved_pool)
+    if not token0 and normalized:
+        token0 = normalized[0].upper()
+    if not token1 and len(normalized) > 1:
+        token1 = normalized[1].upper()
+    return token0, token1
+
+
+def _resolve_lp_decimals(intent: Any) -> tuple[int, int, bool]:
+    dec0_raw = getattr(intent, "token0_decimals", None)
+    if dec0_raw is None:
+        dec0_raw = getattr(intent, "token_a_decimals", None)
+    dec1_raw = getattr(intent, "token1_decimals", None)
+    if dec1_raw is None:
+        dec1_raw = getattr(intent, "token_b_decimals", None)
+    assumed_decimals = dec0_raw is None or dec1_raw is None
+    dec0 = int(dec0_raw) if dec0_raw is not None else 18
+    dec1 = int(dec1_raw) if dec1_raw is not None else 18
+    return dec0, dec1, assumed_decimals
+
+
+def _result_lp_data(intent_type_str: str, result: Any) -> Any:
+    attribute = "lp_open_data" if intent_type_str == "LP_OPEN" else "lp_close_data"
+    return getattr(result, attribute, None)
+
+
+def _extract_lp_amounts(
+    intent_type_str: str,
+    result: Any,
+    lp_data: Any,
+    dec0: int,
+    dec1: int,
+) -> tuple[Decimal | None, Decimal | None, Decimal | None, Decimal | None]:
+    if lp_data is None:
+        if intent_type_str != "LP_OPEN":
+            return None, None, None, None
+        extracted = getattr(result, "extracted_data", None) or {}
+        return _to_human(extracted.get("amount0"), dec0), _to_human(extracted.get("amount1"), dec1), None, None
+
+    if intent_type_str == "LP_OPEN":
+        return (
+            _to_human(getattr(lp_data, "amount0", None), dec0),
+            _to_human(getattr(lp_data, "amount1", None), dec1),
+            None,
+            None,
+        )
+    return (
+        _to_human(getattr(lp_data, "amount0_collected", None), dec0),
+        _to_human(getattr(lp_data, "amount1_collected", None), dec1),
+        _to_human(getattr(lp_data, "fees0", None), dec0),
+        _to_human(getattr(lp_data, "fees1", None), dec1),
+    )
+
+
+def _lp_position_hash(intent_type_str: str, lp_data: Any) -> str | None:
+    if intent_type_str != "LP_OPEN" or lp_data is None:
+        return None
+    return getattr(lp_data, "position_hash", None)
+
+
+def _lp_position_id(lp_data: Any) -> str | None:
+    if lp_data is None:
+        return None
+    raw = getattr(lp_data, "position_id", None)
+    if raw is None or raw == "" or raw == 0 or str(raw).strip() == "0":
+        return None
+    position_id = str(raw).strip()
+    return position_id or None
+
+
+def build_lp_accounting_event(
     *,
     intent: Any,
     result: Any,
@@ -502,94 +603,19 @@ def build_lp_accounting_event(  # noqa: C901
     event_type = LPEventType.LP_OPEN if intent_type_str == "LP_OPEN" else LPEventType.LP_CLOSE
     now = datetime.now(UTC)
 
-    tx_hash = getattr(result, "tx_hash", None) or ""
-    if not tx_hash:
-        for tr in getattr(result, "transaction_results", None) or []:
-            h = getattr(tr, "tx_hash", None)
-            if h:
-                tx_hash = h
-                break
-
-    token0 = str(getattr(intent, "token0", None) or getattr(intent, "token_a", None) or "")
-    token1 = str(getattr(intent, "token1", None) or getattr(intent, "token_b", None) or "")
-    # LP intents store tokens in the pool string (e.g. "WETH/USDC/3000", "USDC/DAI/stable").
-    # Bare token0/token1 attributes are not set on LP intents, so parse from pool string.
-    # VIB-3946: prefer the compiler-resolved canonical label when supplied so a Curve
-    # asset-set ("USDT/USDC/DAI") keys off "3pool" (no "/", token0/token1 stay empty)
-    # instead of leaking phantom symbols. None/empty → raw intent.pool (byte-identical
-    # for every non-Curve connector, e.g. Solidly "USDC/DAI/stable").
-    if not token0 or not token1:
-        if resolved_pool and str(resolved_pool).strip():
-            pool_str = str(resolved_pool).strip()
-        else:
-            pool_str = (getattr(intent, "pool", "") or "").strip()
-        if "/" in pool_str:
-            parts = [p.strip() for p in pool_str.split("/") if p.strip()]
-            normalized = [
-                p.split("(")[0].split(" ")[0].strip()
-                for p in parts
-                if not p.strip().isdigit() and not p.strip().lower().startswith("0x")
-            ]
-            if not token0 and normalized:
-                token0 = normalized[0].upper()
-            if not token1 and len(normalized) > 1:
-                token1 = normalized[1].upper()
-
-    # Prefer explicit decimal fields; fall back to 18 with ESTIMATED confidence.
-    # Use `is None` checks — `or` would treat decimals=0 as missing (valid for some tokens).
-    dec0_raw = getattr(intent, "token0_decimals", None)
-    if dec0_raw is None:
-        dec0_raw = getattr(intent, "token_a_decimals", None)
-    dec1_raw = getattr(intent, "token1_decimals", None)
-    if dec1_raw is None:
-        dec1_raw = getattr(intent, "token_b_decimals", None)
-    assumed_decimals = dec0_raw is None or dec1_raw is None
-    dec0 = int(dec0_raw) if dec0_raw is not None else 18
-    dec1 = int(dec1_raw) if dec1_raw is not None else 18
-
-    amount0: Decimal | None = None
-    amount1: Decimal | None = None
-    lp_token_amount: Decimal | None = None
-    fees0_collected: Decimal | None = None
-    fees1_collected: Decimal | None = None
-    # VIB-4473 — V4 lot-matching anchor read from ``lp_open_data`` on
-    # LP_OPEN. V3 parsers leave it None and the field is forwarded as-is
-    # so the payload key is stable. LP_CLOSE leaves it None: the close
-    # leg matches against the prior OPEN payload by position_key, not by
-    # re-reading the hash off the burn receipt.
-    position_hash: str | None = None
-
-    if intent_type_str == "LP_OPEN":
-        lp_data = getattr(result, "lp_open_data", None)
-        if lp_data is not None:
-            # VIB-4426 P1 #4 — for V4 (currency0/currency1 populated),
-            # re-resolve (token0, token1, dec0, dec1) by canonical PoolKey
-            # address order so amount0 (in PoolKey order) is paired with
-            # the correct symbol/decimals. Otherwise a user pool string in
-            # the opposite order (e.g. "USDC/WETH" when canonical is WETH<USDC)
-            # silently mis-scales and mis-prices.
-            token0, token1, dec0, dec1, assumed_decimals = _v4_align_tokens_to_currency_order(
-                lp_data, chain, token0, token1, dec0, dec1, assumed_decimals
-            )
-            amount0 = _to_human(getattr(lp_data, "amount0", None), dec0)
-            amount1 = _to_human(getattr(lp_data, "amount1", None), dec1)
-            position_hash = getattr(lp_data, "position_hash", None)
-        else:
-            # Fall back to extracted_data dict (older receipt parsers)
-            extracted = getattr(result, "extracted_data", None) or {}
-            amount0 = _to_human(extracted.get("amount0"), dec0)
-            amount1 = _to_human(extracted.get("amount1"), dec1)
-    else:
-        lp_data = getattr(result, "lp_close_data", None)
-        if lp_data is not None:
-            # VIB-4426 P1 #4 — same alignment as LP_OPEN (see above).
-            token0, token1, dec0, dec1, assumed_decimals = _v4_align_tokens_to_currency_order(
-                lp_data, chain, token0, token1, dec0, dec1, assumed_decimals
-            )
-            amount0 = _to_human(getattr(lp_data, "amount0_collected", None), dec0)
-            amount1 = _to_human(getattr(lp_data, "amount1_collected", None), dec1)
-            fees0_collected = _to_human(getattr(lp_data, "fees0", None), dec0)
-            fees1_collected = _to_human(getattr(lp_data, "fees1", None), dec1)
+    tx_hash = _result_tx_hash(result)
+    token0, token1 = _resolve_lp_tokens(intent, resolved_pool)
+    dec0, dec1, assumed_decimals = _resolve_lp_decimals(intent)
+    lp_data = _result_lp_data(intent_type_str, result)
+    if lp_data is not None:
+        token0, token1, dec0, dec1, assumed_decimals = _v4_align_tokens_to_currency_order(
+            lp_data, chain, token0, token1, dec0, dec1, assumed_decimals
+        )
+    amount0, amount1, fees0_collected, fees1_collected = _extract_lp_amounts(
+        intent_type_str, result, lp_data, dec0, dec1
+    )
+    position_hash = _lp_position_hash(intent_type_str, lp_data)
+    position_id = _lp_position_id(lp_data)
 
     confidence = AccountingConfidence.ESTIMATED if assumed_decimals else AccountingConfidence.HIGH
     unavailable_reason = ""
@@ -631,7 +657,7 @@ def build_lp_accounting_event(  # noqa: C901
         token1=token1,
         amount0=amount0,
         amount1=amount1,
-        lp_token_amount=lp_token_amount,
+        lp_token_amount=None,
         cost_basis_usd=cost_basis_usd,
         realized_pnl_usd=None,
         fees0_collected=fees0_collected,
@@ -639,4 +665,5 @@ def build_lp_accounting_event(  # noqa: C901
         confidence=confidence,
         unavailable_reason=unavailable_reason,
         position_hash=position_hash,
+        position_id=position_id,
     )

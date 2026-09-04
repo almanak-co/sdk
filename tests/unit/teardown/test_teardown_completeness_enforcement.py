@@ -212,12 +212,11 @@ async def test_no_intent_completeness_returns_none_when_enumeration_raises():
 
 
 def test_completeness_check_wired_into_manager_execute():
-    # Scope to the ACTUAL function body (not a whole-file grep) so the guard
-    # trips if the call is removed from execute() even when the symbol survives
-    # in an import / comment / helper / dead code (CR hardening, VIB-5469).
-    src = inspect.getsource(TeardownManager.execute)
-    assert "check_intent_coverage" in src, (
-        "TeardownManager.execute must call check_intent_coverage — completeness enforcement removed (VIB-5469)"
+    execute_src = inspect.getsource(TeardownManager.execute)
+    planning_src = inspect.getsource(TeardownManager._plan_execute_intents)
+    assert "_plan_execute_intents" in execute_src
+    assert "check_intent_coverage" in planning_src, (
+        "TeardownManager planning must call check_intent_coverage — completeness enforcement removed (VIB-5469)"
     )
 
 
@@ -231,16 +230,18 @@ def test_completeness_check_wired_into_runner_via_manager():
 
 
 def test_completeness_check_wired_into_runner_no_intents_gate():
-    from almanak.framework.runner.runner_teardown import execute_teardown
+    from almanak.framework.runner.runner_teardown import _complete_teardown_without_intents, execute_teardown
 
-    src = inspect.getsource(execute_teardown)
-    assert "_check_no_intent_completeness" in src, (
-        "execute_teardown no-intents gate must enforce completeness (VIB-5469)"
+    entry_src = inspect.getsource(execute_teardown)
+    gate_src = inspect.getsource(_complete_teardown_without_intents)
+    assert "_complete_teardown_without_intents" in entry_src, (
+        "execute_teardown must route empty plans through its completeness gate"
     )
+    assert "_check_no_intent_completeness" in gate_src, "runner no-intents gate must enforce completeness (VIB-5469)"
     # The no-intents gate must consult the known set BEFORE reporting a clean
     # "no positions" success.
-    no_positions = src.index('"no_positions"')
-    gate = src.index("_check_no_intent_completeness")
+    no_positions = gate_src.index('"no_positions"')
+    gate = gate_src.index("_check_no_intent_completeness")
     assert gate < no_positions, "completeness gate must run before the no_positions success path"
 
 
@@ -251,9 +252,11 @@ def test_manager_failed_result_can_carry_failed_verification_status():
     assert "verification_status" in sig.parameters, (
         "_failed_result must accept verification_status so a coverage failure persists FAILED (VIB-5469)"
     )
-    # ... and execute()'s no-intents gate passes FAILED.
+    # ... and execute()'s extracted no-intents gate passes FAILED.
     execute_src = inspect.getsource(TeardownManager.execute)
-    assert "verification_status=VerificationStatus.FAILED" in execute_src
+    gate_src = inspect.getsource(TeardownManager._resolve_empty_execute_plan)
+    assert "_resolve_empty_execute_plan" in execute_src
+    assert "verification_status=VerificationStatus.FAILED" in gate_src
 
 
 @pytest.mark.asyncio

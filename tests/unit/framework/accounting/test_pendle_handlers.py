@@ -5,13 +5,16 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
+
+import pytest
 
 from almanak.connectors.pendle.accounting_spec import (
     handle_pendle_lp,
     handle_pendle_pt,
 )
 from almanak.framework.accounting.basis import FIFOBasisStore
+from almanak.framework.accounting.ids import make_accounting_event_id
 from almanak.framework.accounting.models import AccountingConfidence, PendleEventType
 
 _SCALE_18 = Decimal(10**18)
@@ -133,6 +136,224 @@ def test_handle_pendle_lp_uses_market_id_from_outbox() -> None:
     )
     assert event is not None
     assert event.market_id == "0xABCDEF"
+
+
+@pytest.mark.parametrize(
+    ("intent_type", "protocol", "extracted", "expected_type", "expected_sy", "expected_pt"),
+    [
+        (
+            "lp_open",
+            "Pendle-V2",
+            {"lp_open_data": {"amount0": 0, "amount1": None}},
+            PendleEventType.PENDLE_LP_OPEN,
+            Decimal("0"),
+            None,
+        ),
+        (
+            "LP_CLOSE",
+            "pendle",
+            {"lp_close_data": {"amount0_collected": "1500000000000000000", "amount1_collected": 0}},
+            PendleEventType.PENDLE_LP_CLOSE,
+            Decimal("1.5"),
+            Decimal("0"),
+        ),
+        ("LP_OPEN", "uniswap_v3", {}, None, None, None),
+        ("SUPPLY", "pendle", {}, None, None, None),
+    ],
+)
+def test_handle_pendle_lp_event_and_amount_branch_table(
+    intent_type: str,
+    protocol: str,
+    extracted: dict,
+    expected_type: PendleEventType | None,
+    expected_sy: Decimal | None,
+    expected_pt: Decimal | None,
+) -> None:
+    event = handle_pendle_lp(
+        _outbox(intent_type),
+        _ledger(intent_type, protocol=protocol, extracted_data_json=json.dumps(extracted)),
+    )
+
+    if expected_type is None:
+        assert event is None
+        return
+    assert event is not None
+    assert event.event_type is expected_type
+    assert event.sy_amount == expected_sy
+    assert event.pt_amount == expected_pt
+
+
+def test_handle_pendle_lp_reads_tagged_typed_amounts() -> None:
+    from almanak.framework.execution.extracted_data import LPOpenData
+    from almanak.framework.observability.ledger import serialize_extracted_data
+
+    extracted = serialize_extracted_data(
+        {
+            "lp_open_data": LPOpenData(
+                position_id=0,
+                liquidity=3 * 10**18,
+                amount0=2 * 10**18,
+                amount1=10**18,
+            )
+        }
+    )
+
+    event = handle_pendle_lp(_outbox(), _ledger(extracted_data_json=extracted))
+
+    assert event is not None
+    assert event.sy_amount == Decimal("2")
+    assert event.pt_amount == Decimal("1")
+
+
+@pytest.mark.parametrize(
+    ("position_key", "market_id", "wallet", "chain", "expected_key", "expected_market"),
+    [
+        (
+            "pendle_lp:arbitrum:0xwallet:0xkeymarket",
+            "0xrowmarket",
+            "0xwallet",
+            "arbitrum",
+            "pendle_lp:arbitrum:0xwallet:0xkeymarket",
+            "0xrowmarket",
+        ),
+        (
+            "pendle_lp:arbitrum:0xwallet:0xkeymarket",
+            "",
+            "0xwallet",
+            "arbitrum",
+            "pendle_lp:arbitrum:0xwallet:0xkeymarket",
+            "0xkeymarket",
+        ),
+        ("", "0xMarket", "0xWALLET", "Arbitrum", "pendle_lp:arbitrum:0xwallet:0xmarket", "0xMarket"),
+        ("", "0xMarket", "", "Arbitrum", "", "0xMarket"),
+        ("pendle_lp:too:short", "", "0xwallet", "arbitrum", "pendle_lp:too:short", ""),
+        ("", "", "0xwallet", "arbitrum", "", ""),
+    ],
+)
+def test_handle_pendle_lp_position_identity_precedence_table(
+    position_key: str,
+    market_id: str,
+    wallet: str,
+    chain: str,
+    expected_key: str,
+    expected_market: str,
+) -> None:
+    outbox = _outbox(position_key=position_key, market_id=market_id, wallet_address=wallet)
+    ledger = _ledger()
+    ledger["chain"] = chain
+
+    event = handle_pendle_lp(outbox, ledger)
+
+    assert event is not None
+    assert event.position_key == expected_key
+    assert event.market_id == expected_market
+
+
+@pytest.mark.parametrize(
+    ("tx_hash", "ledger_entry_id", "expected_seed"),
+    [
+        ("0xTX", "ledger-id", "0xTX"),
+        ("", "ledger-id", "ledger-id"),
+        ("", "", "pendle_lp:arbitrum:0xwallet:0xmarket"),
+    ],
+)
+def test_handle_pendle_lp_identity_seed_precedence(
+    tx_hash: str,
+    ledger_entry_id: str,
+    expected_seed: str,
+) -> None:
+    outbox = _outbox()
+    ledger = _ledger(tx_hash=tx_hash)
+    ledger["id"] = ledger_entry_id
+
+    event = handle_pendle_lp(outbox, ledger)
+
+    assert event is not None
+    assert event.identity.id == make_accounting_event_id(
+        "dep-1",
+        "cycle-1",
+        PendleEventType.PENDLE_LP_OPEN.value,
+        expected_seed,
+        outbox["position_key"],
+    )
+
+
+def test_handle_pendle_lp_ledger_identity_falls_back_to_outbox() -> None:
+    outbox = _outbox()
+    outbox["deployment_id"] = "outbox-deployment"
+    outbox["cycle_id"] = "outbox-cycle"
+    ledger = _ledger()
+    ledger["deployment_id"] = ""
+    ledger["cycle_id"] = None
+
+    event = handle_pendle_lp(outbox, ledger)
+
+    assert event is not None
+    assert event.identity.deployment_id == "outbox-deployment"
+    assert event.identity.cycle_id == "outbox-cycle"
+
+
+def test_handle_pendle_lp_parses_z_timestamp() -> None:
+    ledger = _ledger()
+    ledger["timestamp"] = "2026-01-02T03:04:05Z"
+
+    event = handle_pendle_lp(_outbox(), ledger)
+
+    assert event is not None
+    assert event.identity.timestamp == datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
+
+
+@pytest.mark.parametrize("timestamp", ["not-an-iso-timestamp", None, 123])
+def test_handle_pendle_lp_invalid_or_absent_timestamp_uses_current_utc(timestamp: object) -> None:
+    ledger = _ledger()
+    ledger["timestamp"] = timestamp
+    before = datetime.now(UTC)
+
+    event = handle_pendle_lp(_outbox(), ledger)
+
+    after = datetime.now(UTC)
+    assert event is not None
+    assert before <= event.identity.timestamp <= after
+
+
+def test_handle_pendle_lp_invalid_amount_preserves_decimal_exception() -> None:
+    extracted = json.dumps({"lp_open_data": {"amount0": "not-a-number", "amount1": 0}})
+
+    with pytest.raises(InvalidOperation):
+        handle_pendle_lp(_outbox(), _ledger(extracted_data_json=extracted))
+
+
+def test_handle_pendle_lp_invalid_execution_mode_preserves_value_error() -> None:
+    ledger = _ledger()
+    ledger["execution_mode"] = "invalid"
+
+    with pytest.raises(ValueError, match="invalid run mode"):
+        handle_pendle_lp(_outbox(), ledger)
+
+
+def test_handle_pendle_lp_payload_preserves_unmeasured_fields_and_versions() -> None:
+    ledger = _ledger(
+        extracted_data_json=json.dumps({"lp_open_data": {"amount0": 0, "amount1": None}}),
+        price_inputs_json=json.dumps({"SY": {"price_usd": "1.25"}}),
+    )
+
+    event = handle_pendle_lp(_outbox(), ledger)
+
+    assert event is not None
+    assert event.sy_amount == Decimal("0")
+    assert event.pt_amount is None
+    assert event.sy_price is None
+    assert event.realized_yield_usd is None
+    assert event.realized_yield_sy is None
+    assert event.basis_lot_id is None
+    assert event.schema_version == 1
+    assert event.primitive_version == 1
+    payload = json.loads(event.to_payload_json())
+    assert payload["sy_amount"] == "0"
+    assert payload["pt_amount"] is None
+    assert payload["sy_price"] is None
+    assert payload["schema_version"] == 1
+    assert payload["primitive_version"] == 1
 
 
 # ──────────────────────────────────────────────────────────────────────────────

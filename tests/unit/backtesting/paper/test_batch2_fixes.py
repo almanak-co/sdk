@@ -8,7 +8,6 @@ VIB-1954: force_action config guard warning
 
 from datetime import UTC, datetime
 from decimal import Decimal
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -168,33 +167,31 @@ class TestPaperStartBranches:
         bg_instance.state_dir = "/tmp/state"
         bg_instance.log_file = "/tmp/state.log"
         bg_instance.start.return_value = 12345
+        strategy_instance = SimpleNamespace()
 
         with ExitStack() as stack:
             stack.enter_context(
                 patch("almanak.framework.cli.backtest.paper.BackgroundPaperTrader", return_value=bg_instance)
             )
             stack.enter_context(
-                patch(
-                    "almanak.framework.cli.backtest.paper_helpers.BackgroundPaperTrader", return_value=bg_instance
-                )
+                patch("almanak.framework.cli.backtest.paper_helpers.BackgroundPaperTrader", return_value=bg_instance)
             )
-            mock_save = stack.enter_context(
-                patch("almanak.framework.cli.backtest.paper.save_paper_session_state")
-            )
+            mock_save = stack.enter_context(patch("almanak.framework.cli.backtest.paper.save_paper_session_state"))
             stack.enter_context(
                 patch(
                     "almanak.framework.cli.backtest.paper_helpers.list_strategies_fn",
                     return_value=["test_strat"],
                 )
             )
-            stack.enter_context(
-                patch("almanak.framework.cli.backtest.paper.load_strategy_config", return_value={})
-            )
+            stack.enter_context(patch("almanak.framework.cli.backtest.paper.load_strategy_config", return_value={}))
             stack.enter_context(
                 patch("almanak.framework.cli.backtest.paper_helpers.load_strategy_config", return_value={})
             )
             stack.enter_context(
-                patch("almanak.framework.cli.backtest.paper._create_backtest_strategy", return_value=MagicMock())
+                patch(
+                    "almanak.framework.cli.backtest.paper._create_backtest_strategy",
+                    return_value=strategy_instance,
+                )
             )
             stack.enter_context(
                 patch("almanak.framework.cli.backtest.paper.get_strategy", return_value=type("S", (), {}))
@@ -206,9 +203,11 @@ class TestPaperStartBranches:
         assert result.exit_code == 0, result.output
         bg_instance.start.assert_called_once()
         mock_save.assert_called_once()
+        assert strategy_instance.deployment_id == "test_strat"
         assert "12345" in result.output
 
-    def test_paper_start_foreground_path_runs_paper_trading(self, tmp_path):
+    @pytest.mark.parametrize("write_output", [False, True], ids=["stdout-only", "json-output"])
+    def test_paper_start_foreground_path_runs_paper_trading(self, tmp_path, write_output):
         """`--foreground`: foreground branch must call the asyncio runner."""
         from contextlib import ExitStack
 
@@ -221,6 +220,10 @@ class TestPaperStartBranches:
         fake_summary = MagicMock()
         fake_summary.summary.return_value = "fake summary text"
         fake_summary.to_dict.return_value = {"key": "value"}
+        output_path = tmp_path / "out.json"
+        args = ["-s", "test_strat", "--foreground", "--max-ticks", "1"]
+        if write_output:
+            args.extend(["-o", str(output_path)])
 
         with ExitStack() as stack:
             mock_run = stack.enter_context(
@@ -228,13 +231,17 @@ class TestPaperStartBranches:
             )
             stack.enter_context(
                 patch(
+                    "almanak.framework.cli.backtest.paper._run_paper_trading_foreground",
+                    new=MagicMock(return_value=object()),
+                )
+            )
+            stack.enter_context(
+                patch(
                     "almanak.framework.cli.backtest.paper_helpers.list_strategies_fn",
                     return_value=["test_strat"],
                 )
             )
-            stack.enter_context(
-                patch("almanak.framework.cli.backtest.paper.load_strategy_config", return_value={})
-            )
+            stack.enter_context(patch("almanak.framework.cli.backtest.paper.load_strategy_config", return_value={}))
             stack.enter_context(
                 patch("almanak.framework.cli.backtest.paper_helpers.load_strategy_config", return_value={})
             )
@@ -246,23 +253,12 @@ class TestPaperStartBranches:
             )
             stack.enter_context(patch.dict("os.environ", {"ALMANAK_ARBITRUM_RPC_URL": "http://test"}))
 
-            result = runner.invoke(
-                paper_start,
-                [
-                    "-s",
-                    "test_strat",
-                    "--foreground",
-                    "--max-ticks",
-                    "1",
-                    "-o",
-                    str(tmp_path / "out.json"),
-                ],
-            )
+            result = runner.invoke(paper_start, args)
 
         assert result.exit_code == 0, result.output
         mock_run.assert_called_once()
         assert "fake summary text" in result.output
-        assert (tmp_path / "out.json").exists()
+        assert output_path.exists() is write_output
 
     def test_paper_start_falls_back_to_mock_strategy_when_registry_empty(self):
         """`get_strategy` raising falls through to the inner `MockPaperStrategy`."""
@@ -280,28 +276,33 @@ class TestPaperStartBranches:
         bg_instance.start.return_value = 99
         # First get_strategy() raises (mock fallback), second succeeds (post-fallback path).
         get_strategy_mock = MagicMock(side_effect=[ValueError("not registered"), type("S", (), {})])
+        strategy_instances = []
+
+        def _instantiate_strategy(strategy_class, _config, _chain):
+            instance = strategy_class()
+            strategy_instances.append(instance)
+            return instance
 
         with ExitStack() as stack:
             stack.enter_context(
                 patch("almanak.framework.cli.backtest.paper.BackgroundPaperTrader", return_value=bg_instance)
             )
             stack.enter_context(
-                patch(
-                    "almanak.framework.cli.backtest.paper_helpers.BackgroundPaperTrader", return_value=bg_instance
-                )
+                patch("almanak.framework.cli.backtest.paper_helpers.BackgroundPaperTrader", return_value=bg_instance)
             )
             stack.enter_context(patch("almanak.framework.cli.backtest.paper.save_paper_session_state"))
             stack.enter_context(
                 patch("almanak.framework.cli.backtest.paper_helpers.list_strategies_fn", return_value=[])
             )
-            stack.enter_context(
-                patch("almanak.framework.cli.backtest.paper.load_strategy_config", return_value={})
-            )
+            stack.enter_context(patch("almanak.framework.cli.backtest.paper.load_strategy_config", return_value={}))
             stack.enter_context(
                 patch("almanak.framework.cli.backtest.paper_helpers.load_strategy_config", return_value={})
             )
             stack.enter_context(
-                patch("almanak.framework.cli.backtest.paper._create_backtest_strategy", return_value=MagicMock())
+                patch(
+                    "almanak.framework.cli.backtest.paper._create_backtest_strategy",
+                    side_effect=_instantiate_strategy,
+                )
             )
             stack.enter_context(patch("almanak.framework.cli.backtest.paper.get_strategy", get_strategy_mock))
             stack.enter_context(patch.dict("os.environ", {"ALMANAK_ARBITRUM_RPC_URL": "http://test"}))
@@ -312,6 +313,74 @@ class TestPaperStartBranches:
         # The mock-strategy warning is printed via `click.echo(..., err=True)`.
         combined = result.output + (result.stderr or "")
         assert "mock strategy" in combined.lower()
+        assert strategy_instances[0].decide(MagicMock()) is None
+        assert strategy_instances[0]._iteration == 1
+
+    @pytest.mark.parametrize(
+        ("foreground", "failure", "expected_exit", "expected_message"),
+        [
+            (True, KeyboardInterrupt(), 0, "Paper trading interrupted by user."),
+            (False, RuntimeError("cannot launch"), 1, "Error: cannot launch"),
+        ],
+        ids=["foreground-interrupt", "background-start-failure"],
+    )
+    def test_paper_start_preserves_execution_failure_contract(
+        self,
+        foreground: bool,
+        failure: BaseException,
+        expected_exit: int,
+        expected_message: str,
+    ) -> None:
+        from click.testing import CliRunner
+
+        from almanak.framework.cli.backtest import paper_start
+
+        class _Strategy:
+            pass
+
+        bg_instance = MagicMock()
+        bg_instance.start.side_effect = failure if not foreground else None
+        strategy_instance = SimpleNamespace(deployment_id="test_strat")
+        args = ["-s", "test_strat"]
+        if foreground:
+            args.append("--foreground")
+
+        with (
+            patch("almanak.framework.cli.backtest.paper.resolve_backtest_strategy_name", return_value="test_strat"),
+            patch("almanak.framework.cli.backtest.paper.validate_strategy_registered"),
+            patch("almanak.framework.cli.backtest.paper.abort_if_session_running"),
+            patch("almanak.framework.cli.backtest.paper.resolve_rpc_url", return_value="http://test"),
+            patch(
+                "almanak.framework.cli.backtest.paper.load_funding_from_config",
+                return_value=(None, {}, {}, {}),
+            ),
+            patch(
+                "almanak.framework.cli.backtest.paper.cli_runtime_config_from_env",
+                return_value=SimpleNamespace(allow_hardcoded_prices=False),
+            ),
+            patch("almanak.framework.cli.backtest.paper.print_paper_config"),
+            patch("almanak.framework.cli.backtest.paper.get_strategy", return_value=_Strategy),
+            patch("almanak.framework.cli.backtest.paper.load_strategy_config", return_value={}),
+            patch(
+                "almanak.framework.cli.backtest.paper._create_backtest_strategy",
+                return_value=strategy_instance,
+            ),
+            patch("almanak.framework.cli.backtest.paper.BackgroundPaperTrader", return_value=bg_instance),
+            patch(
+                "almanak.framework.cli.backtest.paper._run_paper_trading_foreground",
+                new=MagicMock(return_value=object()),
+            ),
+            patch(
+                "almanak.framework.cli.backtest.paper.asyncio.run",
+                side_effect=failure if foreground else None,
+            ),
+            patch("almanak.framework.cli.backtest.paper.save_paper_session_state") as save_state,
+        ):
+            result = CliRunner(mix_stderr=False).invoke(paper_start, args)
+
+        assert result.exit_code == expected_exit
+        assert expected_message in result.output + (result.stderr or "")
+        save_state.assert_not_called()
 
 
 def _make_state(deployment_id="test_strat", status="stopped", tick_count=10, pid=None):

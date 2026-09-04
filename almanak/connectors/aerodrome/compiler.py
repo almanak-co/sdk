@@ -1433,11 +1433,6 @@ def compile_lp_close_aerodrome(compiler, intent: LPCloseIntent) -> CompilationRe
     return result
 
 
-# crap-allowlist: VIB-4687 — pre-existing complexity (cc=26) relocated from
-# compiler_aerodrome.py by the phase-2 connector fold; bodies are byte-identical
-# apart from a .pool_validation -> absolute import-path change. Split into
-# per-route helpers (Slipstream / Aerodrome Classic / Velodrome Classic) under
-# the four-step CRAP refactor protocol.
 # Ordered CL tick-spacing candidates probed in the pure-auto routing case
 # (VIB-5548 / ALM-2889, design O3). 100 first preserves the historical default;
 # 200/50/1/2000 cover the remaining live Slipstream spacings. Probes are
@@ -2112,7 +2107,6 @@ def compile_swap_aerodrome(compiler, intent: SwapIntent) -> CompilationResult:  
     return result
 
 
-# crap-allowlist: VIB-4853 — import-path swap only (pool-validation moved into connectors, #2527); function body unchanged, anvil-only coverage. Refactor + coverage backfill tracked in VIB-4139.
 @dataclass(frozen=True, slots=True)
 class _ResolvedSlipstreamPool:
     """One admitted Slipstream LP_OPEN venue, however the intent named it.
@@ -2614,7 +2608,53 @@ def compile_lp_open_aerodrome_slipstream(compiler, intent: LPOpenIntent) -> Comp
     return result
 
 
-# crap-allowlist: VIB-4835 — pre-existing complexity (cc=17, cov=40%) relocated by Phase 2 fold from almanak/framework/connectors/aerodrome/compiler.py; function body unchanged by this PR. Refactor + coverage backfill tracked in VIB-4139.
+def _resolve_slipstream_close_context(
+    compiler: _AerodromeCompileImpl, intent: LPCloseIntent
+) -> tuple[int, bool, tuple[SlipstreamDeployment, ...]] | CompilationResult:
+    """Validate the NFT identity and select the reviewed manager inventory."""
+    position_id_raw = intent.position_id or ""
+    if not position_id_raw:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error="position_id is required for aerodrome_slipstream LP_CLOSE (must be NFT tokenId string)",
+            intent_id=intent.intent_id,
+        )
+
+    try:
+        token_id = int(position_id_raw)
+    except ValueError:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Invalid position_id '{position_id_raw}': aerodrome_slipstream LP_CLOSE requires a numeric tokenId",
+            intent_id=intent.intent_id,
+        )
+
+    reviewed_deployments = slipstream_lp_deployments(compiler.chain)
+    if not reviewed_deployments:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Aerodrome Slipstream CL not supported on chain '{compiler.chain}'. Only 'base' is supported.",
+            intent_id=intent.intent_id,
+        )
+
+    config = getattr(compiler, "_config", None)
+    permission_discovery = bool(config and getattr(config, "permission_discovery", False))
+    if token_id < 0 or (token_id == 0 and not permission_discovery):
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=(
+                f"Invalid position_id '{position_id_raw}': aerodrome_slipstream "
+                "LP_CLOSE requires a positive NFT tokenId"
+            ),
+            intent_id=intent.intent_id,
+        )
+    if permission_discovery and token_id == 0:
+        token_id = 1
+        logger.debug("Permission discovery mode: using synthetic tokenId=1 for Aerodrome Slipstream LP_CLOSE")
+
+    return token_id, permission_discovery, reviewed_deployments
+
+
 def compile_lp_close_aerodrome_slipstream(compiler, intent: LPCloseIntent) -> CompilationResult:
     """Compile LP_CLOSE intent for Aerodrome Slipstream CL.
 
@@ -2637,42 +2677,12 @@ def compile_lp_close_aerodrome_slipstream(compiler, intent: LPCloseIntent) -> Co
     try:
         from almanak.connectors.aerodrome import AerodromeAdapter, AerodromeConfig
 
-        position_id_raw = intent.position_id or ""
-
-        # Validate and parse tokenId
-        if not position_id_raw:
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error="position_id is required for aerodrome_slipstream LP_CLOSE (must be NFT tokenId string)",
-                intent_id=intent.intent_id,
-            )
-
-        try:
-            token_id = int(position_id_raw)
-        except ValueError:
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error=f"Invalid position_id '{position_id_raw}': aerodrome_slipstream LP_CLOSE requires a numeric tokenId",
-                intent_id=intent.intent_id,
-            )
-
-        reviewed_deployments = slipstream_lp_deployments(compiler.chain)
-        if not reviewed_deployments:
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error=f"Aerodrome Slipstream CL not supported on chain '{compiler.chain}'. Only 'base' is supported.",
-                intent_id=intent.intent_id,
-            )
+        close_context = _resolve_slipstream_close_context(compiler, intent)
+        if isinstance(close_context, CompilationResult):
+            return close_context
+        token_id, permission_discovery, reviewed_deployments = close_context
 
         logger.info(f"Compiling Aerodrome Slipstream LP_CLOSE: tokenId={token_id}")
-
-        # Handle permission discovery mode: tokenId=0 → synthetic non-zero
-        _cfg = getattr(compiler, "_config", None)
-        permission_discovery = _cfg and getattr(_cfg, "permission_discovery", False)
-        if permission_discovery and token_id == 0:
-            # Use a non-zero synthetic tokenId so the adapter can produce real TXs
-            token_id = 1
-            logger.debug("Permission discovery mode: using synthetic tokenId=1 for Aerodrome Slipstream LP_CLOSE")
 
         # Create Aerodrome adapter
         config = AerodromeConfig(
@@ -2690,7 +2700,7 @@ def compile_lp_close_aerodrome_slipstream(compiler, intent: LPCloseIntent) -> Co
             adapter=adapter,
             token_id=token_id,
             intent_id=intent.intent_id,
-            permission_discovery=bool(permission_discovery),
+            permission_discovery=permission_discovery,
             reviewed_deployments=reviewed_deployments,
             expected_pool=intent.pool,
         )
@@ -2949,7 +2959,6 @@ def compile_collect_fees_aerodrome_slipstream(compiler, intent: CollectFeesInten
     return result
 
 
-# crap-allowlist: VIB-4853 — import-path swap only (pool-validation moved into connectors, #2527); function body unchanged, anvil-only coverage. Refactor + coverage backfill tracked in VIB-4139.
 def get_aerodrome_pool_address(compiler, token_a: str, token_b: str, stable: bool) -> str | None:
     """Query Aerodrome pool address, preferring gateway RPC over direct calls.
 
@@ -3027,7 +3036,6 @@ def get_aerodrome_pool_address(compiler, token_a: str, token_b: str, stable: boo
     return pool_address
 
 
-# crap-allowlist: VIB-4853 — import-path swap only (pool-validation moved into connectors, #2527); function body unchanged, anvil-only coverage. Refactor + coverage backfill tracked in VIB-4139.
 def get_aerodrome_pool_metadata(compiler, pool_address: str) -> tuple[str, str, bool] | None:
     """Query an Aerodrome V1 pool's (token0, token1, stable) via ``metadata()``.
 
@@ -3042,6 +3050,7 @@ def get_aerodrome_pool_metadata(compiler, pool_address: str) -> tuple[str, str, 
         or ``None`` if the pool can't be read (no gateway/RPC access, the
         address isn't an Aerodrome V1 pool, etc).
     """
+    from almanak.connectors._strategy_base.pool_validation_base import ZERO_ADDRESS
     from almanak.connectors._strategy_base.pool_validation_base import decode_address as _decode_address
 
     def _decode(raw: bytes | None) -> tuple[str, str, bool] | None:
@@ -3058,7 +3067,7 @@ def get_aerodrome_pool_metadata(compiler, pool_address: str) -> tuple[str, str, 
         stable = int.from_bytes(raw[128:160], "big") != 0
         token0 = _decode_address(raw[160:192])
         token1 = _decode_address(raw[192:224])
-        if not token0 or not token1:
+        if ZERO_ADDRESS in (token0, token1):
             return None
         return token0, token1, stable
 

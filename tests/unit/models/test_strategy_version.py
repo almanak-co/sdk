@@ -259,6 +259,39 @@ class TestDeployVersion:
         result = manager.deploy_version(code_hash="abc", code_version="1.0.0", config_snapshot={})
         assert result.version.connector_versions == {}
 
+    def test_deploy_detaches_mutable_snapshot_inputs(self):
+        manager = VersionManager(deployment_id="dep-1")
+        config = {"risk": {"max_slippage": "0.005"}}
+        connectors = {"uniswap_v3": "2.0.0"}
+
+        result = manager.deploy_version(
+            code_hash="abc",
+            code_version="1.0.0",
+            config_snapshot=config,
+            connector_versions=connectors,
+        )
+        config["risk"]["max_slippage"] = "0.5"
+        connectors["uniswap_v3"] = "3.0.0"
+
+        assert result.version.config_snapshot == {"risk": {"max_slippage": "0.005"}}
+        assert result.version.connector_versions == {"uniswap_v3": "2.0.0"}
+
+    def test_deploy_callback_observes_completed_state_transition(self):
+        previous = make_version("v_old", is_active=True)
+        manager = manager_with(previous)
+        manager.generate_version_id = lambda deployment_id, timestamp=None: "v_new"
+
+        def assert_transition(new_version: StrategyVersion) -> None:
+            assert previous.is_active is False
+            assert manager._versions == {"v_old": previous, "v_new": new_version}
+            assert manager._version_order == ["v_old", "v_new"]
+
+        manager._on_deploy = assert_transition
+
+        result = manager.deploy_version(code_hash="abc", code_version="2.0.0", config_snapshot={})
+
+        assert result.success is True
+
 
 class TestRollback:
     def test_rollback_to_unknown_version_fails(self):
@@ -334,6 +367,45 @@ class TestRollback:
         manager._on_rollback = broken_callback
 
         result = manager.rollback("v_old")
+        assert result.success is True
+
+    def test_rollback_detaches_nested_target_snapshot(self):
+        target = make_version(
+            "v_old",
+            config_snapshot={"risk": {"max_slippage": "0.005"}},
+            connector_versions={"uniswap_v3": "1.0.0"},
+        )
+        manager = manager_with(target, make_version("v_new", is_active=True))
+        manager.generate_version_id = lambda deployment_id, timestamp=None: "v_rollback"
+
+        result = manager.rollback("v_old")
+        result.version.config_snapshot["risk"]["max_slippage"] = "0.5"
+        result.version.connector_versions["uniswap_v3"] = "2.0.0"
+
+        assert target.config_snapshot == {"risk": {"max_slippage": "0.005"}}
+        assert target.connector_versions == {"uniswap_v3": "1.0.0"}
+
+    def test_rollback_callback_observes_completed_state_transition(self):
+        target = make_version("v_old")
+        current = make_version("v_current", is_active=True)
+        manager = manager_with(target, current)
+        manager.generate_version_id = lambda deployment_id, timestamp=None: "v_rollback"
+
+        def assert_transition(old_version: StrategyVersion, rollback_version: StrategyVersion) -> None:
+            assert old_version is current
+            assert current.is_active is False
+            assert target.is_active is False
+            assert manager._versions == {
+                "v_old": target,
+                "v_current": current,
+                "v_rollback": rollback_version,
+            }
+            assert manager._version_order == ["v_old", "v_current", "v_rollback"]
+
+        manager._on_rollback = assert_transition
+
+        result = manager.rollback("v_old")
+
         assert result.success is True
 
 

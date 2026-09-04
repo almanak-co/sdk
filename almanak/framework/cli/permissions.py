@@ -14,7 +14,9 @@ from __future__ import annotations
 import json
 import logging
 import sys
+from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import click
 
@@ -23,6 +25,11 @@ from almanak.core.chains import DEFAULT_CHAIN
 from almanak.core.chains._helpers import alchemy_rpc_url_template_for
 
 from .intent_debug import load_strategy_from_file
+
+if TYPE_CHECKING:
+    from ..permissions.models import PermissionManifest
+    from ..strategies.intent_strategy import IntentStrategy
+    from ..strategies.metadata import StrategyMetadata
 
 logger = logging.getLogger(__name__)
 
@@ -61,9 +68,234 @@ def _resolve_rpc_url(explicit_url: str | None, chain: str) -> str | None:
     return template.replace("{key}", alchemy_key)
 
 
-# crap-allowlist: VIB-4851 CS-1 — metadata-fallback literal becomes DEFAULT_CHAIN; the
-# pre-existing cc=36 CLI entrypoint (noqa: C901 since inception) is untouched otherwise;
-# decomposition tracked in VIB-4139.
+@dataclass(frozen=True)
+class _PermissionOptions:
+    working_path: Path
+    chain: str | None
+    output: str | None
+    output_format: str
+    rpc_url: str | None
+
+
+@dataclass(frozen=True)
+class _StrategyInputs:
+    strategy_class: type[IntentStrategy[Any]]
+    strategy_name: str
+    protocols: list[str]
+    declared_protocols_lower: set[str]
+    intent_types: list[str]
+    chains: list[str]
+    config: dict[str, Any]
+
+
+def _resolve_cli_inputs(
+    working_dir: str,
+    chain: str | None,
+    output: str | None,
+    output_format: str,
+    rpc_url: str | None,
+) -> _PermissionOptions:
+    """Resolve CLI inputs before strategy imports or permission discovery."""
+    working_path = Path(working_dir).resolve()
+    _load_dotenv(working_path)
+    return _PermissionOptions(working_path, chain, output, output_format, rpc_url)
+
+
+def _load_strategy_inputs(working_path: Path, explicit_chain: str | None) -> _StrategyInputs:
+    """Load strategy metadata and config in the CLI's established failure order."""
+    strategy_file = working_path / "strategy.py"
+    if not strategy_file.exists():
+        click.echo(f"Error: No strategy.py found in {working_path}", err=True)
+        sys.exit(1)
+
+    strategy_class, error = load_strategy_from_file(strategy_file)
+    if error or strategy_class is None:
+        click.echo(f"Error loading strategy: {error}", err=True)
+        sys.exit(1)
+
+    metadata = getattr(strategy_class, "STRATEGY_METADATA", None)
+    if metadata is None:
+        click.echo(
+            "Error: Strategy has no STRATEGY_METADATA. Add @almanak_strategy(...) decorator to your strategy class.",
+            err=True,
+        )
+        sys.exit(1)
+
+    strategy_name = metadata.name or strategy_class.__name__
+    protocols = list(metadata.supported_protocols) if metadata.supported_protocols else []
+    intent_types = [member.value for member in metadata.intent_types]
+    if not protocols:
+        click.echo("Warning: No supported_protocols in strategy metadata.", err=True)
+    if not intent_types:
+        click.echo("Warning: No intent_types in strategy metadata.", err=True)
+
+    chains = _resolve_strategy_chains(explicit_chain, metadata)
+
+    from ..permissions.generator import load_strategy_config
+
+    config = load_strategy_config(working_path / "config.json")
+    declared_protocols_lower = {protocol.lower() for protocol in protocols}
+    return _StrategyInputs(
+        strategy_class,
+        strategy_name,
+        protocols,
+        declared_protocols_lower,
+        intent_types,
+        chains,
+        config,
+    )
+
+
+def _resolve_strategy_chains(explicit_chain: str | None, metadata: StrategyMetadata) -> list[str]:
+    """Apply the CLI chain precedence without normalizing user or metadata values."""
+    if explicit_chain:
+        return [explicit_chain]
+    if metadata.supported_chains:
+        return list(metadata.supported_chains)
+    if metadata.default_chain:
+        return [metadata.default_chain]
+    return [DEFAULT_CHAIN]
+
+
+def _select_output_chains(chains: list[str], output_format: str) -> list[str]:
+    """Fail closed on unknown and non-EVM chains for Zodiac output only."""
+    if output_format != "zodiac":
+        return chains
+
+    from almanak.core.chains import ChainRegistry
+    from almanak.core.enums import ChainFamily
+
+    evm_chains = []
+    for chain in chains:
+        family = ChainRegistry.family_of(chain)
+        if family is ChainFamily.EVM:
+            evm_chains.append(chain)
+        elif family is None:
+            click.echo(f"  Skipping {chain} (unknown chain, cannot verify EVM)", err=True)
+        else:
+            click.echo(f"  Skipping {chain} (non-EVM, Zodiac not applicable)", err=True)
+    return evm_chains
+
+
+def _render_empty_zodiac(output: str | None) -> None:
+    """Render the successful empty result used when no Zodiac chain is eligible."""
+    click.echo("No EVM chains to generate permissions for.", err=True)
+    if output:
+        Path(output).write_text("[]")
+        click.echo(f"Empty zodiac targets written to {output}", err=True)
+    else:
+        click.echo("[]")
+
+
+def _validate_rpc_scope(rpc_url: str | None, chains: list[str]) -> None:
+    """Reject one explicit RPC URL when discovery still targets multiple chains."""
+    if rpc_url and len(chains) > 1:
+        click.echo(
+            f"Error: --rpc-url cannot be used with multiple chains ({', '.join(chains)}). "
+            "Set ALCHEMY_API_KEY in .env for automatic per-chain RPC resolution.",
+            err=True,
+        )
+        sys.exit(1)
+
+
+def _discover_manifest_for_chain(
+    inputs: _StrategyInputs,
+    target_chain: str,
+    rpc_url: str | None,
+) -> PermissionManifest:
+    """Discover one chain's teardown-aware manifest and translate security errors.
+
+    Generation and binding failures already carry an exact remedy. Broken hints
+    imports need wider context because discovery loads every connector's hints,
+    not only those declared by this strategy. Other exceptions propagate.
+    """
+    from ..permissions.generator import PermissionGenerationError, discover_teardown_protocols, generate_manifest
+    from ..permissions.hints import PermissionBindingError, PermissionHintsError
+
+    td_protocols, td_warnings = discover_teardown_protocols(inputs.strategy_class, target_chain, config=inputs.config)
+    for warning in td_warnings:
+        click.echo(f"  Warning: {warning}", err=True)
+    chain_extra = td_protocols - inputs.declared_protocols_lower
+    chain_protocols = inputs.protocols if not chain_extra else list(set(inputs.protocols) | chain_extra)
+
+    if chain_extra:
+        missing_str = ", ".join(sorted(chain_extra))
+        click.echo(
+            f"  Teardown on {target_chain} uses protocols not in supported_protocols: [{missing_str}]",
+            err=True,
+        )
+
+    chain_rpc_url = _resolve_rpc_url(rpc_url, target_chain)
+    if chain_rpc_url:
+        click.echo(f"  Using RPC for on-chain discovery on {target_chain}", err=True)
+
+    click.echo(f"Generating permissions for {inputs.strategy_name} on {target_chain}...", err=True)
+    try:
+        manifest = generate_manifest(
+            strategy_name=inputs.strategy_name,
+            chain=target_chain,
+            supported_protocols=chain_protocols,
+            intent_types=inputs.intent_types,
+            config=inputs.config,
+            rpc_url=chain_rpc_url,
+        )
+    except (PermissionGenerationError, PermissionBindingError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    except (PermissionHintsError, ImportError) as exc:
+        raise click.ClickException(
+            f"{exc}\n\n"
+            "Permission manifest generation failed while importing. Most often this is a "
+            "connector's permission_hints module missing an export or carrying a broken "
+            "import — and discovery reads EVERY connector's hints, so one bad module blocks "
+            "generation for all of them; the fault need not be in the connector you asked "
+            "for. Inspect the error above for the module that actually failed. Do not "
+            "hand-write a manifest to work around this: an incomplete one reverts "
+            "unauthorized under Safe."
+        ) from exc
+
+    for warning in manifest.warnings:
+        click.echo(f"  Warning: {warning}", err=True)
+    click.echo(
+        f"  Found {len(manifest.permissions)} contract permissions "
+        f"with {sum(len(permission.function_selectors) for permission in manifest.permissions)} selectors",
+        err=True,
+    )
+    return manifest
+
+
+def _discover_manifests(inputs: _StrategyInputs, chains: list[str], rpc_url: str | None) -> list[PermissionManifest]:
+    """Run discovery with compiler noise suppressed and always restore logging."""
+    compiler_logger = logging.getLogger("almanak.framework.intents.compiler")
+    original_level = compiler_logger.level
+    compiler_logger.setLevel(logging.CRITICAL)
+    try:
+        return [_discover_manifest_for_chain(inputs, target_chain, rpc_url) for target_chain in chains]
+    finally:
+        compiler_logger.setLevel(original_level)
+
+
+def _render_manifests(manifests: list[PermissionManifest], output_format: str, output: str | None) -> None:
+    """Serialize manifests in the requested schema and route output to file or stdout."""
+    output_data: object
+    if output_format == "zodiac":
+        if len(manifests) == 1:
+            output_data = manifests[0].to_zodiac_targets()
+        else:
+            output_data = {manifest.chain: manifest.to_zodiac_targets() for manifest in manifests}
+    else:
+        output_data = manifests[0].to_dict() if len(manifests) == 1 else [manifest.to_dict() for manifest in manifests]
+
+    json_output = json.dumps(output_data, indent=2)
+    if output:
+        output_path = Path(output)
+        output_path.write_text(json_output)
+        click.echo(
+            f"{'Zodiac targets' if output_format == 'zodiac' else 'Manifest'} written to {output_path}", err=True
+        )
+    else:
+        click.echo(json_output)
+
+
 @click.command("permissions")
 @click.option(
     "--working-dir",
@@ -99,7 +331,7 @@ def _resolve_rpc_url(explicit_url: str | None, chain: str) -> str | None:
     help="RPC URL for on-chain discovery (e.g. Aerodrome pool addresses). "
     "Auto-resolved from ALCHEMY_API_KEY env if not provided.",
 )
-def permissions(  # noqa: C901
+def permissions(
     working_dir: str, chain: str | None, output: str | None, output_format: str, rpc_url: str | None
 ) -> None:
     """Generate a Zodiac Roles permission manifest for a strategy.
@@ -107,211 +339,13 @@ def permissions(  # noqa: C901
     Automatically discovers required contract permissions by compiling
     synthetic intents with the strategy's declared protocols and intent types.
     """
-    working_path = Path(working_dir).resolve()
-
-    # Load .env from the strategy directory so ALCHEMY_API_KEY (and other
-    # env vars) are available for RPC auto-resolution without the user
-    # having to export them manually.
-    _load_dotenv(working_path)
-
-    strategy_file = working_path / "strategy.py"
-
-    if not strategy_file.exists():
-        click.echo(f"Error: No strategy.py found in {working_path}", err=True)
-        sys.exit(1)
-
-    # Load strategy class
-    strategy_class, error = load_strategy_from_file(strategy_file)
-    if error or strategy_class is None:
-        click.echo(f"Error loading strategy: {error}", err=True)
-        sys.exit(1)
-
-    # Read metadata from decorator
-    metadata = getattr(strategy_class, "STRATEGY_METADATA", None)
-    if metadata is None:
-        click.echo(
-            "Error: Strategy has no STRATEGY_METADATA. Add @almanak_strategy(...) decorator to your strategy class.",
-            err=True,
-        )
-        sys.exit(1)
-
-    strategy_name = metadata.name or strategy_class.__name__
-    protocols = list(metadata.supported_protocols) if metadata.supported_protocols else []
-    intent_types = [member.value for member in metadata.intent_types]
-
-    if not protocols:
-        click.echo("Warning: No supported_protocols in strategy metadata.", err=True)
-    if not intent_types:
-        click.echo("Warning: No intent_types in strategy metadata.", err=True)
-
-    # Determine chain(s)
-    if chain:
-        chains = [chain]
-    elif metadata.supported_chains:
-        chains = list(metadata.supported_chains)
-    elif metadata.default_chain:
-        chains = [metadata.default_chain]
-    else:
-        chains = [DEFAULT_CHAIN]
-
-    # Load config.json for token extraction
-    from ..permissions.generator import discover_teardown_protocols, load_strategy_config
-
-    config_path = working_path / "config.json"
-    config = load_strategy_config(config_path)
-
-    # Teardown protocol discovery is done per-chain inside the manifest loop
-    # to avoid granting chain-specific protocols (e.g. Enso on Base) to all chains.
-    declared_protocols_lower = {p.lower() for p in protocols}
-
-    # Generate manifest for each chain
-    from ..permissions.generator import PermissionGenerationError, generate_manifest
-    from ..permissions.hints import PermissionBindingError, PermissionHintsError
-
-    # Filter out non-EVM chains for zodiac format (Safe/Zodiac is EVM-only)
-    # This must happen before the compiler logger mutation so the early exit
-    # doesn't leave the logger stuck at CRITICAL.
-    if output_format == "zodiac":
-        from almanak.core.chains import ChainRegistry
-        from almanak.core.enums import ChainFamily
-
-        evm_chains = []
-        for c in chains:
-            family = ChainRegistry.family_of(c)
-            if family is ChainFamily.EVM:
-                evm_chains.append(c)
-            elif family is None:
-                # Unknown chain -- fail closed to match PermissionManifest.is_evm_chain
-                click.echo(f"  Skipping {c} (unknown chain, cannot verify EVM)", err=True)
-            else:
-                click.echo(f"  Skipping {c} (non-EVM, Zodiac not applicable)", err=True)
-        chains = evm_chains
-
+    options = _resolve_cli_inputs(working_dir, chain, output, output_format, rpc_url)
+    inputs = _load_strategy_inputs(options.working_path, options.chain)
+    chains = _select_output_chains(inputs.chains, options.output_format)
     if not chains:
-        click.echo("No EVM chains to generate permissions for.", err=True)
-        if output:
-            Path(output).write_text("[]")
-            click.echo(f"Empty zodiac targets written to {output}", err=True)
-        else:
-            click.echo("[]")
+        _render_empty_zodiac(options.output)
         return
 
-    # Block --rpc-url with multiple chains — a single URL can only serve one chain.
-    # Use ALCHEMY_API_KEY for automatic multi-chain resolution instead.
-    if rpc_url and len(chains) > 1:
-        click.echo(
-            f"Error: --rpc-url cannot be used with multiple chains ({', '.join(chains)}). "
-            "Set ALCHEMY_API_KEY in .env for automatic per-chain RPC resolution.",
-            err=True,
-        )
-        sys.exit(1)
-
-    # Suppress noisy compiler warnings during permission discovery
-    # (e.g., Enso API key errors, placeholder price warnings produce tracebacks)
-    compiler_logger = logging.getLogger("almanak.framework.intents.compiler")
-    original_level = compiler_logger.level
-    compiler_logger.setLevel(logging.CRITICAL)
-
-    manifests = []
-    try:
-        for target_chain in chains:
-            # Per-chain teardown protocol discovery
-            td_protocols, td_warnings = discover_teardown_protocols(strategy_class, target_chain, config=config)
-            for w in td_warnings:
-                click.echo(f"  Warning: {w}", err=True)
-            chain_extra = td_protocols - declared_protocols_lower
-            chain_protocols = protocols if not chain_extra else list(set(protocols) | chain_extra)
-
-            if chain_extra:
-                missing_str = ", ".join(sorted(chain_extra))
-                click.echo(
-                    f"  Teardown on {target_chain} uses protocols not in supported_protocols: [{missing_str}]",
-                    err=True,
-                )
-
-            # Resolve RPC URL for this chain (explicit flag > ALCHEMY_API_KEY env)
-            chain_rpc_url = _resolve_rpc_url(rpc_url, target_chain)
-            if chain_rpc_url:
-                click.echo(f"  Using RPC for on-chain discovery on {target_chain}", err=True)
-
-            click.echo(f"Generating permissions for {strategy_name} on {target_chain}...", err=True)
-            try:
-                manifest = generate_manifest(
-                    strategy_name=strategy_name,
-                    chain=target_chain,
-                    supported_protocols=chain_protocols,
-                    intent_types=intent_types,
-                    config=config,
-                    rpc_url=chain_rpc_url,
-                )
-            except (PermissionGenerationError, PermissionBindingError) as exc:
-                # Fail-closed config extraction/binding: the message already
-                # names the unresolvable identity and the remedy — surface it
-                # without a traceback.
-                raise click.ClickException(str(exc)) from exc
-            except (PermissionHintsError, ImportError) as exc:
-                # A connector with a broken permission_hints module now fails
-                # closed rather than degrading to an empty manifest — correct,
-                # but the blast radius is wider than the broken connector:
-                # ``_derive_membership_sets`` folds ``get_permission_hints``
-                # over EVERY slug, so one bad module stops manifest generation
-                # for all of them. Surface it as a CLI error instead of a raw
-                # traceback, and name the remedy.
-                #
-                # BOTH raise paths are caught. ``PermissionHintsError`` is the
-                # malformed-export case; a broken *nested import* inside an
-                # existing hints module propagates as ImportError /
-                # ModuleNotFoundError, and that is the MORE common shape — it is
-                # the one this branch is named for. Left uncaught it reaches the
-                # user as a bare "No module named 'x'", which reads as a broken
-                # install rather than a broken connector, and invites them to
-                # hand-write a manifest instead.
-                # Phrased as "most likely", not "definitely": ImportError is
-                # broad, and generate_manifest imports more than hints modules.
-                # Naming the likely cause without asserting it keeps the message
-                # useful when it IS a hints module and non-misleading when it
-                # is not.
-                raise click.ClickException(
-                    f"{exc}\n\n"
-                    "Permission manifest generation failed while importing. Most often this is a "
-                    "connector's permission_hints module missing an export or carrying a broken "
-                    "import — and discovery reads EVERY connector's hints, so one bad module blocks "
-                    "generation for all of them; the fault need not be in the connector you asked "
-                    "for. Inspect the error above for the module that actually failed. Do not "
-                    "hand-write a manifest to work around this: an incomplete one reverts "
-                    "unauthorized under Safe."
-                ) from exc
-            manifests.append(manifest)
-
-            # Print warnings
-            for warning in manifest.warnings:
-                click.echo(f"  Warning: {warning}", err=True)
-
-            click.echo(
-                f"  Found {len(manifest.permissions)} contract permissions "
-                f"with {sum(len(p.function_selectors) for p in manifest.permissions)} selectors",
-                err=True,
-            )
-    finally:
-        compiler_logger.setLevel(original_level)
-
-    # Output
-    output_data: object
-    if output_format == "zodiac":
-        if len(manifests) == 1:
-            output_data = manifests[0].to_zodiac_targets()
-        else:
-            output_data = {m.chain: m.to_zodiac_targets() for m in manifests}
-    else:
-        output_data = manifests[0].to_dict() if len(manifests) == 1 else [m.to_dict() for m in manifests]
-
-    json_output = json.dumps(output_data, indent=2)
-
-    if output:
-        output_path = Path(output)
-        output_path.write_text(json_output)
-        click.echo(
-            f"{'Zodiac targets' if output_format == 'zodiac' else 'Manifest'} written to {output_path}", err=True
-        )
-    else:
-        click.echo(json_output)
+    _validate_rpc_scope(options.rpc_url, chains)
+    manifests = _discover_manifests(inputs, chains, options.rpc_url)
+    _render_manifests(manifests, options.output_format, options.output)

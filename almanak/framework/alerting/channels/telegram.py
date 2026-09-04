@@ -5,12 +5,15 @@ to operators via Telegram bot API.
 """
 
 import asyncio
+import html
 import logging
 import time
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
+
+from almanak.core.redaction import redact
 
 from ...models.operator_card import OperatorCard, Severity
 
@@ -24,6 +27,11 @@ SEVERITY_EMOJI = {
     Severity.HIGH: "\ud83d\udea8",  # 🚨 alert
     Severity.CRITICAL: "\ud83d\udd34",  # 🔴 red circle
 }
+
+
+def _html_text(value: object) -> str:
+    """Redact and escape a dynamic value for Telegram HTML."""
+    return html.escape(redact(str(value)), quote=True)
 
 
 @dataclass
@@ -90,7 +98,6 @@ class TelegramChannel:
         """Get the Telegram API URL for this bot."""
         return f"{self.TELEGRAM_API_BASE}/bot{self.bot_token}"
 
-    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     def _format_alert_message(self, card: OperatorCard) -> str:
         """Format an OperatorCard as a Telegram message.
 
@@ -103,11 +110,11 @@ class TelegramChannel:
         emoji = SEVERITY_EMOJI.get(card.severity, "\u2753")  # ❓ fallback
 
         lines = [
-            f"{emoji} <b>{card.severity.value} Alert</b>",
+            f"{emoji} <b>{_html_text(card.severity.value)} Alert</b>",
             "",
-            f"<b>Strategy:</b> {card.deployment_id}",
-            f"<b>Status:</b> {card.event_type.value}",
-            f"<b>Reason:</b> {card.reason.value.replace('_', ' ').title()}",
+            f"<b>Strategy:</b> {_html_text(card.deployment_id)}",
+            f"<b>Status:</b> {_html_text(card.event_type.value)}",
+            f"<b>Reason:</b> {_html_text(card.reason.value.replace('_', ' ').title())}",
         ]
 
         # Add context details if available
@@ -116,27 +123,27 @@ class TelegramChannel:
             lines.append("<b>Context:</b>")
             for key, value in card.context.items():
                 # Format the key nicely
-                formatted_key = key.replace("_", " ").title()
-                lines.append(f"  \u2022 {formatted_key}: {value}")
+                formatted_key = _html_text(key.replace("_", " ").title())
+                lines.append(f"  \u2022 {formatted_key}: {_html_text(value)}")
 
         # Add position at risk
         if card.position_summary:
             lines.append("")
-            lines.append(f"<b>Position at Risk:</b> ${card.position_summary.total_value_usd}")
+            lines.append(f"<b>Position at Risk:</b> ${_html_text(card.position_summary.total_value_usd)}")
 
         # Add risk description
         if card.risk_description:
             lines.append("")
-            lines.append(f"<b>Risk:</b> {card.risk_description}")
+            lines.append(f"<b>Risk:</b> {_html_text(card.risk_description)}")
 
         # Add recommended action
         if card.recommended_action:
             lines.append("")
-            lines.append(f"<b>Recommended:</b> {card.recommended_action.description}")
+            lines.append(f"<b>Recommended:</b> {_html_text(card.recommended_action.description)}")
 
         # Add dashboard link
         if self.dashboard_base_url:
-            dashboard_link = f"{self.dashboard_base_url}/strategy/{card.deployment_id}"
+            dashboard_link = _html_text(f"{self.dashboard_base_url}/strategy/{card.deployment_id}")
             lines.append("")
             lines.append(f'\ud83d\udcca <a href="{dashboard_link}">View in Dashboard</a>')
 
@@ -145,6 +152,12 @@ class TelegramChannel:
         lines.append(f"<i>{card.timestamp.strftime('%Y-%m-%d %H:%M:%S UTC')}</i>")
 
         return "\n".join(lines)
+
+    def _redact_error(self, error: object) -> str:
+        """Remove the bot credential and registered secrets from an error."""
+        message = str(error).replace(self.api_url, "<redacted Telegram API URL>")
+        message = message.replace(self.bot_token, "***")
+        return redact(message)
 
     async def _send_message(
         self,
@@ -184,13 +197,25 @@ class TelegramChannel:
                         error=f"Non-JSON response from Telegram (HTTP {response.status_code})",
                     )
 
+                if not isinstance(data, dict):
+                    return TelegramSendResult(
+                        success=False,
+                        error=f"Malformed response from Telegram (HTTP {response.status_code})",
+                    )
+
                 if response.status_code == 200 and data.get("ok"):
-                    message_id = data.get("result", {}).get("message_id")
+                    response_result = data.get("result")
+                    message_id = response_result.get("message_id") if isinstance(response_result, dict) else None
                     return TelegramSendResult(success=True, message_id=message_id)
 
                 # Check for rate limiting (429)
                 if response.status_code == 429:
-                    retry_after = data.get("parameters", {}).get("retry_after", 60)
+                    parameters = data.get("parameters")
+                    retry_after_value = parameters.get("retry_after", 60) if isinstance(parameters, dict) else 60
+                    try:
+                        retry_after = int(retry_after_value)
+                    except (TypeError, ValueError):
+                        retry_after = 60
                     return TelegramSendResult(
                         success=False,
                         error="Rate limited by Telegram",
@@ -198,15 +223,14 @@ class TelegramChannel:
                     )
 
                 # Other error
-                error_desc = data.get("description", "Unknown error")
+                error_desc = self._redact_error(data.get("description", "Unknown error"))
                 return TelegramSendResult(success=False, error=error_desc)
 
             except httpx.TimeoutException:
                 return TelegramSendResult(success=False, error="Request timeout")
             except httpx.RequestError as e:
-                return TelegramSendResult(success=False, error=f"Request error: {e}")
+                return TelegramSendResult(success=False, error=f"Request error: {self._redact_error(e)}")
 
-    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     async def send_alert(self, card: OperatorCard) -> TelegramSendResult:
         """Send an alert to Telegram with exponential backoff retry.
 
@@ -221,6 +245,7 @@ class TelegramChannel:
             TelegramSendResult indicating success or failure
         """
         message = self._format_alert_message(card)
+        safe_deployment_id = redact(card.deployment_id)
 
         # Determine if notification should be silent (low severity)
         disable_notification = card.severity == Severity.LOW
@@ -239,7 +264,7 @@ class TelegramChannel:
                 delay = self.base_delay * (2 ** (attempt - 1))
                 logger.info(
                     f"Retrying Telegram send (attempt {attempt + 1}/{self.max_retries + 1}) "
-                    f"after {delay:.1f}s delay for strategy {card.deployment_id}"
+                    f"after {delay:.1f}s delay for strategy {safe_deployment_id}"
                 )
                 await asyncio.sleep(delay)
 
@@ -253,7 +278,7 @@ class TelegramChannel:
 
             if result.success:
                 logger.info(
-                    f"Telegram alert sent successfully for strategy {card.deployment_id} "
+                    f"Telegram alert sent successfully for strategy {safe_deployment_id} "
                     f"(message_id={result.message_id}, severity={card.severity.value})"
                 )
                 return result
@@ -261,21 +286,21 @@ class TelegramChannel:
             # If rate limited, use the server's retry_after value
             if result.retry_after:
                 logger.warning(
-                    f"Rate limited by Telegram, waiting {result.retry_after}s for strategy {card.deployment_id}"
+                    f"Rate limited by Telegram, waiting {result.retry_after}s for strategy {safe_deployment_id}"
                 )
                 if attempt < self.max_retries:
                     await asyncio.sleep(result.retry_after)
 
-            last_error = result.error
+            last_error = self._redact_error(result.error) if result.error is not None else None
             logger.warning(
                 f"Telegram send failed (attempt {attempt + 1}/{self.max_retries + 1}): "
-                f"{result.error} for strategy {card.deployment_id}"
+                f"{last_error} for strategy {safe_deployment_id}"
             )
 
         # All retries exhausted
         logger.error(
             f"Failed to send Telegram alert after {self.max_retries + 1} attempts "
-            f"for strategy {card.deployment_id}: {last_error}"
+            f"for strategy {safe_deployment_id}: {last_error}"
         )
         return TelegramSendResult(success=False, error=last_error)
 

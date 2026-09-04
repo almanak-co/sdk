@@ -649,6 +649,150 @@ def cost_stack_to_proto(cs: Any) -> gateway_pb2.CostStackInfo:
     )
 
 
+@dataclasses.dataclass(frozen=True)
+class _TimelineQuery:
+    deployment_id: str
+    limit: int
+    event_type: str | None
+    since: datetime | None
+
+
+def _validate_timeline_request(request: gateway_pb2.GetTimelineRequest) -> _TimelineQuery:
+    deployment_id = validate_deployment_id(request.deployment_id)
+    return _TimelineQuery(
+        deployment_id=deployment_id,
+        limit=request.limit if request.limit > 0 else 50,
+        event_type=request.event_type_filter or None,
+        since=datetime.fromtimestamp(request.since_timestamp, tz=UTC) if request.since_timestamp > 0 else None,
+    )
+
+
+def _timeline_validation_error(
+    context: grpc.aio.ServicerContext,
+    error: ValidationError,
+) -> gateway_pb2.GetTimelineResponse:
+    context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+    context.set_details(str(error))
+    return gateway_pb2.GetTimelineResponse()
+
+
+def _timeline_store_event_to_proto(event: Any) -> gateway_pb2.TimelineEventInfo:
+    return gateway_pb2.TimelineEventInfo(
+        timestamp=int(event.timestamp.timestamp()) if event.timestamp else 0,
+        event_type=event.event_type,
+        description=event.description,
+        tx_hash=event.tx_hash or "",
+        details_json=json.dumps(event.details) if event.details else "",
+        chain=event.chain or "",
+        cycle_id=event.cycle_id or "",
+        phase=event.phase or "",
+        related_ledger_entry_id=event.related_ledger_entry_id or "",
+    )
+
+
+def _timeline_record_to_proto(
+    record: dict[str, Any],
+    timestamp: datetime | None,
+    *,
+    default_event_type: str,
+    default_description: str,
+    include_correlation: bool,
+) -> gateway_pb2.TimelineEventInfo:
+    correlation = {}
+    if include_correlation:
+        correlation = {
+            "cycle_id": record.get("cycle_id", ""),
+            "phase": record.get("phase", ""),
+            "related_ledger_entry_id": record.get("related_ledger_entry_id", ""),
+        }
+    return gateway_pb2.TimelineEventInfo(
+        timestamp=int(timestamp.timestamp()) if timestamp else 0,
+        event_type=record.get("event_type", default_event_type),
+        description=record.get("description", default_description),
+        tx_hash=record.get("tx_hash", ""),
+        details_json=json.dumps(record.get("details", {})),
+        chain=record.get("chain", ""),
+        **correlation,
+    )
+
+
+def _timeline_event_matches(
+    event: gateway_pb2.TimelineEventInfo,
+    timestamp: datetime | None,
+    query: _TimelineQuery,
+) -> bool:
+    if query.event_type and event.event_type != query.event_type:
+        return False
+    return query.since is None or (timestamp is not None and timestamp.timestamp() > query.since.timestamp())
+
+
+def _timeline_records_to_proto(
+    records: Any,
+    query: _TimelineQuery,
+    *,
+    source: str,
+    default_event_type: str,
+    default_description: str,
+    include_correlation: bool,
+    take_last: bool = False,
+) -> list[gateway_pb2.TimelineEventInfo]:
+    if not isinstance(records, list):
+        return []
+
+    events: list[gateway_pb2.TimelineEventInfo] = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        try:
+            raw_timestamp = record.get("timestamp", "")
+            timestamp = datetime.fromisoformat(raw_timestamp) if raw_timestamp else None
+            event = _timeline_record_to_proto(
+                record,
+                timestamp,
+                default_event_type=default_event_type,
+                default_description=default_description,
+                include_correlation=include_correlation,
+            )
+        except Exception:
+            logger.debug("Skipping malformed %s timeline record", source, exc_info=True)
+            continue
+        if _timeline_event_matches(event, timestamp, query):
+            events.append(event)
+            if not take_last and len(events) >= query.limit:
+                break
+    return events[-query.limit :] if take_last else events
+
+
+def _timeline_store_events_to_proto(
+    records: Sequence[Any],
+    query: _TimelineQuery,
+) -> list[gateway_pb2.TimelineEventInfo]:
+    events: list[gateway_pb2.TimelineEventInfo] = []
+    for record in records:
+        try:
+            if record.deployment_id != query.deployment_id:
+                continue
+            event = _timeline_store_event_to_proto(record)
+        except Exception:
+            logger.debug("Skipping malformed TimelineStore event", exc_info=True)
+            continue
+        if _timeline_event_matches(event, record.timestamp, query):
+            events.append(event)
+    return events
+
+
+def _build_timeline_response(
+    events: list[gateway_pb2.TimelineEventInfo],
+    limit: int,
+) -> gateway_pb2.GetTimelineResponse:
+    events.sort(key=lambda event: event.timestamp, reverse=True)
+    page = events[:limit]
+    return gateway_pb2.GetTimelineResponse(
+        events=page,
+        has_more=len(page) >= limit,
+    )
+
+
 class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
     """Implements DashboardService gRPC interface.
 
@@ -1011,7 +1155,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
 
         return Decimal("0")
 
-    # crap-allowlist: VIB-4722 only renamed identity plumbing inside existing dashboard history logic.
     @staticmethod
     def _unix_to_dt(ts: int) -> datetime | None:
         """Map a unix-seconds window bound to a UTC datetime (``<= 0`` → open bound).
@@ -1536,12 +1679,55 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             chain_health=chain_health,
         )
 
-    # crap-allowlist: pre-existing RPC. PR2 (VIB-4041) only added a one-line
-    # ``related_ledger_entry_id`` field to the per-event proto construction;
-    # CC=26 was already over-threshold against unit-test coverage. The full
-    # surface is exercised by integration tests in
-    # ``tests/gateway/test_timeline_store.py`` + the round-trip test in
-    # ``tests/gateway/test_timeline_related_ledger.py``.
+    def _load_timeline_store_events(self, query: _TimelineQuery) -> list[gateway_pb2.TimelineEventInfo]:
+        """Read the deployment-scoped primary timeline source."""
+        try:
+            records = get_timeline_store().get_events(
+                deployment_id=query.deployment_id,
+                limit=query.limit,
+                event_type=query.event_type,
+                since=query.since,
+            )
+        except Exception as error:
+            logger.debug("Failed to get events from TimelineStore: %s", error)
+            return []
+        return _timeline_store_events_to_proto(records, query)
+
+    def _load_cached_timeline_events(self, query: _TimelineQuery) -> list[gateway_pb2.TimelineEventInfo]:
+        """Read the local cache when the primary source is empty."""
+        cache_file = self._strategies_root.parent / ".dashboard_events.json" if self._strategies_root else None
+        if not cache_file or not cache_file.exists():
+            return []
+        try:
+            cached_data = json.loads(cache_file.read_text())
+            records = cached_data.get(query.deployment_id, [])
+            return _timeline_records_to_proto(
+                records,
+                query,
+                source="cache",
+                default_event_type="UNKNOWN",
+                default_description="",
+                include_correlation=True,
+            )
+        except Exception as error:
+            logger.debug("Failed to load timeline events from cache: %s", error)
+            return []
+
+    async def _load_state_timeline_events(self, query: _TimelineQuery) -> list[gateway_pb2.TimelineEventInfo]:
+        """Read state execution history under the same deployment identity."""
+        state = await self._get_strategy_state_data(query.deployment_id)
+        if not isinstance(state, dict) or "execution_history" not in state:
+            return []
+        return _timeline_records_to_proto(
+            state.get("execution_history"),
+            query,
+            source="state",
+            default_event_type="EXECUTION",
+            default_description="Execution completed",
+            include_correlation=False,
+            take_last=True,
+        )
+
     async def GetTimeline(
         self,
         request: gateway_pb2.GetTimelineRequest,
@@ -1559,95 +1745,15 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         await self._ensure_initialized()
 
         try:
-            deployment_id = validate_deployment_id(request.deployment_id)
+            query = _validate_timeline_request(request)
         except ValidationError as e:
-            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details(str(e))
-            return gateway_pb2.GetTimelineResponse()
+            return _timeline_validation_error(context, e)
 
-        limit = request.limit if request.limit > 0 else 50
-        event_type_filter = request.event_type_filter if request.event_type_filter else None
-        since = datetime.fromtimestamp(request.since_timestamp, tz=UTC) if request.since_timestamp > 0 else None
-
-        events = []
-
-        try:
-            store = get_timeline_store()
-            timeline_events = store.get_events(
-                deployment_id=deployment_id,
-                limit=limit,
-                event_type=event_type_filter,
-                since=since,
-            )
-
-            for event in timeline_events:
-                events.append(
-                    gateway_pb2.TimelineEventInfo(
-                        timestamp=int(event.timestamp.timestamp()) if event.timestamp else 0,
-                        event_type=event.event_type,
-                        description=event.description,
-                        tx_hash=event.tx_hash or "",
-                        details_json=json.dumps(event.details) if event.details else "",
-                        chain=event.chain or "",
-                        cycle_id=event.cycle_id or "",
-                        phase=event.phase or "",
-                        related_ledger_entry_id=event.related_ledger_entry_id or "",
-                    )
-                )
-        except Exception as e:
-            logger.debug(f"Failed to get events from TimelineStore: {e}")
-
-        # Local cache and state history remain fallbacks when the timeline store is empty.
+        events = self._load_timeline_store_events(query)
         if not events:
-            cache_file = self._strategies_root.parent / ".dashboard_events.json" if self._strategies_root else None
-            if cache_file and cache_file.exists():
-                try:
-                    cached_data = json.loads(cache_file.read_text())
-                    strategy_events = cached_data.get(deployment_id, [])
-
-                    for event_data in strategy_events[:limit]:
-                        events.append(
-                            gateway_pb2.TimelineEventInfo(
-                                timestamp=int(datetime.fromisoformat(event_data.get("timestamp", "")).timestamp())
-                                if event_data.get("timestamp")
-                                else 0,
-                                event_type=event_data.get("event_type", "UNKNOWN"),
-                                description=event_data.get("description", ""),
-                                tx_hash=event_data.get("tx_hash", ""),
-                                details_json=json.dumps(event_data.get("details", {})),
-                                chain=event_data.get("chain", ""),
-                                cycle_id=event_data.get("cycle_id", ""),
-                                phase=event_data.get("phase", ""),
-                                related_ledger_entry_id=event_data.get("related_ledger_entry_id", ""),
-                            )
-                        )
-                except Exception as e:
-                    logger.debug(f"Failed to load timeline events from cache: {e}")
-
-        state = await self._get_strategy_state_data(deployment_id)
-        if state and "execution_history" in state:
-            for exec_record in state.get("execution_history", [])[:limit]:
-                if isinstance(exec_record, dict):
-                    events.append(
-                        gateway_pb2.TimelineEventInfo(
-                            timestamp=int(datetime.fromisoformat(exec_record.get("timestamp", "")).timestamp())
-                            if exec_record.get("timestamp")
-                            else 0,
-                            event_type=exec_record.get("event_type", "EXECUTION"),
-                            description=exec_record.get("description", "Execution completed"),
-                            tx_hash=exec_record.get("tx_hash", ""),
-                            details_json=json.dumps(exec_record.get("details", {})),
-                            chain=exec_record.get("chain", ""),
-                        )
-                    )
-
-        events.sort(key=lambda e: e.timestamp, reverse=True)
-        events = events[:limit]
-
-        return gateway_pb2.GetTimelineResponse(
-            events=events,
-            has_more=len(events) >= limit,
-        )
+            events = self._load_cached_timeline_events(query)
+        events.extend(await self._load_state_timeline_events(query))
+        return _build_timeline_response(events, query.limit)
 
     async def GetStrategyConfig(
         self,
@@ -1840,7 +1946,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                 action_id=action_id,
             )
 
-    # crap-allowlist: VIB-4722 only unified deployment identity fields in the existing registry RPC.
     async def RegisterStrategyInstance(
         self,
         request: gateway_pb2.RegisterInstanceRequest,
@@ -1968,7 +2073,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             logger.error(f"Failed to archive instance {request.deployment_id}: {e}")
             return gateway_pb2.ArchiveInstanceResponse(success=False, error=str(e))
 
-    # crap-allowlist: VIB-4722 only unified deployment identity fields in the existing purge RPC.
     async def PurgeStrategyInstance(
         self,
         request: gateway_pb2.PurgeInstanceRequest,
@@ -2009,7 +2113,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             logger.error(f"Failed to purge instance {request.deployment_id}: {e}")
             return gateway_pb2.PurgeInstanceResponse(success=False, error=str(e))
 
-    # crap-allowlist: VIB-4722 only unified deployment identity fields in the existing ledger RPC.
     async def GetTransactionLedger(
         self,
         request: gateway_pb2.GetTransactionLedgerRequest,
@@ -2026,9 +2129,13 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
 
         await self._ensure_initialized()
 
-        since = None
-        if request.since_timestamp > 0:
-            since = datetime.fromtimestamp(request.since_timestamp, tz=UTC)
+        try:
+            since = self._unix_to_dt(request.since_timestamp)
+        except ValueError as e:
+            logger.warning("Invalid timestamp in GetTransactionLedger: %s", e)
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(e))
+            return gateway_pb2.GetTransactionLedgerResponse()
 
         intent_type = request.intent_type_filter or None
         limit = request.limit if request.limit > 0 else 100
@@ -2068,6 +2175,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                     protocol=entry.protocol,
                     success=entry.success,
                     error=entry.error,
+                    extracted_data_json=entry.extracted_data_json,
                 )
             )
 

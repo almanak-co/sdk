@@ -139,7 +139,6 @@ class EnsoAdapter:
         bundle = adapter.compile_swap_intent(intent)
     """
 
-    # crap-allowlist: VIB-4835 — coverage-driven score (cc=6, well under threshold; CRAP=36 from cov=6%) relocated by Phase 2 fold from almanak/framework/connectors/enso/adapter.py; function body unchanged by this PR. Coverage backfill tracked in VIB-4688.
     def __init__(
         self,
         config: EnsoConfig,

@@ -34,6 +34,7 @@ from almanak.framework.intents.vocabulary import CollectFeesIntent, IntentType, 
 from almanak.framework.models.reproduction_bundle import ActionBundle
 
 if TYPE_CHECKING:
+    from almanak.connectors.traderjoe_v2 import LiquidityPosition, TraderJoeV2Adapter
     from almanak.framework.gateway_client import GatewayClient
 
 logger = logging.getLogger(__name__)
@@ -323,12 +324,12 @@ class _TraderJoeV2CompileImpl(CompilerServicesFacadeMixin):
             rpc_url=rpc_url,
         )
 
-    def _resolve_symbolic_lb_pair_for_close(
-        self, intent: LPCloseIntent, pool: str
+    def _resolve_symbolic_lb_pair(
+        self, intent: LPCloseIntent | CollectFeesIntent, pool: str
     ) -> _ResolvedLBPair | CompilationResult:
-        """Resolve a ``TOKEN_X/TOKEN_Y[/BIN_STEP]`` key for LP_CLOSE (pre-lane behaviour, unchanged).
+        """Resolve a ``TOKEN_X/TOKEN_Y[/BIN_STEP]`` key for an existing LP position.
 
-        The LP_CLOSE lane never validated the pair against the factory here;
+        These lanes never validate the pair against the factory here;
         ``sdk.get_pool_address`` performs that lookup downstream.
         """
         pool_parts = pool.split("/")
@@ -497,10 +498,6 @@ class _TraderJoeV2CompileImpl(CompilerServicesFacadeMixin):
             rpc_url=adapter_rpc,
         )
 
-    # crap-allowlist: VIB-4139 — import-path swap only (pool-validation moved into
-    # connectors, #2527): the only change to this method is the
-    # ``validate_traderjoe_pool`` import path; function body unchanged, anvil-only
-    # coverage (cov=2%). Refactor + coverage backfill tracked in VIB-4139.
     def _compile_lp_open_traderjoe_v2(self, intent: LPOpenIntent) -> CompilationResult:
         """Compile LP_OPEN intent for TraderJoe V2 Liquidity Book.
 
@@ -640,10 +637,215 @@ class _TraderJoeV2CompileImpl(CompilerServicesFacadeMixin):
                 error=str(e),
             )
 
-    # crap-allowlist: VIB-4139 — pre-existing complexity (cc=32) relocated from
-    # almanak/framework/intents/compiler.py by the phase-2 connector fold. The
-    # original location carried the same allowlist on main; this is the same
-    # function body, just relocated. Refactor tracked in VIB-4139.
+    def _resolve_traderjoe_v2_close_pair(self, intent: LPCloseIntent) -> _ResolvedLBPair | CompilationResult:
+        """Resolve the exact or symbolic LB pair required by an LP close."""
+        pool = intent.pool
+        if pool is None:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error="pool is required for TraderJoe V2 LP close",
+                intent_id=intent.intent_id,
+            )
+        if _looks_like_bare_lb_pair(pool):
+            return self._resolve_exact_lb_pair(pool, intent.intent_id)
+        return self._resolve_symbolic_lb_pair(intent, pool)
+
+    @staticmethod
+    def _extract_traderjoe_v2_close_bin_ids(intent: LPCloseIntent) -> tuple[list[int], bool]:
+        """Return normalized bin IDs and whether the caller supplied them."""
+        protocol_params = getattr(intent, "protocol_params", None) or {}
+        known_bin_ids_raw = protocol_params.get("bin_ids")
+        if known_bin_ids_raw is not None and not isinstance(known_bin_ids_raw, list):
+            raise ValueError(
+                "TraderJoe V2 LP_CLOSE protocol_params['bin_ids'] must be a list, "
+                f"got {type(known_bin_ids_raw).__name__}"
+            )
+        known_bin_ids = [int(bin_id) for bin_id in (known_bin_ids_raw or [])]
+        bin_ids_were_provided = "bin_ids" in protocol_params and known_bin_ids_raw is not None
+        return known_bin_ids, bin_ids_were_provided
+
+    @staticmethod
+    def _read_traderjoe_v2_close_active_bin(adapter: TraderJoeV2Adapter, pool_address: str) -> int:
+        """Read informational active-bin data without blocking a close."""
+        try:
+            return adapter.sdk.get_pool_info(pool_address).active_id
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "TraderJoe V2 get_pool_info failed in LP_CLOSE compile, proceeding with active_bin=0: %s",
+                exc,
+            )
+            return 0
+
+    def _resolve_targeted_traderjoe_v2_close_position(
+        self,
+        adapter: TraderJoeV2Adapter,
+        pair: _ResolvedLBPair,
+        known_bin_ids: list[int],
+    ) -> LiquidityPosition | None:
+        """Resolve a position from caller-owned bin IDs, preserving balance order."""
+        if not known_bin_ids:
+            return None
+
+        t0 = time.perf_counter()
+        pool_address = adapter.sdk.get_pool_address(pair.token_x.address, pair.token_y.address, pair.bin_step)
+        balances = adapter.sdk.get_position_balances_for_ids(
+            pool_address,
+            self.wallet_address,
+            known_bin_ids,
+        )
+        logger.debug(
+            "TraderJoe V2 targeted balance lookup (LP_CLOSE): %.2fs",
+            time.perf_counter() - t0,
+        )
+        if not balances:
+            return None
+
+        from almanak.connectors.traderjoe_v2 import LiquidityPosition
+
+        amount_x, amount_y = adapter.sdk.get_total_position_value(
+            pool_address,
+            self.wallet_address,
+            precomputed_balances=balances,
+        )
+        active_bin = self._read_traderjoe_v2_close_active_bin(adapter, pool_address)
+        return LiquidityPosition(
+            pool_address=pool_address,
+            token_x=pair.token_x.address,
+            token_y=pair.token_y.address,
+            bin_step=pair.bin_step,
+            bin_ids=list(balances.keys()),
+            balances=balances,
+            amount_x=amount_x,
+            amount_y=amount_y,
+            active_bin=active_bin,
+        )
+
+    def _resolve_traderjoe_v2_close_position(
+        self,
+        *,
+        adapter: TraderJoeV2Adapter,
+        pair: _ResolvedLBPair,
+        intent: LPCloseIntent,
+        known_bin_ids: list[int],
+        bin_ids_were_provided: bool,
+    ) -> LiquidityPosition | None:
+        """Use exact bin IDs when available, then preserve heuristic discovery."""
+        position = self._resolve_targeted_traderjoe_v2_close_position(adapter, pair, known_bin_ids)
+        if position is not None:
+            return position
+
+        if not bin_ids_were_provided:
+            logger.warning(
+                "TraderJoe V2 LP_CLOSE for pool %s on %s: protocol_params['bin_ids'] "
+                "was not supplied. Falling back to active_id ± 50 bin heuristic, "
+                "which silently MISSES bins outside the current ±50 window after "
+                "price drift and can leave liquidity stranded on-chain. Capture "
+                "bin_ids from the LP_OPEN result and pass them on close: "
+                "Intent.lp_close(..., protocol_params={'bin_ids': captured_bin_ids}). "
+                "See docs/internal/blueprints/05-connectors.md (TraderJoe V2 section).",
+                intent.pool,
+                self.chain,
+            )
+        t0 = time.perf_counter()
+        position = adapter.get_position(pair.token_x.address, pair.token_y.address, pair.bin_step)
+        logger.debug(f"TraderJoe V2 get_position (LP_CLOSE): {time.perf_counter() - t0:.2f}s")
+        return position
+
+    @staticmethod
+    def _traderjoe_v2_no_close_position_result(
+        result: CompilationResult,
+        intent: LPCloseIntent,
+    ) -> CompilationResult:
+        """Return the established successful no-op result for an empty position."""
+        result.action_bundle = ActionBundle(
+            intent_type=IntentType.LP_CLOSE.value,
+            transactions=[],
+            metadata={
+                "pool": intent.pool,
+                "protocol": "traderjoe_v2",
+                "warning": "No position found",
+            },
+        )
+        result.warnings = ["No LP position found to close"]
+        return result
+
+    def _build_traderjoe_v2_close_transactions(
+        self,
+        *,
+        adapter: TraderJoeV2Adapter,
+        pair: _ResolvedLBPair,
+        position: LiquidityPosition,
+        token_x_symbol: str,
+        token_y_symbol: str,
+    ) -> list[TransactionData] | None:
+        """Build approval then removal transactions, or return no-op sentinel."""
+        approve_tx, approve_gas = adapter.sdk.build_approve_for_all_transaction(
+            pool_address=position.pool_address,
+            spender_address=adapter.sdk.router_address,
+            from_address=self.wallet_address,
+        )
+        approve_tx_data = TransactionData(
+            to=approve_tx["to"],
+            value=approve_tx.get("value", 0),
+            data=approve_tx["data"].hex() if isinstance(approve_tx["data"], bytes) else approve_tx["data"],
+            gas_estimate=approve_gas,
+            description="Approve LB tokens for router",
+            tx_type="approve",
+        )
+
+        lp_tx = adapter.build_remove_liquidity_transaction(
+            token_x=pair.token_x.address,
+            token_y=pair.token_y.address,
+            bin_step=pair.bin_step,
+            position=position,
+        )
+        if lp_tx is None:
+            return None
+
+        lp_tx_data = TransactionData(
+            to=lp_tx.to,
+            value=lp_tx.value,
+            data=lp_tx.data if isinstance(lp_tx.data, str) else lp_tx.data,
+            gas_estimate=lp_tx.gas or 300000,
+            description=f"Remove liquidity from TraderJoe V2: {token_x_symbol}/{token_y_symbol}",
+            tx_type="traderjoe_v2_remove_liquidity",
+        )
+        return [approve_tx_data, lp_tx_data]
+
+    def _complete_traderjoe_v2_close_result(
+        self,
+        *,
+        result: CompilationResult,
+        intent: LPCloseIntent,
+        transactions: list[TransactionData],
+        token_x_symbol: str,
+        token_y_symbol: str,
+    ) -> CompilationResult:
+        """Assemble the successful LP-close result and its execution metadata."""
+        total_gas = sum(tx.gas_estimate for tx in transactions)
+        result.action_bundle = ActionBundle(
+            intent_type=IntentType.LP_CLOSE.value,
+            transactions=[tx.to_dict() for tx in transactions],
+            metadata={
+                "pool": intent.pool,
+                "position_id": intent.position_id,
+                "collect_fees": intent.collect_fees,
+                "protocol": "traderjoe_v2",
+                "chain": self.chain,
+            },
+        )
+        result.transactions = transactions
+        result.total_gas_estimate = total_gas
+        result.warnings = []
+
+        tx_types = " + ".join(tx.tx_type for tx in transactions) if transactions else ""
+        tx_summary = f" ({tx_types})" if tx_types else ""
+        logger.info(
+            f"Compiled TraderJoe V2 LP_CLOSE intent: {token_x_symbol}/{token_y_symbol}, "
+            f"{len(transactions)} txs{tx_summary}, {total_gas} gas"
+        )
+        return result
+
     def _compile_lp_close_traderjoe_v2(self, intent: LPCloseIntent) -> CompilationResult:
         """Compile LP_CLOSE intent for TraderJoe V2 Liquidity Book.
 
@@ -662,252 +864,49 @@ class _TraderJoeV2CompileImpl(CompilerServicesFacadeMixin):
             status=CompilationStatus.SUCCESS,
             intent_id=intent.intent_id,
         )
-        transactions: list[TransactionData] = []
-        warnings: list[str] = []
-
         try:
-            # Import TraderJoe V2 adapter
             from almanak.connectors.traderjoe_v2 import TraderJoeV2Adapter, TraderJoeV2Config
 
-            # Pool: TOKEN_X/TOKEN_Y[/BIN_STEP] or an exact bare LB pair address.
-            # An LB position is identified by pair + bin ids, so a strategy
-            # that opened by address can close by address; bin ids still come
-            # from ``protocol_params["bin_ids"]`` below.
-            if intent.pool is None:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error="pool is required for TraderJoe V2 LP close",
-                    intent_id=intent.intent_id,
-                )
-            if _looks_like_bare_lb_pair(intent.pool):
-                resolved = self._resolve_exact_lb_pair(intent.pool, intent.intent_id)
-            else:
-                resolved = self._resolve_symbolic_lb_pair_for_close(intent, intent.pool)
-            if isinstance(resolved, CompilationResult):
-                return resolved
-            token_x_symbol = resolved.token_x_symbol
-            token_y_symbol = resolved.token_y_symbol
-            bin_step = resolved.bin_step
-            token_x_addr = resolved.token_x.address
-            token_y_addr = resolved.token_y.address
-            gateway_client = resolved.gateway_client
-            rpc_url = resolved.rpc_url
+            pair = self._resolve_traderjoe_v2_close_pair(intent)
+            if isinstance(pair, CompilationResult):
+                return pair
+            known_bin_ids, bin_ids_were_provided = self._extract_traderjoe_v2_close_bin_ids(intent)
 
-            # Create TraderJoe V2 adapter
             config = TraderJoeV2Config(
                 chain=self.chain,
                 wallet_address=self.wallet_address,
-                rpc_url=rpc_url,
+                rpc_url=pair.rpc_url,
                 default_deadline_seconds=self.default_deadline_seconds,
-                gateway_client=gateway_client,
+                gateway_client=pair.gateway_client,
             )
-            tj_adapter = TraderJoeV2Adapter(config)
-
-            protocol_params = getattr(intent, "protocol_params", None) or {}
-            known_bin_ids_raw = protocol_params.get("bin_ids")
-            known_bin_ids = [int(bin_id) for bin_id in (known_bin_ids_raw or [])]
-            # VIB-3742: Track whether bin_ids were provided by the caller. The
-            # heuristic fallback (active_id ± 50 bins) silently misses bins
-            # outside that window after price drift — a partial close that the
-            # framework otherwise reports as success. We need this flag to
-            # decide whether to emit a WARNING when we hit the heuristic path.
-            #
-            # An explicit ``bin_ids=[]`` counts as "provided" — the strategy is
-            # telling us "I already cleared my tracked positions" (e.g. last
-            # close just emptied ``self._position_bin_ids``), not "I forgot to
-            # tell you what to close." Treating that as the silent-leak
-            # scenario would emit a misleading warning on a no-op close.
-            bin_ids_were_provided = "bin_ids" in protocol_params and known_bin_ids_raw is not None
-
-            position = None
-            if known_bin_ids:
-                t0 = time.perf_counter()
-                pool_addr = tj_adapter.sdk.get_pool_address(token_x_addr, token_y_addr, bin_step)
-                balances = tj_adapter.sdk.get_position_balances_for_ids(
-                    pool_addr,
-                    self.wallet_address,
-                    known_bin_ids,
-                )
-                logger.debug(
-                    "TraderJoe V2 targeted balance lookup (LP_CLOSE): %.2fs",
-                    time.perf_counter() - t0,
-                )
-                if balances:
-                    from almanak.connectors.traderjoe_v2 import LiquidityPosition
-
-                    # Compute underlying token X/Y the position would yield so
-                    # build_remove_liquidity_transaction can derive proper
-                    # slippage-protected amount_x_min/amount_y_min. Without this,
-                    # the targeted path would fall back to amount_x=0/amount_y=0
-                    # and ship a close with no slippage protection (VIB-3741).
-                    # NOTE: get_total_position_value is best-effort — it
-                    # tolerates per-bin read errors (returning a partial sum)
-                    # so transient RPC blips during compilation don't abort
-                    # closing positions on otherwise healthy bins. The
-                    # heuristic fallback path below uses the same tolerant
-                    # pattern via tj_adapter.get_position(). Tracked as a
-                    # follow-up to harden once we understand which fork-only
-                    # reverts trigger the skip path.
-                    amount_x, amount_y = tj_adapter.sdk.get_total_position_value(
-                        pool_addr,
-                        self.wallet_address,
-                        precomputed_balances=balances,
-                    )
-                    # active_bin is informational; build_remove_liquidity_transaction
-                    # derives slippage minimums from amount_x/amount_y and uses
-                    # bin_ids/balances directly. Don't let a get_pool_info revert
-                    # block a close when we already have enough data to build it.
-                    try:
-                        active_bin = tj_adapter.sdk.get_pool_info(pool_addr).active_id
-                    except Exception as exc:  # noqa: BLE001
-                        logger.debug(
-                            "TraderJoe V2 get_pool_info failed in LP_CLOSE compile, proceeding with active_bin=0: %s",
-                            exc,
-                        )
-                        active_bin = 0
-                    position = LiquidityPosition(
-                        pool_address=pool_addr,
-                        token_x=token_x_addr,
-                        token_y=token_y_addr,
-                        bin_step=bin_step,
-                        bin_ids=list(balances.keys()),
-                        balances=balances,
-                        amount_x=amount_x,
-                        amount_y=amount_y,
-                        active_bin=active_bin,
-                    )
-
-            if position is None:
-                # Fall back to full discovery when the strategy did not provide
-                # known bin IDs or the targeted lookup no longer finds liquidity.
-                # Note: we intentionally let build_remove_liquidity_transaction
-                # derive slippage-protected minimums for this path (below).
-                #
-                # VIB-3742: When bin_ids were absent from the LP_CLOSE intent,
-                # this heuristic falls back to TraderJoeV2Adapter.get_position()
-                # which scans only ±50 bins around the *current* active_id.
-                # After price drift the original bins may sit outside that
-                # window — `removeLiquidity` then closes only a subset and the
-                # framework otherwise reports success while liquidity remains
-                # stranded on-chain (root cause of the $1.16 leak that prompted
-                # VIB-3741 / VIB-3742).
-                #
-                # Fire a WARNING ONLY when the caller did not supply bin_ids.
-                # If bin_ids WERE supplied but the targeted lookup returned
-                # zero balance, that is a legitimate "already closed" no-op
-                # and not the silent-leak scenario — no warning in that case.
-                if not bin_ids_were_provided:
-                    logger.warning(
-                        "TraderJoe V2 LP_CLOSE for pool %s on %s: protocol_params['bin_ids'] "
-                        "was not supplied. Falling back to active_id ± 50 bin heuristic, "
-                        "which silently MISSES bins outside the current ±50 window after "
-                        "price drift and can leave liquidity stranded on-chain. Capture "
-                        "bin_ids from the LP_OPEN result and pass them on close: "
-                        "Intent.lp_close(..., protocol_params={'bin_ids': captured_bin_ids}). "
-                        "See docs/internal/blueprints/05-connectors.md (TraderJoe V2 section).",
-                        intent.pool,
-                        self.chain,
-                    )
-                t0 = time.perf_counter()
-                position = tj_adapter.get_position(token_x_addr, token_y_addr, bin_step)
-                logger.debug(f"TraderJoe V2 get_position (LP_CLOSE): {time.perf_counter() - t0:.2f}s")
+            adapter = TraderJoeV2Adapter(config)
+            position = self._resolve_traderjoe_v2_close_position(
+                adapter=adapter,
+                pair=pair,
+                intent=intent,
+                known_bin_ids=known_bin_ids,
+                bin_ids_were_provided=bin_ids_were_provided,
+            )
 
             if not position or not position.bin_ids:
-                warnings.append("No LP position found to close")
-                action_bundle = ActionBundle(
-                    intent_type=IntentType.LP_CLOSE.value,
-                    transactions=[],
-                    metadata={
-                        "pool": intent.pool,
-                        "protocol": "traderjoe_v2",
-                        "warning": "No position found",
-                    },
-                )
-                result.action_bundle = action_bundle
-                result.warnings = warnings
-                return result
+                return self._traderjoe_v2_no_close_position_result(result, intent)
 
-            # Build approval for LB tokens (ERC1155-like, need approveForAll)
-            pool_addr = position.pool_address
-            router_addr = tj_adapter.sdk.router_address
-            approve_tx, approve_gas = tj_adapter.sdk.build_approve_for_all_transaction(
-                pool_address=pool_addr,
-                spender_address=router_addr,
-                from_address=self.wallet_address,
-            )
-            approve_tx_data = TransactionData(
-                to=approve_tx["to"],
-                value=approve_tx.get("value", 0),
-                data=approve_tx["data"].hex() if isinstance(approve_tx["data"], bytes) else approve_tx["data"],
-                gas_estimate=approve_gas,
-                description="Approve LB tokens for router",
-                tx_type="approve",
-            )
-            transactions.append(approve_tx_data)
-
-            # Build remove liquidity transaction. Pass pre-fetched position so
-            # the adapter skips a redundant get_position() call (saves ~50 serial
-            # RPC calls). Both targeted (bin_ids) and discovery paths populate
-            # position.amount_x/amount_y, so the adapter computes proper
-            # slippage-protected minimums in both cases (VIB-3741).
-            lp_tx = tj_adapter.build_remove_liquidity_transaction(
-                token_x=token_x_addr,
-                token_y=token_y_addr,
-                bin_step=bin_step,
+            transactions = self._build_traderjoe_v2_close_transactions(
+                adapter=adapter,
+                pair=pair,
                 position=position,
+                token_x_symbol=pair.token_x_symbol,
+                token_y_symbol=pair.token_y_symbol,
             )
+            if transactions is None:
+                return self._traderjoe_v2_no_close_position_result(result, intent)
 
-            if lp_tx is None:
-                warnings.append("No LP position found to close")
-                # Return success with empty transactions
-                action_bundle = ActionBundle(
-                    intent_type=IntentType.LP_CLOSE.value,
-                    transactions=[],
-                    metadata={
-                        "pool": intent.pool,
-                        "protocol": "traderjoe_v2",
-                        "warning": "No position found",
-                    },
-                )
-                result.action_bundle = action_bundle
-                result.warnings = warnings
-                return result
-
-            # Convert to TransactionData format
-            lp_tx_data = TransactionData(
-                to=lp_tx.to,
-                value=lp_tx.value,
-                data=lp_tx.data if isinstance(lp_tx.data, str) else lp_tx.data,
-                gas_estimate=lp_tx.gas or 300000,
-                description=(f"Remove liquidity from TraderJoe V2: {token_x_symbol}/{token_y_symbol}"),
-                tx_type="traderjoe_v2_remove_liquidity",
-            )
-            transactions.append(lp_tx_data)
-
-            # Build ActionBundle
-            total_gas = sum(tx.gas_estimate for tx in transactions)
-
-            action_bundle = ActionBundle(
-                intent_type=IntentType.LP_CLOSE.value,
-                transactions=[tx.to_dict() for tx in transactions],
-                metadata={
-                    "pool": intent.pool,
-                    "position_id": intent.position_id,
-                    "collect_fees": intent.collect_fees,
-                    "protocol": "traderjoe_v2",
-                    "chain": self.chain,
-                },
-            )
-
-            result.action_bundle = action_bundle
-            result.transactions = transactions
-            result.total_gas_estimate = total_gas
-            result.warnings = warnings
-
-            tx_types = " + ".join(tx.tx_type for tx in transactions) if transactions else ""
-            tx_summary = f" ({tx_types})" if tx_types else ""
-            logger.info(
-                f"Compiled TraderJoe V2 LP_CLOSE intent: {token_x_symbol}/{token_y_symbol}, {len(transactions)} txs{tx_summary}, {total_gas} gas"
+            return self._complete_traderjoe_v2_close_result(
+                result=result,
+                intent=intent,
+                transactions=transactions,
+                token_x_symbol=pair.token_x_symbol,
+                token_y_symbol=pair.token_y_symbol,
             )
 
         except Exception as e:
@@ -917,7 +916,6 @@ class _TraderJoeV2CompileImpl(CompilerServicesFacadeMixin):
 
         return result
 
-    # crap-allowlist: VIB-4688 — pre-existing logic (cc=18) relocated from compiler.py by phase-2 fold; coverage-driven score. Unit-coverage backfill tracked in VIB-4688.
     def _compile_collect_fees_traderjoe_v2(self, intent: CollectFeesIntent) -> CompilationResult:
         """Compile LP_COLLECT_FEES intent for TraderJoe V2 Liquidity Book.
 
@@ -940,7 +938,8 @@ class _TraderJoeV2CompileImpl(CompilerServicesFacadeMixin):
         try:
             from almanak.connectors.traderjoe_v2 import TraderJoeV2Adapter, TraderJoeV2Config
 
-            # Parse pool info (format: TOKEN_X/TOKEN_Y/BIN_STEP)
+            # Preserve the collection-specific malformed-pool error before
+            # entering the shared symbolic-pair resolver.
             pool_parts = intent.pool.split("/")
             if len(pool_parts) < 2:
                 return CompilationResult(
@@ -949,51 +948,22 @@ class _TraderJoeV2CompileImpl(CompilerServicesFacadeMixin):
                     intent_id=intent.intent_id,
                 )
 
-            token_x_symbol = pool_parts[0]
-            token_y_symbol = pool_parts[1]
-            bin_step = int(pool_parts[2]) if len(pool_parts) > 2 else 20
-
-            # Resolve token addresses via TokenResolver
-            token_x_info = self._resolve_token(token_x_symbol)
-            token_y_info = self._resolve_token(token_y_symbol)
-
-            if not token_x_info or not token_y_info:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Unknown tokens for pool {intent.pool} on {self.chain}",
-                    intent_id=intent.intent_id,
-                )
-
-            token_x_addr = token_x_info.address
-            token_y_addr = token_y_info.address
-
-            # TraderJoe V2 adapter accepts either a connected gateway_client
-            # (production path) or a direct RPC URL (local/backtest fallback).
-            # Treat a disconnected client as unavailable so we don't hand a
-            # dead client to the adapter.
-            gateway_client = self._gateway_client
-            if gateway_client is not None and not gateway_client.is_connected:
-                gateway_client = None
-
-            rpc_url = None if gateway_client is not None else self._get_chain_rpc_url()
-            if gateway_client is None and not rpc_url:
-                raise ValueError(
-                    "Connected gateway_client or RPC URL required for TraderJoe V2 adapter. "
-                    "Either provide rpc_url to IntentCompiler or use GatewayExecutionOrchestrator."
-                )
+            pair = self._resolve_symbolic_lb_pair(intent, intent.pool)
+            if isinstance(pair, CompilationResult):
+                return pair
 
             # Create TraderJoe V2 adapter
             config = TraderJoeV2Config(
                 chain=self.chain,
                 wallet_address=self.wallet_address,
-                rpc_url=rpc_url,
+                rpc_url=pair.rpc_url,
                 default_deadline_seconds=self.default_deadline_seconds,
-                gateway_client=gateway_client,
+                gateway_client=pair.gateway_client,
             )
             tj_adapter = TraderJoeV2Adapter(config)
 
             # Get position to check if we have liquidity
-            position = tj_adapter.get_position(token_x_addr, token_y_addr, bin_step)
+            position = tj_adapter.get_position(pair.token_x.address, pair.token_y.address, pair.bin_step)
             if not position or not position.bin_ids:
                 warnings.append("No LP position found for fee collection")
                 action_bundle = ActionBundle(
@@ -1011,9 +981,10 @@ class _TraderJoeV2CompileImpl(CompilerServicesFacadeMixin):
 
             # Build collect fees transaction (no approval needed - calling LBPair directly)
             fee_tx = tj_adapter.build_collect_fees_transaction(
-                token_x=token_x_addr,
-                token_y=token_y_addr,
-                bin_step=bin_step,
+                token_x=pair.token_x.address,
+                token_y=pair.token_y.address,
+                bin_step=pair.bin_step,
+                position=position,
             )
 
             if fee_tx is None:
@@ -1037,7 +1008,7 @@ class _TraderJoeV2CompileImpl(CompilerServicesFacadeMixin):
                 value=fee_tx.value,
                 data=fee_tx.data if isinstance(fee_tx.data, str) else fee_tx.data,
                 gas_estimate=fee_tx.gas or 200000,
-                description=f"Collect fees from TraderJoe V2: {token_x_symbol}/{token_y_symbol}",
+                description=f"Collect fees from TraderJoe V2: {pair.token_x_symbol}/{pair.token_y_symbol}",
                 tx_type="traderjoe_v2_collect_fees",
             )
             transactions.append(fee_tx_data)
@@ -1062,7 +1033,7 @@ class _TraderJoeV2CompileImpl(CompilerServicesFacadeMixin):
             result.warnings = warnings
 
             logger.info(
-                f"Compiled TraderJoe V2 LP_COLLECT_FEES intent: {token_x_symbol}/{token_y_symbol}, "
+                f"Compiled TraderJoe V2 LP_COLLECT_FEES intent: {pair.token_x_symbol}/{pair.token_y_symbol}, "
                 f"{len(position.bin_ids)} bins, {total_gas} gas"
             )
 

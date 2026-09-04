@@ -896,7 +896,6 @@ def replay(
         sys.exit(1)
 
 
-# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
 def list_available_bundles() -> None:
     """List all available bundles in storage."""
     click.echo("Searching for bundles...")
@@ -908,14 +907,14 @@ def list_available_bundles() -> None:
         if not base_path.exists():
             continue
 
-        for bundle_path in base_path.rglob("*.json"):
+        for bundle_path in sorted(base_path.rglob("*.json")):
             try:
                 with open(bundle_path) as f:
                     data = json.load(f)
                 bundle_id = data.get("bundle_id", bundle_path.stem)
                 deployment_id = data.get("deployment_id", "unknown")
                 found_bundles.append((bundle_path, bundle_id, deployment_id))
-            except (json.JSONDecodeError, KeyError):
+            except (AttributeError, json.JSONDecodeError, KeyError):
                 continue
 
     if not found_bundles:
@@ -939,7 +938,6 @@ def list_available_bundles() -> None:
         click.echo()
 
 
-# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
 def print_bundle_info(bundle: ReproductionBundle) -> None:
     """Print bundle information for dry run.
 

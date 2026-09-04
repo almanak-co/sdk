@@ -186,7 +186,6 @@ def to_upper_snake_case(name: str) -> str:
     return to_snake_case(name).upper()
 
 
-# crap-allowlist: VIB-4835 — pre-existing CLI scaffold (cc=14, cov=0%) touched only by docstring rewrite for new connector path. Refactor tracked in VIB-4139; coverage backfill not planned (CLI helper exercised by end-to-end ax tests).
 def generate_adapter_file(
     name: str,
     protocol_type: ProtocolType,

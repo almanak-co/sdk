@@ -256,7 +256,6 @@ class ReproductionBundle:
             "replay_command": self.to_replay_command(),
         }
 
-    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ReproductionBundle":
         """Create a ReproductionBundle from a dictionary.

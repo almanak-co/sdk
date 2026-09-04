@@ -195,9 +195,7 @@ class TestGetSwapQuote:
         and price impact is computed via 1/price."""
         adapter, sdk = adapter_with_mock_sdk
         # USDC (TOKEN_Y) in -> WAVAX (TOKEN_X) out: pool_info.token_x=TOKEN_X, but token_in is USDC
-        _wire_quote_dependencies(
-            sdk, swap_for_y=False, spot_rate=0.04, swap_out_returns=(0, int(0.04 * 10**18), 100)
-        )
+        _wire_quote_dependencies(sdk, swap_for_y=False, spot_rate=0.04, swap_out_returns=(0, int(0.04 * 10**18), 100))
         # Override pool_info so swap_for_y is False (token_in is not pool.token_x)
         pool_info = MagicMock()
         pool_info.token_x = TOKEN_X
@@ -516,9 +514,7 @@ class TestBuildRemoveLiquidity:
             amount_y=25 * 10**6,
             active_bin=BIN_ID_OFFSET,
         )
-        adapter.build_remove_liquidity_transaction(
-            "WAVAX", "USDC", bin_step=20, position=position, amount_x_min=999
-        )
+        adapter.build_remove_liquidity_transaction("WAVAX", "USDC", bin_step=20, position=position, amount_x_min=999)
         kwargs = sdk.build_remove_liquidity.call_args.kwargs
         assert kwargs["amount_x_min"] == 999
         # amount_y_min still gets slippage discount from position.amount_y.
@@ -601,3 +597,37 @@ class TestPendingFeesAndCollect:
         assert tx is not None
         assert tx.to == POOL_ADDR
         assert tx.gas == 200_000
+
+    def test_build_collect_fees_uses_supplied_position_without_rediscovery(self, adapter_with_mock_sdk) -> None:
+        adapter, sdk = adapter_with_mock_sdk
+        position = LiquidityPosition(
+            pool_address=POOL_ADDR,
+            token_x=TOKEN_X,
+            token_y=TOKEN_Y,
+            bin_step=20,
+            bin_ids=[BIN_ID_OFFSET - 1, BIN_ID_OFFSET + 1],
+            balances={BIN_ID_OFFSET - 1: 100, BIN_ID_OFFSET + 1: 200},
+            amount_x=1,
+            amount_y=2,
+            active_bin=BIN_ID_OFFSET,
+        )
+        sdk.build_collect_fees.return_value = (
+            {"to": POOL_ADDR, "data": "0x225b20b9", "value": 0},
+            200_000,
+        )
+
+        with patch.object(adapter, "get_position") as get_position:
+            tx = adapter.build_collect_fees_transaction(
+                "WAVAX",
+                "USDC",
+                bin_step=20,
+                position=position,
+            )
+
+        assert tx is not None
+        get_position.assert_not_called()
+        sdk.build_collect_fees.assert_called_once_with(
+            pool_address=POOL_ADDR,
+            account=WALLET,
+            ids=[BIN_ID_OFFSET - 1, BIN_ID_OFFSET + 1],
+        )

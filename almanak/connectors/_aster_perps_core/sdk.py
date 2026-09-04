@@ -43,6 +43,7 @@ References:
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -133,6 +134,7 @@ ASTER_BROKER_RAW: int = 0  # No broker attribution (default for raw aster_perps 
 # When opening a BNB-margined position via openMarketTradeBNB, tokenIn is address(0)
 # and the BNB margin is sent as msg.value. The router wraps it to WBNB internally.
 NATIVE_BNB_ADDRESS = "0x0000000000000000000000000000000000000000"
+_EVM_ADDRESS_RE = re.compile(r"0x[0-9a-fA-F]{40}")
 
 
 # =============================================================================
@@ -384,22 +386,19 @@ def _to_bytes32(value: str | bytes) -> bytes:
 
 
 def _check_address(addr: str) -> str:
-    if not isinstance(addr, str) or not addr.startswith("0x") or len(addr) != 42:
+    if not isinstance(addr, str) or _EVM_ADDRESS_RE.fullmatch(addr) is None:
         raise ValueError(f"Invalid EVM address: {addr!r}")
-    # Reject non-hex payloads here so downstream failures (eth_abi encoding,
-    # RPC calls) surface as a deterministic ValueError instead of opaque errors.
-    try:
-        int(addr[2:], 16)
-    except ValueError as exc:
-        raise ValueError(f"Invalid EVM address: {addr!r}") from exc
     # eth_abi accepts either checksum or lowercase; we accept either and
     # let eth_abi handle casing.
     return addr
 
 
-# crap-allowlist: byte-identical relocation from aster_perps/sdk.py (PR #2856); pre-existing
-# cc/coverage unchanged by the move, validated on-chain by the bnb perp intent suite. Unit-coverage
-# backfill tracked as a follow-up (do not refactor money-path validation in a relocation PR).
+def _validate_uint_range(name: str, value: int, bits: int, *, zero_allowed: bool) -> None:
+    below_minimum = value < 0 if zero_allowed else value <= 0
+    if below_minimum or value >= 2**bits:
+        raise ValueError(f"{name} {value} out of uint{bits} range")
+
+
 def _validate_open_struct(t: OpenTradeStruct, *, native: bool) -> None:
     _check_address(t.pair_base)
     _check_address(t.token_in)
@@ -409,18 +408,16 @@ def _validate_open_struct(t: OpenTradeStruct, *, native: bool) -> None:
         raise ValueError(
             "openMarketTrade requires a non-zero ERC20 tokenIn; for native BNB margin use openMarketTradeBNB"
         )
-    if t.amount_in <= 0 or t.amount_in >= 2**96:
-        raise ValueError(f"amountIn {t.amount_in} out of uint96 range")
-    if t.qty <= 0 or t.qty >= 2**80:
-        raise ValueError(f"qty {t.qty} out of uint80 range")
-    if t.price <= 0 or t.price >= 2**64:
-        raise ValueError(f"price {t.price} out of uint64 range")
-    if t.stop_loss < 0 or t.stop_loss >= 2**64:
-        raise ValueError(f"stopLoss {t.stop_loss} out of uint64 range")
-    if t.take_profit < 0 or t.take_profit >= 2**64:
-        raise ValueError(f"takeProfit {t.take_profit} out of uint64 range")
-    if t.broker < 0 or t.broker >= 2**24:
-        raise ValueError(f"broker {t.broker} out of uint24 range")
+    fields = (
+        ("amountIn", t.amount_in, 96, False),
+        ("qty", t.qty, 80, False),
+        ("price", t.price, 64, False),
+        ("stopLoss", t.stop_loss, 64, True),
+        ("takeProfit", t.take_profit, 64, True),
+        ("broker", t.broker, 24, True),
+    )
+    for name, value, bits, zero_allowed in fields:
+        _validate_uint_range(name, value, bits, zero_allowed=zero_allowed)
 
 
 # =============================================================================

@@ -45,8 +45,11 @@ def _is_running_in_docker() -> bool:
 
 IN_DOCKER = _is_running_in_docker()
 
-# Skip all tests in this module if not running in Docker
-pytestmark = pytest.mark.skipif(not IN_DOCKER, reason="Network isolation tests only run inside Docker container")
+# The gateway unit-test target excludes this purpose-built-container suite.
+pytestmark = [
+    pytest.mark.docker,
+    pytest.mark.skipif(not IN_DOCKER, reason="Network isolation tests only run inside Docker container"),
+]
 
 
 class TestDNSResolution:

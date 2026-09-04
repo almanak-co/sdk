@@ -1180,7 +1180,6 @@ def _generate_html_report(
         click.echo(f"Warning: Failed to generate report: {report_result.error}", err=True)
 
 
-# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
 @backtest.command("pnl")
 @click.option(
     "--strategy",

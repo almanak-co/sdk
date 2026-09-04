@@ -1480,7 +1480,21 @@ async def stamp_entry_state_on_open(
         logger.warning("Failed to stamp entry_state on OPEN", exc_info=True)
 
 
-# crap-allowlist: VIB-4888 — pre-existing complexity (cc=16, cov=52%, CRAP=43) unchanged by VIB-4848 (single-line T12 helper call added at line 1293). Decomposition + coverage backfill tracked in VIB-4888.
+def _inject_current_prices(close_dict: dict[str, Any], prices: dict[str, Any] | None) -> None:
+    """Add close-time prices while preserving any measured sidecar fields."""
+    if not prices:
+        return
+    close_attr = close_dict.get("attribution_json") or "{}"
+    try:
+        close_attr_parsed = json.loads(close_attr) if isinstance(close_attr, str) else close_attr
+        if not isinstance(close_attr_parsed, dict):
+            close_attr_parsed = {}
+    except (json.JSONDecodeError, TypeError):
+        close_attr_parsed = {}
+    close_attr_parsed["current_prices"] = prices
+    close_dict["attribution_json"] = json.dumps(close_attr_parsed)
+
+
 async def run_attribution_on_close(
     store: Any,
     close_event: Any,
@@ -1521,7 +1535,9 @@ async def run_attribution_on_close(
             )
             return attribution
 
-        close_dict = close_event.to_dict() if hasattr(close_event, "to_dict") else {}
+        # PositionEvent is the close boundary. Silently replacing an invalid
+        # object with {} would turn every missing money field into a false zero.
+        close_dict = close_event.to_dict()
 
         # VIB-3205: inject current-at-close prices into the close_event's
         # attribution_json sidecar so compute_impermanent_loss can evaluate
@@ -1535,16 +1551,7 @@ async def run_attribution_on_close(
             chain=getattr(close_event, "chain", "") or "",
             as_of=getattr(close_event, "timestamp", None),
         )
-        if prices:
-            close_attr = close_dict.get("attribution_json") or "{}"
-            try:
-                close_attr_parsed = json.loads(close_attr) if isinstance(close_attr, str) else close_attr
-                if not isinstance(close_attr_parsed, dict):
-                    close_attr_parsed = {}
-            except (json.JSONDecodeError, TypeError):
-                close_attr_parsed = {}
-            close_attr_parsed["current_prices"] = prices
-            close_dict["attribution_json"] = json.dumps(close_attr_parsed)
+        _inject_current_prices(close_dict, prices)
 
         # VIB-4848 (T12) — pick mid-life LP_COLLECT_FEES events from the
         # already-loaded history so attribute_lp can fold them into

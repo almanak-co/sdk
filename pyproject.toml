@@ -362,11 +362,14 @@ omit = [
 #   2026-07-31 — CI measured 87.31% on main HEAD 41f2af7 (Main run 30638073675,
 #                test_suite / tests job: 214 564 stmts, 187 331 covered, 27 233
 #                missing). Bumped to 87 → 0.31 pt buffer.
+#   2026-09-04 — The CRAP allowlist cleanup measured 89.29% on the full local
+#                CI scope (238 707 stmts, 213 144 covered, 25 563 missing).
+#                Bumped to 89 → 0.29 pt buffer.
 #
 # fail_under is a no-regress gate, NOT the goal — the 80% target lives in
 # docs/internal/coverage-improvement-plan.md §3. Ratchet policy (each phase increments
 # fail_under to its exit-criteria number, never decrements) is in §8 Phase 0 of the same doc.
-fail_under = 87
+fail_under = 89
 show_missing = true
 skip_empty = true
 

@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
+from almanak.connectors._fluid_core.gateway import market_lookup as market_lookup_module
 from almanak.connectors.fluid.gateway.market_lookup import (
     CACHE_TTL_SECONDS,
     FluidMarketLookup,
@@ -66,6 +67,112 @@ SAMPLE_DATA = {
 }
 
 
+class _FakeResponse:
+    def __init__(self, status, body):
+        self.status = status
+        self._body = body
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def json(self, content_type=None):
+        if isinstance(self._body, Exception):
+            raise self._body
+        return self._body
+
+
+class _FakeSession:
+    def __init__(self, responses):
+        self.responses = responses
+        self.requested_urls = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    def get(self, url, timeout):
+        self.requested_urls.append(url)
+        response = self.responses[url]
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
+class TestFetchFromNetwork:
+    @pytest.mark.asyncio()
+    async def test_keeps_successful_chains_when_other_responses_fail(self):
+        chain_ids = {
+            "ethereum": 1,
+            "arbitrum": 42161,
+            "base": 8453,
+            "polygon": 137,
+            "optimism": 10,
+        }
+        responses = {
+            market_lookup_module._FLUID_CHAIN_URL_TEMPLATE.format(chain_id=1): _FakeResponse(
+                200, {"data": SAMPLE_DATA["ethereum"]}
+            ),
+            market_lookup_module._FLUID_CHAIN_URL_TEMPLATE.format(chain_id=42161): _FakeResponse(503, {}),
+            market_lookup_module._FLUID_CHAIN_URL_TEMPLATE.format(chain_id=8453): _FakeResponse(200, []),
+            market_lookup_module._FLUID_CHAIN_URL_TEMPLATE.format(chain_id=137): _FakeResponse(
+                200, {"data": {"unexpected": "mapping"}}
+            ),
+            market_lookup_module._FLUID_CHAIN_URL_TEMPLATE.format(chain_id=10): RuntimeError("network down"),
+        }
+        session = _FakeSession(responses)
+        lookup = FluidMarketLookup()
+
+        with (
+            patch.object(market_lookup_module, "FLUID_CHAIN_IDS", chain_ids),
+            patch("aiohttp.ClientSession", return_value=session),
+            patch("aiohttp.TCPConnector", return_value=object()),
+            patch("almanak.gateway.utils.ssl_context.build_ssl_context", return_value=object()),
+            patch.object(lookup, "_write_disk_cache") as write_cache,
+        ):
+            result = await lookup._fetch_from_network()
+
+        assert result == {"ethereum": SAMPLE_DATA["ethereum"]}
+        assert set(session.requested_urls) == set(responses)
+        write_cache.assert_called_once_with(result)
+
+    @pytest.mark.asyncio()
+    async def test_returns_none_without_caching_when_all_chains_are_empty(self):
+        url = market_lookup_module._FLUID_CHAIN_URL_TEMPLATE.format(chain_id=1)
+        session = _FakeSession({url: _FakeResponse(200, {"data": []})})
+        lookup = FluidMarketLookup()
+
+        with (
+            patch.object(market_lookup_module, "FLUID_CHAIN_IDS", {"ethereum": 1}),
+            patch("aiohttp.ClientSession", return_value=session),
+            patch("aiohttp.TCPConnector", return_value=object()),
+            patch("almanak.gateway.utils.ssl_context.build_ssl_context", return_value=object()),
+            patch.object(lookup, "_write_disk_cache") as write_cache,
+        ):
+            result = await lookup._fetch_from_network()
+
+        assert result is None
+        write_cache.assert_not_called()
+
+    @pytest.mark.asyncio()
+    async def test_returns_none_when_session_setup_fails(self):
+        lookup = FluidMarketLookup()
+
+        with (
+            patch("aiohttp.TCPConnector", side_effect=RuntimeError("TLS setup failed")),
+            patch("almanak.gateway.utils.ssl_context.build_ssl_context", return_value=object()),
+            patch.object(lookup, "_write_disk_cache") as write_cache,
+        ):
+            result = await lookup._fetch_from_network()
+
+        assert result is None
+        write_cache.assert_not_called()
+
+
 class TestBuildIndices:
     def test_mapped_chains_indexed(self):
         lookup = FluidMarketLookup()
@@ -121,9 +228,7 @@ class TestLookupAPI:
         assert meta is None
 
     def test_lookup_by_address(self, loaded_lookup):
-        meta = loaded_lookup.lookup_by_address(
-            "0x9Fb7b4477576Fe5B32be4C1843aFB1e55F251B33", "ethereum"
-        )
+        meta = loaded_lookup.lookup_by_address("0x9Fb7b4477576Fe5B32be4C1843aFB1e55F251B33", "ethereum")
         assert meta is not None
         assert meta.symbol == "fUSDC"
 
@@ -165,18 +270,14 @@ class TestDiskCache:
         import os
 
         os.utime(cache_path, (stale_mtime, stale_mtime))
-        monkeypatch.setattr(
-            "almanak.connectors._fluid_core.gateway.market_lookup.CACHE_PATH", cache_path
-        )
+        monkeypatch.setattr("almanak.connectors._fluid_core.gateway.market_lookup.CACHE_PATH", cache_path)
         lookup = FluidMarketLookup()
         assert lookup._read_disk_cache() is None
 
     def test_read_disk_cache_returns_fresh_data(self, tmp_path, monkeypatch):
         cache_path = tmp_path / "fluid_market_cache.json"
         cache_path.write_text(json.dumps(SAMPLE_DATA))
-        monkeypatch.setattr(
-            "almanak.connectors._fluid_core.gateway.market_lookup.CACHE_PATH", cache_path
-        )
+        monkeypatch.setattr("almanak.connectors._fluid_core.gateway.market_lookup.CACHE_PATH", cache_path)
         lookup = FluidMarketLookup()
         data = lookup._read_disk_cache()
         assert data is not None
@@ -184,9 +285,7 @@ class TestDiskCache:
 
     def test_write_disk_cache_atomic(self, tmp_path, monkeypatch):
         cache_path = tmp_path / "fluid_market_cache.json"
-        monkeypatch.setattr(
-            "almanak.connectors._fluid_core.gateway.market_lookup.CACHE_PATH", cache_path
-        )
+        monkeypatch.setattr("almanak.connectors._fluid_core.gateway.market_lookup.CACHE_PATH", cache_path)
         lookup = FluidMarketLookup()
         lookup._write_disk_cache(SAMPLE_DATA)
         assert cache_path.exists()
@@ -198,9 +297,7 @@ class TestLoadFlow:
     def test_load_uses_disk_cache_when_fresh(self, tmp_path, monkeypatch):
         cache_path = tmp_path / "fluid_market_cache.json"
         cache_path.write_text(json.dumps(SAMPLE_DATA))
-        monkeypatch.setattr(
-            "almanak.connectors._fluid_core.gateway.market_lookup.CACHE_PATH", cache_path
-        )
+        monkeypatch.setattr("almanak.connectors._fluid_core.gateway.market_lookup.CACHE_PATH", cache_path)
         lookup = FluidMarketLookup()
 
         async def fail_fetch() -> None:  # pragma: no cover

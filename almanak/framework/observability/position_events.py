@@ -810,163 +810,168 @@ def _pair_tokens_from_parser_currencies(lp_data: Any, chain: str) -> tuple[str, 
     return ("", "")
 
 
-# Precedence ladder: currencies-resolved, then declared-legs, then label-order.
-# The order is the property; keep arms inline so misordering stays visible.
-# crap-allowlist: VIB-6475 — precedence ladder; the ORDER is the property, and VIB-6104
-# Move C deletes this function rather than decomposing it. Retire when Move C lands.
-def _realign_event_lp_pair_if_needed(event: PositionEvent, ctx: IntentEventContext, *, opening: bool) -> None:
-    """VIB-5983 — re-pair ``event.token0``/``token1`` to on-chain address order.
-
-    Mirrors ``lp_handler._v3_realign_token_pair`` (VIB-5851) for the Layer-3
-    ``position_events`` producer. Receipt amounts are address-sorted; intent
-    pool labels often are not. Without this, ``value_usd`` books a ~$1bn
-    phantom on inverted-order V3 pools (Ethereum WETH/USDC).
-
-    Two independent order provenances exist, and the gate picks by which one
-    the amounts actually came from (VIB-5988 — gating on bare
-    ``primitive_money_legs`` key presence was wrong):
-
-    1. **Declared money legs win.** When the connector stamped a usable
-       role-appropriate pair (INPUT legs on an OPEN, OUTPUT legs on a CLOSE),
-       those symbols are chain truth in the SAME emission order the connector
-       wrote ``amount0`` / ``amount1``, so adopting them is what aligns the pair
-       — and address-sorting them would *break* it. TraderJoe V2 is the live
-       case: ``amount0``/``amount1`` are tokenX/tokenY, explicitly NOT
-       address-sorted (``traderjoe_v2/receipt_parser.py`` — "do NOT sort by
-       token address ... would swap legs whenever tokenX's address > tokenY's").
-    2. **Otherwise address order**, the V3-family convention the shared sort
-       encodes (Uniswap V3/V4, Aerodrome, Camelot — receipt amounts are
-       address-sorted while intent pool labels often are not).
-
-    Fail-open / no-op when:
-
-    * either symbol empty, or no typed raw amounts on the event;
-    * fungible N-coin (``coin_symbols``) — pool-index order, not address;
-    * declared legs are present but do not yield a usable pair — the connector
-      has asserted an ordering convention we cannot read, so neither provenance
-      is established and label order is kept (no worse than pre-fix), with a
-      warning so the gap is visible rather than silent;
-    * address resolution fails (shared helper keeps label order).
-
-    Args:
-        opening: whether this event is the position-opening leg. Passed
-            explicitly by the two call sites, which both know it unambiguously
-            (``_apply_lp_open`` runs only with ``lp_open_data``;
-            ``_apply_lp_close_columns`` is gated on ``event_type == "CLOSE"``).
-            Deliberately NOT re-derived from ``event.event_type`` here:
-            ``PositionEventType`` also carries ``INCREASE`` / ``DECREASE`` /
-            ``COLLECT_FEES``, so a future LP partial-withdraw mapped to
-            ``DECREASE`` would sniff as opening and read INPUT legs on a
-            proceeds event — adopting the wrong pair silently.
-    """
-    t0 = (event.token0 or "").strip()
-    t1 = (event.token1 or "").strip()
-    if not t0 or not t1:
-        return
-    if not (event.amount0 and event.amount1):
-        return
+def _normalized_lp_pair_inputs(
+    event: PositionEvent,
+    ctx: IntentEventContext,
+    *,
+    opening: bool,
+) -> tuple[str, str, str, dict[str, Any], Any] | None:
+    """Return validated pair inputs and the lifecycle-matching LP payload."""
+    if not isinstance(event.token0, str) or not isinstance(event.token1, str):
+        return None
+    token0 = event.token0.strip()
+    token1 = event.token1.strip()
+    if not token0 or not token1:
+        return None
+    # Amounts are raw text by contract, so "0" is measured and must enter the
+    # precedence ladder. Malformed values fail open without inference.
+    if not isinstance(event.amount0, str) or not isinstance(event.amount1, str):
+        return None
+    if not event.amount0.strip() or not event.amount1.strip():
+        return None
 
     extracted = ctx.extracted if isinstance(ctx.extracted, dict) else {}
+    lp_data_key = "lp_open_data" if opening else "lp_close_data"
+    lp_data = extracted.get(lp_data_key)
+    chain = ctx.chain if isinstance(ctx.chain, str) else ""
+    if not chain and isinstance(event.chain, str):
+        chain = event.chain
+    return token0, token1, chain, extracted, lp_data
 
-    # N-coin pools order by pool index; their coin universe owns the ordering.
-    if event.coin_symbols:
-        return
-    lp_data = extracted.get("lp_open_data") or extracted.get("lp_close_data")
-    if _lp_data_attr(lp_data, "coin_symbols"):
-        return
-    # additional_amounts comes off the receipt, so it cannot drift from live
-    # metadata; per-funded-coin leg index does not align with amount slots there.
-    if _lp_data_attr(lp_data, "additional_amounts"):
-        return
 
-    # Parser-emitted currencies are observed identity and outrank every
-    # derivation below; both ledger and position rows read the same stamp.
-    parser_pair = _pair_tokens_from_parser_currencies(lp_data, ctx.chain or event.chain)
-    currencies_observed = parser_pair is not None
-    if parser_pair is not None:
-        s0, s1 = parser_pair
-        if s0 and s1:
-            if (s0, s1) != (t0, t1):
-                logger.info(
-                    "VIB-6053: re-paired LP position_events pair %s/%s -> %s/%s from "
-                    "parser-emitted currencies (position_id=%s event_type=%s)",
-                    t0,
-                    t1,
-                    s0,
-                    s1,
-                    event.position_id,
-                    event.event_type,
-                )
-                event.token0, event.token1 = s0, s1
-            return
-        # Observed but unresolved currencies fall through to declared legs only;
-        # the address sort stays unreachable and label order is last resort.
+def _is_ncoin_lp_pair(event: PositionEvent, lp_data: Any) -> bool:
+    """Whether pool-index ordering owns this event instead of two-token ordering."""
+    return bool(
+        event.coin_symbols or _lp_data_attr(lp_data, "coin_symbols") or _lp_data_attr(lp_data, "additional_amounts")
+    )
 
-    if extracted.get("primitive_money_legs") is not None:
-        d0, d1 = _pair_tokens_from_declared_legs(extracted, opening=opening)
-        if d0 and d1:
-            if (d0, d1) != (t0, t1):
-                logger.info(
-                    "VIB-5988: re-paired LP position_events pair %s/%s -> %s/%s from declared "
-                    "money legs (chain=%s position_id=%s event_type=%s)",
-                    t0,
-                    t1,
-                    d0,
-                    d1,
-                    ctx.chain or event.chain,
-                    event.position_id,
-                    event.event_type,
-                )
-                event.token0 = d0
-                event.token1 = d1
-            return
-        # Unusable legs mean the connector ordering cannot be read; keep label order.
-        logger.warning(
-            "VIB-5988: declared money legs present but no usable %s pair for LP position_events "
-            "%s/%s (chain=%s position_id=%s event_type=%s); keeping label order — value_usd may be "
-            "mis-paired if the connector's amount order differs from the pool label",
-            "INPUT" if opening else "OUTPUT",
-            t0,
-            t1,
-            ctx.chain or event.chain,
+
+def _adopt_parser_lp_pair(
+    event: PositionEvent,
+    current_pair: tuple[str, str],
+    parser_pair: tuple[str, str] | None,
+) -> bool:
+    """Adopt a complete parser observation and report whether it was terminal."""
+    if parser_pair is None:
+        return False
+    token0, token1 = parser_pair
+    if not token0 or not token1:
+        return False
+    if parser_pair != current_pair:
+        logger.info(
+            "VIB-6053: re-paired LP position_events pair %s/%s -> %s/%s from "
+            "parser-emitted currencies (position_id=%s event_type=%s)",
+            *current_pair,
+            token0,
+            token1,
             event.position_id,
             event.event_type,
         )
+        event.token0, event.token1 = parser_pair
+    return True
+
+
+def _adopt_declared_lp_pair(
+    event: PositionEvent,
+    extracted: dict[str, Any],
+    current_pair: tuple[str, str],
+    chain: str,
+    *,
+    opening: bool,
+) -> bool:
+    """Adopt declared legs, or stop weaker inference when their carrier is unusable."""
+    if extracted.get("primitive_money_legs") is None:
+        return False
+    token0, token1 = _pair_tokens_from_declared_legs(extracted, opening=opening)
+    if token0 and token1:
+        if (token0, token1) != current_pair:
+            logger.info(
+                "VIB-5988: re-paired LP position_events pair %s/%s -> %s/%s from declared "
+                "money legs (chain=%s position_id=%s event_type=%s)",
+                *current_pair,
+                token0,
+                token1,
+                chain,
+                event.position_id,
+                event.event_type,
+            )
+            event.token0, event.token1 = token0, token1
+        return True
+
+    logger.warning(
+        "VIB-5988: declared money legs present but no usable %s pair for LP position_events "
+        "%s/%s (chain=%s position_id=%s event_type=%s); keeping label order — value_usd may be "
+        "mis-paired if the connector's amount order differs from the pool label",
+        "INPUT" if opening else "OUTPUT",
+        *current_pair,
+        chain,
+        event.position_id,
+        event.event_type,
+    )
+    return True
+
+
+def _apply_address_ordered_lp_pair(event: PositionEvent, current_pair: tuple[str, str], chain: str) -> None:
+    """Apply the final address-order inference when no stronger carrier exists."""
+    from almanak.framework.data.tokens.pair_order import realign_token_pair_by_address
+
+    new_pair = realign_token_pair_by_address(*current_pair, chain)
+    if new_pair == current_pair:
+        return
+    logger.info(
+        "VIB-5983: realigned LP position_events pair %s/%s -> %s/%s (chain=%s position_id=%s)",
+        *current_pair,
+        *new_pair,
+        chain,
+        event.position_id,
+    )
+    event.token0, event.token1 = new_pair
+
+
+def _realign_event_lp_pair_if_needed(event: PositionEvent, ctx: IntentEventContext, *, opening: bool) -> None:
+    """Bind LP amount slots to token identity using strict evidence precedence.
+
+    The order is load-bearing: N-coin pool order, complete parser observation,
+    role-appropriate declared legs, unresolved-observation stop, then address
+    order. A complete parser observation is terminal even when it is not address
+    sorted. An unusable declared-leg carrier and an unresolved parser observation
+    keep label order rather than permitting weaker address inference.
+
+    ``opening`` selects both the matching LP payload and the declared money-leg
+    role. It must not be inferred from ``event_type``, whose lifecycle vocabulary
+    also includes partial-position actions.
+    """
+    normalized = _normalized_lp_pair_inputs(event, ctx, opening=opening)
+    if normalized is None:
+        return
+    token0, token1, chain, extracted, lp_data = normalized
+    current_pair = (token0, token1)
+
+    if _is_ncoin_lp_pair(event, lp_data):
         return
 
-    # Keep label order here; future branch-shape edits must not reopen an
-    # address sort on a money path.
-    if currencies_observed:
+    parser_pair = _pair_tokens_from_parser_currencies(lp_data, chain)
+    if _adopt_parser_lp_pair(event, current_pair, parser_pair):
+        return
+
+    if _adopt_declared_lp_pair(event, extracted, current_pair, chain, opening=opening):
+        return
+
+    if parser_pair is not None:
         logger.warning(
             "VIB-6383: parser observed LP currencies on %s but they did not resolve, and no "
             "usable declared money legs are present for %s/%s (position_id=%s event_type=%s); "
             "keeping label order — an address sort is NOT a valid stand-in for a failed "
             "observation and value_usd may be mis-paired if the label order differs from the "
             "connector's amount order",
-            ctx.chain or event.chain,
-            t0,
-            t1,
+            chain,
+            *current_pair,
             event.position_id,
             event.event_type,
         )
         return
 
-    from almanak.framework.data.tokens.pair_order import realign_token_pair_by_address
-
-    new0, new1 = realign_token_pair_by_address(t0, t1, ctx.chain or event.chain or "")
-    if (new0, new1) == (t0, t1):
-        return
-    logger.info(
-        "VIB-5983: realigned LP position_events pair %s/%s -> %s/%s (chain=%s position_id=%s)",
-        t0,
-        t1,
-        new0,
-        new1,
-        ctx.chain or event.chain,
-        event.position_id,
-    )
-    event.token0 = new0
-    event.token1 = new1
+    _apply_address_ordered_lp_pair(event, current_pair, chain)
 
 
 def _apply_lp_open(event: PositionEvent, ctx: IntentEventContext) -> None:

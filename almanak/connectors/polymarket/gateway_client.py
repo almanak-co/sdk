@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import grpc
 
@@ -60,17 +60,77 @@ class GatewayPolymarketClient:
     def _raise_rpc_error(prefix: str, error: str | None, *, status_code: int | None = None) -> None:
         raise PolymarketAPIError(f"{prefix}: {error or 'unknown error'}", status_code=status_code)
 
-    # crap-allowlist: VIB-4819 — proto-relocation PR touched the imports in this
-    # file, not this function body. Pre-existing complexity tracked separately.
+    @staticmethod
+    def _parse_decimal(value: str, default: str = "0") -> Decimal:
+        return Decimal(value or default)
+
+    @staticmethod
+    def _parse_optional_decimal(value: str) -> Decimal | None:
+        return Decimal(value) if value else None
+
+    @staticmethod
+    def _parse_market_end_date(value: str) -> datetime | None:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")) if value else None
+
+    @staticmethod
+    def _parse_order_created_at(value: str) -> datetime | None:
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _parse_position(item: polymarket_pb2.PolymarketPosition) -> Position:
+        return Position(
+            market_id=item.market_id or item.condition_id,
+            condition_id=item.condition_id,
+            token_id=item.token_id or item.asset,
+            outcome=cast(Literal["YES", "NO"], item.outcome or "YES"),
+            size=GatewayPolymarketClient._parse_decimal(item.size),
+            avg_price=GatewayPolymarketClient._parse_decimal(item.avg_price),
+            current_price=GatewayPolymarketClient._parse_decimal(item.cur_price),
+            realized_pnl=GatewayPolymarketClient._parse_decimal(item.realized_pnl),
+            market_question=item.market_question,
+        )
+
+    @staticmethod
+    def _filter_positions(positions: list[Position], filters: PositionFilters) -> list[Position]:
+        market = getattr(filters, "market", None)
+        if market:
+            positions = [position for position in positions if position.market_id == market]
+        outcome = getattr(filters, "outcome", None)
+        if outcome:
+            positions = [position for position in positions if position.outcome == outcome]
+        return positions
+
+    @staticmethod
+    def _open_orders_request(filters: OrderFilters | None) -> polymarket_pb2.PolymarketGetOpenOrdersRequest:
+        return polymarket_pb2.PolymarketGetOpenOrdersRequest(
+            market_id=filters.market if filters and filters.market else "",
+        )
+
+    @staticmethod
+    def _parse_open_order(
+        item: polymarket_pb2.PolymarketOpenOrder | polymarket_pb2.PolymarketOrderInfoResponse,
+    ) -> OpenOrder:
+        return OpenOrder(
+            order_id=item.order_id,
+            market=item.market,
+            side=item.side,
+            price=GatewayPolymarketClient._parse_decimal(item.price),
+            size=GatewayPolymarketClient._parse_decimal(item.original_size),
+            filled_size=GatewayPolymarketClient._parse_decimal(item.size_matched),
+            created_at=GatewayPolymarketClient._parse_order_created_at(item.created_at),
+            expiration=int(item.expiration) if item.expiration else None,
+        )
+
     @staticmethod
     def _parse_market(response: polymarket_pb2.PolymarketMarketResponse) -> GammaMarket:
         raw_payload = response.raw_json.strip()
         if raw_payload:
             return GammaMarket.from_api_response(json.loads(raw_payload))
-
-        end_date = None
-        if response.end_date:
-            end_date = datetime.fromisoformat(response.end_date.replace("Z", "+00:00"))
 
         return GammaMarket(
             id=response.market_id or response.condition_id,
@@ -80,20 +140,20 @@ class GatewayPolymarketClient:
             outcomes=list(response.outcomes),
             outcome_prices=[Decimal(value) for value in response.outcome_prices],
             clob_token_ids=list(response.clob_token_ids or response.tokens),
-            volume=Decimal(response.volume or "0"),
-            volume_24hr=Decimal(response.volume_24hr or "0"),
-            liquidity=Decimal(response.liquidity or "0"),
-            end_date=end_date,
+            volume=GatewayPolymarketClient._parse_decimal(response.volume),
+            volume_24hr=GatewayPolymarketClient._parse_decimal(response.volume_24hr),
+            liquidity=GatewayPolymarketClient._parse_decimal(response.liquidity),
+            end_date=GatewayPolymarketClient._parse_market_end_date(response.end_date),
             active=response.active,
             closed=response.closed,
             enable_order_book=response.enable_order_book,
-            order_price_min_tick_size=Decimal(response.minimum_tick_size or "0.01"),
-            order_min_size=Decimal(response.minimum_order_size or "5"),
+            order_price_min_tick_size=GatewayPolymarketClient._parse_decimal(response.minimum_tick_size, "0.01"),
+            order_min_size=GatewayPolymarketClient._parse_decimal(response.minimum_order_size, "5"),
             maker_base_fee_bps=int(response.maker_base_fee_bps or 0),
             taker_base_fee_bps=int(response.taker_base_fee_bps or 0),
-            best_bid=Decimal(response.best_bid) if response.best_bid else None,
-            best_ask=Decimal(response.best_ask) if response.best_ask else None,
-            last_trade_price=Decimal(response.last_trade_price) if response.last_trade_price else None,
+            best_bid=GatewayPolymarketClient._parse_optional_decimal(response.best_bid),
+            best_ask=GatewayPolymarketClient._parse_optional_decimal(response.best_ask),
+            last_trade_price=GatewayPolymarketClient._parse_optional_decimal(response.last_trade_price),
             event_id=response.event_id or None,
             event_slug=response.event_slug or None,
             group_slug=response.group_slug or None,
@@ -226,8 +286,6 @@ class GatewayPolymarketClient:
             }
         )
 
-    # crap-allowlist: VIB-4819 — proto-relocation PR touched the imports in this
-    # file, not this function body. Pre-existing complexity tracked separately.
     def get_positions(
         self,
         wallet: str | None = None,
@@ -248,34 +306,11 @@ class GatewayPolymarketClient:
             self._raise_rpc_error("GetPositions RPC failed", exc.details(), status_code=None)
         if not response.success:
             self._raise_rpc_error("GetPositions failed", response.error)
-        positions: list[Position] = []
-        for item in response.positions:
-            positions.append(
-                Position(
-                    market_id=item.market_id or item.condition_id,
-                    condition_id=item.condition_id,
-                    token_id=item.token_id or item.asset,
-                    outcome=item.outcome or "YES",
-                    size=Decimal(item.size or "0"),
-                    avg_price=Decimal(item.avg_price or "0"),
-                    current_price=Decimal(item.cur_price or "0"),
-                    realized_pnl=Decimal(item.realized_pnl or "0"),
-                    market_question=item.market_question,
-                )
-            )
-        if filters is not None:
-            if getattr(filters, "market", None):
-                positions = [p for p in positions if p.market_id == filters.market]
-            if getattr(filters, "outcome", None):
-                positions = [p for p in positions if p.outcome == filters.outcome]
-        return positions
+        positions = [self._parse_position(item) for item in response.positions]
+        return self._filter_positions(positions, filters) if filters is not None else positions
 
-    # crap-allowlist: VIB-4819 — proto-relocation PR touched the imports in this
-    # file, not this function body. Pre-existing complexity tracked separately.
     def get_open_orders(self, filters: OrderFilters | None = None) -> list[OpenOrder]:
-        request = polymarket_pb2.PolymarketGetOpenOrdersRequest(
-            market_id=filters.market if filters and filters.market else "",
-        )
+        request = self._open_orders_request(filters)
         try:
             response = self._gateway_client.connector_stub("polymarket").GetOpenOrders(
                 request, timeout=self._rpc_timeout()
@@ -285,30 +320,8 @@ class GatewayPolymarketClient:
         if not response.success:
             self._raise_rpc_error("GetOpenOrders failed", response.error)
 
-        orders: list[OpenOrder] = []
-        for item in response.orders:
-            created_at = None
-            if item.created_at:
-                try:
-                    created_at = datetime.fromisoformat(item.created_at.replace("Z", "+00:00"))
-                except ValueError:
-                    created_at = None
-            orders.append(
-                OpenOrder(
-                    order_id=item.order_id,
-                    market=item.market,
-                    side=item.side,
-                    price=Decimal(item.price or "0"),
-                    size=Decimal(item.original_size or "0"),
-                    filled_size=Decimal(item.size_matched or "0"),
-                    created_at=created_at,
-                    expiration=int(item.expiration) if item.expiration else None,
-                )
-            )
-        return orders
+        return [self._parse_open_order(item) for item in response.orders]
 
-    # crap-allowlist: VIB-4819 — proto-relocation PR touched the imports in this
-    # file, not this function body. Pre-existing complexity tracked separately.
     def get_order(self, order_id: str) -> OpenOrder | None:
         try:
             response = self._gateway_client.connector_stub("polymarket").GetOrder(
@@ -321,22 +334,7 @@ class GatewayPolymarketClient:
             if "not found" in (response.error or "").lower():
                 return None
             self._raise_rpc_error("GetOrder failed", response.error)
-        created_at = None
-        if response.created_at:
-            try:
-                created_at = datetime.fromisoformat(response.created_at.replace("Z", "+00:00"))
-            except ValueError:
-                created_at = None
-        return OpenOrder(
-            order_id=response.order_id,
-            market=response.market,
-            side=response.side,
-            price=Decimal(response.price or "0"),
-            size=Decimal(response.original_size or "0"),
-            filled_size=Decimal(response.size_matched or "0"),
-            created_at=created_at,
-            expiration=int(response.expiration) if response.expiration else None,
-        )
+        return self._parse_open_order(response)
 
     def get_price_history(
         self,

@@ -134,7 +134,6 @@ class UniswapV4Compiler(BaseProtocolCompiler[SwapCompilerContext]):
                 intent_id=intent.intent_id,
             )
 
-    # crap-allowlist: VIB-4688 — pre-existing logic (cc=6, well under threshold); coverage-driven score from phase-2 fold relocation. Unit-coverage backfill tracked in VIB-4688.
     def compile_lp_open(self, ctx: BaseCompilerContext, intent: LPOpenIntent) -> CompilationResult:
         """Compile LP_OPEN intent for Uniswap V4 via PositionManager."""
         result = CompilationResult(status=CompilationStatus.SUCCESS, intent_id=intent.intent_id)
@@ -174,7 +173,6 @@ class UniswapV4Compiler(BaseProtocolCompiler[SwapCompilerContext]):
 
         return result
 
-    # crap-allowlist: VIB-4688 — pre-existing logic (cc=15, at threshold); coverage-driven score from phase-2 fold relocation. Unit-coverage backfill tracked in VIB-4688.
     def compile_lp_close(self, ctx: BaseCompilerContext, intent: LPCloseIntent) -> CompilationResult:
         """Compile LP_CLOSE intent for Uniswap V4 via PositionManager."""
         # VIB-5346 defense-in-depth: position_id is an NFT/identity token-id for
@@ -199,14 +197,10 @@ class UniswapV4Compiler(BaseProtocolCompiler[SwapCompilerContext]):
 
         try:
             adapter = self._adapter(ctx)
-            liquidity = 0
-            currency0 = ""
-            currency1 = ""
             protocol_params = getattr(intent, "protocol_params", None) or {}
-            if protocol_params:
-                liquidity = int(protocol_params.get("liquidity", 0))
-                currency0 = protocol_params.get("currency0", "")
-                currency1 = protocol_params.get("currency1", "")
+            liquidity = int(protocol_params.get("liquidity", 0))
+            currency0 = protocol_params.get("currency0", "")
+            currency1 = protocol_params.get("currency1", "")
 
             # Resolve the close currencies from (in order) protocol_params, the
             # pool hint, then the position NFT on-chain (VIB-5361 close-by-id).
@@ -277,7 +271,6 @@ class UniswapV4Compiler(BaseProtocolCompiler[SwapCompilerContext]):
 
         return result
 
-    # crap-allowlist: VIB-4688 — pre-existing logic (cc=14, under threshold); coverage-driven score from phase-2 fold relocation. Unit-coverage backfill tracked in VIB-4688.
     def compile_collect_fees(self, ctx: BaseCompilerContext, intent: CollectFeesIntent) -> CompilationResult:
         """Compile LP_COLLECT_FEES intent for Uniswap V4 via PositionManager."""
         result = CompilationResult(status=CompilationStatus.SUCCESS, intent_id=intent.intent_id)
@@ -379,7 +372,6 @@ class UniswapV4Compiler(BaseProtocolCompiler[SwapCompilerContext]):
             tx_type=tx_type,
         )
 
-    # crap-allowlist: VIB-4688 — extracted helper from compile_lp_close during phase-2 fold; cc=6 (well under threshold); coverage-driven score. Unit-coverage backfill tracked in VIB-4688.
     @classmethod
     def _resolve_pool_currencies(cls, adapter: Any, pool: str, currency0: str, currency1: str) -> tuple[str, str]:
         try:

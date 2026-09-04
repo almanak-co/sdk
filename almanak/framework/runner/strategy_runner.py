@@ -708,42 +708,54 @@ class BridgeWaitState:
     current_intent: "AnyIntent | None" = None
 
 
-# =============================================================================
-# Position-key helpers (module-level so the parent function stays under CRAP)
-# =============================================================================
+@dataclass(frozen=True, slots=True)
+class _PreparedMultiChainExecution:
+    """Immutable inputs shared by the multi-chain execution lanes."""
+
+    deployment_id: str
+    orchestrator: "MultiChainOrchestrator"
+    chains_involved: tuple[str, ...]
+    has_cross_chain: bool
+    price_map: dict[str, str] | None
+    price_oracle: dict | None
 
 
-def _bridge_outbox_position_key(intent: Any, chain: str, wallet_address: str) -> str:
-    """Derive the BRIDGE outbox position_key (VIB-4164, T4).
+_OutboxPositionKey = tuple[str, str]
+_OutboxPositionKeyResolver = Callable[[Any, str, str, str, str, str | None], _OutboxPositionKey]
 
-    Returns the canonical ``bridge:{from_chain}:{to_chain}:{token}:{wallet}``
-    string, or ``""`` when any required field is missing. Extracted from
-    :meth:`StrategyRunner._compute_outbox_position_key` to keep the parent
-    method under the CRAP threshold (cc-allowance budget already consumed
-    by the pre-existing primitive branches).
 
-    Auditors join a source-leg PENDING row to its eventual destination-leg
-    SETTLED row by ``position_key`` alone; an empty key here would lose the
-    join across cross-chain settlement gaps.
-    """
+def _bridge_outbox_position_key(
+    intent: Any,
+    _intent_type: str,
+    _protocol: str,
+    chain: str,
+    wallet_address: str,
+    _resolved_pool: str | None,
+) -> _OutboxPositionKey:
+    """Derive the BRIDGE key used to join source and destination legs."""
     from_chain = str(getattr(intent, "from_chain", "") or chain).lower().strip()
     to_chain = str(getattr(intent, "to_chain", "") or "").lower().strip()
     token = str(getattr(intent, "token", "") or "").upper().strip()
     if from_chain and to_chain and token and wallet_address:
-        return f"bridge:{from_chain}:{to_chain}:{token}:{wallet_address.lower()}"
-    return ""
+        return f"bridge:{from_chain}:{to_chain}:{token}:{wallet_address.lower()}", ""
+    return "", ""
 
 
-def _prediction_outbox_position_key(intent: Any, protocol: str, chain: str, wallet_address: str) -> tuple[str, str]:
-    """Derive (position_key, market_id) for prediction-market intents (VIB-3707).
+def _prediction_outbox_position_key(
+    intent: Any,
+    _intent_type: str,
+    protocol: str,
+    chain: str,
+    wallet_address: str,
+    _resolved_pool: str | None,
+) -> _OutboxPositionKey:
+    """Derive the aggregate prediction-market key and market ID.
 
     Per-(market_id, outcome) aggregate position. ``PREDICTION_REDEEM``
     intents may carry ``outcome=None`` when redeeming all winning positions;
     in that case we cannot key the position_key here — the handler falls
     back to extracted_data/position_key reconstruction or surfaces an
-    unavailable event. Extracted as a sibling to
-    :func:`_bridge_outbox_position_key` to keep the parent method under
-    the CRAP threshold; semantics are unchanged from the inline form.
+    unavailable event.
     """
     from almanak.connectors._strategy_base.compiler_registry import CompilerRegistry
 
@@ -756,6 +768,139 @@ def _prediction_outbox_position_key(intent: Any, protocol: str, chain: str, wall
     else:
         position_key = ""
     return position_key, market_id
+
+
+def _lending_outbox_position_key(
+    intent: Any,
+    _intent_type: str,
+    protocol: str,
+    chain: str,
+    wallet_address: str,
+    _resolved_pool: str | None,
+) -> _OutboxPositionKey:
+    """Derive the lending key through the accounting-owned identity helpers."""
+    from ..accounting.lending_accounting import _derive_position_key, _intent_asset, _intent_market_id
+
+    market_id = _intent_market_id(intent) or ""
+    asset = _intent_asset(intent)
+    return _derive_position_key(protocol, chain, wallet_address, market_id or None, asset), market_id
+
+
+def _swap_outbox_position_key(
+    _intent: Any,
+    _intent_type: str,
+    _protocol: str,
+    chain: str,
+    wallet_address: str,
+    _resolved_pool: str | None,
+) -> _OutboxPositionKey:
+    """Derive the chain-and-wallet FIFO key for a generic swap."""
+    if chain and wallet_address:
+        return f"swap:{chain.lower().strip()}:{wallet_address.lower().strip()}", ""
+    return "", ""
+
+
+def _lp_outbox_position_key(
+    intent: Any,
+    intent_type: str,
+    protocol: str,
+    chain: str,
+    wallet_address: str,
+    resolved_pool: str | None,
+) -> _OutboxPositionKey:
+    """Derive a generic LP key unless a connector owns the treatment."""
+    from almanak.connectors._strategy_accounting_treatment_registry import AccountingTreatmentRegistry
+
+    if AccountingTreatmentRegistry.categorize(intent_type, protocol, "") is not None:
+        return "", ""
+
+    from ..accounting.lp_accounting import _get_pool_address
+
+    pool_address = _get_pool_address(intent, resolved_pool)
+    if not pool_address:
+        return "", ""
+    return f"lp:{protocol}:{chain.lower()}:{wallet_address.lower()}:{pool_address}", pool_address
+
+
+def _perp_outbox_position_key(
+    intent: Any,
+    _intent_type: str,
+    protocol: str,
+    chain: str,
+    wallet_address: str,
+    _resolved_pool: str | None,
+) -> _OutboxPositionKey:
+    """Derive the separator-insensitive perpetual-market key."""
+    canonical = perp_market_identity_key(getattr(intent, "market", ""))
+    market = canonical.lower().replace(" ", "_")
+    if market:
+        return f"perp:{protocol}:{chain.lower()}:{wallet_address.lower()}:{market}", market
+    return "", market
+
+
+def _address_outbox_position_key(
+    prefix: str,
+    intent: Any,
+    protocol: str,
+    chain: str,
+    wallet_address: str,
+) -> _OutboxPositionKey:
+    """Derive a vault-address key while preserving the legacy normalization."""
+    vault_address = (getattr(intent, "vault_address", "") or "").lower()
+    if vault_address:
+        return f"{prefix}:{protocol}:{chain.lower()}:{wallet_address.lower()}:{vault_address}", vault_address
+    return "", vault_address
+
+
+def _vault_outbox_position_key(
+    intent: Any,
+    _intent_type: str,
+    protocol: str,
+    chain: str,
+    wallet_address: str,
+    _resolved_pool: str | None,
+) -> _OutboxPositionKey:
+    return _address_outbox_position_key("vault", intent, protocol, chain, wallet_address)
+
+
+def _settlement_outbox_position_key(
+    intent: Any,
+    _intent_type: str,
+    protocol: str,
+    chain: str,
+    wallet_address: str,
+    _resolved_pool: str | None,
+) -> _OutboxPositionKey:
+    return _address_outbox_position_key("settlement", intent, protocol, chain, wallet_address)
+
+
+_OUTBOX_POSITION_KEY_RESOLVERS: dict[str, _OutboxPositionKeyResolver] = {
+    "SUPPLY": _lending_outbox_position_key,
+    "BORROW": _lending_outbox_position_key,
+    "REPAY": _lending_outbox_position_key,
+    "DELEVERAGE": _lending_outbox_position_key,
+    "WITHDRAW": _lending_outbox_position_key,
+    "SWAP": _swap_outbox_position_key,
+    "LP_OPEN": _lp_outbox_position_key,
+    "LP_CLOSE": _lp_outbox_position_key,
+    "LP_COLLECT_FEES": _lp_outbox_position_key,
+    "PERP_OPEN": _perp_outbox_position_key,
+    "PERP_CLOSE": _perp_outbox_position_key,
+    "PERP_INCREASE": _perp_outbox_position_key,
+    "PERP_DECREASE": _perp_outbox_position_key,
+    "PERP_LIQUIDATE": _perp_outbox_position_key,
+    "VAULT_DEPOSIT": _vault_outbox_position_key,
+    "VAULT_WITHDRAW": _vault_outbox_position_key,
+    "VAULT_REDEEM": _vault_outbox_position_key,
+    "VAULT_HARVEST": _vault_outbox_position_key,
+    "VAULT_REALLOCATE": _vault_outbox_position_key,
+    "SETTLE_DEPOSIT": _settlement_outbox_position_key,
+    "SETTLE_REDEEM": _settlement_outbox_position_key,
+    "PREDICTION_BUY": _prediction_outbox_position_key,
+    "PREDICTION_SELL": _prediction_outbox_position_key,
+    "PREDICTION_REDEEM": _prediction_outbox_position_key,
+    "BRIDGE": _bridge_outbox_position_key,
+}
 
 
 # =============================================================================
@@ -2099,20 +2244,52 @@ class StrategyRunner:
         state.decide_result = decide_result
         return None
 
-    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     def _step_extract_intents(self, state: RunIterationState) -> IterationResult | None:
         """Normalise ``decide_result`` into ``state.intents`` and handle HOLD."""
         strategy = state.strategy
-        deployment_id = state.deployment_id
         decide_result = state.decide_result
 
-        # Step 3: Extract intents from DecideResult
-        intents: list[AnyIntent] = []
+        intents = self._interpret_decide_result(decide_result)
+
+        # Keep this type gate at the runner seam. MagicMock
+        # strategies synthesize attributes, so callable() alone is insufficient.
+        from ..strategies.lp_position_tracker import LPPositionTracker
+
+        tracker = getattr(strategy, "_lp_position_tracker", None)
+        inject_fn = getattr(strategy, "_framework_inject_intent_params", None)
+        framework_inject = (
+            cast(Callable[[AnyIntent], AnyIntent], inject_fn)
+            if isinstance(tracker, LPPositionTracker) and callable(inject_fn)
+            else None
+        )
+        intents = self._inject_framework_intent_metadata(intents, framework_inject)
+
+        self._invoke_optional_hook(strategy, "on_copy_decision_output", decide_result, intents)
+        state.intents = intents
+
+        if not intents or (len(intents) == 1 and isinstance(intents[0], HoldIntent)):
+            hold_intent = intents[0] if intents and isinstance(intents[0], HoldIntent) else None
+            reason = hold_intent.reason if hold_intent is not None else "No action"
+            data_error = self._validate_no_action_market_data(state, hold_intent)
+            if data_error is not None:
+                return data_error
+            return self._complete_hold_iteration(state, hold_intent, reason)
+        return None
+
+    @staticmethod
+    def _interpret_decide_result(decide_result: Any) -> list[AnyIntent]:
+        """Return the legacy shallow intent list represented by ``decide_result``.
+
+        A top-level sequence and sequences directly inside a list are expanded in
+        order. Other values remain one leaf, and ``None`` leaves are discarded,
+        preserving the runner's historical downstream validation behavior.
+        """
         if decide_result is None:
             intents = []
         elif isinstance(decide_result, IntentSequence):
             intents = list(decide_result)
         elif isinstance(decide_result, list):
+            intents = []
             for item in decide_result:
                 if isinstance(item, IntentSequence):
                     intents.extend(list(item))
@@ -2121,115 +2298,92 @@ class StrategyRunner:
         else:
             intents = [decide_result]
 
-        # Filter out None values and check for HOLD
-        intents = [i for i in intents if i is not None]
+        return [intent for intent in intents if intent is not None]
 
-        # VIB-3742: framework auto-injects tracked LP position metadata
-        # (e.g. TraderJoe V2 bin_ids captured at LP_OPEN) into LP_CLOSE /
-        # LP_COLLECT_FEES intents that would otherwise lack ``protocol_params``.
-        # Strategies that already supply protocol_params manually are
-        # unaffected — the tracker never overwrites caller-supplied data.
-        # See almanak/framework/strategies/lp_position_tracker.py.
-        #
-        # Gate strictly on a real LPPositionTracker — MagicMock fake
-        # strategies in unit tests synthesize attributes on demand, so an
-        # ``isinstance`` check is the only reliable filter.
-        from ..strategies.lp_position_tracker import LPPositionTracker
+    @staticmethod
+    def _inject_framework_intent_metadata(
+        intents: list[AnyIntent],
+        framework_inject: Callable[[AnyIntent], AnyIntent] | None,
+    ) -> list[AnyIntent]:
+        """Apply framework-owned LP metadata in order without replacing failures."""
+        if framework_inject is None:
+            return intents
 
-        tracker = getattr(strategy, "_lp_position_tracker", None)
-        inject_fn = getattr(strategy, "_framework_inject_intent_params", None)
-        if isinstance(tracker, LPPositionTracker) and callable(inject_fn):
-            framework_inject = cast(Callable[[AnyIntent], AnyIntent], inject_fn)
-            injected_intents: list[AnyIntent] = []
-            for raw_intent in intents:
-                try:
-                    injected_intents.append(framework_inject(raw_intent))
-                except Exception as exc:  # noqa: BLE001 — defensive
-                    logger.warning(
-                        "Framework intent-injection hook raised (non-fatal, passing original intent): %s",
-                        exc,
-                        exc_info=True,
-                    )
-                    injected_intents.append(raw_intent)
-            intents = injected_intents
+        injected_intents: list[AnyIntent] = []
+        for raw_intent in intents:
+            try:
+                injected_intents.append(framework_inject(raw_intent))
+            except Exception as exc:  # noqa: BLE001 — metadata enrichment is non-fatal
+                logger.warning(
+                    "Framework intent-injection hook raised (non-fatal, passing original intent): %s",
+                    exc,
+                    exc_info=True,
+                )
+                injected_intents.append(raw_intent)
+        return injected_intents
 
-        self._invoke_optional_hook(strategy, "on_copy_decision_output", decide_result, intents)
+    def _validate_no_action_market_data(
+        self,
+        state: RunIterationState,
+        hold_intent: HoldIntent | None,
+    ) -> IterationResult | None:
+        """Return DATA_ERROR when a no-action decision lacked usable market data."""
+        market = state.market
+        if (
+            market is None
+            or not hasattr(market, "has_critical_data_failures")
+            or not callable(market.has_critical_data_failures)
+            or not market.has_critical_data_failures()
+        ):
+            return None
 
-        state.intents = intents
-
-        # Step 4: Handle HOLD or no intent
-        if not intents or (len(intents) == 1 and isinstance(intents[0], HoldIntent)):
-            hold_intent = intents[0] if intents else None
-            reason = hold_intent.reason if isinstance(hold_intent, HoldIntent) else "No action"
-
-            # HOLD should only be considered healthy when the strategy had
-            # valid data to make that decision. If market-data provider calls
-            # failed unexpectedly, route this cycle into the regular failure
-            # path (SadFlow/consecutive-error escalation) instead of silently
-            # counting it as success forever.
-            market = state.market
-            if (
-                market is not None
-                and hasattr(market, "has_critical_data_failures")
-                and callable(market.has_critical_data_failures)
-                and market.has_critical_data_failures()
-            ):
-                # Quiet-pool liveness backstop: a DEX pool with no recent swaps
-                # returns *stale* (not absent) OHLCV, so trade-derived indicators
-                # can't be computed — but the asset is still continuously
-                # priceable from the 24/7 oracle. Holding through that is benign,
-                # not a data failure; escalating would trip the breaker on a live
-                # pool. Only escalate when the pool is NOT priceable (genuinely
-                # dead/unreachable).
-                # Fail safe: suppress the DATA_ERROR escalation only on an
-                # explicit ``True``. ``is_quiet_pool_hold`` is an optional snapshot
-                # method; anything other than a definite True (missing method,
-                # non-bool) means "not confirmed quiet+live" → escalate as before.
-                if (
-                    hasattr(market, "is_quiet_pool_hold")
-                    and callable(market.is_quiet_pool_hold)
-                    and market.is_quiet_pool_hold() is True
-                ):
-                    logger.info(
-                        "%s HOLD on quiet but live pool (no recent trades; price still available) "
-                        "— not escalating to DATA_ERROR",
-                        deployment_id,
-                    )
-                else:
-                    classification = "unknown"
-                    if hasattr(market, "classify_critical_data_failures") and callable(
-                        market.classify_critical_data_failures
-                    ):
-                        classification = market.classify_critical_data_failures()
-                    details = ""
-                    if hasattr(market, "summarize_critical_data_failures") and callable(
-                        market.summarize_critical_data_failures
-                    ):
-                        details = market.summarize_critical_data_failures(limit=3)
-                    error = (
-                        f"Critical market-data failures while strategy returned HOLD (classification={classification})"
-                    )
-                    if details:
-                        error = f"{error}: {details}"
-                    logger.error("%s", error)
-                    return self._create_error_result(
-                        deployment_id,
-                        IterationStatus.DATA_ERROR,
-                        error,
-                        state.start_time,
-                        intent=hold_intent,
-                    )
-
-            hold_prefix = "⏸️" if _emojis_enabled() else "[HOLD]"
-            logger.info(f"{hold_prefix} {deployment_id} HOLD: {reason}")
-            self._record_success()
-            return IterationResult(
-                status=IterationStatus.HOLD,
-                intent=hold_intent,
-                deployment_id=deployment_id,
-                duration_ms=self._calculate_duration_ms(state.start_time),
+        # Suppression requires an explicit True so malformed optional results fail safe.
+        if (
+            hasattr(market, "is_quiet_pool_hold")
+            and callable(market.is_quiet_pool_hold)
+            and market.is_quiet_pool_hold() is True
+        ):
+            logger.info(
+                "%s HOLD on quiet but live pool (no recent trades; price still available) "
+                "— not escalating to DATA_ERROR",
+                state.deployment_id,
             )
-        return None
+            return None
+
+        classification = "unknown"
+        if hasattr(market, "classify_critical_data_failures") and callable(market.classify_critical_data_failures):
+            classification = market.classify_critical_data_failures()
+        details = ""
+        if hasattr(market, "summarize_critical_data_failures") and callable(market.summarize_critical_data_failures):
+            details = market.summarize_critical_data_failures(limit=3)
+        error = f"Critical market-data failures while strategy returned HOLD (classification={classification})"
+        if details:
+            error = f"{error}: {details}"
+        logger.error("%s", error)
+        return self._create_error_result(
+            state.deployment_id,
+            IterationStatus.DATA_ERROR,
+            error,
+            state.start_time,
+            intent=hold_intent,
+        )
+
+    def _complete_hold_iteration(
+        self,
+        state: RunIterationState,
+        hold_intent: HoldIntent | None,
+        reason: str | None,
+    ) -> IterationResult:
+        """Log and record a healthy HOLD/no-action iteration."""
+        hold_prefix = "⏸️" if _emojis_enabled() else "[HOLD]"
+        logger.info(f"{hold_prefix} {state.deployment_id} HOLD: {reason}")
+        self._record_success()
+        return IterationResult(
+            status=IterationStatus.HOLD,
+            intent=hold_intent,
+            deployment_id=state.deployment_id,
+            duration_ms=self._calculate_duration_ms(state.start_time),
+        )
 
     async def _step_attach_lp_outstanding(self, state: RunIterationState) -> None:
         """Attach the deployment's outstanding fungible-LP bound to LP_CLOSE intents (VIB-6517).
@@ -2488,8 +2642,7 @@ class StrategyRunner:
             )
         return await self._run_single_chain_intents(state)
 
-    # crap-allowlist: VIB-4640 — pre-existing intent-dispatch loop; PR #2370 reduced cc 31→30 via _has_downstream_chained_amount extraction
-    async def _run_single_chain_intents(self, state: RunIterationState) -> IterationResult:  # noqa: C901
+    async def _run_single_chain_intents(self, state: RunIterationState) -> IterationResult:
         """Sequentially execute intents through the single-chain orchestrator.
 
         Handles amount='all' resolution (from previous step output or wallet
@@ -2503,33 +2656,46 @@ class StrategyRunner:
         start_time = state.start_time
         pre_balances = state.pre_balances
         intent_tokens = state.intent_tokens
-
-        # Single-chain execution path
-        # Execute all intents sequentially, stopping on first failure
         if len(intents) > 1:
             logger.info(f"Executing {len(intents)} intents sequentially for {strategy.deployment_id}")
 
-        _chain = getattr(strategy, "chain", "")
-        intent_result: IterationResult | None = None
-        # Issue #1780: track whether the final ``intent_result`` came
-        # from the amount='all' resolver short-circuit (no
-        # ``_execute_single_chain`` call). Single-intent iterations that
-        # short-circuit here never reach a helper that records metrics,
-        # so ``_run_single_chain_intents`` must record on their behalf.
-        result_from_early_shortcut = False
         is_multi_intent = len(intents) > 1
+        intent_result, result_from_early_shortcut = await self._execute_single_chain_intent_sequence(
+            strategy=strategy,
+            intents=intents,
+            market=market,
+            start_time=start_time,
+            is_multi_intent=is_multi_intent,
+        )
+        self._record_single_chain_sequence_metrics(
+            intent_result,
+            is_multi_intent=is_multi_intent,
+            result_from_early_shortcut=result_from_early_shortcut,
+        )
+        await self._log_single_chain_balance_deltas(
+            pre_balances=pre_balances,
+            intent_tokens=intent_tokens,
+            intent_result=intent_result,
+        )
+        return intent_result  # type: ignore[return-value]
+
+    async def _execute_single_chain_intent_sequence(
+        self,
+        *,
+        strategy: "StrategyProtocol",
+        intents: list["AnyIntent"],
+        market: Any,
+        start_time: datetime,
+        is_multi_intent: bool,
+    ) -> tuple[IterationResult | None, bool]:
+        """Resolve and execute each intent in order, stopping at the first failure."""
+        intent_result: IterationResult | None = None
+        result_from_early_shortcut = False
         previous_amount_received: Decimal | None = None
-        # VIB-5346: WEI lane for fungible-LP close chaining. Strictly separate
-        # from ``previous_amount_received`` (the swap-output human-unit lane):
-        # carries the prior LP_OPEN's minted-LP wei so a downstream LP_CLOSE
-        # amount="all" can resolve its position_id. Never read/written by the
-        # swap path; the two lanes never cross.
         previous_lp_minted_wei: int | None = None
+        chain = getattr(strategy, "chain", "")
+
         for idx, intent in enumerate(intents):
-            # Resolve amount="all" from previous step's output or wallet balance.
-            # Returns (intent_to_execute, early_result, should_continue) where
-            # early_result is a failure/dry-run sentinel and should_continue
-            # signals whether to skip this step without breaking the loop.
             (
                 intent_to_execute,
                 early_result,
@@ -2554,7 +2720,8 @@ class StrategyRunner:
 
             if is_multi_intent:
                 logger.info(
-                    f"  Executing intent {idx + 1}/{len(intents)}: {_format_intent_for_log(intent_to_execute, chain=_chain)}"
+                    f"  Executing intent {idx + 1}/{len(intents)}: "
+                    f"{_format_intent_for_log(intent_to_execute, chain=chain)}"
                 )
 
             intent_result = await self._execute_single_chain(
@@ -2565,49 +2732,16 @@ class StrategyRunner:
                 market=market,
                 record_metrics=not is_multi_intent,
             )
-            # Once _execute_single_chain ran, it owns metrics for this
-            # step (via record_metrics=True on single-intent). Flip the
-            # flag off so a later iteration's early_result in a
-            # multi-intent sequence doesn't mis-attribute ownership.
             result_from_early_shortcut = False
 
-            # Track amount received for chaining to next step
-            if intent_result.status == IterationStatus.SUCCESS and intent_result.execution_result:
-                er = intent_result.execution_result
-                if er.swap_amounts and er.swap_amounts.amount_out_decimal is not None:
-                    previous_amount_received = er.swap_amounts.amount_out_decimal
-                else:
-                    # No output amount extracted -- do NOT fall back to input amount
-                    # (input and output can differ wildly, e.g. 1000 USDC -> 0.5 ETH).
-                    # Reset to None so the next chained step fails explicitly
-                    # if it uses amount="all" (prevents stale value reuse).
-                    previous_amount_received = None
-                    if is_multi_intent and self._has_downstream_chained_amount(intents, idx):
-                        logger.warning(
-                            "Amount chaining: no output amount extracted from step %d; "
-                            "subsequent amount='all' steps will fail",
-                            idx + 1,
-                        )
+            if intent_result.status == IterationStatus.SUCCESS:
+                previous_amount_received, previous_lp_minted_wei = self._single_chain_chaining_outputs(
+                    intent_result.execution_result,
+                    intents=intents,
+                    idx=idx,
+                    is_multi_intent=is_multi_intent,
+                )
 
-                # VIB-5346: WEI lane. Capture the minted-LP wei from an LP_OPEN
-                # so a downstream LP_CLOSE amount="all" can resolve its
-                # position_id. Strictly separate from the swap-output lane above:
-                # never touches ``previous_amount_received`` and never reads
-                # ``swap_amounts``.
-                lp_open = StrategyRunner._result_lp_open_data(er)
-                if lp_open is not None and getattr(lp_open, "liquidity", None) is not None:
-                    previous_lp_minted_wei = int(lp_open.liquidity)
-                else:
-                    previous_lp_minted_wei = None
-            elif intent_result.status == IterationStatus.SUCCESS:
-                # VIB-5346 robustness: a SUCCESS step with a falsy
-                # ``execution_result`` produced no measurable output. Reset BOTH
-                # chaining lanes so a downstream ``amount="all"`` step fails
-                # explicitly rather than re-using a stale prior value.
-                previous_amount_received = None
-                previous_lp_minted_wei = None
-
-            # Stop on failure - don't execute subsequent intents
             if not intent_result.success:
                 if is_multi_intent:
                     logger.warning(
@@ -2616,49 +2750,84 @@ class StrategyRunner:
                     )
                 break
 
-        # Record metrics for paths that do NOT go through a helper that
-        # already records them:
-        #   - multi-intent sequences always record here (the per-step
-        #     ``_execute_single_chain`` calls run with record_metrics=False).
-        #   - single-intent iterations that short-circuited via
-        #     ``_resolve_chained_amount_*`` (e.g. COMPILATION_FAILED when
-        #     wallet balance is 0) never reach ``_execute_single_chain``
-        #     and therefore no helper recorded them -- fix for issue
-        #     #1780, which flagged those as invisible in the lifetime
-        #     total. ``consecutive_errors`` and the circuit breaker are
-        #     still handled by ``handle_iteration_failure`` in the outer
-        #     run loop.
-        needs_record_here = is_multi_intent or result_from_early_shortcut
-        if needs_record_here and intent_result is not None:
-            if intent_result.success:
-                self._record_success(execution_proved=intent_result.status == IterationStatus.SUCCESS)
-            else:
-                self._record_failure()
+        return intent_result, result_from_early_shortcut
 
-        # Step 6.9: Compute and log balance deltas after execution
-        if pre_balances and intent_result is not None and intent_result.success:
-            try:
-                self.balance_provider.invalidate_cache()
-                post_balances: dict[str, Decimal] = {}
-                for token in intent_tokens:
-                    try:
-                        bal = await self.balance_provider.get_balance(token)
-                        post_balances[token] = bal.balance
-                    except Exception:
-                        pass
-                deltas = {}
-                for token in intent_tokens:
-                    if token in pre_balances and token in post_balances:
-                        delta = post_balances[token] - pre_balances[token]
-                        if delta != 0:
-                            deltas[token] = f"{delta:+.6g}"
-                if deltas:
-                    delta_str = ", ".join(f"{t}: {v}" for t, v in deltas.items())
-                    logger.info(f"Balance delta: {delta_str}")
-            except Exception:
-                logger.debug("Failed to compute balance deltas", exc_info=True)
+    def _single_chain_chaining_outputs(
+        self,
+        execution_result: Any | None,
+        *,
+        intents: list["AnyIntent"],
+        idx: int,
+        is_multi_intent: bool,
+    ) -> tuple[Decimal | None, int | None]:
+        """Read the human-unit swap lane and wei-denominated LP lane from one result."""
+        if not execution_result:
+            return None, None
 
-        return intent_result  # type: ignore[return-value]
+        # Swap output is human-unit Decimal; LP liquidity is a separate raw-wei lane.
+        previous_amount_received: Decimal | None = None
+        swap_amounts = execution_result.swap_amounts
+        if swap_amounts and swap_amounts.amount_out_decimal is not None:
+            previous_amount_received = swap_amounts.amount_out_decimal
+        elif is_multi_intent and self._has_downstream_chained_amount(intents, idx):
+            logger.warning(
+                "Amount chaining: no output amount extracted from step %d; subsequent amount='all' steps will fail",
+                idx + 1,
+            )
+
+        lp_open = StrategyRunner._result_lp_open_data(execution_result)
+        previous_lp_minted_wei = (
+            int(lp_open.liquidity) if lp_open is not None and getattr(lp_open, "liquidity", None) is not None else None
+        )
+        return previous_amount_received, previous_lp_minted_wei
+
+    def _record_single_chain_sequence_metrics(
+        self,
+        intent_result: IterationResult | None,
+        *,
+        is_multi_intent: bool,
+        result_from_early_shortcut: bool,
+    ) -> None:
+        """Record metrics only when the per-intent executor did not own them."""
+        if intent_result is None or not (is_multi_intent or result_from_early_shortcut):
+            return
+        if intent_result.success:
+            self._record_success(execution_proved=intent_result.status == IterationStatus.SUCCESS)
+        else:
+            self._record_failure()
+
+    async def _log_single_chain_balance_deltas(
+        self,
+        *,
+        pre_balances: dict[str, Decimal],
+        intent_tokens: list[str],
+        intent_result: IterationResult | None,
+    ) -> None:
+        """Best-effort post-execution balance observation for successful iterations."""
+        if not pre_balances or intent_result is None or not intent_result.success:
+            return
+
+        try:
+            self.balance_provider.invalidate_cache()
+            post_balances: dict[str, Decimal] = {}
+            for token in intent_tokens:
+                try:
+                    bal = await self.balance_provider.get_balance(token)
+                    post_balances[token] = bal.balance
+                except Exception:
+                    pass
+
+            deltas = {}
+            for token in intent_tokens:
+                if token in pre_balances and token in post_balances:
+                    delta = post_balances[token] - pre_balances[token]
+                    if delta != 0:
+                        deltas[token] = f"{delta:+.6g}"
+            if deltas:
+                delta_str = ", ".join(f"{token}: {delta}" for token, delta in deltas.items())
+                logger.info(f"Balance delta: {delta_str}")
+        except Exception:
+            logger.debug("Failed to compute balance deltas", exc_info=True)
 
     @staticmethod
     def _has_downstream_chained_amount(intents: list["AnyIntent"], idx: int) -> bool:
@@ -6883,14 +7052,6 @@ class StrategyRunner:
             v4_lp_close_native_principal=v4_lp_close_native_principal,
         )
 
-    # Pre-T4 this function was cc=37; VIB-4164 (T4) extracted the BRIDGE and
-    # Prediction branches into module-level helpers (cc dropped to 27). The
-    # architectural shape — a registry-pattern dispatch parallel to T3's
-    # category_handlers.HANDLERS — is tracked in VIB-4222; bundling that
-    # multi-branch refactor into the BRIDGE→TRANSFER PR violates
-    # .claude/rules/crap-refactor.md (registry shape needs a plan-agent
-    # design pass + truth-table parity precursor).
-    # crap-allowlist: VIB-4222 — pre-existing primitive-dispatch ladder; T4 reduced cc 37→27
     def _compute_outbox_position_key(
         self,
         intent: "AnyIntent",
@@ -6912,107 +7073,25 @@ class StrategyRunner:
         """
         try:
             protocol = (getattr(intent, "protocol", "") or "").lower()
-            t = intent_type_str.upper()
+            intent_type = intent_type_str.upper()
 
-            # Connectors with custom accounting publish their outbox position-key
-            # derivation via the strategy-side registry (VIB-4931). This probe
-            # runs FIRST — mirroring the dispatcher's registry stage-1 (Blueprint
-            # 27 §10.5) — so a connector-owned event keys by its connector
-            # treatment, not the generic branches below. In particular a Pendle PT
-            # redeem arrives as WITHDRAW; without registry-first it would take the
-            # lending branch and get a lending key, breaking the PT FIFO match
-            # (VIB-4988). `position_key_for` returns None for every protocol whose
-            # connector does not publish a position_key (only Pendle does today),
-            # so every genuine lending WITHDRAW falls through to the lending branch
-            # with a byte-identical key.
             from almanak.connectors._strategy_accounting_treatment_registry import (
                 AccountingTreatmentRegistry,
             )
 
             registry_key = AccountingTreatmentRegistry.position_key_for(
-                protocol, intent_type=t, chain=chain, wallet=wallet_address, intent=intent
+                protocol,
+                intent_type=intent_type,
+                chain=chain,
+                wallet=wallet_address,
+                intent=intent,
             )
             if registry_key is not None:
                 return registry_key
 
-            # Lending (SUPPLY / BORROW / REPAY / DELEVERAGE / WITHDRAW)
-            if t in {"SUPPLY", "BORROW", "REPAY", "DELEVERAGE", "WITHDRAW"}:
-                from ..accounting.lending_accounting import _derive_position_key, _intent_asset, _intent_market_id
-
-                market_id = _intent_market_id(intent) or ""
-                asset = _intent_asset(intent)
-                position_key = _derive_position_key(protocol, chain, wallet_address, market_id or None, asset)
-                return position_key, market_id
-
-            # Generic SWAP — position key groups by chain+wallet for FIFO lot tracking.
-            if t == "SWAP":
-                position_key = (
-                    f"swap:{chain.lower().strip()}:{wallet_address.lower().strip()}"
-                    if (chain and wallet_address)
-                    else ""
-                )
-                return position_key, ""
-
-            # Generic LP (LP_OPEN / LP_CLOSE / LP_COLLECT_FEES). Connector-owned
-            # accounting treatments opt out of this fallback even when they do not
-            # publish a custom position key for a particular LP event.
-            if (
-                t in {"LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"}
-                and AccountingTreatmentRegistry.categorize(t, protocol, "") is None
-            ):
-                from ..accounting.lp_accounting import _get_pool_address as _lp_pool_addr
-
-                pool_address = _lp_pool_addr(intent, resolved_pool)
-                if pool_address:
-                    position_key = f"lp:{protocol}:{chain.lower()}:{wallet_address.lower()}:{pool_address}"
-                return position_key, pool_address
-
-            # Perp (PERP_OPEN / PERP_CLOSE / PERP_INCREASE / PERP_DECREASE / PERP_LIQUIDATE)
-            if t in {"PERP_OPEN", "PERP_CLOSE", "PERP_INCREASE", "PERP_DECREASE", "PERP_LIQUIDATE"}:
-                # VIB-6412: canonicalise separators before keying. GMX V2 accepts
-                # several spellings of one market (ALM-3094), and the raw string
-                # would mint a distinct lot-matching key per spelling.
-                canonical = perp_market_identity_key(getattr(intent, "market", ""))
-                market = canonical.lower().replace(" ", "_")
-                position_key = f"perp:{protocol}:{chain.lower()}:{wallet_address.lower()}:{market}" if market else ""
-                return position_key, market
-
-            # Vault (VAULT_DEPOSIT / VAULT_WITHDRAW / VAULT_REDEEM / VAULT_HARVEST / VAULT_REALLOCATE)
-            if t in {"VAULT_DEPOSIT", "VAULT_WITHDRAW", "VAULT_REDEEM", "VAULT_HARVEST", "VAULT_REALLOCATE"}:
-                vault_address = (getattr(intent, "vault_address", "") or "").lower()
-                position_key = (
-                    f"vault:{protocol}:{chain.lower()}:{wallet_address.lower()}:{vault_address}"
-                    if vault_address
-                    else ""
-                )
-                return position_key, vault_address
-
-            # Vault SETTLEMENT (SETTLE_DEPOSIT / SETTLE_REDEEM) — VIB-5666. Keyed
-            # per (protocol, chain, wallet, vault_address) so the settlement
-            # handler resolves the vault from the outbox ``market_id`` (a
-            # settlement is not a strategy position — position_type is None — but
-            # the row still needs a stable vault identity for grouping/audit).
-            if t in {"SETTLE_DEPOSIT", "SETTLE_REDEEM"}:
-                vault_address = (getattr(intent, "vault_address", "") or "").lower()
-                position_key = (
-                    f"settlement:{protocol}:{chain.lower()}:{wallet_address.lower()}:{vault_address}"
-                    if vault_address
-                    else ""
-                )
-                return position_key, vault_address
-
-            # Prediction (PREDICTION_BUY / PREDICTION_SELL / PREDICTION_REDEEM) — VIB-3707.
-            # Delegated to module-level helper to keep this function under
-            # the CRAP threshold.
-            if t in {"PREDICTION_BUY", "PREDICTION_SELL", "PREDICTION_REDEEM"}:
-                return _prediction_outbox_position_key(intent, protocol, chain, wallet_address)
-
-            # BRIDGE — VIB-4164 (T4). Delegated to module-level helper to
-            # keep `_compute_outbox_position_key`'s cyclomatic complexity
-            # under the CRAP threshold.
-            if t == "BRIDGE":
-                return _bridge_outbox_position_key(intent, chain, wallet_address), ""
-
+            resolver = _OUTBOX_POSITION_KEY_RESOLVERS.get(intent_type)
+            if resolver is not None:
+                return resolver(intent, intent_type, protocol, chain, wallet_address, resolved_pool)
         except Exception:
             logger.debug("_compute_outbox_position_key failed", exc_info=True)
 
@@ -8405,12 +8484,6 @@ class StrategyRunner:
         except Exception:  # noqa: BLE001 — never raise on a best-effort refresh
             return None
 
-    # crap-allowlist: VIB-5866 — this edit is a MECHANICAL extra_tokens pass-through to
-    # _refresh_price_oracle_for_ledger (no branches added); the function is pre-existing
-    # high-CRAP/low-coverage on main (cc=14, ~4% cov — nested with_sources + address/coin
-    # backfill + legacy paths). The added tracked-token pricing is fully tested in
-    # _refresh_price_oracle_for_ledger; broadening _merge_oracle_for_ledger coverage is
-    # pre-existing debt, not introduced here.
     def _merge_oracle_for_ledger(self, state: Any, intent: AnyIntent, result: Any | None = None) -> dict | None:
         """Refresh the market oracle and merge with the cached one.
 
@@ -8478,35 +8551,15 @@ class StrategyRunner:
                 logger.debug("get_price_oracle_dict(with_sources=True) raised", exc_info=True)
                 nested_with_sources = None
 
+        # Cached values override the flat refresh. Source-aware observations then
+        # replace matching scalars so their provenance reaches the ledger.
+        merged: dict = {**refreshed, **cached}
         if nested_with_sources:
-            # Overlay the source-aware nested entries on top of the flat
-            # cached/refreshed dict so the ledger writer's normaliser
-            # passes the provenance through. Cached/refreshed entries
-            # without a nested counterpart stay as Decimals (writer wraps
-            # them with oracle_source="unknown").
-            merged: dict = {**refreshed, **cached}
-            for sym, payload in nested_with_sources.items():
-                merged[sym] = payload
-            merged = self._backfill_address_priced_legs(market, merged, intent, result, with_sources=True)
-            # VIB-5553 — also price a Curve LP event's pool-coin SYMBOLS (USDT/WBTC/
-            # WETH for tricrypto) so a non-USD-stable close books per-event USD.
-            merged = self._backfill_coin_symbol_legs(market, merged, intent, result, with_sources=True)
-            return merged or None
-
-        if not cached and not refreshed:
-            # Even with no cached/refreshed symbol prices, a receipt-bearing
-            # result may still let us price coingecko-null legs by address.
-            backfilled = self._backfill_address_priced_legs(market, {}, intent, result, with_sources=False)
-            # VIB-5553 — Curve pool-coin symbol prices (see _merge_oracle_for_ledger).
-            backfilled = self._backfill_coin_symbol_legs(market, backfilled, intent, result, with_sources=False)
-            return backfilled or None
-        # Legacy path: ``refreshed`` first, ``cached`` overrides — preserves
-        # cached provenance / confidence on overlap, fills gaps from refresh.
-        merged_flat: dict = {**refreshed, **cached}
-        merged_flat = self._backfill_address_priced_legs(market, merged_flat, intent, result, with_sources=False)
-        # VIB-5553 — Curve pool-coin symbol prices (see _merge_oracle_for_ledger).
-        merged_flat = self._backfill_coin_symbol_legs(market, merged_flat, intent, result, with_sources=False)
-        return merged_flat or None
+            merged.update(nested_with_sources)
+        with_sources = bool(nested_with_sources)
+        merged = self._backfill_address_priced_legs(market, merged, intent, result, with_sources=with_sources)
+        merged = self._backfill_coin_symbol_legs(market, merged, intent, result, with_sources=with_sources)
+        return merged or None
 
     @staticmethod
     def _receipt_token_legs(result: Any | None) -> list[str]:
@@ -10488,7 +10541,6 @@ class StrategyRunner:
             failure_kind=refusal_kind,
         )
 
-    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     async def _check_and_resume_stuck_execution(
         self,
         strategy: StrategyProtocol,
@@ -10762,8 +10814,7 @@ class StrategyRunner:
             "may still deliver destination assets; reconcile and seal the bridge execution before teardown"
         )
 
-    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
-    async def _execute_multi_chain(  # noqa: C901
+    async def _execute_multi_chain(
         self,
         strategy: StrategyProtocol,
         intents: list[AnyIntent],
@@ -10792,100 +10843,153 @@ class StrategyRunner:
         Returns:
             IterationResult with execution details
         """
-        deployment_id = strategy.deployment_id
-
-        # Type assertion for multi-chain orchestrator
         assert isinstance(self.execution_orchestrator, MultiChainOrchestrator)
-        orchestrator = self.execution_orchestrator
-
-        # Detect chains involved and if any cross-chain intents exist
-        chains_involved = set()
-        has_cross_chain = False
-        for intent in intents:
-            chain = getattr(intent, "chain", None) or orchestrator.primary_chain
-            chains_involved.add(chain)
-            dest_chain = get_intent_destination_chain(intent)
-            if dest_chain:
-                chains_involved.add(dest_chain)
-            if is_cross_chain_intent(intent):
-                has_cross_chain = True
-
-        # Extract real prices from market snapshot for accurate slippage calculations
-        price_oracle = None
-        price_map = None
-        if market is not None and hasattr(market, "get_price_oracle_dict"):
-            price_oracle = market.get_price_oracle_dict()
-            # Pre-fetch prices for intent tokens missing from the oracle.
-            # MultiChainMarketSnapshot.price() requires chain=, so we derive
-            # the chain from each intent to avoid TypeError.
-            if hasattr(market, "price"):
-                from almanak.framework.market.price_store import lookup_price
-
-                fetched_any = False
-                for i in intents:
-                    intent_chain = getattr(i, "chain", None) or orchestrator.primary_chain
-                    for token in _extract_tokens_from_intent(i, default_chain=intent_chain):
-                        if lookup_price(price_oracle, token=token, chain=intent_chain, quote="USD") is None:
-                            try:
-                                market.price(token, chain=intent_chain)
-                                fetched_any = True
-                            except Exception as e:
-                                logger.warning(f"Failed to pre-fetch price for {token} on {intent_chain}: {e}")
-                    # Bridge destination leg: ``to_token`` lives on
-                    # ``destination_chain``, not the intent's source chain the
-                    # loop above prices with. Fetch it explicitly on its own
-                    # chain — ``market.price`` accepts both identity forms, so
-                    # this holds for symbol- and address-form bridge legs alike
-                    # (CodeRabbit review, PR #3612).
-                    dest_chain = getattr(i, "destination_chain", None)
-                    dest_token = getattr(i, "to_token", None)
-                    if (
-                        dest_chain
-                        and dest_token
-                        and dest_chain != intent_chain
-                        and lookup_price(price_oracle, token=dest_token, chain=dest_chain, quote="USD") is None
-                    ):
-                        try:
-                            market.price(dest_token, chain=dest_chain)
-                            fetched_any = True
-                        except Exception as e:
-                            logger.warning(
-                                f"Failed to pre-fetch bridge-leg price for {dest_token} on {dest_chain}: {e}"
-                            )
-                if fetched_any:
-                    price_oracle = market.get_price_oracle_dict()
-            if price_oracle:
-                price_map = {k: str(v) for k, v in price_oracle.items()}
-                logger.debug(f"Multi-chain: using real prices for {list(price_oracle.keys())}")
-            else:
-                price_oracle = None
-
-        logger.info(
-            f"Multi-chain execution for {deployment_id}: "
-            f"{len(intents)} intents across {chains_involved}, "
-            f"has_cross_chain={has_cross_chain}"
+        prepared = self._prepare_multi_chain_execution(
+            deployment_id=strategy.deployment_id,
+            intents=intents,
+            orchestrator=self.execution_orchestrator,
+            market=market,
         )
 
-        # Dry run mode
-        if self.config.dry_run:
-            logger.info(f"Dry run mode - skipping execution for {deployment_id}. Would execute {len(intents)} intents.")
-            self._record_success()
-            return IterationResult(
-                status=IterationStatus.DRY_RUN,
-                intent=intents[0] if intents else None,
-                deployment_id=deployment_id,
-                duration_ms=self._calculate_duration_ms(start_time),
-            )
+        logger.info(
+            f"Multi-chain execution for {prepared.deployment_id}: "
+            f"{len(intents)} intents across {prepared.chains_involved}, "
+            f"has_cross_chain={prepared.has_cross_chain}"
+        )
+        return await self._dispatch_prepared_multi_chain_execution(
+            prepared=prepared,
+            strategy=strategy,
+            intents=intents,
+            start_time=start_time,
+            resume_progress=resume_progress,
+        )
 
-        # If there are cross-chain intents, use PlanExecutor with bridge waiting
-        if has_cross_chain:
+    def _prepare_multi_chain_execution(
+        self,
+        *,
+        deployment_id: str,
+        intents: list[AnyIntent],
+        orchestrator: MultiChainOrchestrator,
+        market: Any,
+    ) -> _PreparedMultiChainExecution:
+        """Discover ordered chain scope and freeze compilation price inputs."""
+        chains_involved, has_cross_chain = self._multi_chain_execution_scope(intents, orchestrator.primary_chain)
+        price_map, price_oracle = self._prepare_multi_chain_prices(market, intents, orchestrator.primary_chain)
+        return _PreparedMultiChainExecution(
+            deployment_id=deployment_id,
+            orchestrator=orchestrator,
+            chains_involved=chains_involved,
+            has_cross_chain=has_cross_chain,
+            price_map=price_map,
+            price_oracle=price_oracle,
+        )
+
+    @staticmethod
+    def _multi_chain_execution_scope(intents: list[AnyIntent], primary_chain: str) -> tuple[tuple[str, ...], bool]:
+        """Return first-seen source/destination chains and cross-chain routing."""
+        chains_involved: list[str] = []
+        seen: set[str] = set()
+        has_cross_chain = False
+        for intent in intents:
+            source_chain = getattr(intent, "chain", None) or primary_chain
+            destination_chain = get_intent_destination_chain(intent)
+            for chain in (source_chain, destination_chain):
+                if chain and chain not in seen:
+                    seen.add(chain)
+                    chains_involved.append(chain)
+            if is_cross_chain_intent(intent):
+                has_cross_chain = True
+        return tuple(chains_involved), has_cross_chain
+
+    def _prepare_multi_chain_prices(
+        self,
+        market: Any,
+        intents: list[AnyIntent],
+        primary_chain: str,
+    ) -> tuple[dict[str, str] | None, dict | None]:
+        """Build the legacy and chain-aware price inputs used for compilation."""
+        if market is None or not hasattr(market, "get_price_oracle_dict"):
+            return None, None
+
+        price_oracle = market.get_price_oracle_dict()
+        if hasattr(market, "price") and self._prefetch_multi_chain_prices(market, intents, primary_chain, price_oracle):
+            price_oracle = market.get_price_oracle_dict()
+        if not price_oracle:
+            return None, None
+
+        price_map = {key: str(value) for key, value in price_oracle.items()}
+        logger.debug(f"Multi-chain: using real prices for {list(price_oracle.keys())}")
+        return price_map, price_oracle
+
+    def _prefetch_multi_chain_prices(
+        self,
+        market: Any,
+        intents: list[AnyIntent],
+        primary_chain: str,
+        price_oracle: dict,
+    ) -> bool:
+        """Warm missing source and destination prices without changing failure policy."""
+        fetched_any = False
+        for intent in intents:
+            source_chain = getattr(intent, "chain", None) or primary_chain
+            for token in _extract_tokens_from_intent(intent, default_chain=source_chain):
+                if self._prefetch_multi_chain_price(market, price_oracle, token, source_chain, "price"):
+                    fetched_any = True
+
+            destination_chain = get_intent_destination_chain(intent)
+            destination_token = get_intent_destination_token(intent)
+            if destination_chain and destination_token and destination_chain != source_chain:
+                if self._prefetch_multi_chain_price(
+                    market,
+                    price_oracle,
+                    destination_token,
+                    destination_chain,
+                    "bridge-leg price",
+                ):
+                    fetched_any = True
+        return fetched_any
+
+    @staticmethod
+    def _prefetch_multi_chain_price(
+        market: Any,
+        price_oracle: dict,
+        token: str,
+        chain: str,
+        price_kind: str,
+    ) -> bool:
+        """Warm one absent price; provider failures remain warning-only."""
+        from almanak.framework.market.price_store import lookup_price
+
+        if lookup_price(price_oracle, token=token, chain=chain, quote="USD") is not None:
+            return False
+        try:
+            market.price(token, chain=chain)
+            return True
+        except Exception as error:
+            logger.warning(f"Failed to pre-fetch {price_kind} for {token} on {chain}: {error}")
+            return False
+
+    async def _dispatch_prepared_multi_chain_execution(
+        self,
+        *,
+        prepared: _PreparedMultiChainExecution,
+        strategy: StrategyProtocol,
+        intents: list[AnyIntent],
+        start_time: datetime,
+        resume_progress: ExecutionProgress | None,
+    ) -> IterationResult:
+        """Dispatch to the lane that owns execution, accounting, and metrics."""
+        if self.config.dry_run:
+            return self._complete_multi_chain_dry_run(prepared.deployment_id, intents, start_time)
+
+        if prepared.has_cross_chain:
             return await self._execute_with_bridge_waiting(
                 strategy=strategy,
                 intents=intents,
-                orchestrator=orchestrator,
+                orchestrator=prepared.orchestrator,
                 start_time=start_time,
-                price_map=price_map,
-                price_oracle=price_oracle,
+                price_map=prepared.price_map,
+                price_oracle=prepared.price_oracle,
                 resume_progress=resume_progress,
             )
 
@@ -10901,11 +11005,27 @@ class StrategyRunner:
         return await self._execute_same_chain_legs(
             strategy=strategy,
             intents=intents,
-            orchestrator=orchestrator,
+            orchestrator=prepared.orchestrator,
             start_time=start_time,
-            price_map=price_map,
-            price_oracle=price_oracle,
+            price_map=prepared.price_map,
+            price_oracle=prepared.price_oracle,
             resume_progress=resume_progress,
+        )
+
+    def _complete_multi_chain_dry_run(
+        self,
+        deployment_id: str,
+        intents: list[AnyIntent],
+        start_time: datetime,
+    ) -> IterationResult:
+        """Fold a dry-run dispatch into its result and lifetime metrics."""
+        logger.info(f"Dry run mode - skipping execution for {deployment_id}. Would execute {len(intents)} intents.")
+        self._record_success()
+        return IterationResult(
+            status=IterationStatus.DRY_RUN,
+            intent=intents[0] if intents else None,
+            deployment_id=deployment_id,
+            duration_ms=self._calculate_duration_ms(start_time),
         )
 
     @staticmethod

@@ -1109,10 +1109,18 @@ class TestFundTokensReport:
         failed = await mgr.fund_tokens_report("0x" + "1" * 40, tokens)
         assert failed == list(tokens)
 
+    @pytest.mark.parametrize(("failed", "expected"), [([], True), (["0x" + "a" * 40], False)])
     @pytest.mark.asyncio()
-    async def test_bool_wrapper_preserves_all_or_nothing_contract(self):
+    async def test_bool_wrapper_preserves_all_or_nothing_contract(self, failed, expected):
         mgr = self._manager()
-        assert await mgr.fund_tokens("0x" + "1" * 40, {"0x" + "a" * 40: Decimal("1")}) is False
+        address = "0x" + "1" * 40
+        tokens = {"0x" + "a" * 40: Decimal("1")}
+
+        with patch.object(mgr, "fund_tokens_report", new=AsyncMock(return_value=failed)) as report:
+            result = await mgr.fund_tokens(address, tokens)
+
+        assert result is expected
+        report.assert_awaited_once_with(address, tokens)
 
     @pytest.mark.asyncio()
     async def test_non_address_key_lands_in_failed_list_verbatim(self):

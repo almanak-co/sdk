@@ -355,7 +355,7 @@ def _ordered_calls(function, first: str, second: str) -> bool:
 
 def test_continuous_runner_captures_boot_before_opening_basis_reconstruction():
     assert _ordered_calls(
-        _run_loop_helpers.initialize_run_loop,
+        _run_loop_helpers._recover_persisted_run_state,
         "capture_boot_snapshot_with_accounting",
         "reconstruct_lending_basis_store",
     )

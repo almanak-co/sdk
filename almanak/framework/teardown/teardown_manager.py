@@ -23,7 +23,7 @@ import logging
 import uuid
 from collections import deque
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any, Protocol
@@ -35,6 +35,7 @@ if TYPE_CHECKING:
 
 from almanak.framework.teardown.cancel_window import CancelWindowManager
 from almanak.framework.teardown.completeness import (
+    CompletenessReport,
     check_intent_coverage,
     resolve_consolidation_noop_target,
 )
@@ -544,6 +545,37 @@ class AtomicBundle:
     multisend_data: bytes | None = None
 
 
+@dataclass(frozen=True)
+class _ExecutePlan:
+    positions: TeardownPositionSummary
+    intents: list[Any]
+    completeness: CompletenessReport
+
+
+@dataclass(frozen=True)
+class _ExecuteDispatch:
+    result: TeardownResult
+    price_oracle: Any
+    pre_teardown_reconciliation: Any
+
+
+@dataclass
+class _IntentAttemptState:
+    submission_landed: bool = False
+    unsettled_async_submission: bool = False
+
+
+@dataclass
+class _IntentExecutionTotals:
+    succeeded: int = 0
+    failed: int = 0
+    skipped: int = 0
+    total_costs: Decimal = Decimal("0")
+    final_balances: dict[str, Decimal] = field(default_factory=dict)
+    last_receipt_block: int | None = None
+    unsettled_async_submission: bool = False
+
+
 def _teardown_wallet_for_chain(strategy: Any, chain: str) -> str:
     """Effective execution address for ``chain`` (VIB-6043).
 
@@ -684,7 +716,6 @@ class TeardownManager:
         self.slippage_manager = EscalatingSlippageManager(self.config)
         self.cancel_window = CancelWindowManager(self.config)
 
-    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     async def preview(
         self,
         strategy: IntentStrategy,
@@ -711,10 +742,9 @@ class TeardownManager:
         try:
             intents = strategy.generate_teardown_intents(internal_mode, market=market)
         except TypeError as exc:
-            if "market" in str(exc):
-                intents = strategy.generate_teardown_intents(internal_mode)
-            else:
+            if "unexpected keyword argument 'market'" not in str(exc):
                 raise
+            intents = strategy.generate_teardown_intents(internal_mode)
 
         max_loss_pct = calculate_max_acceptable_loss(positions.total_value_usd)
         max_loss_usd = positions.total_value_usd * max_loss_pct
@@ -744,8 +774,7 @@ class TeardownManager:
             warnings=warnings,
         )
 
-    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
-    async def execute(  # noqa: C901
+    async def execute(
         self,
         strategy: IntentStrategy,
         mode: str,
@@ -804,244 +833,68 @@ class TeardownManager:
             teardown_id = f"td_{uuid.uuid4().hex[:12]}"
 
         try:
-            logger.info(f"Starting teardown {teardown_id} for {strategy.deployment_id}")
-            await strategy.pause()
-
-            if self.alert_manager:
-                await self.alert_manager.send_teardown_started(strategy.deployment_id, mode)
-
-            if precomputed_positions is not None:
-                positions = precomputed_positions
-            else:
-                positions = strategy.get_open_positions()
-
-            if precomputed_intents is not None:
-                intents = list(precomputed_intents)
-            else:
-                try:
-                    intents = strategy.generate_teardown_intents(internal_mode, market=market)
-                except TypeError as exc:
-                    if "market" in str(exc):
-                        intents = strategy.generate_teardown_intents(internal_mode)
-                    else:
-                        raise
-
-            # Collapse duplicate perp dispatches, but check coverage against the original plan;
-            # intent-to-intent and intent-to-position identity are not equivalent.
-            single_close = collapse_duplicate_perp_closes(intents)
-            intents = single_close.dispatch
-
-            # Evaluate coverage now, but fold failure after execution so risk-reducing intents still run.
-            completeness = check_intent_coverage(
+            await self._start_execute(strategy, mode, teardown_id)
+            positions = self._discover_execute_positions(strategy, precomputed_positions)
+            plan = self._plan_execute_intents(
+                strategy,
+                internal_mode,
                 positions,
-                # Coverage requires the pre-collapse plan.
-                single_close.for_coverage,
-                consolidation_target_token=self._consolidation_noop_target(strategy, intents),
-                wallet_for_chain=lambda c: _teardown_wallet_for_chain(strategy, c) or None,
+                market,
+                precomputed_intents,
+            )
+            early_result = self._resolve_empty_execute_plan(strategy, mode, started_at, plan)
+            if early_result is not None:
+                return early_result
+
+            approval = await self._approve_execute_plan(
+                strategy,
+                mode,
+                internal_mode,
+                started_at,
+                teardown_id,
+                plan,
+                on_cancel_check,
+                is_auto_mode,
+            )
+            if isinstance(approval, TeardownResult):
+                return approval
+            teardown_state = approval
+            dispatch = await self._dispatch_execute_plan(
+                strategy,
+                internal_mode,
+                teardown_id,
+                teardown_state,
+                plan,
+                on_approval_needed,
+                on_progress,
+                is_auto_mode,
+                market,
             )
 
-            if not intents:
-                if completeness.complete:
-                    logger.info(f"No intents to execute for {strategy.deployment_id}")
-                    return self._empty_result(strategy.deployment_id, mode, started_at)
-                logger.error("🛑 %s", completeness.error_message())
-                return self._failed_result(
-                    strategy.deployment_id,
-                    mode,
-                    started_at,
-                    error=completeness.error_message(),
-                    verification_status=VerificationStatus.FAILED,
-                    # Preserve the known position denominator when no intent can run.
-                    positions_total=completeness.total_enforceable,
-                    positions_closed=0,
-                    has_position_breakdown=True,
-                )
-
-            validation = self.safety_guard.validate_teardown_request(positions, internal_mode)
-            if not validation.all_passed:
-                logger.error(f"Safety validation failed: {validation.blocked_reason}")
-                return self._failed_result(
-                    strategy.deployment_id,
-                    mode,
-                    started_at,
-                    error=validation.blocked_reason or "Safety validation failed",
-                )
-
-            teardown_state = await self._persist_state(teardown_id, strategy, internal_mode, intents)
-
-            cancel_result = await self.cancel_window.run_cancel_window(
-                teardown_id=teardown_id,
-                on_check_cancelled=on_cancel_check,
-                is_auto_mode=is_auto_mode,
+            result = await self._verify_execute_result(
+                strategy,
+                teardown_id,
+                teardown_state,
+                plan,
+                dispatch,
+                market,
+                precomputed_positions,
             )
 
-            if cancel_result.was_cancelled:
-                logger.info(f"Teardown {teardown_id} cancelled during window")
-                return self._cancelled_result(strategy.deployment_id, mode, started_at)
-
-            teardown_state.status = TeardownStatus.EXECUTING
-            if self.state_manager:
-                await self.state_manager.save_teardown_state(teardown_state)
-
-            price_oracle = _warm_oracle_risk_first(market, intents, fail_loud=True)
-
-            pre_teardown_reconciliation = await self._pre_teardown_reconciliation(strategy, positions, market)
-
-            result = await self._execute_intents(
-                teardown_id=teardown_id,
-                strategy=strategy,
-                intents=intents,
-                positions=positions,
-                mode=internal_mode,
-                teardown_state=teardown_state,
-                on_approval_needed=on_approval_needed,
-                on_progress=on_progress,
-                is_auto_mode=is_auto_mode,
-                price_oracle=price_oracle,
-                market=market,
+            # Consolidation must not race an unverified or partially unwound position.
+            result = await self._consolidate_execute_result(
+                strategy,
+                teardown_id,
+                teardown_state,
+                internal_mode,
+                plan,
+                dispatch,
+                result,
+                market,
+                is_auto_mode,
+                on_approval_needed,
             )
-
-            # Verify only successful execution so an earlier actionable failure is not masked.
-            if result.success:
-                try:
-                    # Verify the pre-execution set because callbacks may already have cleared local state.
-                    verification = await self._verify_closure_detailed(
-                        strategy,
-                        expected_positions=precomputed_positions,
-                        pre_execution_positions=positions,
-                        close_receipt_block=result.last_receipt_block,
-                    )
-                except Exception as verify_err:
-                    logger.exception(
-                        "Post-teardown verification raised for %s — treating as verify-fail",
-                        strategy.deployment_id,
-                    )
-                    verification = ClosureVerification(
-                        all_closed=False,
-                        positions_total=len(getattr(positions, "positions", []) or []),
-                        positions_closed=0,
-                        has_position_breakdown=True,
-                        verification_status=VerificationStatus.FAILED,
-                    )
-                    verify_error_msg = f"Post-teardown verification error: {verify_err}. Manual check required."
-                else:
-                    verify_error_msg = "Post-teardown verification failed: positions still open. Manual check required."
-
-                verification = await self.verify_closure_against_chain(
-                    strategy,
-                    verification=verification,
-                    pre_execution_positions=positions,
-                    market=market,
-                    pre_teardown_reconciliation=pre_teardown_reconciliation,
-                )
-
-                # Coverage failure is folded after chain verification and remains the final verdict.
-                if not completeness.complete:
-                    uncovered_count = len(completeness.uncovered)
-                    # Include uncovered positions in the denominator and never count them closed.
-                    positions_total = max(verification.positions_total, completeness.total_enforceable)
-                    adjusted_closed = max(
-                        min(verification.positions_closed, positions_total - uncovered_count),
-                        0,
-                    )
-                    verification = replace(
-                        verification,
-                        all_closed=False,
-                        positions_total=positions_total,
-                        positions_closed=adjusted_closed,
-                        has_position_breakdown=True,
-                        verification_status=VerificationStatus.FAILED,
-                    )
-                    verify_error_msg = completeness.error_message()
-
-                result = replace(
-                    result,
-                    positions_total=verification.positions_total,
-                    positions_closed=verification.positions_closed,
-                    has_position_breakdown=verification.has_position_breakdown,
-                    verification_status=verification.verification_status,
-                )
-
-                log_teardown_decision(
-                    deployment_id=strategy.deployment_id,
-                    teardown_id=teardown_id,
-                    phase=TeardownDecisionPhase.VERIFY,
-                    # Unknown closure is distinct from both verified and measured-open failure.
-                    outcome=(
-                        "verify_failed"
-                        if not verification.all_closed
-                        else ("verify_unmeasured" if verification.closure_unknown else "verified")
-                    ),
-                    description=(
-                        f"closure verification: {verification.positions_closed}/"
-                        f"{verification.positions_total} closed "
-                        f"({verification.verification_status.value}"
-                        f"{', closure_unknown' if verification.closure_unknown else ''})"
-                    ),
-                    position_count=verification.positions_total,
-                    positions_closed=verification.positions_closed,
-                    verification_status=verification.verification_status.value,
-                )
-
-                # Check measured residual first; unknown closure must use a distinct message.
-                if not verification.all_closed:
-                    logger.warning(
-                        f"Post-teardown verification: {strategy.deployment_id} still reports "
-                        f"open positions (or verification errored). Marking teardown as incomplete."
-                    )
-                elif verification.closure_unknown:
-                    logger.warning(
-                        "Post-teardown verification: %s closure is UNPROVEN (no measured "
-                        "on-chain evidence either way). Refusing to certify success — this is "
-                        "NOT a claim that positions are open.",
-                        strategy.deployment_id,
-                    )
-                    verify_error_msg = CLOSURE_UNKNOWN_ERROR
-
-                if not verification.all_closed or verification.closure_unknown:
-                    result = replace(
-                        result,
-                        success=False,
-                        error=verify_error_msg,
-                        recovery_options=["Verify positions on-chain", "Re-run teardown"],
-                    )
-                    # Failed or unproven verification must not leave persisted state COMPLETED.
-                    teardown_state.status = TeardownStatus.FAILED
-                    teardown_state.updated_at = datetime.now(UTC)
-                    if self.state_manager:
-                        try:
-                            await self.state_manager.save_teardown_state(teardown_state)
-                        except Exception:
-                            logger.warning(
-                                "Failed to persist FAILED status for teardown %s after verify-fail",
-                                teardown_id,
-                                exc_info=True,
-                            )
-
-            # Consolidation runs only after verified closure, never races a partial unwind,
-            # and reports failure without undoing successful risk reduction.
-            if result.success:
-                from almanak.framework.teardown.consolidation import fold_consolidation_outcome
-
-                consolidation_outcome = await self.run_token_consolidation(
-                    strategy,
-                    teardown_id=teardown_id,
-                    teardown_state=teardown_state,
-                    mode=internal_mode,
-                    market=market,
-                    price_oracle=price_oracle,
-                    positions=positions,
-                    closing_intents=intents,
-                    is_auto_mode=is_auto_mode,
-                    on_approval_needed=on_approval_needed,
-                )
-                result = fold_consolidation_outcome(result, consolidation_outcome)
-
-            if self.alert_manager:
-                await self.alert_manager.send_teardown_complete(result)
-
-            if self.state_manager and result.success:
-                await self.state_manager.delete_teardown_state(teardown_id)
+            await self._finalize_execute_result(teardown_id, result)
 
             return result
 
@@ -1054,7 +907,376 @@ class TeardownManager:
                 error=str(e),
             )
 
-    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
+    async def _start_execute(self, strategy: IntentStrategy, mode: str, teardown_id: str) -> None:
+        """Pause the strategy and publish the existing start notification."""
+        logger.info(f"Starting teardown {teardown_id} for {strategy.deployment_id}")
+        await strategy.pause()
+        if self.alert_manager:
+            await self.alert_manager.send_teardown_started(strategy.deployment_id, mode)
+
+    def _discover_execute_positions(
+        self,
+        strategy: IntentStrategy,
+        precomputed_positions: Any,
+    ) -> TeardownPositionSummary:
+        """Resolve the Stage-1 known set without re-reading discovery output."""
+        if precomputed_positions is not None:
+            return precomputed_positions
+        return strategy.get_open_positions()
+
+    def _generate_execute_intents(
+        self,
+        strategy: IntentStrategy,
+        mode: TeardownMode,
+        market: Any,
+    ) -> list[Any]:
+        """Generate Stage-2 intents, retaining the legacy strategy signature."""
+        try:
+            return strategy.generate_teardown_intents(mode, market=market)
+        except TypeError as exc:
+            if "unexpected keyword argument 'market'" not in str(exc):
+                raise
+            return strategy.generate_teardown_intents(mode)
+
+    def _plan_execute_intents(
+        self,
+        strategy: IntentStrategy,
+        mode: TeardownMode,
+        positions: TeardownPositionSummary,
+        market: Any,
+        precomputed_intents: list[Any] | None,
+    ) -> _ExecutePlan:
+        """Build the Stage-2 dispatch plan and its pre-execution coverage proof."""
+        raw_intents = (
+            list(precomputed_intents)
+            if precomputed_intents is not None
+            else self._generate_execute_intents(strategy, mode, market)
+        )
+        single_close = collapse_duplicate_perp_closes(raw_intents)
+        intents = single_close.dispatch
+        completeness = check_intent_coverage(
+            positions,
+            # Coverage consumes the plan as built. The dispatch-only perp
+            # collapse uses a different identity relation from position coverage.
+            single_close.for_coverage,
+            consolidation_target_token=self._consolidation_noop_target(strategy, intents),
+            wallet_for_chain=lambda chain: _teardown_wallet_for_chain(strategy, chain) or None,
+        )
+        return _ExecutePlan(positions=positions, intents=intents, completeness=completeness)
+
+    def _resolve_empty_execute_plan(
+        self,
+        strategy: IntentStrategy,
+        mode: str,
+        started_at: datetime,
+        plan: _ExecutePlan,
+    ) -> TeardownResult | None:
+        """Resolve the Stage-2 no-plan branch before opening resumable state."""
+        if plan.intents:
+            return None
+        if plan.completeness.complete:
+            logger.info(f"No intents to execute for {strategy.deployment_id}")
+            return self._empty_result(strategy.deployment_id, mode, started_at)
+        logger.error("🛑 %s", plan.completeness.error_message())
+        return self._failed_result(
+            strategy.deployment_id,
+            mode,
+            started_at,
+            error=plan.completeness.error_message(),
+            verification_status=VerificationStatus.FAILED,
+            positions_total=plan.completeness.total_enforceable,
+            positions_closed=0,
+            has_position_breakdown=True,
+        )
+
+    async def _approve_execute_plan(
+        self,
+        strategy: IntentStrategy,
+        mode: str,
+        internal_mode: TeardownMode,
+        started_at: datetime,
+        teardown_id: str,
+        plan: _ExecutePlan,
+        on_cancel_check: Callable[[], Awaitable[bool]] | None,
+        is_auto_mode: bool,
+    ) -> TeardownState | TeardownResult:
+        """Apply safety approval, persist, and run the operator cancel window."""
+        validation = self.safety_guard.validate_teardown_request(plan.positions, internal_mode)
+        if not validation.all_passed:
+            logger.error(f"Safety validation failed: {validation.blocked_reason}")
+            return self._failed_result(
+                strategy.deployment_id,
+                mode,
+                started_at,
+                error=validation.blocked_reason or "Safety validation failed",
+            )
+
+        state = await self._persist_state(teardown_id, strategy, internal_mode, plan.intents)
+        cancel_result = await self.cancel_window.run_cancel_window(
+            teardown_id=teardown_id,
+            on_check_cancelled=on_cancel_check,
+            is_auto_mode=is_auto_mode,
+        )
+        if cancel_result.was_cancelled:
+            logger.info(f"Teardown {teardown_id} cancelled during window")
+            return self._cancelled_result(strategy.deployment_id, mode, started_at)
+
+        state.status = TeardownStatus.EXECUTING
+        if self.state_manager:
+            await self.state_manager.save_teardown_state(state)
+        return state
+
+    async def _dispatch_execute_plan(
+        self,
+        strategy: IntentStrategy,
+        mode: TeardownMode,
+        teardown_id: str,
+        teardown_state: TeardownState,
+        plan: _ExecutePlan,
+        on_approval_needed: ApprovalCallback | None,
+        on_progress: Callable[[int, str], Awaitable[None]] | None,
+        is_auto_mode: bool,
+        market: Any,
+    ) -> _ExecuteDispatch:
+        """Run Blueprint 14a Stage 3 after all pre-flight gates pass."""
+        price_oracle = _warm_oracle_risk_first(market, plan.intents, fail_loud=True)
+        pre_reconciliation = await self._pre_teardown_reconciliation(strategy, plan.positions, market)
+        result = await self._execute_intents(
+            teardown_id=teardown_id,
+            strategy=strategy,
+            intents=plan.intents,
+            positions=plan.positions,
+            mode=mode,
+            teardown_state=teardown_state,
+            on_approval_needed=on_approval_needed,
+            on_progress=on_progress,
+            is_auto_mode=is_auto_mode,
+            price_oracle=price_oracle,
+            market=market,
+        )
+        return _ExecuteDispatch(
+            result=result,
+            price_oracle=price_oracle,
+            pre_teardown_reconciliation=pre_reconciliation,
+        )
+
+    async def _collect_execute_verification(
+        self,
+        strategy: IntentStrategy,
+        plan: _ExecutePlan,
+        dispatch: _ExecuteDispatch,
+        market: Any,
+        precomputed_positions: Any,
+    ) -> tuple[ClosureVerification, str]:
+        """Compose both Stage-5 verification surfaces in their existing order."""
+        try:
+            verification = await self._verify_closure_detailed(
+                strategy,
+                expected_positions=precomputed_positions,
+                pre_execution_positions=plan.positions,
+                close_receipt_block=dispatch.result.last_receipt_block,
+            )
+        except Exception as verify_err:
+            logger.exception(
+                "Post-teardown verification raised for %s — treating as verify-fail",
+                strategy.deployment_id,
+            )
+            verification = ClosureVerification(
+                all_closed=False,
+                positions_total=len(getattr(plan.positions, "positions", []) or []),
+                positions_closed=0,
+                has_position_breakdown=True,
+                verification_status=VerificationStatus.FAILED,
+            )
+            error = f"Post-teardown verification error: {verify_err}. Manual check required."
+        else:
+            error = "Post-teardown verification failed: positions still open. Manual check required."
+
+        verification = await self.verify_closure_against_chain(
+            strategy,
+            verification=verification,
+            pre_execution_positions=plan.positions,
+            market=market,
+            pre_teardown_reconciliation=dispatch.pre_teardown_reconciliation,
+        )
+        return verification, error
+
+    def _apply_execute_completeness(
+        self,
+        verification: ClosureVerification,
+        completeness: CompletenessReport,
+        error: str,
+    ) -> tuple[ClosureVerification, str]:
+        """Fold Stage-2 coverage into Stage-5 without blocking dispatch."""
+        if completeness.complete:
+            return verification, error
+        positions_total = max(verification.positions_total, completeness.total_enforceable)
+        adjusted_closed = max(
+            min(verification.positions_closed, positions_total - len(completeness.uncovered)),
+            0,
+        )
+        return (
+            replace(
+                verification,
+                all_closed=False,
+                positions_total=positions_total,
+                positions_closed=adjusted_closed,
+                has_position_breakdown=True,
+                verification_status=VerificationStatus.FAILED,
+            ),
+            completeness.error_message(),
+        )
+
+    def _record_execute_verification(
+        self,
+        strategy: IntentStrategy,
+        teardown_id: str,
+        verification: ClosureVerification,
+    ) -> None:
+        """Write the existing Stage-5 structured decision record."""
+        outcome = "verified"
+        if verification.closure_unknown:
+            outcome = "verify_unmeasured"
+        if not verification.all_closed:
+            outcome = "verify_failed"
+        unknown_suffix = ", closure_unknown" if verification.closure_unknown else ""
+        log_teardown_decision(
+            deployment_id=strategy.deployment_id,
+            teardown_id=teardown_id,
+            phase=TeardownDecisionPhase.VERIFY,
+            outcome=outcome,
+            description=(
+                f"closure verification: {verification.positions_closed}/"
+                f"{verification.positions_total} closed "
+                f"({verification.verification_status.value}{unknown_suffix})"
+            ),
+            position_count=verification.positions_total,
+            positions_closed=verification.positions_closed,
+            verification_status=verification.verification_status.value,
+        )
+
+    def _execute_verification_refusal(
+        self,
+        strategy: IntentStrategy,
+        verification: ClosureVerification,
+        error: str,
+    ) -> str | None:
+        """Return the terminal refusal reason, keeping residual and unknown distinct."""
+        if not verification.all_closed:
+            logger.warning(
+                f"Post-teardown verification: {strategy.deployment_id} still reports "
+                f"open positions (or verification errored). Marking teardown as incomplete."
+            )
+            return error
+        if verification.closure_unknown:
+            logger.warning(
+                "Post-teardown verification: %s closure is UNPROVEN (no measured "
+                "on-chain evidence either way). Refusing to certify success — this is "
+                "NOT a claim that positions are open.",
+                strategy.deployment_id,
+            )
+            return CLOSURE_UNKNOWN_ERROR
+        return None
+
+    async def _persist_execute_verification_failure(
+        self,
+        teardown_id: str,
+        teardown_state: TeardownState,
+    ) -> None:
+        """Persist Stage-5 refusal after preserving the successful execution result."""
+        teardown_state.status = TeardownStatus.FAILED
+        teardown_state.updated_at = datetime.now(UTC)
+        if not self.state_manager:
+            return
+        try:
+            await self.state_manager.save_teardown_state(teardown_state)
+        except Exception:
+            logger.warning(
+                "Failed to persist FAILED status for teardown %s after verify-fail",
+                teardown_id,
+                exc_info=True,
+            )
+
+    async def _verify_execute_result(
+        self,
+        strategy: IntentStrategy,
+        teardown_id: str,
+        teardown_state: TeardownState,
+        plan: _ExecutePlan,
+        dispatch: _ExecuteDispatch,
+        market: Any,
+        precomputed_positions: Any,
+    ) -> TeardownResult:
+        """Run Stage 5 only after successful risk-reducing execution."""
+        if not dispatch.result.success:
+            return dispatch.result
+        verification, error = await self._collect_execute_verification(
+            strategy,
+            plan,
+            dispatch,
+            market,
+            precomputed_positions,
+        )
+        verification, error = self._apply_execute_completeness(verification, plan.completeness, error)
+        result = replace(
+            dispatch.result,
+            positions_total=verification.positions_total,
+            positions_closed=verification.positions_closed,
+            has_position_breakdown=verification.has_position_breakdown,
+            verification_status=verification.verification_status,
+        )
+        self._record_execute_verification(strategy, teardown_id, verification)
+        refusal = self._execute_verification_refusal(strategy, verification, error)
+        if refusal is None:
+            return result
+        result = replace(
+            result,
+            success=False,
+            error=refusal,
+            recovery_options=["Verify positions on-chain", "Re-run teardown"],
+        )
+        await self._persist_execute_verification_failure(teardown_id, teardown_state)
+        return result
+
+    async def _consolidate_execute_result(
+        self,
+        strategy: IntentStrategy,
+        teardown_id: str,
+        teardown_state: TeardownState,
+        mode: TeardownMode,
+        plan: _ExecutePlan,
+        dispatch: _ExecuteDispatch,
+        result: TeardownResult,
+        market: Any,
+        is_auto_mode: bool,
+        on_approval_needed: ApprovalCallback | None,
+    ) -> TeardownResult:
+        """Run Phase-2 consolidation only after certified closure."""
+        if not result.success:
+            return result
+        from almanak.framework.teardown.consolidation import fold_consolidation_outcome
+
+        outcome = await self.run_token_consolidation(
+            strategy,
+            teardown_id=teardown_id,
+            teardown_state=teardown_state,
+            mode=mode,
+            market=market,
+            price_oracle=dispatch.price_oracle,
+            positions=plan.positions,
+            closing_intents=plan.intents,
+            is_auto_mode=is_auto_mode,
+            on_approval_needed=on_approval_needed,
+        )
+        return fold_consolidation_outcome(result, outcome)
+
+    async def _finalize_execute_result(self, teardown_id: str, result: TeardownResult) -> None:
+        """Preserve completion-alert then successful-state-cleanup ordering."""
+        if self.alert_manager:
+            await self.alert_manager.send_teardown_complete(result)
+        if self.state_manager and result.success:
+            await self.state_manager.delete_teardown_state(teardown_id)
+
     async def cancel(self, deployment_id: str) -> bool:
         """Cancel an in-progress teardown.
 
@@ -1479,8 +1701,1469 @@ class TeardownManager:
                 target=target_token,
             )
 
-    # crap-allowlist: PR is pure string-content cleanup (chore: VIB removal); zero branches added, function was already over threshold on main. Refactor tracked in VIB-4139.
-    async def _execute_intents(  # noqa: C901
+    async def _save_execute_floor(
+        self,
+        teardown_state: TeardownState,
+        floor: int,
+    ) -> None:
+        """Persist the resume FLOOR (lowest still-pending original index).
+
+        Blueprint 14a Stage 3: deferred transient retries make completion
+        non-contiguous, so the running ``succeeded`` count is NOT a safe
+        resume cutoff. The floor guarantees resume re-runs a pending
+        deferred intent; re-running a completed close is a safe no-op.
+        """
+        teardown_state.completed_intents = floor
+        teardown_state.current_intent_index = floor
+        teardown_state.updated_at = datetime.now(UTC)
+        if self.state_manager:
+            await self.state_manager.save_teardown_state(teardown_state)
+
+    def _extract_intent_slippage(self, intent: Any) -> Decimal | None:
+        """Strategy-configured slippage floor for the escalation ladder.
+
+        Blueprint 14 §6: the ladder uses the intent's own ``max_slippage``
+        (e.g. thin-liquidity legs) as a floor. Returns ``None`` when absent
+        or unparseable.
+        """
+        raw = intent.get("max_slippage") if isinstance(intent, dict) else getattr(intent, "max_slippage", None)
+        if raw is None:
+            return None
+        try:
+            return Decimal(str(raw))
+        except (InvalidOperation, TypeError, ValueError):
+            logger.warning("Could not parse intent max_slippage=%r, ignoring.", raw)
+            return None
+
+    def _transient_retry_due(
+        self,
+        exec_result: Any,
+        intent: Any,
+        attempts: int,
+    ) -> str | None:
+        """Vetted-TRANSIENT gate for the time-axis retry (14a Stage 3).
+
+        Returns the raw revert text when the intent should be re-queued to
+        the TAIL, else ``None``. A ``paused_awaiting_approval`` is an approval
+        pause, never a revert, so it is never deferred here.
+        """
+        if getattr(exec_result, "status", None) == "paused_awaiting_approval":
+            return None
+        if attempts >= _TRANSIENT_MAX_ATTEMPTS:
+            return None
+        revert_text = None
+        attempts_list = getattr(exec_result, "attempts", None)
+        if attempts_list and getattr(attempts_list[-1], "error", None):
+            revert_text = attempts_list[-1].error
+        if not revert_text:
+            revert_text = getattr(exec_result, "message", None)
+        if not revert_text:
+            return None
+        intent_type = _intent_field(intent, "intent_type")
+        protocol = _intent_field(intent, "protocol")
+        if classify_revert_transience(revert_text, intent_type=intent_type, protocol=protocol) is Transience.TRANSIENT:
+            return revert_text
+        return None
+
+    def _fold_success_receipt(
+        self,
+        last_receipt_block: int | None,
+        exec_result: Any,
+        positions: TeardownPositionSummary,
+        n_intents: int,
+        total_costs: Decimal,
+    ) -> tuple[int | None, Decimal]:
+        """Fold a successful ladder result into running totals (14a Stage 3).
+
+        MAX (not last-processed) is the correct receipt anchor under
+        non-monotonic completion (VIB-5140).
+        """
+        last_receipt_block = _fold_max_receipt_block(last_receipt_block, exec_result)
+        actual_slippage = exec_result.final_slippage
+        intent_value = positions.total_value_usd / n_intents
+        total_costs += intent_value * actual_slippage
+        return last_receipt_block, total_costs
+
+    async def _notify_intent_success(
+        self,
+        strategy: Any,
+        intent: Any,
+        exec_result: Any,
+        i: int,
+        n_intents: int,
+    ) -> None:
+        """Framework + strategy post-success hooks (14a Stage 4 lane symmetry).
+
+        Best-effort: an observer exception never fails an on-chain success.
+        """
+        try:
+            if hasattr(strategy, "_framework_record_intent_execution"):
+                try:
+                    strategy._framework_record_intent_execution(intent, True, exec_result)
+                except Exception as fhook_err:  # noqa: BLE001
+                    logger.warning(
+                        "framework intent-execution hook raised in teardown lane (non-fatal): %s",
+                        fhook_err,
+                    )
+            if hasattr(strategy, "on_intent_executed"):
+                result = strategy.on_intent_executed(intent, True, exec_result)
+                if asyncio.iscoroutine(result):
+                    await result
+            if hasattr(strategy, "save_state"):
+                strategy.save_state()
+            if hasattr(strategy, "flush_pending_saves"):
+                await strategy.flush_pending_saves()
+        except Exception as e:  # noqa: BLE001
+            logger.error(
+                "Failed to persist strategy state after teardown intent %d/%d: %s "
+                "(on-chain action succeeded but persisted state may be stale)",
+                i + 1,
+                n_intents,
+                e,
+            )
+
+    async def _settle_accepted_executed(
+        self,
+        strategy: Any,
+        intent: Any,
+        i: int,
+        n_intents: int,
+    ) -> None:
+        """Strategy callbacks for a settlement-proven accepted submission.
+
+        Blueprint 14a Stage 3 uniform lane: dispatch-complete + proven
+        terminal, so the run may complete. Settlement proof stays
+        authoritative over callback faults.
+        """
+        try:
+            callback_payload = {
+                key: value
+                for key, value in intent.items()
+                if key
+                not in {
+                    _ACCEPTED_ASYNC_SUBMISSION_KEY,
+                    _ACCEPTED_ASYNC_ORDER_KEYS_KEY,
+                    _ACCEPTED_ASYNC_LEDGER_ID_KEY,
+                }
+            }
+            callback_intent = _deserialize_persisted_intent(callback_payload)
+            if hasattr(strategy, "on_intent_executed"):
+                callback_result = strategy.on_intent_executed(callback_intent, True, None)
+                if asyncio.iscoroutine(callback_result):
+                    await callback_result
+            if hasattr(strategy, "save_state"):
+                strategy.save_state()
+            if hasattr(strategy, "flush_pending_saves"):
+                await strategy.flush_pending_saves()
+        except Exception:  # noqa: BLE001 — settlement proof remains authoritative
+            logger.exception("Failed to persist strategy state after recovered async settlement")
+
+    async def _clear_terminal_failed_marker(
+        self,
+        teardown_state: TeardownState,
+        i: int,
+        n_intents: int,
+    ) -> tuple[Any | None, bool]:
+        """Persist removal of a terminally-failed async marker (VIB-6254).
+
+        Returns ``(replacement, needs_unsettled)``. ``replacement`` is the
+        deserialized intent to dispatch, or ``None`` when no replacement may
+        run. ``needs_unsettled`` distinguishes a conservative no-resubmit
+        backstop (marker unclearable/unpersistable → keep resumable) from a
+        plain intent failure (undeserializable replacement → ``failed`` only,
+        matching the pre-extract behaviour). A save fault leaves the durable
+        no-resubmit marker conservative by restoring the in-memory row.
+        Blueprint 14a Stage 6: never resubmit without a measured verdict.
+        """
+        prior_pending_intents_json = teardown_state.pending_intents_json
+        replacement_intent = _clear_persisted_async_submission(teardown_state, i)
+        if replacement_intent is None:
+            logger.error(
+                "Terminally failed async teardown intent %d/%d could not clear its persisted marker; "
+                "refusing replacement submission",
+                i + 1,
+                n_intents,
+            )
+            return None, True
+        teardown_state.updated_at = datetime.now(UTC)
+        if self.state_manager:
+            try:
+                await self.state_manager.save_teardown_state(teardown_state)
+            except Exception:
+                teardown_state.pending_intents_json = prior_pending_intents_json
+                logger.exception(
+                    "Terminally failed async teardown intent %d/%d could not persist marker removal; "
+                    "refusing replacement submission",
+                    i + 1,
+                    n_intents,
+                )
+                return None, True
+        try:
+            return _deserialize_persisted_intent(replacement_intent), False
+        except (TypeError, ValueError):
+            logger.exception(
+                "Terminally failed async teardown intent %d/%d could not deserialize its "
+                "persisted replacement; recording intent failure",
+                i + 1,
+                n_intents,
+            )
+            return None, False
+
+    def _find_exact_cancel_recovery(
+        self,
+        accepted_async_recovery_intents: list[Any] | None,
+        order_keys: tuple[str, ...],
+    ) -> Any | None:
+        """Exact-order cancel for a still-pending accepted submission (VIB-5568).
+
+        Blueprint 14a Stage 3: the venue age gate was already enforced
+        upstream; this lane only routes the exact durable key through the
+        ordinary compiler/commit lane and keeps the marker until a measured
+        terminal_failed verdict authorizes one replacement close.
+        """
+        return next(
+            (
+                candidate
+                for candidate in accepted_async_recovery_intents or []
+                if str(_intent_field(candidate, "intent_type") or "").upper() == "PERP_CANCEL_ORDER"
+                and str(_intent_field(candidate, "order_key") or "").lower() in set(order_keys)
+            ),
+            None,
+        )
+
+    async def _check_async_settlement(
+        self,
+        strategy: Any,
+        intent: Any,
+        teardown_cycle_id: str,
+        ledger_entry_id: str | None,
+        order_keys: tuple[str, ...],
+    ) -> str | None:
+        """Measured settlement verdict for a persisted accepted submission."""
+        if self.runner_helpers.check_intent_settlement is None:
+            return None
+        return await self.runner_helpers.check_intent_settlement(
+            strategy,
+            ledger_entry_id=ledger_entry_id,
+            order_keys=order_keys,
+            cycle_id=teardown_cycle_id,
+            chain=str(intent.get("chain") or getattr(strategy, "chain", "") or ""),
+            wallet_address=_teardown_wallet_for_chain(
+                strategy,
+                str(intent.get("chain") or getattr(strategy, "chain", "") or ""),
+            ),
+        )
+
+    def _decide_swap_clamp(
+        self,
+        strategy: Any,
+        intent: Any,
+        market: Any,
+        clamp_token: str,
+        live_balance: Decimal | None,
+    ) -> SwapClampDecision:
+        """Size a clampable swap-back to tracked inventory (14 §4.5 ALM-2766).
+
+        Blueprint 14a Stage 2 swap-clamp row: ``min(tracked, live)``, never
+        the commingled remainder. Unmeasured live balance fails closed.
+        """
+        if live_balance is None:
+            return SwapClampDecision(None, True, True, "live_balance_unmeasured")
+        tracked_map = (
+            self.runner_helpers.get_tracked_swap_inventory(strategy)  # type: ignore[misc]
+            if self.runner_helpers.has_tracked_inventory
+            else None
+        )
+        return decide_swap_clamp(
+            live_balance=live_balance,
+            tracked_map=tracked_map,
+            from_token=clamp_token,
+            chain=(intent.get("chain") if isinstance(intent, dict) else getattr(intent, "chain", None)),
+        )
+
+    async def _warn_clamp_skip(
+        self,
+        strategy: Any,
+        intent: Any,
+        clamp_token: str,
+        live_balance: Decimal | None,
+    ) -> None:
+        """VIB-4587 sweep WARNING for a clamp-refused swap-back.
+
+        Best-effort observer; never blocks the unwind (14a Stage 6 inverted
+        semantics: a swap-back is never the risk-reducing intent).
+        """
+        if not self.runner_helpers.has_sweep_warning:
+            return
+        try:
+            self.runner_helpers.warn_sweep_non_strategy_balance(  # type: ignore[misc]
+                strategy,
+                intent,
+                clamp_token,
+                live_balance if live_balance is not None else Decimal("0"),
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("sweep-warning helper raised in clamp skip; ignored", exc_info=True)
+
+    def _log_clamp_skip(
+        self,
+        strategy: Any,
+        teardown_id: str,
+        clamp_token: str,
+        decision: SwapClampDecision,
+    ) -> None:
+        """Structured BLOCK + log line for a clamp-refused swap-back (VIB-5478)."""
+        logger.warning(
+            "🛑 ALM-2766 teardown swap-back clamp: SKIPPING %s swap "
+            "(reason=%s, degraded=%s) — not sweeping commingled wallet funds.",
+            clamp_token,
+            decision.reason,
+            decision.degraded,
+        )
+        log_teardown_decision(
+            deployment_id=strategy.deployment_id,
+            teardown_id=teardown_id,
+            phase=TeardownDecisionPhase.BLOCK,
+            outcome="swap_clamp_skipped",
+            description=f"swap-back clamp skipped {clamp_token} ({decision.reason})",
+            token=clamp_token,
+            reason=decision.reason,
+            degraded=decision.degraded,
+            intent_count=1,
+        )
+
+    def _log_clamp_applied(
+        self,
+        strategy: Any,
+        teardown_id: str,
+        clamp_token: str,
+        decision: SwapClampDecision,
+        live_balance: Decimal | None,
+    ) -> None:
+        """Structured SIZE entry for a tracked-clamped swap-back (VIB-5478)."""
+        logger.info(
+            "🛑 ALM-2766 clamped %s swap-back to tracked qty %s (live wallet %s).",
+            clamp_token,
+            decision.amount,
+            live_balance,
+        )
+        log_teardown_decision(
+            deployment_id=strategy.deployment_id,
+            teardown_id=teardown_id,
+            phase=TeardownDecisionPhase.SIZE,
+            outcome="swap_clamp_applied",
+            description=f"swap-back {clamp_token} sized to tracked inventory",
+            token=clamp_token,
+            reason="clamped_to_tracked_quantity",
+            intent_count=1,
+        )
+
+    def _clone_intent_with_slippage(self, intent_to_exec: Any, slippage: Decimal) -> Any:
+        """Clone an intent with the ladder's slippage (14 §6 escalation).
+
+        Pydantic frozen models use ``model_copy``; legacy models fall back to
+        ``replace`` then dict round-trip. Never raises: an unclonable intent
+        keeps its original slippage loudly.
+        """
+        intent_with_slippage = intent_to_exec
+        if not hasattr(intent_to_exec, "max_slippage"):
+            return intent_with_slippage
+        cloned = False
+        if hasattr(intent_to_exec, "model_copy"):
+            try:
+                intent_with_slippage = intent_to_exec.model_copy(update={"max_slippage": slippage})
+                cloned = True
+            except (TypeError, ValueError):
+                logger.warning(
+                    "model_copy failed for %s, falling back to replace",
+                    type(intent_to_exec).__name__,
+                )
+        if not cloned:
+            try:
+                intent_with_slippage = replace(intent_to_exec, max_slippage=slippage)
+                cloned = True
+            except TypeError:
+                if hasattr(intent_to_exec, "to_dict") and hasattr(intent_to_exec, "from_dict"):
+                    try:
+                        intent_dict = intent_to_exec.to_dict()
+                        intent_dict["max_slippage"] = str(slippage)
+                        intent_with_slippage = type(intent_to_exec).from_dict(intent_dict)
+                        cloned = True
+                    except (TypeError, ValueError, KeyError) as e:
+                        logger.warning(
+                            "dict-based cloning failed for %s: %s",
+                            type(intent_to_exec).__name__,
+                            e,
+                        )
+        if not cloned:
+            logger.error(
+                "Could not clone %s with updated slippage %.1f%% — teardown will use original slippage %.1f%%",
+                type(intent_to_exec).__name__,
+                float(slippage * 100),
+                float(getattr(intent_to_exec, "max_slippage", Decimal("0")) * 100),
+            )
+        return intent_with_slippage
+
+    def _classify_intent_shape(self, intent: Any) -> dict[str, Any]:
+        """Shape flags for amount-resolution and price gating (14a Stage 2).
+
+        Live-resolution markers (``withdraw_all``/``repay_full``/``all``)
+        resolve against on-chain figures at execution time, never stale cache.
+        """
+        is_dict = isinstance(intent, dict)
+        if is_dict:
+            amount_value = intent.get("amount")
+            from_token = intent.get("from_token") or intent.get("token")
+            withdraw_all = intent.get("withdraw_all")
+            intent_type_val = intent.get("intent_type")
+            to_token = intent.get("to_token")
+        else:
+            amount_value = getattr(intent, "amount", None)
+            from_token = getattr(intent, "from_token", None) or getattr(intent, "token", None)
+            withdraw_all = getattr(intent, "withdraw_all", False)
+            intent_type_val = getattr(intent, "intent_type", None)
+            to_token = getattr(intent, "to_token", None)
+        upper = str(intent_type_val).upper() if intent_type_val else ""
+        return {
+            "is_dict": is_dict,
+            "amount_value": amount_value,
+            "from_token": from_token,
+            "withdraw_all": withdraw_all,
+            "intent_type_val": intent_type_val,
+            "to_token": to_token,
+            "is_withdraw": upper in ("WITHDRAW", "INTENTTYPE.WITHDRAW"),
+            "is_repay": upper in ("REPAY", "INTENTTYPE.REPAY"),
+            "is_swap": upper in ("SWAP", "INTENTTYPE.SWAP"),
+        }
+
+    def _resolve_all_amount(
+        self,
+        strategy: Any,
+        intent: Any,
+        market: Any,
+        shape: dict[str, Any],
+    ) -> tuple[Any, str | None]:
+        """Resolve ``amount='all'`` against the live wallet balance.
+
+        Returns ``(intent, None)`` on success or ``(intent, error)`` when the
+        balance cannot be proven. Withdraw/repay legs are owned by the
+        compiler's protocol-balance resolver and are never resolved here.
+        Evicts the memoized balance first: earlier teardown legs may have
+        moved the wallet since the snapshot was built. Emits the VIB-4587
+        sweep WARNING best-effort on a resolved swap (never blocks).
+        """
+        if shape["amount_value"] != "all":
+            return intent, None
+        if shape["withdraw_all"] or shape["is_withdraw"] or shape["is_repay"]:
+            return intent, None
+        from_token = shape["from_token"]
+        if not from_token or market is None:
+            return intent, "Cannot resolve amount='all': missing from_token or market context"
+        invalidate = getattr(market, "invalidate_balance", None)
+        if callable(invalidate):
+            try:
+                invalidate(from_token)
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "invalidate_balance(%s) failed; falling back to cached balance",
+                    from_token,
+                    exc_info=True,
+                )
+        try:
+            bal = market.balance(from_token)
+        except Exception as e:
+            return intent, f"Cannot resolve amount='all' for {from_token}: {e}"
+        if bal.balance <= 0:
+            return intent, f"{from_token} balance is 0, nothing to teardown"
+        resolved: Any
+        if shape["is_dict"]:
+            resolved = {**intent, "amount": str(bal.balance)}
+        else:
+            from almanak.framework.intents import Intent
+
+            resolved = Intent.set_resolved_amount(intent, bal.balance)
+        logger.info(f"Resolved amount='all' for {from_token}: {bal.balance}")
+        if self.runner_helpers.has_sweep_warning:
+            try:
+                self.runner_helpers.warn_sweep_non_strategy_balance(  # type: ignore[misc]
+                    strategy,
+                    resolved,
+                    from_token,
+                    bal.balance,
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug("sweep-warning helper raised; ignored", exc_info=True)
+        return resolved, None
+
+    def _compile_intent_at_slippage(
+        self,
+        intent: Any,
+        shape: dict[str, Any],
+        price_oracle: dict | None,
+    ) -> Any:
+        """Price-gate then compile one attempt (VIB-2928 hard stop).
+
+        A teardown SWAP without a real USD price for both legs refuses to
+        compile: adapters fall back to $1 for expected-out math, so a price
+        gap would size the trade off a fake number. Per-leg: only this swap
+        fails, never the next risk-reducing intent (14a Stage 6).
+        """
+        compiler = self.compiler
+        if compiler is None:
+            raise RuntimeError("No intent compiler configured for teardown execution")
+
+        original_oracle = getattr(compiler, "price_oracle", None)
+        original_placeholders = getattr(compiler, "_using_placeholders", True)
+        if price_oracle and hasattr(compiler, "update_prices"):
+            compiler.update_prices(price_oracle)
+        try:
+            if shape["is_swap"]:
+                assert_prices = getattr(compiler, "assert_prices_available", None)
+                if not callable(assert_prices):
+                    raise ValueError(
+                        "compiler does not support the teardown SWAP price hard-stop "
+                        "(assert_prices_available) — refusing to compile a swap unguarded"
+                    )
+                assert_prices([shape["from_token"], shape["to_token"]])
+            return compiler.compile(intent)
+        finally:
+            if hasattr(compiler, "restore_prices"):
+                compiler.restore_prices(original_oracle, original_placeholders)
+
+    def _describe_attempt_error(self, error: Any) -> str:
+        """Operator-clear revert text (VIB-5470 selector decode)."""
+        try:
+            annotated = annotate_teardown_error(error)
+            return annotated if annotated is not None else str(error)
+        except Exception:  # noqa: BLE001 — annotation is best-effort
+            return str(error)
+
+    async def _capture_pre_attempt_snapshots(
+        self,
+        strategy: Any,
+        intent: Any,
+    ) -> tuple[Any, Any, Any, Any]:
+        """Pre-execute snapshots on one boundary (14a Stage 4).
+
+        Wallet balances (VIB-3918) + lending pre-state (VIB-3934) + V4 fees
+        (VIB-4482) + V4 native principal (VIB-5117). Every read is
+        best-effort and never raises; each must happen BEFORE
+        ``orchestrator.execute`` (a post-burn read returns zero liquidity).
+        """
+        pre_snapshot: Any = None
+        if self.runner_helpers.has_per_intent_balances:
+            try:
+                pre_snapshot = await self.runner_helpers.snapshot_intent_balances(  # type: ignore[misc]
+                    strategy, intent
+                )
+            except Exception as exc:  # noqa: BLE001 — best-effort
+                logger.debug(
+                    "teardown pre-intent balance snapshot failed for %s: %s",
+                    strategy.deployment_id,
+                    exc,
+                )
+        lending_pre: Any = None
+        if self.runner_helpers.has_lending_pre_state:
+            try:
+                lending_pre = await self.runner_helpers.snapshot_intent_lending_state(  # type: ignore[misc]
+                    strategy, intent
+                )
+            except Exception as exc:  # noqa: BLE001 — best-effort
+                logger.debug(
+                    "teardown lending pre-state snapshot failed for %s: %s",
+                    strategy.deployment_id,
+                    exc,
+                )
+        v4_fees: tuple[int, int] | None = None
+        if self.runner_helpers.has_v4_lp_close_fees:
+            try:
+                v4_fees = await self.runner_helpers.snapshot_intent_v4_lp_close_fees(  # type: ignore[misc]
+                    strategy, intent
+                )
+            except Exception as exc:  # noqa: BLE001 — best-effort
+                logger.debug(
+                    "teardown V4 LP-close pre-fee snapshot failed for %s: %s",
+                    strategy.deployment_id,
+                    exc,
+                )
+        v4_native: tuple[int | None, int | None] | None = None
+        if self.runner_helpers.has_v4_lp_close_native_principal:
+            try:
+                v4_native = await self.runner_helpers.snapshot_intent_v4_lp_close_native_principal(  # type: ignore[misc]
+                    strategy, intent
+                )
+            except Exception as exc:  # noqa: BLE001 — best-effort
+                logger.debug(
+                    "teardown V4 LP-close native-principal snapshot failed for %s: %s",
+                    strategy.deployment_id,
+                    exc,
+                )
+        return pre_snapshot, lending_pre, v4_fees, v4_native
+
+    async def _prepare_execution_attempt(
+        self,
+        strategy: Any,
+        intent: Any,
+        slippage: Decimal,
+        price_oracle: dict | None,
+        market: Any,
+    ) -> Any:
+        """Resolve and compile one ladder attempt before dispatch (14a Stage 3)."""
+        intent_with_slippage = self._clone_intent_with_slippage(intent, slippage)
+        intent_with_slippage, clamp_refusal = await self._attach_lp_outstanding(strategy, intent_with_slippage)
+        if clamp_refusal is not None:
+            return ExecutionAttempt(
+                success=False,
+                slippage_used=slippage,
+                actual_slippage=Decimal("0"),
+                error=clamp_refusal,
+                retryable=False,
+                disposition=Disposition.NON_RETRYABLE.value,
+            )
+
+        shape = self._classify_intent_shape(intent_with_slippage)
+        intent_with_slippage, amount_error = self._resolve_all_amount(strategy, intent_with_slippage, market, shape)
+        if amount_error is not None:
+            return ExecutionAttempt(
+                success=False,
+                slippage_used=slippage,
+                actual_slippage=Decimal("0"),
+                error=amount_error,
+            )
+
+        try:
+            compilation_result = self._compile_intent_at_slippage(intent_with_slippage, shape, price_oracle)
+        except ValueError as price_err:
+            logger.error(
+                "🛑 Teardown SWAP price HARD STOP (VIB-2928) for %s: %s",
+                getattr(strategy, "deployment_id", "?"),
+                price_err,
+            )
+            return ExecutionAttempt(
+                success=False,
+                slippage_used=slippage,
+                actual_slippage=Decimal("0"),
+                error=f"Price HARD STOP (VIB-2928): {price_err}",
+                retryable=False,
+            )
+
+        if compilation_result.status.value != "SUCCESS":
+            logger.error(f"Intent compilation failed: {compilation_result.error}")
+            return ExecutionAttempt(
+                success=False,
+                slippage_used=slippage,
+                actual_slippage=Decimal("0"),
+                error=f"Compilation failed: {compilation_result.error}",
+                retryable=compilation_result.is_transient,
+                retry_after_seconds=compilation_result.retry_after_seconds,
+            )
+        if not compilation_result.action_bundle:
+            logger.error("Compilation succeeded but no action bundle produced")
+            return ExecutionAttempt(
+                success=False,
+                slippage_used=slippage,
+                actual_slippage=Decimal("0"),
+                error="No action bundle produced",
+                retryable=False,
+            )
+        return compilation_result
+
+    def _build_execution_context(
+        self,
+        strategy: Any,
+        intent: Any,
+        teardown_id: str,
+        intent_index: int,
+    ) -> Any:
+        """Build a context scoped to the intent's persisted chain and wallet."""
+        from almanak.framework.execution.orchestrator import ExecutionContext
+
+        intent_chain = _intent_field(intent, "chain") or strategy.chain
+        return ExecutionContext(
+            deployment_id=strategy.deployment_id,
+            intent_id=f"teardown_{teardown_id}_{intent_index}",
+            chain=intent_chain,
+            intent_description=self._describe_intent(intent),
+            wallet_address=_teardown_wallet_for_chain(strategy, intent_chain),
+        )
+
+    async def _execute_and_commit_attempt(
+        self,
+        strategy: Any,
+        intent: Any,
+        compilation_result: Any,
+        context: Any,
+        teardown_cycle_id: str,
+        accounting_degraded_records: list[Any],
+        attempt_state: _IntentAttemptState,
+        intent_index: int,
+        intent_count: int,
+    ) -> tuple[Any, Any, tuple[bool, str | None, tuple[str, ...], Any] | None]:
+        """Keep each teardown dispatch paired with its accounting commit."""
+        if self.orchestrator is None:
+            raise RuntimeError("No execution orchestrator configured for teardown execution")
+
+        # Keep dispatch on self so static accounting validation can verify commit pairing.
+        snapshots = await self._capture_pre_attempt_snapshots(strategy, intent)
+        pre_snapshot, lending_pre, v4_fees, v4_native = snapshots
+        exec_result = await self.orchestrator.execute(compilation_result.action_bundle, context)
+        if not exec_result.success:
+            return exec_result, None, None
+
+        attempt_state.submission_landed = True
+        bundle_metadata = getattr(compilation_result.action_bundle, "metadata", None) or None
+        async_submission = self._prepare_async_submission(
+            strategy,
+            intent,
+            exec_result,
+            context,
+            bundle_metadata,
+        )
+        if async_submission[1] is None:
+            tx_hash = exec_result.transaction_results[0].tx_hash if exec_result.transaction_results else "unknown"
+            logger.info(
+                f"Intent {intent_index + 1}/{intent_count} executed successfully. "
+                f"TX: {tx_hash}, Gas used: {exec_result.total_gas_used}"
+            )
+        post_recon: dict[str, Any] | None = None
+        if self.runner_helpers.has_per_intent_balances and pre_snapshot is not None:
+            try:
+                post_recon = await self.runner_helpers.reconcile_post_balances(  # type: ignore[misc]
+                    strategy,
+                    intent,
+                    exec_result,
+                    pre_snapshot=pre_snapshot,
+                )
+            except Exception as exc:  # noqa: BLE001 — best-effort accounting observer
+                logger.debug(
+                    "teardown post-intent reconcile failed for %s: %s",
+                    strategy.deployment_id,
+                    exc,
+                )
+
+        if not self.runner_helpers.has_commit:
+            return exec_result, None, async_submission
+        outcome = await self.runner_helpers.commit(  # type: ignore[misc]
+            strategy,
+            intent,
+            execution_result=exec_result,
+            execution_context=context,
+            bundle_metadata=bundle_metadata,
+            teardown_cycle_id=teardown_cycle_id,
+            pre_snapshot=pre_snapshot,
+            recon=post_recon,
+            lending_pre_state=lending_pre,
+            v4_lp_close_fees=v4_fees,
+            v4_lp_close_native_principal=v4_native,
+        )
+        if outcome.accounting_degraded:
+            accounting_degraded_records.extend(outcome.degraded_writes)
+            logger.error(
+                "Teardown intent %d/%d accounting degraded — %s",
+                intent_index + 1,
+                intent_count,
+                outcome.degraded_reason or "unknown",
+            )
+        return exec_result, outcome, async_submission
+
+    def _prepare_async_submission(
+        self,
+        strategy: Any,
+        intent: Any,
+        exec_result: Any,
+        context: Any,
+        bundle_metadata: Any,
+    ) -> tuple[bool, str | None, tuple[str, ...], Any]:
+        """Classify a landed transaction that may require keeper settlement."""
+        if not self.runner_helpers.has_async_settlement:
+            return False, None, (), None
+        preparation = self.runner_helpers.prepare_intent_settlement(  # type: ignore[misc]
+            strategy,
+            intent,
+            exec_result,
+            context,
+            bundle_metadata=bundle_metadata,
+        )
+        if not preparation.applicable:
+            return False, preparation.error, (), preparation
+        order_keys = tuple(
+            str(getattr(order, "order_id", "") or getattr(order, "order_key", "") or "").lower()
+            for order in preparation.orders
+            if str(getattr(order, "order_id", "") or getattr(order, "order_key", "") or "")
+        )
+        return True, preparation.error, order_keys, preparation
+
+    async def _persist_async_submission_marker(
+        self,
+        teardown_state: TeardownState,
+        intent_index: int,
+        order_keys: tuple[str, ...],
+        commit_outcome: Any,
+        resume_floor: Callable[[], int],
+        intent_count: int,
+    ) -> tuple[bool, bool, Exception | None]:
+        """Persist the no-resubmit identity for an accepted async submission."""
+        ledger_entry_id = (
+            str(commit_outcome.ledger_entry_id) if commit_outcome and commit_outcome.ledger_entry_id else None
+        )
+        if not order_keys and ledger_entry_id:
+            recover_keys = self.runner_helpers.recover_accepted_order_keys
+            if recover_keys is not None:
+                order_keys = await recover_keys(ledger_entry_id)
+        durable_correlation = bool(ledger_entry_id and order_keys)
+        marked = (
+            _mark_persisted_async_submission_accepted(
+                teardown_state,
+                intent_index,
+                order_keys=order_keys,
+                ledger_entry_id=ledger_entry_id,
+            )
+            if durable_correlation
+            else False
+        )
+        if not marked:
+            logger.error(
+                "Accepted async teardown intent %d/%d could not be marked in the persisted plan; "
+                "the contiguous resume floor remains the no-resubmit backstop",
+                intent_index + 1,
+                intent_count,
+            )
+        floor = resume_floor()
+        teardown_state.completed_intents = floor
+        teardown_state.current_intent_index = floor
+        teardown_state.updated_at = datetime.now(UTC)
+        if not marked:
+            return False, durable_correlation, None
+        if not self.state_manager:
+            return True, durable_correlation, None
+        try:
+            await self.state_manager.save_teardown_state(teardown_state)
+        except Exception as exc:  # noqa: BLE001 — submission already landed; never retry it
+            logger.exception("Accepted async teardown marker persistence failed after Phase-1 commit")
+            return False, durable_correlation, exc
+        return True, durable_correlation, None
+
+    async def _settle_async_submission(
+        self,
+        strategy: Any,
+        intent: Any,
+        exec_result: Any,
+        context: Any,
+        bundle_metadata: Any,
+        preparation: Any,
+        teardown_cycle_id: str,
+        accounting_degraded_records: list[Any],
+        intent_index: int,
+        intent_count: int,
+    ) -> str | None:
+        """Wait for and book terminal async settlement (14a Stages 3-4)."""
+        settlement_error = await self.runner_helpers.await_intent_settlement(  # type: ignore[misc]
+            strategy,
+            intent,
+            exec_result,
+            context,
+            bundle_metadata=bundle_metadata,
+            preparation=preparation,
+        )
+        if settlement_error is not None:
+            return settlement_error
+        degraded = await self.runner_helpers.reconcile_intent_settlement(  # type: ignore[misc]
+            strategy,
+            exec_result,
+            context,
+            teardown_cycle_id,
+        )
+        if not degraded:
+            return None
+        accounting_degraded_records.extend(degraded)
+        logger.error(
+            "Teardown intent %d/%d terminal settlement accounting degraded — %s",
+            intent_index + 1,
+            intent_count,
+            "; ".join(str(getattr(record, "error", "") or "unknown") for record in degraded),
+        )
+        return (
+            "Terminal async settlement was observed but Phase-2 booking remains degraded; "
+            "keeping the correlated teardown resumable"
+        )
+
+    async def _complete_successful_attempt(
+        self,
+        strategy: Any,
+        intent: Any,
+        exec_result: Any,
+        context: Any,
+        bundle_metadata: Any,
+        commit_outcome: Any,
+        async_submission: tuple[bool, str | None, tuple[str, ...], Any],
+        slippage: Decimal,
+        teardown_state: TeardownState,
+        teardown_cycle_id: str,
+        resume_floor: Callable[[], int],
+        accounting_degraded_records: list[Any],
+        attempt_state: _IntentAttemptState,
+        intent_index: int,
+        intent_count: int,
+    ) -> ExecutionAttempt:
+        """Enforce the async terminal barrier after a landed transaction."""
+        accepted, settlement_error, order_keys, preparation = async_submission
+        actual_slippage = slippage * Decimal("0.5")
+
+        marker_persisted = False
+        durable_correlation = False
+        if accepted:
+            marker_persisted, durable_correlation, marker_error = await self._persist_async_submission_marker(
+                teardown_state,
+                intent_index,
+                order_keys,
+                commit_outcome,
+                resume_floor,
+                intent_count,
+            )
+            if not marker_persisted:
+                settlement_error = (
+                    "Accepted async submission could not be durably correlated for crash-safe recovery; "
+                    f"refusing resubmission: {marker_error or 'missing Phase-1 ledger/order key'}"
+                )
+
+        if accepted and settlement_error is None:
+            settlement_error = await self._settle_async_submission(
+                strategy,
+                intent,
+                exec_result,
+                context,
+                bundle_metadata,
+                preparation,
+                teardown_cycle_id,
+                accounting_degraded_records,
+                intent_index,
+                intent_count,
+            )
+        if settlement_error is None:
+            return ExecutionAttempt(
+                success=True,
+                slippage_used=slippage,
+                actual_slippage=actual_slippage,
+            )
+
+        logger.error(
+            "Intent %d/%d was accepted but did not settle terminally; refusing resubmission: %s",
+            intent_index + 1,
+            intent_count,
+            settlement_error,
+        )
+        if accepted and (marker_persisted or durable_correlation):
+            attempt_state.unsettled_async_submission = True
+        return ExecutionAttempt(
+            success=False,
+            slippage_used=slippage,
+            actual_slippage=Decimal("0"),
+            error=settlement_error,
+            retryable=False,
+            disposition=Disposition.NON_RETRYABLE.value,
+        )
+
+    def _failed_execution_attempt(
+        self,
+        exec_result: Any,
+        slippage: Decimal,
+        intent_index: int,
+        intent_count: int,
+    ) -> ExecutionAttempt:
+        """Classify a failed dispatch without risking duplicate replay."""
+        from almanak.framework.execution.reconciliation import (
+            failed_submission_requires_reconciliation,
+            reconciliation_required_error,
+        )
+
+        if failed_submission_requires_reconciliation(exec_result):
+            terminal_error = reconciliation_required_error(exec_result)
+            logger.error(
+                "Intent %d/%d requires receipt reconciliation; refusing teardown replay: %s",
+                intent_index + 1,
+                intent_count,
+                terminal_error,
+            )
+            return ExecutionAttempt(
+                success=False,
+                slippage_used=slippage,
+                actual_slippage=Decimal("0"),
+                error=terminal_error,
+                retryable=False,
+                disposition=Disposition.NON_RETRYABLE.value,
+            )
+        revert_class, disposition = classify_teardown_failure(exec_result.error)
+        annotated_error = self._describe_attempt_error(exec_result.error)
+        logger.error(
+            "Intent %d/%d execution failed [%s -> %s]: %s",
+            intent_index + 1,
+            intent_count,
+            revert_class.value,
+            disposition.value,
+            annotated_error,
+        )
+        return ExecutionAttempt(
+            success=False,
+            slippage_used=slippage,
+            actual_slippage=Decimal("0"),
+            error=annotated_error,
+            retryable=disposition != Disposition.NON_RETRYABLE,
+            disposition=disposition.value,
+        )
+
+    async def _execute_intent_at_slippage(
+        self,
+        intent: Any,
+        slippage: Decimal,
+        *,
+        strategy: Any,
+        teardown_id: str,
+        intent_index: int,
+        intent_count: int,
+        teardown_state: TeardownState,
+        teardown_cycle_id: str,
+        price_oracle: dict | None,
+        market: Any,
+        resume_floor: Callable[[], int],
+        accounting_degraded_records: list[Any],
+        attempt_state: _IntentAttemptState,
+    ) -> ExecutionAttempt:
+        """Execute one slippage-ladder attempt through the uniform lane."""
+        if attempt_state.submission_landed:
+            return ExecutionAttempt(
+                success=False,
+                slippage_used=slippage,
+                actual_slippage=Decimal("0"),
+                error="On-chain submission already landed; refusing duplicate teardown execution",
+                retryable=False,
+                disposition=Disposition.NON_RETRYABLE.value,
+            )
+        logger.info(f"Executing intent {intent_index + 1}/{intent_count} at {slippage:.1%} slippage")
+        if not self.orchestrator or not self.compiler:
+            logger.warning(
+                "No orchestrator/compiler configured - teardown cannot execute. "
+                "Inject ExecutionOrchestrator and IntentCompiler for real execution."
+            )
+            return ExecutionAttempt(
+                success=False,
+                slippage_used=slippage,
+                actual_slippage=Decimal("0"),
+                error="No orchestrator/compiler configured for teardown execution",
+            )
+
+        try:
+            compilation_result = await self._prepare_execution_attempt(
+                strategy,
+                intent,
+                slippage,
+                price_oracle,
+                market,
+            )
+            if isinstance(compilation_result, ExecutionAttempt):
+                return compilation_result
+            context = self._build_execution_context(strategy, intent, teardown_id, intent_index)
+            exec_result, commit_outcome, async_submission = await self._execute_and_commit_attempt(
+                strategy,
+                intent,
+                compilation_result,
+                context,
+                teardown_cycle_id,
+                accounting_degraded_records,
+                attempt_state,
+                intent_index,
+                intent_count,
+            )
+            if not exec_result.success:
+                return self._failed_execution_attempt(exec_result, slippage, intent_index, intent_count)
+            if async_submission is None:
+                raise RuntimeError("successful teardown dispatch is missing async classification")
+            bundle_metadata = getattr(compilation_result.action_bundle, "metadata", None) or None
+            return await self._complete_successful_attempt(
+                strategy,
+                intent,
+                exec_result,
+                context,
+                bundle_metadata,
+                commit_outcome,
+                async_submission,
+                slippage,
+                teardown_state,
+                teardown_cycle_id,
+                resume_floor,
+                accounting_degraded_records,
+                attempt_state,
+                intent_index,
+                intent_count,
+            )
+        except Exception as exc:  # noqa: BLE001 — convert execution faults into ladder attempts
+            if attempt_state.submission_landed:
+                logger.exception("Post-submit teardown processing failed; refusing duplicate execution: %s", exc)
+                return ExecutionAttempt(
+                    success=False,
+                    slippage_used=slippage,
+                    actual_slippage=Decimal("0"),
+                    error=f"On-chain submission landed but post-submit processing failed: {exc}",
+                    retryable=False,
+                    disposition=Disposition.NON_RETRYABLE.value,
+                )
+            revert_class, disposition = classify_teardown_failure(str(exc))
+            logger.exception(
+                "Exception during intent execution [%s -> %s]: %s",
+                revert_class.value,
+                disposition.value,
+                exc,
+            )
+            return ExecutionAttempt(
+                success=False,
+                slippage_used=slippage,
+                actual_slippage=Decimal("0"),
+                error=str(exc),
+                retryable=disposition != Disposition.NON_RETRYABLE,
+                disposition=disposition.value,
+            )
+
+    def _paused_result(
+        self,
+        strategy: Any,
+        mode_str: str,
+        started_at: Any,
+        intents: list,
+        succeeded: int,
+        failed: int,
+        skipped: int,
+        positions: TeardownPositionSummary,
+        total_costs: Decimal,
+        final_balances: dict[str, Decimal],
+        accounting_degraded_records: list[Any],
+    ) -> TeardownResult:
+        """Partial result for a slippage-approval pause (14 §6 ladder L3/L4)."""
+        return TeardownResult(
+            success=False,
+            deployment_id=strategy.deployment_id,
+            mode=mode_str,
+            started_at=started_at,
+            completed_at=None,
+            duration_seconds=(datetime.now(UTC) - started_at).total_seconds(),
+            intents_total=len(intents),
+            intents_succeeded=succeeded,
+            intents_failed=failed,
+            intents_skipped=skipped,
+            starting_value_usd=positions.total_value_usd,
+            final_value_usd=positions.total_value_usd - total_costs,
+            total_costs_usd=total_costs,
+            final_balances=final_balances,
+            error="Paused awaiting approval",
+            recovery_options=[
+                "Approve higher slippage",
+                "Wait & Escalate to next level",
+                "Cancel",
+            ],
+            accounting_degraded=bool(accounting_degraded_records),
+            accounting_degraded_count=len(accounting_degraded_records),
+        )
+
+    def _final_result(
+        self,
+        strategy: Any,
+        mode_str: str,
+        started_at: Any,
+        finished_at: Any,
+        intents: list,
+        succeeded: int,
+        failed: int,
+        skipped: int,
+        positions: TeardownPositionSummary,
+        total_costs: Decimal,
+        final_balances: dict[str, Decimal],
+        unsettled_async_submission: bool,
+        accounting_degraded_records: list[Any],
+        last_receipt_block: int | None,
+    ) -> TeardownResult:
+        """Terminal result (14a Stage 6: unsettled async stays resumable)."""
+        completed_at = None if unsettled_async_submission else finished_at
+        if skipped:
+            logger.info(
+                "Teardown for %s completed: %d executed, %d skipped (no-op), %d failed",
+                strategy.deployment_id,
+                succeeded - skipped,
+                skipped,
+                failed,
+            )
+        return TeardownResult(
+            success=failed == 0 and not unsettled_async_submission,
+            deployment_id=strategy.deployment_id,
+            mode=mode_str,
+            started_at=started_at,
+            completed_at=completed_at,
+            duration_seconds=(finished_at - started_at).total_seconds(),
+            intents_total=len(intents),
+            intents_succeeded=succeeded,
+            intents_failed=failed,
+            intents_skipped=skipped,
+            starting_value_usd=positions.total_value_usd,
+            final_value_usd=positions.total_value_usd - total_costs,
+            total_costs_usd=total_costs,
+            final_balances=final_balances,
+            error=(
+                ASYNC_SETTLEMENT_PENDING_ERROR
+                if unsettled_async_submission
+                else None
+                if failed == 0
+                else f"{failed} intents failed"
+            ),
+            async_settlement_pending=unsettled_async_submission,
+            accounting_degraded=bool(accounting_degraded_records),
+            accounting_degraded_count=len(accounting_degraded_records),
+            last_receipt_block=last_receipt_block,
+        )
+
+    async def _process_async_accepted(
+        self,
+        strategy: Any,
+        intent: Any,
+        i: int,
+        n_intents: int,
+        teardown_state: TeardownState,
+        teardown_cycle_id: str,
+        accepted_async_recovery_intents: list[Any] | None,
+        resume_floor: Callable[[], int],
+    ) -> tuple[bool, Any, int, int, bool] | None:
+        """Async-settlement branch for a persisted accepted submission (VIB-6254).
+
+        Blueprint 14a Stage 3 uniform lane: a landed createOrder is
+        dispatch-complete but not proven terminal — never replay it (duplicate
+        economic close). Returns ``None`` when the intent carries no accepted
+        marker (caller falls through to normal dispatch). Otherwise returns
+        ``(should_continue, intent_out, succeeded_inc, failed_inc,
+        unsettled_inc)``; the caller applies the increments and either
+        ``continue``s or dispatches ``intent_out``.
+        """
+        if not _is_persisted_async_submission_accepted(intent):
+            return None
+        ledger_entry_id, order_keys = _accepted_async_submission_metadata(intent)
+        settlement_status = await self._check_async_settlement(
+            strategy, intent, teardown_cycle_id, ledger_entry_id, order_keys
+        )
+        if settlement_status == "executed":
+            logger.info(
+                "Accepted async teardown intent %d/%d is terminally executed and booked; completing resume",
+                i + 1,
+                n_intents,
+            )
+            await self._settle_accepted_executed(strategy, intent, i, n_intents)
+            return True, intent, 1, 0, False
+        if settlement_status == "terminal_failed":
+            replacement, needs_unsettled = await self._clear_terminal_failed_marker(teardown_state, i, n_intents)
+            if replacement is None:
+                return True, intent, 0, 1, needs_unsettled
+            logger.warning(
+                "Accepted async teardown intent %d/%d is terminally failed; dispatching one replacement close",
+                i + 1,
+                n_intents,
+            )
+            return False, replacement, 0, 0, False
+        exact_cancel = self._find_exact_cancel_recovery(accepted_async_recovery_intents, order_keys)
+        if exact_cancel is not None:
+            logger.warning(
+                "Accepted async teardown intent %d/%d remains pending and is now cancellable; "
+                "dispatching exact-order recovery",
+                i + 1,
+                n_intents,
+            )
+            return False, exact_cancel, 0, 0, True
+        logger.error(
+            "Refusing to resubmit accepted async teardown intent %d/%d; terminal settlement is unproven",
+            i + 1,
+            n_intents,
+        )
+        await self._save_execute_floor(teardown_state, resume_floor())
+        return True, intent, 0, 1, True
+
+    async def _process_zero_balance_skip(
+        self,
+        intent: Any,
+        market: Any,
+        i: int,
+        n_intents: int,
+        progress_pct: int,
+        on_progress: Callable[[int, str], Awaitable[None]] | None,
+    ) -> str | None:
+        """Pre-flight no-op skip for a zero-balance ``amount='all'`` swap.
+
+        Blueprint 14a Stage 3 (mirrors the inline lane): nothing to sell is a
+        no-op success, not a failure — retrying at higher slippage cannot
+        conjure tokens. Returns the skip reason, or ``None`` to dispatch.
+        """
+        skip_reason = _zero_balance_swap_skip_reason(intent, market)
+        if not skip_reason:
+            return None
+        logger.info(f"Teardown intent {i + 1}/{n_intents}: skipping — {skip_reason}")
+        if on_progress:
+            await on_progress(progress_pct, f"Skipped step {i + 1}/{n_intents}: {skip_reason}")
+        return skip_reason
+
+    async def _process_swap_clamp(
+        self,
+        strategy: Any,
+        intent: Any,
+        market: Any,
+        teardown_id: str,
+        i: int,
+        n_intents: int,
+        progress_pct: int,
+        on_progress: Callable[[int, str], Awaitable[None]] | None,
+        accounting_degraded_records: list[Any],
+    ) -> tuple[Any, bool, int, int]:
+        """Swap-back clamp branch (14 §4.5 ALM-2766, 14a Stage 2).
+
+        Returns ``(intent_out, should_continue, succeeded_inc, skipped_inc)``.
+        A clampable swap never falls through with a full ``all``: the branch
+        owns the outcome (proceed-clamped or skip), closing the sweep bypass.
+        Skips are no-op successes that strand no on-chain risk (14a Stage 6).
+        """
+        clamp_token = _clampable_swap_from_token(intent, market)
+        if not clamp_token:
+            return intent, False, 0, 0
+        live_balance = _read_live_wallet_balance(market, clamp_token)
+        decision = self._decide_swap_clamp(strategy, intent, market, clamp_token, live_balance)
+        if decision.degraded:
+            accounting_degraded_records.append(
+                {
+                    "kind": "swap_clamp_degraded",
+                    "intent_index": i,
+                    "token": clamp_token,
+                    "reason": decision.reason,
+                }
+            )
+        if decision.skip:
+            await self._warn_clamp_skip(strategy, intent, clamp_token, live_balance)
+            self._log_clamp_skip(strategy, teardown_id, clamp_token, decision)
+            if on_progress:
+                await on_progress(progress_pct, f"Skipped step {i + 1}/{n_intents}: clamp {decision.reason}")
+            return intent, True, 1, 1
+        resolved = _set_intent_resolved_amount(intent, decision.amount)  # type: ignore[arg-type]
+        self._log_clamp_applied(strategy, teardown_id, clamp_token, decision, live_balance)
+        return resolved, False, 0, 0
+
+    def _apply_async_queue_outcome(
+        self,
+        outcome: tuple[bool, Any, int, int, bool],
+        totals: _IntentExecutionTotals,
+        pending_indices: set[int],
+        intent_index: int,
+    ) -> tuple[bool, Any]:
+        """Apply a persisted async verdict to the queue's running totals."""
+        should_continue, intent, succeeded, failed, unsettled = outcome
+        totals.succeeded += succeeded
+        totals.failed += failed
+        totals.unsettled_async_submission |= unsettled
+        if should_continue and succeeded:
+            pending_indices.discard(intent_index)
+        return should_continue, intent
+
+    async def _begin_execute_intent(
+        self,
+        intent_index: int,
+        intent_count: int,
+        attempts: int,
+        teardown_state: TeardownState,
+        resume_floor: Callable[[], int],
+        on_progress: Callable[[int, str], Awaitable[None]] | None,
+    ) -> int:
+        """Apply deferred backoff, progress notification, and resume checkpoint."""
+        if attempts > 0:
+            await asyncio.sleep(_TRANSIENT_BACKOFF_S * attempts)
+        progress_pct = int((intent_index / intent_count) * 100)
+        if on_progress:
+            await on_progress(progress_pct, f"Executing step {intent_index + 1}/{intent_count}")
+        await self._save_execute_floor(teardown_state, resume_floor())
+        return progress_pct
+
+    async def _apply_ladder_result(
+        self,
+        exec_result: Any,
+        attempt_state: _IntentAttemptState,
+        totals: _IntentExecutionTotals,
+        strategy: Any,
+        intent: Any,
+        intent_index: int,
+        attempts: int,
+        intents: list[Any],
+        positions: TeardownPositionSummary,
+        teardown_state: TeardownState,
+        resume_floor: Callable[[], int],
+        pending_indices: set[int],
+        mode_str: str,
+        started_at: datetime,
+        accounting_degraded_records: list[Any],
+    ) -> tuple[tuple[int, Any, int] | None, TeardownResult | None]:
+        """Fold one ladder result into queue state or return a control outcome."""
+        totals.unsettled_async_submission |= attempt_state.unsettled_async_submission
+        if exec_result.success:
+            totals.succeeded += 1
+            pending_indices.discard(intent_index)
+            totals.last_receipt_block, totals.total_costs = self._fold_success_receipt(
+                totals.last_receipt_block,
+                exec_result,
+                positions,
+                len(intents),
+                totals.total_costs,
+            )
+            await self._notify_intent_success(strategy, intent, exec_result, intent_index, len(intents))
+        else:
+            revert_text = self._transient_retry_due(exec_result, intent, attempts)
+            if revert_text is not None:
+                logger.warning(
+                    "Teardown intent %d/%d reverted TRANSIENT (%s/%s): %s — deferring "
+                    "retry %d/%d to end of queue (time-axis backoff).",
+                    intent_index + 1,
+                    len(intents),
+                    _intent_field(intent, "protocol"),
+                    _intent_field(intent, "intent_type"),
+                    revert_text,
+                    attempts + 1,
+                    _TRANSIENT_MAX_ATTEMPTS,
+                )
+                return (intent_index, intent, attempts + 1), None
+
+            totals.failed += 1
+            if exec_result.status == "paused_awaiting_approval":
+                teardown_state.status = TeardownStatus.PAUSED
+                if self.state_manager:
+                    await self.state_manager.save_teardown_state(teardown_state)
+                if self.alert_manager and exec_result.approval_request:
+                    await self.alert_manager.send_approval_needed(exec_result.approval_request)
+                return None, self._paused_result(
+                    strategy,
+                    mode_str,
+                    started_at,
+                    intents,
+                    totals.succeeded,
+                    totals.failed,
+                    totals.skipped,
+                    positions,
+                    totals.total_costs,
+                    totals.final_balances,
+                    accounting_degraded_records,
+                )
+
+        await self._save_execute_floor(teardown_state, resume_floor())
+        return None, None
+
+    async def _finish_execute_state(
+        self,
+        teardown_state: TeardownState,
+        finished_at: datetime,
+        unsettled_async_submission: bool,
+    ) -> None:
+        """Persist terminal or resumable state after the queue drains."""
+        completed_at = None if unsettled_async_submission else finished_at
+        teardown_state.status = TeardownStatus.EXECUTING if unsettled_async_submission else TeardownStatus.COMPLETED
+        teardown_state.completed_at = completed_at
+        if self.state_manager:
+            await self.state_manager.save_teardown_state(teardown_state)
+
+    async def _execute_intents(
         self,
         teardown_id: str,
         strategy: IntentStrategy,
@@ -1520,22 +3203,12 @@ class TeardownManager:
         started_at = teardown_state.started_at
         mode_str = "graceful" if mode == TeardownMode.SOFT else "emergency"
 
-        succeeded = 0
-        failed = 0
-        skipped = 0
-        total_costs = Decimal("0")
-        final_balances: dict[str, Decimal] = {}
-
-        # Pin verification to the latest successful receipt block, not a lagging "latest" read.
-        last_receipt_block: int | None = None
+        totals = _IntentExecutionTotals()
 
         # All per-intent and bracket accounting writes share one teardown cycle identity.
         teardown_cycle_id = f"teardown-{teardown_id}"
 
         accounting_degraded_records: list[Any] = []
-        # An accepted but non-terminal async order must remain resumable to prevent a duplicate close.
-        unsettled_async_submission = False
-
         # Deferred retries trail every first attempt, preserving risk-priority order.
         work: deque[tuple[int, Any, int]] = deque(
             (idx, it, 0) for idx, it in enumerate(intents[start_from_index:], start=start_from_index)
@@ -1550,841 +3223,94 @@ class TeardownManager:
         while work:
             i, intent, attempts = work.popleft()
 
-            if _is_persisted_async_submission_accepted(intent):
-                # A durable accepted order is dispatch-complete but remains pending until terminal proof.
-                ledger_entry_id, order_keys = _accepted_async_submission_metadata(intent)
-                settlement_status: str | None = None
-                if self.runner_helpers.check_intent_settlement is not None:
-                    settlement_status = await self.runner_helpers.check_intent_settlement(
-                        strategy,
-                        ledger_entry_id=ledger_entry_id,
-                        order_keys=order_keys,
-                        cycle_id=teardown_cycle_id,
-                        chain=str(intent.get("chain") or getattr(strategy, "chain", "") or ""),
-                        wallet_address=_teardown_wallet_for_chain(
-                            strategy,
-                            str(intent.get("chain") or getattr(strategy, "chain", "") or ""),
-                        ),
-                    )
-                if settlement_status == "executed":
-                    succeeded += 1
-                    _pending_indices.discard(i)
-                    logger.info(
-                        "Accepted async teardown intent %d/%d is terminally executed and booked; completing resume",
-                        i + 1,
-                        len(intents),
-                    )
-                    try:
-                        callback_payload = {
-                            key: value
-                            for key, value in intent.items()
-                            if key
-                            not in {
-                                _ACCEPTED_ASYNC_SUBMISSION_KEY,
-                                _ACCEPTED_ASYNC_ORDER_KEYS_KEY,
-                                _ACCEPTED_ASYNC_LEDGER_ID_KEY,
-                            }
-                        }
-                        callback_intent = _deserialize_persisted_intent(callback_payload)
-                        if hasattr(strategy, "on_intent_executed"):
-                            callback_result = strategy.on_intent_executed(callback_intent, True, None)
-                            if asyncio.iscoroutine(callback_result):
-                                await callback_result
-                        if hasattr(strategy, "save_state"):
-                            strategy.save_state()
-                        if hasattr(strategy, "flush_pending_saves"):
-                            await strategy.flush_pending_saves()
-                    except Exception:  # noqa: BLE001 — settlement proof remains authoritative
-                        logger.exception("Failed to persist strategy state after recovered async settlement")
+            async_outcome = await self._process_async_accepted(
+                strategy,
+                intent,
+                i,
+                len(intents),
+                teardown_state,
+                teardown_cycle_id,
+                accepted_async_recovery_intents,
+                _resume_floor,
+            )
+            if async_outcome is not None:
+                should_continue, intent = self._apply_async_queue_outcome(
+                    async_outcome,
+                    totals,
+                    _pending_indices,
+                    i,
+                )
+                if should_continue:
                     continue
 
-                if settlement_status == "terminal_failed":
-                    # Persist marker removal before dispatching a replacement.
-                    prior_pending_intents_json = teardown_state.pending_intents_json
-                    replacement_intent = _clear_persisted_async_submission(teardown_state, i)
-                    if replacement_intent is None:
-                        unsettled_async_submission = True
-                        failed += 1
-                        logger.error(
-                            "Terminally failed async teardown intent %d/%d could not clear its persisted marker; "
-                            "refusing replacement submission",
-                            i + 1,
-                            len(intents),
-                        )
-                        continue
-                    teardown_state.updated_at = datetime.now(UTC)
-                    if self.state_manager:
-                        try:
-                            await self.state_manager.save_teardown_state(teardown_state)
-                        except Exception:
-                            # Keep memory aligned with the backend's conservative no-resubmit marker.
-                            teardown_state.pending_intents_json = prior_pending_intents_json
-                            unsettled_async_submission = True
-                            failed += 1
-                            logger.exception(
-                                "Terminally failed async teardown intent %d/%d could not persist marker removal; "
-                                "refusing replacement submission",
-                                i + 1,
-                                len(intents),
-                            )
-                            continue
-                    try:
-                        intent = _deserialize_persisted_intent(replacement_intent)
-                    except (TypeError, ValueError):
-                        failed += 1
-                        logger.exception(
-                            "Terminally failed async teardown intent %d/%d could not deserialize its "
-                            "persisted replacement; recording intent failure",
-                            i + 1,
-                            len(intents),
-                        )
-                        continue
-                    logger.warning(
-                        "Accepted async teardown intent %d/%d is terminally failed; dispatching one replacement close",
-                        i + 1,
-                        len(intents),
-                    )
-                else:
-                    unsettled_async_submission = True
-                    exact_cancel = next(
-                        (
-                            candidate
-                            for candidate in accepted_async_recovery_intents or []
-                            if str(_intent_field(candidate, "intent_type") or "").upper() == "PERP_CANCEL_ORDER"
-                            and str(_intent_field(candidate, "order_key") or "").lower() in set(order_keys)
-                        ),
-                        None,
-                    )
-                    if exact_cancel is not None:
-                        # Cancel only the exact durable key; keep its marker until terminal failure is measured.
-                        intent = exact_cancel
-                        logger.warning(
-                            "Accepted async teardown intent %d/%d remains pending and is now cancellable; "
-                            "dispatching exact-order recovery",
-                            i + 1,
-                            len(intents),
-                        )
-                    else:
-                        failed += 1
-                        logger.error(
-                            "Refusing to resubmit accepted async teardown intent %d/%d; "
-                            "terminal settlement is unproven",
-                            i + 1,
-                            len(intents),
-                        )
-                        floor = _resume_floor()
-                        teardown_state.completed_intents = floor
-                        teardown_state.current_intent_index = floor
-                        teardown_state.updated_at = datetime.now(UTC)
-                        if self.state_manager:
-                            await self.state_manager.save_teardown_state(teardown_state)
-                        continue
+            progress_pct = await self._begin_execute_intent(
+                i,
+                len(intents),
+                attempts,
+                teardown_state,
+                _resume_floor,
+                on_progress,
+            )
 
-            # Queue-level backoff cannot delay first-attempt risk-reducing closes.
-            if attempts > 0:
-                await asyncio.sleep(_TRANSIENT_BACKOFF_S * attempts)
-
-            progress_pct = int((i / len(intents)) * 100)
-            if on_progress:
-                await on_progress(progress_pct, f"Executing step {i + 1}/{len(intents)}")
-
-            # Persist the floor, not the out-of-order queue index.
-            _floor = _resume_floor()
-            teardown_state.current_intent_index = _floor
-            teardown_state.completed_intents = _floor
-            teardown_state.updated_at = datetime.now(UTC)
-            if self.state_manager:
-                await self.state_manager.save_teardown_state(teardown_state)
-
-            # A zero-balance sweep is complete without execution; slippage cannot change that.
-            skip_reason = _zero_balance_swap_skip_reason(intent, market)
+            # A zero-balance sweep is complete without execution.
+            skip_reason = await self._process_zero_balance_skip(
+                intent, market, i, len(intents), progress_pct, on_progress
+            )
             if skip_reason:
-                logger.info(f"Teardown intent {i + 1}/{len(intents)}: skipping — {skip_reason}")
-                succeeded += 1
-                skipped += 1
-                if on_progress:
-                    await on_progress(progress_pct, f"Skipped step {i + 1}/{len(intents)}: {skip_reason}")
-                # Persist the skip as completed before advancing the resume floor.
+                totals.succeeded += 1
+                totals.skipped += 1
                 _pending_indices.discard(i)
-                _floor = _resume_floor()
-                teardown_state.completed_intents = _floor
-                teardown_state.current_intent_index = _floor
-                teardown_state.updated_at = datetime.now(UTC)
-                if self.state_manager:
-                    await self.state_manager.save_teardown_state(teardown_state)
+                await self._save_execute_floor(teardown_state, _resume_floor())
                 continue
 
-            # Clamp swap-backs to tracked inventory so shared-wallet funds are never swept.
-            # Resolve or skip outside the slippage closure to prevent an unclamped retry.
-            clamp_token = _clampable_swap_from_token(intent, market)
-            if clamp_token:
-                live_balance = _read_live_wallet_balance(market, clamp_token)
-                if live_balance is None:
-                    # An unmeasured clamp fails closed because consolidation is not risk-reducing.
-                    decision = SwapClampDecision(None, True, True, "live_balance_unmeasured")
-                else:
-                    tracked_map = (
-                        self.runner_helpers.get_tracked_swap_inventory(strategy)  # type: ignore[misc]
-                        if self.runner_helpers.has_tracked_inventory
-                        else None
-                    )
-                    decision = decide_swap_clamp(
-                        live_balance=live_balance,
-                        tracked_map=tracked_map,
-                        from_token=clamp_token,
-                        chain=(intent.get("chain") if isinstance(intent, dict) else getattr(intent, "chain", None)),
-                    )
-                if decision.degraded:
-                    accounting_degraded_records.append(
-                        {
-                            "kind": "swap_clamp_degraded",
-                            "intent_index": i,
-                            "token": clamp_token,
-                            "reason": decision.reason,
-                        }
-                    )
-                if decision.skip:
-                    if self.runner_helpers.has_sweep_warning:
-                        try:
-                            self.runner_helpers.warn_sweep_non_strategy_balance(  # type: ignore[misc]
-                                strategy,
-                                intent,
-                                clamp_token,
-                                live_balance if live_balance is not None else Decimal("0"),
-                            )
-                        except Exception:  # noqa: BLE001
-                            logger.debug("sweep-warning helper raised in clamp skip; ignored", exc_info=True)
-                    logger.warning(
-                        "🛑 ALM-2766 teardown swap-back clamp: SKIPPING %s swap "
-                        "(reason=%s, degraded=%s) — not sweeping commingled wallet funds.",
-                        clamp_token,
-                        decision.reason,
-                        decision.degraded,
-                    )
-                    log_teardown_decision(
-                        deployment_id=strategy.deployment_id,
-                        teardown_id=teardown_id,
-                        phase=TeardownDecisionPhase.BLOCK,
-                        outcome="swap_clamp_skipped",
-                        description=f"swap-back clamp skipped {clamp_token} ({decision.reason})",
-                        token=clamp_token,
-                        reason=decision.reason,
-                        degraded=decision.degraded,
-                        intent_count=1,
-                    )
-                    # A refused consolidation sweep is a completed no-op, not a teardown failure.
-                    succeeded += 1
-                    skipped += 1
-                    if on_progress:
-                        await on_progress(progress_pct, f"Skipped step {i + 1}/{len(intents)}: clamp {decision.reason}")
-                    _pending_indices.discard(i)
-                    _floor = _resume_floor()
-                    teardown_state.completed_intents = _floor
-                    teardown_state.current_intent_index = _floor
-                    teardown_state.updated_at = datetime.now(UTC)
-                    if self.state_manager:
-                        await self.state_manager.save_teardown_state(teardown_state)
-                    continue
-                # Resolve before escalation so every retry uses the same clamped quantity.
-                intent = _set_intent_resolved_amount(intent, decision.amount)  # type: ignore[arg-type]
-                logger.info(
-                    "🛑 ALM-2766 clamped %s swap-back to tracked qty %s (live wallet %s).",
-                    clamp_token,
-                    decision.amount,
-                    live_balance,
-                )
-                log_teardown_decision(
-                    deployment_id=strategy.deployment_id,
-                    teardown_id=teardown_id,
-                    phase=TeardownDecisionPhase.SIZE,
-                    outcome="swap_clamp_applied",
-                    description=f"swap-back {clamp_token} sized to tracked inventory",
-                    token=clamp_token,
-                    reason="clamped_to_tracked_quantity",
-                    intent_count=1,
-                )
+            # Resolve or skip clamps outside the slippage closure so retries cannot bypass them.
+            intent, clamp_done, clamp_succ, clamp_skip = await self._process_swap_clamp(
+                strategy,
+                intent,
+                market,
+                teardown_id,
+                i,
+                len(intents),
+                progress_pct,
+                on_progress,
+                accounting_degraded_records,
+            )
+            if clamp_done:
+                totals.succeeded += clamp_succ
+                totals.skipped += clamp_skip
+                _pending_indices.discard(i)
+                await self._save_execute_floor(teardown_state, _resume_floor())
+                continue
 
-            # Post-submit failures must never re-enter the slippage ladder.
-            submission_landed = False
+            # Once any transaction lands, a later accounting/state/observer
+            # fault must never let the ladder submit it again.
+            attempt_state = _IntentAttemptState()
 
-            async def execute_at_slippage(  # noqa: C901
-                intent_to_exec: Any, slippage: Decimal, *, intent_index: int = i
+            async def execute_at_slippage(
+                intent_to_exec: Any,
+                slippage: Decimal,
+                *,
+                intent_index: int = i,
+                attempt_state_for_intent: _IntentAttemptState = attempt_state,
             ) -> ExecutionAttempt:
-                """Execute a single intent at given slippage.
-
-                Compiles the intent to an ActionBundle and executes it via the
-                orchestrator. Returns the execution result.
-                """
-                nonlocal submission_landed, unsettled_async_submission
-                if submission_landed:
-                    return ExecutionAttempt(
-                        success=False,
-                        slippage_used=slippage,
-                        actual_slippage=Decimal("0"),
-                        error="On-chain submission already landed; refusing duplicate teardown execution",
-                        retryable=False,
-                        disposition=Disposition.NON_RETRYABLE.value,
-                    )
-
-                logger.info(f"Executing intent {intent_index + 1}/{len(intents)} at {slippage:.1%} slippage")
-
-                if not self.orchestrator or not self.compiler:
-                    logger.warning(
-                        "No orchestrator/compiler configured - teardown cannot execute. "
-                        "Inject ExecutionOrchestrator and IntentCompiler for real execution."
-                    )
-                    return ExecutionAttempt(
-                        success=False,
-                        slippage_used=slippage,
-                        actual_slippage=Decimal("0"),
-                        error="No orchestrator/compiler configured for teardown execution",
-                    )
-
-                try:
-                    # Intents are frozen, so escalation must clone rather than mutate them.
-                    intent_with_slippage = intent_to_exec
-                    if hasattr(intent_to_exec, "max_slippage"):
-                        cloned = False
-                        if hasattr(intent_to_exec, "model_copy"):
-                            try:
-                                intent_with_slippage = intent_to_exec.model_copy(update={"max_slippage": slippage})
-                                cloned = True
-                            except (TypeError, ValueError):
-                                logger.warning(
-                                    "model_copy failed for %s, falling back to replace",
-                                    type(intent_to_exec).__name__,
-                                )
-                        if not cloned:
-                            try:
-                                intent_with_slippage = replace(intent_to_exec, max_slippage=slippage)
-                                cloned = True
-                            except TypeError:
-                                if hasattr(intent_to_exec, "to_dict") and hasattr(intent_to_exec, "from_dict"):
-                                    try:
-                                        intent_dict = intent_to_exec.to_dict()
-                                        intent_dict["max_slippage"] = str(slippage)
-                                        intent_with_slippage = type(intent_to_exec).from_dict(intent_dict)
-                                        cloned = True
-                                    except (TypeError, ValueError, KeyError) as e:
-                                        logger.warning(
-                                            "dict-based cloning failed for %s: %s",
-                                            type(intent_to_exec).__name__,
-                                            e,
-                                        )
-                        if not cloned:
-                            logger.error(
-                                "Could not clone %s with updated slippage %.1f%% — "
-                                "teardown will use original slippage %.1f%%",
-                                type(intent_to_exec).__name__,
-                                float(slippage * 100),
-                                float(getattr(intent_to_exec, "max_slippage", Decimal("0")) * 100),
-                            )
-
-                    # Bound fungible LP closes to this deployment; refuse an unbounded close
-                    # without delaying other risk-reducing intents.
-                    intent_with_slippage, clamp_refusal = await self._attach_lp_outstanding(
-                        strategy, intent_with_slippage
-                    )
-                    if clamp_refusal is not None:
-                        return ExecutionAttempt(
-                            success=False,
-                            slippage_used=slippage,
-                            actual_slippage=Decimal("0"),
-                            error=clamp_refusal,
-                            retryable=False,
-                            disposition=Disposition.NON_RETRYABLE.value,
-                        )
-
-                    _is_dict = isinstance(intent_with_slippage, dict)
-                    amount_value = (
-                        intent_with_slippage.get("amount")
-                        if _is_dict
-                        else getattr(intent_with_slippage, "amount", None)
-                    )
-                    from_token = (
-                        intent_with_slippage.get("from_token") or intent_with_slippage.get("token")
-                        if _is_dict
-                        else getattr(intent_with_slippage, "from_token", None)
-                        or getattr(intent_with_slippage, "token", None)
-                    )
-                    # Protocol-held withdraw and repay amounts use compiler-side resolution.
-                    _withdraw_all = (
-                        intent_with_slippage.get("withdraw_all")
-                        if _is_dict
-                        else getattr(intent_with_slippage, "withdraw_all", False)
-                    )
-                    _intent_type_val = (
-                        intent_with_slippage.get("intent_type")
-                        if _is_dict
-                        else getattr(intent_with_slippage, "intent_type", None)
-                    )
-                    _is_withdraw = (
-                        str(_intent_type_val).upper() in ("WITHDRAW", "INTENTTYPE.WITHDRAW")
-                        if _intent_type_val
-                        else False
-                    )
-                    _is_repay = (
-                        str(_intent_type_val).upper() in ("REPAY", "INTENTTYPE.REPAY") if _intent_type_val else False
-                    )
-                    _is_swap = (
-                        str(_intent_type_val).upper() in ("SWAP", "INTENTTYPE.SWAP") if _intent_type_val else False
-                    )
-                    _to_token = (
-                        intent_with_slippage.get("to_token")
-                        if _is_dict
-                        else getattr(intent_with_slippage, "to_token", None)
-                    )
-                    if amount_value == "all" and not _withdraw_all and not _is_withdraw and not _is_repay:
-                        if not from_token or market is None:
-                            return ExecutionAttempt(
-                                success=False,
-                                slippage_used=slippage,
-                                actual_slippage=Decimal("0"),
-                                error="Cannot resolve amount='all': missing from_token or market context",
-                            )
-                        # Earlier intents may have changed the wallet; resolve "all" from live state.
-                        _invalidate = getattr(market, "invalidate_balance", None)
-                        if callable(_invalidate):
-                            try:
-                                _invalidate(from_token)
-                            except Exception:  # noqa: BLE001
-                                logger.debug(
-                                    "invalidate_balance(%s) failed; falling back to cached balance",
-                                    from_token,
-                                    exc_info=True,
-                                )
-                        try:
-                            bal = market.balance(from_token)
-                        except Exception as e:
-                            return ExecutionAttempt(
-                                success=False,
-                                slippage_used=slippage,
-                                actual_slippage=Decimal("0"),
-                                error=f"Cannot resolve amount='all' for {from_token}: {e}",
-                            )
-                        if bal.balance <= 0:
-                            return ExecutionAttempt(
-                                success=False,
-                                slippage_used=slippage,
-                                actual_slippage=Decimal("0"),
-                                error=f"{from_token} balance is 0, nothing to teardown",
-                            )
-                        if _is_dict:
-                            intent_with_slippage = {
-                                **intent_with_slippage,
-                                "amount": str(bal.balance),
-                            }
-                        else:
-                            from almanak.framework.intents import Intent
-
-                            intent_with_slippage = Intent.set_resolved_amount(intent_with_slippage, bal.balance)
-                        logger.info(f"Resolved amount='all' for {from_token}: {bal.balance}")
-                        if self.runner_helpers.has_sweep_warning:
-                            try:
-                                self.runner_helpers.warn_sweep_non_strategy_balance(  # type: ignore[misc]
-                                    strategy,
-                                    intent_with_slippage,
-                                    from_token,
-                                    bal.balance,
-                                )
-                            except Exception:  # noqa: BLE001
-                                logger.debug("sweep-warning helper raised; ignored", exc_info=True)
-
-                    original_oracle = getattr(self.compiler, "price_oracle", None)
-                    original_placeholders = getattr(self.compiler, "_using_placeholders", True)
-                    if price_oracle and hasattr(self.compiler, "update_prices"):
-                        self.compiler.update_prices(price_oracle)
-
-                    try:
-                        # Refuse fake-price swap sizing per leg without blocking later closes.
-                        if _is_swap:
-                            _assert_prices = getattr(self.compiler, "assert_prices_available", None)
-                            if not callable(_assert_prices):
-                                raise ValueError(
-                                    "compiler does not support the teardown SWAP price hard-stop "
-                                    "(assert_prices_available) — refusing to compile a swap unguarded"
-                                )
-                            _assert_prices([from_token, _to_token])
-                        compilation_result = self.compiler.compile(intent_with_slippage)
-                    except ValueError as price_err:
-                        logger.error(
-                            "🛑 Teardown SWAP price HARD STOP (VIB-2928) for %s: %s",
-                            getattr(strategy, "deployment_id", "?"),
-                            price_err,
-                        )
-                        return ExecutionAttempt(
-                            success=False,
-                            slippage_used=slippage,
-                            actual_slippage=Decimal("0"),
-                            error=f"Price HARD STOP (VIB-2928): {price_err}",
-                            retryable=False,
-                        )
-                    finally:
-                        if hasattr(self.compiler, "restore_prices"):
-                            self.compiler.restore_prices(original_oracle, original_placeholders)
-
-                    if compilation_result.status.value != "SUCCESS":
-                        logger.error(f"Intent compilation failed: {compilation_result.error}")
-                        return ExecutionAttempt(
-                            success=False,
-                            slippage_used=slippage,
-                            actual_slippage=Decimal("0"),
-                            error=f"Compilation failed: {compilation_result.error}",
-                            retryable=compilation_result.is_transient,
-                            retry_after_seconds=compilation_result.retry_after_seconds,
-                        )
-
-                    if not compilation_result.action_bundle:
-                        logger.error("Compilation succeeded but no action bundle produced")
-                        return ExecutionAttempt(
-                            success=False,
-                            slippage_used=slippage,
-                            actual_slippage=Decimal("0"),
-                            error="No action bundle produced",
-                            retryable=False,
-                        )
-
-                    from almanak.framework.execution.orchestrator import ExecutionContext
-
-                    intent_chain = getattr(intent_to_exec, "chain", None) or strategy.chain
-                    context = ExecutionContext(
-                        deployment_id=strategy.deployment_id,
-                        intent_id=f"teardown_{teardown_id}_{intent_index}",
-                        chain=intent_chain,
-                        intent_description=self._describe_intent(intent_to_exec),
-                        # Receipt ownership must use the intent chain's wallet, not the signer EOA.
-                        wallet_address=_teardown_wallet_for_chain(strategy, intent_chain),
-                    )
-
-                    # Snapshot each accounting boundary immediately before its transaction.
-                    pre_intent_snapshot: Any = None
-                    if self.runner_helpers.has_per_intent_balances:
-                        try:
-                            pre_intent_snapshot = await self.runner_helpers.snapshot_intent_balances(  # type: ignore[misc]
-                                strategy, intent_to_exec
-                            )
-                        except Exception as exc:  # noqa: BLE001 — best-effort
-                            logger.debug(
-                                "teardown pre-intent balance snapshot failed for %s: %s",
-                                strategy.deployment_id,
-                                exc,
-                            )
-
-                    lending_pre_state_for_intent: Any = None
-                    if self.runner_helpers.has_lending_pre_state:
-                        try:
-                            lending_pre_state_for_intent = await self.runner_helpers.snapshot_intent_lending_state(  # type: ignore[misc]
-                                strategy, intent_to_exec
-                            )
-                        except Exception as exc:  # noqa: BLE001 — best-effort
-                            logger.debug(
-                                "teardown lending pre-state snapshot failed for %s: %s",
-                                strategy.deployment_id,
-                                exc,
-                            )
-
-                    # V4 fees must be measured before a burn zeroes the position liquidity.
-                    v4_lp_close_fees_for_intent: tuple[int, int] | None = None
-                    if self.runner_helpers.has_v4_lp_close_fees:
-                        try:
-                            v4_lp_close_fees_for_intent = await self.runner_helpers.snapshot_intent_v4_lp_close_fees(  # type: ignore[misc]
-                                strategy, intent_to_exec
-                            )
-                        except Exception as exc:  # noqa: BLE001 — best-effort
-                            logger.debug(
-                                "teardown V4 LP-close pre-fee snapshot failed for %s: %s",
-                                strategy.deployment_id,
-                                exc,
-                            )
-
-                    # Native V4 principal has no Transfer event and must also be captured pre-burn.
-                    v4_lp_close_native_principal_for_intent: tuple[int | None, int | None] | None = None
-                    if self.runner_helpers.has_v4_lp_close_native_principal:
-                        try:
-                            v4_lp_close_native_principal_for_intent = (
-                                await self.runner_helpers.snapshot_intent_v4_lp_close_native_principal(  # type: ignore[misc]
-                                    strategy, intent_to_exec
-                                )
-                            )
-                        except Exception as exc:  # noqa: BLE001 — best-effort
-                            logger.debug(
-                                "teardown V4 LP-close native-principal snapshot failed for %s: %s",
-                                strategy.deployment_id,
-                                exc,
-                            )
-
-                    exec_result = await self.orchestrator.execute(
-                        compilation_result.action_bundle,
-                        context,
-                    )
-
-                    if exec_result.success:
-                        submission_landed = True
-                        # Async create-order submissions need durable identity before settlement waits.
-                        settlement_error: str | None = None
-                        async_submission_accepted = False
-                        accepted_order_keys: tuple[str, ...] = ()
-                        accepted_marker_persisted = False
-                        accepted_marker_save_error: Exception | None = None
-                        durable_async_correlation = False
-                        if self.runner_helpers.has_async_settlement:
-                            preparation = self.runner_helpers.prepare_intent_settlement(  # type: ignore[misc]
-                                strategy,
-                                intent_to_exec,
-                                exec_result,
-                                context,
-                                bundle_metadata=getattr(compilation_result.action_bundle, "metadata", None) or None,
-                            )
-                            async_submission_accepted = preparation.applicable
-                            settlement_error = preparation.error
-                            if async_submission_accepted:
-                                accepted_order_keys = tuple(
-                                    str(getattr(order, "order_id", "") or getattr(order, "order_key", "") or "").lower()
-                                    for order in preparation.orders
-                                    if str(getattr(order, "order_id", "") or getattr(order, "order_key", "") or "")
-                                )
-
-                        actual_slippage = slippage * Decimal("0.5")  # Protocol-independent estimate
-                        tx_hash = (
-                            exec_result.transaction_results[0].tx_hash if exec_result.transaction_results else "unknown"
-                        )
-                        if settlement_error is None:
-                            logger.info(
-                                f"Intent {intent_index + 1}/{len(intents)} executed successfully. "
-                                f"TX: {tx_hash}, Gas used: {exec_result.total_gas_used}"
-                            )
-
-                        # Pair the pre-intent snapshot with confirmed post-execution balances.
-                        post_intent_recon: dict[str, Any] | None = None
-                        if self.runner_helpers.has_per_intent_balances and pre_intent_snapshot is not None:
-                            try:
-                                post_intent_recon = await self.runner_helpers.reconcile_post_balances(  # type: ignore[misc]
-                                    strategy,
-                                    intent_to_exec,
-                                    exec_result,
-                                    pre_snapshot=pre_intent_snapshot,
-                                )
-                            except Exception as exc:  # noqa: BLE001 — best-effort
-                                logger.debug(
-                                    "teardown post-intent reconcile failed for %s: %s",
-                                    strategy.deployment_id,
-                                    exc,
-                                )
-
-                        # Accounting degradation is recorded but cannot block the next risk-reducing intent.
-                        commit_outcome = None
-                        if self.runner_helpers.has_commit:
-                            commit_outcome = await self.runner_helpers.commit(  # type: ignore[misc]
-                                strategy,
-                                intent_to_exec,
-                                execution_result=exec_result,
-                                execution_context=context,
-                                bundle_metadata=getattr(compilation_result.action_bundle, "metadata", None) or None,
-                                teardown_cycle_id=teardown_cycle_id,
-                                pre_snapshot=pre_intent_snapshot,
-                                recon=post_intent_recon,
-                                lending_pre_state=lending_pre_state_for_intent,
-                                v4_lp_close_fees=v4_lp_close_fees_for_intent,
-                                v4_lp_close_native_principal=v4_lp_close_native_principal_for_intent,
-                            )
-                            if commit_outcome.accounting_degraded:
-                                accounting_degraded_records.extend(commit_outcome.degraded_writes)
-                                logger.error(
-                                    "Teardown intent %d/%d accounting degraded — %s",
-                                    intent_index + 1,
-                                    len(intents),
-                                    commit_outcome.degraded_reason or "unknown",
-                                )
-
-                        if async_submission_accepted:
-                            # Never persist an async marker without its reconstructible ledger identity.
-                            ledger_entry_id = (
-                                str(commit_outcome.ledger_entry_id)
-                                if commit_outcome and commit_outcome.ledger_entry_id
-                                else None
-                            )
-                            if not accepted_order_keys and ledger_entry_id:
-                                recover_keys = self.runner_helpers.recover_accepted_order_keys
-                                if recover_keys is not None:
-                                    accepted_order_keys = await recover_keys(ledger_entry_id)
-                            durable_async_correlation = bool(ledger_entry_id and accepted_order_keys)
-                            marked = (
-                                _mark_persisted_async_submission_accepted(
-                                    teardown_state,
-                                    intent_index,
-                                    order_keys=accepted_order_keys,
-                                    ledger_entry_id=ledger_entry_id,
-                                )
-                                if durable_async_correlation
-                                else False
-                            )
-                            if not marked:
-                                logger.error(
-                                    "Accepted async teardown intent %d/%d could not be marked in the persisted plan; "
-                                    "the contiguous resume floor remains the no-resubmit backstop",
-                                    intent_index + 1,
-                                    len(intents),
-                                )
-                            accepted_floor = _resume_floor()
-                            teardown_state.completed_intents = accepted_floor
-                            teardown_state.current_intent_index = accepted_floor
-                            teardown_state.updated_at = datetime.now(UTC)
-                            if marked and self.state_manager:
-                                try:
-                                    await self.state_manager.save_teardown_state(teardown_state)
-                                    accepted_marker_persisted = True
-                                    accepted_marker_save_error = None
-                                except Exception as exc:  # noqa: BLE001 — submission already landed; never retry it
-                                    accepted_marker_save_error = exc
-                                    logger.exception(
-                                        "Accepted async teardown marker persistence failed after Phase-1 commit"
-                                    )
-                            elif marked:
-                                accepted_marker_persisted = True
-                                accepted_marker_save_error = None
-                            if not accepted_marker_persisted:
-                                settlement_error = (
-                                    "Accepted async submission could not be durably correlated for crash-safe recovery; "
-                                    f"refusing resubmission: {accepted_marker_save_error or 'missing Phase-1 ledger/order key'}"
-                                )
-
-                        if async_submission_accepted and settlement_error is None:
-                            settlement_error = await self.runner_helpers.await_intent_settlement(  # type: ignore[misc]
-                                strategy,
-                                intent_to_exec,
-                                exec_result,
-                                context,
-                                bundle_metadata=getattr(compilation_result.action_bundle, "metadata", None) or None,
-                                preparation=preparation,
-                            )
-                            if settlement_error is None:
-                                phase2_degraded = await self.runner_helpers.reconcile_intent_settlement(  # type: ignore[misc]
-                                    strategy,
-                                    exec_result,
-                                    context,
-                                    teardown_cycle_id,
-                                )
-                                if phase2_degraded:
-                                    accounting_degraded_records.extend(phase2_degraded)
-                                    logger.error(
-                                        "Teardown intent %d/%d terminal settlement accounting degraded — %s",
-                                        intent_index + 1,
-                                        len(intents),
-                                        "; ".join(
-                                            str(getattr(record, "error", "") or "unknown") for record in phase2_degraded
-                                        ),
-                                    )
-                                    settlement_error = (
-                                        "Terminal async settlement was observed but Phase-2 booking remains degraded; "
-                                        "keeping the correlated teardown resumable"
-                                    )
-
-                        if settlement_error is not None:
-                            # Accepted orders fail without retry; the exact order remains reconcilable.
-                            logger.error(
-                                "Intent %d/%d was accepted but did not settle terminally; refusing resubmission: %s",
-                                intent_index + 1,
-                                len(intents),
-                                settlement_error,
-                            )
-                            if async_submission_accepted and (accepted_marker_persisted or durable_async_correlation):
-                                unsettled_async_submission = True
-                            return ExecutionAttempt(
-                                success=False,
-                                slippage_used=slippage,
-                                actual_slippage=Decimal("0"),
-                                error=settlement_error,
-                                retryable=False,
-                                disposition=Disposition.NON_RETRYABLE.value,
-                            )
-
-                        return ExecutionAttempt(
-                            success=True,
-                            slippage_used=slippage,
-                            actual_slippage=actual_slippage,
-                        )
-                    else:
-                        # Known hashes with incomplete receipts require reconciliation, never replay.
-                        from almanak.framework.execution.reconciliation import (
-                            failed_submission_requires_reconciliation,
-                            reconciliation_required_error,
-                        )
-
-                        if failed_submission_requires_reconciliation(exec_result):
-                            terminal_error = reconciliation_required_error(exec_result)
-                            logger.error(
-                                "Intent %d/%d requires receipt reconciliation; refusing teardown replay: %s",
-                                intent_index + 1,
-                                len(intents),
-                                terminal_error,
-                            )
-                            return ExecutionAttempt(
-                                success=False,
-                                slippage_used=slippage,
-                                actual_slippage=Decimal("0"),
-                                error=terminal_error,
-                                retryable=False,
-                                disposition=Disposition.NON_RETRYABLE.value,
-                            )
-                        revert_class, disposition = classify_teardown_failure(exec_result.error)
-                        annotated_error = annotate_teardown_error(exec_result.error)
-                        logger.error(
-                            "Intent %d/%d execution failed [%s -> %s]: %s",
-                            intent_index + 1,
-                            len(intents),
-                            revert_class.value,
-                            disposition.value,
-                            annotated_error,
-                        )
-                        return ExecutionAttempt(
-                            success=False,
-                            slippage_used=slippage,
-                            actual_slippage=Decimal("0"),
-                            error=annotated_error,
-                            retryable=disposition != Disposition.NON_RETRYABLE,
-                            disposition=disposition.value,
-                        )
-
-                except Exception as e:
-                    if submission_landed:
-                        logger.exception(
-                            "Post-submit teardown processing failed; refusing duplicate execution: %s",
-                            e,
-                        )
-                        return ExecutionAttempt(
-                            success=False,
-                            slippage_used=slippage,
-                            actual_slippage=Decimal("0"),
-                            error=f"On-chain submission landed but post-submit processing failed: {e}",
-                            retryable=False,
-                            disposition=Disposition.NON_RETRYABLE.value,
-                        )
-                    revert_class, disposition = classify_teardown_failure(str(e))
-                    logger.exception(
-                        "Exception during intent execution [%s -> %s]: %s",
-                        revert_class.value,
-                        disposition.value,
-                        e,
-                    )
-                    return ExecutionAttempt(
-                        success=False,
-                        slippage_used=slippage,
-                        actual_slippage=Decimal("0"),
-                        error=str(e),
-                        retryable=disposition != Disposition.NON_RETRYABLE,
-                        disposition=disposition.value,
-                    )
+                return await self._execute_intent_at_slippage(
+                    intent_to_exec,
+                    slippage,
+                    strategy=strategy,
+                    teardown_id=teardown_id,
+                    intent_index=intent_index,
+                    intent_count=len(intents),
+                    teardown_state=teardown_state,
+                    teardown_cycle_id=teardown_cycle_id,
+                    price_oracle=price_oracle,
+                    market=market,
+                    resume_floor=_resume_floor,
+                    accounting_degraded_records=accounting_degraded_records,
+                    attempt_state=attempt_state_for_intent,
+                )
 
             # Strategy slippage is a floor for thin-liquidity exits.
-            raw_intent_slippage = (
-                intent.get("max_slippage") if isinstance(intent, dict) else getattr(intent, "max_slippage", None)
-            )
-            intent_slippage: Decimal | None = None
-            if raw_intent_slippage is not None:
-                try:
-                    intent_slippage = Decimal(str(raw_intent_slippage))
-                except (InvalidOperation, TypeError, ValueError):
-                    logger.warning("Could not parse intent max_slippage=%r, ignoring.", raw_intent_slippage)
+            intent_slippage = self._extract_intent_slippage(intent)
 
             exec_result = await self.slippage_manager.execute_with_escalation(
                 intent=intent,
@@ -2396,157 +3322,47 @@ class TeardownManager:
                 is_auto_mode=is_auto_mode,
                 intent_slippage=intent_slippage,
             )
-
-            if exec_result.success:
-                succeeded += 1
-                _pending_indices.discard(i)
-                # Completion may be non-monotonic, so retain the maximum receipt block.
-                last_receipt_block = _fold_max_receipt_block(last_receipt_block, exec_result)
-                actual_slippage = exec_result.final_slippage
-                intent_value = positions.total_value_usd / len(intents)  # Approximation
-                total_costs += intent_value * actual_slippage
-
-                # Persist strategy-side effects so a redeploy cannot retry completed work.
-                try:
-                    # Clear framework trackers before invoking the strategy callback.
-                    if hasattr(strategy, "_framework_record_intent_execution"):
-                        try:
-                            strategy._framework_record_intent_execution(intent, True, exec_result)
-                        except Exception as fhook_err:  # noqa: BLE001
-                            logger.warning(
-                                "framework intent-execution hook raised in teardown lane (non-fatal): %s",
-                                fhook_err,
-                            )
-                    if hasattr(strategy, "on_intent_executed"):
-                        result = strategy.on_intent_executed(intent, True, exec_result)
-                        if asyncio.iscoroutine(result):
-                            await result
-                    if hasattr(strategy, "save_state"):
-                        strategy.save_state()
-                    if hasattr(strategy, "flush_pending_saves"):
-                        await strategy.flush_pending_saves()
-                except Exception as e:  # noqa: BLE001
-                    logger.error(
-                        "Failed to persist strategy state after teardown intent %d/%d: %s "
-                        "(on-chain action succeeded but persisted state may be stale)",
-                        i + 1,
-                        len(intents),
-                        e,
-                    )
-            else:
-                # Only vetted transient reverts are deferred; approvals and exhausted retries fail normally.
-                if exec_result.status != "paused_awaiting_approval" and attempts < _TRANSIENT_MAX_ATTEMPTS:
-                    # Classification needs the raw attempt error when available.
-                    _revert_text = None
-                    if exec_result.attempts and exec_result.attempts[-1].error:
-                        _revert_text = exec_result.attempts[-1].error
-                    if not _revert_text:
-                        _revert_text = exec_result.message
-                    _it = _intent_field(intent, "intent_type")
-                    _proto = _intent_field(intent, "protocol")
-                    if (
-                        classify_revert_transience(_revert_text, intent_type=_it, protocol=_proto)
-                        is Transience.TRANSIENT
-                    ):
-                        work.append((i, intent, attempts + 1))
-                        logger.warning(
-                            "Teardown intent %d/%d reverted TRANSIENT (%s/%s): %s — deferring "
-                            "retry %d/%d to end of queue (time-axis backoff).",
-                            i + 1,
-                            len(intents),
-                            _proto,
-                            _it,
-                            _revert_text,
-                            attempts + 1,
-                            _TRANSIENT_MAX_ATTEMPTS,
-                        )
-                        continue
-
-                failed += 1
-                if exec_result.status == "paused_awaiting_approval":
-                    teardown_state.status = TeardownStatus.PAUSED
-                    if self.state_manager:
-                        await self.state_manager.save_teardown_state(teardown_state)
-
-                    if self.alert_manager and exec_result.approval_request:
-                        await self.alert_manager.send_approval_needed(exec_result.approval_request)
-
-                    return TeardownResult(
-                        success=False,
-                        deployment_id=strategy.deployment_id,
-                        mode=mode_str,
-                        started_at=started_at,
-                        completed_at=None,
-                        duration_seconds=(datetime.now(UTC) - started_at).total_seconds(),
-                        intents_total=len(intents),
-                        intents_succeeded=succeeded,
-                        intents_failed=failed,
-                        intents_skipped=skipped,
-                        starting_value_usd=positions.total_value_usd,
-                        final_value_usd=positions.total_value_usd - total_costs,
-                        total_costs_usd=total_costs,
-                        final_balances=final_balances,
-                        error="Paused awaiting approval",
-                        recovery_options=[
-                            "Approve higher slippage",
-                            "Wait & Escalate to next level",
-                            "Cancel",
-                        ],
-                        accounting_degraded=bool(accounting_degraded_records),
-                        accounting_degraded_count=len(accounting_degraded_records),
-                    )
-
-            # Persist the first unfinished index, including deferred retries.
-            _floor = _resume_floor()
-            teardown_state.completed_intents = _floor
-            teardown_state.current_intent_index = _floor
-            teardown_state.updated_at = datetime.now(UTC)
-            if self.state_manager:
-                await self.state_manager.save_teardown_state(teardown_state)
+            retry, paused_result = await self._apply_ladder_result(
+                exec_result,
+                attempt_state,
+                totals,
+                strategy,
+                intent,
+                i,
+                attempts,
+                intents,
+                positions,
+                teardown_state,
+                _resume_floor,
+                _pending_indices,
+                mode_str,
+                started_at,
+                accounting_degraded_records,
+            )
+            if retry is not None:
+                work.append(retry)
+                continue
+            if paused_result is not None:
+                return paused_result
 
         finished_at = datetime.now(UTC)
-        completed_at = None if unsettled_async_submission else finished_at
-        teardown_state.status = TeardownStatus.EXECUTING if unsettled_async_submission else TeardownStatus.COMPLETED
-        teardown_state.completed_at = completed_at
-        if self.state_manager:
-            await self.state_manager.save_teardown_state(teardown_state)
+        await self._finish_execute_state(teardown_state, finished_at, totals.unsettled_async_submission)
 
-        final_value = positions.total_value_usd - total_costs
-        if skipped:
-            logger.info(
-                "Teardown for %s completed: %d executed, %d skipped (no-op), %d failed",
-                strategy.deployment_id,
-                succeeded - skipped,
-                skipped,
-                failed,
-            )
-
-        return TeardownResult(
-            success=failed == 0 and not unsettled_async_submission,
-            deployment_id=strategy.deployment_id,
-            mode=mode_str,
-            started_at=started_at,
-            completed_at=completed_at,
-            duration_seconds=(finished_at - started_at).total_seconds(),
-            intents_total=len(intents),
-            intents_succeeded=succeeded,
-            intents_failed=failed,
-            intents_skipped=skipped,
-            starting_value_usd=positions.total_value_usd,
-            final_value_usd=final_value,
-            total_costs_usd=total_costs,
-            final_balances=final_balances,
-            error=(
-                ASYNC_SETTLEMENT_PENDING_ERROR
-                if unsettled_async_submission
-                else None
-                if failed == 0
-                else f"{failed} intents failed"
-            ),
-            async_settlement_pending=unsettled_async_submission,
-            accounting_degraded=bool(accounting_degraded_records),
-            accounting_degraded_count=len(accounting_degraded_records),
-            last_receipt_block=last_receipt_block,
+        return self._final_result(
+            strategy,
+            mode_str,
+            started_at,
+            finished_at,
+            intents,
+            totals.succeeded,
+            totals.failed,
+            totals.skipped,
+            positions,
+            totals.total_costs,
+            totals.final_balances,
+            totals.unsettled_async_submission,
+            accounting_degraded_records,
+            totals.last_receipt_block,
         )
 
     async def _persist_state(

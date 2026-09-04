@@ -1088,10 +1088,7 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
             resolved_at=datetime.now(UTC),
         )
 
-    # crap-allowlist: VIB-4445 — pre-existing complexity (cc=25, cov=54%).
-    # 9-tier resolution ladder; touched here only by VIB-4424 to pass a
-    # ``gate_config`` parameter, refactor tracked separately.
-    async def _try_evm_symbol_lookup(self, symbol: str, chain: str) -> gateway_pb2.TokenMetadataResponse | None:  # noqa: C901
+    async def _try_evm_symbol_lookup(self, symbol: str, chain: str) -> gateway_pb2.TokenMetadataResponse | None:
         """Try to resolve an EVM token by symbol via Pendle, Aave, Compound, Beefy, Yearn, Morpho, CoinGecko, then DexScreener.
 
         Resolution tiers:
@@ -1172,31 +1169,46 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
         if morpho_response is not None:
             return morpho_response
 
-        # Tier 1: CoinGecko (if the chain is listed)
-        platform = COINGECKO_PLATFORM_IDS.get(chain.lower())
-        if platform:
-            try:
-                cg_address = await self._coingecko_find_address(symbol, platform)
-                if cg_address:
-                    cg_metadata = await self._confirm_address_on_chain(
-                        cg_address,
-                        chain,
-                        expected_symbol=symbol,
-                    )
-                    if cg_metadata is not None:
-                        self._cache_discovered_token(cg_metadata, chain, source="coingecko_dynamic")
-                        logger.info(
-                            "token_dynamic_resolved_evm symbol=%s chain=%s address=%s decimals=%d source=coingecko",
-                            symbol,
-                            chain,
-                            cg_address,
-                            cg_metadata.decimals,
-                        )
-                        return self._metadata_to_response(cg_metadata, source="coingecko_dynamic")
-            except Exception as exc:
-                logger.warning("CoinGecko symbol lookup failed for %s on %s: %s", symbol, chain, exc)
+        coingecko_response = await self._try_coingecko_symbol_lookup(symbol, chain)
+        if coingecko_response is not None:
+            return coingecko_response
 
-        # Tier 2: DexScreener (primary source on non-CoinGecko chains and new launches)
+        return await self._try_dexscreener_symbol_lookup(symbol, chain)
+
+    async def _try_coingecko_symbol_lookup(self, symbol: str, chain: str) -> gateway_pb2.TokenMetadataResponse | None:
+        """Resolve a symbol through CoinGecko and on-chain confirmation."""
+        platform = COINGECKO_PLATFORM_IDS.get(chain.lower())
+        if not platform:
+            return None
+
+        try:
+            cg_address = await self._coingecko_find_address(symbol, platform)
+            if not cg_address:
+                return None
+
+            cg_metadata = await self._confirm_address_on_chain(
+                cg_address,
+                chain,
+                expected_symbol=symbol,
+            )
+            if cg_metadata is None:
+                return None
+
+            self._cache_discovered_token(cg_metadata, chain, source="coingecko_dynamic")
+            logger.info(
+                "token_dynamic_resolved_evm symbol=%s chain=%s address=%s decimals=%d source=coingecko",
+                symbol,
+                chain,
+                cg_address,
+                cg_metadata.decimals,
+            )
+            return self._metadata_to_response(cg_metadata, source="coingecko_dynamic")
+        except Exception as exc:
+            logger.warning("CoinGecko symbol lookup failed for %s on %s: %s", symbol, chain, exc)
+            return None
+
+    async def _try_dexscreener_symbol_lookup(self, symbol: str, chain: str) -> gateway_pb2.TokenMetadataResponse | None:
+        """Resolve a symbol through DexScreener and on-chain confirmation."""
         if chain_slug_for(chain) is None:
             return None
 

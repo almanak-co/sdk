@@ -1,9 +1,12 @@
 """Unit tests for backtest visualization module."""
 
+import builtins
+import copy
 import logging
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -22,6 +25,7 @@ from almanak.framework.backtesting.visualization import (
     _extract_trade_markers,
     _interactive_marker_customdata,
     calculate_distribution_stats,
+    generate_drawdown_chart_html,
     generate_equity_chart_html,
     generate_pnl_distribution_html,
     plot_duration_scatter,
@@ -182,24 +186,169 @@ class TestPlotEquityCurve:
         assert output_path.exists()
 
     def test_plot_equity_curve_matplotlib_not_installed(
-        self, sample_backtest_result: BacktestResult
+        self, sample_backtest_result: BacktestResult, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """Test error handling when matplotlib is not installed."""
-        with patch.dict("sys.modules", {"matplotlib.pyplot": None}):
-            # Mock the import to raise ImportError
-            with patch(
-                "almanak.framework.backtesting.visualization.plot_equity_curve"
-            ) as mock_func:
-                mock_func.return_value = ChartResult(
-                    chart_type="equity_curve",
-                    file_path=None,
-                    success=False,
-                    error="matplotlib not installed. Run: uv add matplotlib",
-                )
-                result = mock_func(sample_backtest_result)
+        """Test the real optional-dependency boundary, including import-first behavior."""
+        real_import = builtins.__import__
 
-                assert result.success is False
-                assert "matplotlib" in result.error
+        def import_without_pyplot(name: str, *args: Any, **kwargs: Any) -> Any:
+            if name == "matplotlib.pyplot":
+                raise ImportError("matplotlib intentionally unavailable")
+            return real_import(name, *args, **kwargs)
+
+        sample_backtest_result.equity_curve = []
+        with caplog.at_level(logging.ERROR), patch("builtins.__import__", side_effect=import_without_pyplot):
+            result = plot_equity_curve(sample_backtest_result)
+
+        assert result == ChartResult(
+            chart_type="equity_curve",
+            file_path=None,
+            success=False,
+            error="matplotlib not installed. Run: pip install 'almanak[backtest]'",
+        )
+        assert caplog.records[-1].getMessage() == "matplotlib not installed. Run: pip install 'almanak[backtest]'"
+
+    def test_plot_equity_curve_exact_plot_contract_and_no_mutation(
+        self,
+        sample_backtest_result: BacktestResult,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        pyplot = pytest.importorskip("matplotlib.pyplot")
+        import almanak.framework.backtesting.visualization as visualization
+
+        timestamps = [datetime(2024, 1, day) for day in (1, 2, 3)]
+        sample_backtest_result.equity_curve = [
+            EquityPoint(timestamp=timestamps[0], value_usd=Decimal("100")),
+            EquityPoint(timestamp=timestamps[1], value_usd=Decimal("80")),
+            EquityPoint(timestamp=timestamps[2], value_usd=Decimal("110")),
+        ]
+        sample_backtest_result.trades = [
+            TradeRecord(
+                timestamp=timestamps[1],
+                intent_type=IntentType.SWAP,
+                executed_price=Decimal("1"),
+                fee_usd=Decimal("0"),
+                slippage_usd=Decimal("0"),
+                gas_cost_usd=Decimal("0"),
+                pnl_usd=Decimal("5"),
+                success=True,
+            ),
+            TradeRecord(
+                timestamp=timestamps[2],
+                intent_type=IntentType.LP_CLOSE,
+                executed_price=Decimal("1"),
+                fee_usd=Decimal("0"),
+                slippage_usd=Decimal("0"),
+                gas_cost_usd=Decimal("0"),
+                pnl_usd=Decimal("-2"),
+                success=True,
+            ),
+        ]
+        benchmark = [
+            EquityPoint(timestamp=timestamps[0], value_usd=Decimal("100")),
+            EquityPoint(timestamp=timestamps[1], value_usd=Decimal("90")),
+            EquityPoint(timestamp=timestamps[2], value_usd=Decimal("120")),
+        ]
+        config = ChartConfig(figure_width=7, figure_height=3, line_color="#123456", benchmark_color="#654321")
+        result_before = copy.deepcopy(sample_backtest_result)
+        benchmark_before = copy.deepcopy(benchmark)
+        config_before = copy.deepcopy(config)
+        captured: dict[str, Any] = {}
+
+        def capture_save(fig: Any, plt: Any, output_path: Path, cfg: ChartConfig) -> None:
+            captured.update(fig=fig, plt=plt, output_path=output_path, config=cfg)
+
+        monkeypatch.setattr(visualization, "_save_static_chart", capture_save)
+        output_path = tmp_path / "nested" / "equity.png"
+
+        chart = plot_equity_curve(
+            sample_backtest_result,
+            output_path=output_path,
+            config=config,
+            title="Pinned equity",
+            benchmark_curve=benchmark,
+            benchmark_label="Reference",
+            show_drawdown=True,
+            min_drawdown_pct=0.1,
+            show_trades=True,
+            color_by_pnl=True,
+        )
+
+        assert chart == ChartResult(
+            chart_type="equity_curve",
+            file_path=output_path,
+            success=True,
+            drawdown_periods=[
+                DrawdownPeriod(
+                    start=timestamps[0],
+                    end=timestamps[2],
+                    peak_value=Decimal("100.0"),
+                    trough_value=Decimal("80.0"),
+                    drawdown_pct=Decimal("0.2"),
+                )
+            ],
+            trade_markers=[
+                TradeMarker(timestamps[1], Decimal("80"), True, "SWAP", Decimal("5")),
+                TradeMarker(timestamps[2], Decimal("110"), False, "LP_CLOSE", Decimal("-2")),
+            ],
+        )
+        assert captured["output_path"] == output_path
+        assert captured["config"] is config
+        assert captured["plt"] is pyplot
+        assert output_path.parent.is_dir()
+
+        fig = captured["fig"]
+        try:
+            ax = fig.axes[0]
+            assert fig.get_size_inches().tolist() == [7.0, 3.0]
+            assert [(line.get_label(), list(line.get_ydata())) for line in ax.lines] == [
+                ("Reference", [100.0, 90.0, 120.0]),
+                ("Strategy", [100.0, 80.0, 110.0]),
+            ]
+            assert [
+                collection.get_label() for collection in ax.collections if not collection.get_label().startswith("_")
+            ] == [
+                "Entry",
+                "Exit",
+            ]
+            assert [text.get_text() for text in ax.get_legend().get_texts()] == [
+                "Drawdown Period",
+                "Reference",
+                "Strategy",
+                "Entry",
+                "Exit",
+            ]
+            assert ax.get_title() == "Pinned equity"
+            assert ax.get_xlabel() == "Time"
+            assert ax.get_ylabel() == "Portfolio Value (USD)"
+            assert ax.yaxis.get_major_formatter()(1234.5) == "$1,234"
+        finally:
+            pyplot.close(fig)
+
+        assert sample_backtest_result == result_before
+        assert benchmark == benchmark_before
+        assert config == config_before
+
+    def test_plot_equity_curve_malformed_point_returns_exact_failure(
+        self, sample_backtest_result: BacktestResult, tmp_path: Path
+    ) -> None:
+        pytest.importorskip("matplotlib.pyplot")
+        sample_backtest_result.equity_curve[0].value_usd = "not-a-number"  # type: ignore[assignment]
+        result_before = copy.deepcopy(sample_backtest_result)
+        output_path = tmp_path / "malformed" / "equity.png"
+
+        chart = plot_equity_curve(sample_backtest_result, output_path=output_path)
+
+        assert chart == ChartResult(
+            chart_type="equity_curve",
+            file_path=None,
+            success=False,
+            error="Failed to convert value(s) to axis units: ['not-a-number', 10200.0, 10150.0, 10400.0, 10350.0]",
+        )
+        assert output_path.parent.is_dir()
+        assert not output_path.exists()
+        assert sample_backtest_result == result_before
 
     def test_plot_equity_curve_deployment_id_sanitized(
         self, sample_backtest_result: BacktestResult, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2294,6 +2443,181 @@ class TestPnlHistogramInteractive:
         content = output_path.read_text()
         assert "Custom PnL Distribution" in content
 
+    def test_interactive_histogram_plotly_not_installed_precedes_empty_trades(
+        self,
+        result_with_trades: BacktestResult,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        real_import = builtins.__import__
+
+        def import_without_plotly(name: str, *args: Any, **kwargs: Any) -> Any:
+            if name == "plotly.graph_objects":
+                raise ImportError("plotly intentionally unavailable")
+            return real_import(name, *args, **kwargs)
+
+        result_with_trades.trades = []
+        with caplog.at_level(logging.ERROR), patch("builtins.__import__", side_effect=import_without_plotly):
+            chart = plot_pnl_histogram_interactive(result_with_trades)
+
+        assert chart == ChartResult(
+            chart_type="pnl_histogram",
+            file_path=None,
+            success=False,
+            error="plotly not installed. Run: pip install 'almanak[backtest]'",
+            format="html",
+        )
+        assert caplog.records[-1].getMessage() == "plotly not installed. Run: pip install 'almanak[backtest]'"
+
+    def test_interactive_histogram_no_realized_pnl_is_exact_failure(
+        self, result_with_trades: BacktestResult, tmp_path: Path
+    ) -> None:
+        pytest.importorskip("plotly.graph_objects")
+        for trade in result_with_trades.trades:
+            trade.pnl_usd = None
+        result_before = copy.deepcopy(result_with_trades)
+        output_path = tmp_path / "empty-pnl" / "histogram.html"
+
+        chart = plot_pnl_histogram_interactive(result_with_trades, output_path=output_path)
+
+        assert chart == ChartResult(
+            chart_type="pnl_histogram",
+            file_path=None,
+            success=False,
+            error="No PnL data in trades",
+            format="html",
+        )
+        assert output_path.parent.is_dir()
+        assert not output_path.exists()
+        assert result_with_trades == result_before
+
+    def test_interactive_histogram_exact_traces_layout_html_and_no_mutation(
+        self,
+        result_with_trades: BacktestResult,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        go = pytest.importorskip("plotly.graph_objects")
+        result_with_trades.trades = result_with_trades.trades[:4]
+        for trade, pnl in zip(result_with_trades.trades, (-20, 0, 10, 30), strict=True):
+            trade.pnl_usd = Decimal(pnl)
+        result_before = copy.deepcopy(result_with_trades)
+        captured: dict[str, Any] = {}
+
+        def capture_write_html(
+            fig: Any,
+            file: str,
+            *,
+            include_plotlyjs: bool,
+            full_html: bool,
+        ) -> None:
+            captured.update(fig=fig, file=file, include_plotlyjs=include_plotlyjs, full_html=full_html)
+            Path(file).write_text("<html>pinned histogram</html>")
+
+        monkeypatch.setattr(go.Figure, "write_html", capture_write_html)
+        output_path = tmp_path / "exact" / "histogram.html"
+
+        chart = plot_pnl_histogram_interactive(
+            result_with_trades,
+            output_path=str(output_path),
+            title="Pinned PnL",
+            bins=4,
+            show_stats=True,
+        )
+
+        assert chart == ChartResult(
+            chart_type="pnl_histogram",
+            file_path=output_path,
+            success=True,
+            format="html",
+        )
+        assert output_path.read_text() == "<html>pinned histogram</html>"
+        assert captured == {
+            "fig": captured["fig"],
+            "file": str(output_path),
+            "include_plotlyjs": True,
+            "full_html": True,
+        }
+
+        fig = captured["fig"]
+        assert [trace.to_plotly_json() for trace in fig.data] == [
+            {
+                "hovertemplate": "PnL: $%{x:,.2f}<br>Count: %{y}<extra></extra>",
+                "marker": {"color": "rgba(244, 67, 54, 0.7)"},
+                "name": "Losses",
+                "x": [-20.0],
+                "xbins": {"end": 30.0, "size": 12.5, "start": -20.0},
+                "type": "histogram",
+            },
+            {
+                "hovertemplate": "PnL: $%{x:,.2f}<br>Count: %{y}<extra></extra>",
+                "marker": {"color": "rgba(76, 175, 80, 0.7)"},
+                "name": "Profits",
+                "x": [0.0, 10.0, 30.0],
+                "xbins": {"end": 30.0, "size": 12.5, "start": -20.0},
+                "type": "histogram",
+            },
+        ]
+        assert fig.layout.title.to_plotly_json() == {
+            "font": {"color": "#333", "size": 18},
+            "text": "Pinned PnL",
+            "x": 0.5,
+            "xanchor": "center",
+        }
+        assert fig.layout.xaxis.title.text == "PnL (USD)"
+        assert fig.layout.xaxis.tickprefix == "$"
+        assert fig.layout.xaxis.tickformat == ",.0f"
+        assert fig.layout.yaxis.title.text == "Number of Trades"
+        assert fig.layout.barmode == "overlay"
+        assert fig.layout.hovermode == "x unified"
+        assert fig.layout.legend.to_plotly_json() == {"x": 0.99, "xanchor": "right", "y": 0.99, "yanchor": "top"}
+        assert fig.layout.margin.to_plotly_json() == {"b": 60, "l": 60, "r": 30, "t": 80}
+        assert [annotation.text for annotation in fig.layout.annotations] == [
+            "Break-even",
+            "Mean ($5)",
+            "Median ($5)",
+            "<b>Distribution Statistics</b><br>Mean: $5.00<br>Median: $5.00<br>Std Dev: $20.82<br>"
+            "<b>Skewness: 0.000</b> (Approximately symmetric)<br>"
+            "<b>Kurtosis: -5.687</b> (Thin tails (extreme values rare))<br>"
+            "Range: $-20.00 to $30.00<br>5th-95th %ile: $-17.00 to $27.00<br>Trade Count: 4",
+        ]
+        assert result_with_trades == result_before
+
+    def test_interactive_histogram_two_pnls_omits_statistics(self, result_with_trades: BacktestResult) -> None:
+        go = pytest.importorskip("plotly.graph_objects")
+        result_with_trades.trades = result_with_trades.trades[:2]
+        result_with_trades.trades[0].pnl_usd = Decimal("-1")
+        result_with_trades.trades[1].pnl_usd = Decimal("1")
+        captured: dict[str, Any] = {}
+
+        def capture_write_html(fig: Any, *_: Any, **__: Any) -> None:
+            captured["fig"] = fig
+
+        with patch.object(go.Figure, "write_html", capture_write_html):
+            chart = plot_pnl_histogram_interactive(result_with_trades, show_stats=True)
+
+        assert chart.success is True
+        assert [annotation.text for annotation in captured["fig"].layout.annotations] == ["Break-even"]
+
+    def test_interactive_histogram_invalid_bins_returns_exact_failure_without_mutation(
+        self, result_with_trades: BacktestResult, tmp_path: Path
+    ) -> None:
+        pytest.importorskip("plotly.graph_objects")
+        result_before = copy.deepcopy(result_with_trades)
+        output_path = tmp_path / "invalid" / "histogram.html"
+
+        chart = plot_pnl_histogram_interactive(result_with_trades, output_path=output_path, bins=0)
+
+        assert chart == ChartResult(
+            chart_type="pnl_histogram",
+            file_path=None,
+            success=False,
+            error="float division by zero",
+            format="html",
+        )
+        assert output_path.parent.is_dir()
+        assert not output_path.exists()
+        assert result_with_trades == result_before
+
 
 class TestGeneratePnlDistributionHtml:
     """Tests for embedded PnL distribution chart generation."""
@@ -2382,6 +2706,154 @@ class TestGeneratePnlDistributionHtml:
 
         assert html == ""
         assert "Failed to generate embedded PnL distribution chart" in caplog.text
+
+
+class TestGenerateDrawdownChartHtml:
+    def test_exact_trace_layout_html_and_no_mutation(
+        self,
+        sample_backtest_result: BacktestResult,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        go = pytest.importorskip("plotly.graph_objects")
+        timestamps = [datetime(2024, 1, day) for day in (1, 2, 3, 4)]
+        sample_backtest_result.equity_curve = [
+            EquityPoint(timestamp=timestamps[0], value_usd=Decimal("100")),
+            EquityPoint(timestamp=timestamps[1], value_usd=Decimal("80")),
+            EquityPoint(timestamp=timestamps[2], value_usd=Decimal("120")),
+            EquityPoint(timestamp=timestamps[3], value_usd=Decimal("60")),
+        ]
+        result_before = copy.deepcopy(sample_backtest_result)
+        captured: dict[str, Any] = {}
+
+        def capture_to_html(
+            fig: Any,
+            *,
+            include_plotlyjs: str,
+            full_html: bool,
+            div_id: str,
+        ) -> str:
+            captured.update(
+                fig=fig,
+                include_plotlyjs=include_plotlyjs,
+                full_html=full_html,
+                div_id=div_id,
+            )
+            return '<div id="drawdown-chart">pinned drawdown</div>'
+
+        monkeypatch.setattr(go.Figure, "to_html", capture_to_html)
+
+        html = generate_drawdown_chart_html(sample_backtest_result, title="Pinned Drawdown", height=275)
+
+        assert html == '<div id="drawdown-chart">pinned drawdown</div>'
+        assert captured == {
+            "fig": captured["fig"],
+            "include_plotlyjs": "cdn",
+            "full_html": False,
+            "div_id": "drawdown-chart",
+        }
+        fig = captured["fig"]
+        assert [trace.to_plotly_json() for trace in fig.data] == [
+            {
+                "fill": "tozeroy",
+                "fillcolor": "rgba(244, 67, 54, 0.3)",
+                "hovertemplate": "<b>%{x}</b><br>Drawdown: %{y:.2f}%<extra></extra>",
+                "line": {"color": "#F44336", "width": 1},
+                "name": "Drawdown",
+                "x": timestamps,
+                "y": [-0.0, -20.0, -0.0, -50.0],
+                "type": "scatter",
+            }
+        ]
+        assert fig.layout.title.to_plotly_json() == {
+            "font": {"size": 16},
+            "text": "Pinned Drawdown",
+            "x": 0.5,
+            "xanchor": "center",
+        }
+        assert fig.layout.xaxis.title.text == "Time"
+        assert fig.layout.yaxis.title.text == "Drawdown (%)"
+        assert fig.layout.yaxis.ticksuffix == "%"
+        assert tuple(fig.layout.yaxis.range) == (-55.00000000000001, 0.5)
+        assert fig.layout.hovermode == "x unified"
+        assert fig.layout.height == 275
+        assert fig.layout.margin.to_plotly_json() == {"b": 50, "l": 60, "r": 30, "t": 50}
+        assert fig.layout.showlegend is False
+        assert sample_backtest_result == result_before
+
+    def test_flat_zero_curve_uses_default_range_title_and_height(
+        self,
+        sample_backtest_result: BacktestResult,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        go = pytest.importorskip("plotly.graph_objects")
+        sample_backtest_result.equity_curve = [
+            EquityPoint(timestamp=datetime(2024, 1, 1), value_usd=Decimal("0")),
+            EquityPoint(timestamp=datetime(2024, 1, 2), value_usd=Decimal("0")),
+        ]
+        captured: dict[str, Any] = {}
+
+        def capture_to_html(fig: Any, **_: Any) -> str:
+            captured["fig"] = fig
+            return "flat"
+
+        monkeypatch.setattr(go.Figure, "to_html", capture_to_html)
+
+        assert generate_drawdown_chart_html(sample_backtest_result) == "flat"
+        assert list(captured["fig"].data[0].y) == [-0.0, -0.0]
+        assert captured["fig"].layout.title.text == "Drawdown"
+        assert captured["fig"].layout.height == 300
+        assert tuple(captured["fig"].layout.yaxis.range) == (-1, 0.5)
+
+    def test_missing_plotly_precedes_empty_equity(
+        self,
+        empty_backtest_result: BacktestResult,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        real_import = builtins.__import__
+
+        def import_without_plotly(name: str, *args: Any, **kwargs: Any) -> Any:
+            if name == "plotly.graph_objects":
+                raise ImportError("plotly intentionally unavailable")
+            return real_import(name, *args, **kwargs)
+
+        with caplog.at_level(logging.WARNING), patch("builtins.__import__", side_effect=import_without_plotly):
+            html = generate_drawdown_chart_html(empty_backtest_result)
+
+        assert html == ""
+        assert caplog.records[-1].getMessage() == (
+            "plotly not installed. Run: pip install 'almanak[backtest]' - cannot generate drawdown chart"
+        )
+
+    def test_empty_equity_logs_exact_warning(
+        self,
+        empty_backtest_result: BacktestResult,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        pytest.importorskip("plotly.graph_objects")
+
+        with caplog.at_level(logging.WARNING):
+            html = generate_drawdown_chart_html(empty_backtest_result)
+
+        assert html == ""
+        assert caplog.records[-1].getMessage() == "No equity curve data - cannot generate drawdown chart"
+
+    def test_malformed_equity_returns_empty_without_mutation(
+        self,
+        sample_backtest_result: BacktestResult,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        pytest.importorskip("plotly.graph_objects")
+        sample_backtest_result.equity_curve[0].value_usd = "not-a-number"  # type: ignore[assignment]
+        result_before = copy.deepcopy(sample_backtest_result)
+
+        with caplog.at_level(logging.ERROR):
+            html = generate_drawdown_chart_html(sample_backtest_result)
+
+        assert html == ""
+        assert caplog.records[-1].getMessage() == (
+            "Failed to generate embedded drawdown chart: could not convert string to float: 'not-a-number'"
+        )
+        assert sample_backtest_result == result_before
 
 
 class TestAttributionCharts:

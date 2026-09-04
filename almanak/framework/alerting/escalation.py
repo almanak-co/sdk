@@ -307,7 +307,6 @@ class EscalationPolicy:
 
         return True
 
-    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     def acknowledge_by_strategy(
         self,
         deployment_id: str,
@@ -500,7 +499,6 @@ class EscalationPolicy:
             message=(f"Escalated from level {old_level.value} to {target_level.value} after {elapsed:.0f} seconds"),
         )
 
-    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     async def process_escalation(
         self,
         alert_id: str,

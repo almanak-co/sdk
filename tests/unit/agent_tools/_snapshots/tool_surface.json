@@ -213,6 +213,12 @@
             "title": "Chain",
             "type": "string"
           },
+          "network": {
+            "default": "",
+            "description": "'mainnet' or 'anvil'; empty means gateway default.",
+            "title": "Network",
+            "type": "string"
+          },
           "position_id": {
             "description": "NFT token ID of the LP position",
             "title": "Position Id",
@@ -2017,6 +2023,12 @@
             "chain": {
               "default": "arbitrum",
               "title": "Chain",
+              "type": "string"
+            },
+            "network": {
+              "default": "",
+              "description": "'mainnet' or 'anvil'; empty means gateway default.",
+              "title": "Network",
               "type": "string"
             },
             "position_id": {

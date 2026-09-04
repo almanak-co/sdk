@@ -119,7 +119,6 @@ class PlotGenerator:
         ax.tick_params(labelsize=self.config.font_size)
         ax.grid(True, alpha=0.3)
 
-    # crap-allowlist: #2703 mechanical extras-message string change in existing high-CRAP function (pre-existing cov ~16%)
     def create_price_plot(
         self,
         token: str,
@@ -218,7 +217,6 @@ class PlotGenerator:
                 error=str(e),
             )
 
-    # crap-allowlist: #2703 mechanical extras-message string change in existing high-CRAP function (pre-existing cov ~14%)
     def create_rsi_plot(
         self,
         token: str,
@@ -364,7 +362,6 @@ class PlotGenerator:
                 error=str(e),
             )
 
-    # crap-allowlist: #2703 mechanical extras-message string change in existing high-CRAP function (pre-existing cov ~16%)
     def create_weth_price_plot(
         self,
         token: str,
@@ -461,7 +458,6 @@ class PlotGenerator:
                 error=str(e),
             )
 
-    # crap-allowlist: #2703 mechanical extras-message string change in existing high-CRAP function (pre-existing cov ~12%)
     def create_summary_grid(
         self,
         plots: list[tuple[str, list, str]],

@@ -255,6 +255,14 @@ _THROTTLED_EVENT_TYPES: frozenset[str] = frozenset(
     }
 )
 
+_LEGACY_EVENT_TYPE_MAPPING = {
+    "TRADE": "TRANSACTION_CONFIRMED",
+    "DEPOSIT": "POSITION_MODIFIED",
+    "WITHDRAW": "POSITION_MODIFIED",
+    "REBALANCE": "REBALANCE_EXECUTED",
+    "STATE_CHANGE": "STRATEGY_STARTED",
+}
+
 
 def set_event_gateway_client(client: Any) -> None:
     """Register a gateway gRPC client for persistent event storage.
@@ -274,18 +282,39 @@ def get_event_gateway_client() -> Any:
     return _gateway_client
 
 
-# crap-allowlist: pre-existing local-fallback path (file-cache hydrate).
-# PR2 (VIB-4041) only added a one-line ``related_ledger_entry_id`` round-trip;
-# CC=16 was already over-threshold against unit-test coverage. The function
-# is exercised in production gateway-fallback startup runs; refactoring is
-# out of scope for the typed-column change.
+def _event_from_cached_data(event_data: Any, deployment_id: str) -> TimelineEvent:
+    event_type_str = event_data.get("event_type", "CUSTOM").upper()
+    event_type_str = _LEGACY_EVENT_TYPE_MAPPING.get(event_type_str, event_type_str)
+    try:
+        event_type = TimelineEventType(event_type_str)
+    except ValueError:
+        event_type = TimelineEventType.CUSTOM
+
+    event_deployment_id = event_data.get("deployment_id", deployment_id)
+    if event_deployment_id != deployment_id:
+        raise ValueError("cached event deployment_id does not match its bucket")
+
+    return TimelineEvent(
+        timestamp=datetime.fromisoformat(event_data["timestamp"]),
+        event_type=event_type,
+        description=event_data.get("description", ""),
+        tx_hash=event_data.get("tx_hash"),
+        deployment_id=event_deployment_id,
+        chain=event_data.get("chain", ""),
+        details=event_data.get("details") or event_data.get("metadata", {}),
+        cycle_id=event_data.get("cycle_id", ""),
+        phase=event_data.get("phase", ""),
+        related_ledger_entry_id=event_data.get("related_ledger_entry_id", ""),
+    )
+
+
 def _load_events_from_file() -> None:
     """Load events from cache file into memory on startup."""
     global _event_store
-    if not EVENTS_CACHE_FILE.exists():
-        return
-
     try:
+        if not EVENTS_CACHE_FILE.exists():
+            return
+
         with open(EVENTS_CACHE_FILE) as f:
             cached_data = json.load(f)
 
@@ -294,45 +323,24 @@ def _load_events_from_file() -> None:
             # Old format: flat list of events
             events_by_strategy: dict[str, list] = {}
             for event_data in cached_data:
+                if not isinstance(event_data, Mapping):
+                    logger.warning("Failed to load events from file: cached event is not an object")
+                    continue
                 sid = event_data.get("deployment_id", "unknown")
-                if sid not in events_by_strategy:
-                    events_by_strategy[sid] = []
-                events_by_strategy[sid].append(event_data)
+                if not isinstance(sid, str):
+                    logger.warning("Failed to load events from file: cached deployment_id is not a string")
+                    continue
+                events_by_strategy.setdefault(sid, []).append(event_data)
             cached_data = events_by_strategy
 
         for deployment_id, events_data in cached_data.items():
-            if deployment_id not in _event_store:
-                _event_store[deployment_id] = []
+            _event_store.setdefault(deployment_id, [])
             for event_data in events_data:
-                # Map event_type - handle both old lowercase and new uppercase formats
-                event_type_str = event_data.get("event_type", "CUSTOM").upper()
-                # Map old format types to new enum values
-                type_mapping = {
-                    "TRADE": "TRANSACTION_CONFIRMED",
-                    "DEPOSIT": "POSITION_MODIFIED",
-                    "WITHDRAW": "POSITION_MODIFIED",
-                    "REBALANCE": "REBALANCE_EXECUTED",
-                    "STATE_CHANGE": "STRATEGY_STARTED",
-                }
-                event_type_str = type_mapping.get(event_type_str, event_type_str)
-
                 try:
-                    event_type = TimelineEventType(event_type_str)
-                except ValueError:
-                    event_type = TimelineEventType.CUSTOM
-
-                event = TimelineEvent(
-                    timestamp=datetime.fromisoformat(event_data["timestamp"]),
-                    event_type=event_type,
-                    description=event_data.get("description", ""),
-                    tx_hash=event_data.get("tx_hash"),
-                    deployment_id=event_data.get("deployment_id", deployment_id),
-                    chain=event_data.get("chain", ""),
-                    details=event_data.get("details") or event_data.get("metadata", {}),
-                    cycle_id=event_data.get("cycle_id", ""),
-                    phase=event_data.get("phase", ""),
-                    related_ledger_entry_id=event_data.get("related_ledger_entry_id", ""),
-                )
+                    event = _event_from_cached_data(event_data, deployment_id)
+                except Exception as e:
+                    logger.warning(f"Failed to load events from file: {e}")
+                    continue
                 # Avoid duplicates
                 if not any(
                     e.timestamp == event.timestamp and e.description == event.description

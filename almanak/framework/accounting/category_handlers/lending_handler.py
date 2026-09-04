@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
@@ -66,17 +67,335 @@ def _parse_state_json(state_json: str) -> dict[str, Any] | None:
         return None
 
 
-# crap-allowlist: VIB-4257 — handle_lending is the canonical per-intent
-# dispatch ladder for SUPPLY/BORROW/REPAY/DELEVERAGE/WITHDRAW (5 distinct
-# branches with FIFO basis-pool side-effects per branch). cc=74 is pre-existing;
-# this PR mirrors the existing post-state extraction block (~22 lines) for
-# pre-state lane symmetry. Decomposing the per-intent ladder into separate
-# functions would scatter the wallet-basis pool side-effects (record_borrow /
-# match_repay / match_swap_disposal / record_swap_acquisition) across files,
-# breaking the lane-symmetry contract this PR enforces. Anti-regression
-# coverage: tests/unit/framework/accounting/test_lending_accounting.py (27
-# tests, 91% line coverage).
-def handle_lending(  # noqa: C901
+@dataclass
+class _FifoContext:
+    """Inputs shared by every per-intent FIFO branch (§12.1)."""
+
+    deployment_id: str
+    cycle_id: str
+    position_key: str
+    asset: str
+    amount_human: Decimal
+    price_oracle: dict[str, Any]
+    timestamp: datetime
+    tx_hash: str
+    ledger_entry_id: str
+    swap_wallet_key: str
+
+
+@dataclass
+class _FifoDeltas:
+    """Principal/interest split for one lending action (§10.11)."""
+
+    principal_delta_usd: Decimal | None = None
+    interest_delta_usd: Decimal | None = None
+
+
+@dataclass
+class _LendingSnapshots:
+    """Pre/post position snapshots; None means unmeasured (§10.10)."""
+
+    collateral_before: Decimal | None = None
+    debt_before: Decimal | None = None
+    net_equity_before: Decimal | None = None
+    hf_before: Decimal | None = None
+    collateral_after: Decimal | None = None
+    debt_after: Decimal | None = None
+    net_equity_after: Decimal | None = None
+    hf_after: Decimal | None = None
+    liquidation_threshold: Decimal | None = None
+
+
+def _resolve_timestamp(raw_ts: Any) -> datetime:
+    """Ledger timestamp with now() fallback (§10.8 identity header)."""
+    try:
+        ts_str = raw_ts.replace("Z", "+00:00") if isinstance(raw_ts, str) else None
+        return datetime.fromisoformat(ts_str) if ts_str else datetime.now(UTC)
+    except (ValueError, AttributeError):
+        return datetime.now(UTC)
+
+
+def _parse_gas_usd(ledger_row: dict[str, Any]) -> Decimal | None:
+    """Gas cost in USD; None when absent or unparseable (§10.10)."""
+    gas_usd_raw = ledger_row.get("gas_usd")
+    if gas_usd_raw:
+        try:
+            return Decimal(str(gas_usd_raw))
+        except Exception:
+            pass
+    return None
+
+
+def _resolve_asset_with_fallback(extracted: dict[str, Any], ledger_row: dict[str, Any]) -> str:
+    """Primary asset from extracted_data, else ledger token_in (§10.11)."""
+    asset = _extract_asset(extracted)
+    if asset == "UNKNOWN":
+        asset = (ledger_row.get("token_in") or "").upper() or "UNKNOWN"
+    return asset
+
+
+def _resolve_position_key_with_fallback(
+    outbox_row: dict[str, Any],
+    protocol: str,
+    chain: str,
+    wallet_address: str,
+    asset: str,
+    position_key: str,
+) -> str:
+    """Outbox position_key, else derived per-market key (§10.11)."""
+    if not position_key:
+        market_id_fallback = outbox_row.get("market_id") or None
+        position_key = _derive_position_key(protocol, chain, wallet_address, market_id_fallback, asset)
+    return position_key
+
+
+def _swap_wallet_key_for(chain: str, wallet_address: str) -> str:
+    """Shared SWAP/lending wallet-basis pool key (§12.1, VIB-3964)."""
+    chain_norm = (chain or "").lower().strip()
+    wallet_norm = (wallet_address or "").lower().strip()
+    return f"swap:{chain_norm}:{wallet_norm}" if chain_norm and wallet_norm else ""
+
+
+def _fifo_borrow(ctx: _FifoContext, basis_store: FIFOBasisStore) -> _FifoDeltas:
+    """BORROW: record debt lot + credit wallet-basis pool (§12.1)."""
+    principal_delta_usd = _amount_to_usd(ctx.amount_human, ctx.price_oracle, ctx.asset)
+    borrow_id_seed = ctx.tx_hash or ctx.ledger_entry_id or ctx.position_key
+    basis_store.record_borrow(
+        deployment_id=ctx.deployment_id,
+        position_key=ctx.position_key,
+        token=ctx.asset,
+        principal_amount=ctx.amount_human,
+        principal_usd=principal_delta_usd,
+        timestamp=ctx.timestamp,
+        lot_id=make_accounting_event_id(
+            ctx.deployment_id, ctx.cycle_id, "BORROW_LOT", borrow_id_seed, ctx.position_key
+        ),
+        source_ledger_entry_id=ctx.ledger_entry_id,
+    )
+    if ctx.swap_wallet_key:
+        basis_store.record_swap_acquisition(
+            deployment_id=ctx.deployment_id,
+            position_key=ctx.swap_wallet_key,
+            token=ctx.asset,
+            amount=ctx.amount_human,
+            cost_usd=principal_delta_usd,
+            timestamp=ctx.timestamp,
+            lot_id=make_accounting_event_id(
+                ctx.deployment_id, ctx.cycle_id, "BORROW_WALLET_LOT", borrow_id_seed, ctx.asset
+            ),
+            source="BORROW",
+        )
+    return _FifoDeltas(principal_delta_usd=principal_delta_usd, interest_delta_usd=None)
+
+
+def _fifo_repay(ctx: _FifoContext, basis_store: FIFOBasisStore) -> _FifoDeltas:
+    """REPAY/DELEVERAGE: FIFO-match debt lots, drain wallet pool (§12.1)."""
+    match_result = basis_store.match_repay(
+        deployment_id=ctx.deployment_id,
+        position_key=ctx.position_key,
+        token=ctx.asset,
+        repay_amount=ctx.amount_human,
+    )
+    principal_delta_usd = _amount_to_usd(match_result.repaid_principal, ctx.price_oracle, ctx.asset)
+    interest_delta_usd = (
+        None
+        if match_result.unmatched_amount > 0
+        else _amount_to_usd(match_result.interest_or_yield, ctx.price_oracle, ctx.asset)
+    )
+    if ctx.swap_wallet_key:
+        basis_store.match_swap_disposal(
+            deployment_id=ctx.deployment_id,
+            position_key=ctx.swap_wallet_key,
+            token=ctx.asset,
+            amount=ctx.amount_human,
+        )
+    return _FifoDeltas(principal_delta_usd=principal_delta_usd, interest_delta_usd=interest_delta_usd)
+
+
+def _fifo_supply(ctx: _FifoContext, basis_store: FIFOBasisStore) -> _FifoDeltas:
+    """SUPPLY: drain wallet pool + record supply principal lot (§12.1)."""
+    principal_delta_usd = _amount_to_usd(ctx.amount_human, ctx.price_oracle, ctx.asset)
+    if ctx.swap_wallet_key:
+        basis_store.match_swap_disposal(
+            deployment_id=ctx.deployment_id,
+            position_key=ctx.swap_wallet_key,
+            token=ctx.asset,
+            amount=ctx.amount_human,
+        )
+    supply_position_key = f"supply:{ctx.position_key}"
+    supply_id_seed = ctx.tx_hash or ctx.ledger_entry_id or ctx.position_key
+    basis_store.record_borrow(
+        deployment_id=ctx.deployment_id,
+        position_key=supply_position_key,
+        token=ctx.asset,
+        principal_amount=ctx.amount_human,
+        principal_usd=principal_delta_usd,
+        timestamp=ctx.timestamp,
+        lot_id=make_accounting_event_id(
+            ctx.deployment_id, ctx.cycle_id, "SUPPLY_LOT", supply_id_seed, supply_position_key
+        ),
+        source_ledger_entry_id=ctx.ledger_entry_id,
+    )
+    return _FifoDeltas(principal_delta_usd=principal_delta_usd, interest_delta_usd=None)
+
+
+def _fifo_withdraw(ctx: _FifoContext, basis_store: FIFOBasisStore) -> _FifoDeltas:
+    """WITHDRAW: credit wallet pool + FIFO-split principal vs interest (§12.1)."""
+    withdraw_total_usd = _amount_to_usd(ctx.amount_human, ctx.price_oracle, ctx.asset)
+    if ctx.swap_wallet_key:
+        withdraw_id_seed = ctx.tx_hash or ctx.ledger_entry_id or ctx.position_key
+        basis_store.record_swap_acquisition(
+            deployment_id=ctx.deployment_id,
+            position_key=ctx.swap_wallet_key,
+            token=ctx.asset,
+            amount=ctx.amount_human,
+            cost_usd=withdraw_total_usd,
+            timestamp=ctx.timestamp,
+            lot_id=make_accounting_event_id(
+                ctx.deployment_id, ctx.cycle_id, "WITHDRAW_WALLET_LOT", withdraw_id_seed, ctx.asset
+            ),
+            source="WITHDRAW",
+        )
+    supply_position_key = f"supply:{ctx.position_key}"
+    supply_match = basis_store.match_repay(
+        deployment_id=ctx.deployment_id,
+        position_key=supply_position_key,
+        token=ctx.asset,
+        repay_amount=ctx.amount_human,
+    )
+    return _split_withdraw_deltas(ctx, supply_match, withdraw_total_usd)
+
+
+def _split_withdraw_deltas(ctx: _FifoContext, supply_match: Any, withdraw_total_usd: Decimal | None) -> _FifoDeltas:
+    """Trust the FIFO interest split only when plausibly bounded (§10.10).
+
+    The matcher reports ``unmatched=0`` whenever it consumed at least one
+    lot, even when tracked supply covers only part of the withdraw. Past a
+    100%-of-principal implied yield the residual is almost certainly
+    untracked supply, so leave interest unmeasured instead of fabricating it.
+    """
+    if supply_match.unmatched_amount > 0:
+        return _FifoDeltas(principal_delta_usd=withdraw_total_usd, interest_delta_usd=None)
+    if (
+        supply_match.repaid_principal >= ctx.amount_human
+        or supply_match.interest_or_yield <= supply_match.repaid_principal
+    ):
+        return _FifoDeltas(
+            principal_delta_usd=_amount_to_usd(supply_match.repaid_principal, ctx.price_oracle, ctx.asset),
+            interest_delta_usd=_amount_to_usd(supply_match.interest_or_yield, ctx.price_oracle, ctx.asset),
+        )
+    return _FifoDeltas(principal_delta_usd=withdraw_total_usd, interest_delta_usd=None)
+
+
+def _apply_fifo_lots(
+    intent_type_str: str,
+    ctx: _FifoContext | None,
+    basis_store: FIFOBasisStore | None,
+) -> _FifoDeltas:
+    """Dispatch one per-intent FIFO branch (§12.1); no-op when unmeasurable."""
+    if ctx is None or basis_store is None:
+        return _FifoDeltas()
+    if intent_type_str == "BORROW":
+        return _fifo_borrow(ctx, basis_store)
+    if intent_type_str in ("REPAY", "DELEVERAGE"):
+        return _fifo_repay(ctx, basis_store)
+    if intent_type_str == "SUPPLY":
+        return _fifo_supply(ctx, basis_store)
+    if intent_type_str == "WITHDRAW":
+        return _fifo_withdraw(ctx, basis_store)
+    return _FifoDeltas()
+
+
+def _snapshot_from_state(
+    state: dict[str, Any] | None, *, log_msg: str
+) -> tuple[Decimal | None, Decimal | None, Decimal | None, Decimal | None]:
+    """Collateral/debt/net-equity/health-factor quad; None when unmeasured (§10.10).
+
+    Single-try shape mirrors the pre-refactor inline blocks: fields parsed
+    before a failing field keep their values, later fields stay None.
+    """
+    collateral: Decimal | None = None
+    debt: Decimal | None = None
+    net_equity: Decimal | None = None
+    hf: Decimal | None = None
+    if not state:
+        return collateral, debt, net_equity, hf
+    try:
+        collateral = Decimal(str(state["collateral_usd"])) if state.get("collateral_usd") is not None else None
+        debt = Decimal(str(state["debt_usd"])) if state.get("debt_usd") is not None else None
+        if collateral is not None and debt is not None:
+            net_equity = collateral - debt
+        hf_raw = state.get("health_factor")
+        hf = Decimal(str(hf_raw)) if hf_raw is not None else None
+    except Exception:
+        logger.debug(log_msg, exc_info=True)
+    return collateral, debt, net_equity, hf
+
+
+def _extract_snapshots(pre_state: dict[str, Any] | None, post_state: dict[str, Any] | None) -> _LendingSnapshots:
+    """Pre/post snapshots with lane symmetry; failures stay unmeasured (§10.10)."""
+    snapshots = _LendingSnapshots()
+    snapshots.collateral_before, snapshots.debt_before, snapshots.net_equity_before, snapshots.hf_before = (
+        _snapshot_from_state(pre_state, log_msg="Failed to parse pre_state_json fields")
+    )
+    snapshots.collateral_after, snapshots.debt_after, snapshots.net_equity_after, snapshots.hf_after = (
+        _snapshot_from_state(post_state, log_msg="Failed to parse post_state_json fields")
+    )
+    if post_state:
+        try:
+            lt_bps = post_state.get("liquidation_threshold_bps")
+            snapshots.liquidation_threshold = Decimal(lt_bps) / Decimal("10000") if lt_bps is not None else None
+        except Exception:
+            logger.debug("Failed to parse post_state_json fields", exc_info=True)
+    return snapshots
+
+
+def _confidence_for_post_state(snapshots: _LendingSnapshots) -> tuple[AccountingConfidence, str]:
+    """HIGH when post-state measured, else ESTIMATED with reason (§10.9)."""
+    has_post_state = snapshots.collateral_after is not None or snapshots.hf_after is not None
+    if has_post_state:
+        return AccountingConfidence.HIGH, ""
+    return (
+        AccountingConfidence.ESTIMATED,
+        "post_state_json missing or invalid (gateway read unavailable for this row)",
+    )
+
+
+@dataclass
+class _RowIds:
+    """Persisted identity columns for one lending row (§10.8)."""
+
+    deployment_id: str
+    cycle_id: str
+    execution_mode: Any
+    chain: str
+    protocol: str
+    tx_hash: str
+    ledger_entry_id: str
+    wallet_address: str
+    position_key: str
+
+
+def _resolve_row_ids(ledger_row: dict[str, Any], outbox_row: dict[str, Any]) -> _RowIds:
+    """Ledger-first identity with outbox fallback (§10.8).
+
+    Parses (and validates) the persisted execution mode before any FIFO
+    mutation, so a malformed legacy row fails without consuming lots.
+    """
+    return _RowIds(
+        deployment_id=ledger_row.get("deployment_id") or outbox_row.get("deployment_id") or "",
+        cycle_id=ledger_row.get("cycle_id") or outbox_row.get("cycle_id") or "",
+        execution_mode=RunMode.parse_optional(ledger_row.get("execution_mode")),
+        chain=ledger_row.get("chain") or "",
+        protocol=ledger_row.get("protocol") or "",
+        tx_hash=ledger_row.get("tx_hash") or "",
+        ledger_entry_id=ledger_row.get("id") or "",
+        wallet_address=outbox_row.get("wallet_address") or "",
+        position_key=outbox_row.get("position_key") or "",
+    )
+
+
+def handle_lending(
     outbox_row: dict[str, Any],
     ledger_row: dict[str, Any],
     basis_store: FIFOBasisStore,
@@ -103,26 +422,22 @@ def handle_lending(  # noqa: C901
     if event_type is None:
         return None
 
-    deployment_id = ledger_row.get("deployment_id") or outbox_row.get("deployment_id") or ""
-    cycle_id = ledger_row.get("cycle_id") or outbox_row.get("cycle_id") or ""
     # Validate persisted identity before any FIFO mutation.  A malformed
     # legacy row must fail without consuming or recording basis lots; the
     # outbox processor will mark that row failed and can safely retry it.
-    execution_mode = RunMode.parse_optional(ledger_row.get("execution_mode"))
-    chain = ledger_row.get("chain") or ""
-    protocol = ledger_row.get("protocol") or ""
-    tx_hash = ledger_row.get("tx_hash") or ""
-    ledger_entry_id = ledger_row.get("id") or ""
-    wallet_address = outbox_row.get("wallet_address") or ""
-    position_key = outbox_row.get("position_key") or ""
+    ids = _resolve_row_ids(ledger_row, outbox_row)
+    deployment_id = ids.deployment_id
+    cycle_id = ids.cycle_id
+    execution_mode = ids.execution_mode
+    chain = ids.chain
+    protocol = ids.protocol
+    tx_hash = ids.tx_hash
+    ledger_entry_id = ids.ledger_entry_id
+    wallet_address = ids.wallet_address
+    position_key = ids.position_key
 
     # Timestamp from ledger row; fall back to now() only as last resort.
-    raw_ts = ledger_row.get("timestamp")
-    try:
-        ts_str = raw_ts.replace("Z", "+00:00") if isinstance(raw_ts, str) else None
-        timestamp = datetime.fromisoformat(ts_str) if ts_str else datetime.now(UTC)
-    except (ValueError, AttributeError):
-        timestamp = datetime.now(UTC)
+    timestamp = _resolve_timestamp(ledger_row.get("timestamp"))
 
     # Deserialize extracted_data and price_oracle from JSON fields. The
     # tolerant ``parse_price_inputs`` (VIB-3885) returns a flat
@@ -137,15 +452,11 @@ def handle_lending(  # noqa: C901
     # Normal enriched lending results store the amount in borrow_amount/supply_amount
     # but debt_token may not be in extracted_data — token_in on the ledger row is the
     # reliable fallback (it's the borrowed/supplied asset symbol for lending intents).
-    asset = _extract_asset(extracted)
-    if asset == "UNKNOWN":
-        asset = (ledger_row.get("token_in") or "").upper() or "UNKNOWN"
+    asset = _resolve_asset_with_fallback(extracted, ledger_row)
 
     # If position_key wasn't stored in the outbox row, derive it using market_id from the
     # outbox row so per-market protocols (Morpho Blue) produce distinct FIFO keys.
-    if not position_key:
-        market_id_fallback = outbox_row.get("market_id") or None
-        position_key = _derive_position_key(protocol, chain, wallet_address, market_id_fallback, asset)
+    position_key = _resolve_position_key_with_fallback(outbox_row, protocol, chain, wallet_address, asset, position_key)
 
     # ── Token amount from extracted_data ────────────────────────────────────────
     amount_human = _extract_amount_human(extracted, intent_type_str, chain, asset)
@@ -155,231 +466,36 @@ def handle_lending(  # noqa: C901
     borrow_apr_bps = _ray_to_bps(extracted.get("borrow_rate"))
 
     # ── Gas ─────────────────────────────────────────────────────────────────────
-    gas_usd: Decimal | None = None
-    gas_usd_raw = ledger_row.get("gas_usd")
-    if gas_usd_raw:
-        try:
-            gas_usd = Decimal(str(gas_usd_raw))
-        except Exception:
-            pass
+    gas_usd = _parse_gas_usd(ledger_row)
 
     # ── FIFO lot matching ────────────────────────────────────────────────────────
-    principal_delta_usd: Decimal | None = None
-    interest_delta_usd: Decimal | None = None
-
-    # VIB-3964: a single chain+wallet wallet-basis pool is shared across the
-    # SWAP handler and the lending handler — BORROW / WITHDRAW credit it,
+    # A single chain+wallet wallet-basis pool is shared across the SWAP
+    # handler and the lending handler — BORROW / WITHDRAW credit it,
     # SUPPLY / REPAY drain it. Mirroring on-chain wallet flow into the FIFO
     # store is what lets a SWAP that disposes a borrowed (or withdrawn) token
-    # report a non-null ``realized_pnl_usd`` and unblocks looping G6.
-    _chain_norm = (chain or "").lower().strip()
-    _wallet_norm = (wallet_address or "").lower().strip()
-    swap_wallet_key = f"swap:{_chain_norm}:{_wallet_norm}" if _chain_norm and _wallet_norm else ""
+    # report a non-null ``realized_pnl_usd``.
+    fifo_ctx: _FifoContext | None = None
+    if amount_human is not None:
+        fifo_ctx = _FifoContext(
+            deployment_id=deployment_id,
+            cycle_id=cycle_id,
+            position_key=position_key,
+            asset=asset,
+            amount_human=amount_human,
+            price_oracle=price_oracle,
+            timestamp=timestamp,
+            tx_hash=tx_hash,
+            ledger_entry_id=ledger_entry_id,
+            swap_wallet_key=_swap_wallet_key_for(chain, wallet_address),
+        )
+    deltas = _apply_fifo_lots(intent_type_str, fifo_ctx, basis_store)
+    principal_delta_usd = deltas.principal_delta_usd
+    interest_delta_usd = deltas.interest_delta_usd
 
-    if amount_human is not None and basis_store is not None:
-        if intent_type_str == "BORROW":
-            principal_delta_usd = _amount_to_usd(amount_human, price_oracle, asset)
-            _borrow_id_seed = tx_hash or ledger_entry_id or position_key
-            basis_store.record_borrow(
-                deployment_id=deployment_id,
-                position_key=position_key,
-                token=asset,
-                principal_amount=amount_human,
-                principal_usd=principal_delta_usd,
-                timestamp=timestamp,
-                lot_id=make_accounting_event_id(deployment_id, cycle_id, "BORROW_LOT", _borrow_id_seed, position_key),
-                source_ledger_entry_id=ledger_entry_id,
-            )
-            # VIB-3964: borrowed tokens land in the wallet — credit the wallet
-            # basis pool so a follow-up SWAP that disposes them gets a basis.
-            if swap_wallet_key:
-                basis_store.record_swap_acquisition(
-                    deployment_id=deployment_id,
-                    position_key=swap_wallet_key,
-                    token=asset,
-                    amount=amount_human,
-                    cost_usd=principal_delta_usd,
-                    timestamp=timestamp,
-                    lot_id=make_accounting_event_id(
-                        deployment_id, cycle_id, "BORROW_WALLET_LOT", _borrow_id_seed, asset
-                    ),
-                    source="BORROW",
-                )
-            interest_delta_usd = None
+    # ── Pre/post-state (populated by the runner; failures stay unmeasured) ─────
+    snapshots = _extract_snapshots(pre_state, post_state)
 
-        elif intent_type_str in ("REPAY", "DELEVERAGE"):
-            match_result = basis_store.match_repay(
-                deployment_id=deployment_id,
-                position_key=position_key,
-                token=asset,
-                repay_amount=amount_human,
-            )
-            principal_delta_usd = _amount_to_usd(match_result.repaid_principal, price_oracle, asset)
-            interest_delta_usd = (
-                None
-                if match_result.unmatched_amount > 0
-                else _amount_to_usd(match_result.interest_or_yield, price_oracle, asset)
-            )
-            # VIB-3964: REPAY drains wallet inventory of the repaid token.
-            # Discarded return: lending realized-PnL routes through match_repay
-            # above; the disposal here exists purely to mirror wallet flow.
-            if swap_wallet_key:
-                basis_store.match_swap_disposal(
-                    deployment_id=deployment_id,
-                    position_key=swap_wallet_key,
-                    token=asset,
-                    amount=amount_human,
-                )
-
-        elif intent_type_str == "SUPPLY":
-            principal_delta_usd = _amount_to_usd(amount_human, price_oracle, asset)
-            # VIB-3964: SUPPLY drains wallet inventory.
-            if swap_wallet_key:
-                basis_store.match_swap_disposal(
-                    deployment_id=deployment_id,
-                    position_key=swap_wallet_key,
-                    token=asset,
-                    amount=amount_human,
-                )
-            # VIB-3964 (G6 closer): also record the supplied principal as a
-            # BORROW-style lot keyed under ``supply:<lending_pk>`` so a later
-            # WITHDRAW can FIFO-match and surface ``interest_accrued_usd``.
-            # The math is identical to BORROW/REPAY (record principal, match
-            # repay → excess = interest). Without this, every WITHDRAW carries
-            # a null ``interest_delta_usd`` and G6 fails on
-            # ``Σ_interest_supply_null_count > 0``.
-            _supply_position_key = f"supply:{position_key}"
-            _supply_id_seed = tx_hash or ledger_entry_id or position_key
-            basis_store.record_borrow(
-                deployment_id=deployment_id,
-                position_key=_supply_position_key,
-                token=asset,
-                principal_amount=amount_human,
-                principal_usd=principal_delta_usd,
-                timestamp=timestamp,
-                lot_id=make_accounting_event_id(
-                    deployment_id, cycle_id, "SUPPLY_LOT", _supply_id_seed, _supply_position_key
-                ),
-                source_ledger_entry_id=ledger_entry_id,
-            )
-
-        elif intent_type_str == "WITHDRAW":
-            # Total withdraw value in USD — used as the wallet-basis lot cost
-            # (the entire withdrawn balance lands in the wallet) but NOT as
-            # the event's ``principal_delta_usd``. The event split mirrors
-            # REPAY (pr-auditor 2026-05-04 item 2): principal_delta_usd is
-            # the matched supply principal only; the residual is interest.
-            # Pre-fix WITHDRAW emitted principal_delta_usd=total AND
-            # interest_delta_usd=excess, so principal+interest summed to
-            # total + interest — broke double-entry reconciliation.
-            _withdraw_total_usd = _amount_to_usd(amount_human, price_oracle, asset)
-            # VIB-3964: WITHDRAW credits the wallet (principal + accrued
-            # interest). Mint a swap-key lot for the FULL withdraw amount
-            # so the next SWAP that disposes the withdrawn token can
-            # compute realized PnL.
-            if swap_wallet_key:
-                _withdraw_id_seed = tx_hash or ledger_entry_id or position_key
-                basis_store.record_swap_acquisition(
-                    deployment_id=deployment_id,
-                    position_key=swap_wallet_key,
-                    token=asset,
-                    amount=amount_human,
-                    cost_usd=_withdraw_total_usd,
-                    timestamp=timestamp,
-                    lot_id=make_accounting_event_id(
-                        deployment_id, cycle_id, "WITHDRAW_WALLET_LOT", _withdraw_id_seed, asset
-                    ),
-                    source="WITHDRAW",
-                )
-            # VIB-3964 (G6 closer): FIFO-match the SUPPLY lots to split
-            # principal vs interest the same way REPAY does. The writer
-            # alias projects ``interest_delta_usd`` onto
-            # ``interest_accrued_usd`` for L1 / L4 / G6.
-            #
-            # Codex 2026-05-04 P2: ``match_repay`` returns ``unmatched=0``
-            # whenever it consumed at least one lot, even if the lot pool
-            # didn't fully cover ``amount_human``. The residual then surfaces
-            # as fabricated ``interest_or_yield``. Trust the figure only when
-            # either:
-            #   (a) lots fully covered the withdraw (excess is true interest), or
-            #   (b) implied interest is bounded by consumed principal — a
-            #       1-year hold at >100% APR would be DeFi outlier territory,
-            #       past that the residual is almost certainly untracked
-            #       supply (e.g. SDK deployed with a pre-existing position).
-            # Otherwise leave it as None (Empty ≠ zero per CLAUDE.md) and
-            # default principal back to the total withdraw — same fallback
-            # REPAY uses when match is unreliable.
-            _supply_position_key = f"supply:{position_key}"
-            _supply_match = basis_store.match_repay(
-                deployment_id=deployment_id,
-                position_key=_supply_position_key,
-                token=asset,
-                repay_amount=amount_human,
-            )
-            if _supply_match.unmatched_amount > 0:
-                principal_delta_usd = _withdraw_total_usd
-                interest_delta_usd = None
-            elif (
-                _supply_match.repaid_principal >= amount_human
-                or _supply_match.interest_or_yield <= _supply_match.repaid_principal
-            ):
-                # Trustworthy split — principal/interest mirror REPAY exactly
-                # so principal + interest = total cash flow.
-                principal_delta_usd = _amount_to_usd(_supply_match.repaid_principal, price_oracle, asset)
-                interest_delta_usd = _amount_to_usd(_supply_match.interest_or_yield, price_oracle, asset)
-            else:
-                principal_delta_usd = _withdraw_total_usd
-                interest_delta_usd = None
-
-    # ── Pre-state from pre_state_json (VIB-3474: populated by the runner) ──────
-    # VIB-4257: lane-symmetry with post_state. Closes the asymmetric-write gap
-    # where _after fields were populated but _before fields were hardcoded None
-    # even though `pre_state_json.health_factor` was present.
-    collateral_before: Decimal | None = None
-    debt_before: Decimal | None = None
-    net_equity_before: Decimal | None = None
-    hf_before: Decimal | None = None
-
-    if pre_state:
-        try:
-            collateral_before = (
-                Decimal(str(pre_state["collateral_usd"])) if pre_state.get("collateral_usd") is not None else None
-            )
-            debt_before = Decimal(str(pre_state["debt_usd"])) if pre_state.get("debt_usd") is not None else None
-            if collateral_before is not None and debt_before is not None:
-                net_equity_before = collateral_before - debt_before
-            hf_raw_pre = pre_state.get("health_factor")
-            hf_before = Decimal(str(hf_raw_pre)) if hf_raw_pre is not None else None
-        except Exception:
-            logger.debug("Failed to parse pre_state_json fields", exc_info=True)
-
-    # ── Post-state from post_state_json (VIB-3474: populated by the runner) ─────
-    collateral_after: Decimal | None = None
-    debt_after: Decimal | None = None
-    net_equity_after: Decimal | None = None
-    hf_after: Decimal | None = None
-    liquidation_threshold: Decimal | None = None
-
-    if post_state:
-        try:
-            collateral_after = (
-                Decimal(str(post_state["collateral_usd"])) if post_state.get("collateral_usd") is not None else None
-            )
-            debt_after = Decimal(str(post_state["debt_usd"])) if post_state.get("debt_usd") is not None else None
-            if collateral_after is not None and debt_after is not None:
-                net_equity_after = collateral_after - debt_after
-            hf_raw = post_state.get("health_factor")
-            hf_after = Decimal(str(hf_raw)) if hf_raw is not None else None
-            lt_bps = post_state.get("liquidation_threshold_bps")
-            liquidation_threshold = Decimal(lt_bps) / Decimal("10000") if lt_bps is not None else None
-        except Exception:
-            logger.debug("Failed to parse post_state_json fields", exc_info=True)
-
-    has_post_state = collateral_after is not None or hf_after is not None
-    confidence = AccountingConfidence.HIGH if has_post_state else AccountingConfidence.ESTIMATED
-    unavailable_reason = (
-        "" if has_post_state else "post_state_json missing or invalid (gateway read unavailable for this row)"
-    )
+    confidence, unavailable_reason = _confidence_for_post_state(snapshots)
 
     _id_seed = tx_hash or ledger_entry_id or position_key
     identity = AccountingIdentity(
@@ -401,15 +517,15 @@ def handle_lending(  # noqa: C901
         position_key=position_key,
         market_id=outbox_row.get("market_id") or "",
         asset=asset,
-        collateral_value_before_usd=collateral_before,
-        collateral_value_after_usd=collateral_after,
-        debt_value_before_usd=debt_before,
-        debt_value_after_usd=debt_after,
-        net_equity_before_usd=net_equity_before,
-        net_equity_after_usd=net_equity_after,
-        health_factor_before=hf_before,
-        health_factor_after=hf_after,
-        liquidation_threshold=liquidation_threshold,
+        collateral_value_before_usd=snapshots.collateral_before,
+        collateral_value_after_usd=snapshots.collateral_after,
+        debt_value_before_usd=snapshots.debt_before,
+        debt_value_after_usd=snapshots.debt_after,
+        net_equity_before_usd=snapshots.net_equity_before,
+        net_equity_after_usd=snapshots.net_equity_after,
+        health_factor_before=snapshots.hf_before,
+        health_factor_after=snapshots.hf_after,
+        liquidation_threshold=snapshots.liquidation_threshold,
         lltv=None,
         supply_apr_bps=supply_apr_bps,
         borrow_apr_bps=borrow_apr_bps,

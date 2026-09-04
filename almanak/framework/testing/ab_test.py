@@ -432,7 +432,6 @@ class ABTest:
             "duration_seconds": self.duration_seconds,
         }
 
-    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ABTest":
         """Create from dictionary."""
@@ -861,7 +860,6 @@ class ABTestManager:
 
         logger.info(f"ABTestManager initialized for strategy {deployment_id}")
 
-    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     def create_ab_test(
         self,
         variant_a: str,
@@ -955,12 +953,13 @@ class ABTestManager:
         # Emit creation event
         self._emit_event(
             ABTestEventType.AB_TEST_CREATED,
-            f"A/B test created: {variant_a} vs {variant_b}, split {split_ratio:.0%}/{1 - split_ratio:.0%}",
+            f"A/B test created: {variant_a} vs {variant_b}, "
+            f"split {config.split_ratio:.0%}/{1 - config.split_ratio:.0%}",
             {
                 "test_id": self.test.test_id,
                 "variant_a_id": variant_a,
                 "variant_b_id": variant_b,
-                "split_ratio": split_ratio,
+                "split_ratio": config.split_ratio,
                 "variant_a_capital_usd": str(self.test.variant_a_capital_usd),
                 "variant_b_capital_usd": str(self.test.variant_b_capital_usd),
             },
@@ -968,7 +967,7 @@ class ABTestManager:
 
         logger.info(
             f"A/B test {self.test.test_id} created: "
-            f"{variant_a} ({split_ratio:.0%}) vs {variant_b} ({1 - split_ratio:.0%})"
+            f"{variant_a} ({config.split_ratio:.0%}) vs {variant_b} ({1 - config.split_ratio:.0%})"
         )
 
         # Call start callback
@@ -1253,7 +1252,6 @@ class ABTestManager:
             final_comparison=self._compare(auto_end=False) if self.test.variant_a_metrics else None,
         )
 
-    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     def get_status(self) -> dict[str, Any]:
         """Get the current status of the A/B test.
 

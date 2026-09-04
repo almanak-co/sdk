@@ -433,6 +433,8 @@ class LocalRuntimeConfig:
 
         try:
             # Derive wallet address from private key
+            if int(key, 16) == 0:
+                raise ValueError("private key scalar cannot be zero")
             account = Account.from_key(key)
             self.wallet_address = account.address
         except Exception:
@@ -1075,6 +1077,8 @@ class MultiChainRuntimeConfig:
 
         try:
             # Derive wallet address from private key
+            if int(key, 16) == 0:
+                raise ValueError("private key scalar cannot be zero")
             account = Account.from_key(key)
             self.wallet_address = account.address
         except Exception:

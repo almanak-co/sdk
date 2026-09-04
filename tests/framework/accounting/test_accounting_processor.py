@@ -602,7 +602,7 @@ async def test_drain_one_lending_borrow_records_fifo_lot(monkeypatch: pytest.Mon
 
 @pytest.mark.asyncio
 async def test_initialize_run_loop_drains_pending_outbox() -> None:
-    """drain_pending() is called in initialize_run_loop with deployment_id set first."""
+    """drain_pending() uses the immutable boot deployment_id before it runs."""
     from almanak.framework.migration import CutoverStorageNotSupported
     from almanak.framework.runner._run_loop_helpers import initialize_run_loop
 
@@ -641,12 +641,11 @@ async def test_initialize_run_loop_drains_pending_outbox() -> None:
     processor = MagicMock()
     processor._deployment_id = ""
 
-    # Use side_effect to assert deployment_id is already set at call time, not
-    # just after initialize_run_loop returns — catches regressions where
-    # drain_pending fires before _deployment_id is assigned.
+    # The strategy attribute is deliberately different: the runner-resolved boot
+    # identity is canonical and must not be replaced during recovery.
     def _drain_pending_probe() -> int:
-        assert processor._deployment_id == "dep-1", (
-            f"deployment_id must be set before drain_pending is called, got {processor._deployment_id!r}"
+        assert processor._deployment_id == deployment_id, (
+            f"boot deployment_id must be set before drain_pending is called, got {processor._deployment_id!r}"
         )
         return 3
 

@@ -520,67 +520,74 @@ async def hydrate_recent_open_events_cache(
     return populated
 
 
-# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
-async def initialize_run_loop(  # noqa: C901
+async def _initialize_run_loop_state_manager(
+    runner: StrategyRunner,
+    deployment_id: str,
+) -> bool:
+    """Initialize the configured state backend using the run-mode failure policy."""
+    if not runner.config.enable_state_persistence:
+        return False
+
+    try:
+        await runner.state_manager.initialize()
+        logger.debug(f"State manager initialized for {deployment_id}")
+        return True
+    except Exception as e:
+        if runner._is_live_mode():
+            raise RuntimeError(f"Failed to initialize state manager for {deployment_id}: {e}") from e
+        logger.error(f"Failed to initialize state manager: {e}")
+        return False
+
+
+async def _drain_pending_accounting_outbox(
+    runner: StrategyRunner,
+    deployment_id: str,
+) -> None:
+    """Drain durable accounting work left by a previous process."""
+    try:
+        processor = getattr(runner, "_accounting_processor", None)
+        if processor is not None:
+            processor._deployment_id = deployment_id
+            drained = await processor.drain_pending()
+            if drained:
+                logger.info("AccountingProcessor: drained %d pending outbox rows on startup", drained)
+    except Exception as e:
+        if runner._is_live_mode():
+            raise RuntimeError(f"AccountingProcessor.drain_pending failed: {e}") from e
+        logger.warning("AccountingProcessor.drain_pending failed on startup: %s", e)
+
+
+async def _recover_persisted_run_state(
     runner: StrategyRunner,
     strategy: StrategyProtocol,
     deployment_id: str,
-    interval: int,
-) -> StatefulActivityProviderProtocol | None:
-    """Run the one-shot setup before the ``while`` loop begins.
-
-    Mirrors the original setup block from ``run_loop`` lines ~1411-1472:
-    state manager init, incomplete session recovery, copy-trading cursor
-    restore, shutdown flag reset, gateway wiring, lifecycle RUNNING write,
-    and the STRATEGY_STARTED timeline event.
-
-    Returns the resolved ``activity_provider`` (may be ``None``) so the
-    caller can feed it to the success-branch copy-trading persist step.
-    """
-    state_manager_ready = False
-    if runner.config.enable_state_persistence:
-        try:
-            await runner.state_manager.initialize()
-            state_manager_ready = True
-            logger.debug(f"State manager initialized for {deployment_id}")
-        except Exception as e:
-            if runner._is_live_mode():
-                raise RuntimeError(f"Failed to initialize state manager for {deployment_id}: {e}") from e
-            logger.error(f"Failed to initialize state manager: {e}")
-
-    # Capture the pre-trade bracket before deriving opening-balance lots from it.
+    *,
+    state_manager_ready: bool,
+) -> None:
+    """Recover persisted accounting, position, registry, and teardown state."""
     if state_manager_ready:
+        # The opening wallet bracket must exist before FIFO reconstruction seeds
+        # OPENING_BALANCE lots from the earliest snapshot.
         await capture_boot_snapshot_with_accounting(runner, strategy, deployment_id)
-
-    # Never treat an uninitialized backend's empty read as an empty durable basis.
-    if state_manager_ready:
         reconstruct_lending_basis_store(runner, strategy, deployment_id)
-
-    if state_manager_ready:
         await hydrate_recent_open_events_cache(runner, strategy)
-
-    if state_manager_ready:
         await _run_cutover_boot_guard(runner, strategy, deployment_id)
-
-    if state_manager_ready:
         _install_registry_preflight(runner, deployment_id)
 
+    # The local teardown store is independent of runner state persistence and
+    # must be swept even when that persistence backend is disabled or unavailable.
     _sweep_stale_executing_teardowns(runner, deployment_id)
 
     if runner.config.enable_state_persistence and state_manager_ready:
-        try:
-            processor = getattr(runner, "_accounting_processor", None)
-            if processor is not None:
-                deployment_id = strategy.deployment_id
-                processor._deployment_id = deployment_id
-                drained = await processor.drain_pending()
-                if drained:
-                    logger.info("AccountingProcessor: drained %d pending outbox rows on startup", drained)
-        except Exception as e:
-            if runner._is_live_mode():
-                raise RuntimeError(f"AccountingProcessor.drain_pending failed: {e}") from e
-            logger.warning("AccountingProcessor.drain_pending failed on startup: %s", e)
+        await _drain_pending_accounting_outbox(runner, deployment_id)
 
+
+async def _recover_run_loop_control_state(
+    runner: StrategyRunner,
+    strategy: StrategyProtocol,
+    deployment_id: str,
+) -> StatefulActivityProviderProtocol | None:
+    """Recover execution sessions and copy-trading state, then reset loop controls."""
     try:
         recovered = await runner._recover_incomplete_sessions()
         if recovered > 0:
@@ -607,7 +614,17 @@ async def initialize_run_loop(  # noqa: C901
     runner._signal_received = False
     runner._terminal_lifecycle_state = None
     runner._terminal_lifecycle_error_message = None
+    return activity_provider
 
+
+async def _configure_run_loop_gateway(
+    runner: StrategyRunner,
+    strategy: StrategyProtocol,
+    deployment_id: str,
+    *,
+    state_manager_ready: bool,
+) -> None:
+    """Wire gateway integrations and run pre-registration safety checks."""
     gateway_client = runner._get_gateway_client()
     if gateway_client is not None:
         from ..api.timeline import set_event_gateway_client
@@ -645,8 +662,14 @@ async def initialize_run_loop(  # noqa: C901
 
     runner._register_with_gateway(strategy)
 
-    runner._lifecycle_write_state(deployment_id, LifecycleState.RUNNING)
 
+def _announce_run_loop_started(
+    runner: StrategyRunner,
+    deployment_id: str,
+    interval: int,
+) -> None:
+    """Publish the RUNNING lifecycle state and strategy-started timeline event."""
+    runner._lifecycle_write_state(deployment_id, LifecycleState.RUNNING)
     start_event = TimelineEvent(
         timestamp=datetime.now(UTC),
         event_type=TimelineEventType.STRATEGY_STARTED,
@@ -661,6 +684,30 @@ async def initialize_run_loop(  # noqa: C901
     add_event(start_event)
     logger.debug(f"Emitted STRATEGY_STARTED event for {deployment_id}")
 
+
+async def initialize_run_loop(
+    runner: StrategyRunner,
+    strategy: StrategyProtocol,
+    deployment_id: str,
+    interval: int,
+) -> StatefulActivityProviderProtocol | None:
+    """Run the one-shot setup before the ``while`` loop begins."""
+    state_manager_ready = await _initialize_run_loop_state_manager(runner, deployment_id)
+    await _recover_persisted_run_state(
+        runner,
+        strategy,
+        deployment_id,
+        state_manager_ready=state_manager_ready,
+    )
+
+    activity_provider = await _recover_run_loop_control_state(runner, strategy, deployment_id)
+    await _configure_run_loop_gateway(
+        runner,
+        strategy,
+        deployment_id,
+        state_manager_ready=state_manager_ready,
+    )
+    _announce_run_loop_started(runner, deployment_id, interval)
     return activity_provider
 
 

@@ -785,8 +785,7 @@ def _style_intent_pie_text(texts: Any, autotexts: Any, cfg: ChartConfig) -> None
         autotext.set_fontweight("bold")
 
 
-# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
-def plot_equity_curve(  # noqa: C901
+def plot_equity_curve(
     result: "BacktestResult",
     output_path: Path | str | None = None,
     config: ChartConfig | None = None,
@@ -1466,8 +1465,7 @@ def _build_interactive_pnl_histogram_figure(
     return fig, stats
 
 
-# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
-def plot_pnl_histogram_interactive(  # noqa: C901
+def plot_pnl_histogram_interactive(
     result: "BacktestResult",
     output_path: Path | str | None = None,
     title: str | None = None,
@@ -2155,7 +2153,6 @@ def _build_drawdown_chart_figure(
     return fig
 
 
-# crap-allowlist: #2703 mechanical extras-message string change in existing high-CRAP function (pre-existing cov ~4%)
 def generate_drawdown_chart_html(
     result: "BacktestResult",
     title: str | None = None,

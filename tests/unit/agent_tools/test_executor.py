@@ -2,12 +2,17 @@
 
 import json
 from decimal import Decimal
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from almanak.framework.agent_tools.errors import AgentErrorCode
-from almanak.framework.agent_tools.executor import ToolExecutor, _action_result_response, _decode_int24
+from almanak.framework.agent_tools.executor import (
+    ToolExecutor,
+    _action_result_response,
+    _decode_int24,
+    _error_payload,
+)
 from almanak.framework.agent_tools.policy import AgentPolicy
 from almanak.framework.agent_tools.schemas import ToolResponse, ToolResponseStatus
 
@@ -140,9 +145,7 @@ class TestDataToolDispatch:
         mock_resp.metadata = {"signal": "overbought"}
         mock_gateway.market.GetIndicator.return_value = mock_resp
 
-        result = await executor.execute(
-            "get_indicator", {"token": "ETH", "indicator": "rsi", "period": 14}
-        )
+        result = await executor.execute("get_indicator", {"token": "ETH", "indicator": "rsi", "period": 14})
         assert result.status == "success"
         assert result.data["indicator"] == "rsi"
         assert result.data["value"] == 72.5
@@ -177,9 +180,7 @@ class TestDataToolDispatch:
         mock_resp.responses = [r1, r2]
         mock_gateway.market.BatchGetBalances.return_value = mock_resp
 
-        result = await executor.execute(
-            "batch_get_balances", {"chain": "arbitrum", "tokens": ["ETH", "USDC"]}
-        )
+        result = await executor.execute("batch_get_balances", {"chain": "arbitrum", "tokens": ["ETH", "USDC"]})
         assert result.status == "success"
         assert len(result.data["balances"]) == 2
 
@@ -194,9 +195,7 @@ class TestDataToolDispatch:
     async def test_get_pool_state_dispatches_to_rpc(self, executor, mock_gateway):
         """get_pool_state should call RPC to read pool state (errors without real RPC are expected)."""
         mock_gateway.rpc.Call.side_effect = Exception("no rpc configured")
-        result = await executor.execute(
-            "get_pool_state", {"token_a": "WETH", "token_b": "USDC", "chain": "base"}
-        )
+        result = await executor.execute("get_pool_state", {"token_a": "WETH", "token_b": "USDC", "chain": "base"})
         # Implementation tries RPC; with mock gateway it will error gracefully
         assert result.status == "error"
 
@@ -327,9 +326,7 @@ class TestPlanningToolDispatch:
     @pytest.mark.asyncio
     async def test_estimate_gas_returns_gas_units(self, executor):
         """estimate_gas returns static gas estimate for intent type."""
-        result = await executor.execute(
-            "estimate_gas", {"intent_type": "swap", "params": {}, "chain": "arbitrum"}
-        )
+        result = await executor.execute("estimate_gas", {"intent_type": "swap", "params": {}, "chain": "arbitrum"})
         assert result.status == "success"
         assert result.data["gas_units"] > 0
 
@@ -499,9 +496,7 @@ class TestActionToolDispatch:
             deployment_id="test-strategy",
             bundle_cache=BundleCache(cache_dir=cache_dir),
         )
-        compile_result = await first.execute(
-            "compile_intent", {"intent_type": "swap", "params": {}}
-        )
+        compile_result = await first.execute("compile_intent", {"intent_type": "swap", "params": {}})
         bundle_id = compile_result.data["bundle_id"]
 
         # Completely new executor, same cache dir -> should resolve the bundle.
@@ -518,16 +513,12 @@ class TestActionToolDispatch:
             deployment_id="test-strategy",
             bundle_cache=BundleCache(cache_dir=cache_dir),
         )
-        result = await second.execute(
-            "execute_compiled_bundle", {"bundle_id": bundle_id, "chain": "arbitrum"}
-        )
+        result = await second.execute("execute_compiled_bundle", {"bundle_id": bundle_id, "chain": "arbitrum"})
         assert result.status == "success"
         assert result.data["tx_hashes"] == ["0xabc"]
 
     @pytest.mark.asyncio
-    async def test_execute_compiled_bundle_consumes_before_gateway_call(
-        self, mock_gateway, tmp_path
-    ):
+    async def test_execute_compiled_bundle_consumes_before_gateway_call(self, mock_gateway, tmp_path):
         """VIB-2996 TOCTOU (Claude auditor item #2): the bundle must be
         popped BEFORE the Execute gateway call so two concurrent
         ``ax run execute_compiled_bundle`` invocations can never both
@@ -564,9 +555,7 @@ class TestActionToolDispatch:
             deployment_id="t",
             bundle_cache=shared_cache,
         )
-        compile_result = await executor.execute(
-            "compile_intent", {"intent_type": "swap", "params": {}}
-        )
+        compile_result = await executor.execute("compile_intent", {"intent_type": "swap", "params": {}})
         bundle_id = compile_result.data["bundle_id"]
 
         # Inside the Execute mock, assert the cache no longer contains the
@@ -584,9 +573,7 @@ class TestActionToolDispatch:
 
         mock_gateway.execution.Execute.side_effect = assert_consumed_before_exec
 
-        result = await executor.execute(
-            "execute_compiled_bundle", {"bundle_id": bundle_id, "chain": "arbitrum"}
-        )
+        result = await executor.execute("execute_compiled_bundle", {"bundle_id": bundle_id, "chain": "arbitrum"})
         assert result.status == "success"
 
     @pytest.mark.asyncio
@@ -627,9 +614,7 @@ class TestActionToolDispatch:
             deployment_id="strat-a",
             bundle_cache=BundleCache(cache_dir=cache_dir),
         )
-        compile_result = await compiler.execute(
-            "compile_intent", {"intent_type": "swap", "params": {}}
-        )
+        compile_result = await compiler.execute("compile_intent", {"intent_type": "swap", "params": {}})
         bundle_id = compile_result.data["bundle_id"]
 
         # Different wallet, same cache dir.
@@ -640,9 +625,7 @@ class TestActionToolDispatch:
             deployment_id="strat-a",
             bundle_cache=BundleCache(cache_dir=cache_dir),
         )
-        result = await attacker.execute(
-            "execute_compiled_bundle", {"bundle_id": bundle_id, "chain": "arbitrum"}
-        )
+        result = await attacker.execute("execute_compiled_bundle", {"bundle_id": bundle_id, "chain": "arbitrum"})
         assert result.status == "error"
         assert result.error["error_code"] == "validation_error"
         assert "wallet" in result.error["message"].lower()
@@ -683,9 +666,7 @@ class TestActionToolDispatch:
             deployment_id="strat-a",
             bundle_cache=BundleCache(cache_dir=cache_dir),
         )
-        compile_result = await compiler.execute(
-            "compile_intent", {"intent_type": "swap", "params": {}}
-        )
+        compile_result = await compiler.execute("compile_intent", {"intent_type": "swap", "params": {}})
         bundle_id = compile_result.data["bundle_id"]
 
         attacker = ToolExecutor(
@@ -695,18 +676,14 @@ class TestActionToolDispatch:
             deployment_id="strat-b",
             bundle_cache=BundleCache(cache_dir=cache_dir),
         )
-        result = await attacker.execute(
-            "execute_compiled_bundle", {"bundle_id": bundle_id, "chain": "arbitrum"}
-        )
+        result = await attacker.execute("execute_compiled_bundle", {"bundle_id": bundle_id, "chain": "arbitrum"})
         assert result.status == "error"
         assert result.error["error_code"] == "validation_error"
         assert "strategy" in result.error["message"].lower()
         mock_gateway.execution.Execute.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_execute_compiled_bundle_expired_returns_friendly_error(
-        self, mock_gateway, tmp_path
-    ):
+    async def test_execute_compiled_bundle_expired_returns_friendly_error(self, mock_gateway, tmp_path):
         """Expired bundles surface a clear 'expired' message, not a generic 'not found'."""
         from almanak.framework.agent_tools.bundle_cache import BundleCache
         from almanak.framework.agent_tools.executor import ToolExecutor
@@ -737,18 +714,14 @@ class TestActionToolDispatch:
             deployment_id="test-strategy",
             bundle_cache=BundleCache(cache_dir=cache_dir, default_ttl_seconds=1),
         )
-        compile_result = await executor.execute(
-            "compile_intent", {"intent_type": "swap", "params": {}}
-        )
+        compile_result = await executor.execute("compile_intent", {"intent_type": "swap", "params": {}})
         bundle_id = compile_result.data["bundle_id"]
 
         import time as _time
 
         _time.sleep(1.2)
 
-        result = await executor.execute(
-            "execute_compiled_bundle", {"bundle_id": bundle_id, "chain": "arbitrum"}
-        )
+        result = await executor.execute("execute_compiled_bundle", {"bundle_id": bundle_id, "chain": "arbitrum"})
         assert result.status == "error"
         assert result.error["error_code"] == "validation_error"
         assert "expired" in result.error["message"].lower()
@@ -762,9 +735,7 @@ class TestActionToolDispatch:
         compile_resp.error = ""
         mock_gateway.execution.CompileIntent.return_value = compile_resp
 
-        compile_result = await executor.execute(
-            "compile_intent", {"intent_type": "swap", "params": {}}
-        )
+        compile_result = await executor.execute("compile_intent", {"intent_type": "swap", "params": {}})
         bundle_id = compile_result.data["bundle_id"]
 
         exec_resp = MagicMock()
@@ -813,9 +784,7 @@ class TestActionToolDispatch:
         bundle_id = compile_result.data["bundle_id"]
 
         # Executing should be blocked by spend limits ($1000 > $500 limit)
-        result = await tight_executor.execute(
-            "execute_compiled_bundle", {"bundle_id": bundle_id, "chain": "arbitrum"}
-        )
+        result = await tight_executor.execute("execute_compiled_bundle", {"bundle_id": bundle_id, "chain": "arbitrum"})
         assert result.status == "error"
         assert "spend limit" in result.error["message"].lower() or "blocked" in result.error["message"].lower()
 
@@ -934,7 +903,7 @@ class TestActionToolDispatch:
         assert intent_data["range_lower"] == "200"
         assert intent_data["range_upper"] == "1000"
         # Amounts should be swapped (USDC first since its addr is lower)
-        assert intent_data["amount0"] == "10"    # was amount_b (USDC)
+        assert intent_data["amount0"] == "10"  # was amount_b (USDC)
         assert intent_data["amount1"] == "1000"  # was amount_a (ALMANAK)
 
     @pytest.mark.asyncio
@@ -1251,9 +1220,7 @@ class TestGetLPPositionDispatch:
     async def test_get_lp_position_dispatches_to_rpc(self, executor, mock_gateway):
         """get_lp_position should call RPC to read position data (errors without real RPC are expected)."""
         mock_gateway.rpc.Call.side_effect = Exception("no rpc configured")
-        result = await executor.execute(
-            "get_lp_position", {"position_id": "12345", "chain": "base"}
-        )
+        result = await executor.execute("get_lp_position", {"position_id": "12345", "chain": "base"})
         # Implementation tries RPC; with mock gateway it will error gracefully
         assert result.status == "error"
 
@@ -1321,9 +1288,7 @@ class TestSimulationPolicyEnforcement:
             cooldown_seconds=0,
             require_simulation_before_execution=True,
         )
-        executor = ToolExecutor(
-            mock_gateway, policy=policy, wallet_address="0x1234", deployment_id="test"
-        )
+        executor = ToolExecutor(mock_gateway, policy=policy, wallet_address="0x1234", deployment_id="test")
 
         # Compile a bundle
         compile_resp = MagicMock()
@@ -1369,9 +1334,7 @@ class TestBatchBalancesTotalUsd:
         mock_resp.responses = [r1, r2]
         mock_gateway.market.BatchGetBalances.return_value = mock_resp
 
-        result = await executor.execute(
-            "batch_get_balances", {"chain": "arbitrum", "tokens": ["ETH", "USDC"]}
-        )
+        result = await executor.execute("batch_get_balances", {"chain": "arbitrum", "tokens": ["ETH", "USDC"]})
         assert result.status == "success"
         assert result.data["total_usd"] == "9800.00"
 
@@ -1447,7 +1410,9 @@ class TestAlertingIntegration:
             max_tool_calls_per_minute=100,
         )
         executor = ToolExecutor(
-            mock_gateway, policy=policy, wallet_address="0x1234",
+            mock_gateway,
+            policy=policy,
+            wallet_address="0x1234",
             alert_manager=mock_alert,
         )
         result = await executor.execute("get_price", {"token": "ETH", "chain": "ethereum"})
@@ -1482,7 +1447,8 @@ class TestAlertingIntegration:
             max_consecutive_failures=2,
         )
         executor = ToolExecutor(
-            mock_gateway, policy=policy,
+            mock_gateway,
+            policy=policy,
             wallet_address="0x1234567890abcdef1234567890abcdef12345678",
             deployment_id="test",
             alert_manager=mock_alert,
@@ -2427,9 +2393,7 @@ class TestListReadCommands:
         weth = "0x82af49447d8a07e3bd95bd0d56f35241523fbab1"
         discovered = [
             self._discovered(token_id=42, token0=usdc, token1=weth, fee=500, liquidity=10**20),
-            self._discovered(
-                token_id=99, token0=usdc, token1=weth, fee=3000, liquidity=500, protocol="sushiswap_v3"
-            ),
+            self._discovered(token_id=99, token0=usdc, token1=weth, fee=3000, liquidity=500, protocol="sushiswap_v3"),
         ]
         with patch(
             "almanak.framework.teardown.discovery.discover_lp_positions",
@@ -2614,6 +2578,308 @@ class TestListReadCommands:
             if request.method == "eth_call" and "portfolio_erc20_" in request.id:
                 erc20_call_seen = True
         assert erc20_call_seen, "portfolio did not issue an ERC20 eth_call for USDC"
+
+    @pytest.mark.asyncio
+    async def test_portfolio_aggregates_successful_sections(self, executor, mock_gateway):
+        wallet = "0xabc0000000000000000000000000000000000000"
+        token = MagicMock(address="0xaf88d065e77c8cc2239327c5edb3a432268e5831", decimals=6)
+        resolver = MagicMock()
+        resolver.resolve.return_value = token
+
+        def rpc_response(request, timeout):
+            assert timeout == 30.0
+            if request.method == "eth_getBalance":
+                return self._rpc_result(self._pack_uint256(2 * 10**18))
+            return self._rpc_result(self._pack_uint256(1_500_000))
+
+        mock_gateway.rpc.Call.side_effect = rpc_response
+        lp_response = ToolResponse(
+            status=ToolResponseStatus.SUCCESS,
+            data={"positions": [{"position_id": "42", "protocol": "uniswap_v3"}]},
+        )
+        lending_response = ToolResponse(
+            status=ToolResponseStatus.SUCCESS,
+            data={"total_collateral_usd": "2000", "total_debt_usd": "500", "health_factor": "3.2"},
+        )
+        lending_capability = MagicMock()
+        lending_capability.lending_pool_address.return_value = "0xpool"
+
+        with (
+            patch("almanak.framework.data.tokens.get_token_resolver", return_value=resolver),
+            patch("almanak.framework.teardown.discovery._npms_for_chain", return_value=["0xnpm"]),
+            patch(
+                "almanak.connectors._strategy_agent_tool_registry.STRATEGY_AGENT_READ_REGISTRY.lookup",
+                return_value=lending_capability,
+            ),
+            patch.object(executor, "_execute_list_lp_positions", AsyncMock(return_value=lp_response)) as list_lp,
+            patch.object(
+                executor,
+                "_execute_list_lending_positions",
+                AsyncMock(return_value=lending_response),
+            ) as list_lending,
+        ):
+            response = await executor.execute(
+                "get_portfolio",
+                {
+                    "chain": "arbitrum",
+                    "wallet_address": wallet,
+                    "tokens": ["USDC"],
+                    "network": "anvil",
+                },
+            )
+
+        assert response.status == ToolResponseStatus.SUCCESS
+        assert response.data == {
+            "chain": "arbitrum",
+            "wallet_address": wallet,
+            "native_balance": "2",
+            "native_symbol": "ETH",
+            "token_balances": [
+                {
+                    "token": "USDC",
+                    "address": token.address,
+                    "balance": "1.5",
+                    "raw_balance": "1500000",
+                    "decimals": 6,
+                }
+            ],
+            "lp_positions": [{"position_id": "42", "protocol": "uniswap_v3"}],
+            "lending": {
+                "protocol": "aave_v3",
+                "total_collateral_usd": "2000",
+                "total_debt_usd": "500",
+                "health_factor": "3.2",
+            },
+            "warnings": [],
+        }
+        resolver.resolve.assert_called_once_with("USDC", "arbitrum")
+        list_lp.assert_awaited_once_with({"chain": "arbitrum", "wallet_address": wallet, "network": "anvil"})
+        list_lending.assert_awaited_once_with({"chain": "arbitrum", "wallet_address": wallet, "network": "anvil"})
+
+    @pytest.mark.asyncio
+    async def test_portfolio_requires_wallet_before_reading_sections(self, mock_gateway):
+        policy = AgentPolicy(
+            allowed_chains={"arbitrum"},
+            max_tool_calls_per_minute=100,
+            cooldown_seconds=0,
+        )
+        executor = ToolExecutor(mock_gateway, policy=policy, wallet_address="", deployment_id="test")
+
+        response = await executor.execute("get_portfolio", {"chain": "arbitrum"})
+
+        assert response.status == ToolResponseStatus.ERROR
+        assert response.error.error_code == AgentErrorCode.VALIDATION_ERROR
+        assert "wallet_address is required" in response.error.message
+        mock_gateway.rpc.Call.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("rpc_success", "rpc_result", "rpc_error", "native_symbol", "expected_code"),
+        [
+            (False, "", "rpc unavailable", "ETH", "rpc_failed"),
+            (True, "7", "", "ETH", "bad_response"),
+            (True, '"not-hex"', "", "ETH", "exception"),
+            (True, '"0x0"', "", None, "unknown_chain"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_portfolio_native_failures_remain_unmeasured(
+        self,
+        executor,
+        mock_gateway,
+        rpc_success,
+        rpc_result,
+        rpc_error,
+        native_symbol,
+        expected_code,
+    ):
+        rpc_response = MagicMock(success=rpc_success, result=rpc_result, error=rpc_error)
+        mock_gateway.rpc.Call.return_value = rpc_response
+
+        with (
+            patch("almanak.framework.agent_tools.executor._native_symbol_for_chain", return_value=native_symbol),
+            patch("almanak.framework.teardown.discovery._npms_for_chain", return_value=[]),
+            patch(
+                "almanak.connectors._strategy_agent_tool_registry.STRATEGY_AGENT_READ_REGISTRY.lookup",
+                return_value=None,
+            ),
+        ):
+            response = await executor.execute("get_portfolio", {"chain": "arbitrum"})
+
+        assert response.status == ToolResponseStatus.PARTIAL
+        assert response.data["native_balance"] == ""
+        assert response.data["native_symbol"] == ""
+        assert len(response.data["warnings"]) == 1
+        assert response.data["warnings"][0]["section"] == "native_balance"
+        assert response.data["warnings"][0]["code"] == expected_code
+        assert response.data["warnings"][0]["message"]
+
+    @pytest.mark.asyncio
+    async def test_portfolio_token_failures_are_independent_and_empty_is_not_zero(self, executor, mock_gateway):
+        from almanak.framework.data.tokens import TokenNotFoundError
+
+        mock_gateway.rpc.Call.return_value = self._rpc_result(self._pack_uint256(0))
+        resolved = {
+            symbol: MagicMock(address=f"0x{index:040x}", decimals=6)
+            for index, symbol in enumerate(("RPC", "EMPTY", "ZERO", "GOOD"), start=1)
+        }
+        resolver = MagicMock()
+
+        def resolve(symbol, chain):
+            assert chain == "arbitrum"
+            if symbol == "UNKNOWN":
+                raise TokenNotFoundError(symbol, chain)
+            if symbol == "BROKEN":
+                raise RuntimeError("resolver unavailable")
+            return resolved[symbol]
+
+        def rpc_call(chain, address, calldata, request_id, network):
+            assert chain == "arbitrum"
+            assert address == resolved[request_id.removeprefix("portfolio_erc20_")].address
+            assert calldata.endswith(executor._wallet_address.removeprefix("0x").zfill(64))
+            assert network == "anvil"
+            if request_id.endswith("RPC"):
+                return False, "token rpc failed"
+            if request_id.endswith("EMPTY"):
+                return True, ""
+            if request_id.endswith("ZERO"):
+                return True, "0x0"
+            return True, "0xf4240"
+
+        resolver.resolve.side_effect = resolve
+        with (
+            patch("almanak.framework.data.tokens.get_token_resolver", return_value=resolver),
+            patch.object(executor, "_rpc_call", side_effect=rpc_call),
+            patch("almanak.framework.teardown.discovery._npms_for_chain", return_value=[]),
+            patch(
+                "almanak.connectors._strategy_agent_tool_registry.STRATEGY_AGENT_READ_REGISTRY.lookup",
+                return_value=None,
+            ),
+        ):
+            response = await executor.execute(
+                "get_portfolio",
+                {
+                    "chain": "arbitrum",
+                    "tokens": ["UNKNOWN", "BROKEN", "RPC", "EMPTY", "ZERO", "GOOD"],
+                    "network": "anvil",
+                },
+            )
+
+        assert response.status == ToolResponseStatus.PARTIAL
+        assert [balance["token"] for balance in response.data["token_balances"]] == ["ZERO", "GOOD"]
+        assert response.data["token_balances"][0]["balance"] == "0"
+        assert response.data["token_balances"][1]["balance"] == "1"
+        assert [warning["code"] for warning in response.data["warnings"]] == [
+            "unknown_token",
+            "resolver_error",
+            "rpc_failed",
+            "decode_error",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_portfolio_unsupported_lp_and_lending_are_silent(self, executor, mock_gateway):
+        mock_gateway.rpc.Call.return_value = self._rpc_result(self._pack_uint256(0))
+
+        with (
+            patch("almanak.framework.teardown.discovery._npms_for_chain", return_value=[]),
+            patch(
+                "almanak.connectors._strategy_agent_tool_registry.STRATEGY_AGENT_READ_REGISTRY.lookup",
+                return_value=None,
+            ),
+            patch.object(executor, "_execute_list_lp_positions", AsyncMock()) as list_lp,
+            patch.object(executor, "_execute_list_lending_positions", AsyncMock()) as list_lending,
+        ):
+            response = await executor.execute("get_portfolio", {"chain": "arbitrum"})
+
+        assert response.status == ToolResponseStatus.SUCCESS
+        assert response.data["lp_positions"] == []
+        assert response.data["lending"] is None
+        assert response.data["warnings"] == []
+        list_lp.assert_not_awaited()
+        list_lending.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_portfolio_surfaces_lp_and_lending_subtool_failures(self, executor, mock_gateway):
+        mock_gateway.rpc.Call.return_value = self._rpc_result(self._pack_uint256(0))
+        lp_response = ToolResponse(
+            status=ToolResponseStatus.ERROR,
+            error=_error_payload(AgentErrorCode.RPC_FAILED, "LP discovery failed", recoverable=True),
+        )
+        lending_response = ToolResponse(status=ToolResponseStatus.SUCCESS)
+        lending_capability = MagicMock()
+        lending_capability.lending_pool_address.return_value = "0xpool"
+
+        with (
+            patch("almanak.framework.teardown.discovery._npms_for_chain", return_value=["0xnpm"]),
+            patch(
+                "almanak.connectors._strategy_agent_tool_registry.STRATEGY_AGENT_READ_REGISTRY.lookup",
+                return_value=lending_capability,
+            ),
+            patch.object(executor, "_execute_list_lp_positions", AsyncMock(return_value=lp_response)),
+            patch.object(
+                executor,
+                "_execute_list_lending_positions",
+                AsyncMock(return_value=lending_response),
+            ),
+        ):
+            response = await executor.execute("get_portfolio", {"chain": "arbitrum"})
+
+        assert response.status == ToolResponseStatus.PARTIAL
+        assert response.data["warnings"] == [
+            {"section": "lp_positions", "code": "rpc_failed", "message": "LP discovery failed"},
+            {
+                "section": "lending",
+                "code": "unknown",
+                "message": "list_lending_positions returned no data",
+            },
+        ]
+
+    @pytest.mark.parametrize(
+        ("lending_data", "expected_status", "expected_code"),
+        [
+            ({"total_collateral_usd": "0", "total_debt_usd": "0"}, ToolResponseStatus.SUCCESS, None),
+            ({"health_factor": ""}, ToolResponseStatus.PARTIAL, "decode_error"),
+            (
+                {"total_collateral_usd": "not-a-decimal", "total_debt_usd": "0"},
+                ToolResponseStatus.PARTIAL,
+                "decode_error",
+            ),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_portfolio_distinguishes_zero_from_unmeasured_lending(
+        self,
+        executor,
+        mock_gateway,
+        lending_data,
+        expected_status,
+        expected_code,
+    ):
+        mock_gateway.rpc.Call.return_value = self._rpc_result(self._pack_uint256(0))
+        lending_capability = MagicMock()
+        lending_capability.lending_pool_address.return_value = "0xpool"
+        lending_response = ToolResponse(status=ToolResponseStatus.SUCCESS, data=lending_data)
+
+        with (
+            patch("almanak.framework.teardown.discovery._npms_for_chain", return_value=[]),
+            patch(
+                "almanak.connectors._strategy_agent_tool_registry.STRATEGY_AGENT_READ_REGISTRY.lookup",
+                return_value=lending_capability,
+            ),
+            patch.object(
+                executor,
+                "_execute_list_lending_positions",
+                AsyncMock(return_value=lending_response),
+            ),
+        ):
+            response = await executor.execute("get_portfolio", {"chain": "arbitrum"})
+
+        assert response.status == expected_status
+        assert response.data["lending"] is None
+        if expected_code is None:
+            assert response.data["warnings"] == []
+        else:
+            assert response.data["warnings"][0]["section"] == "lending"
+            assert response.data["warnings"][0]["code"] == expected_code
 
     @pytest.mark.asyncio
     async def test_rpc_call_extracts_revert_message_from_dict(self, executor, mock_gateway):

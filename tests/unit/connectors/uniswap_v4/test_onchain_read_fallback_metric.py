@@ -202,17 +202,7 @@ def test_decode_failed_increments(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_pool_uninitialized_increments(monkeypatch: pytest.MonkeyPatch) -> None:
     sdk = UniswapV4SDK(chain=CHAIN, rpc_url="http://anvil.local")
-    monkeypatch.setattr("almanak.connectors.uniswap_v4.sdk.eth_call_hex", lambda **_kwargs: "0x00")
-
-    class _UninitState:
-        exists = False
-        sqrt_price_x96 = 0
-        tick = 0
-
-    monkeypatch.setattr(
-        "almanak.connectors.uniswap_v4.hooks.decode_slot0_response",
-        lambda _hex: _UninitState(),
-    )
+    monkeypatch.setattr("almanak.connectors.uniswap_v4.sdk.eth_call_hex", lambda **_kwargs: "0x" + "0" * 256)
 
     before = _counter_value(
         protocol=PROTOCOL, chain=CHAIN, call=CALL, reason=OnchainReadFallbackReason.POOL_UNINITIALIZED.value
@@ -229,18 +219,11 @@ def test_pool_uninitialized_increments(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_success_path_does_not_increment(monkeypatch: pytest.MonkeyPatch) -> None:
     """A healthy on-chain read must NOT touch any fallback counter."""
     sdk = UniswapV4SDK(chain=CHAIN, rpc_url="http://anvil.local")
-    monkeypatch.setattr("almanak.connectors.uniswap_v4.sdk.eth_call_hex", lambda **_kwargs: "0x01")
-
     good_sqrt = _tick_to_sqrt_ratio_x96(0)
-
-    class _GoodState:
-        exists = True
-        sqrt_price_x96 = good_sqrt
-        tick = 0
-
+    response = "0x" + format(good_sqrt, "064x") + "0" * (3 * 64)
     monkeypatch.setattr(
-        "almanak.connectors.uniswap_v4.hooks.decode_slot0_response",
-        lambda _hex: _GoodState(),
+        "almanak.connectors.uniswap_v4.sdk.eth_call_hex",
+        lambda **_kwargs: response,
     )
 
     baselines = {

@@ -43,6 +43,7 @@ from almanak.connectors.uniswap_v4.sdk import (
     PERMIT2_ADDRESS,
     LPDecreaseParams,
     LPMintParams,
+    PoolKey,
     SwapQuote,
     SwapTransaction,
     UniswapV4SDK,
@@ -109,6 +110,45 @@ ON_CHAIN_MIN_SLIPPAGE = Decimal("0.05")
 # Estimated sqrtPrice can diverge from pool state, so a wider buffer avoids
 # PoolManager MaximumAmountExceeded reverts; tight-slippage users opt in explicitly.
 ESTIMATED_PRICE_MIN_SLIPPAGE = Decimal("0.10")
+
+
+@dataclass(frozen=True)
+class _LPOpenPool:
+    token0_symbol: str
+    token1_symbol: str
+    token0_addr: str
+    token1_addr: str
+    token0_dec: int
+    token1_dec: int
+    amount0_wei: int
+    amount1_wei: int
+    range_lower: Decimal
+    range_upper: Decimal
+    tick_lower: int
+    tick_upper: int
+    fee: int
+    hooks: str
+    hook_data: bytes
+    pool_key: PoolKey
+    pool_id: str
+    warnings: list[str]
+
+
+@dataclass(frozen=True)
+class _LPOpenPrice:
+    sqrt_price_x96: int
+    used_onchain_price: bool
+    source: str
+
+
+@dataclass(frozen=True)
+class _LPOpenLiquidity:
+    amount0_budget: int
+    amount1_budget: int
+    amount0_max: int
+    amount1_max: int
+    liquidity: int
+    slippage_bps: int
 
 
 @dataclass
@@ -664,15 +704,280 @@ class UniswapV4Adapter:
             metadata=metadata,
         )
 
-    # crap-allowlist: VIB-4426 — compile_lp_open_intent is the canonical V4 LP-open
-    # compilation pipeline (resolve tokens, normalize pool key, validate slippage,
-    # encode multicall, build calldata, simulate). T06 added 2 V0 scope guards
-    # (hooks != 0, native-ETH currency0) inline at the natural validation point;
-    # extracting them into a helper would not change cc materially because the
-    # function's cc is dominated by the sequential pipeline. Coverage at 84% with
-    # 9 inline test files; a connector-pipeline refactor is the right epic for
-    # this and lives outside VIB-4426 PR-1 scope.
-    def compile_lp_open_intent(  # noqa: C901
+    def _prepare_lp_open_pool(self, intent: LPOpenIntent) -> _LPOpenPool:
+        """Resolve and normalize the intent into the canonical V4 pool order."""
+        token0_symbol, token1_symbol, fee = self._parse_pool(intent.pool)
+        token0_addr, token0_dec = self._resolve_token(token0_symbol, for_v4_pool=True)
+        token1_addr, token1_dec = self._resolve_token(token1_symbol, for_v4_pool=True)
+
+        pair_swapped = int(token0_addr, 16) > int(token1_addr, 16)
+        if pair_swapped:
+            token0_addr, token1_addr = token1_addr, token0_addr
+            token0_dec, token1_dec = token1_dec, token0_dec
+            token0_symbol, token1_symbol = token1_symbol, token0_symbol
+            amount0, amount1 = intent.amount1, intent.amount0
+        else:
+            amount0, amount1 = intent.amount0, intent.amount1
+
+        amount0_wei = int(Decimal(str(amount0)) * Decimal(10**token0_dec))
+        amount1_wei = int(Decimal(str(amount1)) * Decimal(10**token1_dec))
+        if pair_swapped:
+            range_lower = Decimal(1) / Decimal(str(intent.range_upper))
+            range_upper = Decimal(1) / Decimal(str(intent.range_lower))
+        else:
+            range_lower = Decimal(str(intent.range_lower))
+            range_upper = Decimal(str(intent.range_upper))
+        tick_lower = self._sdk.price_to_tick(range_lower, token0_dec, token1_dec)
+        tick_upper = self._sdk.price_to_tick(range_upper, token0_dec, token1_dec)
+
+        tick_spacing = intent.protocol_params.get("tick_spacing") if intent.protocol_params else None
+        if tick_spacing is None:
+            from almanak.connectors.uniswap_v4.sdk import TICK_SPACING
+
+            tick_spacing = TICK_SPACING.get(fee, 60)
+        tick_lower = (tick_lower // tick_spacing) * tick_spacing
+        tick_upper = (tick_upper // tick_spacing) * tick_spacing
+        if tick_lower == tick_upper:
+            tick_upper += tick_spacing
+
+        hooks = NATIVE_CURRENCY
+        hook_data = b""
+        if intent.protocol_params:
+            hooks = intent.protocol_params.get("hooks", NATIVE_CURRENCY)
+            hook_data_hex = intent.protocol_params.get("hook_data", "")
+            if hook_data_hex:
+                hook_data = bytes.fromhex(hook_data_hex.replace("0x", ""))
+
+        warnings: list[str] = []
+        if hooks != NATIVE_CURRENCY:
+            hook_flags = HookFlags.from_address(hooks)
+            if hook_flags.has_any_liquidity_hooks and not hook_data:
+                warnings.append(
+                    f"Pool uses hooks ({hooks[:10]}...) with liquidity callbacks "
+                    f"({', '.join(hook_flags.active_flags)}), but hookData is empty. "
+                    "This may cause the transaction to revert if the hook requires data."
+                )
+
+        pool_key = self._sdk.compute_pool_key(token0_addr, token1_addr, fee, tick_spacing, hooks)
+        self._reject_unsupported_v0_pool(pool_key)
+        return _LPOpenPool(
+            token0_symbol=token0_symbol,
+            token1_symbol=token1_symbol,
+            token0_addr=token0_addr,
+            token1_addr=token1_addr,
+            token0_dec=token0_dec,
+            token1_dec=token1_dec,
+            amount0_wei=amount0_wei,
+            amount1_wei=amount1_wei,
+            range_lower=range_lower,
+            range_upper=range_upper,
+            tick_lower=tick_lower,
+            tick_upper=tick_upper,
+            fee=fee,
+            hooks=hooks,
+            hook_data=hook_data,
+            pool_key=pool_key,
+            pool_id=compute_pool_id(pool_key),
+            warnings=warnings,
+        )
+
+    def _resolve_lp_open_price(
+        self,
+        intent: LPOpenIntent,
+        pool: _LPOpenPool,
+        price_oracle: dict[str, Decimal],
+    ) -> _LPOpenPrice:
+        """Choose the on-chain or estimated price used to size liquidity."""
+        sqrt_price_x96 = None
+        used_onchain_price = False
+        price_source = "on_chain"
+
+        if self.rpc_url:
+            sqrt_price_x96 = self._sdk.get_pool_sqrt_price(pool.pool_key, rpc_url=self.rpc_url)
+            if sqrt_price_x96:
+                used_onchain_price = True
+                logger.info("V4 LP_OPEN: using on-chain sqrtPriceX96=%d for liquidity computation", sqrt_price_x96)
+
+        if sqrt_price_x96 is None:
+            from almanak.framework.intents.compiler_queries import lenient_oracle_price
+
+            mid_price = None
+            price0 = lenient_oracle_price(
+                price_oracle,
+                pool.token0_symbol,
+                getattr(intent, "chain", None) or self.chain,
+            )
+            price1 = lenient_oracle_price(
+                price_oracle,
+                pool.token1_symbol,
+                getattr(intent, "chain", None) or self.chain,
+            )
+            if price0 and price1 and price1 > 0:
+                mid_price = Decimal(str(price0)) / Decimal(str(price1))
+                price_source = "oracle_estimate"
+            elif pool.range_lower is not None and pool.range_upper is not None:
+                mid_price = (pool.range_lower + pool.range_upper) / 2
+                price_source = "range_midpoint_estimate"
+
+            if mid_price and mid_price > 0:
+                sqrt_price_x96 = self._sdk.estimate_sqrt_price_x96(mid_price, pool.token0_dec, pool.token1_dec)
+                logger.info("V4 LP_OPEN: using estimated sqrtPriceX96=%d from oracle prices", sqrt_price_x96)
+            else:
+                from almanak.connectors.uniswap_v4.sdk import _tick_to_sqrt_ratio_x96
+
+                sqrt_price_x96 = (
+                    _tick_to_sqrt_ratio_x96(pool.tick_lower) + _tick_to_sqrt_ratio_x96(pool.tick_upper)
+                ) // 2
+                price_source = "range_midpoint_estimate"
+                logger.info("V4 LP_OPEN: using tick-range midpoint sqrtPriceX96=%d", sqrt_price_x96)
+
+        return _LPOpenPrice(
+            sqrt_price_x96=sqrt_price_x96,
+            used_onchain_price=used_onchain_price,
+            source=price_source,
+        )
+
+    def _compute_lp_open_liquidity(
+        self,
+        intent: LPOpenIntent,
+        pool: _LPOpenPool,
+        price: _LPOpenPrice,
+    ) -> _LPOpenLiquidity:
+        """Apply the slippage policy while keeping requested amounts as hard caps."""
+        user_slippage = getattr(intent, "max_slippage", None)
+        if user_slippage is None:
+            user_slippage = Decimal("0.005")
+
+        if price.used_onchain_price:
+            effective_slippage = max(user_slippage, ON_CHAIN_MIN_SLIPPAGE)
+        else:
+            allow_estimated = (intent.protocol_params or {}).get("allow_estimated_price") is True
+            if not allow_estimated and user_slippage * 2 < ESTIMATED_PRICE_MIN_SLIPPAGE:
+                raise UniswapV4EstimatedPriceWithoutOptInError(
+                    f"V4 LP_OPEN: on-chain sqrtPrice unavailable (pool may be uninitialised "
+                    f"or StateView reverted), so the price is estimated ({price.source}). "
+                    f"Estimated-price fallback requires max_slippage >= "
+                    f"{ESTIMATED_PRICE_MIN_SLIPPAGE * 100:.0f}% to avoid PoolManager reverts; "
+                    f"your max_slippage={user_slippage * 100:.2f}% is too tight. To proceed, set "
+                    f"intent.protocol_params['allow_estimated_price'] = True. (VIB-2180)"
+                )
+            effective_slippage = max(user_slippage, ESTIMATED_PRICE_MIN_SLIPPAGE)
+
+        if effective_slippage > user_slippage:
+            logger.warning(
+                "V4 LP_OPEN: widening user slippage %s%% to %s%% (price_source=%s)",
+                user_slippage * 100,
+                effective_slippage * 100,
+                price.source,
+            )
+        slippage_bps = slippage_to_bps(effective_slippage)
+        slippage_mult = Decimal(10000 + slippage_bps) / Decimal(10000)
+        amount0_budget = int(Decimal(pool.amount0_wei) / slippage_mult)
+        amount1_budget = int(Decimal(pool.amount1_wei) / slippage_mult)
+        liquidity = self._sdk.compute_liquidity_from_amounts(
+            price.sqrt_price_x96,
+            pool.tick_lower,
+            pool.tick_upper,
+            amount0_budget,
+            amount1_budget,
+        )
+        return _LPOpenLiquidity(
+            amount0_budget=amount0_budget,
+            amount1_budget=amount1_budget,
+            amount0_max=pool.amount0_wei,
+            amount1_max=pool.amount1_wei,
+            liquidity=liquidity,
+            slippage_bps=slippage_bps,
+        )
+
+    def _build_lp_open_transactions(
+        self,
+        pool: _LPOpenPool,
+        liquidity: _LPOpenLiquidity,
+    ) -> list[SwapTransaction]:
+        """Build Permit2 approvals followed by the PositionManager mint."""
+        mint_params = LPMintParams(
+            pool_key=pool.pool_key,
+            tick_lower=pool.tick_lower,
+            tick_upper=pool.tick_upper,
+            liquidity=liquidity.liquidity,
+            amount0_max=liquidity.amount0_max,
+            amount1_max=liquidity.amount1_max,
+            owner=self.wallet_address,
+            hook_data=pool.hook_data,
+        )
+        transactions: list[SwapTransaction] = []
+        position_manager = self.addresses["position_manager"]
+        for token_addr, amount_max in [
+            (pool.token0_addr, liquidity.amount0_max),
+            (pool.token1_addr, liquidity.amount1_max),
+        ]:
+            if token_addr.lower() == NATIVE_CURRENCY:
+                continue
+            transactions.append(self._sdk.build_approve_tx(token_addr, PERMIT2_ADDRESS, amount_max))
+            transactions.append(self._sdk.build_permit2_approve_tx(token_addr, position_manager, amount_max))
+
+        transactions.append(
+            self._sdk.build_mint_position_tx(
+                mint_params,
+                deadline=deadline_from_now(self.default_deadline_seconds),
+            )
+        )
+        return transactions
+
+    def _build_lp_open_bundle(
+        self,
+        intent: LPOpenIntent,
+        pool: _LPOpenPool,
+        price: _LPOpenPrice,
+        liquidity: _LPOpenLiquidity,
+        transactions: list[SwapTransaction],
+    ) -> ActionBundle:
+        """Serialize LP-open transactions and compile-time position metadata."""
+        from almanak.connectors.uniswap_v4.sdk import sqrt_ratio_x96_to_tick
+        from almanak.framework.intents.vocabulary import IntentType
+        from almanak.framework.models.reproduction_bundle import ActionBundle
+
+        token0_dict = {"symbol": pool.token0_symbol, "address": pool.token0_addr, "decimals": pool.token0_dec}
+        token1_dict = {"symbol": pool.token1_symbol, "address": pool.token1_addr, "decimals": pool.token1_dec}
+        compile_time_current_tick = sqrt_ratio_x96_to_tick(price.sqrt_price_x96)
+        metadata: dict[str, Any] = {
+            "intent_id": intent.intent_id,
+            "token0": token0_dict,
+            "token1": token1_dict,
+            "amount0_desired": str(pool.amount0_wei),
+            "amount1_desired": str(pool.amount1_wei),
+            "amount0_liquidity_budget": str(liquidity.amount0_budget),
+            "amount1_liquidity_budget": str(liquidity.amount1_budget),
+            "tick_lower": pool.tick_lower,
+            "tick_upper": pool.tick_upper,
+            "liquidity": str(liquidity.liquidity),
+            "fee": pool.fee,
+            "chain": self.chain,
+            "position_manager": self.addresses["position_manager"],
+            "pool_manager": self.addresses["pool_manager"],
+            "hooks": pool.hooks,
+            "gas_estimate": sum(tx.gas_estimate for tx in transactions),
+            "protocol_version": "v4",
+            "effective_slippage_bps": liquidity.slippage_bps,
+            "price_source": price.source,
+            "estimated_sqrt_price_x96": (str(price.sqrt_price_x96) if price.source != "on_chain" else None),
+            "compile_time_current_tick": compile_time_current_tick,
+            "compile_time_current_tick_source": "onchain" if price.used_onchain_price else "estimated",
+            "pool_id": pool.pool_id,
+            "protocol": (getattr(intent, "protocol", None) or "uniswap_v4"),
+            "registry_handle": getattr(intent, "registry_handle", None),
+        }
+        if pool.warnings:
+            metadata["warnings"] = pool.warnings
+
+        return ActionBundle(
+            intent_type=IntentType.LP_OPEN.value,
+            transactions=[tx_to_dict(tx) for tx in transactions],
+            metadata=metadata,
+        )
+
+    def compile_lp_open_intent(
         self,
         intent: LPOpenIntent,
         price_oracle: dict[str, Decimal] | None = None,
@@ -703,238 +1008,18 @@ class UniswapV4Adapter:
         if price_oracle is None:
             price_oracle = {}
 
-        warnings: list[str] = []
-
         try:
-            token0_symbol, token1_symbol, fee = self._parse_pool(intent.pool)
-
-            # Native symbols resolve to address(0) for V4 pools.
-            token0_addr, token0_dec = self._resolve_token(token0_symbol, for_v4_pool=True)
-            token1_addr, token1_dec = self._resolve_token(token1_symbol, for_v4_pool=True)
-
-            # Ensure sorted order (V4 requirement: currency0 < currency1)
-            pair_swapped = int(token0_addr, 16) > int(token1_addr, 16)
-            if pair_swapped:
-                token0_addr, token1_addr = token1_addr, token0_addr
-                token0_dec, token1_dec = token1_dec, token0_dec
-                token0_symbol, token1_symbol = token1_symbol, token0_symbol
-                # Swap amounts to match sorted order
-                amount0 = intent.amount1
-                amount1 = intent.amount0
-            else:
-                amount0 = intent.amount0
-                amount1 = intent.amount1
-
-            # Human-readable amounts to smallest units.
-            amount0_wei = int(Decimal(str(amount0)) * Decimal(10**token0_dec))
-            amount1_wei = int(Decimal(str(amount1)) * Decimal(10**token1_dec))
-
-            # Inverted range when the pair was reordered; V4 expects token0/token1 pricing.
-            if pair_swapped:
-                range_lower = Decimal(1) / Decimal(str(intent.range_upper))
-                range_upper = Decimal(1) / Decimal(str(intent.range_lower))
-            else:
-                range_lower = Decimal(str(intent.range_lower))
-                range_upper = Decimal(str(intent.range_upper))
-            tick_lower = self._sdk.price_to_tick(range_lower, token0_dec, token1_dec)
-            tick_upper = self._sdk.price_to_tick(range_upper, token0_dec, token1_dec)
-
-            # Ticks must align to pool tick spacing.
-            tick_spacing = intent.protocol_params.get("tick_spacing") if intent.protocol_params else None
-            if tick_spacing is None:
-                from almanak.connectors.uniswap_v4.sdk import TICK_SPACING
-
-                tick_spacing = TICK_SPACING.get(fee, 60)
-            tick_lower = (tick_lower // tick_spacing) * tick_spacing
-            tick_upper = (tick_upper // tick_spacing) * tick_spacing
-            if tick_lower == tick_upper:
-                tick_upper += tick_spacing
-
-            # Prefer on-chain sqrtPrice; fall back to an estimate.
-            sqrt_price_x96 = None
-            used_onchain_price = False
-            # price_source is on_chain, oracle_estimate, or range_midpoint_estimate.
-            price_source = "on_chain"
-
-            # Hook address is part of the pool key.
-            hooks = NATIVE_CURRENCY  # default: no hooks
-            hook_data = b""
-            if intent.protocol_params:
-                hooks = intent.protocol_params.get("hooks", NATIVE_CURRENCY)
-                hook_data_hex = intent.protocol_params.get("hook_data", "")
-                if hook_data_hex:
-                    hook_data = bytes.fromhex(hook_data_hex.replace("0x", ""))
-
-            if hooks != NATIVE_CURRENCY:
-                hook_flags = HookFlags.from_address(hooks)
-                if hook_flags.has_any_liquidity_hooks and not hook_data:
-                    warnings.append(
-                        f"Pool uses hooks ({hooks[:10]}...) with liquidity callbacks "
-                        f"({', '.join(hook_flags.active_flags)}), but hookData is empty. "
-                        "This may cause the transaction to revert if the hook requires data."
-                    )
-
-            pool_key = self._sdk.compute_pool_key(token0_addr, token1_addr, fee, tick_spacing, hooks)
-
-            # Only hookless pools are supported; non-zero salt is the normal mint path.
-            self._reject_unsupported_v0_pool(pool_key)
-
-            # pool_id is a pure offline hash of pool_key, available at compile time.
-            pool_id = compute_pool_id(pool_key)
-
-            if self.rpc_url:
-                sqrt_price_x96 = self._sdk.get_pool_sqrt_price(pool_key, rpc_url=self.rpc_url)
-                if sqrt_price_x96:
-                    used_onchain_price = True
-                    logger.info("V4 LP_OPEN: using on-chain sqrtPriceX96=%d for liquidity computation", sqrt_price_x96)
-
-            if sqrt_price_x96 is None:
-                from almanak.framework.intents.compiler_queries import lenient_oracle_price
-
-                mid_price = None
-                price0 = lenient_oracle_price(price_oracle, token0_symbol, getattr(intent, "chain", None) or self.chain)
-                price1 = lenient_oracle_price(price_oracle, token1_symbol, getattr(intent, "chain", None) or self.chain)
-                if price0 and price1 and price1 > 0:
-                    mid_price = Decimal(str(price0)) / Decimal(str(price1))
-                    price_source = "oracle_estimate"
-                elif range_lower is not None and range_upper is not None:
-                    mid_price = (range_lower + range_upper) / 2
-                    price_source = "range_midpoint_estimate"
-
-                if mid_price and mid_price > 0:
-                    sqrt_price_x96 = self._sdk.estimate_sqrt_price_x96(mid_price, token0_dec, token1_dec)
-                    logger.info("V4 LP_OPEN: using estimated sqrtPriceX96=%d from oracle prices", sqrt_price_x96)
-                else:
-                    # Fall back to the tick-range midpoint.
-                    from almanak.connectors.uniswap_v4.sdk import _tick_to_sqrt_ratio_x96
-
-                    sqrt_price_x96 = (_tick_to_sqrt_ratio_x96(tick_lower) + _tick_to_sqrt_ratio_x96(tick_upper)) // 2
-                    price_source = "range_midpoint_estimate"
-                    logger.info("V4 LP_OPEN: using tick-range midpoint sqrtPriceX96=%d", sqrt_price_x96)
-
-            # Never raise amount_max above the requested spend; shrink liquidity instead.
-            # On-chain prices use the narrow floor; estimates need a wider buffer
-            # without widening tolerance more than 2x without opt-in.
-            user_slippage = getattr(intent, "max_slippage", None)
-            if user_slippage is None:
-                user_slippage = Decimal("0.005")
-
-            if used_onchain_price:
-                # On-chain sqrtPrice is accurate; keep the narrow floor.
-                effective_slippage = max(user_slippage, ON_CHAIN_MIN_SLIPPAGE)
-            else:
-                # Estimated sqrtPrice needs a wider buffer to avoid PoolManager
-                # MaximumAmountExceeded reverts. Refuse to silently widen the user's
-                # tolerance by more than 2x unless they explicitly opt in.
-                allow_estimated = (intent.protocol_params or {}).get("allow_estimated_price") is True
-                if not allow_estimated and user_slippage * 2 < ESTIMATED_PRICE_MIN_SLIPPAGE:
-                    raise UniswapV4EstimatedPriceWithoutOptInError(
-                        f"V4 LP_OPEN: on-chain sqrtPrice unavailable (pool may be uninitialised "
-                        f"or StateView reverted), so the price is estimated ({price_source}). "
-                        f"Estimated-price fallback requires max_slippage >= "
-                        f"{ESTIMATED_PRICE_MIN_SLIPPAGE * 100:.0f}% to avoid PoolManager reverts; "
-                        f"your max_slippage={user_slippage * 100:.2f}% is too tight. To proceed, set "
-                        f"intent.protocol_params['allow_estimated_price'] = True. (VIB-2180)"
-                    )
-                effective_slippage = max(user_slippage, ESTIMATED_PRICE_MIN_SLIPPAGE)
-
-            if effective_slippage > user_slippage:
-                logger.warning(
-                    "V4 LP_OPEN: widening user slippage %s%% to %s%% (price_source=%s)",
-                    user_slippage * 100,
-                    effective_slippage * 100,
-                    price_source,
-                )
-            slippage_bps = slippage_to_bps(effective_slippage)
-            slippage_mult = Decimal(10000 + slippage_bps) / Decimal(10000)
-            liquidity_amount0 = int(Decimal(amount0_wei) / slippage_mult)
-            liquidity_amount1 = int(Decimal(amount1_wei) / slippage_mult)
-            amount0_max = amount0_wei
-            amount1_max = amount1_wei
-
-            liquidity = self._sdk.compute_liquidity_from_amounts(
-                sqrt_price_x96, tick_lower, tick_upper, liquidity_amount0, liquidity_amount1
-            )
-
-            if liquidity <= 0:
+            pool = self._prepare_lp_open_pool(intent)
+            price = self._resolve_lp_open_price(intent, pool, price_oracle)
+            liquidity = self._compute_lp_open_liquidity(intent, pool, price)
+            if liquidity.liquidity <= 0:
                 return ActionBundle(
                     intent_type=IntentType.LP_OPEN.value,
                     transactions=[],
                     metadata={"error": "Computed liquidity is zero — check amounts and price range"},
                 )
-
-            mint_params = LPMintParams(
-                pool_key=pool_key,
-                tick_lower=tick_lower,
-                tick_upper=tick_upper,
-                liquidity=liquidity,
-                amount0_max=amount0_max,
-                amount1_max=amount1_max,
-                owner=self.wallet_address,
-                hook_data=hook_data,
-            )
-
-            transactions: list[SwapTransaction] = []
-            position_manager = self.addresses["position_manager"]
-
-            # Approve both tokens via Permit2, skipping native currency.
-            for token_addr, amount_max in [(token0_addr, amount0_max), (token1_addr, amount1_max)]:
-                if token_addr.lower() == NATIVE_CURRENCY:
-                    continue
-                transactions.append(self._sdk.build_approve_tx(token_addr, PERMIT2_ADDRESS, amount_max))
-                transactions.append(self._sdk.build_permit2_approve_tx(token_addr, position_manager, amount_max))
-
-            mint_tx = self._sdk.build_mint_position_tx(
-                mint_params,
-                deadline=deadline_from_now(self.default_deadline_seconds),
-            )
-            transactions.append(mint_tx)
-
-            token0_dict = {"symbol": token0_symbol, "address": token0_addr, "decimals": token0_dec}
-            token1_dict = {"symbol": token1_symbol, "address": token1_addr, "decimals": token1_dec}
-
-            # The mint itself never moves price, so this tick holds unless another tx
-            # interleaves; estimated prices inherit estimate accuracy.
-            from almanak.connectors.uniswap_v4.sdk import sqrt_ratio_x96_to_tick
-
-            compile_time_current_tick = sqrt_ratio_x96_to_tick(sqrt_price_x96)
-
-            metadata: dict[str, Any] = {
-                "intent_id": intent.intent_id,
-                "token0": token0_dict,
-                "token1": token1_dict,
-                "amount0_desired": str(amount0_wei),
-                "amount1_desired": str(amount1_wei),
-                "amount0_liquidity_budget": str(liquidity_amount0),
-                "amount1_liquidity_budget": str(liquidity_amount1),
-                "tick_lower": tick_lower,
-                "tick_upper": tick_upper,
-                "liquidity": str(liquidity),
-                "fee": fee,
-                "chain": self.chain,
-                "position_manager": position_manager,
-                "pool_manager": self.addresses["pool_manager"],
-                "hooks": hooks,
-                "gas_estimate": sum(tx.gas_estimate for tx in transactions),
-                "protocol_version": "v4",
-                "effective_slippage_bps": slippage_bps,
-                "price_source": price_source,
-                "estimated_sqrt_price_x96": (str(sqrt_price_x96) if price_source != "on_chain" else None),
-                "compile_time_current_tick": compile_time_current_tick,
-                "compile_time_current_tick_source": "onchain" if used_onchain_price else "estimated",
-                # Expose pool identity and protocol for the registry-collision preflight.
-                "pool_id": pool_id,
-                "protocol": (getattr(intent, "protocol", None) or "uniswap_v4"),
-                "registry_handle": getattr(intent, "registry_handle", None),
-            }
-            if warnings:
-                metadata["warnings"] = warnings
-
-            return ActionBundle(
-                intent_type=IntentType.LP_OPEN.value,
-                transactions=[tx_to_dict(tx) for tx in transactions],
-                metadata=metadata,
-            )
+            transactions = self._build_lp_open_transactions(pool, liquidity)
+            return self._build_lp_open_bundle(intent, pool, price, liquidity, transactions)
 
         except SlippagePrecisionError:
             raise

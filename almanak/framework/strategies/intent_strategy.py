@@ -741,7 +741,6 @@ class IntentStrategy(StrategyBase[ConfigT]):
         # a closed position cannot be resurrected from stale durable state.
         return {_LP_TRACKER_STATE_KEY: tracker.to_persistent_dict()}
 
-    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     def save_state(self) -> None:
         """Save current strategy state to persistence.
 
@@ -829,7 +828,6 @@ class IntentStrategy(StrategyBase[ConfigT]):
             if isinstance(tracker_data, dict):
                 tracker.load_persistent_dict(tracker_data)
 
-    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     def load_state(self) -> bool:
         """Load strategy state from persistence.
 

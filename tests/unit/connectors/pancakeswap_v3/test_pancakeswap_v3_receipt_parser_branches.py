@@ -36,6 +36,7 @@ from almanak.framework.execution.extract_result import (
     ExtractMissing,
     ExtractOk,
 )
+from almanak.framework.execution.extracted_data import LPOpenData
 
 # =============================================================================
 # Constants and helpers
@@ -44,6 +45,8 @@ from almanak.framework.execution.extract_result import (
 # Canonical PCS V3 NPM (same address across all 5 supported chains today).
 NPM = POSITION_MANAGER_ADDRESSES["arbitrum"]
 POOL = "0x" + "aa" * 20
+POOL_2 = "0x" + "ab" * 20
+POOL_3 = "0x" + "ac" * 20
 WALLET = "0x" + "cc" * 20
 MINT_TOPIC = EVENT_TOPICS["Mint"]
 INCREASE_TOPIC = EVENT_TOPICS["IncreaseLiquidity"]
@@ -205,6 +208,103 @@ class TestPancakeSwapV3ExtractLpOpenData:
         assert out is not None
         assert out.tick_lower == -887220
         assert out.tick_upper == -100
+
+    @pytest.mark.parametrize(
+        ("logs", "expected"),
+        [
+            pytest.param(
+                [
+                    _pool_mint_log(tick_lower=-300, tick_upper=300),
+                    _pool_mint_log(tick_lower=-120, tick_upper=180, pool=POOL_2),
+                    _npm_increase_liquidity_log(token_id=77, liquidity=10, amount0=2, amount1=3),
+                    _pool_mint_log(tick_lower=-60, tick_upper=60, pool=POOL_3),
+                    _npm_increase_liquidity_log(token_id=88, liquidity=20, amount0=4, amount1=5),
+                ],
+                LPOpenData(
+                    position_id=77,
+                    tick_lower=-120,
+                    tick_upper=180,
+                    liquidity=10,
+                    amount0=2,
+                    amount1=3,
+                    pool_address=POOL_2,
+                ),
+                id="first-increase-with-latest-preceding-mint",
+            ),
+            pytest.param(
+                [
+                    _pool_mint_log(tick_lower=-90, tick_upper=150),
+                    {
+                        "address": NPM,
+                        "topics": [INCREASE_TOPIC, "0xNOTHEX"],
+                        "data": "0x" + _pad32(1) + _pad32(1) + _pad32(1),
+                    },
+                    _npm_increase_liquidity_log(token_id=88, liquidity=11, amount0=4, amount1=5),
+                ],
+                LPOpenData(
+                    position_id=88,
+                    tick_lower=-90,
+                    tick_upper=150,
+                    liquidity=11,
+                    amount0=4,
+                    amount1=5,
+                    pool_address=POOL,
+                ),
+                id="malformed-token-id-does-not-consume-mint",
+            ),
+            pytest.param(
+                [
+                    _npm_increase_liquidity_log(token_id=1, liquidity=6, amount0=7, amount1=8),
+                    _pool_mint_log(tick_lower=-20, tick_upper=20),
+                    _npm_increase_liquidity_log(token_id=2, liquidity=9, amount0=10, amount1=11),
+                ],
+                LPOpenData(position_id=1, liquidity=6, amount0=7, amount1=8),
+                id="later-mint-does-not-backfill-first-increase",
+            ),
+            pytest.param(
+                [
+                    _pool_mint_log(tick_lower=-40, tick_upper=80, pool=POOL_2),
+                    _pool_mint_log(tick_lower=-10, tick_upper=10, pool=POOL_3, owner=WALLET),
+                    _npm_increase_liquidity_log(token_id=3, liquidity=12, amount0=13, amount1=14),
+                ],
+                LPOpenData(
+                    position_id=3,
+                    tick_lower=-40,
+                    tick_upper=80,
+                    liquidity=12,
+                    amount0=13,
+                    amount1=14,
+                    pool_address=POOL_2,
+                ),
+                id="foreign-owner-mint-does-not-replace-context",
+            ),
+        ],
+    )
+    def test_open_candidate_precedence_golden(self, logs: list[dict], expected: LPOpenData) -> None:
+        parser = PancakeSwapV3ReceiptParser(chain="arbitrum")
+
+        assert parser.extract_lp_open_data(_receipt(logs)) == expected
+
+    def test_uppercase_hex_prefixes_decode_without_offset_shift(self) -> None:
+        parser = PancakeSwapV3ReceiptParser(chain="ArBiTrUm")
+        logs = [
+            _pool_mint_log(tick_lower=-100, tick_upper=100),
+            _npm_increase_liquidity_log(token_id=42, liquidity=15, amount0=25, amount1=35),
+        ]
+        for log in logs:
+            log["address"] = log["address"].upper()
+            log["topics"] = [topic.upper() for topic in log["topics"]]
+            log["data"] = log["data"].upper()
+
+        assert parser.extract_lp_open_data(_receipt(logs)) == LPOpenData(
+            position_id=42,
+            tick_lower=-100,
+            tick_upper=100,
+            liquidity=15,
+            amount0=25,
+            amount1=35,
+            pool_address=POOL,
+        )
 
     def test_no_increase_liquidity_returns_none(self) -> None:
         """Empty receipt → None (no event found, not a crash)."""
