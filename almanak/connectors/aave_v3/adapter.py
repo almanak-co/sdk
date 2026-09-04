@@ -1201,6 +1201,7 @@ class AaveV3Adapter:
         total_collateral_usd = Decimal("0")
         total_debt_usd = Decimal("0")
         weighted_lt_sum = Decimal("0")
+        effective_lt_bps: dict[str, int] = {}
 
         for position in positions:
             asset = position.asset
@@ -1218,12 +1219,9 @@ class AaveV3Adapter:
             collateral_value = position.current_atoken_balance * price
             debt_value = position.total_debt * price
 
-            # Get liquidation threshold (use E-Mode if applicable)
-            lt = reserve.liquidation_threshold
-            if emode_category > 0 and reserve.emode_category == emode_category:
-                lt = reserve.emode_liquidation_threshold or lt
-
-            lt_decimal = Decimal(lt) / Decimal("10000")  # Convert from bps
+            lt = self._effective_liquidation_threshold_bps(reserve, emode_category)
+            effective_lt_bps[asset] = lt
+            lt_decimal = Decimal(lt) / Decimal("10000")
 
             # Only count as collateral if enabled
             if position.usage_as_collateral_enabled and collateral_value > 0:
@@ -1250,15 +1248,20 @@ class AaveV3Adapter:
             # No debt = infinite health factor (use very large number)
             health_factor = Decimal("999999")
 
+        # The liquidation price must use the same effective threshold as the health
+        # factor above; a zero threshold (unknown reserve, or non-collateral reserve)
+        # means the price is unmeasurable, not that it is zero.
         liquidation_price = None
         if len(positions) == 1 and positions[0].has_supply and total_debt_usd > 0:
             position = positions[0]
-            if position.current_atoken_balance > 0:
-                # Liquidation price = Debt / (Collateral Amount * LT)
-                reserve = reserve_data.get(position.asset)
-                lt_bps: int = reserve.liquidation_threshold if reserve else 8000
-                lt_decimal = Decimal(lt_bps) / Decimal("10000")
-                liquidation_price = total_debt_usd / (position.current_atoken_balance * lt_decimal)
+            lt_bps = effective_lt_bps.get(position.asset, 0)
+            if lt_bps > 0:
+                liquidation_price = self.calculate_liquidation_price(
+                    collateral_asset=position.asset,
+                    collateral_amount=position.current_atoken_balance,
+                    debt_usd=total_debt_usd,
+                    liquidation_threshold_bps=lt_bps,
+                )
 
         return AaveV3HealthFactorCalculation(
             total_collateral_usd=total_collateral_usd,
@@ -1268,6 +1271,18 @@ class AaveV3Adapter:
             liquidation_price=liquidation_price,
             assets_breakdown=assets_breakdown,
         )
+
+    @staticmethod
+    def _effective_liquidation_threshold_bps(reserve: AaveV3ReserveData, emode_category: int) -> int:
+        """Liquidation threshold that Aave applies to this reserve for the user's E-Mode.
+
+        The E-Mode threshold only replaces the reserve threshold when the user's
+        active category matches the reserve's category and the E-Mode threshold is
+        configured (non-zero).
+        """
+        if emode_category > 0 and reserve.emode_category == emode_category:
+            return reserve.emode_liquidation_threshold or reserve.liquidation_threshold
+        return reserve.liquidation_threshold
 
     def calculate_liquidation_price(
         self,

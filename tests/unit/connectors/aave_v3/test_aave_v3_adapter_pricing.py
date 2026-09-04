@@ -309,10 +309,12 @@ class TestHealthFactorCalc:
         assert result.liquidation_price is not None
         assert result.liquidation_price > 0
 
-    def test_single_position_falls_back_to_default_lt_when_reserve_missing(
+    def test_single_position_missing_reserve_has_no_liquidation_price(
         self, adapter: AaveV3Adapter
     ) -> None:
-        # single-position liquidation_price branch where reserve is None → uses 8000
+        # Without reserve data the threshold is unknown (0 bps): the health factor
+        # already reflects that, and the liquidation price must not be fabricated
+        # from a guessed threshold.
         position = AaveV3Position(
             asset="USDC",
             asset_address="0x" + "11" * 20,
@@ -323,7 +325,91 @@ class TestHealthFactorCalc:
         result = adapter.calculate_health_factor(
             [position], {}, prices={"USDC": Decimal("1")}
         )
-        assert result.liquidation_price is not None
+        assert result.assets_breakdown["USDC"]["liquidation_threshold_bps"] == 0
+        assert result.health_factor == Decimal("0")
+        assert result.liquidation_price is None
+
+
+class TestLiquidationPriceUsesEffectiveThreshold:
+    """ALM-3570: liquidation price and health factor must share one threshold."""
+
+    WETH_ADDRESS = "0x" + "11" * 20
+
+    def _position(self) -> AaveV3Position:
+        return AaveV3Position(
+            asset="WETH",
+            asset_address=self.WETH_ADDRESS,
+            current_atoken_balance=Decimal("1"),
+            current_variable_debt=Decimal("0.5"),
+            usage_as_collateral_enabled=True,
+        )
+
+    def _reserve(self, emode_liquidation_threshold: int = 9500, emode_category: int = 1) -> AaveV3ReserveData:
+        return AaveV3ReserveData(
+            asset="WETH",
+            asset_address=self.WETH_ADDRESS,
+            liquidation_threshold=8000,
+            emode_liquidation_threshold=emode_liquidation_threshold,
+            emode_category=emode_category,
+        )
+
+    @staticmethod
+    def _expected_price(debt_usd: Decimal, collateral: Decimal, lt_bps: int) -> Decimal:
+        return debt_usd / (collateral * Decimal(lt_bps) / Decimal("10000"))
+
+    def test_matching_emode_category_uses_emode_threshold(self, adapter: AaveV3Adapter) -> None:
+        result = adapter.calculate_health_factor(
+            [self._position()],
+            {"WETH": self._reserve()},
+            prices={"WETH": Decimal("3000")},
+            emode_category=1,
+        )
+        assert result.assets_breakdown["WETH"]["liquidation_threshold_bps"] == 9500
+        assert result.weighted_liquidation_threshold == Decimal("0.95")
+        assert result.liquidation_price == self._expected_price(Decimal("1500"), Decimal("1"), 9500)
+        # Health factor and liquidation price agree: at the liquidation price HF == 1.
+        assert result.health_factor == Decimal("3000") * Decimal("0.95") / Decimal("1500")
+        assert result.liquidation_price * Decimal("1") * Decimal("0.95") == result.total_debt_usd
+
+    def test_category_mismatch_uses_normal_threshold(self, adapter: AaveV3Adapter) -> None:
+        result = adapter.calculate_health_factor(
+            [self._position()],
+            {"WETH": self._reserve(emode_category=2)},
+            prices={"WETH": Decimal("3000")},
+            emode_category=1,
+        )
+        assert result.assets_breakdown["WETH"]["liquidation_threshold_bps"] == 8000
+        assert result.liquidation_price == self._expected_price(Decimal("1500"), Decimal("1"), 8000)
+
+    def test_zero_emode_threshold_falls_back_to_normal_threshold(self, adapter: AaveV3Adapter) -> None:
+        result = adapter.calculate_health_factor(
+            [self._position()],
+            {"WETH": self._reserve(emode_liquidation_threshold=0)},
+            prices={"WETH": Decimal("3000")},
+            emode_category=1,
+        )
+        assert result.assets_breakdown["WETH"]["liquidation_threshold_bps"] == 8000
+        assert result.liquidation_price == self._expected_price(Decimal("1500"), Decimal("1"), 8000)
+
+    def test_non_emode_position_is_unchanged(self, adapter: AaveV3Adapter) -> None:
+        result = adapter.calculate_health_factor(
+            [self._position()],
+            {"WETH": self._reserve()},
+            prices={"WETH": Decimal("3000")},
+        )
+        assert result.assets_breakdown["WETH"]["liquidation_threshold_bps"] == 8000
+        assert result.liquidation_price == self._expected_price(Decimal("1500"), Decimal("1"), 8000)
+        assert result.liquidation_price == Decimal("1875")
+
+    def test_zero_reserve_threshold_yields_no_liquidation_price(self, adapter: AaveV3Adapter) -> None:
+        # A reserve whose threshold is 0 bps cannot back a liquidation price and must
+        # not raise a Decimal division error.
+        reserve = AaveV3ReserveData(asset="WETH", asset_address=self.WETH_ADDRESS, liquidation_threshold=0)
+        result = adapter.calculate_health_factor(
+            [self._position()], {"WETH": reserve}, prices={"WETH": Decimal("3000")}
+        )
+        assert result.health_factor == Decimal("0")
+        assert result.liquidation_price is None
 
     def test_calculate_liquidation_price_zero_collateral(
         self, adapter: AaveV3Adapter
