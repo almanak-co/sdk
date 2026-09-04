@@ -8291,17 +8291,6 @@ class PnLBacktester:
 
         return calculate_sharpe_ratio(returns, volatility, risk_free_rate, trading_days)
 
-    def _calculate_sortino_ratio(
-        self,
-        returns: list[Decimal],
-        risk_free_rate: Decimal,
-        trading_days: Decimal,
-    ) -> Decimal:
-        """Calculate the Sortino ratio. Delegates to metrics_calculator module."""
-        from .metrics_calculator import calculate_sortino_ratio
-
-        return calculate_sortino_ratio(returns, risk_free_rate, trading_days)
-
     def _calculate_max_drawdown(self, values: list[Decimal]) -> Decimal:
         """Calculate maximum drawdown. Delegates to metrics_calculator module."""
         from .metrics_calculator import calculate_max_drawdown

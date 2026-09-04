@@ -2497,25 +2497,6 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
             cacheable=outcome.cacheable,
         )
 
-    async def _pool_history_ladder_volume_async(
-        self,
-        pool_address_lower: str,
-        chain: str,
-        protocol: str | None,
-        target_date: date,
-        cache_key: tuple[str, date],
-    ) -> tuple[Decimal, DataConfidence] | None:
-        """Async form of :meth:`_pool_history_ladder_volume` for the prewarm hook."""
-        return (
-            await self._pool_history_ladder_volume_outcome_async(
-                pool_address_lower,
-                chain,
-                protocol,
-                target_date,
-                cache_key,
-            )
-        ).value
-
     async def _pool_history_ladder_volume_outcome_async(
         self,
         pool_address_lower: str,

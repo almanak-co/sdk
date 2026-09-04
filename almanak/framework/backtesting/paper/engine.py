@@ -1299,22 +1299,6 @@ class PaperTrader:
 
         return summary
 
-    def _calculate_pnl_usd(self) -> Decimal | None:
-        """Calculate PnL in USD from portfolio changes.
-
-        Uses PortfolioValuer for final value when available (LP + lending aware).
-
-        Returns:
-            Estimated PnL or None if calculation not possible
-        """
-        try:
-            initial_value = self._calculate_initial_capital()
-            rich = self._value_portfolio_rich()
-            final_value = rich[0] if rich is not None else self._calculate_portfolio_value()
-            return final_value - initial_value
-        except Exception:
-            return None
-
     async def _initialize_fork(self) -> None:
         """Initialize the Anvil fork for paper trading."""
         logger.info(f"[{self._backtest_id}] Initializing Anvil fork for chain={self.config.chain}")
@@ -2721,14 +2705,6 @@ class PaperTrader:
 
         return gas_cost_eth * eth_price
 
-    def _extract_fee_usd(self, action_bundle: ActionBundle) -> Decimal:
-        """Extract expected fee from action bundle."""
-        if action_bundle.metadata:
-            fee = action_bundle.metadata.get("expected_fee_usd")
-            if fee is not None:
-                return Decimal(str(fee))
-        return Decimal("0")
-
     def _notify_strategy_callback(
         self,
         strategy: PaperTradeableStrategy,
@@ -3787,11 +3763,6 @@ class PaperTrader:
         self._used_hardcoded_fallback = True
         self._track_fallback("hardcoded_price")
         return price
-
-    def _clear_price_cache(self) -> None:
-        """Clear the price cache to force fresh fetches."""
-        self._price_cache.clear()
-        self._price_cache_sources.clear()
 
     async def _get_portfolio_prices(self) -> dict[str, Decimal]:
         """Fetch prices for all tokens in the portfolio.

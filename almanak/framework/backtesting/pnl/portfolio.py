@@ -1840,18 +1840,6 @@ class SimulatedPortfolio:
                 total += pos.collateral_usd
         return total
 
-    def _get_total_perp_notional(self) -> Decimal:
-        """Calculate total notional value of open perp positions.
-
-        Returns:
-            Total notional value of all open perp positions
-        """
-        total = Decimal("0")
-        for pos in self.positions:
-            if pos.is_perp:
-                total += pos.notional_usd
-        return total
-
     def calculate_unrealized_pnl(self, market_state: MarketState) -> Decimal:
         """Calculate total unrealized PnL from all open positions.
 
@@ -3648,21 +3636,6 @@ class SimulatedPortfolio:
         from .liquidation_simulator import update_health_factors
 
         update_health_factors(self, market_state)
-
-    def _simulate_lending_liquidation(
-        self,
-        borrow_position: SimulatedPosition,
-        health_factor: Decimal,
-        total_collateral_usd: Decimal,
-        debt_value_usd: Decimal,
-        market_state: MarketState,
-    ) -> None:
-        """Simulate a lending liquidation event. Delegates to liquidation_simulator module."""
-        from .liquidation_simulator import simulate_lending_liquidation
-
-        simulate_lending_liquidation(
-            self, borrow_position, health_factor, total_collateral_usd, debt_value_usd, market_state
-        )
 
     def record_equity_point(self, timestamp: datetime, market_state: MarketState) -> None:
         """Record current portfolio value to equity curve.

@@ -297,10 +297,6 @@ class ChainlinkDataProvider:
             deviation_threshold=spec.deviation_threshold_pct,
         )
 
-    @staticmethod
-    def _convert_price(raw_answer: int, decimals: int) -> Decimal:
-        return Decimal(raw_answer) / Decimal(10**decimals)
-
     def is_data_stale(
         self,
         updated_at: datetime,

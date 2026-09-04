@@ -542,27 +542,6 @@ def run_crisis_backtest_sync(
     )
 
 
-def _calculate_crisis_metrics(
-    result: BacktestResult,
-    scenario: CrisisScenario,
-) -> dict[str, Any]:
-    """Calculate crisis-specific metrics from backtest results (legacy dict format).
-
-    This function computes additional metrics that are particularly
-    relevant for analyzing strategy performance during crisis periods.
-
-    Args:
-        result: BacktestResult from the crisis backtest
-        scenario: The crisis scenario that was tested
-
-    Returns:
-        Dictionary with crisis-specific metrics
-    """
-    # Build and use the CrisisMetrics object for calculations
-    crisis_metrics = build_crisis_metrics(result, scenario)
-    return crisis_metrics.to_dict()
-
-
 def build_crisis_metrics(
     result: BacktestResult,
     scenario: CrisisScenario,
