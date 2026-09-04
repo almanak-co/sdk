@@ -63,6 +63,54 @@ def fail_if_v3_pool_missing(
         pytest.fail(f"Could not validate pool existence: {result.warning}")
 
 
+def fail_if_v4_pool_missing(
+    web3,
+    chain: str,
+    token_a: str,
+    token_b: str,
+    fee_tier: int,
+) -> None:
+    """Fail the test if the Uniswap V4 pool for the pair and fee tier is uninitialised.
+
+    V4 pools live inside the PoolManager singleton and are keyed by the
+    PoolKey hash, so existence is read through ``StateView.getSlot0`` at the
+    fork block: an uninitialised pool answers ``sqrtPriceX96 == 0``. When the
+    requested tier is missing, the failure names every canonical tier that IS
+    initialised so the test's fee constant can be corrected in one edit.
+
+    An unreadable StateView (revert or RPC error) is reported but never fails
+    the test: the LP compiler tolerates the same read failing by falling back
+    to an estimated price, and the execution and balance layers still fail
+    closed on a pool that does not exist.
+    """
+    from almanak.connectors.uniswap_v4.addresses import UNISWAP_V4
+    from almanak.connectors.uniswap_v4.hooks import build_get_slot0_calldata, decode_slot0_response
+    from almanak.connectors.uniswap_v4.sdk import FEE_TIERS, TICK_SPACING, PoolKey
+
+    state_view = UNISWAP_V4[chain]["state_view"]
+
+    def _initialised(tier: int) -> bool | None:
+        key = PoolKey(currency0=token_a, currency1=token_b, fee=tier, tick_spacing=TICK_SPACING[tier])
+        try:
+            raw = web3.eth.call({"to": state_view, "data": build_get_slot0_calldata(key)})
+        except Exception as exc:  # noqa: BLE001 - any revert means "not readable here"
+            print(f"Warning: StateView.getSlot0 on {chain} ({state_view}) unreadable for fee={tier}: {exc}")
+            return None
+        return decode_slot0_response(web3.to_hex(raw)).exists
+
+    requested = _initialised(fee_tier)
+    if requested is None:
+        print(f"Warning: skipping V4 pool preflight for {token_a}/{token_b} on {chain}; later layers fail closed")
+        return
+    if requested:
+        return
+    others = [tier for tier in FEE_TIERS if tier != fee_tier and _initialised(tier)]
+    pytest.fail(
+        f"Uniswap V4 pool {token_a}/{token_b} fee={fee_tier} is not initialised on {chain} at the fork block "
+        f"(StateView {state_view}); initialised canonical tiers for this pair: {others or 'none'}"
+    )
+
+
 def fail_if_aerodrome_pool_missing(
     web3,
     chain: str,

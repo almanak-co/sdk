@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import pytest
 
-from almanak.connectors.uniswap_v4.addresses import UNISWAP_V4
 from almanak.connectors._strategy_base.contract_registry import get_default_registry
+from almanak.connectors.uniswap_v4.addresses import UNISWAP_V4
 from almanak.connectors.uniswap_v4.sdk import (
     MODIFY_LIQUIDITIES_SELECTOR,
     MODIFY_LIQUIDITIES_WITHOUT_UNLOCK_SELECTOR,
@@ -22,7 +22,6 @@ from almanak.connectors.uniswap_v4.sdk import (
     V4_SWAP_EXACT_OUT,
     V4_SWAP_EXACT_OUT_SINGLE,
 )
-
 
 # =============================================================================
 # Canonical address verification
@@ -80,10 +79,20 @@ CANONICAL_V4_ADDRESSES_PER_CHAIN = {
         "quoter": "0x9f75dd27d6664c475b90e105573e550ff69437b0",
         "state_view": "0xd13dd3d6e93f276fafc9db9e6bb47c1180aee0c4",
     },
+    # Robinhood (4663) is a non-canonical deployment: the CREATE2 PoolManager
+    # has no code there. These are the addresses verified to carry code on
+    # 4663 (see almanak/connectors/uniswap_v4/addresses.py).
+    "robinhood": {
+        "pool_manager": "0x8366a39cc670b4001a1121b8f6a443a643e40951",
+        "position_manager": "0x58daec3116aae6d93017baaea7749052e8a04fa7",
+        "universal_router": "0x8876789976decbfcbbbe364623c63652db8c0904",
+        "quoter": "0x8dc178efb8111bb0973dd9d722ebeff267c98f94",
+        "state_view": "0xf3334192d15450cdd385c8b70e03f9a6bd9e673b",
+    },
 }
 
 # Chains that should have V4 contracts
-EXPECTED_V4_CHAINS = {"ethereum", "arbitrum", "base", "optimism", "polygon", "avalanche", "bsc"}
+EXPECTED_V4_CHAINS = {"ethereum", "arbitrum", "base", "optimism", "polygon", "avalanche", "bsc", "robinhood"}
 
 
 class TestCanonicalAddresses:

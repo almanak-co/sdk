@@ -5,6 +5,7 @@ from __future__ import annotations
 from almanak.connectors._amm_lifecycle_declaration import (
     AmmCoreExecutionCell,
     build_amm_core_execution_declarations,
+    build_amm_lane_gap_claim_declarations,
 )
 from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
@@ -23,7 +24,9 @@ from almanak.core.chains.bsc import DESCRIPTOR as BSC
 from almanak.core.chains.ethereum import DESCRIPTOR as ETHEREUM
 from almanak.core.chains.optimism import DESCRIPTOR as OPTIMISM
 from almanak.core.chains.polygon import DESCRIPTOR as POLYGON
+from almanak.core.chains.robinhood import DESCRIPTOR as ROBINHOOD
 from almanak.core.intent_types import IntentType
+from almanak.framework.primitives.types import Primitive
 
 _PROVIDER_REFS = {
     ObligationId.ASSET_RESOLUTION: "almanak.connectors.uniswap_v4.compiler:UniswapV4Compiler",
@@ -70,11 +73,24 @@ def _production_lifecycle_declarations():
                 ),
             )
         )
+    # Robinhood carries its four-layer lane under tests/intents/robinhood/, but
+    # that lane has not yet executed against a 4663 fork, so every cell stays a
+    # tracked lane gap rather than claiming real-fork evidence it does not have.
+    robinhood_intents = (IntentType.SWAP, IntentType.LP_OPEN, IntentType.LP_CLOSE, IntentType.LP_COLLECT_FEES)
+    for intent in robinhood_intents:
+        cells.append(AmmCoreExecutionCell(chain=ROBINHOOD, intent=intent, lane_gap_ref="ALM-9996"))
     return build_amm_core_execution_declarations(
         protocol="uniswap_v4",
         cells=tuple(cells),
         provider_refs=_PROVIDER_REFS,
         contract_version="uniswap_v4.core_execution.v1",
+    ) + build_amm_lane_gap_claim_declarations(
+        protocol="uniswap_v4",
+        chain=ROBINHOOD,
+        intents=robinhood_intents,
+        tracking_ref="ALM-9996",
+        lp_primitive=Primitive.LP_V4,
+        quote_feature=True,
     )
 
 
@@ -167,12 +183,14 @@ CONNECTOR = Connector(
         detection=False,
         lp_economic_family="concentrated",
     ),
-    # VIB-4421: extended from ("ethereum", "arbitrum", "base") to the full
-    # deployed set so the registry's (connector, intent, chain) universe matches
-    # ``UNISWAP_V4`` in addresses.py and the 28 on-chain intent tests (7 chains x
-    # 4 intents). ChainRegistry canonical names are used (``bsc``, not the
-    # ``bnb`` alias).
-    supported_chains=SupportedChainsSpec(chains=(ETHEREUM, ARBITRUM, BASE, OPTIMISM, POLYGON, AVALANCHE, BSC)),
+    # Must name exactly the chains carried by ``UNISWAP_V4`` in addresses.py:
+    # every chain here needs an address row and the four on-chain intent tests
+    # under ``tests/intents/<chain>/`` (the intent-coverage gate enforces the
+    # latter). ChainRegistry canonical names are used (``bsc``, not the ``bnb``
+    # alias).
+    supported_chains=SupportedChainsSpec(
+        chains=(ETHEREUM, ARBITRUM, BASE, OPTIMISM, POLYGON, AVALANCHE, BSC, ROBINHOOD),
+    ),
     lifecycle_declarations=_production_lifecycle_declarations(),
     # Matrix output covers deployed V4 chains for both swap and LP rows.
     strategy_matrix_entries=(

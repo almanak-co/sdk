@@ -64,6 +64,21 @@ UNISWAP_V4: dict[str, dict[str, str]] = {
         "quoter": "0x9F75dD27D6664c475B90e105573E550ff69437B0",
         "state_view": "0xd13Dd3D6E93f276FAfc9Db9E6BB47C1180aeE0c4",
     },
+    "robinhood": {
+        # Robinhood Chain (4663, Arbitrum Orbit L2) carries a NON-canonical V4
+        # deployment. The CREATE2 PoolManager 0x000000000004444c5dc75cB358380D2e3dE08A90
+        # has no code on 4663, so the canonical address set compiles every pool
+        # as "unknown pool". Each address below was verified to carry code on
+        # 4663 via eth_getCode (PoolManager 24,009 bytes, PositionManager
+        # 23,877, UniversalRouter 24,546, StateView 3,531, Quoter 6,118).
+        # Permit2 is at its canonical address. Never replace these with the
+        # canonical set — same trap as the Morpho vanity singleton on this chain.
+        "pool_manager": "0x8366a39CC670B4001A1121B8F6A443A643e40951",
+        "position_manager": "0x58daec3116aae6D93017bAAea7749052E8a04fA7",
+        "universal_router": "0x8876789976dEcBfCbBbe364623C63652db8C0904",
+        "quoter": "0x8Dc178eFB8111BB0973Dd9d722ebeFF267c98F94",
+        "state_view": "0xF3334192D15450CdD385c8B70e03f9A6bD9E673b",
+    },
 }
 
 __all__ = ["UNISWAP_V4"]

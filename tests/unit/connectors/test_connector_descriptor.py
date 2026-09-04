@@ -237,9 +237,8 @@ MIGRATED_STRATEGY_REGISTRATION = {
     ),
     "uniswap_v4": (
         ("SWAP", "LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"),
-        # VIB-4421: extended to the full deployed set (matches UNISWAP_V4 +
-        # the 28 on-chain intent tests). Canonical "bsc".
-        ("ethereum", "arbitrum", "base", "optimism", "polygon", "avalanche", "bsc"),
+        # Every UNISWAP_V4 address-table chain, canonical "bsc".
+        ("ethereum", "arbitrum", "base", "optimism", "polygon", "avalanche", "bsc", "robinhood"),
     ),
 }
 

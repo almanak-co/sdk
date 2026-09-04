@@ -15,16 +15,25 @@ from almanak.connectors._lifecycle_declaration_bundle import LifecycleClaimCell,
 from almanak.core.capability_obligations import (
     EvidenceKind,
     EvidenceRef,
+    ExactTargetFeature,
+    IntentSemantics,
     ObligationDeclaration,
     ObligationDisposition,
     ObligationId,
     Satisfied,
+    SupportClaim,
     Unsupported,
 )
 from almanak.core.chains import ChainDescriptor
 from almanak.core.intent_types import IntentType
+from almanak.framework.capabilities.obligation_profiles import ClaimProfileKey, profile_for, semantics_for_intent
+from almanak.framework.primitives.types import Primitive
 
-__all__ = ["AmmCoreExecutionCell", "build_amm_core_execution_declarations"]
+__all__ = [
+    "AmmCoreExecutionCell",
+    "build_amm_core_execution_declarations",
+    "build_amm_lane_gap_claim_declarations",
+]
 
 _CORE_OBLIGATIONS = (
     ObligationId.ASSET_RESOLUTION,
@@ -197,4 +206,98 @@ def build_amm_core_execution_declarations(
                 source_detail="Exact-chain, exact-intent evidence; sibling cells are never treated as proof.",
             ).expand()
         )
+    return tuple(expanded)
+
+
+def _lane_gap_claims(
+    intent: IntentType,
+    *,
+    quote_feature: bool,
+) -> tuple[tuple[SupportClaim, ExactTargetFeature | None], ...]:
+    """The non-core claims the effective matrix raises for an AMM cell.
+
+    Mirrors the matrix's own claim enumeration: position claims follow the
+    intent's lifecycle semantics, the quote feature exists only for SWAP on a
+    connector that binds a swap-quote provider, and every cell is asked whether
+    it is managed-Anvil testable.
+    """
+    semantics = semantics_for_intent(intent)
+    claims: list[tuple[SupportClaim, ExactTargetFeature | None]] = []
+    if semantics is IntentSemantics.POSITION_OPEN_OR_INCREASE:
+        claims.append((SupportClaim.POSITION_OPEN, None))
+    elif semantics is IntentSemantics.POSITION_DECREASE_OR_CLOSE:
+        claims.append((SupportClaim.POSITION_CLOSE, None))
+    if semantics in (
+        IntentSemantics.POSITION_OPEN_OR_INCREASE,
+        IntentSemantics.POSITION_DECREASE_OR_CLOSE,
+        IntentSemantics.POSITION_MAINTENANCE,
+    ):
+        claims.extend(((SupportClaim.FULL_LIFECYCLE_CERTIFICATION, None), (SupportClaim.VALUATION_READY, None)))
+    if quote_feature and intent is IntentType.SWAP:
+        claims.append((SupportClaim.EXACT_TARGET_DATA, ExactTargetFeature.QUOTE))
+    claims.append((SupportClaim.MANAGED_ANVIL_TESTABLE, None))
+    return tuple(claims)
+
+
+def build_amm_lane_gap_claim_declarations(
+    *,
+    protocol: str,
+    chain: ChainDescriptor,
+    intents: tuple[IntentType, ...],
+    tracking_ref: str,
+    lp_primitive: Primitive,
+    quote_feature: bool,
+) -> tuple[LifecycleObligationDecl, ...]:
+    """Declare every non-core claim of lane-gap AMM cells as tracked debt.
+
+    Companion to :class:`AmmCoreExecutionCell` cells that carry ``lane_gap_ref``:
+    those answer only the core-execution claim, while the matrix also raises the
+    position, certification, valuation, quote, and managed-Anvil claims for the
+    same cell. A chain whose four-layer lane exists but has not executed cannot
+    evidence any of them, so each obligation is answered ``Unsupported`` under
+    one tracking reference instead of surfacing as undeclared debt.
+    """
+    if not isinstance(intents, tuple) or not intents:
+        raise ValueError("intents must be a non-empty tuple")
+    expanded: list[LifecycleObligationDecl] = []
+    for intent in intents:
+        primitive = Primitive.SWAP if intent is IntentType.SWAP else lp_primitive
+        for claim, feature in _lane_gap_claims(intent, quote_feature=quote_feature):
+            profile = profile_for(
+                ClaimProfileKey(
+                    semantics=semantics_for_intent(intent),
+                    primitive=primitive,
+                    claim=claim,
+                    exact_target_feature=feature,
+                )
+            )
+            declarations = tuple(
+                ObligationDeclaration(
+                    obligation,
+                    _unsupported(
+                        reason="The exact production cell lacks a non-xfailed four-layer real-fork execution lane.",
+                        tracking_ref=tracking_ref,
+                    ),
+                )
+                for obligation in profile.obligation_ids
+            )
+            suffix = f".{feature.value}" if feature is not None else ""
+            bundle_id = f"{protocol}.{chain.name}.{intent.value.lower()}.{claim.value}{suffix}"
+            expanded.extend(
+                LifecycleDeclarationBundle(
+                    bundle_id=bundle_id,
+                    cells=(
+                        LifecycleClaimCell(
+                            protocol=protocol,
+                            chain=chain,
+                            intent=intent,
+                            claim=claim,
+                            exact_target_feature=feature,
+                        ),
+                    ),
+                    declarations=declarations,
+                    source_ref=f"Connector.lifecycle_declarations[{bundle_id}]",
+                    source_detail="Lane gap: the four-layer lane exists but has not executed for this exact cell.",
+                ).expand()
+            )
     return tuple(expanded)

@@ -92,7 +92,7 @@ def test_production_matrix_is_injected_byte_stable_and_separate_from_registered_
 
     registered = build_effective_capability_matrix()
     assert registered.universe.kind is UniverseKind.REGISTERED_STRATEGY_SUPPORT
-    assert len(registered.cells) == 2148
+    assert len(registered.cells) == 2165
 
 
 def test_universe_carrier_rejects_pair_metadata_inconsistent_with_cells() -> None:

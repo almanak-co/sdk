@@ -100,6 +100,7 @@ _NATIVE_GAS_SYMBOL: dict[str, str] = {
     "ethereum": "ETH",
     "optimism": "ETH",
     "polygon": "POL",
+    "robinhood": "ETH",
 }
 
 
@@ -204,13 +205,22 @@ def _build_pairs() -> tuple[CanonicalV4Pair, ...]:
     # constraint as the wrapped table applies. Token1 quote symbols seeded
     # against the native leg on every chain:
     native_quote_symbols: tuple[str, ...] = ("USDC", "USDT")
+    # Chains whose dollar is neither USDC nor USDT. Robinhood's only liquid
+    # quote asset is USDG (Global Dollar); its USDC/USDT rows resolve to no
+    # token and are skipped, so the USDG-quoted keys are seeded explicitly.
+    chain_specific_pairs: dict[str, tuple[tuple[str, str], ...]] = {
+        "robinhood": (("WETH", "USDG"),),
+    }
+    chain_specific_native_quotes: dict[str, tuple[str, ...]] = {
+        "robinhood": ("USDG",),
+    }
     pairs: list[CanonicalV4Pair] = []
     # Chains supported by V4 per the framework deployment registry. We rely
     # on UNISWAP_V4 as the single source of truth so future chain additions
     # require updating only one place (the contracts registry).
     v4_chains: tuple[str, ...] = tuple(sorted(UNISWAP_V4.keys()))
     for chain in v4_chains:
-        for token0, token1 in base_pairs:
+        for token0, token1 in base_pairs + chain_specific_pairs.get(chain, ()):
             for fee in _CANONICAL_FEE_TIERS:
                 pairs.append(
                     CanonicalV4Pair(
@@ -221,7 +231,7 @@ def _build_pairs() -> tuple[CanonicalV4Pair, ...]:
                     )
                 )
         native_label = _NATIVE_GAS_SYMBOL.get(chain, "NATIVE")
-        for token1 in native_quote_symbols:
+        for token1 in native_quote_symbols + chain_specific_native_quotes.get(chain, ()):
             for fee in _CANONICAL_FEE_TIERS:
                 pairs.append(
                     CanonicalV4Pair(

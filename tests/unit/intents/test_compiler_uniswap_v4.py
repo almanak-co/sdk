@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from almanak.connectors.uniswap_v4.addresses import UNISWAP_V4
 from almanak.framework.intents import SwapIntent
 from almanak.framework.intents.compiler import (
     CompilationStatus,
@@ -25,6 +26,7 @@ def _make_mock_action_bundle(
     num_txs: int = 3,
     gas_estimate: int = 750_000,
     error: str | None = None,
+    chain: str = "arbitrum",
 ) -> MagicMock:
     """Create a mock ActionBundle matching adapter.compile_swap_intent() output."""
     bundle = MagicMock()
@@ -47,9 +49,9 @@ def _make_mock_action_bundle(
         "amount_in": "100000000",
         "amount_out_minimum": "99500000",
         "slippage_bps": 50,
-        "chain": "arbitrum",
-        "router": "0x66a9893cC07D91D95644AEDD05D03f95e1dBA8Af",
-        "pool_manager": "0x000000000004444c5dc75cB358380D2e3dE08A90",
+        "chain": chain,
+        "router": UNISWAP_V4[chain]["universal_router"],
+        "pool_manager": UNISWAP_V4[chain]["pool_manager"],
         "gas_estimate": gas_estimate,
         "protocol_version": "v4",
     }
@@ -187,7 +189,7 @@ class TestUniswapV4SwapCompilation:
 
     @patch(f"{ADAPTER_MODULE}.UniswapV4Adapter")
     def test_swap_metadata_includes_router_and_pool_manager(self, mock_adapter_cls):
-        """Compiled metadata includes canonical V4 contract addresses."""
+        """Compiled metadata carries the V4 contract addresses for the intent's chain."""
         mock_adapter = MagicMock()
         mock_adapter.compile_swap_intent.return_value = _make_mock_action_bundle()
         mock_adapter_cls.return_value = mock_adapter
@@ -206,8 +208,8 @@ class TestUniswapV4SwapCompilation:
         assert result.status == CompilationStatus.SUCCESS
 
         metadata = result.action_bundle.metadata
-        assert metadata["router"] == "0x66a9893cC07D91D95644AEDD05D03f95e1dBA8Af"
-        assert metadata["pool_manager"] == "0x000000000004444c5dc75cB358380D2e3dE08A90"
+        assert metadata["router"] == UNISWAP_V4["arbitrum"]["universal_router"]
+        assert metadata["pool_manager"] == UNISWAP_V4["arbitrum"]["pool_manager"]
         assert metadata["chain"] == "arbitrum"
 
     @patch(f"{ADAPTER_MODULE}.UniswapV4Adapter")
@@ -280,13 +282,13 @@ class TestUniswapV4SwapCompilationMultichain:
 
     @pytest.mark.parametrize(
         "chain",
-        ["ethereum", "arbitrum", "base", "optimism", "polygon", "avalanche", "bsc"],
+        ["ethereum", "arbitrum", "base", "optimism", "polygon", "avalanche", "bsc", "robinhood"],
     )
     @patch(f"{ADAPTER_MODULE}.UniswapV4Adapter")
     def test_swap_compiles_on_all_v4_chains(self, mock_adapter_cls, chain):
-        """V4 swap compilation works on all chains with canonical CREATE2 addresses."""
+        """V4 swap compilation works on every address-table chain and reports that chain's PoolManager."""
         mock_adapter = MagicMock()
-        mock_adapter.compile_swap_intent.return_value = _make_mock_action_bundle()
+        mock_adapter.compile_swap_intent.return_value = _make_mock_action_bundle(chain=chain)
         mock_adapter_cls.return_value = mock_adapter
 
         compiler = _make_compiler(chain=chain)
@@ -301,7 +303,7 @@ class TestUniswapV4SwapCompilationMultichain:
 
         result = compiler.compile(intent)
         assert result.status == CompilationStatus.SUCCESS, f"V4 swap compilation failed on {chain}: {result.error}"
-        assert result.action_bundle.metadata["pool_manager"] == "0x000000000004444c5dc75cB358380D2e3dE08A90"
+        assert result.action_bundle.metadata["pool_manager"] == UNISWAP_V4[chain]["pool_manager"]
 
 
 class TestUniswapV4NotBlocked:

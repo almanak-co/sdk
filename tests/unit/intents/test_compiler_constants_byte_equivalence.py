@@ -607,6 +607,7 @@ class TestNftPositionManagerDerivedViews:
         "polygon": "0x1ec2ebf4f37e7363fdfe3551602425af0b3ceef9",
         "avalanche": "0xb74b1f14d2754acfcbbe1a221023a5cf50ab8acd",
         "bsc": "0x7a4a5c919ae2541aed11041a1aeee68f1287f95b",
+        "robinhood": "0x58daec3116aae6d93017baaea7749052e8a04fa7",
     }
 
     def test_univ4_npm(self) -> None:

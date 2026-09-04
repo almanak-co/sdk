@@ -47,6 +47,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
+from almanak.core.chains.robinhood import DESCRIPTOR as ROBINHOOD
 from almanak.core.intent_types import IntentType
 from almanak.framework.permissions.hints import DiscoveryContext, PermissionHints
 
@@ -63,6 +64,18 @@ if TYPE_CHECKING:
 _SYNTHETIC_FEE_TIER = 3000
 _SYNTHETIC_TICK_SPACING = 60
 
+# (stable, wrapped-native) pairs for chains where the framework-default pair is
+# wrong for V4. The default picker takes the first registered stablecoin, which
+# on Robinhood is Ethena USDe — a token with no liquid pool there — so the
+# manifest would authorise approvals the WETH/USDG strategy never uses while
+# omitting USDG. ``build_discovery_vectors`` substitutes these for
+# ``ctx.usdc`` / ``ctx.weth``; the framework-default LP_COLLECT_FEES builder
+# reads the same pair through ``synthetic_lp_pair`` below.
+_ROBINHOOD_TOKENS = ROBINHOOD.tokens or {}
+_SYNTHETIC_PAIR_OVERRIDES: dict[str, tuple[str, str]] = {
+    ROBINHOOD.name: (_ROBINHOOD_TOKENS["usdg"], _ROBINHOOD_TOKENS["weth"]),
+}
+
 
 PERMISSION_HINTS = PermissionHints(
     # Synthetic-discovery participation (VIB-4928 derivation; wired by VIB-4421).
@@ -71,6 +84,7 @@ PERMISSION_HINTS = PermissionHints(
     # ``_compile_collect_fees_uniswap_v4`` supports standalone collection).
     synthetic_discovery_intents=frozenset({IntentType.SWAP, IntentType.LP_OPEN, IntentType.LP_CLOSE}),
     supports_standalone_fee_collection=True,
+    synthetic_lp_pair=dict(_SYNTHETIC_PAIR_OVERRIDES),
 )
 
 
@@ -107,11 +121,13 @@ def build_discovery_vectors(
         SwapIntent,
     )
 
+    stable, wrapped_native = _SYNTHETIC_PAIR_OVERRIDES.get(chain, (ctx.usdc, ctx.weth))
+
     if intent_type is IntentType.SWAP:
         return [
             SwapIntent(
-                from_token=ctx.usdc,
-                to_token=ctx.weth,
+                from_token=stable,
+                to_token=wrapped_native,
                 amount=Decimal("1"),
                 protocol=protocol,
                 chain=chain,
@@ -121,7 +137,7 @@ def build_discovery_vectors(
     if intent_type is IntentType.LP_OPEN:
         return [
             LPOpenIntent(
-                pool=f"{ctx.usdc}/{ctx.weth}/{_SYNTHETIC_FEE_TIER}",
+                pool=f"{stable}/{wrapped_native}/{_SYNTHETIC_FEE_TIER}",
                 amount0=Decimal("100"),
                 amount1=Decimal("0.05"),
                 range_lower=Decimal("1500"),
@@ -151,8 +167,8 @@ def build_discovery_vectors(
                 protocol=protocol,
                 chain=chain,
                 protocol_params={
-                    "currency0": ctx.usdc,
-                    "currency1": ctx.weth,
+                    "currency0": stable,
+                    "currency1": wrapped_native,
                     "fee": _SYNTHETIC_FEE_TIER,
                     "tick_spacing": _SYNTHETIC_TICK_SPACING,
                 },

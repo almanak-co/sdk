@@ -149,7 +149,10 @@ EXPECTED_LP_POSITION_MANAGERS: dict[str, dict[str, str]] = {
     },
     "xlayer": {"uniswap_v3": "0x315e413A11AB0df498eF83873012430ca36638Ae"},
     "zerog": {"uniswap_v3": "0x8F67A30Ed186e3E1f6504c6dE3239Ef43A2e0d72"},
-    "robinhood": {"uniswap_v3": "0x73991a25C818Bf1f1128dEAaB1492D45638DE0D3"},
+    "robinhood": {
+        "uniswap_v3": "0x73991a25C818Bf1f1128dEAaB1492D45638DE0D3",
+        "uniswap_v4": "0x58daec3116aae6D93017bAAea7749052E8a04fA7",
+    },
 }
 
 EXPECTED_SWAP_QUOTER_ADDRESSES: dict[str, dict[str, str]] = {
