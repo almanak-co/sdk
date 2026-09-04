@@ -77,27 +77,14 @@ from almanak.framework.data.timeframes import (
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Retry policy (VIB-3447 + VIB-3802)
-# ---------------------------------------------------------------------------
-
-# Max additional attempts beyond the first for the primary DEX provider.
-# Total attempts = 1 + _MAX_PRIMARY_RETRIES.
+# Additional attempts beyond the first for the primary DEX provider.
 _MAX_PRIMARY_RETRIES = 2
 _RETRY_BASE_DELAY = 0.25  # seconds
 _RETRY_MAX_DELAY = 2.0  # seconds cap (default full-jitter backoff)
 
-# Cap on upstream-advised retry delay (RetryInfo). Adversarial or misconfigured
-# upstreams can return very long delays; we honor the advice but cap so a
-# single retry can never stretch beyond the framework's iteration budget.
-# Values longer than this are breaker territory, not retry territory — that's
-# what VIB-3803's exposure-aware breaker is for.
+# Upstream advice cannot extend a retry beyond the iteration's latency budget.
 _UPSTREAM_RETRY_MAX_DELAY = 5.0  # seconds
 
-# Legacy substring heuristic. VIB-3802 prefers typed exceptions
-# (DataSourceRateLimited / DataSourceTimeout / DataSourceUnavailable populated
-# from RetryInfo), but we keep this as a fallback for paths that haven't been
-# migrated to the typed-error contract yet.
 _TRANSIENT_ERROR_HINTS: frozenset[str] = frozenset(
     [
         "statuscode.internal",
@@ -149,7 +136,7 @@ def _is_retryable_exc(exc: Exception) -> bool:
     return any(hint in s for hint in _TRANSIENT_ERROR_HINTS)
 
 
-# Back-compat alias — external callers still import the legacy name.
+# External callers still import the legacy name.
 _is_transient_exc = _is_retryable_exc
 
 
@@ -192,9 +179,7 @@ def _backoff_delay(attempt: int) -> float:
     return random.uniform(0, cap)
 
 
-# DEX-side providers that get bounded retries on transient failures.
-# CEX providers (binance, coingecko) are excluded: their failures are almost
-# always deterministic ("unknown token"), so retrying wastes latency budget.
+# DEX providers get bounded transient retries; CEX misses are generally deterministic.
 _RETRYABLE_PROVIDERS: frozenset[str] = frozenset(["coingecko_onchain", "defillama", "coingecko_dex"])
 
 
@@ -213,11 +198,6 @@ def _error_text(exc: Exception | None) -> str:
     return str(exc)
 
 
-# ---------------------------------------------------------------------------
-# CEX/DEX classification
-# ---------------------------------------------------------------------------
-
-# All base symbols that have a known CEX mapping (for any exchange)
 _CEX_KNOWN_BASES: frozenset[str] = frozenset(base for (_exchange, base, _quote) in CEX_SYMBOL_MAP)
 
 
@@ -254,9 +234,7 @@ def classify_instrument(
     return "defi_primary"
 
 
-# Quotes the venue index is denominated in. A perp venue publishes one plane per
-# market, quoted in USD; `resolve_instrument` may spell that USD, USDC, or a
-# bridged stablecoin depending on how the caller asked.
+# Venue indexes are USD-denominated; resolution may spell that as a supported stablecoin.
 _VENUE_NATIVE_QUOTES = frozenset({"USD", "USDC", "USDT", "DAI", "USDC.E", "USDT.E", "DAI.E"})
 
 
@@ -295,31 +273,10 @@ def venue_native_owns(
     return not quote or quote in _VENUE_NATIVE_QUOTES
 
 
-# Provider chain ordering per classification.
-#
-# INVARIANT (VIB-4847): every name here MUST be registered by the OHLCV
-# factory. A name listed but never constructed is a "phantom tier" — the
-# router walks past it on every miss and the chain silently degrades to one
-# fewer provider than advertised. ``assert_provider_chains_registered`` (in
-# ``factory.py``) enforces this at build time + in unit tests. If a provider
-# is intentionally not-yet-wired, REMOVE it from the chain rather than leaving
-# it dangling.
-#
-# ``defillama`` was removed here (VIB-4847) because no gateway-backed DeFi
-# Llama OHLCV provider exists yet (tracked on VIB-3448). When that provider
-# ships, re-add it to both chains AND register it in the factory in the same
-# change so the invariant stays satisfied.
-# ``venue_native`` deliberately has NO fallback tier. Falling GMX -> Binance on
-# a miss would silently swap the basis: the strategy would decide on a CEX price
-# while its position is marked and liquidated against the venue index. That is
-# "two answers to one question" re-created inside the fix for it, and it is
-# invisible in the result — the call still returns a plausible number.
-#
-# The correct resilience for this lane is host failover *within* the venue
-# (several API hosts on separate failure domains), which belongs gateway-side
-# where the egress lives. Until that ships, this lane fails loudly, and a
-# strategist who prefers availability over basis integrity says so explicitly
-# with ``ohlcv_source`` (see ``venue_context``).
+# Every listed provider must be registered by the factory; an unwired tier silently
+# shortens its chain. Venue-native routing deliberately has no cross-basis fallback:
+# decisions and liquidation marks must use the same venue index. Resilience belongs
+# within that venue; choosing another basis requires an explicit source policy.
 _PROVIDER_CHAINS: dict[str, list[str]] = {
     VENUE_NATIVE_PROVIDER: [VENUE_NATIVE_PROVIDER],
     "cex_primary": ["binance", "coingecko"],
@@ -344,70 +301,26 @@ def provider_names_in_chains() -> set[str]:
     return {name for label, chain in _PROVIDER_CHAINS.items() if label != VENUE_NATIVE_PROVIDER for name in chain}
 
 
-# ---------------------------------------------------------------------------
-# Disk cache for finalized candles
-# ---------------------------------------------------------------------------
-
-# Candles older than this are considered finalized and cached immutably
+# Only candles older than this threshold are cached as immutable history.
 _FINALIZATION_AGE = timedelta(hours=24)
 
-# ---------------------------------------------------------------------------
-# Upstream-staleness guard (ALM-2697)
-# ---------------------------------------------------------------------------
-#
-# Without this guard, a CEX upstream that has silently stopped returning fresh
-# data — e.g. Binance after the MATIC -> POL ticker rebrand still answering
-# `MATICUSDT` requests with last-month klines — will hand back a fully populated
-# response. ``_split_by_finality`` then classifies *every* candle as "finalized"
-# (because they are all >24h old), the disk cache writes them, and on every
-# subsequent iteration the router serves the same byte-identical bag. RSI on a
-# 5-minute timeframe ends up frozen forever.
-#
-# We treat a fetch as stale when the youngest candle's *start-time* (i.e. the
-# candle's ``timestamp`` field — see ``OHLCVCandle``) is more than
-# ``_STALE_TIMEFRAME_MULTIPLE * timeframe`` behind wall-clock. Start-time is a
-# stricter signal than close-time (a candle's close-time is start-time +
-# timeframe), so any check that passes start-time also passes close-time —
-# this is intentional safety margin, not a bug. Two timeframes is generous
-# enough to absorb upstream propagation delay and weekend gaps on longer
-# intervals, while still catching "MATICUSDT hasn't traded in 2+ days but
-# Binance is happy to keep echoing 5m klines from June".
-#
-# How many full timeframes the youngest candle may lag wall-clock before the
-# upstream is judged stale. Two is the smallest value that doesn't false-alarm
-# on a normal 5m fetch where the most recent in-progress candle hasn't closed
-# yet (lag < 1 timeframe) and the previous closed candle is still <2 timeframes
-# old. Three+ would let a >10-minute outage slide on 5m, which is the regime
-# where RSI stops moving.
+# Reject fully populated but outdated responses before they become immutable cache
+# entries. Lag is measured from candle start time, intentionally stricter than close
+# time; two intervals allow an in-progress candle without masking a feed outage.
 _STALE_TIMEFRAME_MULTIPLE = 2
 
-# Floor on the staleness budget. For ``1m`` this would otherwise be only 120s,
-# which is too tight given upstream propagation jitter on a healthy feed. We
-# never claim a feed is stale until at least this many seconds have passed
-# since the youngest candle.
+# Short intervals need a floor to absorb healthy upstream propagation jitter.
 _STALE_MIN_BUDGET = timedelta(seconds=300)
 
-# VIB-4875: on-chain DEX OHLCV sources where "no trade in an interval" is the
-# *correct* representation of a quiet market — not a dead feed. For a quiet
-# pool the newest real candle legitimately lags wall-clock (CoinGecko Onchain only
-# emits a bucket when a swap occurs, and ``include_empty_intervals`` backfills
-# only *interior* gaps, never past the last trade). For these sources we (1)
-# forward-fill flat candles up to the current bucket so indicators get a
-# continuous, current series, and (2) apply a relaxed staleness budget that
-# doubles as the "dead pool" horizon. CEX sources (binance/coingecko) are
-# deliberately excluded — there, a stale response means a dead/rebranded ticker
-# (the ALM-2697 case) and must still be rejected on the strict budget.
+# These DEX sources omit trailing buckets when no swap occurs. They receive flat
+# forward-filled candles and a relaxed dead-pool horizon; CEX sources retain the
+# strict budget because their stale tape indicates a broken or renamed market.
 _DEX_QUIET_POOL_PROVIDERS = frozenset({"coingecko_onchain"})
 
-# Relaxed staleness multiple for DEX quiet-pool sources. This is the dead-pool
-# horizon: a DEX pool with no trade for more than ``_DEX_STALE_TIMEFRAME_MULTIPLE``
-# timeframes is presumed dead/illiquid and is NOT forward-filled (the staleness
-# guard then rejects it). It also bounds the number of synthetic forward-fill
-# candles to at most this many. 24x the timeframe (e.g. 24h on 1h, 24m on 1m).
+# This both defines the dead-pool horizon and bounds synthetic candle count.
 _DEX_STALE_TIMEFRAME_MULTIPLE = 24
 
-# Confidence ceiling stamped on a response that carries synthetic forward-filled
-# candles — lower than a live trade, mirroring the CEX/DEX basis-risk haircut.
+# Synthetic no-trade candles must not carry live-trade confidence.
 _DEX_FORWARD_FILL_CONFIDENCE = 0.6
 
 
@@ -488,7 +401,6 @@ class _OHLCVDiskCache:
             return None
         try:
             raw = json.loads(path.read_text())
-            # Validate checksum
             payload = raw.get("candles", [])
             stored_checksum = raw.get("checksum", "")
             computed = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
@@ -529,11 +441,6 @@ class _OHLCVDiskCache:
         path.unlink(missing_ok=True)
 
 
-# ---------------------------------------------------------------------------
-# OHLCV Router
-# ---------------------------------------------------------------------------
-
-
 @dataclass
 class OHLCVRouter:
     """Routes OHLCV requests to providers with CEX/DEX classification.
@@ -549,9 +456,7 @@ class OHLCVRouter:
 
     default_chain: str = DEFAULT_CHAIN
     disk_cache_dir: Path | None = None
-    # The strategy's resolved OHLCV source policy (ALM-3148). ``None`` for
-    # callers with no strategy context — dashboard, ad-hoc tooling, tests —
-    # which keeps classification and routing exactly as they were.
+    # Without strategy context, classification retains the default routing basis.
     source_policy: OHLCVSourcePolicy | None = None
     _providers: dict[str, DataProvider] = field(default_factory=dict, init=False, repr=False)
     _disk_cache: _OHLCVDiskCache = field(init=False, repr=False)
@@ -616,18 +521,11 @@ class OHLCVRouter:
         addr = (pool_address or "auto").lower()
         cache_source = force_provider or pinned
         if cache_source is None:
-            # Not pinned: the plane is venue-native only for an instrument this
-            # policy actually claims. An unclaimed leg of a perp strategy routes
-            # exactly as it did before.
+            # Only policy-owned instruments use the venue-native cache plane.
             claimed = venue_native_owns(instrument, self.source_policy, pool_address)
             if claimed:
-                # Name the VENUE and the MARKET, not just the lane. Keying on the
-                # literal "venue_native" would make GMX's ETH and a future
-                # Hyperliquid ETH share one entry on the same chain — one venue's
-                # index served for another's, which is the same basis swap one
-                # level down, and it would silently ignore the `ohlcv_venue` the
-                # strategist chose. The market is included because two markets on
-                # one venue can quote the same base.
+                # Venue and market both identify the price basis; the lane name alone
+                # would let distinct indexes share a cache entry.
                 assert self.source_policy is not None  # narrowed by `claimed`
                 policy = self.source_policy
                 market = policy.market_for(instrument.base, instrument.chain) or "?"
@@ -1019,17 +917,12 @@ class OHLCVRouter:
             resolve_instrument(token, target_chain, quote=quote) if not isinstance(token, Instrument) else token
         )
 
-        # Determine provider chain. Resolution order mirrors the timeframe
-        # ladder (MarketSnapshot._resolve_timeframe): explicit call argument >
-        # strategy config > framework default.
+        # Per-call override takes precedence over strategy policy and classification.
         pinned = self.source_policy.pinned_provider() if self.source_policy is not None else None
         if force_provider:
             provider_chain = [force_provider]
         elif pinned:
-            # The strategist pinned a source for this strategy (e.g. "use
-            # Binance for my GMX strategy"). That has to apply to every
-            # instrument to be worth having — honouring it only for
-            # CEX-classified bases would silently serve two different planes.
+            # A strategy pin owns every instrument; partial application would mix bases.
             provider_chain = [pinned]
             logger.debug(
                 "ohlcv_source_pinned instrument=%s provider=%s",
@@ -1046,11 +939,6 @@ class OHLCVRouter:
                 provider_chain,
             )
 
-        # Disk cache lookup, with the ALM-2697 staleness guard baked in. Returns
-        # a DataEnvelope on a fresh cache hit; otherwise the cache is missing,
-        # too short, or stale (and has been evicted) and we fall through to the
-        # provider chain. The key names the routed *plane*, not just the
-        # instrument — see `_disk_cache_key` for why that is load-bearing.
         disk_key = self._disk_cache_key(
             instrument, target_chain, timeframe, limit, pool_address, force_provider, pinned
         )
@@ -1058,13 +946,6 @@ class OHLCVRouter:
         if (cache_hit := self._consume_disk_cache(disk_key, limit, timeframe, now)) is not None:
             return cache_hit
 
-        # Try each provider in chain.
-        # - primary_provider_name / primary_error: tracks the terminal (most recent)
-        #   failure of the first retryable DEX provider attempted. Updated on every
-        #   failure of that same provider so the final error reflects its actual last
-        #   known state rather than a stale transient from an early retry.
-        # - last_error: most recent failure across all providers (often the futile
-        #   CEX "unknown token" fallback). Both are used to compose the raised DSU.
         primary_provider_name: str | None = None
         primary_error: Exception | None = None
         last_error: Exception | None = None
@@ -1073,8 +954,6 @@ class OHLCVRouter:
             provider = self._providers.get(provider_name)
             if provider is None:
                 if last_error is None:
-                    # Record a sentinel so that if every provider is unregistered
-                    # the final error message is informative rather than "None".
                     last_error = DataSourceUnavailable(
                         source=provider_name,
                         reason=f"{provider_name} provider is not registered",
@@ -1082,13 +961,9 @@ class OHLCVRouter:
                 logger.debug("ohlcv_provider_not_registered provider=%s", provider_name)
                 continue
 
-            # Give DEX providers bounded retries; CEX paths get one attempt only
-            # because their failures are almost always deterministic (no symbol).
+            # DEX providers receive the bounded retry budget; CEX misses get one attempt.
             max_attempts = (1 + _MAX_PRIMARY_RETRIES) if provider_name in _RETRYABLE_PROVIDERS else 1
 
-            # Tracks the exception from the most recent failed attempt against
-            # this provider, so the next iteration's backoff can honor any
-            # upstream-advised RetryInfo (VIB-3802).
             last_provider_exc: Exception | None = None
 
             for attempt in range(max_attempts):
@@ -1120,24 +995,14 @@ class OHLCVRouter:
                             primary_provider_name, primary_error, provider_name, miss
                         )
                         logger.debug("ohlcv_empty_result provider=%s", provider_name)
-                        break  # treat empty result as a provider miss, skip to next
+                        break
 
                     now = datetime.now(UTC)
 
-                    # VIB-4875: quiet-pool trailing-edge forward-fill for DEX
-                    # sources, applied BEFORE the staleness guard so a quiet
-                    # (but live) pool yields a continuous, current series rather
-                    # than a false "stale upstream" miss. `limit` is honored
-                    # (it is a maximum) inside the helper.
                     candles, n_synth = self._forward_fill_and_trim(
                         candles, provider_name, timeframe, instrument, now, limit
                     )
 
-                    # ALM-2697: upstream-staleness guard. Stale response →
-                    # provider miss; never cached, never returned. DEX sources
-                    # use the relaxed dead-pool budget (VIB-4875). The helper
-                    # logs the structured warning; we just record the miss and
-                    # break out to the next provider.
                     if (
                         stale_miss := self._build_stale_response_miss(
                             candles,
@@ -1153,7 +1018,7 @@ class OHLCVRouter:
                         primary_provider_name, primary_error = self._record_miss(
                             primary_provider_name, primary_error, provider_name, stale_miss
                         )
-                        break  # fall through to next provider in the chain
+                        break
 
                     return self._build_success_envelope(
                         candles=candles,
@@ -1176,7 +1041,6 @@ class OHLCVRouter:
 
                     elapsed = int((time.monotonic() - start) * 1000)
 
-                    # Retry on transient errors if we have attempts left
                     if attempt < max_attempts - 1 and _is_retryable_exc(exc):
                         logger.warning(
                             "ohlcv_retry_scheduled provider=%s instrument=%s attempt=%d/%d error=%s elapsed_ms=%d",
@@ -1187,7 +1051,7 @@ class OHLCVRouter:
                             exc,
                             elapsed,
                         )
-                        continue  # retry this provider
+                        continue
 
                     logger.warning(
                         "ohlcv_provider_failed provider=%s instrument=%s attempt=%d/%d error=%s elapsed_ms=%d",
@@ -1198,28 +1062,11 @@ class OHLCVRouter:
                         exc,
                         elapsed,
                     )
-                    break  # move to next provider
+                    break
 
-        # Wrapped token proxy fallback: if all providers failed and the
-        # token has a known unwrapped equivalent, retry with the proxy.
-        #
-        # ALM-3148: NOT from the venue-native lane. The retry re-enters
-        # classification from scratch with the unwrapped base, and if the policy
-        # does not also claim that spelling the request lands on Binance — which
-        # is precisely the CEX fallback `_PROVIDER_CHAINS` refuses to give this
-        # lane, arriving through the back door and without the DeFi confidence
-        # haircut. The trigger is not an outage: this lane runs the strict
-        # staleness budget, so ordinary upstream lag is recorded as a provider
-        # miss, the single-entry chain exhausts, and the proxy retry serves a CEX
-        # tape while the position marks and liquidates against the venue index.
-        #
-        # Scoped to the classification-derived chain, which is the only one the
-        # recursion can lose: `force_provider` is threaded through the retry and
-        # `pinned` is a strategy-level policy read that resolves identically for
-        # the proxy symbol, so neither retry can land anywhere the first attempt
-        # would not have. Blocking those refused a fallback that was never able
-        # to leave the lane — a guard is not free, and one that fires outside
-        # the case it reasons about just breaks a working path.
+        # Proxy recursion must not escape a claims-derived venue lane into a CEX
+        # basis. Forced and pinned sources remain safe because the retry preserves
+        # those selections exactly.
         lane_is_claims_derived = (
             not force_provider and not pinned and venue_native_owns(instrument, self.source_policy, pool_address)
         )
@@ -1235,11 +1082,8 @@ class OHLCVRouter:
         ):
             return proxy_envelope
 
-        # Lead with the primary (DEX) error so logs point at the actionable
-        # cause, not the trailing CEX "unknown token" from a known-futile path.
-        # Use _error_text() to extract raw reason text instead of str(exc) so
-        # DSU boilerplate ("Data source '...' unavailable:") is never re-embedded
-        # into the composed reason, which would confuse downstream hint matching.
+        # Preserve the actionable DEX failure without reintroducing retry hints
+        # from exception boilerplate.
         if primary_error is not None and primary_error is not last_error:
             reason = (
                 f"All providers failed for {instrument.pair} on {target_chain}"
@@ -1323,9 +1167,7 @@ def _is_upstream_stale(
     if not candles:
         return False, None
 
-    # Candles are produced in ascending order by every provider in this
-    # codebase; defend against sloppy upstreams by taking the explicit max
-    # rather than trusting [-1].
+    # Do not trust provider ordering for this correctness check.
     youngest = max(candle.timestamp for candle in candles)
     lag = now - youngest
     return lag > _staleness_budget(timeframe, is_dex=is_dex), lag
@@ -1368,12 +1210,10 @@ def _forward_fill_dex_candles(
     youngest = max(candles, key=lambda c: c.timestamp)
     gap = now - youngest.timestamp
 
-    # Already current (the in-progress / just-closed bucket is present), or so
-    # stale the pool is presumed dead — in both cases, no forward-fill.
+    # Never synthesize beyond the dead-pool horizon.
     if gap <= step or gap > _staleness_budget(timeframe, is_dex=True):
         return candles, 0
 
-    # Fill up to the current wall-clock bucket start (floor(now / tf)).
     current_bucket = datetime.fromtimestamp((int(now.timestamp()) // tf_seconds) * tf_seconds, tz=UTC)
     last_close = youngest.close
     synthetic: list[OHLCVCandle] = []
@@ -1395,10 +1235,6 @@ def _forward_fill_dex_candles(
         return candles, 0
     return candles + synthetic, len(synthetic)
 
-
-# =============================================================================
-# Exports
-# =============================================================================
 
 __all__ = [
     "OHLCVRouter",
