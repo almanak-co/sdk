@@ -8,7 +8,6 @@ mirroring the cli/run.py Phase 4 refactor pattern.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
@@ -652,8 +651,3 @@ def render_single_session_status(strategy: str) -> None:
         return
 
     render_fallback_state(strategy, state)
-
-
-def utc_now() -> datetime:
-    """Indirection for `datetime.now(UTC)` so tests can patch it cleanly."""
-    return datetime.now(UTC)

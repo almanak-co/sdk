@@ -212,14 +212,6 @@ def _resolve_backtest_token(ref: str, chain: str) -> ResolvedToken | None:
         return None
 
 
-def _display_symbol_for_ref(ref: str, chain: str) -> str:
-    resolved = _resolve_backtest_token(ref, chain)
-    if resolved is not None:
-        return resolved.symbol.upper()
-    cleaned = ref.strip()
-    return cleaned.lower() if cleaned.lower().startswith("0x") else cleaned
-
-
 def normalize_backtest_token_refs(token_refs: Iterable[str], chain: str) -> list[TokenRef]:
     """Normalize refs while preserving exact-contract chain identity.
 

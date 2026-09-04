@@ -41,7 +41,6 @@ import logging
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -506,13 +505,3 @@ def repair_teardown_lp_close(
         result.backup_path,
     )
     return result
-
-
-def _value_decimal(value_usd: str) -> Decimal | None:
-    """Parse a value_usd string to Decimal (None on empty/malformed)."""
-    if not value_usd:
-        return None
-    try:
-        return Decimal(value_usd)
-    except (ValueError, ArithmeticError):
-        return None

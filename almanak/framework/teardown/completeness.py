@@ -526,14 +526,6 @@ def _intent_type(intent: Any) -> str:
     return str(getattr(itype, "value", itype)).upper().split(".")[-1]
 
 
-def _attr_str(intent: Any, name: str) -> str | None:
-    """A string intent attribute, upper-cased; ``None`` when absent/empty."""
-    value = _field(intent, name)
-    if value is None or value == "":
-        return None
-    return str(value).upper()
-
-
 def _chain_compatible(position: PositionInfo, intent: Any) -> bool:
     """True unless BOTH carry a chain and they differ.
 

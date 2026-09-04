@@ -723,29 +723,6 @@ class CompilerQueries:
         # stablecoin peg, so this cannot reintroduce symbol-authorized pegs.
         return self._host._require_token_price(token.symbol)
 
-    def _price_from_address_keys(self, token: TokenInfo) -> Decimal | None:
-        """Oracle price under ``chain:0xaddr`` / bare-address keys, else ``None``.
-
-        Natives are skipped: their ``address`` is a placeholder sentinel,
-        and native prices are warmed under symbol keys. A zero price is
-        treated as a miss so the symbol path keeps ownership of the
-        fail-closed zero/missing error shape.
-        """
-        address = getattr(token, "address", None)
-        if not self._host.price_oracle or not address or getattr(token, "is_native", False):
-            return None
-        if not str(address).strip():
-            return None
-        from almanak.framework.market.price_store import lookup_price
-
-        found = lookup_price(
-            self._host.price_oracle,
-            chain=getattr(self._host, "chain", None),
-            address=str(address),
-            infer_symbol_from_address=False,
-        )
-        return found.price if found is not None and found.price != 0 else None
-
     def require_token_price(self, symbol: str) -> Decimal:
         """Look up a token price, failing fast on missing or zero prices.
 

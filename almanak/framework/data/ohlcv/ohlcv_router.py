@@ -346,18 +346,6 @@ def _resolve_cache_dir() -> Path:
 _DEFAULT_CACHE_DIR = _resolve_cache_dir()
 
 
-@dataclass(frozen=True)
-class _CachedCandle:
-    """Serializable candle representation for disk cache."""
-
-    timestamp_iso: str
-    open: str
-    high: str
-    low: str
-    close: str
-    volume: str | None
-
-
 def _candle_to_dict(candle: OHLCVCandle) -> dict[str, Any]:
     return {
         "timestamp": candle.timestamp.isoformat(),
