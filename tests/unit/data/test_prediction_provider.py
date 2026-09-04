@@ -32,9 +32,7 @@ from almanak.connectors.polymarket.models import (
     PriceHistory as ClobPriceHistory,
 )
 
-# VIB-4989: the provider class lives in the connector now; the neutral result
-# dataclasses stay in the framework. Importing the class here gives the relocated
-# connector copy real execution coverage (CRAP gate).
+# Conversion stays with connector models; neutral result types remain framework-owned.
 from almanak.connectors.polymarket.prediction_provider import (
     PredictionMarketDataProvider,
     to_historical_price,
@@ -49,10 +47,6 @@ from almanak.framework.data.prediction_provider import (
     PredictionOrder,
     PriceHistory,
 )
-
-# =============================================================================
-# Fixtures
-# =============================================================================
 
 
 @pytest.fixture
@@ -98,12 +92,12 @@ def mock_orderbook() -> OrderBook:
         bids=[
             PriceLevel(price=Decimal("0.62"), size=Decimal("5000")),
             PriceLevel(price=Decimal("0.63"), size=Decimal("2500")),
-            PriceLevel(price=Decimal("0.64"), size=Decimal("1000")),  # best bid
+            PriceLevel(price=Decimal("0.64"), size=Decimal("1000")),
         ],
         asks=[
             PriceLevel(price=Decimal("0.68"), size=Decimal("4500")),
             PriceLevel(price=Decimal("0.67"), size=Decimal("3000")),
-            PriceLevel(price=Decimal("0.66"), size=Decimal("1500")),  # best ask
+            PriceLevel(price=Decimal("0.66"), size=Decimal("1500")),
         ],
         hash="0xabc123",
     )
@@ -120,7 +114,7 @@ def mock_position() -> Position:
         size=Decimal("100"),
         avg_price=Decimal("0.50"),
         current_price=Decimal("0.65"),
-        unrealized_pnl=Decimal("15"),  # (0.65 - 0.50) * 100
+        unrealized_pnl=Decimal("15"),
         realized_pnl=Decimal("0"),
     )
 
@@ -158,11 +152,6 @@ def provider(mock_clob_client) -> PredictionMarketDataProvider:
     return PredictionMarketDataProvider(mock_clob_client, cache_ttl=5)
 
 
-# =============================================================================
-# PredictionMarket Tests
-# =============================================================================
-
-
 class TestPredictionMarket:
     """Tests for PredictionMarket model."""
 
@@ -178,7 +167,7 @@ class TestPredictionMarket:
         assert market.no_price == Decimal("0.35")
         assert market.yes_token_id is not None
         assert market.no_token_id is not None
-        assert market.spread == Decimal("0.02")  # 0.66 - 0.64
+        assert market.spread == Decimal("0.02")
         assert market.volume_24h == Decimal("125000")
         assert market.liquidity == Decimal("50000")
         assert market.is_active is True
@@ -219,11 +208,6 @@ class TestPredictionMarket:
         assert data["is_resolved"] is False
 
 
-# =============================================================================
-# PredictionPosition Tests
-# =============================================================================
-
-
 class TestPredictionPosition:
     """Tests for PredictionPosition model."""
 
@@ -241,7 +225,7 @@ class TestPredictionPosition:
     def test_value_property(self, mock_position):
         """Test position value calculation."""
         pos = to_prediction_position(mock_position)
-        assert pos.value == Decimal("65")  # 100 * 0.65
+        assert pos.value == Decimal("65")
 
     def test_to_dict(self, mock_position):
         """Test converting PredictionPosition to dictionary."""
@@ -253,11 +237,6 @@ class TestPredictionPosition:
         assert data["size"] == "100"
         assert Decimal(data["value"]) == Decimal("65")
         assert data["unrealized_pnl"] == "15"
-
-
-# =============================================================================
-# PredictionOrder Tests
-# =============================================================================
 
 
 class TestPredictionOrder:
@@ -299,11 +278,6 @@ class TestPredictionOrder:
         assert data["remaining_size"] == "70"
 
 
-# =============================================================================
-# PredictionMarketDataProvider Tests
-# =============================================================================
-
-
 class TestPredictionMarketDataProvider:
     """Tests for PredictionMarketDataProvider."""
 
@@ -331,13 +305,10 @@ class TestPredictionMarketDataProvider:
 
     def test_get_market_caching(self, provider):
         """Test that market data is cached."""
-        # First call
         market1 = provider.get_market("12345")
-        # Second call (should use cache)
         market2 = provider.get_market("12345")
 
         assert market1.market_id == market2.market_id
-        # Client should only be called once due to caching
         assert provider.client.get_market.call_count == 1
 
     def test_get_price_yes(self, provider):
@@ -361,7 +332,6 @@ class TestPredictionMarketDataProvider:
 
     def test_get_orderbook_no_token_id(self, provider, mock_gamma_market):
         """Test error when token ID not found."""
-        # Create market with missing token IDs
         mock_gamma_market.clob_token_ids = []
         provider.client.get_market.return_value = mock_gamma_market
 
@@ -371,7 +341,7 @@ class TestPredictionMarketDataProvider:
     def test_get_spread(self, provider):
         """Test getting bid-ask spread."""
         spread = provider.get_spread("12345", "YES")
-        assert spread == Decimal("0.02")  # 0.66 - 0.64
+        assert spread == Decimal("0.02")
 
     def test_get_volume_24h(self, provider):
         """Test getting 24h volume."""
@@ -424,7 +394,7 @@ class TestPredictionMarketDataProvider:
     def test_get_position_value(self, provider, mock_position):
         """Test getting total position value."""
         value = provider.get_position_value("12345")
-        assert value == Decimal("65")  # 100 * 0.65
+        assert value == Decimal("65")
 
     def test_get_open_orders(self, provider, mock_gamma_market, mock_open_order):
         """Test fetching open orders."""
@@ -438,7 +408,6 @@ class TestPredictionMarketDataProvider:
 
     def test_get_open_orders_filters_by_market(self, provider, mock_gamma_market):
         """Test that orders are filtered by market token IDs."""
-        # Create an order for a different market
         other_order = OpenOrder(
             order_id="other123",
             market="different_token_id",
@@ -452,7 +421,7 @@ class TestPredictionMarketDataProvider:
         provider.client.get_open_orders.return_value = [other_order]
 
         orders = provider.get_open_orders("12345")
-        assert len(orders) == 0  # Should filter out non-matching market
+        assert len(orders) == 0
 
     def test_get_open_orders_without_market_context_resolves_outcome(
         self, provider, mock_gamma_market, mock_open_order
@@ -462,28 +431,24 @@ class TestPredictionMarketDataProvider:
         # which calls get_market_by_token_id, which calls client.get_markets
         provider.client.get_markets.return_value = [mock_gamma_market]
 
-        orders = provider.get_open_orders()  # No market_id filter
+        orders = provider.get_open_orders()
 
         assert len(orders) == 1
-        # Outcome should be resolved via market lookup (token is YES token)
         assert orders[0].outcome == "YES"
         assert orders[0].order_id == "order123"
 
     def test_get_open_orders_without_market_context_no_outcome(self, provider, mock_open_order):
         """Test that outcome is None when market lookup fails."""
-        # Setup: get_markets returns empty list (token not found)
         provider.client.get_markets.return_value = []
 
-        orders = provider.get_open_orders()  # No market_id filter
+        orders = provider.get_open_orders()
 
         assert len(orders) == 1
-        # Outcome should be None since market lookup failed
         assert orders[0].outcome is None
         assert orders[0].order_id == "order123"
 
     def test_get_open_orders_market_context_yes_token(self, provider, mock_gamma_market):
         """Test YES outcome with market context."""
-        # Order for YES token
         yes_order = OpenOrder(
             order_id="yes_order",
             market=mock_gamma_market.clob_token_ids[0],  # YES token
@@ -503,7 +468,6 @@ class TestPredictionMarketDataProvider:
 
     def test_get_open_orders_market_context_no_token(self, provider, mock_gamma_market):
         """Test NO outcome with market context."""
-        # Order for NO token
         no_order = OpenOrder(
             order_id="no_order",
             market=mock_gamma_market.clob_token_ids[1],  # NO token
@@ -523,18 +487,11 @@ class TestPredictionMarketDataProvider:
 
     def test_clear_cache(self, provider):
         """Test clearing cache."""
-        # Populate cache
         provider.get_market("12345")
         assert len(provider._cache) > 0
 
-        # Clear cache
         provider.clear_cache()
         assert len(provider._cache) == 0
-
-
-# =============================================================================
-# Cache Tests
-# =============================================================================
 
 
 class TestProviderCaching:
@@ -546,11 +503,9 @@ class TestProviderCaching:
 
         from almanak.connectors.polymarket.prediction_provider import CacheEntry
 
-        # Create expired entry
         entry = CacheEntry(value="test", expires_at=time.time() - 1)
         assert entry.is_expired() is True
 
-        # Create valid entry
         entry = CacheEntry(value="test", expires_at=time.time() + 10)
         assert entry.is_expired() is False
 
@@ -560,7 +515,6 @@ class TestProviderCaching:
 
         from almanak.connectors.polymarket.prediction_provider import CacheEntry
 
-        # Set an expired entry
         provider._cache["test"] = CacheEntry(
             value="stale_data",
             expires_at=time.time() - 1,
@@ -568,7 +522,7 @@ class TestProviderCaching:
 
         result = provider._get_cached("test")
         assert result is None
-        assert "test" not in provider._cache  # Should be cleaned up
+        assert "test" not in provider._cache
 
     def test_set_cached_with_custom_ttl(self, provider):
         """Test setting cache with custom TTL."""
@@ -577,13 +531,8 @@ class TestProviderCaching:
         import time
 
         entry = provider._cache["test"]
-        # Should expire approximately 60 seconds from now
+        # The five-second margin avoids scheduler jitter in the TTL assertion.
         assert entry.expires_at > time.time() + 55
-
-
-# =============================================================================
-# Market Lookup by Token ID Tests
-# =============================================================================
 
 
 class TestGetMarketByTokenId:
@@ -635,42 +584,33 @@ class TestGetMarketByTokenId:
 
     def test_get_market_by_token_id_caching(self, provider, mock_gamma_market):
         """Test that market lookups are cached."""
-        # First call
         market1 = provider.get_market_by_token_id("yes_token_12345")
-        # Second call (should use cache)
         market2 = provider.get_market_by_token_id("yes_token_12345")
 
         assert market1 is not None
         assert market2 is not None
         assert market1.market_id == market2.market_id
-        # get_markets should only be called once
         assert provider.client.get_markets.call_count == 1
 
     def test_get_market_by_token_id_caches_both_tokens(self, provider, mock_gamma_market):
         """Test that finding by YES token also caches NO token."""
-        # Find by YES token
         provider.get_market_by_token_id("yes_token_12345")
 
-        # Finding by NO token should use cache
         market = provider.get_market_by_token_id("no_token_12345")
 
         assert market is not None
         assert market.market_id == "12345"
-        # get_markets should only be called once (first lookup cached both)
         assert provider.client.get_markets.call_count == 1
 
     def test_get_market_by_token_id_caches_negative_result(self, provider):
         """Test that failed lookups are cached."""
         provider.client.get_markets.return_value = []
 
-        # First call
         market1 = provider.get_market_by_token_id("unknown_token")
-        # Second call (should use cached negative result)
         market2 = provider.get_market_by_token_id("unknown_token")
 
         assert market1 is None
         assert market2 is None
-        # get_markets should only be called once
         assert provider.client.get_markets.call_count == 1
 
 
@@ -723,14 +663,11 @@ class TestResolveOutcomeFromTokenId:
 
     def test_resolve_outcome_caching(self, provider):
         """Test that outcome resolution uses cached market lookups."""
-        # First call
         outcome1 = provider._resolve_outcome_from_token_id("yes_token_12345")
-        # Second call (should use cache)
         outcome2 = provider._resolve_outcome_from_token_id("yes_token_12345")
 
         assert outcome1 == "YES"
         assert outcome2 == "YES"
-        # get_markets should only be called once
         assert provider.client.get_markets.call_count == 1
 
 
@@ -769,26 +706,18 @@ class TestPredictionOrderOutcomeNone:
         assert data["order_id"] == "123"
 
 
-# =============================================================================
-# Integration-style Tests
-# =============================================================================
-
-
 class TestProviderWorkflows:
     """Integration-style tests for common provider workflows."""
 
     def test_market_lookup_and_position_check(self, provider, mock_position):
         """Test typical workflow: lookup market and check position."""
-        # Get market data
         market = provider.get_market("12345")
         assert market.yes_price == Decimal("0.65")
 
-        # Check existing position
         position = provider.get_position("12345", outcome="YES")
         assert position is not None
         assert position.size == Decimal("100")
 
-        # Calculate current value and PnL
         assert position.value == Decimal("65")
         assert position.unrealized_pnl == Decimal("15")
 
@@ -796,11 +725,9 @@ class TestProviderWorkflows:
         """Test orderbook analysis workflow."""
         orderbook = provider.get_orderbook("12345", "YES")
 
-        # Check spread
         spread = orderbook.spread
         assert spread == Decimal("0.02")
 
-        # Check depth at each level
         total_bid_size = sum(level.size for level in orderbook.bids)
         total_ask_size = sum(level.size for level in orderbook.asks)
 
@@ -815,11 +742,6 @@ class TestProviderWorkflows:
         # Prices should sum to approximately 1.0 (may have small arbitrage opportunity)
         total = yes_price + no_price
         assert Decimal("0.95") <= total <= Decimal("1.05")
-
-
-# =============================================================================
-# Historical Data Models Tests
-# =============================================================================
 
 
 class TestHistoricalPrice:
@@ -882,10 +804,10 @@ class TestPriceHistory:
             prices=sample_prices,
         )
 
-        assert history.open_price == Decimal("0.50")  # First
-        assert history.close_price == Decimal("0.60")  # Last
-        assert history.high_price == Decimal("0.65")  # Max
-        assert history.low_price == Decimal("0.45")  # Min
+        assert history.open_price == Decimal("0.50")
+        assert history.close_price == Decimal("0.60")
+        assert history.high_price == Decimal("0.65")
+        assert history.low_price == Decimal("0.45")
 
     def test_price_change(self, sample_prices):
         """Test price change calculation."""
@@ -896,8 +818,8 @@ class TestPriceHistory:
             prices=sample_prices,
         )
 
-        assert history.price_change == Decimal("0.10")  # 0.60 - 0.50
-        assert history.price_change_pct == Decimal("20")  # 10% change
+        assert history.price_change == Decimal("0.10")
+        assert history.price_change_pct == Decimal("20")
 
     def test_empty_prices(self):
         """Test handling of empty price list."""
@@ -1006,7 +928,7 @@ class TestHistoricalTrade:
             timestamp=datetime(2025, 1, 15, 10, 30, tzinfo=UTC),
         )
 
-        assert trade.value == Decimal("65")  # 100 * 0.65
+        assert trade.value == Decimal("65")
 
     def test_to_dict(self):
         """Test converting HistoricalTrade to dictionary."""
@@ -1029,11 +951,6 @@ class TestHistoricalTrade:
         assert data["price"] == "0.65"
         assert data["size"] == "100"
         assert Decimal(data["value"]) == Decimal("65")
-
-
-# =============================================================================
-# Historical Data Provider Tests
-# =============================================================================
 
 
 class TestPredictionMarketDataProviderHistorical:
@@ -1151,7 +1068,7 @@ class TestPredictionMarketDataProviderHistorical:
             interval="1d",
         )
 
-        # Should use NO token ID
+        # NO history is keyed by the market's NO token ID.
         provider_with_history.client.get_price_history.assert_called_once()
         call_args = provider_with_history.client.get_price_history.call_args
         assert "token_id" in call_args.kwargs
@@ -1170,20 +1087,17 @@ class TestPredictionMarketDataProviderHistorical:
 
     def test_get_price_history_caching(self, provider_with_history):
         """Test that price history is cached."""
-        # First call
         provider_with_history.get_price_history(
             market_id_or_slug="12345",
             outcome="YES",
             interval="1d",
         )
-        # Second call (should use cache)
         provider_with_history.get_price_history(
             market_id_or_slug="12345",
             outcome="YES",
             interval="1d",
         )
 
-        # CLOB client should only be called once for history
         assert provider_with_history.client.get_price_history.call_count == 1
 
     def test_get_trade_tape(self, provider_with_history, mock_clob_trades):
@@ -1195,14 +1109,12 @@ class TestPredictionMarketDataProviderHistorical:
         )
 
         assert len(trades) == 2
-        # Should be sorted by timestamp descending
         assert trades[0].timestamp > trades[1].timestamp
         assert trades[0].id == "trade1"
         assert trades[0].outcome == "YES"
 
     def test_get_trade_tape_both_outcomes(self, provider_with_history, mock_gamma_market):
         """Test fetching trade tape for both outcomes."""
-        # Create separate trades for YES and NO
         yes_trade = ClobHistoricalTrade(
             id="yes_trade",
             token_id=mock_gamma_market.yes_token_id,
@@ -1233,7 +1145,6 @@ class TestPredictionMarketDataProviderHistorical:
             limit=100,
         )
 
-        # Should have trades from both outcomes
         assert len(trades) == 2
         outcomes = {t.outcome for t in trades}
         assert outcomes == {"YES", "NO"}
@@ -1251,7 +1162,6 @@ class TestPredictionMarketDataProviderHistorical:
 
     def test_get_trade_tape_limit(self, provider_with_history):
         """Test trade tape respects limit."""
-        # Create 5 trades
         many_trades = [
             ClobHistoricalTrade(
                 id=f"trade{i}",
@@ -1274,11 +1184,6 @@ class TestPredictionMarketDataProviderHistorical:
         assert len(trades) == 3
 
 
-# =============================================================================
-# Historical Data Workflow Tests
-# =============================================================================
-
-
 class TestHistoricalDataWorkflows:
     """Integration-style tests for historical data workflows."""
 
@@ -1289,7 +1194,6 @@ class TestHistoricalDataWorkflows:
         client.get_market.return_value = mock_gamma_market
         client.get_market_by_slug.return_value = mock_gamma_market
 
-        # Mock price history
         client.get_price_history.return_value = ClobPriceHistory(
             token_id="token_yes",
             interval="1d",
@@ -1311,7 +1215,6 @@ class TestHistoricalDataWorkflows:
             end_time=datetime(2025, 1, 15, 0, 0, tzinfo=UTC),
         )
 
-        # Mock trade tape
         client.get_trade_tape.return_value = [
             ClobHistoricalTrade(
                 id="trade1",
@@ -1341,13 +1244,11 @@ class TestHistoricalDataWorkflows:
             interval="1d",
         )
 
-        # Analyze trend
         assert history.open_price == Decimal("0.45")
         assert history.close_price == Decimal("0.65")
         assert history.price_change == Decimal("0.20")
-        assert history.price_change_pct > 0  # Positive trend
+        assert history.price_change_pct > 0
 
-        # Determine trend direction
         trend = "bullish" if history.price_change > 0 else "bearish"
         assert trend == "bullish"
 
@@ -1359,47 +1260,35 @@ class TestHistoricalDataWorkflows:
             limit=100,
         )
 
-        # Separate buys and sells
         buys = [t for t in trades if t.side == "BUY"]
         sells = [t for t in trades if t.side == "SELL"]
 
-        # Calculate volumes
         buy_volume = sum(t.value for t in buys)
         sell_volume = sum(t.value for t in sells)
 
         assert len(buys) == 1
         assert len(sells) == 1
-        assert buy_volume == Decimal("130")  # 200 * 0.65
-        assert sell_volume == Decimal("64")  # 100 * 0.64
+        assert buy_volume == Decimal("130")
+        assert sell_volume == Decimal("64")
 
-        # Buy pressure > sell pressure
         assert buy_volume > sell_volume
 
     def test_market_momentum_workflow(self, full_provider):
         """Test workflow: assess market momentum."""
-        # Get current price
         current_price = full_provider.get_price("12345", "YES")
 
-        # Get historical data
         history = full_provider.get_price_history(
             market_id_or_slug="12345",
             outcome="YES",
             interval="1d",
         )
 
-        # Compare current to historical range
         assert current_price == Decimal("0.65")
         assert history.high_price == Decimal("0.65")
         assert history.low_price == Decimal("0.45")
 
-        # Current is at the high - strong momentum
         is_at_high = current_price >= history.high_price
         assert is_at_high is True
-
-
-# =============================================================================
-# Correlation Tests
-# =============================================================================
 
 
 class TestCorrelationResult:
@@ -1509,7 +1398,6 @@ class TestMultiMarketCorrelation:
         """Create provider for correlation testing."""
         client = MagicMock()
 
-        # Return different markets based on ID
         def mock_get_market(market_id):
             if market_id == "12346":
                 return mock_related_market
@@ -1574,29 +1462,23 @@ class TestMultiMarketCorrelation:
             include_same_tags=True,
         )
 
-        # Should find markets for both "crypto" and "bitcoin" tags
         assert len(related) >= 1
 
     def test_get_related_markets_excludes_source(self, correlation_provider, mock_gamma_market_with_event):
         """Test that source market is excluded from related markets."""
-        # Include the source market in the results
         correlation_provider.client.get_markets.return_value = [mock_gamma_market_with_event]
 
         related = correlation_provider.get_related_markets("12345")
 
-        # Source market should not be in the results
         assert all(m.market_id != "12345" for m in related)
 
     def test_get_related_markets_caching(self, correlation_provider):
         """Test that related markets are cached."""
-        # First call - gets markets for event_id and 2 tags
         result1 = correlation_provider.get_related_markets("12345")
         initial_count = correlation_provider.client.get_markets.call_count
 
-        # Second call (should use cache)
         result2 = correlation_provider.get_related_markets("12345")
 
-        # Client calls should not increase on second call due to caching
         assert correlation_provider.client.get_markets.call_count == initial_count
         assert len(result1) == len(result2)
 
@@ -1611,19 +1493,15 @@ class TestMultiMarketCorrelation:
         """Test category filter with active_only."""
         correlation_provider.get_markets_by_category("crypto", active_only=True)
 
-        # Check that the filter was passed correctly
         call_args = correlation_provider.client.get_markets.call_args
         filters = call_args.args[0] if call_args.args else call_args.kwargs.get("filters")
         assert filters.active is True
 
     def test_get_markets_by_category_caching(self, correlation_provider):
         """Test that category results are cached."""
-        # First call
         correlation_provider.get_markets_by_category("crypto")
-        # Second call (should use cache)
         correlation_provider.get_markets_by_category("crypto")
 
-        # Client should only be called once
         assert correlation_provider.client.get_markets.call_count == 1
 
     def test_calculate_correlation(self, correlation_provider):
@@ -1639,26 +1517,22 @@ class TestMultiMarketCorrelation:
         assert isinstance(result, CorrelationResult)
         assert result.market_1_id == "12345"
         assert result.market_2_id == "12346"
-        # Both markets have same price trend so correlation should be high
+        # Matching trends provide a high-correlation oracle.
         assert result.correlation >= Decimal("0.9")
         assert result.sample_size == 5
         assert result.window_hours == 24
 
     def test_calculate_correlation_caching(self, correlation_provider):
         """Test that correlation results are cached."""
-        # First call - fetches price history for both markets
         correlation_provider.calculate_correlation("12345", "12346", 24)
         initial_count = correlation_provider.client.get_price_history.call_count
 
-        # Second call (should use cache)
         correlation_provider.calculate_correlation("12345", "12346", 24)
 
-        # Price history calls should not increase on second call due to caching
         assert correlation_provider.client.get_price_history.call_count == initial_count
 
     def test_calculate_correlation_insufficient_data(self, correlation_provider):
         """Test error when insufficient data for correlation."""
-        # Mock with only 2 data points
         correlation_provider.client.get_price_history.side_effect = lambda **kwargs: ClobPriceHistory(
             token_id="test",
             interval="1d",
@@ -1672,7 +1546,6 @@ class TestMultiMarketCorrelation:
             end_time=datetime(2025, 1, 14, 0, 0, tzinfo=UTC),
         )
 
-        # Clear cache first
         correlation_provider.clear_cache()
 
         with pytest.raises(ValueError, match="Insufficient overlapping data"):
@@ -1767,7 +1640,6 @@ class TestPearsonCorrelation:
         y = [3.0, 1.0, 4.0, 5.0, 2.0]
 
         corr, _ = provider._pearson_correlation(x, y)
-        # Should be close to 0 for uncorrelated data
         assert abs(corr) < 0.5
 
     def test_constant_series(self, provider):
@@ -1790,11 +1662,6 @@ class TestPearsonCorrelation:
         corr, p_value = provider._pearson_correlation([1.0], [2.0])
         assert corr == 0.0
         assert p_value is None
-
-
-# =============================================================================
-# Arbitrage Detection Tests
-# =============================================================================
 
 
 class TestArbitrageOpportunity:
@@ -1951,7 +1818,6 @@ class TestArbitrageDetection:
 
     def test_detect_yes_no_arbitrage_not_found(self, arb_provider):
         """Test when no arbitrage exists (YES + NO >= 1)."""
-        # Update orderbooks so there's no arb
         no_arb_yes_book = OrderBook(
             market="token_yes",
             asset_id="token_yes",
@@ -1980,7 +1846,6 @@ class TestArbitrageDetection:
 
     def test_detect_yes_no_arbitrage_confidence_high(self, arb_provider):
         """Test high confidence arbitrage (good profit, depth, spreads)."""
-        # Set up high confidence scenario
         high_conf_yes_book = OrderBook(
             market="token_yes",
             asset_id="token_yes",
@@ -2007,14 +1872,13 @@ class TestArbitrageDetection:
         opp = arb_provider.detect_yes_no_arbitrage("12345")
 
         assert opp is not None
-        assert opp.total_cost == Decimal("0.94")  # 0.47 + 0.47
-        assert opp.expected_profit == Decimal("0.06")  # 1.0 - 0.94
+        assert opp.total_cost == Decimal("0.94")
+        assert opp.expected_profit == Decimal("0.06")
         # Profit > 1%, depth >= 100, spreads <= 2% -> HIGH
         assert opp.confidence == "HIGH"
 
     def test_detect_yes_no_arbitrage_confidence_low(self, arb_provider):
         """Test low confidence arbitrage (small profit, limited depth)."""
-        # Set up low confidence scenario
         low_conf_yes_book = OrderBook(
             market="token_yes",
             asset_id="token_yes",
@@ -2050,7 +1914,7 @@ class TestArbitrageDetection:
             market="token_yes",
             asset_id="token_yes",
             bids=[PriceLevel(price=Decimal("0.50"), size=Decimal("100"))],
-            asks=[],  # No asks
+            asks=[],
             hash="0xyes",
         )
 
@@ -2075,8 +1939,6 @@ class TestArbitrageDetection:
         opp = arb_provider.detect_yes_no_arbitrage("12345")
 
         assert opp is not None
-        # Profit = 1 - 0.96 = 0.04
-        # Profit % = 0.04 / 0.96 * 100 = 4.166...%
         assert opp.expected_profit == Decimal("0.04")
         expected_pct = (Decimal("0.04") / Decimal("0.96")) * Decimal("100")
         assert abs(opp.expected_profit_pct - expected_pct) < Decimal("0.01")
@@ -2090,7 +1952,6 @@ class TestCrossMarketArbitrage:
         """Create provider with multiple markets for testing."""
         client = MagicMock()
 
-        # Create markets with different arb opportunities
         markets = {
             "market1": GammaMarket(
                 id="market1",
@@ -2141,7 +2002,6 @@ class TestCrossMarketArbitrage:
 
         client.get_market.side_effect = mock_get_market
 
-        # Create orderbooks with varying arb opportunities
         orderbooks = {
             "m1_yes": OrderBook(
                 market="m1_yes",
@@ -2202,15 +2062,12 @@ class TestCrossMarketArbitrage:
             min_profit_pct=Decimal("0"),
         )
 
-        # Market1: 0.45 + 0.45 = 0.90 -> 10% profit
-        # Market2: 0.50 + 0.50 = 1.00 -> 0% profit (no arb, exact 1.00)
-        # Market3: 0.55 + 0.50 = 1.05 -> no arb
-        assert len(opps) == 1  # Only market1 has arb
+        # Only market1's 0.90 combined ask cost is below the 1.00 arbitrage boundary.
+        assert len(opps) == 1
         assert opps[0].market_id == "market1"
 
     def test_detect_cross_market_arbitrage_min_profit_filter(self, multi_market_provider):
         """Test filtering by minimum profit percentage."""
-        # First, fix market2 to have a small arb
         multi_market_provider.client.get_orderbook.side_effect = lambda token_id: {
             "m1_yes": OrderBook(
                 market="m1_yes",
@@ -2243,20 +2100,17 @@ class TestCrossMarketArbitrage:
         }.get(token_id)
         multi_market_provider.clear_cache()
 
-        # With 5% minimum, only market1 (10%) should be returned
         opps = multi_market_provider.detect_cross_market_arbitrage(
             market_ids=["market1", "market2"],
             min_profit_pct=Decimal("5.0"),
         )
 
-        # Market1: 0.45 + 0.45 = 0.90 -> ~11% profit
-        # Market2: 0.49 + 0.49 = 0.98 -> ~2% profit
+        # A 5% floor retains market1 (~11%) and excludes market2 (~2%).
         assert len(opps) == 1
         assert opps[0].market_id == "market1"
 
     def test_detect_cross_market_arbitrage_sorted_by_profit(self, multi_market_provider):
         """Test results are sorted by profit percentage descending."""
-        # Set up multiple markets with arb
         multi_market_provider.client.get_orderbook.side_effect = lambda token_id: {
             "m1_yes": OrderBook(
                 market="m1_yes",
@@ -2296,7 +2150,7 @@ class TestCrossMarketArbitrage:
 
         # Market2 has better arb (0.90 cost) than market1 (0.96 cost)
         assert len(opps) == 2
-        assert opps[0].market_id == "market2"  # Higher profit first
+        assert opps[0].market_id == "market2"
         assert opps[0].expected_profit_pct > opps[1].expected_profit_pct
 
     def test_detect_cross_market_arbitrage_empty_list(self, multi_market_provider):
@@ -2330,7 +2184,6 @@ class TestCalculateImpliedProbability:
             fee_rate_bps=200,  # 2% fee
         )
 
-        # With 2% fee, probability should be higher
         # prob = 0.65 / (1 - 0.02) = 0.65 / 0.98 ≈ 0.6633
         expected = Decimal("0.65") / Decimal("0.98")
         assert abs(prob - expected) < Decimal("0.001")
@@ -2365,7 +2218,6 @@ class TestCalculateImpliedProbability:
             fee_rate_bps=500,  # 5% fee would push above 1.0
         )
 
-        # Should be clamped to 1.0
         assert prob <= Decimal("1.0")
 
     def test_implied_probability_clamped_low(self, provider):
@@ -2375,19 +2227,15 @@ class TestCalculateImpliedProbability:
             spread=Decimal("0.10"),  # Large spread would push negative
         )
 
-        # Should be clamped to 0.0
         assert prob >= Decimal("0.0")
 
     def test_implied_probability_edge_cases(self, provider):
         """Test edge case prices."""
-        # Minimum price
         prob_min = provider.calculate_implied_probability(Decimal("0.01"))
         assert prob_min == Decimal("0.01")
 
-        # Maximum price
         prob_max = provider.calculate_implied_probability(Decimal("0.99"))
         assert prob_max == Decimal("0.99")
 
-        # 50/50 price
         prob_50 = provider.calculate_implied_probability(Decimal("0.50"))
         assert prob_50 == Decimal("0.50")
