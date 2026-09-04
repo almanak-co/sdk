@@ -23,6 +23,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from almanak.connectors.gmx_v2.orders_read import (
     ORDER_TYPE_MARKET_INCREASE,
     build_account_orders_calldata,
@@ -400,6 +402,39 @@ def test_framework_discovery_hook_crash_surfaces_sentinel(monkeypatch) -> None:
     positions = rd.discover_teardown_residuals(_FakeStrategy(["arbitrum"], _FakeGateway()))
     assert len(positions) == 1
     assert positions[0].details["kind"] == "residual_unverified"
+
+
+@pytest.mark.asyncio
+async def test_recovery_wrapper_failure_over_pending_collateral_stays_unmeasured(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from almanak.framework.runner.runner_teardown import _recover_pending_order_intents
+    from almanak.framework.teardown import residual_discovery as rd
+
+    gateway = _FakeGateway()
+    strategy = _FakeStrategy(["arbitrum"], gateway)
+    strategy.deployment_id = "test:gmx"
+    runner = SimpleNamespace()
+    existing_intent = object()
+
+    def _fail_conversion(residual: Any) -> None:
+        assert residual.details["collateral_amount_raw"] == "50000000"
+        raise RuntimeError("position conversion failed")
+
+    monkeypatch.setattr(rd, "_position_info_from_residual", _fail_conversion)
+
+    intents, incomplete, warning = await _recover_pending_order_intents(
+        runner,
+        strategy,
+        [existing_intent],
+        None,
+    )
+
+    assert _ORDERS_SEL in gateway.calls
+    assert intents == [existing_intent]
+    assert incomplete is True
+    assert warning is not None and "UNMEASURED" in warning
+    assert runner._teardown_pending_recovery_keys is None
 
 
 def test_framework_discovery_survives_raising_compiler_property() -> None:

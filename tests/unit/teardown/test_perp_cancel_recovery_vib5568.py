@@ -309,15 +309,17 @@ async def test_recover_unmeasured_read_marks_incomplete():
 async def test_recover_no_residuals_is_noop():
     from almanak.framework.runner.runner_teardown import _recover_pending_order_intents
 
+    runner = SimpleNamespace()
     with patch(
         "almanak.framework.teardown.residual_discovery.discover_teardown_residuals",
         return_value=[],
     ):
-        intents, incomplete, warning = await _recover_pending_order_intents(None, object(), [], None)
+        intents, incomplete, warning = await _recover_pending_order_intents(runner, object(), [], None)
 
     assert intents == []
     assert incomplete is False
     assert warning is None
+    assert runner._teardown_pending_recovery_keys == frozenset()
 
 
 @pytest.mark.asyncio
@@ -337,6 +339,31 @@ async def test_recover_never_raises_on_discovery_failure():
     assert intents == existing  # untouched — never blocks the next risk-reducing intent
     assert incomplete is True  # fail-closed: discovery couldn't complete → don't certify clean
     assert warning is not None and "manual on-chain verification" in warning
+
+
+def test_accepted_fill_cannot_clear_unmeasured_pending_recovery():
+    from almanak.framework.runner.runner_teardown import _clear_stale_pending_recovery_after_accepted_fill
+
+    runner = SimpleNamespace(
+        _teardown_recovery_incomplete=True,
+        _teardown_recovery_warning="pending discovery was unmeasured",
+        _teardown_lp_recovery_incomplete=False,
+        _teardown_lp_recovery_warning=None,
+        _teardown_pending_recovery_keys=None,
+    )
+    with patch(
+        "almanak.framework.teardown.teardown_manager.accepted_async_order_keys",
+        return_value=frozenset({_KEY}),
+    ):
+        _clear_stale_pending_recovery_after_accepted_fill(
+            runner,
+            SimpleNamespace(),
+            SimpleNamespace(success=True),
+            resume_accepted_async=True,
+        )
+
+    assert runner._teardown_recovery_incomplete is True
+    assert runner._teardown_recovery_warning == "pending discovery was unmeasured"
 
 
 # --------------------------------------------------------------------------- #

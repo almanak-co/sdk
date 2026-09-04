@@ -685,12 +685,15 @@ def _record_teardown_pending_recovery_keys(runner: Any, keys: frozenset[str] | N
         runner._teardown_pending_recovery_keys = keys
 
 
-def _pending_order_keys(residuals: list[Any]) -> frozenset[str]:
-    """Normalize measured pending-order keys for exact resume correlation."""
+def _pending_order_keys(residuals: list[Any]) -> frozenset[str] | None:
+    """Normalize pending-order keys while preserving unmeasured discovery."""
+    if any((residual.details or {}).get("kind") == "residual_unverified" for residual in residuals):
+        return None
     return frozenset(
         str((residual.details or {}).get("order_key") or "").lower()
         for residual in residuals
-        if str((residual.details or {}).get("order_key") or "")
+        if (residual.details or {}).get("kind") == "pending_order"
+        and str((residual.details or {}).get("order_key") or "")
     )
 
 
@@ -767,7 +770,8 @@ async def _recover_pending_order_intents(
 
         # An UNMEASURED residual read (fail-closed sentinel) means we could NOT
         # enumerate the OrderVault — a strand may remain, so do not certify clean.
-        unmeasured = any((p.details or {}).get("kind") == "residual_unverified" for p in residuals)
+        pending_order_keys = _pending_order_keys(residuals)
+        unmeasured = pending_order_keys is None
 
         # Partition pending orders by the GMX cancel age-gate (VIB-5568). Only orders
         # comfortably past REQUEST_EXPIRATION_TIME (~300s) carry ``cancellable=True``
@@ -775,7 +779,7 @@ async def _recover_pending_order_intents(
         # DEFERRED — cancelling it now would just revert (RequestNotYetCancellable) and
         # burn the slippage-escalation ladder to FAILED.
         pending = [p for p in residuals if (p.details or {}).get("kind") == "pending_order"]
-        _record_teardown_pending_recovery_keys(runner, _pending_order_keys(pending))
+        _record_teardown_pending_recovery_keys(runner, pending_order_keys)
         cancellable = [p for p in pending if (p.details or {}).get("cancellable")]
         deferred = [p for p in pending if not (p.details or {}).get("cancellable")]
 

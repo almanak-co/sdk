@@ -311,14 +311,20 @@ def discover_teardown_residuals(strategy: Any) -> list[PositionInfo]:
     whole enumeration). This top-level guard is load-bearing: the VIB-5116
     real-fork run showed a single unguarded attribute access (the raising
     ``IntentStrategy.compiler`` property) crashing the entire teardown enumeration.
-    An empty return here means "no residuals discovered"; the protocol's on-chain
-    post-condition remains the authoritative closure verify at execution time.
+    An unexpected failure surfaces an unmeasured sentinel rather than a measured-
+    empty list, preserving the never-raise contract without certifying absence.
     """
     try:
         return _discover_teardown_residuals(strategy)
-    except Exception:  # noqa: BLE001 — discovery must NEVER fault the teardown enumeration
-        logger.exception("Teardown residual discovery raised unexpectedly; skipping the residual sweep")
-        return []
+    except Exception as exc:  # noqa: BLE001 — discovery must NEVER fault the teardown enumeration
+        logger.exception("Teardown residual discovery raised unexpectedly; preserving an UNMEASURED sentinel")
+        return [
+            _unmeasured_sentinel(
+                "teardown_residual_discovery",
+                "",
+                f"residual discovery raised: {type(exc).__name__}: {exc}",
+            )
+        ]
 
 
 def remeasure_teardown_residuals(
