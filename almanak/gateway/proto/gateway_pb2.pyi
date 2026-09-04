@@ -1274,6 +1274,8 @@ class LendingMarket(_message.Message):
     IRM_FIELD_NUMBER: _builtins.int
     VERIFIED_FIELD_NUMBER: _builtins.int
     SOURCE_FIELD_NUMBER: _builtins.int
+    TOTAL_SUPPLY_ASSETS_FIELD_NUMBER: _builtins.int
+    TOTAL_BORROW_ASSETS_FIELD_NUMBER: _builtins.int
     kind: Global___LendingMarketKind.ValueType
     protocol: _builtins.str
     chain: _builtins.str
@@ -1298,6 +1300,15 @@ class LendingMarket(_message.Message):
     matches ``market_id``. Catalog candidates are FALSE.
     """
     source: Global___LendingMarketSource.ValueType
+    total_supply_assets: _builtins.str
+    """Loan-token RAW base-unit totals from a live pool-state read (e.g. Morpho
+    Blue's market(bytes32)). ABSENT (empty string) when unmeasured — a
+    protocol without a live-state read, or the read itself failing — NEVER a
+    fabricated "0" (ALM-3515). Populated ONLY by the on-chain verification
+    path (GetLendingMarket); ListLendingMarkets candidates never carry these.
+    Available borrow liquidity = total_supply_assets - total_borrow_assets.
+    """
+    total_borrow_assets: _builtins.str
     def __init__(
         self,
         *,
@@ -1314,8 +1325,10 @@ class LendingMarket(_message.Message):
         irm: _builtins.str = ...,
         verified: _builtins.bool = ...,
         source: Global___LendingMarketSource.ValueType = ...,
+        total_supply_assets: _builtins.str = ...,
+        total_borrow_assets: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "collateral_symbol", b"collateral_symbol", "collateral_token", b"collateral_token", "irm", b"irm", "kind", b"kind", "lltv_bps", b"lltv_bps", "loan_symbol", b"loan_symbol", "loan_token", b"loan_token", "market_id", b"market_id", "oracle", b"oracle", "protocol", b"protocol", "source", b"source", "verified", b"verified"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "collateral_symbol", b"collateral_symbol", "collateral_token", b"collateral_token", "irm", b"irm", "kind", b"kind", "lltv_bps", b"lltv_bps", "loan_symbol", b"loan_symbol", "loan_token", b"loan_token", "market_id", b"market_id", "oracle", b"oracle", "protocol", b"protocol", "source", b"source", "total_borrow_assets", b"total_borrow_assets", "total_supply_assets", b"total_supply_assets", "verified", b"verified"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___LendingMarket: _TypeAlias = LendingMarket  # noqa: Y015

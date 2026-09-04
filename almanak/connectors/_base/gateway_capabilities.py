@@ -843,9 +843,22 @@ class LendingMarketRecord:
 
     Returned by :class:`GatewayLendingMarketDiscoveryCapability`. The gateway
     servicer maps it to the ``LendingMarket`` proto message. Immutable market
-    params (tokens, oracle, IRM, LLTV) only — live supply/borrow/liquidity state
-    is deliberately out of scope for this capability (it is short-TTL and belongs
-    on the rate/analytics surfaces). ``lltv_bps`` is always measured.
+    params (tokens, oracle, IRM, LLTV) are the core of this record; live
+    supply/borrow/liquidity state is deliberately out of scope for the
+    ``list_lending_markets`` (offline catalog) path — it is short-TTL and
+    belongs on the rate/analytics surfaces (``GatewayLendingRateHistoryCapability``).
+
+    ``total_supply_assets`` / ``total_borrow_assets`` (ALM-3515) are the sole,
+    narrow exception: a market-scoped rate-history read only covers markets in
+    the connector's curated catalog (keyed by ``asset_symbol``), but a
+    permissionless lender's market id can be verified on-chain (VIB-5985)
+    without ever appearing in that catalog. A pre-deploy capacity check
+    (``ax lending-capacity``) needs raw liquidity for EXACTLY the markets
+    ``verify_lending_market`` can already reach, so these two fields are
+    populated ONLY by the on-chain ``verify_lending_market`` path, as a
+    byproduct of the identity-verification read — never by
+    ``list_lending_markets``, which stays a pure offline catalog listing.
+    ``lltv_bps`` is always measured.
 
     Attributes:
         kind: One of the ``LENDING_MARKET_KIND_*`` constants (Morpho =
@@ -865,6 +878,16 @@ class LendingMarketRecord:
         verified: ``True`` ONLY after an on-chain recompute-and-compare;
             catalog candidates are ``False``.
         source: One of the ``LENDING_MARKET_SOURCE_*`` constants.
+        total_supply_assets: Loan-token RAW base-unit total supplied to the
+            market, decimal-as-string, or ``""`` when unmeasured (Empty ≠
+            Zero — never fabricated ``"0"``). Populated only by
+            ``verify_lending_market`` for protocols that expose a live pool-state
+            read (Morpho Blue's ``market(bytes32)``); every other producer
+            leaves it unset.
+        total_borrow_assets: Loan-token RAW base-unit total currently borrowed
+            from the market, same units/absence convention as
+            ``total_supply_assets``. Available borrow liquidity is
+            ``total_supply_assets - total_borrow_assets`` when both are present.
     """
 
     kind: str
@@ -880,6 +903,8 @@ class LendingMarketRecord:
     irm: str
     verified: bool
     source: str
+    total_supply_assets: str = ""
+    total_borrow_assets: str = ""
 
 
 @runtime_checkable

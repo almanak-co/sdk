@@ -388,6 +388,15 @@ message LendingMarket {
   // matches ``market_id``. Catalog candidates are FALSE.
   bool verified = 12;
   LendingMarketSource source = 13;
+
+  // Loan-token RAW base-unit totals from a live pool-state read (e.g. Morpho
+  // Blue's market(bytes32)). ABSENT (empty string) when unmeasured — a
+  // protocol without a live-state read, or the read itself failing — NEVER a
+  // fabricated "0" (ALM-3515). Populated ONLY by the on-chain verification
+  // path (GetLendingMarket); ListLendingMarkets candidates never carry these.
+  // Available borrow liquidity = total_supply_assets - total_borrow_assets.
+  string total_supply_assets = 14;
+  string total_borrow_assets = 15;
 }
 
 message ListLendingMarketsRequest {

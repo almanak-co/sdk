@@ -11,6 +11,10 @@ Implements :class:`GatewayLendingMarketDiscoveryCapability` for Morpho Blue:
   (``keccak256(abi.encode(loanToken, collateralToken, oracle, irm, lltv))``) and
   compares it to the requested id. A mismatch is a loud
   :class:`LendingMarketVerificationError`; a non-existent market returns ``None``.
+  On a verified match it also reads ``market(id)`` for the market's raw
+  loan-token liquidity (``total_supply_assets`` / ``total_borrow_assets``,
+  ALM-3515) — a best-effort supplementary read that never fails the
+  verification itself; see :func:`_read_market_liquidity`.
 
 Morpho is permissionless — anyone can deploy a same-pair market with a hostile
 oracle/IRM — so a market id is only trustworthy after this recompute-and-compare.
@@ -25,6 +29,7 @@ the gateway boundary explicitly permits.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -47,8 +52,32 @@ logger = logging.getLogger(__name__)
 # idToMarketParams(bytes32) selector — keccak256("idToMarketParams(bytes32)")[:4].
 # Mirrors ``MorphoBlueSDK.ID_TO_MARKET_PARAMS_SELECTOR`` (sdk.py) verbatim.
 _ID_TO_MARKET_PARAMS_SELECTOR = "0x2c3c9157"
+# market(bytes32) selector — keccak256("market(bytes32)")[:4]. Mirrors
+# ``MorphoBlueGatewayConnector``'s rate-history reader
+# (``_MORPHO_BLUE_MARKET_SELECTOR`` in gateway/provider.py); duplicated here
+# rather than imported because provider.py imports this module (`from . import
+# market_discovery`), so importing back from provider.py would be circular.
+_MARKET_SELECTOR = "0x5c60e39a"
 _ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 _LLTV_SCALE = 10**18  # LLTV is 1e18-scaled (0.86e18 = 86%).
+# Market struct is six uint128 words: totalSupplyAssets, totalSupplyShares,
+# totalBorrowAssets, totalBorrowShares, lastUpdate, fee.
+_MARKET_STRUCT_WORDS = 6
+_MARKET_STRUCT_HEX_LEN = _MARKET_STRUCT_WORDS * 64
+# The identity read (idToMarketParams) and this supplementary liquidity read
+# share one eth_call transport whose per-call server-side budget
+# (GATEWAY_PT_RPC_TIMEOUT_SECONDS, pt_rpc_adapter.py) equals the CLIENT's
+# GetLendingMarket gRPC deadline (_GATEWAY_RPC_TIMEOUT_SECONDS,
+# snapshot.py). Two uncapped sequential calls can together exceed that single
+# client deadline, turning a slow-but-successful identity verification into a
+# DEADLINE_EXCEEDED -- which would fail a strategy's boot gate, contradicting
+# this read's "never fails the verification itself" contract. Bounding this
+# call alone shrinks that window (a sub-8s liquidity read can no longer be
+# the cause) but does not eliminate it -- an identity read alone taking
+# >22s under the shared 30s-per-call budget can still exceed the combined
+# deadline; closing that fully needs a shared elapsed budget across both
+# calls, which is a larger change than this bound.
+_LIQUIDITY_READ_TIMEOUT_SECONDS = 8.0
 
 # Morpho market kind is always an isolated collateral↔loan pair.
 _MORPHO_KIND = LENDING_MARKET_KIND_ISOLATED_PAIR
@@ -216,6 +245,70 @@ def _decode_address_word(word_hex: str) -> str:
     return "0x" + word_hex[-40:].lower()
 
 
+async def _read_market_liquidity(
+    *,
+    chain: str,
+    morpho_addr: str,
+    market_id: str,
+    eth_call: Callable[[str, str], Awaitable[str]],
+) -> tuple[str, str]:
+    """Read ``market(bytes32)`` and return ``(total_supply_assets, total_borrow_assets)``.
+
+    Raw loan-token base units, decimal-as-string (ALM-3515). This is a
+    best-effort, SUPPLEMENTARY read layered on top of identity verification —
+    a transport failure or a short/malformed response returns ``("", "")``
+    (Empty ≠ Zero: unmeasured, never a fabricated ``"0"``) rather than raising,
+    so a liquidity-read hiccup never turns a successfully verified market id
+    into a hard failure. A well-formed struct that is genuinely all zero (e.g.
+    a dormant market) is a measured zero and returns ``("0", "0")``.
+    """
+    try:
+        calldata = _MARKET_SELECTOR + market_id[2:]
+        raw = await asyncio.wait_for(eth_call(morpho_addr, calldata), timeout=_LIQUIDITY_READ_TIMEOUT_SECONDS)
+    except Exception:
+        logger.warning("Morpho Blue market(%s) liquidity read failed on %s", market_id, chain, exc_info=True)
+        return "", ""
+    if not isinstance(raw, str):
+        # The injected eth_call is typed to return str; a non-conforming
+        # implementation returning None/non-str must still read as a
+        # malformed response, never crash this "never fails identity
+        # verification" best-effort read.
+        logger.warning("Morpho Blue market(%s) on %s returned a non-string result (%r)", market_id, chain, type(raw))
+        return "", ""
+
+    result = raw[2:] if raw.startswith(("0x", "0X")) else raw
+    if len(result) < _MARKET_STRUCT_HEX_LEN:
+        logger.warning(
+            "Morpho Blue market(%s) on %s returned a short payload (%d hex chars, need %d)",
+            market_id,
+            chain,
+            len(result),
+            _MARKET_STRUCT_HEX_LEN,
+        )
+        return "", ""
+
+    try:
+        # Each field is a uint128 ABI-encoded into a 32-byte word -- a
+        # correctly-encoded response always zero-pads the upper 16 bytes. A
+        # nonzero upper half means either a malformed/truncated response or a
+        # struct layout this reader doesn't understand -- never silently
+        # truncate it into a wrong (and possibly enormous) liquidity number.
+        # This catches non-zero-padding corruption specifically; unlike
+        # idToMarketParams, there is no recomputable ground truth for a
+        # liquidity value, so a compromised RPC returning a correctly-padded
+        # but simply wrong number is not detectable here.
+        if int(result[0:32], 16) != 0 or int(result[128:160], 16) != 0:
+            logger.warning("Morpho Blue market(%s) on %s returned a non-zero-padded uint128 word", market_id, chain)
+            return "", ""
+        total_supply_assets = int(result[32:64], 16)
+        total_borrow_assets = int(result[160:192], 16)
+    except ValueError:
+        logger.warning("Morpho Blue market(%s) on %s returned an undecodable payload", market_id, chain)
+        return "", ""
+
+    return str(total_supply_assets), str(total_borrow_assets)
+
+
 async def verify_morpho_market(
     *,
     chain: str,
@@ -276,6 +369,13 @@ async def verify_morpho_market(
         str(catalog.get("collateral_token", "")) if catalog else _reverse_symbol(chain, collateral_token)
     )
 
+    total_supply_assets, total_borrow_assets = await _read_market_liquidity(
+        chain=chain,
+        morpho_addr=morpho_addr,
+        market_id=mid,
+        eth_call=eth_call,
+    )
+
     return LendingMarketRecord(
         kind=_MORPHO_KIND,
         protocol="morpho_blue",
@@ -290,4 +390,6 @@ async def verify_morpho_market(
         irm=irm,
         verified=True,
         source=LENDING_MARKET_SOURCE_ONCHAIN_VERIFY,
+        total_supply_assets=total_supply_assets,
+        total_borrow_assets=total_borrow_assets,
     )

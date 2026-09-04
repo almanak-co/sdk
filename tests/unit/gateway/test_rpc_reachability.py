@@ -97,9 +97,8 @@ EXEMPT_RPCS: dict[str, str] = {
     # which defaults False on every live network.
     "SimulateBundle": "confirmed unreachable, ticketed ALM-3488 (2026-09-02) — mainnet execution never simulates by default",
     # TokenService: ResolveToken / GetTokenMetadata ARE called from within
-    # almanak/; these two "lightweight"/"batch" siblings are not — looks like
-    # unused convenience endpoints, but not confirmed dead vs. planned.
-    "GetTokenDecimals": "found unreachable 2026-09-02 (ALM-3474 audit) — needs owner triage, ALM-3490",
+    # almanak/; this "batch" sibling is not — looks like an unused
+    # convenience endpoint, but not confirmed dead vs. planned.
     "BatchResolveTokens": "found unreachable 2026-09-02 (ALM-3474 audit) — needs owner triage, ALM-3490",
     # RpcService.Call (singular) IS called from 23+ files; the batch sibling
     # has no caller anywhere.

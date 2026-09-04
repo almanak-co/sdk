@@ -531,6 +531,8 @@ def _lending_market_to_proto(record: LendingMarketRecord) -> gateway_pb2.Lending
         irm=record.irm,
         verified=record.verified,
         source=_LENDING_MARKET_SOURCE_TO_PROTO.get(record.source, gateway_pb2.LENDING_MARKET_SOURCE_UNSPECIFIED),
+        total_supply_assets=record.total_supply_assets,
+        total_borrow_assets=record.total_borrow_assets,
     )
 
 

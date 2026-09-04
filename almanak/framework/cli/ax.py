@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import re
 import sys
 import time
 from typing import TYPE_CHECKING, NoReturn
@@ -22,6 +23,8 @@ from almanak.framework.agent_tools.schemas import ToolResponse, ToolResponseStat
 from almanak.framework.data.models import _NATIVE_TO_WRAPPED
 
 if TYPE_CHECKING:
+    from decimal import Decimal
+
     from almanak.gateway.managed import ManagedGateway
 
 
@@ -2086,6 +2089,746 @@ def _render_lending_market_human(item, kind_label: str) -> None:
         click.echo(f"  oracle        {item.oracle}")
     if item.irm:
         click.echo(f"  irm           {item.irm}")
+
+
+_LENDING_CAPACITY_INCONCLUSIVE_HINT = (
+    "Inconclusive: the gateway, the market's liquidity read, or the swap-route "
+    "provider was unreachable. Retry when reachable; report this as 'could not "
+    "verify', never as 'safe' or 'unsafe'."
+)
+
+# Named, configurable default: a position whose implied borrow would consume
+# more than this share of a market's AVAILABLE (unborrowed) liquidity is
+# flagged, since it would materially move the market and risk not finding
+# liquidity to unwind under stress. Overridable via --max-liquidity-utilization-bps.
+_DEFAULT_MAX_LIQUIDITY_UTILIZATION_BPS = 5000
+
+
+_LENDING_CAPACITY_ADDRESS_RE = re.compile(r"0x[0-9a-fA-F]{40}")
+
+
+def _lending_capacity_looks_like_address(value: str) -> bool:
+    # `int(v, 16)` is NOT a hex-charset check -- it accepts a leading sign,
+    # surrounding whitespace, and PEP-515 underscore grouping, all of which
+    # would still reach the route provider verbatim as a malformed
+    # `from_address`. A strict charset regex is what this guard actually needs.
+    v = (value or "").strip()
+    return bool(_LENDING_CAPACITY_ADDRESS_RE.fullmatch(v))
+
+
+def _lending_capacity_fail(
+    *, json_output: bool, identity: dict, status: str, error: str, exit_code: int, hint: str | None = None
+) -> NoReturn:
+    """Shared exit path for every failure branch of `ax lending-capacity`."""
+    import json as _json
+
+    from almanak.framework.cli.ax_render import render_error
+
+    if json_output:
+        payload: dict = {"status": status, **identity, "error": error}
+        if hint:
+            payload["hint"] = hint
+        click.echo(_json.dumps(payload, indent=2, default=str))
+    else:
+        render_error(f"{status}: {error}", json_output=False)
+        if hint:
+            click.echo(hint, err=True)
+    sys.exit(exit_code)
+
+
+def _lending_capacity_verify_market(
+    *, market_stub, protocol: str, chain: str, market_id: str, json_output: bool, identity: dict
+):
+    """`GetLendingMarket` + the same identity error-mapping as `ax lending-market`."""
+    import grpc
+
+    from almanak.gateway.proto import gateway_pb2
+
+    try:
+        response = market_stub.GetLendingMarket(
+            gateway_pb2.GetLendingMarketRequest(protocol=protocol, chain=chain, market_id=market_id),
+            timeout=30.0,
+        )
+    except grpc.RpcError as exc:
+        code = exc.code()
+        details = exc.details() or str(exc)
+        if code is grpc.StatusCode.NOT_FOUND:
+            _lending_capacity_fail(
+                json_output=json_output,
+                identity=identity,
+                status="fail",
+                error=f"market does not exist on-chain: {details}",
+                exit_code=1,
+            )
+        if code is grpc.StatusCode.INVALID_ARGUMENT:
+            _lending_capacity_fail(
+                json_output=json_output, identity=identity, status="invalid", error=details, exit_code=2
+            )
+        _lending_capacity_fail(
+            json_output=json_output,
+            identity=identity,
+            status="unavailable",
+            error=details,
+            exit_code=4,
+            hint=_LENDING_CAPACITY_INCONCLUSIVE_HINT,
+        )
+    except Exception as exc:
+        # Never let a local CLI fault (stub construction, proto encoding,
+        # interceptor failure) escape as Click's default exit 1 -- that exit
+        # code is reserved for the authoritative on-chain NOT_FOUND. Mirrors
+        # the sibling `ax lending-market` command's exact handling.
+        _lending_capacity_fail(
+            json_output=json_output,
+            identity=identity,
+            status="unavailable",
+            error=f"unexpected CLI failure: {exc}",
+            exit_code=4,
+            hint=_LENDING_CAPACITY_INCONCLUSIVE_HINT,
+        )
+    if not response.success or not response.market.verified:
+        _lending_capacity_fail(
+            json_output=json_output,
+            identity=identity,
+            status="unverified",
+            error=response.error or "gateway returned an unverified lending-market record",
+            exit_code=4,
+            hint=_LENDING_CAPACITY_INCONCLUSIVE_HINT,
+        )
+
+    market = response.market
+    # Token-substitution guard: these addresses come ONLY from the
+    # on-chain-verified GetLendingMarket response — every downstream call in
+    # this command (decimals, swap routes) uses them verbatim, never a
+    # symbol-resolved substitute.
+    if not _lending_capacity_looks_like_address(market.collateral_token) or not _lending_capacity_looks_like_address(
+        market.loan_token
+    ):
+        _lending_capacity_fail(
+            json_output=json_output,
+            identity=identity,
+            status="invalid",
+            error=(
+                f"verified market carries an unusable token address (collateral={market.collateral_token!r}, "
+                f"loan={market.loan_token!r})"
+            ),
+            exit_code=2,
+        )
+    return market
+
+
+def _lending_capacity_get_decimals(*, token_stub, token: str, chain: str, json_output: bool, identity: dict) -> int:
+    import grpc
+
+    from almanak.gateway.proto import gateway_pb2
+
+    try:
+        resp = token_stub.GetTokenDecimals(gateway_pb2.GetTokenDecimalsRequest(token=token, chain=chain), timeout=30.0)
+    except grpc.RpcError as exc:
+        _lending_capacity_fail(
+            json_output=json_output,
+            identity=identity,
+            status="unavailable",
+            error=f"decimals lookup failed for {token}: {exc.details() or exc}",
+            exit_code=4,
+            hint=_LENDING_CAPACITY_INCONCLUSIVE_HINT,
+        )
+    except Exception as exc:
+        _lending_capacity_fail(
+            json_output=json_output,
+            identity=identity,
+            status="unavailable",
+            error=f"unexpected CLI failure resolving decimals for {token}: {exc}",
+            exit_code=4,
+            hint=_LENDING_CAPACITY_INCONCLUSIVE_HINT,
+        )
+    if not resp.success:
+        _lending_capacity_fail(
+            json_output=json_output,
+            identity=identity,
+            status="unavailable",
+            error=f"decimals lookup failed for {token}: {resp.error}",
+            exit_code=4,
+            hint=_LENDING_CAPACITY_INCONCLUSIVE_HINT,
+        )
+    return resp.decimals
+
+
+def _lending_capacity_get_route(
+    *,
+    enso_stub,
+    chain: str,
+    token_in: str,
+    token_out: str,
+    amount_in: int,
+    wallet: str,
+    max_slippage_bps: int,
+    json_output: bool,
+    identity: dict,
+):
+    import grpc
+
+    from almanak.gateway.proto import gateway_pb2
+
+    try:
+        return enso_stub.GetRoute(
+            gateway_pb2.EnsoRouteRequest(
+                chain=chain,
+                token_in=token_in,
+                token_out=token_out,
+                amount_in=str(amount_in),
+                from_address=wallet,
+                slippage_bps=max_slippage_bps,
+                max_price_impact_bps=max_slippage_bps,
+            ),
+            timeout=30.0,
+        )
+    except grpc.RpcError as exc:
+        _lending_capacity_fail(
+            json_output=json_output,
+            identity=identity,
+            status="unavailable",
+            error=f"route lookup failed ({token_in} -> {token_out}): {exc.details() or exc}",
+            exit_code=4,
+            hint=_LENDING_CAPACITY_INCONCLUSIVE_HINT,
+        )
+    except Exception as exc:
+        _lending_capacity_fail(
+            json_output=json_output,
+            identity=identity,
+            status="unavailable",
+            error=f"unexpected CLI failure on route lookup ({token_in} -> {token_out}): {exc}",
+            exit_code=4,
+            hint=_LENDING_CAPACITY_INCONCLUSIVE_HINT,
+        )
+
+
+def _lending_capacity_require_measured_route(route, *, leg_name: str, json_output: bool, identity: dict) -> None:
+    """A route reporting `success=True` with a non-positive or unparseable
+    `amount_out` is a degraded upstream response (e.g. an Enso HTTP-200 body
+    that omits `amountOut` on schema drift), not evidence the leg is safe --
+    it must read as unavailable, never a silent PASS with the leg treated as
+    zero-sized (Empty != Zero: `success=True, amount_out="0"` is not the same
+    as a genuinely quoted zero-value swap, and this command has no way to
+    tell them apart, so it must not guess safe)."""
+    if not route.success:
+        return
+    try:
+        amount_out = int(route.amount_out)
+    except (TypeError, ValueError):
+        amount_out = -1
+    if amount_out <= 0:
+        _lending_capacity_fail(
+            json_output=json_output,
+            identity=identity,
+            status="unavailable",
+            error=(
+                f"{leg_name} route reported success with a non-positive or unparseable "
+                f"amount_out ({route.amount_out!r}) -- cannot verify route viability"
+            ),
+            exit_code=4,
+            hint=_LENDING_CAPACITY_INCONCLUSIVE_HINT,
+        )
+
+
+def _lending_capacity_parse_inputs(
+    *, target_leverage: str, collateral_amount: str, wallet_address: str | None, ctx_wallet: str
+) -> tuple[Decimal, Decimal, str]:
+    """Parse/validate --target-leverage and --collateral-amount, and resolve the
+    quote wallet (--wallet-address, else ax's configured wallet, else derived
+    from ALMANAK_PRIVATE_KEY). Raises click.UsageError on any invalid input."""
+    from decimal import Decimal, InvalidOperation
+
+    try:
+        leverage = Decimal(str(target_leverage))
+    except InvalidOperation:
+        raise click.UsageError(f"--target-leverage {target_leverage!r} is not a valid decimal") from None
+    # `Decimal` parses "nan"/"inf" without raising InvalidOperation above -- a
+    # NaN comparison or an infinite value reaching integer sizing later raises
+    # instead, so both must be rejected here as the same "not a valid decimal"
+    # input error, not left to surface from an unrelated line downstream.
+    if not leverage.is_finite():
+        raise click.UsageError(f"--target-leverage {target_leverage!r} is not a valid decimal") from None
+    if leverage < 1:
+        raise click.UsageError(f"--target-leverage must be >= 1.0, got {target_leverage!r}")
+    try:
+        collateral_amount_human = Decimal(str(collateral_amount))
+    except InvalidOperation:
+        raise click.UsageError(f"--collateral-amount {collateral_amount!r} is not a valid decimal") from None
+    if not collateral_amount_human.is_finite():
+        raise click.UsageError(f"--collateral-amount {collateral_amount!r} is not a valid decimal") from None
+    if collateral_amount_human <= 0:
+        raise click.UsageError(f"--collateral-amount must be > 0, got {collateral_amount!r}")
+
+    # An explicitly-passed --wallet-address is the operator's own input: a
+    # typo in it must surface as their error, never silently fall through to
+    # a different wallet (the ALMANAK_PRIVATE_KEY derivation below), which
+    # would substitute an address the operator did not ask for.
+    if wallet_address is not None:
+        if not _lending_capacity_looks_like_address(wallet_address):
+            raise click.UsageError(f"--wallet-address {wallet_address!r} is not a valid 0x-prefixed address")
+        # `_lending_capacity_looks_like_address` strips before validating, so a
+        # whitespace-wrapped address passes the check above -- return the
+        # SAME normalized form, not the raw operator input, or the whitespace
+        # would still reach the route provider verbatim as `from_address`.
+        return leverage, collateral_amount_human, wallet_address.strip()
+
+    wallet = (ctx_wallet or "").strip()
+    if not _lending_capacity_looks_like_address(wallet):
+        # Same ALMANAK_PRIVATE_KEY resolution every other `ax` command uses
+        # (the `--wallet` pin is an override, not the primary path) -- one
+        # owner for key-to-address resolution, not a second copy. Keep this
+        # import function-local: tests monkeypatch the attribute on
+        # `cli_executor` itself, which only works because `ax` never holds
+        # its own module-level reference to it.
+        from almanak.framework.agent_tools.cli_executor import _resolve_wallet_address
+
+        wallet = _resolve_wallet_address()
+    if not _lending_capacity_looks_like_address(wallet):
+        # The route provider requires a syntactically valid `fromAddress` on every
+        # quote request even though this command never signs or executes -- fail
+        # loud here with an actionable message instead of surfacing the route
+        # provider's opaque validation error after an on-chain market verification
+        # has already run.
+        raise click.UsageError(
+            "no wallet configured for the route quotes -- pass --wallet-address, "
+            "set ALMANAK_WALLET_ADDRESS / --wallet, or set ALMANAK_PRIVATE_KEY "
+            f"(got {wallet!r})"
+        )
+    return leverage, collateral_amount_human, wallet
+
+
+def _lending_capacity_sizes(*, collateral_amount_human, leverage, collateral_decimals: int) -> tuple[int, int]:
+    """Pure sizing math: (collateral_amount_base, full_position_collateral_base)."""
+    from decimal import ROUND_CEILING, ROUND_DOWN, Decimal
+
+    collateral_amount_base = int(
+        (collateral_amount_human * (Decimal(10) ** collateral_decimals)).to_integral_value(rounding=ROUND_DOWN)
+    )
+    full_stack_base = int((Decimal(collateral_amount_base) * leverage).to_integral_value(rounding=ROUND_CEILING))
+    return collateral_amount_base, full_stack_base
+
+
+def _lending_capacity_implied_borrow(*, teardown_amount_out: str, leverage) -> int:
+    """Derive the implied total borrow (loan-token base units) from the
+    teardown-leg quote: value(full stack, in loan token) * (leverage-1)/leverage."""
+    from decimal import ROUND_CEILING, Decimal
+
+    full_stack_value_in_loan = Decimal(teardown_amount_out or "0")
+    return int((full_stack_value_in_loan * (leverage - 1) / leverage).to_integral_value(rounding=ROUND_CEILING))
+
+
+def _lending_capacity_liquidity(
+    *, market, implied_borrow_base: int, max_liquidity_utilization_bps: int
+) -> tuple[bool, int | None, int | None, bool]:
+    """Returns (liquidity_measured, available_liquidity_base, utilization_bps, liquidity_ok)."""
+    liquidity_measured = bool(market.total_supply_assets) and bool(market.total_borrow_assets)
+    if not liquidity_measured:
+        return False, None, None, True
+
+    try:
+        available_liquidity_base = int(market.total_supply_assets) - int(market.total_borrow_assets)
+    except ValueError:
+        # These strings cross the gRPC trust boundary from a connector-owned
+        # interface (LendingMarketRecord) -- a malformed value must read the
+        # same as "not measured" (WARN), never crash into an uncaught
+        # exception whose resulting exit 1 would be misread as "unsafe".
+        return False, None, None, True
+    # A no-borrow position (target-leverage=1, no loop) never touches this
+    # market's liquidity at all -- check this FIRST, so a fully-utilized
+    # market never fails a position that doesn't borrow from it.
+    if implied_borrow_base <= 0:
+        return True, available_liquidity_base, 0, True
+    if available_liquidity_base <= 0:
+        return True, available_liquidity_base, None, False
+
+    # Ceiling, not floor: this is a safety threshold, so a fractional bps of
+    # utilization must round UP -- floor division under-reports utilization and
+    # can pass a position whose true utilization exceeds the configured limit
+    # (e.g. 1/3 floors to 3333bps, which under-reports the true 3333.33...bps).
+    numerator = implied_borrow_base * 10_000
+    utilization_bps = -(-numerator // available_liquidity_base)
+    return True, available_liquidity_base, utilization_bps, utilization_bps <= max_liquidity_utilization_bps
+
+
+def _lending_capacity_leg_report(direction: str, amount_in_human: str, route, *, amount_out_decimals: int) -> dict:
+    from decimal import Decimal
+
+    success = bool(route.success)
+    return {
+        "direction": direction,
+        "amount_in": amount_in_human,
+        "success": success,
+        "amount_out": (str(Decimal(int(route.amount_out)) / (Decimal(10) ** amount_out_decimals)) if success else None),
+        "price_impact_bps": route.price_impact if success else None,
+        "error": route.error or None,
+    }
+
+
+def _lending_capacity_build_leg_reports(
+    *,
+    market,
+    full_stack_base: int,
+    implied_borrow_base: int,
+    collateral_decimals: int,
+    loan_decimals: int,
+    teardown_route,
+    loopup_route,
+    human_amount,
+) -> tuple[dict, dict | None]:
+    """Build both leg reports.
+
+    Both routes have already passed `_lending_capacity_require_measured_route`
+    by the time this runs, so a successful route's `amount_out` is guaranteed
+    to parse to a positive int -- this is pure formatting, not another
+    upstream-data validation point.
+    """
+    teardown_leg_report = _lending_capacity_leg_report(
+        f"{market.collateral_symbol or market.collateral_token} -> {market.loan_symbol or market.loan_token}",
+        human_amount(full_stack_base, collateral_decimals),
+        teardown_route,
+        amount_out_decimals=loan_decimals,
+    )
+    loopup_leg_report = (
+        _lending_capacity_leg_report(
+            f"{market.loan_symbol or market.loan_token} -> {market.collateral_symbol or market.collateral_token}",
+            human_amount(implied_borrow_base, loan_decimals),
+            loopup_route,
+            amount_out_decimals=collateral_decimals,
+        )
+        if loopup_route is not None
+        else None
+    )
+    return teardown_leg_report, loopup_leg_report
+
+
+@ax.command(name="lending-capacity")
+@click.option("--protocol", required=True, help="Lending protocol (e.g. 'morpho_blue').")
+@click.option(
+    "--market-id", required=True, help="Exact 0x-prefixed bytes32 market id (verify with `ax lending-market` first)."
+)
+@click.option(
+    "--collateral-amount",
+    required=True,
+    help="Funded collateral amount, in human decimal units of the market's collateral token (e.g. '10.5').",
+)
+@click.option(
+    "--target-leverage",
+    required=True,
+    help="Target leverage as a decimal >= 1.0 (1.0 = no borrow / no loop).",
+)
+@click.option(
+    "--max-slippage-bps",
+    type=int,
+    default=100,
+    show_default=True,
+    help="Max acceptable slippage / price impact, in basis points, for EACH swap leg.",
+)
+@click.option(
+    "--max-liquidity-utilization-bps",
+    type=int,
+    default=_DEFAULT_MAX_LIQUIDITY_UTILIZATION_BPS,
+    show_default=True,
+    help="Max share of the market's available (unborrowed) liquidity the position's implied borrow may consume, in basis points.",
+)
+@click.option(
+    "--wallet-address",
+    default=None,
+    help=(
+        "Address the swap-route quotes are computed for. No signing or execution ever "
+        "happens -- this command only calls read-only quote/route endpoints -- but the "
+        "route provider requires a syntactically valid address on every request. "
+        "Defaults to ax's configured wallet (ALMANAK_PRIVATE_KEY); pass this explicitly "
+        "to run the check before any wallet is configured for the strategy."
+    ),
+)
+@_chain_option
+@click.pass_context
+def lending_capacity(
+    ctx,
+    protocol,
+    market_id,
+    collateral_amount,
+    target_leverage,
+    max_slippage_bps,
+    max_liquidity_utilization_bps,
+    wallet_address,
+):
+    """Pre-deploy capacity + bidirectional route-viability check (ALM-3515).
+
+    A market can pass `ax lending-market` (verified, on-chain, non-empty id)
+    and STILL be unsafe to deploy into: thin borrow liquidity for the position's
+    size, or no viable exit route under stress. This command answers that,
+    given a verified market and the strategy's sizing:
+
+    \b
+    1. Verifies the market on-chain (same check as `ax lending-market`) and
+       reads its exact, verified collateral/loan token addresses — this
+       command NEVER re-resolves tokens by symbol; every downstream call
+       (decimals, swap routes) uses the addresses `GetLendingMarket` returned.
+    2. Reads the market's raw available borrow liquidity (loan-token units) and
+       flags a position whose implied borrow would consume more than
+       --max-liquidity-utilization-bps of it. Liquidity is UNMEASURED (never
+       fabricated) for protocols that don't expose a live pool-state read.
+    3. Quotes the collateral->loan swap at the FULL leveraged position size
+       (collateral_amount * target_leverage) — the emergency-deleverage /
+       teardown leg, sized at the worst case: unwinding the entire position.
+    4. Derives the implied total borrow from that quote and quotes the
+       loan->collateral swap at that size — the loop-up leg.
+       Both quotes are checked against --max-slippage-bps, enforced gateway-side
+       against the route provider's reported price impact. CAVEAT: the route
+       provider's price-impact field is nullable and the gateway currently
+       treats an absent value the same as a true zero (ALM-3558) --
+       a `price_impact_bps: 0` in this command's output is not distinguishable
+       from "not reported" until that gateway-side gap closes.
+
+    \b
+    Examples:
+        almanak ax --chain base lending-capacity --protocol morpho_blue \\
+            --market-id 0x13c42741a359ac4a8aa8287d2be109dcf28344484f91185f9a79bd5a805a55ae \\
+            --collateral-amount 10 --target-leverage 3 --max-slippage-bps 100
+        almanak ax --chain base --json lending-capacity --protocol morpho_blue \\
+            --market-id 0x13c42741a359ac4a8aa8287d2be109dcf28344484f91185f9a79bd5a805a55ae \\
+            --collateral-amount 10 --target-leverage 3
+        # Before any wallet is configured for the strategy (e.g. checking a
+        # candidate market ahead of the pool-wallet funding step):
+        almanak ax --chain base lending-capacity --protocol morpho_blue \\
+            --market-id 0x13c42741a359ac4a8aa8287d2be109dcf28344484f91185f9a79bd5a805a55ae \\
+            --collateral-amount 10 --target-leverage 3 \\
+            --wallet-address 0x0000000000000000000000000000000000dEaD
+
+    \b
+    Exit codes:
+        0 -- PASS: liquidity and both swap legs are within threshold.
+        1 -- FAIL: the market does not exist on-chain, OR the position is
+             unsafe (liquidity would be over-utilized, or a swap leg has no
+             viable route / exceeds --max-slippage-bps).
+        2 -- invalid input: bad protocol/chain/market_id/leverage, no wallet
+             configured and no --wallet-address given, or the market_id
+             failed on-chain recompute verification.
+        3 -- WARN: PASS on every measured axis, but at least one axis
+             (typically liquidity, on a protocol without a live-state read)
+             could not be measured — not evidence of safety.
+        4 -- could not verify: gateway or an upstream provider unavailable.
+             NOT evidence the position is unsafe.
+    """
+    import json as _json
+    from decimal import Decimal
+
+    json_output = ctx.obj["json_output"]
+    chain = ctx.obj["chain"]
+    identity = {"protocol": protocol, "chain": chain, "market_id": market_id}
+
+    leverage, collateral_amount_human, wallet = _lending_capacity_parse_inputs(
+        target_leverage=target_leverage,
+        collateral_amount=collateral_amount,
+        wallet_address=wallet_address,
+        ctx_wallet=ctx.obj.get("wallet") or "",
+    )
+
+    try:
+        channel, error_note = _acquire_gateway_channel(ctx)
+    except Exception as exc:
+        _lending_capacity_fail(
+            json_output=json_output,
+            identity=identity,
+            status="unavailable",
+            error=f"unexpected CLI failure: {exc}",
+            exit_code=4,
+            hint=_LENDING_CAPACITY_INCONCLUSIVE_HINT,
+        )
+    if channel is None:
+        _lending_capacity_fail(
+            json_output=json_output,
+            identity=identity,
+            status="unavailable",
+            error=error_note or "gateway unavailable",
+            exit_code=4,
+            hint=_LENDING_CAPACITY_INCONCLUSIVE_HINT,
+        )
+
+    from almanak.gateway.proto import gateway_pb2_grpc
+
+    try:
+        market = _lending_capacity_verify_market(
+            market_stub=gateway_pb2_grpc.MarketServiceStub(channel),
+            protocol=protocol,
+            chain=chain,
+            market_id=market_id,
+            json_output=json_output,
+            identity=identity,
+        )
+
+        token_stub = gateway_pb2_grpc.TokenServiceStub(channel)
+        collateral_decimals = _lending_capacity_get_decimals(
+            token_stub=token_stub,
+            token=market.collateral_token,
+            chain=chain,
+            json_output=json_output,
+            identity=identity,
+        )
+        loan_decimals = _lending_capacity_get_decimals(
+            token_stub=token_stub, token=market.loan_token, chain=chain, json_output=json_output, identity=identity
+        )
+
+        _collateral_amount_base, full_stack_base = _lending_capacity_sizes(
+            collateral_amount_human=collateral_amount_human, leverage=leverage, collateral_decimals=collateral_decimals
+        )
+
+        enso_stub = gateway_pb2_grpc.EnsoServiceStub(channel)
+        teardown_route = _lending_capacity_get_route(
+            enso_stub=enso_stub,
+            chain=chain,
+            token_in=market.collateral_token,
+            token_out=market.loan_token,
+            amount_in=full_stack_base,
+            wallet=wallet,
+            max_slippage_bps=max_slippage_bps,
+            json_output=json_output,
+            identity=identity,
+        )
+        _lending_capacity_require_measured_route(
+            teardown_route, leg_name="teardown-leg", json_output=json_output, identity=identity
+        )
+        teardown_ok = bool(teardown_route.success)
+
+        # `_lending_capacity_require_measured_route` above already guarantees a
+        # successful teardown_route's amount_out parses to a positive int, so
+        # this can no longer raise on a malformed/non-positive value.
+        implied_borrow_base = 0
+        loopup_route = None
+        if leverage > 1 and teardown_ok:
+            implied_borrow_base = _lending_capacity_implied_borrow(
+                teardown_amount_out=teardown_route.amount_out, leverage=leverage
+            )
+        if implied_borrow_base > 0:
+            loopup_route = _lending_capacity_get_route(
+                enso_stub=enso_stub,
+                chain=chain,
+                token_in=market.loan_token,
+                token_out=market.collateral_token,
+                amount_in=implied_borrow_base,
+                wallet=wallet,
+                max_slippage_bps=max_slippage_bps,
+                json_output=json_output,
+                identity=identity,
+            )
+            _lending_capacity_require_measured_route(
+                loopup_route, leg_name="loop-up-leg", json_output=json_output, identity=identity
+            )
+        loopup_ok = bool(loopup_route.success) if loopup_route is not None else True
+
+        liquidity_measured, available_liquidity_base, utilization_bps, liquidity_ok = _lending_capacity_liquidity(
+            market=market,
+            implied_borrow_base=implied_borrow_base,
+            max_liquidity_utilization_bps=max_liquidity_utilization_bps,
+        )
+
+        if not teardown_ok or not loopup_ok or not liquidity_ok:
+            status, exit_code = "fail", 1
+        elif not liquidity_measured:
+            status, exit_code = "warn", 3
+        else:
+            status, exit_code = "pass", 0
+
+        def _human_amount(base_units: int, decimals: int) -> str:
+            return str(Decimal(base_units) / (Decimal(10) ** decimals))
+
+        teardown_leg_report, loopup_leg_report = _lending_capacity_build_leg_reports(
+            market=market,
+            full_stack_base=full_stack_base,
+            implied_borrow_base=implied_borrow_base,
+            collateral_decimals=collateral_decimals,
+            loan_decimals=loan_decimals,
+            teardown_route=teardown_route,
+            loopup_route=loopup_route,
+            human_amount=_human_amount,
+        )
+
+        report = {
+            "status": status,
+            "protocol": protocol,
+            "chain": chain,
+            "market_id": market.market_id,
+            "collateral_symbol": market.collateral_symbol or None,
+            "collateral_token": market.collateral_token,
+            "loan_symbol": market.loan_symbol or None,
+            "loan_token": market.loan_token,
+            "collateral_amount": str(collateral_amount_human),
+            "target_leverage": str(leverage),
+            "full_position_collateral": _human_amount(full_stack_base, collateral_decimals),
+            "implied_total_borrow": _human_amount(implied_borrow_base, loan_decimals) if implied_borrow_base else "0",
+            "liquidity_measured": liquidity_measured,
+            "available_liquidity": (
+                _human_amount(available_liquidity_base, loan_decimals) if available_liquidity_base is not None else None
+            ),
+            "liquidity_utilization_bps": utilization_bps,
+            "max_liquidity_utilization_bps": max_liquidity_utilization_bps,
+            "teardown_leg": teardown_leg_report,
+            "loopup_leg": loopup_leg_report,
+            "max_slippage_bps": max_slippage_bps,
+            "notes": [
+                "price_impact_bps reflects the route provider's response; the provider's "
+                "price-impact field is nullable and an absent value currently reads the same "
+                "as a true zero (ALM-3558) -- 0 is not yet distinguishable from "
+                "'not reported'."
+            ],
+        }
+    finally:
+        _close_channel(channel)
+
+    if json_output:
+        click.echo(_json.dumps(report, indent=2, default=str))
+    else:
+        _render_lending_capacity_human(report)
+    sys.exit(exit_code)
+
+
+def _render_lending_capacity_human(report: dict) -> None:
+    """Human-readable PASS/WARN/FAIL report for `ax lending-capacity`."""
+    verdict = {"pass": "PASS", "warn": "WARN", "fail": "FAIL"}[report["status"]]
+    click.echo(
+        f"{verdict} — {report['market_id']} on {report['protocol']} ({report['chain']}) "
+        f"[{report['collateral_symbol'] or '?'} / {report['loan_symbol'] or '?'}]"
+    )
+    click.echo(f"  collateral         {report['collateral_amount']} {report['collateral_symbol'] or ''}")
+    click.echo(f"  target leverage    {report['target_leverage']}x")
+    click.echo(f"  full position      {report['full_position_collateral']} {report['collateral_symbol'] or ''}")
+    click.echo(f"  implied borrow     {report['implied_total_borrow']} {report['loan_symbol'] or ''}")
+    if report["liquidity_measured"] and report["liquidity_utilization_bps"] is None:
+        # available_liquidity_base <= 0 -- no utilization ratio is meaningful,
+        # not "0 bps used"; the market has no room at all.
+        click.echo(
+            f"  available liquidity {report['available_liquidity']} {report['loan_symbol'] or ''} "
+            "(no available liquidity)"
+        )
+    elif report["liquidity_measured"]:
+        click.echo(
+            f"  available liquidity {report['available_liquidity']} {report['loan_symbol'] or ''} "
+            f"(would use {report['liquidity_utilization_bps']} bps, max {report['max_liquidity_utilization_bps']} bps)"
+        )
+    else:
+        click.echo("  available liquidity UNMEASURED (protocol has no live pool-state read) — not evidence of safety")
+    leg = report["teardown_leg"]
+    click.echo(
+        f"  teardown leg ({leg['direction']}): "
+        + (
+            f"OK, out={leg['amount_out']}, impact={leg['price_impact_bps']}bps"
+            if leg["success"]
+            else f"FAIL — {leg['error']}"
+        )
+    )
+    if report["loopup_leg"] is not None:
+        leg = report["loopup_leg"]
+        click.echo(
+            f"  loop-up leg ({leg['direction']}): "
+            + (
+                f"OK, out={leg['amount_out']}, impact={leg['price_impact_bps']}bps"
+                if leg["success"]
+                else f"FAIL — {leg['error']}"
+            )
+        )
+    for note in report.get("notes", []):
+        click.echo(f"  note: {note}")
 
 
 def _render_reserves_table(response, *, protocol: str, chain: str) -> None:
