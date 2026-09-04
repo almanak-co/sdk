@@ -36,10 +36,7 @@ from almanak.framework.primitives.types import (
 logger = logging.getLogger(__name__)
 
 ALIASES: dict[str, str] = {
-    # Ghost name from accounting/classifier.py:24 (pre-VIB-4161). The intent
-    # was never declared in IntentType but the classifier still accepted it.
-    # Resolving here keeps any caller that still passes the legacy spelling
-    # working until T2 deletes the classifier-side acceptance.
+    # Legacy classifier spelling that was never a declared IntentType.
     "VAULT_WITHDRAW": "VAULT_REDEEM",
 }
 
@@ -83,20 +80,13 @@ def _record(
     )
 
 
-# Canonical lifecycles — kept as module-level constants so tests can assert
-# that fixture lifecycles match the declared expectation without re-declaring
-# them out-of-band.
 _LP_LIFECYCLE: tuple[str, ...] = ("LP_OPEN", "LP_CLOSE")
 _LP_LIFECYCLE_WITH_FEES: tuple[str, ...] = ("LP_OPEN", "LP_COLLECT_FEES", "LP_CLOSE")
 _PERP_LIFECYCLE: tuple[str, ...] = ("PERP_OPEN", "PERP_CLOSE")
 _LENDING_LIFECYCLE: tuple[str, ...] = ("SUPPLY", "BORROW", "REPAY", "WITHDRAW")
 _VAULT_LIFECYCLE: tuple[str, ...] = ("VAULT_DEPOSIT", "VAULT_REDEEM")
-# VIB-5682: vault SETTLEMENT (Lagoon operator side) canonical lifecycle — the two
-# capital-moving legs. The propose leg (updateNewTotalAssets → SETTLE_PROPOSE) is
-# NO_ACCOUNTING and moves no capital, so it is NOT a lifecycle step. Distinct from
-# _VAULT_LIFECYCLE (depositor-facing VAULT_DEPOSIT/VAULT_REDEEM); settlement is the
-# operator side that issues/burns shares. Source of truth for the Accountant Test's
-# ``settlement`` scorecard profile required_lifecycle.
+# Lagoon settlement includes only capital-moving operator legs. SETTLE_PROPOSE
+# updates total assets without moving capital, and the depositor lifecycle is separate.
 _SETTLEMENT_LIFECYCLE: tuple[str, ...] = ("SETTLE_DEPOSIT", "SETTLE_REDEEM")
 _STAKING_LIFECYCLE: tuple[str, ...] = ("STAKE", "UNSTAKE")
 _PREDICTION_LIFECYCLE: tuple[str, ...] = (
@@ -106,39 +96,14 @@ _PREDICTION_LIFECYCLE: tuple[str, ...] = (
 )
 
 
-# VIB-5865 — every row below declares a ``wallet_delta`` lane
-# (:class:`WalletDeltaLane`). The declarations in THIS revision encode CURRENT
-# truth, not aspiration, so no fold mechanics change for measured lanes:
-#
-#   * ``EVENT_REPLAY``      == exactly the taxonomy-backed keys of
-#                              ``accounting.basis._REPLAY_DISPATCH``.
-#   * ``LEDGER_PROJECTION`` == exactly the ``AccountingCategory.NO_ACCOUNTING``
-#                              rows (the VIB-5416 / VIB-5471 measured-ledger
-#                              lane). Kept an EXACT match so the generalized
-#                              predicate ``basis._is_ledger_projected_row`` is
-#                              behaviour-preserving BY CONSTRUCTION — pinned by
-#                              a parity test against the old category check.
-#                              This deliberately includes rows that move nothing
-#                              (``HOLD`` / ``ENSURE_BALANCE``) and the
-#                              compile-blocked CDP / ``LIQUIDATE`` placeholders:
-#                              they write no token-legged ``transaction_ledger``
-#                              row, so projecting them is a no-op, whereas
-#                              demoting them to ``NONE`` would silently narrow a
-#                              fund-safety lane. A later PR may demote them with
-#                              its own evidence.
-#   * ``UNMEASURED``        == every other wallet-moving row (LP, vault, perp,
-#                              bridge/transfer, settlement, prediction BUY/SELL).
-#                              These POISON their token footprint in the teardown
-#                              clamp's tracked map (Empty ≠ Zero) so the strand is
-#                              a visible degraded refusal, not silence. PR-2+ move
-#                              rows out of this lane as real replay folds land.
-#   * ``NONE``              == reviewed as moving no fungible wallet token; each
-#                              such row carries a justification comment.
+# Lane assignments are measurement guarantees. EVENT_REPLAY must match
+# ``accounting.basis._REPLAY_DISPATCH``; LEDGER_PROJECTION must match
+# ``AccountingCategory.NO_ACCOUNTING``. Rows without ledger token legs remain
+# harmless projections rather than narrowing teardown fund-safety coverage.
+# UNMEASURED poisons the token footprint (Empty != Zero) so missing reliable folds
+# cause a visible refusal. NONE is reserved for rows that move no fungible token.
 TAXONOMY: dict[str, PrimitiveRecord] = dict(
     [
-        # ──────────────────────────────────────────────────────────────────
-        # Swap
-        # ──────────────────────────────────────────────────────────────────
         _record(
             "SWAP",
             Primitive.SWAP,
@@ -147,9 +112,6 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             event_kind=EventKind.NONE,
             wallet_delta=WalletDeltaLane.EVENT_REPLAY,
         ),
-        # ──────────────────────────────────────────────────────────────────
-        # LP
-        # ──────────────────────────────────────────────────────────────────
         _record(
             "LP_OPEN",
             Primitive.LP,
@@ -177,9 +139,6 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             required_lifecycle=_LP_LIFECYCLE_WITH_FEES,
             wallet_delta=WalletDeltaLane.EVENT_REPLAY,
         ),
-        # ──────────────────────────────────────────────────────────────────
-        # Lending
-        # ──────────────────────────────────────────────────────────────────
         _record(
             "SUPPLY",
             Primitive.LENDING,
@@ -225,9 +184,6 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             required_lifecycle=_LENDING_LIFECYCLE,
             wallet_delta=WalletDeltaLane.EVENT_REPLAY,
         ),
-        # ──────────────────────────────────────────────────────────────────
-        # Perp
-        # ──────────────────────────────────────────────────────────────────
         _record(
             "PERP_OPEN",
             Primitive.PERP,
@@ -246,17 +202,9 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             required_lifecycle=_PERP_LIFECYCLE,
             wallet_delta=WalletDeltaLane.UNMEASURED,
         ),
-        # PERP_CANCEL_ORDER (VIB-5568) — cancel a pending (unfilled) perp order and
-        # refund its committed collateral. Deliberately NOT AccountingCategory.PERP:
-        # a cancel closes NO position (a stranded pending order never opened one —
-        # the VIB-5116 orphaned-collateral case), so classifying it as a PERP CLOSE
-        # would fabricate an unmatched close leg with no PERP_OPEN counterpart and
-        # break perp lifecycle / lot-matching. It is a refund of committed-but-unspent
-        # collateral: the wallet credit is captured by the portfolio balance snapshot,
-        # and the cancel tx still gets a transaction_ledger row via the teardown commit
-        # pipeline — so it is visible without a phantom position/PnL event. Modeled on
-        # FLASH_LOAN (domain primitive + NO_ACCOUNTING + EventKind.NONE); position_type
-        # None and NO required_lifecycle (order-management, not a position leg).
+        # Cancelling an unfilled order refunds collateral but closes no position.
+        # PERP accounting would fabricate an unmatched close; the snapshot and ledger
+        # capture the refund without a phantom position or PnL event.
         _record(
             "PERP_CANCEL_ORDER",
             Primitive.PERP,
@@ -265,19 +213,10 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             event_kind=EventKind.NONE,
             wallet_delta=WalletDeltaLane.LEDGER_PROJECTION,
         ),
-        # PERP_WITHDRAW (VIB-5617) — withdraw free margin off the venue's off-chain
-        # account back to L1 (Hyperliquid: a CoreWriter spotSend HyperCore→HyperEVM
-        # USDC bridge). Deliberately NOT AccountingCategory.PERP: a withdraw closes
-        # NO position — it is a cash movement (moving already-owned USD from the
-        # off-chain ledger to the on-chain wallet), so classifying it as a PERP
-        # CLOSE would fabricate an unmatched close leg with no PERP_OPEN counterpart
-        # and break perp lifecycle / lot-matching. The credited wallet balance is
-        # captured by the portfolio snapshot and the tx still gets a
-        # transaction_ledger row via the commit pipeline — visible without a phantom
-        # position/PnL event. The ~$1 HyperCore withdraw fee is a measured venue
-        # deduction in the balance delta, never synthesised as a PnL row (Empty ≠
-        # Zero). Modeled on PERP_CANCEL_ORDER / FLASH_LOAN (domain primitive +
-        # NO_ACCOUNTING + EventKind.NONE); position_type None, no required_lifecycle.
+        # Hyperliquid free-margin withdrawal bridges USDC from HyperCore to HyperEVM.
+        # It moves owned cash but closes no position, so PERP accounting would create
+        # an unmatched close. Snapshot and ledger capture the credit; the venue fee is
+        # a measured balance deduction, never a synthesized PnL row.
         _record(
             "PERP_WITHDRAW",
             Primitive.PERP,
@@ -286,20 +225,10 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             event_kind=EventKind.NONE,
             wallet_delta=WalletDeltaLane.LEDGER_PROJECTION,
         ),
-        # PERP_SETTLEMENT (VIB-3872, WI-3) — the Phase-2 keeper-settlement economics
-        # event. Primitive.PERP + AccountingCategory.PERP so the version-stamp
-        # chokepoint resolves the canonical perp maps and the wallet-delta lane
-        # matches PERP_OPEN/CLOSE (UNMEASURED — the keeper's on-chain deltas are
-        # captured by the portfolio snapshot, NOT projected from a ledger row: there
-        # is NO keeper-tx ledger row, since the keeper pays gas, not us — a ledger row
-        # would poison gas_usd + the capital-flow classifier, the VIB-5952 class; so
-        # LEDGER_PROJECTION would be a lie here). EventKind.NONE: the Phase-1
-        # PERP_OPEN/PERP_CLOSE submission event already owns the position lifecycle and
-        # the lot-matching key, so augment must NOT stamp an OPEN/CLOSE
-        # position_reference for the settlement event (no matching_policy bump). This
-        # event is written DIRECTLY through AccountingWriter and NEVER reaches the
-        # outbox/drain classifier (it has no ledger/outbox row), so the PERP category
-        # is metadata-only for the version stamp and can never route to perp_handler.
+        # Keeper settlement shares the PERP version stream but owns no position
+        # lifecycle; the submission event already does. The keeper pays gas and no
+        # keeper transaction-ledger row exists, so projection would invent gas and
+        # capital flow. AccountingWriter writes it directly, making PERP metadata-only.
         _record(
             "PERP_SETTLEMENT",
             Primitive.PERP,
@@ -308,9 +237,6 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             event_kind=EventKind.NONE,
             wallet_delta=WalletDeltaLane.UNMEASURED,
         ),
-        # ──────────────────────────────────────────────────────────────────
-        # Vault (ERC-4626)
-        # ──────────────────────────────────────────────────────────────────
         _record(
             "VAULT_DEPOSIT",
             Primitive.VAULT,
@@ -347,23 +273,10 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             required_lifecycle=_VAULT_LIFECYCLE,
             wallet_delta=WalletDeltaLane.UNMEASURED,
         ),
-        # ──────────────────────────────────────────────────────────────────
-        # Vault SETTLEMENT (Lagoon ERC-7540 operator side) — VIB-5666
-        #
-        # Payload-only event types (NOT IntentType members — settlement is
-        # lifecycle-owned and pre-``decide()``, never a first-class Intent verb;
-        # design doc §Pillar-1). Emitted by ``settlement_handler`` when the
-        # runner-owned settlement-commit pipeline routes a settleDeposit /
-        # settleRedeem tx. ``event_kind=NONE`` because a settlement is a CAPITAL
-        # event, not a position OPEN/CLOSE — the augment chokepoint must NOT
-        # stamp a ``position_reference`` and no ``position_events`` row is emitted
-        # (depositor capital is not a strategy position). ``AccountingCategory.
-        # SETTLEMENT`` routes to the dedicated ``settlement_handler``;
-        # ``Primitive.SETTLEMENT`` isolates the version streams. Present in
-        # ``ALL_ACCOUNTING_EVENT_TYPES`` (via ``SettlementEventType``) so
-        # ``test_taxonomy_has_no_extra_rows`` accepts these non-IntentType rows
-        # and the augment chokepoint can resolve their per-primitive version.
-        # ──────────────────────────────────────────────────────────────────
+        # Lagoon operator settlements are payload-only because they occur before
+        # ``decide()``. They move depositor capital, not a strategy position, so
+        # EventKind.NONE prevents a position reference. The dedicated category and
+        # primitive route the handler and isolate its version stream.
         _record(
             "SETTLE_DEPOSIT",
             Primitive.SETTLEMENT,
@@ -382,9 +295,6 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             required_lifecycle=_SETTLEMENT_LIFECYCLE,
             wallet_delta=WalletDeltaLane.UNMEASURED,
         ),
-        # ──────────────────────────────────────────────────────────────────
-        # Staking
-        # ──────────────────────────────────────────────────────────────────
         _record(
             "STAKE",
             Primitive.STAKING,
@@ -403,16 +313,8 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             required_lifecycle=_STAKING_LIFECYCLE,
             wallet_delta=WalletDeltaLane.LEDGER_PROJECTION,
         ),
-        # ──────────────────────────────────────────────────────────────────
-        # Bridge / Transfer (VIB-4164, T4)
-        #
-        # T4 reclassifies BRIDGE from `NO_ACCOUNTING` to `TRANSFER`: a bridge
-        # is a typed `transfer_out` on chain A and `transfer_in` on chain B
-        # with a settlement gap, not "no accounting". The gateway whitelist
-        # (`ALL_ACCOUNTING_EVENT_TYPES`) is widened atomically in this same
-        # PR so the writer can persist the typed event the dispatcher now
-        # routes to `transfer_handler`.
-        # ──────────────────────────────────────────────────────────────────
+        # A bridge is a transfer-out/in pair with a settlement gap, not a
+        # position or accounting-free operation.
         _record(
             "BRIDGE",
             Primitive.BRIDGE,
@@ -421,34 +323,14 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             event_kind=EventKind.TRANSFER,
             is_async=True,
             lifecycle_phase=LifecyclePhase.REQUEST,
-            # VIB-5865 PR-4: stays UNMEASURED — the source leg is NOT
-            # receipt-measured on any surface the clamp can fold. The persisted
-            # ledger ``amount_in`` (and the ``TransferAccountingEvent.asset`` /
-            # ``amount`` derived from it) come from the INTENT via
-            # ``ledger._extract_from_intent_fallback`` → ``BridgeIntent.token`` /
-            # ``BridgeIntent.amount`` (no connector declares money-legs; bridges
-            # emit no ``swap_amounts``). Folding an intent-requested amount is the
-            # exact anti-pattern the LP FLOW-A trace disproved (requested 1.9006 vs
-            # consumed 1.7087). The receipt-measured ``amount_sent`` exists only in
-            # ``bridge_data`` / ``extracted_data_json`` (e.g.
-            # ``stargate/receipt_parser.py``), never in ``amount_in`` and never in
-            # the ``TransferAccountingEvent`` payload — so neither a LEDGER_PROJECTION
-            # (empty-safe on ``amount_in``, but that value is a guess) nor an
-            # EVENT_REPLAY handler can read a trustworthy source amount today.
-            # UNMEASURED poisons the bridged token → VISIBLE degraded refusal
-            # (the safe direction; live balance is the real over-sweep cap). A
-            # measured fold requires first surfacing ``amount_sent`` into the
-            # ledger / transfer-event payload (follow-up), then a ``_replay_transfer``.
+            # The ledger source amount is an intent fallback; receipt-measured
+            # ``amount_sent`` exists only in bridge_data/extracted_data_json. Folding
+            # the requested amount risks over-sweeping, so poison the token footprint
+            # until a measured source amount reaches the ledger or event payload.
             wallet_delta=WalletDeltaLane.UNMEASURED,
         ),
-        # Payload-only event-type row (mirrors the VIB-4162 payload-only
-        # rows for PT_BUY / PERP_INCREASE / etc.). The writer's augment
-        # chokepoint at `accounting/writer.py:139` calls
-        # `record_for(payload['event_type'])` with `event_type="TRANSFER"`
-        # for every `TransferAccountingEvent`; without this row, every live
-        # write would raise `UnknownIntentTypeError`. The `primitive` is
-        # `Primitive.BRIDGE` so the augment step stamps
-        # `MATCHING_POLICY_VERSIONS[Primitive.BRIDGE]`.
+        # TRANSFER is payload-only so the writer can resolve TransferAccountingEvent
+        # and stamp the bridge version stream without failing strict lookup.
         _record(
             "TRANSFER",
             Primitive.BRIDGE,
@@ -457,39 +339,13 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             event_kind=EventKind.TRANSFER,
             is_async=True,
             lifecycle_phase=LifecyclePhase.REQUEST,
-            # VIB-5865 PR-4: same as BRIDGE (this is the payload-only twin the
-            # ``TransferAccountingEvent`` writer routes through) — the persisted
-            # ``asset`` / ``amount`` are the intent-requested source values, not
-            # receipt-measured, so it stays UNMEASURED. See the BRIDGE note above.
+            # The event payload has the same unmeasured source amount as BRIDGE.
             wallet_delta=WalletDeltaLane.UNMEASURED,
         ),
-        # ──────────────────────────────────────────────────────────────────
-        # Prediction markets (Polymarket)
-        # ──────────────────────────────────────────────────────────────────
-        # VIB-5865 PR-4: PREDICTION_BUY / PREDICTION_SELL stay UNMEASURED.
-        # LEDGER_PROJECTION is NOT viable and a lane flip alone wires in zero:
-        #   1. These are OFF-CHAIN CLOB fills. The measured values (filled shares,
-        #      ``cost_basis`` on BUY / ``proceeds`` on SELL) live in
-        #      ``extracted_data_json`` (``polymarket/receipt_parser.py``
-        #      SUPPORTED_EXTRACTIONS), NOT in the ledger ``token_in`` /
-        #      ``token_out`` / ``amount_in`` / ``amount_out`` columns — those are
-        #      EMPTY (``PredictionIntent`` has no from_token/token/amount, and
-        #      ``amount_usd`` is deliberately excluded from the fallback,
-        #      ``ledger.py`` VIB-5060). ``synthetic_wallet_movement_events`` reads
-        #      exactly those empty columns and its has_in/has_out guard skips the
-        #      row → projects nothing.
-        #   2. Category is PREDICTION, not NO_ACCOUNTING, so declaring
-        #      LEDGER_PROJECTION would break the PR-1 parity invariants
-        #      (``test_ledger_projection_lane_equals_no_accounting_category`` +
-        #      ``test_ledger_predicate_matches_old_category_predicate_on_every_row``).
-        # A measured fold would need a ``_replay_prediction`` EVENT_REPLAY handler
-        # sourcing the fill's cost_basis (USDC debit) / proceeds (USDC credit) —
-        # today those live only in the ledger row's ``extracted_data_json`` (the
-        # persisted PredictionAccountingEvent payload carries ``usd_delta``, not
-        # the split legs), so the handler needs a payload-surfacing change first.
-        # Its own design with real evidence (follow-up).
-        # PREDICTION_REDEEM already declares EVENT_REPLAY, so the redemption USDC
-        # return is already folded; only BUY-cost / SELL-proceeds remain the gap.
+        # Polymarket BUY/SELL fills are off-chain. Measured cost and proceeds live
+        # only in extracted_data_json while ledger token/amount columns are empty;
+        # projection therefore emits nothing. The event payload's aggregate usd_delta
+        # cannot reconstruct wallet legs, so keep them unmeasured. REDEEM has replay.
         _record(
             "PREDICTION_BUY",
             Primitive.PREDICTION,
@@ -517,9 +373,6 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             required_lifecycle=_PREDICTION_LIFECYCLE,
             wallet_delta=WalletDeltaLane.EVENT_REPLAY,
         ),
-        # ──────────────────────────────────────────────────────────────────
-        # Flash loan
-        # ──────────────────────────────────────────────────────────────────
         _record(
             "FLASH_LOAN",
             Primitive.FLASH_LOAN,
@@ -528,19 +381,9 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             event_kind=EventKind.NONE,
             wallet_delta=WalletDeltaLane.LEDGER_PROJECTION,
         ),
-        # ──────────────────────────────────────────────────────────────────
-        # Payload-only event types — emitted by typed accounting models
-        # (`accounting.models.*EventType`) but NOT declared in
-        # `intents.vocabulary.IntentType`. The augment chokepoint
-        # (`writer.augment_accounting_payload`) looks up the primitive
-        # via `record_for(payload['event_type'])` and stamps the
-        # per-primitive `matching_policy_version`. Without these rows,
-        # live Pendle / PT / Prediction / extended-Perp / extended-Vault
-        # writes raise `AccountingPersistenceError(cause=UnknownIntentTypeError)`
-        # and halt the writer for legitimate handler output. These rows
-        # are payload-side only — the dispatcher consumes IntentType
-        # values, never these.
-        # ──────────────────────────────────────────────────────────────────
+        # These accounting event types are payload-only, not IntentType members.
+        # The writer resolves every emitted event type to stamp its primitive version;
+        # these rows keep legitimate handler output from failing strict lookup.
         _record(
             "PT_BUY",
             Primitive.SWAP,
@@ -583,10 +426,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             required_lifecycle=_LP_LIFECYCLE,
             wallet_delta=WalletDeltaLane.UNMEASURED,
         ),
-        # VIB-5865 wallet_delta=NONE: a snapshot is a periodic *observation* of an
-        # already-open LP position (``event_kind=NONE``) — it moves no fungible
-        # wallet token. The wallet-moving legs are LP_OPEN / LP_CLOSE /
-        # LP_COLLECT_FEES, which carry their own (UNMEASURED) declarations.
+        # Observation only; LP_OPEN, LP_CLOSE, and LP_COLLECT_FEES own wallet movement.
         _record(
             "LP_SNAPSHOT",
             Primitive.LP,
@@ -595,14 +435,8 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             event_kind=EventKind.NONE,
             wallet_delta=WalletDeltaLane.NONE,
         ),
-        # VIB-5865 PR-2: stays UNMEASURED while LP_OPEN/LP_CLOSE/LP_COLLECT_FEES
-        # move to EVENT_REPLAY. ``LPEventType.LP_REBALANCE`` is a RESERVED event
-        # type — no handler emits it today (``observability/pnl_attributor.py``
-        # §"The alternative model — explicit LP_REBALANCE lifecycle events — is
-        # reserved"), so there is no payload shape to fold and no real row to
-        # prove a fold against. Folding a hypothetical shape would be
-        # unverifiable guesswork on a money path; the UNMEASURED declaration
-        # keeps the safe visible-refusal behaviour until the lane actually ships.
+        # Reserved event type with no emitted payload shape. UNMEASURED preserves
+        # visible refusal rather than guessing how a hypothetical money path folds.
         _record(
             "LP_REBALANCE",
             Primitive.LP,
@@ -647,9 +481,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             required_lifecycle=_VAULT_LIFECYCLE,
             wallet_delta=WalletDeltaLane.UNMEASURED,
         ),
-        # VIB-5865 wallet_delta=NONE: observation-only, same rationale as
-        # LP_SNAPSHOT. The vault's wallet-moving legs are VAULT_DEPOSIT /
-        # VAULT_REDEEM / VAULT_HARVEST / VAULT_REALLOCATE / VAULT_MANAGE.
+        # Observation only; the vault lifecycle events own wallet movement.
         _record(
             "VAULT_SNAPSHOT",
             Primitive.VAULT,
@@ -658,14 +490,8 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             event_kind=EventKind.NONE,
             wallet_delta=WalletDeltaLane.NONE,
         ),
-        # VIB-5865 wallet_delta=NONE (reviewed judgment call — brief Q8). ``CLOSE``
-        # is the lending *aggregate marker* consumed by
-        # ``accounting/reporting/lending_report.py`` to flag a lending summary as
-        # closed; it has no position_type and no token legs of its own. Every
-        # fungible movement of the close is carried by the constituent WITHDRAW /
-        # REPAY events, which are EVENT_REPLAY. Declaring it UNMEASURED would
-        # poison the very tokens those measured legs just reconstructed — an
-        # over-degradation with no fund-safety gain.
+        # Aggregate close marker with no token legs; WITHDRAW and REPAY own movement.
+        # NONE avoids poisoning tokens reconstructed by those measured events.
         _record(
             "CLOSE",
             Primitive.LENDING,
@@ -674,8 +500,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             event_kind=EventKind.CLOSE,
             wallet_delta=WalletDeltaLane.NONE,
         ),
-        # VIB-5865 wallet_delta=NONE: a health-factor/risk observation
-        # (``event_kind=NONE``) emitted between lending legs — no token moves.
+        # Health-factor observation between lending legs; no token moves.
         _record(
             "LIQUIDATION_RISK_UPDATE",
             Primitive.LENDING,
@@ -720,37 +545,9 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             required_lifecycle=_PREDICTION_LIFECYCLE,
             wallet_delta=WalletDeltaLane.EVENT_REPLAY,
         ),
-        # ──────────────────────────────────────────────────────────────────
-        # P0 placeholders (VIB-4165, T5 of VIB-4160) — locked design item #5.
-        # Primitive split: VIB-4248.
-        #
-        # These five rows exist so ``record_for(...)`` returns a row for every
-        # ``IntentType`` value (parity invariant). The CDP-family rows
-        # (``OPEN_CDP``, ``MINT_STABLE``, ``REPAY_STABLE``, ``CLOSE_CDP``)
-        # resolve to ``Primitive.CDP``; ``LIQUIDATE`` resolves to
-        # ``Primitive.LIQUIDATION``. They do NOT resolve to ``Primitive.LENDING``
-        # because the source PRD (VIB-4159 / 2026-05-08) explicitly required
-        # the split: "without them, future code paths smuggle CDP through
-        # BORROW/REPAY and pollute lending accounting before P1 lands."
-        # Mapping these to LENDING here would have re-created at the data
-        # layer the exact conflation the placeholders exist to prevent —
-        # every CDP / liquidation event would consume LENDING's per-primitive
-        # ``matching_policy_version`` slot, defeating the VIB-4166 (T6)
-        # isolation contract.
-        #
-        # ``AccountingCategory.NO_ACCOUNTING`` and ``position_type=None`` because
-        # no real handler / position bucket exists yet — that lands in P1
-        # with the real connector.
-        #
-        # The compiler raises ``NotImplementedError`` for each — guarded by
-        # ``_raise_if_placeholder_intent`` in
-        # ``almanak/framework/intents/compiler.py`` and a parameterised test
-        # in ``tests/unit/intents/test_placeholder_compilers.py`` (Hard
-        # Ratification Condition #5). VIB-4248 leaves Gate A (PolicyEngine)
-        # and Gate B (compiler) untouched: the corrected primitive only
-        # matters when a P1 ticket removes one of these IntentTypes from
-        # ``_PLACEHOLDER_INTENT_TYPES`` and starts emitting real events.
-        # ──────────────────────────────────────────────────────────────────
+        # Compile-blocked placeholders preserve IntentType parity. CDP and
+        # liquidation use isolated version streams instead of contaminating LENDING.
+        # No handlers or position buckets exist, hence NO_ACCOUNTING and no position.
         _record(
             "LIQUIDATE",
             Primitive.LIQUIDATION,
@@ -791,9 +588,6 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             event_kind=EventKind.NONE,
             wallet_delta=WalletDeltaLane.LEDGER_PROJECTION,
         ),
-        # ──────────────────────────────────────────────────────────────────
-        # Utility intents (no position, no accounting row)
-        # ──────────────────────────────────────────────────────────────────
         _record(
             "HOLD",
             Primitive.UTILITY,
@@ -922,10 +716,6 @@ def classify(
     if record is None:
         return AccountingCategory.NO_ACCOUNTING
 
-    # VIB-4931: Pendle's LP/PT events are routed to the connector treatment by
-    # ``AccountingProcessor._dispatch`` (stage-1, via ``AccountingTreatmentRegistry``)
-    # BEFORE ``classify`` is consulted, so the generic taxonomy no longer special-cases
-    # Pendle here — it returns the generic category like every other protocol.
     return record.accounting_category
 
 
@@ -944,14 +734,8 @@ def position_type_for(intent_type: str) -> PositionKind | None:
     return record.position_type
 
 
-# Generic (non-protocol) position-type labels — the taxonomy's own
-# vocabulary, NOT connector folder names. These are shared across every venue
-# (``LP`` is "some LP position", ``LENDING`` is "some money-market position",
-# …) so they have no single connector owner and stay here rather than on a
-# connector ``primitive.py``. Protocol-name labels (``AAVE_V3`` / ``UNI_V3`` /
-# ``GMX_V2`` / …) are owned by their connector and resolved through
-# :class:`PrimitiveRegistry` — see the W-series self-containment blueprint
-# (``docs/internal/blueprints/22-connector-self-containment.md``).
+# Generic position labels are shared across venues. Protocol-name aliases belong
+# to connectors and resolve through PrimitiveRegistry instead.
 _GENERIC_LABEL_PRIMITIVES: dict[str, Primitive] = {
     "LP": Primitive.LP,
     "LENDING": Primitive.LENDING,
@@ -964,14 +748,10 @@ _GENERIC_LABEL_PRIMITIVES: dict[str, Primitive] = {
     "STAKING": Primitive.STAKING,
     "STAKED": Primitive.STAKING,
     "PREDICTION": Primitive.PREDICTION,
-    # Pendle PT — the position lives on the SWAP primitive (a PT buy/sell IS a
-    # swap; a redeem IS a withdraw treated as a swap-class disposal). The
-    # PENDLE_PT PositionKind is the position-axis label, SWAP the primitive.
+    # Pendle PT is a swap primitive; PENDLE_PT is only the position-axis label.
     "PENDLE_PT": Primitive.SWAP,
-    # CEX holdings + plain token balances are bookkeeping legs the teardown
-    # system unwinds via swap / withdraw — no protocol state machine. Mapping
-    # to UTILITY documents the "no primitive of its own" invariant while
-    # keeping the teardown-coverage test green.
+    # CEX holdings and plain balances have no protocol state machine; teardown
+    # unwinds them through swap or withdraw flows.
     "CEX": Primitive.UTILITY,
     "TOKEN": Primitive.UTILITY,
     "BALANCE": Primitive.UTILITY,
@@ -1038,21 +818,14 @@ def materializer_primitive_for(position_type_str: str) -> Primitive | None:
     only step missing.
     """
     s = position_type_str.upper().strip()
-    # Generic (non-protocol) labels take precedence: they are the taxonomy's
-    # own vocabulary and a connector must never re-claim one (the registry
-    # only owns protocol-name aliases, never these). Then fall through to the
-    # connector-owned registry for protocol-name labels.
+    # Generic taxonomy labels take precedence over connector-owned protocol aliases.
     primitive = _GENERIC_LABEL_PRIMITIVES.get(s)
     if primitive is not None:
         return primitive
     primitive = PrimitiveRegistry.primitive_for_label(s)
     if primitive is not None:
         return primitive
-    # T05 (VIB-4190): unknown position-type strings are silently coerced to
-    # None today, then the caller in accounting.position_state._classify_position
-    # treats them as "skip". WARN here so the operator sees the unrecognized
-    # string rather than the silent skip — primitives T2 (VIB-4162) deferred
-    # this diagnostic to the position-registry epic.
+    # The caller skips unknown labels; warn so the loss is visible.
     logger.warning(
         "materializer_primitive_for: unknown position_type_str=%r (normalized=%r); "
         "returning None — caller will treat as no-primitive. Declare the "
