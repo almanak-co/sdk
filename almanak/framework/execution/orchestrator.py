@@ -101,12 +101,6 @@ logger = logging.getLogger(__name__)
 _NATIVE_FUNDING_PREFLIGHT_KEY = "native_funding_preflight"
 
 
-# =============================================================================
-# Enums and Constants
-# =============================================================================
-
-
-# Import ExecutionEventType from events module (canonical source)
 from almanak.core.chains import DEFAULT_CHAIN
 
 from .events import ExecutionEventType, build_tx_reverted_payload
@@ -122,10 +116,6 @@ class ExecutionPhase(StrEnum):
     SUBMISSION = "SUBMISSION"
     CONFIRMATION = "CONFIRMATION"
     COMPLETE = "COMPLETE"
-
-
-# Chain-specific gas knobs come from ``ChainRegistry`` (VIB-4801). Use the
-# helpers below rather than re-introducing the legacy chain-keyed dicts.
 
 
 def _gas_buffer_for(chain: str) -> float:
@@ -147,11 +137,6 @@ def _gas_cost_cap_native_for(chain: str) -> float:
     if descriptor is None or descriptor.gas.cost_cap_native is None:
         return 0.0
     return descriptor.gas.cost_cap_native
-
-
-# =============================================================================
-# Data Classes
-# =============================================================================
 
 
 @dataclass
@@ -249,23 +234,19 @@ class ExecutionResult:
     correlation_id: str = ""
     submission_provenance: SubmissionProvenance = SubmissionProvenance.UNSPECIFIED
 
-    # === Gas Estimation Warnings ===
     gas_warnings: list[str] = field(default_factory=list)
 
-    # === Enriched Data (populated by ResultEnricher) ===
     position_id: int | str | None = None
     swap_amounts: SwapAmounts | None = None
     lp_close_data: LPCloseData | None = None
     prediction_fill: PredictionFill | None = None
-    bridge_data: BridgeData | None = None  # VIB-3226: BRIDGE intent enrichment
+    bridge_data: BridgeData | None = None
     async_orders: list[AsyncOrderData] = field(default_factory=list)
     settlement_receipts: list[dict[str, Any]] = field(default_factory=list)
-    bin_ids: list[int] | None = None  # TraderJoe V2 LP bin IDs
-    protocol_fees: ProtocolFees | None = None  # VIB-159: protocol-fee enrichment
-    # VIB-159 — connector-declared money legs (US-008/US-009). Type-only import
-    # to respect the framework -> connector boundary; the annotation is a string
-    # (no ``from __future__ import annotations`` in this module) so the connector
-    # value type is never loaded at framework-module import time.
+    bin_ids: list[int] | None = None
+    protocol_fees: ProtocolFees | None = None
+    # Keep the annotation as a string so connector types are not loaded across
+    # the framework boundary at runtime.
     primitive_money_legs: "PrimitiveMoneyLegs | None" = None
     extracted_data: dict[str, Any] = field(default_factory=dict)
     extraction_warnings: list[str] = field(default_factory=list)
@@ -353,9 +334,7 @@ class ExecutionResult:
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
             "correlation_id": self.correlation_id,
             "submission_provenance": self.submission_provenance.value,
-            # Gas warnings
             "gas_warnings": self.gas_warnings,
-            # Enriched data
             "position_id": self.position_id,
             "swap_amounts": self.swap_amounts.to_dict() if self.swap_amounts else None,
             "lp_close_data": self.lp_close_data.to_dict() if self.lp_close_data else None,
@@ -388,12 +367,12 @@ class ExecutionContext:
     chain: str = DEFAULT_CHAIN
     wallet_address: str = ""
     correlation_id: str = ""
-    cycle_id: str = ""  # Forensic correlation ID for the decide->execute cycle
+    cycle_id: str = ""
     session_id: str = ""
     simulation_enabled: bool = False
-    intent_description: str = ""  # Human-readable description of the intent
+    intent_description: str = ""
     dry_run: bool = False
-    protocol: str | None = None  # Resolved protocol (for result enrichment)
+    protocol: str | None = None
 
     def __post_init__(self) -> None:
         """Generate correlation_id if not provided."""
@@ -401,11 +380,6 @@ class ExecutionContext:
             import uuid
 
             self.correlation_id = str(uuid.uuid4())
-
-
-# =============================================================================
-# Transaction Risk Configuration
-# =============================================================================
 
 
 @dataclass
@@ -455,19 +429,18 @@ class TransactionRiskConfig:
             as max_value_eth.
     """
 
-    max_value_usd: Decimal = Decimal("0")  # opt-in USD cap (CLI sets via env)
-    max_value_eth: Decimal = Decimal("0")  # opt-in legacy wei cap
+    max_value_usd: Decimal = Decimal("0")
+    max_value_eth: Decimal = Decimal("0")
     max_value_per_token: dict[str, Decimal] = field(default_factory=dict)
-    allowed_contracts: set[str] | None = None  # None = allow all
+    allowed_contracts: set[str] | None = None
     block_contract_deployment: bool = True
-    max_gas_price_gwei: int = 0  # 0 = no limit
-    max_gas_cost_native: float = 0.0  # Max gas cost in native token per tx (0 = no limit)
-    max_gas_cost_usd: float = 0.0  # Max gas cost in USD per tx (0 = no limit)
-    native_token_price_usd: float = 0.0  # Current native token price for USD conversion
-    max_slippage_bps: int = 0  # Max acceptable swap slippage in bps (0 = no limit)
-    max_daily_volume_eth: Decimal = Decimal("0")  # 0 = no limit
+    max_gas_price_gwei: int = 0
+    max_gas_cost_native: float = 0.0
+    max_gas_cost_usd: float = 0.0
+    native_token_price_usd: float = 0.0
+    max_slippage_bps: int = 0
+    max_daily_volume_eth: Decimal = Decimal("0")
 
-    # Track daily volume for limit enforcement
     _daily_volume_wei: int = field(default=0, init=False, repr=False)
     _daily_volume_date: str = field(default="", init=False, repr=False)
 
@@ -482,7 +455,7 @@ class TransactionRiskConfig:
         return cls(
             block_contract_deployment=True,
             max_gas_price_gwei=DEFAULT_GAS_PRICE_CAP_GWEI,
-            max_daily_volume_eth=Decimal("100"),  # 100 native units daily limit
+            max_daily_volume_eth=Decimal("100"),
         )
 
     @classmethod
@@ -508,8 +481,8 @@ class TransactionRiskConfig:
     def permissive(cls) -> "TransactionRiskConfig":
         """Create permissive configuration for testing."""
         return cls(
-            max_value_usd=Decimal("0"),  # no USD cap
-            max_value_eth=Decimal("0"),  # no wei cap
+            max_value_usd=Decimal("0"),
+            max_value_eth=Decimal("0"),
             block_contract_deployment=False,
             max_gas_price_gwei=0,
             max_daily_volume_eth=Decimal("0"),
@@ -532,24 +505,11 @@ class TransactionRiskConfig:
         }
 
 
-# =============================================================================
-# Event Callback Type
-# =============================================================================
-
-
 EventCallback = Callable[[ExecutionEventType, dict[str, Any]], None]
 
-# VIB-4614: async pre-execution registry-collision check injected by the runner.
-# Receives the ActionBundle about to be submitted; returns a human-readable
-# rejection reason when an open auto-mode position-registry row would collide
-# (orphan-NFT risk), or ``None`` to allow. Defined as a structural alias so the
-# orchestrator never imports the StateManager (layering boundary — see __init__).
+# The injected callback preserves the framework/StateManager boundary while
+# allowing the runner to reject registry collisions before submission.
 RegistryPreflightCheck = Callable[["ActionBundle"], Awaitable[str | None]]
-
-
-# =============================================================================
-# Intent Description Generator
-# =============================================================================
 
 
 def _wei_lending_protocols() -> frozenset[str]:
@@ -645,9 +605,6 @@ def _swap_amount_is_wei(protocol: Any) -> bool:
     """
     key = _normalize_protocol_key(protocol)
     if not key:
-        # Default to wei when protocol is missing/None: matches the
-        # legacy code path that always tried to scale large amounts by
-        # 10**decimals when ``token_data`` was present.
         return True
     return key not in _human_amount_swap_protocols()
 
@@ -666,7 +623,7 @@ def _get_token_decimals(token_data: Any) -> int:
     """Extract token decimals from token data dict."""
     if isinstance(token_data, dict):
         return token_data.get("decimals", 18)
-    return 18  # Default to 18 decimals (ETH standard)
+    return 18
 
 
 def _format_amount(amount: Any, token_data: Any = None, *, is_wei: bool = True) -> str:
@@ -705,15 +662,10 @@ def _format_amount(amount: Any, token_data: Any = None, *, is_wei: bool = True) 
         if isinstance(amount, int | float | Decimal):
             amount = Decimal(str(amount))
 
-            # Wei-encoded values are always scaled by ``10**decimals``;
-            # human-readable values are printed as-is. Avoid the previous
-            # magnitude heuristic — it under-scaled 6-decimal tokens at
-            # small dollar amounts (the $100 USDC = 100_000_000 case).
             if is_wei and token_data:
                 decimals = _get_token_decimals(token_data)
                 amount = amount / Decimal(10**decimals)
 
-            # Format based on magnitude
             if amount >= 1000:
                 return f"{amount:,.0f}"
             elif amount >= 1:
@@ -737,12 +689,8 @@ def _describe_swap(metadata: dict[str, Any], protocol: str) -> str:
     to_token_data = metadata.get("to_token", {})
     from_token = _get_token_symbol(from_token_data)
     to_token = _get_token_symbol(to_token_data)
-    # ``amount_in`` is the canonical key emitted by the SWAP compilers
-    # (``almanak/framework/intents/compiler*.py``); ``from_amount`` and
-    # ``amount`` are legacy aliases kept for manually-constructed bundles.
-    # Most SWAP compilers store wei (``str(amount_in)``); Curve and
-    # Aerodrome diverged and ship human Decimals (``str(amount_decimal)``).
-    # See ``_human_amount_swap_protocols`` for the canonical list.
+    # ``amount_in`` is canonical; the aliases support hand-built bundles.
+    # Curve and Aerodrome encode human Decimals while other swaps use wei.
     raw_amount = metadata.get("amount_in", metadata.get("from_amount", metadata.get("amount", "")))
     amount = _format_amount(raw_amount, from_token_data, is_wei=_swap_amount_is_wei(protocol))
 
@@ -758,14 +706,7 @@ def _describe_swap(metadata: dict[str, Any], protocol: str) -> str:
 def _describe_supply(metadata: dict[str, Any], protocol: str) -> str:
     supply_token_data = metadata.get("supply_token", {})
     supply_token = _get_token_symbol(supply_token_data)
-    # Lending metadata encoding splits by protocol family — keep the
-    # description formatter aligned with ``_preflight_supply_requirements``
-    # so a $100 USDC supply on Aave V3 prints "100 USDC" (wei) and on
-    # Morpho Blue prints "100 USDC" (already human). Drift between these
-    # two sites is what surfaced as the VIB-3747 cosmetic regression;
-    # ``_lending_amount_is_wei`` mirrors the lowercase normalisation done
-    # by ``_preflight_collect_requirements`` so display-cased protocol
-    # strings ("Aave V3") can't reintroduce the drift.
+    # Lending metadata encoding varies by protocol; display and preflight must agree.
     amount = _format_amount(
         metadata.get("supply_amount", ""), supply_token_data, is_wei=_lending_amount_is_wei(protocol)
     )
@@ -862,11 +803,7 @@ def _describe_perp_open(metadata: dict[str, Any], protocol: str) -> str:
     leverage = metadata.get("leverage", "")
     collateral_token_data = metadata.get("collateral_token", {})
     collateral_token = _get_token_symbol(collateral_token_data)
-    # PERP_OPEN metadata stores ``str(intent.collateral_amount)`` — the
-    # human-readable Decimal from the user-facing intent (see
-    # ``IntentCompiler._compile_perp_open`` and ``DriftAdapter``). Wei
-    # conversion happens internally before contract calls but is never
-    # exposed in metadata.
+    # Perpetual metadata exposes human-readable collateral, not contract units.
     collateral_amount = _format_amount(metadata.get("collateral_amount", ""), collateral_token_data, is_wei=False)
 
     if collateral_amount and collateral_token:
@@ -913,10 +850,6 @@ def _describe_hold(metadata: dict[str, Any]) -> str:
     return f"Hold: {reason}" if reason else "Hold position"
 
 
-# Dispatch table: intent_type -> handler(metadata, protocol, chain) -> str.
-# Every describer takes the same 3-arg signature so the table covers ALL known
-# intent types uniformly. Handlers that don't need ``protocol`` or ``chain``
-# simply ignore the extra arg (see ``_describe_hold`` wrapper).
 _INTENT_DESCRIBERS: dict[str, Callable[[dict[str, Any], str, str], str]] = {
     "SWAP": lambda m, p, _c: _describe_swap(m, p),
     "SUPPLY": lambda m, p, _c: _describe_supply(m, p),
@@ -950,18 +883,8 @@ def _generate_intent_description(action_bundle: "ActionBundle") -> str:
     if describer is not None:
         return describer(metadata, protocol, chain)
 
-    # Default: title-case the intent type.
     return intent_type.replace("_", " ").title()
 
-
-# =============================================================================
-# Pre-flight balance-check helpers
-# =============================================================================
-
-
-# ``_wei_lending_protocols`` is declared near the top of the file (next to
-# the description formatter) so it's available to both pre-flight and
-# description code paths. Same metadata-encoding rule applies here.
 
 # ``balanceOf(address)`` function selector (first 4 bytes of keccak256).
 _ERC20_BALANCE_OF_SELECTOR: bytes = bytes.fromhex("70a08231")
@@ -970,8 +893,6 @@ _ERC20_BALANCE_OF_SELECTOR: bytes = bytes.fromhex("70a08231")
 # (the check is a best-effort optimisation, not a hard gate).
 _PREFLIGHT_RPC_TIMEOUT_S: float = 5.0
 
-# Requirement tuple emitted by ``_preflight_collect_requirements``:
-# ``(symbol, address, amount_wei, decimals, is_native)``.
 _Requirement = tuple[str, str, int, int | None, bool]
 
 
@@ -1004,10 +925,9 @@ def _preflight_parse_amount_wei(raw_amount: str, token_info: dict, is_wei: bool 
             return None
         return int(val)
 
-    # Human-readable -> convert to wei.
     if token_decimals is not None and token_decimals >= 0:
         return int(val * Decimal(10**token_decimals))
-    return None  # Can't convert without decimals
+    return None
 
 
 def _preflight_requirement_from(
@@ -1103,8 +1023,6 @@ def _preflight_borrow_requirements(metadata: dict, protocol: str) -> list[_Requi
     return [req] if req is not None else []
 
 
-# Dispatch table: intent type -> requirement collector.  Adding a new balance-
-# checked intent type is a single entry here.
 _PREFLIGHT_COLLECTORS: dict[str, Callable[[dict, str], list[_Requirement]]] = {
     "SWAP": _preflight_swap_requirements,
     "LP_OPEN": _preflight_lp_open_requirements,
@@ -1124,10 +1042,6 @@ def _preflight_collect_requirements(action_bundle: ActionBundle) -> list[_Requir
     """
     metadata = action_bundle.metadata or {}
     intent_type = (action_bundle.intent_type or "").upper()
-    # Normalise via the same helper used by ``_lending_amount_is_wei`` /
-    # ``_swap_amount_is_wei`` so a display-name variant (``"Aave V3"``,
-    # ``"morpho-blue"``) classifies the same way in the balance check
-    # as it does in the description formatter. (VIB-3747)
     protocol = _normalize_protocol_key(metadata.get("protocol"))
 
     collector = _PREFLIGHT_COLLECTORS.get(intent_type)
@@ -1170,11 +1084,6 @@ def _preflight_format_shortfall(symbol: str, balance_wei: int, required_wei: int
         actual_human = Decimal(balance_wei) / Decimal(10**decimals)
         return f"Insufficient {symbol}: have {actual_human:.6f}, need {required_human:.6f}"
     return f"Insufficient {symbol}: have {balance_wei} wei, need {required_wei} wei"
-
-
-# =============================================================================
-# Execution Orchestrator
-# =============================================================================
 
 
 class ExecutionOrchestrator:
@@ -1263,7 +1172,6 @@ class ExecutionOrchestrator:
         self.risk_guard = risk_guard or RiskGuard()
         self._event_callback = event_callback
 
-        # Use chain-specific timeout if not explicitly provided
         from almanak.framework.execution.gas.constants import DEFAULT_TX_TIMEOUT_SECONDS
 
         descriptor = ChainRegistry.try_resolve(chain)
@@ -1276,17 +1184,14 @@ class ExecutionOrchestrator:
         self._session_store = session_store
         self.tx_risk_config = tx_risk_config or TransactionRiskConfig.default()
 
-        # Set gas buffer multiplier based on chain
         if gas_buffer_multiplier is not None:
             self.gas_buffer_multiplier = gas_buffer_multiplier
         else:
             self.gas_buffer_multiplier = _gas_buffer_for(chain)
 
-        # Web3 instance for nonce queries (lazy initialized)
         self._web3: AsyncWeb3 | None = None
 
-        # Local nonce tracker: maps address -> next expected nonce.
-        # Prevents nonce collisions when multiple tool calls execute rapidly.
+        # Cache the next expected nonce to avoid collisions across rapid executions.
         self._local_nonce: dict[str, int] = {}
 
         logger.info(
@@ -1321,7 +1226,6 @@ class ExecutionOrchestrator:
                 from almanak.gateway.utils.ssl_context import build_ssl_context
 
                 self._web3 = AsyncWeb3(AsyncHTTPProvider(self.rpc_url, request_kwargs={"ssl": build_ssl_context()}))
-                # Inject POA middleware for chains like Polygon, Avalanche, BSC
                 from almanak.gateway.utils.rpc_provider import is_poa_chain
 
                 if is_poa_chain(self.chain):
@@ -1359,7 +1263,6 @@ class ExecutionOrchestrator:
         event_details: dict[str, Any] = dict(details) if details else {}
         event_details["correlation_id"] = context.correlation_id
 
-        # Map execution event type to timeline event type
         timeline_event_type_map: dict[ExecutionEventType, TimelineEventType] = {
             ExecutionEventType.VALIDATING: TimelineEventType.CUSTOM,
             ExecutionEventType.RISK_BLOCKED: TimelineEventType.RISK_GUARD_TRIGGERED,
@@ -1377,7 +1280,6 @@ class ExecutionOrchestrator:
 
         timeline_event_type = timeline_event_type_map.get(event_type, TimelineEventType.CUSTOM)
 
-        # Generate human-readable description based on event type
         intent_desc = context.intent_description or "Unknown action"
         if event_type == ExecutionEventType.EXECUTION_SUCCESS:
             description = f"✓ {intent_desc}"
@@ -1414,7 +1316,6 @@ class ExecutionOrchestrator:
         else:
             description = f"{intent_desc}"
 
-        # Create timeline event
         timeline_event = TimelineEvent(
             timestamp=datetime.now(UTC),
             event_type=timeline_event_type,
@@ -1428,10 +1329,8 @@ class ExecutionOrchestrator:
             },
         )
 
-        # Add to timeline
         add_event(timeline_event)
 
-        # Call custom callback if provided
         if self._event_callback:
             try:
                 self._event_callback(event_type, event_details)
@@ -1457,20 +1356,16 @@ class ExecutionOrchestrator:
         if self._session_store is None:
             return None
 
-        # Create session with PREPARING phase
         session = create_session(
             deployment_id=context.deployment_id,
             intent_id=context.intent_id or context.correlation_id,
             session_id=context.session_id if context.session_id else None,
         )
 
-        # Store action bundle snapshot for potential replay
         session.set_action_bundle(action_bundle.to_dict())
 
-        # Persist the session
         self._session_store.save(session)
 
-        # Update context with session_id
         context.session_id = session.session_id
 
         logger.debug(f"Created execution session {session.session_id} for deployment {context.deployment_id}")
@@ -1575,12 +1470,8 @@ class ExecutionOrchestrator:
             return state.result
         except Exception as exc:
             if state is None:
-                # Init failed (e.g., intent-description generation, session
-                # creation, session-store persistence). Return a minimal
-                # failure result rather than letting the exception escape.
-                # Preserve observability: log the traceback, keep the
-                # caller-provided correlation_id, and emit EXECUTION_FAILED
-                # so timeline/event-callback consumers still see the failure.
+                # Initialization failures retain the standard failure shape and
+                # event path so callers do not lose observability.
                 logger.exception(f"Pipeline initialization failed: {exc}")
                 fallback_context = (
                     context
@@ -1606,10 +1497,6 @@ class ExecutionOrchestrator:
                 return result
             return self._handle_execution_exception(state, exc)
 
-    # -------------------------------------------------------------------------
-    # Pipeline setup
-    # -------------------------------------------------------------------------
-
     def _init_pipeline_state(
         self,
         action_bundle: ActionBundle,
@@ -1633,7 +1520,6 @@ class ExecutionOrchestrator:
             if not context.chain:
                 context.chain = self.chain
 
-        # Generate human-readable intent description
         if not context.intent_description:
             context.intent_description = _generate_intent_description(action_bundle)
 
@@ -1644,7 +1530,6 @@ class ExecutionOrchestrator:
             submission_provenance=SubmissionProvenance.NOT_ATTEMPTED,
         )
 
-        # Create execution session for crash recovery (PREPARING phase)
         session = self._create_session(context, action_bundle)
 
         return ExecutionPipelineState(
@@ -1653,10 +1538,6 @@ class ExecutionOrchestrator:
             result=result,
             session=session,
         )
-
-    # -------------------------------------------------------------------------
-    # Phase helpers
-    # -------------------------------------------------------------------------
 
     async def _phase_build(self, state: ExecutionPipelineState) -> ExecutionResult | None:
         """Step 0, 1, 1.5, 1.6: refresh deferred, build unsigned, pre-flight, gas fallback.
@@ -1670,7 +1551,6 @@ class ExecutionOrchestrator:
         result = state.result
         session = state.session
 
-        # Step 0: Refresh deferred transactions (LiFi, Enso) with fresh route data
         from .deferred_refresh import refresh_deferred_bundle
 
         state.action_bundle = refresh_deferred_bundle(
@@ -1681,26 +1561,21 @@ class ExecutionOrchestrator:
         )
         action_bundle = state.action_bundle
 
-        # Step 1: Build unsigned transactions from ActionBundle
-        # Gas prices are set as placeholders; _update_gas_prices() sets final values.
         unsigned_txs = await self._build_unsigned_transactions(action_bundle, context)
 
         if not unsigned_txs:
             return self._handle_empty_bundle(state)
 
-        # Step 1.5: Pre-flight token balance check
         # Prevents sending doomed transactions that can hang Anvil forks
         # via expensive upstream RPC calls during gas estimation / simulation.
         await self._check_token_balance_before_submit(action_bundle, context)
 
-        # Step 1.6: On-chain gas estimation fallback (when simulation is disabled)
         if not context.simulation_enabled:
             unsigned_txs, gas_warnings = await self._maybe_estimate_gas_limits(unsigned_txs, context)
             if gas_warnings:
                 result.gas_warnings = gas_warnings
 
         state.unsigned_txs = unsigned_txs
-        # session is unused here but referenced via state.session elsewhere
         _ = session
         return None
 
@@ -1718,8 +1593,6 @@ class ExecutionOrchestrator:
         session = state.session
 
         intent_type = (action_bundle.intent_type or "").upper()
-        # HOLD intents legitimately produce 0 transactions.
-        # No-op bundles (e.g., withdraw_all on zero collateral) are also legitimate.
         is_no_op = bool(action_bundle.metadata and action_bundle.metadata.get("no_op"))
         if intent_type == "HOLD" or is_no_op:
             no_op_reason = (
@@ -1738,9 +1611,6 @@ class ExecutionOrchestrator:
             )
             return result
 
-        # For all other intent types (LP_CLOSE, SWAP, etc.), 0 transactions
-        # means nothing happened -- this is a false positive if reported as
-        # SUCCESS. Mark as failed so the strategy knows the action didn't execute.
         error_msg = (
             f"Empty ActionBundle: {intent_type} compiled to 0 transactions. "
             f"Nothing was executed. This usually means no position was found to close "
@@ -1791,11 +1661,8 @@ class ExecutionOrchestrator:
         try:
             rejection = await self.registry_preflight(state.action_bundle)
         except Exception as exc:
-            # A failing preflight check must NOT block execution: the
-            # commit-path collision classifier is the authoritative backstop,
-            # and a transient StateManager read error must not strand a
-            # legitimate open. Log loudly and continue (fail-open here is
-            # safe — the post-mint INSERT still enforces the unique index).
+            # Fail open because the post-mint insert still enforces uniqueness;
+            # a transient registry read must not strand a legitimate open.
             logger.warning(
                 "Registry preflight check raised; continuing (commit-path classifier remains the backstop): %s",
                 exc,
@@ -1820,9 +1687,8 @@ class ExecutionOrchestrator:
         context = state.context
         result = state.result
         session = state.session
-        assert state.unsigned_txs is not None  # set by _phase_build
+        assert state.unsigned_txs is not None
 
-        # Step 2: Validate via RiskGuard
         self._emit_event(
             ExecutionEventType.VALIDATING,
             context,
@@ -1841,10 +1707,6 @@ class ExecutionOrchestrator:
             )
             return result
 
-        # Step 2.5: Pre-flight balance check (VIB-521)
-        # Prevents wasting gas on approvals when the wallet can't cover the
-        # final action (e.g., LP mint). Extracts required token amounts from
-        # the ActionBundle metadata and checks on-chain balances.
         preflight_error = await self._preflight_balance_check(state.action_bundle, context)
         if preflight_error:
             result.error = preflight_error
@@ -1877,14 +1739,10 @@ class ExecutionOrchestrator:
             {"tx_count": len(state.unsigned_txs)},
         )
 
-        # Build state overrides for Safe wallet simulation
-        # Safe wallets hold the tokens, but EOA signs - simulator needs to
-        # see the Safe's balance, not the EOA's
+        # The EOA signs, but simulation must see the assets held by the Safe.
         state_overrides = None
         if isinstance(self.signer, SafeSigner):
             safe_address = self.signer.address
-            # Override Safe wallet ETH balance for simulation
-            # This ensures simulation sees the Safe can pay for gas
             state_overrides = {
                 safe_address: {
                     "balance": hex(10 * 10**18)  # 10 ETH for simulation
@@ -1914,7 +1772,6 @@ class ExecutionOrchestrator:
             )
             return result
 
-        # Update gas estimates from simulation if available
         if simulation_result.gas_estimates:
             source = simulation_result.simulator_name or "unknown"
             for i, gas_estimate in enumerate(simulation_result.gas_estimates):
@@ -1936,11 +1793,9 @@ class ExecutionOrchestrator:
         session = state.session
         assert state.unsigned_txs is not None
 
-        # Step 3.5: Update gas prices from network
         state.unsigned_txs = await self._update_gas_prices(state.unsigned_txs)
 
-        # Step 3.6: Validate gas prices against configured cap
-        # This must run AFTER _update_gas_prices() sets real values.
+        # Caps must be checked after network prices replace the placeholders.
         gas_price_result = self._validate_gas_prices(state.unsigned_txs)
         if not gas_price_result.passed:
             result.error = f"Gas price cap exceeded: {'; '.join(gas_price_result.violations)}"
@@ -1964,12 +1819,10 @@ class ExecutionOrchestrator:
 
         result.phase = ExecutionPhase.NONCE_ASSIGNMENT
 
-        # Step 4: Assign nonces
         state.unsigned_txs = await self._assign_nonces(state.unsigned_txs, context)
 
         result.phase = ExecutionPhase.SIGNING
 
-        # Step 5: Sign transactions
         self._emit_event(
             ExecutionEventType.SIGNING,
             context,
@@ -1982,7 +1835,6 @@ class ExecutionOrchestrator:
             signed_txs = await self.signer.sign_batch(state.unsigned_txs, context.chain)
         state.signed_txs = signed_txs
 
-        # Checkpoint session after signing (SIGNING phase with nonces)
         tx_states = [
             TransactionState(
                 nonce=tx.nonce if tx.nonce is not None else 0,
@@ -1994,8 +1846,7 @@ class ExecutionOrchestrator:
 
         result.phase = ExecutionPhase.SUBMISSION
 
-        # Step 6: Dry run check. Opted-in bundles first run the final native-
-        # funding phase below, using the same signed liability as live execution.
+        # Opted-in dry runs validate the same signed liability as live execution.
         funding_config = (state.action_bundle.metadata or {}).get(_NATIVE_FUNDING_PREFLIGHT_KEY)
         if context.dry_run and not isinstance(funding_config, dict):
             result.success = True
@@ -2151,8 +2002,6 @@ class ExecutionOrchestrator:
         assert state.signed_txs is not None
         signed_txs = state.signed_txs
 
-        # Step 7+8: Submit transactions and collect receipts.
-        #
         # Use sequential submit-and-confirm for multi-TX bundles with EOA
         # signers to avoid hitting RPC in-flight TX limits (e.g. Alchemy's
         # 2-TX limit for delegated accounts on Base).  Safe signers bundle
@@ -2174,7 +2023,6 @@ class ExecutionOrchestrator:
         receipts: list[Any] | None = None
 
         if use_sequential:
-            # --- Sequential path: submit TX -> confirm -> submit next ---
             from .submitter.public import PublicMempoolSubmitter
 
             if isinstance(self.submitter, PublicMempoolSubmitter):
@@ -2200,9 +2048,8 @@ class ExecutionOrchestrator:
                         )
                     raise
             else:
-                # Non-public submitter fallback: submit all, then confirm
                 submission_results = await self.submitter.submit(signed_txs)
-                use_sequential = False  # fall through to parallel receipt path
+                use_sequential = False
         else:
             submission_results = await self.submitter.submit(signed_txs)
 
@@ -2210,8 +2057,6 @@ class ExecutionOrchestrator:
         state.submission_results = submission_results
 
         if not use_sequential:
-            # --- Parallel path (single TX, Safe signer, or fallback) ---
-            # Check for submission failures
             failed_submissions = [r for r in submission_results if not r.submitted]
             if failed_submissions:
                 first_error = failed_submissions[0].error or "Unknown submission error"
@@ -2225,20 +2070,17 @@ class ExecutionOrchestrator:
                 )
                 return result
 
-        # Emit TX_SENT events and update transaction states
         for i, submission in enumerate(submission_results):
             self._emit_event(
                 ExecutionEventType.TX_SENT,
                 context,
                 {"tx_hash": submission.tx_hash},
             )
-            # Update transaction state with tx_hash
             if session and i < len(session.transactions):
                 session.transactions[i].tx_hash = submission.tx_hash
                 session.transactions[i].status = TransactionStatus.SUBMITTED
                 session.transactions[i].submitted_at = datetime.now(UTC)
 
-        # Checkpoint SUBMITTED phase with tx_hash and nonce
         self._checkpoint_session(
             session,
             SessionPhase.SUBMITTED,
@@ -2247,11 +2089,9 @@ class ExecutionOrchestrator:
 
         result.phase = ExecutionPhase.CONFIRMATION
 
-        # Checkpoint CONFIRMING phase
         self._checkpoint_session(session, SessionPhase.CONFIRMING)
 
         if not use_sequential:
-            # Parallel receipt polling (single TX or Safe bundles)
             self._emit_event(
                 ExecutionEventType.WAITING,
                 context,
@@ -2274,7 +2114,6 @@ class ExecutionOrchestrator:
         action_bundle = state.action_bundle
         assert state.receipts is not None
 
-        # Step 9: Process receipts
         for _i, receipt in enumerate(state.receipts):
             tx_result = TransactionResult(
                 tx_hash=receipt.tx_hash,
@@ -2283,11 +2122,7 @@ class ExecutionOrchestrator:
                 gas_used=receipt.gas_used,
                 gas_cost_wei=receipt.gas_cost_wei,
                 logs=receipt.logs,
-                # Preserve the receipt's revert reason so downstream diagnostics
-                # (e.g. build_verbose_revert_report) receive the original failure
-                # payload instead of None. Support both `error` and `raw_error`
-                # attribute names since not every submitter populates the same
-                # field (see issue #1659).
+                # Submitters expose revert details under either attribute name.
                 error=getattr(receipt, "error", None) or getattr(receipt, "raw_error", None),
             )
 
@@ -2295,7 +2130,6 @@ class ExecutionOrchestrator:
             result.total_gas_used += receipt.gas_used
             result.total_gas_cost_wei += receipt.gas_cost_wei
 
-            # Update session transaction state
             if session:
                 session.update_transaction(
                     tx_hash=receipt.tx_hash,
@@ -2315,15 +2149,8 @@ class ExecutionOrchestrator:
                     },
                 )
             else:
-                # Receipt-level revert: full confirmed receipt available, but
-                # no decoded revert_reason/verbose_report at this per-tx point
-                # (the verbose report is built once below for the batch).
-                # ``tx_result.error`` is unset in the receipt loop (see the
-                # TransactionResult construction above), so fall back to a
-                # non-null sentinel so downstream consumers using
-                # ``payload.get("error", <default>)`` do not surface a literal
-                # ``None`` error string. Full revert detail is surfaced in the
-                # batch-level EXECUTION_FAILED event below.
+                # Keep the per-transaction error non-null; the batch event below
+                # carries the full revert diagnostics.
                 self._emit_event(
                     ExecutionEventType.TX_REVERTED,
                     context,
@@ -2337,12 +2164,10 @@ class ExecutionOrchestrator:
                     ),
                 )
 
-        # Check for any reverted transactions
         reverted = [tr for tr in result.transaction_results if not tr.success]
         if reverted:
             first_reverted = reverted[0]
 
-            # Build verbose revert report, record on result, and close the session.
             verbose_report = self._build_and_record_revert_report(
                 state,
                 raw_error=first_reverted.error,
@@ -2359,7 +2184,6 @@ class ExecutionOrchestrator:
                 },
             )
 
-            # Log user-friendly failure summary
             intent_type = action_bundle.intent_type if action_bundle else "UNKNOWN"
             tx_hash_fmt = format_tx_hash(first_reverted.tx_hash)
             logger.error(f"FAILED: {intent_type} - Transaction reverted at {tx_hash_fmt}")
@@ -2367,18 +2191,14 @@ class ExecutionOrchestrator:
 
             return result
 
-        # Success!
         result.success = True
         result.phase = ExecutionPhase.COMPLETE
         result.completed_at = datetime.now(UTC)
 
-        # Update local nonce cache ONLY after confirmed on-chain success.
-        # This prevents nonce drift when transactions fail. (VIB-1449)
+        # Advance the nonce cache only after confirmed success to prevent drift.
         confirmed_count = len([tr for tr in result.transaction_results if tr.success])
         if confirmed_count > 0:
             wallet_key = context.wallet_address.lower()
-            # Set nonce to chain_nonce + confirmed_count (or use the
-            # highest confirmed nonce + 1 from the transaction results).
             web3 = await self._get_web3()
             fresh_nonce = await web3.eth.get_transaction_count(
                 web3.to_checksum_address(context.wallet_address), "pending"
@@ -2386,7 +2206,6 @@ class ExecutionOrchestrator:
             self._local_nonce[wallet_key] = fresh_nonce
             logger.debug(f"Updated local nonce cache to {fresh_nonce} after {confirmed_count} confirmed TXs")
 
-        # Mark session complete on success
         self._complete_session(session, success=True)
 
         self._emit_event(
@@ -2399,7 +2218,6 @@ class ExecutionOrchestrator:
             },
         )
 
-        # Log user-friendly execution summary
         intent_type = action_bundle.intent_type if action_bundle else "UNKNOWN"
         tx_hashes = [format_tx_hash(tr.tx_hash) for tr in result.transaction_results]
         gas_fmt = format_gas_cost(result.total_gas_used)
@@ -2409,10 +2227,6 @@ class ExecutionOrchestrator:
         logger.info(f"   Txs: {len(result.transaction_results)} ({', '.join(tx_hashes)}) | {gas_fmt}")
 
         return result
-
-    # -------------------------------------------------------------------------
-    # Revert report helper
-    # -------------------------------------------------------------------------
 
     def _build_and_record_revert_report(
         self,
@@ -2449,10 +2263,6 @@ class ExecutionOrchestrator:
         state.result.error_phase = error_phase
         self._complete_session(state.session, success=False, error=state.result.error)
         return report
-
-    # -------------------------------------------------------------------------
-    # Exception consolidation
-    # -------------------------------------------------------------------------
 
     def _handle_execution_exception(
         self,
@@ -2503,16 +2313,8 @@ class ExecutionOrchestrator:
             return result
 
         if isinstance(exc, TransactionRevertedError):
-            # VIB-4581 / F1.A — record the reverted tx_hash on the result so
-            # the downstream ledger writer (``build_ledger_entry`` reads
-            # ``result.transaction_results[0].tx_hash``) persists the mined
-            # tx hash even when the tx reverted. Pre-fix, the exception path
-            # left ``transaction_results`` empty and the ledger row carried
-            # ``tx_hash=""`` despite gas being burned on chain — invisible to
-            # post-mortem auditors. ``_phase_enrich`` already populates the
-            # list from receipts on the non-exception revert path; the
-            # ``SubmissionError`` branch below uses the same pattern for
-            # partially-submitted txs.
+            # Reverted transactions still burn gas; retain their hashes for
+            # ledger and audit records even on the exception path.
             if exc.tx_hash and not any(tr.tx_hash == exc.tx_hash for tr in result.transaction_results):
                 result.transaction_results.append(
                     TransactionResult(
@@ -2525,17 +2327,12 @@ class ExecutionOrchestrator:
                 if exc.gas_used:
                     result.total_gas_used += exc.gas_used
 
-            # Build verbose revert report, record on result, and close the session.
             verbose_report = self._build_and_record_revert_report(
                 state,
                 raw_error=str(exc),
                 error_phase=ExecutionPhase.CONFIRMATION,
             )
 
-            # Exception-path revert: no confirmed receipt, so block_number
-            # may be ``None``. ``TransactionRevertedError`` always declares
-            # ``block_number`` / ``gas_used`` attributes (``None`` default), so
-            # direct attribute access is safe here.
             self._emit_event(
                 ExecutionEventType.TX_REVERTED,
                 context,
@@ -2549,7 +2346,6 @@ class ExecutionOrchestrator:
                 ),
             )
 
-            # Log user-friendly failure summary
             intent_type = action_bundle.intent_type if action_bundle else "UNKNOWN"
             tx_hash_fmt = format_tx_hash(exc.tx_hash)
             logger.error(f"FAILED: {intent_type} - Transaction reverted at {tx_hash_fmt}")
@@ -2561,9 +2357,7 @@ class ExecutionOrchestrator:
             result.error = str(exc)
             result.error_phase = ExecutionPhase.SUBMISSION
 
-            # Preserve submitted tx_hashes on timeout so the runner can check
-            # if transactions confirmed before blindly retrying (which could
-            # cause duplicate swaps).
+            # Preserve submitted hashes so retries cannot duplicate transactions.
             if not result.transaction_results and session and session.transactions:
                 for tx_state in session.transactions:
                     if tx_state.tx_hash:
@@ -2590,15 +2384,11 @@ class ExecutionOrchestrator:
             self._emit_event(
                 ExecutionEventType.EXECUTION_FAILED,
                 context,
-                # Unlike the exact-type branches above, this one catches every
-                # remaining ``ExecutionError`` subclass, so report the concrete
-                # class (as the generic path below does) rather than flattening
-                # e.g. ``DeferredRefreshError`` to the base name.
+                # Preserve the concrete subclass for downstream error classifiers.
                 {"error": str(exc), "error_type": type(exc).__name__},
             )
             return result
 
-        # Generic / unexpected exception path.
         logger.exception(f"Unexpected execution error: {exc}")
         result.error = f"Unexpected error: {exc}"
         result.error_phase = result.phase
@@ -2630,26 +2420,18 @@ class ExecutionOrchestrator:
         """
         unsigned_txs: list[UnsignedTransaction] = []
 
-        # Get chain ID for the target chain (use canonical CHAIN_IDS constant)
         chain_id = CHAIN_IDS.get(context.chain.lower(), 42161)
-
-        # Gas prices are set as placeholders here; _update_gas_prices() overwrites
-        # them with accurate network values (2x base fee EIP-1559 formula) later
-        # in the execute() flow, before nonce assignment and signing.
 
         logger.debug(f"Building {len(action_bundle.transactions)} unsigned transactions for chain {context.chain}")
 
         for tx_data in action_bundle.transactions:
-            # Parse transaction data from ActionBundle format
             to_address = tx_data.get("to", "")
             value = int(tx_data.get("value", "0"))
             data = tx_data.get("data", "0x")
             gas_estimate = tx_data.get("gas_estimate", 100000)
 
-            # Apply gas buffer
             buffered_gas = int(gas_estimate * self.gas_buffer_multiplier)
 
-            # Build unsigned transaction (EIP-1559 by default)
             unsigned_tx = UnsignedTransaction(
                 to=to_address,
                 value=value,
@@ -2697,9 +2479,7 @@ class ExecutionOrchestrator:
         violations: list[str] = []
         config = self.tx_risk_config
 
-        # Reject misconfiguration up front: a negative cap is never meaningful
-        # and silently disabling enforcement on bad config would be a
-        # foot-gun (CodeRabbit catch on PR #1568).
+        # Negative caps are invalid; treating them as disabled would weaken enforcement.
         if config.max_value_usd < 0 or config.max_value_eth < 0:
             return RiskGuardResult(
                 passed=False,
@@ -2711,12 +2491,10 @@ class ExecutionOrchestrator:
                 ],
             )
 
-        # Get today's date for daily volume tracking
         from datetime import date
 
         today = date.today().isoformat()
         if config._daily_volume_date != today:
-            # Reset daily volume on new day
             config._daily_volume_wei = 0
             config._daily_volume_date = today
 
@@ -2724,9 +2502,7 @@ class ExecutionOrchestrator:
         check_value_usd = config.max_value_usd > 0
 
         for i, tx in enumerate(unsigned_txs):
-            # 1a. USD-denominated per-tx cap (preferred, cross-chain).
-            #     Fail-closed if oracle price unavailable — same pattern as
-            #     max_gas_cost_usd guard below.
+            # A configured USD value cap fails closed when its price is unavailable.
             if check_value_usd and tx.value > 0:
                 if config.native_token_price_usd <= 0:
                     violations.append(
@@ -2745,9 +2521,6 @@ class ExecutionOrchestrator:
                             f"${config.native_token_price_usd:,.4f})"
                         )
 
-            # 1b. Legacy wei-denominated per-tx cap (opt-in).
-            #     Token-agnostic — caps native units (POL, AVAX, ETH...) the
-            #     same. Disabled by default (max_value_eth=0). Prefer max_value_usd.
             if config.max_value_eth > 0:
                 max_value_wei = int(config.max_value_eth * 10**18)
                 if tx.value > max_value_wei:
@@ -2759,22 +2532,15 @@ class ExecutionOrchestrator:
 
             total_value_wei += tx.value
 
-            # 2. Check contract deployment blocking
             if tx.to is None and config.block_contract_deployment:
                 violations.append(f"Transaction {i}: Contract deployment blocked by risk guard")
 
-            # 3. Check allowed contracts whitelist
             if config.allowed_contracts is not None and tx.to is not None:
-                # Normalize to lowercase for comparison
                 normalized_to = tx.to.lower()
                 allowed_normalized = {addr.lower() for addr in config.allowed_contracts}
                 if normalized_to not in allowed_normalized:
                     violations.append(f"Transaction {i}: Contract {tx.to[:10]}... not in allowed whitelist")
 
-            # 4. Gas price limits are checked separately in _validate_gas_prices()
-            # after _update_gas_prices() sets real values from the network.
-
-        # 5. Check daily volume limits
         if config.max_daily_volume_eth > 0:
             max_daily_wei = int(config.max_daily_volume_eth * 10**18)
             projected_daily = config._daily_volume_wei + total_value_wei
@@ -2787,7 +2553,6 @@ class ExecutionOrchestrator:
                     f"{config.max_daily_volume_eth} ETH"
                 )
 
-        # Update daily volume tracking if validation passes
         if not violations:
             config._daily_volume_wei += total_value_wei
             logger.debug(
@@ -2914,11 +2679,11 @@ class ExecutionOrchestrator:
             Error message string if balance is insufficient, None if OK.
         """
         if not self.rpc_url:
-            return None  # Can't check without RPC
+            return None
 
         requirements = _preflight_collect_requirements(action_bundle)
         if not requirements:
-            return None  # Nothing to check (HOLD, LP_CLOSE, parse error, etc.)
+            return None
 
         wallet = context.wallet_address or self.signer.address
         try:
@@ -3008,11 +2773,9 @@ class ExecutionOrchestrator:
         if len(unsigned_txs) == 1:
             signed = await self.signer.sign_with_web3(unsigned_txs[0], web3, eoa_nonce)
         else:
-            # Atomic MultiSend bundle -- all txs succeed or fail together
             signed = await self.signer.sign_bundle_with_web3(unsigned_txs, web3, eoa_nonce, context.chain)
 
-        # NOTE: Do NOT update _local_nonce here. Updated only after
-        # confirmed on-chain success in execute(). (VIB-1449)
+        # The nonce cache advances only after confirmed on-chain success.
         return [signed]
 
     async def _assign_nonces(
@@ -3032,18 +2795,15 @@ class ExecutionOrchestrator:
         if not unsigned_txs:
             return unsigned_txs
 
-        # Get current nonce -- use max of chain nonce and local tracker
-        # to avoid "nonce too low" when rapid tool calls overlap.
+        # Reconcile pending chain state with rapid local executions.
         web3 = await self._get_web3()
         wallet_addr = web3.to_checksum_address(context.wallet_address)
         chain_nonce = await web3.eth.get_transaction_count(wallet_addr, "pending")
         local_nonce = self._local_nonce.get(wallet_addr.lower(), 0)
         current_nonce = max(chain_nonce, local_nonce)
 
-        # Assign sequential nonces
         result_txs: list[UnsignedTransaction] = []
         for i, tx in enumerate(unsigned_txs):
-            # Create new transaction with nonce assigned
             tx_with_nonce = UnsignedTransaction(
                 to=tx.to,
                 value=tx.value,
@@ -3060,11 +2820,8 @@ class ExecutionOrchestrator:
             )
             result_txs.append(tx_with_nonce)
 
-        # NOTE: Do NOT update _local_nonce here. The nonce cache is only
-        # updated after confirmed on-chain success (in execute()). Optimistic
-        # pre-update caused nonce drift when transactions failed — the cache
-        # kept the inflated value while on-chain nonce stayed unchanged,
-        # leading to "nonce too high" on subsequent calls. (VIB-1449)
+        # Optimistic cache updates drift when a transaction fails, so the cache
+        # advances only after confirmed on-chain success.
         logger.debug(
             f"Assigned nonces {current_nonce} to {current_nonce + len(unsigned_txs) - 1} (chain={chain_nonce}, local={local_nonce})"
         )
@@ -3089,8 +2846,7 @@ class ExecutionOrchestrator:
         Returns:
             Transaction with buffered gas limit
         """
-        # Guard against zero/negative gas estimates (RPC error, rate limiting, timeout).
-        # Fall back to the compiler-provided gas limit instead of crashing.
+        # Invalid estimates fall back to the compiler limit instead of aborting.
         if gas_estimate <= 0:
             compiler_gas = tx.gas_limit or 0
             if compiler_gas > 0:
@@ -3101,18 +2857,11 @@ class ExecutionOrchestrator:
             )
             gas_estimate = 300_000
 
-        # Single point of gas buffer application -- simulators return raw gas_used
+        # This is the single point where raw simulator gas receives a buffer.
         buffered_gas = int(gas_estimate * self.gas_buffer_multiplier)
 
-        # Never go below the compiler-provided gas limit. The compiler seeds a
-        # worst-case static estimate per intent; a simulator / eth_estimateGas can
-        # underestimate when a tx is estimated against pre-execution state (e.g. a
-        # multi-step LP close where collect is estimated before decrease releases
-        # tokens, or a single withdraw simulated before the position changes). The
-        # estimate may only RAISE the limit, never lower it below the compiler floor.
-        # This mirrors the clamp in _maybe_estimate_gas_limits so BOTH the
-        # simulation-enabled (this is the default path) and simulation-disabled
-        # submission paths are protected against undersizing. (VIB-4915)
+        # Pre-execution state can underestimate later bundle operations. Estimates
+        # may raise the compiler's worst-case floor, never lower it.
         compiler_limit = tx.gas_limit or 0
         if buffered_gas < compiler_limit:
             logger.warning(
@@ -3156,7 +2905,7 @@ class ExecutionOrchestrator:
         if not self.rpc_url:
             return unsigned_txs, gas_warnings
 
-        # Safe transactions are executed via Safe modules; skip direct estimation.
+        # Safe module execution cannot be estimated as a direct wallet call.
         if isinstance(self.signer, SafeSigner):
             return unsigned_txs, gas_warnings
 
@@ -3171,12 +2920,6 @@ class ExecutionOrchestrator:
                 updated.append(tx)
                 continue
 
-            # For multi-TX bundles, non-first TXs may depend on state changes from
-            # prior TXs (e.g., approve must execute before addLiquidity). Gas estimation
-            # may revert for these — the exception handler below gracefully falls back
-            # to the compiler-provided gas limit. However, some non-first TXs (like
-            # bridge deposits after approvals) may be estimatable if the wallet already
-            # has sufficient allowance from a previous attempt.
             try:
                 tx_params: dict[str, Any] = {
                     "from": web3.to_checksum_address(context.wallet_address),
@@ -3200,12 +2943,8 @@ class ExecutionOrchestrator:
                 )
                 buffered = int(gas_estimate * self.gas_buffer_multiplier)
 
-                # Never go below compiler-provided gas limit. On-chain estimation
-                # for multi-step bundles (e.g. LP close: decrease→collect→burn) can
-                # underestimate later txs because it estimates against pre-execution
-                # state. For example, collect estimated before decrease sees 0 tokens
-                # owed (cheap), but actual collect after decrease transfers tokens
-                # (expensive). The compiler default accounts for worst-case.
+                # Later transactions can estimate against stale pre-bundle state;
+                # preserve the compiler's worst-case floor.
                 compiler_limit = tx.gas_limit or 0
                 if buffered < compiler_limit:
                     logger.warning(
@@ -3223,10 +2962,7 @@ class ExecutionOrchestrator:
                     updated.append(self._update_gas_estimate(tx, gas_estimate))
             except Exception as e:
                 error_str = str(e)
-                # Gas estimation for non-first TXs in multi-step bundles (approve+supply,
-                # decrease+collect+burn, etc.) will often fail because they depend on state
-                # changes from prior TXs that haven't been executed yet. This is expected
-                # and the compiler-provided gas limit is always used as fallback.
+                # Dependent bundle transactions may not estimate before earlier state changes.
                 is_multi_tx_dependent = idx > 0
                 is_known_pattern = any(
                     code in error_str for code in ("STF", "allowance", "TRANSFER_FROM_FAILED", "ds-math-sub")
@@ -3272,12 +3008,10 @@ class ExecutionOrchestrator:
         """
         web3 = await self._get_web3()
 
-        # Get latest base fee
         latest_block = await web3.eth.get_block("latest")
         base_fee = latest_block.get("baseFeePerGas", 0)
 
-        # Get max priority fee suggestion; None means the node raised / does
-        # not support eth_maxPriorityFeePerGas → the helper floors it.
+        # ``None`` lets the shared helper apply the chain's priority-fee floor.
         try:
             rpc_priority_fee = int(await web3.eth.max_priority_fee)
         except Exception:
@@ -3304,7 +3038,6 @@ class ExecutionOrchestrator:
         Returns:
             Transactions updated with network gas prices
         """
-        # Fetch current gas prices
         gas_prices = await self.get_gas_price()
         max_fee = gas_prices["max_fee_per_gas"]
         max_priority_fee = gas_prices["max_priority_fee_per_gas"]
@@ -3313,7 +3046,6 @@ class ExecutionOrchestrator:
             f"Updating gas prices: max_fee={max_fee / 10**9:.4f} gwei, priority_fee={max_priority_fee / 10**9:.4f} gwei"
         )
 
-        # Update each transaction
         result_txs = []
         for tx in unsigned_txs:
             updated_tx = UnsignedTransaction(
@@ -3348,28 +3080,27 @@ class ExecutionOrchestrator:
             return
 
         metadata = action_bundle.metadata or {}
-        # For multi-step bundles (e.g., Pendle pre-swap routing), use the
-        # original input token/amount instead of the intermediate token
-        # that won't exist until the pre-swap TX runs (VIB-2559).
+        # Intermediate route tokens do not exist until preceding transactions run,
+        # so check the wallet's original input.
         from_token = metadata.get("original_from_token") or metadata.get("from_token", {})
         amount_in_str = metadata.get("original_amount_in") or metadata.get("amount_in")
 
         if not from_token or not amount_in_str:
-            return  # Can't check without metadata
+            return
 
         token_address = from_token.get("address")
         is_native = from_token.get("is_native", False)
 
         if not token_address or is_native:
-            return  # Skip for native tokens
+            return
 
         try:
             amount_in = int(amount_in_str)
         except (ValueError, TypeError):
-            return  # Can't parse amount
+            return
 
         if not self.rpc_url:
-            return  # No RPC URL configured
+            return
 
         try:
             web3 = await self._get_web3()
@@ -3384,7 +3115,6 @@ class ExecutionOrchestrator:
             )
             balance_int = int.from_bytes(balance, "big")
         except Exception as e:  # noqa: BLE001
-            # Balance check is best-effort - don't block execution on RPC errors
             logger.debug(f"Pre-submission balance check failed: {e}")
             return
 
@@ -3403,11 +3133,6 @@ class ExecutionOrchestrator:
             callback: Callback function for execution events
         """
         self._event_callback = callback
-
-
-# =============================================================================
-# Exports
-# =============================================================================
 
 
 __all__ = [
