@@ -346,6 +346,87 @@ class TestAdaptLegToExecutionResult:
         assert tr.receipt is receipt
         assert tr.gas_used == 50000
 
+    def test_failed_transaction_batch_preserves_every_child(self):
+        runner = _make_runner()
+        approval_receipt = TransactionReceipt("0xapprove", 200, "0xblk-a", 40_000, 2, 1, [])
+        revert_receipt = TransactionReceipt("0xaction", 201, "0xblk-b", 80_000, 3, 0, [])
+        tx = TransactionExecutionResult(
+            success=False,
+            tx_hash="0xaction",
+            error="reverted",
+            gas_used=120_000,
+            gas_cost_wei=320_000,
+            transaction_results=[
+                TransactionExecutionResult(
+                    success=True,
+                    tx_hash="0xapprove",
+                    receipt=approval_receipt,
+                    gas_used=40_000,
+                    gas_cost_wei=80_000,
+                    transaction_index=0,
+                ),
+                TransactionExecutionResult(
+                    success=False,
+                    tx_hash="0xaction",
+                    receipt=revert_receipt,
+                    gas_used=80_000,
+                    gas_cost_wei=240_000,
+                    error="reverted",
+                    transaction_index=1,
+                ),
+            ],
+        )
+        leg = MagicMock(tx_result=tx)
+
+        exec_result, tx_results = runner._adapt_leg_to_execution_result(leg)
+
+        assert exec_result.success is False
+        assert [item.tx_hash for item in tx_results] == ["0xapprove", "0xaction"]
+        assert [item.transaction_index for item in tx_results] == [0, 1]
+        assert [item.receipt for item in tx_results] == [approval_receipt, revert_receipt]
+        assert exec_result.total_gas_used == 120_000
+        assert exec_result.total_gas_cost_wei == 320_000
+
+    def test_failed_gateway_batch_preserves_complete_receipts(self):
+        runner = _make_runner()
+        gw = GatewayExecutionResult(
+            success=False,
+            tx_hashes=["0xapprove", "0xaction"],
+            total_gas_used=120_000,
+            receipts=[
+                {
+                    "tx_hash": "0xapprove",
+                    "status": 1,
+                    "gas_used": "0x9c40",
+                    "effective_gas_price": "0x2",
+                    "block_number": "0xc8",
+                    "block_hash": "0xblk-a",
+                    "logs": [],
+                },
+                {
+                    "tx_hash": "0xaction",
+                    "status": 0,
+                    "gas_used": "0x13880",
+                    "effective_gas_price": "0x3",
+                    "block_number": "0xc9",
+                    "block_hash": "0xblk-b",
+                    "logs": [],
+                },
+            ],
+            execution_id="exec-failed",
+            error="reverted",
+        )
+        leg = MagicMock(tx_result=gw)
+
+        exec_result, tx_results = runner._adapt_leg_to_execution_result(leg)
+
+        assert exec_result.success is False
+        assert [item.tx_hash for item in tx_results] == ["0xapprove", "0xaction"]
+        assert [item.success for item in tx_results] == [True, False]
+        assert all(item.receipt is not None for item in tx_results)
+        assert [item.gas_used for item in tx_results] == [40_000, 80_000]
+        assert [item.gas_cost_wei for item in tx_results] == [80_000, 240_000]
+
     def test_unsupported_shape_raises(self):
         runner = _make_runner()
         leg = MagicMock()

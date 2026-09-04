@@ -78,6 +78,34 @@ class ReplayPolicy(StrEnum):
         return cls.NEVER
 
 
+def _canonical_tx_id(value: Any) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    canonical = value.strip().lower().removeprefix("0x")
+    return canonical or None
+
+
+def _submission_binding_metadata(
+    transactions: list[Any],
+    tx_ids: list[str] | tuple[str, ...],
+    transaction_indices: list[int | None] | tuple[int | None, ...],
+) -> tuple[dict[int, int], dict[str, int], bool]:
+    index_counts = {
+        index: transaction_indices.count(index)
+        for index in transaction_indices
+        if isinstance(index, int) and not isinstance(index, bool)
+    }
+    canonical_tx_ids = [_canonical_tx_id(tx_id) for tx_id in tx_ids]
+    tx_id_counts = {identity: canonical_tx_ids.count(identity) for identity in canonical_tx_ids if identity is not None}
+    bound_indices = [index for index in transaction_indices if isinstance(index, int) and not isinstance(index, bool)]
+    complete_plan_binding = (
+        len(tx_ids) == len(transactions)
+        and len(bound_indices) == len(transactions)
+        and set(bound_indices) == set(range(len(transactions)))
+    )
+    return index_counts, tx_id_counts, complete_plan_binding
+
+
 @dataclass(frozen=True)
 class SubmissionTransactionEvidence:
     """Plan-bound role evidence for one submitted transaction identifier."""
@@ -128,14 +156,16 @@ def certify_submission_transactions(
     action_bundle: Any,
     tx_ids: list[str] | tuple[str, ...],
     *,
+    transaction_indices: list[int | None] | tuple[int | None, ...] | None = None,
     atomic_batch: bool = False,
 ) -> list[SubmissionTransactionEvidence]:
     """Certify conservative per-transaction roles from the compiled plan.
 
-    Only a transaction explicitly labelled as an approval *and* carrying the
-    canonical ERC-20 ``approve(address,uint256)`` selector with zero native
-    value is replay-elidable after recompilation. Everything else is an ACTION
-    with a NEVER policy. Connector prose or receipt logs alone are not trusted.
+    Only evidence explicitly bound to one unique compiled transaction index can
+    inherit that transaction's role. A canonical ERC-20 approval with zero
+    native value is replay-elidable after recompilation; unaligned evidence is
+    UNKNOWN/NEVER. Connector prose, array position, or receipt logs alone are
+    not trusted.
     """
     if hasattr(action_bundle, "to_dict"):
         bundle = action_bundle.to_dict()
@@ -175,18 +205,43 @@ def certify_submission_transactions(
     # replay-elidable only when *every* member of the wrapper is certified
     # setup. Any action member makes the whole physical transaction an ACTION.
     if atomic_batch:
+        atomic_tx_ids = [identity for tx_id in tx_ids if (identity := _canonical_tx_id(tx_id)) is not None]
         all_setup = bool(transactions) and all(
             _role_and_policy(transaction) == (TransactionRole.SETUP_APPROVAL, ReplayPolicy.RECOMPILE_ONLY)
             for transaction in transactions
         )
-        role = TransactionRole.SETUP_APPROVAL if all_setup else TransactionRole.ACTION
-        policy = ReplayPolicy.RECOMPILE_ONLY if all_setup else ReplayPolicy.NEVER
+        valid_physical_identity = len(tx_ids) == 1 and len(atomic_tx_ids) == 1
+        if not valid_physical_identity:
+            role, policy = TransactionRole.UNKNOWN, ReplayPolicy.NEVER
+        elif all_setup:
+            role, policy = TransactionRole.SETUP_APPROVAL, ReplayPolicy.RECOMPILE_ONLY
+        else:
+            role, policy = TransactionRole.ACTION, ReplayPolicy.NEVER
         return [SubmissionTransactionEvidence(tx_id=tx_id, role=role, replay_policy=policy) for tx_id in tx_ids]
 
+    if transaction_indices is None or len(transaction_indices) != len(tx_ids):
+        transaction_indices = [None] * len(tx_ids)
+    index_counts, tx_id_counts, complete_plan_binding = _submission_binding_metadata(
+        transactions,
+        tx_ids,
+        transaction_indices,
+    )
     evidence: list[SubmissionTransactionEvidence] = []
-    for index, tx_id in enumerate(tx_ids):
-        transaction = transactions[index] if index < len(transactions) else None
-        role, policy = _role_and_policy(transaction)
+    for tx_id, transaction_index in zip(tx_ids, transaction_indices, strict=True):
+        transaction_identity = _canonical_tx_id(tx_id)
+        if (
+            isinstance(transaction_index, int)
+            and not isinstance(transaction_index, bool)
+            and 0 <= transaction_index < len(transactions)
+            and index_counts.get(transaction_index) == 1
+            and transaction_identity is not None
+            and tx_id_counts.get(transaction_identity) == 1
+        ):
+            role, policy = _role_and_policy(transactions[transaction_index])
+            if role is TransactionRole.SETUP_APPROVAL and not complete_plan_binding:
+                role, policy = TransactionRole.UNKNOWN, ReplayPolicy.NEVER
+        else:
+            role, policy = TransactionRole.UNKNOWN, ReplayPolicy.NEVER
         evidence.append(SubmissionTransactionEvidence(tx_id=tx_id, role=role, replay_policy=policy))
     return evidence
 

@@ -361,6 +361,20 @@ def test_production_intent_wrapper_handles_local_transaction_result() -> None:
     assert failed_submission_requires_reconciliation(result) is True
 
 
+def test_local_batch_hashes_preserve_compiled_order() -> None:
+    approval = TransactionExecutionResult(success=True, tx_hash="0xapprove", transaction_index=0)
+    action = TransactionExecutionResult(success=False, tx_hash="0xaction", transaction_index=1, error="reverted")
+    batch = TransactionExecutionResult(
+        success=False,
+        tx_hash=action.tx_hash,
+        error=action.error,
+        transaction_results=[approval, action],
+    )
+
+    assert submitted_transaction_hashes(batch) == ("0xapprove", "0xaction")
+    assert failed_submission_requires_reconciliation(batch) is True
+
+
 def test_fully_observed_local_revert_remains_normally_retryable() -> None:
     receipt = TransactionReceipt(
         tx_hash="0xlocal-revert",

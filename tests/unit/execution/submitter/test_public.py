@@ -405,9 +405,7 @@ class TestSubmission:
             side_effect=Exception({"message": "nonce too low: tx: 1635 state: 1636"})
         )
         # Receipt lookup proves the tx is on-chain with status=1.
-        mock_web3.eth.get_transaction_receipt = AsyncMock(
-            return_value={"status": 1, "blockNumber": 464118091}
-        )
+        mock_web3.eth.get_transaction_receipt = AsyncMock(return_value={"status": 1, "blockNumber": 464118091})
         mock_web3_class.return_value = mock_web3
 
         submitter = PublicMempoolSubmitter(rpc_url="https://example.com")
@@ -478,7 +476,17 @@ class TestSubmission:
             side_effect=Exception({"message": "nonce too low: tx: 5 state: 6"})
         )
         mock_web3.eth.get_transaction_receipt = AsyncMock(
-            return_value={"status": 0, "blockNumber": 100, "gasUsed": 42000}
+            return_value={
+                "transactionHash": sample_signed_tx.tx_hash,
+                "status": 0,
+                "blockNumber": 100,
+                "blockHash": "0xblock",
+                "gasUsed": 42000,
+                "effectiveGasPrice": 7,
+                "logs": [{"address": "0xtoken"}],
+                "from": "0xsender",
+                "to": "0xrecipient",
+            }
         )
         mock_web3_class.return_value = mock_web3
 
@@ -493,6 +501,10 @@ class TestSubmission:
         assert exc_info.value.tx_hash == sample_signed_tx.tx_hash
         assert exc_info.value.gas_used == 42000
         assert exc_info.value.block_number == 100
+        assert exc_info.value.receipt is not None
+        assert exc_info.value.receipt.block_hash == "0xblock"
+        assert exc_info.value.receipt.status == 0
+        assert exc_info.value.receipt.logs == [{"address": "0xtoken"}]
         assert submitter._metrics.successful_submissions == 0
         mock_web3.eth.get_transaction_receipt.assert_awaited_once_with(sample_signed_tx.tx_hash)
 
@@ -511,9 +523,7 @@ class TestSubmission:
         mock_web3.eth.send_raw_transaction = AsyncMock(
             side_effect=Exception({"message": "nonce too low: tx: 5 state: 6"})
         )
-        mock_web3.eth.get_transaction_receipt = AsyncMock(
-            side_effect=Exception("TransactionNotFound")
-        )
+        mock_web3.eth.get_transaction_receipt = AsyncMock(side_effect=Exception("TransactionNotFound"))
         mock_web3_class.return_value = mock_web3
 
         submitter = PublicMempoolSubmitter(rpc_url="https://example.com")
@@ -537,14 +547,10 @@ class TestSubmission:
         """
         mock_web3 = MagicMock()
         mock_web3.eth = AsyncMock()
-        mock_web3.eth.send_raw_transaction = AsyncMock(
-            side_effect=Exception({"message": "nonce too high"})
-        )
+        mock_web3.eth.send_raw_transaction = AsyncMock(side_effect=Exception({"message": "nonce too high"}))
         # If the code (wrongly) calls receipt lookup, this would return a
         # mined receipt and silently succeed — confirm the call is NOT made.
-        mock_web3.eth.get_transaction_receipt = AsyncMock(
-            return_value={"status": 1, "blockNumber": 99}
-        )
+        mock_web3.eth.get_transaction_receipt = AsyncMock(return_value={"status": 1, "blockNumber": 99})
         mock_web3_class.return_value = mock_web3
 
         submitter = PublicMempoolSubmitter(rpc_url="https://example.com")
@@ -567,9 +573,7 @@ class TestSubmission:
         # an unparseable string falls through to SubmissionError under the
         # new behaviour and we want to exercise the InsufficientFundsError path.
         mock_web3.eth.send_raw_transaction = AsyncMock(
-            side_effect=Exception(
-                "insufficient funds for gas * price + value: have 0 want 1000000000000000"
-            )
+            side_effect=Exception("insufficient funds for gas * price + value: have 0 want 1000000000000000")
         )
         mock_web3_class.return_value = mock_web3
 
@@ -702,7 +706,7 @@ class TestReceiptPolling:
             "gasUsed": 21000,
             "effectiveGasPrice": 30_000_000_000,
             "status": 1,
-            "logs": [],
+            "logs": [{"address": "0xtoken", "data": "0x01"}],
             "contractAddress": None,
             "from": "0x1234567890123456789012345678901234567890",
             "to": "0x0987654321098765432109876543210987654321",
@@ -746,16 +750,25 @@ class TestReceiptPolling:
         mock_web3 = MagicMock()
         mock_web3.eth = AsyncMock()
         mock_web3.eth.wait_for_transaction_receipt = AsyncMock(return_value=mock_receipt)
+        mock_web3.eth.get_transaction = AsyncMock(return_value=None)
         mock_web3_class.return_value = mock_web3
 
         submitter = PublicMempoolSubmitter(rpc_url="https://example.com")
         submitter._web3 = mock_web3
 
+        requested_hash = "0x" + "abcdef1234567890" * 4
         with pytest.raises(TransactionRevertedError) as exc_info:
-            run_async(submitter.get_receipt("0xabcdef"))
+            run_async(submitter.get_receipt(requested_hash))
 
         assert exc_info.value.gas_used == 50000
         assert exc_info.value.block_number == 12345
+        receipt = exc_info.value.receipt
+        assert receipt is not None
+        assert receipt.tx_hash == mock_receipt["transactionHash"].hex()
+        assert receipt.block_hash == mock_receipt["blockHash"].hex()
+        assert receipt.gas_used == 50000
+        assert receipt.status == 0
+        assert receipt.logs == mock_receipt["logs"]
 
     @patch("almanak.framework.execution.submitter.public.AsyncWeb3")
     def test_get_receipt_timeout_raises(self, mock_web3_class: MagicMock) -> None:

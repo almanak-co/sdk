@@ -28,10 +28,8 @@ _GATEWAY_ENV_VARS = (
 )
 
 
-def _gateway_env(**overrides: str) -> dict[str, str]:
-    env = os.environ.copy()
-    for name in _GATEWAY_ENV_VARS:
-        env.pop(name, None)
+def _gateway_env(**overrides: str) -> dict[str, str | None]:
+    env: dict[str, str | None] = {name: None for name in _GATEWAY_ENV_VARS}
     env.update(overrides)
     return env
 

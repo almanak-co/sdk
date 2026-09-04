@@ -39,9 +39,7 @@ def test_complete_status_zero_receipt_serializes_for_strategy_reconciliation() -
 
 def test_non_binary_receipt_status_fails_closed() -> None:
     with pytest.raises(ReceiptSetSerializationError):
-        _serialize_evm_transaction_results(
-            [TransactionResult(tx_hash="0xabc", success=False, receipt=_receipt(2))]
-        )
+        _serialize_evm_transaction_results([TransactionResult(tx_hash="0xabc", success=False, receipt=_receipt(2))])
 
 
 def test_legacy_or_unknown_proto_value_is_unspecified() -> None:

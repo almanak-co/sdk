@@ -167,18 +167,26 @@ class TestExecuteTransaction:
         assert result.error == "Signing failed: bad key"
         assert result.nonce_used == 3
 
-    def test_reverted_error_classified_without_tx_hash(self, executor):
-        # TransactionRevertedError shares the execution-error handler, so the
-        # result deliberately reports an empty tx_hash even though the error
-        # itself carries one.
+    def test_reverted_error_preserves_mined_evidence(self, executor):
         tx = _unsigned(nonce=3)
         _wire_eoa_seams(executor, tx)
-        executor.wait_for_receipt = AsyncMock(side_effect=TransactionRevertedError(tx_hash=_TX_HASH, gas_used=100))
+        receipt = _receipt(status=0, gas_used=100, effective_gas_price=7)
+        executor.wait_for_receipt = AsyncMock(
+            side_effect=TransactionRevertedError(
+                tx_hash=_TX_HASH,
+                gas_used=100,
+                block_number=receipt.block_number,
+                receipt=receipt,
+            )
+        )
 
         result = asyncio.run(executor.execute_transaction(tx))
 
         assert result.success is False
-        assert result.tx_hash == ""
+        assert result.tx_hash == _TX_HASH
+        assert result.receipt is receipt
+        assert result.gas_used == 100
+        assert result.gas_cost_wei == 700
         assert _TX_HASH in (result.error or "")
 
     def test_submission_error_propagates_tx_hash(self, executor):
@@ -238,9 +246,7 @@ class TestExecuteTransactionSafe:
         assert result.nonce_used == 11
         assert result.gas_used == 21000
         assert result.gas_cost_wei == 210000
-        safe_signer.sign_with_web3.assert_awaited_once_with(
-            tx, executor._get_web3.return_value, 11, pos_in_bundle=0
-        )
+        safe_signer.sign_with_web3.assert_awaited_once_with(tx, executor._get_web3.return_value, 11, pos_in_bundle=0)
 
     def test_success_without_confirmation(self, executor):
         tx = _unsigned()
@@ -329,9 +335,7 @@ class TestExecuteBundle:
         assert result.gas_cost_wei == 210000
         # A fresh bundle always clears the Safe nonce cache before signing.
         safe_signer.clear_nonce_cache.assert_called_once_with()
-        safe_signer.sign_bundle_with_web3.assert_awaited_once_with(
-            txs, executor._get_web3.return_value, 11, "arbitrum"
-        )
+        safe_signer.sign_bundle_with_web3.assert_awaited_once_with(txs, executor._get_web3.return_value, 11, "arbitrum")
 
     def test_success_without_confirmation(self, executor):
         txs = [_unsigned()]
@@ -452,9 +456,7 @@ class TestWaitForReceipt:
 
         asyncio.run(executor.wait_for_receipt(_TX_HASH, timeout=5))
 
-        web3.eth.wait_for_transaction_receipt.assert_awaited_once_with(
-            HexBytes(_TX_HASH), timeout=5
-        )
+        web3.eth.wait_for_transaction_receipt.assert_awaited_once_with(HexBytes(_TX_HASH), timeout=5)
 
     def test_missing_optional_fields_default(self, executor):
         raw = _raw_receipt()
@@ -479,6 +481,23 @@ class TestWaitForReceipt:
         assert excinfo.value.tx_hash == _TX_HASH
         assert excinfo.value.gas_used == 21000
         assert excinfo.value.block_number == 123
+        receipt = excinfo.value.receipt
+        assert receipt is not None
+        assert receipt.block_hash == HexBytes("0x" + "cd" * 32).hex()
+        assert receipt.status == 0
+        assert receipt.logs == [{"address": "0x" + "ee" * 20, "data": "0x"}]
+
+    def test_incomplete_reverted_receipt_retains_hash_without_fabricating_receipt(self, executor):
+        raw = _raw_receipt(status=0)
+        del raw["effectiveGasPrice"]
+        _wire_receipt(executor, raw)
+
+        with pytest.raises(TransactionRevertedError) as excinfo:
+            asyncio.run(executor.wait_for_receipt(_TX_HASH))
+
+        assert excinfo.value.tx_hash == _TX_HASH
+        assert excinfo.value.receipt is None
+        assert excinfo.value.gas_used == 21000
 
     def test_timeout_wrapped_as_recoverable_submission_error(self, executor):
         _wire_receipt(executor, TimeoutError())

@@ -15,9 +15,9 @@ from almanak.gateway.proto import gateway_pb2
 from almanak.gateway.services.execution_service import ExecutionServiceServicer
 
 
-def _request(max_gas_price_gwei: int) -> gateway_pb2.ExecuteRequest:
+def _request(max_gas_price_gwei: int, *, transactions: list[dict] | None = None) -> gateway_pb2.ExecuteRequest:
     return gateway_pb2.ExecuteRequest(
-        action_bundle=json.dumps({"intent_type": "swap", "transactions": []}).encode("utf-8"),
+        action_bundle=json.dumps({"intent_type": "swap", "transactions": transactions or []}).encode("utf-8"),
         dry_run=True,
         simulation_enabled=False,
         deployment_id="s1",
@@ -211,6 +211,94 @@ async def test_execute_fails_closed_on_mismatched_or_duplicate_receipt_identity(
 
     assert not response.success
     assert response.error_code == "RECEIPT_SET_INCOMPLETE"
+
+
+@pytest.mark.asyncio
+async def test_execute_returns_ordered_approval_and_reverted_action_evidence():
+    settings = GatewaySettings()
+    service = ExecutionServiceServicer(settings)
+    service._ensure_initialized = AsyncMock()
+
+    approval_receipt = _SerializableReceipt("0xapprove")
+    reverted_receipt = _SerializableReceipt("0xaction")
+    reverted_receipt.to_dict = MagicMock(
+        return_value={
+            "tx_hash": "0xaction",
+            "block_number": 101,
+            "block_hash": "0xreverted-block",
+            "status": 0,
+            "gas_used": 152_000,
+            "effective_gas_price": 7,
+            "logs": [{"address": "0xpool", "data": "0xdead"}],
+        }
+    )
+    orchestrator = MagicMock()
+    orchestrator.tx_risk_config = SimpleNamespace(max_gas_price_gwei=42)
+    orchestrator.execute = AsyncMock(
+        return_value=SimpleNamespace(
+            success=False,
+            transaction_results=[
+                SimpleNamespace(tx_hash="0xapprove", receipt=approval_receipt, transaction_index=0),
+                SimpleNamespace(tx_hash="0xaction", receipt=reverted_receipt, transaction_index=1),
+            ],
+            total_gas_used=197_000,
+            correlation_id="cid",
+            error="swap reverted",
+            submission_provenance="ATTEMPTED",
+        )
+    )
+    service._get_orchestrator = AsyncMock(return_value=orchestrator)
+    transactions = [
+        {"to": "0xtoken", "data": "0x095ea7b3" + "00" * 64, "value": 0, "tx_type": "approve"},
+        {"to": "0xrouter", "data": "0x12345678", "value": 0, "tx_type": "swap"},
+    ]
+
+    response = await service.Execute(_request(5, transactions=transactions), MagicMock())
+    receipts = json.loads(response.receipts)
+
+    assert not response.success
+    assert response.error_code == ""
+    assert list(response.tx_hashes) == ["0xapprove", "0xaction"]
+    assert [receipt["status"] for receipt in receipts] == [1, 0]
+    assert receipts[1]["block_hash"] == "0xreverted-block"
+    assert receipts[1]["block_number"] == 101
+    assert receipts[1]["gas_used"] == 152_000
+    assert receipts[1]["logs"] == [{"address": "0xpool", "data": "0xdead"}]
+    assert [item.role for item in response.submission_transactions] == [
+        gateway_pb2.EXECUTION_TRANSACTION_ROLE_SETUP_APPROVAL,
+        gateway_pb2.EXECUTION_TRANSACTION_ROLE_ACTION,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_execute_keeps_submitted_false_approval_hash_unknown_and_non_replayable():
+    settings = GatewaySettings()
+    service = ExecutionServiceServicer(settings)
+    service._ensure_initialized = AsyncMock()
+    orchestrator = MagicMock()
+    orchestrator.tx_risk_config = SimpleNamespace(max_gas_price_gwei=42)
+    orchestrator.execute = AsyncMock(
+        return_value=SimpleNamespace(
+            success=False,
+            transaction_results=[
+                SimpleNamespace(tx_hash="0xambiguous", receipt=None, transaction_index=None),
+            ],
+            total_gas_used=0,
+            correlation_id="cid",
+            error="connection reset after broadcast attempt",
+            submission_provenance="ATTEMPTED",
+        )
+    )
+    service._get_orchestrator = AsyncMock(return_value=orchestrator)
+    approval = {"to": "0xtoken", "data": "0x095ea7b3" + "00" * 64, "value": 0, "tx_type": "approve"}
+
+    response = await service.Execute(_request(5, transactions=[approval]), MagicMock())
+
+    assert not response.success
+    assert response.error_code == "RECEIPT_SET_INCOMPLETE"
+    assert list(response.tx_hashes) == ["0xambiguous"]
+    assert response.submission_transactions[0].role == gateway_pb2.EXECUTION_TRANSACTION_ROLE_UNSPECIFIED
+    assert response.submission_transactions[0].replay_policy == gateway_pb2.REPLAY_POLICY_NEVER
 
 
 @pytest.mark.asyncio

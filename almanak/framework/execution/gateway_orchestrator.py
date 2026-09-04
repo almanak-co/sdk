@@ -333,13 +333,37 @@ class GatewayExecutionResult:
         attached, enabling the ResultEnricher to extract intent-specific data
         (position_id, swap_amounts, etc.) from transaction logs.
 
-        Returns empty list if execution failed.
+        Failed executions retain transaction results only when the gateway
+        returned a complete identity-preserving receipt set.
         """
-        if not self.success or not self.receipts:
+        if not self.receipts:
+            return []
+
+        from almanak.framework.execution.reconciliation import complete_receipt_set_error
+
+        if (
+            complete_receipt_set_error(
+                self.tx_hashes,
+                self.receipts,
+                solana=self.chain_family == ChainFamily.SOLANA.value,
+            )
+            is not None
+        ):
             return []
 
         from almanak.framework.execution.interfaces import TransactionReceipt
         from almanak.framework.execution.orchestrator import TransactionResult
+
+        def _quantity(value: Any) -> int:
+            if isinstance(value, bool) or value is None:
+                return 0
+            if isinstance(value, int):
+                return value
+            try:
+                text = str(value).strip()
+                return int(text, 16) if text.startswith(("0x", "0X")) else int(text, 10)
+            except (TypeError, ValueError):
+                return 0
 
         results = []
         is_solana = self.chain_family == ChainFamily.SOLANA.value
@@ -365,7 +389,9 @@ class GatewayExecutionResult:
                         tx_hash,
                     )
                     status = 0
-                gas_used = receipt_data.get("fee_lamports", 0) if is_solana else receipt_data.get("gas_used", 0)
+                gas_used = _quantity(
+                    receipt_data.get("fee_lamports", 0) if is_solana else receipt_data.get("gas_used", 0)
+                )
                 logs = receipt_data.get("logs") or []
             else:
                 status = 0
@@ -378,10 +404,12 @@ class GatewayExecutionResult:
             if isinstance(receipt_data, dict):
                 tx_receipt = TransactionReceipt(
                     tx_hash=tx_hash,
-                    block_number=receipt_data.get("slot", 0) if is_solana else receipt_data.get("block_number", 0),
+                    block_number=_quantity(
+                        receipt_data.get("slot", 0) if is_solana else receipt_data.get("block_number", 0)
+                    ),
                     block_hash=receipt_data.get("block_hash", ""),
                     gas_used=gas_used,
-                    effective_gas_price=1 if is_solana else receipt_data.get("effective_gas_price", 0),
+                    effective_gas_price=(1 if is_solana else _quantity(receipt_data.get("effective_gas_price", 0))),
                     status=status,
                     logs=logs,
                     from_address=receipt_data.get("from_address"),
@@ -393,6 +421,7 @@ class GatewayExecutionResult:
                     success=status == 1,
                     tx_hash=tx_hash,
                     gas_used=gas_used,
+                    gas_cost_wei=tx_receipt.gas_cost_wei if tx_receipt is not None else 0,
                     logs=logs,
                     receipt=tx_receipt,  # Proper TransactionReceipt for ResultEnricher
                 )

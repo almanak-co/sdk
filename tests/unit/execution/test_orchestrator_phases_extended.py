@@ -62,6 +62,7 @@ from almanak.framework.execution.orchestrator import (
     TransactionResult,
 )
 from almanak.framework.execution.session import TransactionStatus
+from almanak.framework.execution.submission import ReplayPolicy, TransactionRole, certify_submission_transactions
 from almanak.framework.models.reproduction_bundle import ActionBundle
 from almanak.framework.strategies.base import RiskGuardResult
 
@@ -125,7 +126,13 @@ def _make_state(
 # injects a ``None`` return the production type signature forbids.
 # -----------------------------------------------------------------------------
 
-_FRESH_TX = {"to": "0xf6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6", "value": 0, "data": "0x6672657368", "gas_estimate": 1, "tx_type": "swap"}
+_FRESH_TX = {
+    "to": "0xf6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6",
+    "value": 0,
+    "data": "0x6672657368",
+    "gas_estimate": 1,
+    "tx_type": "swap",
+}
 _FETCH = "almanak.framework.execution.deferred_refresh._fetch_fresh_transaction"
 _REGISTRY = "almanak.framework.execution.deferred_refresh.DEFERRED_REFRESH_REGISTRY"
 
@@ -453,7 +460,13 @@ class TestPhaseBuildExtended:
             transactions=[{"to": "0xR", "data": "0xstale", "value": 0, "tx_type": "swap_deferred"}],
             metadata={"deferred_swap": True, "protocol": "lifi", "route_params": {"from_amount": "1"}},
         )
-        fresh = {"to": "0xf6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6", "value": 0, "data": "0x6672657368", "gas_estimate": 21000, "tx_type": "swap"}
+        fresh = {
+            "to": "0xf6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6",
+            "value": 0,
+            "data": "0x6672657368",
+            "gas_estimate": 21000,
+            "tx_type": "swap",
+        }
 
         state = ExecutionPipelineState(
             action_bundle=bundle,
@@ -968,6 +981,34 @@ class TestPhaseSubmitAndConfirmExtended:
         assert "nonce too low" in (early.error or "")
 
     @pytest.mark.asyncio
+    async def test_submitted_false_hash_is_retained_as_unbound_evidence(self, orchestrator):
+        state = _make_state(
+            orchestrator,
+            transactions=[{"to": "0xtoken", "data": "0x095ea7b3" + "00" * 64, "value": 0, "tx_type": "approve"}],
+        )
+        state.signed_txs = [MagicMock(tx_hash="0xambiguous")]
+        orchestrator.submitter.submit = AsyncMock(
+            return_value=[MagicMock(submitted=False, tx_hash="0xambiguous", error="connection reset")]
+        )
+
+        result = await orchestrator._phase_submit_and_confirm(state)
+
+        assert result is state.result
+        assert result.submission_provenance.value == "ATTEMPTED"
+        assert len(result.transaction_results) == 1
+        transaction_result = result.transaction_results[0]
+        assert transaction_result.tx_hash == "0xambiguous"
+        assert transaction_result.receipt is None
+        assert transaction_result.transaction_index is None
+        evidence = certify_submission_transactions(
+            state.action_bundle,
+            [transaction_result.tx_hash],
+            transaction_indices=[transaction_result.transaction_index],
+        )
+        assert evidence[0].role is TransactionRole.UNKNOWN
+        assert evidence[0].replay_policy is ReplayPolicy.NEVER
+
+    @pytest.mark.asyncio
     async def test_multi_tx_with_public_submitter_uses_sequential(self, orchestrator):
         """2+ txs with non-Safe signer and PublicMempoolSubmitter take the sequential path."""
         from almanak.framework.execution.submitter.public import PublicMempoolSubmitter
@@ -979,7 +1020,7 @@ class TestPhaseSubmitAndConfirmExtended:
                 {"to": "0x0", "data": "0x", "value": 0},
             ],
         )
-        state.signed_txs = [MagicMock(), MagicMock()]
+        state.signed_txs = [MagicMock(tx_hash="0xa"), MagicMock(tx_hash="0xb")]
 
         receipts = [
             _make_receipt(success=True, tx_hash="0xa"),
@@ -1084,7 +1125,7 @@ class TestPhaseSubmitAndConfirmExtended:
                 {"to": "0x0", "data": "0x", "value": 0},
             ],
         )
-        state.signed_txs = [MagicMock(), MagicMock()]
+        state.signed_txs = [MagicMock(tx_hash="0xconfirmed"), MagicMock(tx_hash="0xfail")]
 
         session = MagicMock()
         tx_state_0 = MagicMock(tx_hash=None)
@@ -1141,7 +1182,7 @@ class TestPhaseSubmitAndConfirmExtended:
     async def test_parallel_path_updates_session_transactions_with_hashes(self, orchestrator):
         """TX_SENT loop copies tx_hash/status/submitted_at onto session transactions."""
         state = _make_state(orchestrator, transactions=[{"to": "0x0", "data": "0x", "value": 0}])
-        state.signed_txs = [MagicMock()]
+        state.signed_txs = [MagicMock(tx_hash="0xabc")]
 
         session = MagicMock()
         tx_state = MagicMock(tx_hash=None, submitted_at=None)

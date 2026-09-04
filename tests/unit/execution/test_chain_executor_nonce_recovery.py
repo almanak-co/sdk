@@ -80,18 +80,14 @@ class TestChainExecutorNonceRecovery:
         return executor
 
     @patch("almanak.framework.execution.chain_executor.AsyncWeb3")
-    def test_nonce_too_low_with_mined_receipt_returns_success(
-        self, mock_web3_class: MagicMock
-    ) -> None:
+    def test_nonce_too_low_with_mined_receipt_returns_success(self, mock_web3_class: MagicMock) -> None:
         """Receipt with status=1 means our prior submission landed — recover."""
         mock_web3 = MagicMock()
         mock_web3.eth = AsyncMock()
         mock_web3.eth.send_raw_transaction = AsyncMock(
             side_effect=Exception({"message": "nonce too low: tx: 1635 state: 1636"})
         )
-        mock_web3.eth.get_transaction_receipt = AsyncMock(
-            return_value={"status": 1, "blockNumber": 464118091}
-        )
+        mock_web3.eth.get_transaction_receipt = AsyncMock(return_value={"status": 1, "blockNumber": 464118091})
         mock_web3_class.return_value = mock_web3
 
         signed = _make_signed_tx()
@@ -107,9 +103,7 @@ class TestChainExecutorNonceRecovery:
         mock_web3.eth.get_transaction_receipt.assert_awaited_once_with(signed.tx_hash)
 
     @patch("almanak.framework.execution.chain_executor.AsyncWeb3")
-    def test_nonce_too_low_with_reverted_receipt_raises_revert(
-        self, mock_web3_class: MagicMock
-    ) -> None:
+    def test_nonce_too_low_with_reverted_receipt_raises_revert(self, mock_web3_class: MagicMock) -> None:
         """Receipt with status=0 means our tx landed but reverted — surface revert."""
         mock_web3 = MagicMock()
         mock_web3.eth = AsyncMock()
@@ -117,7 +111,15 @@ class TestChainExecutorNonceRecovery:
             side_effect=Exception({"message": "nonce too low: tx: 5 state: 6"})
         )
         mock_web3.eth.get_transaction_receipt = AsyncMock(
-            return_value={"status": 0, "blockNumber": 100, "gasUsed": 42000}
+            return_value={
+                "transactionHash": "0x" + "cd" * 32,
+                "status": 0,
+                "blockNumber": 100,
+                "blockHash": "0xblock",
+                "gasUsed": 42000,
+                "effectiveGasPrice": 7,
+                "logs": [{"address": "0xtoken"}],
+            }
         )
         mock_web3_class.return_value = mock_web3
 
@@ -130,12 +132,49 @@ class TestChainExecutorNonceRecovery:
         assert exc_info.value.tx_hash == signed.tx_hash
         assert exc_info.value.gas_used == 42000
         assert exc_info.value.block_number == 100
+        assert exc_info.value.receipt is not None
+        assert exc_info.value.receipt.block_hash == "0xblock"
+        assert exc_info.value.receipt.status == 0
+        assert exc_info.value.receipt.logs == [{"address": "0xtoken"}]
         mock_web3.eth.get_transaction_receipt.assert_awaited_once_with(signed.tx_hash)
 
+    @pytest.mark.parametrize(
+        "missing_field",
+        ["transactionHash", "blockNumber", "blockHash", "gasUsed", "effectiveGasPrice", "logs"],
+    )
     @patch("almanak.framework.execution.chain_executor.AsyncWeb3")
-    def test_nonce_too_low_with_no_receipt_raises_nonce_error(
-        self, mock_web3_class: MagicMock
+    def test_incomplete_reverted_receipt_is_not_certified(
+        self,
+        mock_web3_class: MagicMock,
+        missing_field: str,
     ) -> None:
+        signed = _make_signed_tx()
+        receipt = {
+            "transactionHash": signed.tx_hash,
+            "status": 0,
+            "blockNumber": 100,
+            "blockHash": "0xblock",
+            "gasUsed": 42000,
+            "effectiveGasPrice": 7,
+            "logs": [],
+        }
+        del receipt[missing_field]
+        mock_web3 = MagicMock()
+        mock_web3.eth = AsyncMock()
+        mock_web3.eth.send_raw_transaction = AsyncMock(
+            side_effect=Exception({"message": "nonce too low: tx: 5 state: 6"})
+        )
+        mock_web3.eth.get_transaction_receipt = AsyncMock(return_value=receipt)
+        mock_web3_class.return_value = mock_web3
+
+        with pytest.raises(TransactionRevertedError) as exc_info:
+            _run(self._make_executor(mock_web3).submit_transaction(signed))
+
+        assert exc_info.value.tx_hash == signed.tx_hash
+        assert exc_info.value.receipt is None
+
+    @patch("almanak.framework.execution.chain_executor.AsyncWeb3")
+    def test_nonce_too_low_with_no_receipt_raises_nonce_error(self, mock_web3_class: MagicMock) -> None:
         """No receipt means the tx was dropped — preserve NonceError."""
         mock_web3 = MagicMock()
         mock_web3.eth = AsyncMock()
@@ -154,18 +193,14 @@ class TestChainExecutorNonceRecovery:
         mock_web3.eth.get_transaction_receipt.assert_awaited_once_with(signed.tx_hash)
 
     @patch("almanak.framework.execution.chain_executor.AsyncWeb3")
-    def test_nonce_too_low_with_receipt_lookup_error_raises_nonce_error(
-        self, mock_web3_class: MagicMock
-    ) -> None:
+    def test_nonce_too_low_with_receipt_lookup_error_raises_nonce_error(self, mock_web3_class: MagicMock) -> None:
         """Receipt-lookup transient errors must NOT be silently treated as success."""
         mock_web3 = MagicMock()
         mock_web3.eth = AsyncMock()
         mock_web3.eth.send_raw_transaction = AsyncMock(
             side_effect=Exception({"message": "nonce too low: tx: 5 state: 6"})
         )
-        mock_web3.eth.get_transaction_receipt = AsyncMock(
-            side_effect=Exception("TransactionNotFound")
-        )
+        mock_web3.eth.get_transaction_receipt = AsyncMock(side_effect=Exception("TransactionNotFound"))
         mock_web3_class.return_value = mock_web3
 
         signed = _make_signed_tx()
@@ -177,9 +212,7 @@ class TestChainExecutorNonceRecovery:
         mock_web3.eth.get_transaction_receipt.assert_awaited_once_with(signed.tx_hash)
 
     @patch("almanak.framework.execution.chain_executor.AsyncWeb3")
-    def test_nonce_too_high_does_not_attempt_receipt_recovery(
-        self, mock_web3_class: MagicMock
-    ) -> None:
+    def test_nonce_too_high_does_not_attempt_receipt_recovery(self, mock_web3_class: MagicMock) -> None:
         """Only 'nonce too low' carries the 'tx may have landed' ambiguity.
 
         'nonce too high' means a gap in the nonce sequence — the tx CANNOT
@@ -187,14 +220,10 @@ class TestChainExecutorNonceRecovery:
         """
         mock_web3 = MagicMock()
         mock_web3.eth = AsyncMock()
-        mock_web3.eth.send_raw_transaction = AsyncMock(
-            side_effect=Exception({"message": "nonce too high"})
-        )
+        mock_web3.eth.send_raw_transaction = AsyncMock(side_effect=Exception({"message": "nonce too high"}))
         # If the code wrongly attempts a lookup, this would return success
         # and silently swallow the error — confirm it is NOT called.
-        mock_web3.eth.get_transaction_receipt = AsyncMock(
-            return_value={"status": 1, "blockNumber": 99}
-        )
+        mock_web3.eth.get_transaction_receipt = AsyncMock(return_value={"status": 1, "blockNumber": 99})
         mock_web3_class.return_value = mock_web3
 
         signed = _make_signed_tx()

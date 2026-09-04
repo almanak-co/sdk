@@ -241,13 +241,14 @@ def submitted_transaction_hashes(result: Any) -> tuple[str, ...]:
         if isinstance(plural, str):
             plural = (plural,)
         candidates: list[Any] = list(plural)
-        # Older adapters and direct consumers expose only the singular action
-        # hash. Include it across a rolling producer/consumer upgrade.
-        candidates.append(_field(envelope, "tx_hash"))
-        candidates.extend(
+        child_candidates = [
             _field(transaction_result, "tx_hash")
             for transaction_result in (_field(envelope, "transaction_results") or ())
-        )
+        ]
+        candidates.extend(child_candidates)
+        # Older adapters and direct consumers expose only the singular action
+        # hash. Keep it as a fallback after the ordered per-transaction carrier.
+        candidates.append(_field(envelope, "tx_hash"))
         for candidate in candidates:
             normalized = _canonical_hash(candidate)
             if normalized is None:

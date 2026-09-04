@@ -34,6 +34,7 @@ from typing import Any
 from almanak.framework.execution.interfaces import (
     SignedTransaction,
     SubmissionResult,
+    TransactionReceipt,
     TransactionRevertedError,
 )
 
@@ -57,6 +58,131 @@ def _extract_receipt_field(receipt: Any, *keys: str) -> Any:
             if value is not None:
                 return value
     return None
+
+
+def _hex_string(value: Any) -> str | None:
+    if isinstance(value, str):
+        return value.strip() or None
+    if hasattr(value, "hex") and callable(value.hex):
+        try:
+            converted = value.hex()
+        except (TypeError, ValueError):
+            return None
+        return converted if isinstance(converted, str) and converted else None
+    return None
+
+
+def _quantity(value: Any) -> int | None:
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            value = int(text, 16) if text.startswith(("0x", "0X")) else int(text, 10)
+        except ValueError:
+            return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def _same_transaction_hash(left: str, right: str) -> bool:
+    return left.lower().removeprefix("0x") == right.lower().removeprefix("0x")
+
+
+def _complete_evm_receipt_fields(
+    *,
+    tx_hash: str | None,
+    expected_tx_hash: str,
+    block_number: int | None,
+    block_hash: str | None,
+    gas_used: int | None,
+    effective_gas_price: int | None,
+    status: int | None,
+) -> tuple[str, int, str, int, int, int] | None:
+    if (
+        tx_hash is None
+        or not _same_transaction_hash(tx_hash, expected_tx_hash)
+        or block_number is None
+        or block_hash is None
+        or gas_used is None
+        or effective_gas_price is None
+        or status is None
+        or status not in {0, 1}
+    ):
+        return None
+    return tx_hash, block_number, block_hash, gas_used, effective_gas_price, status
+
+
+def build_complete_evm_receipt(receipt: Any, *, expected_tx_hash: str) -> TransactionReceipt | None:
+    """Return a receipt only when all replay-safety fields are present."""
+    if isinstance(receipt, TransactionReceipt):
+        tx_hash = _hex_string(receipt.tx_hash)
+        block_number = _quantity(receipt.block_number)
+        block_hash = _hex_string(receipt.block_hash)
+        gas_used = _quantity(receipt.gas_used)
+        effective_gas_price = _quantity(receipt.effective_gas_price)
+        status = _quantity(receipt.status)
+        complete_fields = _complete_evm_receipt_fields(
+            tx_hash=tx_hash,
+            expected_tx_hash=expected_tx_hash,
+            block_number=block_number,
+            block_hash=block_hash,
+            gas_used=gas_used,
+            effective_gas_price=effective_gas_price,
+            status=status,
+        )
+        if complete_fields is None or not isinstance(receipt.logs, list):
+            return None
+        tx_hash, block_number, block_hash, gas_used, effective_gas_price, status = complete_fields
+        return TransactionReceipt(
+            tx_hash=tx_hash,
+            block_number=block_number,
+            block_hash=block_hash,
+            gas_used=gas_used,
+            effective_gas_price=effective_gas_price,
+            status=status,
+            logs=receipt.logs,
+            contract_address=receipt.contract_address,
+            from_address=receipt.from_address,
+            to_address=receipt.to_address,
+        )
+
+    tx_hash = _hex_string(_extract_receipt_field(receipt, "transactionHash", "transaction_hash", "tx_hash"))
+    block_number = _quantity(_extract_receipt_field(receipt, "blockNumber", "block_number"))
+    block_hash = _hex_string(_extract_receipt_field(receipt, "blockHash", "block_hash"))
+    gas_used = _quantity(_extract_receipt_field(receipt, "gasUsed", "gas_used"))
+    effective_gas_price = _quantity(_extract_receipt_field(receipt, "effectiveGasPrice", "effective_gas_price"))
+    status = _quantity(_extract_receipt_field(receipt, "status"))
+    logs = _extract_receipt_field(receipt, "logs")
+    complete_fields = _complete_evm_receipt_fields(
+        tx_hash=tx_hash,
+        expected_tx_hash=expected_tx_hash,
+        block_number=block_number,
+        block_hash=block_hash,
+        gas_used=gas_used,
+        effective_gas_price=effective_gas_price,
+        status=status,
+    )
+    if complete_fields is None or not isinstance(logs, list | tuple):
+        return None
+    tx_hash, block_number, block_hash, gas_used, effective_gas_price, status = complete_fields
+    try:
+        normalized_logs = [dict(log) for log in logs]
+    except (TypeError, ValueError):
+        return None
+    return TransactionReceipt(
+        tx_hash=tx_hash,
+        block_number=block_number,
+        block_hash=block_hash,
+        gas_used=gas_used,
+        effective_gas_price=effective_gas_price,
+        status=status,
+        logs=normalized_logs,
+        contract_address=_extract_receipt_field(receipt, "contractAddress", "contract_address"),
+        from_address=_extract_receipt_field(receipt, "from", "from_address"),
+        to_address=_extract_receipt_field(receipt, "to", "to_address"),
+    )
 
 
 async def try_recover_nonce_too_low(
@@ -114,9 +240,9 @@ async def try_recover_nonce_too_low(
     if receipt is None:
         return None
 
-    status = _extract_receipt_field(receipt, "status")
-    block = _extract_receipt_field(receipt, "blockNumber", "block_number")
-    gas = _extract_receipt_field(receipt, "gasUsed", "gas_used")
+    status = _quantity(_extract_receipt_field(receipt, "status"))
+    block = _quantity(_extract_receipt_field(receipt, "blockNumber", "block_number"))
+    gas = _quantity(_extract_receipt_field(receipt, "gasUsed", "gas_used"))
     suffix = f" on {chain_label}" if chain_label else ""
 
     if status == 1:
@@ -131,6 +257,7 @@ async def try_recover_nonce_too_low(
         )
 
     if status == 0:
+        tx_receipt = build_complete_evm_receipt(receipt, expected_tx_hash=signed_tx.tx_hash)
         logger.warning(
             f"Recovered from 'nonce too low'{suffix} via receipt lookup: "
             f"tx_hash={signed_tx.tx_hash} mined-but-reverted "
@@ -141,6 +268,7 @@ async def try_recover_nonce_too_low(
             revert_reason=None,
             gas_used=gas,
             block_number=block,
+            receipt=tx_receipt,
         )
 
     return None

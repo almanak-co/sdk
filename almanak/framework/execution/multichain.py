@@ -677,34 +677,54 @@ class MultiChainOrchestrator:
             return await executor.execute_bundle(unsigned_txs)
 
         # EOA MODE (or single tx in Safe mode): Execute transactions sequentially
-        last_result: TransactionExecutionResult | None = None
+        transaction_results: list[TransactionExecutionResult] = []
+        sequence_error: str | None = None
 
         for i, unsigned_tx in enumerate(unsigned_txs):
             tx_desc = transactions[i].get("description", f"tx {i + 1}/{len(unsigned_txs)}")
             logger.info(f"Executing {tx_desc}")
 
-            # Get nonce for this specific transaction
-            nonce = await executor.get_next_nonce()
-            unsigned_tx.nonce = nonce
+            try:
+                # Get nonce for this specific transaction
+                nonce = await executor.get_next_nonce()
+                unsigned_tx.nonce = nonce
 
-            logger.info(
-                f"Transaction {i + 1}/{len(unsigned_txs)}: "
-                f"to={(unsigned_tx.to or '')[:10]}..., gas={unsigned_tx.gas_limit}, nonce={nonce}"
-            )
+                logger.info(
+                    f"Transaction {i + 1}/{len(unsigned_txs)}: "
+                    f"to={(unsigned_tx.to or '')[:10]}..., gas={unsigned_tx.gas_limit}, nonce={nonce}"
+                )
 
-            # Execute this transaction
-            tx_result = await executor.execute_transaction(unsigned_tx)
+                # Execute this transaction
+                tx_result = await executor.execute_transaction(unsigned_tx)
+            except Exception as exc:
+                if not transaction_results:
+                    raise
+                sequence_error = f"Transaction {i + 1}/{len(unsigned_txs)} failed between executions: {exc}"
+                logger.exception(sequence_error)
+                break
+            tx_result.transaction_index = i
+            transaction_results.append(tx_result)
 
             if not tx_result.success:
                 logger.error(f"Transaction {i + 1}/{len(unsigned_txs)} failed: {tx_result.error}")
-                return tx_result
+                break
 
             logger.info(f"Transaction {i + 1}/{len(unsigned_txs)} confirmed: {tx_result.tx_hash}")
-            last_result = tx_result
 
-        if last_result is None:
+        if not transaction_results:
             raise ExecutionError("No transactions were executed")
-        return last_result
+        last_result = transaction_results[-1]
+        return TransactionExecutionResult(
+            success=sequence_error is None and all(item.success for item in transaction_results),
+            tx_hash=last_result.tx_hash,
+            receipt=last_result.receipt,
+            gas_used=sum(item.gas_used for item in transaction_results),
+            gas_cost_wei=sum(item.gas_cost_wei for item in transaction_results),
+            error=sequence_error or last_result.error,
+            nonce_used=last_result.nonce_used,
+            transaction_index=last_result.transaction_index if len(transaction_results) == 1 else None,
+            transaction_results=transaction_results,
+        )
 
     async def initialize(self) -> None:
         """Initialize all chain executors and verify connections.

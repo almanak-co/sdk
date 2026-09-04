@@ -6693,14 +6693,11 @@ class StrategyRunner:
           property (receipts → ``TransactionResult`` with logs), so it is reused
           verbatim; gas is taken from its ``total_gas_used`` /
           ``total_gas_cost_wei`` (the derived Σ that feeds ``gas_usd``).
-        - ``TransactionExecutionResult`` is a single confirmed tx; it is wrapped
-          into one ``TransactionResult`` carrying its receipt + gas.
+        - ``TransactionExecutionResult`` may carry an ordered batch of child
+          results; each child is preserved with its receipt, error, and index.
 
-        Only success-path legs are adapted here (Stage 2/3 gate on
-        ``leg.success`` before calling); the built ``ExecutionResult`` is stamped
-        ``success=True`` / ``phase=COMPLETE`` so the enricher's fail-closed path
-        reads the receipts. Raises ``TypeError`` on an unrecognised
-        ``tx_result`` shape (never silently fabricates an empty result).
+        Raises ``TypeError`` on an unrecognised ``tx_result`` shape (never
+        silently fabricates an empty result).
         """
         from ..execution.chain_executor import TransactionExecutionResult
         from ..execution.gateway_orchestrator import GatewayExecutionResult
@@ -6709,31 +6706,47 @@ class StrategyRunner:
 
         if isinstance(tx_result, GatewayExecutionResult):
             tx_results = list(tx_result.transaction_results)
+            if not tx_results and tx_result.tx_hashes:
+                tx_results = [
+                    TransactionResult(tx_hash=tx_hash, success=False, error=tx_result.error)
+                    for tx_hash in tx_result.tx_hashes
+                ]
             execution_result = ExecutionResult(
-                success=True,
-                phase=ExecutionPhase.COMPLETE,
+                success=tx_result.success,
+                phase=ExecutionPhase.COMPLETE if tx_result.success else ExecutionPhase.CONFIRMATION,
                 transaction_results=tx_results,
                 total_gas_used=int(getattr(tx_result, "total_gas_used", 0) or 0),
                 total_gas_cost_wei=int(getattr(tx_result, "total_gas_cost_wei", 0) or 0),
+                error=tx_result.error,
+                error_phase=None if tx_result.success else ExecutionPhase.CONFIRMATION,
+                submission_provenance=tx_result.submission_provenance,
             )
             return execution_result, tx_results
 
         if isinstance(tx_result, TransactionExecutionResult):
-            tr = TransactionResult(
-                tx_hash=tx_result.tx_hash,
-                success=True,
-                receipt=tx_result.receipt,
-                gas_used=int(getattr(tx_result, "gas_used", 0) or 0),
-                gas_cost_wei=int(getattr(tx_result, "gas_cost_wei", 0) or 0),
-            )
+            raw_results = tx_result.transaction_results or [tx_result]
+            tx_results = [
+                TransactionResult(
+                    tx_hash=item.tx_hash,
+                    success=item.success,
+                    receipt=item.receipt,
+                    gas_used=int(item.gas_used or 0),
+                    gas_cost_wei=int(item.gas_cost_wei or 0),
+                    error=item.error,
+                    transaction_index=item.transaction_index,
+                )
+                for item in raw_results
+            ]
             execution_result = ExecutionResult(
-                success=True,
-                phase=ExecutionPhase.COMPLETE,
-                transaction_results=[tr],
-                total_gas_used=tr.gas_used,
-                total_gas_cost_wei=tr.gas_cost_wei,
+                success=tx_result.success,
+                phase=ExecutionPhase.COMPLETE if tx_result.success else ExecutionPhase.CONFIRMATION,
+                transaction_results=tx_results,
+                total_gas_used=sum(item.gas_used for item in tx_results),
+                total_gas_cost_wei=sum(item.gas_cost_wei for item in tx_results),
+                error=tx_result.error,
+                error_phase=None if tx_result.success else ExecutionPhase.CONFIRMATION,
             )
-            return execution_result, [tr]
+            return execution_result, tx_results
 
         raise TypeError(
             "_adapt_leg_to_execution_result: unsupported leg tx_result type "
@@ -6770,6 +6783,55 @@ class StrategyRunner:
                 f"(swap: {swap_amounts.token_in} -> {swap_amounts.token_out})"
             )
         return ""
+
+    def _failed_leg_execution_result(
+        self,
+        leg: Any,
+        prior_results: list[TransactionResult],
+        total_gas_used: int,
+        total_gas_cost_wei: int,
+        error: str,
+    ) -> tuple[ExecutionResult | None, list[TransactionResult]]:
+        try:
+            failed_leg_result, failed_tx_results = self._adapt_leg_to_execution_result(leg)
+        except TypeError:
+            return None, []
+        if not failed_tx_results:
+            return None, []
+        combined = [*prior_results, *failed_tx_results]
+        return (
+            ExecutionResult(
+                success=False,
+                phase=ExecutionPhase.CONFIRMATION,
+                transaction_results=combined,
+                total_gas_used=total_gas_used + sum(item.gas_used for item in failed_tx_results),
+                total_gas_cost_wei=total_gas_cost_wei + sum(item.gas_cost_wei for item in failed_tx_results),
+                error=error,
+                error_phase=ExecutionPhase.CONFIRMATION,
+                submission_provenance=failed_leg_result.submission_provenance,
+            ),
+            failed_tx_results,
+        )
+
+    @staticmethod
+    def _failed_iteration_execution_result(
+        current: ExecutionResult | None,
+        transaction_results: list[TransactionResult],
+        total_gas_used: int,
+        total_gas_cost_wei: int,
+        error: str,
+    ) -> ExecutionResult | None:
+        if current is not None or not transaction_results:
+            return current
+        return ExecutionResult(
+            success=False,
+            phase=ExecutionPhase.CONFIRMATION,
+            transaction_results=list(transaction_results),
+            total_gas_used=total_gas_used,
+            total_gas_cost_wei=total_gas_cost_wei,
+            error=error,
+            error_phase=ExecutionPhase.CONFIRMATION,
+        )
 
     def _leg_recon_error(self, recon: dict[str, Any] | None, *, chain: str, deployment_id: str) -> str:
         """Triage a per-leg reconciliation report into a downgrade marker (VIB-5670).
@@ -11133,6 +11195,7 @@ class StrategyRunner:
         previous_amount_received = resume_progress.previous_amount_received if resume_progress is not None else None
         error_summary = ""
         persisted_count = 0
+        failed_execution_result: ExecutionResult | None = None
 
         await self._flush_strategy_pending_save_strict(strategy)
         if resume_progress is None:
@@ -11215,7 +11278,18 @@ class StrategyRunner:
                         f"Multi-chain leg failed at intent {intent_to_execute.intent_id[:8]}..., "
                         f"chain={leg.chain}: {leg.error}"
                     )
-                    self._notify_intent_executed(strategy, intent_to_execute, False, None)
+                    failed_execution_result, failed_tx_results = self._failed_leg_execution_result(
+                        leg,
+                        leg_tx_results,
+                        total_gas_used,
+                        total_gas_cost_wei,
+                        classified_error,
+                    )
+                    if failed_execution_result is not None:
+                        leg_tx_results.extend(failed_tx_results)
+                        total_gas_used = failed_execution_result.total_gas_used
+                        total_gas_cost_wei = failed_execution_result.total_gas_cost_wei
+                    self._notify_intent_executed(strategy, intent_to_execute, False, failed_execution_result)
                     break
 
                 progress.mark_landed_repair_pending(
@@ -11308,9 +11382,17 @@ class StrategyRunner:
             )
             # Issue #1780: tick the lifetime counter exactly once per iteration.
             self._record_failure()
+            failed_execution_result = self._failed_iteration_execution_result(
+                failed_execution_result,
+                leg_tx_results,
+                total_gas_used,
+                total_gas_cost_wei,
+                error_summary,
+            )
             return IterationResult(
                 status=IterationStatus.EXECUTION_FAILED,
                 intent=first_intent,
+                execution_result=failed_execution_result,
                 error=error_summary,
                 deployment_id=deployment_id,
                 duration_ms=self._calculate_duration_ms(start_time),
@@ -11749,6 +11831,7 @@ class StrategyRunner:
         if bridge_break:
             # Source tx succeeded; the bridge wait / settlement failed.
             # Record the money that already moved (VIB-5670 Stage 3).
+            state.failed_result = result
             await self._persist_degraded_bridge_source_leg(state, intent_to_execute, chain, result)
             return True
         return False
@@ -12659,8 +12742,7 @@ class StrategyRunner:
         from almanak.framework.execution.reconciliation import failed_submission_requires_reconciliation
 
         safe_retry = bool(
-            state.failed_result is not None
-            and getattr(state.failed_result, "success", None) is False
+            getattr(state.failed_result, "success", None) is False
             and not failed_submission_requires_reconciliation(state.failed_result)
         )
         if state.progress.effective_barrier_phase is ExecutionBarrierPhase.RECOMPILE_REQUIRED:
@@ -12752,6 +12834,26 @@ class StrategyRunner:
         # to prevent stale reads on the next decide() cycle.
         self.balance_provider.invalidate_cache()
 
+        iteration_error = f"{failed_step}: {error_message}"
+        total_gas_used = sum(int(getattr(tr, "gas_used", 0) or 0) for tr in state.leg_tx_results)
+        total_gas_cost_wei = sum(int(getattr(tr, "gas_cost_wei", 0) or 0) for tr in state.leg_tx_results)
+        failed_execution_result = None
+        if state.failed_result is not None:
+            failed_execution_result, _failed_tx_results = self._failed_leg_execution_result(
+                state.failed_result,
+                state.leg_tx_results,
+                total_gas_used,
+                total_gas_cost_wei,
+                iteration_error,
+            )
+        failed_execution_result = self._failed_iteration_execution_result(
+            failed_execution_result,
+            state.leg_tx_results,
+            total_gas_used,
+            total_gas_cost_wei,
+            iteration_error,
+        )
+
         # Issue #1780: the bridge-wait failed result is the terminal
         # outcome of a cross-chain iteration -- record it exactly once
         # here so the lifetime total matches the success branch that
@@ -12760,7 +12862,8 @@ class StrategyRunner:
         return IterationResult(
             status=IterationStatus.EXECUTION_FAILED,
             intent=state.first_intent,
-            error=f"{failed_step}: {error_message}",
+            execution_result=failed_execution_result,
+            error=iteration_error,
             deployment_id=deployment_id,
             duration_ms=self._calculate_duration_ms(state.start_time),
         )

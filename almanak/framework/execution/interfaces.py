@@ -158,6 +158,7 @@ class TransactionRevertedError(ExecutionError):
         revert_reason: Decoded revert reason if available
         gas_used: Gas consumed before revert
         block_number: Block where revert occurred
+        receipt: Complete mined receipt proving the revert, when available
     """
 
     def __init__(
@@ -166,11 +167,13 @@ class TransactionRevertedError(ExecutionError):
         revert_reason: str | None = None,
         gas_used: int | None = None,
         block_number: int | None = None,
+        receipt: "TransactionReceipt | None" = None,
     ) -> None:
         self.tx_hash = tx_hash
         self.revert_reason = revert_reason
         self.gas_used = gas_used
         self.block_number = block_number
+        self.receipt = receipt
         reason_str = f": {revert_reason}" if revert_reason else ""
         super().__init__(f"Transaction {tx_hash} reverted{reason_str}")
 

@@ -59,7 +59,7 @@ from almanak.framework.execution.interfaces import (
     TransactionReceipt,
     TransactionRevertedError,
 )
-from almanak.framework.execution.nonce_recovery import try_recover_nonce_too_low
+from almanak.framework.execution.nonce_recovery import build_complete_evm_receipt, try_recover_nonce_too_low
 
 logger = logging.getLogger(__name__)
 
@@ -860,6 +860,7 @@ class PublicMempoolSubmitter(Submitter):
 
         submission_results: list[SubmissionResult] = []
         receipts: list[TransactionReceipt] = []
+        pending_submission: SignedTransaction | None = None
 
         def _attach_partial(exc: Exception) -> None:
             """Attach partial results to an exception for upstream recovery."""
@@ -871,8 +872,10 @@ class PublicMempoolSubmitter(Submitter):
                 logger.info(f"Sequential submit: TX {i + 1}/{len(txs)}")
 
                 # Submit this TX
+                pending_submission = tx
                 result = await self._submit_single(tx)
                 submission_results.append(result)
+                pending_submission = None
 
                 if not result.submitted:
                     # Determine recoverability from the error message.
@@ -900,6 +903,16 @@ class PublicMempoolSubmitter(Submitter):
                 )
 
         except Exception as exc:
+            if pending_submission is not None and pending_submission.tx_hash.strip():
+                # A signed hash exists before the RPC call. If the call raises,
+                # the broadcast outcome is unknown until that hash is reconciled.
+                submission_results.append(
+                    SubmissionResult(
+                        tx_hash=pending_submission.tx_hash.strip(),
+                        submitted=False,
+                        error=str(exc),
+                    )
+                )
             _attach_partial(exc)
             raise
 
@@ -1192,6 +1205,24 @@ class PublicMempoolSubmitter(Submitter):
                     recoverable=True,
                 )
 
+            status = receipt["status"]
+            if status == 0:
+                tx_receipt = build_complete_evm_receipt(receipt, expected_tx_hash=tx_hash)
+                revert_reason = None
+                if tx_receipt is not None:
+                    revert_reason = await self._extract_revert_reason(
+                        tx_hash=tx_hash,
+                        block_number=tx_receipt.block_number,
+                    )
+                logger.warning(f"Transaction reverted: tx_hash={tx_hash}, reason={revert_reason or 'Unknown'}")
+                raise TransactionRevertedError(
+                    tx_hash=tx_hash,
+                    revert_reason=revert_reason,
+                    gas_used=tx_receipt.gas_used if tx_receipt is not None else receipt.get("gasUsed"),
+                    block_number=tx_receipt.block_number if tx_receipt is not None else receipt.get("blockNumber"),
+                    receipt=tx_receipt,
+                )
+
             # Convert to our TransactionReceipt dataclass
             tx_receipt = TransactionReceipt(
                 tx_hash=receipt["transactionHash"].hex(),
@@ -1199,26 +1230,12 @@ class PublicMempoolSubmitter(Submitter):
                 block_hash=receipt["blockHash"].hex(),
                 gas_used=receipt["gasUsed"],
                 effective_gas_price=receipt.get("effectiveGasPrice", 0),
-                status=receipt["status"],
+                status=status,
                 logs=[dict(log) for log in receipt.get("logs", [])],
                 contract_address=receipt.get("contractAddress"),
                 from_address=receipt.get("from"),
                 to_address=receipt.get("to"),
             )
-
-            if tx_receipt.status == 0:
-                # Extract revert reason by replaying the transaction
-                revert_reason = await self._extract_revert_reason(
-                    tx_hash=tx_hash,
-                    block_number=tx_receipt.block_number,
-                )
-                logger.warning(f"Transaction reverted: tx_hash={tx_hash}, reason={revert_reason or 'Unknown'}")
-                raise TransactionRevertedError(
-                    tx_hash=tx_hash,
-                    revert_reason=revert_reason,
-                    gas_used=tx_receipt.gas_used,
-                    block_number=tx_receipt.block_number,
-                )
 
             logger.info(
                 f"Transaction confirmed: tx_hash={tx_hash}, "

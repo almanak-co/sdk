@@ -15,8 +15,12 @@ import pytest
 
 from almanak.framework.execution.events import ExecutionEventType
 from almanak.framework.execution.interfaces import (
+    GasEstimationError,
+    InsufficientFundsError,
+    NonceError,
     SimulationResult,
     SubmissionError,
+    SubmissionResult,
     TransactionReceipt,
     TransactionRevertedError,
 )
@@ -25,7 +29,9 @@ from almanak.framework.execution.orchestrator import (
     ExecutionOrchestrator,
     ExecutionPhase,
 )
+from almanak.framework.execution.reconciliation import failed_submission_requires_reconciliation
 from almanak.framework.execution.submission import SubmissionProvenance
+from almanak.framework.execution.submitter.public import PublicMempoolSubmitter
 from almanak.framework.models.reproduction_bundle import ActionBundle
 from almanak.framework.strategies.base import RiskGuardResult
 
@@ -325,6 +331,50 @@ class TestExecuteSubmitterFailure:
         assert result.error_phase == ExecutionPhase.SUBMISSION
         assert "timeout" in (result.error or "")
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "error",
+        [
+            NonceError("nonce too low"),
+            InsufficientFundsError(required=2, available=1),
+            GasEstimationError("intrinsic gas too low"),
+        ],
+    )
+    async def test_sequential_typed_error_preserves_confirmed_prefix_and_ambiguous_action(
+        self,
+        orchestrator,
+        error: Exception,
+    ):
+        bundle = ActionBundle(
+            intent_type="SWAP",
+            transactions=[
+                {"to": "0xtoken", "data": "0x095ea7b3" + "00" * 64, "value": 0, "tx_type": "approve"},
+                {"to": "0xrouter", "data": "0x12345678", "value": 0, "tx_type": "swap"},
+            ],
+        )
+        _wire_for_happy_path(orchestrator, tx_count=2)
+        orchestrator.signer.sign_batch = AsyncMock(
+            return_value=[MagicMock(tx_hash="0xapprove"), MagicMock(tx_hash="0xaction")]
+        )
+        submitter = PublicMempoolSubmitter(rpc_url="http://localhost:8545")
+        submitter._submit_single = AsyncMock(
+            side_effect=[
+                SubmissionResult(tx_hash="0xapprove", submitted=True),
+                error,
+            ]
+        )
+        approval_receipt = _make_receipt(success=True, tx_hash="0xapprove")
+        submitter.get_receipt = AsyncMock(return_value=approval_receipt)
+        orchestrator.submitter = submitter
+
+        result = await orchestrator.execute(bundle)
+
+        assert result.success is False
+        assert [item.tx_hash for item in result.transaction_results] == ["0xapprove", "0xaction"]
+        assert [item.receipt for item in result.transaction_results] == [approval_receipt, None]
+        assert [item.transaction_index for item in result.transaction_results] == [0, None]
+        assert failed_submission_requires_reconciliation(result) is True
+
 
 # =============================================================================
 # Receipt timeout with partial hashes preserved
@@ -469,3 +519,174 @@ class TestReceiptRevertedMidPipeline:
         assert result.success is False
         assert result.error_phase == ExecutionPhase.CONFIRMATION
         assert result.error == "FROM EXCEPTION"
+
+    @pytest.mark.asyncio
+    async def test_sequential_approval_then_revert_preserves_ordered_receipts(self, orchestrator):
+        bundle = ActionBundle(
+            intent_type="SWAP",
+            transactions=[
+                {"to": "0xtoken", "data": "0x095ea7b3" + "00" * 64, "value": 0, "tx_type": "approve"},
+                {"to": "0xrouter", "data": "0x12345678", "value": 0, "tx_type": "swap"},
+            ],
+        )
+        _wire_for_happy_path(orchestrator, tx_count=2)
+        signed_txs = [MagicMock(tx_hash="0xapprove"), MagicMock(tx_hash="0xaction")]
+        orchestrator.signer.sign_batch = AsyncMock(return_value=signed_txs)
+
+        submitter = PublicMempoolSubmitter(rpc_url="http://localhost:8545")
+        submitter._submit_single = AsyncMock(
+            side_effect=lambda tx: SubmissionResult(tx_hash=tx.tx_hash, submitted=True)
+        )
+        approval_receipt = _make_receipt(
+            success=True,
+            tx_hash="0xapprove",
+            gas_used=45_000,
+            block_number=100,
+        )
+        reverted_receipt = TransactionReceipt(
+            tx_hash="0xaction",
+            block_number=101,
+            block_hash="0xreverted-block",
+            gas_used=152_000,
+            effective_gas_price=7,
+            status=0,
+            logs=[{"address": "0xpool", "data": "0xdead"}],
+        )
+
+        async def get_receipt(tx_hash: str, timeout: float = 120.0) -> TransactionReceipt:
+            if tx_hash == "0xapprove":
+                return approval_receipt
+            raise TransactionRevertedError(
+                tx_hash=tx_hash,
+                revert_reason="swap reverted",
+                gas_used=reverted_receipt.gas_used,
+                block_number=reverted_receipt.block_number,
+                receipt=reverted_receipt,
+            )
+
+        submitter.get_receipt = AsyncMock(side_effect=get_receipt)
+        orchestrator.submitter = submitter
+
+        with patch("almanak.framework.execution.orchestrator.build_verbose_revert_report") as mock_build:
+            mock_report = MagicMock()
+            mock_report.format.return_value = "SWAP REVERTED"
+            mock_report.to_dict.return_value = {}
+            mock_build.return_value = mock_report
+            result = await orchestrator.execute(bundle)
+
+        assert result.success is False
+        assert [item.tx_hash for item in result.transaction_results] == ["0xapprove", "0xaction"]
+        assert [item.transaction_index for item in result.transaction_results] == [0, 1]
+        assert [item.receipt for item in result.transaction_results] == [approval_receipt, reverted_receipt]
+        assert result.transaction_results[0].success is True
+        assert result.transaction_results[1].success is False
+        assert result.total_gas_used == 197_000
+        assert reverted_receipt.block_hash == "0xreverted-block"
+        assert reverted_receipt.block_number == 101
+        assert reverted_receipt.gas_used == 152_000
+        assert reverted_receipt.status == 0
+        assert reverted_receipt.logs == [{"address": "0xpool", "data": "0xdead"}]
+
+    @pytest.mark.asyncio
+    async def test_direct_second_submission_revert_preserves_ordered_receipts(self, orchestrator):
+        bundle = ActionBundle(
+            intent_type="SWAP",
+            transactions=[
+                {"to": "0xtoken", "data": "0x095ea7b3" + "00" * 64, "value": 0, "tx_type": "approve"},
+                {"to": "0xrouter", "data": "0x12345678", "value": 0, "tx_type": "swap"},
+            ],
+        )
+        _wire_for_happy_path(orchestrator, tx_count=2)
+        orchestrator.signer.sign_batch = AsyncMock(
+            return_value=[MagicMock(tx_hash="0xapprove"), MagicMock(tx_hash="0xaction")]
+        )
+
+        approval_receipt = _make_receipt(
+            success=True,
+            tx_hash="0xapprove",
+            gas_used=45_000,
+            effective_gas_price=3,
+            block_number=100,
+        )
+        reverted_receipt = TransactionReceipt(
+            tx_hash="0xaction",
+            block_number=101,
+            block_hash="0xreverted-block",
+            gas_used=152_000,
+            effective_gas_price=7,
+            status=0,
+            logs=[{"address": "0xpool", "data": "0xdead"}],
+        )
+
+        async def submit_single(tx):
+            if tx.tx_hash == "0xaction":
+                raise TransactionRevertedError(
+                    tx_hash=tx.tx_hash,
+                    revert_reason="swap reverted",
+                    gas_used=reverted_receipt.gas_used,
+                    block_number=reverted_receipt.block_number,
+                    receipt=reverted_receipt,
+                )
+            return SubmissionResult(tx_hash=tx.tx_hash, submitted=True)
+
+        submitter = PublicMempoolSubmitter(rpc_url="http://localhost:8545")
+        submitter._submit_single = AsyncMock(side_effect=submit_single)
+        submitter.get_receipt = AsyncMock(return_value=approval_receipt)
+        orchestrator.submitter = submitter
+
+        with patch("almanak.framework.execution.orchestrator.build_verbose_revert_report") as mock_build:
+            mock_report = MagicMock()
+            mock_report.format.return_value = "SWAP REVERTED"
+            mock_report.to_dict.return_value = {}
+            mock_build.return_value = mock_report
+            result = await orchestrator.execute(bundle)
+
+        assert result.success is False
+        assert [item.tx_hash for item in result.transaction_results] == ["0xapprove", "0xaction"]
+        assert [item.transaction_index for item in result.transaction_results] == [0, 1]
+        assert [item.receipt for item in result.transaction_results] == [approval_receipt, reverted_receipt]
+        reverted_result = result.transaction_results[1]
+        assert reverted_result.success is False
+        assert reverted_result.gas_used == 152_000
+        assert reverted_result.gas_cost_wei == 1_064_000
+        assert reverted_result.logs == [{"address": "0xpool", "data": "0xdead"}]
+        assert reverted_result.receipt is not None
+        assert reverted_result.receipt.status == 0
+        assert reverted_result.receipt.block_number == 101
+        assert reverted_result.receipt.block_hash == "0xreverted-block"
+        assert result.total_gas_used == 197_000
+        assert result.total_gas_cost_wei == 1_199_000
+        assert submitter._submit_single.await_count == 2
+        assert submitter.get_receipt.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_reordered_submission_and_receipts_map_by_signed_hash(self, orchestrator):
+        bundle = ActionBundle(
+            intent_type="SWAP",
+            transactions=[
+                {"to": "0xtoken", "data": "0x095ea7b3" + "00" * 64, "value": 0, "tx_type": "approve"},
+                {"to": "0xrouter", "data": "0x12345678", "value": 0, "tx_type": "swap"},
+            ],
+        )
+        _wire_for_happy_path(orchestrator, tx_count=2)
+        orchestrator.signer.sign_batch = AsyncMock(
+            return_value=[MagicMock(tx_hash="0xapprove"), MagicMock(tx_hash="0xaction")]
+        )
+        orchestrator.submitter.submit = AsyncMock(
+            return_value=[
+                SubmissionResult(tx_hash="0xaction", submitted=True),
+                SubmissionResult(tx_hash="0xapprove", submitted=True),
+            ]
+        )
+        orchestrator.submitter.get_receipts = AsyncMock(
+            return_value=[
+                _make_receipt(success=True, tx_hash="0xaction"),
+                _make_receipt(success=True, tx_hash="0xapprove"),
+            ]
+        )
+
+        result = await orchestrator.execute(bundle)
+
+        assert result.success is True
+        assert [item.tx_hash for item in result.transaction_results] == ["0xaction", "0xapprove"]
+        assert [item.transaction_index for item in result.transaction_results] == [1, 0]

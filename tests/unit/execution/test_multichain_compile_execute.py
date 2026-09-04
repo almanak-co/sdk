@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from almanak.framework.execution.chain_executor import TransactionExecutionResult
+from almanak.framework.execution.interfaces import TransactionReceipt
 from almanak.framework.execution.multichain import ExecutionError, MultiChainOrchestrator
 from almanak.framework.intents.compiler import CompilationResult, CompilationStatus
 from almanak.framework.models.reproduction_bundle import ActionBundle
@@ -33,16 +34,12 @@ def _executor(*, safe_mode=False, results=None):
     executor._chain = "arbitrum"
     executor._chain_id = 42161
     executor.is_safe_mode = safe_mode
-    executor.get_gas_params = AsyncMock(
-        return_value={"max_fee_per_gas": 100, "max_priority_fee_per_gas": 2}
-    )
+    executor.get_gas_params = AsyncMock(return_value={"max_fee_per_gas": 100, "max_priority_fee_per_gas": 2})
     executor.get_next_nonce = AsyncMock(side_effect=[7, 8, 9])
     executor.execute_transaction = AsyncMock(
         side_effect=results or [TransactionExecutionResult(success=True, tx_hash="0x1")]
     )
-    executor.execute_bundle = AsyncMock(
-        return_value=TransactionExecutionResult(success=True, tx_hash="0xbundle")
-    )
+    executor.execute_bundle = AsyncMock(return_value=TransactionExecutionResult(success=True, tx_hash="0xbundle"))
     return executor
 
 
@@ -80,11 +77,7 @@ class TestPriceOracleOverride:
     def test_override_applied_and_restored(self):
         mco, compiler = _make_mco()
         _wire_compile(compiler, [_tx()])
-        asyncio.run(
-            mco._compile_and_execute_intent(
-                _intent(), _executor(), price_oracle={"ETH": "3500"}
-            )
-        )
+        asyncio.run(mco._compile_and_execute_intent(_intent(), _executor(), price_oracle={"ETH": "3500"}))
         compiler.update_prices.assert_called_once_with({"ETH": "3500"})
         compiler.restore_prices.assert_called_once_with({"ETH": "3000"}, False)
 
@@ -92,11 +85,7 @@ class TestPriceOracleOverride:
         mco, compiler = _make_mco()
         compiler.compile.side_effect = ValueError("compiler exploded")
         with pytest.raises(ValueError, match="compiler exploded"):
-            asyncio.run(
-                mco._compile_and_execute_intent(
-                    _intent(), _executor(), price_oracle={"ETH": "3500"}
-                )
-            )
+            asyncio.run(mco._compile_and_execute_intent(_intent(), _executor(), price_oracle={"ETH": "3500"}))
         compiler.restore_prices.assert_called_once()
 
     def test_no_override_without_price_oracle(self):
@@ -168,6 +157,71 @@ class TestEoaExecution:
         assert not result.success
         assert result.error == "reverted"
         assert executor.execute_transaction.call_count == 1
+
+    def test_mid_sequence_failure_retains_confirmed_prefix(self):
+        mco, compiler = _make_mco()
+        _wire_compile(compiler, [_tx(description="approve"), _tx(description="swap"), _tx(description="never")])
+        approval_receipt = TransactionReceipt("0xapprove", 10, "0xblock-a", 45_000, 2, 1)
+        revert_receipt = TransactionReceipt("0xswap", 11, "0xblock-b", 80_000, 3, 0)
+        executor = _executor(
+            results=[
+                TransactionExecutionResult(
+                    success=True,
+                    tx_hash="0xapprove",
+                    receipt=approval_receipt,
+                    gas_used=45_000,
+                    gas_cost_wei=90_000,
+                ),
+                TransactionExecutionResult(
+                    success=False,
+                    tx_hash="0xswap",
+                    receipt=revert_receipt,
+                    gas_used=80_000,
+                    gas_cost_wei=240_000,
+                    error="reverted",
+                ),
+            ]
+        )
+
+        result = asyncio.run(mco._compile_and_execute_intent(_intent(), executor))
+
+        assert result.success is False
+        assert [item.tx_hash for item in result.transaction_results] == ["0xapprove", "0xswap"]
+        assert [item.transaction_index for item in result.transaction_results] == [0, 1]
+        assert [item.receipt for item in result.transaction_results] == [approval_receipt, revert_receipt]
+        assert result.gas_used == 125_000
+        assert result.gas_cost_wei == 330_000
+        assert executor.execute_transaction.call_count == 2
+
+    @pytest.mark.parametrize("failure_point", ["nonce", "execute"])
+    def test_between_transaction_exception_retains_confirmed_prefix(self, failure_point):
+        mco, compiler = _make_mco()
+        _wire_compile(compiler, [_tx(description="approve"), _tx(description="swap")])
+        approval_receipt = TransactionReceipt("0xapprove", 10, "0xblock-a", 45_000, 2, 1)
+        executor = _executor(
+            results=[
+                TransactionExecutionResult(
+                    success=True,
+                    tx_hash="0xapprove",
+                    receipt=approval_receipt,
+                    gas_used=45_000,
+                    gas_cost_wei=90_000,
+                ),
+                RuntimeError("executor unavailable"),
+            ]
+        )
+        if failure_point == "nonce":
+            executor.get_next_nonce = AsyncMock(side_effect=[7, RuntimeError("nonce unavailable")])
+
+        result = asyncio.run(mco._compile_and_execute_intent(_intent(), executor))
+
+        assert result.success is False
+        assert result.tx_hash == "0xapprove"
+        assert result.receipt is approval_receipt
+        assert [item.tx_hash for item in result.transaction_results] == ["0xapprove"]
+        assert result.transaction_results[0].transaction_index == 0
+        assert result.gas_used == 45_000
+        assert "unavailable" in (result.error or "")
 
 
 class TestSafeMode:

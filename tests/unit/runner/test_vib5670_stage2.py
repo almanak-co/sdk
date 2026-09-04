@@ -384,10 +384,11 @@ class TestSameChainLegsFailStop:
         assert result.error.endswith("reverted")
         # Leg 1 persisted; failed leg 2 did not persist.
         assert runner._persist_executed_leg.await_count == 1
-        # Failure notify fired with success=False and no result.
+        # Failure notify retains the confirmed prefix and the failed leg evidence.
         args = runner._notify_intent_executed.call_args.args
         assert args[2] is False
-        assert args[3] is None
+        assert args[3] is result.execution_result
+        assert len(result.execution_result.transaction_results) == 2
         runner._record_failure.assert_called_once()
         runner._record_success.assert_not_called()
 

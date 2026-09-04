@@ -64,7 +64,7 @@ from almanak.framework.execution.interfaces import (
     TransactionType,
     UnsignedTransaction,
 )
-from almanak.framework.execution.nonce_recovery import try_recover_nonce_too_low
+from almanak.framework.execution.nonce_recovery import build_complete_evm_receipt, try_recover_nonce_too_low
 
 if TYPE_CHECKING:
     from almanak.framework.execution.signer.safe import SafeSigner
@@ -219,6 +219,8 @@ class TransactionExecutionResult:
         gas_cost_wei: Total gas cost in wei
         error: Error message if failed
         nonce_used: Nonce used for the transaction
+        transaction_index: Index in the compiled transaction bundle
+        transaction_results: Individual results when this represents a batch
     """
 
     success: bool
@@ -228,6 +230,8 @@ class TransactionExecutionResult:
     gas_cost_wei: int = 0
     error: str | None = None
     nonce_used: int | None = None
+    transaction_index: int | None = None
+    transaction_results: list["TransactionExecutionResult"] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -239,7 +243,26 @@ class TransactionExecutionResult:
             "gas_cost_wei": str(self.gas_cost_wei),
             "error": self.error,
             "nonce_used": self.nonce_used,
+            "transaction_index": self.transaction_index,
+            "transaction_results": [result.to_dict() for result in self.transaction_results],
         }
+
+
+def _reverted_execution_result(
+    exc: TransactionRevertedError,
+    *,
+    nonce_used: int | None = None,
+) -> TransactionExecutionResult:
+    receipt = exc.receipt
+    return TransactionExecutionResult(
+        success=False,
+        tx_hash=exc.tx_hash,
+        receipt=receipt,
+        gas_used=exc.gas_used or 0,
+        gas_cost_wei=receipt.gas_cost_wei if receipt is not None else 0,
+        error=exc.revert_reason or str(exc),
+        nonce_used=nonce_used,
+    )
 
 
 # =============================================================================
@@ -868,26 +891,29 @@ class ChainExecutor:
                 timeout=timeout_to_use,
             )
 
+            status = receipt["status"]
+            if status == 0:
+                tx_receipt = build_complete_evm_receipt(receipt, expected_tx_hash=tx_hash)
+                logger.warning(f"Transaction reverted on {self._chain}: {tx_hash}")
+                raise TransactionRevertedError(
+                    tx_hash=tx_hash,
+                    gas_used=tx_receipt.gas_used if tx_receipt is not None else receipt.get("gasUsed"),
+                    block_number=tx_receipt.block_number if tx_receipt is not None else receipt.get("blockNumber"),
+                    receipt=tx_receipt,
+                )
+
             tx_receipt = TransactionReceipt(
                 tx_hash=receipt["transactionHash"].hex(),
                 block_number=receipt["blockNumber"],
                 block_hash=receipt["blockHash"].hex(),
                 gas_used=receipt["gasUsed"],
                 effective_gas_price=receipt.get("effectiveGasPrice", 0),
-                status=receipt["status"],
+                status=status,
                 logs=[dict(log) for log in receipt.get("logs", [])],
                 contract_address=receipt.get("contractAddress"),
                 from_address=receipt.get("from"),
                 to_address=receipt.get("to"),
             )
-
-            if tx_receipt.status == 0:
-                logger.warning(f"Transaction reverted on {self._chain}: {tx_hash}")
-                raise TransactionRevertedError(
-                    tx_hash=tx_hash,
-                    gas_used=tx_receipt.gas_used,
-                    block_number=tx_receipt.block_number,
-                )
 
             logger.info(
                 f"Transaction confirmed on {self._chain}: {tx_hash}, "
@@ -983,12 +1009,13 @@ class ChainExecutor:
                     nonce_used=nonce_used,
                 )
 
+        except TransactionRevertedError as e:
+            return _reverted_execution_result(e, nonce_used=nonce_used)
         except (
             SigningError,
             NonceError,
             InsufficientFundsError,
             GasEstimationError,
-            TransactionRevertedError,
         ) as e:
             return TransactionExecutionResult(
                 success=False,
@@ -1075,12 +1102,13 @@ class ChainExecutor:
                     nonce_used=eoa_nonce,
                 )
 
+        except TransactionRevertedError as e:
+            return _reverted_execution_result(e, nonce_used=eoa_nonce)
         except (
             SigningError,
             NonceError,
             InsufficientFundsError,
             GasEstimationError,
-            TransactionRevertedError,
         ) as e:
             return TransactionExecutionResult(
                 success=False,
@@ -1180,12 +1208,13 @@ class ChainExecutor:
                     nonce_used=eoa_nonce,
                 )
 
+        except TransactionRevertedError as e:
+            return _reverted_execution_result(e, nonce_used=eoa_nonce)
         except (
             SigningError,
             NonceError,
             InsufficientFundsError,
             GasEstimationError,
-            TransactionRevertedError,
         ) as e:
             return TransactionExecutionResult(
                 success=False,

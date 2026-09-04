@@ -14,6 +14,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from almanak.framework.execution.interfaces import (
+    GasEstimationError,
+    InsufficientFundsError,
+    NonceError,
     SignedTransaction,
     SubmissionError,
     SubmissionResult,
@@ -23,7 +26,6 @@ from almanak.framework.execution.interfaces import (
     UnsignedTransaction,
 )
 from almanak.framework.execution.submitter.public import PublicMempoolSubmitter
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -87,9 +89,7 @@ class TestSubmitSequential:
         """Single TX should submit and confirm."""
         tx = _signed_tx("0x111", nonce=0)
 
-        submitter._submit_single = AsyncMock(
-            return_value=SubmissionResult(tx_hash="0x111", submitted=True)
-        )
+        submitter._submit_single = AsyncMock(return_value=SubmissionResult(tx_hash="0x111", submitted=True))
         submitter.get_receipt = AsyncMock(return_value=_receipt("0x111"))
 
         results, receipts = await submitter.submit_sequential([tx])
@@ -149,9 +149,7 @@ class TestSubmitSequential:
         """If a TX reverts on-chain, TransactionRevertedError propagates."""
         txs = [_signed_tx("0xrevert", nonce=0)]
 
-        submitter._submit_single = AsyncMock(
-            return_value=SubmissionResult(tx_hash="0xrevert", submitted=True)
-        )
+        submitter._submit_single = AsyncMock(return_value=SubmissionResult(tx_hash="0xrevert", submitted=True))
         submitter.get_receipt = AsyncMock(
             side_effect=TransactionRevertedError(
                 tx_hash="0xrevert",
@@ -214,6 +212,37 @@ class TestSubmitSequential:
         assert exc.partial_results[1].submitted is False  # type: ignore[attr-defined]
         assert len(exc.partial_receipts) == 1  # type: ignore[attr-defined]
         assert exc.partial_receipts[0].tx_hash == "0x0"  # type: ignore[attr-defined]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "error",
+        [
+            NonceError("nonce too low"),
+            InsufficientFundsError(required=2, available=1),
+            GasEstimationError("intrinsic gas too low"),
+        ],
+    )
+    async def test_raised_submit_retains_current_signed_hash_as_ambiguous(
+        self,
+        submitter: PublicMempoolSubmitter,
+        error: Exception,
+    ) -> None:
+        txs = [_signed_tx("0xapprove", nonce=0), _signed_tx("0xaction", nonce=1)]
+        submitter._submit_single = AsyncMock(
+            side_effect=[
+                SubmissionResult(tx_hash="0xapprove", submitted=True),
+                error,
+            ]
+        )
+        submitter.get_receipt = AsyncMock(return_value=_receipt("0xapprove"))
+
+        with pytest.raises(type(error)) as exc_info:
+            await submitter.submit_sequential(txs)
+
+        partial_results = exc_info.value.partial_results  # type: ignore[attr-defined]
+        assert [item.tx_hash for item in partial_results] == ["0xapprove", "0xaction"]
+        assert [item.submitted for item in partial_results] == [True, False]
+        assert [receipt.tx_hash for receipt in exc_info.value.partial_receipts] == ["0xapprove"]  # type: ignore[attr-defined]
 
     @pytest.mark.asyncio
     async def test_connection_error_is_recoverable(self, submitter: PublicMempoolSubmitter) -> None:

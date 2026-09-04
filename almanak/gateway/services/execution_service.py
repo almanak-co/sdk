@@ -1356,6 +1356,12 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
                         certify_submission_transactions(
                             action_bundle,
                             known_hashes,
+                            transaction_indices=[
+                                getattr(transaction_result, "transaction_index", None)
+                                for transaction_result in transaction_results
+                                if isinstance(getattr(transaction_result, "tx_hash", None), str)
+                                and transaction_result.tx_hash.strip()
+                            ],
                             atomic_batch=atomic_safe_batch,
                         )
                     ),
@@ -1377,6 +1383,10 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
                     certify_submission_transactions(
                         action_bundle,
                         tx_hashes,
+                        transaction_indices=[
+                            getattr(transaction_result, "transaction_index", None)
+                            for transaction_result in transaction_results
+                        ],
                         atomic_batch=atomic_safe_batch,
                     )
                 ),

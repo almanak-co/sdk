@@ -328,6 +328,94 @@ class TestBridgeFinalizeAggregate:
         assert result.status == IterationStatus.SUCCESS
         assert result.execution_result is None
 
+    @pytest.mark.asyncio
+    async def test_failure_attaches_confirmed_prefix_and_failed_batch(self):
+        runner = _make_runner()
+        runner._save_execution_progress = AsyncMock()  # type: ignore[method-assign]
+        runner._record_failure = MagicMock()  # type: ignore[method-assign]
+
+        intent = SwapIntent(from_token="USDC", to_token="ETH", amount=Decimal("1"))
+        state = _make_state([intent])
+        state.progress = _make_progress()
+        state.failed_step = "step-1"
+        state.error_message = "action submission uncertain"
+        state.current_intent = intent
+        state.rpc_urls = {}
+        state.leg_tx_results = [TransactionResult(tx_hash="0xprefix", success=True, gas_used=10, gas_cost_wei=100)]
+        failed_batch = TransactionExecutionResult(
+            success=False,
+            tx_hash="0xaction",
+            error="action submission uncertain",
+            transaction_results=[
+                TransactionExecutionResult(
+                    success=True,
+                    tx_hash="0xapprove",
+                    gas_used=20,
+                    gas_cost_wei=200,
+                    transaction_index=0,
+                ),
+                TransactionExecutionResult(
+                    success=False,
+                    tx_hash="0xaction",
+                    error="action submission uncertain",
+                    transaction_index=1,
+                ),
+            ],
+        )
+        state.failed_result = MagicMock(success=False, tx_result=failed_batch)
+
+        result = await runner._bridge_wait_finalize(state)
+
+        assert result.status == IterationStatus.EXECUTION_FAILED
+        aggregate = result.execution_result
+        assert isinstance(aggregate, ExecutionResult)
+        assert aggregate.success is False
+        assert [item.tx_hash for item in aggregate.transaction_results] == [
+            "0xprefix",
+            "0xapprove",
+            "0xaction",
+        ]
+        assert aggregate.total_gas_used == 30
+        assert aggregate.total_gas_cost_wei == 300
+
+    @pytest.mark.asyncio
+    async def test_bridge_failure_attaches_successful_source_transaction(self):
+        runner = _make_runner()
+        runner._bridge_wait_cross_chain = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        runner._persist_degraded_bridge_source_leg = AsyncMock()  # type: ignore[method-assign]
+        runner._save_execution_progress = AsyncMock()  # type: ignore[method-assign]
+        runner._record_failure = MagicMock()  # type: ignore[method-assign]
+
+        intent = SwapIntent(from_token="USDC", to_token="USDC", amount=Decimal("1"))
+        state = _make_state([intent])
+        state.progress = _make_progress()
+        state.current_intent = intent
+        state.rpc_urls = {}
+        state.failed_step = "step-1-bridge"
+        state.error_message = "bridge settlement failed"
+        source_result = _success_leg("0xsource")
+
+        should_break = await runner._bridge_wait_settle_cross_chain(
+            state,
+            result=source_result,
+            intent_to_execute=intent,
+            step_num=1,
+            chain="arbitrum",
+            dest_chain="base",
+            token_symbol="USDC",
+            is_cross_chain=True,
+        )
+        result = await runner._bridge_wait_finalize(state)
+
+        assert should_break is True
+        assert state.failed_result is source_result
+        aggregate = result.execution_result
+        assert isinstance(aggregate, ExecutionResult)
+        assert aggregate.success is False
+        assert [item.tx_hash for item in aggregate.transaction_results] == ["0xsource"]
+        assert aggregate.total_gas_used == 7
+        assert aggregate.total_gas_cost_wei == 700
+
 
 # =============================================================================
 # Accounting-pending resume surfacing

@@ -106,6 +106,20 @@ from almanak.core.chains import DEFAULT_CHAIN
 from .events import ExecutionEventType, build_tx_reverted_payload
 
 
+def _canonical_tx_hash(value: Any) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value.strip().lower().removeprefix("0x")
+
+
+def _signed_transaction_index(signed_txs: list[SignedTransaction], tx_hash: Any) -> int | None:
+    identity = _canonical_tx_hash(tx_hash)
+    if identity is None:
+        return None
+    matches = [index for index, signed_tx in enumerate(signed_txs) if _canonical_tx_hash(signed_tx.tx_hash) == identity]
+    return matches[0] if len(matches) == 1 else None
+
+
 class ExecutionPhase(StrEnum):
     """Current phase of execution."""
 
@@ -151,6 +165,7 @@ class TransactionResult:
         gas_cost_wei: Total gas cost in wei
         logs: Event logs from the transaction
         error: Error message if failed
+        transaction_index: Index of this transaction in the compiled bundle
     """
 
     tx_hash: str
@@ -160,6 +175,7 @@ class TransactionResult:
     gas_cost_wei: int = 0
     logs: list[dict[str, Any]] = field(default_factory=list)
     error: str | None = None
+    transaction_index: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -171,6 +187,7 @@ class TransactionResult:
             "gas_cost_wei": str(self.gas_cost_wei),
             "logs": _sanitize_logs(self.logs),
             "error": self.error,
+            "transaction_index": self.transaction_index,
         }
 
 
@@ -2035,11 +2052,19 @@ class ExecutionOrchestrator:
                     # Record partial tx_hashes from already-confirmed TXs
                     # so retry logic can detect them and avoid duplicate swaps.
                     partial = getattr(exc, "partial_results", [])
-                    for i, sub in enumerate(partial):
-                        if sub.submitted and session and i < len(session.transactions):
-                            session.transactions[i].tx_hash = sub.tx_hash
-                            session.transactions[i].status = TransactionStatus.SUBMITTED
-                            session.transactions[i].submitted_at = datetime.now(UTC)
+                    state.submission_results = list(partial)
+                    state.receipts = list(getattr(exc, "partial_receipts", []))
+                    for sub in partial:
+                        transaction_index = _signed_transaction_index(signed_txs, sub.tx_hash)
+                        if (
+                            sub.submitted
+                            and session
+                            and transaction_index is not None
+                            and transaction_index < len(session.transactions)
+                        ):
+                            session.transactions[transaction_index].tx_hash = sub.tx_hash
+                            session.transactions[transaction_index].status = TransactionStatus.SUBMITTED
+                            session.transactions[transaction_index].submitted_at = datetime.now(UTC)
                     if partial:
                         self._checkpoint_session(
                             session,
@@ -2056,12 +2081,42 @@ class ExecutionOrchestrator:
         state.use_sequential = use_sequential
         state.submission_results = submission_results
 
+        submitted_count = 0
+        for submission in submission_results:
+            if not submission.submitted:
+                continue
+            submitted_count += 1
+            self._emit_event(
+                ExecutionEventType.TX_SENT,
+                context,
+                {"tx_hash": submission.tx_hash},
+            )
+            transaction_index = _signed_transaction_index(signed_txs, submission.tx_hash)
+            if session and transaction_index is not None and transaction_index < len(session.transactions):
+                session.transactions[transaction_index].tx_hash = submission.tx_hash
+                session.transactions[transaction_index].status = TransactionStatus.SUBMITTED
+                session.transactions[transaction_index].submitted_at = datetime.now(UTC)
+
+        if submitted_count:
+            self._checkpoint_session(
+                session,
+                SessionPhase.SUBMITTED,
+                transactions=session.transactions if session else None,
+            )
+
         if not use_sequential:
             failed_submissions = [r for r in submission_results if not r.submitted]
             if failed_submissions:
                 first_error = failed_submissions[0].error or "Unknown submission error"
                 result.error = f"Submission failed: {first_error}"
                 result.error_phase = ExecutionPhase.SUBMISSION
+                self._materialize_submission_evidence(
+                    state,
+                    SubmissionError(
+                        reason=first_error,
+                        tx_hash=failed_submissions[0].tx_hash,
+                    ),
+                )
                 self._complete_session(session, success=False, error=result.error)
                 self._emit_event(
                     ExecutionEventType.EXECUTION_FAILED,
@@ -2069,23 +2124,6 @@ class ExecutionOrchestrator:
                     {"error": first_error, "failed_count": len(failed_submissions)},
                 )
                 return result
-
-        for i, submission in enumerate(submission_results):
-            self._emit_event(
-                ExecutionEventType.TX_SENT,
-                context,
-                {"tx_hash": submission.tx_hash},
-            )
-            if session and i < len(session.transactions):
-                session.transactions[i].tx_hash = submission.tx_hash
-                session.transactions[i].status = TransactionStatus.SUBMITTED
-                session.transactions[i].submitted_at = datetime.now(UTC)
-
-        self._checkpoint_session(
-            session,
-            SessionPhase.SUBMITTED,
-            transactions=session.transactions if session else None,
-        )
 
         result.phase = ExecutionPhase.CONFIRMATION
 
@@ -2124,6 +2162,7 @@ class ExecutionOrchestrator:
                 logs=receipt.logs,
                 # Submitters expose revert details under either attribute name.
                 error=getattr(receipt, "error", None) or getattr(receipt, "raw_error", None),
+                transaction_index=_signed_transaction_index(state.signed_txs or [], receipt.tx_hash),
             )
 
             result.transaction_results.append(tx_result)
@@ -2264,6 +2303,72 @@ class ExecutionOrchestrator:
         self._complete_session(state.session, success=False, error=state.result.error)
         return report
 
+    @staticmethod
+    def _materialize_submission_evidence(
+        state: ExecutionPipelineState,
+        exc: Exception,
+    ) -> None:
+        """Build ordered results only from hash-bound receipt evidence."""
+        result = state.result
+        available_receipts = list(state.receipts or [])
+        exception_receipt = getattr(exc, "receipt", None)
+        if exception_receipt is not None:
+            available_receipts.append(exception_receipt)
+
+        for submission in state.submission_results or []:
+            submission_identity = _canonical_tx_hash(submission.tx_hash)
+            if submission_identity is None:
+                continue
+            if any(
+                _canonical_tx_hash(transaction_result.tx_hash) == submission_identity
+                for transaction_result in result.transaction_results
+            ):
+                continue
+            matching_receipts = [
+                receipt
+                for receipt in available_receipts
+                if _canonical_tx_hash(getattr(receipt, "tx_hash", None)) == submission_identity
+            ]
+            is_reverted = (
+                isinstance(exc, TransactionRevertedError) and _canonical_tx_hash(exc.tx_hash) == submission_identity
+            )
+            exception_receipt_matches = (
+                is_reverted and _canonical_tx_hash(getattr(exception_receipt, "tx_hash", None)) == submission_identity
+            )
+            receipt = (
+                exception_receipt
+                if exception_receipt_matches
+                else (matching_receipts[0] if submission.submitted and len(matching_receipts) == 1 else None)
+            )
+            transaction_index = (
+                _signed_transaction_index(state.signed_txs or [], submission.tx_hash)
+                if submission.submitted or receipt is not None
+                else None
+            )
+            if isinstance(exc, TransactionRevertedError):
+                exception_error = exc.revert_reason or str(exc)
+            else:
+                exception_error = str(exc)
+            result.transaction_results.append(
+                TransactionResult(
+                    tx_hash=submission.tx_hash,
+                    success=bool(receipt and receipt.success),
+                    receipt=receipt,
+                    gas_used=receipt.gas_used if receipt else 0,
+                    gas_cost_wei=receipt.gas_cost_wei if receipt else 0,
+                    logs=receipt.logs if receipt else [],
+                    error=(
+                        exception_error
+                        if is_reverted
+                        else (None if receipt else getattr(submission, "error", None) or str(exc))
+                    ),
+                    transaction_index=transaction_index,
+                )
+            )
+            if receipt is not None:
+                result.total_gas_used += receipt.gas_used
+                result.total_gas_cost_wei += receipt.gas_cost_wei
+
     def _handle_execution_exception(
         self,
         state: ExecutionPipelineState,
@@ -2278,6 +2383,9 @@ class ExecutionOrchestrator:
         result = state.result
         session = state.session
         action_bundle = state.action_bundle
+
+        if state.submission_results:
+            self._materialize_submission_evidence(state, exc)
 
         if isinstance(exc, NonceError):
             result.error = str(exc)
@@ -2315,17 +2423,27 @@ class ExecutionOrchestrator:
         if isinstance(exc, TransactionRevertedError):
             # Reverted transactions still burn gas; retain their hashes for
             # ledger and audit records even on the exception path.
-            if exc.tx_hash and not any(tr.tx_hash == exc.tx_hash for tr in result.transaction_results):
+            transaction_index = _signed_transaction_index(state.signed_txs or [], exc.tx_hash)
+            exception_identity = _canonical_tx_hash(exc.tx_hash)
+            if exception_identity and not any(
+                _canonical_tx_hash(tr.tx_hash) == exception_identity for tr in result.transaction_results
+            ):
                 result.transaction_results.append(
                     TransactionResult(
                         tx_hash=exc.tx_hash,
                         success=False,
+                        receipt=exc.receipt,
                         gas_used=exc.gas_used or 0,
+                        gas_cost_wei=exc.receipt.gas_cost_wei if exc.receipt else 0,
+                        logs=exc.receipt.logs if exc.receipt else [],
                         error=exc.revert_reason or str(exc),
+                        transaction_index=transaction_index,
                     )
                 )
                 if exc.gas_used:
                     result.total_gas_used += exc.gas_used
+                if exc.receipt:
+                    result.total_gas_cost_wei += exc.receipt.gas_cost_wei
 
             verbose_report = self._build_and_record_revert_report(
                 state,
@@ -2359,13 +2477,14 @@ class ExecutionOrchestrator:
 
             # Preserve submitted hashes so retries cannot duplicate transactions.
             if not result.transaction_results and session and session.transactions:
-                for tx_state in session.transactions:
+                for index, tx_state in enumerate(session.transactions):
                     if tx_state.tx_hash:
                         result.transaction_results.append(
                             TransactionResult(
                                 tx_hash=tx_state.tx_hash,
                                 success=False,
                                 error="timeout_waiting_for_receipt",
+                                transaction_index=index,
                             )
                         )
 

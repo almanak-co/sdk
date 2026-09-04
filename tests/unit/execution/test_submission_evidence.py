@@ -23,18 +23,71 @@ def _bundle(approval_data: str = "0x095ea7b3" + "00" * 64) -> dict:
 
 
 def test_certification_requires_canonical_approval_calldata_and_zero_value() -> None:
-    evidence = certify_submission_transactions(_bundle(), ["0xaaa", "0xbbb"])
+    evidence = certify_submission_transactions(_bundle(), ["0xaaa", "0xbbb"], transaction_indices=[0, 1])
 
     assert evidence == [
         SubmissionTransactionEvidence("0xaaa", TransactionRole.SETUP_APPROVAL, ReplayPolicy.RECOMPILE_ONLY),
         SubmissionTransactionEvidence("0xbbb", TransactionRole.ACTION, ReplayPolicy.NEVER),
     ]
 
-    wrong_selector = certify_submission_transactions(_bundle("0xdeadbeef"), ["0xaaa", "0xbbb"])
+    wrong_selector = certify_submission_transactions(
+        _bundle("0xdeadbeef"), ["0xaaa", "0xbbb"], transaction_indices=[0, 1]
+    )
     assert wrong_selector[0].role is TransactionRole.ACTION
     native_value_bundle = _bundle()
     native_value_bundle["transactions"][0]["value"] = "0x1"
-    assert certify_submission_transactions(native_value_bundle, ["0xaaa"])[0].role is TransactionRole.ACTION
+    assert (
+        certify_submission_transactions(native_value_bundle, ["0xaaa"], transaction_indices=[0])[0].role
+        is TransactionRole.ACTION
+    )
+
+
+def test_partial_evidence_requires_explicit_non_positional_alignment() -> None:
+    unbound = certify_submission_transactions(_bundle(), ["0xaction"])
+    bound = certify_submission_transactions(_bundle(), ["0xaction"], transaction_indices=[1])
+
+    assert unbound == [SubmissionTransactionEvidence("0xaction", TransactionRole.UNKNOWN, ReplayPolicy.NEVER)]
+    assert bound == [SubmissionTransactionEvidence("0xaction", TransactionRole.ACTION, ReplayPolicy.NEVER)]
+
+
+def test_partial_approval_evidence_cannot_authorize_recompile_of_an_unaccounted_action() -> None:
+    evidence = certify_submission_transactions(_bundle(), ["0xapprove"], transaction_indices=[0])
+
+    assert evidence == [SubmissionTransactionEvidence("0xapprove", TransactionRole.UNKNOWN, ReplayPolicy.NEVER)]
+
+
+def test_duplicate_or_out_of_range_indices_fail_closed() -> None:
+    duplicate = certify_submission_transactions(
+        _bundle(),
+        ["0xfirst", "0xsecond"],
+        transaction_indices=[0, 0],
+    )
+    out_of_range = certify_submission_transactions(_bundle(), ["0xunknown"], transaction_indices=[2])
+
+    assert all(item.role is TransactionRole.UNKNOWN for item in duplicate)
+    assert out_of_range == [SubmissionTransactionEvidence("0xunknown", TransactionRole.UNKNOWN, ReplayPolicy.NEVER)]
+
+
+def test_duplicate_transaction_id_with_distinct_indices_fails_closed() -> None:
+    evidence = certify_submission_transactions(
+        _bundle(),
+        ["0xduplicate", "0xDUPLICATE"],
+        transaction_indices=[0, 1],
+    )
+
+    assert all(item.role is TransactionRole.UNKNOWN for item in evidence)
+    assert all(item.replay_policy is ReplayPolicy.NEVER for item in evidence)
+
+
+def test_duplicate_transaction_id_uses_canonical_evm_identity() -> None:
+    evidence = certify_submission_transactions(
+        _bundle(),
+        ["0xAbC", "abc"],
+        transaction_indices=[0, 1],
+    )
+
+    assert all(item.role is TransactionRole.UNKNOWN for item in evidence)
+    assert all(item.replay_policy is ReplayPolicy.NEVER for item in evidence)
 
 
 def test_atomic_safe_batch_is_action_if_any_logical_member_is_action() -> None:
@@ -55,6 +108,15 @@ def test_atomic_safe_batch_is_setup_only_when_every_member_is_idempotent_setup()
     assert evidence == [
         SubmissionTransactionEvidence("0xsafe", TransactionRole.SETUP_APPROVAL, ReplayPolicy.RECOMPILE_ONLY)
     ]
+
+
+def test_atomic_safe_batch_rejects_prefix_only_transaction_id() -> None:
+    bundle = _bundle()
+    bundle["transactions"] = [bundle["transactions"][0]]
+
+    evidence = certify_submission_transactions(bundle, ["0x"], atomic_batch=True)
+
+    assert evidence == [SubmissionTransactionEvidence("0x", TransactionRole.UNKNOWN, ReplayPolicy.NEVER)]
 
 
 def test_plan_hash_binds_order_and_exact_transaction_bytes() -> None:
