@@ -49,10 +49,6 @@ from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2
 from almanak.gateway.services.dashboard_service import DashboardServiceServicer
 
-# ---------------------------------------------------------------------------
-# Deterministic seed parameters (no wall-clock anywhere)
-# ---------------------------------------------------------------------------
-
 _BASE = datetime(2026, 1, 1, tzinfo=UTC)
 """Fixed inception timestamp. Day 0 == _BASE; day N == _BASE + N days."""
 
@@ -61,17 +57,13 @@ _DEPLOYMENT_ID = "deployment:vib5059p2test"
 _CADENCE = timedelta(minutes=5)
 _PER_DAY = 288  # 24h / 5min
 _DAYS = 60
-_TOTAL_SNAPSHOTS = _DAYS * _PER_DAY  # 17280
+_TOTAL_SNAPSHOTS = _DAYS * _PER_DAY
 
-# A flat baseline NAV with one deep drawdown spike planted at a known index.
+# The interior spike is a bucket minimum and must survive decimation.
 _FLAT_VALUE = Decimal("1000.00")
-_SPIKE_INDEX = 8000  # somewhere in the interior, NOT an endpoint
-_SPIKE_VALUE = Decimal("12.34")  # far below neighbours -> a per-bucket min
-# A flat-control index in an interior bucket that decimation provably thins away
-# (it is neither an anchor nor its bucket's min/max) — used to prove the series
-# was thinned, not returned whole. Empirically absent from the decimated output
-# for the (17280-row, 1500-budget) shape; the test re-derives it deterministically
-# from the decimation policy so the proof never relies on a magic constant.
+_SPIKE_INDEX = 8000
+_SPIKE_VALUE = Decimal("12.34")
+# The flat control is neither an anchor nor a bucket extremum, so it must be thinned.
 _FLAT_CONTROL_INDEX = 200
 
 
@@ -108,11 +100,6 @@ def _snap_value(index: int) -> Decimal:
 
 def _day_start(day: int) -> datetime:
     return _BASE + timedelta(days=day)
-
-
-# ---------------------------------------------------------------------------
-# Store / StateManager / servicer construction helpers
-# ---------------------------------------------------------------------------
 
 
 async def _make_store(db_path: str) -> SQLiteStore:
@@ -190,17 +177,11 @@ def _latest_snapshot() -> PortfolioSnapshot:
     )
 
 
-# ---------------------------------------------------------------------------
-# Session-scoped heavy 60-day seed (built once, reused read-only)
-# ---------------------------------------------------------------------------
-
-
 @pytest_asyncio.fixture(scope="session")
 async def big_store(tmp_path_factory) -> SQLiteStore:
     """17 280 snapshots (60d @ 5min) with one planted drawdown spike, built once."""
     db_path = str(tmp_path_factory.mktemp("vib5059p2_big") / "big.db")
     store = await _make_store(db_path)
-    # Seed in one transaction-batched loop via the production writer.
     for i in range(_TOTAL_SNAPSHOTS):
         await _seed_snapshot(store, i, _snap_value(i))
     return store
@@ -209,11 +190,6 @@ async def big_store(tmp_path_factory) -> SQLiteStore:
 @pytest_asyncio.fixture(scope="session")
 async def big_sm(big_store: SQLiteStore) -> StateManager:
     return _make_state_manager(big_store)
-
-
-# ---------------------------------------------------------------------------
-# D1.S1 — Windowed NAV fetch: bounds, budget, ordering, anchors
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -226,23 +202,21 @@ async def test_nav_window_bounds_and_budget(big_sm: StateManager) -> None:
     assert not truncated
     assert rows, "7-day window must contain snapshots"
 
-    # Build NavPoints exactly as the gateway builder does, then decimate.
     points = [NavPoint(ts, Decimal(v)) for ts, v, _cash, _c, _pj in rows if v]
     out = decimate_nav(points, clamp_max_points(max_points))
 
-    # Every returned point lies inside the requested window.
+    # Snapshot windows include both boundaries.
     for p in out:
         assert from_dt <= p.timestamp <= to_dt
 
-    # Budget respected.
     assert len(out) <= max_points
 
-    # Strictly ascending, no duplicate timestamps.
+    # Windowed output is oldest-first with unique timestamps.
     times = [p.timestamp for p in out]
     assert times == sorted(times)
     assert len(set(times)) == len(times)
 
-    # Endpoints are anchors — the window's earliest + latest raw rows verbatim.
+    # Earliest and latest in-window rows are retained as lossless anchors.
     first_raw_ts, first_raw_val, _, _, _ = rows[0]
     last_raw_ts, last_raw_val, _, _, _ = rows[-1]
     assert out[0].timestamp == first_raw_ts
@@ -251,11 +225,6 @@ async def test_nav_window_bounds_and_budget(big_sm: StateManager) -> None:
     assert str(out[-1].value) == str(Decimal(last_raw_val))
 
     _marker(f"NAV_WINDOW_OK points={len(out)} window=[{from_dt.isoformat()},{to_dt.isoformat()}]")
-
-
-# ---------------------------------------------------------------------------
-# D1.S2 — Decimation preserves a planted spike (POINTWISE)
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -267,14 +236,13 @@ async def test_nav_decimation_preserves_spike(big_sm: StateManager) -> None:
     points = [NavPoint(ts, Decimal(v)) for ts, v, _cash, _c, _pj in rows if v]
     out = decimate_nav(points, clamp_max_points(DEFAULT_MAX_POINTS))
 
-    # Decimation actually occurred.
     assert len(out) <= DEFAULT_MAX_POINTS
     assert len(out) < _TOTAL_SNAPSHOTS
 
     spike_ts = _snap_ts(_SPIKE_INDEX)
     out_by_ts = {p.timestamp: p.value for p in out}
 
-    # The spike survives POINTWISE: exact ts AND exact value string.
+    # Bucket extrema survive pointwise, including timestamp and value.
     if spike_ts not in out_by_ts or str(out_by_ts[spike_ts]) != str(_SPIKE_VALUE):
         _marker("SPIKE_LOST")
         raise AssertionError(
@@ -282,8 +250,7 @@ async def test_nav_decimation_preserves_spike(big_sm: StateManager) -> None:
             f"present={spike_ts in out_by_ts} value={out_by_ts.get(spike_ts)!r} expected={_SPIKE_VALUE!r}"
         )
 
-    # The spike's bucket also yields its bucket-local maximum (both V shoulders).
-    # Locate the bucket boundaries used by decimate_nav for this n/budget.
+    # Retaining both extrema preserves the spike bucket's V shape.
     n = len(points)
     budget = clamp_max_points(DEFAULT_MAX_POINTS)
     num_buckets = (budget - 2) // 3
@@ -294,10 +261,7 @@ async def test_nav_decimation_preserves_spike(big_sm: StateManager) -> None:
     bucket_max_ts = points[bucket_max_idx].timestamp
     assert bucket_max_ts in out_by_ts, "bucket-local max must be retained alongside the spike"
 
-    # A flat-control snapshot was thinned away — proving the series is not whole.
-    # _FLAT_CONTROL_INDEX is a deterministically-absent interior point for this
-    # (n, budget) shape; re-derive the absent set so the proof is self-checking and
-    # not a brittle magic constant.
+    # Re-derive absent interior points so the thinning proof is not a magic constant.
     flat_ts = _snap_ts(_FLAT_CONTROL_INDEX)
     absent_interior = [i for i in range(_PER_DAY, _SPIKE_INDEX) if _snap_ts(i) not in out_by_ts]
     assert absent_interior, "decimation must thin away some interior snapshot"
@@ -309,17 +273,12 @@ async def test_nav_decimation_preserves_spike(big_sm: StateManager) -> None:
     _marker(f"SPIKE_PRESERVED spike_ts={spike_ts.isoformat()} value={_SPIKE_VALUE} out_points={len(out)}")
 
 
-# ---------------------------------------------------------------------------
-# D1.S3 — No-arg default equals a pinned golden baseline (back compat)
-# ---------------------------------------------------------------------------
-
-
 @pytest_asyncio.fixture()
 async def golden_store(tmp_path) -> SQLiteStore:
     """200 snapshots at known timestamps with distinct values (oldest->newest)."""
     store = await _make_store(str(tmp_path / "golden.db"))
-    for i in range(1, 201):  # T[1]..T[200]
-        await _seed_snapshot(store, i, Decimal("500") + Decimal(i))  # distinct
+    for i in range(1, 201):
+        await _seed_snapshot(store, i, Decimal("500") + Decimal(i))
     return store
 
 
@@ -336,7 +295,7 @@ async def test_default_path_golden_baseline(golden_store: SQLiteStore) -> None:
     svc = _make_servicer_with_sm(sm, latest)
 
     async with _discovery_patched():
-        # No window fields -> legacy recent-window path (max_points unset == 0).
+        # Unset window fields retain the recent-history path, with max_points equal to zero.
         request = gateway_pb2.GetStrategyDetailsRequest(
             deployment_id=_DEPLOYMENT_ID, include_pnl_history=True, include_timeline=False
         )
@@ -345,16 +304,13 @@ async def test_default_path_golden_baseline(golden_store: SQLiteStore) -> None:
 
     ctx.set_code.assert_not_called()
     pnl = list(resp.pnl_history)
-    # Exactly 168 (the get_recent_snapshots default), oldest-first.
+    # The compatibility path returns the latest 168 samples oldest-first.
     assert len(pnl) == 168, f"expected 168 default points, got {len(pnl)}"
 
-    # First == T[33] (200-168+1), last == T[200].
     assert pnl[0].timestamp == int(_snap_ts(33).timestamp())
     assert pnl[-1].timestamp == int(_snap_ts(200).timestamp())
-    # Boundary values equal seeded values exactly.
     assert pnl[0].value_usd == str(Decimal("500") + Decimal(33))
     assert pnl[-1].value_usd == str(Decimal("500") + Decimal(200))
-    # T[1]..T[32] absent.
     emitted_ts = {p.timestamp for p in pnl}
     for i in range(1, 33):
         assert int(_snap_ts(i).timestamp()) not in emitted_ts
@@ -362,22 +318,16 @@ async def test_default_path_golden_baseline(golden_store: SQLiteStore) -> None:
     _marker(f"DEFAULT_GOLDEN_OK len={len(pnl)} first_ts={pnl[0].timestamp} last_ts={pnl[-1].timestamp}")
 
 
-# ---------------------------------------------------------------------------
-# D1.S4 — Trade markers fetched for the same window as the chart
-# ---------------------------------------------------------------------------
-
-
 @pytest_asyncio.fixture()
 async def markers_store(tmp_path) -> SQLiteStore:
     """Ledger with trades strictly interior to days {5, 12, 14, 30}."""
     store = await _make_store(str(tmp_path / "markers.db"))
-    # Strictly-interior timestamps so the EXCLUSIVE lower bound on `since`
-    # (timestamp > since) does not matter at the boundary.
-    trade_days = {5: 1, 12: 1, 14: 2, 30: 1}  # day -> count
+    # Interior timestamps keep this fixture independent of the store's exclusive `since` bound.
+    trade_days = {5: 1, 12: 1, 14: 2, 30: 1}
     seq = 0
     for day, count in trade_days.items():
         for k in range(count):
-            ts = _day_start(day) + timedelta(hours=6 + k)  # interior of the day
+            ts = _day_start(day) + timedelta(hours=6 + k)
             seq += 1
             entry = LedgerEntry(
                 id=f"tx-{seq}",
@@ -413,18 +363,13 @@ async def test_trade_markers_windowed(markers_store: SQLiteStore) -> None:
     resp = await svc.GetTradeTape(request, ctx)
 
     ctx.set_code.assert_not_called()
-    # In-window seeded trades: day12 (1) + day14 (2) = 3. day5 and day30 excluded.
     in_window = 3
     assert len(resp.rows) == in_window, f"expected {in_window} in-window markers, got {len(resp.rows)}"
+    # Trade pagination includes from_ts and excludes before_timestamp.
     for row in resp.rows:
         assert from_ts <= row.timestamp < before_ts
 
     _marker(f"MARKERS_WINDOWED_OK count={len(resp.rows)} window=[{from_ts},{before_ts})")
-
-
-# ---------------------------------------------------------------------------
-# D1.S5 — OHLCV granularity ladder picks a bounded candle count
-# ---------------------------------------------------------------------------
 
 
 def test_granularity_ladder() -> None:
@@ -442,10 +387,8 @@ def test_granularity_ladder() -> None:
         assert range_seconds / secs <= candle_budget, (
             f"{label}: tf={tf} would request {range_seconds / secs:.0f} candles > {candle_budget}"
         )
-    # A 1-year window must NOT pick a 5-minute granularity.
     assert granularity_for_range(365 * 86400, candle_budget) == "1d"
 
-    # Delegation preserved the legacy ohlcv count table byte-for-byte.
     from almanak.framework.dashboard.templates._ohlcv_window import ohlcv_limit_for_timeframe
 
     legacy = {"1m": 720, "5m": 720, "15m": 720, "1h": 168, "4h": 180, "1d": 120}
@@ -455,15 +398,9 @@ def test_granularity_ladder() -> None:
     _marker("LADDER_OK " + ",".join(f"{k}->{granularity_for_range(v, candle_budget)}" for k, v in ranges.items()))
 
 
-# ---------------------------------------------------------------------------
-# D2.M3 — Window-size sweep (minutes -> full lifetime)
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_window_size_sweep(big_sm: StateManager) -> None:
     max_points = 1500
-    # (label, from_dt, to_dt)
     full_from = None
     windows = [
         ("15m", _day_start(20), _day_start(20) + timedelta(minutes=15)),
@@ -495,17 +432,11 @@ async def test_window_size_sweep(big_sm: StateManager) -> None:
         assert len(set(times)) == len(times)
 
         if label == "15m":
-            # Raw rows <= budget -> returned un-decimated (count == raw in-window).
             assert len(out) == raw_in_window, "small window must return raw rows un-decimated"
         if label == "full":
             assert len(out) < raw_in_window, "full lifetime must exercise decimation"
 
     _marker("SWEEP_OK windows=" + ",".join(w[0] for w in windows))
-
-
-# ---------------------------------------------------------------------------
-# D2.M2 — Postgres backend: SQL shape + row conversion + cross-backend parity
-# ---------------------------------------------------------------------------
 
 
 class _FakeConn:
@@ -540,7 +471,6 @@ def _make_pg_store(conn: _FakeConn):
 
 @pytest.mark.asyncio
 async def test_postgres_window_sql_shape_and_parity(big_sm: StateManager) -> None:
-    # --- (a) SQL shape: lower+upper bound, projection, ORDER BY + tiebreak, LIMIT.
     conn = _FakeConn(fetch_rows=[])
     store = _make_pg_store(conn)
     from_dt = _day_start(10)
@@ -550,32 +480,30 @@ async def test_postgres_window_sql_shape_and_parity(big_sm: StateManager) -> Non
     kind, sql, args = conn.calls[0]
     assert kind == "fetch"
     assert "FROM portfolio_snapshots" in sql
-    assert "timestamp >=" in sql  # lower bound
-    assert "timestamp <=" in sql  # upper bound
-    assert "total_value_usd::text" in sql  # cast for Empty!=Zero ownership
-    assert "available_cash_usd::text" in sql  # VIB-5942: wallet-NAV (total-debt+cash)
+    # PostgreSQL applies both inclusive window bounds.
+    assert "timestamp >=" in sql
+    assert "timestamp <=" in sql
+    # Text projection preserves unmeasured empty values without zero coercion.
+    assert "total_value_usd::text" in sql
+    assert "available_cash_usd::text" in sql
     assert "value_confidence" in sql
-    # VIB-5170: positions_json::text projected for per-row debt netting; other JSON
-    # blobs still excluded (transfer-size discipline).
+    # Positions support row-level debt netting; unrelated JSON stays out of the transfer.
     assert "positions_json::text" in sql
     assert "token_prices_json" not in sql
     assert "wallet_balances_json" not in sql
-    # Deterministic ordering with an id tiebreak; LIMIT/scan-cap present.
+    # The ID tiebreak and LIMIT make newest-first pagination deterministic and bounded.
     assert "ORDER BY timestamp DESC, id DESC" in sql
     assert "LIMIT $" in sql
-    # deployment_id + from + to + (scan_cap+1) limit.
+    # Bound arguments precede the scan_cap-plus-one limit.
     assert args[0] == _DEPLOYMENT_ID
     assert args[1] == from_dt
     assert args[2] == to_dt
     _marker("PG_SQL_SHAPE_OK")
 
-    # --- (b) cross-backend parity at the logic boundary the live DB would share.
-    # Take the SAME logical series the SQLite path returns for a window and feed
-    # it through the PG row->type conversion + decimate_nav. Output must match.
+    # Feed SQLite's logical window through PostgreSQL's row conversion; both
+    # backends must produce the same oldest-first decimated series.
     sqlite_rows, _ = await big_sm.get_snapshots_in_window(_DEPLOYMENT_ID, from_dt, to_dt)
 
-    # The PG method reverses a DESC fetch to oldest-first; emulate the DB by
-    # handing the fake conn the same rows newest-first.
     pg_db_rows = [
         {
             "timestamp": ts,
@@ -599,7 +527,7 @@ async def test_postgres_window_sql_shape_and_parity(big_sm: StateManager) -> Non
     assert [(p.timestamp, str(p.value)) for p in pg_out] == [(p.timestamp, str(p.value)) for p in sqlite_out]
     _marker(f"PG_PARITY_OK points={len(pg_out)}")
 
-    # --- (c) Empty!=Zero: a PG row with total_value_usd text "" is unmeasured.
+    # Empty text is unmeasured; a measured "0" remains a valid value.
     empty_rows = [
         {
             "timestamp": _snap_ts(1),
@@ -614,7 +542,7 @@ async def test_postgres_window_sql_shape_and_parity(big_sm: StateManager) -> Non
             "available_cash_text": "0",
             "value_confidence": "HIGH",
             "positions_text": "[]",
-        },  # unmeasured
+        },
         {
             "timestamp": _snap_ts(3),
             "total_value_text": "1001.00",
@@ -623,19 +551,14 @@ async def test_postgres_window_sql_shape_and_parity(big_sm: StateManager) -> Non
             "positions_text": "[]",
         },
     ]
-    conn3 = _FakeConn(fetch_rows=list(reversed(empty_rows)))  # DB hands DESC
+    conn3 = _FakeConn(fetch_rows=list(reversed(empty_rows)))
     store3 = _make_pg_store(conn3)
     rows3, _ = await store3.get_snapshots_in_window(_DEPLOYMENT_ID, None, None)
-    pts = _to_points(rows3)  # builder drops "" -> never Decimal("0")
+    pts = _to_points(rows3)
     assert len(pts) == 2, "the empty-text row must be excluded, not parsed to 0"
     assert all(p.value != Decimal("0") for p in pts)
     assert Decimal("0") not in [p.value for p in pts]
     _marker("PG_EMPTY_NOT_ZERO_OK")
-
-
-# ---------------------------------------------------------------------------
-# D3.F1 — Backend read raises during windowed fetch (loud, not swallowed)
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -647,7 +570,6 @@ async def test_store_error_propagates(golden_store: SQLiteStore, caplog) -> None
     pre_snaps = await _table_count(golden_store, "portfolio_snapshots")
     pre_ledger = await _table_count(golden_store, "transaction_ledger")
 
-    # Inject: the WARM backend's windowed read raises.
     async def _boom(*a, **k):
         raise RuntimeError("simulated backend failure")
 
@@ -667,25 +589,17 @@ async def test_store_error_propagates(golden_store: SQLiteStore, caplog) -> None
     with caplog.at_level(logging.ERROR):
         resp = await svc.GetStrategyDetails(request, ctx)
 
-    # Non-OK status set; NOT an OK response with empty history.
     codes = [c.args[0] for c in ctx.set_code.call_args_list]
     if grpc.StatusCode.UNAVAILABLE not in codes:
         _marker("STORE_ERROR_SWALLOWED")
         raise AssertionError(f"windowed backend error not surfaced as non-OK status; codes={codes}")
-    assert len(resp.pnl_history) == 0  # empty StrategyDetails returned WITH the error code
-    # ERROR-level log naming the failure.
+    assert len(resp.pnl_history) == 0
     assert any(r.levelno >= logging.ERROR for r in caplog.records), "an ERROR log must name the failure"
 
-    # Read path performed zero writes.
     assert await _table_count(golden_store, "portfolio_snapshots") == pre_snaps
     assert await _table_count(golden_store, "transaction_ledger") == pre_ledger
 
     _marker(f"STORE_ERROR_LOUD code={grpc.StatusCode.UNAVAILABLE.name}")
-
-
-# ---------------------------------------------------------------------------
-# D3.F2 — Inverted window (both bounds, from >= to) -> INVALID_ARGUMENT
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -697,7 +611,6 @@ async def test_inverted_window_rejected(golden_store: SQLiteStore) -> None:
     pre_snaps = await _table_count(golden_store, "portfolio_snapshots")
     pre_ledger = await _table_count(golden_store, "transaction_ledger")
 
-    # Inverted: from = day 30, to = day 10, both non-zero, from > to.
     request = gateway_pb2.GetStrategyDetailsRequest(
         deployment_id=_DEPLOYMENT_ID,
         include_pnl_history=True,
@@ -713,23 +626,16 @@ async def test_inverted_window_rejected(golden_store: SQLiteStore) -> None:
     assert grpc.StatusCode.INVALID_ARGUMENT in codes, f"inverted window must be INVALID_ARGUMENT; codes={codes}"
     assert len(resp.pnl_history) == 0
 
-    # An OPEN bound (from set, to=0) is valid and NOT rejected — the pure
-    # validator pins that the two are never conflated.
-    validate_window(int(_day_start(10).timestamp()), 0)  # from-only open bound: no raise
-    validate_window(0, int(_day_start(10).timestamp()))  # to-only open bound: no raise
+    # One-sided windows are valid; only two reversed bounds are rejected.
+    validate_window(int(_day_start(10).timestamp()), 0)
+    validate_window(0, int(_day_start(10).timestamp()))
     with pytest.raises(ValueError):
         validate_window(int(_day_start(30).timestamp()), int(_day_start(10).timestamp()))
 
-    # Zero writes.
     assert await _table_count(golden_store, "portfolio_snapshots") == pre_snaps
     assert await _table_count(golden_store, "transaction_ledger") == pre_ledger
 
     _marker("INVERTED_REJECTED")
-
-
-# ---------------------------------------------------------------------------
-# D3.F3 — max_points is bounded: oversized clamps, never unbounded
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -737,7 +643,6 @@ async def test_max_points_bounded(big_sm: StateManager) -> None:
     rows, _ = await big_sm.get_snapshots_in_window(_DEPLOYMENT_ID, None, None)
     points = [NavPoint(ts, Decimal(v)) for ts, v, _cash, _c, _pj in rows if v]
 
-    # max_points = 10_000_000 -> clamped to CEILING.
     huge = clamp_max_points(10_000_000)
     assert huge == MAX_POINTS_CEILING
     out_huge = decimate_nav(points, huge)
@@ -745,52 +650,40 @@ async def test_max_points_bounded(big_sm: StateManager) -> None:
         _marker("BUDGET_UNBOUNDED")
         raise AssertionError(f"oversized budget not bounded: {len(out_huge)} > {MAX_POINTS_CEILING}")
 
-    # max_points = 1 -> clamped up to the documented floor (2 anchors).
     assert clamp_max_points(1) == MAX_POINTS_FLOOR
     out_floor = decimate_nav(points, 1)
     assert len(out_floor) == MAX_POINTS_FLOOR, "tiny budget honored at the floor, not ignored"
     for p in out_floor:
-        # In-window (full lifetime here) — endpoints are the global anchors.
         assert rows[0][0] <= p.timestamp <= rows[-1][0]
     assert out_floor[0].timestamp == rows[0][0]
     assert out_floor[-1].timestamp == rows[-1][0]
 
-    # max_points = 0 -> default recent-window mode, NOT windowed-with-zero-budget.
-    # The mode trigger lives at the request layer (max_points > 0). Pin the
-    # contract: 0 means legacy default (the D1.S3 golden), 5000 is the ceiling.
+    # Zero selects recent history; positive values select bounded windowing.
     assert MAX_POINTS_CEILING == 5000
     assert DEFAULT_MAX_POINTS == 1500
 
     _marker(f"MAX_POINTS_BOUNDED_OK ceiling={MAX_POINTS_CEILING} floor={MAX_POINTS_FLOOR} huge_out={len(out_huge)}")
 
 
-# ---------------------------------------------------------------------------
-# D3.F4 — Row-cap truncation is surfaced, never silent
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_rowcap_truncation_flagged(big_store: SQLiteStore, caplog) -> None:
-    # Set the scan-cap below the full in-window row count and request the full window.
     cap = 1000
     rows, truncated = await big_store.get_snapshots_in_window(_DEPLOYMENT_ID, None, None, scan_cap=cap)
 
     if not truncated:
         _marker("TRUNCATION_SILENT")
         raise AssertionError(f"scan_cap={cap} below {_TOTAL_SNAPSHOTS} rows must flag truncated=True")
+    # Truncation returns the newest scan_cap rows.
     assert len(rows) == cap, "the newest scan_cap rows are returned on truncation"
 
-    # The gateway builder logs a WARNING containing 'truncat' AND increments the metric.
     from almanak.gateway.metrics import DASHBOARD_NAV_HISTORY_TRUNCATED
 
-    # Metric carries a deployment_id label (1 series per gateway instance).
     metric = DASHBOARD_NAV_HISTORY_TRUNCATED.labels(deployment_id=_DEPLOYMENT_ID)
     before_metric = metric._value.get()
 
     svc = DashboardServiceServicer(GatewaySettings())
     svc._state_manager = _make_state_manager(big_store)
-    # Force the facade read to hit the cap by monkeypatching the warm read to
-    # pass the low scan_cap (the builder calls it without scan_cap, so wrap it).
+    # Wrap the warm backend to exercise facade truncation with a cheap scan cap.
     real = big_store.get_snapshots_in_window
 
     async def _capped(deployment_id, from_ts, to_ts, *, scan_cap=cap):
@@ -807,7 +700,6 @@ async def test_rowcap_truncation_flagged(big_store: SQLiteStore, caplog) -> None
     assert after_metric == before_metric + 1, "truncation metric must increment"
     assert any("truncat" in r.getMessage().lower() for r in caplog.records), "operator-visible WARNING required"
 
-    # Returned series is still a valid decimation: <= budget, ascending.
     assert 0 < len(out) <= 1500
     out_ts = [p.timestamp for p in out]
     assert out_ts == sorted(out_ts)
@@ -815,14 +707,8 @@ async def test_rowcap_truncation_flagged(big_store: SQLiteStore, caplog) -> None
     _marker(f"TRUNCATION_FLAGGED cap={cap} returned={len(rows)} metric_delta=1")
 
 
-# ---------------------------------------------------------------------------
-# D3.F5 — Non-empty window must never return empty output
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_nonempty_window_never_empty(tmp_path) -> None:
-    # 1- and 2-row cases: returned verbatim un-decimated.
     store1 = await _make_store(str(tmp_path / "one.db"))
     await _seed_snapshot(store1, 0, Decimal("100"))
     sm1 = _make_state_manager(store1)
@@ -838,8 +724,7 @@ async def test_nonempty_window_never_empty(tmp_path) -> None:
     out2 = decimate_nav([NavPoint(ts, Decimal(v)) for ts, v, _cash, _c, _pj in rows2 if v], clamp_max_points(1500))
     assert len(out2) == 2, "2-row window returns both rows, never empty"
 
-    # max_points+1 case (over budget): returns <= budget but >= 2 (anchors).
-    budget = 4  # small budget so we can seed budget+1 rows cheaply
+    budget = 4
     storeN = await _make_store(str(tmp_path / "n.db"))
     for i in range(budget + 1):
         await _seed_snapshot(storeN, i, Decimal("100") + Decimal(i))
@@ -854,21 +739,14 @@ async def test_nonempty_window_never_empty(tmp_path) -> None:
     _marker(f"NONEMPTY_OK one={len(out1)} two={len(out2)} over_budget={len(outN)}/{budget}")
 
 
-# ---------------------------------------------------------------------------
-# D3.F6 — Empty != Zero silent-coercion guard (mandatory)
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_empty_not_zero_guard(tmp_path, caplog) -> None:
     store = await _make_store(str(tmp_path / "empty.db"))
-    # Three measured rows + one with total_value_usd = "" (unmeasured).
     await _seed_snapshot(store, 0, Decimal("100"))
     await _seed_snapshot(store, 1, Decimal("101"))
     await _seed_snapshot(store, 2, Decimal("102"))
 
-    # The typed model will not let us store "" via Decimal; insert raw SQL so the
-    # TEXT NOT NULL column holds an empty string (the Empty!=Zero case).
+    # Raw SQL is required to seed unmeasured text that the Decimal model rejects.
     store._conn.execute(  # noqa: SLF001 — deliberately bypass the typed writer for "" seeding
         """
         INSERT INTO portfolio_snapshots (
@@ -885,7 +763,7 @@ async def test_empty_not_zero_guard(tmp_path, caplog) -> None:
     sm = _make_state_manager(store)
     pre_snaps = await _table_count(store, "portfolio_snapshots")
     pre_ledger = await _table_count(store, "transaction_ledger")
-    assert pre_snaps == 4  # 3 measured + 1 empty
+    assert pre_snaps == 4
 
     svc = DashboardServiceServicer(GatewaySettings())
     svc._state_manager = sm
@@ -893,16 +771,14 @@ async def test_empty_not_zero_guard(tmp_path, caplog) -> None:
     with caplog.at_level(logging.WARNING):
         out = await svc._build_pnl_history(_DEPLOYMENT_ID, from_dt=None, to_dt=None, max_points=1500)
 
-    # The unmeasured point is EXCLUDED (count drops by 1) — not coerced to 0.
+    # Empty text is excluded rather than coerced to measured zero.
     assert len(out) == 3, f"empty-text snapshot must be excluded; got {len(out)} points"
     emitted_values = [Decimal(p.value_usd) for p in out]
     if Decimal("0") in emitted_values or "0.0" in [p.value_usd for p in out] or "0" in [p.value_usd for p in out]:
         _marker("COERCED_TO_ZERO")
         raise AssertionError(f"empty NAV coerced to a fake $0 trough: values={[p.value_usd for p in out]}")
-    # A WARNING naming the Empty!=Zero drop was logged.
     assert any("Empty!=Zero" in r.getMessage() for r in caplog.records), "Empty!=Zero WARNING required"
 
-    # Zero writes.
     assert await _table_count(store, "portfolio_snapshots") == pre_snaps
     assert await _table_count(store, "transaction_ledger") == pre_ledger
 
@@ -911,8 +787,6 @@ async def test_empty_not_zero_guard(tmp_path, caplog) -> None:
 
 @pytest.mark.asyncio
 async def test_scan_cap_must_be_positive(golden_store: SQLiteStore) -> None:
-    # Defensive guard (CodeRabbit): a non-positive scan_cap is a caller error, not
-    # an ambiguous SQL LIMIT — fail fast with a deterministic ValueError.
     for bad in (0, -1):
         with pytest.raises(ValueError, match="scan_cap"):
             await golden_store.get_snapshots_in_window(_DEPLOYMENT_ID, None, None, scan_cap=bad)

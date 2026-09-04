@@ -101,10 +101,6 @@ class TestOkxIntegration:
         assert integration_chain_id("avalanche", "okx") == "43114"
         assert integration_chain_id("solana", "okx") == "501"  # synthetic OKX literal
 
-    # -------------------------------------------------------------------------
-    # Response normalization tests
-    # -------------------------------------------------------------------------
-
     def test_normalize_total_value(self, okx):
         """Total value response is normalized correctly."""
         payload = {
@@ -188,7 +184,6 @@ class TestOkxIntegration:
         assert usdc_pos.label == "USDC"
         assert usdc_pos.value_usd == "500.000"
 
-        # Total should be sum of positions
         assert snapshot.total_value_usd == "3500.000"
 
     def test_normalize_token_balances_with_risk_token(self, okx):
@@ -243,10 +238,6 @@ class TestOkxIntegration:
         assert Decimal(OkxIntegration._calc_usd_value("invalid", "2000")) == 0
         assert Decimal(OkxIntegration._calc_usd_value("1.5", "invalid")) == 0
 
-    # -------------------------------------------------------------------------
-    # Caching tests
-    # -------------------------------------------------------------------------
-
     @pytest.mark.asyncio
     async def test_get_wallet_portfolio_caches_result(self, okx):
         """Portfolio results are cached."""
@@ -287,16 +278,14 @@ class TestOkxIntegration:
             ],
         }
 
-        # Mock _fetch to return token payload for balance call, empty for DeFi call
         defi_empty = {"code": "0", "msg": "success", "data": []}
 
         with patch.object(okx, "_fetch", side_effect=[mock_payload, defi_empty]) as fetch_mock:
             first = await okx.get_wallet_positions("0x1234567890123456789012345678901234567890", "arbitrum")
 
         assert len(first.positions) == 1
-        assert fetch_mock.call_count == 2  # token balances + DeFi platform list
+        assert fetch_mock.call_count == 2
 
-        # Second call should hit cache
         second = await okx.get_wallet_positions("0x1234567890123456789012345678901234567890", "arbitrum")
         assert second.cache_hit is True
 
@@ -309,12 +298,10 @@ class TestOkxIntegration:
             await okx.get_wallet_positions("0xabc", "base")
 
         assert fetch_mock.call_count == 2
-        # First call: token balances
         fetch_mock.assert_any_call(
             "/api/v6/dex/balance/all-token-balances-by-address",
             params={"address": "0xabc", "chains": "8453"},
         )
-        # Second call: DeFi platform list
         fetch_mock.assert_any_call(
             "/api/v6/defi/user/asset/platform/list",
             method="POST",
@@ -350,10 +337,6 @@ class TestOkxIntegration:
             with pytest.raises(ValueError, match="does not support chain 'berachain'"):
                 await getattr(okx, method_name)("0xabc", "berachain")
         fetch.assert_not_awaited()
-
-    # -------------------------------------------------------------------------
-    # DeFi API tests
-    # -------------------------------------------------------------------------
 
     def test_extract_platforms(self, okx):
         """Platform list is extracted from DeFi response."""
@@ -462,21 +445,18 @@ class TestOkxIntegration:
         }
 
         positions = okx._normalize_defi_details(payload, platforms)
-        assert len(positions) == 3  # 2 investments + 1 reward
+        assert len(positions) == 3
 
-        # First position: lending (save)
         assert positions[0].protocol == "Aave V3"
         assert positions[0].label == "USDC Supply"
         assert positions[0].position_type == "save"
         assert positions[0].value_usd == "500.00"
         assert positions[0].token_symbols == ["USDC"]
 
-        # Second position: LP pool
         assert positions[1].position_type == "pool"
         assert positions[1].value_usd == "1200.50"
         assert positions[1].token_symbols == ["ETH", "USDC"]
 
-        # Third: reward
         assert positions[2].position_type == "reward"
         assert positions[2].value_usd == "8.25"
         assert positions[2].token_symbols == ["ARB"]
@@ -607,17 +587,12 @@ class TestOkxIntegration:
         with patch.object(okx, "_fetch", side_effect=[token_payload, defi_platform_payload, defi_detail_payload]):
             snap = await okx.get_wallet_positions("0xabc", "ethereum")
 
-        assert len(snap.positions) == 2  # 1 token + 1 DeFi
+        assert len(snap.positions) == 2
         assert snap.positions[0].position_type == "token"
         assert snap.positions[0].label == "ETH"
         assert snap.positions[1].position_type == "save"
         assert snap.positions[1].protocol == "Aave V3"
-        # Total = 2000 + 500
         assert "2500" in snap.total_value_usd
-
-    # -------------------------------------------------------------------------
-    # Schema-invalid response tests
-    # -------------------------------------------------------------------------
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("bad_body", [{}, [], {"msg": "ok"}])
@@ -676,10 +651,6 @@ class TestNormalizeDefiDetails:
             {"id": "99", "name": "Compound V3"},
         ]
 
-    # ------------------------------------------------------------------
-    # Shape variants: dict vs list-of-entries
-    # ------------------------------------------------------------------
-
     def test_real_api_shape_data_as_dict(self, platforms):
         """Real OKX API: ``data`` is a dict with a single entry.
 
@@ -689,15 +660,13 @@ class TestNormalizeDefiDetails:
         payload = json.loads((FIXTURES_DIR / "okx_defi_real_shape.json").read_text())
         positions = OkxIntegration._normalize_defi_details(payload, platforms)
 
-        # 2 investments + 1 position-level reward (AAVE) + 1 network-level reward (ARB)
-        # from the Aave platform, plus 1 investment from Uniswap = 4 rows total.
         assert len(positions) == 4
 
         aave_supply = positions[0]
         assert aave_supply.position_id == "okx:defi:44:aave-usdc-supply"
-        assert aave_supply.protocol == "Aave"  # from investLogo.bottomRightLogoList
+        assert aave_supply.protocol == "Aave"  # investLogo supplies the protocol.
         assert aave_supply.label == "USDC Supply"
-        assert aave_supply.position_type == "lending"  # investType 6
+        assert aave_supply.position_type == "lending"
         assert aave_supply.value_usd == "1500.75"
         assert aave_supply.token_symbols == ["USDC"]
         assert aave_supply.pool_address == "0xaave-pool"
@@ -709,52 +678,46 @@ class TestNormalizeDefiDetails:
             "platform_id": "44",
         }
 
-        # Position-level reward (unclaimFeesDefiTokenInfo)
         aave_reward = positions[1]
         assert aave_reward.position_id == "okx:reward:44:aave-usdc-supply:AAVE"
         assert aave_reward.position_type == "reward"
         assert aave_reward.protocol == "Aave"
         assert aave_reward.value_usd == "22.50"
         assert aave_reward.token_symbols == ["AAVE"]
-        # Reward rows now carry platform_id in details (#1708 dedup key component).
         assert aave_reward.details == {
             "reward_amount": "0.25",
             "chain_index": "42161",
             "platform_id": "44",
         }
 
-        # Network-level reward (availableRewards)
         arb_reward = positions[2]
         assert arb_reward.position_id == "okx:reward:44:ARB"
         assert arb_reward.position_type == "reward"
-        # Network-level reward uses platform_names lookup, NOT investLogo.
+        # Network-level rewards use platform_names rather than investLogo.
         assert arb_reward.protocol == "Aave V3"
         assert arb_reward.value_usd == "15.50"
         assert arb_reward.token_symbols == ["ARB"]
 
-        # Uniswap investment
         uni_pool = positions[3]
-        assert uni_pool.protocol == "Uniswap"  # investLogo overrides platform_names
-        assert uni_pool.position_type == "pool"  # investType 2
+        assert uni_pool.protocol == "Uniswap"  # investLogo overrides the platform-name lookup.
+        assert uni_pool.position_type == "pool"
         assert uni_pool.token_symbols == ["ETH", "USDC"]
-        assert uni_pool.pool_address == "0xuni-pool-token"  # tokenAddress fallback
+        assert uni_pool.pool_address == "0xuni-pool-token"  # tokenAddress is the poolAddress fallback.
 
     def test_list_of_entries_shape(self, platforms):
         """``data`` as a list of entries is handled identically to dict form."""
         payload = json.loads((FIXTURES_DIR / "okx_defi_list_shape.json").read_text())
         positions = OkxIntegration._normalize_defi_details(payload, platforms)
 
-        # 1 investment + 2 position-level rewards (COMP, WETH)
         assert len(positions) == 3
 
         compound_market = positions[0]
         assert compound_market.position_id == "okx:defi:99:compound-usdc"
-        assert compound_market.protocol == "Compound V3"  # platform_names lookup
+        assert compound_market.protocol == "Compound V3"
         assert compound_market.position_type == "lending"
-        # Fixture omits totalValue: _sum_position_values sums
-        # 250.50 + 750.25 = 1000.75 across the two assetsTokenList entries.
+        # Omitting totalValue exercises aggregation across both asset entries.
         assert compound_market.value_usd == "1000.75"
-        # No investLogo + no empty middleLogoList => tokenList fallback.
+        # Without investLogo, tokenList supplies the symbols.
         assert compound_market.token_symbols == ["USDC"]
 
         comp_reward = positions[1]
@@ -765,10 +728,6 @@ class TestNormalizeDefiDetails:
         assert weth_reward.position_id == "okx:reward:99:compound-usdc:WETH"
         assert weth_reward.value_usd == "18.00"
 
-    # ------------------------------------------------------------------
-    # Payload-envelope edge cases
-    # ------------------------------------------------------------------
-
     @pytest.mark.parametrize(
         "payload",
         [
@@ -776,10 +735,10 @@ class TestNormalizeDefiDetails:
             "not a dict",
             [],
             42,
-            {"code": "0"},  # no 'data' key
-            {"code": "0", "data": "nope"},  # data is neither dict nor list
+            {"code": "0"},
+            {"code": "0", "data": "nope"},
             {"code": "0", "data": None},
-            {"code": "0", "data": {}},  # dict without walletIdPlatformDetailList
+            {"code": "0", "data": {}},
             {"code": "0", "data": []},
         ],
     )
@@ -803,7 +762,7 @@ class TestNormalizeDefiDetails:
                 "walletIdPlatformDetailList": [
                     {"analysisPlatformId": "44", "networkHoldVoList": []},
                     {"analysisPlatformId": "44", "networkHoldVoList": None},
-                    {"analysisPlatformId": "44"},  # key absent entirely
+                    {"analysisPlatformId": "44"},
                 ]
             },
         }
@@ -825,8 +784,6 @@ class TestNormalizeDefiDetails:
                         "networkHoldVoList": [
                             {
                                 "chainIndex": "1",
-                                # investTokenBalanceVoList absent -> no invest rows,
-                                # but availableRewards still scanned at network level.
                                 "availableRewards": [
                                     {
                                         "tokenSymbol": "ARB",
@@ -841,10 +798,6 @@ class TestNormalizeDefiDetails:
             },
         }
         positions = OkxIntegration._normalize_defi_details(payload, platforms)
-        # Current behavior: when investTokenBalanceVoList is absent, the inner
-        # loop is skipped entirely via `continue`, which ALSO skips the
-        # network-level availableRewards check (it lives inside the invest-list
-        # loop body). Net: no rewards emitted.
         assert positions == []
 
     def test_non_list_nested_containers_skipped(self, platforms):
@@ -861,12 +814,10 @@ class TestNormalizeDefiDetails:
                     {
                         "analysisPlatformId": "44",
                         "networkHoldVoList": [
-                            # First hold: investTokenBalanceVoList is not a list.
                             {
                                 "chainIndex": "1",
                                 "investTokenBalanceVoList": "not-a-list",
                             },
-                            # Second hold: valid invest, but baseDefiTokenInfos non-list.
                             {
                                 "chainIndex": "1",
                                 "investTokenBalanceVoList": [
@@ -892,7 +843,6 @@ class TestNormalizeDefiDetails:
             },
         }
         positions = OkxIntegration._normalize_defi_details(payload, platforms)
-        # Only the single valid investment row; no rewards.
         assert len(positions) == 1
         assert positions[0].label == "ok"
 
@@ -912,28 +862,28 @@ class TestNormalizeDefiDetails:
             "code": "0",
             "data": {
                 "walletIdPlatformDetailList": [
-                    "not-a-dict-detail",  # skipped
+                    "not-a-dict-detail",
                     {
                         "analysisPlatformId": "44",
                         "networkHoldVoList": [
-                            "not-a-dict-network",  # skipped
+                            "not-a-dict-network",
                             {
                                 "chainIndex": "1",
                                 "investTokenBalanceVoList": [
-                                    "not-a-dict-invest",  # skipped
+                                    "not-a-dict-invest",
                                     {
                                         "investmentName": "real",
                                         "investmentId": "r",
                                         "investType": 1,
                                         "totalValue": "50",
                                         "positionList": [
-                                            "not-a-dict-pos",  # skipped
+                                            "not-a-dict-pos",
                                             {
                                                 "unclaimFeesDefiTokenInfo": [
-                                                    "not-a-dict-fee-group",  # skipped
+                                                    "not-a-dict-fee-group",
                                                     {
                                                         "baseDefiTokenInfos": [
-                                                            "not-a-dict-reward",  # skipped
+                                                            "not-a-dict-reward",
                                                             {
                                                                 "tokenSymbol": "R",
                                                                 "coinAmount": "1",
@@ -947,7 +897,7 @@ class TestNormalizeDefiDetails:
                                     },
                                 ],
                                 "availableRewards": [
-                                    "not-a-dict-net-reward",  # skipped
+                                    "not-a-dict-net-reward",
                                     {
                                         "tokenSymbol": "N",
                                         "tokenAmount": "3",
@@ -961,15 +911,10 @@ class TestNormalizeDefiDetails:
             },
         }
         positions = OkxIntegration._normalize_defi_details(payload, platforms)
-        # 1 investment + 1 position-level reward + 1 network-level reward.
         assert len(positions) == 3
         assert positions[0].label == "real"
         assert positions[1].token_symbols == ["R"]
         assert positions[2].token_symbols == ["N"]
-
-    # ------------------------------------------------------------------
-    # investLogo handling
-    # ------------------------------------------------------------------
 
     def test_invest_logo_missing(self, platforms):
         """No investLogo: protocol falls back to platform_names, symbols to tokenList."""
@@ -985,7 +930,7 @@ class TestNormalizeDefiDetails:
         )
         positions = OkxIntegration._normalize_defi_details(payload, platforms)
         assert len(positions) == 1
-        assert positions[0].protocol == "Aave V3"  # platform_names lookup
+        assert positions[0].protocol == "Aave V3"
         assert positions[0].token_symbols == ["USDC"]
 
     @pytest.mark.parametrize("non_dict_logo", ["string", 42, ["list"], None])
@@ -1018,7 +963,6 @@ class TestNormalizeDefiDetails:
                 "totalValue": "50",
                 "investLogo": {
                     "bottomRightLogoList": [{"tokenName": "Morpho"}],
-                    # middleLogoList absent
                 },
                 "tokenList": [{"tokenSymbol": "USDT"}],
             },
@@ -1046,8 +990,7 @@ class TestNormalizeDefiDetails:
             },
         )
         positions = OkxIntegration._normalize_defi_details(payload, platforms)
-        assert positions[0].protocol == "Aave V3"  # platform_names fallback
-        # middleLogoList wins over tokenList fallback.
+        assert positions[0].protocol == "Aave V3"
         assert positions[0].token_symbols == ["WBTC", "WETH"]
 
     def test_invest_logo_both_present(self, platforms):
@@ -1083,7 +1026,7 @@ class TestNormalizeDefiDetails:
                 "totalValue": "10",
                 "investLogo": {
                     "bottomRightLogoList": [{"tokenName": "Morpho"}],
-                    "middleLogoList": [],  # empty -> fallback triggers
+                    "middleLogoList": [],
                 },
                 "tokenList": [{"tokenSymbol": "FRAX"}],
             },
@@ -1091,10 +1034,6 @@ class TestNormalizeDefiDetails:
         positions = OkxIntegration._normalize_defi_details(payload, platforms)
         assert positions[0].protocol == "Morpho"
         assert positions[0].token_symbols == ["FRAX"]
-
-    # ------------------------------------------------------------------
-    # Reward handling
-    # ------------------------------------------------------------------
 
     def test_position_level_rewards_from_unclaim_fees(self, platforms):
         """positionList[].unclaimFeesDefiTokenInfo[] emits one reward row per non-zero reward."""
@@ -1118,7 +1057,7 @@ class TestNormalizeDefiDetails:
                                     {
                                         "tokenSymbol": "ZERO",
                                         "coinAmount": "0",
-                                        "currencyAmount": "0",  # filtered out
+                                        "currencyAmount": "0",
                                     },
                                     {
                                         "tokenSymbol": "REW2",
@@ -1133,7 +1072,6 @@ class TestNormalizeDefiDetails:
             },
         )
         positions = OkxIntegration._normalize_defi_details(payload, platforms)
-        # 1 investment + 2 non-zero rewards
         assert len(positions) == 3
         reward_symbols = [p.token_symbols[0] for p in positions if p.position_type == "reward"]
         assert reward_symbols == ["REW1", "REW2"]
@@ -1197,13 +1135,12 @@ class TestNormalizeDefiDetails:
         }
         positions = OkxIntegration._normalize_defi_details(payload, platforms)
         rewards = [p for p in positions if p.position_type == "reward"]
-        # Deduped: position-level (innermost) wins.
         assert len(rewards) == 1
         surviving = rewards[0]
         assert surviving.position_id == "okx:reward:44:inv-dup:ARB"
-        # Inherits the investLogo-derived protocol attribution, not platform_names fallback.
+        # Dedup preserves the position-level protocol attribution.
         assert surviving.protocol == "Aave"
-        # The internal source marker must not leak to downstream consumers.
+        # Internal dedup metadata must not cross the normalization boundary.
         assert "_reward_source" not in surviving.details
 
     def test_distinct_rewards_not_deduped_issue_1708(self, platforms):
@@ -1330,7 +1267,6 @@ class TestNormalizeDefiDetails:
         }
         positions = OkxIntegration._normalize_defi_details(payload, platforms)
         rewards = [p for p in positions if p.position_type == "reward"]
-        # Both position-level AAVE rewards are preserved (distinct investments).
         assert len(rewards) == 2
         ids = sorted(r.position_id for r in rewards)
         assert ids == ["okx:reward:44:inv-1:AAVE", "okx:reward:44:inv-2:AAVE"]
@@ -1357,7 +1293,7 @@ class TestNormalizeDefiDetails:
                                 "availableRewards": [
                                     {"tokenSymbol": "A", "tokenAmount": "1.0", "currencyAmount": "5"},
                                     {"tokenSymbol": "B", "coinAmount": "2.0", "currencyAmount": "6"},
-                                    {"tokenSymbol": "C", "currencyAmount": "7"},  # defaults to "0"
+                                    {"tokenSymbol": "C", "currencyAmount": "7"},
                                 ],
                             }
                         ],
@@ -1371,10 +1307,6 @@ class TestNormalizeDefiDetails:
         amounts = {p.token_symbols[0]: p.details["reward_amount"] for p in rewards}
         assert amounts == {"A": "1.0", "B": "2.0", "C": "0"}
 
-    # ------------------------------------------------------------------
-    # _sum_position_values fallback
-    # ------------------------------------------------------------------
-
     def test_sum_position_values_fallback_when_total_value_missing(self, platforms):
         """totalValue absent -> _sum_position_values aggregates assets."""
         payload = self._single_invest_payload(
@@ -1383,7 +1315,6 @@ class TestNormalizeDefiDetails:
                 "investmentName": "summed",
                 "investmentId": "s",
                 "investType": 1,
-                # totalValue omitted
                 "positionList": [
                     {
                         "assetsTokenList": [
@@ -1396,7 +1327,6 @@ class TestNormalizeDefiDetails:
         )
         positions = OkxIntegration._normalize_defi_details(payload, platforms)
         assert len(positions) == 1
-        # 10.25 + 5.75 = 16.00
         assert Decimal(positions[0].value_usd) == Decimal("16.00")
 
     def test_measured_zero_total_value_preserved_issue_1707(self, platforms, caplog):
@@ -1413,7 +1343,7 @@ class TestNormalizeDefiDetails:
                 "investmentName": "zero-measured",
                 "investmentId": "z",
                 "investType": 1,
-                "totalValue": "0",  # measured zero
+                "totalValue": "0",
                 "positionList": [
                     {
                         "assetsTokenList": [
@@ -1426,9 +1356,7 @@ class TestNormalizeDefiDetails:
         with caplog.at_level("WARNING", logger="almanak.gateway.integrations.okx"):
             positions = OkxIntegration._normalize_defi_details(payload, platforms)
         assert len(positions) == 1
-        # Fixed: totalValue "0" is preserved; the zero aggregate wins over the dust sum.
         assert positions[0].value_usd == "0"
-        # Warning surfaces the non-empty positionList mismatch.
         assert any(
             "totalValue=0" in rec.message and "positionList is non-empty" in rec.message for rec in caplog.records
         )
@@ -1442,14 +1370,13 @@ class TestNormalizeDefiDetails:
                 "investmentId": "z",
                 "investType": 1,
                 "totalValue": "0",
-                "positionList": [],  # empty -> trust the zero, no warning
+                "positionList": [],
             },
         )
         with caplog.at_level("WARNING", logger="almanak.gateway.integrations.okx"):
             positions = OkxIntegration._normalize_defi_details(payload, platforms)
         assert len(positions) == 1
         assert positions[0].value_usd == "0"
-        # No warning for the clean-zero case.
         assert not any("totalValue=0" in rec.message for rec in caplog.records)
 
     def test_missing_total_value_still_falls_back_to_sum_issue_1707(self, platforms):
@@ -1460,7 +1387,6 @@ class TestNormalizeDefiDetails:
                 "investmentName": "no-total-field",
                 "investmentId": "z",
                 "investType": 1,
-                # totalValue absent -> fall back to _sum_position_values
                 "positionList": [
                     {
                         "assetsTokenList": [
@@ -1473,10 +1399,6 @@ class TestNormalizeDefiDetails:
         positions = OkxIntegration._normalize_defi_details(payload, platforms)
         assert len(positions) == 1
         assert Decimal(positions[0].value_usd) == Decimal("42.00")
-
-    # ------------------------------------------------------------------
-    # investType label mapping
-    # ------------------------------------------------------------------
 
     @pytest.mark.parametrize(
         "invest_type,expected_label",
@@ -1521,7 +1443,6 @@ class TestNormalizeDefiDetails:
         positions = OkxIntegration._normalize_defi_details(payload, platforms)
         assert positions[0].position_type == "type_99"
         assert positions[0].details["invest_type_id"] == 99
-        # investType missing entirely defaults to 0 -> "type_0".
         payload2 = self._single_invest_payload(
             platform_id="44",
             invest={
@@ -1532,10 +1453,6 @@ class TestNormalizeDefiDetails:
         )
         positions2 = OkxIntegration._normalize_defi_details(payload2, platforms)
         assert positions2[0].position_type == "type_0"
-
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
 
     @staticmethod
     def _single_invest_payload(*, platform_id: str, invest: dict, chain_index: str = "1") -> dict:
@@ -1589,10 +1506,6 @@ class TestNormalizeDefiExtractors:
             chain_index="42161",
         )
 
-    # ------------------------------------------------------------------
-    # _extract_data_entries
-    # ------------------------------------------------------------------
-
     def test_extract_data_entries_dict_shape(self):
         """``data`` as a dict yields a single-element list."""
         entry = {"walletIdPlatformDetailList": []}
@@ -1629,10 +1542,6 @@ class TestNormalizeDefiExtractors:
         assert _extract_data_entries([1, 2, 3]) == []
         assert _extract_data_entries(42) == []
 
-    # ------------------------------------------------------------------
-    # _resolve_protocol_and_symbols
-    # ------------------------------------------------------------------
-
     def test_resolve_protocol_no_invest_logo(self, ctx):
         """No investLogo: protocol from platform_names, symbols from tokenList."""
         invest = {"tokenList": [{"tokenSymbol": "USDC"}]}
@@ -1668,7 +1577,6 @@ class TestNormalizeDefiExtractors:
         }
         protocol, symbols = _resolve_protocol_and_symbols(invest, ctx)
         assert protocol == "Aave V3"
-        # middleLogoList wins over tokenList fallback.
         assert symbols == ["WBTC", "WETH"]
 
     def test_resolve_protocol_both_logos_present(self, ctx):
@@ -1722,19 +1630,15 @@ class TestNormalizeDefiExtractors:
             "investLogo": {
                 "middleLogoList": [
                     {"tokenName": "A"},
-                    {},  # skipped
-                    "not-a-dict",  # skipped
-                    {"tokenName": ""},  # skipped (falsy)
+                    {},
+                    "not-a-dict",
+                    {"tokenName": ""},
                     {"tokenName": "B"},
                 ]
             }
         }
         _, symbols = _resolve_protocol_and_symbols(invest, ctx)
         assert symbols == ["A", "B"]
-
-    # ------------------------------------------------------------------
-    # _extract_position_rows
-    # ------------------------------------------------------------------
 
     def test_extract_position_rows_happy_path(self, ctx):
         """Valid invest produces exactly one WalletPosition with correct fields."""
@@ -1755,7 +1659,7 @@ class TestNormalizeDefiExtractors:
         assert row.position_id == "okx:defi:44:inv-1"
         assert row.protocol == "Aave"
         assert row.label == "Supply"
-        assert row.position_type == "lending"  # investType 6
+        assert row.position_type == "lending"
         assert row.value_usd == "1500.75"
         assert row.pool_address == "0xpool"
         assert row.token_symbols == ["USDC"]
@@ -1791,7 +1695,6 @@ class TestNormalizeDefiExtractors:
             "investmentName": "empty",
             "investmentId": "i",
             "investType": 1,
-            # no totalValue
             "positionList": [],
         }
         rows = _extract_position_rows(invest, ctx)
@@ -1802,17 +1705,12 @@ class TestNormalizeDefiExtractors:
         """Malformed/minimal invest dict still produces a single row with defaults."""
         invest = {}
         rows = _extract_position_rows(invest, ctx)
-        # Always exactly one row; no crash.
         assert len(rows) == 1
         row = rows[0]
         assert row.position_id == "okx:defi:44:"
         assert row.protocol == "Aave V3"
-        # investType missing defaults to 0 -> "type_0".
         assert row.position_type == "type_0"
-        # label = "" (investmentName empty) is falsy so fallback kicks in
-        # to "<protocol> <type>". Here: "Aave V3 type_0".
         assert row.label == "Aave V3 type_0"
-        # totalValue absent -> ""; _sum_position_values(None) -> "0".
         assert row.value_usd == "0"
         assert row.pool_address == ""
         assert row.token_symbols == []
@@ -1852,10 +1750,6 @@ class TestNormalizeDefiExtractors:
         assert row_a.details["chain_index"] == "1"
         assert row_b.details["chain_index"] == "42161"
 
-    # ------------------------------------------------------------------
-    # _extract_reward_rows_from_position
-    # ------------------------------------------------------------------
-
     def test_extract_reward_rows_from_position_happy_path(self, ctx):
         """Two non-zero rewards produce two rows with inherited protocol attribution."""
         invest = {
@@ -1885,11 +1779,11 @@ class TestNormalizeDefiExtractors:
         rows = _extract_reward_rows_from_position(invest, ctx)
         assert len(rows) == 2
         assert rows[0].position_id == "okx:reward:44:inv-r:REW1"
-        # Rewards inherit investLogo protocol, not platform_names.
+        # Position-level rewards inherit investLogo protocol attribution.
         assert rows[0].protocol == "Aave"
         assert rows[0].value_usd == "5.00"
         assert rows[0].token_symbols == ["REW1"]
-        # Position-level rows carry platform_id + the internal source marker for dedup (#1708).
+        # Source metadata lets dedup prefer the more specific position-level row.
         assert rows[0].details == {
             "reward_amount": "1.0",
             "chain_index": "42161",
@@ -1929,9 +1823,9 @@ class TestNormalizeDefiExtractors:
         """Missing/non-list unclaimFeesDefiTokenInfo skips the position entry."""
         invest = {
             "positionList": [
-                {},  # no unclaim
-                {"unclaimFeesDefiTokenInfo": None},  # non-list
-                {"unclaimFeesDefiTokenInfo": "bad"},  # non-list
+                {},
+                {"unclaimFeesDefiTokenInfo": None},
+                {"unclaimFeesDefiTokenInfo": "bad"},
             ],
         }
         assert _extract_reward_rows_from_position(invest, ctx) == []
@@ -1947,14 +1841,14 @@ class TestNormalizeDefiExtractors:
         invest = {
             "investmentId": "inv",
             "positionList": [
-                "not-a-dict-position",  # skipped: not a dict
+                "not-a-dict-position",
                 {
                     "unclaimFeesDefiTokenInfo": [
-                        "not-a-dict-fee-group",  # skipped
-                        {"baseDefiTokenInfos": "oh"},  # non-list baseDefiTokenInfos
+                        "not-a-dict-fee-group",
+                        {"baseDefiTokenInfos": "oh"},
                         {
                             "baseDefiTokenInfos": [
-                                "not-a-dict-reward",  # skipped
+                                "not-a-dict-reward",
                                 {
                                     "tokenSymbol": "OK",
                                     "coinAmount": "1",
@@ -1978,10 +1872,6 @@ class TestNormalizeDefiExtractors:
         rows = _extract_reward_rows_from_network(rewards, ctx)
         assert [r.token_symbols[0] for r in rows] == ["KEEP"]
 
-    # ------------------------------------------------------------------
-    # _extract_reward_rows_from_network
-    # ------------------------------------------------------------------
-
     def test_extract_reward_rows_from_network_happy_path(self, ctx):
         """Network-level rewards use platform_names for protocol (not investLogo)."""
         rewards = [
@@ -1991,12 +1881,11 @@ class TestNormalizeDefiExtractors:
         assert len(rows) == 1
         row = rows[0]
         assert row.position_id == "okx:reward:44:ARB"
-        # NOTE: network-level rewards resolve protocol via platform_names.
         assert row.protocol == "Aave V3"
         assert row.label == "Aave V3 reward"
         assert row.value_usd == "15.50"
         assert row.token_symbols == ["ARB"]
-        # Network-level rows carry platform_id + the internal source marker for dedup (#1708).
+        # Source metadata lets dedup discard a less-specific network-level duplicate.
         assert row.details == {
             "reward_amount": "5.0",
             "chain_index": "42161",
@@ -2009,7 +1898,7 @@ class TestNormalizeDefiExtractors:
         rewards = [
             {"tokenSymbol": "A", "tokenAmount": "1.0", "coinAmount": "99.9", "currencyAmount": "5"},
             {"tokenSymbol": "B", "coinAmount": "2.0", "currencyAmount": "6"},
-            {"tokenSymbol": "C", "currencyAmount": "7"},  # no amount -> default "0"
+            {"tokenSymbol": "C", "currencyAmount": "7"},
         ]
         rows = _extract_reward_rows_from_network(rewards, ctx)
         amounts = {r.token_symbols[0]: r.details["reward_amount"] for r in rows}
@@ -2043,10 +1932,6 @@ class TestNormalizeDefiExtractors:
         ]
         rows = _extract_reward_rows_from_network(rewards, ctx)
         assert [r.token_symbols[0] for r in rows] == ["C"]
-
-    # ------------------------------------------------------------------
-    # _safe_decimal
-    # ------------------------------------------------------------------
 
     def test_safe_decimal_valid_strings(self):
         """Valid numeric strings parse into Decimal."""
@@ -2083,10 +1968,6 @@ class TestNormalizeDefiExtractors:
         assert _safe_decimal(42) == Decimal("42")
         assert _safe_decimal(1.5) == Decimal("1.5")
 
-    # ------------------------------------------------------------------
-    # _sum_position_values
-    # ------------------------------------------------------------------
-
     def test_sum_position_values_multi_position(self):
         """Sums currencyAmount across every asset in every position."""
         positions = [
@@ -2119,15 +2000,15 @@ class TestNormalizeDefiExtractors:
     def test_sum_position_values_malformed_entries_tolerated(self):
         """Non-dict positions and non-list assetsTokenList entries are skipped."""
         positions = [
-            "not-a-dict",  # skipped
-            {"assetsTokenList": None},  # skipped
-            {"assetsTokenList": "bad"},  # skipped
-            {},  # skipped (no assets)
+            "not-a-dict",
+            {"assetsTokenList": None},
+            {"assetsTokenList": "bad"},
+            {},
             {
                 "assetsTokenList": [
-                    "not-a-dict",  # skipped
+                    "not-a-dict",
                     {"currencyAmount": "1.50"},
-                    {"currencyAmount": "invalid"},  # parses to 0
+                    {"currencyAmount": "invalid"},
                     {"currencyAmount": "2.50"},
                 ]
             },
@@ -2139,7 +2020,7 @@ class TestNormalizeDefiExtractors:
         positions = [
             {
                 "assetsTokenList": [
-                    {"tokenSymbol": "A"},  # no currencyAmount
+                    {"tokenSymbol": "A"},
                     {"currencyAmount": "3.50"},
                 ]
             },
@@ -2191,12 +2072,11 @@ class TestDedupeRewardRows:
         """Network-level row is dropped when a matching position-level row exists."""
         pos = self._reward(source="position", investment_id="inv-1", protocol="Aave")
         net = self._reward(source="network", protocol="Aave V3")
-        # Order should not matter: network before position.
+        # Input order must not affect the preferred source.
         result = _dedupe_reward_rows([net, pos])
         assert len(result) == 1
         assert result[0].protocol == "Aave"
         assert result[0].position_id == "okx:reward:44:inv-1:ARB"
-        # Source marker stripped from the surviving row.
         assert "_reward_source" not in result[0].details
 
     def test_two_position_rows_same_symbol_different_investments_both_kept(self):
@@ -2231,7 +2111,7 @@ class TestDedupeRewardRows:
         )
         net = self._reward(source="network")
         result = _dedupe_reward_rows([investment, net])
-        assert result[0] is investment  # identity-preserved for non-reward
+        assert result[0] is investment
         assert result[1].position_type == "reward"
 
     def test_empty_input_returns_empty_list(self):
@@ -2310,15 +2190,15 @@ class TestSumPositionValuesStaticMethod:
 
     def test_malformed_positions_and_assets_are_skipped(self):
         positions = [
-            "not-a-dict",  # non-dict position skipped
-            {"assetsTokenList": None},  # assets not a list skipped
-            {"assetsTokenList": "bad"},  # assets not a list skipped
-            {},  # no assets key skipped
+            "not-a-dict",
+            {"assetsTokenList": None},
+            {"assetsTokenList": "bad"},
+            {},
             {
                 "assetsTokenList": [
-                    "not-a-dict",  # non-dict asset skipped
+                    "not-a-dict",
                     {"currencyAmount": "1.50"},
-                    {"currencyAmount": "invalid"},  # unparseable -> 0
+                    {"currencyAmount": "invalid"},
                     {"currencyAmount": "2.50"},
                 ]
             },
@@ -2329,7 +2209,7 @@ class TestSumPositionValuesStaticMethod:
         positions = [
             {
                 "assetsTokenList": [
-                    {"tokenSymbol": "A"},  # no currencyAmount
+                    {"tokenSymbol": "A"},
                     {"currencyAmount": "3.50"},
                 ]
             },
