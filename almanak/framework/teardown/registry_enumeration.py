@@ -44,7 +44,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from typing import Any
 
@@ -105,16 +105,17 @@ def _lp_identity(position: PositionInfo) -> str:
     return f"nft:{token_id}"
 
 
-# Connector-private contract-kind names for an LP position's ERC-721 manager.
-# The kind vocabulary is explicitly connector-private and may grow, so this asks
-# for several and takes the first that resolves rather than assuming one.
+# Connector-private contract-kind names for an LP position's ERC-721 manager,
+# used for slugs that declare no ``CL_POSITION_MANAGER`` role. The kind
+# vocabulary is explicitly connector-private and may grow, so this asks for
+# several and takes the first that resolves rather than assuming one.
 _LP_MANAGER_CONTRACT_KINDS: tuple[str, ...] = (
     "position_manager",
     "nft_position_manager",
-    "cl_nft",
-    "cl_nft_current",
     "nft",
 )
+
+_LP_MANAGER_DETAIL_KEYS: tuple[str, ...] = ("nft_manager_addr", "position_manager", "nft_manager")
 
 
 def _derived_lp_manager(protocol: str, chain: str) -> str:
@@ -181,6 +182,7 @@ def _derived_lp_manager(protocol: str, chain: str) -> str:
     """
     from almanak.connectors._strategy_base.address_registry import addresses_for
     from almanak.connectors._strategy_base.protocol_aliases import normalize_protocol
+    from almanak.connectors._strategy_contract_role_registry import CONTRACT_ROLE_REGISTRY, ContractRole
 
     raw_protocol = (protocol or "").strip().lower()
     chain_norm = (chain or "").strip().lower()
@@ -198,8 +200,17 @@ def _derived_lp_manager(protocol: str, chain: str) -> str:
     # exactly one result (agni/mantle) and leaves the rest byte-identical.
     protocol_norm = normalize_protocol(chain_norm, raw_protocol)
 
-    table = addresses_for(protocol_norm, chain_norm) or {}
-    candidates = {str(table[kind]).strip().lower() for kind in _LP_MANAGER_CONTRACT_KINDS if table.get(kind)}
+    # A slug with a CL_POSITION_MANAGER role publishes one kind per reviewed
+    # manager generation on its address-owning connector's table; every one
+    # of them is a candidate, so a multi-generation venue refuses below.
+    cl_kinds = CONTRACT_ROLE_REGISTRY.kinds_for(protocol_norm, ContractRole.CL_POSITION_MANAGER)
+    if cl_kinds:
+        table = addresses_for(CONTRACT_ROLE_REGISTRY.address_protocol(protocol_norm), chain_norm) or {}
+        kinds: tuple[str, ...] = tuple(cl_kinds)
+    else:
+        table = addresses_for(protocol_norm, chain_norm) or {}
+        kinds = _LP_MANAGER_CONTRACT_KINDS
+    candidates = {str(table[kind]).strip().lower() for kind in kinds if table.get(kind)}
     if len(candidates) != 1:
         # 0 -> this connector publishes no manager for the chain.
         # >1 -> the venue publishes MORE THAN ONE reviewed manager, so no single
@@ -225,7 +236,7 @@ def _lp_nft_parts(position: PositionInfo) -> tuple[str, str] | None:
     if token_id is None:
         return None
     details = position.details if isinstance(position.details, dict) else {}
-    raw_manager = details.get("nft_manager_addr") or details.get("position_manager") or details.get("nft_manager")
+    raw_manager = next((details.get(key) for key in _LP_MANAGER_DETAIL_KEYS if details.get(key)), None)
     if raw_manager:
         return str(token_id), str(raw_manager).strip().lower()
     return str(token_id), _derived_lp_manager(str(position.protocol or ""), str(position.chain or ""))
@@ -1251,29 +1262,129 @@ def reconcile_lp_with_registry(
     for keys in (*strategy_keys, *registry_keys):
         _link(keys)
 
+    # A registry row that MATCHES an existing strategy position is not
+    # just a duplicate to discard — it is frequently the only source of the
+    # position's authoritative NFT-manager identity. Every V3-family receipt
+    # parser stamps ``nft_manager_addr`` (or ``position_manager``) onto the
+    # ``position_registry`` row; a strategy's own ``get_open_positions()``
+    # essentially never does (see :func:`_unambiguous_lp_nft_ids`). On a
+    # multi-generation venue (Aerodrome/Velodrome Slipstream, which publishes a
+    # legacy AND a current reviewed NPM) that missing authority is exactly what
+    # makes ``teardown_post_condition`` and the LP valuation reader refuse to
+    # certify a position that closed cleanly on-chain — not because closure is
+    # in doubt, but because nothing on the strategy's own row says which
+    # reviewed manager it lives on. Map each root back to the strategy position
+    # that owns it so a matching registry row can enrich it instead of being
+    # silently dropped.
+    root_to_strategy_index: dict[tuple[str, ...], int] = {}
+    for idx, keys in enumerate(strategy_keys):
+        for k in keys:
+            root_to_strategy_index.setdefault(_find(k), idx)
+
     claimed: set[tuple[str, ...]] = {_find(k) for keys in strategy_keys for k in keys}
-    net_new: list[PositionInfo] = []
-    for rp, keys in zip(registry_positions, registry_keys, strict=True):
-        roots = {_find(k) for k in keys}
-        if roots & claimed:
-            continue
-        net_new.append(rp)
-        claimed |= roots
-    if not net_new:
+    enriched_positions, any_enriched, net_new = _apply_registry_lp_enrichment(
+        strategy_positions=strategy_summary.positions,
+        registry_positions=registry_positions,
+        registry_keys=registry_keys,
+        claimed=claimed,
+        root_to_strategy_index=root_to_strategy_index,
+        find=_find,
+    )
+    if not net_new and not any_enriched:
         return strategy_summary
 
     return TeardownPositionSummary(
         deployment_id=strategy_summary.deployment_id,
         timestamp=strategy_summary.timestamp,
-        positions=list(strategy_summary.positions) + net_new,
+        positions=enriched_positions + net_new,
         # Preserve the strategy's explicit totals: the model recomputes
         # ``total_value_usd`` / ``has_liquidation_risk`` from positions when
         # omitted (== 0 / == False), which would silently clobber a strategy
         # that set them explicitly. Registry-derived rows carry value_usd=0 and
-        # liquidation_risk=False, so they add nothing to either total.
+        # liquidation_risk=False, so they add nothing to either total, and
+        # enrichment only ever touches ``details`` — never ``value_usd`` /
+        # ``liquidation_risk`` — so it cannot change either total either.
         total_value_usd=strategy_summary.total_value_usd,
         has_liquidation_risk=(strategy_summary.has_liquidation_risk or any(p.liquidation_risk for p in net_new)),
     )
+
+
+def _apply_registry_lp_enrichment(
+    *,
+    strategy_positions: list[PositionInfo],
+    registry_positions: list[PositionInfo],
+    registry_keys: list[frozenset[tuple[str, ...]]],
+    claimed: set[tuple[str, ...]],
+    root_to_strategy_index: dict[tuple[str, ...], int],
+    find: Callable[[tuple[str, ...]], tuple[str, ...]],
+) -> tuple[list[PositionInfo], bool, list[PositionInfo]]:
+    """Partition ``registry_positions`` into (enriched strategy rows, any_enriched, net_new).
+
+    Extracted from :func:`reconcile_lp_with_registry` to keep that function's
+    complexity in gate — this is pure partitioning, no new policy. A registry
+    row whose key intersects an already-claimed root enriches the matching
+    strategy position's NFT-manager authority (ALM-3428) instead of being
+    discarded; every other registry row is net-new, exactly as before.
+    """
+    enriched_positions = list(strategy_positions)
+    any_enriched = False
+    net_new: list[PositionInfo] = []
+    claimed = set(claimed)
+    for rp, keys in zip(registry_positions, registry_keys, strict=True):
+        roots = {find(k) for k in keys}
+        matched = roots & claimed
+        if matched:
+            idx = root_to_strategy_index.get(next(iter(matched)))
+            if idx is not None:
+                candidate = _merge_registry_lp_authority(enriched_positions[idx], rp)
+                if candidate is not enriched_positions[idx]:
+                    enriched_positions[idx] = candidate
+                    any_enriched = True
+            continue
+        net_new.append(rp)
+        claimed |= roots
+    return enriched_positions, any_enriched, net_new
+
+
+def _merge_registry_lp_authority(strategy_position: PositionInfo, registry_position: PositionInfo) -> PositionInfo:
+    """Enrich a strategy-reported LP position with the registry row's NFT-manager
+    authority, additive only (ALM-3428).
+
+    The strategy's own fields — ``value_usd``, ``protocol`` (the real connector
+    slug; the registry's is only the generic ``lp``/``lp_v4`` primitive label),
+    ``liquidation_risk``, everything else — are the real answer for those and are
+    never touched here. Manager aliases form one authority: registry metadata
+    is admitted only when the strategy supplied no manager under any alias, and
+    contradictory registry aliases are left unmerged so closure remains
+    unproven instead of selecting by alias order.
+    """
+    if strategy_position.position_type != PositionType.LP:
+        return strategy_position
+    registry_details = registry_position.details if isinstance(registry_position.details, dict) else {}
+    if not registry_details:
+        return strategy_position
+    current_details = strategy_position.details if isinstance(strategy_position.details, dict) else {}
+    if any(str(current_details.get(key) or "").strip() for key in _LP_MANAGER_DETAIL_KEYS):
+        return strategy_position
+
+    registry_managers = {
+        str(registry_details[key]).strip().lower()
+        for key in _LP_MANAGER_DETAIL_KEYS
+        if registry_details.get(key) and str(registry_details[key]).strip()
+    }
+    if len(registry_managers) != 1:
+        return strategy_position
+
+    merged_details = dict(current_details)
+    changed = False
+    for key in _LP_MANAGER_DETAIL_KEYS:
+        value = registry_details.get(key)
+        if str(value or "").strip():
+            merged_details[key] = value
+            changed = True
+    if not changed:
+        return strategy_position
+    return replace(strategy_position, details=merged_details)
 
 
 def _union_residuals(

@@ -4,8 +4,11 @@ Publishes the on-chain *read descriptors* the agent-tool LP read handler
 (``_execute_get_lp_position``) needs for Aerodrome's concentrated-liquidity
 ("Slipstream") positions:
 
-* ``factory_address(chain)`` — the Slipstream CL factory (``cl_factory``)
-  used by ``factory.getPool(token0, token1, tickSpacing)``.
+* ``factory_addresses(chain)`` — every reviewed Slipstream factory
+  generation; pool discovery asks each one with
+  ``factory.getPool(token0, token1, tickSpacing)`` and refuses a key that
+  more than one answers. ``factory_address`` names a single factory only
+  when the chain has exactly one reviewed generation.
 * manager descriptors — a singleton default when unambiguous, otherwise the
   reviewed manager set and its exact generation/factory pairing.
 * ``get_pool_selector()`` — ``0x28af8d0b``, the **int24 tick-spacing**
@@ -19,9 +22,9 @@ Byte-equivalence (VIB-4860)
 These values MUST match what ``_execute_get_lp_position`` resolved inline
 before W8 for ``lp_protocol == "aerodrome_slipstream"``:
 
-* ``factory_address`` ← ``AERODROME[chain]["cl_factory"]`` (the pre-W8 handler
-  used the ``cl_factory`` key for the ``aerodrome_slipstream`` entry of
-  ``_LP_PROTOCOL_REGISTRIES``, via ``_LP_FACTORY_KEY["aerodrome_slipstream"]``).
+* ``factory_addresses`` ← the factories of ``slipstream_lp_deployments(chain)``;
+  the pre-W8 singleton ``cl_factory`` read is retired because Base has more
+  than one reviewed generation.
 * ``position_manager_address`` preserves singleton behavior but returns
   ``None`` on multi-generation Base; exact manager/factory lookup replaces the
   unsafe legacy default for token-ID-scoped reads.
@@ -37,7 +40,7 @@ the pre-W8 ``_LP_PROTOCOL_REGISTRIES`` used, and the only value
 handler does *not* alias ``"aerodrome"`` → ``"aerodrome_slipstream"`` via
 ``normalize_protocol``, so the agent passes the explicit canonical slug).
 Slipstream only deploys on Base today; Velodrome V2 on Optimism is a v2
-(non-CL) interface with no ``cl_factory`` / ``cl_nft``, so the lookups
+(non-CL) interface with no reviewed Slipstream generation, so the lookups
 return ``None`` there — matching the pre-W8 ``.get(...)`` semantics.
 """
 
@@ -66,13 +69,13 @@ class AerodromeSlipstreamAgentReadConnector(AgentReadConnector, AgentReadCapabil
         return frozenset({"pool_state", "lp_position"})
 
     def factory_address(self, chain: str) -> str | None:
-        from almanak.connectors.aerodrome.addresses import AERODROME
+        factories = self.factory_addresses(chain)
+        return factories[0] if len(factories) == 1 else None
 
-        chain_contracts = AERODROME.get(chain)
-        # Pool discovery is not token-ID scoped: it intentionally uses the
-        # connector's current factory. LP-position reads pair an exact manager
-        # to its generation through factory_address_for_position_manager().
-        return chain_contracts.get("cl_factory") if isinstance(chain_contracts, dict) else None
+    def factory_addresses(self, chain: str) -> tuple[str, ...]:
+        from almanak.connectors.aerodrome.addresses import slipstream_lp_deployments
+
+        return tuple(deployment.factory for deployment in slipstream_lp_deployments(chain))
 
     def position_manager_address(self, chain: str) -> str | None:
         from almanak.connectors.aerodrome.addresses import slipstream_lp_deployments

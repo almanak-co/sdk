@@ -4,8 +4,11 @@ The SwapIntent contract documents the pool pin as an exact execution constraint.
 Aerodrome's route resolver used to read only ``classic`` / ``tick_spacing`` /
 ``stable`` and silently auto-routed a pinned swap. These tests pin the
 V3-mirrored contract: on-chain identity read, pair match, conflict detection,
-factory round-trip to the same address, router-reachability for CL pools, and
-no downgrade to the auto ladder.
+factory round-trip to the same address, and no downgrade to the auto ladder.
+
+A Slipstream router derives the pool from ITS factory, so a pinned CL pool is
+routed through the router of the reviewed generation its own ``factory()``
+names; an unreviewed factory, or a generation without a router, is refused.
 """
 
 from __future__ import annotations
@@ -18,7 +21,7 @@ import pytest
 
 from almanak.connectors._strategy_base.pool_validation_base import PoolValidationReason, PoolValidationResult
 from almanak.connectors.aerodrome import compiler as aerodrome_compiler
-from almanak.connectors.aerodrome.addresses import AERODROME
+from almanak.connectors.aerodrome.addresses import SlipstreamDeployment, slipstream_deployment_for_factory
 from almanak.connectors.aerodrome.pool_validation import SlipstreamPoolBinding
 from almanak.framework.intents.compiler_models import CompilationResult, CompilationStatus
 from almanak.framework.intents.vocabulary import Intent
@@ -27,10 +30,19 @@ WETH = "0x4200000000000000000000000000000000000006"
 USDC = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
 AERO = "0x940181a94a35a4569e4529a3cdfb74e38fd98631"
 CLASSIC_POOL = "0xcdac0d6c6c59727a65f871236188350531885c43"  # WETH/USDC volatile
-CL_POOL = "0xb2cc224c1c9fee385f8ad6a55b4d94e92359dc59"  # WETH/USDC ts=100 on the router-bound factory
+CL_POOL = "0xb2cc224c1c9fee385f8ad6a55b4d94e92359dc59"  # WETH/USDC ts=100 on the legacy Slipstream factory
 OTHER_POOL = "0x7f670f78b17dec44d5ef68a48740b6f8849cc2e6"
-ROUTER_FACTORY = AERODROME["base"]["cl_factory"]
-CURRENT_FACTORY = "0xf8f2eb4940cfe7d13603dddd87f123820fc061ef"
+UNREVIEWED_FACTORY = "0x" + "ab" * 20
+
+
+def _generation(factory: str) -> SlipstreamDeployment:
+    deployment = slipstream_deployment_for_factory("base", factory)
+    assert deployment is not None, factory
+    return deployment
+
+
+CURRENT = _generation("0xf8f2eB4940CFE7d13603DDDD87f123820Fc061Ef")
+LEGACY = _generation("0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A")
 
 
 def _token(symbol: str, address: str, decimals: int) -> SimpleNamespace:
@@ -61,8 +73,8 @@ def _intent(**swap_params) -> Intent:
     )
 
 
-def _confirmed(pool: str) -> PoolValidationResult:
-    return PoolValidationResult(exists=True, reason=PoolValidationReason.CONFIRMED, pool_address=pool)
+def _confirmed(pool: str, factory: str | None = None) -> PoolValidationResult:
+    return PoolValidationResult(exists=True, reason=PoolValidationReason.CONFIRMED, pool_address=pool, factory=factory)
 
 
 def _route(compiler=None, **swap_params):
@@ -87,7 +99,7 @@ def _cl_factory(result: PoolValidationResult):
     return patch("almanak.connectors.aerodrome.pool_validation.validate_aerodrome_cl_pool", return_value=result)
 
 
-def _cl_binding(*, factory: str = ROUTER_FACTORY, tick_spacing: int = 100, token1: str = USDC) -> SlipstreamPoolBinding:
+def _cl_binding(*, factory: str = LEGACY.factory, tick_spacing: int = 100, token1: str = USDC) -> SlipstreamPoolBinding:
     return SlipstreamPoolBinding(token0=WETH, token1=token1, tick_spacing=tick_spacing, factory=factory.lower())
 
 
@@ -105,6 +117,7 @@ def test_classic_pin_routes_to_that_exact_pool_with_no_fallback() -> None:
     assert (route.use_classic, route.stable, route.routing, route.fallback_used) == (True, False, "classic", False)
     assert route.pinned_pool == CLASSIC_POOL
     assert route.pool_check.pool_address == CLASSIC_POOL
+    assert route.deployment is None
     assert factory.call_args.args[:4] == ("base", WETH, USDC, False)
 
 
@@ -153,24 +166,58 @@ def test_classic_pin_accepts_consistent_stable_key() -> None:
 
 # Slipstream CL pins
 def test_cl_pin_routes_at_the_contract_tick_spacing() -> None:
-    with _classic(None), _cl(_cl_binding()), _cl_factory(_confirmed(CL_POOL)) as factory:
+    with _classic(None), _cl(_cl_binding()), _cl_factory(_confirmed(CL_POOL, LEGACY.factory)) as factory:
         route = _route(pool=CL_POOL)
     assert isinstance(route, aerodrome_compiler._AerodromeRoute)
     assert (route.use_classic, route.tick_spacing, route.routing, route.fallback_used) == (False, 100, "cl", False)
     assert route.pinned_pool == CL_POOL
+    assert route.deployment == LEGACY
     assert factory.call_args.args[:4] == ("base", WETH, USDC, 100)
+    assert factory.call_args.kwargs["deployment"] == LEGACY
 
 
-def test_cl_pin_on_a_factory_the_router_cannot_reach_is_refused() -> None:
-    """The Slipstream swap router is bound to one factory; a current-generation pool is unreachable."""
-    with _classic(None), _cl(_cl_binding(factory=CURRENT_FACTORY)), _cl_factory(_confirmed(CL_POOL)) as factory:
+@pytest.mark.parametrize("generation", [CURRENT, LEGACY], ids=["current", "legacy"])
+def test_cl_pin_routes_through_the_router_of_the_generation_the_pool_claims(
+    generation: SlipstreamDeployment,
+) -> None:
+    """The pool's own factory() selects the generation; that generation's router and factory are used."""
+    with (
+        _classic(None),
+        _cl(_cl_binding(factory=generation.factory)),
+        _cl_factory(_confirmed(CL_POOL, generation.factory)) as factory,
+    ):
+        route = _route(pool=CL_POOL)
+    assert isinstance(route, aerodrome_compiler._AerodromeRoute)
+    assert route.deployment == generation
+    assert route.deployment.swap_router == generation.swap_router
+    assert factory.call_args.kwargs["deployment"] == generation
+
+
+def test_cl_pin_on_an_unreviewed_factory_is_refused_before_the_round_trip() -> None:
+    with _classic(None), _cl(_cl_binding(factory=UNREVIEWED_FACTORY)), _cl_factory(_confirmed(CL_POOL)) as factory:
         result = _failed(_route(pool=CL_POOL))
-    assert "swap router on base routes through factory " + ROUTER_FACTORY in (result.error or "")
+    assert "not a reviewed Slipstream factory generation" in (result.error or "")
+    assert UNREVIEWED_FACTORY in (result.error or "")
+    factory.assert_not_called()
+
+
+def test_cl_pin_on_a_generation_without_a_router_is_refused() -> None:
+    """A reviewed LP-only generation has pools no reviewed router can reach."""
+    lp_only = SlipstreamDeployment(factory=UNREVIEWED_FACTORY, position_manager="0x" + "cd" * 20, generation="lp-only")
+    with (
+        _classic(None),
+        _cl(_cl_binding(factory=UNREVIEWED_FACTORY)),
+        patch.object(aerodrome_compiler, "slipstream_deployment_for_factory", return_value=lp_only),
+        _cl_factory(_confirmed(CL_POOL)) as factory,
+    ):
+        result = _failed(_route(pool=CL_POOL))
+    assert "has no reviewed swap router" in (result.error or "")
+    assert "lp-only" in (result.error or "")
     factory.assert_not_called()
 
 
 def test_cl_pin_refuses_alternate_pool_substitution() -> None:
-    with _classic(None), _cl(_cl_binding()), _cl_factory(_confirmed(OTHER_POOL)):
+    with _classic(None), _cl(_cl_binding()), _cl_factory(_confirmed(OTHER_POOL, LEGACY.factory)):
         result = _failed(_route(pool=CL_POOL))
     assert "Refusing alternate-pool substitution" in (result.error or "")
 
@@ -198,7 +245,7 @@ def test_cl_pin_rejects_conflicting_keys(extra: dict, needle: str) -> None:
 
 
 def test_cl_pin_accepts_consistent_tick_spacing_key() -> None:
-    with _classic(None), _cl(_cl_binding()), _cl_factory(_confirmed(CL_POOL)):
+    with _classic(None), _cl(_cl_binding()), _cl_factory(_confirmed(CL_POOL, LEGACY.factory)):
         route = _route(pool=CL_POOL, tick_spacing=100)
     assert isinstance(route, aerodrome_compiler._AerodromeRoute)
     assert route.tick_spacing == 100
@@ -230,7 +277,7 @@ def test_malformed_pin_fails_before_any_read_at_the_resolver() -> None:
     with _classic() as read:
         result = _failed(
             aerodrome_compiler._resolve_aerodrome_pinned_route(
-                _compiler(), "swap-1", WETH_T, USDC_T, {"pool": "0xdead"}, AERODROME["base"]
+                _compiler(), "swap-1", WETH_T, USDC_T, {"pool": "0xdead"}
             )
         )
     assert result.error == "Invalid pinned pool address: 0xdead"
@@ -275,42 +322,44 @@ def test_placeholder_pricing_with_unreadable_pin_fails_closed() -> None:
 
 
 # Through compile_swap_aerodrome: the pin reaches the adapter and metadata
-def test_compiled_swap_carries_the_pin_into_adapter_call_and_metadata() -> None:
-    class _Compiler:
-        chain = "base"
-        wallet_address = "0x" + "11" * 20
-        default_deadline_seconds = 300
-        price_oracle = {"USDC": Decimal("1"), "WETH": Decimal("3000")}
-        _gateway_client = None
-        _config = SimpleNamespace(
-            max_price_impact_pct=Decimal("0.30"), using_placeholders=False, permission_discovery=False
-        )
+class _Compiler:
+    chain = "base"
+    wallet_address = "0x" + "11" * 20
+    default_deadline_seconds = 300
+    price_oracle = {"USDC": Decimal("1"), "WETH": Decimal("3000")}
+    _gateway_client = None
+    _config = SimpleNamespace(
+        max_price_impact_pct=Decimal("0.30"), using_placeholders=False, permission_discovery=False
+    )
 
-        def _resolve_token(self, sym):
-            token = MagicMock()
-            token.symbol = sym
-            token.address, token.decimals = {"WETH": (WETH, 18), "USDC": (USDC, 6)}[sym]
-            token.is_native = False
-            token.to_dict.return_value = {"symbol": sym, "address": token.address, "decimals": token.decimals}
-            return token
+    def _resolve_token(self, sym):
+        token = MagicMock()
+        token.symbol = sym
+        token.address, token.decimals = {"WETH": (WETH, 18), "USDC": (USDC, 6)}[sym]
+        token.is_native = False
+        token.to_dict.return_value = {"symbol": sym, "address": token.address, "decimals": token.decimals}
+        return token
 
-        def _require_token_price(self, sym):
-            return self.price_oracle[sym]
+    def _require_token_price(self, sym):
+        return self.price_oracle[sym]
 
-        def _get_chain_rpc_url(self):
-            return "http://localhost:8545"
+    def _get_chain_rpc_url(self):
+        return "http://localhost:8545"
 
-        def _validate_pool(self, result, intent_id):
-            return None
+    def _validate_pool(self, result, intent_id):
+        return None
 
+
+@pytest.mark.parametrize("generation", [CURRENT, LEGACY], ids=["current", "legacy"])
+def test_compiled_swap_carries_the_pin_into_adapter_call_and_metadata(generation: SlipstreamDeployment) -> None:
     tx = MagicMock(gas_estimate=120_000)
     tx.to_dict.return_value = {"tx_type": "swap"}
     quote = MagicMock(amount_out=3000 * 10**6, is_onchain=True)
     swap_result = MagicMock(success=True, transactions=[tx], quote=quote, error=None)
     with (
         _classic(None),
-        _cl(_cl_binding()),
-        _cl_factory(_confirmed(CL_POOL)),
+        _cl(_cl_binding(factory=generation.factory)),
+        _cl_factory(_confirmed(CL_POOL, generation.factory)),
         patch("almanak.connectors.aerodrome.AerodromeConfig"),
         patch("almanak.connectors.aerodrome.AerodromeAdapter") as adapter_cls,
     ):
@@ -319,6 +368,9 @@ def test_compiled_swap_carries_the_pin_into_adapter_call_and_metadata() -> None:
     assert result.status is CompilationStatus.SUCCESS, result.error
     kwargs = adapter_cls.return_value.swap_exact_input.call_args.kwargs
     assert (kwargs["use_classic"], kwargs["tick_spacing"]) == (False, 100)
+    assert kwargs["deployment"] == generation
     meta = result.action_bundle.metadata
     assert meta["pinned_pool"] == CL_POOL
     assert (meta["routing"], meta["tick_spacing"], meta["routing_fallback"]) == ("cl", 100, False)
+    assert meta["slipstream_deployment"] == generation.generation
+    assert meta["swap_router"] == generation.swap_router

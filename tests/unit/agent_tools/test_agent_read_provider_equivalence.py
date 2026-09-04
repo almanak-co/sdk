@@ -34,6 +34,8 @@ def test_uniswap_v3_provider_matches_address_tables() -> None:
     # Factory + NPM match the canonical tables on every chain they cover.
     for chain, contracts in UNISWAP_V3.items():
         assert cap.factory_address(chain) == contracts.get("factory")
+        # Single-generation venue: the plural view is the singleton factory.
+        assert cap.factory_addresses(chain) == (contracts.get("factory"),)
     for chain, npm in POSITION_MANAGER_ADDRESSES.items():
         assert cap.position_manager_address(chain) == npm
     # Not a lending connector.
@@ -104,21 +106,26 @@ def test_sushiswap_v3_provider_matches_address_tables() -> None:
 
 
 def test_slipstream_provider_requires_exact_manager_generation() -> None:
-    from almanak.connectors.aerodrome.addresses import AERODROME, slipstream_lp_deployments
+    from almanak.connectors.aerodrome.addresses import slipstream_lp_deployments
 
     cap = STRATEGY_AGENT_READ_REGISTRY.lookup("aerodrome_slipstream")
     assert cap is not None
     deployments = slipstream_lp_deployments("base")
     assert len(deployments) == 2
     assert cap.position_manager_address("base") is None
-    assert cap.factory_address("base") == AERODROME["base"]["cl_factory"]
+    # Two reviewed factory generations: no singleton factory may be named,
+    # and the plural view lists every generation so readers ask each one.
+    assert cap.factory_address("base") is None
+    assert cap.factory_addresses("base") == tuple(deployment.factory for deployment in deployments)
+    assert len({f.lower() for f in cap.factory_addresses("base")}) == 2
+    assert cap.factory_addresses("ethereum") == ()
+    assert cap.factory_address("ethereum") is None
     assert cap.reviewed_position_manager_addresses("base") == tuple(
         deployment.position_manager for deployment in deployments
     )
     for deployment in deployments:
         assert (
-            cap.factory_address_for_position_manager("base", deployment.position_manager.upper())
-            == deployment.factory
+            cap.factory_address_for_position_manager("base", deployment.position_manager.upper()) == deployment.factory
         )
     assert cap.factory_address_for_position_manager("base", "0x" + "11" * 20) is None
 

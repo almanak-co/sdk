@@ -126,7 +126,14 @@ class AgentReadCapability(Protocol):
 
     * ``factory_address(chain) -> str | None`` — CL-DEX factory contract on
       ``chain`` for ``factory.getPool(tokenA, tokenB, fee)``; ``None`` if
-      the connector has no deployment on ``chain`` (or doesn't back pools).
+      the connector has no deployment on ``chain`` (or doesn't back pools),
+      or when several reviewed factory generations coexist and no single
+      one is "the" factory.
+
+    * ``factory_addresses(chain) -> tuple[str, ...]`` — every factory that
+      may own the connector's pools on ``chain``. Pool discovery asks each
+      one; a pair/key more than one answers is ambiguous. Defaults to the
+      singleton ``factory_address``.
 
     * ``position_manager_address(chain) -> str | None`` — CL-DEX NFT
       position manager on ``chain`` for ``positions(uint256)``; ``None``
@@ -175,6 +182,8 @@ class AgentReadCapability(Protocol):
 
     def factory_address(self, chain: str) -> str | None: ...
 
+    def factory_addresses(self, chain: str) -> tuple[str, ...]: ...
+
     def position_manager_address(self, chain: str) -> str | None: ...
 
     def reviewed_position_manager_addresses(self, chain: str) -> tuple[str, ...]: ...
@@ -205,6 +214,12 @@ class AgentReadConnector:
 
     protocol: ClassVar[ProtocolName]
     kind: ClassVar[ProtocolKind]
+
+    def factory_addresses(self, chain: str) -> tuple[str, ...]:
+        """Every factory that may own this connector's pools on ``chain``."""
+
+        factory = cast(AgentReadCapability, self).factory_address(chain)
+        return (factory,) if factory else ()
 
     def reviewed_position_manager_addresses(self, chain: str) -> tuple[str, ...]:
         """Return manager authorities accepted by the connector's read path."""

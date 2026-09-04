@@ -34,6 +34,7 @@ import pytest
 
 from almanak.connectors._strategy_base.pool_validation_base import PoolValidationReason, PoolValidationResult
 from almanak.connectors.aerodrome import compiler as aerodrome_compiler
+from almanak.connectors.aerodrome.addresses import slipstream_deployment_for_factory
 from almanak.framework.intents.compiler_models import CompilationStatus
 from almanak.framework.intents.min_out_guard import UnprotectedTradeError
 from almanak.framework.intents.vocabulary import LPOpenIntent, PriceBand
@@ -46,10 +47,15 @@ _TOKENS = {
     "USDC": ("0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", 6),
 }
 
+# The symbolic lane asks every reviewed factory; a confirmed probe names the
+# generation that owns the pool, and the compiler mints on that generation.
+_CURRENT = slipstream_deployment_for_factory("base", "0xf8f2eB4940CFE7d13603DDDD87f123820Fc061Ef")
+assert _CURRENT is not None
 _CONFIRMED_POOL = PoolValidationResult(
     exists=True,
     reason=PoolValidationReason.CONFIRMED,
     pool_address="0x1111111111111111111111111111111111111111",
+    factory=_CURRENT.factory,
 )
 
 
@@ -183,18 +189,12 @@ class TestSlipstreamLpOpenSafetyRefusal:
             patch.object(
                 aerodrome_compiler,
                 "_resolve_slipstream_ticks",
-                side_effect=UnprotectedTradeError(
-                    "lp mint", "lp_slippage must be in [0, 1) (got 5)"
-                ),
+                side_effect=UnprotectedTradeError("lp mint", "lp_slippage must be in [0, 1) (got 5)"),
             ) as injected,
         ):
-            result = aerodrome_compiler.compile_lp_open_aerodrome_slipstream(
-                _compiler(), _intent()
-            )
+            result = aerodrome_compiler.compile_lp_open_aerodrome_slipstream(_compiler(), _intent())
 
-        assert injected.called, (
-            "injection point was never reached — this test would be vacuous"
-        )
+        assert injected.called, "injection point was never reached — this test would be vacuous"
         assert result.status == CompilationStatus.FAILED
         assert result.is_safety_refusal is True, (
             "an unprotected-minimum refusal must be classified as a safety refusal, "
@@ -219,9 +219,7 @@ class TestSlipstreamLpOpenSafetyRefusal:
                 side_effect=RuntimeError("pool read failed"),
             ),
         ):
-            result = aerodrome_compiler.compile_lp_open_aerodrome_slipstream(
-                _compiler(), _intent()
-            )
+            result = aerodrome_compiler.compile_lp_open_aerodrome_slipstream(_compiler(), _intent())
 
         assert result.status == CompilationStatus.FAILED
         assert result.is_safety_refusal is False
@@ -242,9 +240,7 @@ class TestSlipstreamLpOpenSafetyRefusal:
             patch.object(
                 aerodrome_compiler,
                 "_resolve_slipstream_ticks",
-                side_effect=UnprotectedTradeError(
-                    "lp mint", "lp_slippage must be in [0, 1) (got 5)"
-                ),
+                side_effect=UnprotectedTradeError("lp mint", "lp_slippage must be in [0, 1) (got 5)"),
             ),
         ):
             aerodrome_compiler.compile_lp_open_aerodrome_slipstream(_compiler(), _intent())

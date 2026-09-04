@@ -351,7 +351,10 @@ class TestLpPositionManagersDerivedView:
         # fluid was removed from LP_POSITION_MANAGERS in Phase 1 (VIB-5029):
         # SWAP-only, routerless -- no framework role table applies.
         ("base", "aerodrome", "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43".lower()),
-        ("base", "aerodrome_slipstream", "0x827922686190790b37229fd06084350E74485b72".lower()),
+        # Membership/display table only: it carries the first CL_POSITION_MANAGER
+        # kind the connector declares (the current generation). Execution never
+        # reads a generation from here; the pool decides.
+        ("base", "aerodrome_slipstream", "0xe1f8cd9AC4e4A65F54f38a5CdAfCA44f6dD68b53".lower()),
         ("avalanche", "traderjoe_v2", "0xb4315e873dBcf96Ffd0acd8EA43f689D8c20fB30".lower()),
     ]
 
@@ -511,7 +514,15 @@ class TestNftPositionManagerDerivedViews:
         "bnb": "0x46a15b0b27311cedf172ab29e4f4766fbe7f4364",
     }
 
-    EXPECTED_SLIPSTREAM = {"base": "0x827922686190790b37229fd06084350e74485b72"}
+    # Base ships two reviewed Slipstream generations, so no chain has a single
+    # "the" NPM: the singleton view is empty and the SETS view carries both.
+    EXPECTED_SLIPSTREAM: dict[str, str] = {}
+    EXPECTED_SLIPSTREAM_SETS = {
+        "base": (
+            "0xe1f8cd9ac4e4a65f54f38a5cdafca44f6dd68b53",
+            "0x827922686190790b37229fd06084350e74485b72",
+        ),
+    }
 
     def test_univ3_npm(self) -> None:
         from almanak.framework.intents.compiler_constants import UNIV3_NFT_POSITION_MANAGERS
@@ -541,6 +552,31 @@ class TestNftPositionManagerDerivedViews:
             list(SLIPSTREAM_NFT_POSITION_MANAGERS.items())
             == list(self.EXPECTED_SLIPSTREAM.items())
         )
+
+    def test_slipstream_npm_sets(self) -> None:
+        from almanak.framework.intents.compiler_constants import (
+            SLIPSTREAM_NFT_POSITION_MANAGER_SETS,
+        )
+
+        assert SLIPSTREAM_NFT_POSITION_MANAGER_SETS == self.EXPECTED_SLIPSTREAM_SETS
+        assert (
+            list(SLIPSTREAM_NFT_POSITION_MANAGER_SETS.items())
+            == list(self.EXPECTED_SLIPSTREAM_SETS.items())
+        )
+
+    def test_slipstream_singleton_view_excludes_multi_generation_chains(self) -> None:
+        """A chain with several reviewed generations has no singleton manager."""
+        from almanak.framework.intents.compiler_constants import (
+            SLIPSTREAM_NFT_POSITION_MANAGER_SETS,
+            SLIPSTREAM_NFT_POSITION_MANAGERS,
+        )
+
+        assert SLIPSTREAM_NFT_POSITION_MANAGER_SETS, "the SETS view must publish every reviewed chain"
+        for chain, managers in SLIPSTREAM_NFT_POSITION_MANAGER_SETS.items():
+            if len(managers) > 1:
+                assert chain not in SLIPSTREAM_NFT_POSITION_MANAGERS
+            else:
+                assert SLIPSTREAM_NFT_POSITION_MANAGERS[chain] == managers[0]
 
     def test_univ3_excludes_curated_chains(self) -> None:
         """blast / linea stay excluded (curated subset, VIB-4864)."""

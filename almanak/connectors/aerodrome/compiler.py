@@ -299,6 +299,48 @@ def _slipstream_venue_metadata(verified: VerifiedVenueBinding | None) -> dict[st
     }
 
 
+def _compile_discovery_position_bundle(
+    result: CompilationResult,
+    intent_type: IntentType,
+    reviewed: tuple[SlipstreamDeployment, ...],
+    build: Any,
+    *,
+    metadata: dict[str, Any],
+    intent_id: str,
+) -> CompilationResult:
+    """Permission discovery emits every reviewed generation's calldata so the manifest is their union.
+
+    Discovery cannot read which generation owns a synthetic position, and a
+    manifest that authorises only one generation would revert the other's
+    close on the Safe path.
+    """
+    transactions: list[Any] = []
+    for deployment in reviewed:
+        outcome = build(deployment)
+        if not outcome.success:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"Failed to build {intent_type.value} calldata for the {deployment.generation} "
+                    f"Slipstream generation: {outcome.error}"
+                ),
+                intent_id=intent_id,
+            )
+        transactions.extend(outcome.transactions)
+    result.action_bundle = ActionBundle(
+        intent_type=intent_type.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            **metadata,
+            "nft_managers": [deployment.position_manager for deployment in reviewed],
+            "slipstream_deployment": "all-reviewed",
+        },
+    )
+    result.transactions = transactions
+    result.total_gas_estimate = sum(tx.gas_estimate for tx in transactions)
+    return result
+
+
 @dataclass(frozen=True, slots=True)
 class _ResolvedSlipstreamPosition:
     """Physical position authority plus any currently certified venue."""
@@ -313,8 +355,6 @@ def _resolve_slipstream_position(
     adapter: AerodromeAdapter,
     token_id: int,
     intent_id: str,
-    permission_discovery: bool,
-    reviewed_deployments: tuple[SlipstreamDeployment, ...],
     expected_pool: str | None = None,
 ) -> _ResolvedSlipstreamPosition | CompilationResult:
     """Resolve a position's manager generation and paired factory binding.
@@ -327,9 +367,6 @@ def _resolve_slipstream_position(
     the NFT's factory-reconstructed pool must be that exact address (the V3
     lane's address-bound close contract); a symbolic key is not cross-checked.
     """
-
-    if permission_discovery:
-        return _ResolvedSlipstreamPosition(reviewed_deployments[0], None)
 
     try:
         deployment = adapter.resolve_owned_cl_deployment(token_id)
@@ -1461,22 +1498,32 @@ class _AerodromeRoute:
     # Exact pool the caller pinned via ``swap_params={"pool": "0x..."}`` after
     # factory authentication; None for auto/symbolic routing.
     pinned_pool: str | None = None
+    # Reviewed Slipstream generation whose router and quoter execute a CL route.
+    # None for Classic routes, and for offline CL routes where no generation can
+    # be proven and the compile enumerates every reviewed one.
+    deployment: SlipstreamDeployment | None = None
 
 
-def _aerodrome_chain_has_cl(chain_addrs: dict[str, str]) -> bool:
-    """Hard capability gate: True iff this chain has Slipstream CL contracts.
+def _aerodrome_chain_has_cl(chain: str) -> bool:
+    """Hard capability gate: True iff ``chain`` has a reviewed Slipstream generation with a swap router.
 
-    Optimism/Velodrome has no CL factory/router, so it is Classic-only.
+    Optimism/Velodrome has no reviewed Slipstream generation, so it is Classic-only.
     """
-    return bool(chain_addrs.get("cl_router") and chain_addrs.get("cl_factory"))
+    return any(deployment.swap_router for deployment in slipstream_lp_deployments(chain))
+
+
+def _aerodrome_route_deployment(chain: str, pool_check: Any) -> SlipstreamDeployment | None:
+    """The reviewed generation whose factory confirmed ``pool_check``, if the probe named one."""
+    factory = getattr(pool_check, "factory", None)
+    return slipstream_deployment_for_factory(chain, factory) if factory else None
 
 
 def _aerodrome_is_offline(compiler) -> bool:
-    """True in placeholder-price or permission-discovery mode.
+    """True when pool probes may not establish an executable venue.
 
-    In these modes pool-existence probes cannot be trusted (they run against
-    unreachable RPC / only need calldata shapes), so auto-routing degrades to the
-    legacy default rather than fail-closing on an unverifiable probe.
+    Permission discovery may emit calldata for every reviewed generation because
+    its bundle is never executed. Placeholder-price compiles still pass through
+    the downstream generation gate and are refused unless the probe names one.
     """
     cfg = getattr(compiler, "_config", None)
     return bool(getattr(cfg, "using_placeholders", False) or getattr(cfg, "permission_discovery", False))
@@ -1561,11 +1608,11 @@ def _resolve_aerodrome_cl_route(
 ) -> _AerodromeRoute | None:
     """Probe CL (Slipstream) pools across the candidate tick spacings (VIB-5548).
 
-    First *confirmed* pool wins. If a probe is unverifiable (``exists is None`` —
-    e.g. a missing factory entry or malformed response), degrade to the legacy
-    CL@100 default **carrying that unverifiable probe** so the caller's
-    ``_validate_pool`` gate warns-and-proceeds instead of fail-closing on a
-    previously-cached absent CL@100 probe. Returns ``None`` only when every
+    First *confirmed* pool wins. An unverifiable probe (``exists is None`` — e.g.
+    a missing factory entry or malformed response) produces an unresolved
+    CL@100-shaped route for the downstream generation gate. Permission discovery
+    may expand that shape across every reviewed router; executable compilation
+    refuses it because no generation was proven. Returns ``None`` only when every
     candidate spacing is *confirmed absent*, leaving the caller to either fall
     back to Classic (auto) or fail closed (explicit ``classic=False``).
     """
@@ -1573,15 +1620,19 @@ def _resolve_aerodrome_cl_route(
         pool_check = _aerodrome_cached_probe(compiler, "cl", from_token.address, to_token.address, ts)
         probed.append(f"cl(tick_spacing={ts})")
         if pool_check.exists is True:
-            return _AerodromeRoute(False, ts, False, pool_check, False, "cl")
+            return _AerodromeRoute(
+                False,
+                ts,
+                False,
+                pool_check,
+                False,
+                "cl",
+                deployment=_aerodrome_route_deployment(compiler.chain, pool_check),
+            )
         if pool_check.exists is None:
-            # Unverifiable while online (missing factory entry / malformed
-            # response). Degrade to the legacy default and warn-and-proceed,
-            # carrying THIS probe (exists=None) so _validate_pool does not
-            # fail-close on the earlier confirmed-absent CL@100 probe.
             logger.info(
                 "Aerodrome routing could not verify CL pool for %s->%s at tick_spacing=%s (reason=%s); "
-                "defaulting to CL@100 (warn-and-proceed).",
+                "recording an unresolved CL@100 route for the downstream generation safety gate.",
                 from_token.symbol,
                 to_token.symbol,
                 ts,
@@ -1655,19 +1706,18 @@ def _pin_aerodrome_cl_route(
     swap_params: dict[str, Any],
     from_token: Any,
     to_token: Any,
-    chain_addrs: dict[str, str],
     intent_id: str,
 ) -> _AerodromeRoute | CompilationResult:
-    """Pin a swap to one Slipstream CL pool reachable by the registered swap router.
+    """Pin a swap to one Slipstream CL pool through the router of the generation that owns it.
 
-    The router derives the pool from ITS factory as ``(pair, tickSpacing)``, so
-    the pinned pool must report that same factory; a pool from another
-    generation would resolve to a plausible binding yet execute elsewhere.
+    A router derives the pool from ITS factory as ``(pair, tickSpacing)``, so
+    the pool's own ``factory()`` selects the generation, and that generation's
+    router executes; a generation without a router is LP-only and is refused.
     """
     from . import pool_validation
 
     chain = compiler.chain
-    if not _aerodrome_chain_has_cl(chain_addrs):
+    if not _aerodrome_chain_has_cl(chain):
         return CompilationResult(
             status=CompilationStatus.FAILED,
             error=f"Pinned pool {pool} is a Slipstream CL pool but CL routing is not available on {chain}.",
@@ -1684,14 +1734,24 @@ def _pin_aerodrome_cl_route(
         )
     if {binding.token0, binding.token1} != {from_token.address.lower(), to_token.address.lower()}:
         return _pinned_pair_mismatch(pool, binding.token0, binding.token1, from_token, to_token, intent_id)
-    router_factory = chain_addrs["cl_factory"]
-    if binding.factory.lower() != router_factory.lower():
+    deployment = slipstream_deployment_for_factory(chain, binding.factory)
+    if deployment is None:
+        reviewed = ", ".join(f"{d.generation} ({d.factory})" for d in slipstream_lp_deployments(chain))
         return CompilationResult(
             status=CompilationStatus.FAILED,
             error=(
-                f"Pinned pool {pool} reports Slipstream factory {binding.factory}, but the registered Slipstream "
-                f"swap router on {chain} routes through factory {router_factory}; a swap cannot be pinned to a "
-                f"pool the router cannot reach. Use the {router_factory} pool for this pair, or pin by tick_spacing."
+                f"Pinned pool {pool} reports Slipstream factory {binding.factory}, which is not a reviewed "
+                f"Slipstream factory generation on {chain} (reviewed: {reviewed}); refusing to route it."
+            ),
+            intent_id=intent_id,
+        )
+    if not deployment.swap_router:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=(
+                f"Pinned pool {pool} belongs to the {deployment.generation} Slipstream generation "
+                f"({deployment.factory}), which has no reviewed swap router; its pools are LP-only. "
+                f"Pin a pool from a generation with a router, or route by tick_spacing."
             ),
             intent_id=intent_id,
         )
@@ -1702,6 +1762,7 @@ def _pin_aerodrome_cl_route(
         binding.tick_spacing,
         compiler._get_chain_rpc_url(),
         gateway_client=compiler._gateway_client,
+        deployment=deployment,
     )
     if pool_check.exists is not True:
         detail = pool_check.error or pool_check.warning or "factory lookup unavailable"
@@ -1721,7 +1782,9 @@ def _pin_aerodrome_cl_route(
             ),
             intent_id=intent_id,
         )
-    return _AerodromeRoute(False, binding.tick_spacing, False, pool_check, False, "cl", pinned_pool=pool)
+    return _AerodromeRoute(
+        False, binding.tick_spacing, False, pool_check, False, "cl", pinned_pool=pool, deployment=deployment
+    )
 
 
 def _resolve_aerodrome_pinned_route(
@@ -1730,7 +1793,6 @@ def _resolve_aerodrome_pinned_route(
     from_token: Any,
     to_token: Any,
     swap_params: dict[str, Any],
-    chain_addrs: dict[str, str],
 ) -> _AerodromeRoute | CompilationResult:
     """Honour ``swap_params={"pool": "0x..."}`` as an exact, factory-authenticated pin.
 
@@ -1767,7 +1829,7 @@ def _resolve_aerodrome_pinned_route(
             ),
             intent_id=intent_id,
         )
-    return _pin_aerodrome_cl_route(compiler, pool, binding, swap_params, from_token, to_token, chain_addrs, intent_id)
+    return _pin_aerodrome_cl_route(compiler, pool, binding, swap_params, from_token, to_token, intent_id)
 
 
 def _resolve_aerodrome_route(  # noqa: C901 - explicit, flat routing-priority ladder (design O2/O3)
@@ -1801,8 +1863,7 @@ def _resolve_aerodrome_route(  # noqa: C901 - explicit, flat routing-priority la
             intent_id=intent_id,
         )
 
-    chain_addrs = AERODROME_ADDRESSES[chain]
-    has_cl = _aerodrome_chain_has_cl(chain_addrs)
+    has_cl = _aerodrome_chain_has_cl(chain)
     classic_req = swap_params.get("classic")
     ts_req = swap_params.get("tick_spacing")
     stable_req = swap_params.get("stable")
@@ -1818,7 +1879,7 @@ def _resolve_aerodrome_route(  # noqa: C901 - explicit, flat routing-priority la
         if getattr(getattr(compiler, "_config", None), "permission_discovery", False):
             logger.info("Aerodrome permission discovery: pinned pool %s not resolved", swap_params["pool"])
         else:
-            return _resolve_aerodrome_pinned_route(compiler, intent_id, from_token, to_token, swap_params, chain_addrs)
+            return _resolve_aerodrome_pinned_route(compiler, intent_id, from_token, to_token, swap_params)
 
     # (2) Explicit Classic.
     if classic_req is True:
@@ -1840,19 +1901,30 @@ def _resolve_aerodrome_route(  # noqa: C901 - explicit, flat routing-priority la
 
     # --- chain has CL from here ---
 
-    # Offline/placeholder cannot verify pools -> legacy default CL@100 for every
-    # CL-eligible path (auto, classic=False, pinned tick_spacing). Permission
-    # discovery only needs calldata shapes, so degrade rather than fail-close.
+    # Permission discovery only needs calldata shapes and may emit every
+    # reviewed generation. A placeholder compile follows the same unresolved
+    # route shape but the downstream generation gate refuses execution unless
+    # the probe still names a reviewed deployment.
     if _aerodrome_is_offline(compiler):
         ts = ts_req if ts_req is not None else 100
         pool_check = _aerodrome_cached_probe(compiler, "cl", from_token.address, to_token.address, ts)
         logger.info(
-            "Aerodrome routing offline/placeholder for %s->%s: defaulting to CL@%s (warn-and-proceed).",
+            "Aerodrome routing offline/placeholder for %s->%s: recording unresolved CL@%s for the downstream "
+            "generation safety gate.",
             from_token.symbol,
             to_token.symbol,
             ts,
         )
-        return _AerodromeRoute(False, ts, False, pool_check, False, "cl", degraded=True)
+        return _AerodromeRoute(
+            False,
+            ts,
+            False,
+            pool_check,
+            False,
+            "cl",
+            degraded=True,
+            deployment=_aerodrome_route_deployment(chain, pool_check),
+        )
 
     # (3) Explicit CL-only (classic=False): never fall back to Classic. A pinned
     #     tick_spacing probes that exact pool once; otherwise probe CL across the
@@ -1860,7 +1932,9 @@ def _resolve_aerodrome_route(  # noqa: C901 - explicit, flat routing-priority la
     if classic_req is False:
         if ts_req is not None:
             pool_check = _aerodrome_cached_probe(compiler, "cl", from_token.address, to_token.address, ts_req)
-            return _AerodromeRoute(False, ts_req, False, pool_check, False, "cl")
+            return _AerodromeRoute(
+                False, ts_req, False, pool_check, False, "cl", deployment=_aerodrome_route_deployment(chain, pool_check)
+            )
         cl_route = _resolve_aerodrome_cl_route(compiler, from_token, to_token, probed=probed)
         if cl_route is not None:
             return cl_route
@@ -1876,10 +1950,13 @@ def _resolve_aerodrome_route(  # noqa: C901 - explicit, flat routing-priority la
     # (4) Explicit tick_spacing (classic unset): CL at that spacing, no fallback.
     if ts_req is not None:
         pool_check = _aerodrome_cached_probe(compiler, "cl", from_token.address, to_token.address, ts_req)
-        return _AerodromeRoute(False, ts_req, False, pool_check, False, "cl")
+        return _AerodromeRoute(
+            False, ts_req, False, pool_check, False, "cl", deployment=_aerodrome_route_deployment(chain, pool_check)
+        )
 
     # (5) Auto. Probe CL across the candidate spacings; first hit wins, an
-    #     unverifiable probe degrades to legacy CL@100 (warn-and-proceed).
+    #     unverifiable probe returns an unresolved CL@100-shaped route. The
+    #     downstream gate permits only discovery or a factory-proven deployment.
     cl_route = _resolve_aerodrome_cl_route(compiler, from_token, to_token, probed=probed)
     if cl_route is not None:
         return cl_route
@@ -1909,6 +1986,135 @@ def _resolve_aerodrome_route(  # noqa: C901 - explicit, flat routing-priority la
         ),
         intent_id=intent_id,
     )
+
+
+def _build_every_generation_cl_swap(
+    adapter: Any, chain: str, token_in: str, token_out: str, amount_in: Decimal, tick_spacing: int
+) -> Any:
+    """Offline CL swap shape: one approve + exactInputSingle per reviewed generation with a router."""
+    from almanak.connectors.aerodrome.adapter import SwapResult
+
+    results = []
+    for deployment in slipstream_lp_deployments(chain):
+        if not deployment.swap_router:
+            continue
+        outcome = adapter.swap_exact_input(
+            token_in=token_in,
+            token_out=token_out,
+            amount_in=amount_in,
+            tick_spacing=tick_spacing,
+            use_classic=False,
+            deployment=deployment,
+        )
+        if not outcome.success:
+            return outcome
+        results.append(outcome)
+    if not results:
+        return SwapResult(success=False, error=f"No reviewed Slipstream generation with a swap router on {chain}")
+    first = results[0]
+    return SwapResult(
+        success=True,
+        transactions=[tx for outcome in results for tx in outcome.transactions],
+        quote=first.quote,
+        amount_in=first.amount_in,
+        amount_out_minimum=first.amount_out_minimum,
+        gas_estimate=sum(int(getattr(outcome, "gas_estimate", 0) or 0) for outcome in results),
+    )
+
+
+def _build_aerodrome_route_swap(
+    compiler,
+    route: _AerodromeRoute,
+    adapter: Any,
+    from_token: Any,
+    to_token: Any,
+    amount_decimal: Decimal,
+    tick_spacing: int,
+    intent_id: str,
+) -> tuple[Any, SlipstreamDeployment | None] | CompilationResult:
+    """Build the swap for a resolved route through the venue the route names.
+
+    A CL route executes through the router of the generation that owns the
+    pool. Only permission discovery, whose bundle is never executed, emits
+    every reviewed generation so the manifest is their union; any executable
+    compile that cannot name the generation refuses rather than choose a
+    router or emit a swap per router. Returns ``(swap_result, deployment)``,
+    with ``deployment`` ``None`` when every generation was emitted.
+    """
+    deployment = route.deployment
+    discovery = bool(getattr(getattr(compiler, "_config", None), "permission_discovery", False))
+    if not route.use_classic and (deployment is None or discovery):
+        if not discovery:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"Cannot resolve which reviewed Slipstream generation owns the CL pool for "
+                    f"{from_token.symbol}->{to_token.symbol} tick_spacing {tick_spacing} on {compiler.chain}; "
+                    f"refusing to choose a swap router. Pin the pool address with swap_params={{'pool': ...}}."
+                ),
+                intent_id=intent_id,
+            )
+        # A manifest must authorise every reviewed router: which generation a
+        # strategy's pools live on is not knowable from the synthetic pair.
+        swap_result = _build_every_generation_cl_swap(
+            adapter, compiler.chain, from_token.symbol, to_token.symbol, amount_decimal, tick_spacing
+        )
+        return swap_result, None
+    swap_result = adapter.swap_exact_input(
+        token_in=from_token.symbol,
+        token_out=to_token.symbol,
+        amount_in=amount_decimal,
+        stable=route.stable,
+        tick_spacing=tick_spacing,
+        use_classic=route.use_classic,
+        deployment=deployment,
+    )
+    return swap_result, deployment
+
+
+def _aerodrome_swap_metadata(
+    compiler,
+    route: _AerodromeRoute,
+    from_token: Any,
+    to_token: Any,
+    amount_decimal: Decimal,
+    tick_spacing: int,
+    deployment: SlipstreamDeployment | None,
+    swap_result: Any,
+) -> dict[str, Any]:
+    """Bundle metadata for a compiled Aerodrome swap.
+
+    ``expected_output_human`` is the pre-slippage quote in human units, read by
+    the result enricher to compute realized slippage after execution.
+    """
+    expected_output_human: Decimal | None = None
+    try:
+        quoted_amount_out = getattr(swap_result.quote, "amount_out", None) if swap_result.quote else None
+        if quoted_amount_out:
+            expected_output_human = Decimal(str(quoted_amount_out)) / Decimal(10**to_token.decimals)
+    except (TypeError, ValueError, AttributeError):
+        expected_output_human = None
+
+    metadata: dict[str, Any] = {
+        "from_token": from_token.to_dict(),
+        "to_token": to_token.to_dict(),
+        "swap_token_meta": build_swap_token_meta(from_token, to_token, chain=compiler.chain),
+        "amount_in": str(amount_decimal),
+        "routing": route.routing,
+        "routing_fallback": route.fallback_used,
+        "stable": route.stable,
+        "protocol": "aerodrome",
+    }
+    # tick_spacing is only meaningful for CL routing; omit for Classic.
+    if not route.use_classic:
+        metadata["tick_spacing"] = tick_spacing
+        metadata["slipstream_deployment"] = deployment.generation if deployment else "all-reviewed"
+        metadata["swap_router"] = deployment.swap_router if deployment else None
+    if route.pinned_pool is not None:
+        metadata["pinned_pool"] = route.pinned_pool
+    if expected_output_human is not None:
+        metadata["expected_output_human"] = str(expected_output_human)
+    return metadata
 
 
 def compile_swap_aerodrome(compiler, intent: SwapIntent) -> CompilationResult:  # noqa: C901
@@ -1984,8 +2190,6 @@ def compile_swap_aerodrome(compiler, intent: SwapIntent) -> CompilationResult:  
         if isinstance(route, CompilationResult):
             return route
 
-        use_classic = route.use_classic
-        stable = route.stable
         # Adapter needs a concrete tick spacing even for Classic routing (unused
         # there); default to 100 when the route did not pin one.
         tick_spacing = route.tick_spacing if route.tick_spacing is not None else 100
@@ -2019,15 +2223,12 @@ def compile_swap_aerodrome(compiler, intent: SwapIntent) -> CompilationResult:  
         )
         adapter = AerodromeAdapter(config)
 
-        # Build swap using adapter
-        swap_result = adapter.swap_exact_input(
-            token_in=from_token.symbol,
-            token_out=to_token.symbol,
-            amount_in=amount_decimal,
-            stable=stable,
-            tick_spacing=tick_spacing,
-            use_classic=use_classic,
+        built = _build_aerodrome_route_swap(
+            compiler, route, adapter, from_token, to_token, amount_decimal, tick_spacing, intent.intent_id
         )
+        if isinstance(built, CompilationResult):
+            return built
+        swap_result, deployment = built
 
         if not swap_result.success:
             return CompilationResult(
@@ -2052,33 +2253,9 @@ def compile_swap_aerodrome(compiler, intent: SwapIntent) -> CompilationResult:  
 
         total_gas = sum(tx.gas_estimate for tx in transactions)
 
-        # VIB-3203: Pre-slippage-discount quote in human units for realized slippage
-        # computation by ResultEnricher after execution.
-        expected_output_human: Decimal | None = None
-        try:
-            quoted_amount_out = getattr(swap_result.quote, "amount_out", None) if swap_result.quote else None
-            if quoted_amount_out:
-                expected_output_human = Decimal(str(quoted_amount_out)) / Decimal(10**to_token.decimals)
-        except (TypeError, ValueError, AttributeError):
-            expected_output_human = None
-
-        metadata: dict[str, Any] = {
-            "from_token": from_token.to_dict(),
-            "to_token": to_token.to_dict(),
-            "swap_token_meta": build_swap_token_meta(from_token, to_token, chain=compiler.chain),
-            "amount_in": str(amount_decimal),
-            "routing": routing,
-            "routing_fallback": route.fallback_used,
-            "stable": stable,
-            "protocol": "aerodrome",
-        }
-        # tick_spacing is only meaningful for CL routing; omit for Classic.
-        if not use_classic:
-            metadata["tick_spacing"] = tick_spacing
-        if route.pinned_pool is not None:
-            metadata["pinned_pool"] = route.pinned_pool
-        if expected_output_human is not None:
-            metadata["expected_output_human"] = str(expected_output_human)
+        metadata = _aerodrome_swap_metadata(
+            compiler, route, from_token, to_token, amount_decimal, tick_spacing, deployment, swap_result
+        )
 
         action_bundle = ActionBundle(
             intent_type=IntentType.SWAP.value,
@@ -2128,9 +2305,11 @@ def _resolve_symbolic_slipstream_pool(
     compiler: _AerodromeCompileImpl,
     intent: LPOpenIntent,
 ) -> _ResolvedSlipstreamPool | CompilationResult:
-    """Resolve a ``TOKEN0/TOKEN1/tick_spacing`` key through the current reviewed factory."""
-    from almanak.connectors.aerodrome.pool_validation import validate_aerodrome_cl_pool
+    """Resolve a ``TOKEN0/TOKEN1/tick_spacing`` key by asking every reviewed factory generation.
 
+    Exactly one generation must own a pool for the key; a key that two
+    generations answer is refused so the caller names the pool address.
+    """
     pool_parts = intent.pool.split("/")
     if len(pool_parts) < 3:
         return CompilationResult(
@@ -2153,16 +2332,12 @@ def _resolve_symbolic_slipstream_pool(
             intent_id=intent.intent_id,
         )
 
-    deployments = slipstream_lp_deployments(compiler.chain)
-    if not deployments:
+    if not slipstream_lp_deployments(compiler.chain):
         return CompilationResult(
             status=CompilationStatus.FAILED,
             error=f"Aerodrome Slipstream CL not supported on chain '{compiler.chain}'. Only 'base' is supported.",
             intent_id=intent.intent_id,
         )
-    # New positions always use the newest reviewed factory/NPM pair.
-    # Historical pairs remain available only to close positions they own.
-    deployment = deployments[0]
 
     # Resolve tokens
     token0_info = compiler._resolve_token(token0_symbol)
@@ -2197,25 +2372,31 @@ def _resolve_symbolic_slipstream_pool(
             intent_id=intent.intent_id,
         )
 
-    # Validate pool existence
-    pool_check = validate_aerodrome_cl_pool(
+    from . import pool_validation
+
+    # With no ``deployment`` the validator asks every reviewed generation and
+    # confirms only a key exactly one of them owns, naming that factory.
+    pool_check = pool_validation.validate_aerodrome_cl_pool(
         compiler.chain,
         token0_info.address,
         token1_info.address,
         tick_spacing,
         compiler._get_chain_rpc_url(),
         gateway_client=compiler._gateway_client,
-        deployment=deployment,
     )
     failed = compiler._validate_pool(pool_check, intent.intent_id)
     if failed is not None:
         return failed
 
-    if not pool_check.pool_address:
+    deployment = _aerodrome_route_deployment(compiler.chain, pool_check)
+    if deployment is None or not pool_check.pool_address:
+        detail = pool_check.warning or pool_check.error or "no reviewed generation confirmed the pool"
         return CompilationResult(
             status=CompilationStatus.FAILED,
-            error="Slipstream factory confirmed a pool without returning its address",
-            is_safety_refusal=True,
+            error=(
+                f"Cannot resolve which reviewed Slipstream generation owns {intent.pool} on {compiler.chain}: "
+                f"{detail}. Name the pool address instead."
+            ),
             intent_id=intent.intent_id,
         )
     return _ResolvedSlipstreamPool(token0_info, token1_info, tick_spacing, deployment, pool_check)
@@ -2235,10 +2416,8 @@ def _resolve_exact_slipstream_pool(
     inference, tick-spacing auto-selection, or alternate-pool substitution is
     permitted — the same contract as the Uniswap V3-family exact lane.
 
-    New positions are still admitted only through the current reviewed
-    generation (blueprint 05, VIB-6679); an authenticated legacy-generation
-    pool is refused with the generation named so the caller can pick the
-    current-generation venue for that pair (generation policy is ALM-3451).
+    Every reviewed generation is admitted: the pool's factory selects the
+    position manager that will own the new NFT.
     """
     from almanak.connectors.aerodrome.pool_validation import (
         read_slipstream_cl_pool_binding,
@@ -2252,8 +2431,7 @@ def _resolve_exact_slipstream_pool(
             intent_id=intent_id,
         )
 
-    deployments = slipstream_lp_deployments(compiler.chain)
-    if not deployments:
+    if not slipstream_lp_deployments(compiler.chain):
         return CompilationResult(
             status=CompilationStatus.FAILED,
             error=f"Aerodrome Slipstream CL not supported on chain '{compiler.chain}'. Only 'base' is supported.",
@@ -2335,19 +2513,6 @@ def _resolve_exact_slipstream_pool(
                 f"Exact Slipstream pool {pool_address} is not the reviewed {deployment.generation} factory's pool "
                 f"for {binding.token0}/{binding.token1} tick_spacing {binding.tick_spacing} on {compiler.chain}; "
                 f"the factory returned {canonical or 'no pool'}. Refusing alternate-pool substitution."
-            ),
-            intent_id=intent_id,
-        )
-
-    current = deployments[0]
-    if deployment != current:
-        return CompilationResult(
-            status=CompilationStatus.FAILED,
-            error=(
-                f"Exact Slipstream pool {pool_address} belongs to the {deployment.generation} factory generation "
-                f"({deployment.factory}); new positions are admitted only through the current reviewed "
-                f"factory/position-manager pair ({current.factory}). Name the current-generation pool for "
-                f"{token0_info.symbol}/{token1_info.symbol} instead (generation policy: ALM-3451)."
             ),
             intent_id=intent_id,
         )
@@ -2695,13 +2860,28 @@ def compile_lp_close_aerodrome_slipstream(compiler, intent: LPCloseIntent) -> Co
         )
         adapter = AerodromeAdapter(config)
 
+        if permission_discovery:
+            return _compile_discovery_position_bundle(
+                result,
+                IntentType.LP_CLOSE,
+                reviewed_deployments,
+                lambda deployment: adapter.remove_cl_liquidity(
+                    token_id=token_id, recipient=compiler.wallet_address, deployment=deployment
+                ),
+                metadata={
+                    "position_id": intent.position_id,
+                    "token_id": token_id,
+                    "protocol": "aerodrome_slipstream",
+                    "collect_fees": intent.collect_fees,
+                },
+                intent_id=intent.intent_id,
+            )
+
         resolved = _resolve_slipstream_position(
             compiler=compiler,
             adapter=adapter,
             token_id=token_id,
             intent_id=intent.intent_id,
-            permission_discovery=permission_discovery,
-            reviewed_deployments=reviewed_deployments,
             expected_pool=intent.pool,
         )
         if isinstance(resolved, CompilationResult):
@@ -2885,13 +3065,29 @@ def compile_collect_fees_aerodrome_slipstream(compiler, intent: CollectFeesInten
         )
         adapter = AerodromeAdapter(config)
 
+        if permission_discovery:
+            return _compile_discovery_position_bundle(
+                result,
+                IntentType.LP_COLLECT_FEES,
+                reviewed_deployments,
+                lambda deployment: adapter.collect_cl_fees(
+                    token_id=token_id, recipient=compiler.wallet_address, deployment=deployment
+                ),
+                metadata={
+                    "pool": intent.pool,
+                    "position_id": str(position_id_raw),
+                    "token_id": token_id,
+                    "protocol": "aerodrome_slipstream",
+                    "chain": compiler.chain,
+                },
+                intent_id=intent.intent_id,
+            )
+
         resolved = _resolve_slipstream_position(
             compiler=compiler,
             adapter=adapter,
             token_id=token_id,
             intent_id=intent.intent_id,
-            permission_discovery=permission_discovery,
-            reviewed_deployments=reviewed_deployments,
             expected_pool=intent.pool,
         )
         if isinstance(resolved, CompilationResult):

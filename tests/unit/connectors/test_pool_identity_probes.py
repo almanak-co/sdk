@@ -27,6 +27,7 @@ WETH = "0x4200000000000000000000000000000000000006"
 USDC = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
 POOL = "0x0b1c2dcbbfa744ebd3fc17ff1a96a1e1eb4b2d69"
 FACTORY = "0x33128a8fc17869897dce68ed026d694621f6fdfd"
+SECOND_FACTORY = "0x1111111111111111111111111111111111111111"
 
 
 def _word(value: int) -> bytes:
@@ -73,6 +74,34 @@ def test_clamm_probe_verified_when_factory_acknowledges():
     assert payload is not None
     assert payload["protocol"] == "uniswap_v3"
     assert payload["fee_tier"] == 10000
+    assert payload["factory_verified"] == "verified"
+
+
+def test_clamm_probe_abstains_without_factories():
+    spec = _spec(factory_addresses={})
+    with _patch_calls({}) as eth_call:
+        assert identify_clamm_pool(spec, "base", POOL) is None
+    eth_call.assert_not_called()
+
+
+def test_clamm_probe_checks_every_factory_generation_until_one_acknowledges():
+    selector = "0x1698ee82"
+    spec = _spec(
+        factory_addresses={},
+        factory_generations={"base": (FACTORY, SECOND_FACTORY)},
+        get_pool_selector=selector,
+    )
+    get_pool_data = encode_get_pool(selector, WETH, USDC, 10000)
+    script = _v3_pool_script(acknowledged="0x" + "99" * 20)
+    script[(SECOND_FACTORY, get_pool_data)] = _addr(POOL)
+
+    with _patch_calls(script) as eth_call:
+        payload = identify_clamm_pool(spec, "base", POOL)
+
+    factory_calls = [call.args[1].lower() for call in eth_call.call_args_list if call.args[2] == get_pool_data]
+    assert factory_calls == [FACTORY, SECOND_FACTORY]
+    assert payload is not None
+    assert payload["factory"] == SECOND_FACTORY
     assert payload["factory_verified"] == "verified"
 
 

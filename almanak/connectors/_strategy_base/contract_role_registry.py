@@ -115,8 +115,8 @@ class NpmView(StrEnum):
     #: PancakeSwap V3's own NPM -> ``PANCAKESWAP_V3_NFT_POSITION_MANAGERS``
     #: (lowercased, ``bnb`` alias).
     PANCAKESWAP = "pancakeswap"
-    #: Aerodrome / Velodrome Slipstream ``cl_nft`` ->
-    #: ``SLIPSTREAM_NFT_POSITION_MANAGERS`` (lowercased).
+    #: Aerodrome / Velodrome Slipstream reviewed CL managers ->
+    #: ``SLIPSTREAM_NFT_POSITION_MANAGER_SETS`` (lowercased tuples).
     SLIPSTREAM = "slipstream"
     #: Uniswap V4's per-chain ``PositionManager`` ->
     #: ``UNIV4_NFT_POSITION_MANAGERS`` (lowercased). V4 LP positions hash their

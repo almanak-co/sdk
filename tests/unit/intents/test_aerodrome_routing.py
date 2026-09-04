@@ -29,6 +29,7 @@ from almanak.connectors._strategy_base.pool_validation_base import (
     PoolValidationReason,
     PoolValidationResult,
 )
+from almanak.connectors.aerodrome.addresses import slipstream_lp_deployments
 from almanak.connectors.aerodrome.compiler import compile_swap_aerodrome
 from almanak.framework.intents.compiler import CompilationStatus
 from almanak.framework.intents.vocabulary import Intent, SwapIntent
@@ -39,6 +40,12 @@ _T1_ADDR = "0x" + "bb" * 20
 
 _PV_CL = "almanak.connectors.aerodrome.pool_validation.validate_aerodrome_cl_pool"
 _PV_CLASSIC = "almanak.connectors.aerodrome.pool_validation.validate_aerodrome_pool"
+
+# Reviewed Slipstream generations on Base, named explicitly: the pool's factory
+# decides which one a swap executes on, so tests state which factory owns the pool.
+_DEPLOYMENTS_BASE = slipstream_lp_deployments("base")
+_CURRENT = next(d for d in _DEPLOYMENTS_BASE if d.generation == "current")
+_LEGACY = next(d for d in _DEPLOYMENTS_BASE if d.generation == "legacy")
 
 
 # ===========================================================================
@@ -187,8 +194,11 @@ class _FakeSwapCompiler:
         return None
 
 
-def _confirmed(address: str = "0x" + "cc" * 20) -> PoolValidationResult:
-    return PoolValidationResult(exists=True, reason=PoolValidationReason.CONFIRMED, pool_address=address)
+def _confirmed(address: str = "0x" + "cc" * 20, *, factory: str | None = _CURRENT.factory) -> PoolValidationResult:
+    """A confirmed pool; ``factory`` names the reviewed generation that owns it."""
+    return PoolValidationResult(
+        exists=True, reason=PoolValidationReason.CONFIRMED, pool_address=address, factory=factory
+    )
 
 
 def _absent_cl(tick_spacing: int) -> PoolValidationResult:
@@ -269,8 +279,32 @@ def test_auto_cl_hit_routes_cl_no_fallback() -> None:
     assert result.action_bundle.metadata["routing"] == "cl"
     assert result.action_bundle.metadata["routing_fallback"] is False
     assert result.action_bundle.metadata["tick_spacing"] == 100
-    # Adapter invoked with CL routing.
+    # Adapter invoked with CL routing on the generation that owns the pool.
     assert swap_call.call_args.kwargs["use_classic"] is False
+    assert swap_call.call_args.kwargs["deployment"] == _CURRENT
+    assert result.action_bundle.metadata["slipstream_deployment"] == "current"
+    assert result.action_bundle.metadata["swap_router"] == _CURRENT.swap_router
+
+
+def test_auto_cl_hit_on_legacy_factory_routes_through_legacy_router() -> None:
+    """The pool's factory picks the router: a legacy-owned pool executes on the legacy router."""
+    compiler = _FakeSwapCompiler()
+    result, swap_call = _run(compiler, _intent(), cl_return=_confirmed(factory=_LEGACY.factory))
+    assert result.status == CompilationStatus.SUCCESS, result.error
+    assert result.action_bundle.metadata["routing"] == "cl"
+    assert swap_call.call_args.kwargs["deployment"] == _LEGACY
+    assert result.action_bundle.metadata["slipstream_deployment"] == "legacy"
+    assert result.action_bundle.metadata["swap_router"] == _LEGACY.swap_router
+
+
+@pytest.mark.parametrize("factory", [None, "0x" + "dd" * 20], ids=["no-factory", "unreviewed-factory"])
+def test_online_cl_hit_without_reviewed_factory_refuses_router_choice(factory: str | None) -> None:
+    """A confirmed pool no reviewed generation claims must not be routed by guessing a router."""
+    compiler = _FakeSwapCompiler()
+    result, swap_call = _run(compiler, _intent(), cl_return=_confirmed(factory=factory))
+    assert result.status == CompilationStatus.FAILED
+    assert "refusing to choose a swap router" in (result.error or "")
+    swap_call.assert_not_called()
 
 
 def test_positive_sub_basis_point_slippage_is_a_safety_refusal() -> None:
@@ -406,22 +440,42 @@ def test_explicit_tick_spacing_probes_once_no_fallback() -> None:
     assert swap_call.call_args.kwargs["tick_spacing"] == 200
 
 
-def test_offline_degrades_to_legacy_default_warn_and_proceed() -> None:
-    """Offline/placeholder mode: probes return exists=None; auto routing degrades
-    to the legacy CL@100 default and proceeds (permission-discovery friendly)."""
+def test_placeholder_compile_without_a_named_generation_refuses_rather_than_emit_every_router() -> None:
+    """Placeholder-price mode is still an executable compile: probes return
+    exists=None, auto routing degrades to CL@100, but no generation can be named,
+    so the compile refuses instead of choosing a router or emitting one swap per
+    router (which a funded wallet would execute twice)."""
     compiler = _FakeSwapCompiler(offline=True)
+    result, swap_call = _run(compiler, _intent(), cl_return=_unknown(), classic_return=_unknown())
+    assert result.status == CompilationStatus.FAILED
+    assert "refusing to choose a swap router" in (result.error or "")
+    assert swap_call.call_count == 0
+
+
+def test_permission_discovery_emits_every_reviewed_router() -> None:
+    """Permission discovery never executes its bundle, so it enumerates every
+    reviewed generation's router; the manifest is their union."""
+    compiler = _FakeSwapCompiler(offline=True)
+    compiler._config.permission_discovery = True
     result, swap_call = _run(compiler, _intent(), cl_return=_unknown(), classic_return=_unknown())
     assert result.status == CompilationStatus.SUCCESS, result.error
     assert result.action_bundle.metadata["routing"] == "cl"
     assert result.action_bundle.metadata["tick_spacing"] == 100
-    assert swap_call.call_args.kwargs["use_classic"] is False
+    assert result.action_bundle.metadata["slipstream_deployment"] == "all-reviewed"
+    assert result.action_bundle.metadata["swap_router"] is None
+    routed = [call.kwargs["deployment"] for call in swap_call.call_args_list]
+    assert routed == [d for d in _DEPLOYMENTS_BASE if d.swap_router]
+    assert len(routed) > 1, "both reviewed routers must be emitted, not a chosen one"
+    assert all(call.kwargs["use_classic"] is False for call in swap_call.call_args_list)
+    assert len(result.transactions) == len(routed)
 
 
-def test_online_unverifiable_probe_degrades_not_fail_closed() -> None:
+def test_online_unverifiable_probe_refuses_router_choice_not_cached_absent_probe() -> None:
     """Online auto routing where CL@100 is *confirmed absent* but a later candidate
-    spacing is *unverifiable* (exists=None) must degrade to legacy CL@100 and
-    warn-and-proceed -- NOT fail closed on the cached absent CL@100 probe (the
-    degraded route must carry the unverifiable probe so _validate_pool passes)."""
+    spacing is *unverifiable* (exists=None) degrades to CL@100 carrying the
+    unverifiable probe, so it must NOT fail closed on the cached absent CL@100
+    probe. That degraded probe names no factory, and online the compile refuses
+    to choose a swap router rather than guess a generation."""
     compiler = _FakeSwapCompiler()  # online (not placeholder/permission-discovery)
 
     def cl_effect(chain, a, b, ts, rpc, gateway_client=None):
@@ -438,10 +492,12 @@ def test_online_unverifiable_probe_degrades_not_fail_closed() -> None:
         cl_side_effect=cl_effect,
         classic_side_effect=lambda *a, **k: _absent_classic(),
     )
-    assert result.status == CompilationStatus.SUCCESS, result.error
-    assert result.action_bundle.metadata["routing"] == "cl"
-    assert result.action_bundle.metadata["tick_spacing"] == 100
-    assert swap_call.call_args.kwargs["use_classic"] is False
+    assert result.status == CompilationStatus.FAILED
+    error = result.error or ""
+    assert "no cl pool ts=100" not in error, "must not fail closed on the cached absent CL@100 probe"
+    assert "refusing to choose a swap router" in error
+    assert "tick_spacing 100" in error
+    swap_call.assert_not_called()
 
 
 def test_price_impact_guard_still_runs_on_classic_fallback() -> None:

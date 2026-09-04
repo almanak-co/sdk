@@ -922,6 +922,44 @@ async def fetch_v3_twap_series(
     return [point_by_block[sample] for sample in block_samples]
 
 
+# ``factory()`` on a V3-shaped pool.
+_POOL_FACTORY_SELECTOR = "c45a0155"
+
+
+def _normalized_factory_address(factory_address: str | None) -> str:
+    """Lowercase 0x-address or empty when malformed."""
+    normalized = factory_address.strip().lower() if isinstance(factory_address, str) else ""
+    if (
+        len(normalized) != 42
+        or not normalized.startswith("0x")
+        or any(char not in "0123456789abcdef" for char in normalized[2:])
+    ):
+        return ""
+    return normalized
+
+
+async def _reviewed_factory_of_pool(
+    web3: Any,
+    pool_checksum: str,
+    block: int,
+    factory_for_pool: Callable[[str], str | None],
+    protocol: str,
+) -> str:
+    """The pool's own ``factory()`` mapped through the connector's reviewed set; raises when unreviewed."""
+    reported_raw = await web3.eth.call(
+        {"to": pool_checksum, "data": f"0x{_POOL_FACTORY_SELECTOR}"},
+        block_identifier=block,
+    )
+    if len(reported_raw) < 32:
+        raise ValueError(f"factory() returned {len(reported_raw)} bytes; need 32")
+    reported_factory = "0x" + bytes(reported_raw)[-20:].hex()
+    reviewed_factory = factory_for_pool(reported_factory)
+    normalized = _normalized_factory_address(reviewed_factory) if reviewed_factory else ""
+    if not normalized:
+        raise ValueError(f"pool reports factory {reported_factory}, which is not a reviewed {protocol} factory")
+    return normalized
+
+
 async def fetch_v3_pool_state_series(
     servicer: Any,
     *,
@@ -931,10 +969,11 @@ async def fetch_v3_pool_state_series(
     end_ts: int,
     interval_secs: int,
     protocol: str,
-    factory_address: str,
+    factory_address: str | None = None,
     factory_get_pool_selector: str = "0x1698ee82",
     factory_pool_key_selector: str = "0xddca3f43",
     factory_pool_key_signed: bool = False,
+    factory_for_pool: Callable[[str], str | None] | None = None,
 ) -> list[Any]:
     """Read and factory-authenticate exact V3-compatible state.
 
@@ -942,18 +981,25 @@ async def fetch_v3_pool_state_series(
     notably Aerodrome Slipstream, key them by signed ``tickSpacing()`` and use
     a different factory selector. The connector supplies those two ABI facts;
     the archive state reader remains shared.
+
+    The authenticating factory is either ``factory_address`` (one registered
+    factory) or, for families with several reviewed factory generations, the
+    one ``factory_for_pool`` returns for the pool's own ``factory()`` — the
+    pool decides its generation, and the connector decides whether that
+    generation is reviewed (``None`` refuses).
     """
     from almanak.gateway.services.rate_history_service import (
         DexPoolStatePoint,
         RateHistoryUnavailable,
     )
 
-    normalized_factory = factory_address.strip().lower() if isinstance(factory_address, str) else ""
-    if (
-        len(normalized_factory) != 42
-        or not normalized_factory.startswith("0x")
-        or any(char not in "0123456789abcdef" for char in normalized_factory[2:])
-    ):
+    if (factory_address is None) == (factory_for_pool is None):
+        raise RateHistoryUnavailable(
+            protocol,
+            f"exactly one of factory_address / factory_for_pool must be supplied for {protocol} on {chain!r}",
+        )
+    normalized_factory = _normalized_factory_address(factory_address) if factory_address is not None else ""
+    if factory_address is not None and not normalized_factory:
         raise RateHistoryUnavailable(
             protocol,
             f"invalid or missing factory address for {protocol} on {chain!r}: {factory_address!r}",
@@ -1023,6 +1069,10 @@ async def fetch_v3_pool_state_series(
         )
         from almanak.connectors._base.v3_pool_abi import encode_get_pool
 
+        if factory_for_pool is not None:
+            normalized_factory = await _reviewed_factory_of_pool(
+                web3, pool_checksum, unique_blocks[-1][0], factory_for_pool, protocol
+            )
         factory_checksum = web3.to_checksum_address(normalized_factory)
         canonical_raw = await web3.eth.call(
             {

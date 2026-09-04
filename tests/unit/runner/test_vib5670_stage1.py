@@ -250,13 +250,12 @@ class TestEmitPositionEventWalletThreading:
 class TestRegistryResolveChainParam:
     """``_registry_resolve_chain_and_nft_manager`` honours an explicit chain."""
 
+    _CANDIDATES = "almanak.framework.migration.backfill._nft_manager_candidates_for_protocol_chain"
+
     def test_none_uses_strategy_chain(self):
         runner = _make_runner()
         strategy = _make_strategy()
-        with patch(
-            "almanak.framework.migration.backfill._nft_manager_for_protocol_chain",
-            return_value="0xNPM",
-        ) as nft:
+        with patch(self._CANDIDATES, return_value=("0xNPM",)) as nft:
             out = runner._registry_resolve_chain_and_nft_manager(strategy, "LP_OPEN", "uniswap_v3")
         assert out == ("arbitrum", "0xNPM")
         assert nft.call_args.args[1] == "arbitrum"
@@ -264,13 +263,35 @@ class TestRegistryResolveChainParam:
     def test_explicit_chain_wins(self):
         runner = _make_runner()
         strategy = _make_strategy()
-        with patch(
-            "almanak.framework.migration.backfill._nft_manager_for_protocol_chain",
-            return_value="0xNPM",
-        ) as nft:
+        with patch(self._CANDIDATES, return_value=("0xNPM",)) as nft:
             out = runner._registry_resolve_chain_and_nft_manager(strategy, "LP_OPEN", "uniswap_v3", chain="polygon")
         assert out == ("polygon", "0xNPM")
         assert nft.call_args.args[1] == "polygon"
+
+    def test_no_candidates_returns_none(self):
+        runner = _make_runner()
+        strategy = _make_strategy()
+        with patch(self._CANDIDATES, return_value=()):
+            out = runner._registry_resolve_chain_and_nft_manager(strategy, "LP_OPEN", "uniswap_v3")
+        assert out is None
+
+    def test_several_candidates_leave_manager_to_the_receipt(self):
+        """Several reviewed managers: the chain resolves but no manager is
+        named, so the row builders must read the authority from the receipt."""
+        runner = _make_runner()
+        strategy = _make_strategy()
+        with patch(self._CANDIDATES, return_value=("0xNPM-current", "0xNPM-legacy")):
+            out = runner._registry_resolve_chain_and_nft_manager(strategy, "LP_OPEN", "aerodrome_slipstream")
+        assert out == ("arbitrum", "")
+
+    def test_slipstream_base_is_multi_generation_unpatched(self):
+        """The real registry: Aerodrome Slipstream on Base has two reviewed
+        managers, so no single manager is ever returned for it."""
+        runner = _make_runner()
+        strategy = _make_strategy()
+        strategy.chain = "base"
+        out = runner._registry_resolve_chain_and_nft_manager(strategy, "LP_OPEN", "aerodrome_slipstream")
+        assert out == ("base", "")
 
 
 # =============================================================================

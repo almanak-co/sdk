@@ -6,6 +6,9 @@ mint calldata. Money-critical input invariants must be enforced at the
 adapter boundary so an upstream bug (negative wei, min > desired) fails
 loudly at compile time instead of producing malformed calldata or a
 guaranteed on-chain revert.
+
+Every call names the reviewed Slipstream generation that owns the pool; the
+guards under test sit behind that admission gate.
 """
 
 from decimal import Decimal
@@ -17,11 +20,15 @@ from almanak.connectors.aerodrome.adapter import (
     AerodromeAdapter,
     AerodromeConfig,
 )
+from almanak.connectors.aerodrome.addresses import slipstream_deployment_for_factory
 from almanak.framework.data.tokens.models import ResolvedToken
 
 TEST_WALLET = "0x1234567890123456789012345678901234567890"
 USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
 WETH_ADDRESS = "0x4200000000000000000000000000000000000006"
+
+CURRENT = slipstream_deployment_for_factory("base", "0xf8f2eB4940CFE7d13603DDDD87f123820Fc061Ef")
+assert CURRENT is not None
 
 
 @pytest.fixture
@@ -36,11 +43,19 @@ def adapter():
     def _resolve(symbol_or_addr: str, *args: object, **kwargs: object) -> ResolvedToken:
         if symbol_or_addr in ("USDC", USDC_ADDRESS):
             return ResolvedToken(
-                symbol="USDC", address=USDC_ADDRESS, decimals=6, chain="base", chain_id=8453,
+                symbol="USDC",
+                address=USDC_ADDRESS,
+                decimals=6,
+                chain="base",
+                chain_id=8453,
             )
         if symbol_or_addr in ("WETH", WETH_ADDRESS):
             return ResolvedToken(
-                symbol="WETH", address=WETH_ADDRESS, decimals=18, chain="base", chain_id=8453,
+                symbol="WETH",
+                address=WETH_ADDRESS,
+                decimals=18,
+                chain="base",
+                chain_id=8453,
             )
         raise AssertionError(f"Unexpected token in test: {symbol_or_addr}")
 
@@ -76,6 +91,7 @@ class TestWeiOverloadAllOrNone:
             tick_upper=200,
             amount_a=Decimal("0"),
             amount_b=Decimal("0"),
+            deployment=CURRENT,
             **kwargs,
         )
         assert result.success is False
@@ -88,10 +104,10 @@ class TestWeiOverloadInvariantGuards:
     @pytest.mark.parametrize(
         "amounts",
         [
-            (-1, 200, 50, 60),      # negative amount_a
-            (100, -200, 50, 60),    # negative amount_b
-            (100, 200, -1, 60),     # negative min_a
-            (100, 200, 50, -1),     # negative min_b
+            (-1, 200, 50, 60),  # negative amount_a
+            (100, -200, 50, 60),  # negative amount_b
+            (100, 200, -1, 60),  # negative min_a
+            (100, 200, 50, -1),  # negative min_b
         ],
     )
     def test_negative_wei_rejected(self, adapter: AerodromeAdapter, amounts: tuple[int, int, int, int]) -> None:
@@ -109,6 +125,7 @@ class TestWeiOverloadInvariantGuards:
             amount_b_wei=b_wei,
             amount_a_min_wei=a_min,
             amount_b_min_wei=b_min,
+            deployment=CURRENT,
         )
         assert result.success is False
         assert "non-negative" in (result.error or "").lower()
@@ -140,6 +157,7 @@ class TestWeiOverloadInvariantGuards:
             amount_b_wei=b_wei,
             amount_a_min_wei=a_min,
             amount_b_min_wei=b_min,
+            deployment=CURRENT,
         )
         assert result.success is False
         assert "<= desired" in (result.error or "")
@@ -153,7 +171,7 @@ class TestWeiOverloadInvariantGuards:
         # need to assert the guard does NOT short-circuit on zeros, so we
         # patch the SDK call to a benign success.
         adapter.sdk.build_cl_mint_tx = MagicMock(  # type: ignore[method-assign]
-            return_value={"to": adapter.addresses["cl_nft"], "value": 0, "data": b"\x00" * 4},
+            return_value={"to": CURRENT.position_manager, "value": 0, "data": b"\x00" * 4},
         )
         adapter._get_web3 = MagicMock(return_value=MagicMock())  # type: ignore[method-assign]
         result = adapter.add_cl_liquidity(
@@ -168,5 +186,26 @@ class TestWeiOverloadInvariantGuards:
             amount_b_wei=0,
             amount_a_min_wei=0,
             amount_b_min_wei=0,
+            deployment=CURRENT,
         )
         assert result.success is True
+
+    def test_missing_deployment_is_refused_ahead_of_the_wei_guards(self, adapter: AerodromeAdapter) -> None:
+        """No generation means no manager to approve or mint on, whatever the amounts say."""
+        adapter.sdk.build_cl_mint_tx = MagicMock()  # type: ignore[method-assign]
+        result = adapter.add_cl_liquidity(
+            token_a="USDC",
+            token_b="WETH",
+            tick_spacing=200,
+            tick_lower=-200,
+            tick_upper=200,
+            amount_a=Decimal("0"),
+            amount_b=Decimal("0"),
+            amount_a_wei=-1,
+            amount_b_wei=200,
+            amount_a_min_wei=50,
+            amount_b_min_wei=60,
+        )
+        assert result.success is False
+        assert "requires the reviewed generation" in (result.error or "")
+        adapter.sdk.build_cl_mint_tx.assert_not_called()

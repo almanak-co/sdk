@@ -54,7 +54,7 @@ from almanak.framework.intents.compiler_constants import (
     AAVE_COMPATIBLE_PROTOCOLS,
     GMX_COMPATIBLE_PROTOCOLS,
     PANCAKESWAP_V3_NFT_POSITION_MANAGERS,
-    SLIPSTREAM_NFT_POSITION_MANAGERS,
+    SLIPSTREAM_NFT_POSITION_MANAGER_SETS,
     UNIV3_LP_GROUPING_PROTOCOLS,
     UNIV3_NFT_POSITION_MANAGERS,
     UNIV4_LP_GROUPING_PROTOCOLS,
@@ -1645,16 +1645,40 @@ def _nft_manager_for_chain(chain: str) -> str | None:
 # V3 on the same chain. VIB-4864 (W2-followup): these derived views live in
 # ``compiler_constants`` and are sourced from each connector's
 # self-contained ``addresses.py`` (W1 / VIB-4853) — the migration backfill
-# no longer imports connector ``receipt_parser`` modules. Each view is
-# byte-equivalent to the parser map it replaces (lowercased addresses,
-# ``bnb`` alias preserved). Protocols absent from this map fall through to
-# the canonical UniV3-family lookup (``uniswap_v3`` / ``sushiswap_v3`` share
-# the canonical NPM on the chains they support today).
-_NPM_ADDRESSES_BY_PROTOCOL: dict[str, dict[str, str]] = {
-    "aerodrome_slipstream": SLIPSTREAM_NFT_POSITION_MANAGERS,
-    "velodrome_slipstream": SLIPSTREAM_NFT_POSITION_MANAGERS,
-    "pancakeswap_v3": PANCAKESWAP_V3_NFT_POSITION_MANAGERS,
+# no longer imports connector ``receipt_parser`` modules (lowercased
+# addresses, ``bnb`` alias preserved). Every chain entry is the full set of
+# reviewed managers: a single-generation fork has one, a fork with several
+# reviewed generations on one chain has one per generation, and the
+# receipt, not this table, names the one a position lives under. Protocols
+# absent from this map fall through to the canonical UniV3-family lookup
+# (``uniswap_v3`` / ``sushiswap_v3`` share the canonical NPM on the chains
+# they support today).
+_NPM_ADDRESS_SETS_BY_PROTOCOL: dict[str, dict[str, tuple[str, ...]]] = {
+    "aerodrome_slipstream": SLIPSTREAM_NFT_POSITION_MANAGER_SETS,
+    "pancakeswap_v3": {chain: (manager,) for chain, manager in PANCAKESWAP_V3_NFT_POSITION_MANAGERS.items()},
+    # No reviewed Velodrome Slipstream generation exists yet; the Aerodrome
+    # Base managers must never be offered as authorities for that slug.
+    "velodrome_slipstream": {},
 }
+
+
+def _nft_manager_candidates_for_protocol_chain(protocol: str, chain: str) -> tuple[str, ...]:
+    """Every NPM that may own a ``(protocol, chain)`` position; empty when none is registered.
+
+    One candidate means the registry can name the authority itself; several
+    mean the authority must be read from the receipt (each Slipstream
+    generation mints under its own manager).
+    """
+    chain_norm = (chain or "").strip().lower()
+    protocol_norm = (protocol or "").strip().lower()
+    if protocol_norm in _UNIV4_LP_PROTOCOLS:
+        manager = _position_manager_for_univ4_chain(chain_norm)
+        return (manager,) if manager else ()
+    set_map = _NPM_ADDRESS_SETS_BY_PROTOCOL.get(protocol_norm)
+    if set_map is not None:
+        return tuple(manager for manager in set_map.get(chain_norm) or () if manager)
+    manager = _nft_manager_for_chain(chain_norm)
+    return (manager,) if manager else ()
 
 
 def _nft_manager_for_protocol_chain(protocol: str, chain: str) -> str | None:
@@ -1687,18 +1711,13 @@ def _nft_manager_for_protocol_chain(protocol: str, chain: str) -> str | None:
       supports today).
 
     Returns ``None`` (NOT ``""``) on unrecognized chains, so the caller
-    can distinguish "no NPM registered" from "NPM is the empty string".
+    can distinguish "no NPM registered" from "NPM is the empty string", and
+    ``None`` when several reviewed managers are candidates — there is then no
+    single canonical NPM to return (see
+    :func:`_nft_manager_candidates_for_protocol_chain`).
     """
-    chain_norm = (chain or "").strip().lower()
-    protocol_norm = (protocol or "").strip().lower()
-    # VIB-4583: V4 resolves through its own PositionManager view (membership
-    # checked against the registry-derived family set, not a name literal).
-    if protocol_norm in _UNIV4_LP_PROTOCOLS:
-        return _position_manager_for_univ4_chain(chain_norm)
-    fork_map = _NPM_ADDRESSES_BY_PROTOCOL.get(protocol_norm)
-    if fork_map is not None:
-        return fork_map.get(chain_norm) or None
-    return _nft_manager_for_chain(chain_norm)
+    candidates = _nft_manager_candidates_for_protocol_chain(protocol, chain)
+    return candidates[0] if len(candidates) == 1 else None
 
 
 def _position_manager_for_univ4_chain(chain: str) -> str | None:

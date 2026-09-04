@@ -30,7 +30,7 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.connectors.aerodrome.addresses import slipstream_lp_deployments
+from almanak.connectors.aerodrome.addresses import slipstream_deployment_for_factory
 from almanak.connectors.aerodrome.receipt_parser import (
     AerodromeSlipstreamReceiptParser,
 )
@@ -82,24 +82,27 @@ from tests.intents.conftest import (
 CHAIN_NAME = "base"
 PROTOCOL = "aerodrome_slipstream"
 
-# New positions use the newest reviewed factory/manager pair. Legacy positions
-# remain closeable through their receipt- and ownership-derived manager.
-SLIPSTREAM_DEPLOYMENT = slipstream_lp_deployments("base")[0]
+# The pool below lives on the current reviewed factory; the generation (and so
+# the position manager) is decided by that pool, never by a default.
+CURRENT_FACTORY = "0xf8f2eB4940CFE7d13603DDDD87f123820Fc061Ef"
+_current = slipstream_deployment_for_factory("base", CURRENT_FACTORY)
+assert _current is not None and _current.generation == "current"
+SLIPSTREAM_DEPLOYMENT = _current
 POSITION_MANAGER = SLIPSTREAM_DEPLOYMENT.position_manager
 FIXED_PRICE_ORACLE = {"USDC": Decimal("1"), "WETH": Decimal("3000")}
 ALM_3074_O_TOKEN = "0x182fa643e5f29d5eca75e7b9cf9336a3fe4620b2"
 ALM_3074_O_USDC_POOL = "0x8d479a4c680a76d4ae03f10203569558405ddfff"
 
 # Pool: WETH/USDC, tick_spacing=50 on the reviewed current Slipstream factory
-# (the same generation and spacing used by the demo strategy). The prior
-# deployment's WETH/USDC pool used spacing 200; crossing those generations is
-# exactly the authority mismatch this suite now prevents.
+# (the same venue the demo strategy uses), named by ADDRESS: the symbolic key
+# WETH/USDC/50 also exists on the legacy factory, so the compiler refuses it
+# as ambiguous and the address is the only way to name this venue.
 #
 # Token order: Base WETH (0x4200…) < USDC (0x8335…) by address, so
 # token0=WETH, token1=USDC. Ticks therefore measure log(USDC_raw/WETH_raw),
 # which is negative for any realistic ETH price (USDC has 6 decimals vs WETH's
 # 18, so the raw ratio is ~1e-9 even at ETH=$3000).
-POOL = "WETH/USDC/50"
+POOL = "0x3FE04A59Ebd38cF06080a6F60a98D124eb59392A"
 LP_AMOUNT_WETH = Decimal("0.1")  # amount0 (WETH, token0 on Base)
 LP_AMOUNT_USDC = Decimal("250")  # amount1 (USDC, token1 on Base)
 
@@ -281,6 +284,7 @@ async def _open_position_for_accounting(
         wallet_address=funded_wallet,
         price_oracle=price_oracle,
         rpc_url=anvil_rpc_url,
+        gateway_client=anvil_eth_call_adapter,
         venue_verification_gateway_factory=lambda: anvil_eth_call_adapter,
     )
     compilation_result = compiler.compile(intent)
@@ -483,12 +487,11 @@ class TestAerodromeSlipstreamLPOpenIntent:
             wallet_address=funded_wallet,
             price_oracle=price_oracle,
             rpc_url=anvil_rpc_url,
+            gateway_client=anvil_eth_call_adapter,
             venue_verification_gateway_factory=lambda: anvil_eth_call_adapter,
         )
         compilation_result = compiler.compile(intent)
-        assert compilation_result.status.value == "SUCCESS", (
-            f"Compilation failed: {compilation_result.error}"
-        )
+        assert compilation_result.status.value == "SUCCESS", f"Compilation failed: {compilation_result.error}"
         assert compilation_result.action_bundle is not None
         metadata = compilation_result.action_bundle.metadata
         assert metadata["nft_manager"].lower() == POSITION_MANAGER.lower()
@@ -518,9 +521,7 @@ class TestAerodromeSlipstreamLPOpenIntent:
                 pos_id_str = parser.extract_position_id(tx_result.receipt.to_dict())
                 if pos_id_str is not None:
                     position_id = int(pos_id_str)
-        assert position_id is not None, (
-            "Must extract position ID from Slipstream mint receipt"
-        )
+        assert position_id is not None, "Must extract position ID from Slipstream mint receipt"
         print(f"\nPosition tokenId: {position_id}")
 
         # Position must have on-chain liquidity after mint.
@@ -540,12 +541,8 @@ class TestAerodromeSlipstreamLPOpenIntent:
 
         expected_usdc_max = int(LP_AMOUNT_USDC * Decimal(10**usdc_decimals))
         expected_weth_max = int(LP_AMOUNT_WETH * Decimal(10**weth_decimals))
-        assert usdc_spent <= expected_usdc_max, (
-            f"USDC spent ({usdc_spent}) exceeds desired ({expected_usdc_max})"
-        )
-        assert weth_spent <= expected_weth_max, (
-            f"WETH spent ({weth_spent}) exceeds desired ({expected_weth_max})"
-        )
+        assert usdc_spent <= expected_usdc_max, f"USDC spent ({usdc_spent}) exceeds desired ({expected_usdc_max})"
+        assert weth_spent <= expected_weth_max, f"WETH spent ({weth_spent}) exceeds desired ({expected_weth_max})"
 
         # Layer 5 — assert the real accounting pipeline persisted LP_OPEN.
         # Slipstream is V3-concentrated: ticks/liquidity ship via the
@@ -570,9 +567,7 @@ class TestAerodromeSlipstreamLPOpenIntent:
         )
         assert Decimal(payload["amount0"]) >= 0
         assert Decimal(payload["amount1"]) >= 0
-        assert payload["position_hash"] is None, (
-            "Aerodrome Slipstream LP_OPEN must not fabricate a V4 position_hash"
-        )
+        assert payload["position_hash"] is None, "Aerodrome Slipstream LP_OPEN must not fabricate a V4 position_hash"
         assert payload["tick_lower"] is not None
         assert payload["tick_upper"] is not None
         assert payload["liquidity"] is not None
@@ -642,6 +637,7 @@ class TestAerodromeSlipstreamLPOpenIntent:
             wallet_address=funded_wallet,
             price_oracle=price_oracle,
             rpc_url=anvil_rpc_url,
+            gateway_client=anvil_eth_call_adapter,
             venue_verification_gateway_factory=lambda: anvil_eth_call_adapter,
         )
         compilation_result = compiler.compile(intent)
@@ -752,7 +748,11 @@ class TestAerodromeSlipstreamLPCloseIntent:
         # Open via the accounting helper so Layer 5 has the prior LP_OPEN row
         # for linkage + cost basis.
         position_id, open_intent, open_result, open_metadata = await _open_position_for_accounting(
-            funded_wallet, orchestrator, price_oracle, anvil_rpc_url, anvil_eth_call_adapter,
+            funded_wallet,
+            orchestrator,
+            price_oracle,
+            anvil_rpc_url,
+            anvil_eth_call_adapter,
         )
         open_accounting_row = await assert_accounting_persisted(
             layer5_accounting_harness,
@@ -783,20 +783,18 @@ class TestAerodromeSlipstreamLPCloseIntent:
             wallet_address=funded_wallet,
             price_oracle=price_oracle,
             rpc_url=anvil_rpc_url,
+            gateway_client=anvil_eth_call_adapter,
             venue_verification_gateway_factory=lambda: anvil_eth_call_adapter,
         )
         compilation_result = compiler.compile(close_intent)
-        assert compilation_result.status.value == "SUCCESS", (
-            f"LP Close compilation failed: {compilation_result.error}"
-        )
+        assert compilation_result.status.value == "SUCCESS", f"LP Close compilation failed: {compilation_result.error}"
         assert compilation_result.action_bundle is not None
         assert compilation_result.action_bundle.metadata["nft_manager"].lower() == POSITION_MANAGER.lower()
         assert compilation_result.action_bundle.metadata["slipstream_deployment"] == "current"
         assert compilation_result.action_bundle.metadata["venue_binding_hash"] == open_metadata["venue_binding_hash"]
         # Slipstream LP_CLOSE = decreaseLiquidity + collect = 2 txs.
         assert len(compilation_result.action_bundle.transactions) == 2, (
-            "Slipstream LP_CLOSE must compile to exactly two transactions "
-            "(decreaseLiquidity + collect, no burn)"
+            "Slipstream LP_CLOSE must compile to exactly two transactions (decreaseLiquidity + collect, no burn)"
         )
 
         execution_result = await orchestrator.execute(compilation_result.action_bundle)
@@ -819,17 +817,16 @@ class TestAerodromeSlipstreamLPCloseIntent:
                 receipt_dict = tx_result.receipt.to_dict()
                 parse_result = parser.parse_receipt(receipt_dict)
                 assert parse_result.success, (
-                    f"Receipt parser must succeed on a confirmed receipt; "
-                    f"error={parse_result.error}"
+                    f"Receipt parser must succeed on a confirmed receipt; error={parse_result.error}"
                 )
                 data = parser.extract_lp_close_data(receipt_dict)
                 if data:
                     lp_close_data = data
 
         assert lp_close_data is not None, "Must extract LP close data from a receipt"
-        assert (
-            lp_close_data.amount0_collected > 0 or lp_close_data.amount1_collected > 0
-        ), "At least one collected amount must be positive"
+        assert lp_close_data.amount0_collected > 0 or lp_close_data.amount1_collected > 0, (
+            "At least one collected amount must be positive"
+        )
 
         # Layer 4 strict: wallet deltas EXACTLY equal parsed Collect amounts.
         # POOL = "WETH/USDC/50" on Base → token0=WETH (0x4200…), token1=USDC
@@ -857,12 +854,10 @@ class TestAerodromeSlipstreamLPCloseIntent:
                 lp_close_data.amount1_collected,
             )
         assert weth_returned == parsed_weth, (
-            f"WETH wallet delta must equal parsed Collect amount exactly. "
-            f"wallet={weth_returned}, parsed={parsed_weth}"
+            f"WETH wallet delta must equal parsed Collect amount exactly. wallet={weth_returned}, parsed={parsed_weth}"
         )
         assert usdc_returned == parsed_usdc, (
-            f"USDC wallet delta must equal parsed Collect amount exactly. "
-            f"wallet={usdc_returned}, parsed={parsed_usdc}"
+            f"USDC wallet delta must equal parsed Collect amount exactly. wallet={usdc_returned}, parsed={parsed_usdc}"
         )
 
         # Layer 5 — assert the real accounting pipeline persisted LP_CLOSE.
@@ -886,9 +881,7 @@ class TestAerodromeSlipstreamLPCloseIntent:
         assert close_payload["position_hash"] is None, (
             "Aerodrome Slipstream LP_CLOSE must not fabricate a V4 position_hash"
         )
-        assert close_payload["realized_pnl_usd"] is not None, (
-            "open-then-close must compute realized PnL"
-        )
+        assert close_payload["realized_pnl_usd"] is not None, "open-then-close must compute realized PnL"
         # #3 parser ↔ event exact scaled-int equality.
         dec0 = get_token_decimals(web3, tokens[close_payload["token0"]])
         dec1 = get_token_decimals(web3, tokens[close_payload["token1"]])
@@ -919,7 +912,11 @@ class TestAerodromeSlipstreamLPCloseIntent:
         # Open via the accounting helper so Layer 5 persists the OPEN — the
         # no-op close assertion is then not vacuous against a fresh harness.
         position_id, open_intent, open_result, _ = await _open_position_for_accounting(
-            funded_wallet, orchestrator, price_oracle, anvil_rpc_url, anvil_eth_call_adapter,
+            funded_wallet,
+            orchestrator,
+            price_oracle,
+            anvil_rpc_url,
+            anvil_eth_call_adapter,
         )
         await assert_accounting_persisted(
             layer5_accounting_harness,
@@ -938,14 +935,20 @@ class TestAerodromeSlipstreamLPCloseIntent:
         # ``position_manager`` and the Slipstream protocol literal so the
         # late-binding manifest covers the right selectors.
         await decrease_all_liquidity(
-            web3, orchestrator,
-            chain=CHAIN_NAME, protocol=PROTOCOL,
-            position_manager=POSITION_MANAGER, token_id=position_id,
+            web3,
+            orchestrator,
+            chain=CHAIN_NAME,
+            protocol=PROTOCOL,
+            position_manager=POSITION_MANAGER,
+            token_id=position_id,
         )
         await collect_all_tokens(
-            web3, orchestrator,
-            chain=CHAIN_NAME, protocol=PROTOCOL,
-            position_manager=POSITION_MANAGER, token_id=position_id,
+            web3,
+            orchestrator,
+            chain=CHAIN_NAME,
+            protocol=PROTOCOL,
+            position_manager=POSITION_MANAGER,
+            token_id=position_id,
             recipient=funded_wallet,
         )
 
@@ -967,12 +970,11 @@ class TestAerodromeSlipstreamLPCloseIntent:
             wallet_address=funded_wallet,
             price_oracle=price_oracle,
             rpc_url=anvil_rpc_url,
+            gateway_client=anvil_eth_call_adapter,
             venue_verification_gateway_factory=lambda: anvil_eth_call_adapter,
         )
         compilation_result = compiler.compile(close_intent)
-        assert compilation_result.status.value == "SUCCESS", (
-            f"LP Close compilation failed: {compilation_result.error}"
-        )
+        assert compilation_result.status.value == "SUCCESS", f"LP Close compilation failed: {compilation_result.error}"
         assert compilation_result.action_bundle is not None
 
         # Layer 5 — snapshot the LP_CLOSE row set BEFORE the no-op close so the
@@ -984,28 +986,20 @@ class TestAerodromeSlipstreamLPCloseIntent:
         )
 
         execution_result = await orchestrator.execute(compilation_result.action_bundle)
-        assert execution_result.success, (
-            "LP Close on empty Slipstream position must succeed as a no-op"
-        )
+        assert execution_result.success, "LP Close on empty Slipstream position must succeed as a no-op"
         assert compilation_result.action_bundle.metadata.get("no_op") is True, (
             "Empty Slipstream LP_CLOSE must carry no_op metadata"
         )
-        assert compilation_result.action_bundle.transactions == [], (
-            "No-op bundle must have 0 transactions"
-        )
-        assert len(execution_result.transaction_results) == 0, (
-            "No-op execution must produce 0 executed transactions"
-        )
+        assert compilation_result.action_bundle.transactions == [], "No-op bundle must have 0 transactions"
+        assert len(execution_result.transaction_results) == 0, "No-op execution must produce 0 executed transactions"
 
         usdc_after_close = get_token_balance(web3, usdc_addr, funded_wallet)
         weth_after_close = get_token_balance(web3, weth_addr, funded_wallet)
         assert usdc_after_close == usdc_before_close, (
-            f"USDC balance must be unchanged for empty position close; "
-            f"delta={usdc_after_close - usdc_before_close}"
+            f"USDC balance must be unchanged for empty position close; delta={usdc_after_close - usdc_before_close}"
         )
         assert weth_after_close == weth_before_close, (
-            f"WETH balance must be unchanged for empty position close; "
-            f"delta={weth_after_close - weth_before_close}"
+            f"WETH balance must be unchanged for empty position close; delta={weth_after_close - weth_before_close}"
         )
 
         # Layer 5 — a no-op empty LP_CLOSE must NOT fabricate an accounting
@@ -1048,7 +1042,11 @@ class TestAerodromeSlipstreamLPCloseIntent:
 
         # Open via the accounting helper for the prior LP_OPEN (linkage + basis).
         position_id, open_intent, open_result, _ = await _open_position_for_accounting(
-            funded_wallet, orchestrator, price_oracle, anvil_rpc_url, anvil_eth_call_adapter,
+            funded_wallet,
+            orchestrator,
+            price_oracle,
+            anvil_rpc_url,
+            anvil_eth_call_adapter,
         )
         open_accounting_row = await assert_accounting_persisted(
             layer5_accounting_harness,
@@ -1066,13 +1064,17 @@ class TestAerodromeSlipstreamLPCloseIntent:
             wallet_address=funded_wallet,
             price_oracle=price_oracle,
             rpc_url=anvil_rpc_url,
+            gateway_client=anvil_eth_call_adapter,
             venue_verification_gateway_factory=lambda: anvil_eth_call_adapter,
         )
 
         await decrease_all_liquidity(
-            web3, orchestrator,
-            chain=CHAIN_NAME, protocol=PROTOCOL,
-            position_manager=POSITION_MANAGER, token_id=position_id,
+            web3,
+            orchestrator,
+            chain=CHAIN_NAME,
+            protocol=PROTOCOL,
+            position_manager=POSITION_MANAGER,
+            token_id=position_id,
         )
 
         liquidity = query_position_liquidity(web3, POSITION_MANAGER, position_id)
@@ -1089,9 +1091,7 @@ class TestAerodromeSlipstreamLPCloseIntent:
             chain=CHAIN_NAME,
         )
         compilation_result = compiler.compile(close_intent)
-        assert compilation_result.status.value == "SUCCESS", (
-            f"LP Close compilation failed: {compilation_result.error}"
-        )
+        assert compilation_result.status.value == "SUCCESS", f"LP Close compilation failed: {compilation_result.error}"
         assert compilation_result.action_bundle is not None
         # No liquidity → decreaseLiquidity is skipped, only collect emitted.
         assert len(compilation_result.action_bundle.transactions) == 1, (
@@ -1119,17 +1119,16 @@ class TestAerodromeSlipstreamLPCloseIntent:
                 receipt_dict = tx_result.receipt.to_dict()
                 parse_result = parser.parse_receipt(receipt_dict)
                 assert parse_result.success, (
-                    f"Receipt parser must succeed on a confirmed receipt; "
-                    f"error={parse_result.error}"
+                    f"Receipt parser must succeed on a confirmed receipt; error={parse_result.error}"
                 )
                 data = parser.extract_lp_close_data(receipt_dict)
                 if data:
                     lp_close_data = data
 
         assert lp_close_data is not None, "Must extract LP close data from receipt"
-        assert (
-            lp_close_data.amount0_collected > 0 or lp_close_data.amount1_collected > 0
-        ), "At least one collected amount must be positive (owed tokens from decrease)"
+        assert lp_close_data.amount0_collected > 0 or lp_close_data.amount1_collected > 0, (
+            "At least one collected amount must be positive (owed tokens from decrease)"
+        )
 
         # Layer 4 strict: wallet deltas EXACTLY equal parsed Collect amounts.
         usdc_after_close = get_token_balance(web3, usdc_addr, funded_wallet)
@@ -1151,12 +1150,10 @@ class TestAerodromeSlipstreamLPCloseIntent:
                 lp_close_data.amount1_collected,
             )
         assert weth_collected == parsed_weth, (
-            f"WETH wallet delta must equal parsed Collect amount exactly. "
-            f"wallet={weth_collected}, parsed={parsed_weth}"
+            f"WETH wallet delta must equal parsed Collect amount exactly. wallet={weth_collected}, parsed={parsed_weth}"
         )
         assert usdc_collected == parsed_usdc, (
-            f"USDC wallet delta must equal parsed Collect amount exactly. "
-            f"wallet={usdc_collected}, parsed={parsed_usdc}"
+            f"USDC wallet delta must equal parsed Collect amount exactly. wallet={usdc_collected}, parsed={parsed_usdc}"
         )
 
         # Layer 5 — assert the real accounting pipeline persisted LP_CLOSE.
@@ -1223,8 +1220,7 @@ class TestAerodromeSlipstreamCollectFeesIntent:
         )
         tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
         balances_before = {
-            symbol: get_token_balance(web3, tokens[symbol], funded_wallet)
-            for symbol in ("WETH", "USDC")
+            symbol: get_token_balance(web3, tokens[symbol], funded_wallet) for symbol in ("WETH", "USDC")
         }
         liquidity_before = query_position_liquidity(web3, POSITION_MANAGER, position_id)
 
@@ -1239,6 +1235,7 @@ class TestAerodromeSlipstreamCollectFeesIntent:
             wallet_address=funded_wallet,
             price_oracle=FIXED_PRICE_ORACLE,
             rpc_url=anvil_rpc_url,
+            gateway_client=anvil_eth_call_adapter,
             venue_verification_gateway_factory=lambda: anvil_eth_call_adapter,
         )
         compiled = compiler.compile(intent)
@@ -1269,8 +1266,7 @@ class TestAerodromeSlipstreamCollectFeesIntent:
         assert saw_collect, "confirmed collect receipt must be parsed from the reviewed NPM"
         assert query_position_liquidity(web3, POSITION_MANAGER, position_id) == liquidity_before
         assert {
-            symbol: get_token_balance(web3, tokens[symbol], funded_wallet)
-            for symbol in ("WETH", "USDC")
+            symbol: get_token_balance(web3, tokens[symbol], funded_wallet) for symbol in ("WETH", "USDC")
         } == balances_before
 
     @pytest.mark.intent(IntentType.LP_OPEN, IntentType.SWAP, IntentType.LP_COLLECT_FEES)
@@ -1337,7 +1333,11 @@ class TestAerodromeSlipstreamCollectFeesIntent:
         # Open via the accounting helper so Layer 5 covers the LP_OPEN even
         # though the downstream fee-accrual swap is the xfail-prone step.
         position_id, open_intent, open_result, open_metadata = await _open_position_for_accounting(
-            funded_wallet, orchestrator, price_oracle, anvil_rpc_url, anvil_eth_call_adapter,
+            funded_wallet,
+            orchestrator,
+            price_oracle,
+            anvil_rpc_url,
+            anvil_eth_call_adapter,
         )
         open_accounting_row = await assert_accounting_persisted(
             layer5_accounting_harness,
@@ -1374,6 +1374,7 @@ class TestAerodromeSlipstreamCollectFeesIntent:
             wallet_address=funded_wallet,
             price_oracle=price_oracle,
             rpc_url=anvil_rpc_url,
+            gateway_client=anvil_eth_call_adapter,
             venue_verification_gateway_factory=lambda: anvil_eth_call_adapter,
         )
         swap_compilation = compiler.compile(swap_intent)
@@ -1382,9 +1383,7 @@ class TestAerodromeSlipstreamCollectFeesIntent:
         )
         assert swap_compilation.action_bundle is not None
         swap_result = await orchestrator.execute(swap_compilation.action_bundle)
-        assert swap_result.success, (
-            f"Fee-accrual swap must execute. Error: {swap_result.error}"
-        )
+        assert swap_result.success, f"Fee-accrual swap must execute. Error: {swap_result.error}"
 
         # Record balances AFTER the swap (the load-bearing reference for the
         # conservation check below — the LP_COLLECT_FEES intent must not
@@ -1406,9 +1405,7 @@ class TestAerodromeSlipstreamCollectFeesIntent:
         assert compilation_result.action_bundle.metadata["nft_manager"].lower() == POSITION_MANAGER.lower()
         assert compilation_result.action_bundle.metadata["venue_binding_hash"] == open_metadata["venue_binding_hash"]
         execution_result = await orchestrator.execute(compilation_result.action_bundle)
-        assert execution_result.success, (
-            f"CollectFees execution failed: {execution_result.error}"
-        )
+        assert execution_result.success, f"CollectFees execution failed: {execution_result.error}"
 
         # Layer 3: receipt parser must succeed on the confirmed receipt and
         # surface a Collect event with zero collected amounts (the on-chain
@@ -1422,8 +1419,7 @@ class TestAerodromeSlipstreamCollectFeesIntent:
                 receipt_dict = tx_result.receipt.to_dict()
                 parse_result = parser.parse_receipt(receipt_dict)
                 assert parse_result.success, (
-                    f"Receipt parser must succeed on a confirmed receipt; "
-                    f"error={parse_result.error}"
+                    f"Receipt parser must succeed on a confirmed receipt; error={parse_result.error}"
                 )
                 lp_close_data = parser.extract_lp_close_data(receipt_dict)
                 if lp_close_data:
@@ -1466,8 +1462,7 @@ class TestAerodromeSlipstreamCollectFeesIntent:
         # NPM collect() entry point).
         liquidity_after = query_position_liquidity(web3, POSITION_MANAGER, position_id)
         assert liquidity_after == liquidity_before, (
-            f"LP_COLLECT_FEES must NOT remove liquidity. "
-            f"before={liquidity_before}, after={liquidity_after}"
+            f"LP_COLLECT_FEES must NOT remove liquidity. before={liquidity_before}, after={liquidity_after}"
         )
 
 

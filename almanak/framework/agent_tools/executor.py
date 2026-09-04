@@ -2406,8 +2406,8 @@ class ToolExecutor:
             return None, None
         return pool_address, None
 
-    def _read_pool_liquidity(self, chain: str, pool_address: str) -> int | None:
-        """Read a CL pool's in-range ``liquidity()``; ``None`` = unmeasured."""
+    def _read_pool_liquidity(self, chain: str, pool_address: str) -> tuple[int | None, str | None]:
+        """Read a CL pool's in-range ``liquidity()`` without collapsing an unreadable result to zero."""
         from almanak.connectors._strategy_base.v3_pool_abi import V3_LIQUIDITY_SELECTOR
         from almanak.gateway.proto import gateway_pb2
 
@@ -2421,15 +2421,17 @@ class ToolExecutor:
             timeout=30.0,
         )
         if not resp.success:
-            return None
+            return None, f"liquidity() failed for pool {pool_address}: {resp.error}"
         try:
             decoded = json.loads(resp.result)
             if not isinstance(decoded, str):
-                return None  # non-string payload (null / int) = unmeasured, not zero
+                return None, f"liquidity() returned {type(decoded).__name__} for pool {pool_address}"
             liq_hex = decoded.removeprefix("0x")
-            return int(liq_hex, 16) if liq_hex else None
-        except (ValueError, TypeError):
-            return None
+            if not liq_hex:
+                return None, f"liquidity() returned an empty payload for pool {pool_address}"
+            return int(liq_hex, 16), None
+        except (ValueError, TypeError) as e:
+            return None, f"liquidity() returned a malformed result for pool {pool_address}: {e}"
 
     def _sweep_best_pool(
         self,
@@ -2439,16 +2441,16 @@ class ToolExecutor:
         token_a_address: str,
         token_b_address: str,
         candidate_keys: tuple[int, ...],
-    ) -> tuple[str | None, int | None, list[str]]:
+    ) -> tuple[str | None, int | None, int, list[str]]:
         """Resolve the deepest pool across the spec's candidate pool keys.
 
         Mirrors ``resolve_best_pool_address`` (VIB-4924 C1): every candidate
         key from the connector's pool-reader spec is resolved via
         ``factory.getPool()``; readable candidates are ranked by in-range
-        liquidity, a resolved-but-unreadable pool is kept only as a last
-        resort, and ties keep the first key in spec order.
+        liquidity, unreadable candidates are reported as incomplete probes,
+        and ties keep the first key in spec order.
 
-        Returns ``(pool_address, selected_key, rpc_errors)``.
+        Returns ``(pool_address, selected_key, liquidity_rank, rpc_errors)``.
         """
         best_addr: str | None = None
         best_key: int | None = None
@@ -2463,10 +2465,37 @@ class ToolExecutor:
                 continue
             if pool_address is None:
                 continue
-            liquidity = self._read_pool_liquidity(chain, pool_address)
-            rank = -1 if liquidity is None else liquidity  # unreadable pool = last-resort candidate
-            if best_addr is None or rank > best_liquidity:
-                best_addr, best_key, best_liquidity = pool_address, key, rank
+            liquidity, liquidity_error = self._read_pool_liquidity(chain, pool_address)
+            if liquidity_error is not None or liquidity is None:
+                rpc_errors.append(liquidity_error or f"liquidity() returned no measurement for pool {pool_address}")
+                continue
+            if best_addr is None or liquidity > best_liquidity:
+                best_addr, best_key, best_liquidity = pool_address, key, liquidity
+        return best_addr, best_key, best_liquidity, rpc_errors
+
+    def _sweep_best_pool_across_factories(
+        self,
+        chain: str,
+        factory_addresses: tuple[str, ...],
+        get_pool_selector: str,
+        token_a_address: str,
+        token_b_address: str,
+        candidate_keys: tuple[int, ...],
+    ) -> tuple[str | None, int | None, list[str]]:
+        """Deepest pool across every factory generation and every candidate key."""
+        best_addr: str | None = None
+        best_key: int | None = None
+        best_liquidity = -1
+        rpc_errors: list[str] = []
+        for factory_address in factory_addresses:
+            pool_address, key, liquidity_rank, errors = self._sweep_best_pool(
+                chain, factory_address, get_pool_selector, token_a_address, token_b_address, candidate_keys
+            )
+            rpc_errors.extend(errors)
+            if pool_address is None:
+                continue
+            if best_addr is None or liquidity_rank > best_liquidity:
+                best_addr, best_key, best_liquidity = pool_address, key, liquidity_rank
         return best_addr, best_key, rpc_errors
 
     def _resolve_pool_state_address(
@@ -2494,75 +2523,127 @@ class ToolExecutor:
         """
         from almanak.connectors._strategy_base.pool_reader import DEFAULT_CANDIDATE_POOL_KEYS
 
-        factory_address = cap.factory_address(chain)
-        if not factory_address:
+        factory_addresses = cap.factory_addresses(chain)
+        if not factory_addresses:
             return ToolResponse(
                 status=ToolResponseStatus.ERROR,
                 error=_error_payload(AgentErrorCode.UNSUPPORTED_CHAIN, f"No {protocol} factory on {chain}"),
             )
         # getPool selector: uint24 (fee_tier) for v3-family, int24 (tick_spacing) for Slipstream.
         get_pool_selector = cap.get_pool_selector()
+        discriminator = getattr(getattr(reader_spec, "discriminator_kind", None), "value", "")
+        key_name = "tick_spacing" if discriminator == "tick_spacing" else "fee"
 
         if fee_tier is not None:
-            pool_address, rpc_error = self._factory_get_pool(
-                chain, factory_address, get_pool_selector, token_a.address, token_b.address, fee_tier
-            )
-            if rpc_error is not None:
+            # Every factory that may own the pair is asked; a key more than one
+            # answers is ambiguous and needs the pool address.
+            hits: list[dict[str, str]] = []
+            lookup_errors: list[dict[str, str]] = []
+            for factory_address in factory_addresses:
+                pool_address, rpc_error = self._factory_get_pool(
+                    chain, factory_address, get_pool_selector, token_a.address, token_b.address, fee_tier
+                )
+                if rpc_error is not None:
+                    lookup_errors.append({"factory_address": factory_address.lower(), "error": rpc_error})
+                    continue
+                if pool_address is not None:
+                    hits.append({"pool_address": pool_address, "factory_address": factory_address.lower()})
+            if lookup_errors:
                 return ToolResponse(
                     status=ToolResponseStatus.ERROR,
                     error=_error_payload(
                         AgentErrorCode.RPC_FAILED,
-                        f"factory.getPool() failed: {rpc_error}",
+                        f"factory.getPool() failed for {len(lookup_errors)} of {len(factory_addresses)} reviewed "
+                        f"factories while resolving {protocol} {token_a_sym}/{token_b_sym} "
+                        f"{key_name}={fee_tier} on {chain}; uniqueness is unmeasured. "
+                        f"First error: {lookup_errors[0]['error']}",
                         recoverable=True,
+                        suggestion=(
+                            "Retry the same lookup after RPC recovery; do not select an observed pool while a "
+                            "factory is unmeasured."
+                        ),
                     ),
+                    decision_hints={
+                        "reason": "incomplete_factory_scan",
+                        "observed_candidate_pools": hits,
+                        "unmeasured_factories": lookup_errors,
+                        "selection_policy": "No pool may be selected until every reviewed factory answers.",
+                    },
                 )
-            if pool_address is None:
+            if not hits:
                 return ToolResponse(
                     status=ToolResponseStatus.ERROR,
                     error=_error_payload(
                         AgentErrorCode.EMPTY_POOL,
-                        f"Pool not found: {protocol} {token_a_sym}/{token_b_sym} fee={fee_tier} on {chain}. "
+                        f"Pool not found: {protocol} {token_a_sym}/{token_b_sym} {key_name}={fee_tier} on {chain}. "
                         f"The factory returned a zero address — the pool may not exist.",
                     ),
                 )
-            return pool_address, fee_tier
-
-        candidate_keys = reader_spec.candidate_pool_keys if reader_spec is not None else DEFAULT_CANDIDATE_POOL_KEYS
-        pool_address, selected_key, rpc_errors = self._sweep_best_pool(
-            chain, factory_address, get_pool_selector, token_a.address, token_b.address, candidate_keys
-        )
-        if pool_address is None:
-            # Any candidate left unmeasured by an RPC error means we cannot
-            # honestly claim "no pool" — the pair could exist on a tier we never
-            # read (Empty ≠ Zero applies to error reporting too). Report a
-            # recoverable RPC failure and, on a partial failure, disclose the
-            # measured-empty vs. unmeasured split so it is never misreported as
-            # "zero address for every tier".
-            if rpc_errors:
-                n_total = len(candidate_keys)
-                n_unmeasured = len(rpc_errors)
-                split_note = (
-                    f" ({n_total - n_unmeasured} of {n_total} tiers returned a zero address; "
-                    f"{n_unmeasured} were unmeasured due to RPC errors)"
-                    if n_unmeasured < n_total
-                    else ""
+            if len(hits) > 1:
+                candidates = "; ".join(
+                    f"pool_address={hit['pool_address']} (factory_address={hit['factory_address']})" for hit in hits
+                )
+                next_action = (
+                    "Read or quote every candidate pool address, compare executable price impact and liquidity, then "
+                    "retry with the selected pool_address. Never select by candidate order."
                 )
                 return ToolResponse(
                     status=ToolResponseStatus.ERROR,
                     error=_error_payload(
-                        AgentErrorCode.RPC_FAILED,
-                        f"factory.getPool() failed for {protocol} {token_a_sym}/{token_b_sym} on {chain}: "
-                        f"{rpc_errors[0]}{split_note}",
+                        AgentErrorCode.VALIDATION_ERROR,
+                        f"Ambiguous pool key: {protocol} {token_a_sym}/{token_b_sym} {key_name}={fee_tier} on {chain}. "
+                        f"{len(hits)} reviewed factories returned distinct candidate pool addresses: {candidates}. "
+                        f"No pool was selected. {next_action}",
                         recoverable=True,
+                        suggestion=next_action,
                     ),
+                    decision_hints={
+                        "reason": "ambiguous_pool",
+                        "candidate_pools": hits,
+                        "next_action": "get_pool_state_or_quote_each_candidate",
+                        "selection_policy": "Compare executable quotes and liquidity; never select by candidate order.",
+                    },
                 )
+            return hits[0]["pool_address"], fee_tier
+
+        candidate_keys = reader_spec.candidate_pool_keys if reader_spec is not None else DEFAULT_CANDIDATE_POOL_KEYS
+        pool_address, selected_key, rpc_errors = self._sweep_best_pool_across_factories(
+            chain, factory_addresses, get_pool_selector, token_a.address, token_b.address, candidate_keys
+        )
+        # Any unmeasured factory/key probe can hide the actual deepest pool.
+        # Refuse even when another probe found a candidate: selecting it would
+        # present a partial measurement as a complete cross-generation ranking.
+        if rpc_errors:
+            n_total = len(factory_addresses) * len(candidate_keys)
+            n_unmeasured = len(rpc_errors)
+            n_measured = n_total - n_unmeasured
+            return ToolResponse(
+                status=ToolResponseStatus.ERROR,
+                error=_error_payload(
+                    AgentErrorCode.RPC_FAILED,
+                    f"Cannot select the deepest {protocol} pool for {token_a_sym}/{token_b_sym} on {chain}: "
+                    f"{n_measured} of {n_total} factory/{key_name} probes completed and {n_unmeasured} were "
+                    f"unmeasured due to RPC errors. A deeper candidate may be hidden. First error: {rpc_errors[0]}",
+                    recoverable=True,
+                    suggestion="Retry after RPC recovery; do not use a partially ranked candidate pool.",
+                ),
+                decision_hints={
+                    "reason": "incomplete_factory_sweep",
+                    "measured_probes": n_measured,
+                    "total_probes": n_total,
+                    "unmeasured_probes": n_unmeasured,
+                    "observed_candidate_pool": pool_address,
+                    "selection_policy": "No deepest pool may be selected from a partial factory/key sweep.",
+                },
+            )
+        if pool_address is None:
             return ToolResponse(
                 status=ToolResponseStatus.ERROR,
                 error=_error_payload(
                     AgentErrorCode.EMPTY_POOL,
                     f"Pool not found: {protocol} {token_a_sym}/{token_b_sym} on {chain} at any candidate "
-                    f"fee tier {list(candidate_keys)}. The factory returned a zero address for every "
-                    f"tier — the pair may not have a pool on this protocol.",
+                    f"{key_name} {list(candidate_keys)}. Every factory returned a zero address for every "
+                    f"candidate — the pair may not have a pool on this protocol.",
                 ),
             )
         return pool_address, selected_key
@@ -2881,7 +2962,7 @@ class ToolExecutor:
         tick = _decode_int24(slot0_hex[64:128])
 
         # Read liquidity (None = unmeasured; historic behaviour reports 0)
-        liquidity = self._read_pool_liquidity(chain, pool_address)
+        liquidity, _liquidity_error = self._read_pool_liquidity(chain, pool_address)
         if liquidity is None:
             liquidity = 0
 

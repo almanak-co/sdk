@@ -3,9 +3,11 @@
 The Aerodrome connector owns both its Classic factory validator
 (``getPool(address,address,bool)`` — selector ``0x79bc57d5``) and its
 Slipstream / concentrated-liquidity factory validator
-(``getPool(address,address,int24)`` — selector ``0x28af8d0b``, resolved against
-the ``cl_factory`` contract kind). Factory addresses are resolved through
-:class:`AddressRegistry` rather than hardcoded here.
+(``getPool(address,address,int24)`` — selector ``0x28af8d0b``). The Classic
+factory is resolved through :class:`AddressRegistry`; Slipstream factories
+come from the reviewed generation registry, and a symbolic
+``(token0, token1, tickSpacing)`` key is asked of every reviewed generation so
+the pool, not a constant, decides which generation executes.
 """
 
 from __future__ import annotations
@@ -31,9 +33,12 @@ if TYPE_CHECKING:
 
 __all__ = [
     "SLIPSTREAM_TICK_SPACING_SELECTOR",
+    "SlipstreamKeyMatch",
+    "SlipstreamKeyResolution",
     "SlipstreamPoolBinding",
     "encode_aerodrome_cl_get_pool",
     "read_slipstream_cl_pool_binding",
+    "resolve_slipstream_pool_key",
     "validate_aerodrome_cl_pool",
     "validate_aerodrome_pool",
 ]
@@ -200,6 +205,144 @@ def read_slipstream_cl_pool_binding(
     return SlipstreamPoolBinding(token0=token0, token1=token1, tick_spacing=tick_spacing, factory=factory)
 
 
+@dataclass(frozen=True)
+class SlipstreamKeyMatch:
+    """One reviewed generation whose factory returned a pool for a symbolic key."""
+
+    deployment: SlipstreamDeployment
+    pool_address: str
+
+
+@dataclass(frozen=True)
+class SlipstreamKeyResolution:
+    """Outcome of asking every reviewed Slipstream generation for one key.
+
+    ``matches`` are the generations whose factory returned a non-zero pool.
+    ``unreachable`` are the generations whose factory read failed; a scan with
+    any unreachable generation cannot prove uniqueness, so callers must treat
+    it as unverified rather than trust a lone match.
+    """
+
+    chain: str
+    token_a: str
+    token_b: str
+    tick_spacing: int
+    matches: tuple[SlipstreamKeyMatch, ...]
+    unreachable: tuple[SlipstreamDeployment, ...]
+    reviewed: tuple[SlipstreamDeployment, ...]
+
+    @property
+    def unique(self) -> SlipstreamKeyMatch | None:
+        """The single owning generation, or ``None`` when absent, ambiguous, or unverified."""
+        if self.unreachable or len(self.matches) != 1:
+            return None
+        return self.matches[0]
+
+    def describe_matches(self) -> str:
+        return ", ".join(
+            f"{match.deployment.generation} factory {match.deployment.factory} -> {match.pool_address}"
+            for match in self.matches
+        )
+
+    def validation_result(self) -> PoolValidationResult:
+        """Collapse the scan into the fail-closed shape the compiler's pool gate consumes."""
+        key = f"{self.token_a[:10]}.../{self.token_b[:10]}... with tick spacing {self.tick_spacing} on {self.chain}"
+        if not self.reviewed:
+            return PoolValidationResult(
+                exists=None,
+                reason=PoolValidationReason.FACTORY_MISSING,
+                warning=f"No reviewed Aerodrome Slipstream factory for chain '{self.chain}' — cannot verify pool existence",
+            )
+        if self.unreachable:
+            names = ", ".join(f"{d.generation} ({d.factory})" for d in self.unreachable)
+            return PoolValidationResult(
+                exists=None,
+                reason=PoolValidationReason.RPC_FAILED,
+                warning=f"RPC call to Aerodrome Slipstream factory generation(s) {names} failed — cannot verify {key}",
+            )
+        if not self.matches:
+            factories = ", ".join(f"{d.generation} ({d.factory})" for d in self.reviewed)
+            return PoolValidationResult(
+                exists=False,
+                reason=PoolValidationReason.NOT_FOUND,
+                error=(
+                    f"No Aerodrome CL pool found for {key}. Probed every reviewed Slipstream factory "
+                    f"generation: {factories}. The pool may not exist or may use a different tick spacing."
+                ),
+            )
+        if len(self.matches) > 1:
+            return PoolValidationResult(
+                exists=False,
+                reason=PoolValidationReason.AMBIGUOUS,
+                error=(
+                    f"Ambiguous Aerodrome Slipstream pool key {key}: more than one reviewed factory generation "
+                    f"owns a pool for it ({self.describe_matches()}). Name the pool address instead of the "
+                    f"symbolic key so the generation is decided by the pool."
+                ),
+            )
+        match = self.matches[0]
+        return PoolValidationResult(
+            exists=True,
+            reason=PoolValidationReason.CONFIRMED,
+            pool_address=match.pool_address,
+            factory=match.deployment.factory,
+        )
+
+
+def _factory_get_pool(
+    chain: str,
+    factory: str,
+    token_a: str,
+    token_b: str,
+    tick_spacing: int,
+    rpc_url: str | None,
+    gateway_client: GatewayClient | None,
+) -> str | None:
+    """``getPool`` on one factory; ``None`` when the read failed, the zero address when absent."""
+    calldata = encode_aerodrome_cl_get_pool(token_a, token_b, tick_spacing)
+    raw = eth_call(rpc_url or "", factory, calldata, chain=chain, gateway_client=gateway_client)
+    if raw is None:
+        return None
+    return decode_address(raw)
+
+
+def resolve_slipstream_pool_key(
+    chain: str,
+    token_a: str,
+    token_b: str,
+    tick_spacing: int,
+    rpc_url: str | None,
+    gateway_client: GatewayClient | None = None,
+) -> SlipstreamKeyResolution:
+    """Ask every reviewed Slipstream generation for ``(token_a, token_b, tick_spacing)``.
+
+    Every reviewed factory is read even after a hit: a key that resolves on
+    two generations is ambiguous and must be refused, never resolved by the
+    order generations happen to be listed in.
+    """
+    reviewed = slipstream_lp_deployments(chain)
+    matches: list[SlipstreamKeyMatch] = []
+    unreachable: list[SlipstreamDeployment] = []
+    if rpc_url is not None or gateway_client is not None:
+        for deployment in reviewed:
+            pool = _factory_get_pool(chain, deployment.factory, token_a, token_b, tick_spacing, rpc_url, gateway_client)
+            if pool is None:
+                unreachable.append(deployment)
+            elif pool != ZERO_ADDRESS:
+                matches.append(SlipstreamKeyMatch(deployment=deployment, pool_address=pool))
+    else:
+        unreachable.extend(reviewed)
+    return SlipstreamKeyResolution(
+        chain=chain,
+        token_a=token_a,
+        token_b=token_b,
+        tick_spacing=tick_spacing,
+        matches=tuple(matches),
+        unreachable=tuple(unreachable),
+        reviewed=reviewed,
+    )
+
+
 def validate_aerodrome_cl_pool(
     chain: str,
     token_a: str,
@@ -218,7 +361,9 @@ def validate_aerodrome_cl_pool(
         tick_spacing: CL pool tick spacing (e.g. 100).
         rpc_url: RPC URL for on-chain query. If None, returns unknown unless gateway_client is available.
         gateway_client: Optional connected gateway client for gateway-routed eth_call.
-        deployment: Optional exact connector-reviewed factory/NPM generation.
+        deployment: Exact connector-reviewed generation to authenticate against.
+            When omitted the key is asked of every reviewed generation and is
+            confirmed only when exactly one owns a pool for it.
 
     Returns:
         PoolValidationResult with exists=True/False/None.
@@ -230,31 +375,21 @@ def validate_aerodrome_cl_pool(
             warning=f"No RPC URL available — cannot verify Aerodrome CL pool existence on {chain}",
         )
 
-    cl_factory: str | None
-    if deployment is not None:
-        if type(deployment) is not SlipstreamDeployment or deployment not in slipstream_lp_deployments(chain):
-            raise ValueError(f"unreviewed Slipstream deployment for chain {chain}")
-        cl_factory = deployment.factory
-    else:
-        cl_factory = AddressRegistry.resolve_contract_address("aerodrome", chain, "cl_factory")
-    if not cl_factory:
-        return PoolValidationResult(
-            exists=None,
-            reason=PoolValidationReason.FACTORY_MISSING,
-            warning=f"No Aerodrome CL factory address for chain '{chain}' — cannot verify pool existence",
-        )
+    if deployment is None:
+        return resolve_slipstream_pool_key(
+            chain, token_a, token_b, tick_spacing, rpc_url, gateway_client
+        ).validation_result()
 
-    calldata = encode_aerodrome_cl_get_pool(token_a, token_b, tick_spacing)
-    raw = eth_call(rpc_url or "", cl_factory, calldata, chain=chain, gateway_client=gateway_client)
+    if type(deployment) is not SlipstreamDeployment or deployment not in slipstream_lp_deployments(chain):
+        raise ValueError(f"unreviewed Slipstream deployment for chain {chain}")
 
-    if raw is None:
+    pool_address = _factory_get_pool(chain, deployment.factory, token_a, token_b, tick_spacing, rpc_url, gateway_client)
+    if pool_address is None:
         return PoolValidationResult(
             exists=None,
             reason=PoolValidationReason.RPC_FAILED,
             warning=f"RPC call to Aerodrome CL factory failed on {chain} — cannot verify pool existence",
         )
-
-    pool_address = decode_address(raw)
 
     if pool_address == ZERO_ADDRESS:
         return PoolValidationResult(
@@ -262,9 +397,12 @@ def validate_aerodrome_cl_pool(
             reason=PoolValidationReason.NOT_FOUND,
             error=(
                 f"No Aerodrome CL pool found for "
-                f"{token_a[:10]}.../{token_b[:10]}... with tick spacing {tick_spacing} on {chain}. "
+                f"{token_a[:10]}.../{token_b[:10]}... with tick spacing {tick_spacing} on the "
+                f"{deployment.generation} Slipstream factory {deployment.factory} on {chain}. "
                 f"The pool may not exist or may use a different tick spacing."
             ),
         )
 
-    return PoolValidationResult(exists=True, reason=PoolValidationReason.CONFIRMED, pool_address=pool_address)
+    return PoolValidationResult(
+        exists=True, reason=PoolValidationReason.CONFIRMED, pool_address=pool_address, factory=deployment.factory
+    )

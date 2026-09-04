@@ -73,6 +73,11 @@ class PoolReaderSpec:
     # ``identify_pool_payload(spec, chain, address, *, gateway_client, rpc_url,
     # timeout) -> dict | None`` callable.
     identity_probe: ImportRef | None = None
+    # Chains where several reviewed factory generations coexist (Aerodrome
+    # Slipstream). Symbolic resolution asks every generation and refuses a key
+    # more than one answers; ``factory_addresses`` stays empty for such chains
+    # so no single factory is ever "the" factory.
+    factory_generations: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not isinstance(self.reader, ImportRef):
@@ -94,6 +99,20 @@ class PoolReaderSpec:
     def keys(self) -> tuple[str, ...]:
         """Return canonical protocol plus any lookup aliases."""
         return (self.protocol, *self.aliases)
+
+    def factories_for(self, chain: str) -> tuple[str, ...]:
+        """Every factory that may own this protocol's pools on ``chain``."""
+        chain_lower = chain.lower()
+        generations = self.factory_generations.get(chain_lower)
+        if generations:
+            return tuple(generations)
+        single = self.factory_addresses.get(chain_lower)
+        return (single,) if single else ()
+
+    def supports_chain(self, chain: str) -> bool:
+        """Whether the spec publishes any pool-resolution data for ``chain``."""
+        chain_lower = chain.lower()
+        return bool(self.factories_for(chain_lower)) or chain_lower in self.known_pools
 
 
 __all__ = [

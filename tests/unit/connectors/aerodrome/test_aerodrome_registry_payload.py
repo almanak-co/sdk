@@ -28,13 +28,13 @@ from typing import Any
 
 from almanak.connectors.aerodrome.receipt_parser import (
     EVENT_TOPICS,
+    SLIPSTREAM_RECEIPT_SPEC,
     AerodromeSlipstreamReceiptParser,
 )
 from almanak.framework.execution.extract_result import ExtractOk
 
-# Canonical Aerodrome Slipstream NPM on Base (single source of truth:
-# ``AERODROME["base"]["cl_nft"]`` in ``almanak/core/contracts.py``). Mirrors
-# the constant used in ``test_aerodrome_receipt_parser_branches.py``.
+# Reviewed legacy and current Slipstream NPMs on Base. These concrete fixtures
+# verify receipt-emitter disambiguation independently of registry lookup helpers.
 _SLIPSTREAM_NPM_BASE = "0x827922686190790b37229fd06084350e74485b72"
 _SLIPSTREAM_NPM_CURRENT = "0xe1f8cd9ac4e4a65f54f38a5cdafca44f6dd68b53"
 _SLIPSTREAM_POOL_MINT_TOPIC = (
@@ -192,6 +192,7 @@ def _receipt(logs: list[dict[str, Any]], status: int = 1) -> dict[str, Any]:
 
 class TestNftManagerAddress:
     def test_base_chain_with_multiple_managers_has_no_static_default(self) -> None:
+        assert SLIPSTREAM_RECEIPT_SPEC.position_manager("base") == ""
         parser = AerodromeSlipstreamReceiptParser(chain="base")
         assert parser._nft_manager_address() == ""
 

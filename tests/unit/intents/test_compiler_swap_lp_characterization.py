@@ -168,11 +168,12 @@ def _make_mock_lp_adapter(
     return adapter
 
 
-def _mock_pool_validation_ok(pool_address: str | None = None) -> MagicMock:
+def _mock_pool_validation_ok(pool_address: str | None = None, factory: str | None = None) -> MagicMock:
     """Return a ``PoolValidationResult``-shaped mock that passes ``_validate_pool``.
 
     ``pool_address=None`` skips the slot0 recompute branch in
-    ``_compile_lp_open`` which is what keeps most tests simple.
+    ``_compile_lp_open`` which is what keeps most tests simple. ``factory`` is
+    the reviewed Slipstream factory that confirmed the pool, when one did.
     """
 
     result = MagicMock(name="PoolValidationResult")
@@ -182,6 +183,7 @@ def _mock_pool_validation_ok(pool_address: str | None = None) -> MagicMock:
     result.reason = None
     result.error = None
     result.warning = None
+    result.factory = factory
     return result
 
 
@@ -1564,8 +1566,12 @@ class TestCompileLPOpenSlipstreamSlot0Recompute:
         sentinels, not from intent.amount0 / intent.amount1.
         """
 
+        from almanak.connectors.aerodrome.addresses import slipstream_lp_deployments
+
+        generation = next(d for d in slipstream_lp_deployments("base") if d.generation == "current")
         mock_validate_cl.return_value = _mock_pool_validation_ok(
             pool_address="0xb2cc224c1c9feE385f8ad6a55b4d94E92359DC59",
+            factory=generation.factory,
         )
         # Plausible sqrtPriceX96 (~1:1); recompute_lp_amounts is mocked out so
         # the actual value doesn't drive arithmetic, only branch entry.
@@ -1643,6 +1649,8 @@ class TestCompileLPOpenSlipstreamSlot0Recompute:
         assert metadata["amount0_min"] == str(kwargs["amount_a_min_wei"])
         assert metadata["amount1_min"] == str(kwargs["amount_b_min_wei"])
         assert metadata["protocol"] == "aerodrome_slipstream"
+        assert metadata["nft_manager"] == generation.position_manager
+        assert metadata["slipstream_deployment"] == "current"
 
 
 class TestCompileLPOpenTickSpacing:

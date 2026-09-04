@@ -1,14 +1,14 @@
-"""Four-layer exact-address Aerodrome Slipstream LP_OPEN + address-bound LP_CLOSE on Base Anvil (ALM-3462).
+"""Four-layer exact-address Aerodrome Slipstream LP_OPEN + address-bound LP_CLOSE on Base Anvil.
 
 The symbolic ``TOKEN0/TOKEN1/tick_spacing`` lifecycle lives in
 ``test_aerodrome_slipstream_lp.py``. This cell proves the OTHER admission lane:
 a strategy names the pool by its bare address, the compiler reverses the
 address into the pool's own ``token0/token1/tickSpacing/factory`` through the
-gateway-shaped adapter, authenticates it against the reviewed current factory,
-and the block-anchored verifier certifies THAT address before the mint. The
-close phase then proves the address-bound cross-check: a close naming a
-different (real, current-generation) pool is refused, and the close naming the
-NFT's own pool executes.
+gateway-shaped adapter, selects the reviewed generation that factory belongs
+to, authenticates the address against it, and the block-anchored verifier
+certifies THAT address before the mint. The close phase then proves the
+address-bound cross-check: a close naming a different (real, same-generation)
+pool is refused, and the close naming the NFT's own pool executes.
 """
 
 import os
@@ -17,8 +17,8 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.connectors.aerodrome.addresses import slipstream_lp_deployments
 from almanak.connectors._strategy_base.teardown_post_condition import get_teardown_post_condition
+from almanak.connectors.aerodrome.addresses import slipstream_deployment_for_factory
 from almanak.connectors.aerodrome.pool_validation import encode_aerodrome_cl_get_pool
 from almanak.connectors.aerodrome.receipt_parser import AerodromeSlipstreamReceiptParser
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
@@ -30,20 +30,25 @@ from tests.intents._lp_setup_helpers import query_position_liquidity
 from tests.intents.conftest import CHAIN_CONFIGS, get_token_balance, get_token_decimals
 
 CHAIN_NAME = "base"
-CURRENT_DEPLOYMENT = slipstream_lp_deployments(CHAIN_NAME)[0]
+CURRENT_FACTORY = "0xf8f2eB4940CFE7d13603DDDD87f123820Fc061Ef"
+CURRENT_DEPLOYMENT = slipstream_deployment_for_factory(CHAIN_NAME, CURRENT_FACTORY)
+assert CURRENT_DEPLOYMENT is not None and CURRENT_DEPLOYMENT.generation == "current"
 POSITION_MANAGER = CURRENT_DEPLOYMENT.position_manager
-# WETH/USDC tick_spacing=50 on the CURRENT reviewed Slipstream factory — the
-# same pool the symbolic sibling opens as "WETH/USDC/50", named here by address
-# so the two cells certify the same venue through both lanes.
+# WETH/USDC tick_spacing=50 on the CURRENT reviewed Slipstream factory. The
+# symbolic key "WETH/USDC/50" also exists on the legacy factory, so the address
+# is the only way to name this venue.
 EXACT_POOL = "0x3FE04A59Ebd38cF06080a6F60a98D124eb59392A"
 EXPECTED_TICK_SPACING = 50
 # A different real pool on the same (current) factory: WETH/VVV ts=100. Closing
 # the WETH/USDC NFT while naming this pool must be refused.
 OTHER_CURRENT_POOL = "0xa135b59fe221c0c8d441294f97f96fbc37bc9fbe"
-# Discriminating refusal controls for LP_OPEN: real, well-formed addresses the
-# exact lane must refuse before any approval is built.
-LEGACY_GENERATION_POOL = "0xb2cc224c1c9feE385f8ad6a55b4d94E92359DC59"  # WETH/USDC ts=100 on the legacy factory
+# Discriminating refusal controls for LP_OPEN: real, well-formed addresses that
+# answer the Slipstream pool ABI but report a factory no reviewed generation
+# owns; the exact lane must refuse them before any approval is built.
+UNREGISTERED_AERODROME_POOL = "0xc758d81B9b81A6FCDAd075bD471874A2c46B54e0"  # WETH/USDC ts=50 on the Gauge Caps factory
+UNREGISTERED_AERODROME_FACTORY = "0xaDe65c38CD4849aDBA595a4323a8C7DdfE89716a"
 UNISWAP_V3_LOOKALIKE_POOL = "0xd0b53D9277642d899DF5C87A3966A349A798F224"  # Uniswap V3 WETH/USDC on Base
+UNISWAP_V3_FACTORY = "0x33128a8fC17869897dcE68Ed026d694621f6FDfD"
 _TOKEN0_SELECTOR = "0x0dfe1681"
 _TOKEN1_SELECTOR = "0xd21220a7"
 _TICK_SPACING_SELECTOR = "0xd0c93a7c"
@@ -186,10 +191,12 @@ class TestAerodromeSlipstreamExactPoolLP:
 
         # Mismatch refusal, before any approval: two real, well-formed addresses
         # that are NOT admissible exact pools must fail with balances untouched.
-        for wrong_pool, needle in (
-            (LEGACY_GENERATION_POOL, "legacy factory generation"),
-            (UNISWAP_V3_LOOKALIKE_POOL, "reports unreviewed factory"),
+        for wrong_pool, wrong_factory in (
+            (UNREGISTERED_AERODROME_POOL, UNREGISTERED_AERODROME_FACTORY),
+            (UNISWAP_V3_LOOKALIKE_POOL, UNISWAP_V3_FACTORY),
         ):
+            needle = f"reports unreviewed factory {wrong_factory.lower()}"
+            assert _read_pool_tuple(web3, wrong_pool)[3] == wrong_factory.lower()
             refused = compiler.compile(
                 Intent.lp_open(
                     pool=wrong_pool,
@@ -226,16 +233,23 @@ class TestAerodromeSlipstreamExactPoolLP:
             == binding_hash
         )
 
-        # Layer 3 — the production parser recovers the minted position.
+        # Layer 3 — the production parser recovers the minted position and the
+        # amounts it actually deposited.
         parser = AerodromeSlipstreamReceiptParser(chain=CHAIN_NAME)
         position_id = None
+        open_data = None
         for tx_result in execution.transaction_results:
             if tx_result.receipt is None:
                 continue
-            parsed = parser.parse_receipt(tx_result.receipt.to_dict())
+            receipt_dict = tx_result.receipt.to_dict()
+            parsed = parser.parse_receipt(receipt_dict)
             assert parsed.success, f"LP_OPEN receipt parsing failed for {tx_result.tx_hash}: {parsed.error}"
-            position_id = parser.extract_position_id(tx_result.receipt.to_dict()) or position_id
+            position_id = parser.extract_position_id(receipt_dict) or position_id
+            open_data = parser.extract_lp_open_data(receipt_dict) or open_data
         assert position_id is not None, "Exact-pool LP_OPEN receipt must contain the minted position id"
+        assert open_data is not None, "Exact-pool LP_OPEN receipt must decode into LPOpenData"
+        assert open_data.liquidity > 0
+        assert open_data.amount0 > 0 and open_data.amount1 > 0
         # Outcome binding: the terminal position state on the reviewed NPM is
         # the exact pool's canonical tuple, not merely "some liquidity".
         assert _read_npm_position(web3, int(position_id)) == (pool_token0, pool_token1, pool_tick_spacing)
@@ -248,6 +262,10 @@ class TestAerodromeSlipstreamExactPoolLP:
         assert usdc_spent > 0 and weth_spent > 0
         assert usdc_spent <= int(LP_AMOUNT_USDC * Decimal(10**usdc_decimals))
         assert weth_spent <= int(LP_AMOUNT_WETH * Decimal(10**weth_decimals))
+        # token0=WETH, token1=USDC on this pool: the parser's decoded deposit
+        # must equal the wallet movement exactly, not merely bound it.
+        assert (open_data.amount0, open_data.amount1) == (weth_spent, usdc_spent)
+        assert open_data.liquidity == query_position_liquidity(web3, POSITION_MANAGER, int(position_id))
         usdc_after_open = get_token_balance(web3, usdc_addr, funded_wallet)
         weth_after_open = get_token_balance(web3, weth_addr, funded_wallet)
 
@@ -295,13 +313,24 @@ class TestAerodromeSlipstreamExactPoolLP:
         assert close_compilation.action_bundle.metadata["venue_binding_hash"] == binding_hash
         close_execution = await orchestrator.execute(close_compilation.action_bundle)
         assert close_execution.success, f"Exact-pool LP_CLOSE execution failed: {close_execution.error}"
+        # A Slipstream close is decreaseLiquidity then collect; only the terminal
+        # collect reports what actually left the pool for the wallet, so summing
+        # both receipts would double-count the principal.
+        close_data = None
         for tx_result in close_execution.transaction_results:
             assert tx_result.receipt is not None and tx_result.receipt.status == 1
-            parsed = parser.parse_receipt(tx_result.receipt.to_dict())
+            receipt_dict = tx_result.receipt.to_dict()
+            parsed = parser.parse_receipt(receipt_dict)
             assert parsed.success, f"LP_CLOSE receipt parsing failed for {tx_result.tx_hash}: {parsed.error}"
+            close_data = parser.extract_lp_close_data(receipt_dict) or close_data
+        assert close_data is not None, "Exact-pool LP_CLOSE receipt must decode into LPCloseData"
         assert query_position_liquidity(web3, POSITION_MANAGER, int(position_id)) == 0
-        assert get_token_balance(web3, usdc_addr, funded_wallet) > usdc_after_open
-        assert get_token_balance(web3, weth_addr, funded_wallet) > weth_after_open
+        weth_returned = get_token_balance(web3, weth_addr, funded_wallet) - weth_after_open
+        usdc_returned = get_token_balance(web3, usdc_addr, funded_wallet) - usdc_after_open
+        assert weth_returned > 0 and usdc_returned > 0
+        # The close collects the whole position, so the parser's decoded
+        # collection must equal the wallet movement exactly.
+        assert (close_data.amount0_collected, close_data.amount1_collected) == (weth_returned, usdc_returned)
 
         # Teardown post-condition AFTER the close, pinned to the close receipt
         # block: a MEASURED closure on the exact reviewed manager — the

@@ -145,11 +145,13 @@ _SLIPSTREAM_COLLECT_SIG = "collect(CollectParams)"
 def _build_slipstream_static_permissions() -> dict[str, list[StaticPermissionEntry]]:
     """Per-intent static permissions for Aerodrome Slipstream CL.
 
-    Per reviewed chain, emit one LP_OPEN entry for the current deployment plus
-    close and collect entries for every reviewed deployment generation. Each
-    entry is scoped to the single intent type that emits the selector:
+    Per reviewed chain, emit mint, close and collect entries for EVERY reviewed
+    deployment generation: the generation a strategy mints on is decided by the
+    pool it names, so the manifest must authorise each reviewed position
+    manager. Each entry is scoped to the single intent type that emits the
+    selector:
 
-    - ``LP_OPEN`` → ``mint`` on the current position manager only.
+    - ``LP_OPEN`` → ``mint`` on each reviewed position manager.
     - ``LP_CLOSE`` → ``decreaseLiquidity`` + ``collect`` (two-tx teardown
       per audit B6 / compiler ``adapter.remove_cl_liquidity``).
     - ``LP_COLLECT_FEES`` → ``collect`` (standalone, no decreaseLiquidity).
@@ -168,20 +170,18 @@ def _build_slipstream_static_permissions() -> dict[str, list[StaticPermissionEnt
         deployments = slipstream_lp_deployments(chain)
         if not deployments:
             continue
-        current = deployments[0]
-        entries = [
-            StaticPermissionEntry(
-                target=current.position_manager.lower(),
-                label=f"Aerodrome Slipstream NonfungiblePositionManager ({current.generation})",
-                selectors={_SLIPSTREAM_MINT_SELECTOR: _SLIPSTREAM_MINT_SIG},
-                intent_types=frozenset({IntentType.LP_OPEN}),
-            )
-        ]
+        entries: list[StaticPermissionEntry] = []
         for deployment in deployments:
             label = f"Aerodrome Slipstream NonfungiblePositionManager ({deployment.generation})"
             target = deployment.position_manager.lower()
             entries.extend(
                 [
+                    StaticPermissionEntry(
+                        target=target,
+                        label=label,
+                        selectors={_SLIPSTREAM_MINT_SELECTOR: _SLIPSTREAM_MINT_SIG},
+                        intent_types=frozenset({IntentType.LP_OPEN}),
+                    ),
                     StaticPermissionEntry(
                         target=target,
                         label=label,
@@ -253,9 +253,11 @@ PERMISSION_HINTS_SLIPSTREAM = PermissionHints(
     # offline-capable (``_resolve_aerodrome_route`` degrades to CL@100 when
     # offline), so synthetic discovery — not ``static_permissions`` — is the
     # drift-proof mechanism. The SWAP synthetic is emitted by
-    # ``build_discovery_vectors`` below because the CL SwapRouter lives in
-    # this connector's ``AERODROME[chain]["cl_router"]``, not in the
-    # framework's ``PROTOCOL_ROUTERS`` (the TraderJoe V2 precedent).
+    # ``build_discovery_vectors`` below because the CL SwapRouters live on
+    # this connector's reviewed Slipstream generations, not in the
+    # framework's ``PROTOCOL_ROUTERS`` (the TraderJoe V2 precedent). Offline
+    # the swap compile emits every reviewed generation's router, so the
+    # manifest authorises each of them.
     # LP_COLLECT_FEES stays gated by
     # ``supports_standalone_fee_collection=True`` above.
     synthetic_discovery_intents=frozenset({IntentType.SWAP, IntentType.LP_OPEN, IntentType.LP_CLOSE}),
@@ -272,10 +274,10 @@ def build_discovery_vectors(
 
     ``_build_swap_intents`` gates the framework-default SWAP synthetic on
     ``protocol in PROTOCOL_ROUTERS[chain]`` — a table the ``aerodrome_slipstream``
-    slug is deliberately absent from (its swap venue is the Slipstream CL
-    SwapRouter, declared as ``cl_router`` in this connector's
-    :data:`~almanak.connectors.aerodrome.addresses.AERODROME`, while the slug's
-    role-registry slot is ``CL_POSITION_MANAGER``). This override runs BEFORE
+    slug is deliberately absent from (its swap venues are the per-generation
+    Slipstream CL SwapRouters on
+    :data:`~almanak.connectors.aerodrome.addresses.SLIPSTREAM_LP_DEPLOYMENTS`,
+    while the slug's role-registry slot is ``CL_POSITION_MANAGER``). This override runs BEFORE
     that gate and emits the SWAP synthetic directly, mirroring the
     ``traderjoe_v2`` self-containment pattern.
 
@@ -290,15 +292,12 @@ def build_discovery_vectors(
     # entry and returns ``[]``) is the right outcome there.
     #
     # Reuse the COMPILER's own capability predicate rather than re-deriving it:
-    # it gates on ``cl_router`` AND ``cl_factory``, and a manifest built from a
-    # weaker predicate than the one that picks the route is drift waiting to
-    # happen (a future chain entry with a router but no factory would have the
-    # override emit a CL vector while the compiler routed Classic). Imported
-    # lazily — like ``SwapIntent`` below — to keep this module cheap to load
-    # during manifest discovery.
+    # a manifest built from a weaker predicate than the one that picks the
+    # route is drift waiting to happen. Imported lazily — like ``SwapIntent``
+    # below — to keep this module cheap to load during manifest discovery.
     from .compiler import _aerodrome_chain_has_cl
 
-    if not _aerodrome_chain_has_cl(AERODROME.get(chain, {})):
+    if not _aerodrome_chain_has_cl(chain):
         return None
     from almanak.framework.intents.vocabulary import SwapIntent
 

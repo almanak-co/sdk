@@ -495,10 +495,10 @@ class AerodromeSDK:
         # Gas buffer for Base chain (higher base fees)
         self.gas_buffer = 0.5
 
-        # Load CL ABIs (only if cl_nft address is present for chain)
+        # Load CL ABIs only on chains with a reviewed Slipstream generation
         self._cl_nft_abi: list[dict] = []
         self._cl_pool_abi: list[dict] = []
-        if "cl_nft" in self.addresses:
+        if slipstream_lp_deployments(chain):
             self._cl_nft_abi = self._load_abi("cl_nft")
             self._cl_pool_abi = self._load_abi("cl_pool")
 
@@ -507,17 +507,16 @@ class AerodromeSDK:
     def resolve_slipstream_position_manager(self, deployment: SlipstreamDeployment | None) -> str:
         """Return only a connector-reviewed manager for this chain.
 
-        ``None`` preserves the legacy SDK default for callers outside the staged
-        exact-venue compiler.  A supplied deployment must be the exact frozen
-        value published by this connector; arbitrary transaction targets are
-        never accepted at this boundary.
+        There is no default manager: the deployment must be the exact frozen
+        value published by this connector for the generation that owns the
+        pool or position.  Arbitrary transaction targets are never accepted at
+        this boundary.
         """
 
         if deployment is None:
-            manager = self.addresses.get("cl_nft")
-            if not manager:
-                raise ValueError(f"cl_nft not configured for chain {self.chain}")
-            return manager
+            raise ValueError(
+                f"a reviewed Slipstream deployment is required on chain {self.chain}; there is no default manager"
+            )
         if type(deployment) is not SlipstreamDeployment:
             raise TypeError("deployment must be an exact SlipstreamDeployment")
         if deployment not in slipstream_lp_deployments(self.chain):
@@ -1121,20 +1120,24 @@ class AerodromeSDK:
         token_b: str,
         tick_spacing: int,
         web3: Any,
+        deployment: SlipstreamDeployment | None = None,
     ) -> str | None:
-        """Get Slipstream CL pool address from cl_factory.
+        """Get the Slipstream CL pool address from one reviewed generation's factory.
 
         Args:
             token_a: First token address
             token_b: Second token address
             tick_spacing: Pool tick spacing (int24)
             web3: Web3 instance
+            deployment: Reviewed generation whose factory is asked. Required;
+                a symbolic key can live on several generations, so no factory
+                is assumed.
 
         Returns:
             Pool address if exists, None otherwise
         """
-        if "cl_factory" not in self.addresses:
-            logger.warning(f"No cl_factory address for chain {self.chain}")
+        if deployment is None or deployment not in slipstream_lp_deployments(self.chain):
+            logger.warning(f"No reviewed Slipstream deployment supplied for chain {self.chain}")
             return None
         try:
             # Minimal ABI for getPool(address,address,int24)
@@ -1152,7 +1155,7 @@ class AerodromeSDK:
                 }
             ]
             factory = web3.eth.contract(
-                address=web3.to_checksum_address(self.addresses["cl_factory"]),
+                address=web3.to_checksum_address(deployment.factory),
                 abi=cl_factory_abi,
             )
             pool_address = factory.functions.getPool(
@@ -1318,10 +1321,8 @@ class AerodromeSDK:
             sender: Transaction sender
             web3: Web3 instance
             sqrt_price_x96: Initial sqrt price (0 for existing pool)
-            deployment: Reviewed factory/position-manager generation. New
-                mints should pass the current deployment explicitly. ``None``
-                retains the legacy direct-SDK default for compatibility; the
-                exact-venue compiler never relies on that default.
+            deployment: Reviewed generation that owns the pool. Required:
+                there is no default manager; ``None`` raises ``ValueError``.
 
         Returns:
             Transaction dictionary
@@ -1380,7 +1381,7 @@ class AerodromeSDK:
             sender: Transaction sender
             web3: Web3 instance
             deployment: Reviewed generation that owns the physical position.
-                ``None`` retains the legacy direct-SDK manager default.
+                Required: there is no default manager; ``None`` raises ``ValueError``.
 
         Returns:
             Transaction dictionary
@@ -1424,7 +1425,7 @@ class AerodromeSDK:
             sender: Transaction sender
             web3: Web3 instance
             deployment: Reviewed generation that owns the physical position.
-                ``None`` retains the legacy direct-SDK manager default.
+                Required: there is no default manager; ``None`` raises ``ValueError``.
 
         Returns:
             Transaction dictionary

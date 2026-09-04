@@ -1,12 +1,13 @@
-"""Four-layer exact-address Aerodrome lanes on Base Anvil (PR #3828 follow-on to ALM-3462).
+"""Four-layer exact-address Aerodrome lanes on Base Anvil.
 
 Covers the lanes that share the Slipstream LP_OPEN fix's contract:
 
 - Classic (Solidly) ``LP_OPEN`` by bare pool address — reversed through the
   pool's ``metadata()`` and authenticated against the registered factory.
 - ``SWAP`` with ``swap_params={"pool": "0x..."}`` honoured as an exact pin for
-  a Classic pool and for a Slipstream CL pool on the router-bound factory, and
-  refused for a CL pool on a factory the registered swap router cannot reach.
+  a Classic pool and for a Slipstream CL pool of EITHER reviewed generation,
+  each executed through the router of the generation that owns the pool, and
+  refused for a CL pool whose factory is not a reviewed generation.
 """
 
 from decimal import Decimal
@@ -14,8 +15,8 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.connectors.aerodrome.addresses import AERODROME
 from almanak.connectors._strategy_base.teardown_post_condition import get_teardown_post_condition
+from almanak.connectors.aerodrome.addresses import slipstream_deployment_for_factory
 from almanak.connectors.aerodrome.receipt_parser import AerodromeReceiptParser
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import IntentCompiler, LPCloseIntent, LPOpenIntent, SwapIntent
@@ -24,14 +25,21 @@ from almanak.framework.teardown.models import PositionInfo, PositionType
 from tests.intents.conftest import CHAIN_CONFIGS, get_token_balance, get_token_decimals
 
 CHAIN_NAME = "base"
-# Real Base pools, read on-chain 2026-09-02:
+# Real Base pools, read on-chain:
 #   factory.getPool(WETH, USDC, volatile) -> CLASSIC_POOL (token0=WETH, token1=USDC)
-#   legacy CL factory (the one the registered Slipstream swap router is bound to), WETH/USDC ts=100
-#   current CL factory (NOT reachable by the swap router), WETH/USDC ts=50
+#   legacy CL factory 0x5e7BB104..., WETH/USDC ts=100
+#   current CL factory 0xf8f2eB49..., WETH/USDC ts=50
+#   Aerodrome's unregistered "Gauge Caps" factory 0xaDe65c38..., WETH/USDC ts=50
+#   Uniswap V3 WETH/USDC 0.05% (answers the Slipstream ABI, foreign factory)
 CLASSIC_POOL = "0xcDAC0d6c6C59727a65F871236188350531885C43"
-ROUTER_CL_POOL = "0xb2cc224c1c9feE385f8ad6a55b4d94E92359DC59"
-UNREACHABLE_CL_POOL = "0x3FE04A59Ebd38cF06080a6F60a98D124eb59392A"
-ROUTER_FACTORY = AERODROME["base"]["cl_factory"]
+LEGACY_CL_POOL = "0xb2cc224c1c9feE385f8ad6a55b4d94E92359DC59"
+CURRENT_CL_POOL = "0x3FE04A59Ebd38cF06080a6F60a98D124eb59392A"
+LEGACY_FACTORY = "0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A"
+CURRENT_FACTORY = "0xf8f2eB4940CFE7d13603DDDD87f123820Fc061Ef"
+UNREGISTERED_AERODROME_CL_POOL = "0xc758d81B9b81A6FCDAd075bD471874A2c46B54e0"
+UNREGISTERED_AERODROME_FACTORY = "0xaDe65c38CD4849aDBA595a4323a8C7DdfE89716a"
+UNISWAP_V3_POOL = "0xd0b53D9277642d899DF5C87A3966A349A798F224"
+UNISWAP_V3_FACTORY = "0x33128a8fC17869897dcE68Ed026d694621f6FDfD"
 # A real, well-formed contract that is not an Aerodrome pool (the WETH token).
 NOT_A_POOL = "0x4200000000000000000000000000000000000006"
 
@@ -71,7 +79,9 @@ async def _run_pinned_swap(
     pool: str,
     expected_routing: str,
     expected_tick_spacing: int | None,
+    expected_router: str | None = None,
 ) -> None:
+    assert expected_routing != "cl" or expected_router, "a CL pin must name the router it is expected to execute on"
     tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
     usdc, weth = tokens["USDC"], tokens["WETH"]
     usdc_decimals = get_token_decimals(web3, usdc)
@@ -90,6 +100,13 @@ async def _run_pinned_swap(
         assert "tick_spacing" not in meta
     else:
         assert meta["tick_spacing"] == expected_tick_spacing
+    if expected_router is not None:
+        # The generation that owns the pool routes it: its router is both the
+        # recorded venue and the executed swap target.
+        assert meta["swap_router"].lower() == expected_router.lower()
+        swap_tx = compilation.action_bundle.transactions[-1]
+        swap_target = swap_tx["to"] if isinstance(swap_tx, dict) else swap_tx.to
+        assert swap_target.lower() == expected_router.lower()
 
     # Layer 2 — execute.
     execution = await orchestrator.execute(compilation.action_bundle)
@@ -147,7 +164,7 @@ class TestAerodromePinnedSwap:
 
     @pytest.mark.intent(IntentType.SWAP)
     @pytest.mark.asyncio
-    async def test_swap_pinned_to_exact_cl_pool_on_router_factory(
+    async def test_swap_pinned_to_legacy_generation_cl_pool_routes_through_legacy_router(
         self,
         web3: Web3,
         anvil_rpc_url: str,
@@ -155,21 +172,47 @@ class TestAerodromePinnedSwap:
         orchestrator: ExecutionOrchestrator,
         price_oracle: dict[str, Decimal],
     ):
+        legacy = slipstream_deployment_for_factory(CHAIN_NAME, LEGACY_FACTORY)
+        assert legacy is not None and legacy.generation == "legacy" and legacy.swap_router
         await _run_pinned_swap(
             web3=web3,
             funded_wallet=funded_wallet,
             orchestrator=orchestrator,
             compiler=_compiler(funded_wallet, price_oracle, anvil_rpc_url),
-            pool=ROUTER_CL_POOL,
+            pool=LEGACY_CL_POOL,
             expected_routing="cl",
             expected_tick_spacing=100,
+            expected_router=legacy.swap_router,
+        )
+
+    @pytest.mark.intent(IntentType.SWAP)
+    @pytest.mark.asyncio
+    async def test_swap_pinned_to_current_generation_cl_pool_routes_through_current_router(
+        self,
+        web3: Web3,
+        anvil_rpc_url: str,
+        funded_wallet: str,
+        orchestrator: ExecutionOrchestrator,
+        price_oracle: dict[str, Decimal],
+    ):
+        current = slipstream_deployment_for_factory(CHAIN_NAME, CURRENT_FACTORY)
+        assert current is not None and current.generation == "current" and current.swap_router
+        await _run_pinned_swap(
+            web3=web3,
+            funded_wallet=funded_wallet,
+            orchestrator=orchestrator,
+            compiler=_compiler(funded_wallet, price_oracle, anvil_rpc_url),
+            pool=CURRENT_CL_POOL,
+            expected_routing="cl",
+            expected_tick_spacing=50,
+            expected_router=current.swap_router,
         )
 
     @pytest.mark.intent(IntentType.SWAP)
     @pytest.mark.asyncio
     # Compile-time refusal: no bundle exists to execute, so Layers 2-4 cannot
     # apply; bilateral balance conservation is asserted instead.
-    async def test_swap_pinned_to_cl_pool_the_router_cannot_reach_is_refused(  # noqa: layers
+    async def test_swap_pinned_to_cl_pool_on_an_unreviewed_factory_is_refused(  # noqa: layers
         self,
         web3: Web3,
         anvil_rpc_url: str,
@@ -177,16 +220,21 @@ class TestAerodromePinnedSwap:
         orchestrator: ExecutionOrchestrator,
         price_oracle: dict[str, Decimal],
     ):
-        """A current-generation CL pool is a real pool, but the registered swap router is bound to the legacy factory."""
+        """Real pools that answer the Slipstream ABI but report a factory no reviewed generation owns."""
         tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
         usdc_before = get_token_balance(web3, tokens["USDC"], funded_wallet)
         weth_before = get_token_balance(web3, tokens["WETH"], funded_wallet)
+        compiler = _compiler(funded_wallet, price_oracle, anvil_rpc_url)
 
-        compilation = _compiler(funded_wallet, price_oracle, anvil_rpc_url).compile(_swap_intent(UNREACHABLE_CL_POOL))
-        assert compilation.status.value == "FAILED"
-        assert compilation.action_bundle is None
-        assert f"swap router on {CHAIN_NAME} routes through factory {ROUTER_FACTORY}" in (compilation.error or "")
-        assert "0xf8f2eb4940cfe7d13603dddd87f123820fc061ef" in (compilation.error or "")
+        for pool, factory in (
+            (UNREGISTERED_AERODROME_CL_POOL, UNREGISTERED_AERODROME_FACTORY),
+            (UNISWAP_V3_POOL, UNISWAP_V3_FACTORY),
+        ):
+            compilation = compiler.compile(_swap_intent(pool))
+            assert compilation.status.value == "FAILED", pool
+            assert compilation.action_bundle is None
+            assert "not a reviewed Slipstream factory generation" in (compilation.error or ""), compilation.error
+            assert factory.lower() in (compilation.error or "").lower()
 
         assert get_token_balance(web3, tokens["USDC"], funded_wallet) == usdc_before
         assert get_token_balance(web3, tokens["WETH"], funded_wallet) == weth_before

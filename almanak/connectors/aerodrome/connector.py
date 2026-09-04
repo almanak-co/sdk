@@ -252,11 +252,10 @@ CONNECTOR = Connector(
         chains=(BASE, OPTIMISM),
         # Slipstream (concentrated liquidity) is deployed on Base only. Optimism
         # is Velodrome V2 — the Solidly-fork Classic pools — and `addresses.py`
-        # carries no `cl_*` entries for it: no cl_factory, no cl_nft
-        # (NonfungiblePositionManager), no cl_quoter. Without the override the
-        # alias inherits the connector union and publishes an optimism row that
-        # cannot compile an LP_OPEN. Optimism's concentrated venue is Velodrome
-        # Slipstream, which has its own row.
+        # registers no reviewed Slipstream generation for it. Without the
+        # override the alias inherits the connector union and publishes an
+        # optimism row that cannot compile an LP_OPEN. Optimism's concentrated
+        # venue is Velodrome Slipstream, which has its own row.
         protocol_overrides={"aerodrome_slipstream": (BASE,)},
     ),
     lifecycle_declarations=_production_lifecycle_declarations(),

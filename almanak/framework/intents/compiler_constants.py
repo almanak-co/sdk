@@ -45,6 +45,7 @@ if TYPE_CHECKING:
     UNIV3_NFT_POSITION_MANAGERS: dict[str, str]
     PANCAKESWAP_V3_NFT_POSITION_MANAGERS: dict[str, str]
     SLIPSTREAM_NFT_POSITION_MANAGERS: dict[str, str]
+    SLIPSTREAM_NFT_POSITION_MANAGER_SETS: dict[str, tuple[str, ...]]
     UNIV4_NFT_POSITION_MANAGERS: dict[str, str]
 
 logger = logging.getLogger(__name__)
@@ -466,19 +467,60 @@ def _build_pancakeswap_v3_nft_position_managers() -> dict[str, str]:
     )
 
 
-def _build_slipstream_nft_position_managers() -> dict[str, str]:
-    """Aerodrome / Velodrome Slipstream ``{chain: NPM}`` (lowercased).
+def _build_npm_view_sets(view: NpmView) -> dict[str, tuple[str, ...]]:
+    """Materialize one backfill NPM ``{chain: (address, ...)}`` view-map with EVERY declared kind.
 
-    Byte-equivalent to ``aerodrome.receipt_parser._SLIPSTREAM_NPM_ADDRESSES``.
+    Where :func:`_build_npm_view` takes the first kind that resolves, this
+    keeps all of them: a connector with several reviewed manager generations
+    on one chain publishes one kind per generation, and no single address is
+    "the" manager there. Lowercased.
+    """
+    from almanak.connectors._strategy_base.address_registry import AddressRegistry
+    from almanak.connectors._strategy_contract_role_registry import (
+        CONTRACT_ROLE_REGISTRY,
+        ContractRole,
+    )
+
+    managers: dict[str, tuple[str, ...]] = {}
+    for protocol in CONTRACT_ROLE_REGISTRY.protocols_with_npm_view(view):
+        kinds = CONTRACT_ROLE_REGISTRY.kinds_for(
+            protocol, ContractRole.LP_POSITION_MANAGER
+        ) or CONTRACT_ROLE_REGISTRY.kinds_for(protocol, ContractRole.CL_POSITION_MANAGER)
+        if kinds is None:
+            continue
+        addr_proto = CONTRACT_ROLE_REGISTRY.address_protocol(protocol)
+        for chain in AddressRegistry.address_chains_ordered(addr_proto):
+            addresses = tuple(
+                dict.fromkeys(
+                    address.lower()
+                    for kind in kinds
+                    if (address := AddressRegistry.resolve_contract_address(addr_proto, chain, (kind,)))
+                )
+            )
+            if addresses:
+                managers[chain.lower()] = addresses
+    return managers
+
+
+def _build_slipstream_nft_position_managers() -> dict[str, str]:
+    """Aerodrome / Velodrome Slipstream ``{chain: NPM}`` (lowercased) for single-generation chains only.
+
+    A chain with several reviewed generations has no single manager and is
+    absent here; consumers that need the whole reviewed set read
+    ``SLIPSTREAM_NFT_POSITION_MANAGER_SETS``.
     """
     from almanak.connectors._strategy_contract_role_registry import NpmView
 
-    return _build_npm_view(
-        NpmView.SLIPSTREAM,
-        preserve_case=False,
-        chain_exclusions=frozenset(),
-        bnb_alias=False,
-    )
+    return {
+        chain: managers[0] for chain, managers in _build_npm_view_sets(NpmView.SLIPSTREAM).items() if len(managers) == 1
+    }
+
+
+def _build_slipstream_nft_position_manager_sets() -> dict[str, tuple[str, ...]]:
+    """Aerodrome / Velodrome Slipstream ``{chain: (NPM, ...)}`` — every reviewed generation (lowercased)."""
+    from almanak.connectors._strategy_contract_role_registry import NpmView
+
+    return _build_npm_view_sets(NpmView.SLIPSTREAM)
 
 
 def _build_univ4_nft_position_managers() -> dict[str, str]:
@@ -526,6 +568,12 @@ def _pancakeswap_v3_nft_position_managers() -> dict[str, str]:
 def _slipstream_nft_position_managers() -> dict[str, str]:
     """Cached ``SLIPSTREAM_NFT_POSITION_MANAGERS`` (lazy)."""
     return _build_slipstream_nft_position_managers()
+
+
+@functools.cache
+def _slipstream_nft_position_manager_sets() -> dict[str, tuple[str, ...]]:
+    """Cached ``SLIPSTREAM_NFT_POSITION_MANAGER_SETS`` (lazy)."""
+    return _build_slipstream_nft_position_manager_sets()
 
 
 @functools.cache
@@ -1010,6 +1058,7 @@ _LAZY_TABLE_ACCESSORS: dict[str, Callable[[], dict[str, Any]]] = {
     "UNIV3_NFT_POSITION_MANAGERS": _univ3_nft_position_managers,
     "PANCAKESWAP_V3_NFT_POSITION_MANAGERS": _pancakeswap_v3_nft_position_managers,
     "SLIPSTREAM_NFT_POSITION_MANAGERS": _slipstream_nft_position_managers,
+    "SLIPSTREAM_NFT_POSITION_MANAGER_SETS": _slipstream_nft_position_manager_sets,
     "UNIV4_NFT_POSITION_MANAGERS": _univ4_nft_position_managers,
 }
 

@@ -59,6 +59,7 @@ import re
 import threading
 import time
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import datetime
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
@@ -1044,28 +1045,20 @@ class TokenResolver:
         cached = self._cache.get(chain_lower, address=addr_key)
         if cached:
             preferred_symbol = _STATIC_ADDRESS_CANONICAL_SYMBOLS.get((chain_lower, addr_key))
-            if preferred_symbol is None or cached.symbol.upper() == preferred_symbol.upper():
-                self._stats["cache_hits"] += 1
-                logger.debug(
-                    "token_cache_hit",
-                    extra={"token": address, "chain": chain_lower, "cache_type": "memory"},
-                )
-                _try_record_metric("record_token_resolution_cache_hit", chain_lower, "memory")
-                return cached
-            # Stale row: cached symbol disagrees with the table's preference,
-            # e.g. a warm disk cache or a write path that missed
-            # ``_put_resolved``. Fall through to the static index below,
-            # which already prefers ``preferred_symbol`` on address collision,
-            # and let the resulting ``_put_resolved`` self-heal the row.
+            if preferred_symbol is not None:
+                preferred_token = self._static_registry.get(chain_lower, {}).get(preferred_symbol.upper())
+                if preferred_token is not None:
+                    canonical = self._token_to_resolved(preferred_token, chain_lower, source="static")
+                    if cached != replace(canonical, resolved_at=cached.resolved_at):
+                        cached = canonical
+                        self._put_resolved(cached)
+            self._stats["cache_hits"] += 1
             logger.debug(
-                "token_cache_stale_canonical_symbol",
-                extra={
-                    "address": address,
-                    "chain": chain_lower,
-                    "cached_symbol": cached.symbol,
-                    "preferred_symbol": preferred_symbol,
-                },
+                "token_cache_hit",
+                extra={"token": address, "chain": chain_lower, "cache_type": "memory"},
             )
+            _try_record_metric("record_token_resolution_cache_hit", chain_lower, "memory")
+            return cached
 
         # 2. Check static registry address index
         chain_index = self._static_address_index.get(chain_lower, {})

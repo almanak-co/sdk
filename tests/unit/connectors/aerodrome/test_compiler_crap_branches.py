@@ -86,7 +86,6 @@ def test_slipstream_close_permission_discovery_substitutes_token_id_without_chan
     with (
         patch("almanak.connectors.aerodrome.AerodromeConfig"),
         patch("almanak.connectors.aerodrome.AerodromeAdapter") as adapter_cls,
-        patch.object(aerodrome_compiler, "_resolve_slipstream_position", return_value=_resolved_position()) as resolve,
     ):
         adapter_cls.return_value.remove_cl_liquidity.return_value = SimpleNamespace(
             success=True, transactions=[tx], error=None
@@ -94,11 +93,14 @@ def test_slipstream_close_permission_discovery_substitutes_token_id_without_chan
         result = aerodrome_compiler.compile_lp_close_aerodrome_slipstream(compiler, intent)
 
     assert result.status is CompilationStatus.SUCCESS
-    assert resolve.call_args.kwargs["token_id"] == 1
-    assert resolve.call_args.kwargs["permission_discovery"] is True
+    # Permission discovery never resolves a real, owned position -- it enumerates
+    # every reviewed generation's calldata directly via
+    # _compile_discovery_position_bundle, so _resolve_slipstream_position (which
+    # requires an actual on-chain-owned NFT) is not on this path at all.
     assert adapter_cls.return_value.remove_cl_liquidity.call_args.kwargs["token_id"] == 1
     assert result.action_bundle.metadata["position_id"] == "0"
     assert result.action_bundle.metadata["token_id"] == 1
+    assert result.action_bundle.metadata["slipstream_deployment"] == "all-reviewed"
 
 
 def test_slipstream_close_returns_position_resolution_failure_without_building_transactions() -> None:

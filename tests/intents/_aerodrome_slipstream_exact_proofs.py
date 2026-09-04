@@ -14,12 +14,10 @@ seal-time contract can re-derive pool identity without a CREATE2 formula it does
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
-import pytest
 from web3 import Web3
 
 from almanak.connectors.aerodrome.addresses import SlipstreamDeployment, slipstream_lp_deployments
@@ -178,15 +176,6 @@ async def run_aerodrome_slipstream_lp_open_exact_proof(
         gateway_client=gateway_client,
         venue_verification_gateway_factory=lambda: venue_verification_gateway,
     ).compile(intent)
-    if (
-        compiled.status.value != "SUCCESS"
-        and "No Aerodrome CL pool found" in str(compiled.error)
-        and os.environ.get("ALMANAK_QA_STRICT_PROOFS") != "1"
-    ):
-        # Excuse EXACTLY the known venue-steering failure (VIB-6810), never the
-        # node: any other compile error, and every assertion below, stays hard.
-        # Self-healing on fix; the Lab seal lane keeps the honest FAIL cell.
-        pytest.xfail("VIB-6810: discovery returns a legacy-factory pool the compiler cannot execute (as of 2026-09-01)")
     assert compiled.status.value == "SUCCESS", (
         f"LP_OPEN compilation failed for the pool the SDK's own discovery returned "
         f"({venue.label} = {venue.pool}, {venue.deployment.generation} factory): {compiled.error}"

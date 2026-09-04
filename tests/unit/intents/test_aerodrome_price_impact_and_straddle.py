@@ -22,6 +22,7 @@ from almanak.connectors._strategy_base.pool_validation_base import (
     PoolValidationReason,
     PoolValidationResult,
 )
+from almanak.connectors.aerodrome.addresses import slipstream_lp_deployments
 from almanak.connectors.aerodrome.compiler import (
     compile_lp_open_aerodrome_slipstream,
     compile_swap_aerodrome,
@@ -35,6 +36,11 @@ _T0_ADDR = "0x" + "aa" * 20
 _T1_ADDR = "0x" + "bb" * 20
 
 
+_PV_CL = "almanak.connectors.aerodrome.pool_validation.validate_aerodrome_cl_pool"
+# The reviewed generation whose factory owns the fixture pool, named explicitly.
+_CURRENT = next(d for d in slipstream_lp_deployments("base") if d.generation == "current")
+
+
 def _confirmed_cl_pool() -> PoolValidationResult:
     """A confirmed-existing CL pool so the per-pair resolver (VIB-5548) routes to
     CL at the first candidate tick spacing instead of probing a fallback."""
@@ -42,6 +48,7 @@ def _confirmed_cl_pool() -> PoolValidationResult:
         exists=True,
         reason=PoolValidationReason.CONFIRMED,
         pool_address="0x" + "cc" * 20,
+        factory=_CURRENT.factory,
     )
 
 
@@ -344,6 +351,24 @@ def test_slipstream_lp_open_allows_in_range_straddling_position() -> None:
         result = compile_lp_open_aerodrome_slipstream(compiler, intent)
 
     assert result.status == CompilationStatus.SUCCESS, result.error
+    assert result.action_bundle.metadata["nft_manager"] == _CURRENT.position_manager
+    assert result.action_bundle.metadata["slipstream_deployment"] == "current"
+
+
+def test_slipstream_lp_open_refuses_pool_no_reviewed_generation_confirmed() -> None:
+    """A confirmed pool that no reviewed generation claims must not mint by guessing an NPM."""
+    compiler = _FakeLpCompiler(current_tick=0)
+    intent = _make_lp_open_intent(-2000, 2000)
+    unclaimed = _confirmed_cl_pool()
+    unclaimed.factory = None
+    _, p2, p3, p4, p5 = _patches()
+    with patch(_PV_CL, return_value=unclaimed), p2, p3, p4, p5 as adapter_cls:
+        adapter_cls.return_value.add_cl_liquidity.return_value = _cl_adapter_result()
+        result = compile_lp_open_aerodrome_slipstream(compiler, intent)
+
+    assert result.status == CompilationStatus.FAILED
+    assert "cannot resolve which reviewed slipstream generation" in (result.error or "").lower()
+    adapter_cls.return_value.add_cl_liquidity.assert_not_called()
 
 
 def test_slipstream_lp_open_out_of_range_opt_in_compiles() -> None:

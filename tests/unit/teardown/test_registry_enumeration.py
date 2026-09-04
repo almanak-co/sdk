@@ -29,6 +29,7 @@ from almanak.framework.teardown.models import (
 )
 from almanak.framework.teardown.registry_enumeration import (
     RegistryReadResult,
+    _merge_registry_lp_authority,
     _position_info_from_registry_row,
     read_open_lp_positions_detailed,
     read_open_lp_positions_from_registry,
@@ -325,6 +326,101 @@ def test_reconcile_dedupes_same_token_id_on_same_nft_manager_case_insensitively(
 
     assert len(out.positions) == 1
     assert out.positions[0].value_usd == Decimal("100")
+
+
+def test_reconcile_enriches_manager_less_strategy_lp_with_registry_authority_ALM_3428() -> None:
+    """ALM-3428: a strategy that reports NO manager (the AlmanakCode-generated
+    shape, not a hand-authored SDK demo) must still come out of the union able
+    to name its reviewed manager on a multi-generation venue, or
+    ``teardown_post_condition`` / the LP valuation reader refuse to certify a
+    position that closed cleanly on-chain — confirmed live on Aerodrome
+    Slipstream (PortfolioManager Experiment-35): LP_CLOSE executed and
+    confirmed on-chain, but teardown still reported ``failed`` because the
+    matching registry row (which DID carry the manager) was discarded instead
+    of merged.
+    """
+    manager = "0x" + "11" * 20
+    strat = TeardownPositionSummary(
+        deployment_id=DEPLOYMENT_ID,
+        timestamp=datetime.now(UTC),
+        # No nft_manager_addr at all — real AlmanakCode dynamic_lp output.
+        positions=[_lp("42", protocol="aerodrome_slipstream", value="100")],
+    )
+
+    out = reconcile_lp_with_registry(
+        strategy_summary=strat,
+        registry_positions=[_lp("42", protocol="lp", nft_manager_addr=manager)],
+        registry_available=True,
+    )
+
+    assert len(out.positions) == 1  # still one physical position, not two
+    kept = out.positions[0]
+    assert kept.value_usd == Decimal("100")  # strategy's own value preserved
+    assert kept.protocol == "aerodrome_slipstream"  # strategy's own slug preserved, not "lp"
+    assert kept.details["nft_manager_addr"] == manager  # registry's authority merged in, not dropped
+
+
+def test_reconcile_manager_less_merge_never_overwrites_a_manager_the_strategy_already_named() -> None:
+    """A strategy that DOES know its own manager keeps its own answer even if
+    a (differently-cased, or stale) registry copy also matches."""
+    strategy_manager = "0x" + "ab" * 20
+    registry_manager = "0x" + "ab" * 20  # same address, different case below
+    strat = TeardownPositionSummary(
+        deployment_id=DEPLOYMENT_ID,
+        timestamp=datetime.now(UTC),
+        positions=[_lp("42", protocol="aerodrome_slipstream", value="100", nft_manager_addr=strategy_manager)],
+    )
+
+    out = reconcile_lp_with_registry(
+        strategy_summary=strat,
+        registry_positions=[_lp("42", protocol="lp", nft_manager_addr=registry_manager.upper())],
+        registry_available=True,
+    )
+
+    assert len(out.positions) == 1
+    assert out.positions[0].details["nft_manager_addr"] == strategy_manager  # unchanged, not overwritten
+
+
+def test_registry_authority_does_not_add_a_higher_precedence_alias_to_strategy_authority() -> None:
+    strategy = _lp("42")
+    strategy.details = {"position_manager": "0x" + "ab" * 20}
+    registry = _lp("42", nft_manager_addr="0x" + "cd" * 20)
+
+    out = _merge_registry_lp_authority(strategy, registry)
+
+    assert out is strategy
+    assert out.details == {"position_manager": "0x" + "ab" * 20}
+
+
+def test_registry_authority_replaces_a_whitespace_only_strategy_alias() -> None:
+    strategy = _lp("42", protocol="aerodrome_slipstream")
+    strategy.details = {"position_manager": " \t "}
+    manager = "0x" + "ab" * 20
+
+    out = reconcile_lp_with_registry(
+        strategy_summary=TeardownPositionSummary(
+            deployment_id=DEPLOYMENT_ID,
+            timestamp=datetime.now(UTC),
+            positions=[strategy],
+        ),
+        registry_positions=[_lp("42", protocol="lp", nft_manager_addr=manager)],
+        registry_available=True,
+    )
+
+    assert len(out.positions) == 1
+    assert out.positions[0].details["nft_manager_addr"] == manager
+    assert registry_enumeration_module._lp_nft_parts(out.positions[0]) == ("42", manager)
+
+
+def test_conflicting_registry_manager_aliases_are_not_merged() -> None:
+    strategy = _lp("42")
+    registry = _lp("42", nft_manager_addr="0x" + "ab" * 20)
+    registry.details["position_manager"] = "0x" + "cd" * 20
+
+    out = _merge_registry_lp_authority(strategy, registry)
+
+    assert out is strategy
+    assert out.details == {}
 
 
 def test_reconcile_never_drops_strategy_positions() -> None:
@@ -1942,10 +2038,19 @@ def test_vib6735_producer_supplied_manager_still_wins_over_derivation() -> None:
 
 
 def _fallback_chains(protocol: str) -> frozenset[str]:
-    """Chains a protocol reaches only through the migration NPM view."""
-    from almanak.framework.migration.backfill import _NPM_ADDRESSES_BY_PROTOCOL
+    """Chains a protocol reaches only through the migration NPM view (every reviewed manager per chain)."""
+    from almanak.connectors._strategy_base.address_registry import address_supported_chains
+    from almanak.framework.migration.backfill import _NPM_ADDRESS_SETS_BY_PROTOCOL
 
-    return frozenset((_NPM_ADDRESSES_BY_PROTOCOL.get(protocol) or {}).keys())
+    set_map = _NPM_ADDRESS_SETS_BY_PROTOCOL.get(protocol)
+    if set_map:
+        return frozenset(set_map)
+    if set_map is not None:
+        # Declared with no reviewed generation anywhere (velodrome_slipstream
+        # rides the aerodrome table): the derivation is still checked on every
+        # chain that table covers, where it must refuse.
+        return frozenset(address_supported_chains("aerodrome") or frozenset())
+    return frozenset()
 
 
 def _reviewed_lp_managers(protocol: str, chain: str) -> frozenset[str]:
@@ -1955,11 +2060,11 @@ def _reviewed_lp_managers(protocol: str, chain: str) -> frozenset[str]:
     is "the" authority — Aerodrome Slipstream on Base publishes a legacy and a
     current NPM, and new positions always mint under the current one.
 
-    Deliberately does NOT consult ``_NPM_ADDRESSES_BY_PROTOCOL``. That map is a
-    per-protocol SINGLETON view, so for a multi-generation venue it reports one
-    address where the connector publishes two — which is exactly how the Aerodrome
-    defect was produced, and an earlier version of this helper inherited the same
-    blind spot and would have blessed it again.
+    Deliberately consults the migration view that carries EVERY reviewed manager
+    per chain, never a per-protocol singleton: a singleton reports one address
+    where a multi-generation venue publishes two — which is exactly how the
+    Aerodrome defect was produced, and an earlier version of this helper
+    inherited the same blind spot and would have blessed it again.
     """
     from almanak.connectors._strategy_base.address_registry import addresses_for
 
@@ -1974,6 +2079,12 @@ def _reviewed_lp_managers(protocol: str, chain: str) -> frozenset[str]:
     parser_map = _receipt_parser_managers(protocol)
     if parser_map.get(chain):
         return frozenset({str(parser_map[chain]).strip().lower()})
+
+    from almanak.framework.migration.backfill import _NPM_ADDRESS_SETS_BY_PROTOCOL
+
+    set_map = _NPM_ADDRESS_SETS_BY_PROTOCOL.get(protocol)
+    if set_map is not None:
+        return frozenset(str(manager).strip().lower() for manager in set_map.get(chain) or ())
 
     table = addresses_for(protocol, chain) or {}
     return frozenset(
@@ -2063,10 +2174,11 @@ def test_vib6730_no_slug_ever_derives_a_superseded_slipstream_generation() -> No
     and the invariant is not.
 
     Measured on the shipped code, the two Aerodrome-family slugs refuse for
-    DIFFERENT reasons: ``aerodrome`` publishes both ``cl_nft`` (legacy) and
-    ``cl_nft_current``, so it hits the >1-candidate refusal; ``aerodrome_slipstream``
-    — the slug real Slipstream rows actually carry — has no address table registered
-    at all, so it hits the older zero-candidate branch. Same safe output, different
+    DIFFERENT reasons: ``aerodrome_slipstream`` — the slug real Slipstream rows
+    actually carry — declares a ``CL_POSITION_MANAGER`` role with one kind per
+    reviewed generation on the shared ``aerodrome`` table, so it hits the
+    >1-candidate refusal; Classic ``aerodrome`` publishes no manager kind at all,
+    so it hits the older zero-candidate branch. Same safe output, different
     reason.
 
     That difference is a live regression path. Register an ``aerodrome_slipstream``
@@ -2087,9 +2199,11 @@ def test_vib6730_no_slug_ever_derives_a_superseded_slipstream_generation() -> No
     for chain, deployments in SLIPSTREAM_LP_DEPLOYMENTS.items():
         if len(deployments) < 2:
             continue  # single-generation chain: nothing to supersede
-        superseded = {str(d.position_manager).strip().lower() for d in deployments[1:]}
-        current = str(deployments[0].position_manager).strip().lower()
-        assert current not in superseded, f"{chain}: deployment ordering is not newest-first"
+        # Tuple order carries no meaning; the generation name does.
+        by_generation = {d.generation: d for d in deployments}
+        current = str(by_generation["current"].position_manager).strip().lower()
+        superseded = {str(d.position_manager).strip().lower() for d in deployments if d.generation != "current"}
+        assert current not in superseded, f"{chain}: the current NPM is also published as a superseded generation"
         for slug in ("aerodrome", "aerodrome_slipstream", "velodrome_slipstream"):
             checked += 1
             derived = registry_enumeration_module._derived_lp_manager(slug, chain)

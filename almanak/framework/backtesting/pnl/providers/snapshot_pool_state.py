@@ -562,7 +562,10 @@ class SnapshotPoolStateSource:
         from almanak.connectors._strategy_pool_reader_registry import POOL_READER_REGISTRY
 
         spec = POOL_READER_REGISTRY.lookup(series.target.protocol)
-        factory = spec.factory_addresses.get(series.target.chain) if spec is not None else None
+        # Unmeasured when several reviewed generations could own the pool; the
+        # archive point does not carry the pool's own factory.
+        factories = spec.factories_for(series.target.chain) if spec is not None else ()
+        factory = factories[0] if len(factories) == 1 else None
         return PoolDescriptor(
             chain=series.target.chain,
             protocol=series.target.protocol,

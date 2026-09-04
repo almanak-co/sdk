@@ -56,7 +56,7 @@ from almanak.framework.intents._compiler_helpers import deadline_from_now
 from almanak.framework.intents.vocabulary import IntentType, SwapIntent
 from almanak.framework.models.reproduction_bundle import ActionBundle
 
-from .addresses import SlipstreamDeployment
+from .addresses import SlipstreamDeployment, slipstream_lp_deployments
 from .sdk import (
     AERODROME_ADDRESSES,
     AERODROME_GAS_ESTIMATES,
@@ -502,6 +502,26 @@ class AerodromeAdapter:
     # Swap Operations
     # =========================================================================
 
+    def _require_cl_swap_venue(self, deployment: SlipstreamDeployment | None) -> tuple[str, str | None] | str:
+        """Return ``(swap_router, quoter)`` of a reviewed generation, or the refusal reason.
+
+        The router derives the pool from ITS factory, so only the generation that
+        owns the pool may route it; a generation without a router is LP-only.
+        """
+        if deployment is None:
+            return (
+                f"Aerodrome Slipstream CL swap on {self.chain} requires the reviewed generation that owns the pool; "
+                "no generation was resolved."
+            )
+        if type(deployment) is not SlipstreamDeployment or deployment not in slipstream_lp_deployments(self.chain):
+            return f"unreviewed Slipstream deployment for chain {self.chain}"
+        if not deployment.swap_router:
+            return (
+                f"The {deployment.generation} Slipstream generation ({deployment.factory}) on {self.chain} has no "
+                "reviewed swap router; its pools are LP-only."
+            )
+        return deployment.swap_router, deployment.quoter
+
     def swap_exact_input(
         self,
         token_in: str,
@@ -512,11 +532,14 @@ class AerodromeAdapter:
         recipient: str | None = None,
         tick_spacing: int = 100,
         use_classic: bool = False,
+        deployment: SlipstreamDeployment | None = None,
     ) -> SwapResult:
         """Build a swap transaction with exact input amount.
 
-        By default, routes through the Slipstream CL (concentrated liquidity) pool.
-        Use ``use_classic=True`` to opt into the Classic (v1) volatile/stable router.
+        By default, routes through the Slipstream CL (concentrated liquidity) pool
+        of ``deployment`` (the reviewed generation that owns the pool; its swap
+        router and quoter are used). Use ``use_classic=True`` to opt into the
+        Classic (v1) volatile/stable router, which needs no deployment.
 
         Args:
             token_in: Input token symbol or address
@@ -527,6 +550,8 @@ class AerodromeAdapter:
             recipient: Address to receive output tokens (default: wallet_address)
             tick_spacing: Slipstream CL tick spacing (default 100)
             use_classic: If True, route through Classic router instead of CL
+            deployment: Reviewed Slipstream generation for CL routing; required
+                unless ``use_classic`` is True.
 
         Returns:
             SwapResult with transaction data
@@ -536,6 +561,14 @@ class AerodromeAdapter:
             # Use defaults from config if not specified
             slippage_bps = self.config.default_slippage_bps if slippage_bps is None else slippage_bps
             recipient = recipient or self.wallet_address
+
+            cl_router: str | None = None
+            cl_quoter: str | None = None
+            if not use_classic:
+                venue = self._require_cl_swap_venue(deployment)
+                if isinstance(venue, str):
+                    return SwapResult(success=False, error=venue)
+                cl_router, cl_quoter = venue
 
             # Resolve token addresses
             token_in_address = self._resolve_token(token_in)
@@ -579,6 +612,7 @@ class AerodromeAdapter:
                     stable,
                     tick_spacing=tick_spacing,
                     use_cl=True,
+                    quoter=cl_quoter,
                 )
             else:
                 quote = self._get_quote_exact_input(actual_token_in, token_out_address, amount_in_wei, stable)
@@ -588,8 +622,8 @@ class AerodromeAdapter:
             # Build transactions
             transactions: list[TransactionData] = []
 
-            # Determine spender (CL router vs Classic router)
-            spender = self.addresses["cl_router"] if routing == "cl" else self.addresses["router"]
+            # Determine spender (the generation's CL router vs Classic router)
+            spender = cl_router if routing == "cl" and cl_router else self.addresses["router"]
 
             # Build approve transaction if needed (skip for native token)
             if not is_native_input:
@@ -603,6 +637,7 @@ class AerodromeAdapter:
 
             # Build swap transaction
             if routing == "cl":
+                assert cl_router is not None
                 swap_tx = self._build_swap_exact_input_cl_tx(
                     token_in=actual_token_in,
                     token_out=token_out_address,
@@ -611,6 +646,7 @@ class AerodromeAdapter:
                     amount_in=amount_in_wei,
                     amount_out_minimum=amount_out_minimum,
                     value=amount_in_wei if is_native_input else 0,
+                    router=cl_router,
                 )
             else:
                 swap_tx = self._build_swap_exact_input_tx(
@@ -984,20 +1020,24 @@ class AerodromeAdapter:
                 are derived from pool-aligned amounts, not the oracle inputs.
                 Must be paired with the other three wei overload kwargs.
             amount_b_min_wei: See ``amount_a_min_wei``.
-            deployment: Reviewed Slipstream factory/position-manager pair.
-                New positions should pass the current deployment explicitly;
-                ``None`` retains the legacy direct-adapter default only. The
-                exact-venue compiler always supplies the reviewed current pair.
+            deployment: Reviewed Slipstream generation that owns the pool
+                (selected by the pool's factory). Required: there is no
+                default position manager.
 
         Returns:
             CLLiquidityResult with transaction data
         """
         self.clear_planned_allowance_cache()
         try:
-            if deployment is None and "cl_nft" not in self.addresses:
+            if not slipstream_lp_deployments(self.chain):
                 return CLLiquidityResult(
                     success=False,
-                    error=f"Aerodrome Slipstream CL not supported on chain '{self.chain}' (no cl_nft address)",
+                    error=f"Aerodrome Slipstream CL not supported on chain '{self.chain}' (no reviewed deployment)",
+                )
+            if deployment is None:
+                return CLLiquidityResult(
+                    success=False,
+                    error="Aerodrome Slipstream CL mint requires the reviewed generation that owns the pool",
                 )
 
             slippage_bps = slippage_bps if slippage_bps is not None else self.config.default_slippage_bps
@@ -1206,13 +1246,18 @@ class AerodromeAdapter:
             slippage_bps: Slippage tolerance (unused, mins set to 0)
             recipient: Address to receive tokens (default: wallet_address)
             deployment: Reviewed generation that owns the physical position.
-                ``None`` retains the legacy direct-adapter manager default.
+                Required: there is no default position manager.
 
         Returns:
             LiquidityResult with transaction data
         """
         self.clear_planned_allowance_cache()
         try:
+            if deployment is None:
+                return LiquidityResult(
+                    success=False,
+                    error="Aerodrome Slipstream CL removal requires the reviewed generation that owns the position",
+                )
             # slippage_bps is accepted for API compatibility but is not applied to
             # decreaseLiquidity amount0Min/amount1Min.  Computing precise expected
             # amounts from liquidity requires sqrtPrice math (FullMath/TickMath) and
@@ -1340,13 +1385,18 @@ class AerodromeAdapter:
             token_id: NFT tokenId for the CL position
             recipient: Address to receive collected tokens (default: wallet)
             deployment: Reviewed generation that owns the physical position.
-                ``None`` retains the legacy direct-adapter manager default.
+                Required: there is no default position manager.
 
         Returns:
             LiquidityResult with a single ``collect`` transaction
         """
         self.clear_planned_allowance_cache()
         try:
+            if deployment is None:
+                return LiquidityResult(
+                    success=False,
+                    error="Aerodrome Slipstream CL collect requires the reviewed generation that owns the position",
+                )
             recipient = recipient or self.wallet_address
             web3 = self._get_web3()
 
@@ -1392,7 +1442,13 @@ class AerodromeAdapter:
         stable: bool = False,
         price_oracle: dict[str, Decimal] | None = None,
     ) -> ActionBundle:
-        """Compile a SwapIntent to an ActionBundle.
+        """Compile a SwapIntent to a Classic (Solidly) router ActionBundle.
+
+        This direct-adapter helper is Classic-only: its metadata names the
+        Classic router and it takes no Slipstream generation. A request that
+        asks for CL routing is refused rather than silently routed through
+        Classic; Slipstream CL swaps are compiled by the intent compiler,
+        which resolves the generation from the pool.
 
         Args:
             intent: The SwapIntent to compile
@@ -1402,6 +1458,16 @@ class AerodromeAdapter:
         Returns:
             ActionBundle containing transactions for execution
         """
+        swap_params = getattr(intent, "swap_params", None) or {}
+        cl_keys = sorted(key for key in ("pool", "tick_spacing") if swap_params.get(key) is not None)
+        if swap_params.get("classic") is False:
+            cl_keys.append("classic=False")
+        if cl_keys:
+            raise ValueError(
+                f"compile_swap_intent routes Aerodrome Classic only; {', '.join(cl_keys)} asks for Slipstream CL "
+                "routing, which the intent compiler owns (it resolves the generation from the pool)."
+            )
+
         # Use default price oracle if not provided
         if price_oracle is None:
             price_oracle = self._get_default_price_oracle()
@@ -1437,6 +1503,7 @@ class AerodromeAdapter:
             amount_in=amount_in,
             stable=stable,
             slippage_bps=slippage_bps,
+            use_classic=True,
         )
 
         if not result.success:
@@ -1547,8 +1614,10 @@ class AerodromeAdapter:
         amount_in: int,
         amount_out_minimum: int,
         value: int = 0,
+        *,
+        router: str,
     ) -> TransactionData:
-        """Build Slipstream CL exactInputSingle swap transaction.
+        """Build Slipstream CL exactInputSingle swap transaction on ``router``.
 
         Aerodrome Slipstream exactInputSingle signature:
         function exactInputSingle(ExactInputSingleParams calldata params)
@@ -1582,7 +1651,7 @@ class AerodromeAdapter:
         amount_out_formatted = Decimal(str(amount_out_minimum)) / Decimal(10**token_out_decimals)
 
         return TransactionData(
-            to=self.addresses["cl_router"],
+            to=router,
             value=value,
             data=calldata,
             gas_estimate=AERODROME_GAS_ESTIMATES["swap"],
@@ -1710,11 +1779,22 @@ class AerodromeAdapter:
         tick_spacing: int = 100,
         use_cl: bool = True,
         require_onchain: bool = False,
+        deployment: SlipstreamDeployment | None = None,
     ) -> int:
-        """Quote an exact-input swap output in token base units."""
+        """Quote an exact-input swap output in token base units.
+
+        CL quotes go through the quoter of ``deployment``, the reviewed
+        generation that owns the pool; there is no default quoter.
+        """
+        quoter: str | None = None
+        if use_cl:
+            venue = self._require_cl_swap_venue(deployment)
+            if isinstance(venue, str):
+                raise ValueError(venue)
+            quoter = venue[1]
         if require_onchain:
             amount_out = (
-                self._try_get_cl_amount_out_onchain(token_in, token_out, amount_in_wei, tick_spacing)
+                self._try_get_cl_amount_out_onchain(token_in, token_out, amount_in_wei, tick_spacing, quoter=quoter)
                 if use_cl
                 else self._try_get_amount_out_onchain(token_in, token_out, amount_in_wei, stable)
             )
@@ -1728,6 +1808,7 @@ class AerodromeAdapter:
             stable,
             tick_spacing=tick_spacing,
             use_cl=use_cl,
+            quoter=quoter,
         )
         return quote.amount_out
 
@@ -1740,6 +1821,7 @@ class AerodromeAdapter:
         tick_spacing: int | None = None,
         use_cl: bool = False,
         skip_onchain: bool = False,
+        quoter: str | None = None,
     ) -> SwapQuote:
         """Get quote for exact input swap.
 
@@ -1761,6 +1843,7 @@ class AerodromeAdapter:
                 token_out,
                 amount_in,
                 tick_spacing or 100,
+                quoter=quoter,
             )
         else:
             amount_out = self._try_get_amount_out_onchain(token_in, token_out, amount_in, stable)
@@ -1880,9 +1963,10 @@ class AerodromeAdapter:
         token_out: str,
         amount_in: int,
         tick_spacing: int,
+        *,
+        quoter: str | None,
     ) -> int | None:
-        """Best-effort on-chain quote for Slipstream CL exact-input swaps."""
-        quoter = self.addresses.get("cl_quoter")
+        """Best-effort on-chain quote for Slipstream CL exact-input swaps through ``quoter``."""
         if not quoter:
             return None
         if self.config.gateway_client is None and not self.config.rpc_url:

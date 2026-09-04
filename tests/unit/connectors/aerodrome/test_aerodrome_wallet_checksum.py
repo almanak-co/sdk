@@ -20,6 +20,7 @@ from unittest.mock import MagicMock
 
 from web3 import Web3
 
+from almanak.connectors.aerodrome.addresses import slipstream_deployment_for_factory
 from almanak.connectors.aerodrome.sdk import AerodromeSDK
 
 # Real Base wallet from the 2026-05-04 prod crash. Lowercase form is NOT
@@ -30,6 +31,10 @@ NON_CHECKSUM_WALLET = "0xca69825e381929621c8b614c9042b85a3f446947"
 # used as token0 / token1 / recipient in mint param construction.
 USDC_BASE = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
 CBBTC_BASE = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+
+# Every CL builder targets one reviewed generation's position manager.
+CURRENT = slipstream_deployment_for_factory("base", "0xf8f2eB4940CFE7d13603DDDD87f123820Fc061Ef")
+assert CURRENT is not None
 
 
 def _make_web3_mock() -> MagicMock:
@@ -109,6 +114,7 @@ class TestAerodromeSDKLowercaseSender:
             deadline=1_777_872_926,
             sender=NON_CHECKSUM_WALLET,
             web3=web3,
+            deployment=CURRENT,
         )
 
         # The nonce lookup must have received the checksum form, not the raw
@@ -129,6 +135,7 @@ class TestAerodromeSDKLowercaseSender:
             deadline=1_777_872_926,
             sender=NON_CHECKSUM_WALLET,
             web3=web3,
+            deployment=CURRENT,
         )
 
         nonce_arg = web3.eth.get_transaction_count.call_args.args[0]
@@ -145,6 +152,7 @@ class TestAerodromeSDKLowercaseSender:
             amount1_max=2**128 - 1,
             sender=NON_CHECKSUM_WALLET,
             web3=web3,
+            deployment=CURRENT,
         )
 
         nonce_arg = web3.eth.get_transaction_count.call_args.args[0]

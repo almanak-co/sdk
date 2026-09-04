@@ -32,8 +32,14 @@ synthetically via the connector-owned ``build_discovery_vectors`` override.
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
 
+from almanak.connectors._strategy_base.pool_validation_base import (
+    PoolValidationReason,
+    PoolValidationResult,
+)
 from almanak.connectors.aerodrome.addresses import AERODROME, slipstream_lp_deployments
 from almanak.framework.permissions.discovery import discover_permissions
 from almanak.framework.permissions.hints import (
@@ -58,12 +64,14 @@ _CLASSIC_SWAP_SELECTOR = "0xcac88ea9"
 _ERC20_APPROVE_SELECTOR = "0x095ea7b3"
 
 _DEPLOYMENTS_BASE = slipstream_lp_deployments("base")
-_NPM_CURRENT = _DEPLOYMENTS_BASE[0].position_manager.lower()
-_NPM_LEGACY = _DEPLOYMENTS_BASE[1].position_manager.lower()
-_NPM_BASE = _NPM_LEGACY
-_NPM_TARGETS = {_NPM_CURRENT, _NPM_LEGACY}
+_BY_GENERATION = {deployment.generation: deployment for deployment in _DEPLOYMENTS_BASE}
+_NPM_CURRENT = _BY_GENERATION["current"].position_manager.lower()
+_NPM_LEGACY = _BY_GENERATION["legacy"].position_manager.lower()
+_NPM_TARGETS = {deployment.position_manager.lower() for deployment in _DEPLOYMENTS_BASE}
 _ROUTER_BASE = AERODROME["base"]["router"].lower()
-_CL_ROUTER_BASE = AERODROME["base"]["cl_router"].lower()
+# One CL SwapRouter per reviewed generation. The pool decides which one a live
+# swap executes on, so the offline manifest must authorise every one of them.
+_CL_ROUTERS_BASE = {deployment.swap_router.lower() for deployment in _DEPLOYMENTS_BASE if deployment.swap_router}
 
 
 def _npm_selectors_for_intents(
@@ -176,14 +184,14 @@ class TestSlipstreamManifestLeastPrivilege:
     """
 
     def test_lp_open_only_npm_selectors_are_mint_only(self) -> None:
-        selectors = _npm_selectors_for_intents(["LP_OPEN"])
-        assert selectors == {_SLIPSTREAM_MINT_SELECTOR}, (
-            f"LP_OPEN-only NPM selectors must be exactly mint "
-            f"({_SLIPSTREAM_MINT_SELECTOR}); got {sorted(selectors)}"
-        )
-        assert _npm_selectors_for_intents(["LP_OPEN"], target=_NPM_LEGACY) == set(), (
-            "New LP positions must not be minted through the legacy manager"
-        )
+        # The pool a strategy names decides which generation mints, so every
+        # reviewed NPM is authorised for mint and nothing else.
+        for target in _NPM_TARGETS:
+            selectors = _npm_selectors_for_intents(["LP_OPEN"], target=target)
+            assert selectors == {_SLIPSTREAM_MINT_SELECTOR}, (
+                f"LP_OPEN-only selectors on {target} must be exactly mint "
+                f"({_SLIPSTREAM_MINT_SELECTOR}); got {sorted(selectors)}"
+            )
 
     def test_lp_close_only_npm_selectors_are_decrease_and_collect(self) -> None:
         for target in _NPM_TARGETS:
@@ -206,20 +214,19 @@ class TestSlipstreamManifestLeastPrivilege:
 
     def test_combined_discovery_is_union_of_intent_sets(self) -> None:
         """Sanity: union of per-intent sets matches the combined discovery."""
-        current = _npm_selectors_for_intents(["LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"])
-        assert current == {
-            _SLIPSTREAM_MINT_SELECTOR,
-            _SLIPSTREAM_DECREASE_SELECTOR,
-            _SLIPSTREAM_COLLECT_SELECTOR,
-        }, (
-            "Current NPM combined discovery must include mint/decrease/collect; "
-            f"got {sorted(current)}"
-        )
-        legacy = _npm_selectors_for_intents(
-            ["LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"],
-            target=_NPM_LEGACY,
-        )
-        assert legacy == {_SLIPSTREAM_DECREASE_SELECTOR, _SLIPSTREAM_COLLECT_SELECTOR}
+        for target in _NPM_TARGETS:
+            combined = _npm_selectors_for_intents(
+                ["LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"],
+                target=target,
+            )
+            assert combined == {
+                _SLIPSTREAM_MINT_SELECTOR,
+                _SLIPSTREAM_DECREASE_SELECTOR,
+                _SLIPSTREAM_COLLECT_SELECTOR,
+            }, (
+                f"Combined discovery on {target} must include mint/decrease/collect; "
+                f"got {sorted(combined)}"
+            )
 
 
 def _discover(intent_types: list[str], chain: str = "base"):
@@ -254,19 +261,64 @@ class TestSlipstreamSwapManifest:
     the SWAP and LP manifests.
     """
 
+    @pytest.fixture(autouse=True)
+    def _offline_probes(self):
+        """Hold both pool probes unverifiable so the default cells model offline discovery."""
+        unverifiable = PoolValidationResult(exists=None, reason=PoolValidationReason.RPC_UNAVAILABLE, warning="offline")
+        with (
+            patch(
+                "almanak.connectors.aerodrome.pool_validation.validate_aerodrome_cl_pool",
+                return_value=unverifiable,
+            ),
+            patch(
+                "almanak.connectors.aerodrome.pool_validation.validate_aerodrome_pool",
+                return_value=unverifiable,
+            ),
+        ):
+            yield
+
+    def test_swap_manifest_authorises_every_router_even_when_a_probe_names_one_generation(self) -> None:
+        """A reachable RPC must not narrow the manifest to the generation the synthetic pair happens to live on.
+
+        Which generation a strategy's real pools live on is not knowable from
+        the synthetic pair, so discovery emits every reviewed router; the
+        Safe-path swap through the other generation's router would otherwise
+        revert unauthorized.
+        """
+        legacy = next(d for d in slipstream_lp_deployments("base") if d.generation == "legacy")
+        confirmed = PoolValidationResult(
+            exists=True,
+            reason=PoolValidationReason.CONFIRMED,
+            pool_address="0xb2cc224c1c9fee385f8ad6a55b4d94e92359dc59",
+            factory=legacy.factory,
+        )
+        with patch(
+            "almanak.connectors.aerodrome.pool_validation.validate_aerodrome_cl_pool",
+            return_value=confirmed,
+        ):
+            by_target = _selectors_by_target(_discover(["SWAP"]))
+        for router in _CL_ROUTERS_BASE:
+            assert by_target.get(router) == {_CL_EXACT_INPUT_SINGLE_SELECTOR}, (router, sorted(by_target))
+
     def test_swap_manifest_contains_cl_router_swap_selector(self) -> None:
+        # Both reviewed generations, named explicitly: a pool owned by either
+        # factory executes on that generation's router.
+        assert _CL_ROUTERS_BASE == {
+            _BY_GENERATION["current"].swap_router.lower(),
+            _BY_GENERATION["legacy"].swap_router.lower(),
+        }
         by_target = _selectors_by_target(_discover(["SWAP"]))
-        assert _CL_ROUTER_BASE in by_target, (
-            "SWAP manifest must authorise the Slipstream CL SwapRouter "
-            f"({_CL_ROUTER_BASE}); got targets {sorted(by_target)} — an empty "
-            "or router-less manifest reverts every Safe-path slipstream swap "
-            "(VIB-5990)"
-        )
-        assert by_target[_CL_ROUTER_BASE] == {_CL_EXACT_INPUT_SINGLE_SELECTOR}, (
-            "CL SwapRouter selectors for SWAP-only discovery must be exactly "
-            f"exactInputSingle ({_CL_EXACT_INPUT_SINGLE_SELECTOR}); got "
-            f"{sorted(by_target[_CL_ROUTER_BASE])}"
-        )
+        for router in _CL_ROUTERS_BASE:
+            assert router in by_target, (
+                "SWAP manifest must authorise every reviewed Slipstream CL SwapRouter "
+                f"({router}); got targets {sorted(by_target)} — a manifest missing a "
+                "router reverts every Safe-path slipstream swap on that generation's pools"
+            )
+            assert by_target[router] == {_CL_EXACT_INPUT_SINGLE_SELECTOR}, (
+                "CL SwapRouter selectors for SWAP-only discovery must be exactly "
+                f"exactInputSingle ({_CL_EXACT_INPUT_SINGLE_SELECTOR}); got "
+                f"{sorted(by_target[router])}"
+            )
 
     def test_swap_manifest_contains_erc20_approve(self) -> None:
         by_target = _selectors_by_target(_discover(["SWAP"]))
@@ -280,8 +332,8 @@ class TestSlipstreamSwapManifest:
             f"({_ERC20_APPROVE_SELECTOR}) for the CL SwapRouter spender; got "
             f"{ {t: sorted(s) for t, s in by_target.items()} }"
         )
-        assert _CL_ROUTER_BASE not in approve_targets, (
-            "approve() must be authorised on the token contract, never on the "
+        assert approve_targets.isdisjoint(_CL_ROUTERS_BASE), (
+            "approve() must be authorised on the token contract, never on a "
             "router target itself"
         )
 
@@ -337,8 +389,8 @@ class TestSlipstreamSwapManifest:
     def test_swap_manifest_excludes_npm_target(self) -> None:
         """Least privilege: a SWAP-only manifest must not authorise the LP NPM."""
         by_target = _selectors_by_target(_discover(["SWAP"]))
-        assert _NPM_BASE not in by_target, (
-            "SWAP-only manifest must NOT include the Slipstream NPM target "
+        assert _NPM_TARGETS.isdisjoint(by_target), (
+            "SWAP-only manifest must NOT include any Slipstream NPM target "
             "(LP over-permissioning)"
         )
 
@@ -347,8 +399,8 @@ class TestSlipstreamSwapManifest:
         by_target = _selectors_by_target(
             _discover(["LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"])
         )
-        assert _CL_ROUTER_BASE not in by_target, (
-            "LP-only manifest must NOT include the CL SwapRouter target "
+        assert _CL_ROUTERS_BASE.isdisjoint(by_target), (
+            "LP-only manifest must NOT include any CL SwapRouter target "
             "(swap over-permissioning)"
         )
 
@@ -361,8 +413,8 @@ class TestSlipstreamSwapManifest:
         )
 
     def test_swap_synthetic_builder_empty_on_optimism(self) -> None:
-        """Velodrome on Optimism is Classic-only (no ``cl_router``), so the
-        slipstream slug must emit no SWAP synthetic there."""
+        """Velodrome on Optimism is Classic-only (no reviewed Slipstream
+        generation), so the slipstream slug must emit no SWAP synthetic there."""
         assert build_synthetic_intents("aerodrome_slipstream", "SWAP", "optimism") == []
 
     def test_matrix_includes_slipstream_swap(self) -> None:

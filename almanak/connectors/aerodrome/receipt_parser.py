@@ -1801,7 +1801,7 @@ SLIPSTREAM_RECEIPT_SPEC = V3ForkSpec(
         "CollectCL": AerodromeEventType.UNKNOWN,
     },
     position_manager_addresses={
-        chain: managers[0] for chain, managers in _SLIPSTREAM_NPM_ADDRESSES.items() if managers
+        chain: managers[0] for chain, managers in _SLIPSTREAM_NPM_ADDRESSES.items() if len(managers) == 1
     },
     strict_decode_fields={
         "Swap": frozenset(

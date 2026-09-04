@@ -26,6 +26,15 @@ def test_spec_accepts_importref_lazy_references():
     assert spec.identity_probe is _READER
 
 
+def test_spec_preserves_legacy_positional_get_pool_selector():
+    selector = "0x12345678"
+    spec = PoolReaderSpec("uniswap_v3", {"base": "0xfactory"}, {}, selector)
+
+    assert spec.get_pool_selector == selector
+    assert spec.factory_generations == {}
+    assert spec.factories_for("base") == ("0xfactory",)
+
+
 def test_reader_rpc_call_forwards_arguments_and_returns_bytes():
     with patch("almanak.connectors._strategy_base.pool_validation_base.eth_call", return_value=b"\x01" * 32) as mock:
         call = reader_rpc_call(gateway_client=None, rpc_url="http://rpc", timeout=5.0)

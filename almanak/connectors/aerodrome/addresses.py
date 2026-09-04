@@ -16,11 +16,6 @@ AERODROME: dict[str, dict[str, str]] = {
         "router": "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43",
         "factory": "0x420DD381b31aEf6683db6B902084cB0FFECe40Da",
         "voter": "0x16613524e02ad97eDfeF371bC883F2F5d6C480A5",
-        "cl_router": "0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5",
-        "cl_factory": "0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A",
-        "cl_nft": "0x827922686190790b37229fd06084350E74485b72",  # Slipstream NonfungiblePositionManager
-        "cl_nft_current": "0xe1f8cd9AC4e4A65F54f38a5CdAfCA44f6dD68b53",
-        "cl_quoter": "0x254cF9E1E6e233aa1AC962CB9B05b2cfeAaE15b0",
     },
     # Velodrome V2 on Optimism — same Solidly fork interface as Aerodrome on Base.
     # Addresses verified on Optimism block explorer (optimistic.etherscan.io).
@@ -34,67 +29,112 @@ AERODROME: dict[str, dict[str, str]] = {
 
 @dataclass(frozen=True, slots=True)
 class SlipstreamDeployment:
-    """One factory generation and the NPM that owns its physical positions.
+    """One Slipstream factory generation and the contracts bound to it.
 
-    Slipstream has multiple Base factory generations.  A pool's factory and
-    its paired position manager are operational facts, not interchangeable
-    aliases: an NFT minted by one NPM cannot be closed through another.
+    Slipstream has multiple Base factory generations.  A pool's factory, the
+    position manager that owns its NFTs, and the swap router / quoter that
+    derive pools from that factory are operational facts, not interchangeable
+    aliases: an NFT minted by one NPM cannot be closed through another, and a
+    router bound to one factory cannot reach another generation's pool.
+
+    ``swap_router`` / ``quoter`` are ``None`` for a generation Aerodrome
+    deployed without a periphery; such pools are LP-only and the swap lane
+    refuses them with that reason.
     """
 
     factory: str
     position_manager: str
     generation: str
+    swap_router: str | None = None
+    quoter: str | None = None
 
 
-# Ordered newest first for discovery.  The current and legacy pairs are
-# published by Velodrome's official Sugar SDK.  The additional factory listed
-# by Sugar's aggregate deployment inventory is intentionally not admitted here
-# until its position-manager authority is published and verified: a factory
-# address alone is insufficient to build or close an NFT position safely.
+# Keyed by chain; each entry is one complete generation.  Tuple order carries
+# NO meaning: every lane resolves the generation from the pool (``factory()``
+# for an address, ``getPool`` on every entry for a symbolic key) and the
+# chain-truth CI gate proves each entry's periphery reports ``factory()`` equal
+# to the entry's factory.  Adding a generation is one entry here plus a fixture
+# row in that gate.  Aerodrome's third Base deployment ("Gauge Caps",
+# 0xaDe65c38CD4849aDBA595a4323a8C7DdfE89716a) is intentionally not admitted.
 SLIPSTREAM_LP_DEPLOYMENTS: dict[str, tuple[SlipstreamDeployment, ...]] = {
     "base": (
         SlipstreamDeployment(
             factory="0xf8f2eB4940CFE7d13603DDDD87f123820Fc061Ef",
             position_manager="0xe1f8cd9AC4e4A65F54f38a5CdAfCA44f6dD68b53",
             generation="current",
+            swap_router="0x698Cb2b6dd822994581fEa6eA4Fc755d1363A92F",
+            quoter="0x514c8B5f54112481E28028F1166Bd78501089259",
         ),
         SlipstreamDeployment(
             factory="0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A",
             position_manager="0x827922686190790b37229fd06084350E74485b72",
             generation="legacy",
+            swap_router="0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5",
+            quoter="0x254cF9E1E6e233aa1AC962CB9B05b2cfeAaE15b0",
         ),
     ),
 }
 
 
 def slipstream_lp_deployments(chain: str) -> tuple[SlipstreamDeployment, ...]:
-    """Return the reviewed Slipstream LP deployments for ``chain``."""
+    """Return the reviewed Slipstream deployments for ``chain``."""
 
     return SLIPSTREAM_LP_DEPLOYMENTS.get(chain.strip().lower(), ())
 
 
-def slipstream_deployment_for_factory(chain: str, factory: str) -> SlipstreamDeployment | None:
-    """Resolve an exact factory to its paired position-manager authority."""
-
-    factory_key = factory.strip().lower()
+def _deployment_where(chain: str, attribute: str, address: str) -> SlipstreamDeployment | None:
+    key = address.strip().lower()
+    if not key:
+        return None
     return next(
-        (deployment for deployment in slipstream_lp_deployments(chain) if deployment.factory.lower() == factory_key),
+        (
+            deployment
+            for deployment in slipstream_lp_deployments(chain)
+            if str(getattr(deployment, attribute) or "").lower() == key
+        ),
         None,
     )
+
+
+def slipstream_deployment_for_factory(chain: str, factory: str) -> SlipstreamDeployment | None:
+    """Resolve the factory a pool reports to its reviewed generation."""
+
+    return _deployment_where(chain, "factory", factory)
 
 
 def slipstream_deployment_for_position_manager(chain: str, position_manager: str) -> SlipstreamDeployment | None:
     """Resolve an exact NPM to the factory generation that created its NFTs."""
 
-    manager_key = position_manager.strip().lower()
-    return next(
-        (
-            deployment
-            for deployment in slipstream_lp_deployments(chain)
-            if deployment.position_manager.lower() == manager_key
-        ),
-        None,
-    )
+    return _deployment_where(chain, "position_manager", position_manager)
+
+
+def slipstream_deployment_for_router(chain: str, swap_router: str) -> SlipstreamDeployment | None:
+    """Resolve an exact swap router to the generation whose factory it derives pools from."""
+
+    return _deployment_where(chain, "swap_router", swap_router)
+
+
+def slipstream_position_manager_kind(deployment: SlipstreamDeployment) -> str:
+    """Contract-kind name under which ``deployment``'s NPM is published in :data:`AERODROME`."""
+
+    return f"slipstream_position_manager_{deployment.generation}"
+
+
+def _publish_reviewed_position_managers() -> None:
+    """Mirror every reviewed NPM into the flat address table under a generation-named kind.
+
+    Framework registries (contract roles, valuation, teardown) enumerate
+    connector addresses by kind name; publishing one kind per generation lets
+    them see the whole reviewed set without a singleton "the" manager.
+    """
+
+    for chain, deployments in SLIPSTREAM_LP_DEPLOYMENTS.items():
+        table = AERODROME.setdefault(chain, {})
+        for deployment in deployments:
+            table[slipstream_position_manager_kind(deployment)] = deployment.position_manager
+
+
+_publish_reviewed_position_managers()
 
 
 AERODROME_TOKENS: dict[str, dict[str, str]] = {
@@ -128,5 +168,7 @@ __all__ = [
     "SlipstreamDeployment",
     "slipstream_deployment_for_factory",
     "slipstream_deployment_for_position_manager",
+    "slipstream_deployment_for_router",
     "slipstream_lp_deployments",
+    "slipstream_position_manager_kind",
 ]

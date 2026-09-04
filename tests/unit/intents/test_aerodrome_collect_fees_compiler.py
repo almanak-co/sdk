@@ -392,14 +392,24 @@ def test_aerodrome_slipstream_collect_fees_permission_discovery_substitutes_toke
         result = compiler._compile_collect_fees(intent)
 
     assert result.status == CompilationStatus.SUCCESS
-    mock_adapter.collect_cl_fees.assert_called_once()
-    kwargs = mock_adapter.collect_cl_fees.call_args.kwargs
-    assert kwargs["token_id"] == 1
+    # Discovery cannot read which generation owns a synthetic position, so the
+    # bundle carries one collect per reviewed generation and never resolves
+    # ownership on-chain.
+    reviewed = slipstream_lp_deployments("base")
+    assert len(reviewed) > 1
+    calls = mock_adapter.collect_cl_fees.call_args_list
+    assert len(calls) == len(reviewed)
+    assert [call.kwargs["deployment"] for call in calls] == list(reviewed)
+    assert all(call.kwargs["token_id"] == 1 for call in calls)
+    mock_adapter.resolve_owned_cl_deployment.assert_not_called()
     # Original user input is preserved verbatim; synthetic substitute lives
     # in the numeric on-chain token_id slot only.
     assert result.action_bundle is not None
     assert result.action_bundle.metadata["position_id"] == "0"
     assert result.action_bundle.metadata["token_id"] == 1
+    assert result.action_bundle.metadata["nft_managers"] == [d.position_manager for d in reviewed]
+    assert result.action_bundle.metadata["slipstream_deployment"] == "all-reviewed"
+    assert len(result.transactions) == len(reviewed)
 
 
 # ---------------------------------------------------------------------------

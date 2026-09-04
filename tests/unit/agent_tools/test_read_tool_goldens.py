@@ -145,9 +145,7 @@ async def test_get_pool_state_uniswap_v3_arbitrum_golden() -> None:
     assert d["token1"] == "USDC"
     assert d["price_token1_per_token0"] == d["current_price"]
     assert float(d["price_token0_per_token1"]) == pytest.approx(1 / float(d["current_price"]))
-    assert d["price_label"] == (
-        f"1 WETH = {d['current_price']} USDC; 1 USDC = {d['price_token0_per_token1']} WETH"
-    )
+    assert d["price_label"] == (f"1 WETH = {d['current_price']} USDC; 1 USDC = {d['price_token0_per_token1']} WETH")
 
 
 @pytest.mark.asyncio
@@ -354,21 +352,32 @@ def _calldata_of(req: Any) -> tuple[str, str]:
     return payload["to"].lower(), payload["data"]
 
 
+def _slipstream_factories() -> tuple[str, ...]:
+    """Every reviewed Slipstream factory generation on Base, lower-cased."""
+    from almanak.connectors.aerodrome.addresses import slipstream_lp_deployments
+
+    return tuple(deployment.factory.lower() for deployment in slipstream_lp_deployments("base"))
+
+
 @pytest.mark.asyncio
 async def test_get_pool_state_aerodrome_slipstream_slug_accepted() -> None:
     """``protocol="aerodrome_slipstream"`` must dispatch to the concentrated-
     liquidity agent-read capability. The Slipstream int24 getPool selector in
-    the factory calldata proves the right capability was resolved."""
+    the factory calldata proves the right capability was resolved, and every
+    reviewed factory generation is asked — the one that owns the key answers."""
     pool_addr = "0xb2cc224c1c9fee385f8ad6a55b4d94e92359dc59"
-    factory_calls: list[str] = []
+    factories = _slipstream_factories()
+    assert len(factories) == 2
+    owning_factory = factories[1]
+    factory_calls: list[tuple[str, str]] = []
 
     gateway = MagicMock()
 
     def _call(req: Any, **kwargs: Any) -> Any:
-        _to, data = _calldata_of(req)
+        to, data = _calldata_of(req)
         if req.id == "factory_get_pool":
-            factory_calls.append(data)
-            return _rpc_ok(_addr_word(pool_addr))
+            factory_calls.append((to, data))
+            return _rpc_ok(_addr_word(pool_addr) if to == owning_factory else _ZERO_WORD)
         if req.id == "pool_slot0":
             return _rpc_ok(_slot0_hex(2**96, 0))
         if req.id == "pool_liquidity":
@@ -393,10 +402,258 @@ async def test_get_pool_state_aerodrome_slipstream_slug_accepted() -> None:
     assert result.data["pool_address"] == pool_addr
     assert result.data["fee_tier"] == 100
     assert result.data["fee_tier_source"] == "explicit"
-    # Explicit tier -> exactly one factory lookup, with the Slipstream
-    # (int24 tick-spacing) getPool selector — not the uint24 V3 one.
-    assert len(factory_calls) == 1
-    assert factory_calls[0].startswith("0x28af8d0b")
+    # Explicit tier -> one lookup per reviewed factory generation (no sweep),
+    # each with the Slipstream (int24 tick-spacing) getPool selector — not
+    # the uint24 V3 one.
+    assert len(factory_calls) == len(factories)
+    assert sorted(to for to, _ in factory_calls) == sorted(factories)
+    assert all(data.startswith("0x28af8d0b") for _, data in factory_calls)
+    assert len({data for _, data in factory_calls}) == 1, "same key sent to every generation"
+
+
+@pytest.mark.asyncio
+async def test_get_pool_state_slipstream_ambiguous_key_requires_pool_address() -> None:
+    """A key both reviewed factory generations answer is ambiguous: the tool
+    refuses to pick a generation and asks for the pool address instead. No
+    pool read may run on either candidate."""
+    factories = _slipstream_factories()
+    pools = {
+        factories[0]: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        factories[1]: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    }
+    asked: list[str] = []
+
+    gateway = MagicMock()
+
+    def _call(req: Any, **kwargs: Any) -> Any:
+        to, _data = _calldata_of(req)
+        if req.id == "factory_get_pool":
+            asked.append(to)
+            return _rpc_ok(_addr_word(pools[to]))
+        raise AssertionError(f"unexpected rpc id {req.id}")
+
+    gateway.rpc.Call.side_effect = _call
+
+    executor = _make_executor(gateway)
+    result = await executor.execute(
+        "get_pool_state",
+        {
+            "token_a": "WETH",
+            "token_b": "USDC",
+            "fee_tier": 100,
+            "chain": "base",
+            "protocol": "aerodrome_slipstream",
+        },
+    )
+
+    assert result.status == "error"
+    err = result.error or {}
+    assert err.get("error_code") == "validation_error"
+    message = err.get("message", "")
+    assert "Ambiguous pool key" in message
+    assert "pool_address" in message
+    for pool in pools.values():
+        assert pool in message
+    assert sorted(asked) == sorted(factories)
+    assert err.get("recoverable") is True
+    assert "tick_spacing=100" in message
+    assert "Read or quote every candidate pool address" in message
+    hints = result.decision_hints or {}
+    assert hints["reason"] == "ambiguous_pool"
+    assert hints["next_action"] == "get_pool_state_or_quote_each_candidate"
+    assert {row["pool_address"] for row in hints["candidate_pools"]} == set(pools.values())
+    assert {row["factory_address"] for row in hints["candidate_pools"]} == set(factories)
+
+
+@pytest.mark.asyncio
+async def test_get_pool_state_explicit_key_partial_factory_failure_refuses_observed_pool() -> None:
+    """A hit from one generation is not unique while another generation is unmeasured."""
+    factories = _slipstream_factories()
+    observed_pool = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    asked: list[str] = []
+
+    gateway = MagicMock()
+
+    def _call(req: Any, **kwargs: Any) -> Any:
+        to, _data = _calldata_of(req)
+        if req.id == "factory_get_pool":
+            asked.append(to)
+            if to == factories[0]:
+                return _rpc_ok(_addr_word(observed_pool))
+            resp = MagicMock()
+            resp.success = False
+            resp.error = "legacy factory timeout"
+            return resp
+        raise AssertionError(f"unexpected rpc id {req.id}")
+
+    gateway.rpc.Call.side_effect = _call
+    executor = _make_executor(gateway)
+    result = await executor.execute(
+        "get_pool_state",
+        {
+            "token_a": "WETH",
+            "token_b": "USDC",
+            "fee_tier": 100,
+            "chain": "base",
+            "protocol": "aerodrome_slipstream",
+        },
+    )
+
+    assert result.status == "error"
+    err = result.error or {}
+    assert err.get("error_code") == "rpc_failed"
+    assert err.get("recoverable") is True
+    assert "uniqueness is unmeasured" in err.get("message", "")
+    assert sorted(asked) == sorted(factories)
+    hints = result.decision_hints or {}
+    assert hints["reason"] == "incomplete_factory_scan"
+    assert hints["observed_candidate_pools"] == [{"pool_address": observed_pool, "factory_address": factories[0]}]
+    assert hints["unmeasured_factories"][0]["factory_address"] == factories[1]
+
+
+@pytest.mark.asyncio
+async def test_get_pool_state_auto_sweep_partial_factory_failure_refuses_ranked_pool() -> None:
+    """Automatic depth ranking is unavailable if any generation/key probe failed."""
+    from almanak.connectors._strategy_pool_reader_registry import POOL_READER_REGISTRY
+
+    factories = _slipstream_factories()
+    candidate_keys = POOL_READER_REGISTRY.require("aerodrome_slipstream").candidate_pool_keys
+    observed_pool = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+    gateway = MagicMock()
+
+    def _call(req: Any, **kwargs: Any) -> Any:
+        to, data = _calldata_of(req)
+        if req.id == "factory_get_pool":
+            key = int(data[-64:], 16)
+            if to == factories[0] and key == candidate_keys[0]:
+                return _rpc_ok(_addr_word(observed_pool))
+            if to == factories[1] and key == candidate_keys[-1]:
+                resp = MagicMock()
+                resp.success = False
+                resp.error = "legacy factory timeout"
+                return resp
+            return _rpc_ok(_ZERO_WORD)
+        if req.id == "pool_liquidity":
+            return _rpc_ok(_hex_word(123))
+        raise AssertionError(f"unexpected rpc id {req.id}")
+
+    gateway.rpc.Call.side_effect = _call
+    executor = _make_executor(gateway)
+    result = await executor.execute(
+        "get_pool_state",
+        {
+            "token_a": "WETH",
+            "token_b": "USDC",
+            "chain": "base",
+            "protocol": "aerodrome_slipstream",
+        },
+    )
+
+    assert result.status == "error"
+    err = result.error or {}
+    assert err.get("error_code") == "rpc_failed"
+    assert err.get("recoverable") is True
+    assert "A deeper candidate may be hidden" in err.get("message", "")
+    hints = result.decision_hints or {}
+    assert hints["reason"] == "incomplete_factory_sweep"
+    assert hints["total_probes"] == len(factories) * len(candidate_keys)
+    assert hints["unmeasured_probes"] == 1
+    assert hints["observed_candidate_pool"] == observed_pool
+
+
+@pytest.mark.parametrize("failure", ["rpc", "malformed"])
+@pytest.mark.asyncio
+async def test_get_pool_state_auto_sweep_liquidity_failure_refuses_ranked_pool(failure: str) -> None:
+    """A readable shallow pool cannot win while another candidate's depth is unmeasured."""
+    from almanak.connectors import _strategy_pool_reader_registry as registry_module
+
+    factories = _slipstream_factories()
+    candidate_keys = registry_module.POOL_READER_REGISTRY.require("aerodrome_slipstream").candidate_pool_keys
+    shallow_pool = "0x1111111111111111111111111111111111111111"
+    unmeasured_pool = "0x2222222222222222222222222222222222222222"
+    owned = {(factories[0], candidate_keys[0]): shallow_pool, (factories[1], candidate_keys[-1]): unmeasured_pool}
+
+    gateway = MagicMock()
+
+    def _call(req: Any, **kwargs: Any) -> Any:
+        to, data = _calldata_of(req)
+        if req.id == "factory_get_pool":
+            key = int(data[-64:], 16)
+            pool = owned.get((to, key))
+            return _rpc_ok(_addr_word(pool) if pool else _ZERO_WORD)
+        if req.id == "pool_liquidity" and to == shallow_pool:
+            return _rpc_ok(_hex_word(10))
+        if req.id == "pool_liquidity" and to == unmeasured_pool:
+            if failure == "malformed":
+                return MagicMock(success=True, result=json.dumps(None), error="")
+            response = MagicMock(success=False, error="liquidity timeout")
+            return response
+        raise AssertionError(f"unexpected rpc id {req.id}")
+
+    gateway.rpc.Call.side_effect = _call
+    result = await _make_executor(gateway).execute(
+        "get_pool_state",
+        {"token_a": "WETH", "token_b": "USDC", "chain": "base", "protocol": "aerodrome_slipstream"},
+    )
+
+    assert result.status == "error"
+    err = result.error or {}
+    assert err.get("error_code") == "rpc_failed"
+    assert "A deeper candidate may be hidden" in err.get("message", "")
+    hints = result.decision_hints or {}
+    assert hints["reason"] == "incomplete_factory_sweep"
+    assert hints["unmeasured_probes"] == 1
+    assert hints["observed_candidate_pool"] == shallow_pool
+
+
+@pytest.mark.asyncio
+async def test_get_pool_state_sweep_picks_deepest_pool_across_slipstream_generations() -> None:
+    """Without a ``fee_tier`` the sweep covers every reviewed factory
+    generation and returns the deepest pool among all of them, reporting the
+    tick spacing it was found under."""
+    factories = _slipstream_factories()
+    shallow_pool = "0x1111111111111111111111111111111111111111"
+    deep_pool = "0x2222222222222222222222222222222222222222"
+    # Each generation owns a different key; the legacy-owned pool is deeper.
+    owned = {(factories[0], 100): shallow_pool, (factories[1], 200): deep_pool}
+    liquidity_reads: list[str] = []
+
+    gateway = MagicMock()
+
+    def _call(req: Any, **kwargs: Any) -> Any:
+        to, data = _calldata_of(req)
+        if req.id == "factory_get_pool":
+            key = int(data[-64:], 16)
+            pool = owned.get((to, key))
+            return _rpc_ok(_addr_word(pool) if pool else _ZERO_WORD)
+        if req.id == "pool_liquidity":
+            liquidity_reads.append(to)
+            return _rpc_ok(_hex_word(999_000 if to == deep_pool else 10))
+        if req.id == "pool_slot0":
+            assert to == deep_pool, "slot0 must be read on the sweep winner"
+            return _rpc_ok(_slot0_hex(2**96, 0))
+        raise AssertionError(f"unexpected rpc id {req.id}")
+
+    gateway.rpc.Call.side_effect = _call
+
+    executor = _make_executor(gateway)
+    result = await executor.execute(
+        "get_pool_state",
+        {
+            "token_a": "WETH",
+            "token_b": "USDC",
+            "chain": "base",
+            "protocol": "aerodrome_slipstream",
+        },
+    )
+
+    assert result.status == "success", result.error
+    assert result.data["pool_address"] == deep_pool
+    assert result.data["fee_tier"] == 200
+    assert result.data["fee_tier_source"] == "sweep"
+    # One ranking read per candidate, then one final read to populate the response.
+    assert liquidity_reads == [shallow_pool, deep_pool, deep_pool]
 
 
 @pytest.mark.asyncio
@@ -522,15 +779,16 @@ async def test_get_pool_state_sweep_no_pool_any_tier_lists_candidates() -> None:
 @pytest.mark.asyncio
 async def test_get_pool_state_sweep_uses_slipstream_tick_spacings() -> None:
     """The sweep's candidate set is the connector's own discriminator set:
-    tick spacings for Slipstream, not the Uniswap fee-tier list."""
-    swept_keys: list[int] = []
+    tick spacings for Slipstream, not the Uniswap fee-tier list — and the
+    full set is swept on every reviewed factory generation."""
+    swept_keys_by_factory: dict[str, list[int]] = {}
 
     gateway = MagicMock()
 
     def _call(req: Any, **kwargs: Any) -> Any:
         if req.id == "factory_get_pool":
-            _to, data = _calldata_of(req)
-            swept_keys.append(int(data[-64:], 16))
+            to, data = _calldata_of(req)
+            swept_keys_by_factory.setdefault(to, []).append(int(data[-64:], 16))
             return _rpc_ok(_ZERO_WORD)
         raise AssertionError(f"unexpected rpc id {req.id}")
 
@@ -547,11 +805,14 @@ async def test_get_pool_state_sweep_uses_slipstream_tick_spacings() -> None:
         },
     )
 
-    assert result.status == "error"  # scripted all-zero factory
+    assert result.status == "error"  # scripted all-zero factories
     from almanak.connectors._strategy_pool_reader_registry import POOL_READER_REGISTRY
 
     spec = POOL_READER_REGISTRY.require("aerodrome_slipstream")
-    assert tuple(swept_keys) == spec.candidate_pool_keys
+    factories = _slipstream_factories()
+    assert sorted(swept_keys_by_factory) == sorted(factories)
+    for factory in factories:
+        assert tuple(swept_keys_by_factory[factory]) == spec.candidate_pool_keys
 
 
 @pytest.mark.asyncio

@@ -14,7 +14,11 @@ from unittest.mock import MagicMock
 import pytest
 from web3.exceptions import ContractLogicError
 
-from almanak.connectors.aerodrome.addresses import SlipstreamDeployment, slipstream_lp_deployments
+from almanak.connectors.aerodrome.addresses import (
+    SlipstreamDeployment,
+    slipstream_deployment_for_factory,
+    slipstream_lp_deployments,
+)
 from almanak.connectors.aerodrome.sdk import (
     MAX_UINT256,
     AerodromeSDK,
@@ -29,6 +33,17 @@ from almanak.framework.data.tokens.models import ResolvedToken
 USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
 WETH_ADDRESS = "0x4200000000000000000000000000000000000006"
 TEST_WALLET = "0x1234567890123456789012345678901234567890"
+
+
+def _generation(factory: str) -> SlipstreamDeployment:
+    deployment = slipstream_deployment_for_factory("base", factory)
+    assert deployment is not None, factory
+    return deployment
+
+
+# Every CL read and builder targets one reviewed generation; there is no default.
+CURRENT = _generation("0xf8f2eB4940CFE7d13603DDDD87f123820Fc061Ef")
+LEGACY = _generation("0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A")
 
 
 def _make_resolver() -> MagicMock:
@@ -397,31 +412,43 @@ class TestWrapUnwrapEth:
 
 
 class TestCLPoolQueries:
-    def test_get_cl_pool_address_no_factory_returns_none(self) -> None:
+    def test_get_cl_pool_address_unreviewed_on_chain_returns_none(self) -> None:
         sdk = AerodromeSDK(chain="optimism", token_resolver=_make_resolver())
+        web3 = MagicMock()
+        out = sdk.get_cl_pool_address(USDC_ADDRESS, WETH_ADDRESS, 100, web3, deployment=CURRENT)
+        assert out is None
+        web3.eth.contract.assert_not_called()
+
+    def test_get_cl_pool_address_without_deployment_returns_none_without_reading(self, sdk: AerodromeSDK) -> None:
         web3 = MagicMock()
         out = sdk.get_cl_pool_address(USDC_ADDRESS, WETH_ADDRESS, 100, web3)
         assert out is None
+        web3.eth.contract.assert_not_called()
 
     def test_get_cl_pool_address_zero_returns_none(self, sdk: AerodromeSDK) -> None:
         contract = MagicMock()
         contract.functions.getPool.return_value.call.return_value = "0x0000000000000000000000000000000000000000"
         web3 = _make_web3_with_contract(contract)
-        out = sdk.get_cl_pool_address(USDC_ADDRESS, WETH_ADDRESS, 100, web3)
+        out = sdk.get_cl_pool_address(USDC_ADDRESS, WETH_ADDRESS, 100, web3, deployment=CURRENT)
         assert out is None
 
-    def test_get_cl_pool_address_returns_address(self, sdk: AerodromeSDK) -> None:
+    @pytest.mark.parametrize("deployment", [CURRENT, LEGACY], ids=["current", "legacy"])
+    def test_get_cl_pool_address_asks_the_supplied_generation_factory(
+        self, sdk: AerodromeSDK, deployment: SlipstreamDeployment
+    ) -> None:
         pool = "0xcDAC0d6c6C59727a65F871236188350531885C43"
         contract = MagicMock()
         contract.functions.getPool.return_value.call.return_value = pool
         web3 = _make_web3_with_contract(contract)
-        out = sdk.get_cl_pool_address(USDC_ADDRESS, WETH_ADDRESS, 100, web3)
+        out = sdk.get_cl_pool_address(USDC_ADDRESS, WETH_ADDRESS, 100, web3, deployment=deployment)
         assert out == pool
+        assert web3.eth.contract.call_args.kwargs["address"] == deployment.factory
+        contract.functions.getPool.assert_called_once_with(USDC_ADDRESS, WETH_ADDRESS, 100)
 
     def test_get_cl_pool_address_exception_returns_none(self, sdk: AerodromeSDK) -> None:
         web3 = MagicMock()
         web3.eth.contract.side_effect = RuntimeError("rpc")
-        out = sdk.get_cl_pool_address(USDC_ADDRESS, WETH_ADDRESS, 100, web3)
+        out = sdk.get_cl_pool_address(USDC_ADDRESS, WETH_ADDRESS, 100, web3, deployment=CURRENT)
         assert out is None
 
     def test_get_cl_pool_slot0_returns_tuple(self, sdk: AerodromeSDK) -> None:
@@ -575,13 +602,21 @@ class TestCLPositionQueries:
         with pytest.raises(RuntimeError, match="malformed owner response"):
             sdk.find_owned_slipstream_deployments(42, TEST_WALLET, web3)
 
-    def test_get_cl_position_no_nft_returns_none(self) -> None:
+    def test_get_cl_position_unreviewed_on_chain_returns_none(self) -> None:
         sdk = AerodromeSDK(chain="optimism", token_resolver=_make_resolver())
+        web3 = MagicMock()
+        out = sdk.get_cl_position(42, web3, deployment=CURRENT)
+        assert out is None
+        web3.eth.contract.assert_not_called()
+
+    def test_get_cl_position_without_deployment_returns_none_without_reading(self, sdk: AerodromeSDK) -> None:
         web3 = MagicMock()
         out = sdk.get_cl_position(42, web3)
         assert out is None
+        web3.eth.contract.assert_not_called()
 
-    def test_get_cl_position_returns_info(self, sdk: AerodromeSDK) -> None:
+    @pytest.mark.parametrize("deployment", [CURRENT, LEGACY], ids=["current", "legacy"])
+    def test_get_cl_position_returns_info(self, sdk: AerodromeSDK, deployment: SlipstreamDeployment) -> None:
         contract = MagicMock()
         contract.functions.positions.return_value.call.return_value = (
             0,  # nonce
@@ -598,17 +633,19 @@ class TestCLPositionQueries:
             600,  # tokensOwed1
         )
         web3 = _make_web3_with_contract(contract)
-        out = sdk.get_cl_position(42, web3)
+        out = sdk.get_cl_position(42, web3, deployment=deployment)
         assert out is not None
         assert out.token_id == 42
         assert out.liquidity == 10**18
         assert out.tokens_owed0 == 500
         assert out.tokens_owed1 == 600
+        # The read targets the supplied generation's manager.
+        assert web3.eth.contract.call_args.kwargs["address"] == deployment.position_manager
 
     def test_get_cl_position_exception_returns_none(self, sdk: AerodromeSDK) -> None:
         web3 = MagicMock()
         web3.eth.contract.side_effect = RuntimeError("rpc")
-        out = sdk.get_cl_position(42, web3)
+        out = sdk.get_cl_position(42, web3, deployment=CURRENT)
         assert out is None
 
 
@@ -646,7 +683,7 @@ class TestCLPositionTransientRetry:
         ]
         web3 = _make_web3_with_contract(contract)
 
-        out = sdk.get_cl_position(72457473, web3)
+        out = sdk.get_cl_position(72457473, web3, deployment=CURRENT)
 
         assert out is not None
         assert out.liquidity == 10**18
@@ -665,7 +702,7 @@ class TestCLPositionTransientRetry:
         # Exhaustion re-raises (does NOT return None) so the caller cannot mistake
         # a flapping RPC for a missing position.
         with pytest.raises(RuntimeError, match="RESOURCE_EXHAUSTED"):
-            sdk.get_cl_position(42, web3)
+            sdk.get_cl_position(42, web3, deployment=CURRENT)
         # 3 attempts -> 2 backoff sleeps between them.
         assert len(sleeps) == 2
 
@@ -679,7 +716,7 @@ class TestCLPositionTransientRetry:
         contract.functions.positions.return_value.call.side_effect = ValueError("execution reverted: Invalid token ID")
         web3 = _make_web3_with_contract(contract)
 
-        out = sdk.get_cl_position(999, web3)
+        out = sdk.get_cl_position(999, web3, deployment=CURRENT)
 
         assert out is None
         assert sleeps == []  # never retried a non-transient error
@@ -709,7 +746,7 @@ class TestCLPositionTransientRetry:
         ]
         web3 = _make_web3_with_contract(contract)
 
-        out = sdk.get_cl_position(72457473, web3)
+        out = sdk.get_cl_position(72457473, web3, deployment=CURRENT)
 
         assert out is not None  # recovered on retry
         assert len(sleeps) == 1  # exactly one backoff between the two attempts
@@ -726,56 +763,66 @@ class TestCLPositionTransientRetry:
         )
         web3 = _make_web3_with_contract(contract)
 
-        out = sdk.get_cl_position(999, web3)
+        out = sdk.get_cl_position(999, web3, deployment=CURRENT)
 
         assert out is None  # treated as a real "no position", returned immediately
         assert sleeps == []  # never retried
 
 
+_MINT_KWARGS = {
+    "token0": USDC_ADDRESS,
+    "token1": WETH_ADDRESS,
+    "tick_spacing": 100,
+    "tick_lower": -100,
+    "tick_upper": 100,
+    "amount0_desired": 1_000_000,
+    "amount1_desired": 10**15,
+    "amount0_min": 0,
+    "amount1_min": 0,
+    "recipient": TEST_WALLET,
+    "deadline": 1234567890,
+    "sender": TEST_WALLET,
+}
+
+
 class TestCLBuilders:
-    def test_build_cl_mint_tx(self, sdk: AerodromeSDK) -> None:
+    @pytest.mark.parametrize("deployment", [CURRENT, LEGACY], ids=["current", "legacy"])
+    def test_build_cl_mint_tx(self, sdk: AerodromeSDK, deployment: SlipstreamDeployment) -> None:
         contract = MagicMock()
         contract.functions.mint.return_value.build_transaction.return_value = {
-            "to": sdk.addresses["cl_nft"],
+            "to": deployment.position_manager,
             "data": b"\x00" * 4,
         }
         web3 = _make_web3_with_contract(contract)
-        tx = sdk.build_cl_mint_tx(
-            token0=USDC_ADDRESS,
-            token1=WETH_ADDRESS,
-            tick_spacing=100,
-            tick_lower=-100,
-            tick_upper=100,
-            amount0_desired=1_000_000,
-            amount1_desired=10**15,
-            amount0_min=0,
-            amount1_min=0,
-            recipient=TEST_WALLET,
-            deadline=1234567890,
-            sender=TEST_WALLET,
-            web3=web3,
-        )
+        tx = sdk.build_cl_mint_tx(web3=web3, deployment=deployment, **_MINT_KWARGS)
         assert "to" in tx
+        assert web3.eth.contract.call_args.kwargs["address"] == deployment.position_manager
 
-    def test_build_cl_mint_tx_raises_when_no_cl_nft(self) -> None:
-        sdk = AerodromeSDK(chain="optimism", token_resolver=_make_resolver())
+    def test_build_cl_mint_tx_raises_without_deployment(self, sdk: AerodromeSDK) -> None:
+        """There is no default manager on Base either; a mint must name its generation."""
         web3 = MagicMock()
-        with pytest.raises(ValueError, match="cl_nft not configured"):
-            sdk.build_cl_mint_tx(
-                token0=USDC_ADDRESS,
-                token1=WETH_ADDRESS,
-                tick_spacing=100,
-                tick_lower=-100,
-                tick_upper=100,
-                amount0_desired=1,
-                amount1_desired=1,
-                amount0_min=0,
-                amount1_min=0,
-                recipient=TEST_WALLET,
-                deadline=1,
-                sender=TEST_WALLET,
-                web3=web3,
-            )
+        with pytest.raises(ValueError, match="reviewed Slipstream deployment is required"):
+            sdk.build_cl_mint_tx(web3=web3, **_MINT_KWARGS)
+        web3.eth.contract.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("deployment", "message"),
+        [
+            (None, "reviewed Slipstream deployment is required on chain optimism"),
+            (CURRENT, "unreviewed Slipstream deployment for chain optimism"),
+        ],
+        ids=["none", "base-generation"],
+    )
+    def test_build_cl_mint_tx_raises_on_chain_without_reviewed_generation(
+        self, deployment: SlipstreamDeployment | None, message: str
+    ) -> None:
+        """Optimism loads no CL ABI; the manager gate refuses before the empty ABI is ever bound."""
+        sdk = AerodromeSDK(chain="optimism", token_resolver=_make_resolver())
+        assert sdk._cl_nft_abi == []
+        web3 = MagicMock()
+        with pytest.raises(ValueError, match=message):
+            sdk.build_cl_mint_tx(web3=web3, deployment=deployment, **_MINT_KWARGS)
+        web3.eth.contract.assert_not_called()
 
     def test_build_cl_mint_rejects_unreviewed_deployment(self, sdk: AerodromeSDK) -> None:
         unreviewed = SlipstreamDeployment(
@@ -784,27 +831,23 @@ class TestCLBuilders:
             generation="injected",
         )
         with pytest.raises(ValueError, match="unreviewed Slipstream deployment"):
-            sdk.build_cl_mint_tx(
-                token0=USDC_ADDRESS,
-                token1=WETH_ADDRESS,
-                tick_spacing=100,
-                tick_lower=-100,
-                tick_upper=100,
-                amount0_desired=1,
-                amount1_desired=1,
-                amount0_min=0,
-                amount1_min=0,
-                recipient=TEST_WALLET,
-                deadline=1,
-                sender=TEST_WALLET,
-                web3=MagicMock(),
-                deployment=unreviewed,
-            )
+            sdk.build_cl_mint_tx(web3=MagicMock(), deployment=unreviewed, **_MINT_KWARGS)
 
-    def test_build_cl_decrease_liquidity_tx(self, sdk: AerodromeSDK) -> None:
+    def test_build_cl_mint_rejects_a_lookalike_deployment_type(self, sdk: AerodromeSDK) -> None:
+        class _Lookalike(SlipstreamDeployment):
+            __slots__ = ()
+
+        lookalike = _Lookalike(
+            factory=CURRENT.factory, position_manager=CURRENT.position_manager, generation=CURRENT.generation
+        )
+        with pytest.raises(TypeError, match="exact SlipstreamDeployment"):
+            sdk.build_cl_mint_tx(web3=MagicMock(), deployment=lookalike, **_MINT_KWARGS)
+
+    @pytest.mark.parametrize("deployment", [CURRENT, LEGACY], ids=["current", "legacy"])
+    def test_build_cl_decrease_liquidity_tx(self, sdk: AerodromeSDK, deployment: SlipstreamDeployment) -> None:
         contract = MagicMock()
         contract.functions.decreaseLiquidity.return_value.build_transaction.return_value = {
-            "to": sdk.addresses["cl_nft"],
+            "to": deployment.position_manager,
             "data": b"",
         }
         web3 = _make_web3_with_contract(contract)
@@ -816,13 +859,14 @@ class TestCLBuilders:
             deadline=1,
             sender=TEST_WALLET,
             web3=web3,
+            deployment=deployment,
         )
         assert "to" in tx
+        assert web3.eth.contract.call_args.kwargs["address"] == deployment.position_manager
 
-    def test_build_cl_decrease_liquidity_tx_raises_when_no_cl_nft(self) -> None:
-        sdk = AerodromeSDK(chain="optimism", token_resolver=_make_resolver())
+    def test_build_cl_decrease_liquidity_tx_raises_without_deployment(self, sdk: AerodromeSDK) -> None:
         web3 = MagicMock()
-        with pytest.raises(ValueError, match="cl_nft not configured"):
+        with pytest.raises(ValueError, match="reviewed Slipstream deployment is required"):
             sdk.build_cl_decrease_liquidity_tx(
                 token_id=42,
                 liquidity=1,
@@ -832,11 +876,29 @@ class TestCLBuilders:
                 sender=TEST_WALLET,
                 web3=web3,
             )
+        web3.eth.contract.assert_not_called()
 
-    def test_build_cl_collect_tx(self, sdk: AerodromeSDK) -> None:
+    def test_build_cl_decrease_liquidity_tx_raises_on_chain_without_reviewed_generation(self) -> None:
+        sdk = AerodromeSDK(chain="optimism", token_resolver=_make_resolver())
+        web3 = MagicMock()
+        with pytest.raises(ValueError, match="unreviewed Slipstream deployment for chain optimism"):
+            sdk.build_cl_decrease_liquidity_tx(
+                token_id=42,
+                liquidity=1,
+                amount0_min=0,
+                amount1_min=0,
+                deadline=1,
+                sender=TEST_WALLET,
+                web3=web3,
+                deployment=CURRENT,
+            )
+        web3.eth.contract.assert_not_called()
+
+    @pytest.mark.parametrize("deployment", [CURRENT, LEGACY], ids=["current", "legacy"])
+    def test_build_cl_collect_tx(self, sdk: AerodromeSDK, deployment: SlipstreamDeployment) -> None:
         contract = MagicMock()
         contract.functions.collect.return_value.build_transaction.return_value = {
-            "to": sdk.addresses["cl_nft"],
+            "to": deployment.position_manager,
             "data": b"",
         }
         web3 = _make_web3_with_contract(contract)
@@ -847,13 +909,14 @@ class TestCLBuilders:
             amount1_max=2**128 - 1,
             sender=TEST_WALLET,
             web3=web3,
+            deployment=deployment,
         )
         assert "to" in tx
+        assert web3.eth.contract.call_args.kwargs["address"] == deployment.position_manager
 
-    def test_build_cl_collect_tx_raises_when_no_cl_nft(self) -> None:
-        sdk = AerodromeSDK(chain="optimism", token_resolver=_make_resolver())
+    def test_build_cl_collect_tx_raises_without_deployment(self, sdk: AerodromeSDK) -> None:
         web3 = MagicMock()
-        with pytest.raises(ValueError, match="cl_nft not configured"):
+        with pytest.raises(ValueError, match="reviewed Slipstream deployment is required"):
             sdk.build_cl_collect_tx(
                 token_id=42,
                 recipient=TEST_WALLET,
@@ -862,6 +925,22 @@ class TestCLBuilders:
                 sender=TEST_WALLET,
                 web3=web3,
             )
+        web3.eth.contract.assert_not_called()
+
+    def test_build_cl_collect_tx_raises_on_chain_without_reviewed_generation(self) -> None:
+        sdk = AerodromeSDK(chain="optimism", token_resolver=_make_resolver())
+        web3 = MagicMock()
+        with pytest.raises(ValueError, match="unreviewed Slipstream deployment for chain optimism"):
+            sdk.build_cl_collect_tx(
+                token_id=42,
+                recipient=TEST_WALLET,
+                amount0_max=1,
+                amount1_max=1,
+                sender=TEST_WALLET,
+                web3=web3,
+                deployment=CURRENT,
+            )
+        web3.eth.contract.assert_not_called()
 
 
 # =============================================================================

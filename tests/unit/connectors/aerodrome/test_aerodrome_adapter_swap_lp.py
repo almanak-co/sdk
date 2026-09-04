@@ -23,6 +23,7 @@ from almanak.connectors.aerodrome.adapter import (
     SwapResult,
     TransactionData,
 )
+from almanak.connectors.aerodrome.addresses import SlipstreamDeployment, slipstream_deployment_for_factory
 from almanak.framework.data.tokens.exceptions import TokenResolutionError
 from almanak.framework.data.tokens.models import ResolvedToken
 from almanak.framework.intents.vocabulary import IntentType, SwapIntent
@@ -31,6 +32,18 @@ TEST_WALLET = "0x1234567890123456789012345678901234567890"
 USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
 WETH_ADDRESS = "0x4200000000000000000000000000000000000006"
 NATIVE_ETH = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
+
+
+def _generation(factory: str) -> SlipstreamDeployment:
+    deployment = slipstream_deployment_for_factory("base", factory)
+    assert deployment is not None, factory
+    return deployment
+
+
+# CL swaps execute through the router and quoter of the reviewed generation
+# that owns the pool; there is no default Slipstream router.
+CURRENT = _generation("0xf8f2eB4940CFE7d13603DDDD87f123820Fc061Ef")
+LEGACY = _generation("0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A")
 
 
 def _make_resolver(known_addresses: dict[str, tuple[str, int]]) -> MagicMock:
@@ -156,16 +169,78 @@ class TestSwapExactInputCL:
             token_out="WETH",
             amount_in=Decimal("100"),
             stable=False,
+            deployment=CURRENT,
         )
         assert result.success
         # approve + swap
         assert len(result.transactions) == 2
         assert result.transactions[0].tx_type == "approve"
         assert result.transactions[1].tx_type == "swap"
-        # swap is to cl_router
-        assert result.transactions[1].to == adapter.addresses["cl_router"]
+        # swap is to the owning generation's router
+        assert result.transactions[1].to == CURRENT.swap_router
         # amount_in_wei is 100 * 10^6 = 100_000_000
         assert result.amount_in == 100_000_000
+
+    @pytest.mark.parametrize("deployment", [CURRENT, LEGACY], ids=["current", "legacy"])
+    def test_cl_swap_approves_and_routes_through_the_generation_router(
+        self, adapter: AerodromeAdapter, deployment: SlipstreamDeployment
+    ) -> None:
+        """The approve spender and the swap target are the supplied generation's router, never a constant."""
+        assert deployment.swap_router is not None
+        result = adapter.swap_exact_input(
+            token_in="USDC",
+            token_out="WETH",
+            amount_in=Decimal("100"),
+            deployment=deployment,
+        )
+        assert result.success, result.error
+        approve, swap = result.transactions
+        assert approve.tx_type == "approve"
+        # ERC-20 approve(spender, amount): the spender is the second calldata word.
+        spender_word = approve.data[10:74]
+        assert spender_word == deployment.swap_router[2:].lower().rjust(64, "0")
+        assert swap.to == deployment.swap_router
+
+    def test_cl_swap_without_deployment_is_refused_before_any_build(self, adapter: AerodromeAdapter) -> None:
+        adapter._get_quote_exact_input = MagicMock()  # type: ignore[method-assign]
+        result = adapter.swap_exact_input(
+            token_in="USDC",
+            token_out="WETH",
+            amount_in=Decimal("100"),
+        )
+        assert result.success is False
+        assert "requires the reviewed generation" in (result.error or "")
+        assert result.transactions == []
+        adapter._get_quote_exact_input.assert_not_called()
+
+    def test_cl_swap_rejects_an_unreviewed_deployment(self, adapter: AerodromeAdapter) -> None:
+        injected = SlipstreamDeployment(
+            factory="0x" + "aa" * 20,
+            position_manager="0x" + "bb" * 20,
+            generation="injected",
+            swap_router="0x" + "cc" * 20,
+        )
+        result = adapter.swap_exact_input(
+            token_in="USDC",
+            token_out="WETH",
+            amount_in=Decimal("1"),
+            deployment=injected,
+        )
+        assert result.success is False
+        assert "unreviewed Slipstream deployment" in (result.error or "")
+
+    def test_cl_swap_quotes_through_the_generation_quoter(self, adapter: AerodromeAdapter) -> None:
+        adapter._try_get_cl_amount_out_onchain = MagicMock(return_value=5 * 10**16)  # type: ignore[method-assign]
+        result = adapter.swap_exact_input(
+            token_in="USDC",
+            token_out="WETH",
+            amount_in=Decimal("100"),
+            deployment=LEGACY,
+        )
+        assert result.success, result.error
+        assert result.quote is not None
+        assert result.quote.amount_out == 5 * 10**16
+        assert adapter._try_get_cl_amount_out_onchain.call_args.kwargs["quoter"] == LEGACY.quoter
 
     def test_cl_swap_unknown_input_token_returns_error(self, usdc_weth_resolver: MagicMock) -> None:
         # token_in resolution will raise — adapter wraps it in SwapResult error.
@@ -175,10 +250,12 @@ class TestSwapExactInputCL:
             token_in="UNKNOWN_TOKEN",
             token_out="WETH",
             amount_in=Decimal("1"),
+            deployment=CURRENT,
         )
         assert result.success is False
         # Either "Unknown input token" or TokenResolutionError reason
         assert result.error is not None
+        assert "requires the reviewed generation" not in result.error
 
     def test_swap_exception_caught_returns_failed_result(self, adapter: AerodromeAdapter) -> None:
         # Force exception in _get_quote_exact_input.
@@ -187,20 +264,21 @@ class TestSwapExactInputCL:
             token_in="USDC",
             token_out="WETH",
             amount_in=Decimal("1"),
+            deployment=CURRENT,
         )
         assert result.success is False
         assert "boom" in (result.error or "")
 
     def test_reemits_approve_after_abandoned_and_failed_bundle(self, adapter: AerodromeAdapter) -> None:
-        first = adapter.swap_exact_input("USDC", "WETH", Decimal("1"))
-        retry = adapter.swap_exact_input("USDC", "WETH", Decimal("1"))
+        first = adapter.swap_exact_input("USDC", "WETH", Decimal("1"), deployment=CURRENT)
+        retry = adapter.swap_exact_input("USDC", "WETH", Decimal("1"), deployment=CURRENT)
 
         assert any(tx.tx_type == "approve" for tx in first.transactions)
         assert any(tx.tx_type == "approve" for tx in retry.transactions)
 
         with patch.object(adapter, "_build_swap_exact_input_cl_tx", side_effect=RuntimeError("build failed")):
-            failed = adapter.swap_exact_input("USDC", "WETH", Decimal("1"))
-        after_failure = adapter.swap_exact_input("USDC", "WETH", Decimal("1"))
+            failed = adapter.swap_exact_input("USDC", "WETH", Decimal("1"), deployment=CURRENT)
+        after_failure = adapter.swap_exact_input("USDC", "WETH", Decimal("1"), deployment=CURRENT)
 
         assert failed.success is False
         assert any(tx.tx_type == "approve" for tx in after_failure.transactions)
@@ -267,11 +345,13 @@ class TestSwapExactInputNativeToken:
             token_in="ETH",
             token_out="USDC",
             amount_in=Decimal("1"),
+            deployment=CURRENT,
         )
         assert result.success
         # No approve tx — only swap
         approves = [tx for tx in result.transactions if tx.tx_type == "approve"]
         assert approves == []
+        assert result.transactions[-1].to == CURRENT.swap_router
 
 
 # =============================================================================
@@ -628,7 +708,9 @@ class TestBuildTxFunctions:
         # Calldata starts with the swap selector
         assert tx.data.startswith("0xcac88ea9")
 
-    def test_build_swap_exact_input_cl_tx(self, adapter: AerodromeAdapter) -> None:
+    @pytest.mark.parametrize("deployment", [CURRENT, LEGACY], ids=["current", "legacy"])
+    def test_build_swap_exact_input_cl_tx(self, adapter: AerodromeAdapter, deployment: SlipstreamDeployment) -> None:
+        assert deployment.swap_router is not None
         tx = adapter._build_swap_exact_input_cl_tx(
             token_in=USDC_ADDRESS,
             token_out=WETH_ADDRESS,
@@ -636,9 +718,21 @@ class TestBuildTxFunctions:
             recipient=TEST_WALLET,
             amount_in=1_000_000,
             amount_out_minimum=10**14,
+            router=deployment.swap_router,
         )
-        assert tx.to == adapter.addresses["cl_router"]
+        assert tx.to == deployment.swap_router
         assert tx.data.startswith("0xa026383e")
+
+    def test_build_swap_exact_input_cl_tx_requires_a_router(self, adapter: AerodromeAdapter) -> None:
+        with pytest.raises(TypeError):
+            adapter._build_swap_exact_input_cl_tx(  # type: ignore[call-arg]
+                token_in=USDC_ADDRESS,
+                token_out=WETH_ADDRESS,
+                tick_spacing=100,
+                recipient=TEST_WALLET,
+                amount_in=1_000_000,
+                amount_out_minimum=10**14,
+            )
 
     def test_build_add_liquidity_tx(self, adapter: AerodromeAdapter) -> None:
         tx = adapter._build_add_liquidity_tx(
@@ -695,6 +789,7 @@ class TestResultDataclassesToDict:
             token_out="WETH",
             amount_in=Decimal("10"),
             stable=False,
+            deployment=CURRENT,
         )
         assert result.success
         d = result.to_dict()
@@ -1022,3 +1117,25 @@ class TestRouterQuoteHelpers:
 
         sdk, web3, _ = self._sdk_with_fake_web3((0, 0))
         assert sdk.quote_remove_liquidity(USDC_ADDRESS, WETH_ADDRESS, False, 1, web3) == (0, 0)
+
+
+@pytest.mark.parametrize(
+    "swap_params",
+    [
+        {"pool": "0xb2cc224c1c9fee385f8ad6a55b4d94e92359dc59"},
+        {"tick_spacing": 100},
+        {"classic": False},
+    ],
+)
+def test_compile_swap_intent_refuses_a_cl_routing_request(adapter: AerodromeAdapter, swap_params: dict) -> None:
+    """The direct-adapter helper is Classic-only; a CL request must fail loudly, never route Classic silently."""
+    intent = SwapIntent(
+        from_token="USDC",
+        to_token="WETH",
+        amount=Decimal("100"),
+        protocol="aerodrome",
+        chain="base",
+        swap_params=swap_params,
+    )
+    with pytest.raises(ValueError, match="Classic only"):
+        adapter.compile_swap_intent(intent)

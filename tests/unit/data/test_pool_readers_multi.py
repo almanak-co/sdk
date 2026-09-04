@@ -15,6 +15,7 @@ import pytest
 
 from almanak.connectors._strategy_base.v3_pool_abi import V3_GET_POOL_SELECTOR
 from almanak.connectors._strategy_pool_reader_registry import POOL_READER_REGISTRY
+from almanak.connectors.aerodrome.addresses import slipstream_lp_deployments
 from almanak.framework.data.exceptions import DataUnavailableError
 from almanak.framework.data.models import DataClassification, DataEnvelope
 from almanak.framework.data.pools.reader import (
@@ -135,9 +136,13 @@ class TestAerodromePoolReader:
         assert AerodromePoolReader.protocol_name == "aerodrome_slipstream"
 
     def test_factory_addresses(self):
-        """Uses Aerodrome CL factory addresses."""
+        """No single "the" factory: every reviewed Base generation is a factory."""
         assert AerodromePoolReader._factory_addresses is AERODROME_CL_FACTORY
-        assert "base" in AerodromePoolReader._factory_addresses
+        assert "base" not in AerodromePoolReader._factory_addresses
+        generations = AerodromePoolReader._factory_generations["base"]
+        assert generations == tuple(d.factory for d in slipstream_lp_deployments("base"))
+        assert len(generations) == 2
+        assert len({f.lower() for f in generations}) == 2
 
     def test_known_pools(self):
         """Uses Aerodrome known pools registry."""
@@ -173,21 +178,55 @@ class TestAerodromePoolReader:
         assert env1.meta.cache_hit is False
         assert env2.meta.cache_hit is True
 
-    def test_resolve_known_pool_on_base(self):
-        """Resolve a known Aerodrome pool from the static registry."""
-        rpc_call = _make_rpc_call()
-        reader = AerodromePoolReader(rpc_call=rpc_call, cache_ttl_seconds=0)
-
-        addr = reader.resolve_pool_address(WETH_BASE, USDC_BASE, "base", fee_tier=100)
-        assert addr is not None
-        assert addr == "0xb2cc224c1c9feE385f8ad6a55b4d94E92359DC59"
-
-    def test_resolve_unknown_pool_uses_factory(self):
-        """Unknown pools fall back to factory getPool() call."""
-        expected_pool = "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+    def test_resolve_known_pool_on_base_verifies_every_generation(self):
+        """A known-pool entry is a hint until every reviewed factory confirms uniqueness."""
+        expected_pool = "0xb2cc224c1c9feE385f8ad6a55b4d94E92359DC59"
+        current_factory, legacy_factory = AerodromePoolReader._factory_generations["base"]
+        asked: list[str] = []
 
         def factory_rpc(chain, to, calldata):
-            return _address_bytes(expected_pool)
+            asked.append(to.lower())
+            if to.lower() == legacy_factory.lower():
+                return _address_bytes(expected_pool)
+            return _address_bytes("0x" + "0" * 40)
+
+        reader = AerodromePoolReader(rpc_call=factory_rpc, cache_ttl_seconds=0)
+        addr = reader.resolve_pool_address(WETH_BASE, USDC_BASE, "base", fee_tier=100)
+
+        assert addr.lower() == expected_pool.lower()
+        assert sorted(asked) == sorted([current_factory.lower(), legacy_factory.lower()])
+
+    def test_known_pool_that_becomes_multi_generation_is_ambiguous(self):
+        """A static hint cannot hide a second generation creating the same key later."""
+        factories = AerodromePoolReader._factory_generations["base"]
+        pools = {
+            factories[0].lower(): "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            factories[1].lower(): "0xb2cc224c1c9feE385f8ad6a55b4d94E92359DC59",
+        }
+        asked: list[str] = []
+
+        def factory_rpc(chain, to, calldata):
+            asked.append(to.lower())
+            return _address_bytes(pools[to.lower()])
+
+        reader = AerodromePoolReader(rpc_call=factory_rpc, cache_ttl_seconds=0)
+        addr = reader.resolve_pool_address(WETH_BASE, USDC_BASE, "base", fee_tier=100)
+
+        assert addr is None
+        assert sorted(asked) == sorted(pools)
+
+    def test_resolve_unknown_pool_uses_factory(self):
+        """Unknown pools ask every reviewed factory generation; the one that
+        owns the key answers and the other returns the zero address."""
+        expected_pool = "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+        current_factory, legacy_factory = AerodromePoolReader._factory_generations["base"]
+        asked: list[str] = []
+
+        def factory_rpc(chain, to, calldata):
+            asked.append(to.lower())
+            if to.lower() == legacy_factory.lower():
+                return _address_bytes(expected_pool)
+            return _address_bytes("0x" + "0" * 40)
 
         reader = AerodromePoolReader(rpc_call=factory_rpc, cache_ttl_seconds=0)
         addr = reader.resolve_pool_address(
@@ -198,6 +237,31 @@ class TestAerodromePoolReader:
         )
         assert addr is not None
         assert addr.lower() == expected_pool.lower()
+        assert sorted(asked) == sorted([current_factory.lower(), legacy_factory.lower()])
+
+    def test_resolve_pool_owned_by_two_generations_is_ambiguous(self):
+        """A key both reviewed factories answer must not resolve: the pool,
+        not the reader, decides which generation executes."""
+        current_factory, legacy_factory = AerodromePoolReader._factory_generations["base"]
+        pools = {
+            current_factory.lower(): "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            legacy_factory.lower(): "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        }
+        asked: list[str] = []
+
+        def factory_rpc(chain, to, calldata):
+            asked.append(to.lower())
+            return _address_bytes(pools[to.lower()])
+
+        reader = AerodromePoolReader(rpc_call=factory_rpc, cache_ttl_seconds=0)
+        addr = reader.resolve_pool_address(
+            "0x1111111111111111111111111111111111111111",
+            "0x2222222222222222222222222222222222222222",
+            "base",
+            fee_tier=500,
+        )
+        assert addr is None
+        assert sorted(asked) == sorted(pools)
 
     def test_resolve_sends_int24_selector(self):
         """Slipstream factory.getPool uses the int24 selector, not the v3 uint24 one."""
@@ -231,12 +295,16 @@ class TestAerodromePoolReader:
         live Base deployment."""
         cbbtc = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
         expected = "0xaaaabbbbccccddddeeeeffff0000111122223333"
+        current_factory, legacy_factory = AerodromePoolReader._factory_generations["base"]
+        factories_asked: set[str] = set()
 
         def rpc(chain, to, calldata):
             selector = calldata[:10]
             if selector == "0x28af8d0b":  # getPool(address,address,int24 tickSpacing)
+                factories_asked.add(to.lower())
                 tick_spacing = int(calldata[-64:], 16)
-                return _address_bytes(expected if tick_spacing == 200 else "0x" + "0" * 40)
+                owned = tick_spacing == 200 and to.lower() == current_factory.lower()
+                return _address_bytes(expected if owned else "0x" + "0" * 40)
             if selector == SLOT0_SELECTOR:
                 return _build_slot0_response(2**96, 0)
             if selector == LIQUIDITY_SELECTOR:
@@ -255,6 +323,7 @@ class TestAerodromePoolReader:
         best = reader.resolve_best_pool_address(USDC_BASE, cbbtc, "base")
         assert best is not None
         assert best.lower() == expected.lower()
+        assert factories_asked == {current_factory.lower(), legacy_factory.lower()}
 
     def test_resolve_no_factory_for_chain(self):
         """Chain without factory returns None for unknown pools."""
@@ -676,6 +745,9 @@ class TestManifestPoolReaderSpecs:
         classic_spec = POOL_READER_REGISTRY.lookup("aerodrome")
         assert classic_spec is not None and classic_spec.get_pool_selector == "0x79bc57d5"
         assert spec.factory_addresses is AERODROME_CL_FACTORY
+        assert spec.factory_addresses == {}
+        assert spec.factories_for("base") == tuple(d.factory for d in slipstream_lp_deployments("base"))
+        assert spec.supports_chain("base")
         assert spec.known_pools is _AERODROME_KNOWN_POOLS
         assert spec.get_pool_selector == "0x28af8d0b"
 

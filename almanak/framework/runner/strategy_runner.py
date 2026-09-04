@@ -4082,9 +4082,12 @@ class StrategyRunner:
     ) -> tuple[str, str] | None:
         """Resolve ``(chain, nft_manager_addr)`` from the strategy.
 
-        Returns ``None`` and INFO-logs when no canonical NPM address is
-        registered for the strategy's (chain, protocol) pair (the caller
-        falls back to ``save_ledger_entry``).
+        Returns ``None`` and INFO-logs when no NPM address is registered for
+        the strategy's (chain, protocol) pair (the caller falls back to
+        ``save_ledger_entry``). When several reviewed managers are candidates
+        (Slipstream generations) ``nft_manager_addr`` is ``""``: the row
+        builders must take the authority from the receipt and refuse the row
+        otherwise, never default to one generation.
 
         ``protocol`` is consulted because Slipstream forks (Aerodrome on
         Base, Velodrome on Optimism) ship their OWN NonfungiblePositionManager
@@ -4094,7 +4097,7 @@ class StrategyRunner:
         would not match the on-chain emitter address, and lookups against
         ``position_registry`` would consistently miss.
         """
-        from almanak.framework.migration.backfill import _nft_manager_for_protocol_chain
+        from almanak.framework.migration.backfill import _nft_manager_candidates_for_protocol_chain
 
         # VIB-5670: explicit per-leg chain wins; single-chain callers pass
         # ``None`` and fall back to the strategy/config derivation (identical).
@@ -4103,8 +4106,8 @@ class StrategyRunner:
         )
         chain = (eff_chain or "").lower()
         protocol_norm = (protocol or "").lower()
-        nft_manager = _nft_manager_for_protocol_chain(protocol_norm, chain)
-        if not nft_manager:
+        candidates = _nft_manager_candidates_for_protocol_chain(protocol_norm, chain)
+        if not candidates:
             logger.info(
                 "Registry-mode skip: no NPM known for (protocol=%r, chain=%r); "
                 "falling back to save_ledger_entry for %s",
@@ -4113,7 +4116,16 @@ class StrategyRunner:
                 intent_type_str,
             )
             return None
-        return chain, nft_manager
+        if len(candidates) > 1:
+            logger.info(
+                "Registry mode: %d reviewed NPMs for (protocol=%r, chain=%r); the receipt names the authority for %s",
+                len(candidates),
+                protocol_norm,
+                chain,
+                intent_type_str,
+            )
+            return chain, ""
+        return chain, candidates[0]
 
     def _registry_resolve_receipt_and_parser(
         self,
@@ -4234,6 +4246,12 @@ class StrategyRunner:
         payload_manager = str(payload.get("nft_manager_addr") or "").lower()
         if payload_manager:
             nft_manager = payload_manager
+        if not nft_manager:
+            logger.error(
+                "Registry-mode skip: LP_OPEN receipt names no NFT-manager authority and the venue has "
+                "several reviewed managers; refusing to hash under a default",
+            )
+            return None
         pih = physical_identity_hash_univ3(
             chain=chain,
             nft_manager_addr=nft_manager,
@@ -4325,6 +4343,12 @@ class StrategyRunner:
             )
             return None
         nft_manager = payload_manager or receipt_manager or nft_manager
+        if not nft_manager:
+            logger.error(
+                "Registry-mode skip: LP_CLOSE receipt names no NFT-manager authority and the venue has "
+                "several reviewed managers; refusing to hash under a default",
+            )
+            return None
         pih = physical_identity_hash_univ3(
             chain=chain,
             nft_manager_addr=nft_manager,

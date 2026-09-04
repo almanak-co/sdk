@@ -10,7 +10,8 @@ tests pin the new contract, mirrored from the Uniswap V3 exact lane:
   gateway boundary only;
 - the pool's claimed factory must be a reviewed generation AND must round-trip
   the tuple to the same address (no alternate-pool substitution);
-- new positions are still admitted only through the current generation.
+- every reviewed generation is admitted; the pool's own factory selects the
+  position manager that owns the new NFT.
 """
 
 from __future__ import annotations
@@ -70,8 +71,8 @@ def _binding(*, factory: str = CURRENT.factory, tick_spacing: int = 100) -> Slip
     return SlipstreamPoolBinding(token0=WETH, token1=VVV, tick_spacing=tick_spacing, factory=factory.lower())
 
 
-def _confirmed(pool: str = POOL) -> PoolValidationResult:
-    return PoolValidationResult(exists=True, reason=PoolValidationReason.CONFIRMED, pool_address=pool)
+def _confirmed(pool: str = POOL, factory: str = CURRENT.factory) -> PoolValidationResult:
+    return PoolValidationResult(exists=True, reason=PoolValidationReason.CONFIRMED, pool_address=pool, factory=factory)
 
 
 def _resolve(compiler: SimpleNamespace, pool: str = POOL):
@@ -249,8 +250,8 @@ def test_exact_pool_refuses_alternate_pool_substitution() -> None:
     assert OTHER_POOL in (result.error or "")
 
 
-def test_exact_pool_on_legacy_generation_is_refused_with_generation_named() -> None:
-    """An authenticated legacy pool is a real pool, but mint is current-generation only (ALM-3451)."""
+def test_exact_pool_on_legacy_generation_is_admitted_on_the_legacy_manager() -> None:
+    """An authenticated legacy pool mints on the legacy NPM: the pool, not a constant, picks the generation."""
     with (
         patch(
             "almanak.connectors.aerodrome.pool_validation.read_slipstream_cl_pool_binding",
@@ -258,13 +259,16 @@ def test_exact_pool_on_legacy_generation_is_refused_with_generation_named() -> N
         ),
         patch(
             "almanak.connectors.aerodrome.pool_validation.validate_aerodrome_cl_pool",
-            return_value=_confirmed(OTHER_POOL),
+            return_value=_confirmed(OTHER_POOL, LEGACY.factory),
         ) as validate,
     ):
-        result = _failed(_resolve(_compiler(), OTHER_POOL))
+        resolved = _resolve(_compiler(), OTHER_POOL)
+    assert not isinstance(resolved, CompilationResult), resolved.error
     assert validate.call_args.kwargs["deployment"] == LEGACY
-    assert "legacy factory generation" in (result.error or "")
-    assert "ALM-3451" in (result.error or "")
+    assert resolved.deployment == LEGACY
+    assert resolved.deployment.generation == "legacy"
+    assert resolved.deployment.position_manager == LEGACY.position_manager
+    assert resolved.pool_check.pool_address == OTHER_POOL
 
 
 # Compiler dispatch: the bare address clears the format gate
@@ -348,6 +352,41 @@ def test_bare_address_compiles_mint_bound_to_the_exact_pool_without_substitution
     assert meta["tick_spacing"] == 100
     assert meta["nft_manager"] == CURRENT.position_manager
     assert meta["slipstream_deployment"] == "current"
+
+
+def test_bare_address_on_the_legacy_generation_mints_on_the_legacy_manager() -> None:
+    compiler = _full_compiler()
+    tx = MagicMock(gas_estimate=250_000, tx_type="mint")
+    tx.to_dict.return_value = {"tx_type": "mint"}
+
+    with (
+        patch(
+            "almanak.connectors.aerodrome.pool_validation.read_slipstream_cl_pool_binding",
+            return_value=_binding(factory=LEGACY.factory),
+        ),
+        patch(
+            "almanak.connectors.aerodrome.pool_validation.validate_aerodrome_cl_pool",
+            return_value=_confirmed(OTHER_POOL, LEGACY.factory),
+        ),
+        patch.object(aerodrome_compiler, "_resolve_slipstream_ticks", return_value=(0, 100)),
+        patch.object(aerodrome_compiler, "maybe_recompute_lp_amounts_from_slot0", return_value=(10**16, 10**20)),
+        patch.object(aerodrome_compiler, "compute_lp_slippage_mins", return_value=(1, 1)),
+        patch.object(aerodrome_compiler, "_verify_slipstream_binding", return_value=None) as verify,
+        patch("almanak.connectors.aerodrome.AerodromeConfig"),
+        patch("almanak.connectors.aerodrome.AerodromeAdapter") as adapter_cls,
+    ):
+        adapter_cls.return_value.add_cl_liquidity.return_value = MagicMock(success=True, transactions=[tx], error=None)
+        result = aerodrome_compiler.compile_lp_open_aerodrome_slipstream(compiler, _intent(OTHER_POOL))
+
+    assert result.status is CompilationStatus.SUCCESS, result.error
+    assert verify.call_args.kwargs["pool_address"] == OTHER_POOL
+    assert verify.call_args.kwargs["expected_position_manager"] == LEGACY.position_manager
+    mint = adapter_cls.return_value.add_cl_liquidity.call_args.kwargs
+    assert mint["deployment"] == LEGACY
+    meta = result.action_bundle.metadata
+    assert meta["pool"] == OTHER_POOL
+    assert meta["nft_manager"] == LEGACY.position_manager
+    assert meta["slipstream_deployment"] == "legacy"
 
 
 def test_exact_lane_refusal_precedes_any_range_or_adapter_work() -> None:

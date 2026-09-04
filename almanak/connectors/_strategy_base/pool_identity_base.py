@@ -97,8 +97,8 @@ def identify_clamm_pool(
     def call(to: str, data: str) -> bytes | None:
         return probe_call(chain, to, data, gateway_client=gateway_client, rpc_url=rpc_url, timeout=timeout)
 
-    factory = spec.factory_addresses.get(chain.lower())
-    if not factory:
+    factories = spec.factories_for(chain)
+    if not factories:
         return None
     token0 = decode_word_address(call(address, TOKEN0_SELECTOR))
     token1 = decode_word_address(call(address, TOKEN1_SELECTOR))
@@ -114,22 +114,24 @@ def identify_clamm_pool(
         keys = [k for k in (tick_spacing,) if k is not None]
     else:
         keys = [k for k in (fee,) if k is not None]
-    for pool_key in keys:
-        raw = call(factory, encode_get_pool(spec.get_pool_selector, token0, token1, pool_key))
-        acknowledged = decode_word_address(raw)
-        if acknowledged is not None and acknowledged.lower() == address.lower():
-            return {
-                "kind": "pool",
-                "family": "clamm",
-                "protocol": spec.protocol,
-                "pool_address": address.lower(),
-                "token0": token0,
-                "token1": token1,
-                "fee_tier": fee,
-                "tick_spacing": tick_spacing,
-                "factory_verified": "verified",
-                "identified_via": "abi-probe+factory",
-            }
+    for factory in factories:
+        for pool_key in keys:
+            raw = call(factory, encode_get_pool(spec.get_pool_selector, token0, token1, pool_key))
+            acknowledged = decode_word_address(raw)
+            if acknowledged is not None and acknowledged.lower() == address.lower():
+                return {
+                    "kind": "pool",
+                    "family": "clamm",
+                    "protocol": spec.protocol,
+                    "pool_address": address.lower(),
+                    "token0": token0,
+                    "token1": token1,
+                    "fee_tier": fee,
+                    "tick_spacing": tick_spacing,
+                    "factory": factory.lower(),
+                    "factory_verified": "verified",
+                    "identified_via": "abi-probe+factory",
+                }
     return None
 
 

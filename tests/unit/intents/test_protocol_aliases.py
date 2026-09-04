@@ -13,7 +13,6 @@ from almanak import IntentCompiler, IntentCompilerConfig, SwapIntent
 from almanak.connectors._strategy_base.protocol_aliases import (
     PROTOCOL_ALIASES,
     PROTOCOL_DISPLAY_NAMES,
-    UNISWAP_V3_FORKS,
     display_protocol,
     is_uniswap_v3_fork,
     normalize_protocol,
@@ -274,20 +273,27 @@ class TestVelodromeCompilerIntegration:
         assert "not supported on ethereum" in (result.error or "").lower()
 
     def test_base_aerodrome_defaults_to_cl(self, base_compiler):
-        """On Base, Aerodrome swap should default to CL routing (has cl_router)."""
+        """On Base, Aerodrome swap should default to CL routing: a reviewed
+        Slipstream generation with a swap router exists there."""
         from almanak.connectors.aerodrome.addresses import AERODROME as AERODROME_ADDRESSES
+        from almanak.connectors.aerodrome.addresses import slipstream_lp_deployments
+        from almanak.connectors.aerodrome.compiler import _aerodrome_chain_has_cl
 
-        chain_addrs = AERODROME_ADDRESSES["base"]
-        assert "cl_router" in chain_addrs
-        assert "cl_factory" in chain_addrs
+        deployments = slipstream_lp_deployments("base")
+        assert deployments
+        assert any(deployment.swap_router for deployment in deployments)
+        assert _aerodrome_chain_has_cl("base") is True
+        # No singleton CL contract is published; the pool decides the generation.
+        assert not {"cl_router", "cl_factory", "cl_quoter", "cl_nft"} & set(AERODROME_ADDRESSES["base"])
 
     def test_optimism_velodrome_defaults_to_classic(self):
-        """On Optimism, Velodrome should default to classic routing (no cl_router)."""
-        from almanak.connectors.aerodrome.addresses import AERODROME as AERODROME_ADDRESSES
+        """On Optimism, Velodrome should default to classic routing: no reviewed
+        Slipstream generation exists there."""
+        from almanak.connectors.aerodrome.addresses import slipstream_lp_deployments
+        from almanak.connectors.aerodrome.compiler import _aerodrome_chain_has_cl
 
-        chain_addrs = AERODROME_ADDRESSES["optimism"]
-        assert "cl_router" not in chain_addrs
-        assert "cl_factory" not in chain_addrs
+        assert slipstream_lp_deployments("optimism") == ()
+        assert _aerodrome_chain_has_cl("optimism") is False
 
     def test_optimism_compiles_with_classic_default(self):
         """Optimism compilation should succeed using classic (non-CL) routing."""

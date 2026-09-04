@@ -11,8 +11,12 @@ from almanak.connectors._strategy_base.pool_data import (
 )
 from almanak.connectors._strategy_base.pool_reader import PoolDiscriminatorKind, PoolReaderSpec
 
-from .addresses import AERODROME
+from .addresses import AERODROME, SLIPSTREAM_LP_DEPLOYMENTS
 
+# Cached (token0, token1, tickSpacing) -> pool hints. Each key below is currently
+# owned by exactly one reviewed factory generation (the legacy one). The shared
+# reader still probes every reviewed generation before returning a hint because
+# another factory can create the same key later.
 _KNOWN_POOLS: dict[str, dict[tuple[str, str, int], str]] = {
     "base": {
         (
@@ -20,9 +24,6 @@ _KNOWN_POOLS: dict[str, dict[tuple[str, str, int], str]] = {
             "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
             100,
         ): "0xb2cc224c1c9feE385f8ad6a55b4d94E92359DC59",
-        # Corrected 2026-08-18: this slot previously pointed at the CLASSIC
-        # AERO/USDC vAMM pool (0x6cDc…971d) — wrong pair, wrong AMM family.
-        # Verified on-chain: cl_factory.getPool(WETH, USDC, 200) below.
         (
             "0x4200000000000000000000000000000000000006",
             "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
@@ -33,7 +34,11 @@ _KNOWN_POOLS: dict[str, dict[tuple[str, str, int], str]] = {
 
 SLIPSTREAM_POOL_READER_SPEC = PoolReaderSpec(
     protocol="aerodrome_slipstream",
-    factory_addresses={chain: addrs["cl_factory"] for chain, addrs in AERODROME.items() if "cl_factory" in addrs},
+    factory_addresses={},
+    factory_generations={
+        chain: tuple(deployment.factory for deployment in deployments)
+        for chain, deployments in SLIPSTREAM_LP_DEPLOYMENTS.items()
+    },
     reader=ImportRef(
         module="almanak.framework.data.pools.reader",
         attribute="AerodromePoolReader",

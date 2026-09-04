@@ -11,6 +11,7 @@ the alias.
 
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -79,6 +80,29 @@ class TestResolverFoldsPolygonNativeAlias:
 
         assert by_alias.address.lower() == by_symbol.address.lower()
         assert by_alias.symbol == by_symbol.symbol
+
+    def test_runtime_registration_cannot_replace_the_canonical_address_symbol(self, resolver: TokenResolver) -> None:
+        resolver.register_token("MATIC", "polygon", NATIVE_SENTINEL, 6)
+
+        by_alias = resolver.resolve(POLYGON_NATIVE_PRECOMPILE, "polygon", skip_gateway=True)
+        by_sentinel = resolver.resolve(NATIVE_SENTINEL, "polygon", skip_gateway=True)
+
+        assert by_alias.symbol == "POL"
+        assert by_alias.decimals == 18
+        assert by_sentinel.symbol == "POL"
+        assert by_sentinel.decimals == 18
+
+    def test_same_symbol_registration_cannot_replace_canonical_address_metadata(self, resolver: TokenResolver) -> None:
+        resolver.register_token("POL", "polygon", NATIVE_SENTINEL, 6)
+
+        with patch.object(resolver._cache, "put", wraps=resolver._cache.put) as cache_put:
+            by_sentinel = resolver.resolve(NATIVE_SENTINEL, "polygon", skip_gateway=True)
+            resolver.resolve(NATIVE_SENTINEL, "polygon", skip_gateway=True)
+
+        assert cache_put.call_count == 1
+        assert by_sentinel.symbol == "POL"
+        assert by_sentinel.decimals == 18
+        assert by_sentinel.source == "static"
 
     def test_alias_resolves_through_caip19(self, resolver: TokenResolver) -> None:
         token = resolver.resolve_caip19(f"eip155:137/erc20:{POLYGON_NATIVE_PRECOMPILE}", skip_gateway=True)

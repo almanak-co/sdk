@@ -16,6 +16,8 @@ owning connector module's namespace. Verified behaviour:
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from almanak.connectors._strategy_base.pool_validation_base import (
     ZERO_ADDRESS,
     PoolValidationReason,
@@ -26,12 +28,7 @@ from almanak.connectors._strategy_base.pool_validation_registry import (
     PoolValidationRegistry,
     validate_pool,
 )
-from almanak.connectors.aerodrome.pool_validation import (
-    _encode_get_pool_aerodrome,
-    validate_aerodrome_cl_pool,
-    validate_aerodrome_pool,
-)
-from almanak.connectors.traderjoe_v2.pool_validation import validate_traderjoe_pool
+
 # The V3-family validator + slot0 reader moved to the shared connector
 # foundation (almanak.connectors._strategy_base.v3_pool_validation); the
 # uniswap_v3 module re-exports the public surface. Test the internals (and
@@ -41,6 +38,14 @@ from almanak.connectors._strategy_base.v3_pool_validation import (
     fetch_v3_pool_sqrt_price_x96,
     validate_v3_pool,
 )
+from almanak.connectors.aerodrome.addresses import SlipstreamDeployment, slipstream_deployment_for_factory
+from almanak.connectors.aerodrome.pool_validation import (
+    _encode_get_pool_aerodrome,
+    resolve_slipstream_pool_key,
+    validate_aerodrome_cl_pool,
+    validate_aerodrome_pool,
+)
+from almanak.connectors.traderjoe_v2.pool_validation import validate_traderjoe_pool
 
 # eth_call patch targets — the connector validators call the base ``eth_call``
 # through the name imported into their own module namespace.
@@ -420,11 +425,38 @@ class TestFetchV3PoolSqrtPriceX96:
         assert result is None
 
 
+def _slipstream_generation(factory: str) -> SlipstreamDeployment:
+    deployment = slipstream_deployment_for_factory("base", factory)
+    assert deployment is not None, factory
+    return deployment
+
+
+SLIPSTREAM_CURRENT = _slipstream_generation("0xf8f2eB4940CFE7d13603DDDD87f123820Fc061Ef")
+SLIPSTREAM_LEGACY = _slipstream_generation("0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A")
+POOL_A = "0xc31e54c7a869b9fcbecc14363cf510d1c41fa443"
+POOL_B = "0xabcdef1234567890abcdef1234567890abcdef12"
+
+
+def _address_word(address: str) -> bytes:
+    return bytes(12) + bytes.fromhex(address[2:])
+
+
+def _factory_answers(answers: dict[str, bytes | None]):
+    """``eth_call`` stand-in keyed on the factory being asked; ``None`` models a failed read."""
+
+    def _call(rpc_url, to, calldata, *args, **kwargs):
+        return answers[to]
+
+    return _call
+
+
 class TestValidateAerodromeClPool:
     """Aerodrome Slipstream (CL) pool validation.
 
-    Exercises the ``AddressRegistry.resolve_contract_address(... "cl_factory")``
-    path. Base/Optimism publish a CL factory; other chains resolve FACTORY_MISSING.
+    Without an explicit ``deployment`` the key is asked of EVERY reviewed
+    factory generation and confirmed only when exactly one owns a pool for it;
+    with one, only that factory is asked. Chains without a reviewed generation
+    resolve FACTORY_MISSING.
     """
 
     # Base WETH / USDC — only need to be 42-char hex for calldata encoding; the
@@ -435,7 +467,7 @@ class TestValidateAerodromeClPool:
     RPC_URL = "http://localhost:8545"
 
     def test_factory_missing_on_unsupported_chain(self):
-        """A chain with no Aerodrome CL factory resolves FACTORY_MISSING."""
+        """A chain with no reviewed Slipstream generation resolves FACTORY_MISSING."""
         result = validate_aerodrome_cl_pool("ethereum", self.WETH, self.USDC, self.TICK_SPACING, self.RPC_URL)
         assert result.exists is None
         assert result.reason == PoolValidationReason.FACTORY_MISSING
@@ -443,17 +475,149 @@ class TestValidateAerodromeClPool:
 
     @patch(AERODROME_ETH_CALL)
     def test_valid_address_returns_true(self, mock_eth_call):
-        """A non-zero factory response on a supported chain means the pool exists."""
-        mock_eth_call.return_value = bytes(12) + bytes.fromhex("C31E54c7a869B9FcBEcc14363CF510d1c41fa443")
+        """Exactly one reviewed factory answering non-zero confirms the pool and names that factory."""
+        mock_eth_call.side_effect = _factory_answers(
+            {SLIPSTREAM_CURRENT.factory: _address_word(POOL_A), SLIPSTREAM_LEGACY.factory: bytes(32)}
+        )
         result = validate_aerodrome_cl_pool("base", self.WETH, self.USDC, self.TICK_SPACING, self.RPC_URL)
         assert result.exists is True
+        assert result.reason == PoolValidationReason.CONFIRMED
+        assert result.pool_address == POOL_A
+        assert result.factory == SLIPSTREAM_CURRENT.factory
+        # Every reviewed factory is asked, even after a hit.
+        assert {call.args[1] for call in mock_eth_call.call_args_list} == {
+            SLIPSTREAM_CURRENT.factory,
+            SLIPSTREAM_LEGACY.factory,
+        }
+        assert all(call.args[2].startswith("0x28af8d0b") for call in mock_eth_call.call_args_list)
 
     @patch(AERODROME_ETH_CALL)
     def test_zero_address_returns_false(self, mock_eth_call):
-        """A zero-address factory response means the pool does not exist."""
+        """Zero from every reviewed factory means the pool does not exist."""
         mock_eth_call.return_value = bytes(32)
         result = validate_aerodrome_cl_pool("base", self.WETH, self.USDC, self.TICK_SPACING, self.RPC_URL)
         assert result.exists is False
+        assert result.reason == PoolValidationReason.NOT_FOUND
+        assert result.factory is None
+        assert "current" in result.error and "legacy" in result.error
+
+    @patch(AERODROME_ETH_CALL)
+    def test_two_generations_owning_the_key_is_ambiguous(self, mock_eth_call):
+        """A key two generations answer is refused; tuple order never picks the winner."""
+        mock_eth_call.side_effect = _factory_answers(
+            {SLIPSTREAM_CURRENT.factory: _address_word(POOL_A), SLIPSTREAM_LEGACY.factory: _address_word(POOL_B)}
+        )
+        result = validate_aerodrome_cl_pool("base", self.WETH, self.USDC, self.TICK_SPACING, self.RPC_URL)
+        assert result.exists is False
+        assert result.reason == PoolValidationReason.AMBIGUOUS
+        assert result.pool_address is None
+        assert result.factory is None
+        assert POOL_A in result.error and POOL_B in result.error
+        assert "Name the pool address" in result.error
+
+    @patch(AERODROME_ETH_CALL)
+    def test_unreachable_generation_is_rpc_failed_even_with_a_hit(self, mock_eth_call):
+        """A lone hit cannot prove uniqueness while another reviewed factory is unreadable."""
+        mock_eth_call.side_effect = _factory_answers(
+            {SLIPSTREAM_CURRENT.factory: _address_word(POOL_A), SLIPSTREAM_LEGACY.factory: None}
+        )
+        result = validate_aerodrome_cl_pool("base", self.WETH, self.USDC, self.TICK_SPACING, self.RPC_URL)
+        assert result.exists is None
+        assert result.reason == PoolValidationReason.RPC_FAILED
+        assert result.pool_address is None
+        assert "legacy" in result.warning
+
+    @patch(AERODROME_ETH_CALL)
+    def test_explicit_deployment_queries_only_that_factory(self, mock_eth_call):
+        mock_eth_call.return_value = _address_word(POOL_B)
+        result = validate_aerodrome_cl_pool(
+            "base", self.WETH, self.USDC, self.TICK_SPACING, self.RPC_URL, deployment=SLIPSTREAM_LEGACY
+        )
+        assert result.exists is True
+        assert result.pool_address == POOL_B
+        assert result.factory == SLIPSTREAM_LEGACY.factory
+        mock_eth_call.assert_called_once()
+        assert mock_eth_call.call_args.args[1] == SLIPSTREAM_LEGACY.factory
+
+    @patch(AERODROME_ETH_CALL)
+    def test_explicit_deployment_zero_names_the_generation(self, mock_eth_call):
+        mock_eth_call.return_value = bytes(32)
+        result = validate_aerodrome_cl_pool(
+            "base", self.WETH, self.USDC, self.TICK_SPACING, self.RPC_URL, deployment=SLIPSTREAM_CURRENT
+        )
+        assert result.exists is False
+        assert result.reason == PoolValidationReason.NOT_FOUND
+        assert SLIPSTREAM_CURRENT.factory in result.error
+
+    @patch(AERODROME_ETH_CALL)
+    def test_explicit_deployment_read_failure_is_rpc_failed(self, mock_eth_call):
+        mock_eth_call.return_value = None
+        result = validate_aerodrome_cl_pool(
+            "base", self.WETH, self.USDC, self.TICK_SPACING, self.RPC_URL, deployment=SLIPSTREAM_CURRENT
+        )
+        assert result.exists is None
+        assert result.reason == PoolValidationReason.RPC_FAILED
+
+    @patch(AERODROME_ETH_CALL)
+    def test_unreviewed_deployment_is_rejected_before_any_read(self, mock_eth_call):
+        injected = SlipstreamDeployment(factory="0x" + "aa" * 20, position_manager="0x" + "bb" * 20, generation="x")
+        with pytest.raises(ValueError, match="unreviewed Slipstream deployment"):
+            validate_aerodrome_cl_pool(
+                "base", self.WETH, self.USDC, self.TICK_SPACING, self.RPC_URL, deployment=injected
+            )
+        mock_eth_call.assert_not_called()
+
+
+class TestResolveSlipstreamPoolKey:
+    """The cross-generation scan behind the deployment-less validator."""
+
+    WETH = "0x4200000000000000000000000000000000000006"
+    USDC = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+    RPC_URL = "http://localhost:8545"
+
+    @patch(AERODROME_ETH_CALL)
+    def test_scans_every_reviewed_factory_and_reports_the_unique_owner(self, mock_eth_call):
+        mock_eth_call.side_effect = _factory_answers(
+            {SLIPSTREAM_CURRENT.factory: bytes(32), SLIPSTREAM_LEGACY.factory: _address_word(POOL_B)}
+        )
+        resolution = resolve_slipstream_pool_key("base", self.WETH, self.USDC, 100, self.RPC_URL)
+        assert [call.args[1] for call in mock_eth_call.call_args_list] == [d.factory for d in resolution.reviewed]
+        assert resolution.unreachable == ()
+        assert [(m.deployment, m.pool_address) for m in resolution.matches] == [(SLIPSTREAM_LEGACY, POOL_B)]
+        assert resolution.unique is not None
+        assert resolution.unique.deployment == SLIPSTREAM_LEGACY
+        assert resolution.validation_result().factory == SLIPSTREAM_LEGACY.factory
+
+    @patch(AERODROME_ETH_CALL)
+    def test_ambiguous_and_unreachable_scans_have_no_unique_owner(self, mock_eth_call):
+        mock_eth_call.side_effect = _factory_answers(
+            {SLIPSTREAM_CURRENT.factory: _address_word(POOL_A), SLIPSTREAM_LEGACY.factory: _address_word(POOL_B)}
+        )
+        ambiguous = resolve_slipstream_pool_key("base", self.WETH, self.USDC, 100, self.RPC_URL)
+        assert len(ambiguous.matches) == 2
+        assert ambiguous.unique is None
+        assert ambiguous.validation_result().reason == PoolValidationReason.AMBIGUOUS
+
+        mock_eth_call.side_effect = _factory_answers(
+            {SLIPSTREAM_CURRENT.factory: _address_word(POOL_A), SLIPSTREAM_LEGACY.factory: None}
+        )
+        unverified = resolve_slipstream_pool_key("base", self.WETH, self.USDC, 100, self.RPC_URL)
+        assert unverified.unreachable == (SLIPSTREAM_LEGACY,)
+        assert unverified.unique is None
+        assert unverified.validation_result().reason == PoolValidationReason.RPC_FAILED
+
+    @patch(AERODROME_ETH_CALL)
+    def test_no_transport_marks_every_generation_unreachable_without_reading(self, mock_eth_call):
+        resolution = resolve_slipstream_pool_key("base", self.WETH, self.USDC, 100, None)
+        mock_eth_call.assert_not_called()
+        assert resolution.matches == ()
+        assert set(resolution.unreachable) == set(resolution.reviewed)
+        assert resolution.unique is None
+
+    def test_unsupported_chain_has_nothing_to_scan(self):
+        resolution = resolve_slipstream_pool_key("ethereum", self.WETH, self.USDC, 100, self.RPC_URL)
+        assert resolution.reviewed == ()
+        assert resolution.validation_result().reason == PoolValidationReason.FACTORY_MISSING
 
 
 class TestPoolValidationRegistry:
@@ -476,9 +640,7 @@ class TestPoolValidationRegistry:
         assert PoolValidationRegistry.has("definitely_not_a_dex") is False
 
     def test_unknown_protocol_returns_protocol_unknown(self):
-        result = PoolValidationRegistry.validate(
-            "definitely_not_a_dex", "base", self.WETH, self.USDC, {}, self.RPC_URL
-        )
+        result = PoolValidationRegistry.validate("definitely_not_a_dex", "base", self.WETH, self.USDC, {}, self.RPC_URL)
         assert result.exists is None
         assert result.reason == PoolValidationReason.PROTOCOL_UNKNOWN
 
@@ -487,10 +649,12 @@ class TestPoolValidationRegistry:
         """V3 dispatch routes to the uniswap_v3 validator (selector 0x1698ee82)."""
         mock_eth_call.return_value = bytes(12) + bytes.fromhex("C31E54c7a869B9FcBEcc14363CF510d1c41fa443")
         result = PoolValidationRegistry.validate(
-            "uniswap_v3", "arbitrum",
+            "uniswap_v3",
+            "arbitrum",
             "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
             "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
-            {"fee_tier": 500}, self.RPC_URL,
+            {"fee_tier": 500},
+            self.RPC_URL,
         )
         assert result.exists is True
         _, _, calldata = mock_eth_call.call_args.args
@@ -509,12 +673,16 @@ class TestPoolValidationRegistry:
 
     @patch(AERODROME_ETH_CALL)
     def test_dispatch_aerodrome_slipstream(self, mock_eth_call):
-        """Slipstream dispatch uses the CL getPool(address,address,int24)."""
-        mock_eth_call.return_value = bytes(12) + bytes.fromhex("abcdef1234567890abcdef1234567890abcdef12")
+        """Slipstream dispatch uses the CL getPool(address,address,int24) on every reviewed factory."""
+        mock_eth_call.side_effect = _factory_answers(
+            {SLIPSTREAM_CURRENT.factory: _address_word(POOL_B), SLIPSTREAM_LEGACY.factory: bytes(32)}
+        )
         result = PoolValidationRegistry.validate(
             "aerodrome_slipstream", "base", self.USDC, self.WETH, {"tick_spacing": 100}, self.RPC_URL
         )
         assert result.exists is True
+        assert result.factory == SLIPSTREAM_CURRENT.factory
+        assert mock_eth_call.call_count == 2
         _, _, calldata = mock_eth_call.call_args.args
         assert calldata.startswith("0x28af8d0b")
 
@@ -526,10 +694,12 @@ class TestPoolValidationRegistry:
         factory_response = first_word + pool_addr_word + bytes(32) + bytes(32)
         mock_eth_call.return_value = factory_response
         result = PoolValidationRegistry.validate(
-            "traderjoe_v2", "avalanche",
+            "traderjoe_v2",
+            "avalanche",
             "0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7",
             "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E",
-            {"bin_step": 20, "allow_empty_reserves": True}, self.RPC_URL,
+            {"bin_step": 20, "allow_empty_reserves": True},
+            self.RPC_URL,
         )
         assert result.exists is True
         # allow_empty_reserves=True -> only the factory call happens, no getReserves().
@@ -542,10 +712,12 @@ class TestPoolValidationRegistry:
         """The module-level convenience wrapper delegates to the registry."""
         mock_eth_call.return_value = bytes(32)
         result = validate_pool(
-            "uniswap_v3", "arbitrum",
+            "uniswap_v3",
+            "arbitrum",
             "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
             "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
-            {"fee_tier": 3000}, self.RPC_URL,
+            {"fee_tier": 3000},
+            self.RPC_URL,
         )
         assert result.exists is False
         assert result.reason == PoolValidationReason.NOT_FOUND

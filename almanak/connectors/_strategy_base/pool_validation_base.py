@@ -52,6 +52,7 @@ class PoolValidationReason(StrEnum):
     # Negative outcomes — callers MUST fail closed.
     NOT_FOUND = "NOT_FOUND"  # Factory returned zero address / pool is absent
     RPC_FAILED = "RPC_FAILED"  # RPC call was attempted but errored / bad response
+    AMBIGUOUS = "AMBIGUOUS"  # More than one reviewed factory generation owns a pool for the key
 
     # Impossible-to-verify outcomes — callers may warn and proceed.
     RPC_UNAVAILABLE = "RPC_UNAVAILABLE"  # No RPC URL configured
@@ -70,6 +71,8 @@ class PoolValidationResult:
         pool_address: Pool address if found, None otherwise.
         warning: Set when validation could not be performed (exists=None).
         error: Set when validation confirmed the pool is absent/broken (exists=False).
+        factory: The factory that confirmed ``pool_address``, when the validator
+            chose among several (Slipstream generations); ``None`` otherwise.
     """
 
     exists: bool | None
@@ -77,6 +80,7 @@ class PoolValidationResult:
     pool_address: str | None = None
     warning: str | None = None
     error: str | None = None
+    factory: str | None = None
 
 
 def eth_call(

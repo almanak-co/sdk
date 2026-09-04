@@ -124,7 +124,7 @@ EXPECTED_LP_POSITION_MANAGERS: dict[str, dict[str, str]] = {
         "sushiswap_v3": "0x80C7DD17B01855a6D2347444a0FCC36136a314de",
         "pancakeswap_v3": "0x46A15B0b27311cedF172AB29E4f4766fbE7F4364",
         "aerodrome": "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43",
-        "aerodrome_slipstream": "0x827922686190790b37229fd06084350E74485b72",
+        "aerodrome_slipstream": "0xe1f8cd9AC4e4A65F54f38a5CdAfCA44f6dD68b53",
     },
     "avalanche": {
         "uniswap_v3": "0x655C406EBFa14EE2006250925e54ec43AD184f8B",
@@ -385,7 +385,8 @@ def _legacy_build_lp_position_managers() -> dict[str, dict[str, str]]:
         ("pancakeswap_v3", PANCAKESWAP_V3, "nft"),
         ("agni_finance", AGNI_FINANCE, "position_manager"),
         ("aerodrome", AERODROME, "router"),
-        ("aerodrome_slipstream", AERODROME, "cl_nft"),
+        # First declared CL_POSITION_MANAGER kind; membership/display only.
+        ("aerodrome_slipstream", AERODROME, "slipstream_position_manager_current"),
         ("traderjoe_v2", TRADERJOE_V2, "router"),
         ("camelot", CAMELOT, "position_manager"),
     )
@@ -601,3 +602,41 @@ class TestConnectorDeclaredSurfaceMetadata:
 
         assert dict(CONTRACT_ROLE_REGISTRY.router_aliases("aerodrome")) == {"velodrome": frozenset({"optimism"})}
         assert dict(CONTRACT_ROLE_REGISTRY.router_aliases("uniswap_v3")) == {}
+
+
+class TestSlipstreamPositionManagerSets:
+    """Every reviewed Slipstream generation is published, one kind per generation."""
+
+    def test_registry_declares_one_kind_per_reviewed_generation(self) -> None:
+        from almanak.connectors._strategy_contract_role_registry import (
+            CONTRACT_ROLE_REGISTRY,
+            ContractRole,
+        )
+        from almanak.connectors.aerodrome.addresses import (
+            SLIPSTREAM_LP_DEPLOYMENTS,
+            slipstream_position_manager_kind,
+        )
+
+        expected = tuple(
+            dict.fromkeys(
+                slipstream_position_manager_kind(deployment)
+                for deployments in SLIPSTREAM_LP_DEPLOYMENTS.values()
+                for deployment in deployments
+            )
+        )
+        assert expected == ("slipstream_position_manager_current", "slipstream_position_manager_legacy")
+        assert CONTRACT_ROLE_REGISTRY.kinds_for("aerodrome_slipstream", ContractRole.CL_POSITION_MANAGER) == expected
+
+    def test_sets_view_matches_receipt_parser(self) -> None:
+        from almanak.connectors.aerodrome.receipt_parser import _SLIPSTREAM_NPM_ADDRESSES
+        from almanak.framework.intents.compiler_constants import (
+            SLIPSTREAM_NFT_POSITION_MANAGER_SETS,
+            SLIPSTREAM_NFT_POSITION_MANAGERS,
+        )
+
+        assert SLIPSTREAM_NFT_POSITION_MANAGER_SETS == _SLIPSTREAM_NPM_ADDRESSES
+        assert list(SLIPSTREAM_NFT_POSITION_MANAGER_SETS.items()) == list(_SLIPSTREAM_NPM_ADDRESSES.items())
+        # The singleton view never names a manager on a multi-generation chain.
+        assert SLIPSTREAM_NFT_POSITION_MANAGERS == {
+            chain: managers[0] for chain, managers in _SLIPSTREAM_NPM_ADDRESSES.items() if len(managers) == 1
+        }

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 from eth_abi import encode as abi_encode
 
+from almanak.connectors._strategy_base.pool_validation_base import PoolValidationReason, PoolValidationResult
 from almanak.connectors._strategy_base.rpc import decode_uint256
 from almanak.connectors._strategy_base.swap_quote_registry import (
     SwapQuoteConnector,
@@ -14,6 +15,42 @@ from almanak.connectors._strategy_base.swap_quote_registry import (
     SwapQuoteResult,
     SwapQuoteUnavailable,
 )
+
+USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+WETH_BASE = "0x4200000000000000000000000000000000000006"
+
+
+def _slipstream_generation(factory: str):
+    from almanak.connectors.aerodrome.addresses import slipstream_deployment_for_factory
+
+    deployment = slipstream_deployment_for_factory("base", factory)
+    assert deployment is not None, factory
+    return deployment
+
+
+def _slipstream_resolution(*matches, unreachable=()):
+    """A ``resolve_slipstream_pool_key`` outcome with the given (deployment, pool) hits."""
+    from almanak.connectors.aerodrome.addresses import slipstream_lp_deployments
+    from almanak.connectors.aerodrome.pool_validation import SlipstreamKeyMatch, SlipstreamKeyResolution
+
+    return SlipstreamKeyResolution(
+        chain="base",
+        token_a=USDC_BASE,
+        token_b=WETH_BASE,
+        tick_spacing=100,
+        matches=tuple(SlipstreamKeyMatch(deployment=d, pool_address=pool) for d, pool in matches),
+        unreachable=tuple(unreachable),
+        reviewed=slipstream_lp_deployments("base"),
+    )
+
+
+def _aerodrome_ctx() -> SimpleNamespace:
+    return SimpleNamespace(
+        wallet_address="0x1234567890123456789012345678901234567890",
+        rpc_url="http://anvil.local",
+        gateway_client=None,
+        token_resolver=None,
+    )
 
 
 def test_swap_quote_request_freezes_extra_mapping() -> None:
@@ -405,29 +442,33 @@ def test_curve_provider_wraps_adapter_initialization_failure(monkeypatch: pytest
 
 
 def test_aerodrome_provider_uses_adapter_quote(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A symbolic CL key is asked of every reviewed generation; the unique owner's quoter answers."""
     from almanak.connectors.aerodrome import adapter as aerodrome_adapter
+    from almanak.connectors.aerodrome import pool_validation as aerodrome_pool_validation
     from almanak.connectors.aerodrome.swap_quote_provider import AerodromeSwapQuoteConnector
 
+    current = _slipstream_generation("0xf8f2eB4940CFE7d13603DDDD87f123820Fc061Ef")
     calls: list[dict[str, object]] = []
+    resolver_calls: list[tuple] = []
 
     def fake_quote_swap_output(self, **kwargs):
         calls.append(kwargs)
         return 47_000_000_000_000_000
 
+    def fake_resolve(chain, token_a, token_b, tick_spacing, rpc_url, gateway_client=None):
+        resolver_calls.append((chain, token_a, token_b, tick_spacing, rpc_url, gateway_client))
+        return _slipstream_resolution((current, "0x" + "ab" * 20))
+
     monkeypatch.setattr(aerodrome_adapter.AerodromeAdapter, "quote_swap_output", fake_quote_swap_output)
+    monkeypatch.setattr(aerodrome_pool_validation, "resolve_slipstream_pool_key", fake_resolve)
 
     result = AerodromeSwapQuoteConnector().quote_swap(
-        SimpleNamespace(
-            wallet_address="0x1234567890123456789012345678901234567890",
-            rpc_url="http://anvil.local",
-            gateway_client=None,
-            token_resolver=None,
-        ),
+        _aerodrome_ctx(),
         SwapQuoteRequest(
             chain="base",
             protocol="aerodrome",
-            token_in="0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-            token_out="0x4200000000000000000000000000000000000006",
+            token_in=USDC_BASE,
+            token_out=WETH_BASE,
             amount_in=100_000_000,
             extra={"tick_spacing": 100, "use_cl": True},
         ),
@@ -435,17 +476,232 @@ def test_aerodrome_provider_uses_adapter_quote(monkeypatch: pytest.MonkeyPatch) 
 
     assert result.amount_out == 47_000_000_000_000_000
     assert result.source == "aerodrome_cl_quoter"
+    assert resolver_calls == [("base", USDC_BASE, WETH_BASE, 100, "http://anvil.local", None)]
     assert calls == [
         {
-            "token_in": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-            "token_out": "0x4200000000000000000000000000000000000006",
+            "token_in": USDC_BASE,
+            "token_out": WETH_BASE,
             "amount_in_wei": 100_000_000,
             "stable": False,
             "tick_spacing": 100,
             "use_cl": True,
             "require_onchain": True,
+            "deployment": current,
         }
     ]
+    assert result.metadata["slipstream_deployment"] == "current"
+    assert result.metadata["quoter"] == current.quoter
+
+
+def test_aerodrome_provider_pinned_pool_selects_the_generation_from_its_factory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An exact pool address decides the generation by its own factory(); no symbolic scan runs."""
+    from almanak.connectors.aerodrome import adapter as aerodrome_adapter
+    from almanak.connectors.aerodrome import pool_validation as aerodrome_pool_validation
+    from almanak.connectors.aerodrome.pool_validation import SlipstreamPoolBinding
+    from almanak.connectors.aerodrome.swap_quote_provider import AerodromeSwapQuoteConnector
+
+    legacy = _slipstream_generation("0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A")
+    pool = "0xb2cc224c1c9fee385f8ad6a55b4d94e92359dc59"
+    calls: list[dict[str, object]] = []
+    reads: list[tuple] = []
+
+    def fake_quote_swap_output(self, **kwargs):
+        calls.append(kwargs)
+        return 1
+
+    def fake_read(pool_address, rpc_url, *, chain=None, gateway_client=None):
+        reads.append((pool_address, rpc_url, chain, gateway_client))
+        return SlipstreamPoolBinding(
+            token0=WETH_BASE.lower(), token1=USDC_BASE.lower(), tick_spacing=50, factory=legacy.factory.lower()
+        )
+
+    def forbidden_resolve(*args, **kwargs):
+        raise AssertionError("a pinned pool must not trigger the symbolic scan")
+
+    validations: list[dict[str, object]] = []
+
+    def fake_validate(chain, token_a, token_b, tick_spacing, rpc_url, gateway_client=None, deployment=None):
+        validations.append({"tokens": (token_a, token_b), "tick_spacing": tick_spacing, "deployment": deployment})
+        return PoolValidationResult(
+            exists=True, reason=PoolValidationReason.CONFIRMED, pool_address=pool, factory=deployment.factory
+        )
+
+    monkeypatch.setattr(aerodrome_adapter.AerodromeAdapter, "quote_swap_output", fake_quote_swap_output)
+    monkeypatch.setattr(aerodrome_pool_validation, "read_slipstream_cl_pool_binding", fake_read)
+    monkeypatch.setattr(aerodrome_pool_validation, "validate_aerodrome_cl_pool", fake_validate)
+    monkeypatch.setattr(aerodrome_pool_validation, "resolve_slipstream_pool_key", forbidden_resolve)
+
+    result = AerodromeSwapQuoteConnector().quote_swap(
+        _aerodrome_ctx(),
+        SwapQuoteRequest(
+            chain="base",
+            protocol="aerodrome",
+            pool_address=pool,
+            token_in=USDC_BASE,
+            token_out=WETH_BASE,
+            amount_in=100_000_000,
+            extra={"tick_spacing": 100},
+        ),
+    )
+
+    assert reads == [(pool, "http://anvil.local", "base", None)]
+    # The pool's tuple is round-tripped through the generation it claims, only.
+    assert validations == [{"tokens": (WETH_BASE.lower(), USDC_BASE.lower()), "tick_spacing": 50, "deployment": legacy}]
+    assert calls[0]["deployment"] == legacy
+    # The pool's own tickSpacing() overrides the requested one.
+    assert calls[0]["tick_spacing"] == 50
+    assert result.metadata["tick_spacing"] == 50
+    assert result.metadata["slipstream_deployment"] == "legacy"
+    assert result.metadata["quoter"] == legacy.quoter
+
+
+def test_aerodrome_provider_refuses_an_ambiguous_symbolic_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    from almanak.connectors.aerodrome import adapter as aerodrome_adapter
+    from almanak.connectors.aerodrome import pool_validation as aerodrome_pool_validation
+    from almanak.connectors.aerodrome.swap_quote_provider import AerodromeSwapQuoteConnector
+
+    current = _slipstream_generation("0xf8f2eB4940CFE7d13603DDDD87f123820Fc061Ef")
+    legacy = _slipstream_generation("0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A")
+    quoted: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        aerodrome_adapter.AerodromeAdapter, "quote_swap_output", lambda self, **kw: quoted.append(kw) or 1
+    )
+    monkeypatch.setattr(
+        aerodrome_pool_validation,
+        "resolve_slipstream_pool_key",
+        lambda *a, **k: _slipstream_resolution((current, "0x" + "ab" * 20), (legacy, "0x" + "cd" * 20)),
+    )
+
+    with pytest.raises(SwapQuoteUnavailable, match="Ambiguous Aerodrome Slipstream pool key"):
+        AerodromeSwapQuoteConnector().quote_swap(
+            _aerodrome_ctx(),
+            SwapQuoteRequest(
+                chain="base",
+                protocol="aerodrome",
+                token_in=USDC_BASE,
+                token_out=WETH_BASE,
+                amount_in=100_000_000,
+                extra={"tick_spacing": 100, "use_cl": True},
+            ),
+        )
+    assert quoted == []
+
+
+def test_aerodrome_provider_refuses_an_unreachable_generation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A lone hit cannot prove uniqueness while another reviewed factory is unreadable."""
+    from almanak.connectors.aerodrome import adapter as aerodrome_adapter
+    from almanak.connectors.aerodrome import pool_validation as aerodrome_pool_validation
+    from almanak.connectors.aerodrome.swap_quote_provider import AerodromeSwapQuoteConnector
+
+    current = _slipstream_generation("0xf8f2eB4940CFE7d13603DDDD87f123820Fc061Ef")
+    legacy = _slipstream_generation("0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A")
+
+    monkeypatch.setattr(aerodrome_adapter.AerodromeAdapter, "quote_swap_output", lambda self, **kw: 1)
+    monkeypatch.setattr(
+        aerodrome_pool_validation,
+        "resolve_slipstream_pool_key",
+        lambda *a, **k: _slipstream_resolution((current, "0x" + "ab" * 20), unreachable=(legacy,)),
+    )
+
+    with pytest.raises(SwapQuoteUnavailable, match="legacy"):
+        AerodromeSwapQuoteConnector().quote_swap(
+            _aerodrome_ctx(),
+            SwapQuoteRequest(
+                chain="base",
+                protocol="aerodrome",
+                token_in=USDC_BASE,
+                token_out=WETH_BASE,
+                amount_in=100_000_000,
+                extra={"use_cl": True},
+            ),
+        )
+
+
+def test_aerodrome_provider_refuses_a_pinned_pool_on_an_unreviewed_factory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from almanak.connectors.aerodrome import adapter as aerodrome_adapter
+    from almanak.connectors.aerodrome import pool_validation as aerodrome_pool_validation
+    from almanak.connectors.aerodrome.pool_validation import SlipstreamPoolBinding
+    from almanak.connectors.aerodrome.swap_quote_provider import AerodromeSwapQuoteConnector
+
+    unreviewed = "0x" + "ab" * 20
+    monkeypatch.setattr(aerodrome_adapter.AerodromeAdapter, "quote_swap_output", lambda self, **kw: 1)
+    monkeypatch.setattr(
+        aerodrome_pool_validation,
+        "read_slipstream_cl_pool_binding",
+        lambda *a, **k: SlipstreamPoolBinding(
+            token0=WETH_BASE.lower(), token1=USDC_BASE.lower(), tick_spacing=100, factory=unreviewed
+        ),
+    )
+
+    with pytest.raises(SwapQuoteUnavailable, match=f"unreviewed Slipstream factory {unreviewed}"):
+        AerodromeSwapQuoteConnector().quote_swap(
+            _aerodrome_ctx(),
+            SwapQuoteRequest(
+                chain="base",
+                protocol="aerodrome",
+                pool_address="0xb2cc224c1c9fee385f8ad6a55b4d94e92359dc59",
+                token_in=USDC_BASE,
+                token_out=WETH_BASE,
+                amount_in=100_000_000,
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    ("binding_tokens", "factory_answer", "needle"),
+    [
+        ((WETH_BASE.lower(), "0x" + "cc" * 20), "0xb2cc224c1c9fee385f8ad6a55b4d94e92359dc59", "holds"),
+        ((WETH_BASE.lower(), USDC_BASE.lower()), "0x" + "dd" * 20, "is not the legacy Slipstream factory's pool"),
+    ],
+)
+def test_aerodrome_provider_refuses_a_pinned_pool_that_does_not_authenticate(
+    monkeypatch: pytest.MonkeyPatch, binding_tokens, factory_answer, needle
+) -> None:
+    """A pinned pool must hold the requested pair AND be the pool its claimed factory returns for that tuple."""
+    from almanak.connectors.aerodrome import adapter as aerodrome_adapter
+    from almanak.connectors.aerodrome import pool_validation as aerodrome_pool_validation
+    from almanak.connectors.aerodrome.pool_validation import SlipstreamPoolBinding
+    from almanak.connectors.aerodrome.swap_quote_provider import AerodromeSwapQuoteConnector
+
+    legacy = _slipstream_generation("0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A")
+    pool = "0xb2cc224c1c9fee385f8ad6a55b4d94e92359dc59"
+    quotes: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        aerodrome_adapter.AerodromeAdapter, "quote_swap_output", lambda self, **kw: quotes.append(kw) or 1
+    )
+    monkeypatch.setattr(
+        aerodrome_pool_validation,
+        "read_slipstream_cl_pool_binding",
+        lambda *a, **k: SlipstreamPoolBinding(
+            token0=binding_tokens[0], token1=binding_tokens[1], tick_spacing=100, factory=legacy.factory.lower()
+        ),
+    )
+    monkeypatch.setattr(
+        aerodrome_pool_validation,
+        "validate_aerodrome_cl_pool",
+        lambda *a, **k: PoolValidationResult(
+            exists=True, reason=PoolValidationReason.CONFIRMED, pool_address=factory_answer, factory=legacy.factory
+        ),
+    )
+
+    with pytest.raises(SwapQuoteUnavailable, match=needle):
+        AerodromeSwapQuoteConnector().quote_swap(
+            _aerodrome_ctx(),
+            SwapQuoteRequest(
+                chain="base",
+                protocol="aerodrome",
+                pool_address=pool,
+                token_in=USDC_BASE,
+                token_out=WETH_BASE,
+                amount_in=100_000_000,
+            ),
+        )
+    assert quotes == [], "no quote may be produced for an unauthenticated pin"
 
 
 def test_aerodrome_provider_honors_explicit_classic_route(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -483,6 +739,7 @@ def test_aerodrome_provider_honors_explicit_classic_route(monkeypatch: pytest.Mo
     assert calls[0]["stable"] is True
     assert calls[0]["tick_spacing"] == 200
     assert calls[0]["use_cl"] is False
+    assert calls[0]["deployment"] is None
 
 
 def test_aerodrome_provider_wraps_quote_failures(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -534,7 +791,8 @@ def test_aerodrome_provider_wraps_invalid_tick_spacing() -> None:
         )
 
 
-def test_aerodrome_provider_defaults_to_classic_without_cl_quoter(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_aerodrome_provider_defaults_to_classic_without_a_reviewed_cl_router(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Velodrome on Optimism has no reviewed Slipstream generation, so ``use_cl`` defaults off."""
     from almanak.connectors.aerodrome import adapter as aerodrome_adapter
     from almanak.connectors.aerodrome.swap_quote_provider import AerodromeSwapQuoteConnector
 
@@ -573,6 +831,7 @@ def test_aerodrome_provider_defaults_to_classic_without_cl_quoter(monkeypatch: p
             "tick_spacing": 100,
             "use_cl": False,
             "require_onchain": True,
+            "deployment": None,
         }
     ]
 

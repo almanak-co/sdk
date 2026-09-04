@@ -51,7 +51,7 @@ from almanak.connectors._base.v3_gateway_twap import (
     fetch_v3_twap_series,
 )
 
-from ..addresses import AERODROME
+from ..addresses import AERODROME, slipstream_deployment_for_factory, slipstream_lp_deployments
 
 # W7-followup / VIB-4870 — Aerodrome daily-volume subgraph IDs.
 # Migrated verbatim from
@@ -266,13 +266,17 @@ class AerodromeSlipstreamGatewayConnector(
         """Read and authenticate exact Slipstream state at archive blocks."""
         from almanak.gateway.services.rate_history_service import RateHistoryUnavailable
 
-        deployment = AERODROME.get(chain.strip().lower())
-        factory_address = deployment.get("cl_factory") if deployment is not None else None
-        if not isinstance(factory_address, str) or not factory_address.strip():
+        chain_key = chain.strip().lower()
+        if not slipstream_lp_deployments(chain_key):
             raise RateHistoryUnavailable(
                 "aerodrome_slipstream",
-                f"no authenticated Aerodrome Slipstream factory configured for chain {chain!r}",
+                f"no reviewed Aerodrome Slipstream factory generation for chain {chain!r}",
             )
+
+        def _reviewed_factory(reported_factory: str) -> str | None:
+            deployment = slipstream_deployment_for_factory(chain_key, reported_factory)
+            return deployment.factory if deployment is not None else None
+
         return await fetch_v3_pool_state_series(
             servicer,
             chain=chain,
@@ -281,7 +285,7 @@ class AerodromeSlipstreamGatewayConnector(
             end_ts=end_ts,
             interval_secs=interval_secs,
             protocol="aerodrome_slipstream",
-            factory_address=factory_address,
+            factory_for_pool=_reviewed_factory,
             factory_get_pool_selector="0x28af8d0b",
             factory_pool_key_selector="0xd0c93a7c",
             factory_pool_key_signed=True,

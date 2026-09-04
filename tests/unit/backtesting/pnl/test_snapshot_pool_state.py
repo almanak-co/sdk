@@ -650,6 +650,37 @@ def test_undeclared_pool_refuses_instead_of_using_token_ratio() -> None:
         source.view_at(END).read_pool_price("0x0000000000000000000000000000000000000001", "polygon")
 
 
+def test_pool_descriptor_factory_is_named_only_when_one_generation_can_own_the_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Several reviewed factory generations leave the descriptor's factory unmeasured, never guessed."""
+    from almanak.connectors import _strategy_pool_reader_registry as registry_module
+
+    source = SnapshotPoolStateSource(
+        start_time=START,
+        end_time=END,
+        sample_interval_seconds=3_600,
+        manifest=RunDataManifest(),
+        fetcher=_fetcher,
+    )
+    assert asyncio.run(source.materialize_history(TARGET)) == 2
+    cases = (
+        ((), None),
+        (("0x1f98431c8ad98523631ae4a59f267346ea31f984",), "0x1f98431c8ad98523631ae4a59f267346ea31f984"),
+        (("0x" + "aa" * 20, "0x" + "bb" * 20), None),
+    )
+    for factories, expected in cases:
+        monkeypatch.setattr(
+            registry_module.POOL_READER_REGISTRY,
+            "lookup",
+            lambda _protocol, found=factories: SimpleNamespace(factories_for=lambda _chain: found),
+        )
+        descriptor = source.pool_descriptor("POLYGON", "Uniswap-V3", POOL.upper())
+        assert descriptor is not None
+        assert descriptor.factory == expected
+        assert (descriptor.token0, descriptor.token1) == (TOKEN0, TOKEN1)
+
+
 def _tvl_market_state() -> MarketState:
     return MarketState(
         timestamp=END,

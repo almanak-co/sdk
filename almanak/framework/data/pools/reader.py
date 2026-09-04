@@ -310,6 +310,7 @@ class UniswapV3PoolPriceReader:
     # exist as defaults for direct construction; registry-dispatched instances
     # are additionally bound to their spec in ``__init__``.
     _factory_addresses: Mapping[str, str] = UNISWAP_V3_FACTORY
+    _factory_generations: Mapping[str, tuple[str, ...]] = _UNISWAP_POOL_READER_SPEC.factory_generations
     _known_pools: Mapping[str, Mapping[tuple[str, str, int], str]] = _KNOWN_POOLS
     protocol_name: str = "uniswap_v3"
     _get_pool_selector: str = _UNISWAP_POOL_READER_SPEC.get_pool_selector
@@ -338,6 +339,7 @@ class UniswapV3PoolPriceReader:
             # identical to the class attributes (drift-guarded by
             # tests/unit/data/test_pool_reader_manifest_dispatch.py).
             self._factory_addresses = spec.factory_addresses
+            self._factory_generations = spec.factory_generations
             self._known_pools = spec.known_pools
             self.protocol_name = spec.protocol
             self._get_pool_selector = spec.get_pool_selector
@@ -491,27 +493,31 @@ class UniswapV3PoolPriceReader:
         b_lower = addr_b.lower()
         sorted_a, sorted_b = (a_lower, b_lower) if a_lower < b_lower else (b_lower, a_lower)
 
-        # Check static registry
+        factories = self._factories_for(chain_lower)
+
+        # A static entry is authoritative only for protocols with at most one
+        # factory. With multiple reviewed generations, factory ownership is
+        # mutable on-chain: another factory can later create the same key and
+        # make a formerly unique entry ambiguous. In that case the registry is
+        # only a hint and every factory must still be queried.
         chain_pools = self._known_pools.get(chain_lower, {})
         known = chain_pools.get((sorted_a, sorted_b, fee_tier))
-        if known:
+        if known and len(factories) <= 1:
             return known
 
-        # Try factory getPool() call
-        factory = self._factory_addresses.get(chain_lower)
-        if factory is None:
+        # Ask every factory that may own the pair. A key that more than one
+        # reviewed generation answers is ambiguous and is not resolved here.
+        if not factories:
             return None
 
+        found: list[str] = []
         try:
             calldata = encode_get_pool(self._get_pool_selector, sorted_a, sorted_b, fee_tier)
-            result = self._rpc_call(chain_lower, factory, calldata)
-            pool_addr = decode_address(result)
-
-            # Check for zero address (pool doesn't exist)
-            if pool_addr == "0x" + "0" * 40:
-                return None
-
-            return pool_addr
+            for factory in factories:
+                result = self._rpc_call(chain_lower, factory, calldata)
+                pool_addr = decode_address(result)
+                if pool_addr != "0x" + "0" * 40:
+                    found.append(pool_addr)
         except Exception:
             logger.debug(
                 "Failed to resolve pool via factory for %s/%s on %s",
@@ -520,6 +526,24 @@ class UniswapV3PoolPriceReader:
                 chain_lower,
             )
             return None
+        if len(found) > 1:
+            logger.info(
+                "Pool key %s/%s/%s on %s is owned by %d factory generations; name the pool address",
+                token_a,
+                token_b,
+                fee_tier,
+                chain_lower,
+                len(found),
+            )
+            return None
+        return found[0] if found else None
+
+    def _factories_for(self, chain_lower: str) -> tuple[str, ...]:
+        generations = self._factory_generations.get(chain_lower)
+        if generations:
+            return tuple(generations)
+        single = self._factory_addresses.get(chain_lower)
+        return (single,) if single else ()
 
     def resolve_best_pool_address(
         self,
@@ -737,6 +761,7 @@ class AerodromePoolReader(UniswapV3PoolPriceReader):
     """
 
     _factory_addresses: Mapping[str, str] = AERODROME_CL_FACTORY
+    _factory_generations: Mapping[str, tuple[str, ...]] = _AERODROME_POOL_READER_SPEC.factory_generations
     _known_pools: Mapping[str, Mapping[tuple[str, str, int], str]] = _AERODROME_KNOWN_POOLS
     protocol_name: str = "aerodrome_slipstream"
     # int24 (tick_spacing) getPool variant + the tick-spacing sweep — both
@@ -1551,7 +1576,8 @@ class PoolReaderRegistry:
             spec = self._protocol_specs.get(name)
             factories = spec.factory_addresses if spec is not None else getattr(cls, "_factory_addresses", {})
             known_pools = spec.known_pools if spec is not None else getattr(cls, "_known_pools", {})
-            if chain_lower in factories or chain_lower in known_pools:
+            generations = spec.factory_generations if spec is not None else getattr(cls, "_factory_generations", {})
+            if chain_lower in factories or chain_lower in known_pools or chain_lower in generations:
                 result.append(name)
                 continue
             # An exact-address reader need not publish a pair-to-pool address
