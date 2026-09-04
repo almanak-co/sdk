@@ -4,7 +4,7 @@ import hashlib
 
 import pytest
 
-from scripts.qa.derived_claims import derive_observed_claim
+from qa_lab.derived_claims import derive_observed_claim
 
 
 def _claim(tmp_path, *, status: str = "PASS", measurement: object = 1) -> dict:

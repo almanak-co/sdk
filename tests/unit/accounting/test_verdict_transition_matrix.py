@@ -84,7 +84,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 # collection fragility than it removes.
 def _load_script(basename: str):
     """Import a ``scripts/qa/*.py`` module (no ``__init__.py`` in that dir)."""
-    path = _REPO_ROOT / "scripts" / "qa" / f"{basename}.py"
+    path = _REPO_ROOT / "qa_lab" / f"{basename}.py"
     spec = importlib.util.spec_from_file_location(f"_matrix_{basename}", path)
     assert spec and spec.loader, path
     mod = importlib.util.module_from_spec(spec)

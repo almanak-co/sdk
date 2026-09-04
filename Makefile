@@ -15,13 +15,13 @@ help: ## Show this help
 
 # Run linting with auto-fix (local development)
 lint: ## Ruff check + format with auto-fix (local dev)
-	uv run ruff check almanak scripts/quant-test --fix
-	uv run ruff format almanak scripts/quant-test
+	uv run ruff check almanak qa_lab --fix
+	uv run ruff format almanak qa_lab
 	uv run python scripts/ci/check_comment_quality.py
 
 # Run linting without auto-fix - fails on errors (CI)
 lint-check: ## Ruff check + format, no fixes (CI)
-	uv run ruff check almanak scripts/quant-test
+	uv run ruff check almanak qa_lab
 	# format-check stays scoped to almanak/: the quant-test tree carries inherited
 	# formatting debt (all 8 files would be rewritten). `ruff check` is the half that
 	# catches defects and it now gates these mainnet-signing scripts in CI.
@@ -34,7 +34,7 @@ test-quant-report: ## Fail-closed guards in the quant-test report renderer
 	# executed only when a human typed the command, which is how a guard rots. Hung
 	# off lint-check because that is what CI already invokes; needs no network,
 	# no chain, no fixtures.
-	uv run python scripts/quant-test/render_report.py selftest
+	uv run python qa_lab/render_report.py selftest
 
 check-ci-status: ## Validate the statusCheckRollup green predicate (PR-manager gates)
 	bash scripts/pr-manager/test-ci-status.sh
@@ -742,21 +742,21 @@ list-demo-strategies:
 	uv run python scripts/run_demo.py --list
 
 # Run the VIB-4316 accounting matrix end-to-end across every in-scope fixture
-# defined in scripts/qa/accounting-matrix.yml. Drives each strategy on managed
+# defined in qa_lab/accounting-matrix.yml. Drives each strategy on managed
 # Anvil, scores the 21-cell Accountant Test per row, and writes a typed gap
 # report. Per-row artifacts land under docs/internal/notes/.tmp/accounting-matrix/<row_id>/
 # (gitignored). Full matrix is ~92 min serial — use test-accounting-matrix-quick
 # for a 7-min smoke gate on the two baselined rows.
 test-accounting-matrix:
-	uv run python scripts/qa/run_accounting_matrix.py \
-		--matrix scripts/qa/accounting-matrix.yml \
+	uv run python qa_lab/run_accounting_matrix.py \
+		--matrix qa_lab/accounting-matrix.yml \
 		--output-dir docs/internal/notes/.tmp/accounting-matrix
 
 # Quick accounting matrix smoke: only the two baselined rows (lp + looping),
 # ~7-8 min total. Use as a CI gate for accounting-affecting PRs.
 test-accounting-matrix-quick:
-	uv run python scripts/qa/run_accounting_matrix.py \
-		--matrix scripts/qa/accounting-matrix.yml \
+	uv run python qa_lab/run_accounting_matrix.py \
+		--matrix qa_lab/accounting-matrix.yml \
 		--output-dir docs/internal/notes/.tmp/accounting-matrix \
 		--rows-include lp-uniswap_v3-arbitrum,looping-aave_v3-arbitrum
 
@@ -765,13 +765,13 @@ test-accounting-matrix-quick:
 # the only strict-xfails are S6 x {perp, pendle} (no on-chain closure verifier
 # yet — VIB-5116 / VIB-3808). A green cell regressing to red OR a strict-xfail
 # XPASSing fails this gate (and the normal unit suite, which also collects it).
-# See docs/internal/qa/teardown-regression-matrix.md.
+# See qa_lab/docs/teardown-regression-matrix.md.
 test-teardown-matrix: ## Teardown seam x primitive regression matrix (VIB-5479)
 	uv run pytest tests/unit/teardown/test_regression_matrix.py -q --import-mode=importlib
 
 # Foundational semantic invariant matrix — the cross-cutting regression layer
 # between narrow unit examples and real-fork Intent/Quant evidence
-# (docs/internal/qa/foundational-invariant-contract.md, blueprint 10). Known
+# (qa_lab/docs/foundational-invariant-contract.md, blueprint 10). Known
 # product gaps are strict xfails, so an XPASS fails this gate and forces a
 # deliberate promotion to green. The standard unit suite also collects it; this
 # target is the narrow gate both documents already told operators to run.
@@ -779,7 +779,7 @@ test-qa-invariants: ## Foundational semantic invariant matrix (narrow gate)
 	uv run pytest tests/unit/testing/test_foundational_invariant_matrix.py -q --import-mode=importlib
 
 # Execute every permanent user-ticket counterexample registered in
-# docs/internal/qa/catalog/v1/ticket-counterexamples.json. The registry is an
+# qa_lab/docs/catalog/v1/ticket-counterexamples.json. The registry is an
 # executable contract, not a documentation index: the gate fails if a
 # registered node id no longer collects or no longer passes.
 check-qa-counterexamples: ## Run the registered user-ticket QA counterexamples
@@ -797,7 +797,7 @@ check-qa-scalar-projection: ## Refuse scalar coverage grades in QA renderers
 # records and never rewrites or deletes ledger bytes. Point at another store
 # with ALMANAK_QA_STORE or `--store`.
 check-qa-invalidations: ## Report the QA ledger invalidation manifest vs the store
-	uv run python scripts/quant-test/qa_invalidate.py
+	uv run python qa_lab/qa_invalidate.py
 
 # Check Pendle market expiry dates in demo and incubating strategy configs.
 # Fails if any demo strategy references a market expiring within 30 days.

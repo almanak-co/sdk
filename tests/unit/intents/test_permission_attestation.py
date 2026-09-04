@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from almanak.framework.execution.signer.safe.constants import MULTISEND_SELECTOR
-from scripts.qa.permission_attestation import effective_calls
+from qa_lab.permission_attestation import effective_calls
 from tests.intents._permission_onchain_harness import ZodiacOrchestrator
 
 

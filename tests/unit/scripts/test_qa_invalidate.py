@@ -19,8 +19,8 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-SCRIPT_DIR = REPO_ROOT / "scripts" / "quant-test"
-MANIFEST_PATH = REPO_ROOT / "docs/internal/qa/catalog/v1/experiment-invalidations.json"
+SCRIPT_DIR = REPO_ROOT / "qa_lab"
+MANIFEST_PATH = REPO_ROOT / "qa_lab/docs/catalog/v1/experiment-invalidations.json"
 COMMIT = "a" * 40
 SDK = {
     "commit": COMMIT,

@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from scripts.qa.admission_contract import (
+from qa_lab.admission_contract import (
     AdmissionRefused,
     admit_claim,
     artifact_authority,
@@ -61,7 +61,7 @@ def _vacuous_derive(bundle: Path) -> dict[str, Any]:
 
 
 def _digest(bundle: Path) -> str:
-    from scripts.qa.derived_claims import sha256_file
+    from qa_lab.derived_claims import sha256_file
 
     return sha256_file(bundle / "measurement.json")
 

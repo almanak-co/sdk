@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-QA_COVERAGE_PATH = REPO_ROOT / "scripts" / "quant-test" / "qa_coverage.py"
+QA_COVERAGE_PATH = REPO_ROOT / "qa_lab" / "qa_coverage.py"
 
 
 def _load_qa_coverage():

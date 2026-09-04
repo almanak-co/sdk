@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-SCRIPT = Path(__file__).resolve().parents[3] / "scripts" / "quant-test" / "qa_history.py"
+SCRIPT = Path(__file__).resolve().parents[3] / "qa_lab" / "qa_history.py"
 COMMIT_A = "a" * 40
 COMMIT_B = "b" * 40
 COMMIT_C = "c" * 40

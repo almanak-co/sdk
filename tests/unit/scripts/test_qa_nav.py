@@ -24,7 +24,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 def _load(name: str) -> ModuleType:
-    path = REPO_ROOT / "scripts" / "quant-test" / f"{name}.py"
+    path = REPO_ROOT / "qa_lab" / f"{name}.py"
     spec = importlib.util.spec_from_file_location(f"{name}_test", path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)

@@ -9,14 +9,14 @@ from pathlib import Path
 import pytest
 
 from almanak.connectors.traderjoe_v2.addresses import TRADERJOE_V2
-from scripts.qa.mainnet_intent_envelope import (
+from qa_lab.mainnet_intent_envelope import (
     MainnetEnvelopeError,
     _validate_traderjoe_guard,
     _validate_traderjoe_phase_action,
     artifact_reference,
     validate_mainnet_envelope,
 )
-from scripts.qa.mainnet_intent_recipe import TRADERJOE_V2_AVALANCHE_SWAP_EOA, build_approval, build_run_plan
+from qa_lab.mainnet_intent_recipe import TRADERJOE_V2_AVALANCHE_SWAP_EOA, build_approval, build_run_plan
 
 RECIPE = TRADERJOE_V2_AVALANCHE_SWAP_EOA
 WALLET = "0x" + "11" * 20

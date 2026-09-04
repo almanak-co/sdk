@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.qa.mainnet_intent_envelope import (
+from qa_lab.mainnet_intent_envelope import (
     MainnetEnvelopeError,
     _validate_uniswap_close_components,
     _validate_uniswap_guard,
@@ -17,7 +17,7 @@ from scripts.qa.mainnet_intent_envelope import (
     artifact_reference,
     validate_mainnet_envelope,
 )
-from scripts.qa.mainnet_intent_recipe import (
+from qa_lab.mainnet_intent_recipe import (
     UNISWAP_V3_ARBITRUM_LP_CLOSE_EOA,
     UNISWAP_V3_ARBITRUM_LP_OPEN_EOA,
     UNISWAP_V3_BASE_LP_CLOSE_EOA,

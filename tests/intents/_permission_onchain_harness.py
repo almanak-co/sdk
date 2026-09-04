@@ -58,7 +58,7 @@ from almanak.framework.permissions.generator import (
     INFRASTRUCTURE_NON_LOAD_BEARING_SELECTORS,
     generate_manifest,
 )
-from scripts.qa.permission_attestation import derive_permission_attestation
+from qa_lab.permission_attestation import derive_permission_attestation
 
 #: Set by ``tests/intents/conftest.py::pytest_configure`` when the opt-in
 #: receipt-evidence contract is enabled.

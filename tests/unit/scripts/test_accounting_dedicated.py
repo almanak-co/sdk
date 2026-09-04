@@ -9,15 +9,15 @@ from pathlib import Path
 
 import pytest
 
-from scripts.qa import accounting_dedicated as dedicated
-from scripts.qa import run_accounting_matrix as matrix_runner
-from scripts.qa.run_accounting_matrix import _read_detached_anvil_pid, _read_managed_anvil_rpc_url
+from qa_lab import accounting_dedicated as dedicated
+from qa_lab import run_accounting_matrix as matrix_runner
+from qa_lab.run_accounting_matrix import _read_detached_anvil_pid, _read_managed_anvil_rpc_url
 
 
 def test_looping_matrix_rows_wait_for_the_observable_loop_leg() -> None:
     """Teardown must not truncate the lifecycle before Accountant L6 is observable."""
     root = Path(__file__).resolve().parents[3]
-    rows = matrix_runner._load_matrix(root / "scripts/qa/accounting-matrix.yml")
+    rows = matrix_runner._load_matrix(root / "qa_lab/accounting-matrix.yml")
     looping_rows = [row for row in rows if row.fixture == "looping"]
 
     assert looping_rows
@@ -27,7 +27,7 @@ def test_looping_matrix_rows_wait_for_the_observable_loop_leg() -> None:
 
 def test_benqi_teardown_is_signalled_while_lending_exposure_is_open() -> None:
     root = Path(__file__).resolve().parents[3]
-    rows = matrix_runner._load_matrix(root / "scripts/qa/accounting-matrix.yml")
+    rows = matrix_runner._load_matrix(root / "qa_lab/accounting-matrix.yml")
     row = next(row for row in rows if row.id == "lending-benqi-avalanche")
 
     assert row.expected_shape == {"SUPPLY": 1, "BORROW": 1, "REPAY": 1, "WITHDRAW": 1}

@@ -11,10 +11,10 @@ from typing import Any
 
 import pytest
 
-from scripts.qa.lifecycle_attestation import validate_lifecycle_attestations
+from qa_lab.lifecycle_attestation import validate_lifecycle_attestations
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-QA_COVERAGE_PATH = REPO_ROOT / "scripts" / "quant-test" / "qa_coverage.py"
+QA_COVERAGE_PATH = REPO_ROOT / "qa_lab" / "qa_coverage.py"
 TX_ID = "0x" + "ab" * 32
 
 

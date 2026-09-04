@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 from almanak.framework.teardown.models import PositionType
 
-SCRIPT = Path(__file__).parents[3] / "scripts" / "quant-test" / "capture_terminal_proof.py"
+SCRIPT = Path(__file__).parents[3] / "qa_lab" / "capture_terminal_proof.py"
 
 
 def _load_module():

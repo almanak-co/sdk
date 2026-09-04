@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-_SCRIPT = Path(__file__).parents[3] / "scripts" / "quant-test" / "build_data_json.py"
+_SCRIPT = Path(__file__).parents[3] / "qa_lab" / "build_data_json.py"
 _SPEC = importlib.util.spec_from_file_location("quant_build_data_json", _SCRIPT)
 assert _SPEC is not None and _SPEC.loader is not None
 _MODULE = importlib.util.module_from_spec(_SPEC)

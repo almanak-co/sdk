@@ -21,7 +21,7 @@ TEST_SDK = {
 
 @pytest.fixture(scope="module")
 def readiness_module() -> ModuleType:
-    path = Path(__file__).resolve().parents[3] / "scripts" / "quant-test" / "qa_readiness.py"
+    path = Path(__file__).resolve().parents[3] / "qa_lab" / "qa_readiness.py"
     spec = importlib.util.spec_from_file_location("qa_readiness_test", path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
@@ -269,7 +269,7 @@ def test_a_hand_typed_readiness_manifest_cannot_mint_an_official_certificate(
     readiness_module: ModuleType, tmp_path: Path
 ) -> None:
     """Scored failure F1: a readiness certificate produced from one file."""
-    from scripts.qa.admission_contract import AdmissionRefused
+    from qa_lab.admission_contract import AdmissionRefused
 
     store = tmp_path / "qa"
     readiness_module.bootstrap_readiness(store)
@@ -323,7 +323,7 @@ def test_an_official_certificate_must_survive_its_own_negative_control(
 
 def test_a_gate_contradicted_by_its_own_report_is_not_derived(readiness_module: ModuleType, tmp_path: Path) -> None:
     """A PASS whose attached suite records a failure loses the basis, not the record."""
-    from scripts.qa.admission_contract import AdmissionRefused
+    from qa_lab.admission_contract import AdmissionRefused
 
     store = tmp_path / "qa"
     readiness_module.bootstrap_readiness(store)

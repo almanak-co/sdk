@@ -10,7 +10,7 @@ is a potential false green.
 scripts read the *same* SQLite files asking the *same* question and were not,
 which is what this module covers:
 
-* ``scripts/qa/score_demos_anvil.py`` — the 7 Quant Questions demo scorer.
+* ``qa_lab/score_demos_anvil.py`` — the 7 Quant Questions demo scorer.
   **This one actively regressed**: a degraded swap was skipped by the very
   check that looks for unmeasured amounts, flipping Q1/Q2 PARTIAL -> PASS.
 * ``scripts/ci/accounting_regression_assert.py`` — the operator ship-gate.
@@ -40,8 +40,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 def _load_script(basename: str):
-    """Import a ``scripts/qa/*.py`` module (no ``__init__.py`` in that dir)."""
-    path = _REPO_ROOT / "scripts" / "qa" / f"{basename}.py"
+    """Import a ``qa_lab/*.py`` module (no ``__init__.py`` in that dir)."""
+    path = _REPO_ROOT / "qa_lab" / f"{basename}.py"
     spec = importlib.util.spec_from_file_location(f"_{basename}", path)
     assert spec and spec.loader, path
     mod = importlib.util.module_from_spec(spec)
@@ -203,7 +203,7 @@ LANDED_READERS: dict[str, str] = {
 #: Modules that legitimately hold the SQL form rather than the Python one.
 LANDED_SQL_READERS = (
     "scripts/ci/accounting_regression_assert.py",
-    "scripts/qa/run_accounting_matrix.py",
+    "qa_lab/run_accounting_matrix.py",
     "almanak/framework/accounting/accountant_test.py",
 )
 
@@ -295,7 +295,11 @@ def test_no_module_re_implements_the_landed_rule() -> None:
     imported constant all defeat it. None of them defeat this.
     """
     offenders: list[str] = []
-    for path in (*(_REPO_ROOT / "almanak").rglob("*.py"), *(_REPO_ROOT / "scripts").rglob("*.py")):
+    for path in (
+        *(_REPO_ROOT / "almanak").rglob("*.py"),
+        *(_REPO_ROOT / "scripts").rglob("*.py"),
+        *(_REPO_ROOT / "qa_lab").rglob("*.py"),
+    ):
         if path.name == "ledger_guard.py":
             continue  # the one home
         try:

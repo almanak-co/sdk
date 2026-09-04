@@ -8,12 +8,12 @@ from pathlib import Path
 import pytest
 
 from almanak.connectors.aave_v3.receipt_parser import EVENT_TOPICS
-from scripts.qa.mainnet_intent_envelope import (
+from qa_lab.mainnet_intent_envelope import (
     MainnetEnvelopeError,
     artifact_reference,
     validate_mainnet_envelope,
 )
-from scripts.qa.mainnet_intent_recipe import (
+from qa_lab.mainnet_intent_recipe import (
     AAVE_V3_ARBITRUM_SUPPLY_EOA,
     build_approval,
     build_run_plan,
@@ -342,7 +342,7 @@ def test_qa_coverage_admission_paths_refuse_a_non_integral_status(value: float) 
     import importlib.util
     import sys
 
-    qa_coverage_path = Path(__file__).resolve().parents[3] / "scripts" / "quant-test" / "qa_coverage.py"
+    qa_coverage_path = Path(__file__).resolve().parents[3] / "qa_lab" / "qa_coverage.py"
     spec = importlib.util.spec_from_file_location("_qa_cov_probe", qa_coverage_path)
     module = importlib.util.module_from_spec(spec)
     sys.modules["_qa_cov_probe"] = module
@@ -372,9 +372,9 @@ def test_non_integral_receipt_status_is_refused(value: float) -> None:
     every validator that coerces an integer evidence field on a verdict path,
     so the next one cannot be missed silently.
     """
-    from scripts.qa.mainnet_intent_envelope import MainnetEnvelopeError
-    from scripts.qa.mainnet_intent_envelope import _quantity as envelope_quantity
-    from scripts.qa.quant_books import _quantity as books_quantity
+    from qa_lab.mainnet_intent_envelope import MainnetEnvelopeError
+    from qa_lab.mainnet_intent_envelope import _quantity as envelope_quantity
+    from qa_lab.quant_books import _quantity as books_quantity
 
     with pytest.raises(MainnetEnvelopeError, match="must be an integer quantity"):
         envelope_quantity(value, label="raw receipt status")
@@ -384,8 +384,8 @@ def test_non_integral_receipt_status_is_refused(value: float) -> None:
 
 def test_integral_receipt_status_still_passes_every_validator() -> None:
     """Liveness: the refusal above is not simply refusing everything."""
-    from scripts.qa.mainnet_intent_envelope import _quantity as envelope_quantity
-    from scripts.qa.quant_books import _quantity as books_quantity
+    from qa_lab.mainnet_intent_envelope import _quantity as envelope_quantity
+    from qa_lab.quant_books import _quantity as books_quantity
 
     for accepted in (1, 1.0, "0x1", "1"):
         assert envelope_quantity(accepted, label="raw receipt status") == 1
@@ -589,7 +589,7 @@ def test_approval_pair_enumeration_excludes_erc721_approvals() -> None:
     rows for an ERC-721 pair, a clean run would fail validation on a pair that
     has no allowance(address,address) to observe.
     """
-    from scripts.qa.mainnet_intent_envelope import APPROVAL_TOPIC, _approval_pairs
+    from qa_lab.mainnet_intent_envelope import APPROVAL_TOPIC, _approval_pairs
 
     wallet = "0x" + "11" * 20
     owner_word = "0x" + wallet.removeprefix("0x").rjust(64, "0")
@@ -618,7 +618,7 @@ def test_duplicate_allowance_rows_cannot_shadow_a_residual() -> None:
     mis-reported its own pair set could green past a live allowance; duplicate
     shadowing is the same failure class as omission.
     """
-    from scripts.qa.mainnet_intent_envelope import _validate_no_residual_allowances
+    from qa_lab.mainnet_intent_envelope import _validate_no_residual_allowances
 
     wallet = "0x" + "11" * 20
     row = {"token": "0x" + "aa" * 20, "spender": "0x" + "bb" * 20}

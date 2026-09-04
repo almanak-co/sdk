@@ -6,7 +6,7 @@ import pytest
 
 from almanak.framework.intents.compiler_models import IntentCompilerConfig
 from almanak.framework.intents.vocabulary import IntentType
-from scripts.qa.operator_gateway import OperatorGatewayClient
+from qa_lab.operator_gateway import OperatorGatewayClient
 from tests.intents._uniswap_v3_exact_proofs import (
     execute_uniswap_v3_exact_reverse_cleanup,
     run_uniswap_v3_swap_exact_proof,

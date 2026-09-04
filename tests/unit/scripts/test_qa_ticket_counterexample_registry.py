@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-REGISTRY = REPO_ROOT / "docs/internal/qa/catalog/v1/ticket-counterexamples.json"
+REGISTRY = REPO_ROOT / "qa_lab/docs/catalog/v1/ticket-counterexamples.json"
 # ALM-3242, ALM-3254 and ALM-3263 are absent on purpose. Their counterexample
 # nodes travelled out with the production capabilities they pin -- the strat-test
 # lifecycle coverage gate (sibling patch A) and the Aerodrome Slipstream closure

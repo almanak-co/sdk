@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.qa.quant_admission import (
+from qa_lab.quant_admission import (
     EVIDENCE_KIND,
     evidence_set_digest,
     validate_audit_decision,

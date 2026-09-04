@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-SCRIPTS = REPO_ROOT / "scripts" / "quant-test"
+SCRIPTS = REPO_ROOT / "qa_lab"
 
 TEST_SDK = {
     "commit": "a" * 40,

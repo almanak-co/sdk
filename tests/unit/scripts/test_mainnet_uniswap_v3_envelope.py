@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.qa.mainnet_intent_envelope import (
+from qa_lab.mainnet_intent_envelope import (
     MainnetEnvelopeError,
     _validate_uniswap_guard,
     _validate_uniswap_phase_action,
@@ -16,7 +16,7 @@ from scripts.qa.mainnet_intent_envelope import (
     artifact_reference,
     validate_mainnet_envelope,
 )
-from scripts.qa.mainnet_intent_recipe import (
+from qa_lab.mainnet_intent_recipe import (
     UNISWAP_V3_ARBITRUM_SWAP_EOA,
     build_approval,
     build_run_plan,

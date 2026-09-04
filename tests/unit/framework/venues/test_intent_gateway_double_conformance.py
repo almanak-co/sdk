@@ -21,7 +21,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from scripts.qa.operator_gateway import OperatorGatewayClient
+from qa_lab.operator_gateway import OperatorGatewayClient
 from tests.intents.conftest import AnvilEthCallAdapter
 
 GATEWAY_SOURCE = Path(__file__).resolve().parents[4] / "almanak" / "framework" / "venues" / "gateway.py"

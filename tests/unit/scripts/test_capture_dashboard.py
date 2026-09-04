@@ -7,7 +7,7 @@ import importlib.util
 import json
 from pathlib import Path
 
-SCRIPT = Path(__file__).parents[3] / "scripts" / "quant-test" / "capture_dashboard.py"
+SCRIPT = Path(__file__).parents[3] / "qa_lab" / "capture_dashboard.py"
 
 
 def _load_module():

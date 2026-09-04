@@ -28,11 +28,11 @@ from almanak.framework.data.qa.production_identity import (
     derive_production_requirements,
     requirements_digest,
 )
-from scripts.qa.permission_attestation import derive_permission_attestation
+from qa_lab.permission_attestation import derive_permission_attestation
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-SCRIPT_DIR = REPO_ROOT / "scripts" / "quant-test"
-REAL_CATALOG = REPO_ROOT / "docs" / "internal" / "qa" / "catalog" / "v1" / "cells.yaml"
+SCRIPT_DIR = REPO_ROOT / "qa_lab"
+REAL_CATALOG = REPO_ROOT / "qa_lab" / "docs" / "catalog" / "v1" / "cells.yaml"
 REJECTION_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "quant_rejection_bundles"
 TEST_COMMIT = "a" * 40
 TEST_SDK = {
@@ -1556,7 +1556,7 @@ def test_traderjoe_v2_avalanche_mainnet_eoa_uses_reviewed_recipe(modules) -> Non
 
     assert len(recipes) == 1
     assert recipes[0]["contract_profile"] == "liquidity_book_swap.v1"
-    assert recipes[0]["source"] == "scripts/quant-test/run_mainnet_intent.py"
+    assert recipes[0]["source"] == "qa_lab/run_mainnet_intent.py"
 
 
 @pytest.mark.parametrize("chain", ["base", "arbitrum", "ethereum"])
@@ -1566,7 +1566,7 @@ def test_traderjoe_v2_avalanche_mainnet_eoa_uses_reviewed_recipe(modules) -> Non
 # exact-Safe proofs that ship with the connector's synthetic permission
 # discovery. That capability was lifted out of this PR, so asserting a safe
 # recipe here would declare coverage this branch cannot back. Both return
-# together in docs/internal/qa/pr-3582-sibling-patches/B-euler-v2-permission-discovery.patch.
+# together in qa_lab/docs/pr-3582-sibling-patches/B-euler-v2-permission-discovery.patch.
 @pytest.mark.parametrize("exec_path", ["eoa"])
 def test_euler_v2_lending_cells_have_one_atomic_recipe(
     modules,
@@ -1599,7 +1599,7 @@ def test_aave_arbitrum_supply_mainnet_eoa_has_one_versioned_runner_recipe(module
 
     assert plan["proof_recipe"]["proof_id"] == "aave_v3.supply.arbitrum.eoa"
     assert plan["proof_recipe"]["contract_profile"] == "lending.v1"
-    assert plan["proof_recipe"]["runner"] == "scripts/quant-test/run_mainnet_intent.py"
+    assert plan["proof_recipe"]["runner"] == "qa_lab/run_mainnet_intent.py"
     assert len(plan["proof_recipe"]["nodeids"]) == 1
 
 
@@ -1610,7 +1610,7 @@ def test_aave_arbitrum_mainnet_eoa_cells_have_exact_runner_recipes(modules, inte
     plan = qa.intent_cell_plan(cell_id=f"intent.aave_v3.arbitrum.{intent}.mainnet.eoa")
 
     assert plan["proof_recipe"]["contract_profile"] == "lending.v1"
-    assert plan["proof_recipe"]["runner"] == "scripts/quant-test/run_mainnet_intent.py"
+    assert plan["proof_recipe"]["runner"] == "qa_lab/run_mainnet_intent.py"
     assert len(plan["proof_recipe"]["nodeids"]) == 1
 
 
@@ -1622,7 +1622,7 @@ def test_aave_mainnet_eoa_cells_are_routable_only_with_exact_recipes(modules, ch
     plan = qa.intent_cell_plan(cell_id=f"intent.aave_v3.{chain}.{intent}.mainnet.eoa")
 
     assert plan["proof_recipe"]["contract_profile"] == "lending.v1"
-    assert plan["proof_recipe"]["runner"] == "scripts/quant-test/run_mainnet_intent.py"
+    assert plan["proof_recipe"]["runner"] == "qa_lab/run_mainnet_intent.py"
     assert len(plan["proof_recipe"]["nodeids"]) == 1
 
 
@@ -1633,7 +1633,7 @@ def test_uniswap_v3_swap_mainnet_eoa_is_routable_only_with_exact_recipe(modules,
     plan = qa.intent_cell_plan(cell_id=f"intent.uniswap_v3.{chain}.SWAP.mainnet.eoa")
 
     assert plan["proof_recipe"]["contract_profile"] == "swap.v1"
-    assert plan["proof_recipe"]["runner"] == "scripts/quant-test/run_mainnet_intent.py"
+    assert plan["proof_recipe"]["runner"] == "qa_lab/run_mainnet_intent.py"
     assert len(plan["proof_recipe"]["nodeids"]) == 1
 
 
@@ -1647,7 +1647,7 @@ def test_uniswap_v3_lp_mainnet_eoa_is_routable_only_with_exact_lifecycle_recipe(
     plan = qa.intent_cell_plan(cell_id=f"intent.uniswap_v3.{chain}.{intent}.mainnet.eoa")
 
     assert plan["proof_recipe"]["contract_profile"] == "v3_lp.v1"
-    assert plan["proof_recipe"]["runner"] == "scripts/quant-test/run_mainnet_intent.py"
+    assert plan["proof_recipe"]["runner"] == "qa_lab/run_mainnet_intent.py"
     assert len(plan["proof_recipe"]["nodeids"]) == 1
 
 
@@ -1661,7 +1661,7 @@ def test_gmx_v2_mainnet_eoa_is_routable_only_through_keeper_settlement_certifier
     plan = qa.intent_cell_plan(cell_id=f"intent.gmx_v2.{chain}.{intent}.mainnet.eoa")
 
     assert plan["proof_recipe"]["contract_profile"] == "async_perp.v1"
-    assert plan["proof_recipe"]["runner"] == "scripts/quant-test/intent_mainnet.py"
+    assert plan["proof_recipe"]["runner"] == "qa_lab/intent_mainnet.py"
     assert len(plan["proof_recipe"]["nodeids"]) == 1
 
 

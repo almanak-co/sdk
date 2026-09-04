@@ -20,7 +20,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 
 @pytest.fixture(scope="module")
 def demo_module() -> ModuleType:
-    path = REPO_ROOT / "scripts" / "quant-test" / "qa_demo.py"
+    path = REPO_ROOT / "qa_lab" / "qa_demo.py"
     spec = importlib.util.spec_from_file_location("qa_demo_test", path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
@@ -227,7 +227,7 @@ def test_wired_cell_plan_names_a_real_command(demo_module: ModuleType) -> None:
     wired = next(cell for cell in catalog["cells"] if cell["pipeline_status"] == "ready" and not cell["is_canary"])
     plan = demo_module.demo_cell_plan(cell_id=wired["cell_id"], catalog=catalog)
     assert plan["routable"] is True
-    assert plan["command"].startswith("uv run python scripts/quant-test/qa_demo.py run ")
+    assert plan["command"].startswith("uv run python qa_lab/qa_demo.py run ")
     assert f"--demo {wired['demo']}" in plan["command"]
 
 

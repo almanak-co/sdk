@@ -85,7 +85,7 @@ _DETAIL_MAX: Final[int] = 800
 # every reader asking "did this transaction happen?" needs the same widened
 # predicate, and those readers span three layers — the Accountant Test in this
 # package, the operator ship-gate in ``scripts/ci/``, and the demo scorer plus
-# the matrix harness in ``scripts/qa/``.
+# the matrix harness in ``qa_lab/``.
 #
 # An earlier revision of this leg duplicated the prefix as a literal in each of
 # them "to stay pure-stdlib", pinned by a test. That is a mirror-drift design:

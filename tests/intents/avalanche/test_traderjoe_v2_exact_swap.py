@@ -4,7 +4,7 @@ import pytest
 
 from almanak.framework.intents.compiler_models import IntentCompilerConfig
 from almanak.framework.intents.vocabulary import IntentType
-from scripts.qa.operator_gateway import OperatorGatewayClient
+from qa_lab.operator_gateway import OperatorGatewayClient
 from tests.intents._traderjoe_v2_exact_proofs import (
     execute_traderjoe_v2_reverse_cleanup,
     run_traderjoe_v2_swap_exact_proof,

@@ -20,7 +20,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 
 @pytest.fixture(scope="module")
 def daily_module() -> ModuleType:
-    path = REPO_ROOT / "scripts" / "quant-test" / "qa_daily.py"
+    path = REPO_ROOT / "qa_lab" / "qa_daily.py"
     spec = importlib.util.spec_from_file_location("qa_daily_test", path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)

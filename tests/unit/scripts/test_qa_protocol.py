@@ -22,7 +22,7 @@ TEST_SDK = {
 
 @pytest.fixture(scope="module")
 def protocol_module() -> ModuleType:
-    path = Path(__file__).resolve().parents[3] / "scripts" / "quant-test" / "qa_protocol.py"
+    path = Path(__file__).resolve().parents[3] / "qa_lab" / "qa_protocol.py"
     spec = importlib.util.spec_from_file_location("qa_protocol_test", path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
@@ -32,7 +32,7 @@ def protocol_module() -> ModuleType:
 
 @pytest.fixture(scope="module")
 def authority_module() -> ModuleType:
-    path = Path(__file__).resolve().parents[3] / "scripts" / "quant-test" / "qa_gmx_authority.py"
+    path = Path(__file__).resolve().parents[3] / "qa_lab" / "qa_gmx_authority.py"
     spec = importlib.util.spec_from_file_location("qa_gmx_authority_test", path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)

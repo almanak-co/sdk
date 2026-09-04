@@ -1,6 +1,6 @@
 # Accounting matrix row configs
 
-Per-row `config.json` overrides for `scripts/qa/run_accounting_matrix.py`.
+Per-row `config.json` overrides for `qa_lab/run_accounting_matrix.py`.
 One file per matrix row that needs to deviate from the algo folder's
 default config.
 
@@ -12,9 +12,9 @@ strategies/accounting/<algo>/              ← protocol- and chain-agnostic algo
   config.json                              ← the canonical/default row
 
 tests/fixtures/accounting/matrix-configs/  ← per-row config overrides (this dir)
-  <row_id>.json                            ← matches scripts/qa/accounting-matrix.yml row id
+  <row_id>.json                            ← matches qa_lab/accounting-matrix.yml row id
 
-scripts/qa/accounting-matrix.yml           ← matrix
+qa_lab/accounting-matrix.yml               ← matrix
   rows:
     - id: <row_id>
       fixture: <algo-folder>               ← strategies/accounting/<this>

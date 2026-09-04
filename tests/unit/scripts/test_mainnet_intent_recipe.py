@@ -13,7 +13,7 @@ import pytest
 from web3 import Web3
 
 from almanak.connectors.uniswap_v3.sdk import compute_pool_address
-from scripts.qa.mainnet_intent_recipe import (
+from qa_lab.mainnet_intent_recipe import (
     AAVE_V3_ARBITRUM_SUPPLY_EOA,
     MAINNET_ASSET_DECIMALS,
     TRADERJOE_V2_AVALANCHE_SWAP_EOA,
@@ -26,13 +26,13 @@ from scripts.qa.mainnet_intent_recipe import (
     verify_approval,
     verify_run_plan,
 )
-from scripts.qa.operator_gateway import OperatorGatewayClient
+from qa_lab.operator_gateway import OperatorGatewayClient
 
 REPO = Path(__file__).resolve().parents[3]
 
 
 def _runner_module():
-    path = REPO / "scripts" / "quant-test" / "run_mainnet_intent.py"
+    path = REPO / "qa_lab" / "run_mainnet_intent.py"
     spec = importlib.util.spec_from_file_location("run_mainnet_intent", path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
@@ -136,7 +136,7 @@ def test_gmx_mainnet_recipe_requires_one_full_keeper_settled_lifecycle(chain: st
     assert recipe.quant_cell_id == f"perp.gmx_v2.{chain}.simple.mainnet.eoa"
     assert recipe.required_lifecycle == ("PERP_OPEN", "PERP_CLOSE")
     assert recipe.terminal == ("NO_OPEN_GMX_POSITIONS", "NO_PENDING_GMX_ORDERS")
-    assert recipe.source == "scripts/quant-test/intent_mainnet.py"
+    assert recipe.source == "qa_lab/intent_mainnet.py"
 
 
 def test_gmx_does_not_fabricate_unsupported_base_or_unproved_cancel_routes() -> None:
@@ -546,7 +546,7 @@ def test_runner_call_sites_bind_every_required_proof_helper_argument() -> None:
             "execute_aave_lending_target",
         )
     }
-    source = (REPO / "scripts" / "quant-test" / "run_mainnet_intent.py").read_text(encoding="utf-8")
+    source = (REPO / "qa_lab" / "run_mainnet_intent.py").read_text(encoding="utf-8")
     seen: set[str] = set()
     for node in ast.walk(ast.parse(source)):
         if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name) or node.func.id not in helpers:

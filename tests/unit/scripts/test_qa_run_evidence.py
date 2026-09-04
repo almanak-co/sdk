@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-SCRIPT = Path(__file__).parents[3] / "scripts" / "quant-test" / "qa_run_evidence.py"
+SCRIPT = Path(__file__).parents[3] / "qa_lab" / "qa_run_evidence.py"
 
 
 def _load():

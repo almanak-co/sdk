@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-QA_COVERAGE = REPO_ROOT / "scripts" / "quant-test" / "qa_coverage.py"
+QA_COVERAGE = REPO_ROOT / "qa_lab" / "qa_coverage.py"
 
 
 @pytest.fixture(scope="module")

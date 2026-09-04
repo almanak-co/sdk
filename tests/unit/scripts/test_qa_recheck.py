@@ -11,7 +11,7 @@ import pytest
 
 @pytest.fixture(scope="module")
 def recheck_module() -> ModuleType:
-    path = Path(__file__).resolve().parents[3] / "scripts" / "quant-test" / "qa_recheck.py"
+    path = Path(__file__).resolve().parents[3] / "qa_lab" / "qa_recheck.py"
     spec = importlib.util.spec_from_file_location("qa_recheck_test", path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)

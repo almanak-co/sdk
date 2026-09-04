@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-RUNNER = REPO_ROOT / "scripts" / "quant-test" / "run_mainnet_intent.py"
+RUNNER = REPO_ROOT / "qa_lab" / "run_mainnet_intent.py"
 
 
 @pytest.fixture(scope="module")

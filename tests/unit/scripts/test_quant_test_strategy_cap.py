@@ -11,7 +11,7 @@ import pytest
 
 import almanak
 
-_SCRIPT = Path(__file__).parents[3] / "scripts" / "quant-test" / "validate_strategy_cap.py"
+_SCRIPT = Path(__file__).parents[3] / "qa_lab" / "validate_strategy_cap.py"
 _SPEC = importlib.util.spec_from_file_location("validate_strategy_cap_test", _SCRIPT)
 assert _SPEC and _SPEC.loader
 _MODULE = importlib.util.module_from_spec(_SPEC)

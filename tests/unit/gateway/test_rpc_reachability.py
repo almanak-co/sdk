@@ -43,7 +43,7 @@ So:
   promoting a discovered candidate into a strategy config. Each assertion
   names the EXACT file (and, where the path is multi-hop, every hop), hand-
   verified rather than inferred — the same "reviewed, exact claim" discipline
-  `scripts/quant-test/qa_protocol.py`'s obligation `runner=`/`source=` fields
+  `qa_lab/qa_protocol.py`'s obligation `runner=`/`source=` fields
   already use elsewhere in this codebase for this identical class of
   problem. When one of these RPCs' real call site moves, update the
   assertion to the new exact site — never delete it to make the test pass.

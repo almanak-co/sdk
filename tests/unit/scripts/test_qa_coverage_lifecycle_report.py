@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-SCRIPT_DIR = Path(__file__).resolve().parents[3] / "scripts" / "quant-test"
+SCRIPT_DIR = Path(__file__).resolve().parents[3] / "qa_lab"
 APPROVAL_TOPIC = "0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925"
 SUPPLY_TOPIC = "0x2b627736bca15cd5381dcf80b0bf11fd197d01a037c52b927a881a10fb73ba61"
 REPAY_TOPIC = "0xa534c8dbe71f871f9f3530e97a74601fea17b426cae02e1c5aee42c96c784051"

@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
-SCRIPT = Path(__file__).parents[3] / "scripts" / "quant-test" / "render_report.py"
+SCRIPT = Path(__file__).parents[3] / "qa_lab" / "render_report.py"
 
 
 def _load():

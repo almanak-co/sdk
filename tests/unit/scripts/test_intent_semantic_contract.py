@@ -12,7 +12,7 @@ from almanak.connectors.aave_v3.receipt_parser import EVENT_TOPICS
 from almanak.connectors.traderjoe_v2.addresses import TRADERJOE_V2, TRADERJOE_V2_LBPAIRS, TRADERJOE_V2_TOKENS
 from almanak.connectors.uniswap_v3.addresses import UNISWAP_V3
 from almanak.connectors.uniswap_v3.sdk import compute_pool_address
-from scripts.qa.intent_semantic_contract import validate_semantic_contract
+from qa_lab.intent_semantic_contract import validate_semantic_contract
 
 ACCOUNT = "0x" + "11" * 20
 ASSET = "0x" + "22" * 20

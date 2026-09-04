@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from scripts.qa.permission_attestation import derive_permission_attestation
+from qa_lab.permission_attestation import derive_permission_attestation
 from tests.intents.intent_evidence import (
     APPROVAL_TOPIC,
     TRANSFER_TOPIC,

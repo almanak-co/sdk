@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-SCRIPT_DIR = REPO_ROOT / "scripts" / "quant-test"
+SCRIPT_DIR = REPO_ROOT / "qa_lab"
 TEST_COMMIT = "a" * 40
 TEST_SDK = {
     "commit": TEST_COMMIT,
@@ -278,7 +278,7 @@ def test_a_happy_path_pass_is_derived_from_the_process_output(ax_module, tmp_pat
 
 def test_a_pass_contradicted_by_the_process_output_stops_the_seal(ax_module, tmp_path: Path) -> None:
     """A declared PASS over a run that emitted no structured response is refused."""
-    from scripts.qa.admission_contract import AdmissionRefused
+    from qa_lab.admission_contract import AdmissionRefused
 
     store, catalog = _ax_store(ax_module, tmp_path)
     bundle = tmp_path / "contradicted"

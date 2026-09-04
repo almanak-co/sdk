@@ -20,13 +20,13 @@ from pathlib import Path
 
 import pytest
 
-from scripts.qa.mainnet_approval_ledger import (
+from qa_lab.mainnet_approval_ledger import (
     ApprovalAlreadyConsumedError,
     ApprovalLedgerError,
     consume_approval,
     read_ledger,
 )
-from scripts.qa.mainnet_intent_recipe import (
+from qa_lab.mainnet_intent_recipe import (
     AAVE_V3_ARBITRUM_SUPPLY_EOA,
     assert_approval_spendable,
     build_approval,
@@ -35,7 +35,7 @@ from scripts.qa.mainnet_intent_recipe import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-RUNNER = REPO_ROOT / "scripts" / "quant-test" / "run_mainnet_intent.py"
+RUNNER = REPO_ROOT / "qa_lab" / "run_mainnet_intent.py"
 WALLET = "0x" + "11" * 20
 GIT_SHA = "a" * 40
 APPROVED_AT = "2026-08-29T10:00:00Z"

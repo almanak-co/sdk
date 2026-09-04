@@ -31,7 +31,7 @@ from almanak.framework.intents.compiler import (
 from almanak.framework.permissions.generator import generate_manifest, load_strategy_config
 from almanak.framework.permissions.hints import get_permission_hints
 from almanak.framework.permissions.synthetic_intents import build_synthetic_intents
-from scripts.qa.permission_attestation import derive_permission_attestation
+from qa_lab.permission_attestation import derive_permission_attestation
 
 logger = logging.getLogger(__name__)
 

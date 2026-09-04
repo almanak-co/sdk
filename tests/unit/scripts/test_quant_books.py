@@ -4,7 +4,7 @@ import json
 import sqlite3
 from pathlib import Path
 
-from scripts.qa.quant_books import derive_quant_books_claim
+from qa_lab.quant_books import derive_quant_books_claim
 
 TX_HASH = "0x" + "12" * 32
 

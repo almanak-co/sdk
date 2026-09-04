@@ -11,7 +11,7 @@ import pytest
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-SCRIPT_DIR = REPO_ROOT / "scripts" / "quant-test"
+SCRIPT_DIR = REPO_ROOT / "qa_lab"
 
 
 def _load(name: str, filename: str):

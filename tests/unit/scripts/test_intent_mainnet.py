@@ -15,9 +15,9 @@ import pytest
 from eth_abi import encode as abi_encode
 
 from almanak.connectors.gmx_v2.perps_read import _GET_ACCOUNT_POSITIONS_OUTPUT
-from scripts.qa.intent_semantic_contract import validate_semantic_contract
+from qa_lab.intent_semantic_contract import validate_semantic_contract
 
-SCRIPT = Path(__file__).resolve().parents[3] / "scripts" / "quant-test" / "intent_mainnet.py"
+SCRIPT = Path(__file__).resolve().parents[3] / "qa_lab" / "intent_mainnet.py"
 SPEC = importlib.util.spec_from_file_location("intent_mainnet_test", SCRIPT)
 assert SPEC is not None and SPEC.loader is not None
 intent_mainnet = importlib.util.module_from_spec(SPEC)
@@ -26,7 +26,7 @@ SPEC.loader.exec_module(intent_mainnet)
 
 
 def _qa_coverage_module():
-    path = Path(__file__).resolve().parents[3] / "scripts" / "quant-test" / "qa_coverage.py"
+    path = Path(__file__).resolve().parents[3] / "qa_lab" / "qa_coverage.py"
     spec = importlib.util.spec_from_file_location("qa_coverage_gmx_test", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)

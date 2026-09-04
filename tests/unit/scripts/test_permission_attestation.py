@@ -9,7 +9,7 @@ from web3 import Web3
 
 from almanak.framework.execution.signer.safe.constants import get_multisend_address
 from almanak.framework.execution.signer.safe.multisend import MultiSendEncoder
-from scripts.qa.permission_attestation import derive_permission_attestation, validate_permission_attestation
+from qa_lab.permission_attestation import derive_permission_attestation, validate_permission_attestation
 
 POOL = "0x1111111111111111111111111111111111111111"
 CATALOG_POOL = "0x2222222222222222222222222222222222222222"

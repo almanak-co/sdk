@@ -19,7 +19,7 @@ from types import SimpleNamespace
 from web3 import Web3
 
 from almanak.framework.gateway_client import GatewayClient
-from scripts.qa.operator_gateway import OperatorGatewayClient
+from qa_lab.operator_gateway import OperatorGatewayClient
 
 REPO = Path(__file__).resolve().parents[3]
 WALLET = "0x" + "11" * 20

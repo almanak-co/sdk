@@ -13,7 +13,7 @@ REPO = Path(__file__).resolve().parents[3]
 
 
 def _load(name: str):
-    path = REPO / "scripts" / "quant-test" / name
+    path = REPO / "qa_lab" / name
     spec = importlib.util.spec_from_file_location(name.removesuffix(".py"), path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
