@@ -446,9 +446,7 @@ def test_realized_yield_measured_price_projects_to_usd() -> None:
     from almanak.connectors.pendle.accounting_spec import _realized_yield_from_match
     from almanak.framework.accounting.models import AccountingConfidence
 
-    usd, sy, _reason, conf = _realized_yield_from_match(
-        _match(interest="0.05"), Decimal("0.95"), Decimal("2")
-    )
+    usd, sy, _reason, conf = _realized_yield_from_match(_match(interest="0.05"), Decimal("2"))
     assert usd == Decimal("0.10")  # 0.05 SY * $2
     assert sy == Decimal("0.05")
     assert conf == AccountingConfidence.HIGH
@@ -459,9 +457,7 @@ def test_realized_yield_unmeasured_price_usd_none_sy_carried() -> None:
     from almanak.connectors.pendle.accounting_spec import _realized_yield_from_match
     from almanak.framework.accounting.models import AccountingConfidence
 
-    usd, sy, reason, conf = _realized_yield_from_match(
-        _match(interest="0.05"), Decimal("0.95"), None
-    )
+    usd, sy, reason, conf = _realized_yield_from_match(_match(interest="0.05"), None)
     assert usd is None
     assert sy == Decimal("0.05")
     assert conf == AccountingConfidence.ESTIMATED
@@ -473,9 +469,7 @@ def test_realized_yield_no_lot_match_both_none() -> None:
     from almanak.connectors.pendle.accounting_spec import _realized_yield_from_match
     from almanak.framework.accounting.models import AccountingConfidence
 
-    usd, sy, _reason, conf = _realized_yield_from_match(
-        _match(interest="0", matched=False), Decimal("0.95"), Decimal("2")
-    )
+    usd, sy, _reason, conf = _realized_yield_from_match(_match(interest="0", matched=False), Decimal("2"))
     assert usd is None
     assert sy is None
     assert conf == AccountingConfidence.ESTIMATED
@@ -485,9 +479,7 @@ def test_realized_yield_break_even_is_measured_zero_not_none() -> None:
     """Measured break-even (interest 0) → usd Decimal('0') (NOT None), sy 0."""
     from almanak.connectors.pendle.accounting_spec import _realized_yield_from_match
 
-    usd, sy, _reason, _conf = _realized_yield_from_match(
-        _match(interest="0"), Decimal("0.9"), Decimal("1")
-    )
+    usd, sy, _reason, _conf = _realized_yield_from_match(_match(interest="0"), Decimal("1"))
     assert usd == Decimal("0")
     assert usd is not None  # measured zero, distinct from unmeasured None
     assert sy == Decimal("0")
@@ -498,9 +490,7 @@ def test_realized_yield_partial_match_downgrades_estimated() -> None:
     from almanak.connectors.pendle.accounting_spec import _realized_yield_from_match
     from almanak.framework.accounting.models import AccountingConfidence
 
-    usd, sy, reason, conf = _realized_yield_from_match(
-        _match(interest="0.05", unmatched="0.5"), Decimal("0.95"), Decimal("1")
-    )
+    usd, sy, reason, conf = _realized_yield_from_match(_match(interest="0.05", unmatched="0.5"), Decimal("1"))
     assert usd == Decimal("0.05")
     assert sy == Decimal("0.05")
     assert conf == AccountingConfidence.ESTIMATED

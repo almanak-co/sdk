@@ -129,9 +129,6 @@ class CompilerServicesFacadeMixin:
     def _require_token_price_for(self, token: TokenInfo) -> Decimal:
         return self._ctx.services.require_token_price_for(token)
 
-    def _assert_prices_available(self, tokens: list[str | None]) -> None:
-        self._ctx.services.assert_prices_available(tokens)
-
     def _usd_to_token_amount(self, usd_amount: Decimal, token: TokenInfo) -> int:
         return self._ctx.services.usd_to_token_amount(usd_amount, token)
 
@@ -183,9 +180,6 @@ class CompilerServicesFacadeMixin:
 
     def _eth_call(self, to: str, data: str, *, chain: str | None = None) -> str | None:
         return self.eth_call(to, data, chain=chain)
-
-    def _default_swap_adapter(self, protocol: str) -> DefaultSwapAdapter:
-        return self._ctx.services.default_swap_adapter(protocol)
 
 
 @dataclass(frozen=True, kw_only=True)

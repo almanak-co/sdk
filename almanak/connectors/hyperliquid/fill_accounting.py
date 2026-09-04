@@ -35,10 +35,6 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# Direction labels HyperCore reports on a CLOSING fill (``dir`` field). Only
-# closing fills carry a non-zero ``closedPnl``; opening fills carry ``"0.0"``.
-_CLOSE_DIR_HINTS = ("close", "long > short", "short > long")
-
 # VIB-5724 — leverage is an integer on-venue (``uint32``); a sub-0.01 gap is only
 # a Decimal-representation artefact of the requested value, not a real divergence.
 _LEVERAGE_DIVERGENCE_TOLERANCE = Decimal("0.01")

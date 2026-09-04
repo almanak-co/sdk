@@ -32,7 +32,7 @@ invented default, or Hyperliquid proxy participates in this lane.
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, ClassVar
@@ -161,26 +161,6 @@ GMX_V2_READER_GET_MARKET_INFO_ABI = [
         "type": "function",
     },
 ]
-
-# ``MarketInfo`` field positions consumed by the funding fetch.
-_MARKET_INFO_NEXT_FUNDING = 4
-_NEXT_FUNDING_LONGS_PAY_SHORTS = 0
-_NEXT_FUNDING_FACTOR_PER_SECOND = 1
-
-# GMX fixed-point precision for funding factors.
-_GMX_FUNDING_PRECISION = Decimal(10) ** 30
-
-
-def _signed_funding_factor_per_second(market_info: Sequence[Any]) -> Decimal:
-    """Signed per-second funding rate from a decoded ``MarketInfo`` tuple.
-
-    ``nextFunding.fundingFactorPerSecond`` is an unsigned magnitude;
-    ``nextFunding.longsPayShorts`` carries the direction. The service-wide
-    sign convention is positive = longs pay shorts.
-    """
-    next_funding = market_info[_MARKET_INFO_NEXT_FUNDING]
-    magnitude = Decimal(int(next_funding[_NEXT_FUNDING_FACTOR_PER_SECOND])) / _GMX_FUNDING_PRECISION
-    return magnitude if next_funding[_NEXT_FUNDING_LONGS_PAY_SHORTS] else -magnitude
 
 
 class GmxV2GatewayConnector(

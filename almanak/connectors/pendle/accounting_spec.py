@@ -486,7 +486,6 @@ def _sy_price_from_ledger(ctx: _PTContext, base_token_symbol: str) -> Decimal | 
 
 def _realized_yield_from_match(
     match: MatchResult,
-    sy_received_human: Decimal,
     sy_price: Decimal | None,
 ) -> tuple[Decimal | None, Decimal | None, str, AccountingConfidence]:
     """Convert a FIFO ``MatchResult`` into ``(realized_yield_usd, realized_yield_sy, reason, confidence)``.
@@ -671,7 +670,7 @@ def _build_pt_sell(ctx: _PTContext, basis_store: FIFOBasisStore | None) -> Pendl
                 sy_received=sy_human,
             )
             realized_yield_usd, realized_yield_sy, unavailable_reason, confidence = _realized_yield_from_match(
-                match, sy_human, sy_price
+                match, sy_price
             )
             if match.lot_matches:
                 basis_lot_id = match.lot_matches[0].lot_id
@@ -822,7 +821,7 @@ def _build_pt_redeem(ctx: _PTContext, basis_store: FIFOBasisStore | None) -> Pen
                 pt_redeemed=pt_human,
                 sy_received=sy_human,
             )
-            yield_usd, yield_sy, match_reason, match_conf = _realized_yield_from_match(match, sy_human, sy_price)
+            yield_usd, yield_sy, match_reason, match_conf = _realized_yield_from_match(match, sy_price)
             realized_yield_usd = yield_usd
             realized_yield_sy = yield_sy
             if match.lot_matches:

@@ -270,13 +270,6 @@ class SiloV2Adapter:
         borrower_hex = f"{int(borrower, 16):064x}"
         return f"{selector}{amount_hex}{borrower_hex}"
 
-    def _encode_repay_shares(self, shares: int, borrower: str) -> str:
-        """Encode repayShares(uint256,address) calldata for full repay."""
-        selector = SILO_V2_FUNCTION_SELECTORS["repay_shares"]
-        shares_hex = f"{shares:064x}"
-        borrower_hex = f"{int(borrower, 16):064x}"
-        return f"{selector}{shares_hex}{borrower_hex}"
-
     def supply(
         self,
         asset: str,
@@ -302,7 +295,7 @@ class SiloV2Adapter:
                 error=f"No Silo V2 market found for asset: {asset}",
             )
 
-        market, silo_address, asset_idx = result
+        market, silo_address, _asset_idx = result
 
         decimals = resolve_token_decimals(asset, self.chain)
         amount_wei = int(amount * Decimal(10**decimals))

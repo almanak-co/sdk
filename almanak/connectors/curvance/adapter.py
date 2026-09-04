@@ -28,7 +28,6 @@ from almanak.framework.data.tokens.exceptions import TokenResolutionError
 
 from .constants import (
     CURVANCE_MARKETS,
-    CURVANCE_PROTOCOL_CONTRACTS,
     SUPPORTED_CHAINS,
     CurvanceMarket,
     get_market,
@@ -177,7 +176,6 @@ class CurvanceAdapter:
 
             self._token_resolver = get_token_resolver()
 
-        self._protocol_contracts = CURVANCE_PROTOCOL_CONTRACTS[self.chain]
         self._markets = CURVANCE_MARKETS[self.chain]
 
         logger.info(
