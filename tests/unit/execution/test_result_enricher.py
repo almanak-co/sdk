@@ -17,10 +17,6 @@ from typing import Any
 from almanak.framework.execution.extracted_data import SwapAmounts
 from almanak.framework.execution.result_enricher import ResultEnricher
 
-# ---------------------------------------------------------------------------
-# Minimal stubs for ExecutionResult / TransactionResult / TransactionReceipt
-# ---------------------------------------------------------------------------
-
 
 @dataclass
 class _FakeReceipt:
@@ -82,12 +78,8 @@ class _FakeIntent:
     protocol: str | None = None
 
 
-# ---------------------------------------------------------------------------
-# ERC-20 Transfer event topic
-# ---------------------------------------------------------------------------
 TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 
-# Uniswap V3 / SushiSwap V3 Swap event topic
 SWAP_TOPIC = "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67"
 
 
@@ -143,11 +135,6 @@ def _make_swap_log(
     }
 
 
-# ===========================================================================
-# Tests
-# ===========================================================================
-
-
 class TestEnsoSwapEnrichment:
     """VIB-544: Enso swap_amounts enrichment via Transfer events."""
 
@@ -194,7 +181,6 @@ class TestEnsoSwapEnrichment:
         enricher = ResultEnricher()
         enriched = enricher.enrich(result, intent, context)
 
-        # This documents the pre-fix behavior: no from_address -> no swap_amounts
         assert enriched.swap_amounts is None
 
 
@@ -204,9 +190,9 @@ class TestSushiSwapV3SwapEnrichment:
     POOL_BASE = "0x1234000000000000000000000000000000000001"
     POOL_OPTIMISM = "0xabcdef1234567890abcdef1234567890abcdef12"
     ROUTER_BASE = "0x2626664c2603336E57B271c5C0b26F421741e481"
-    ROUTER_OPTIMISM = "0x8c32Fd078B89Eccb06B40289A539D84A4aA9FDA6"  # sushi V3 SwapRouter (VIB-5991)
+    ROUTER_OPTIMISM = "0x8c32Fd078B89Eccb06B40289A539D84A4aA9FDA6"
     WALLET = "0xabcdef0000000000000000000000000000000001"
-    USDC = "0x0b2c639c533813f4aa9d7837caf62653d097ff85"  # USDC on Optimism
+    USDC = "0x0b2c639c533813f4aa9d7837caf62653d097ff85"
 
     def test_sushiswap_v3_swap_enrichment(self):
         """SushiSwap V3 swap_amounts extracted from Swap event on Base."""
@@ -278,7 +264,6 @@ class TestSushiSwapV3SwapEnrichment:
         weth_op = "0x4200000000000000000000000000000000000006"
         APPROVAL_TOPIC = "0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925"
 
-        # TX 1: approve receipt (has Approval event, NO Swap event)
         approval_log = {
             "address": self.USDC,
             "topics": [
@@ -297,7 +282,6 @@ class TestSushiSwapV3SwapEnrichment:
             from_address=self.WALLET,
         )
 
-        # TX 2: swap receipt (has Swap event + Transfer events)
         swap_log = _make_swap_log(
             pool_address=self.POOL_OPTIMISM,
             sender=self.ROUTER_OPTIMISM,
@@ -378,7 +362,7 @@ class TestSushiSwapV3SwapEnrichment:
                     "effective_gas_price": 1,
                     "logs": [transfer_out, swap_log, transfer_in],
                     "from_address": self.WALLET,
-                },  # swap tx
+                },
             ],
             execution_id="test-vib-1437",
         )
@@ -445,7 +429,6 @@ class TestEnrichmentProtocolResolution:
 
         enricher = ResultEnricher()
         enriched = enricher.enrich(result, intent, context)
-        # No crash, protocol resolved from intent
         assert enriched.success
 
     def test_protocol_from_context_fallback(self):
@@ -571,11 +554,6 @@ class TestEnrichmentDiagnosticLogging:
         assert any("protocol=None" in r.message for r in caplog.records)
 
 
-# ---------------------------------------------------------------------------
-# VIB-1446: Solana lending enrichment (no longer blanket-skipped)
-# ---------------------------------------------------------------------------
-
-
 class TestSolanaLendingEnrichment:
     """Verify that Solana lending receipts are enriched instead of skipped."""
 
@@ -600,9 +578,8 @@ class TestSolanaLendingEnrichment:
                 {"accountIndex": 0, "mint": usdc_mint, "uiTokenAmount": {"amount": "0", "decimals": 6}},
             ],
         )
-        # Use raw dict receipt (Solana receipts don't have to_dict)
+        # Solana receipts are raw dictionaries without to_dict().
         tx_result = _FakeTxResult(success=True, receipt=solana_receipt)
-        # Override: receipt is a dict, so enricher's _collect_receipts handles it
         result = _FakeExecResult(transaction_results=[tx_result])
         intent = _FakeIntent(intent_type="SUPPLY", protocol="jupiter_lend")
         context = _FakeContext(chain="solana")
@@ -666,11 +643,6 @@ class TestSolanaLendingEnrichment:
         assert supply.amount == Decimal("50")
 
 
-# ===========================================================================
-# VIB-3203: expected_out threading from bundle metadata -> swap extractor
-# ===========================================================================
-
-
 class TestExpectedOutPlumbing:
     """Verify ``bundle_metadata["expected_output_human"]`` is threaded
     through :meth:`ResultEnricher.enrich` to the parser's ``extract_swap_amounts``
@@ -684,7 +656,7 @@ class TestExpectedOutPlumbing:
         class _SpyParser:
             """Minimal parser that records the kwargs it was called with."""
 
-            def __init__(self, **_kwargs):  # accept (chain=...) from registry
+            def __init__(self, **_kwargs):
                 pass
 
             def parse_receipt(self, receipt):  # noqa: ARG002
@@ -723,7 +695,6 @@ class TestExpectedOutPlumbing:
         context = _FakeContext(chain="arbitrum", protocol="spy")
 
         enricher = ResultEnricher(live_mode=False)
-        # Inject the spy via custom registration so the registry hands it back.
         enricher.parser_registry.register("spy", _SpyParser)
 
         enriched = enricher.enrich(
@@ -866,7 +837,7 @@ class TestExpectedOutPlumbing:
         captured_kwargs: dict[str, Any] = {}
 
         class _SpyParser:
-            def __init__(self, **_kwargs):  # accept (chain=...) from registry
+            def __init__(self, **_kwargs):
                 pass
 
             def parse_receipt(self, receipt):  # noqa: ARG002
@@ -917,7 +888,7 @@ class TestExpectedOutPlumbing:
         class _LegacyParser:
             """Mimics the pre-VIB-3203 signature: no expected_out kwarg."""
 
-            def __init__(self, **_kwargs):  # accept (chain=...) from registry
+            def __init__(self, **_kwargs):
                 pass
 
             def parse_receipt(self, receipt):  # noqa: ARG002
@@ -947,7 +918,6 @@ class TestExpectedOutPlumbing:
         enricher = ResultEnricher(live_mode=False)
         enricher.parser_registry.register("legacy", _LegacyParser)
 
-        # Pass bundle_metadata with expected_output_human — parser should NOT crash.
         enriched = enricher.enrich(
             result,
             intent,
@@ -956,11 +926,6 @@ class TestExpectedOutPlumbing:
         )
         assert enriched.swap_amounts is not None
         assert enriched.swap_amounts.slippage_bps is None
-
-
-# ===========================================================================
-# VIB-4320 — Per-protocol extraction-spec overlay
-# ===========================================================================
 
 
 @dataclass
@@ -1020,8 +985,6 @@ class TestExtractionSpecPerProtocolOverlay:
     the merged spec only when the resolved protocol matches.
     """
 
-    # ----- 1. Uniswap V3 LP_OPEN no longer emits the bin_ids capability warning.
-
     def test_uniswap_v3_lp_open_no_bin_ids_warning(self) -> None:
         from almanak.connectors.uniswap_v3.receipt_parser import (
             UniswapV3ReceiptParser,
@@ -1038,8 +1001,6 @@ class TestExtractionSpecPerProtocolOverlay:
         assert not _bin_warning_present(enriched.extraction_warnings, "bin_ids"), (
             f"Unexpected bin_ids warning for uniswap_v3 LP_OPEN: {enriched.extraction_warnings}"
         )
-
-    # ----- 2. PancakeSwap V3 LP_OPEN no longer emits the bin_ids warning.
 
     def test_pancakeswap_v3_lp_open_no_bin_ids_warning(self) -> None:
         from almanak.connectors.pancakeswap_v3.receipt_parser import (
@@ -1058,9 +1019,6 @@ class TestExtractionSpecPerProtocolOverlay:
             f"Unexpected bin_ids warning for pancakeswap_v3 LP_OPEN: {enriched.extraction_warnings}"
         )
 
-    # ----- 3. Uniswap V3 LP_COLLECT_FEES: no bin_ids warning;
-    #         fees0/fees1 warnings still fire (VIB-4344 follow-up).
-
     def test_uniswap_v3_lp_collect_fees_no_bin_ids_warning(self) -> None:
         from almanak.connectors.uniswap_v3.receipt_parser import (
             UniswapV3ReceiptParser,
@@ -1077,19 +1035,13 @@ class TestExtractionSpecPerProtocolOverlay:
         assert not _bin_warning_present(enriched.extraction_warnings, "bin_ids"), (
             f"Unexpected bin_ids warning for uniswap_v3 LP_COLLECT_FEES: {enriched.extraction_warnings}"
         )
-        # fees0 / fees1 are genuinely unsupported on Uniswap V3 today (VIB-4344
-        # follow-up). Their SUPPORTED_EXTRACTIONS warning must still fire so
-        # the fee-harvest gap stays visible until the extractors are
-        # implemented; merely moving them into the overlay would silence the
-        # signal without fixing the underlying gap.
+        # Unsupported fee fields must continue to warn rather than hide missing extractors.
         assert _bin_warning_present(enriched.extraction_warnings, "fees0"), (
             f"Expected fees0 warning still fires: {enriched.extraction_warnings}"
         )
         assert _bin_warning_present(enriched.extraction_warnings, "fees1"), (
             f"Expected fees1 warning still fires: {enriched.extraction_warnings}"
         )
-
-    # ----- 4. PancakeSwap V3 LP_COLLECT_FEES: no bin_ids warning.
 
     def test_pancakeswap_v3_lp_collect_fees_no_bin_ids_warning(self) -> None:
         from almanak.connectors.pancakeswap_v3.receipt_parser import (
@@ -1108,11 +1060,7 @@ class TestExtractionSpecPerProtocolOverlay:
             f"Unexpected bin_ids warning for pancakeswap_v3 LP_COLLECT_FEES: {enriched.extraction_warnings}"
         )
 
-    # ----- 5. TraderJoe V2 LP_OPEN still extracts bin_ids into extracted_data,
-    #         AND the bin_ids warning does NOT fire (TJ V2 parser does not
-    #         declare SUPPORTED_EXTRACTIONS — the capability check skips when
-    #         the parser omits the declaration).
-
+    # Parsers without SUPPORTED_EXTRACTIONS bypass capability warnings.
     def test_traderjoe_v2_lp_open_still_extracts_bin_ids_into_extracted_data(self) -> None:
         from almanak.connectors.traderjoe_v2.receipt_parser import (
             EVENT_TOPICS,
@@ -1123,8 +1071,7 @@ class TestExtractionSpecPerProtocolOverlay:
         pool = "0x" + "22" * 20
         bin_ids = [8388607, 8388608, 8388609]
 
-        # ABI encoding for DepositedToBins data — mirror tests/unit/connectors/
-        # traderjoe_v2/test_traderjoe_v2_receipt_parser_extras.py::_bins_data
+        # DepositedToBins ABI data contains offsets for the bin ID and amount arrays.
         def _uint256_hex(value: int) -> str:
             return f"{value:064x}"
 
@@ -1158,8 +1105,6 @@ class TestExtractionSpecPerProtocolOverlay:
         assert not _bin_warning_present(enriched.extraction_warnings, "bin_ids"), (
             f"Unexpected bin_ids warning for traderjoe_v2 LP_OPEN: {enriched.extraction_warnings}"
         )
-
-    # ----- 6. LPPositionTracker._extract_bin_ids reads the enriched result.
 
     def test_lp_position_tracker_captures_bin_ids_after_enrichment(self) -> None:
         from almanak.connectors.traderjoe_v2.receipt_parser import (
@@ -1203,8 +1148,6 @@ class TestExtractionSpecPerProtocolOverlay:
             f"captured={captured} expected={bin_ids} "
             f"extracted_data={enriched.extracted_data}"
         )
-
-    # ----- 6b. TraderJoe V2 LP_COLLECT_FEES (nitpick from CodeRabbit on PR #2269).
 
     def test_traderjoe_v2_lp_collect_fees_still_extracts_bin_ids_into_extracted_data(
         self,
@@ -1253,8 +1196,6 @@ class TestExtractionSpecPerProtocolOverlay:
             f"Unexpected bin_ids warning for traderjoe_v2 LP_COLLECT_FEES: {enriched.extraction_warnings}"
         )
 
-    # ----- 6c. Protocol aliases must canonicalise into the overlay (Codex P2 fix).
-
     def test_traderjoe_v2_alias_normalized_for_overlay_lookup(self) -> None:
         """``ReceiptParserRegistry.get`` normalises aliases like
         ``trader-joe-v2`` to ``traderjoe_v2``. The overlay lookup must do the
@@ -1291,7 +1232,6 @@ class TestExtractionSpecPerProtocolOverlay:
         parser = TraderJoeV2ReceiptParser()
         enricher = ResultEnricher(parser_registry=_PinnedRegistry(parser), live_mode=False)
         result = _LpExecResult(transaction_results=[_FakeTxResult(receipt=_FakeReceipt(logs=[deposit_log]))])
-        # Use a non-canonical alias on both intent and context.
         intent = _FakeIntent(intent_type="LP_OPEN", protocol="trader-joe-v2")
         context = _FakeContext(chain="avalanche", protocol="trader-joe-v2")
 
@@ -1305,39 +1245,31 @@ class TestExtractionSpecPerProtocolOverlay:
             f"Unexpected bin_ids warning for aliased traderjoe_v2: {enriched.extraction_warnings}"
         )
 
-    # ----- 7. Pure unit test of _merge_spec_with_overlay.
-
     def test_overlay_merge_dedup_and_order(self) -> None:
-        # (a) unknown protocol returns base unchanged.
+        # Unknown protocols use the base spec unchanged.
         base = list(ResultEnricher.EXTRACTION_SPECS["LP_OPEN"])
         merged = ResultEnricher._merge_spec_with_overlay("LP_OPEN", "no_such_protocol")
         assert merged == base
-        # (b) overlay fields append at the tail. The TJ V2 LP_OPEN overlay is
-        # ``["bin_ids", "primitive_money_legs"]`` (VIB-5414 added the latter), so
-        # both append after the base fields in declaration order.
+        # Overlay fields follow base fields in declaration order.
         merged_tj = ResultEnricher._merge_spec_with_overlay("LP_OPEN", "traderjoe_v2")
         assert merged_tj[: len(base)] == base, "base fields must come first"
         assert merged_tj[len(base) :] == ["bin_ids", "primitive_money_legs"], "overlay fields appended at tail in order"
-        # (c) duplicates collapse — overlay containing a field already in base
-        # must not duplicate it. Drive this by temporarily extending the
-        # overlay class attribute and restoring it.
+        # Duplicate fields collapse without changing base ordering.
         saved = ResultEnricher.EXTRACTION_SPECS_BY_PROTOCOL.get("__test__", None)
         try:
             ResultEnricher.EXTRACTION_SPECS_BY_PROTOCOL["__test__"] = {
-                # ``position_id`` is already in base LP_OPEN spec — must dedup.
                 "LP_OPEN": ["position_id", "bin_ids", "position_id"],
             }
             merged_dedup = ResultEnricher._merge_spec_with_overlay("LP_OPEN", "__test__")
             assert merged_dedup.count("position_id") == 1
             assert merged_dedup.count("bin_ids") == 1
-            # base ordering must be preserved verbatim
             assert merged_dedup[: len(base)] == base
         finally:
             if saved is None:
                 ResultEnricher.EXTRACTION_SPECS_BY_PROTOCOL.pop("__test__", None)
             else:
                 ResultEnricher.EXTRACTION_SPECS_BY_PROTOCOL["__test__"] = saved
-        # (d) protocol=None returns base.
+        # None protocols use the base spec unchanged.
         merged_none = ResultEnricher._merge_spec_with_overlay("LP_OPEN", None)
         assert merged_none == base
 
@@ -1353,7 +1285,6 @@ class TestExtractionSpecPerProtocolOverlay:
         assert merged[: len(base)] == base, "base LP_CLOSE fields preserved first"
         assert "primitive_money_legs" in merged
         assert merged[-1] == "primitive_money_legs", "overlay field appended at tail"
-        # A non-migrated protocol's LP_CLOSE spec is untouched.
         assert "primitive_money_legs" not in ResultEnricher._merge_spec_with_overlay("LP_CLOSE", "uniswap_v3")
 
     def test_traderjoe_v2_lp_open_overlay_appends_primitive_money_legs(self) -> None:
@@ -1368,7 +1299,6 @@ class TestExtractionSpecPerProtocolOverlay:
         assert merged[: len(base)] == base, "base LP_OPEN fields preserved first"
         assert "bin_ids" in merged, "existing TJ LP_OPEN bin_ids overlay preserved"
         assert "primitive_money_legs" in merged
-        # A non-migrated protocol's LP_OPEN spec is untouched.
         assert "primitive_money_legs" not in ResultEnricher._merge_spec_with_overlay("LP_OPEN", "uniswap_v3")
 
     def test_with_parser_extra_extractions_merges_connector_declared_fields(self) -> None:
@@ -1384,12 +1314,9 @@ class TestExtractionSpecPerProtocolOverlay:
         merged = ResultEnricher._with_parser_extra_extractions(base, _StubParser(), "WITHDRAW")
         assert merged[: len(base)] == base, "base fields preserved first"
         assert merged[-1] == "primitive_money_legs", "declared field appended at tail"
-        # A different intent type is untouched.
         assert ResultEnricher._with_parser_extra_extractions(base, _StubParser(), "SWAP") == base
-        # Re-merging does not duplicate (order-preserving dedup).
         again = ResultEnricher._with_parser_extra_extractions(merged, _StubParser(), "WITHDRAW")
         assert again.count("primitive_money_legs") == 1
-        # A parser without the attribute is a no-op (never raises).
         assert ResultEnricher._with_parser_extra_extractions(base, object(), "WITHDRAW") == base
 
     def test_with_parser_extraction_removals_drops_connector_declared_fields(self) -> None:
@@ -1405,9 +1332,7 @@ class TestExtractionSpecPerProtocolOverlay:
 
         removed = ResultEnricher._with_parser_extraction_removals(base, _StubParser(), "LP_OPEN")
         assert removed == ["position_id", "liquidity", "lp_open_data"]
-        # A different intent type is untouched.
         assert ResultEnricher._with_parser_extraction_removals(base, _StubParser(), "LP_CLOSE") == base
-        # A parser without the attribute is a no-op (never raises).
         assert ResultEnricher._with_parser_extraction_removals(base, object(), "LP_OPEN") == base
 
     def test_curve_tickless_removals_are_connector_owned_not_framework_overlay(self) -> None:
@@ -1428,16 +1353,7 @@ class TestExtractionSpecPerProtocolOverlay:
 
         assert "primitive_money_legs" in PendleReceiptParser.EXTRA_EXTRACTIONS_BY_INTENT["WITHDRAW"]
         assert "primitive_money_legs" in PendleReceiptParser.SUPPORTED_EXTRACTIONS
-        # Not present as a framework per-protocol overlay.
         assert "pendle" not in ResultEnricher.EXTRACTION_SPECS_BY_PROTOCOL
-
-    # ----- 8. Forward-compat guard: a parser that declares
-    #         SUPPORTED_EXTRACTIONS with Uniswap-V3-style fields under
-    #         protocol="sushiswap_v3" must not emit any bin_ids / fees0 /
-    #         fees1 warning once the per-protocol overlay is in place. If
-    #         SushiSwap V3 (or any V3 fork) standardises on
-    #         SUPPORTED_EXTRACTIONS later, this catches a regression where
-    #         the generic spec silently reintroduces bin_ids.
 
     def test_sushiswap_v3_lp_open_no_warning_when_supported_extractions_declared(self) -> None:
         class _SyntheticV3Parser:
@@ -1479,18 +1395,10 @@ class TestExtractionSpecPerProtocolOverlay:
 
         enriched = enricher.enrich(result, intent, context)
 
-        # Spec is the generic LP_OPEN — overlay only adds ``bin_ids`` for
-        # ``traderjoe_v2``. The synthetic V3 parser declares everything in
-        # base spec, so no SUPPORTED_EXTRACTIONS warning for any field.
         for field_name in ("bin_ids", "fees0", "fees1"):
             assert not _bin_warning_present(enriched.extraction_warnings, field_name), (
                 f"Unexpected {field_name!r} warning for sushiswap_v3 LP_OPEN: {enriched.extraction_warnings}"
             )
-
-
-# ===========================================================================
-# VIB-4434 W2 — Per-protocol EXTRACTION_SPECS_REMOVE_BY_PROTOCOL narrowing
-# ===========================================================================
 
 
 class TestExtractionSpecRemoveOverlay:
@@ -1511,8 +1419,6 @@ class TestExtractionSpecRemoveOverlay:
        to LP_OPEN spec; no regression from the REMOVE table addition.
     """
 
-    # ----- 1. Aerodrome V1 narrowing fires (no false noise).
-
     def test_aerodrome_v1_lp_open_no_v3_field_warnings(self) -> None:
         from almanak.connectors.aerodrome.receipt_parser import (
             AerodromeReceiptParser,
@@ -1532,8 +1438,6 @@ class TestExtractionSpecRemoveOverlay:
                 f"the REMOVE overlay must narrow this field away: "
                 f"{enriched.extraction_warnings}"
             )
-
-    # ----- 2a. Aerodrome Slipstream narrowing fires (no false noise on ticks).
 
     def test_aerodrome_slipstream_lp_open_no_tick_warnings(self) -> None:
         from almanak.connectors.aerodrome.receipt_parser import (
@@ -1556,8 +1460,6 @@ class TestExtractionSpecRemoveOverlay:
                 f"{enriched.extraction_warnings}"
             )
 
-    # ----- 2b. Slipstream KEEPS lp_open_data in the effective spec.
-
     def test_aerodrome_slipstream_lp_open_data_remains_in_effective_spec(self) -> None:
         """The REMOVE table for ``aerodrome_slipstream`` MUST drop only
         ``tick_lower`` / ``tick_upper`` from LP_OPEN — NOT ``lp_open_data``.
@@ -1579,9 +1481,6 @@ class TestExtractionSpecRemoveOverlay:
             f"(ticks ship via lp_open_data). Got: {effective}"
         )
 
-    # ----- 3. Cross-protocol regression guard — UniV3 LP_OPEN must still
-    #         include lp_open_data / tick_lower / tick_upper.
-
     def test_uniswap_v3_lp_open_unaffected_by_aerodrome_narrowing(self) -> None:
         effective = ResultEnricher._merge_spec_with_overlay("LP_OPEN", "uniswap_v3")
         for field_name in ("lp_open_data", "tick_lower", "tick_upper"):
@@ -1591,18 +1490,13 @@ class TestExtractionSpecRemoveOverlay:
                 f"to other protocols. Got: {effective}"
             )
 
-    # ----- 4. TraderJoe V2 additive overlay (VIB-4320) regression guard.
-
     def test_traderjoe_v2_additive_overlay_unchanged(self) -> None:
         effective = ResultEnricher._merge_spec_with_overlay("LP_OPEN", "traderjoe_v2")
         base = list(ResultEnricher.EXTRACTION_SPECS["LP_OPEN"])
         assert "bin_ids" in effective, (
             f"TraderJoe V2 LP_OPEN must still append bin_ids via the additive overlay (VIB-4320). Got: {effective}"
         )
-        # bin_ids appended at the tail (post-base-fields)
         assert effective.index("bin_ids") >= len(base), f"bin_ids must come after base fields. Got: {effective}"
-
-    # ----- 5. Direct unit test of two-phase merge ordering.
 
     def test_merge_overlay_then_remove_ordering(self) -> None:
         """Verify the merge semantics: additive THEN subtractive, so a
@@ -1616,9 +1510,6 @@ class TestExtractionSpecRemoveOverlay:
                 "LP_OPEN": ["bin_ids", "synthetic_added"],
             }
             ResultEnricher.EXTRACTION_SPECS_REMOVE_BY_PROTOCOL["__test_merge__"] = {
-                # ``position_id`` is a base field; ``synthetic_added`` came
-                # from the additive overlay above. Both must be removable.
-                # Stored as frozenset to match the production dict's value type.
                 "LP_OPEN": frozenset({"position_id", "synthetic_added"}),
             }
             merged = ResultEnricher._merge_spec_with_overlay("LP_OPEN", "__test_merge__")
@@ -1635,27 +1526,17 @@ class TestExtractionSpecRemoveOverlay:
             else:
                 ResultEnricher.EXTRACTION_SPECS_REMOVE_BY_PROTOCOL["__test_merge__"] = saved_rm
 
-    # ----- 6. Aerodrome V1 effective spec direct assertion.
-
     def test_aerodrome_v1_lp_open_effective_spec_drops_three_v3_fields(self) -> None:
         effective = ResultEnricher._merge_spec_with_overlay("LP_OPEN", "aerodrome")
         for field_name in ("lp_open_data", "tick_lower", "tick_upper"):
             assert field_name not in effective, (
                 f"Aerodrome V1 LP_OPEN effective spec must drop {field_name!r}. Got: {effective}"
             )
-        # Sanity — the V1-supported fields are still in the effective spec.
         assert "position_id" in effective
         assert "liquidity" in effective
         assert "protocol_fees" in effective
 
-    # ----- 7. LP_CLOSE narrowing for Aerodrome V1 (Codex review on PR #2331).
-    #
-    # V1's SUPPORTED_EXTRACTIONS lists ``lp_close_data`` but NOT the standalone
-    # flat fields ``amount0_collected`` / ``amount1_collected`` / ``fees0`` /
-    # ``fees1`` (those collected amounts live INSIDE the lp_close_data struct).
-    # Without LP_CLOSE narrowing, every Aerodrome V1 LP_CLOSE receipt would
-    # trigger 4 false info-warnings.
-
+    # Aerodrome V1 exposes collected amounts only through lp_close_data.
     def test_aerodrome_v1_lp_close_effective_spec_drops_flat_close_fields(self) -> None:
         effective = ResultEnricher._merge_spec_with_overlay("LP_CLOSE", "aerodrome")
         for field_name in ("amount0_collected", "amount1_collected", "fees0", "fees1"):
@@ -1663,26 +1544,16 @@ class TestExtractionSpecRemoveOverlay:
                 f"Aerodrome V1 LP_CLOSE effective spec must drop {field_name!r} "
                 f"(collected amounts ship via lp_close_data only). Got: {effective}"
             )
-        # Sanity — the V1-supported close fields are still in the effective spec.
         assert "lp_close_data" in effective
         assert "protocol_fees" in effective
 
-    # ----- 8. LP_CLOSE narrowing for Aerodrome Slipstream (Codex review on PR #2331).
-    #
-    # Slipstream SUPPORTED_EXTRACTIONS lists ``lp_close_data`` AND ``fees0`` /
-    # ``fees1`` (standalone fee extractors exist for Slipstream) but NOT
-    # ``amount0_collected`` / ``amount1_collected`` (those live inside
-    # lp_close_data only on Slipstream too). The narrowing therefore only
-    # drops the two collected-flat fields and KEEPS fees0/fees1.
-
+    # Slipstream keeps standalone fee extractors but exposes collected amounts through lp_close_data.
     def test_aerodrome_slipstream_lp_close_drops_only_collected_flat_fields(self) -> None:
         effective = ResultEnricher._merge_spec_with_overlay("LP_CLOSE", "aerodrome_slipstream")
         for field_name in ("amount0_collected", "amount1_collected"):
             assert field_name not in effective, (
                 f"Aerodrome Slipstream LP_CLOSE effective spec must drop {field_name!r}. Got: {effective}"
             )
-        # fees0 / fees1 MUST remain because Slipstream has standalone
-        # extract_fees0 / extract_fees1 methods.
         assert "fees0" in effective, (
             "Slipstream LP_CLOSE effective spec must KEEP fees0 (standalone "
             f"extract_fees0 method exists). Got: {effective}"
@@ -1691,15 +1562,7 @@ class TestExtractionSpecRemoveOverlay:
             "Slipstream LP_CLOSE effective spec must KEEP fees1 (standalone "
             f"extract_fees1 method exists). Got: {effective}"
         )
-        # lp_close_data is the structured path — must remain.
         assert "lp_close_data" in effective
-
-    # ----- 9. VIB-4805: UniV3 LP_CLOSE flat fields suppressed (ship via lp_close_data).
-    #
-    # Prior to VIB-4805 this test was a cross-protocol regression guard that
-    # asserted the flat fields were PRESENT on uniswap_v3. Now they are
-    # intentionally removed because the data ships via lp_close_data; the old
-    # assertion is updated to confirm suppression.
 
     def test_uniswap_v3_lp_close_flat_fields_suppressed(self) -> None:
         """VIB-4805: uniswap_v3 LP_CLOSE removes redundant flat fields.
@@ -1713,22 +1576,15 @@ class TestExtractionSpecRemoveOverlay:
         remains — no data is lost.
         """
         effective = ResultEnricher._merge_spec_with_overlay("LP_CLOSE", "uniswap_v3")
-        # Flat fields must be suppressed (they live inside lp_close_data).
         for field_name in ("amount0_collected", "amount1_collected", "fees0", "fees1"):
             assert field_name not in effective, (
                 f"VIB-4805: uniswap_v3 LP_CLOSE effective spec must suppress "
                 f"{field_name!r} — it ships via lp_close_data, not a standalone "
                 f"extractor. Got: {effective}"
             )
-        # lp_close_data must remain — it IS the source of truth.
         assert "lp_close_data" in effective, (
             f"lp_close_data must remain in uniswap_v3 LP_CLOSE effective spec. Got: {effective}"
         )
-
-
-# ===========================================================================
-# VIB-4805 — Uni V3 fork LP_CLOSE extraction-warning suppression
-# ===========================================================================
 
 
 class TestVib4805LpCloseFlatFieldSuppression:
@@ -1793,8 +1649,6 @@ class TestVib4805LpCloseFlatFieldSuppression:
                 f"overlay must suppress the field before the capability check. "
                 f"Got warnings: {enriched.extraction_warnings}"
             )
-        # lp_close_data field must still be attempted (and return None on empty
-        # receipt — parser returns None gracefully, not a warning).
         lp_close_warning = any("'lp_close_data'" in w for w in enriched.extraction_warnings)
         assert not lp_close_warning, (
             f"lp_close_data must not produce a 'does not declare support' "
