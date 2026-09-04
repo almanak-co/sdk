@@ -58,7 +58,7 @@ class _FakeMarket:
     ) -> None:
         self._health = _Health(collateral_usd, debt_usd)
         self._raise = raise_on_read
-        self.chain = chain  # snapshot's pinned (primary) chain (P1 chain-scoping)
+        self.chain = chain  # Snapshot reads are pinned to one chain.
         self.reads = 0
 
     def position_health(self, protocol: str, market_id: str, **kwargs: Any) -> _Health:
@@ -84,11 +84,6 @@ def _types(intents: list[Any]) -> list[str]:
     return [i.intent_type.value for i in intents]
 
 
-# ---------------------------------------------------------------------------
-# Case 1 + 3 + 5: measured zero debt AND zero collateral -> no intents
-# ---------------------------------------------------------------------------
-
-
 def test_case1_no_debt_no_collateral_emits_no_intents():
     """Fresh measured zero on both legs -> drop everything, mark no-op."""
     market = _FakeMarket(collateral_usd=Decimal("0"), debt_usd=Decimal("0"))
@@ -96,7 +91,7 @@ def test_case1_no_debt_no_collateral_emits_no_intents():
 
     assert result.intents == []
     assert not result.degraded
-    assert result.no_op_positions  # the position was flagged fully flat
+    assert result.no_op_positions
     assert len(result.dropped) == 2
 
 
@@ -105,8 +100,6 @@ def test_case3_stale_cached_nonzero_but_fresh_zero_emits_no_intents():
     FRESH read says both legs are flat -> guard drops both (the stale-state bug
     this ticket fixes)."""
     market = _FakeMarket(collateral_usd=Decimal("0.0"), debt_usd=Decimal("0.0"))
-    # The intents themselves look like a real unwind (repay_full + withdraw_all);
-    # only the fresh read reveals they are stale.
     result = sanitize_lending_teardown_intents([_repay(), _withdraw_all()], market)
     assert result.intents == []
 
@@ -126,11 +119,6 @@ def test_case5_dust_debt_treated_as_zero():
     market = _FakeMarket(collateral_usd=Decimal("1000"), debt_usd=Decimal("0.001"))
     result = sanitize_lending_teardown_intents([_repay(), _withdraw_all()], market)
     assert "REPAY" not in _types(result.intents)
-
-
-# ---------------------------------------------------------------------------
-# Case 2: debt + collateral -> repay before withdraw
-# ---------------------------------------------------------------------------
 
 
 def test_case2_debt_and_collateral_repays_before_withdraw():
@@ -155,11 +143,6 @@ def test_case2_reads_position_once_per_distinct_position():
     market = _FakeMarket(collateral_usd=Decimal("1000"), debt_usd=Decimal("500"))
     sanitize_lending_teardown_intents([_repay(), _withdraw_all()], market)
     assert market.reads == 1
-
-
-# ---------------------------------------------------------------------------
-# Case 4: fresh unknown/None -> degraded; no unsafe withdraw_all
-# ---------------------------------------------------------------------------
 
 
 def test_case4_unmeasured_read_keeps_repay_and_paired_withdraw_degraded():
@@ -203,11 +186,6 @@ def test_case4_partial_none_collateral_is_unmeasured():
     assert result.degraded
 
 
-# ---------------------------------------------------------------------------
-# Case 6: non-lending intents pass through untouched
-# ---------------------------------------------------------------------------
-
-
 def test_case6_non_lending_intents_pass_through():
     """A swap-only teardown has no lending intents -> no reads, untouched."""
     market = _FakeMarket(collateral_usd=Decimal("0"), debt_usd=Decimal("0"))
@@ -244,7 +222,6 @@ def test_unknown_protocol_is_left_untouched():
     repay = Intent.repay(protocol="not_a_real_lending_protocol", token="USDC", repay_full=True, chain=_CHAIN)
     market = _FakeMarket(collateral_usd=Decimal("0"), debt_usd=Decimal("0"))
     result = sanitize_lending_teardown_intents([repay], market)
-    # Unknown protocol -> not treated as a lending unwind, so no read, untouched.
     assert result.intents == [repay]
     assert market.reads == 0
 
@@ -266,11 +243,6 @@ def test_original_list_not_mutated():
     snapshot = list(original)
     sanitize_lending_teardown_intents(original, market)
     assert original == snapshot
-
-
-# ---------------------------------------------------------------------------
-# P0: interleaved leveraged-loop staircase ORDER must be preserved
-# ---------------------------------------------------------------------------
 
 
 def _withdraw_slice(amount: str) -> Any:
@@ -308,7 +280,6 @@ def test_p0_interleaved_staircase_order_is_preserved():
     staircase = _staircase()
     result = sanitize_lending_teardown_intents(staircase, market)
 
-    # Order preserved exactly, nothing dropped (everything live).
     assert result.intents == staircase
     assert _types(result.intents)[0] == "WITHDRAW"
     assert _types(result.intents) == ["WITHDRAW", "SWAP", "REPAY", "WITHDRAW", "SWAP", "REPAY", "WITHDRAW", "SWAP"]
@@ -326,8 +297,6 @@ def test_p0_staircase_drops_genuinely_zero_leg_in_place():
     staircase = _staircase()
     result = sanitize_lending_teardown_intents(staircase, market)
 
-    # The two partial REPAYs are dropped (measured zero debt); everything else
-    # keeps its original relative order.
     assert _types(result.intents) == ["WITHDRAW", "SWAP", "WITHDRAW", "SWAP", "WITHDRAW", "SWAP"]
     assert _types(result.intents)[0] == "WITHDRAW"
     assert all("zero debt" in d for d in result.dropped)
@@ -343,7 +312,7 @@ def test_p0_multi_round_no_interleave_is_not_order_locked():
     market = _FakeMarket(collateral_usd=Decimal("2000"), debt_usd=Decimal("900"))
     plan = [_repay_partial("400"), _repay_partial("500"), _withdraw_slice("0.3"), _withdraw_all()]
     result = sanitize_lending_teardown_intents(plan, market)
-    assert result.intents == plan  # reorder is a no-op (repays already precede withdraws)
+    assert result.intents == plan
     assert not result.synthesized_positions  # price-less fake market -> no strand proof
 
 
@@ -352,36 +321,24 @@ def test_p0_simple_single_round_still_reorders():
     this ticket targets) is NOT order-locked and still gets the repay-first
     reorder."""
     market = _FakeMarket(collateral_usd=Decimal("1000"), debt_usd=Decimal("500"))
-    # Strategy emitted WITHDRAW before REPAY (wrong order), single round, no
-    # interleaving -> guard reorders to repay-first.
     result = sanitize_lending_teardown_intents([_withdraw_all(), _repay()], market)
     assert _types(result.intents) == ["REPAY", "WITHDRAW"]
-
-
-# ---------------------------------------------------------------------------
-# P1: multi-chain wrong-chain exposure read must NOT drop a live intent
-# ---------------------------------------------------------------------------
 
 
 def test_p1_intent_on_other_chain_not_dropped_by_primary_chain_read():
     """The snapshot is pinned to chain[0] (arbitrum) and reads measured-zero
     there. A lending intent on chain[1] (optimism) must NOT be dropped on the
     strength of the unrelated chain[0] read — it degrades to unmeasured instead."""
-    # Snapshot pinned to arbitrum, reading a flat position there.
     market = _FakeMarket(collateral_usd=Decimal("0"), debt_usd=Decimal("0"), chain="arbitrum")
-    # The intents target optimism (a different chain).
     repay_op = Intent.repay(protocol=_PROTOCOL, token="USDC", repay_full=True, chain="optimism")
     withdraw_op = Intent.withdraw(
         protocol=_PROTOCOL, token="WETH", amount=Decimal("0"), withdraw_all=True, chain="optimism"
     )
     result = sanitize_lending_teardown_intents([repay_op, withdraw_op], market)
 
-    # The chain[0] measured-zero must NOT drop the chain[1] intents.
     assert _types(result.intents) == ["REPAY", "WITHDRAW"]
-    assert result.degraded  # forced unmeasured (wrong chain)
+    assert result.degraded  # Wrong-chain reads are unmeasured.
     assert not result.no_op_positions
-    # The read happens, but its result is discarded (wrong chain) — at minimum
-    # the live intents survive.
     assert repay_op in result.intents and withdraw_op in result.intents
 
 
@@ -391,7 +348,7 @@ def test_p1_intent_on_matching_chain_is_trusted():
     market = _FakeMarket(collateral_usd=Decimal("0"), debt_usd=Decimal("0"), chain="arbitrum")
     repay = Intent.repay(protocol=_PROTOCOL, token="USDC", repay_full=True, chain="arbitrum")
     result = sanitize_lending_teardown_intents([repay], market)
-    assert result.intents == []  # measured zero debt -> dropped
+    assert result.intents == []
     assert not result.degraded
 
 
@@ -404,13 +361,8 @@ def test_p1_snapshot_without_chain_attr_forces_unmeasured():
 
     repay = _repay()
     result = sanitize_lending_teardown_intents([repay], _NoChainMarket())
-    assert result.intents == [repay]  # not dropped — read not trusted
+    assert result.intents == [repay]
     assert result.degraded
-
-
-# ---------------------------------------------------------------------------
-# HIGH #3: refuse WITHDRAW on MEASURED active debt with no repay-first
-# ---------------------------------------------------------------------------
 
 
 def test_high3_measured_active_debt_standalone_withdraw_is_dropped():
@@ -422,7 +374,7 @@ def test_high3_measured_active_debt_standalone_withdraw_is_dropped():
 
     assert result.intents == []
     assert any("active debt and no repay-first" in d for d in result.dropped)
-    assert not result.degraded  # measured read, not unmeasured
+    assert not result.degraded
 
 
 def test_high3_measured_active_debt_withdraw_kept_when_repay_present():
@@ -443,17 +395,9 @@ def test_high3_staircase_withdraws_not_dropped_by_active_debt_branch():
     staircase = _staircase()
     result = sanitize_lending_teardown_intents(staircase, market)
 
-    # Order preserved, NOTHING dropped — the first WITHDRAW(slice) survives even
-    # though it precedes the repays in execution order (has_repay is per-position
-    # over the whole plan).
     assert result.intents == staircase
     assert _types(result.intents)[0] == "WITHDRAW"
     assert not result.dropped
-
-
-# ---------------------------------------------------------------------------
-# HIGH #1: protocol-name normalization for grouping + reads
-# ---------------------------------------------------------------------------
 
 
 def test_high1_protocol_aliases_group_as_one_position():
@@ -464,7 +408,6 @@ def test_high1_protocol_aliases_group_as_one_position():
     withdraw = Intent.withdraw(protocol="aave_v3", token="WETH", amount=Decimal("0"), withdraw_all=True, chain=_CHAIN)
     result = sanitize_lending_teardown_intents([repay, withdraw], market)
 
-    # One distinct position → exactly one fresh read; repay-first kept together.
     assert market.reads == 1
     assert _types(result.intents) == ["REPAY", "WITHDRAW"]
 
@@ -480,14 +423,8 @@ def test_high1_morpho_alias_normalizes_and_groups():
         protocol="morpho_blue", token="WETH", amount=Decimal("0"), withdraw_all=True, market_id=mid, chain=_CHAIN
     )
     result = sanitize_lending_teardown_intents([repay, withdraw], market)
-    assert market.reads == 1  # one canonical position
+    assert market.reads == 1
     assert _types(result.intents) == ["REPAY", "WITHDRAW"]
-
-
-# ---------------------------------------------------------------------------
-# VIB-4466 / VIB-589: synthesise the HF-safe staircase when the naive plan would
-# STRAND (wallet cannot fully repay live debt -> dust debt -> withdraw-all reverts)
-# ---------------------------------------------------------------------------
 
 
 class _RichHealth:
@@ -550,20 +487,17 @@ def test_vib4466_wallet_cannot_cover_debt_synthesizes_staircase():
     """Wallet holds less debt token than the live debt (the bug) -> the naive
     REPAY->WITHDRAW(all) is replaced with the HF-safe unwind staircase, which
     sources the interest shortfall from collateral before the final withdraw-all."""
-    # collateral 2.3 WETH = $2300; debt $1150; wallet 1140 USDC (< $1150 debt).
+    # The $10 debt-token shortfall forces staircase synthesis.
     market = _RichMarket(
         collateral_usd=Decimal("2300"), debt_usd=Decimal("1150"), lltv=Decimal("0.8"), wallet_usdc=Decimal("1140")
     )
     result = sanitize_lending_teardown_intents(_plain_borrow_plan(), market)
 
-    # Synthesised: NOT the naive 2-intent plan — a real staircase ran.
     assert result.synthesized_positions, "expected the position to be synthesised"
     assert not result.degraded
     types = _types(result.intents)
-    # withdraw->swap->repay rounds then a final withdraw-all (more than 2 intents).
     assert len(result.intents) > 2
-    assert "SWAP" in types  # collateral->debt swap to clear the shortfall
-    # The final withdraw is the full withdraw-all (debt is truly zero by then).
+    assert "SWAP" in types
     withdraws = [i for i in result.intents if i.intent_type.value == "WITHDRAW"]
     assert getattr(withdraws[-1], "withdraw_all", False) is True
 
@@ -578,8 +512,6 @@ def test_vib4466_consolidate_to_collateral_not_debt_token():
     )
     result = sanitize_lending_teardown_intents(_plain_borrow_plan(), market)
     swaps = [i for i in result.intents if i.intent_type.value == "SWAP"]
-    # The final (residual sweep) swap must end in the collateral token (WETH),
-    # i.e. sweep stray borrow token back to collateral — never the reverse.
     last_swap = swaps[-1]
     assert last_swap.to_token == "WETH"
     assert last_swap.from_token == "USDC"
@@ -589,7 +521,6 @@ def test_vib4466_wallet_covers_debt_keeps_naive_plan():
     """When the wallet CAN fully repay the live debt, the naive plan works (Aave
     caps the repay at the debt, clearing it, so withdraw-all is safe) — the guard
     must NOT synthesise an unnecessary staircase."""
-    # wallet 2000 USDC > $1150 debt -> covers it.
     market = _RichMarket(
         collateral_usd=Decimal("2300"), debt_usd=Decimal("1150"), lltv=Decimal("0.8"), wallet_usdc=Decimal("2000")
     )
@@ -611,9 +542,8 @@ def test_vib4466_planner_failure_degrades_to_repay_only_no_unsafe_withdraw():
     assert result.degraded
     assert not result.synthesized_positions
     types = _types(result.intents)
-    assert "WITHDRAW" not in types  # the unsafe withdraw_all is withheld
-    assert types == ["REPAY"]  # only the risk-reducing partial repay survives
-    # The kept repay is an explicit partial (never repay_full on degrade).
+    assert "WITHDRAW" not in types
+    assert types == ["REPAY"]
     assert result.intents[0].repay_full is False
     assert any("staircase unavailable" in d for d in result.dropped)
 
@@ -626,7 +556,7 @@ def test_vib4466_dust_debt_below_floor_does_not_synthesize():
     )
     result = sanitize_lending_teardown_intents(_plain_borrow_plan(), market)
     assert not result.synthesized_positions
-    assert _types(result.intents) == ["WITHDRAW"]  # zero-debt -> repay dropped, withdraw kept
+    assert _types(result.intents) == ["WITHDRAW"]
 
 
 def test_vib4466_order_locked_staircase_is_never_resynthesized():
@@ -659,7 +589,6 @@ def test_vib4466_two_independent_positions_each_synthesized_not_order_locked():
         ),
     ]
     result = sanitize_lending_teardown_intents(plan, market)
-    # Both independent positions are strand-proven and synthesised (not order-locked).
     assert len(result.synthesized_positions) == 2
     assert not result.degraded
 
@@ -673,11 +602,11 @@ def test_vib4466_partial_repay_not_covering_debt_synthesizes_even_when_wallet_co
         collateral_usd=Decimal("2300"), debt_usd=Decimal("1150"), lltv=Decimal("0.8"), wallet_usdc=Decimal("2000")
     )
     plan = [
-        Intent.repay(protocol=_PROTOCOL, token="USDC", amount=Decimal("100"), chain=_CHAIN),  # partial < debt
+        Intent.repay(protocol=_PROTOCOL, token="USDC", amount=Decimal("100"), chain=_CHAIN),
         Intent.withdraw(protocol=_PROTOCOL, token="WETH", amount=Decimal("0"), withdraw_all=True, chain=_CHAIN),
     ]
     result = sanitize_lending_teardown_intents(plan, market)
-    assert result.synthesized_positions  # residual debt after the partial repay -> staircase
+    assert result.synthesized_positions
 
 
 def test_vib4466_partial_repay_covering_debt_keeps_naive_when_wallet_covers():
@@ -687,7 +616,7 @@ def test_vib4466_partial_repay_covering_debt_keeps_naive_when_wallet_covers():
         collateral_usd=Decimal("2300"), debt_usd=Decimal("1150"), lltv=Decimal("0.8"), wallet_usdc=Decimal("2000")
     )
     plan = [
-        Intent.repay(protocol=_PROTOCOL, token="USDC", amount=Decimal("1200"), chain=_CHAIN),  # covers 1150 debt
+        Intent.repay(protocol=_PROTOCOL, token="USDC", amount=Decimal("1200"), chain=_CHAIN),
         Intent.withdraw(protocol=_PROTOCOL, token="WETH", amount=Decimal("0"), withdraw_all=True, chain=_CHAIN),
     ]
     result = sanitize_lending_teardown_intents(plan, market)
@@ -703,7 +632,7 @@ def test_vib4466_partial_withdraw_not_all_is_never_synthesized():
     )
     plan = [
         Intent.repay(protocol=_PROTOCOL, token="USDC", repay_full=True, chain=_CHAIN),
-        Intent.withdraw(protocol=_PROTOCOL, token="WETH", amount=Decimal("0.5"), chain=_CHAIN),  # partial, not all
+        Intent.withdraw(protocol=_PROTOCOL, token="WETH", amount=Decimal("0.5"), chain=_CHAIN),
     ]
     result = sanitize_lending_teardown_intents(plan, market)
     assert not result.synthesized_positions
@@ -724,8 +653,7 @@ def test_vib4466_multi_partial_repay_then_withdraw_all_does_not_bypass_strand_gu
         Intent.withdraw(protocol=_PROTOCOL, token="WETH", amount=Decimal("0"), withdraw_all=True, chain=_CHAIN),
     ]
     result = sanitize_lending_teardown_intents(plan, market)
-    assert result.synthesized_positions  # strand-proven -> staircase, not a bare withdraw-all
-    # The raw multi-partial plan is gone; the dispatched plan is the synthesized staircase.
+    assert result.synthesized_positions
     assert result.intents != plan
 
 
@@ -745,17 +673,8 @@ def test_vib4466_mode_soft_vs_hard_changes_synthesized_slippage():
     soft = staircase_swap_slippages(TeardownMode.SOFT)
     hard = staircase_swap_slippages(TeardownMode.HARD)
     assert soft and hard, "both modes should emit collateral->debt swaps with a slippage cap"
-    # HARD widens the slippage cap relative to SOFT (emergency unwind makes progress).
+    # Emergency unwinds trade a wider slippage cap for forward progress.
     assert max(hard) > max(soft)
-
-
-# ---------------------------------------------------------------------------
-# VIB-5468 / VIB-5484: "unmeasured ⇒ unsafe" + USD-aggregate vs aToken-balance
-# conflation. A zero-debt withdraw must not be stranded when the account-level
-# USD collateral aggregate is zero (LTV=0 / isolation supply) or the account read
-# came back spuriously unmeasured, as long as a fresh per-reserve on-chain read
-# confirms a withdrawable aToken balance with no debt.
-# ---------------------------------------------------------------------------
 
 
 class _ReserveMarket:
@@ -838,7 +757,7 @@ def test_vib5484_ltv0_supply_zero_aggregate_but_atoken_balance_keeps_withdraw():
     )
     result = sanitize_lending_teardown_intents([_withdraw_all()], market)
     assert _types(result.intents) == ["WITHDRAW"]
-    assert market.balance_reads == 1  # the un-conflated on-chain fallback ran
+    assert market.balance_reads == 1
     assert not result.dropped
 
 
@@ -863,13 +782,13 @@ def test_vib5484_zero_aggregate_with_active_debt_does_not_keep_via_atoken():
     debt_is_zero) — a withdraw with active debt and no repay stays refused."""
     market = _ReserveMarket(
         collateral_usd=Decimal("0"),
-        debt_usd=Decimal("500"),  # active debt
+        debt_usd=Decimal("500"),
         reserve_supply_wei=15_550_000_000_000_000_000,
         reserve_debt_wei=0,
     )
     result = sanitize_lending_teardown_intents([_withdraw_all()], market)
     assert result.intents == []
-    assert market.balance_reads == 0  # rescue not attempted under active debt
+    assert market.balance_reads == 0
 
 
 def test_vib5452_fluid_market_id_resolved_from_token_makes_read_measured():
@@ -890,7 +809,7 @@ def test_vib5452_fluid_market_id_resolved_from_token_makes_read_measured():
     )
     result = sanitize_lending_teardown_intents([fluid_withdraw], market)
     assert _types(result.intents) == ["WITHDRAW"]
-    assert market.last_market_id == "USDC"  # resolved from intent.token
+    assert market.last_market_id == "USDC"
     assert not result.degraded
 
 
@@ -923,15 +842,15 @@ def test_vib5468_unmeasured_collateral_but_measured_zero_account_debt_keeps_with
     The keep is gated on the account aggregate (``exposure.debt_is_zero``), NOT on the
     withdraw token's reserve debt (VIB-5468) — see the cross-asset regression below."""
     market = _ReserveMarket(
-        collateral_usd=None,  # collateral USD valuation failed (unmeasured leg)
-        debt_usd=Decimal("0"),  # account-level total debt is a MEASURED zero
+        collateral_usd=None,
+        debt_usd=Decimal("0"),
         reserve_supply_wei=50_000_000,
         reserve_debt_wei=0,
     )
     withdraw = Intent.withdraw(protocol=_PROTOCOL, token="USDC", amount=Decimal("0"), withdraw_all=True, chain=_CHAIN)
     result = sanitize_lending_teardown_intents([withdraw], market)
     assert _types(result.intents) == ["WITHDRAW"]
-    assert result.degraded  # partial (unmeasured collateral) account read -> flagged
+    assert result.degraded
     assert market.balance_reads == 1
 
 
@@ -944,14 +863,14 @@ def test_vib5468_cross_asset_account_debt_not_proxied_by_withdraw_reserve_debt()
     token's ``reserve_debt == 0`` as "no position debt". The withdraw_all is REFUSED."""
     market = _ReserveMarket(
         collateral_usd=None,
-        debt_usd=None,  # account-level debt UNMEASURED — cannot confirm whole-position safety
-        reserve_supply_wei=2_000_000_000_000_000_000,  # 2 WETH aToken present
-        reserve_debt_wei=0,  # WETH reserve carries no debt; the USDC debt is on another reserve
+        debt_usd=None,
+        reserve_supply_wei=2_000_000_000_000_000_000,
+        reserve_debt_wei=0,
         raise_on_health=True,
     )
     withdraw = Intent.withdraw(protocol=_PROTOCOL, token="WETH", amount=Decimal("0"), withdraw_all=True, chain=_CHAIN)
     result = sanitize_lending_teardown_intents([withdraw], market)
-    assert result.intents == []  # NOT kept — per-reserve zero-debt is not whole-position proof
+    assert result.intents == []
     assert any("unmeasured exposure and no repay-first" in d for d in result.dropped)
     assert result.degraded
 
@@ -981,7 +900,7 @@ def test_vib5468_unmeasured_account_read_atoken_with_debt_still_refused():
         collateral_usd=None,
         debt_usd=None,
         reserve_supply_wei=50_000_000,
-        reserve_debt_wei=10_000_000,  # reserve has debt
+        reserve_debt_wei=10_000_000,
         raise_on_health=True,
     )
     withdraw = Intent.withdraw(protocol=_PROTOCOL, token="USDC", amount=Decimal("0"), withdraw_all=True, chain=_CHAIN)
@@ -997,7 +916,7 @@ def test_vib5468_unmeasured_account_and_unmeasured_reserve_stays_conservative():
     market = _ReserveMarket(
         collateral_usd=None,
         debt_usd=None,
-        reserve_supply_wei=None,  # unmeasured fallback
+        reserve_supply_wei=None,
         reserve_debt_wei=None,
         raise_on_health=True,
     )
@@ -1025,15 +944,6 @@ def test_vib5468_older_snapshot_without_balances_method_stays_conservative():
     assert any("unmeasured exposure and no repay-first" in d for d in result.dropped)
 
 
-# ---------------------------------------------------------------------------
-# VIB-5418: Morpho Blue collateral-only teardown on a cross-asset ISOLATED
-# market with EMPTY snapshot prices. The account-level USD read is unmeasured
-# (no price to value the cross-asset market); the fix reads the RAW per-market
-# position and — because the market is isolated (reserve debt == whole-position
-# debt) — KEEPS the zero-debt collateral withdraw_all. Non-isolated protocols
-# stay conservatively refused.
-# ---------------------------------------------------------------------------
-
 _MORPHO_MID = "0x" + "cd" * 32
 
 
@@ -1059,9 +969,9 @@ def test_vib5418_morpho_isolated_collateral_only_empty_prices_unmeasured_stub_dr
     market = _ReserveMarket(
         collateral_usd=None,
         debt_usd=None,
-        reserve_supply_wei=None,  # today's Morpho stub: shares-based supply unreadable
+        reserve_supply_wei=None,
         reserve_debt_wei=None,
-        raise_on_health=True,  # empty prices → cross-asset read unmeasured
+        raise_on_health=True,
     )
     result = sanitize_lending_teardown_intents([_morpho_collateral_withdraw()], market)
     assert result.intents == []
@@ -1078,14 +988,14 @@ def test_vib5418_morpho_isolated_measured_reserve_zero_debt_keeps_withdraw():
     market = _ReserveMarket(
         collateral_usd=None,
         debt_usd=None,
-        reserve_supply_wei=5_000_000_000_000_000_000,  # 5 wstETH collateral (raw uint128)
-        reserve_debt_wei=0,  # borrow_shares == 0 ⇒ no debt (isolated market)
+        reserve_supply_wei=5_000_000_000_000_000_000,  # Raw 5 wstETH collateral.
+        reserve_debt_wei=0,  # borrow_shares == 0 means measured zero debt.
         raise_on_health=True,
     )
     result = sanitize_lending_teardown_intents([_morpho_collateral_withdraw()], market)
     assert _types(result.intents) == ["WITHDRAW"]
-    assert market.balance_reads == 1  # the raw per-reserve read ran
-    assert result.degraded  # account read was unmeasured → still flagged
+    assert market.balance_reads == 1
+    assert result.degraded
 
 
 def test_vib5418_morpho_isolated_measured_reserve_with_debt_still_refused():
@@ -1096,7 +1006,7 @@ def test_vib5418_morpho_isolated_measured_reserve_with_debt_still_refused():
         collateral_usd=None,
         debt_usd=None,
         reserve_supply_wei=5_000_000_000_000_000_000,
-        reserve_debt_wei=1_000_000,  # borrow_shares > 0 ⇒ open debt
+        reserve_debt_wei=1_000_000,  # Positive borrow_shares means open debt.
         raise_on_health=True,
     )
     result = sanitize_lending_teardown_intents([_morpho_collateral_withdraw()], market)
@@ -1113,8 +1023,8 @@ def test_vib5418_morpho_isolated_measured_supply_unmeasured_debt_still_refused()
     market = _ReserveMarket(
         collateral_usd=None,
         debt_usd=None,
-        reserve_supply_wei=5_000_000_000_000_000_000,  # collateral measured
-        reserve_debt_wei=None,  # debt leg UNMEASURED — cannot prove zero
+        reserve_supply_wei=5_000_000_000_000_000_000,
+        reserve_debt_wei=None,  # An unmeasured debt leg cannot prove zero debt.
         raise_on_health=True,
     )
     result = sanitize_lending_teardown_intents([_morpho_collateral_withdraw()], market)
@@ -1142,12 +1052,6 @@ def test_vib5418_non_isolated_measured_reserve_zero_debt_still_refused():
     result = sanitize_lending_teardown_intents([withdraw], market)
     assert result.intents == []
     assert any("unmeasured exposure and no repay-first" in d for d in result.dropped)
-
-
-# ---------------------------------------------------------------------------
-# VIB-5493: token-keyed (Fluid fToken) positions are keyed PER TOKEN, while
-# account/vault-keyed protocols (Aave family, fluid_vault) stay grouped.
-# ---------------------------------------------------------------------------
 
 
 class _FluidMarket:
@@ -1188,7 +1092,6 @@ def test_vib5493_two_live_fluid_supplies_are_two_positions_both_kept():
     result = sanitize_lending_teardown_intents([_fluid_withdraw("USDC"), _fluid_withdraw("USDT")], market)
     kept_tokens = [i.token for i in result.intents]
     assert kept_tokens == ["USDC", "USDT"]
-    # One exposure read per distinct token-keyed position (not one shared read).
     assert sorted(market.reads) == ["usdc", "usdt"]
     assert not result.dropped
 
@@ -1201,11 +1104,8 @@ def test_vib5493_fluid_empty_first_does_not_silently_drop_live_second():
     market = _FluidMarket({"USDC": Decimal("0"), "USDT": Decimal("500")})
     result = sanitize_lending_teardown_intents([_fluid_withdraw("USDC"), _fluid_withdraw("USDT")], market)
     kept_tokens = [i.token for i in result.intents]
-    assert kept_tokens == ["USDT"]  # live second supply survives
-    # Only the genuinely-empty USDC supply is dropped (measured zero collateral).
+    assert kept_tokens == ["USDT"]
     assert any("measured zero collateral" in d for d in result.dropped)
-    # USDT must NOT appear in no_op_positions (it is live, not flat) — the old
-    # collapsed key reported it as a flat no_op and never closed it.
     assert all("usdt" not in p for p in result.no_op_positions)
 
 
@@ -1226,9 +1126,7 @@ def test_vib5493_aave_collateral_plus_borrow_stays_one_group():
     withdraw = Intent.withdraw(protocol="aave_v3", token="WETH", amount=Decimal("0"), withdraw_all=True, chain=_CHAIN)
     repay = Intent.repay(protocol="aave_v3", token="USDC", repay_full=True, chain=_CHAIN)
     result = sanitize_lending_teardown_intents([withdraw, repay], market)
-    # One grouped position → exactly one exposure read.
     assert market.reads == 1
-    # Repay-before-withdraw within the single group.
     assert _types(result.intents) == ["REPAY", "WITHDRAW"]
 
 
@@ -1244,14 +1142,9 @@ def test_vib5493_fluid_vault_collateral_plus_debt_stays_grouped_by_market_id():
     )
     repay = Intent.repay(protocol="fluid_vault", token="USDC", market_id=vault, repay_full=True, chain=_CHAIN)
     result = sanitize_lending_teardown_intents([withdraw, repay], market)
-    assert market.reads == 1  # single vault-keyed position
+    assert market.reads == 1
     assert _types(result.intents) == ["REPAY", "WITHDRAW"]
 
-
-# ---------------------------------------------------------------------------
-# VIB-5775: synthetic-market resolution in _read_exposure so euler/silo aren't
-# stranded with a bare-token market_id that position_health cannot resolve.
-# ---------------------------------------------------------------------------
 
 _AVALANCHE = "avalanche"
 
@@ -1274,7 +1167,7 @@ class _CapturingMarket:
         self._strict_id = strict_id
         self._prices = prices or {}
         self.reads: list[str] = []
-        self.calls: list[dict[str, Any]] = []  # captured position_health kwargs
+        self.calls: list[dict[str, Any]] = []
 
     def position_health(
         self,
@@ -1310,13 +1203,13 @@ def test_vib5775_read_exposure_uses_resolved_synthetic_id_not_bare_token() -> No
     from almanak.connectors.euler_v2.lending_read import _synthesize_market_id
 
     expected = _synthesize_market_id(_AVALANCHE, "WAVAX", "USDC")
-    assert expected == "wavax/usdc"  # sanity: directed pair, not the bare token
+    assert expected == "wavax/usdc"
 
     market = _CapturingMarket(collateral_usd=Decimal("1000"), debt_usd=Decimal("400"))
     exposure = _read_exposure(market, _euler_withdraw(), collateral_token="WAVAX", borrow_token="USDC")
 
-    assert market.reads == ["wavax/usdc"]  # resolved directed-pair id, NOT "WAVAX"
-    assert exposure.measured  # measured collateral + debt (not unmeasured)
+    assert market.reads == ["wavax/usdc"]
+    assert exposure.measured
     assert exposure.collateral_usd == Decimal("1000")
     assert exposure.debt_usd == Decimal("400")
 
@@ -1337,7 +1230,7 @@ def test_vib5775_euler_withdraw_kept_end_to_end_via_resolved_id() -> None:
     result = sanitize_lending_teardown_intents([_euler_repay("USDC"), _euler_withdraw("WAVAX")], market)
     assert "wavax/usdc" in market.reads
     assert "WAVAX" not in market.reads and "wavax" not in market.reads
-    assert _types(result.intents) == ["REPAY", "WITHDRAW"]  # both risk-reducing legs kept
+    assert _types(result.intents) == ["REPAY", "WITHDRAW"]
 
 
 def test_vib5775_fluid_still_falls_back_to_token_not_resolver() -> None:
@@ -1349,7 +1242,7 @@ def test_vib5775_fluid_still_falls_back_to_token_not_resolver() -> None:
     )
     market.chain = _CHAIN
     _read_exposure(market, fluid_withdraw, collateral_token="USDC", borrow_token=None)
-    assert market.reads == ["USDC"]  # bare token, not a synthetic composite
+    assert market.reads == ["USDC"]
 
 
 def test_vib5775_explicit_market_id_bypasses_resolver() -> None:
@@ -1377,16 +1270,9 @@ def test_vib5775_explicit_market_id_bypasses_resolver() -> None:
         )
         _read_exposure(market, morpho_withdraw, collateral_token="wstETH", borrow_token="USDC")
         assert market.reads == ["0xMARKET"]
-        assert called == []  # resolver never invoked when an explicit id is present
+        assert called == []
     finally:
         guard._resolve_ref_market_id = real  # type: ignore[assignment]
-
-
-# ---------------------------------------------------------------------------
-# VIB-5775 surgical form: single-sided position on a TWO-LEG (pair) market must be
-# valued by SUPPLYING the market's own loan-leg price — never by blanking the
-# present collateral price (which would drop euler/silo to unit price + dust-flip).
-# ---------------------------------------------------------------------------
 
 
 def _silo_withdraw(token: str = "USDC") -> Any:
@@ -1399,17 +1285,17 @@ def test_vib5775_silo_single_sided_supplies_both_real_prices() -> None:
     leg WAVAX (priced from params) — so ``_build_price_oracle_dict`` never sees a
     partial pair. collateral_usd stays REAL (no unit-price dust flip)."""
     market = _CapturingMarket(
-        collateral_usd=Decimal("5"),  # $5 USDC supply
+        collateral_usd=Decimal("5"),
         debt_usd=Decimal("0"),
         prices={"USDC": Decimal("1"), "WAVAX": Decimal("30")},
     )
     exposure = _read_exposure(market, _silo_withdraw("USDC"), collateral_token="USDC", borrow_token=None)
 
-    assert market.reads == ["usdc/wavax"]  # resolved two-leg pair id
+    assert market.reads == ["usdc/wavax"]
     call = market.calls[-1]
-    assert call["collateral_price_usd"] == Decimal("1")  # real USDC override
-    assert call["debt_price_usd"] == Decimal("30")  # loan leg (WAVAX) supplied from params
-    assert exposure.measured and not exposure.collateral_is_zero  # real, not dust
+    assert call["collateral_price_usd"] == Decimal("1")
+    assert call["debt_price_usd"] == Decimal("30")
+    assert exposure.measured and not exposure.collateral_is_zero
 
 
 def test_vib5775_silo_single_sided_withdraw_kept_end_to_end() -> None:
@@ -1421,8 +1307,8 @@ def test_vib5775_silo_single_sided_withdraw_kept_end_to_end() -> None:
         prices={"USDC": Decimal("1"), "WAVAX": Decimal("30")},
     )
     result = sanitize_lending_teardown_intents([_silo_withdraw("USDC")], market)
-    assert [i.intent_type.value for i in result.intents] == ["WITHDRAW"]  # not dropped
-    assert market.calls[-1]["debt_price_usd"] == Decimal("30")  # loan leg was supplied
+    assert [i.intent_type.value for i in result.intents] == ["WITHDRAW"]
+    assert market.calls[-1]["debt_price_usd"] == Decimal("30")
 
 
 def test_vib5775_euler_single_leg_single_supply_keeps_real_collateral_price() -> None:
@@ -1438,10 +1324,10 @@ def test_vib5775_euler_single_leg_single_supply_keeps_real_collateral_price() ->
     )
     exposure = _read_exposure(market, _euler_withdraw("WAVAX"), collateral_token="WAVAX", borrow_token=None)
 
-    assert market.reads == ["wavax"]  # single-leg id (loan_token None)
+    assert market.reads == ["wavax"]
     call = market.calls[-1]
-    assert call["collateral_price_usd"] == Decimal("30")  # REAL price, NOT blanked to None
-    assert call["debt_price_usd"] is None  # no loan leg to supply
+    assert call["collateral_price_usd"] == Decimal("30")
+    assert call["debt_price_usd"] is None
     assert exposure.measured and not exposure.collateral_is_zero
 
 
@@ -1456,7 +1342,7 @@ def test_vib5775_two_sided_passes_both_real_prices_unchanged() -> None:
     _read_exposure(market, _euler_withdraw("WAVAX"), collateral_token="WAVAX", borrow_token="USDC")
     call = market.calls[-1]
     assert call["collateral_price_usd"] == Decimal("30")
-    assert call["debt_price_usd"] == Decimal("1")  # from borrow_token, not the params lookup
+    assert call["debt_price_usd"] == Decimal("1")
 
 
 def test_vib5775_two_sided_unpriceable_borrow_stays_partial() -> None:
@@ -1471,7 +1357,7 @@ def test_vib5775_two_sided_unpriceable_borrow_stays_partial() -> None:
     _read_exposure(market, _euler_withdraw("WAVAX"), collateral_token="WAVAX", borrow_token="USDC")
     call = market.calls[-1]
     assert call["collateral_price_usd"] == Decimal("30")
-    assert call["debt_price_usd"] is None  # unpriceable loan leg not fabricated
+    assert call["debt_price_usd"] is None
 
 
 def test_vib5775_fluid_token_keyed_passes_lone_collateral_no_loan_leg() -> None:
@@ -1482,16 +1368,8 @@ def test_vib5775_fluid_token_keyed_passes_lone_collateral_no_loan_leg() -> None:
         protocol="fluid", token="USDC", amount=Decimal("0"), withdraw_all=True, chain=_CHAIN
     )
     _read_exposure(market, fluid_withdraw, collateral_token="USDC", borrow_token=None)
-    assert market.reads == ["USDC"]  # bare token, not a synthetic composite
-    assert market.calls[-1]["debt_price_usd"] is None  # no loan leg supplied
-
-
-# ---------------------------------------------------------------------------
-# VIB-5775 silent-error gate (D3.F6): the exposure-read failure path must NOT be
-# silent. Before VIB-5775 the guard swallowed the read exception and returned
-# unmeasured with NO log, hiding the euler/silo strand. These lock BOTH halves of
-# the D3.F6 contract: the degraded state AND the emitted log line.
-# ---------------------------------------------------------------------------
+    assert market.reads == ["USDC"]
+    assert market.calls[-1]["debt_price_usd"] is None
 
 
 class _RaisingHealthMarket:
@@ -1518,18 +1396,16 @@ def test_vib5775_exposure_read_failure_is_unmeasured_and_warns(caplog: pytest.Lo
     with caplog.at_level(logging.WARNING, logger=_GUARD_LOGGER):
         exposure = _read_exposure(market, _euler_withdraw("USDC"), collateral_token="USDC", borrow_token=None)
 
-    # Degraded state: unmeasured, NOT a fabricated zero.
     assert exposure.collateral_usd is None
     assert exposure.debt_usd is None
     assert not exposure.measured
 
-    # Emitted log: a WARNING that names the failure, protocol, and resolved market.
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING and r.name == _GUARD_LOGGER]
     assert warnings, "exposure-read failure must emit a WARNING (no silent swallow)"
     msg = warnings[-1].getMessage().lower()
     assert "exposure read failed" in msg
     assert "euler_v2" in msg
-    assert "usdc" in msg  # the resolved market id appears (not blank)
+    assert "usdc" in msg
 
 
 def test_vib5775_loan_leg_enrichment_failure_degrades_and_logs_debug(
@@ -1543,8 +1419,6 @@ def test_vib5775_loan_leg_enrichment_failure_degrades_and_logs_debug(
     def _boom(*_args: Any, **_kwargs: Any) -> Any:
         raise RuntimeError("params backend down")
 
-    # Force the enrichment's market_params lookup to raise. The read itself still
-    # succeeds (single-sided silo: collateral priced, borrow leg absent).
     monkeypatch.setattr(LendingReadRegistry, "market_params", classmethod(_boom))
 
     market = _CapturingMarket(
@@ -1555,10 +1429,8 @@ def test_vib5775_loan_leg_enrichment_failure_degrades_and_logs_debug(
     with caplog.at_level(logging.DEBUG, logger=_GUARD_LOGGER):
         exposure = _read_exposure(market, _silo_withdraw("USDC"), collateral_token="USDC", borrow_token=None)
 
-    # Degraded, not crashed: the lone REAL collateral override still flows through
-    # (debt leg not fabricated), and the collateral read is measured.
     assert market.calls[-1]["collateral_price_usd"] == Decimal("1")
-    assert market.calls[-1]["debt_price_usd"] is None  # loan leg could not be supplied → not fabricated
+    assert market.calls[-1]["debt_price_usd"] is None
     assert exposure.measured
 
     debugs = [
@@ -1582,7 +1454,7 @@ class _PerIdRaisingMarket:
         self.reads.append(market_id)
         if market_id in self._raise:
             raise RuntimeError(f"gateway UNAVAILABLE for {market_id}")
-        return _Health(Decimal("100"), Decimal("0"))  # measured, zero-debt
+        return _Health(Decimal("100"), Decimal("0"))
 
     def price(self, token: str) -> Decimal:
         return Decimal("1")
@@ -1596,8 +1468,7 @@ def test_vib5775_faulting_position_is_loud_but_does_not_block_other_withdraw(
     withdraw_all is dropped as unmeasured and the loud WARNING fires — while position B, a
     live independent position, keeps + dispatches its WITHDRAW. One position's read fault
     must never strand another's risk-reducing intent."""
-    # Fluid keys each token as its own position → A (USDC) and B (WETH) are independent.
-    market = _PerIdRaisingMarket(raise_ids={"USDC"}, chain=_CHAIN)  # A=USDC raises; B=WETH measured
+    market = _PerIdRaisingMarket(raise_ids={"USDC"}, chain=_CHAIN)
     a_withdraw = Intent.withdraw(protocol="fluid", token="USDC", amount=Decimal("0"), withdraw_all=True, chain=_CHAIN)
     b_withdraw = Intent.withdraw(protocol="fluid", token="WETH", amount=Decimal("0"), withdraw_all=True, chain=_CHAIN)
 
@@ -1605,17 +1476,15 @@ def test_vib5775_faulting_position_is_loud_but_does_not_block_other_withdraw(
         result = sanitize_lending_teardown_intents([a_withdraw, b_withdraw], market)
 
     kept = [(i.protocol, i.token, i.intent_type.value) for i in result.intents]
-    # B survives; A is dropped (unmeasured standalone withdraw_all) — non-blocking.
     assert ("fluid", "WETH", "WITHDRAW") in kept
     assert ("fluid", "USDC", "WITHDRAW") not in kept
-    # A's fault was LOUD, not silent.
     warnings = [
         r
         for r in caplog.records
         if r.levelno == logging.WARNING and r.name == _GUARD_LOGGER and "exposure read failed" in r.getMessage().lower()
     ]
     assert warnings, "the faulting position must emit a WARNING (loud, not silent)"
-    assert "usdc" in warnings[-1].getMessage().lower()  # names the faulting position
+    assert "usdc" in warnings[-1].getMessage().lower()
 
 
 def test_vib5775_benqi_whole_account_ref_resolves_fixed_id_and_keeps() -> None:
@@ -1629,7 +1498,7 @@ def test_vib5775_benqi_whole_account_ref_resolves_fixed_id_and_keeps() -> None:
         protocol="benqi", token="USDC", amount=Decimal("0"), withdraw_all=True, chain=_AVALANCHE
     )
     exposure = _read_exposure(market, benqi_withdraw, collateral_token="USDC", borrow_token=None)
-    assert market.reads == ["benqi"]  # fixed whole-account id, NOT the bare "USDC" token
+    assert market.reads == ["benqi"]
     assert exposure.measured
     result = sanitize_lending_teardown_intents([benqi_withdraw], market)
-    assert [i.intent_type.value for i in result.intents] == ["WITHDRAW"]  # kept, not dropped
+    assert [i.intent_type.value for i in result.intents] == ["WITHDRAW"]
