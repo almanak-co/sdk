@@ -2560,8 +2560,9 @@ def compile_lp_open_aerodrome_slipstream(compiler, intent: LPOpenIntent) -> Comp
         from almanak.connectors.aerodrome import AerodromeAdapter, AerodromeConfig
 
         # Two admission lanes, one resolved shape. A bare address is exact and
-        # authenticated against the pool's own reviewed factory; a
-        # symbolic key is resolved through the current reviewed factory.
+        # authenticated against the pool's own reviewed factory; a symbolic
+        # key is resolved by probing every reviewed factory generation and
+        # refusing if more than one owns a pool for the key.
         if _looks_like_bare_pool(intent.pool):
             resolved = _resolve_exact_slipstream_pool(compiler, intent.pool, intent.intent_id)
         else:

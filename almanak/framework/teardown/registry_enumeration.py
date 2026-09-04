@@ -236,7 +236,7 @@ def _lp_nft_parts(position: PositionInfo) -> tuple[str, str] | None:
     if token_id is None:
         return None
     details = position.details if isinstance(position.details, dict) else {}
-    raw_manager = next((details.get(key) for key in _LP_MANAGER_DETAIL_KEYS if details.get(key)), None)
+    raw_manager = next((details[key] for key in _LP_MANAGER_DETAIL_KEYS if str(details.get(key) or "").strip()), None)
     if raw_manager:
         return str(token_id), str(raw_manager).strip().lower()
     return str(token_id), _derived_lp_manager(str(position.protocol or ""), str(position.chain or ""))

@@ -412,6 +412,14 @@ def test_registry_authority_replaces_a_whitespace_only_strategy_alias() -> None:
     assert registry_enumeration_module._lp_nft_parts(out.positions[0]) == ("42", manager)
 
 
+def test_lp_nft_parts_skips_a_blank_higher_precedence_alias_for_a_valid_lower_one() -> None:
+    position = _lp("42", protocol="aerodrome_slipstream")
+    manager = "0x" + "ab" * 20
+    position.details = {"nft_manager_addr": " \t ", "position_manager": manager}
+
+    assert registry_enumeration_module._lp_nft_parts(position) == ("42", manager)
+
+
 def test_conflicting_registry_manager_aliases_are_not_merged() -> None:
     strategy = _lp("42")
     registry = _lp("42", nft_manager_addr="0x" + "ab" * 20)
