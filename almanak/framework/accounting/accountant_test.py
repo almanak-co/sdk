@@ -74,22 +74,14 @@ from almanak.framework.valuation.net_debt import (
 
 logger = logging.getLogger(__name__)
 
-# VIB-4201 (T15): close-event allow-list for cell #22.
-# Materialized once at module import from the canonical taxonomy.
-# A unit test (`test_cell22_sql_close_list_equals_taxonomy`) asserts
-# this tuple stays in lock-step with the SQL CTE in cell #22's predicate
-# so a future taxonomy addition is loud, not silently under-counting.
+# Derived from the taxonomy so registry-coherence checks cover every close event.
+# Keep the corresponding SQL CTE in lockstep; a unit test enforces this.
 CLOSE_EVENT_TYPES: tuple[str, ...] = tuple(
     sorted(intent for intent, rec in TAXONOMY.items() if rec.event_kind == EventKind.CLOSE)
 )
 
-# The scorecard-profile string contract: the stable keys used by the ratchet,
-# matrix YAML, CLI, fixture directories, and the accounting unit tests. This is
-# NOT the canonical ``Primitive`` enum — ``"looping"`` is a leverage-loop
-# *lending* scorecard with no enum twin. Each profile carries its canonical
-# ``Primitive`` via ``SCORECARD_PROFILES`` (assembled below). ``Primitive`` is
-# kept as a back-compat alias: it is exported in ``__all__`` and referenced by
-# annotations throughout this module.
+# Profile keys are a stable external contract and are distinct from taxonomy primitives;
+# for example, ``looping`` is a lending scorecard with no primitive enum twin.
 ProfileName = Literal[
     "spot",
     "lp",
@@ -103,13 +95,6 @@ ProfileName = Literal[
 ]
 Primitive = ProfileName
 CellStatus = Literal["PASS", "FAIL", "XFAIL", "SKIP"]
-
-
-# VIB-4162 (T2): canonical lifecycle expectations per primitive now live on each
-# ``ScorecardProfile.required_lifecycle`` (see ``SCORECARD_PROFILES`` below). The
-# lifecycle harness reads them through the registry; a unit test asserts each
-# tuple equals the taxonomy lifecycle constant for the profile's canonical
-# primitive, so the explicit tuple cannot silently drift from the taxonomy.
 
 
 class FixtureLifecycleError(AssertionError):
@@ -147,20 +132,10 @@ def _assert_fixture_lifecycle(
     profile = _profile_for(primitive)
     expected = set(profile.required_lifecycle)
     if not expected:
-        # An atomic primitive (e.g. pendle_pt: SWAP has no multi-step
-        # lifecycle constant) declares an empty required_lifecycle — its
-        # round-trip is enforced by its cell pack, not this guard. Unknown
-        # profiles never reach here: _profile_for raises above.
+        # Atomic primitive round trips are enforced by their cell packs.
         return
-    # VIB-6043 leg 2: a step that LANDED but was accounting-degraded still
-    # happened — the lifecycle question is "did this primitive complete its
-    # round trip?", not "were the books clean?". Without the degraded arm a
-    # degraded LP_CLOSE (the VIB-6051 shape this guard targets) drops out of
-    # ``actual`` and this raises FixtureLifecycleError, so NO cells score at
-    # all — the audit tool would abort on exactly the input it exists to
-    # measure, and G1 would never get the chance to report the real defect.
-    # Predicate imported, not inlined — see ``ledger_guard.landed_sql`` for why
-    # the prefix match uses substr rather than LIKE.
+    # Lifecycle records chain-landed steps even when their accounting verdict is degraded;
+    # otherwise the audit would abort before cells can report the accounting defect.
     if deployment_id is None:
         cur = conn.execute(
             f"SELECT DISTINCT intent_type FROM transaction_ledger WHERE {_landed_sql()}",
@@ -180,12 +155,8 @@ def _assert_fixture_lifecycle(
         )
 
 
-# Cells that render in the report but are EXCLUDED from the >=16/21 gating
-# denominator. A cell lands here when it is newly introduced: the bar was set
-# against the cells that existed when it was set, so silently folding a new cell
-# into the denominator moves the bar for every prior run and makes scores
-# non-comparable. Being informational is about GATING ARITHMETIC only -- these
-# cells still evaluate, still render, and still report FAIL loudly.
+# These cells remain visible and strict but are excluded from the historical
+# 21-cell denominator so scores remain comparable across runs.
 _INFORMATIONAL_CELL_IDS = frozenset({"L5_22", "G16", "G17"})
 
 
@@ -219,21 +190,9 @@ class AccountantReport:
     on_chain_footprint: list[dict[str, Any]] = field(default_factory=list)
     g6_decomposition: dict[str, Any] = field(default_factory=dict)
     db_dump_path: str | None = None
-    # VIB-3868: every accounting_events row whose payload failed Pydantic
-    # validation against payload_schemas.py. Cells that read this row's
-    # payload FAIL with the captured error — the permissive `_json` helper
-    # used to silently substitute `{}` for malformed payloads, hiding the
-    # contract drift.
     payload_validation_errors: list[dict[str, Any]] = field(default_factory=list)
-    # VIB-3868: list of cells that flipped to FAIL specifically because of
-    # an upstream payload validation error. Lets reviewers triage cell-status
-    # changes between runs without re-deriving the propagation by hand.
     cells_blocked_by_payload_errors: list[str] = field(default_factory=list)
-    # VIB-5540: non-failing N-leg reconciliation diagnostics computed by
-    # ``run_against_sqlite`` (Seam A snapshot-coverage + Seam B LP5-principal).
-    # Empty on a post-fix DB and on any fixture with no ``coin_symbols``; a
-    # Seam-A/B regression on a real run makes this non-empty and visible in the
-    # report without changing a cell status. See the invariant helpers below.
+    # N-leg findings are diagnostic-only and do not change cell status.
     nleg_invariant_findings: list[str] = field(default_factory=list)
 
     @property
@@ -308,7 +267,6 @@ class AccountantReport:
         if self.db_dump_path:
             lines.append(f"- DB: `{self.db_dump_path}`")
         lines.append("")
-        # Score
         generic = [c for c in self.cells if c.cell_id.startswith("G") and c.cell_id not in _INFORMATIONAL_CELL_IDS]
         prim = [c for c in self.cells if not c.cell_id.startswith("G") and c.cell_id not in _INFORMATIONAL_CELL_IDS]
         informational = [c for c in self.cells if c.cell_id in _INFORMATIONAL_CELL_IDS]
@@ -326,25 +284,7 @@ class AccountantReport:
         if informational:
             lines.append(f"- Informational {len(informational)}: {_score(informational)}")
         lines.append(f"- Total: {self.passed}/{self.total_cells} PASS, {self.failed} FAIL, {self.xfailed} XFAIL")
-        # VIB-4201 (T15): cell L5_22 is informational only — not in the
-        # ≥16/21 gating sum. The gating line below partitions the original
-        # 21 cells from cell #22 explicitly so a FAIL on #22 stays visible
-        # but does not degrade gating arithmetic. If L5_22 is absent for
-        # any reason (legacy back-compat caller, primitive that does not
-        # produce a 22nd cell), the gating line still renders against the
-        # 21 cells with status="absent".
-        #
-        # VIB-6061: G16 (native lane) joins L5_22 as informational-only for the
-        # same reason and on the same precedent — a newly-introduced cell must not
-        # silently move the ≥16/21 bar it was never scored against. It is excluded
-        # from the denominator, not from the report: it renders as a normal row and
-        # its status is called out below, so a FAIL is impossible to miss while the
-        # gating arithmetic stays comparable with every prior run.
-        #
-        # G17 follows the same rollout rule. It is a strict invariant over the
-        # persisted landed receipt set, but cannot be folded into a historical
-        # denominator that pre-dates the cell without making prior scores
-        # incomparable.
+        # Informational cells render normally but do not change the historical denominator.
         gated_cells = [c for c in self.cells if c.cell_id not in _INFORMATIONAL_CELL_IDS]
         cell22 = next((c for c in self.cells if c.cell_id == "L5_22"), None)
         g16 = next((c for c in self.cells if c.cell_id == "G16"), None)
@@ -361,7 +301,6 @@ class AccountantReport:
         )
         lines.append("")
         lines.append("## Cells")
-        # MD058: blank line between heading and table.
         lines.append("")
         lines.append("| ID | Description | Status | Diagnostic |")
         lines.append("|---|---|---|---|")
@@ -375,8 +314,6 @@ class AccountantReport:
                 lines.append(f"- {k}: {v}")
             lines.append("")
         if self.payload_validation_errors:
-            # VIB-3868: surface schema mismatches at top level so reviewers
-            # can triage them without combing through cell diagnostics.
             lines.append("## Payload validation errors")
             lines.append("")
             for rec in self.payload_validation_errors:
@@ -388,10 +325,6 @@ class AccountantReport:
                 lines.append(f"_Cells blocked by validation errors: {', '.join(self.cells_blocked_by_payload_errors)}_")
             lines.append("")
         if self.nleg_invariant_findings:
-            # VIB-5540: N-leg reconciliation diagnostics (non-failing). Their
-            # presence means a returned coin fell out of the equity universe
-            # (Seam A) or a fungible-close principal diverged from the measured
-            # cost_basis (Seam B) on this DB — investigate before trusting NAV.
             lines.append("## N-leg reconciliation diagnostics (VIB-5540)")
             lines.append("")
             for finding in self.nleg_invariant_findings:
@@ -409,9 +342,6 @@ class AccountantReport:
         return "\n".join(lines)
 
 
-# ─── DB read helpers ─────────────────────────────────────────────────────
-
-
 def _connect(db_path: str | Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
@@ -426,10 +356,6 @@ _ALLOWED_READ_TABLES: frozenset[str] = frozenset(
         "portfolio_snapshots",
         "portfolio_metrics",
         "position_state_snapshots",
-        # VIB-4201 (T15): cell #22 reads position_registry.
-        # The table may be absent on pre-T11 fixtures; ``_table_rows`` returns
-        # ``[]`` on a missing table (sqlite3.OperationalError caught), which
-        # routes the cell to its "registry-absent" branch.
         "position_registry",
     }
 )
@@ -471,21 +397,12 @@ def _table_rows(
                 (deployment_id,),
             )
     except sqlite3.OperationalError:
-        # Table missing or (when ``deployment_id`` is supplied) the column
-        # is absent on an older schema. Either case collapses to "no rows"
-        # so callers get the same back-compat shape they had before VIB-4540.
+        # Missing tables or deployment columns represent an unavailable read surface.
         return []
     return [dict(r) for r in cur.fetchall()]
 
 
-# VIB-4540: the small subset of tables whose ``deployment_id`` column is
-# the canonical identity key — querying any one of them is enough to
-# enumerate the deployments present in a folder DB. ``SELECT DISTINCT
-# deployment_id`` on these tables performs a full table scan on an
-# unindexed column, so the cost is O(rows), not O(deployments). For the
-# CLI's interactive case that's fine (one call per invocation); a future
-# hot-path caller should add an index or maintain a separate
-# ``deployments`` table (gemini review on PR #2343).
+# These scans are O(rows); add an index or deployment table before using them on a hot path.
 _DEPLOYMENT_SCAN_TABLES: tuple[str, ...] = (
     "transaction_ledger",
     "accounting_events",
@@ -556,7 +473,6 @@ def _resolve_singleton_deployment_id(conn: sqlite3.Connection) -> str | None:
             )
             deployments.update(row[0] for row in cur.fetchall() if row[0])
         except sqlite3.OperationalError:
-            # Table or column missing — partial schema is fine, keep scanning.
             continue
     if not deployments:
         return None
@@ -572,9 +488,7 @@ def _dec(v: Any) -> Decimal | None:
         value = Decimal(str(v))
     except (InvalidOperation, TypeError):
         return None
-    # NaN parses as a Decimal but poisons every ordered comparison with
-    # InvalidOperation — a CRASH of the scoring cell instead of a FAIL. It is
-    # not a measurement; read it as unmeasured (Empty≠Zero, VIB-5857 hardening).
+    # NaN is unmeasured; ordered Decimal comparisons against it raise.
     if value.is_nan():
         return None
     return value
@@ -628,11 +542,7 @@ def _snapshot_equity(s: dict[str, Any]) -> Decimal | None:
         return None
     positions_json = s.get("positions_json")
     _count, raw_debt_mark, _debt_cost = net_debt_from_positions_json(positions_json)
-    # The unmeasured-deployed guard keys on the RAW mark, not the corrected
-    # one: a legacy net-shaped row with unmeasured deployed would have its
-    # correction cancel the corrected mark to 0 and slip back into the
-    # bracket as ``0 + cash`` — a wrong VALUE admitted as measured, the same
-    # inversion relocated. Raw-column discipline, same as G9.
+    # Use raw debt here so legacy correction cannot turn an unmeasured asset side into zero.
     if deployed is None and raw_debt_mark != 0:
         return None
     debt_mark = _corrected_debt_mark(positions_json, raw_debt_mark)
@@ -710,7 +620,7 @@ def _missing_debt_leg_rows(snapshots: list[dict[str, Any]]) -> int:
             key = _leg_reserve_key(leg, details)
             if key is None or key not in borrow_keys:
                 n += 1
-                break  # count the ROW once, not every affected leg
+                break
     return n
 
 
@@ -807,12 +717,7 @@ def _legacy_net_supply_debt(positions_json: Any) -> Decimal:
     def _leg_field(leg: Any, key: str) -> Any:
         return leg.get(key) if isinstance(leg, dict) else getattr(leg, key, None)
 
-    # The sibling pool holds ONLY BORROW legs (the docstring's contract — an
-    # underwater perp or negatively-valued LP sharing the reserve key must not
-    # enlarge what a correction may cancel) and is CONSUMED as legacy legs
-    # claim from it, so two legacy legs on one reserve cannot each cancel the
-    # same sibling debt and spill the surplus onto another reserve through the
-    # global clamp.
+    # Only same-reserve BORROW debt may be cancelled, and each amount is consumed once.
     borrow_by_reserve: dict[tuple[str, str, str], Decimal] = {}
     for leg in legs:
         if str(_leg_field(leg, "position_type") or "").upper() != "BORROW":
@@ -879,9 +784,6 @@ def _json_list(s: Any) -> list[Any]:
         return []
 
 
-# ─── VIB-3868: typed payload reads ───────────────────────────────────────
-
-
 def _project_payload_for_v1_validation(payload: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
     """Map writer output → v1 spec shape before Pydantic validation.
 
@@ -901,25 +803,13 @@ def _project_payload_for_v1_validation(payload: dict[str, Any], row: dict[str, A
     et = (payload.get("event_type") or "").upper()
     out = dict(payload)
 
-    # Inject ``protocol`` from the row's protocol column when the payload
-    # itself doesn't carry it (LP/Perp writers don't emit it; the row
-    # column is the canonical source).
     if not out.get("protocol"):
         row_protocol = (row.get("protocol") or "").strip()
         if row_protocol:
             out["protocol"] = row_protocol
 
-    # Lending: amount_token → amount (SUPPLY/REPAY/WITHDRAW) or borrowed_amount (BORROW)
-    #
-    # VIB-4539: forward ``amount_token`` even when it is None **for WITHDRAW
-    # only**. ``WithdrawEventPayload.amount`` is widened to ``Decimal | None``
-    # per the AGENTS.md Empty ≠ Zero rule because the Morpho receipt parser
-    # cannot always resolve assets amount on shares-mode withdraws / unresolved
-    # decimals. SUPPLY / REPAY / DELEVERAGE / BORROW schemas remain strictly
-    # ``Decimal`` — keep the prior "only forward when non-None" behaviour for
-    # them so an unmeasured row fails Pydantic loudly with "field required"
-    # instead of silently aliasing None onto a still-required field (audit
-    # PR #2343 Claude finding 3).
+    # WITHDRAW permits an unmeasured amount; other lending schemas require a Decimal
+    # and must fail validation rather than receiving an aliased None.
     if et == "WITHDRAW" and "amount" not in out and "amount_token" in out:
         out["amount"] = out["amount_token"]
     if et in {"SUPPLY", "REPAY", "DELEVERAGE"} and "amount" not in out:
@@ -929,10 +819,7 @@ def _project_payload_for_v1_validation(payload: dict[str, Any], row: dict[str, A
         if out.get("amount_token") is not None:
             out["borrowed_amount"] = out["amount_token"]
 
-    # APR bps → pct projection (10000 bps = 100%, so bps / 100 = pct).
-    # Gemini (2026-05-02): narrow the except to the only error classes
-    # ``Decimal(str(bps))`` and division can raise; let unexpected ones
-    # propagate so refactor regressions surface loudly.
+    # 10,000 bps = 100%, so percentage units are bps / 100.
     from decimal import Decimal as _Dec
     from decimal import InvalidOperation as _InvalidOp
 
@@ -996,13 +883,9 @@ def _typed_acct_payloads(
         et = r.get("event_type") or ""
         decoded = _json(r.get("payload_json"))
         if not is_v1_event_type(et):
-            # Out of v1 scope — preserve the decoded dict but do NOT validate.
-            # AttemptNo17 §8.5 explicitly tracks PENDLE / POLYMARKET / etc.
-            # under v2 placeholder tickets; surfacing v1 schema mismatches on
-            # them would be noise.
+            # Non-v1 payloads intentionally pass through without schema validation.
             payloads_by_id[row_id] = decoded
             continue
-        # Project writer output → spec shape before validation (Codex P1).
         projected = _project_payload_for_v1_validation(decoded, r)
         try:
             validated = validate_payload(et, projected)
@@ -1043,15 +926,8 @@ def _payload_block_cell(
     )
 
 
-# ─── Cell predicates ─────────────────────────────────────────────────────
-
-
-# VIB-5319: Pendle PT trade legs ride the SWAP intent_type in the ledger but are
-# booked as typed ``PendleAccountingEvent`` rows (PT_BUY / PT_SELL / PT_REDEEM),
-# NOT generic ``SWAP`` events. Their money-trail USD proof therefore lives in the
-# Pendle payload (``sy_amount`` × ``sy_price``), not a SwapEventPayload. G1 maps
-# such ledger rows to their Pendle event so the money-trail USD pillar reads the
-# correct typed field instead of false-failing on a missing SwapEventPayload.
+# Pendle PT ledger rows use SWAP, but their USD proof is ``sy_amount * sy_price``
+# on the typed Pendle event rather than a generic swap payload.
 _PENDLE_PT_EVENT_TYPES = ("PT_BUY", "PT_SELL", "PT_REDEEM")
 _PENDLE_PT_DISPOSAL_TYPES = ("PT_SELL", "PT_REDEEM")
 
@@ -1100,28 +976,17 @@ def _g1_classify_swap_usd_legs(
             sy_amount = pt_payload.get("sy_amount")
             sy_price = pt_payload.get("sy_price")
             if sy_amount not in (None, "") and sy_price not in (None, ""):
-                continue  # PT leg fully valued in USD — money trail intact.
+                continue
             detail = f"sy_amount={sy_amount!r} sy_price={sy_price!r}"
-            # The VIB-5276 XFAIL waiver is narrowly the *gateway price* gap: an
-            # on-chain disposal whose SY proceeds AMOUNT is measured but whose
-            # sell-side SY USD price is *absent on the fork* — and "absent" is
-            # specifically ``sy_price is None`` (the gateway returned no PT/SY
-            # implied price). Two adjacent states are NOT the waiver and must FAIL:
-            #   * a missing disposal AMOUNT (sy_amount None/"") — a receipt/writer
-            #     data loss, never a price gap;
-            #   * ``sy_price == ""`` — the parser failed to emit the field at all,
-            #     a real serialization defect, distinct from the gateway returning
-            #     None. (Empty≠Zero, and Empty≠Unmeasured.)
+            # The waiver applies only to measured disposal amounts with an unavailable
+            # gateway price (None). Missing amounts and parser-omitted prices ("") fail.
             amount_measured = sy_amount not in (None, "")
             price_is_gateway_gap = sy_price is None
             if et in _PENDLE_PT_DISPOSAL_TYPES and amount_measured and price_is_gateway_gap:
                 pt_unmeasured_disposals.append((ledger_id, detail))
             elif et in _PENDLE_PT_DISPOSAL_TYPES:
-                # Missing disposal amount, or sy_price=="" (parser omission) — a
-                # real money-trail gap, not the ticketed VIB-5276 price waiver.
                 missing_swap_usd.append((ledger_id, f"{et} {detail}"))
             else:
-                # An acquiring PT_BUY with no USD is a real money-trail gap.
                 missing_swap_usd.append((ledger_id, f"PT_BUY {detail}"))
             continue
         payload = swap_acct_by_ledger_id.get(ledger_id)
@@ -1135,13 +1000,7 @@ def _g1_classify_swap_usd_legs(
     return missing_swap_usd, pt_unmeasured_disposals
 
 
-#: The landed / degraded rules are IMPORTED from ``accounting.ledger_guard`` —
-#: one shared set of predicates, so the scorecard and the write path cannot
-#: drift apart. ``test_ledger_guard`` pins Python and SQL forms together.
-#:
-#: An earlier version of this note claimed the opposite — a local mirror
-#: constant and no import-time dependency on the write path. The imports below
-#: are hard and module-level; the comment described a design that was replaced.
+# The scorecard imports the write-path landed/degraded predicates to prevent drift.
 from almanak.framework.accounting.ledger_guard import LANDED_PARAMS as _LANDED_PARAMS
 from almanak.framework.accounting.ledger_guard import degraded as _degraded_rule
 from almanak.framework.accounting.ledger_guard import landed as _landed_rule
@@ -1162,17 +1021,6 @@ def _row_landed(row: dict[str, Any]) -> bool:
     direction produces a scorecard that reports something it has not
     verified — G1, G10 and G11 have each been bitten by it.
     """
-    # Delegates to the ONE rule. This previously read ``bool(row.get("success"))``,
-    # which treats the malformed string "0" as LANDED — an Empty != Zero
-    # violation sitting inside the helper meant to enforce the distinction.
-    #
-    # ``tx_hash`` is passed because the degraded arm requires it: the marker's
-    # ``chain_success`` is stamped by construction, so a NO-OP bundle (no
-    # transaction submitted, ``tx_hash=""``) carries it too. ``.get`` is safe
-    # here specifically because every caller's rows come from ``_table_rows``,
-    # which issues ``SELECT *`` — the column is always present. A future caller
-    # that hand-builds row dicts must include it, or its degraded rows silently
-    # stop counting as landed.
     return _landed_rule(row.get("success"), row.get("error"), row.get("tx_hash"))
 
 
@@ -1213,43 +1061,16 @@ def _cell_g1_money_trail(
             "FAIL",
             "transaction_ledger empty",
         )
-    # Successful intents only — failed intents are evaluated under G11
-    # (gas-only money trail). Mixing the two would FAIL G1 for a reverted
-    # SWAP that legitimately has no amount_out, masking the actual gap.
+    # Reverted intents legitimately lack output amounts and are evaluated by G11.
     successful = [r for r in rows if r.get("success")]
-    # VIB-6043 leg 2 — anti-laundering. The write-time guard downgrades a
-    # would-be-success SWAP row with unmeasured amounts to success=False plus an
-    # ``accounting_degraded:`` marker. That row would otherwise DROP OUT of the
-    # ``successful`` scan below and this cell would flip green while the money is
-    # still unmeasured — turning a fix into a way to hide the defect. Degraded
-    # rows are therefore evaluated over ALL rows.
-    #
-    # UNCONDITIONALLY — do NOT re-add a ``tx_hash`` filter here. The guard fires
-    # on any success row with unmeasured money slots regardless of whether a
-    # hash was captured, so gating this clause on ``tx_hash`` re-opens the exact
-    # laundering hole it exists to close: a row with success=True, no hash and
-    # no amounts (the Safe/bundle under-measured shape) used to FAIL under
-    # ``missing_hash``, and the downgrade to success=False removes it from
-    # ``successful`` — so a hash-gated clause would let it escape BOTH and flip
-    # this cell green where it was previously red.
+    # Degraded rows must remain in G1 even though the write guard sets success=False.
+    # Do not filter them by tx_hash: unmeasured rows without a captured hash must fail too.
     degraded = [r for r in rows if _degraded_rule(r.get("error"))]
-    # Spans successful + degraded so downgrading a row can never remove it from
-    # a clause that used to see it. NOTE this extension is currently INERT:
-    # the ``if degraded:`` clause below returns FAIL first, so the unconditional
-    # degraded check is doing all the work. It is kept as defence-in-depth
-    # against a future reordering of these clauses, not because it changes any
-    # verdict today.
+    # Keep degraded rows in the hash check if verdict branches are reordered.
     missing_hash = [r for r in (*successful, *degraded) if not r.get("tx_hash")]
     missing_token_amounts = [
         r for r in successful if r.get("intent_type") == "SWAP" and not (r.get("amount_in") and r.get("amount_out"))
     ]
-    # Cross-table USD pillar: every successful SWAP ledger row must have a
-    # matching accounting_events row whose validated SwapEventPayload
-    # populates BOTH amount_in_usd and amount_out_usd. ``acct_payloads`` is
-    # the validated map from ``_typed_acct_payloads`` — a row whose payload
-    # failed Pydantic validation lands as ``{}`` here, which counts as
-    # missing USD (and the matching cell-level error is also surfaced via
-    # the report's ``payload_validation_errors`` list).
     missing_swap_usd, pt_unmeasured_disposals = _g1_classify_swap_usd_legs(successful, acct_events, acct_payloads)
 
     if degraded:
@@ -1285,9 +1106,6 @@ def _cell_g1_money_trail(
             "FAIL",
             f"{len(missing_swap_usd)} SWAP rows missing USD valuation in SwapEventPayload (e.g. {sample_usd!r})",
         )
-    # VIB-5319: every measured leg is intact; the only remaining gap is a PT
-    # disposal whose sell-side SY price is unmeasured (VIB-5276). For a profile
-    # that opts in, that is a measured-but-blocked XFAIL, not a FAIL.
     if pt_unmeasured_disposals:
         profile = _profile_for(primitive)
         pt_sample = pt_unmeasured_disposals[:3]
@@ -1316,15 +1134,9 @@ def _cell_g1_money_trail(
     )
 
 
-# ── G16: native-lane reconciliation (VIB-6061) ───────────────────────────────
-#
-# Absolute floor on the residual, in native token units. Sized well below one
-# order's keeper fee (~0.000118 ETH on Arbitrum) so the cell can still SEE the
-# defect it exists for, but above the Decimal round-trip noise of recovering a
-# native amount from ``gas_usd / native_price``.
+# Native-token residual floor, above Decimal round-trip noise but below a typical keeper fee.
 _G16_ABS_EPSILON_NATIVE = Decimal("0.000005")
-# Relative floor: a residual under this fraction of the attributed cost is
-# rounding, not a missing cost line. The motivating defect was 86% unattributed.
+# Residuals below 5% of attributed native cost are treated as rounding.
 _G16_REL_TOLERANCE = Decimal("0.05")
 
 
@@ -1414,30 +1226,9 @@ def _g16_escrow_outstanding(fees: list[_G16SettlementFee], at: str) -> Decimal:
     return total
 
 
-# KNOWN LIMITATION — ``settled_at`` IS A BOOKING TIME, NOT AN ON-CHAIN TIME.
-#
-# ``_g16_settlement_fees`` reads ``settled_at`` off the PERP_SETTLEMENT accounting
-# row, which the reconciler writes on a LATER tick than the keeper's transaction.
-# Between the keeper settling on-chain and that row being booked, the refund is
-# already back in the wallet while ``_g16_escrow_outstanding`` still counts the
-# whole escrow as in flight — so a snapshot landing in that gap has its balance
-# over-adjusted by exactly the refund, and G16 reports a spurious residual.
-#
-# Measured, not theorised: on a managed-Anvil round trip (2026-08-04, PERP_OPEN +
-# teardown) the first snapshot sat 59s after the keeper settled and 1s after the
-# ledger write, and G16 reported UNATTRIBUTED 0.005358973 ETH — precisely that
-# leg's ``execution_fee_refund_wei``. Nothing was actually unattributed; the
-# Cost Stack booked both legs correctly on that same run (venue fee 86.6% of
-# native cost).
-#
-# The fix is to key the window on the keeper transaction's own block time rather
-# than the booking tick, which needs a settlement timestamp the payload does not
-# carry today (it has ``block_number``). Deliberately NOT bodged here: widening
-# the tolerance to swallow a refund would blind the cell to exactly the magnitude
-# of cost it exists to catch. Tracked as a follow-up; until then G16 is sound
-# whenever snapshots do not fall inside the settle-to-book gap, which is the
-# normal case at production snapshot cadence (the two sealed 20260726-0035-gmxdca
-# runs both score, and both correctly FAIL).
+# ``settled_at`` is booking time, not keeper block time. A snapshot in that gap sees
+# the refund in-wallet while escrow still appears in flight, so endpoint windows with
+# outstanding escrow must be refused. Do not widen tolerance to hide this ambiguity.
 
 
 def _g16_gas_native(row: dict[str, Any], symbol: str) -> Decimal | None:
@@ -1504,11 +1295,7 @@ def _cell_g16_native_lane(
     chain = (ledger[0].get("chain") if ledger else "") or ""
     symbol = native_token_for_chain(chain)
 
-    # Endpoints must be chosen by TIME, not by SQLite row order (``_table_rows``
-    # issues no ORDER BY). Reversing two otherwise-valid snapshots inverts the
-    # window and can turn a correct PASS into an OVER-ATTRIBUTED FAIL. Reuse G5's
-    # helper, which also refuses when any timestamp is unparseable — the same
-    # "refuse rather than guess" direction the rest of this cell takes.
+    # SQLite row order is not chronological; refuse unorderable endpoints rather than guess.
     ordered = _snapshots_in_time_order(snapshots)
     if ordered is None:
         return CellResult(
@@ -1527,14 +1314,7 @@ def _cell_g16_native_lane(
             f"need >=2 snapshots carrying a {symbol} wallet balance (have {len(priced)} of {len(snapshots)})",
         )
 
-    # LANDED, not ``success``. ``transaction_ledger.success`` is the framework's
-    # BOOKS verdict: the slippage breaker, the reconciliation finalizer and the
-    # Empty != Zero guard all write success=False on transactions that landed and
-    # burned real gas. This cell asks "what native left the wallet on-chain?", so
-    # per ``_row_landed``'s contract it must use that helper -- filtering on
-    # ``success`` drops a degraded row's gas from ``attributed`` while the balance
-    # delta still contains it, manufacturing an UNATTRIBUTED residual exactly when
-    # accounting is already degraded (and SKIPping outright when every row is).
+    # Native outflow includes every chain-landed row, including rows with a failed books verdict.
     settled = [r for r in ledger if _row_landed(r)]
     if not settled:
         return CellResult(
@@ -1560,14 +1340,7 @@ def _cell_g16_native_lane(
     t1 = str(last.get("timestamp") or "")
 
     fees = _g16_settlement_fees(acct_events, ledger)
-    # Endpoints are the wallet balance PLUS escrow still in flight at that instant —
-    # escrowed native is out of the wallet but is not yet a cost.
-    #
-    # ``priced`` and the ``unrecoverable`` gate above already established that these
-    # reads are measured, but that is a cross-statement fact the type checker cannot
-    # follow. Re-derive locally rather than asserting it: an ``or Decimal(0)`` here
-    # would substitute a measured zero for an unmeasured read, which is the exact
-    # Empty != Zero violation those gates exist to prevent.
+    # Re-read rather than coerce None to zero; an unmeasured endpoint is not zero balance.
     start_balance = _g16_native_balance(first, symbol)
     end_balance = _g16_native_balance(last, symbol)
     if start_balance is None or end_balance is None:  # pragma: no cover — gated above
@@ -1577,29 +1350,8 @@ def _cell_g16_native_lane(
             "SKIP",
             f"the window endpoints stopped carrying a measured {symbol} balance",
         )
-    # AN ESCROW AT AN ENDPOINT IS UNRESOLVABLE, SO REFUSE TO SCORE (VIB-6061).
-    #
-    # ``settled_at`` is when the PERP_SETTLEMENT row was BOOKED, not when the keeper
-    # settled on-chain -- the reconciler books on a later tick. Between those two
-    # moments the refund is already back in the wallet while this cell still counts
-    # the whole escrow as outstanding, so the endpoint is over-adjusted by exactly
-    # the refund and the cell reports a residual that no missing money caused.
-    #
-    # Measured on this PR's own fork proof: G16 returned FAIL with a 0.005358973 ETH
-    # residual identical to that leg's ``execution_fee_refund_wei``, on a run whose
-    # Cost Stack was provably correct. An invariant that cannot tell correct
-    # accounting from missing money is worse than one that admits it does not know,
-    # because the first gets muted and the second gets fixed.
-    #
-    # Scoped to the ambiguity and no wider: when no escrow is outstanding at either
-    # endpoint the identity is exact and the cell still scores. That keeps every
-    # discriminating case -- the sealed pre-fix runs (whose payloads carry no fee at
-    # all, so no escrow is in flight) still FAIL, and the ratchet fixtures still PASS.
-    #
-    # The sound fix is the keeper transaction's own block timestamp on the payload,
-    # which it does not carry today (it has ``block_number``). Deferred rather than
-    # bodged: widening the tolerance to absorb a refund would blind the cell to
-    # exactly the magnitude of cost it exists to catch.
+    # Booking time cannot resolve an endpoint with in-flight escrow; refuse to score
+    # until the payload carries the keeper transaction's block timestamp.
     escrow_t0 = _g16_escrow_outstanding(fees, t0)
     escrow_t1 = _g16_escrow_outstanding(fees, t1)
     if escrow_t0 or escrow_t1:
@@ -1621,7 +1373,7 @@ def _cell_g16_native_lane(
         if not (t0 < str(r.get("timestamp") or "") <= t1):
             continue
         gas = _g16_gas_native(r, symbol)
-        if gas is not None:  # gated by ``unrecoverable`` above; re-checked for the type
+        if gas is not None:
             in_window_gas.append(gas)
     gas_native = sum(in_window_gas, Decimal("0"))
     fee_native = sum(
@@ -1751,21 +1503,14 @@ def _cell_g2_cost_ledger(rows: list[dict[str, Any]]) -> CellResult:
 def _cell_g3_yield_ledger(pos_events: list[dict[str, Any]], acct_events: list[dict[str, Any]]) -> CellResult:
     if not pos_events and not acct_events:
         return CellResult("G3", "Yield ledger", "XFAIL", "no position_events nor accounting_events")
-    # Diagnostic list — heterogeneous tuples (3-4 fields) are intentional;
-    # downstream we only count `len(yields)`. Annotate as tuple-of-Any so
-    # mypy doesn't pin the element shape to whichever append it sees first.
+    # Entries are heterogeneous because only their count is consumed.
     yields: list[tuple[Any, ...]] = []
     for r in pos_events:
         if r.get("fees_token0") or r.get("fees_token1"):
             yields.append(("fees", r.get("event_type"), r.get("fees_token0"), r.get("fees_token1")))
     for r in acct_events:
         p = _json(r.get("payload_json"))
-        # VIB-4905 (F1): for SWAP, prefer ``realized_pnl_usd_matched``
-        # (matched-portion PnL, populated on partial matches under v2 contract)
-        # over legacy ``realized_pnl_usd`` (null on partial under v1).  Other
-        # event types still read ``realized_pnl_usd`` per their own contracts.
-        # Keeps this diagnostic in lockstep with dashboard +
-        # ``_cell_g6_reconciliation``'s SWAP-bucket precedence.
+        # Partial SWAP matches use matched-portion PnL; other events use their own PnL field.
         rpnl_for_yield = (
             p.get("realized_pnl_usd_matched")
             if r.get("event_type") == "SWAP" and p.get("realized_pnl_usd_matched") is not None
@@ -1773,26 +1518,12 @@ def _cell_g3_yield_ledger(pos_events: list[dict[str, Any]], acct_events: list[di
         )
         if rpnl_for_yield:
             yields.append(("realized_pnl", r.get("event_type"), rpnl_for_yield))
-        # Pendle PT realised fixed yield (VIB-5319): a PT_SELL / PT_REDEEM books
-        # its payoff in ``realized_yield_usd`` — the disposal-leg PnL of the PT
-        # primitive (blueprint 27 §11.3, the registry's per-event contribution
-        # row for Pendle disposals). PT events ride the SWAP taxonomy but do NOT
-        # populate ``realized_pnl_usd``, so without reading this typed field the
-        # yield ledger cell never sees the PT strategy's entire realised payoff.
-        # A measured 0 (``Decimal("0")``) is a real no-yield disposal and is
-        # intentionally NOT counted; a null is unmeasured. Raw payload JSON can
-        # carry the value as the STRING ``"0"`` (truthy), so normalise via
-        # ``_dec`` and compare against ``Decimal("0")`` — a bare truthiness test
-        # would miscount a measured-zero yield as yield-emitting (Empty≠Zero).
+        # Pendle disposals book PnL as realized_yield_usd. Normalize strings so
+        # measured zero is not misclassified as a yield-emitting event.
         pendle_yield = _dec(p.get("realized_yield_usd"))
         if pendle_yield is not None and pendle_yield != Decimal("0"):
             yields.append(("pendle_yield", r.get("event_type"), p.get("realized_yield_usd")))
-        # ``augment_accounting_payload`` projects lending events onto the
-        # AttemptNo17 spec field names (``interest_paid_usd`` for REPAY,
-        # ``interest_accrued_usd`` for WITHDRAW). Counting only the legacy
-        # ``interest_paid`` here would silently mark spec-shaped lending
-        # rows as "no interest" and false-fail G3 once Track A's projection
-        # fully replaces the legacy keys.
+        # Accept both legacy and projected lending interest fields.
         if p.get("interest_paid") or p.get("interest_paid_usd") or p.get("interest_accrued_usd"):
             yields.append(
                 (
@@ -1835,12 +1566,7 @@ def _cell_g4_capital_deployed(snapshots: list[dict[str, Any]]) -> CellResult:
     """
     if not snapshots:
         return CellResult("G4", "Capital deployed right now", "FAIL", "no portfolio_snapshots")
-    # "Right now" is the CHRONOLOGICALLY last snapshot, established through the
-    # shared ordering authority — never positional access (VIB-6545: a restart
-    # resets iteration_number, and the legacy shared sort filed the teardown
-    # snapshot mid-series, so this cell reported deployed capital on a
-    # torn-down wallet). Refusing to order is a FAIL, same direction as G5:
-    # an endpoint elected by row order is a wrong answer wearing a green.
+    # Restarts reset iteration numbers, so only timestamp order can identify "right now".
     ordered = _snapshots_in_time_order(snapshots)
     if ordered is None:
         return CellResult(
@@ -1868,13 +1594,7 @@ def _cell_g4_capital_deployed(snapshots: list[dict[str, Any]]) -> CellResult:
             "FAIL",
             f"negative side: deployed=${deployed} cash=${cash}",
         )
-    # The cell's PREDICATE is the sign/measured-ness checks above; the equity in
-    # the detail is reporting only — but a reported number must still be the
-    # canonical one. VIB-5857: equity nets the debt legs (``deployed`` is Σ
-    # positive value_usd, gross of debt), same projection as ``_snapshot_equity``
-    # including the legacy net-shaped-leg exclusion. The unreadable-payload
-    # count (VIB-6703) is appended so a positive deployed value with no
-    # readable legs is loud here too, not only in G6's decomposition.
+    # Report canonical net equity even though this cell predicates only measuredness and sign.
     debt_mark = _snapshot_debt_mark(last.get("positions_json"))
     equity = wallet_nav_usd(deployed, debt_mark, cash)
     unreadable = _unreadable_payload_rows(ordered)
@@ -2039,13 +1759,7 @@ def _cell_g5_initial_vs_current(
             "FAIL",
             f"initial=${initial} but no snapshots for current",
         )
-    # ``_table_rows`` issues no ORDER BY, so positional access is only
-    # incidentally chronological. The endpoints of a PnL delta must not depend
-    # on SQLite's row order — the same unordered-read trap VIB-6287 measured on
-    # the position registry, where identical inputs yielded different answers.
-    # Ordering that cannot be established is a FAIL, never a fall-through to
-    # SQLite's accident order: this cell exists to stop a green wrong PnL, so
-    # "I could not order the endpoints" must not resolve to PASS.
+    # PnL endpoints must be chronological; SQLite row order is not an oracle.
     ordered = _snapshots_in_time_order(snapshots)
     if ordered is None:
         return CellResult(
@@ -2057,18 +1771,10 @@ def _cell_g5_initial_vs_current(
             "endpoints would be SQLite row order rather than first/last",
         )
 
-    # An UNAVAILABLE snapshot is the runner's *failure* contract, not a
-    # measurement: ``_make_unavailable_snapshot`` stamps total_value_usd=0 AND
-    # available_cash_usd=0 so the equity curve has no holes, and that row is
-    # persisted even when metrics are skipped. ``_snapshot_equity`` reads 0+0 as
-    # a measured zero, so using it as the opening endpoint would report the
-    # whole final equity as profit — the exact wrong-signed PASS this cell
-    # exists to kill.
+    # UNAVAILABLE snapshots contain placeholder zeros and cannot anchor PnL.
     usable = [s for s in ordered if _snapshot_confidence_can_anchor_pnl(s)]
     refused = len(ordered) - len(usable)
     if len(usable) < 2:
-        # One point is not a delta. Equity-vs-equity needs two measured
-        # endpoints; ``delta = $0`` would report "no change" as a measurement.
         why = (
             f"; {refused} refused as unmeasured/UNAVAILABLE"
             if refused
@@ -2080,9 +1786,7 @@ def _cell_g5_initial_vs_current(
             "FAIL",
             f"need >=2 snapshots whose confidence can anchor a PnL endpoint; have {len(usable)} of {len(ordered)}{why}",
         )
-    # Refusing the most recent row means ``current`` is not the run's last
-    # state. Dropping it is right — a 0/0 endpoint would fabricate a total
-    # loss — but the delta must not read as if it covered the whole run.
+    # If the terminal row is refused, the diagnostic must not imply full-run coverage.
     trailing_refused = not _snapshot_confidence_can_anchor_pnl(ordered[-1])
     ordered = usable
 
@@ -2090,8 +1794,7 @@ def _cell_g5_initial_vs_current(
     if current is None:
         return CellResult("G5", "Initial vs current", "FAIL", f"initial=${initial} but current null")
 
-    # Equity-vs-equity. ``initial_value_usd`` is NOT used as the baseline —
-    # it is the value under test below.
+    # Compare equity endpoints; initial_value_usd is the value under test.
     opening = _snapshot_equity(ordered[0])
     if opening is None:
         return CellResult(
@@ -2113,10 +1816,7 @@ def _cell_g5_initial_vs_current(
             f"were refused as unmeasured, so this delta stops at the last measured point"
         )
 
-    # The ``or``-drop signature: the persisted baseline is exactly the deployed
-    # column of the snapshot it was derived from, while that snapshot also held
-    # cash. Empty≠Zero — an unmeasured cash column is not a measured zero and
-    # cannot establish the drop, so both columns must be measured to fire.
+    # Both opening columns must be measured before diagnosing a discarded cash leg.
     opening_deployed = _dec(ordered[0].get("total_value_usd"))
     opening_cash = _dec(ordered[0].get("available_cash_usd"))
     source_failure = _g5_baseline_source_failure(
@@ -2130,8 +1830,7 @@ def _cell_g5_initial_vs_current(
     if source_failure is not None:
         return source_failure
 
-    # Placement is a diagnostic on an otherwise-consistent baseline: the delta
-    # is real but understates by whatever the first transaction already spent.
+    # A late baseline yields a real but understated delta, so report the placement.
     late_by = _baseline_window_coverage(ordered[0] if ordered else None, ledger).late_by
     if late_by is not None:
         detail += (
@@ -2142,9 +1841,7 @@ def _cell_g5_initial_vs_current(
     return CellResult("G5", "Initial vs current", "PASS", detail)
 
 
-# A measured-zero cash column is a legitimate all-deployed opening snapshot, and
-# sub-cent dust must not manufacture a FAIL. Above this, ``initial == deployed``
-# means the cash leg was genuinely discarded rather than absent.
+# Measured-zero cash is valid; ignore sub-cent dust when detecting a discarded cash leg.
 _G5_CASH_DROP_FLOOR_USD = Decimal("0.01")
 
 
@@ -2179,25 +1876,14 @@ def _snapshot_confidence_can_anchor_pnl(snapshot: dict[str, Any]) -> bool:
     try:
         parsed = ValueConfidence.parse(raw)
     except (ValueError, TypeError):
-        # ``parse`` is deliberately exact — "accepting different casing or
-        # surrounding whitespace would turn an unknown boundary value into a
-        # trusted one" (portfolio/models.py). Folding case here would re-trust
-        # exactly what that contract refuses, so an unparseable stamp is
-        # unmeasured, not "probably fine".
+        # Do not normalize unknown confidence values into trusted measurements.
         return False
     return parsed.value in _G5_ANCHORING_CONFIDENCES
 
 
-# Which ``ValueConfidence`` members may anchor a PnL endpoint. Pinned by
-# ``test_every_value_confidence_member_is_classified``: a closed classification
-# over the enum, so a new member fails that census until someone decides which
-# side it belongs on, rather than silently defaulting to "cannot anchor" (which
-# would quietly disable G5) or "can anchor" (which would quietly re-open the
-# UNAVAILABLE hole).
+# This closed classification must be updated explicitly when ValueConfidence grows.
 _G5_ANCHORING_CONFIDENCES = frozenset({"HIGH", "ESTIMATED", "STALE"})
 
-# The complement, owned HERE rather than duplicated in the test. A census that
-# keeps its own second copy cannot detect a member being moved between the two.
 _G5_REFUSED_CONFIDENCES = frozenset({"UNAVAILABLE"})
 
 
@@ -2230,10 +1916,6 @@ def _snapshots_in_time_order(snapshots: list[dict[str, Any]]) -> list[dict[str, 
     without an integer-coercible ``id`` falls back to input position, ranked
     after every id-bearing row so the two key shapes never interleave.
     """
-    # Build the narrowed pairs explicitly rather than relying on the `any(...)`
-    # guard above: that guard proves None is absent to a reader but not to the
-    # type checker, and a `# type: ignore` here would suppress exactly the
-    # None-in-a-sort-key error worth keeping.
     pairs: list[tuple[tuple[datetime, tuple[int, int]], dict[str, Any]]] = []
     for index, snapshot in enumerate(snapshots):
         parsed = _parse_ts(snapshot.get("timestamp"))
@@ -2397,17 +2079,7 @@ def _baseline_window_coverage(
     )
 
 
-# ── VIB-6541: PERP_SETTLEMENT terms for the G6 fold ──────────────────────────
-#
-# The dashboard's ``compute_reconciliation`` has done per-component settlement
-# supersession since VIB-3872 WI-4, and its own docstring names this cell as the
-# thing it mirrors ("If the formula upstream changes, both sites move together").
-# The mirror was one-way: this cell never learned about PERP_SETTLEMENT at all, so
-# on a GMX run it read ``realized_pnl_usd`` and the funding pair off the ESTIMATED
-# PERP_CLOSE row — where the perp receipt parser leaves them null — and failed G6
-# with two unmeasured buckets while the measured values sat one row away. Both
-# helpers below are the accountant-side halves of functions that already exist in
-# ``almanak/framework/dashboard/quant_aggregations.py``; keep them in lockstep.
+# Keep settlement supersession here in lockstep with dashboard reconciliation.
 
 
 def _g6_settlement_by_link(
@@ -2493,11 +2165,7 @@ def _cell_g6_reconciliation(  # noqa: C901
     basis) is a NULL input (Empty≠Zero) and FAILs the cell with a diagnostic,
     never a silent zero.
     """
-    # VIB-3868: any acct_event with a malformed payload would silently
-    # contribute zero to the component PnL through ``_json`` returning ``{}``
-    # — exactly the false-positive shape Codex flagged. Pre-empt the whole
-    # cell with a FAIL when validation drift exists; surfacing the typed
-    # error here keeps the diagnostic actionable.
+    # Invalid payloads must fail before missing fields can collapse into zero contribution.
     blocked = _payload_block_cell(
         "G6",
         "Reconciliation (wallet ≡ component)",
@@ -2506,14 +2174,7 @@ def _cell_g6_reconciliation(  # noqa: C901
     )
     if blocked is not None:
         return blocked, {}
-    # The wallet-method endpoints are CHRONOLOGICAL first/last, established
-    # through the shared ordering authority (VIB-6545). This cell used to
-    # inherit evaluate_cells' (iteration_number, timestamp) sort, which broke
-    # on any restarted run: the terminal teardown snapshot filed mid-series
-    # and the bracket ended before the close — bundle 20260804-2310 read
-    # wallet_pnl = +$0.0149 on a run that lost $0.52, a mis-window that HIDES
-    # a loss. Unorderable timestamps refuse, same direction as G5 — never a
-    # fall-through to row order.
+    # Wallet PnL requires chronological endpoints; process-local iteration numbers reset.
     ordered_by_time = _snapshots_in_time_order(snapshots)
     if ordered_by_time is None:
         return (
@@ -2527,11 +2188,6 @@ def _cell_g6_reconciliation(  # noqa: C901
             ),
             {},
         )
-    # Wallet method: equity_final − equity_initial across all priced
-    # snapshots. ``_snapshot_equity`` is the netted NAV — total_value_usd
-    # (deployed, gross of debt) − debt_mark + available_cash_usd (VIB-5857).
-    # A post-teardown snapshot with all-cash equity is a valid endpoint, not
-    # a measurement gap.
     priced = [s for s in ordered_by_time if _snapshot_confidence_can_anchor_pnl(s) and _snapshot_equity(s) is not None]
     if len(priced) < 2:
         return (
@@ -2557,11 +2213,6 @@ def _cell_g6_reconciliation(  # noqa: C901
         )
     wallet_pnl = final - initial
 
-    # Component method: sum the typed columns + payload reads.
-    # Each bucket attributes to a distinct economic source so the
-    # reconciliation diagnostic can pin which primitive's accounting drifted
-    # if wallet_pnl ≠ component_pnl. PERP_CLOSE realized_pnl gets its own
-    # bucket (sum_perp) — VIB-3865 fixed it accumulating into sum_lp.
     sum_swap = Decimal(0)
     sum_lp = Decimal(0)
     sum_perp = Decimal(0)
@@ -2571,20 +2222,9 @@ def _cell_g6_reconciliation(  # noqa: C901
     sum_gas = Decimal(0)
     il_diagnostic = Decimal(0)
 
-    # VIB-3869 (A): per-bucket null counts.
-    # The bug the cell hides today: `if rpnl is not None: sum_swap += rpnl`
-    # silently treats a null `realized_pnl_usd` on a SWAP payload as zero.
-    # On a hosted run where every SWAP payload had `realized_pnl_usd=null`,
-    # `Σ_swaps_usd = 0` would reconcile against a wallet PnL that's also
-    # zero — a false positive. Counting the nulls separately surfaces this
-    # as "the inputs to the reconciliation are NULL, not measured zero".
+    # Null bucket counts prevent unmeasured component PnL from becoming measured zero.
     null_swap_rpnl = 0
-    # VIB-4394: a SWAP whose realized_pnl is None because there was no prior
-    # FIFO lot to realize against (an opening / acquiring swap, or the first
-    # disposal of pre-existing wallet inventory) is a LEGITIMATE measured state,
-    # NOT a measurement gap. It is counted separately and reported for forensics,
-    # but — unlike null_swap_rpnl — it does NOT trip has_nulls / fail G6. Only an
-    # UNMEASURED-amount SWAP (amount_in_usd is None) increments null_swap_rpnl.
+    # A swap with measured amounts but no prior FIFO basis is not an unmeasured PnL input.
     no_prior_basis_swap = 0
     null_lp_close_rpnl = 0
     null_lp_fees = 0
@@ -2592,42 +2232,23 @@ def _cell_g6_reconciliation(  # noqa: C901
     null_perp_funding = 0
     null_withdraw_interest = 0
     null_repay_interest = 0
-    # VIB-5403: a Pendle PT disposal (PT_SELL / PT_REDEEM) rides Primitive.SWAP,
-    # so per blueprint 27 §11.3 its SELL leg books its REALIZED PnL
-    # (``realized_yield_usd``), a delta — NOT gross proceeds. Three measured
-    # states are distinguished (Empty≠Zero), mirroring the canonical SWAP
-    # SELL-leg / VIB-4394 no-prior-basis handling above:
-    #   * ``realized_yield_usd`` measured  → booked into sum_swap (PASS).
-    #   * matched FIFO lot but USD projection unmeasured (sy_price=None on the
-    #     fork — VIB-5276): ``realized_yield_sy`` present, ``realized_yield_usd``
-    #     None → ``null_pt_realized_usd`` (the ONLY waiver-eligible bucket).
-    #   * a disposal with no matched FIFO lot to realize against (first disposal
-    #     of pre-existing PT) → ``no_prior_basis_pt`` — a legitimate measured
-    #     state, surfaced for forensics, NON-failing (mirror VIB-4394).
-    # A disposal whose amounts are themselves unmeasured (no realized_yield_usd,
-    # no realized_yield_sy, no sy_amount) is a real receipt/writer data loss —
-    # counted in ``null_pt_amount``, which always FAILs G6 and is never eligible
-    # for the VIB-5276 waiver.
+    # Pendle disposal PnL is realized_yield_usd, not gross proceeds. Only a matched
+    # lot with an unavailable USD projection is waiver-eligible; missing amounts fail.
+    # A measured disposal with no prior lot is diagnostic-only, as for generic swaps.
     null_pt_realized_usd = 0
     null_pt_amount = 0
     no_prior_basis_pt = 0
 
-    # VIB-3869 (B): notional accumulators for primitive-aware tolerance.
-    notional_traded = Decimal(0)  # LP / Spot scaling base
-    debt_outstanding = Decimal(0)  # Looping running debt
-    max_debt = Decimal(0)  # Looping scaling base
-    max_perp_notional = Decimal(0)  # Perp scaling base
+    notional_traded = Decimal(0)
+    debt_outstanding = Decimal(0)
+    max_debt = Decimal(0)
+    max_perp_notional = Decimal(0)
 
-    # VIB-6541 — the perp lane's settlement-carried costs, summed for the
-    # decomposition (they land in ``sum_fees``, which is a NET fee contribution:
-    # income positive, fees paid negative). ``*_unmeasured`` are FORENSIC counters,
-    # deliberately kept OUT of ``null_breakdown`` — see the note where they are
-    # emitted below.
+    # Settlement fees are positive cost subtotals and are negated into the net fee bucket.
     sum_perp_trading_fee = Decimal(0)
     sum_perp_keeper_fee = Decimal(0)
     perp_settlement_fee_unmeasured = 0
     perp_keeper_fee_unmeasured = 0
-    # VIB-3872 WI-4 per-component supersession, mirroring the dashboard fold.
     settlement_by_link = _g6_settlement_by_link(acct_events, acct_payloads)
     estimate_links = _g6_perp_estimate_links(acct_events)
 
@@ -2636,36 +2257,22 @@ def _cell_g6_reconciliation(  # noqa: C901
         if gas is not None:
             sum_gas += gas
 
-    # Time-ordered iteration so debt_outstanding tracks the actual running
-    # liability through BORROW → REPAY pairs. ``acct_events`` was already
-    # sorted by timestamp in ``run_against_sqlite``.
+    # Event order is required for the running BORROW-to-REPAY debt balance.
     for r in acct_events:
         p = acct_payloads.get(r.get("id"), {})
         et = r.get("event_type")
         rpnl = _dec(p.get("realized_pnl_usd"))
         if et == "SWAP":
-            # VIB-4905 (F1): SWAP bucket prefers ``realized_pnl_usd_matched``
-            # (matched-portion PnL, populated on partial matches too) over
-            # legacy ``realized_pnl_usd`` (null on partial under the v1
-            # contract).  Keeps the G6 SWAP bucket in lockstep with the
-            # dashboard's ``compute_cost_stack`` precedence — same precedence,
-            # same number on the same DB.  Pre-v2 payloads only carry the
-            # legacy key; the ``is not None`` fall-through handles both.
+            # Prefer matched-portion PnL for partial swaps; legacy payloads fall back.
             matched = _dec(p.get("realized_pnl_usd_matched"))
             rpnl_swap = matched if matched is not None else rpnl
             amt_in_usd = _dec(p.get("amount_in_usd"))
             if rpnl_swap is not None:
                 sum_swap += rpnl_swap
             elif amt_in_usd is not None:
-                # VIB-4394: measured amounts but no prior FIFO basis to realize
-                # against — an opening / acquiring swap, or the first disposal of
-                # pre-existing wallet inventory. A legitimate measured state, NOT
-                # a measurement gap. Surfaced for forensics; does NOT fail G6.
+                # Measured amount with no prior lot is a valid no-prior-basis state.
                 no_prior_basis_swap += 1
             else:
-                # Unmeasured amounts: the receipt parser could not resolve a USD
-                # value the SWAP path should have emitted. A genuine gap — the
-                # reconciliation runs on null, not a real signal. FAIL G6.
                 null_swap_rpnl += 1
             if amt_in_usd is not None:
                 notional_traded += abs(amt_in_usd)
@@ -2680,8 +2287,6 @@ def _cell_g6_reconciliation(  # noqa: C901
                     sum_lp += rpnl
             fees_usd = _dec(p.get("fees_total_usd"))
             if fees_usd is None and et == "LP_CLOSE":
-                # Only LP_CLOSE is expected to emit `fees_total_usd`;
-                # LP_OPEN doesn't have realized fees yet.
                 null_lp_fees += 1
             elif fees_usd is not None:
                 sum_fees += fees_usd
@@ -2691,18 +2296,8 @@ def _cell_g6_reconciliation(  # noqa: C901
                 notional_traded += abs(amt0_usd)
             if amt1_usd is not None:
                 notional_traded += abs(amt1_usd)
-            # VIB-5540 / VIB-5566 — an N-coin fungible LP (Curve StableSwap /
-            # CryptoSwap, Balancer) books its position size as a single
-            # ``cost_basis_usd`` over ALL N coins and carries NO per-token
-            # ``amount0_usd``/``amount1_usd`` (those are a 2-coin concept). Without
-            # this the fungible LP contributes ZERO to ``notional_traded``, so the
-            # G6 tolerance collapses to the $0.10 floor and sub-percent round-trip
-            # pricing noise on a real portfolio false-FAILs G6 — the same 2-coin
-            # assumption that hid the returned coins from equity (Seam A), here on
-            # the tolerance side. Fall back to ``cost_basis_usd`` ONLY when the
-            # per-token amounts are absent, so a 2-coin LP is unchanged and the
-            # notional is never double-counted. Primitive-agnostic — keyed on the
-            # payload shape, not a protocol.
+            # N-coin LPs expose aggregate cost basis instead of two token notionals.
+            # Fall back only when both token amounts are absent to avoid double counting.
             if amt0_usd is None and amt1_usd is None:
                 lp_cost_basis = _dec(p.get("cost_basis_usd"))
                 if lp_cost_basis is not None:
@@ -2732,35 +2327,24 @@ def _cell_g6_reconciliation(  # noqa: C901
             principal = _dec(p.get("principal_repaid_usd"))
             if principal is not None:
                 debt_outstanding -= principal
-                # Clamp at zero — partial-repay accounting noise can drive
-                # the running tally slightly negative without affecting the
-                # high-water mark.
+                # Partial-repay rounding must not create negative outstanding debt.
                 if debt_outstanding < Decimal(0):
                     debt_outstanding = Decimal(0)
             amt_usd = _dec(p.get("amount_usd"))
             if amt_usd is not None:
                 notional_traded += abs(amt_usd)
         if et == "PERP_CLOSE":
-            # VIB-6541 — the MEASURED settlement supersedes the ESTIMATED submission
-            # row, per component. The perp receipt parser leaves ``realized_pnl_usd``
-            # and the funding pair null on the PERP_CLOSE payload (it says so in its
-            # own ``unavailable_reason``), so without this the cell fails on two
-            # unmeasured buckets while the keeper receipt one row away carries both.
-            # Precedence is settlement-measured → estimate → unmeasured; a settlement
-            # field that is itself ``None`` never overwrites a measured estimate with
-            # a fabricated zero (Empty≠Zero, the FIX-1 property of WI-4).
+            # Measured settlement components supersede submission estimates. A None
+            # settlement field never replaces a measured estimate with zero.
             s = settlement_by_link.get(str(r.get("ledger_entry_id") or ""))
             s_funding = _dec(s.get("funding_fee_usd")) if s else None
             if s_funding is not None:
-                # ``funding_fee_usd`` is SIGNED, paid-positive; ``sum_funding`` is a
-                # PnL contribution, so paid funding subtracts.
+                # funding_fee_usd is signed and paid-positive; PnL contribution is opposite.
                 sum_funding -= s_funding
             else:
                 funding_p = _dec(p.get("funding_paid_usd"))
                 funding_r = _dec(p.get("funding_received_usd"))
-                # Funding is "all-or-nothing" per row: a payload that emitted
-                # neither is unmeasured. Both being zero is a measured zero
-                # (no funding accrued) and is fine.
+                # Neither funding field means unmeasured; two zeros are measured zero.
                 if funding_p is None and funding_r is None:
                     null_perp_funding += 1
                 if funding_p is not None:
@@ -2788,28 +2372,10 @@ def _cell_g6_reconciliation(  # noqa: C901
                 if notional > max_perp_notional:
                     max_perp_notional = notional
         if et == "PERP_SETTLEMENT":
-            # VIB-6541 — the perp lane's real costs, measured on the keeper receipt
-            # and, until this change, in NO reconciliation bucket at all. Both are
-            # money that left the wallet inside the window the wallet method
-            # measures, so the component method has to book them or G6 reports the
-            # omission as an unexplained gap. On the sealed mainnet bundle
-            # 20260804-2310-gmxrt this was $0.4563 (keeper) + $0.0060 (position) of
-            # a $0.52 run, i.e. 89% of the loss.
-            #
-            # VIB-6061 measured the keeper fee and deliberately stopped short of this
-            # fold, naming the residual it left behind rather than absorbing it
-            # silently. This is the other half.
-            #
-            # Folded from the settlement row ALONE, with no supersession dance: these
-            # terms exist on exactly one row per settlement (only the keeper receipt
-            # carries them; the Phase-1 submission payload never does), so the guards
-            # that stop a double-count of terms present on BOTH rows have nothing to
-            # guard and would only drop them.
+            # Keeper and trading costs exist only on the settlement row and must be
+            # included in the same wallet window without submission supersession.
             trading_fee, keeper_fee = _g6_settlement_cost_usd(p)
-            # The trading fee is scoped to EXECUTED settlements: a cancelled or frozen
-            # order was never filled and owes no position fee, so its absent fee is a
-            # correct absence, not a measurement gap. The KEEPER fee is not scoped
-            # that way — the keeper consumed the escrow whatever the order did.
+            # Trading fees require a fill; keeper fees consume escrow for every outcome.
             if p.get("settlement_state") == "EXECUTED":
                 if trading_fee is None:
                     perp_settlement_fee_unmeasured += 1
@@ -2819,10 +2385,7 @@ def _cell_g6_reconciliation(  # noqa: C901
                 perp_keeper_fee_unmeasured += 1
             else:
                 sum_perp_keeper_fee += keeper_fee
-            # An ORPHAN EXECUTED settlement (no PERP_OPEN/PERP_CLOSE row for its link)
-            # carries economics nothing else booked; a linked one was already merged
-            # by the PERP_CLOSE branch above and must not fold again. Mirrors
-            # ``_perp_reconciliation_terms``.
+            # Orphan settlements contribute economics directly; linked ones were merged above.
             link = str(p.get("submission_ledger_entry_id") or r.get("ledger_entry_id") or "")
             if p.get("settlement_state") == "EXECUTED" and link not in estimate_links:
                 orphan_rpnl = _dec(p.get("realized_pnl_usd"))
@@ -2831,78 +2394,34 @@ def _cell_g6_reconciliation(  # noqa: C901
                 orphan_funding = _dec(p.get("funding_fee_usd"))
                 if orphan_funding is not None:
                     sum_funding -= orphan_funding
-        # VIB-5403: Pendle PT registry rows (blueprint 27 §11.3 — a contribution
-        # row per event_type; PT rides Primitive.SWAP, so its disposal leg obeys
-        # the SWAP SELL-leg registry: it books REALIZED PnL, a delta — NOT gross
-        # proceeds).
-        #   PT_BUY  — the basis (acquiring) leg: records a FIFO lot, contributes
-        #             nothing to PnL (mirrors a SWAP BUY leg). No bucket entry.
-        #   PT_SELL / PT_REDEEM — the disposal (SELL) leg: books
-        #             ``realized_yield_usd`` (= amount_in_usd − cost_basis_consumed
-        #             for the PT primitive), exactly as the SWAP SELL leg books
-        #             ``realized_pnl_usd``. A closed-form W(t)/C(t) analysis proved
-        #             the realized-PnL model ties on a symmetric round-trip bracket;
-        #             gross-proceeds booking was a workaround for a defective fixture.
-        # Empty≠Zero on the disposal leg, mirroring the SWAP SELL / VIB-4394 path:
-        #   * realized_yield_usd measured → booked into sum_swap (PASS);
-        #   * matched lot but USD projection unmeasured (realized_yield_sy present,
-        #     realized_yield_usd None — sy_price absent, VIB-5276) → the ONLY
-        #     waiver-eligible bucket (null_pt_realized_usd);
-        #   * disposal with no matched FIFO lot (sy_amount measured, no realized
-        #     yield) → forensic no_prior_basis_pt — legitimate, NON-failing;
-        #   * genuinely unmeasured disposal → null_pt_amount, always FAIL.
-        # The ε notional base is booked independently of the PnL leg, from the
-        # measured (sy_amount × sy_price) when present.
+        # PT buys establish basis but no PnL; disposals contribute realized yield,
+        # never gross proceeds. Missing USD price is distinct from missing quantities,
+        # and measured no-prior-basis disposals remain non-failing diagnostics.
         if et in ("PT_SELL", "PT_REDEEM"):
             rpnl_pt = _dec(p.get("realized_yield_usd"))
             ryield_sy = _dec(p.get("realized_yield_sy"))
             sy_amount = _dec(p.get("sy_amount"))
             sy_price = _dec(p.get("sy_price"))
             if rpnl_pt is not None:
-                # Disposal-leg realized PnL (§11.3 SELL-leg contribution).
                 sum_swap += rpnl_pt
             elif ryield_sy is not None and sy_price is None:
-                # Matched FIFO lot, USD projection unmeasured because the sell-side
-                # SY price is GENUINELY absent (sy_price=None). The ONLY waiver-
-                # eligible bucket; the profile decides FAIL/XFAIL.
                 null_pt_realized_usd += 1
             elif ryield_sy is not None:
-                # Matched lot AND a measured sy_price, yet realized_yield_usd is
-                # None: the USD projection (realized_yield_sy × sy_price) was
-                # DERIVABLE but not booked — a real builder defect, not a price
-                # gap. FAIL, never waive (Empty≠Zero; a measured price is not an
-                # excuse for a missing USD value).
                 null_pt_amount += 1
             elif sy_amount is not None:
-                # Disposal with no matched FIFO lot to realize against (first
-                # disposal of pre-existing PT). A legitimate measured state —
-                # surfaced for forensics, NON-failing (mirror VIB-4394 SWAP).
                 no_prior_basis_pt += 1
             else:
-                # Genuinely unmeasured disposal — a receipt/writer data loss.
-                # Always FAIL G6; never waiver-eligible (Empty≠Zero).
                 null_pt_amount += 1
-            # ε notional base, independent of the PnL booking above.
             if sy_amount is not None and sy_price is not None:
                 notional_traded += abs(sy_amount * sy_price)
         if et == "PT_BUY":
-            # Basis leg: the SY cost the wallet paid to acquire the PT. Adds to
-            # the ε notional base (so ε scales to PT trade size); not a PnL term.
             sy_amount = _dec(p.get("sy_amount"))
             sy_price = _dec(p.get("sy_price"))
             if sy_amount is not None and sy_price is not None:
                 notional_traded += abs(sy_amount * sy_price)
 
-    # Ambient inventory revaluation term (blueprint 27 §11.5): the component
-    # sum above only carries the PnL of tokens the strategy TRADED. The wallet
-    # (equity) method also moves when an UNTRADED token the strategy is merely
-    # holding changes price between the two endpoint snapshots (idle WETH, the
-    # native-gas remainder, the unspent half of a single-sided swap, an open
-    # swap lot's residual MTM). That revaluation is a real reconciliation term,
-    # not a measurement gap. It is read off the SAME priced[0]/priced[-1] rows
-    # that produced wallet_pnl — same snapshot rows ⇒ same marks ⇒ no skew, and
-    # no new on-chain / price reads. The term collapses to exactly zero when no
-    # untraded inventory exists at either endpoint.
+    # Untraded inventory revaluation is a component term and must use the same
+    # persisted endpoint marks as wallet PnL to avoid price-time skew.
     inv_deployment_id = ""
     for s in (priced[0], priced[-1]):
         did = s.get("deployment_id")
@@ -2915,55 +2434,23 @@ def _cell_g6_reconciliation(  # noqa: C901
         accounting_events=acct_events,
         deployment_id=inv_deployment_id,
     )
-    # Empty ≠ Zero: a None total means a held token's mark (or an open lot's
-    # basis) was unmeasured at an endpoint. Surface it as a null bucket so G6
-    # FAILs with a diagnostic instead of folding an unmeasured term in as zero.
+    # Preserve an unmeasured inventory total as a failing null bucket, not measured zero.
     sum_inventory_reval = inv.total_usd if inv.total_usd is not None else Decimal(0)
     null_inventory_reval = 0 if inv.total_usd is not None else 1
 
-    # VIB-6541 — the settlement-carried perp costs land in ``sum_fees``, the NET fee
-    # contribution to PnL (LP income above is positive; these are paid, so they
-    # subtract). Kept in the same bucket rather than given their own so the
-    # decomposition's arithmetic identity — component = Σ buckets — stays readable,
-    # with the two sub-totals emitted separately below for forensics.
+    # Perp fees are costs; keep their positive subtotals separate but negate them into net fees.
     sum_fees -= sum_perp_trading_fee
     sum_fees -= sum_perp_keeper_fee
-    # KNOWN LIMITATION, stated because this fold makes it BIGGER (VIB-6546).
-    #
-    # The component method is now right about the keeper fee; the WALLET method
-    # can still be wrong about it, because a GMX order escrows native as
-    # ``msg.value`` and the keeper refunds the remainder at settlement. While that
-    # escrow is in flight it is out of the wallet without being a cost, so a
-    # snapshot endpoint landing inside the flight window measures a balance that
-    # is short by the escrow. G16 detects exactly this and REFUSES to score
-    # (``_g16_escrow_outstanding``); G6 has no such guard and bills the residue to
-    # the books. On the 20260804-2310-gmxrt bundle both endpoints straddle an
-    # escrow, so G6 sees ~$0.22 of escrow effect against the ~$0.46 of keeper fee
-    # booked here. Giving G6 G16's guard is VIB-6546; it is a different defect
-    # from this one and is deliberately not fixed here.
-    #
-    # Not a reason to withhold the fold. The fee is real money the wallet loses,
-    # and an omitted cost is a silently WRONG component sum, whereas a straddled
-    # endpoint is a loudly wrong one.
+    # G6 does not yet refuse wallet endpoints during in-flight native escrow, so
+    # such a window can report a loud residual even when these cost terms are correct.
 
     component_pnl = sum_swap + sum_lp + sum_perp + sum_fees + sum_funding + sum_interest - sum_gas
     component_pnl += sum_inventory_reval
 
-    # VIB-3869 (B): primitive-aware notional-scaled tolerance.
-    # Replaces the prior `max($0.50, eps_pct × capital)` rule, which on a
-    # $5 validation run gave a $0.50 floor — i.e. 10% of capital — masking
-    # real reconciliation errors. The new floor is $0.10 (rounding /
-    # oracle-noise floor) and the percent is scaled against the right
-    # *notional* base for the primitive:
-    #   - LP/Spot: 0.25% × notional_traded (sum of swap + LP open/close USD)
-    #   - Looping: 0.10% × max(notional_traded, max_debt_outstanding)
-    #   - Perp:    0.05% × max_notional_exposure
+    # Tolerance is the greater of a $0.10 noise floor and a primitive-specific
+    # percentage of traded notional, debt high-water mark, or perp exposure.
     floor = Decimal("0.10")
     eps_floor_label = "$0.10"
-    # Per-primitive tolerance lives on the ``ScorecardProfile`` (G-A): a flat
-    # ``eps_pct`` plus a selector over the three notional bases computed above.
-    # ``eps_pct`` / ``scaling_base`` / ``scaling_label`` / ``eps`` are identical
-    # to the former if/elif/else ladder for lp/looping/perp.
     _profile = _profile_for(primitive)
     eps_pct = _profile.eps_pct
     scaling_base, scaling_label = _profile.eps_scaling(
@@ -2977,33 +2464,8 @@ def _cell_g6_reconciliation(  # noqa: C901
     capital = max(abs(initial), abs(final))
     gap = abs(wallet_pnl - component_pnl)
 
-    # VIB-5826: a notional-scaled tolerance that meets or exceeds the capital at
-    # risk makes G6 *unfalsifiable* — ``gap <= eps`` holds for every reconciliation
-    # error the run could physically produce, so the cell reports PASS while
-    # verifying nothing. That is not a measured pass; it is an absent measurement,
-    # and per Empty != Zero it must not be scored as one.
-    #
-    # This is a LOGICAL bound, not a tuned threshold — below it the cell can still
-    # discriminate, at or above it the cell is dead. Only the *scaled* term is
-    # bounded: the ``floor`` is a deliberate rounding/oracle-noise ε and a dust-sized
-    # run must not trip on it.
-    #
-    # Motivating defect (docs/internal/qa/g6-matrix-sweep-2026-07-15.md §6):
-    # ``lp-uniswap_v3-ethereum`` scored 21/22 — the best row in the matrix — on
-    # ε=$5,160,574 from a $2.06bn phantom ``notional_traded`` (token decimals applied
-    # by config label order instead of on-chain token0/token1), against $191,861 of
-    # capital. Its baseline said FAIL, so an outcome-only ratchet read the corruption
-    # as an improvement. Across that 24-row sweep the worst legitimate row sat at
-    # scaled/capital = 8.3e-6 — five orders of magnitude of headroom under this bound.
-    # The vacuity test and the ratio have DIFFERENT preconditions, and conflating
-    # them re-opens the hole: guarding the test on ``capital > 0`` (to keep the
-    # ratio's divisor safe) would suppress the guard on the most vacuous row of all
-    # — zero capital with a non-zero scaled tolerance, where nothing is at stake and
-    # ε is still positive. So the test is bare and only the RATIO is divisor-guarded.
-    #
-    # ``eps_scaled > 0`` keeps a genuinely empty run (no capital, no notional) out of
-    # it: there the floor governs and the cell is comparing 0 against 0, which is
-    # uninformative but not a false green.
+    # A scaled tolerance at least as large as capital makes the cell unfalsifiable.
+    # Test zero-capital runs too; only the diagnostic ratio requires a nonzero divisor.
     eps_scaled = eps_pct * scaling_base
     eps_vacuous = eps_scaled > 0 and eps_scaled >= capital
     eps_over_capital = (eps_scaled / capital) if capital > 0 else None
@@ -3016,99 +2478,23 @@ def _cell_g6_reconciliation(  # noqa: C901
         "Σ_funding_usd_null_count": null_perp_funding,
         "Σ_interest_supply_null_count": null_withdraw_interest,
         "Σ_interest_borrow_null_count": null_repay_interest,
-        # An unmeasured ambient-revaluation term (a held token with no mark, or
-        # an open lot with no basis) is a null input to the reconciliation, not
-        # a measured zero — FAIL the cell rather than fold it in as zero.
+        # Missing marks or basis make inventory revaluation unmeasured, not zero.
         "Σ_inventory_reval_usd_null_count": null_inventory_reval,
-        # VIB-5403: a Pendle PT disposal with a matched FIFO lot but whose
-        # realized-PnL USD projection is unmeasured (sy_price=None on the fork —
-        # VIB-5276 gateway PT price). Null input to the reconciliation, surfaced
-        # separately so the profile can classify it as a known ticketed
-        # measurement gap (XFAIL) vs a real bug (FAIL).
+        # A matched PT lot with no USD price is the profile's narrow XFAIL case.
         "Σ_pt_realized_usd_null_count": null_pt_realized_usd,
-        # VIB-5403: a PT disposal whose amounts are themselves unmeasured (no
-        # realized_yield_usd, no realized_yield_sy, no sy_amount). A real
-        # receipt/writer data loss — always FAILs (never the VIB-5276 waiver,
-        # which is the realized-USD-only price gap). Kept as its own bucket so
-        # the XFAIL gate below can never absorb it.
+        # Missing PT amounts are data loss and never qualify for the price-gap waiver.
         "Σ_pt_amount_null_count": null_pt_amount,
     }
     has_nulls = any(v > 0 for v in null_breakdown.values())
 
-    # VIB-5854: the two methods must measure the same interval. The wallet method
-    # brackets ``[priced[0] … priced[-1]]``; the component method sums EVERY typed
-    # row in the DB. Those coincide only if no money moved before the first priced
-    # snapshot — and the runner captures its first snapshot *inside* iteration 1,
-    # after tx₁ has already executed. tx₁'s gas is spent before the baseline is
-    # read, so it can never appear in any snapshot-derived delta, while the
-    # component sum books it correctly. The residue lands in ``gap`` with no
-    # attribution: an operator cannot tell "the books lost money" from "the
-    # baseline was two seconds late".
+    # Wallet and component methods measure different intervals if ledger activity
+    # predates the first priced snapshot.
     coverage = _baseline_window_coverage(priced[0], ledger)
     window_uncovered = coverage.measurable and not coverage.covers
-    # An uncovered window explains only as much of the gap as the pre-baseline
-    # spend it measured. The residue beyond that is an ordinary reconciliation
-    # failure and must keep failing: a late baseline is not a licence to excuse
-    # unrelated books errors, and XFAIL outranks FAIL, so an unconditional
-    # waiver would SOFTEN the validation contract relative to no guard at all.
-    # ``None`` when the aggregate is not measured — an unexplained residual and
-    # an unmeasurable one both fail, but for different stated reasons.
-    #
-    # Measured against the SIGNED discrepancy, never against ``gap``. The
-    # mechanism has exactly one sign — pre-baseline gas is booked by the
-    # component method and is invisible to the wallet method, so it can only
-    # push ``wallet - component`` POSITIVE by G. The residue is therefore
-    # ``|signed - G|``. Testing ``|gap - G| = ||signed| - G|`` instead loses the
-    # sign and understates the residue whenever an unrelated books error drives
-    # the discrepancy negative — one-directionally, always toward "explained".
-    # At ``signed = -G`` it reports a residue of exactly zero while the true
-    # residue is ``2G``: measured on a $165k fixture, a $1.40 error (14x ε) was
-    # certified "not a books error". Sign-blindness here reintroduces precisely
-    # the FAIL -> XFAIL softening this gate exists to prevent.
-    #
-    # KNOWN LIMITATION (VIB-6436): this nets the discrepancy against GAS ONLY, so
-    # the residue is not a clean measure of "unrelated books error". The component
-    # method books tx₁'s *economics* from ``accounting_events`` too — see the
-    # comment on the XFAIL branch below — and ``transaction_ledger`` carries no
-    # realized-PnL column at all. When tx₁ realizes R against pre-existing
-    # inventory the true structural offset is ``G - R``, so a run whose only defect
-    # is the late baseline can FAIL naming a books error that does not exist. The
-    # direction is FAIL, never XFAIL or PASS, so nothing is softened — but do not
-    # read this residue as "the books error" without checking for a pre-window
-    # realized leg.
-    #
-    # ``eps`` is the right tolerance: same question, same units, same run as the
-    # gap it bounds — but only while it can still discriminate.
-    #
-    # VIB-6434. A tolerance the cell itself has ruled unfalsifiable may not license a
-    # waiver. The VIB-5826 vacuity guard below fires only on
-    # ``eps_vacuous and gap <= eps``, so a vacuous ε that ALSO exceeds the gap used to
-    # fall through to this test and grant an XFAIL — the exact outcome that guard
-    # exists to deny a PASS, and worse than denying it, because XFAIL outranks FAIL.
-    # ``not eps_vacuous`` is the narrowest possible closure: when ε is sound the
-    # expression is unchanged, so no healthy run moves.
-    #
-    # Two corrections to what the previous round of this comment asserted, both
-    # measured rather than reasoned:
-    #
-    #   * "Needs a corrupted scaling base, so it is not on a healthy run's path" was
-    #     half right. 6 of the 8 vacuous DBs in the evidence corpus are vacuous from
-    #     UNDERSTATED CAPITAL, not an inflated notional — Hyperliquid perp scores
-    #     max_perp_notional=$20,439 against measured equity of $0.74 because HyperCore
-    #     collateral is not in snapshot equity. Those six satisfy every condition of
-    #     the waiver branch except ``gap > eps``; this guard is the only thing between
-    #     them and it. It is a live shape, not a corrupted-data hypothetical.
-    #   * The waiver is NOT "near-trivially satisfiable" as VIB-6434 states. Reaching
-    #     it needs ``gap > eps``, which forces ``residual >= gap - G``; so ε must land
-    #     in ``[gap - G, gap)``, an interval of width at most G (the pre-baseline gas).
-    #     It is a knife-edge, which is why zero corpus rows take it today.
-    #
-    # NOT hoisted, and not written as a bare ``if eps_vacuous:`` at the guard below.
-    # That was the original VIB-5826 shape and review on PR #3290 rejected it: it
-    # swallows the ordinary-gap FAIL and sends the reader to "root-cause the scaling
-    # base" when the books are genuinely off. ``test_vacuous_eps_with_a_real_gap_
-    # reports_the_ordinary_gap_fail`` pins that, and the verdict is FAIL either way —
-    # so no ratchet would catch the regression, only that test would.
+    # Subtract pre-window gas from the signed discrepancy; using abs(gap) first
+    # loses direction and can falsely explain an opposite-signed books error.
+    # This does not account for pre-window realized economics, so an unexplained
+    # result may remain conservative. A vacuous epsilon cannot authorize a waiver.
     window_gas = coverage.gas_before_measured
     signed_delta = wallet_pnl - component_pnl
     window_residual = None if window_gas is None else abs(signed_delta - window_gas)
@@ -3118,51 +2504,24 @@ def _cell_g6_reconciliation(  # noqa: C901
         "wallet_pnl_usd": str(wallet_pnl),
         "component_pnl_usd": str(component_pnl),
         "Σ_swaps_usd": str(sum_swap),
-        # VIB-4394: SWAPs with measured amounts but no prior FIFO basis to
-        # realize against (opening / acquiring swaps, first disposal of
-        # pre-existing inventory). A legitimate measured state — surfaced for
-        # forensics but deliberately NOT in null_breakdown, so it never fails G6.
+        # Measured swaps without prior basis are diagnostic, not null inputs.
         "Σ_swaps_no_prior_basis_count": str(no_prior_basis_swap),
-        # VIB-5403: a Pendle PT disposal with measured amounts but no matched
-        # FIFO lot to realize against (first disposal of pre-existing PT).
-        # Mirrors Σ_swaps_no_prior_basis_count — a legitimate measured state,
-        # surfaced for forensics but deliberately NOT in null_breakdown, so it
-        # never fails G6.
+        # Measured PT disposals without prior basis follow the same rule.
         "Σ_pt_no_prior_basis_count": str(no_prior_basis_pt),
         "Σ_lp_usd": str(sum_lp),
         "Σ_perp_usd": str(sum_perp),
         "Σ_fees_usd": str(sum_fees),
-        # VIB-6541 — the two perp sub-totals inside Σ_fees_usd, emitted separately so
-        # a reader can see WHICH cost moved the bucket (LP fee income and perp fees
-        # paid net against each other inside one number otherwise). Both are stated
-        # as POSITIVE costs; Σ_fees_usd carries them negated.
+        # These subtotals are positive costs; Σ_fees_usd carries them negated.
         "Σ_perp_trading_fee_usd": str(sum_perp_trading_fee),
         "Σ_perp_keeper_fee_usd": str(sum_perp_keeper_fee),
-        # FORENSIC, NOT FAILING — deliberately outside ``null_breakdown``.
-        #
-        # Empty≠Zero argues these should fail the cell: an unmeasured cost is not a
-        # zero cost. They do not, for one reason and one only — a settlement that
-        # predates the VIB-6061 measured-fee writer carries no fee field at all, so
-        # promoting this to a failing bucket would flip G6 on every historical perp
-        # DB for a gap this ticket did not introduce and does not fix. The magnitude
-        # is not lost: the count is printed here, and the omitted cost also shows up
-        # as gap. Promote to a failing bucket once every perp DB in the corpus is
-        # post-VIB-6061 — that is a corpus question, not a code question, so it is
-        # deliberately not decided here.
-        #
-        # Tracked as VIB-6558, which also covers the mirrored half: the dashboard's
-        # ``compute_reconciliation`` subtracts these same buckets without consulting
-        # their ``*_measured`` flags, so it never sets ``has_unmeasured`` either. Both
-        # sites move together when the corpus question is answered. Raised by Codex in
-        # the VIB-6541 panel; the consequence is that an EXECUTED settlement with a
-        # missing fee can leave G6 PASSING when the omission lands inside epsilon.
+        # Legacy settlements omit these fields, so missing-fee counts remain forensic
+        # rather than failing until the persisted corpus can support strictness.
         "Σ_perp_trading_fee_unmeasured_count": str(perp_settlement_fee_unmeasured),
         "Σ_perp_keeper_fee_unmeasured_count": str(perp_keeper_fee_unmeasured),
         "Σ_funding_usd": str(sum_funding),
         "Σ_interest_usd": str(sum_interest),
         "Σ_gas_usd": str(-sum_gas),
-        # Blueprint 27 §11.5 — ambient inventory revaluation (untraded
-        # qty_idle × Δmark + open swap-lot residual MTM). "" when unmeasured.
+        # Ambient inventory revaluation is empty, not zero, when unmeasured.
         "Σ_inventory_reval_usd": ("" if inv.total_usd is None else str(sum_inventory_reval)),
         "inventory_reval_confidence": inv.confidence,
         "inventory_reval_per_token": inv.per_token,
@@ -3174,57 +2533,32 @@ def _cell_g6_reconciliation(  # noqa: C901
         "ε_scaling_base_usd": str(scaling_base),
         "ε_scaling_base_label": scaling_label,
         "capital_usd": str(capital),
-        # VIB-5826: always emitted so a vacuous tolerance is visible in the
-        # decomposition even on rows where it does not change the verdict.
-        # Empty != Zero: ratio is "" (not 0) when capital is unmeasured.
+        # Empty ratio means no nonzero capital denominator was available.
         "ε_vacuous": str(eps_vacuous),
         "ε_scaled_over_capital": ("" if eps_over_capital is None else str(eps_over_capital)),
         "il_diagnostic_usd_NOT_in_PnL": str(il_diagnostic),
-        # VIB-5854 window coverage. Always emitted so the wallet bracket is
-        # visible in the decomposition even on rows where it changes no verdict —
-        # the same rule ``ε_vacuous`` follows. Empty != Zero: when the endpoint
-        # carries no parseable timestamp the coverage is UNMEASURED, so these read
-        # "" rather than claiming a covered window nobody verified.
+        # Empty coverage means endpoint chronology was unmeasured.
         "initial_endpoint_covers_run": ("" if not coverage.measurable else str(coverage.covers)),
         "initial_snapshot_cycle_id": priced[0].get("cycle_id") or "",
         "ledger_rows_before_initial_endpoint": str(coverage.rows_before),
-        # The attributable magnitude: spend the wallet method structurally cannot
-        # see. Ratcheted, so it can only shrink — and it goes to zero when the
-        # producer-side boot snapshot lands, which is what proves that fix.
-        # "" when coverage could not be evaluated at all, AND when the aggregate
-        # is only a subtotal because some pre-window row's gas was unmeasured —
-        # Empty != Zero applies to the TOTAL, not merely to its terms.
+        # Empty gas total means chronology or at least one pre-window gas value was unmeasured.
         "gas_usd_before_initial_endpoint": ("" if window_gas is None else str(window_gas)),
         "gas_usd_before_initial_endpoint_unmeasured_count": str(coverage.gas_before_unmeasured_rows),
-        # The part of the gap a late baseline does NOT explain. This decides the
-        # verdict below, so it is always emitted — "" when it cannot be computed.
+        # Empty residual means the explained portion could not be computed.
         "window_residual_usd": ("" if window_residual is None else str(window_residual)),
         "ledger_rows_without_timestamp": str(coverage.rows_without_timestamp),
-        # VIB-6703: rows claiming positive deployed value with no readable legs
-        # — on a leveraged row this scores gross-of-debt with nothing else to
-        # show for it, so the count is always emitted (diagnostic-only; see
-        # ``_unreadable_payload_rows`` for the promotion discipline).
+        # Positive deployed value without readable legs remains diagnostic-only.
         "unreadable_payload_rows": str(_unreadable_payload_rows(priced)),
-        # VIB-6699: marked-gross SUPPLY legs whose declared reserve debt has no
-        # surviving BORROW sibling — the partial-discovery shape that would
-        # otherwise read as silently plausible overstated equity.
+        # Missing same-reserve debt siblings expose partially discovered leveraged positions.
         "missing_debt_leg_rows": str(_missing_debt_leg_rows(priced)),
         **{k: str(v) for k, v in null_breakdown.items()},
     }
 
-    # VIB-3869 (A): any null in a bucket where the row's intent_type would
-    # normally emit a value FAILs G6 — the reconciliation result is
-    # otherwise running on unmeasured zero, not a real signal.
+    # Any required null makes reconciliation operate on unmeasured zero.
     if has_nulls:
         nonzero = {k: v for k, v in null_breakdown.items() if v > 0}
-        # VIB-5403: a Pendle PT disposal blocked ONLY because its realized-PnL USD
-        # projection is unmeasured (matched FIFO lot, but sy_price=None on the fork
-        # — VIB-5276 gateway PT price) is a known, ticketed measurement gap, not a
-        # books error. When the profile opts in AND the sole non-zero null bucket
-        # is the PT realized-USD counter, surface XFAIL (measured-but-blocked)
-        # instead of FAIL. Any OTHER null bucket — a real swap/lp/perp/ambient gap,
-        # or the always-failing Σ_pt_amount_null_count — still FAILs: the XFAIL is
-        # narrowly scoped to the one ticketed gap and never blanket-passes Pendle.
+        # The profile may waive only an unavailable PT USD projection; every other
+        # null bucket, including missing PT quantities, remains a failure.
         if (
             _profile.disposal_usd_unmeasured_is_xfail
             and null_pt_realized_usd > 0
@@ -3256,10 +2590,7 @@ def _cell_g6_reconciliation(  # noqa: C901
             ),
             decomp,
         )
-    # VIB-5826: guard the PASS path. Placed after the null check (an unmeasured
-    # input is the more specific diagnosis) and before ``gap <= eps`` — which, with
-    # a vacuous ε, is true by construction. A gap that exceeds even a vacuous ε is
-    # still reported as an ordinary gap FAIL below, since that verdict is sound.
+    # Prefer the null diagnosis, then block only the otherwise-PASS vacuous case.
     if eps_vacuous and gap <= eps:
         return (
             CellResult(
@@ -3277,32 +2608,9 @@ def _cell_g6_reconciliation(  # noqa: C901
             ),
             decomp,
         )
-    # VIB-5854: an uncovered window makes BOTH remaining verdicts unsound. A PASS
-    # would certify a reconciliation between two different intervals; a FAIL would
-    # bill the books for a residue the wallet method structurally cannot see.
-    # XFAIL is the honest verdict — measured-but-blocked, pending the
-    # producer-side pre-trade boot snapshot — and it is placed BEFORE the
-    # ``gap <= eps`` PASS because the false GREEN is the dangerous direction: in
-    # paper/dry_run a failed boot capture logs and continues, so without this
-    # guard the matrix scores green on a degraded run.
-    #
-    # NOT the repair. Windowing ``Σ_gas`` to the wallet bracket would make the two
-    # numbers agree and is incorrect, not merely narrow: the component books tx₁'s
-    # *economics* from ``accounting_events`` (FIFO lot, realized leg, notional into
-    # ε) and only its *gas* from ``transaction_ledger``, so windowing the gas alone
-    # drops one of tx₁'s terms and keeps the rest. That looks right only while tx₁
-    # is an acquiring swap with ``realized_pnl=None``; the day tx₁ disposes of
-    # pre-existing inventory it re-opens the gap with the opposite sign. Ranked
-    # below the null and vacuous-ε branches deliberately — both are more specific
-    # diagnoses, and neither may be softened into an XFAIL by this guard.
-    #
-    # And the waiver is bounded by what the late baseline actually EXPLAINS. An
-    # unconditional XFAIL would excuse an unrelated books error that merely
-    # happened to share a run with a late baseline — measured here as a $10.00
-    # gap of which $0.50 was pre-baseline gas, reported as "not a books error".
-    # Because XFAIL outranks FAIL, that is strictly WORSE than having no guard at
-    # all: a run that fails today would soft-pass. So the residue beyond the
-    # attributed spend keeps failing, and says so.
+    # An uncovered wallet window cannot support PASS. Waive only when measured
+    # pre-window spend explains the discrepancy; unrelated residue must still fail.
+    # Do not window gas alone because component economics would remain unwindowed.
     if window_uncovered and window_explained:
         return (
             CellResult(
@@ -3322,40 +2630,10 @@ def _cell_g6_reconciliation(  # noqa: C901
             decomp,
         )
     if window_uncovered:
-        # The residue can exceed BOTH the gap and the spend, so it is a portion of
-        # neither and must not be written as one. It is measured against the SIGNED
-        # discrepancy, so when the two omissions partly cancel a near-zero gap can
-        # hide a large residue; and it is netted only against gas, the smaller limb
-        # (VIB-6436). Two rounds of this diagnostic each made the residue a part of
-        # whichever noun sat nearest — "$10.5 of a $10.0 gap", then "$10.5 of that
-        # $0.5 spend", the second false by 21x in the same sentence that states the
-        # $0.5. It is a quantity in its own right. The threshold sentence cites the
-        # residue because the residue is what this branch tested; printing
-        # "gap > ε" was false whenever the gap itself sat under ε.
-        #
-        # Three arms, because the reason the residue is unexplained decides what the
-        # reader should go and do — and two of them must NOT claim a books error.
-        # Claim a second defect only where one was measured: on the unmeasured-gas
-        # branch the cell has just said the explained portion cannot be established,
-        # so concluding "reconcile the residue as an ordinary gap" there asserts
-        # exactly what it disclaimed, and on the run that produced it the gap sat
-        # three orders of magnitude UNDER ε.
+        # Residual is a signed-discrepancy calculation, not a portion of gap or spend.
+        # Distinguish an unfalsifiable threshold, a measured excess, and unmeasured gas.
         if eps_vacuous and window_residual is not None and window_residual <= eps:
-            # VIB-6434 redirects here, but ONLY where the waiver would actually have
-            # been granted. The guard has to name ``residual <= eps`` explicitly: an
-            # earlier revision fired on ``eps_vacuous`` alone and its comment claimed
-            # "this branch is reached precisely when residual <= ε", which control
-            # flow did not enforce. With a residue of $2,000 against ε=$1,550 it
-            # announced "cannot be decided" and "compares nothing" about a comparison
-            # that had just produced a definite answer — a vacuous ε is one that is
-            # too WIDE, so a residue exceeding even it is MORE conclusive, not less.
-            #
-            # That made three consecutive rounds of this diagnostic wrong, each right
-            # about the case it tested and blind to the axis beside it: "$10.5 of a
-            # $10.0 gap", then "$10.5 of that $0.5 spend", then a decidable residue
-            # called undecidable. The comment above described that pattern and the
-            # next revision repeated it, which is the argument for the condition
-            # being readable in the branch rather than asserted in prose.
+            # A residual beyond even a vacuous epsilon is still a definite failure.
             unexplained = (
                 f"whether that spend explains the discrepancy cannot be tested: the "
                 f"tolerance is vacuous (notional-scaled ε=${eps_scaled} >= capital="
@@ -3492,24 +2770,13 @@ def _cell_g8_time_series(snapshots: list[dict[str, Any]]) -> CellResult:
 def _cell_g9_confidence(snapshots: list[dict[str, Any]], acct_events: list[dict[str, Any]]) -> CellResult:
     bad = []
     for s in snapshots:
-        # A cash-only snapshot still bears USD value and still requires a
-        # confidence stamp (post-teardown, total_value_usd collapses to 0 and
-        # the equity is entirely in available_cash_usd); previously it was
-        # waved through.
-        # VIB-5857: test USD-bearing-ness on the RAW columns plus the raw debt
-        # legs, not the netted equity — a fully-drawn leveraged snapshot whose
-        # netted equity lands on exactly 0 still bears USD value (widening),
-        # and a 0/0 row carrying a live BORROW leg bears a real liability
-        # (keeps the class the netted-equity form caught via equity == −debt).
-        # Both directions are pinned by
-        # tests/unit/accounting/test_snapshot_equity_netting_vib5857.py.
+        # Use raw assets and debt: zero net equity can still contain measured USD exposure.
         deployed = _dec(s.get("total_value_usd"))
         cash = _dec(s.get("available_cash_usd"))
         bears_usd = (
             (deployed is not None and deployed != 0)
             or (cash is not None and cash != 0)
-            # RAW mark on purpose: whether a liability needs a confidence
-            # stamp must not depend on the legacy-shape correction.
+            # Confidence on a liability must not depend on legacy net-shape correction.
             or net_debt_from_positions_json(s.get("positions_json"))[1] != 0
         )
         if bears_usd and not s.get("value_confidence"):
@@ -3560,13 +2827,9 @@ def _cell_g10_multi_tx_atomicity(
     A cycle with a single landed row is uniform-by-construction (no mixed
     status possible) and contributes nothing to either check.
     """
-    # ── Contract 1: no double-writes ────────────────────────────────────
     by_intent: dict[Any, int] = {}
     for r in ledger:
-        # Skip teardown rows whose tx_hash may be NULL until the intent
-        # confirms; G10 evaluates only landed intents (success/fail with a
-        # dispatched TX). A None tx_hash on an "in-flight" row would otherwise
-        # collide with other in-flight rows in the same cycle.
+        # In-flight rows have no stable transaction identity and must not collide.
         tx_hash = r.get("tx_hash")
         if not tx_hash:
             continue
@@ -3582,11 +2845,7 @@ def _cell_g10_multi_tx_atomicity(
             f"{len(dups)} ledger entries duplicated for the same intent (e.g. {sample!r} ×{dups[sample]})",
         )
 
-    # ── Contract 2: cycle-level uniform status ─────────────────────────
-    # Group rows that landed (have tx_hash) by cycle_id. A cycle is "mixed"
-    # when at least one row succeeded and at least one row failed — that's
-    # the partial-unwind / partial-supply / leaked-state bug that breaks
-    # accounting recoverability.
+    # A dispatched cycle must not mix landed and reverted transactions.
     cycles: dict[Any, list[dict[str, Any]]] = {}
     for r in ledger:
         if not r.get("tx_hash"):
@@ -3596,14 +2855,7 @@ def _cell_g10_multi_tx_atomicity(
             continue
         cycles.setdefault(cyc, []).append(r)
 
-    # VIB-6043 leg 2: this cell asks "did every dispatched intent in the cycle
-    # reach the same ON-CHAIN outcome?" — so it must key on chain reality, not
-    # the framework verdict. An ``accounting_degraded:`` row LANDED; its
-    # success=False is a books verdict about unmeasured amounts, not a revert.
-    # Counting it as a failure makes a clean-row + degraded-row cycle report
-    # "some succeeded, some reverted" when nothing reverted, and leaves G10
-    # permanently red on any multi-intent cycle containing a degraded row —
-    # masking the genuine partial-unwind signal this cell exists to surface.
+    # Use chain outcome, not the books verdict; accounting-degraded rows still landed.
     mixed: list[tuple[Any, int, int]] = []  # (cycle_id, landed_count, reverted_count)
     for cyc, rs in cycles.items():
         if len(rs) < 2:
@@ -3632,13 +2884,7 @@ def _cell_g10_multi_tx_atomicity(
 
 
 def _cell_g11_failed_intents(ledger: list[dict[str, Any]]) -> CellResult:
-    # VIB-6043 leg 2: a landed-but-degraded row did NOT fail. Keying this on
-    # the framework verdict counts it as a failed intent, which flips a run
-    # where nothing reverted from SKIP to PASS — the cell would assert the
-    # failed-intent writer contract was exercised when zero intents failed.
-    # (And where the same under-measured shape also leaves gas_usd empty, it
-    # flips to FAIL with the diagnostic "failed intents have no gas_usd" for a
-    # transaction that never failed.) Same defect shape as G1 and G10.
+    # Accounting-degraded rows landed and do not exercise the failed-intent contract.
     failed = [r for r in ledger if not _row_landed(r)]
     if not failed:
         return CellResult(
@@ -3669,10 +2915,7 @@ def _cell_g12_oracle_consistency(ledger: list[dict[str, Any]]) -> CellResult:
             "FAIL",
             f"{len(empty)}/{len(ledger)} ledger rows have empty price_inputs_json",
         )
-    # Catch "non-empty but not a JSON object" rows separately from empty rows
-    # so a writer that produced ``"[]"`` or ``"42"`` doesn't slip through G12
-    # by way of ``_json`` collapsing the bad payload to ``{}`` (which the
-    # shape loop below would silently accept).
+    # Reject non-object roots before _json can collapse them to an empty mapping.
     malformed_root: list[Any] = []
     for r in ledger:
         raw = r.get("price_inputs_json")
@@ -3692,7 +2935,6 @@ def _cell_g12_oracle_consistency(ledger: list[dict[str, Any]]) -> CellResult:
             "FAIL",
             f"{len(malformed_root)} rows have non-object price_inputs_json (e.g. {malformed_root[:3]!r})",
         )
-    # Validate shape: should be {symbol_or_addr: {price_usd, oracle_source, ...}}
     bad_shape = []
     for r in ledger:
         d = _json(r.get("price_inputs_json"))
@@ -3756,11 +2998,7 @@ def _g13_collect_versions(
         et = r.get("event_type") or p.get("event_type")
         if not isinstance(et, str) or not et:
             continue
-        # VIB-4477: protocol-aware bucket resolution. ``record_for(et)`` returns
-        # ``Primitive.LP`` for every LP event_type; ``primitive_for(et, proto)``
-        # overrides LP → LP_V4 when ``payload.protocol`` is ``uniswap_v4`` so V3
-        # and V4 rows land in distinct G13 buckets. Falls back to the plain
-        # ``record_for`` lookup (no override) when the event_type is unknown.
+        # Protocol-aware resolution keeps LP v3 and v4 matching versions independent.
         try:
             record_for(et)
         except UnknownIntentTypeError:
@@ -3849,36 +3087,9 @@ def _cell_g14_sdk_eq_onchain(
             "or no recognizable open positions); cell is xfail by design until rows exist",
         )
 
-    # Track C is wired: evaluate the 1-bp tolerance.
-    #
-    # VIB-6399 / VIB-6310. Every row whose delta cannot be read is counted, never
-    # silently dropped, and the verdict is decided on the number of rows actually
-    # COMPARED — not the number present. The old shape ``continue``d past every
-    # unreadable row and then asserted
-    # ``f"all {len(position_state_rows)} rows within 1bp of on-chain state"``: on a
-    # run with 10 unmeasured rows it compared 0 and reported a successful
-    # comparison against on-chain state that never happened. That is the
-    # Empty != Zero rule (blueprint 27) violated in the validation layer itself,
-    # and it is worse than the defects the cell exists to catch — G14 and G15
-    # scored two free PASSes claiming Track C coverage on the very run where
-    # P2/P4/P6 XFAILed with the reason "needs Track C".
-    #
-    # Three skip routes reach the same place, and a fix that closes only the first
-    # leaves a cell that still cannot fail:
-    #   NULL          -> the producer never wrote a value (the corpus-wide case)
-    #   ""            -> the parser emitted nothing
-    #   unparseable   -> a value is present but is not a number ("n/a", a dict)
-    # They are counted separately because Empty != Zero distinguishes them and a
-    # merged count would hide which producer stage is at fault.
-    # KNOWN LIMITATION (VIB-6447): this is 1bp as a FRACTION, applied to a field
-    # named ``_pct`` whose PASS message says "1bp". If the producer ever writes a
-    # percent, the cell is 100x stricter than it advertises (0.005 — half a basis
-    # point — already FAILs); if it writes a fraction, the name and the message are
-    # the wrong pair. Exactly one is true and nothing here can tell which, because
-    # no producer exists (VIB-6443), so the units are undefined rather than merely
-    # undocumented. Left as-is deliberately: unreachable while nothing is compared,
-    # and the producer must settle it in the same change.
-    eps_pct = Decimal("0.0001")  # 1 bp, as a fraction — see VIB-6447
+    # Count null, omitted, and invalid deltas separately; only compared rows can pass.
+    # The threshold assumes the producer emits a fraction, not percentage points.
+    eps_pct = Decimal("0.0001")  # 1 bp as a fraction
     bad: list[tuple[Any, Decimal]] = []
     compared = 0
     null_rows = 0
@@ -3897,18 +3108,7 @@ def _cell_g14_sdk_eq_onchain(
         except (InvalidOperation, ValueError, TypeError):
             unparseable_rows += 1
             continue
-        # A NaN CONSTRUCTS as a Decimal and then raises InvalidOperation on the
-        # comparison below — outside the try, so it propagated out of the cell and
-        # took the whole report down rather than scoring it. Found by the Phase 4
-        # UAT evaluator probing past ``"n/a"``: `nan`, `NaN`, `-nan`, `snan` and
-        # `json.dumps(float("nan"))` all reach here, and this column is written by a
-        # producer whose float pipeline can emit exactly that.
-        #
-        # NaN is "not a number", so no comparison against it is meaningful — it is
-        # unreadable, which is what the unparseable bucket means, and the
-        # three-bucket claim above is only true once it lands in one. Infinity is
-        # deliberately NOT swept in: ``abs(inf) > eps`` is well-defined and an
-        # infinite deviation is a real breach, so it stays a compared FAIL.
+        # NaN is unreadable; infinity remains comparable and must fail the bound.
         if delta.is_nan():
             unparseable_rows += 1
             continue
@@ -3934,20 +3134,7 @@ def _cell_g14_sdk_eq_onchain(
             decomposition=decomp,
         )
     if compared == 0:
-        # Rows exist but not one carried a readable delta, so there is no evidence
-        # either way. XFAIL — measured-but-blocked — deliberately matching the
-        # status the row-absent branch above already returns for the same
-        # underlying condition (Track C present, nothing measured). SKIP would rank
-        # this BELOW those fixtures for an identical semantic state and park the
-        # floor one step off the bottom of the partial order.
-        #
-        # This is currently the outcome on every local SQLite DB, and that is a
-        # PRODUCER gap, not a scorer gap: `delta_vs_protocol_pct` is declared at
-        # position_state.py:87 and assigned in exactly one place in the tree —
-        # gateway/services/state_service.py, copying a proto row. The local
-        # materializer never computes it, so the column is unreachable by
-        # construction. G14 cannot advance past XFAIL until a producer writes it;
-        # read this status as "not yet measurable", never as "known-broken".
+        # Present but wholly unreadable rows are unmeasurable, not a successful comparison.
         return CellResult(
             "G14",
             "SDK ≡ on-chain reconciliation",
@@ -3968,14 +3155,8 @@ def _cell_g14_sdk_eq_onchain(
     )
 
 
-# The four top-level primitives whose positions the Track-C materializer
-# (``accounting.position_state._classify_position``) actually re-reads on
-# chain. Stored as ``Primitive`` enum-value strings so the eligibility check
-# below can also recognise a ``position_type`` that is itself one of these
-# enum-value labels (e.g. the literal ``"LP_V4"``), which the registry-driven
-# ``materializer_primitive_for`` does NOT map (it answers protocol-name
-# aliases like ``"UNISWAP_V4"`` and the generic ``"LP"`` label, not the
-# enum-value string ``"LP_V4"``).
+# Track C re-reads protocol positions, not wallet token inventory. Direct enum
+# values are included because the alias resolver handles protocol names instead.
 _TRACK_C_PRIMITIVE_VALUES: frozenset[str] = frozenset(
     {
         _TaxonomyPrimitive.LP.value,
@@ -4026,8 +3207,7 @@ def _is_track_c_eligible_position(pos: dict[str, Any]) -> bool:
     primitive = materializer_primitive_for(pt)
     if primitive is not None and primitive.value in _TRACK_C_PRIMITIVE_VALUES:
         return True
-    # Fallback: the position_type is itself a Track-C primitive enum-value
-    # string (e.g. "LP_V4") that the materializer's alias registry does not map.
+    # Accept a direct primitive enum value when no protocol alias resolves.
     return pt.strip().lower() in _TRACK_C_PRIMITIVE_VALUES
 
 
@@ -4061,10 +3241,6 @@ def _cell_g15_multi_period_self_consistency(
             "or no recognizable open positions); cell is xfail by design until rows exist",
         )
 
-    # Coverage check: every snapshot that reported open positions must
-    # have at least one Track C row tied to it. A row count below the
-    # snapshot's open-position count is a partial-write — surface it
-    # rather than silently masking with the telescope identity.
     snapshot_position_counts: dict[Any, int] = {}
     unreadable_snapshots: list[Any] = []
     for s in snapshots:
@@ -4074,15 +3250,10 @@ def _cell_g15_multi_period_self_consistency(
         try:
             parsed = json.loads(positions_json)
         except (json.JSONDecodeError, TypeError):
-            # Unreadable JSON is NOT "no positions" — surface as coverage
-            # failure rather than silently passing G15 as cash-only (VIB-3891).
+            # Unreadable position data cannot prove a cash-only snapshot.
             unreadable_snapshots.append(s.get("id"))
             continue
-        # VIB-4489: accept two writer shapes. Legacy plain list and the
-        # versioned-envelope dict the writer ships today
-        # ({"schema_version": 1, "positions": [...], "metadata": {...}}).
-        # The accept rule is structural: a list at the root, OR a dict
-        # whose `positions` key holds a list. Any other shape is malformed.
+        # Accept the legacy list and versioned-envelope writer shapes.
         if isinstance(parsed, list):
             positions = parsed
         elif isinstance(parsed, dict) and isinstance(parsed.get("positions"), list):
@@ -4090,11 +3261,7 @@ def _cell_g15_multi_period_self_consistency(
         else:
             unreadable_snapshots.append(s.get("id"))
             continue
-        # Count only Track-C-eligible (protocol LP/lending/perp) positions —
-        # the Track C materializer excludes wallet/TOKEN inventory (incl. the
-        # VIB-5057 swap_inventory_lots pseudo-position), so counting them here
-        # would demand Track C rows that correctly never get written and
-        # false-fail a clean round-trip that ends holding deployed cash.
+        # Wallet inventory is not a Track-C protocol position.
         track_c_positions = [p for p in positions if isinstance(p, dict) and _is_track_c_eligible_position(p)]
         if track_c_positions:
             snapshot_position_counts[s.get("id")] = len(track_c_positions)
@@ -4111,11 +3278,7 @@ def _cell_g15_multi_period_self_consistency(
         )
 
     if not snapshot_position_counts:
-        # Track C rows exist but the strategy never reported open
-        # positions on any snapshot — nothing to reconcile against.
-        # Treat as PASS: the materializer is wired and chose to write
-        # nothing useful (e.g. a strategy that holds only cash). A FAIL
-        # here would penalise the strategy for being position-less.
+        # Track C is present but there are no eligible open positions to reconcile.
         return CellResult(
             "G15",
             "Multi-period MtM self-consistency",
@@ -4134,11 +3297,7 @@ def _cell_g15_multi_period_self_consistency(
     gaps: list[tuple[Any, int, int]] = []
     for sid, expected in snapshot_position_counts.items():
         actual = track_c_by_snapshot.get(sid, 0)
-        # CodeRabbit (2026-05-02): also fail on over-coverage. The DDL has no
-        # uniqueness constraint so a retry / double-call could insert the same
-        # position twice; ``actual > expected`` is just as much a coverage
-        # contract violation as ``actual < expected`` and silently passing
-        # an over-counted snapshot would mask the duplication regression.
+        # Over-coverage can indicate a duplicate write and fails like under-coverage.
         if actual != expected:
             gaps.append((sid, expected, actual))
     if gaps:
@@ -4159,9 +3318,6 @@ def _cell_g15_multi_period_self_consistency(
         f"({len(snapshot_position_counts)} snapshots, "
         f"{sum(track_c_by_snapshot.values())} Track C rows)",
     )
-
-
-# ─── VIB-4201 (T15): cell #22 — registry coherence ───────────────────────
 
 
 def _cell22_position_reference_phid(payload_str: Any) -> str | None:
@@ -4233,7 +3389,6 @@ def _cell22_registry_coherence(  # noqa: C901
     cell_id = "L5_22"
     description = "Registry coherence (accounting_events ↔ position_registry, bidirectional)"
 
-    # Preflight P1: column exists?
     if not position_reference_column_present:
         return CellResult(
             cell_id,
@@ -4242,7 +3397,6 @@ def _cell22_registry_coherence(  # noqa: C901
             "accounting_events.position_reference column missing (pre-T10 DB); cell cannot evaluate",
         )
 
-    # Preflight P3: malformed JSON?
     if malformed_position_reference_row_ids:
         sample = malformed_position_reference_row_ids[:5]
         return CellResult(
@@ -4253,11 +3407,7 @@ def _cell22_registry_coherence(  # noqa: C901
             f"position_reference JSON (e.g. ids={sample!r}); corrupt payloads contaminate the audit trail",
         )
 
-    # CLOSE event census (independent of registry presence — the F6/F7
-    # boundary needs this number whether the registry is there or not).
-    # Hoist `set(CLOSE_EVENT_TYPES)` out of the comprehension so the lookup
-    # cost stays O(1) per row instead of rebuilding the set every iteration
-    # (gemini-code-assist 2026-05-10).
+    # The close-event census is required even when the registry is absent.
     _close_event_types = set(CLOSE_EVENT_TYPES)
     close_events = [r for r in acct_events if r.get("event_type") in _close_event_types]
     close_event_phids: set[str] = set()
@@ -4271,11 +3421,6 @@ def _cell22_registry_coherence(  # noqa: C901
             close_events_with_hash += 1
             close_event_phids.add(phid)
 
-    # Preflight P2: registry table present?
-    # Note: the registry-row sort + set construction below is gated on
-    # ``position_registry_table_present`` so pre-T11 fixtures don't pay
-    # for work that the registry-absent branches never read
-    # (gemini-code-assist 2026-05-10).
     if not position_registry_table_present:
         if close_events_with_hash > 0:
             return CellResult(
@@ -4293,7 +3438,6 @@ def _cell22_registry_coherence(  # noqa: C901
                 "XFAIL",
                 "no CLOSE accounting events and no position_registry table — lifecycle not exercised in this run",
             )
-        # Registry absent + every CLOSE event has null hash → legacy.
         return CellResult(
             cell_id,
             description,
@@ -4303,12 +3447,7 @@ def _cell22_registry_coherence(  # noqa: C901
             f"not yet on for any primitive in this run",
         )
 
-    # Registry table present — compute closed-row census now (deferred from
-    # before the P2 gate so the sort doesn't fire on pre-T11 fixtures).
-    # Sort by physical_identity_hash so the FAIL diagnostic sample is
-    # deterministic across SQLite versions / file orderings — the cell's
-    # idempotency contract (UAT card §D3 F5) requires identical
-    # ``(status, diagnostic)`` tuples on repeat runs.
+    # Sort by identity hash for deterministic diagnostics.
     closed_registry_rows = sorted(
         (r for r in registry_rows if r.get("status") == "closed"),
         key=lambda r: r.get("physical_identity_hash") or "",
@@ -4317,9 +3456,7 @@ def _cell22_registry_coherence(  # noqa: C901
         r["physical_identity_hash"] for r in closed_registry_rows if r.get("physical_identity_hash")
     }
 
-    # Compute the bidirectional orphan sets. Carry the extracted hash on
-    # each forward-orphan tuple so the diagnostic sample doesn't re-parse
-    # ``position_reference`` JSON (gemini-code-assist 2026-05-10).
+    # Carry the parsed hash so diagnostics do not reparse position_reference.
     forward_orphans: list[tuple[dict[str, Any], str]] = [
         (r, phid)
         for r in close_events
@@ -4363,12 +3500,7 @@ def _cell22_registry_coherence(  # noqa: C901
             "; ".join(diag_parts),
         )
 
-    # No orphans on either side. Determine if work was actually exercised.
     if close_events_with_hash == 0 and not closed_registry_phids:
-        # Registry table is present but empty AND no CLOSE events with
-        # hashes were emitted. Either pre-cutover for every primitive in
-        # this run, or no close lifecycle exercised. Either way, the
-        # cell did not have the inputs to make a meaningful claim.
         if not close_events:
             return CellResult(
                 cell_id,
@@ -4392,13 +3524,7 @@ def _cell22_registry_coherence(  # noqa: C901
     )
 
 
-# ─── Primitive-specific cells ────────────────────────────────────────────
-
-
-# IL sanity factor for LP4 — ``|il_usd|`` must not exceed
-# ``_LP4_IL_SANITY_FACTOR × max(|cost_basis_usd|, |hodl_value_usd|)``.
-# Factor 2.0 accommodates legitimate large-IL positions while still
-# catching "IL = entire position value" pathology (lp-close-may20.md §6.5).
+# Allow large IL while rejecting values beyond twice the position reference scale.
 _LP4_IL_SANITY_FACTOR = Decimal("2.0")
 
 
@@ -4491,10 +3617,7 @@ def _lp4_il_sanity_cell(
     )
 
 
-# The decomposition legs ``attribute_lp`` writes onto the CLOSE
-# ``attribution_json`` (pnl_attributor.py). LP5 PASSes only when a CLOSE event
-# carries the LP marker plus all four — anything short means attribution did
-# not run end-to-end.
+# LP5 requires every close-attribution leg emitted by attribute_lp.
 _LP5_REQUIRED_FIELDS = (
     "net_pnl_usd",
     "principal_deposited_usd",
@@ -4547,7 +3670,6 @@ def _cells_lp(
     position_state_rows = position_state_rows or []
     lp_state_rows = [r for r in position_state_rows if r.get("position_type") == "LP"]
     out: list[CellResult] = []
-    # LP1: range exposure
     has_ticks = any(r.get("tick_lower") is not None and r.get("tick_upper") is not None for r in pos_events)
     out.append(
         CellResult(
@@ -4557,7 +3679,6 @@ def _cells_lp(
             "found tick_lower/upper on position_events" if has_ticks else "no position_events row carries ticks",
         )
     )
-    # LP2: in-range time fraction (Track C)
     if lp_state_rows:
         in_range_rows = [r for r in lp_state_rows if r.get("in_range") is not None]
         if in_range_rows:
@@ -4590,7 +3711,6 @@ def _cells_lp(
                 "no LP rows in position_state_snapshots (no LP observers wired or no LP positions)",
             )
         )
-    # LP3: fees per position
     fees_seen = any(r.get("fees_token0") or r.get("fees_token1") for r in pos_events)
     out.append(
         CellResult(
@@ -4600,34 +3720,15 @@ def _cells_lp(
             "position_events.fees_token0/1 populated" if fees_seen else "no fees_token0/1 on any position_event",
         )
     )
-    # LP4: IL diagnostic — VIB-3868 / lp-close-may20.md §6.5. Sanity-bound
-    # check (not presence-only): see ``_lp4_il_sanity_cell``.
     lp_acct = [r for r in acct_events if r.get("event_type") in ("LP_OPEN", "LP_CLOSE")]
     blocked = _payload_block_cell("LP4", "Impermanent loss (diagnostic, NOT in net PnL)", lp_acct, payload_errors)
     if blocked is not None:
         out.append(blocked)
     else:
         out.append(_lp4_il_sanity_cell(lp_acct, acct_payloads))
-    # LP5: open→close delta decomposition (VIB-4263).
-    #
-    # Gate on data presence in the CLOSE position_event's ``attribution_json``,
-    # mirroring the conditional-XFAIL shape of LP2 / LP6 (which gate on Track-C
-    # row presence). Before VIB-4263 this cell was an UNCONDITIONAL XFAIL with
-    # no PASS branch, so it could never validate what it claims even once the
-    # upstream attribution (VIB-3954, computed by ``attribute_lp`` →
-    # ``run_attribution_on_close``) lands. The required decomposition fields are
-    # exactly the ones ``attribute_lp`` emits (pnl_attributor.py): the marker
-    # ``position_type == "LP"`` plus the four core USD legs. A field present but
-    # empty-string is treated as "not computed" — Empty != zero per CLAUDE.md;
-    # the genuine values are always non-empty ``str(Decimal(...))`` when
-    # attribution ran.
     out.append(_lp5_decomposition_cell(pos_events))
-    # LP6: liquidity over time (Track C)
     if lp_state_rows:
-        # CodeRabbit (2026-05-02): position_state.py materialises liquidity as
-        # an integer column, so SQLite reads it back as int 0 — not the
-        # string "0". Include numeric 0 in the empty-set check so LP6
-        # doesn't pass on rows that genuinely have zero liquidity.
+        # SQLite can return liquidity zero as either text or integer.
         liq_rows = [r for r in lp_state_rows if r.get("liquidity") not in (None, "", "0", 0)]
         if liq_rows:
             out.append(
@@ -4672,15 +3773,9 @@ def _cells_lending(  # noqa: C901
     position_state_rows = position_state_rows or []
     lending_state_rows = [r for r in position_state_rows if r.get("position_type") == "LENDING"]
     out: list[CellResult] = []
-    # L1: net carry — VIB-3868 validated reads. A WITHDRAW/REPAY payload
-    # that fails Pydantic validation FAILs L1 with the schema-mismatch
-    # message instead of silently summing zero interest.
     lending_acct = [r for r in acct_events if r.get("event_type") in ("WITHDRAW", "REPAY", "DELEVERAGE")]
     blocked = _payload_block_cell("L1", "Net carry (supply_int − borrow_int)", lending_acct, payload_errors)
-    # CodeRabbit (2026-05-02): a malformed payload only invalidates the
-    # payload-driven cells (L1 / L4 / L6). L2 / L3 / L5 read Track-C
-    # ``position_state_rows`` and are independent of the payload schema —
-    # do NOT short-circuit them on a payload validation failure.
+    # Payload errors do not invalidate independent Track-C cells.
     payload_blocked = blocked is not None
     if blocked is not None:
         out.append(blocked)
@@ -4702,12 +3797,7 @@ def _cells_lending(  # noqa: C901
                 )
             )
     if not payload_blocked:
-        # CodeRabbit (2026-05-02): truthiness checks collapse Decimal("0") /
-        # "0" into "missing", which downgrades a measured-zero-carry run to
-        # XFAIL (Empty ≠ zero per CLAUDE.md). Use explicit ``not in (None, "")``
-        # to preserve measured zero. Also include DELEVERAGE — the rest of
-        # this file treats it as a REPAY-class event; missing it under-counts
-        # borrow interest on deleveraging loops.
+        # Preserve measured zero interest and treat DELEVERAGE as REPAY-class.
         interest_supply = Decimal(0)
         interest_borrow = Decimal(0)
         for r in acct_events:
@@ -4736,7 +3826,6 @@ def _cells_lending(  # noqa: C901
                     "no interest_*_usd captured (needs Track C materializer for accrual or REPAY/WITHDRAW with interest split)",
                 )
             )
-    # L2: HF/LTV trajectory (Track C)
     if lending_state_rows:
         hf_rows = [r for r in lending_state_rows if r.get("health_factor") not in (None, "")]
         if hf_rows:
@@ -4767,8 +3856,6 @@ def _cells_lending(  # noqa: C901
                 "no LENDING rows in position_state_snapshots",
             )
         )
-    # L3: liquidation buffer (Track C). Reuses HF samples; the buffer is
-    # min(HF) > 1.0 across the trajectory.
     if lending_state_rows:
         hf_decimals: list[Decimal] = []
         for r in lending_state_rows:
@@ -4815,13 +3902,8 @@ def _cells_lending(  # noqa: C901
                 "no LENDING rows in position_state_snapshots",
             )
         )
-    # L4: principal vs interest at REPAY (skip when payload validation blocked above).
-    # Both spec names (``principal_repaid_usd`` / ``interest_paid_usd``) and
-    # legacy ``*_delta_usd`` names are accepted — the writer projects from
-    # the legacy fields to the spec names (see writer._project_lending_aliases).
-    # ``interest_paid_usd`` may be None in cases where there were no matching
-    # BORROW lots (FIFO miss) — that's UNAVAILABLE rather than a fail. The
-    # cell looks for AT LEAST ONE REPAY row where the split was emittable.
+    # Accept projected and legacy principal/interest names. At least one REPAY
+    # must carry both because a row without a matching BORROW lot may be unavailable.
     if not payload_blocked:
         has_split = False
         repay_rows = 0
@@ -4866,7 +3948,6 @@ def _cells_lending(  # noqa: C901
                     "FIFO basis store may not have a matching BORROW lot",
                 )
             )
-    # L5: APR/APY snapshot (Track C)
     if lending_state_rows:
         apr_rows = [
             r
@@ -4902,12 +3983,8 @@ def _cells_lending(  # noqa: C901
                 "no LENDING rows in position_state_snapshots",
             )
         )
-    # L6 applicability is selected by the scorecard profile, never inferred from
-    # the *absence* of a SWAP. A pure lending lifecycle intentionally has no
-    # borrow→swap leg; a leverage-loop profile must still fail loudly when that
-    # same leg is absent. Presence is different: if a run declared pure lending
-    # but actually disposed a borrowed asset, score that observed loop leg so a
-    # misdeclared profile cannot hide missing basis attribution.
+    # Applicability comes from the profile, but an observed borrow-to-swap leg is
+    # always scored so a misdeclared profile cannot hide missing attribution.
     observed_borrow_assets = {
         str((acct_payloads.get(r.get("id"), {}) or {}).get("asset") or "").upper()
         for r in acct_events
@@ -4930,26 +4007,10 @@ def _cells_lending(  # noqa: C901
         )
         return out
 
-    # L6: loop-leg attribution (VIB-3964).
-    # The basis store now mints swap-key acquisition lots on BORROW / WITHDRAW
-    # and consumes them on SUPPLY / REPAY, so a SWAP that disposes the borrowed
-    # token reports a non-null ``realized_pnl_usd``. The cell PASSes when the
-    # accounting events tell a coherent loop story:
-    #   1. At least one BORROW and one REPAY (loop is structurally complete).
-    #   2. At least one SWAP whose ``token_in`` matches a borrowed asset
-    #      (the borrow→swap leg actually executed).
-    #   3. Every SWAP carries a non-null ``realized_pnl_usd`` (basis was
-    #      attributed end-to-end — same invariant G6 enforces, repeated here
-    #      because L6 should fail loudly for the loop primitive even if a
-    #      future G6 tolerance change masks it).
+    # A complete loop needs BORROW, matching asset disposal, REPAY, and fully
+    # attributed PnL on every matching disposal.
     if not payload_blocked:
-        # CodeRabbit 2026-05-04: L6 also reads ``BORROW.asset`` and
-        # ``SWAP.token_in`` / ``SWAP.realized_pnl_usd`` — so a payload
-        # validation error on a BORROW or SWAP row would otherwise hand L6
-        # an empty dict and the cell would misclassify as "loop incomplete"
-        # or "null PnL" instead of surfacing the schema mismatch. The
-        # earlier ``payload_blocked`` check covers WITHDRAW/REPAY/DELEVERAGE
-        # only (it gates L1); BORROW+SWAP need their own block here.
+        # Validate BORROW and SWAP payloads before classifying loop completeness.
         l6_borrow_swap_rows = [r for r in acct_events if r.get("event_type") in ("BORROW", "SWAP")]
         l6_blocked = _payload_block_cell("L6", "Loop-leg attribution", l6_borrow_swap_rows, payload_errors)
         if l6_blocked is not None:
@@ -4968,23 +4029,10 @@ def _cells_lending(  # noqa: C901
                 repay_count += 1
 
         swap_payloads = [acct_payloads.get(r.get("id"), {}) or {} for r in acct_events if r.get("event_type") == "SWAP"]
-        # CodeRabbit 2026-05-04: L6 is "loop-leg attribution" — a non-loop
-        # SWAP (e.g. a side spot trade in the same strategy) carrying a null
-        # realized_pnl_usd shouldn't FAIL the loop-leg cell. Filter to swaps
-        # whose token_in matches a borrowed asset before checking nulls.
+        # Side trades are outside the loop-leg PnL invariant.
         loop_leg_payloads = [p for p in swap_payloads if (p.get("token_in") or "").upper() in borrow_assets]
-        # VIB-4905 (F1) — INTENTIONAL DIVERGENCE from the G6/G3 precedence
-        # walk: L6 stays on legacy ``realized_pnl_usd`` deliberately.  L6's
-        # invariant is stricter than G6's reconciliation — every loop-leg
-        # SWAP MUST fully match against accumulated BORROW/WITHDRAW basis
-        # credits because the wallet-basis store (VIB-3964 v3) mints
-        # acquisition lots on BORROW and consumes them on REPAY/SUPPLY.  A
-        # partial-match loop-leg SWAP signals that the basis store missed a
-        # credit somewhere — exactly the failure mode L6 must surface.
-        # Migrating to the matched-portion precedence walk would mask that
-        # by counting the partial-match as a successful loop leg.  Pre-V2
-        # payloads only carry ``realized_pnl_usd`` anyway, so the legacy
-        # field is the safer signal here.
+        # L6 intentionally requires full realized_pnl_usd, unlike G6's matched-portion
+        # precedence: a partial loop match signals a missing basis credit.
         null_loop_leg_pnl = sum(1 for p in loop_leg_payloads if p.get("realized_pnl_usd") is None)
 
         if not borrow_assets or repay_count == 0:
@@ -5036,19 +4084,7 @@ def _cells_perp(
     payload_errors: dict[Any, str],
 ) -> list[CellResult]:
     out: list[CellResult] = []
-    # VIB-5830 — ``position_events`` and ``accounting_events`` use DIFFERENT
-    # event-type vocabularies, and conflating them made this cell
-    # XFAIL-by-construction:
-    #   * ``position_events.event_type``  → ``PositionEventType`` (OPEN / CLOSE / …)
-    #     with the primitive carried separately on ``position_type`` (PERP).
-    #   * ``accounting_events.event_type`` → intent-type strings (PERP_OPEN / PERP_CLOSE).
-    # The old code matched the accounting vocabulary ("PERP_OPEN") against the
-    # position table, which can never match — P1 reported XFAIL even on a DB
-    # holding a complete PERP OPEN→CLOSE arc. Compare against the enum, and scope
-    # by ``position_type`` because LP / lending rows share the OPEN/CLOSE verbs —
-    # without that filter an LP-only DB would score P1 PASS by construction.
-    # (The sibling read of ``acct_events`` below is correct as-is: that table
-    # genuinely does speak PERP_OPEN / PERP_CLOSE.)
+    # Position events use OPEN/CLOSE plus position_type; accounting events use PERP_*.
     perp_pos = [r for r in pos_events if r.get("position_type") == PositionType.PERP]
     has_open = any(r.get("event_type") == PositionEventType.OPEN for r in perp_pos)
     has_close = any(r.get("event_type") == PositionEventType.CLOSE for r in perp_pos)
@@ -5056,14 +4092,7 @@ def _cells_perp(
         CellResult(
             "P1",
             "Position lifecycle (size, leverage, direction, entry/exit price)",
-            # An OPEN is REQUIRED: it carries entry price/size/leverage/direction —
-            # the very things this cell is named for. A CLOSE-only DB means the
-            # entry was never recorded, which is precisely the lifecycle gap P1
-            # exists to catch, so it must stay XFAIL rather than score green off
-            # the exit alone. OPEN-only is legitimate: a mid-flight position has
-            # no CLOSE yet. (Pre-VIB-5830 the predicate was ``has_open or
-            # has_close``, but both terms were unreachable — the vocabulary bug
-            # pinned them False — so the ``or`` only became live with this fix.)
+            # OPEN carries the entry economics; CLOSE-only cannot prove the lifecycle.
             "PASS" if has_open else "XFAIL",
             f"OPEN={has_open} CLOSE={has_close} on {len(perp_pos)} PERP position_events row(s)",
         )
@@ -5076,14 +4105,8 @@ def _cells_perp(
             "needs position_state_snapshots (Track C)",
         )
     )
-    # VIB-3872 WI-4 — the measured Phase-2 ``PERP_SETTLEMENT`` event is the honest
-    # source for the fee split (P3) and realized PnL (P5) on an ASYNC round trip:
-    # the submission-time PERP_OPEN/PERP_CLOSE payload cannot know settled fees /
-    # realized PnL (they only exist after the keeper fills the order — VIB-5717), so
-    # it carries measured-unavailable nulls. The settlement event supersedes it. Join
-    # settlement→submission by ledger_entry_id (the _lp_close_correlation_key
-    # precedent): a settlement's ``submission_ledger_entry_id`` == the submission
-    # row's ``ledger_entry_id``. Only EXECUTED settlements carry measured economics.
+    # Async fees and realized PnL are measured only after execution. Join an EXECUTED
+    # settlement to its submission by ledger_entry_id and prefer its economics.
     settlement_by_link: dict[str, dict[str, Any]] = {}
     for r in acct_events:
         if r.get("event_type") != "PERP_SETTLEMENT":
@@ -5108,9 +4131,7 @@ def _cells_perp(
         for r in perp_acct:
             p = acct_payloads.get(r.get("id"), {})
             s = _linked_settlement(r)
-            # The measured settlement is the HONEST source — check it BEFORE the inline
-            # submission payload so a close carrying stale inline economics AND a linked
-            # EXECUTED settlement reports the settlement as the provenance (VIB-3872 WI-4).
+            # Settlement economics supersede stale inline submission values.
             if s.get("position_fee_usd") is not None:
                 has_fee_split = True
                 via_settlement = True
@@ -5145,8 +4166,7 @@ def _cells_perp(
         for r in perp_close_acct:
             p = acct_payloads.get(r.get("id"), {})
             s = _linked_settlement(r)
-            # Settlement is the honest measured source — check it before the inline
-            # payload so the diagnostic names the measured provenance (VIB-3872 WI-4).
+            # Settlement economics supersede stale inline submission values.
             if s.get("realized_pnl_usd") is not None:
                 has_realized = True
                 via_settlement = True
@@ -5207,10 +4227,7 @@ def _open_pt_inventory_rows(snapshots: list[dict[str, Any]]) -> tuple[list[dict[
     any_unreadable = False
     ordered = _snapshots_in_time_order(snapshots)
     if ordered is None:
-        # Known limitation (VIB-6578): `any_unreadable` is returned as False
-        # here although no positions_json was parsed — the flag is undefined,
-        # not measured, on the unorderable path. Harmless today because the
-        # sole caller branches on `unorderable` first and never reads it.
+        # any_unreadable is undefined here; the caller must branch on unorderable first.
         return [], False, True
     for s in ordered:
         positions_json = s.get("positions_json")
@@ -5275,11 +4292,7 @@ def _pen3_open_pt_cell(snapshots: list[dict[str, Any]]) -> CellResult:
     name = "Open-PT mark-to-market (unrealised discount accretion)"
     pt_rows, pt_unreadable, pt_unorderable = _open_pt_inventory_rows(snapshots)
     if pt_unorderable:
-        # VIB-6545: this cell's claim is taken on the LATEST PT-bearing
-        # snapshot, and "latest" is a chronological claim. When time order
-        # cannot be established the claim is unmeasurable — XFAIL (this cell
-        # has no FAIL branch by design; an unestablishable mark is Empty ≠
-        # Zero, not a books error), never an election by row order.
+        # Latest is a chronological claim; unorderable marks are unmeasurable.
         return CellResult(
             "PEN3",
             name,
@@ -5298,9 +4311,7 @@ def _pen3_open_pt_cell(snapshots: list[dict[str, Any]]) -> CellResult:
     latest = pt_rows[-1]
     d = latest.get("details") or {}
     sym = d.get("pt_symbol") or d.get("asset") or "PT"
-    # The unrealised-discount-accretion claim needs the mark AND the cost basis AND
-    # the unrealised PnL all measured. Any *_unmeasured flag → XFAIL (Empty ≠ Zero;
-    # the placeholder 0s the valuer pairs with those flags must never read as PASS).
+    # Placeholder zeros paired with *_unmeasured flags cannot satisfy the claim.
     unmeasured = d.get("mark_unmeasured") or d.get("cost_basis_unmeasured") or d.get("unrealized_pnl_unmeasured")
     if not unmeasured:
         return CellResult(
@@ -5344,8 +4355,6 @@ def _cells_pendle_pt(
     pt_buys = [r for r in acct_events if r.get("event_type") == "PT_BUY"]
     pt_disposals = [r for r in acct_events if r.get("event_type") in ("PT_SELL", "PT_REDEEM")]
 
-    # PEN1 — acquisition cost basis: a PT buy books principal (pt_amount) AND its
-    # SY cost (sy_amount), the two inputs every downstream PnL number needs.
     blocked = _payload_block_cell(
         "PEN1", "PT acquisition cost basis (principal + SY cost booked)", pt_buys, payload_errors
     )
@@ -5367,8 +4376,6 @@ def _cells_pendle_pt(
             )
         )
 
-    # PEN2 — entry economics: discount-to-par (pt_price) and implied fixed APY
-    # (implied_apr_bps) are persisted at entry so the thesis is auditable.
     blocked = _payload_block_cell("PEN2", "Discount-to-par + implied fixed APY at entry", pt_buys, payload_errors)
     if blocked is not None:
         out.append(blocked)
@@ -5388,16 +4395,8 @@ def _cells_pendle_pt(
             )
         )
 
-    # PEN3 — open-PT mark-to-market (unrealised discount accretion). The gateway
-    # PT implied-price path (VIB-5276) is now wired through the portfolio valuer,
-    # so this cell reads the open-PT mark off the snapshot instead of hardcoding
-    # XFAIL. Predicate extracted to ``_pen3_open_pt_cell`` (keeps this pack small +
-    # unit-testable, mirroring ``_lp5_decomposition_cell``).
     out.append(_pen3_open_pt_cell(snapshots))
 
-    # PEN4 — realised fixed yield: a PT sell/redeem books realized_yield_usd
-    # (sy_received − matched-lot cost) against the FIFO buy lot. This is the
-    # strategy's entire payoff.
     blocked = _payload_block_cell(
         "PEN4", "Realised fixed yield on sell/redeem (FIFO-matched)", pt_disposals, payload_errors
     )
@@ -5419,10 +4418,6 @@ def _cells_pendle_pt(
             )
         )
 
-    # PEN5 — lifecycle continuity: a PT buy seeds a PENDLE_PT OPEN and a
-    # sell/redeem a CLOSE on the SAME position_id, so the dashboard renders one
-    # position. (position_events ↔ accounting_events join key is byte-identical,
-    # asserted in the connector/observability unit suites.)
     pt_pos = [r for r in pos_events if r.get("position_type") == "PENDLE_PT"]
     opens = [r for r in pt_pos if r.get("event_type") == "OPEN"]
     closes = [r for r in pt_pos if r.get("event_type") == "CLOSE"]
@@ -5440,11 +4435,6 @@ def _cells_pendle_pt(
         )
     )
 
-    # PEN6 — PT-quantity conservation: the principal acquired must equal the
-    # principal disposed (sold + redeemed) within tolerance — the conservation
-    # invariant the lane-symmetry contract rests on. Full money-leg (USD) lane
-    # symmetry is the PrimitiveMoneyLegs work (G-PT4); this is the unit-level
-    # conservation it presupposes, checkable from the existing payloads.
     def _sum_pt(rows: list[dict[str, Any]]) -> tuple[Decimal, bool]:
         total = Decimal(0)
         seen = False
@@ -5511,11 +4501,7 @@ def _cells_pendle_lp(
     lp_opens = [r for r in acct_events if r.get("event_type") == "PENDLE_LP_OPEN"]
     lp_closes = [r for r in acct_events if r.get("event_type") == "PENDLE_LP_CLOSE"]
 
-    # PLP1 — open books both legs: a Pendle LP_OPEN books sy_amount (SY supplied)
-    # AND pt_amount (PT supplied), the two quantity inputs every downstream PnL
-    # number needs. (B3: these rows are out of the v1 surface, so _payload_block
-    # returns None and we read the decoded payload directly — but we still call
-    # it so a future v1 wiring of PENDLE_LP would surface validation errors here.)
+    # Keep the payload guard even though Pendle LP currently bypasses v1 validation.
     blocked = _payload_block_cell("PLP1", "LP_OPEN books both legs (sy_amount + pt_amount)", lp_opens, payload_errors)
     if blocked is not None:
         out.append(blocked)
@@ -5537,10 +4523,6 @@ def _cells_pendle_lp(
             )
         )
 
-    # PLP2 — close books the collected legs: a Pendle LP_CLOSE books sy_amount
-    # AND pt_amount drained on burn (amount0_collected / amount1_collected scaled
-    # into human units by handle_pendle_lp). These are the realized proceeds the
-    # conservation invariant (PLP6) rests on.
     blocked = _payload_block_cell(
         "PLP2", "LP_CLOSE books collected legs (sy_amount + pt_amount)", lp_closes, payload_errors
     )
@@ -5564,14 +4546,7 @@ def _cells_pendle_lp(
             )
         )
 
-    # PLP3 — open-LP mark-to-market. Requires the portfolio valuer to price an
-    # open Pendle LP (value_pendle_lp / value_principal_token_lp_from_components),
-    # which is NOT wired into portfolio_valuer.py (limitation B2) — so an open
-    # Pendle LP marks to ~0 and carries no cost_basis_usd / unrealized_pnl_usd.
-    # XFAIL, not FAIL: the capability is absent, not wrong. NOTE: the gateway PT
-    # implied-price path (VIB-5276) is now SHIPPED and consumed for open-PT MTM
-    # (PEN3 PASS); the remaining PLP3 gap is the Pendle-LP valuer wiring
-    # (value_pendle_lp), a separate follow-up — not the gateway price.
+    # Open Pendle LP valuation is unavailable, so absence is XFAIL rather than FAIL.
     out.append(
         CellResult(
             "PLP3",
@@ -5581,10 +4556,6 @@ def _cells_pendle_lp(
         )
     )
 
-    # PLP4 — realised PnL / fees in USD on close. Pendle LP events are USD-less
-    # by design today (limitation B1: pt_price=None, realized_yield_usd=None, no
-    # *_usd fields on the LP payload model), so a close cannot attribute realised
-    # PnL or fees in USD. XFAIL until the USD-pricing follow-up lands.
     out.append(
         CellResult(
             "PLP4",
@@ -5594,22 +4565,13 @@ def _cells_pendle_lp(
         )
     )
 
-    # PLP5 — lifecycle continuity: an LP_OPEN seeds an LP position_events OPEN and
-    # an LP_CLOSE a CLOSE on the SAME position_id, so the dashboard renders one
-    # position. NOTE Pendle LP's conftest position-key special-case yields an
-    # EMPTY position_key / market_id on the accounting event (a real contract
-    # divergence vs Uniswap V3 LP — see tests/intents/arbitrum/test_pendle_lp.py),
-    # so the join key lives on position_events, not the accounting payload. We
-    # assert what is actually true: if position_events carry a shared OPEN/CLOSE
-    # position_id, PASS; if Pendle LP does not seed position_events with a usable
-    # shared id (the present floor), XFAIL with the observed shape.
+    # Pendle LP lifecycle identity lives on position_events, not its accounting payload.
     lp_pos = [r for r in pos_events if r.get("position_type") in ("LP", "PENDLE_LP")]
     opens = [r for r in lp_pos if r.get("event_type") == "OPEN"]
     closes = [r for r in lp_pos if r.get("event_type") == "CLOSE"]
     has_open = bool(opens)
     has_close = bool(closes)
-    # Filter falsy/empty position_ids so {None}&{None} (or {""}&{""}) cannot
-    # spuriously read as a shared id (CodeRabbit/Gemini).
+    # Empty IDs cannot establish shared lifecycle identity.
     same_id = bool(
         has_open
         and has_close
@@ -5625,10 +4587,6 @@ def _cells_pendle_lp(
         )
     )
 
-    # PLP6 — quantity conservation: the SY+PT supplied on open must equal the
-    # SY+PT drained on close within tolerance (single round-trip, no MEV on a
-    # fork). This is the unit-level conservation the lane-symmetry contract rests
-    # on; the USD lane symmetry is deferred to the B1/B2 USD-pricing follow-up.
     def _sum_legs(rows: list[dict[str, Any]]) -> tuple[Decimal, bool]:
         total = Decimal(0)
         seen = False
@@ -5665,43 +4623,10 @@ def _cells_pendle_lp(
     return out
 
 
-# ─── Curve LP cell pack (CURVE1–CURVE6) — VIB-5430 ────────────────────────
-#
-# Curve LP is a *multi-coin fungible* LP surface (2/3/4 coins; e.g. 3pool
-# DAI/USDC/USDT, tricrypto). A deposit mints an ERC-20 LP token (the pool /
-# gauge address — NO NFT, NO tick range); a proportional withdraw burns it and
-# returns ALL N coins with no token_in/out direction (a one-coin or imbalanced
-# withdraw returns a subset). It rides the LP primitive in the taxonomy
-# (``taxonomy.py`` ``LP_OPEN / LP_CLOSE -> Primitive.LP``) so its ledger
-# intent_type IS ``LP_OPEN`` / ``LP_CLOSE`` and the canonical lifecycle is LP's
-# — but the rangeless StableSwap / CryptoSwap economics make the generic V3 cell
-# pack (``_cells_lp``: LP1 tick exposure, LP2 in-range-time fraction) assert
-# structure a Curve pool NEVER emits. Scored under the ``lp`` profile those two
-# cells are a false "books-broken" FAIL on a healthy fixture — exactly the frozen
-# ``lp_curve`` verdict this pack corrects (VIB-5430, Curve epic VIB-5422 M2).
-#
-# Mirrors the Pendle precedent (``_cells_pendle_lp``): does NOT call ``_cells_lp``
-# and never asserts ticks. The inapplicable range cells are REPLACED, not dropped
-# — the pack still emits exactly 6 primitive cells (CURVE1–CURVE6), so the gating
-# denominator is unchanged (a fungible-LP equivalent assertion stands in for each
-# tick assertion). There is no first-class ``"N/A"`` ``CellResult`` status, and a
-# bare ``SKIP`` would understate what Curve genuinely books; converting the
-# structural inapplicability to a Curve-shaped PASS/XFAIL is the honest move
-# (rationale: ``docs/internal/qa/curve-cell-applicability-matrix.md``).
-#
-# This scores the EXISTING frozen ``lp_curve`` fixture (captured pre-#3109, so its
-# typed payload is the generic LP shape: ``amount0`` / ``amount1`` / ``token0`` /
-# ``token1``, no ``coin_symbols``). No money-path read changes here — only the
-# scorer. Each predicate also accepts the richer post-#3109 ``_curve_legs`` /
-# ``coin_symbols`` shape so a future re-captured fixture never silently FAILs.
-
-# Curve fixtures carry coin amounts on two surfaces: the typed accounting-event
-# payload (``amount0`` / ``amount1`` on the generic-LP shape) and — for the
-# realized collected coins on a proportional close — the CLOSE ``position_event``
-# (``amount0`` / ``amount1``, the proceeds surface CURVE5's decomposition rests
-# on). Empty != Zero: a leg present with a measured value (INCLUDING measured
-# zero, e.g. an imbalanced / one-coin withdraw that returns 0 of a coin) is a
-# booked leg; only ``None`` / ``""`` is unmeasured.
+# Curve is an N-coin fungible LP without NFT ranges or ticks, so it uses six
+# Curve-specific cells rather than concentrated-liquidity assertions. Legacy
+# fixtures expose amount0/amount1 while newer payloads may expose richer coin legs.
+# Measured zero is a booked leg; only None or empty text is unmeasured.
 _CURVE_COIN_AMOUNT_KEYS = ("amount0", "amount1")
 
 
@@ -5776,8 +4701,7 @@ def _curve3_fees(
     also PASSes; only a silent gap (no fee, no reason) is XFAIL.
     """
     desc = "Fees measured OR explicitly unavailable-with-reason (Curve fee USD unavailable by design)"
-    # A schema-broken payload must FAIL loud, never be scored PASS/XFAIL off a
-    # partially-read payload (same guard the other CURVE cells use).
+    # Validate before interpreting absent fee fields as an availability state.
     blocked = _payload_block_cell("CURVE3", desc, lp_events, payload_errors)
     if blocked is not None:
         return blocked
@@ -5814,9 +4738,7 @@ def _curve4_il(
     """
     desc = "Impermanent loss (diagnostic, NOT in net PnL) — N/A for single-sided"
     lp_acct = lp_opens + lp_closes
-    # Check payload validity BEFORE inferring "single-sided": a broken LP_OPEN
-    # payload reads as zero funded legs, which would silently take the XFAIL
-    # single-sided path instead of the loud FAIL a schema-mismatch must produce.
+    # Validate before inferring single-sidedness from absent legs.
     blocked = _payload_block_cell("CURVE4", desc, lp_acct, payload_errors)
     if blocked is not None:
         return blocked
@@ -5880,9 +4802,6 @@ def _cells_curve_lp(
         _curve3_fees(lp_opens + lp_closes, acct_payloads, pos_events, payload_errors),
         _curve4_il(lp_opens, lp_closes, acct_payloads, payload_errors),
     ]
-    # CURVE5 — reuse the generic open->close decomposition predicate (it reads
-    # the CLOSE position_event's attribution_json, identical for Curve LP), under
-    # the CURVE5 id.
     lp5 = _lp5_decomposition_cell(pos_events)
     out.append(
         CellResult(
@@ -5893,29 +4812,8 @@ def _cells_curve_lp(
     return out
 
 
-# ─── Vault SETTLEMENT cells (VIB-5682) ────────────────────────────────────
-#
-# The settlement scorecard scores the vault operator-side propose→settle two-phase
-# boundary as its own accounting primitive (``Primitive.SETTLEMENT``): a
-# ``settleDeposit`` issues shares against pending depositor capital, a
-# ``settleRedeem`` burns redeem shares and returns assets. Both are CAPITAL events,
-# NOT strategy returns — the ``SettlementAccountingEvent`` deliberately carries no
-# ``realized_pnl_usd`` / ``principal_delta_usd`` / ``cost_basis_usd``
-# (``settlement_accounting.py``), so no PnL fold reads a depositor inflow as profit
-# or a redemption as loss. These two cells assert exactly that discipline per leg:
-# the typed event exists, its receipt-measured magnitudes are MEASURED (Empty ≠
-# Zero — an unmeasured ``None`` never satisfies the cell), the version stamps are
-# present, the payload is PnL-inert, and the event carries its ledger linkage
-# (``tx_hash`` + ``ledger_entry_id``) so the ledger↔event join holds.
-#
-# Distinct cells (not folded into an LP/lending/vault pack): folding settlement
-# into an existing cell would hide the two-phase propose→settle boundary and the
-# share issuance/redemption that mutates AUM composition — the exact seams
-# VIB-5682 exists to score.
-
-# Keys whose presence would mean a settlement leaked into the PnL fold. A
-# settlement is capital in/out, never a return; the ``SettlementAccountingEvent``
-# must never carry any of these (capital-event discipline, ``settlement_accounting.py``).
+# Vault settlement changes depositor capital and shares, not strategy return.
+# Keep its two legs distinct and reject fields that would leak capital into PnL.
 _SETTLEMENT_PNL_LEAK_KEYS: frozenset[str] = frozenset(
     {"realized_pnl_usd", "principal_delta_usd", "cost_basis_usd", "unrealized_pnl", "net_pnl_usd"}
 )
@@ -6204,7 +5102,6 @@ def _cells_spot(
         else "need a measured SWAP→SWAP-back pair whose BUY records acquisition basis",
     )
 
-    # S2 — independent FIFO replay of every matched disposal.
     _, replay_errors = _spot_replay_lots(swaps)
     s2 = CellResult(
         "S2",
@@ -6216,24 +5113,14 @@ def _cells_spot(
     return [s1, s2, _spot_mark_cell(snapshots), _spot_basis_cell(swaps, snapshots)]
 
 
-# ─── Scorecard profile registry (G-A foundation) ─────────────────────────
-#
-# One declarative table replaces the former per-primitive if/elif ladders (the
-# lifecycle map, the G6 ε selector, and the cell-pack dispatch). Each profile
-# carries its canonical taxonomy ``Primitive`` (Blueprint 27 §2.4) and an adapter
-# that calls the existing cell pack with its current signature — so adding a
-# primitive is one entry, not three new branches. Assembled here (not in
-# ``scorecard_profiles.py``) because the cell-pack callables live in this module;
-# the dataclass tier is neutral so there is no import cycle (§2.1 layering).
-#
-# ``_TaxonomyPrimitive`` is the canonical enum (imported as such because the
-# module-local ``Primitive`` name is the ``ProfileName`` string alias).
+# Profiles centralize lifecycle, tolerance, and cell dispatch. They live here
+# because the cell-pack callables are module-local; _TaxonomyPrimitive avoids
+# colliding with the module's ProfileName alias.
 SCORECARD_PROFILES: dict[str, ScorecardProfile] = {
     "spot": ScorecardProfile(
         name="spot",
         canonical_primitive=_TaxonomyPrimitive.SWAP,
-        # SWAP is atomic in the taxonomy. The S1–S4 pack, rather than the
-        # coarse intent-type guard, proves the BUY→SELL round trip.
+        # The spot cell pack proves the round trip; SWAP itself is atomic.
         required_lifecycle=(),
         eps_pct=Decimal("0.0025"),
         eps_scaling=lambda b: (b.notional_traded, "notional_traded"),
@@ -6276,11 +5163,7 @@ SCORECARD_PROFILES: dict[str, ScorecardProfile] = {
             ctx.position_state_rows,
         ),
     ),
-    # Pure lending (BENQI / VIB-5734) uses the same canonical lifecycle and ε
-    # as ``looping`` but differs deliberately in L6 applicability. A
-    # SUPPLY→BORROW→REPAY→WITHDRAW study has no borrow→swap leg by contract, so
-    # L6 is a declared SKIP; leverage-loop fixtures must keep using ``looping``,
-    # where the same missing attribution is a real defect.
+    # Pure lending has no borrow-to-swap leg, unlike the looping profile.
     "lending_lifecycle": ScorecardProfile(
         name="lending_lifecycle",
         canonical_primitive=_TaxonomyPrimitive.LENDING,
@@ -6312,12 +5195,7 @@ SCORECARD_PROFILES: dict[str, ScorecardProfile] = {
             ctx.payload_errors,
         ),
     ),
-    # Pendle PT rides the SWAP primitive in the taxonomy (taxonomy.py
-    # ``PENDLE_PT → Primitive.SWAP``): a PT buy/sell IS a swap, and both legs land
-    # as ``SWAP`` intent_type in the ledger — so the canonical lifecycle is SWAP's
-    # (atomic, empty). The buy→sell round-trip is asserted by the PEN cell pack
-    # (PEN1/PEN4/PEN5), not the coarse intent_type lifecycle guard, which cannot
-    # tell a PT buy from a PT sell (both are ``SWAP``).
+    # PT buy and sell both map to atomic SWAP; PEN cells prove the round trip.
     "pendle_pt": ScorecardProfile(
         name="pendle_pt",
         canonical_primitive=_TaxonomyPrimitive.SWAP,
@@ -6331,24 +5209,10 @@ SCORECARD_PROFILES: dict[str, ScorecardProfile] = {
             ctx.acct_payloads,
             ctx.payload_errors,
         ),
-        # VIB-5319: a PT disposal on a fork without the gateway PT/SY implied
-        # price (VIB-5276) carries sy_price=None, so the disposal's gross USD
-        # (money-trail leg G1, reconciliation proceeds G6) is unmeasured. That is
-        # a ticketed measurement gap, not an accounting bug → G1/G6 surface XFAIL
-        # (measured-but-blocked) rather than FAIL. The PT economics themselves are
-        # proven by PEN1/PEN4/PEN5/PEN6. Flips to PASS once VIB-5276 lands the
-        # sell-side SY price and the fixture is re-captured.
+        # A measured PT disposal with unavailable gateway price is blocked, not wrong.
         disposal_usd_unmeasured_is_xfail=True,
     ),
-    # Pendle LP rides the LP primitive in the taxonomy (taxonomy.py
-    # ``PENDLE_LP_OPEN/CLOSE -> Primitive.LP`` with ``_LP_LIFECYCLE``): the
-    # ledger intent_type IS ``LP_OPEN`` / ``LP_CLOSE``, so the canonical
-    # lifecycle is LP's and the FixtureLifecycleError guard verifies the
-    # round-trip from the ledger. The cell pack scores the *Pendle* economics
-    # off the PendleAccountingEvent payload (sy_amount/pt_amount), NOT the
-    # generic LP shape (ticks/IL/Track-C) which Pendle LP never emits — using
-    # ``_cells_lp`` here would FAIL, not XFAIL. LP's ε (0.0025 on
-    # notional_traded) is reused. VIB-5320 PR A.
+    # Pendle LP shares LP lifecycle and tolerance but has fungible Pendle economics.
     "pendle_lp": ScorecardProfile(
         name="pendle_lp",
         canonical_primitive=_TaxonomyPrimitive.LP,
@@ -6362,26 +5226,8 @@ SCORECARD_PROFILES: dict[str, ScorecardProfile] = {
             ctx.payload_errors,
         ),
     ),
-    # Curve LP rides the LP primitive in the taxonomy (taxonomy.py
-    # ``LP_OPEN / LP_CLOSE -> Primitive.LP``): the ledger intent_type IS
-    # ``LP_OPEN`` / ``LP_CLOSE``, so the canonical lifecycle is LP's and the
-    # FixtureLifecycleError guard verifies the round-trip from the ledger. The
-    # cell pack scores the *Curve* economics (multi-coin fungible LP, no NFT, no
-    # tick range) off the typed payload / position_events, NOT the generic V3 LP
-    # shape (tick exposure / in-range time) which a rangeless StableSwap /
-    # CryptoSwap pool never emits — using ``_cells_lp`` here scores LP1/LP2 a
-    # false "books-broken" FAIL (the frozen ``lp_curve`` verdict). LP's ε
-    # (0.0025 on notional_traded) is reused. VIB-5430, Curve epic VIB-5422 M2.
-    #
-    # P2-4 shared-matching-version coupling (recorded risk): the LP matching
-    # policy version (``MATCHING_POLICY_VERSIONS[Primitive.LP]``) is ONE key
-    # shared by every LP venue (uniswap / sushi / pancake / aerodrome / traderjoe
-    # / raydium / orca / meteora + Curve) — this profile reuses ``Primitive.LP``
-    # (no ``Primitive.CURVE_LP``: ``Primitive`` is AST-frozen, ``test_types.py``).
-    # This PR changes only the SCORECARD, not the matching algorithm, so the
-    # shared key is untouched. A future Curve-specific matching change would
-    # retro-restamp every LP venue — see
-    # docs/internal/qa/curve-cell-applicability-matrix.md §shared-matching-version.
+    # Curve shares LP lifecycle, tolerance, and matching version, but its
+    # rangeless N-coin economics require a distinct cell pack.
     "curve_lp": ScorecardProfile(
         name="curve_lp",
         canonical_primitive=_TaxonomyPrimitive.LP,
@@ -6396,18 +5242,7 @@ SCORECARD_PROFILES: dict[str, ScorecardProfile] = {
             ctx.position_state_rows,
         ),
     ),
-    # Vault SETTLEMENT (Lagoon ERC-7540 operator side) — VIB-5682. Its own
-    # canonical ``Primitive.SETTLEMENT`` (F3/VIB-5666): the propose→settle
-    # two-phase boundary and the share issuance/redemption that mutates AUM
-    # composition are seams no LP/lending/perp cell scores. The ledger lifecycle
-    # is the two capital-moving legs (``SETTLE_DEPOSIT`` / ``SETTLE_REDEEM``); the
-    # NO_ACCOUNTING ``SETTLE_PROPOSE`` leg moves no capital and is not a lifecycle
-    # step. ε reuses the LP tolerance on ``notional_traded`` — settlement is a
-    # capital event, not a position round-trip, so the generic G6 reconciliation
-    # does not gate on it (the SETTLE cells carry the real per-leg assertions).
-    # The lot-matching ``matching_policy_version`` is UNCHANGED (settlement does no
-    # lot matching): ``MATCHING_POLICY_VERSIONS[Primitive.SETTLEMENT]`` stays the
-    # F3 value; this profile only adds scoring.
+    # Settlement lifecycle includes only capital-moving settle legs, not proposals.
     "settlement": ScorecardProfile(
         name="settlement",
         canonical_primitive=_TaxonomyPrimitive.SETTLEMENT,
@@ -6440,9 +5275,6 @@ def _profile_for(name: str) -> ScorecardProfile:
         raise ValueError(f"unknown scorecard profile {name!r}; known: {sorted(SCORECARD_PROFILES)}") from None
 
 
-# ─── Top-level runner ────────────────────────────────────────────────────
-
-
 def evaluate_cells(
     *,
     ledger: list[dict[str, Any]],
@@ -6453,10 +5285,7 @@ def evaluate_cells(
     position_state_rows: list[dict[str, Any]],
     primitive: Primitive,
     db_dump_path: str | None = None,
-    # VIB-4201 (T15): cell #22 inputs. Defaults preserve back-compat for
-    # callers that pre-date cell #22 — they get an XFAIL on cell #22 with
-    # a "preflight not run" diagnostic rather than a crash. Production
-    # callers (run_against_sqlite, accountant_query) supply real values.
+    # Missing registry preflight inputs produce XFAIL instead of crashing older callers.
     position_registry_rows: list[dict[str, Any]] | None = None,
     position_reference_column_present: bool | None = None,
     position_registry_table_present: bool | None = None,
@@ -6471,22 +5300,12 @@ def evaluate_cells(
     Sorts the input lists in-place by timestamp — cells assume time-ordered
     rows for running aggregations (see the BORROW → REPAY tracker in G6).
     """
-    # VIB-6545: snapshots are canonicalized chronologically through the ONE
-    # shared ordering authority. The old (iteration_number, timestamp) key
-    # broke on any restarted run — iteration_number is process-local and
-    # resets to 1 — filing the terminal teardown snapshot in the middle, so
-    # every cell reading snapshots[-1] measured a pre-close endpoint.
+    # Snapshot chronology cannot depend on process-local iteration numbers.
     _ordered_snapshots = _snapshots_in_time_order(snapshots)
     if _ordered_snapshots is not None:
         snapshots[:] = _ordered_snapshots
     else:
-        # Chronology cannot be established: some timestamp is unmeasured or
-        # unparseable. Keep the legacy deterministic key so iterating cells
-        # see a stable order, but do NOT let endpoint semantics ride on it —
-        # the endpoint-reading cells (G4, G5, G6, PEN3) each re-derive order
-        # through _snapshots_in_time_order and refuse when it returns None,
-        # rather than electing "first"/"last" by this accident-adjacent key.
-        # Empty ≠ Zero: an unknown time is not "earliest".
+        # Preserve deterministic iteration, but endpoint cells re-derive and refuse chronology.
         snapshots.sort(key=lambda r: (r.get("iteration_number") or 0, r.get("timestamp") or ""))
     ledger.sort(key=lambda r: r.get("timestamp") or "")
     pos_events.sort(key=lambda r: r.get("timestamp") or "")
@@ -6499,10 +5318,7 @@ def evaluate_cells(
     if ledger:
         network = ledger[0].get("chain") or ""
 
-    # VIB-3868: typed payload reads. Every cell that reads a payload field
-    # goes through this validated map; rows whose payload failed Pydantic
-    # validation are surfaced via ``payload_errors`` and FAIL the cells
-    # downstream of them.
+    # Payload-reading cells consume this validated map and fail on schema errors.
     acct_payloads, payload_errors, payload_error_records = _typed_acct_payloads(acct_events)
 
     cells: list[CellResult] = []
@@ -6525,9 +5341,6 @@ def evaluate_cells(
     cells.append(_cell_g14_sdk_eq_onchain(snapshots, position_state_rows))
     cells.append(_cell_g15_multi_period_self_consistency(snapshots, position_state_rows))
 
-    # Primitive-specific cell pack (G-A): one registry lookup replaces the
-    # former if/elif ladder. An unrecognised profile extends nothing — exactly
-    # the old fall-through (there was no ``else`` branch).
     _profile = SCORECARD_PROFILES.get(primitive)
     if _profile is not None:
         cells.extend(
@@ -6543,26 +5356,11 @@ def evaluate_cells(
             )
         )
 
-    # VIB-6061: G16 — native lane. Appended here rather than beside G15 so the
-    # 15-cell generic block keeps its identity and ordering; the check itself is
-    # primitive-agnostic (it catches any venue charging native outside transaction
-    # gas), but it is informational for now, exactly like cell #22 below.
     cells.append(_cell_g16_native_lane(snapshots, ledger, acct_events))
 
-    # G17 — receipt-set integrity. Kept beside the other newly introduced
-    # informational cells so the historical 21-cell gating denominator remains
-    # comparable. The cell itself is strict and reports every contradiction as
-    # FAIL; only the release-score arithmetic is unchanged this cycle.
     cells.append(_cell_g17_receipt_set(ledger))
 
-    # VIB-4201 (T15): cell #22 — registry coherence. Appended after the
-    # 15 generic + 6 primitive-specific cells. NOT in the ≥16/21 gating
-    # sum (see ``format_markdown``); informational on every primitive.
     if position_reference_column_present is None:
-        # Caller did not run preflight (pre-T15 caller, or back-compat
-        # path). Mark as XFAIL with an explicit "preflight not run"
-        # diagnostic rather than crashing. New production callers
-        # (``run_against_sqlite``) always provide the flags.
         cells.append(
             CellResult(
                 "L5_22",
@@ -6582,9 +5380,7 @@ def evaluate_cells(
             )
         )
 
-    # Track which cells flipped to FAIL specifically because of payload
-    # validation drift. Lets reviewers diff cell-status changes between
-    # runs without re-deriving propagation by hand.
+    # Expose which cell failures propagated from payload validation.
     cells_blocked: list[str] = []
     if payload_errors:
         for c in cells:
@@ -6619,19 +5415,8 @@ def evaluate_cells(
     )
 
 
-# ─── VIB-5540 standing invariants (primitive-agnostic N-leg reconciliation) ──
-#
-# These are NOT scored 21-cell cells (adding a cell would churn every fixture's
-# expected_cells) — they are surfaced as a NON-failing diagnostic
-# (``AccountantReport.nleg_invariant_findings``). ``run_against_sqlite`` calls
-# both on the real DB it evaluates, so every ``make test-accounting-matrix`` run
-# and every real-fork DB carries the findings in its report: on a post-fix DB
-# they are empty, and a Seam-A/B regression on a real run makes them non-empty
-# and visible without silently changing a cell status. They are primitive-
-# agnostic (Curve 3pool/4pool/tricrypto/metapool, Balancer, any future N-coin
-# venue keyed on the shared ``coin_symbols`` carrier, no per-primitive branch)
-# and FAIL-SAFE: a fixture with no ``coin_symbols`` (2-coin venues, legacy
-# captures) yields no findings, so they never break a frozen fixture's score.
+# N-leg reconciliation findings are primitive-agnostic diagnostics and do not
+# alter the historical cell denominator. Fixtures without coin_symbols are out of scope.
 
 
 def _acct_event_coin_symbols(acct_events: list[dict[str, Any]]) -> set[str]:
@@ -6708,7 +5493,7 @@ def check_snapshot_covers_position_coins(
     """
     required = _acct_event_coin_symbols(acct_events)
     if not required:
-        return []  # no N-coin position in this fixture — nothing to assert
+        return []
     covered = _snapshot_covered_symbols(snapshots)
     missing = sorted(required - covered)
     if missing:
@@ -6756,37 +5541,34 @@ def check_lp5_principal_matches_cost_basis(
     ITS OWN close cost_basis; a close with one side measured but not the other
     (Empty≠Zero) is skipped, never cross-matched to a different position.
     """
-    # Group each fungible N-coin close's measured cost_basis by its correlation
-    # key. Only closes that stamp ``coin_symbols`` (the N-coin carrier) are in
-    # scope; an unmeasured cost_basis (None) is skipped (Empty≠Zero).
+    # Correlate only N-coin closes with measured basis.
     cost_basis_by_key: dict[str, Decimal] = {}
     for ae in acct_events:
         if (ae.get("event_type") or "").upper() != "LP_CLOSE":
             continue
         payload = _json(ae.get("payload_json"))
         if not payload.get("coin_symbols"):
-            continue  # not a fungible N-coin close
+            continue
         cb = _dec(payload.get("cost_basis_usd"))
         if cb is None:
-            continue  # cost_basis unmeasured → nothing to correlate against
+            continue
         key = _lp_close_correlation_key(ae)
         if key:
             cost_basis_by_key[key] = cb
     if not cost_basis_by_key:
         return []
-    # Compare each CLOSE position-event's principal against the cost_basis of the
-    # SAME close (correlated by ledger_entry_id / tx_hash), never a different one.
+    # Never compare principal and basis from different close intents.
     findings: list[str] = []
     for pe in pos_events:
         if (pe.get("event_type") or "").upper() != "CLOSE":
             continue
         key = _lp_close_correlation_key(pe)
         if not key or key not in cost_basis_by_key:
-            continue  # no correlated fungible-close cost_basis for this position
+            continue
         attr = _json(pe.get("attribution_json"))
         principal = _dec(attr.get("principal_recovered_usd"))
         if principal is None:
-            continue  # principal unmeasured (Empty≠Zero) — never compared as zero
+            continue
         cb = cost_basis_by_key[key]
         tolerance = max(rel_eps * abs(cb), abs_floor_usd)
         if abs(principal - cb) > tolerance:
@@ -6868,10 +5650,7 @@ def run_against_sqlite(
     """
     conn = _connect(db_path)
     try:
-        # VIB-4540 (audit PR #2343): resolve deployment_id BEFORE the
-        # lifecycle check so strict mode evaluates the same scoped row
-        # set as the cells, and validate an explicit id so a typo
-        # surfaces as a config error instead of an empty-filter FAIL.
+        # Resolve deployment before lifecycle checks so every read uses one scope.
         if deployment_id is None:
             deployment_id = _resolve_singleton_deployment_id(conn)
         elif not _deployment_exists(conn, deployment_id):
@@ -6888,11 +5667,7 @@ def run_against_sqlite(
         acct_events = _table_rows(conn, "accounting_events", deployment_id=deployment_id)
         snapshots = _table_rows(conn, "portfolio_snapshots", deployment_id=deployment_id)
         metrics = _table_rows(conn, "portfolio_metrics", deployment_id=deployment_id)
-        # Track C surface — empty list when the materializer hasn't been
-        # wired (current state on this branch). Both G14 and G15 stay
-        # XFAIL in that case by design.
         position_state_rows = _table_rows(conn, "position_state_snapshots", deployment_id=deployment_id)
-        # VIB-4201 (T15): cell #22 preflight + reads.
         position_registry_rows = _table_rows(conn, "position_registry", deployment_id=deployment_id)
         (
             position_reference_column_present,
@@ -6915,10 +5690,7 @@ def run_against_sqlite(
         position_registry_table_present=position_registry_table_present,
         malformed_position_reference_row_ids=malformed_position_reference_row_ids,
     )
-    # VIB-5540 — run the N-leg reconciliation invariants over the SAME real DB
-    # the cells were scored against, so every ``make test-accounting-matrix`` run
-    # and every real-fork DB carries the findings (non-failing diagnostic; empty
-    # on a clean post-fix DB and on any fixture with no ``coin_symbols``).
+    # Run diagnostics over the same scoped rows as the scorecard.
     report.nleg_invariant_findings = evaluate_nleg_invariants(snapshots, pos_events, acct_events)
     return report
 
@@ -6945,7 +5717,6 @@ def _cell22_preflight(
     existence) and P2 (table existence) are schema-level checks that
     apply DB-wide and don't need scoping.
     """
-    # P1: position_reference column exists?
     try:
         cur = conn.execute(
             "SELECT count(*) FROM pragma_table_info('accounting_events') WHERE name = 'position_reference'"
@@ -6954,14 +5725,12 @@ def _cell22_preflight(
     except sqlite3.OperationalError:
         position_reference_column_present = False
 
-    # P2: position_registry table exists?
     try:
         cur = conn.execute("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='position_registry'")
         position_registry_table_present = (cur.fetchone()[0] or 0) > 0
     except sqlite3.OperationalError:
         position_registry_table_present = False
 
-    # P3: malformed position_reference JSON? Skip if column missing.
     malformed_ids: list[Any] = []
     if position_reference_column_present:
         try:
@@ -6979,16 +5748,7 @@ def _cell22_preflight(
                 )
             malformed_ids = [row[0] for row in cur.fetchall()]
         except sqlite3.OperationalError:
-            # ``json_valid`` is missing on ancient SQLite builds (<3.38;
-            # Python 3.10+ bundles 3.40+, so this branch only fires on
-            # exotic system-SQLite installs). The Python-side orphan
-            # walker (``_cell22_position_reference_phid``) handles
-            # malformed JSON safely by returning ``None``, so a corrupt
-            # row collapses into the "legacy null hash" census bucket.
-            # That's a degraded F10 surface — corrupt payloads no longer
-            # produce a loud FAIL — but the cell remains crash-free.
-            # Track in VIB-4201 follow-up if the Python target ever
-            # regresses to <3.10.
+            # Without SQLite json_valid(), malformed references degrade to null hashes.
             malformed_ids = []
 
     return position_reference_column_present, position_registry_table_present, malformed_ids
