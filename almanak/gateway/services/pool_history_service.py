@@ -92,27 +92,6 @@ from almanak.gateway.services._history_common import (
 logger = logging.getLogger(__name__)
 
 
-# =============================================================================
-# Pool-specific allowlists (POOL-3 / VIB-4751) — registry-driven (VIB-4811).
-# =============================================================================
-# Phase 3 (VIB-4811) replaces the hardcoded ``POOL_PROTOCOL_ALLOWLIST`` +
-# ``SUPPORTED_POOL_PAIRS`` tables with a derivation from
-# ``GATEWAY_REGISTRY.capability_providers(GatewayPoolHistoryCapability)``.
-# Each connector publishes its own supported chain set; the validator
-# unions them at module-import time.
-#
-# Behaviour is byte-identical to the historical hardcoded sets: Uniswap
-# V3 contributes ``{ethereum, arbitrum, base, optimism, polygon}`` and
-# Aerodrome contributes ``{base}`` — exactly the previous six
-# ``(chain, protocol)`` pairs. New protocols are added by registering a
-# ``GatewayPoolHistoryCapability`` provider in
-# ``almanak.connectors._gateway_registry`` (and NOT by editing this file).
-#
-# These tables live HERE (not in ``_history_common.py``) because they
-# remain pool-specific. ``RateHistoryService`` (VIB-4747) will have its
-# own allowlist / dispatch built from a sibling capability.
-
-
 def _derive_pool_history_tables() -> tuple[frozenset[str], frozenset[tuple[str, str]]]:
     """Compute ``(POOL_PROTOCOL_ALLOWLIST, SUPPORTED_POOL_PAIRS)`` from the registry.
 
@@ -146,17 +125,11 @@ def _derive_pool_history_tables() -> tuple[frozenset[str], frozenset[tuple[str, 
         protocol = str(connector.protocol).lower()  # type: ignore[attr-defined]
         allowlist.add(protocol)
         for chain in connector.pool_history_supported_chains():
-            # Normalize to lowercase — the validator (POOL-3) already
-            # lowercases incoming request fields, and we must match
-            # there. (Gemini code-review.)
+            # Registry declarations and request values share one lowercase form.
             pairs.add((chain.lower(), protocol))
     return frozenset(allowlist), frozenset(pairs)
 
 
-# ``frozenset`` is final and can't be subclassed cleanly, so the lazy
-# proxy is a ``set`` subclass that materializes its contents on first
-# access. Tests that compare with ``== frozenset(...)`` still match
-# (set equality is contents-based) and ``in`` checks work normally.
 class _LazyFrozenset(frozenset):
     """Marker base for the proxy classes below — exists only so callers
     that do ``isinstance(x, frozenset)`` keep returning True.
@@ -251,19 +224,14 @@ def is_supported_pool_pair(chain: str, protocol: str) -> bool:
     return (chain, protocol) in SUPPORTED_POOL_PAIRS
 
 
-# =============================================================================
-# Request validator (POOL-3 / VIB-4751)
-# =============================================================================
-#
 # Short-circuit on the first failure, in this order:
 #
 #   resolution -> chain -> protocol -> (chain, protocol) pair
 #   -> pool_address (empty / normalize) -> pool_address syntax
 #   -> start_ts -> end_ts -> start_ts < end_ts -> future-time tolerance
 #
-# This order matches VIB-4727's "first failure wins" pattern. Tests in
-# ``test_history_validation.py`` lock both the codes AND the error
-# messages so a regression that swaps two checks is caught.
+# Tests lock the first failure's code and message, so this order is part
+# of the validation contract.
 
 
 def _validate_pool_history_request(
@@ -321,23 +289,13 @@ def _validate_pool_history_request(
     return None
 
 
-# =============================================================================
-# health() schema — counter NAMES locked here.
-# =============================================================================
-# Per-RPC observability surface (UAT card VIB-4728 D2.M4 / D2.M2 / D3.F7 /
-# D3.F11). POOL-8 fills VALUES; the NAMES below are the stable
-# observability contract.
 _PER_RPC_COUNTER_NAMES: tuple[str, ...] = (
     "requests_total",
     "cache_hits",
     "cache_misses",
     "provider_fallback",
-    # POOL-8 (VIB-4756): scalar ``truncated`` counter — total responses where
-    # ``truncation_reason != TRUNCATION_REASON_UNSPECIFIED``. The richer
-    # per-reason breakdown lives in the ``truncated_by_reason`` dict (added
-    # below); the scalar plus the per-reason sum-identity catches BOTH
-    # scalar-vs-dict divergence AND bucket cross-contamination (UAT card
-    # §D2.M2.b.1 full-dict equality assertions).
+    # The scalar counts all truncated responses; it must equal the sum of
+    # the per-reason buckets.
     "truncated",
     "inflight_dedup_hits",
     "cache_evictions_by_entries",
@@ -356,29 +314,20 @@ _TRUNCATION_REASON_NAMES: tuple[str, ...] = (
     "PROVIDER_RETENTION",
 )
 
-# Provider-bound counters. The provider set is OPEN — POOL-5 adds
-# ``the_graph`` / ``defillama`` / ``coingecko_onchain`` when it lands. POOL-2
-# initializes the keyset empty so health() returns a stable shape even
-# pre-POOL-5.
 _PER_PROVIDER_COUNTER_NAMES: tuple[str, ...] = (
     "requests",
     "errors",
     "bucket_throttle_waits_ms",
 )
 
-# Budget-tracker counters. Source-of-truth for `the_graph_monthly_queries`
-# lives in whatever store the POOL-5 prerequisite spike chose (per
-# PoolX.md §6.1); health() is the READ surface only.
+# The dispatcher's budget tracker is authoritative; health() only reads it.
 _BUDGET_COUNTER_NAMES: tuple[str, ...] = (
     "the_graph_monthly_queries",
     "the_graph_monthly_budget_max",
 )
 
-# Defensive fallbacks (POOL-6 / VIB-4754) used only if the dispatcher ever
-# reports a provider id absent from the per-provider maps (which are populated
-# for all three known providers from settings). They mirror the settings
-# defaults so a fallback can never mark provisional data finalized (cutoff) or
-# truncate a response to zero rows (page cap).
+# Unknown providers use conservative defaults that cannot finalize provisional
+# data early or truncate a response to zero rows.
 _FALLBACK_FINALITY_CUTOFF_SECONDS = 86400
 _FALLBACK_PAGE_CAP_ROWS = 100000
 
@@ -428,23 +377,20 @@ class PoolHistoryServiceServicer(gateway_pb2_grpc.PoolHistoryServiceServicer):
     def __init__(self, settings: GatewaySettings) -> None:
         self._settings = settings
         self._enabled = bool(settings.pool_history_enabled)
-        # ``_metrics`` is the live counter store for fields the cache
-        # doesn't own (truncation_reason split, errors_by_grpc_code,
-        # provider_fallback, budget). The cache owns hit/miss/eviction
-        # counters; ``health()`` merges both sources into the locked
-        # schema.
+        # Cache-owned and service-owned counters remain separate until health()
+        # merges them into its stable schema.
         self._metrics: dict[str, dict[str, int | dict[str, int]]] = _zero_health_snapshot()
 
-        # Two-tier cache (POOL-4 / PoolX.md §D6):
+        # Two-tier cache:
         #   public: 7-tuple key, no provider, ``get_or_fetch`` lives here.
         #   raw   : 8-tuple key, includes provider; per-provider partition
         #           tracking via ``extract_provider_from_raw_key``.
         max_entries = load_max_entries_from_settings(settings)
         max_bytes = load_max_bytes_from_settings(settings)
-        # The public cache uses a WALL-CLOCK TTL (``time.time``) so its TTL and
+        # The public cache uses a wall-clock TTL so its TTL and
         # the finality cutoff share one timeline: a provisional entry's 60s TTL
         # and the "row aged past the cutoff" test advance together, which is what
-        # makes finality re-promotion (POOL-6 / D3.F9) deterministic. The
+        # makes finality re-promotion deterministic. The
         # ``repromoter`` flips a provisional entry to finalized in place once its
         # newest row ages past the serving provider's cutoff (see
         # ``_repromote_public_entry``). The raw cache does NOT re-promote.
@@ -464,21 +410,9 @@ class PoolHistoryServiceServicer(gateway_pb2_grpc.PoolHistoryServiceServicer):
             name="pool_history_raw",
         )
 
-        # Provider dispatcher (POOL-5 / VIB-4753). Constructed once here,
-        # alongside the cache instances, so the providers + their shared HTTP
-        # session live for the servicer's lifetime. The counter callbacks
-        # mutate ``self._metrics`` structurally — they populate the EXISTING
-        # locked health() keyset (provider_fallback, per-provider
-        # requests/errors); they do NOT add new schema keys (POOL-8 owns
-        # export hardening — decision #7).
-        # Per-provider truncation / finality knobs (POOL-6 / VIB-4754), keyed by
-        # the provider ``name`` the dispatcher reports as ``outcome.source``.
-        # ``_finality_cutoffs`` selects the provisional/finalized band (DefiLlama
-        # longer — it revises daily data >24h after the fact). ``_page_cap_rows``
-        # is the response row ceiling: a provider that returns MORE rows than
-        # this for the (clamped) window is served as the oldest ceiling-many with
-        # ``PROVIDER_PAGE_CAP``. Defaults are huge, so page-cap is unreachable in
-        # production after soft-cap clamping (the test lowers a provider's).
+        # Keep one dispatcher for the service lifetime so providers share their
+        # HTTP session. Provider knobs use the reported source name; DefiLlama's
+        # cutoff is longer because it can revise daily data after 24 hours.
         self._finality_cutoffs: dict[str, int] = {
             "the_graph": settings.pool_history_finality_cutoff_seconds_the_graph,
             "defillama": settings.pool_history_finality_cutoff_seconds_defillama,
@@ -500,11 +434,6 @@ class PoolHistoryServiceServicer(gateway_pb2_grpc.PoolHistoryServiceServicer):
                 on_provider_request=self._bump_provider_request,
                 on_provider_error=self._bump_provider_error,
                 on_provider_fallback=self._bump_provider_fallback,
-                # POOL-8 (VIB-4756): per-provider ``bucket_throttle_waits_ms``.
-                # Fires once per bucket refusal (BOTH the_graph
-                # ``_ProviderError`` primary path AND defillama/CoinGecko Onchain
-                # ``_NotAttempted`` fallback paths — the ``_ObservableTokenBucket``
-                # covers both). UAT card §D2.M2.b.3.
                 on_provider_throttle_wait=self._bump_provider_throttle_wait,
             ),
         )
@@ -526,8 +455,6 @@ class PoolHistoryServiceServicer(gateway_pb2_grpc.PoolHistoryServiceServicer):
         Idempotent and safe even if no provider was ever invoked.
         """
         await self._dispatcher.close()
-
-    # -- Counter helpers (structural increments; decision #7) --------------
 
     def _provider_counters(self, provider: str) -> dict[str, int]:
         """Lazily create + return the per-provider counter dict.
@@ -603,8 +530,6 @@ class PoolHistoryServiceServicer(gateway_pb2_grpc.PoolHistoryServiceServicer):
         reason_name = self._safe_truncation_name(reason)
         by_reason[reason_name] = by_reason.get(reason_name, 0) + 1
 
-    # -- Health -----------------------------------------------------------
-
     def health(self) -> dict[str, dict[str, int | dict[str, int]]]:
         """Per-RPC + per-provider + budget counter snapshot.
 
@@ -625,44 +550,27 @@ class PoolHistoryServiceServicer(gateway_pb2_grpc.PoolHistoryServiceServicer):
         """
         public_stats = self._public_cache.stats()
         raw_stats = self._raw_cache.stats()
-        # Cache hit/miss counters aggregate across BOTH tiers (a public
-        # hit avoids an upstream call regardless of which tier served it).
+        # Cache metrics aggregate both tiers; raw currently has no in-flight
+        # deduplication, but including it keeps the aggregation symmetric.
         cache_hits = public_stats["cache_hits"] + raw_stats["cache_hits"]
         cache_misses = public_stats["cache_misses"] + raw_stats["cache_misses"]
         evictions_by_entries = public_stats["cache_evictions_by_entries"] + raw_stats["cache_evictions_by_entries"]
         evictions_by_bytes = public_stats["cache_evictions_by_bytes"] + raw_stats["cache_evictions_by_bytes"]
-        # ``cache_bytes_resident`` is also the sum (both tiers consume
-        # gateway memory).
         cache_bytes_resident = public_stats["bytes_resident"] + raw_stats["bytes_resident"]
-        # ``inflight_dedup_hits`` only lives on the public cache (raw cache
-        # has no ``get_or_fetch`` surface); summing for forward-compat.
         inflight_dedup_hits = public_stats["inflight_dedup_hits"] + raw_stats["inflight_dedup_hits"]
 
-        # Defensive copy: callers should not be able to mutate the live
-        # metrics store (the analytics service test harness has done this
-        # historically and surfaced flakes). Generic shallow-deep copy via
-        # dict comprehension — when POOL-8 adds new nested-dict counters
-        # they're defensively copied automatically.
+        # Copy nested metric dictionaries so callers cannot mutate live state.
         rpc_metrics = {k: (dict(v) if isinstance(v, dict) else v) for k, v in self._metrics["per_rpc"].items()}
-        # Overlay live cache values (these supersede the zero-initialised
-        # per_rpc placeholders from ``_zero_health_snapshot``).
         rpc_metrics["cache_hits"] = cache_hits
         rpc_metrics["cache_misses"] = cache_misses
         rpc_metrics["cache_evictions_by_entries"] = evictions_by_entries
         rpc_metrics["cache_evictions_by_bytes"] = evictions_by_bytes
         rpc_metrics["cache_bytes_resident"] = cache_bytes_resident
         rpc_metrics["inflight_dedup_hits"] = inflight_dedup_hits
-        # The raw-cache partition counts are live; POOL-5's dispatcher
-        # writes to the raw cache and updates this map on each put.
         rpc_metrics["raw_cache_entries_by_provider"] = self._raw_cache.entries_by_partition
 
-        # Budget counters (POOL-5 / VIB-4753). The dispatcher's monthly-budget
-        # tracker owns the live WRITE side; health() is the READ surface
-        # (decision #7). A NEVER-QUERIED fresh servicer reports the
-        # zero-snapshot shape (both counters 0) so the POOL-2 skeleton schema
-        # lock still holds; once the dispatcher has attempted ANY TheGraph
-        # query the live ``the_graph_monthly_queries`` + the configured
-        # ``the_graph_monthly_budget_max`` are surfaced (D3.F11 trip ratio).
+        # Preserve the all-zero fresh-service snapshot until the first TheGraph
+        # query, then expose both the live count and configured maximum.
         budget = dict(self._metrics["budget"])
         dispatcher = getattr(self, "_dispatcher", None)
         if dispatcher is not None and dispatcher.the_graph_monthly_queries > 0:
@@ -678,23 +586,7 @@ class PoolHistoryServiceServicer(gateway_pb2_grpc.PoolHistoryServiceServicer):
             "budget": budget,
         }
 
-    # -- Structured log helpers (POOL-8 / VIB-4756) -----------------------
-    #
-    # The card §D2.M2.b.4 asserts: exactly 2 INFO records per happy-path
-    # request (entry + success exit), 1 INFO + 1 WARNING per error path.
-    # All bound fields go through ``extra=`` so the log MESSAGE is a stable
-    # template string — no f-string interpolation of secrets. The
-    # ``record.api_key`` slot is intentionally never written by these
-    # helpers; the redaction test (``test_api_key_never_in_logs``) confirms
-    # nothing in this module lands the API-key value on a LogRecord.
-
-    #: Bound on the per-record ``pool_address`` size in structured-log
-    #: extras. EVM addresses are 42 chars (``0x`` + 40 hex); Solana base58
-    #: addresses are at most 44 chars. 80 is comfortably above both, and
-    #: caps the log-volume amplifier surface from a malicious / accidental
-    #: multi-MB ``pool_address`` (gRPC default max message is 4MB; the
-    #: validator rejects oversize addresses but only AFTER the entry log
-    #: fires — pr-auditor 2026-05-28).
+    #: Bound untrusted structured-log input before validation emits the entry record.
     _MAX_LOGGED_POOL_ADDRESS = 80
 
     @staticmethod
@@ -726,10 +618,7 @@ class PoolHistoryServiceServicer(gateway_pb2_grpc.PoolHistoryServiceServicer):
         return {
             "chain": chain,
             "protocol": protocol,
-            # Resolution is logged as the int enum value per UAT card §D2.M2.b.4
-            # ("resolution as the integer enum value"). Operator readability via
-            # the enum NAME is a follow-up tracked separately — changing it here
-            # would require re-running Phase 0b on the card.
+            # Resolution is intentionally logged as the integer enum value.
             "resolution": resolution,
             "pool_address": pool_address[: cls._MAX_LOGGED_POOL_ADDRESS],
             "start_ts": start_ts,
@@ -756,24 +645,15 @@ class PoolHistoryServiceServicer(gateway_pb2_grpc.PoolHistoryServiceServicer):
             "chain": chain,
             "protocol": protocol,
             "resolution": resolution,
-            # ``pool_address`` is included on exit records so a per-request
-            # log correlation (entry -> exit) is possible without joining on
-            # request_id (CodeRabbit-flagged 2026-05-28). Truncated to the
-            # same bound as the entry log so a multi-MB malicious address
-            # cannot blow up exit-log volume either.
             "pool_address": pool_address[: cls._MAX_LOGGED_POOL_ADDRESS],
             "source": source,
             "snapshots_count": snapshots_count,
-            # Wrap ``Name(...)`` so an unknown enum int (future proto bump)
-            # cannot crash the structured-log emission (Gemini 2026-05-28).
             "truncation_reason": cls._safe_truncation_name(truncation_reason),
             "finality_band": finality_band,
             "latency_ms": latency_ms,
             "grpc_code": grpc_code.name,
             "error": error,
         }
-
-    # -- gRPC entry point -------------------------------------------------
 
     async def GetPoolHistory(
         self,
@@ -803,19 +683,9 @@ class PoolHistoryServiceServicer(gateway_pb2_grpc.PoolHistoryServiceServicer):
         perceives one truncation regardless of cache state).
         """
         started_monotonic = time.monotonic()
-        # Pre-normalize for the structured log + cache key. The validator
-        # re-runs the same transforms; doing it here gives the entry log
-        # the canonical fields per UAT card §D2.M2.b.4 (chain/protocol
-        # lowercased, pool_address chain-aware canonical). An empty
-        # address normalises to "" — the validator rejects that with
-        # ``INVALID_ARGUMENT``, the log just records what was seen.
-        #
-        # ``normalize_pool_address`` is defensive (today it cannot raise on
-        # any string input; the only failure mode would be a future change
-        # adding a chain-specific normalization step that does), but we
-        # wrap it anyway so an unexpected exception in normalization
-        # CANNOT crash the handler before the validator has a chance to
-        # return a clean ``INVALID_ARGUMENT`` (Gemini-flagged 2026-05-28).
+        # Normalize before validation so telemetry and cache keys use canonical
+        # fields. The fallback keeps unexpected normalization errors on the
+        # validator's clean INVALID_ARGUMENT path.
         chain = request.chain.strip().lower()
         protocol = request.protocol.strip().lower()
         try:
@@ -877,36 +747,17 @@ class PoolHistoryServiceServicer(gateway_pb2_grpc.PoolHistoryServiceServicer):
             _emit_error_exit(code, message)
             return gateway_pb2.PoolHistoryResponse(success=False, error=message)
 
-        # Validator passed: dispatch through the provider fallback chain
-        # (POOL-5 / VIB-4753). The pre-normalized chain/protocol/pool_address
-        # above are identical to the validator's transforms (chain + protocol
-        # lowercased, EVM addresses lowercased, Solana case-preserved); reuse
-        # them rather than re-stripping.
-
-        # Soft-cap clamp (POOL-6 / VIB-4754, UAT card §D3.F8): when the half-open
-        # window exceeds the per-resolution soft cap, serve the OLDEST cap-sized
-        # slice ``[start_ts, start_ts + soft_cap)`` and report CAP_EXCEEDED with a
-        # forward ``next_start_ts`` — the soft cap truncates, it never raises
-        # INVALID_ARGUMENT (only a hard cap would, and none is configured by
-        # default). ``get_soft_cap_seconds`` / ``resolution_to_seconds`` raise
-        # only for RESOLUTION_UNSPECIFIED, which the validator already rejected.
+        # Soft caps serve the oldest cap-sized half-open slice and return a
+        # forward cursor; they truncate rather than reject the request.
         soft_cap_seconds = get_soft_cap_seconds(self._settings, resolution)
         clamped = (end_ts - start_ts) > soft_cap_seconds
         eff_end_ts = start_ts + soft_cap_seconds if clamped else end_ts
         resolution_seconds = resolution_to_seconds(resolution)
 
-        # The PUBLIC cache key uses a FIXED finality band so a provisional entry
-        # and its finalized re-promotion share ONE key (D3.F9 — key stable, only
-        # the TTL band flips; the actual band lives on the cache ENTRY, set via
-        # the fetcher's returned band below). The key window is the caller's
-        # ORIGINAL ``[start_ts, end_ts)`` — NOT the clamped ``eff_end_ts``: the
-        # truncation metadata (CAP_EXCEEDED vs UNSPECIFIED, next_start_ts) is a
-        # function of the requested window, so an over-cap request and an
-        # exact-cap request that happen to clamp to the same slice MUST NOT share
-        # a public entry (they carry different truncation envelopes — keying by
-        # eff_end would let an UNSPECIFIED entry mask a CAP_EXCEEDED one and
-        # silently strand the over-cap caller). The raw cache (below) keys by the
-        # fetched ``eff_end_ts`` so the identical upstream payload still dedupes.
+        # A fixed public-key band lets provisional entries re-promote in place.
+        # Key the public envelope by the original window because exact-cap and
+        # over-cap requests carry different truncation metadata. Raw payloads
+        # use the effective window so identical upstream reads still deduplicate.
         public_key = make_public_key(
             chain=chain,
             pool_address=pool_address,
@@ -920,11 +771,8 @@ class PoolHistoryServiceServicer(gateway_pb2_grpc.PoolHistoryServiceServicer):
         self._metrics["per_rpc"]["requests_total"] = cast(int, self._metrics["per_rpc"].get("requests_total", 0)) + 1
 
         async def _fetch() -> tuple[gateway_pb2.PoolHistoryResponse, CacheFinality]:
-            # Raw-cache write per successful provider (D2.M4 partition): the
-            # 8-tuple raw key carries the provider so a TheGraph-served entry
-            # and a DefiLlama-served entry for the same public key stay
-            # separate. Written BEFORE the public cache settles so a
-            # cross-provider fallback re-issue keeps both raw payloads.
+            # Keep successful raw payloads partitioned by provider and write
+            # them before the public cache settles so fallback results coexist.
             async def _on_success(
                 provider: str,
                 snapshots: list[gateway_pb2.PoolSnapshot],
@@ -940,10 +788,8 @@ class PoolHistoryServiceServicer(gateway_pb2_grpc.PoolHistoryServiceServicer):
                     finality_band=band,
                     provider=provider,
                 )
-                # Raw cache stores the FULL, untruncated provider payload (D6):
-                # truncation is a public-response concern, so the raw envelope
-                # carries UNSPECIFIED + next_start_ts=0; its finalized_only
-                # mirrors the raw band the dispatcher computed.
+                # Raw cache stores the full provider payload; truncation belongs
+                # only to the public envelope.
                 raw_response = self._build_success_response(
                     provider=provider,
                     snapshots=snapshots,
@@ -963,16 +809,11 @@ class PoolHistoryServiceServicer(gateway_pb2_grpc.PoolHistoryServiceServicer):
                 on_provider_success=_on_success,
             )
             if not outcome.success:
-                # No negative caching (decision #4): raising here means the
-                # ``get_or_fetch`` closure does NOT cache the failure and the
-                # in-flight slot clears. Each failed call re-attempts providers
-                # (D3.F2 / D3.F6); the handler maps the raise to UNAVAILABLE.
+                # Raising prevents negative caching and clears the in-flight
+                # slot, so later calls retry providers.
                 raise _ProviderError(outcome.error)
 
-            # POOL-6 (VIB-4754): classify truncation on the served window and
-            # compute finality on the (possibly page-capped) public slice. The
-            # serving provider (``outcome.source``) selects its row ceiling +
-            # finality cutoff; defaults are populated for all three providers.
+            # The serving provider selects the row ceiling and finality cutoff.
             truncation = classify_truncation(
                 snapshots=outcome.snapshots,
                 eff_start_ts=start_ts,
@@ -981,12 +822,8 @@ class PoolHistoryServiceServicer(gateway_pb2_grpc.PoolHistoryServiceServicer):
                 resolution_seconds=resolution_seconds,
                 page_cap_rows=self._page_cap_rows.get(outcome.source, _FALLBACK_PAGE_CAP_ROWS),
             )
-            # Recompute "now" AFTER dispatch (which awaits provider I/O) so the
-            # public finality band reflects the same serving time as the
-            # dispatcher's raw-cache band (which uses its own post-fetch clock).
-            # The pre-dispatch now_seconds (used by the validator) could stamp a
-            # row that crossed the cutoff mid-fetch as provisional here while the
-            # raw cache stamped it finalized (CodeRabbit).
+            # Recompute time after provider I/O so raw and public entries cannot
+            # disagree when a row crosses the finality cutoff during the fetch.
             served_now_seconds = int(time.time())
             cutoff = self._finality_cutoffs.get(outcome.source, _FALLBACK_FINALITY_CUTOFF_SECONDS)
             newest_ts = int(truncation.kept[-1].timestamp) if truncation.kept else 0
@@ -1006,11 +843,8 @@ class PoolHistoryServiceServicer(gateway_pb2_grpc.PoolHistoryServiceServicer):
         try:
             response = await self._public_cache.get_or_fetch(public_key, _fetch)
         except _ProviderError as exc:
-            # All eligible providers failed / pool not found anywhere. Honest
-            # failure envelope (D3.F6 shape lock): success=False, source="",
-            # snapshots=[], truncation=UNSPECIFIED, next_start_ts=0,
-            # finalized_only=False, non-empty error -> gRPC UNAVAILABLE so the
-            # framework raises DataSourceUnavailable (never OK + []).
+            # Provider exhaustion is UNAVAILABLE with an explicit failure
+            # envelope, never an apparently successful empty result.
             message = str(exc)
             context.set_code(grpc.StatusCode.UNAVAILABLE)
             context.set_details(message)
@@ -1025,25 +859,8 @@ class PoolHistoryServiceServicer(gateway_pb2_grpc.PoolHistoryServiceServicer):
                 error=message,
             )
 
-        # Success: gRPC OK (no code set on the context). The response carries
-        # the populated snapshots + the serving provider's source.
-        #
-        # POOL-8 (VIB-4756) telemetry — bump truncated counters AFTER the
-        # cache resolves (so a cache-hit response that carries a truncation
-        # reason counts the same as a fresh truncated fetch — the user
-        # perceives one truncation event per response, regardless of cache).
-        # Gated on ``!= UNSPECIFIED`` so the UNSPECIFIED bucket stays at 0
-        # (UAT card §D2.M2.b.1 anti-collapse).
-        #
-        # Counter semantics for dashboard authors (pr-auditor 2026-05-28):
-        # this is "truncated_RESPONSES" (per-response, includes cache hits),
-        # NOT "truncated_UPSTREAM_FETCHES" (per fetch, excludes cache hits).
-        # A dashboard label that conflates the two will overcount actual
-        # upstream truncations by the cache-hit ratio. If a future operator
-        # needs the upstream-only signal, bump a sibling counter inside the
-        # ``_fetch`` closure (currently scoped to truncation classification
-        # for the public response — moving it pre-cache would require a
-        # second counter to keep the response signal intact).
+        # Count truncated responses after cache resolution so cache hits and
+        # fresh fetches have identical per-response telemetry semantics.
         if response.truncation_reason != gateway_pb2.TruncationReason.TRUNCATION_REASON_UNSPECIFIED:
             self._bump_truncated(response.truncation_reason)
 
