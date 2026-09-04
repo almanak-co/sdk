@@ -19,6 +19,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   The platform runner echoes the verdict in `result_summary.run_validity`.
   (ALM-3045, epic ALM-3471)
 
+### Fixed
+
+- **Backtest refusals always reach the ledgers.** `perp_market`,
+  `reference_price`, `perp_positions`, `lending_position_balances`,
+  `funding_rate`, `pool_price`, `pool_price_by_pair`, `pool_reserves`,
+  `lending_rate_history` and `funding_rate_history` now record a
+  `decision_input_failures` entry on every refusal path. A pending intent
+  whose fill hits `NoAcceptableDataSourceError` under a tolerant error policy
+  ends as a `missing_data` rejection with an `execution:<data_type>` ledger
+  entry instead of vanishing, and the end-of-run drain with no market state
+  records a `no_market_state` rejection per intent.
+  `DataQualityReport.coverage_ratio` is `None` (serialized `null`) when no
+  price lookup was made; the data-quality gate fails a ticked run that
+  measured nothing and its institutional-mode raise is now an error result
+  rather than an exception escaping `backtest()`. (ALM-3496, epic ALM-3471)
+
 ## [2.27.0] - 2026-09-03
 
 ### Added

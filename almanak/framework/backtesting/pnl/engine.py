@@ -53,7 +53,7 @@ Examples:
             print(f"Compliance violations: {result.compliance_violations}")
 
         # Access data quality metrics
-        if result.data_quality:
+        if result.data_quality and result.data_quality.coverage_ratio is not None:
             print(f"Data coverage: {result.data_quality.coverage_ratio:.1%}")
             print(f"Sources used: {result.data_quality.source_breakdown}")
 """
@@ -3949,6 +3949,9 @@ class PnLBacktester:
     #: Positions whose accrual update already reported a data gap (log-once
     #: bookkeeping for the non-strict skip path, ALM-2930).
     _accrual_data_gap_positions: set[str] = field(default_factory=set)
+    #: Fill-time missing-data refusals awaiting the run's decision-input
+    #: ledger, ``(source, key) -> detail``; drained by the iteration loop.
+    _execution_input_failures: dict[tuple[str, str], str] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Validate configuration after initialization."""
@@ -5183,6 +5186,15 @@ class PnLBacktester:
                     bt_logger=bt_logger,
                     state=state,
                 )
+                # Data quality gate: appends a compliance violation below the
+                # coverage threshold and raises in institutional mode. It sits
+                # inside this try so the raise becomes an error result with a
+                # diagnostic artifact instead of escaping backtest().
+                _engine_helpers.enforce_data_quality_gate(
+                    config=config,
+                    bt_logger=bt_logger,
+                    state=state,
+                )
             except PreflightValidationError:
                 # A demand-discovered structural requirement mismatch is not
                 # a recoverable simulation error and must reach hosted/CLI
@@ -5201,15 +5213,6 @@ class PnLBacktester:
                     preflight_passed=preflight_passed,
                     error=e,
                 )
-
-            # Data quality gate enforcement - check coverage ratio after simulation.
-            # Raises ValueError in institutional mode; otherwise appends compliance
-            # violation + logs warning.
-            _engine_helpers.enforce_data_quality_gate(
-                config=config,
-                bt_logger=bt_logger,
-                state=state,
-            )
 
             # Metrics calculation + BacktestResult assembly
             return _engine_helpers.finalize_backtest_result(
@@ -5463,7 +5466,14 @@ class PnLBacktester:
                 data_quality_tracker=data_quality_tracker,
             )
         except NoAcceptableDataSourceError as exc:
-            self._handle_pending_missing_data(intent, strategy, market_state.timestamp, exc)
+            self._handle_pending_missing_data(
+                intent,
+                strategy,
+                portfolio,
+                market_state.timestamp,
+                exc,
+                trades_before_execution=trades_before_execution,
+            )
             return
         except Exception as exc:
             self._handle_pending_execution_error(
@@ -5516,12 +5526,23 @@ class PnLBacktester:
         self,
         intent: Any,
         strategy: Any,
+        portfolio: SimulatedPortfolio,
         timestamp: datetime,
         exc: NoAcceptableDataSourceError,
-    ) -> None:
-        # VIB-5088 (pattern from VIB-4849): missing data is a deliberate
-        # fail-loud signal, not a warn-and-skip. Notify the strategy before
-        # consulting the error policy so state machines do not silently stall.
+        *,
+        trades_before_execution: int,
+        delayed_at_end: bool = False,
+    ) -> TradeRecord:
+        """Terminate a pending intent whose fill refused to fabricate a number.
+
+        Missing data is a fail-loud signal: the strategy is notified before the
+        error policy runs so a state machine never silently stalls, and a fatal
+        classification re-raises. A non-fatal classification must still leave a
+        terminal ledger outcome: the intent is recorded as a ``missing_data``
+        rejection and the starved lane lands in ``decision_input_failures``, so
+        the run classifies on what actually happened instead of reporting an
+        emitted intent that reached neither fill nor rejection.
+        """
         logger.error(
             "Missing data source while executing intent at %s: %s",
             timestamp.isoformat(),
@@ -5536,6 +5557,19 @@ class PnLBacktester:
         )
         if result.should_stop:
             raise exc
+        self._execution_input_failures.setdefault(
+            (f"execution:{exc.data_type}", exc.identifier),
+            f"{type(intent).__name__} not executed: {exc}",
+        )
+        return self._record_intent_execution_rejection(
+            intent,
+            portfolio,
+            timestamp,
+            exc,
+            trades_before_execution=trades_before_execution,
+            delayed_at_end=delayed_at_end,
+            rejection_code="missing_data",
+        )
 
     def _handle_pending_execution_error(
         self,
@@ -5585,6 +5619,7 @@ class PnLBacktester:
         *,
         trades_before_execution: int,
         delayed_at_end: bool = False,
+        rejection_code: str = "execution_error",
     ) -> TradeRecord:
         """Record one terminal rejection for a non-fatal execution exception.
 
@@ -5619,7 +5654,7 @@ class PnLBacktester:
             metadata={
                 "intent": str(intent),
                 "failure_reason": failure_reason,
-                "rejection_code": "execution_error",
+                "rejection_code": rejection_code,
             },
             delayed_at_end=delayed_at_end,
         )

@@ -517,8 +517,8 @@ class TestRunBacktestErrorHandling:
 
 class TestRunBacktestDataQualityGate:
     @pytest.mark.asyncio
-    async def test_institutional_mode_raises_on_low_coverage(self, make_backtester, make_config):
-        """In institutional mode, coverage below ``min_data_coverage`` raises ValueError from the data-quality gate."""
+    async def test_institutional_mode_fails_the_run_on_low_coverage(self, make_backtester, make_config):
+        """In institutional mode, coverage below ``min_data_coverage`` is an error result from the data-quality gate."""
         # Provider supplies only USDC. Config requires both USDC and WETH, so
         # each tick produces 1 successful + 1 failed lookup => coverage 0.5,
         # which is well below the institutional-mode default of 0.98.
@@ -532,15 +532,19 @@ class TestRunBacktestDataQualityGate:
 
         passing_report = PreflightReport(passed=True, estimated_coverage=Decimal("1.0"))
 
-        with (
-            patch.object(
-                PnLBacktester,
-                "run_preflight_validation",
-                AsyncMock(return_value=passing_report),
-            ),
-            pytest.raises(ValueError, match="Data quality gate failed"),
+        with patch.object(
+            PnLBacktester,
+            "run_preflight_validation",
+            AsyncMock(return_value=passing_report),
         ):
-            await backtester.backtest(HoldStrategy(), config)
+            result = await backtester.backtest(HoldStrategy(), config)
+
+        # The gate's raise is caught by the error-result path: the run fails
+        # with a diagnostic artifact instead of an exception escaping backtest().
+        assert result.success is False
+        assert "Data quality gate failed" in (result.error or "")
+        assert result.run_validity is not None
+        assert result.run_validity.reason_codes == ("ENGINE_ERROR",)
 
     @pytest.mark.asyncio
     async def test_non_institutional_mode_low_coverage_warns_only(self, make_backtester, make_config):

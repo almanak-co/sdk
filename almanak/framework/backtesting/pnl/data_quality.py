@@ -157,14 +157,16 @@ class DataQualityTracker:
         return list(self._missing_price_tokens)
 
     @property
-    def coverage_ratio(self) -> Decimal:
+    def coverage_ratio(self) -> Decimal | None:
         """Calculate the price data coverage ratio.
 
         Returns:
-            Ratio of successful lookups to total lookups (0.0 to 1.0)
+            Ratio of successful lookups to total lookups (0.0 to 1.0), or
+            ``None`` when nothing was looked up: unmeasured is not full
+            coverage (Empty != Zero).
         """
         if self.total_price_lookups == 0:
-            return Decimal("1.0")  # No lookups means perfect coverage
+            return None
 
         return Decimal(str(self.successful_lookups)) / Decimal(str(self.total_price_lookups))
 

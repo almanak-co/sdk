@@ -1052,10 +1052,17 @@ class MarketSnapshot:
                 chain=requested_chain,
                 index_symbol=cached.index_token_symbol.strip().upper(),
             )
+
+        def _refuse(message: str, cause: Exception | None = None) -> MarketSnapshotError:
+            self._record_critical_data_failure(
+                "perp_market", f"{protocol}:{market}@{requested_chain}", cause if cause is not None else message
+            )
+            return MarketSnapshotError(message)
+
         client = self._gateway_client
         stub = getattr(getattr(client, "market", None), "GetPerpMarket", None)
         if stub is None:
-            raise MarketSnapshotError("perpetual market discovery is unavailable")
+            raise _refuse("perpetual market discovery is unavailable")
         configured_timeout = getattr(getattr(client, "config", None), "timeout", 30.0)
         timeout = (
             float(configured_timeout)
@@ -1078,13 +1085,13 @@ class MarketSnapshot:
                 timeout=timeout,
             )
         except Exception as exc:  # noqa: BLE001 - normalize transport failures for strategies
-            raise MarketSnapshotError(f"perpetual market discovery failed: {exc}") from exc
+            raise _refuse(f"perpetual market discovery failed: {exc}", exc) from exc
         item = getattr(response, "market", None)
         if not getattr(response, "success", False) or not getattr(item, "verified", False):
-            raise MarketSnapshotError(getattr(response, "error", "") or "perpetual market is not verified")
+            raise _refuse(getattr(response, "error", "") or "perpetual market is not verified")
         index_symbol = str(getattr(item, "index_symbol", "") or "").strip().upper()
         if not index_symbol:
-            raise MarketSnapshotError("verified perpetual market has no index symbol")
+            raise _refuse("verified perpetual market has no index symbol")
         return PerpMarketData(
             protocol=protocol,
             chain=requested_chain,
@@ -1178,7 +1185,9 @@ class MarketSnapshot:
             return _unavailable(str(exc))
 
         if response.availability != gateway_pb2.REFERENCE_PRICE_AVAILABILITY_AVAILABLE:
-            return _unavailable(response.reason or "reference_price_unavailable", response=response)
+            reason = response.reason or "reference_price_unavailable"
+            self._record_critical_data_failure("reference_price", f"{instrument}@{requested_chain}", reason)
+            return _unavailable(reason, response=response)
 
         try:
             price = Decimal(response.price)
@@ -4215,11 +4224,18 @@ class MarketSnapshot:
                 )
                 return _PerpsReadResult(positions=(), ok=False)
 
-        return PerpsPositionReader.from_gateway_client(self._gateway_client).read_positions(
+        read = PerpsPositionReader.from_gateway_client(self._gateway_client).read_positions(
             effective_chain,
             self._wallet_address,
             protocol,
         )
+        if not read.ok:
+            self._record_critical_data_failure(
+                "perp_positions",
+                f"{protocol}@{effective_chain}",
+                f"perp_positions unavailable for {protocol} on {effective_chain}: gateway read did not run",
+            )
+        return read
 
     def block_timestamp(self, *, chain: str | None = None) -> datetime | None:
         """Return the latest measured block timestamp through the gateway.
@@ -4469,27 +4485,36 @@ class MarketSnapshot:
             ``== 0`` debt check but not directly comparable to an asset amount (see
             the ``protocol`` arg above).
         """
+
         # A present-but-DISCONNECTED client must not reach the on-chain readers
         # (they would fault or return a stale/empty read that looks like measured
         # zero). Treat it as unmeasured, same as no client. ``is_connected``
         # absent (legacy/mock clients) defaults to True so existing reads proceed.
-        if self._gateway_client is None or not getattr(self._gateway_client, "is_connected", True):
+        def _unmeasured(key: str, detail: str) -> tuple[None, None]:
+            self._record_critical_data_failure(
+                "lending_position_balances",
+                key,
+                f"lending_position_balances unmeasured for {protocol}/{token}: {detail}",
+            )
             return (None, None)
+
+        if self._gateway_client is None or not getattr(self._gateway_client, "is_connected", True):
+            return _unmeasured("no_gateway", "no connected GatewayClient")
         target_chain = chain or self._chain or ""
         if not target_chain:
-            return (None, None)
+            return _unmeasured("no_chain", "no chain to read on")
         asset = self._resolve_token_address(token, target_chain)
         if asset is None:
-            return (None, None)
+            return _unmeasured("unresolved_token", f"token could not be resolved on {target_chain}")
         wallet = self._wallet_address
         if not wallet:
-            return (None, None)
+            return _unmeasured("no_wallet", "no wallet address bound to the snapshot")
 
         from almanak.framework.intents.balance_readers import get_reader_for_protocol
 
         reader = get_reader_for_protocol(protocol)
         if reader is None:
-            return (None, None)
+            return _unmeasured("unsupported_protocol", "no balance reader registered for the protocol")
         try:
             # ``get_reserve_position`` is the price-independent raw per-reserve read
             # (VIB-5418): the default composes get_supply_balance/get_debt_balance
@@ -4506,7 +4531,7 @@ class MarketSnapshot:
                 market_id=market_id,
                 gateway_client=self._gateway_client,
             )
-        except Exception:  # noqa: BLE001 — an unavailable read is unmeasured, never a fabricated zero
+        except Exception as e:  # noqa: BLE001 — an unavailable read is unmeasured, never a fabricated zero
             logger.debug(
                 "lending_position_balances read failed for protocol=%s token=%s chain=%s — unmeasured (None, None)",
                 protocol,
@@ -4514,7 +4539,7 @@ class MarketSnapshot:
                 target_chain,
                 exc_info=True,
             )
-            return (None, None)
+            return _unmeasured("read_failed", f"read failed on {target_chain}: {e}")
         return (supply, debt)
 
     def aave_health_factor(self, *, chain: str | None = None) -> Decimal | None:
@@ -4594,13 +4619,21 @@ class MarketSnapshot:
 
         from almanak.framework.data.funding import Venue
 
-        venue_enum = Venue(venue)
+        try:
+            venue_enum = Venue(venue)
+        except ValueError as e:
+            self._record_critical_data_failure("funding_rate", f"{venue}:{market}", f"unsupported venue: {e}")
+            raise
         request = (
             self._funding_rate_provider.get_funding_rate(venue_enum, market, market_address)
             if market_address
             else self._funding_rate_provider.get_funding_rate(venue_enum, market)
         )
-        return self._run_async_bridged(request)
+        try:
+            return self._run_async_bridged(request)
+        except Exception as e:
+            self._record_critical_data_failure("funding_rate", f"{venue}:{market}", e)
+            raise
 
     def perp_mark_price(
         self,
@@ -5022,9 +5055,11 @@ class MarketSnapshot:
                 pool_address,
                 f"All protocols failed for pool {pool_address} on {target_chain}: {last_error}",
             )
-        except PoolPriceUnavailableError:
+        except PoolPriceUnavailableError as e:
+            self._record_critical_data_failure("pool_price", pool_address, e)
             raise
         except Exception as e:  # noqa: BLE001
+            self._record_critical_data_failure("pool_price", pool_address, e)
             raise PoolPriceUnavailableError(pool_address, f"Unexpected error: {e}") from e
 
     def pool_price_by_pair(
@@ -5068,10 +5103,9 @@ class MarketSnapshot:
 
         protocols = [protocol] if protocol else self._pool_reader_registry.protocols_for_chain(target_chain)
         if not protocols:
-            raise PoolPriceUnavailableError(
-                pair_str,
-                f"No pool reader protocols registered for chain '{target_chain}'",
-            )
+            detail = f"No pool reader protocols registered for chain '{target_chain}'"
+            self._record_critical_data_failure("pool_price_by_pair", pair_str, detail)
+            raise PoolPriceUnavailableError(pair_str, detail)
         last_error: Exception | None = None
         for proto in protocols:
             try:
@@ -5084,10 +5118,9 @@ class MarketSnapshot:
                 last_error = e
                 continue
 
-        raise PoolPriceUnavailableError(
-            pair_str,
-            f"No pool found for {pair_str} (fee_tier={fee_tier}) on {target_chain}: {last_error}",
-        )
+        detail = f"No pool found for {pair_str} (fee_tier={fee_tier}) on {target_chain}: {last_error}"
+        self._record_critical_data_failure("pool_price_by_pair", pair_str, detail)
+        raise PoolPriceUnavailableError(pair_str, detail)
 
     def pool_reserves(self, pool_address: str, chain: str | None = None) -> PoolReserves:
         """Get DEX pool reserves and state.
@@ -5127,10 +5160,13 @@ class MarketSnapshot:
         try:
             return self._run_async_bridged(self._pool_reader.get_pool_reserves(pool_address, target_chain))
         except DataSourceUnavailable as e:
+            self._record_critical_data_failure("pool_reserves", pool_address, e)
             raise PoolReservesUnavailableError(pool_address, e.reason) from e
         except DataSourceError as e:
+            self._record_critical_data_failure("pool_reserves", pool_address, e)
             raise PoolReservesUnavailableError(pool_address, str(e)) from e
         except Exception as e:  # noqa: BLE001
+            self._record_critical_data_failure("pool_reserves", pool_address, e)
             raise PoolReservesUnavailableError(pool_address, f"Unexpected error: {e}") from e
 
     # --- Price aggregation ----------------------------------------------------
@@ -6028,6 +6064,7 @@ class MarketSnapshot:
                 days=days,
             )
         except Exception as e:  # noqa: BLE001
+            self._record_critical_data_failure("lending_rate_history", f"{protocol}:{token}@{target_chain}", e)
             raise LendingRateHistoryUnavailableError(
                 protocol,
                 token,
@@ -6069,6 +6106,7 @@ class MarketSnapshot:
                 hours=hours,
             )
         except Exception as e:  # noqa: BLE001
+            self._record_critical_data_failure("funding_rate_history", f"{venue}:{market_symbol}", e)
             raise FundingRateHistoryUnavailableError(
                 venue,
                 market_symbol,

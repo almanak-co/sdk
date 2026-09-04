@@ -450,7 +450,7 @@ class TestInstitutionalModeDataCoverage:
         self,
         mock_strategy: MockHoldStrategy,
     ) -> None:
-        """Verify institutional_mode=True raises error on low coverage."""
+        """Verify institutional_mode=True fails the run on low coverage."""
         # Include WBTC as an expected token without provider prices to simulate
         # low coverage without blocking token-funded startup valuation.
         provider = FullHistoryDataProvider()
@@ -470,12 +470,15 @@ class TestInstitutionalModeDataCoverage:
             slippage_models={},
         )
 
-        # In institutional mode, low coverage should raise ValueError
-        with pytest.raises(ValueError) as exc_info:
-            await backtester.backtest(mock_strategy, config)
+        # The gate's institutional-mode refusal is an error result with a
+        # diagnostic artifact, never an exception escaping backtest().
+        result = await backtester.backtest(mock_strategy, config)
 
-        error_msg = str(exc_info.value)
-        assert "institutional mode" in error_msg.lower() or "coverage" in error_msg.lower()
+        assert result.success is False
+        error_msg = result.error or ""
+        assert "institutional mode" in error_msg.lower() and "coverage" in error_msg.lower()
+        assert result.run_validity is not None
+        assert result.run_validity.reason_codes == ("ENGINE_ERROR",)
 
 
 class TestComplianceViolationTracking:

@@ -1414,6 +1414,7 @@ def initialize_backtest(
     with bt_logger.phase("initialization"):
         # Initialize error handler for consistent error classification
         backtester._error_handler = BacktestErrorHandler(BacktestErrorConfig())
+        backtester._execution_input_failures = {}
         bt_logger.debug("Initialized BacktestErrorHandler for error classification")
 
         # Initialize MEV simulator based on config
@@ -1993,6 +1994,7 @@ async def execute_iteration_loop(
                 data_quality_tracker=state.data_quality_tracker,
                 strategy=strategy,
             )
+            _drain_execution_input_failures(backtester, state)
 
             # Mirror the sim's open LP positions into the run's IL calculator
             # AFTER fills, BEFORE the snapshot and decide(): a position filled
@@ -2189,6 +2191,27 @@ async def execute_iteration_loop(
             bt_logger=bt_logger,
             state=state,
         )
+        _drain_execution_input_failures(backtester, state)
+
+
+def _drain_execution_input_failures(backtester: PnLBacktester, state: BacktestState) -> None:
+    """Fold fill-time missing-data refusals into the run's decision-input ledger.
+
+    Same aggregation as the per-tick snapshot drain, so an intent that could
+    not be filled for want of a number is nameable in the run report next to
+    the decide()-time lanes.
+    """
+    pending = getattr(backtester, "_execution_input_failures", None)
+    if not pending:
+        return
+    for failure_key, detail in pending.items():
+        entry = state.decision_input_failures.setdefault(
+            failure_key,
+            {"ticks": 0, "detail": detail, "first_tick": state.tick_count, "last_tick": state.tick_count},
+        )
+        entry["ticks"] += 1
+        entry["last_tick"] = state.tick_count
+    pending.clear()
 
 
 def _invoke_strategy_decide(
@@ -2410,9 +2433,13 @@ async def _drain_pending_intents_at_end(
                 backtester._handle_pending_missing_data(
                     intent,
                     strategy,
+                    state.portfolio,
                     state.last_market_state.timestamp,
                     exc,
+                    trades_before_execution=trades_before_execution,
+                    delayed_at_end=True,
                 )
+                state.execution_delayed_at_end += 1
                 continue
             except Exception as e:
                 # Use error handler for intent execution errors
@@ -2438,9 +2465,25 @@ async def _drain_pending_intents_at_end(
                 suffix = " - skipping" if backtester._error_handler else ""
                 bt_logger.warning(f"Failed to execute pending intent at simulation end: {e}{suffix}")
     elif state.pending_intents:
+        # No tick ever produced a market state, so nothing can be priced. The
+        # intents still need terminal outcomes: a dropped intent reads as a
+        # ledger drop, a rejection reads as what it is.
         bt_logger.warning(
             f"Cannot execute {len(state.pending_intents)} remaining pending intents: no valid market state available"
         )
+        for intent, decision_time, _ in state.pending_intents:
+            unpriced = RuntimeError("no valid market state available at simulation end")
+            trade_record = backtester._record_intent_execution_rejection(
+                intent,
+                state.portfolio,
+                decision_time,
+                unpriced,
+                trades_before_execution=len(state.portfolio.trades),
+                delayed_at_end=True,
+                rejection_code="no_market_state",
+            )
+            state.execution_delayed_at_end += 1
+            notify_intent_outcome(backtester, strategy, intent, trade_record, bt_logger)
 
 
 # =============================================================================
@@ -2542,6 +2585,20 @@ def enforce_data_quality_gate(
     otherwise logs a warning.
     """
     coverage_ratio = state.data_quality_tracker.coverage_ratio
+    if coverage_ratio is None:
+        # Empty != Zero: nothing was looked up, so coverage is unmeasured. An
+        # empty run is the NO_TICKS verdict's to name; a ticked run that
+        # valued nothing has no price plane at all and cannot pass the gate.
+        if state.tick_count == 0:
+            return
+        unmeasured = f"Data coverage unmeasured: no price lookups were recorded over {state.tick_count} tick(s)"
+        state.compliance_violations.append(unmeasured)
+        if config.institutional_mode:
+            error_msg = f"Data quality gate failed in institutional mode: {unmeasured}"
+            bt_logger.error(error_msg)
+            raise ValueError(error_msg)
+        bt_logger.warning(f"{unmeasured}. Enable institutional_mode=True to enforce data quality requirements.")
+        return
     if coverage_ratio < config.min_data_coverage:
         # Track as compliance violation regardless of institutional_mode
         state.compliance_violations.append(

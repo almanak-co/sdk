@@ -27,7 +27,7 @@ Example:
         print(f"Violations: {result.compliance_violations}")
 
     # Access data quality metrics
-    if result.data_quality:
+    if result.data_quality and result.data_quality.coverage_ratio is not None:
         print(f"Coverage: {result.data_quality.coverage_ratio:.1%}")
 """
 
@@ -910,6 +910,8 @@ class DataQualityReport:
         coverage_ratio: Percentage of timestamps with valid prices (0.0-1.0).
             A value of 1.0 means all requested prices were available.
             Lower values indicate missing data that required fallback or interpolation.
+            ``None`` means no price lookup was made, so coverage is unmeasured
+            rather than complete (Empty != Zero).
         source_breakdown: Count of price lookups by provider (e.g., {"coingecko": 100, "chainlink": 50}).
             Shows which data sources were used and their relative contribution.
         stale_data_count: Number of prices that were older than the staleness threshold.
@@ -933,7 +935,7 @@ class DataQualityReport:
             Useful for identifying which specific tokens need price data support.
     """
 
-    coverage_ratio: Decimal = Decimal("1.0")
+    coverage_ratio: Decimal | None = None
     source_breakdown: dict[str, int] = field(default_factory=dict)
     stale_data_count: int = 0
     interpolation_count: int = 0
@@ -945,7 +947,7 @@ class DataQualityReport:
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dictionary."""
         return {
-            "coverage_ratio": str(self.coverage_ratio),
+            "coverage_ratio": str(self.coverage_ratio) if self.coverage_ratio is not None else None,
             "source_breakdown": self.source_breakdown,
             "stale_data_count": self.stale_data_count,
             "interpolation_count": self.interpolation_count,
@@ -965,8 +967,9 @@ class DataQualityReport:
         Returns:
             DataQualityReport instance
         """
+        raw_coverage = data.get("coverage_ratio")
         return cls(
-            coverage_ratio=Decimal(data.get("coverage_ratio", "1.0")),
+            coverage_ratio=Decimal(str(raw_coverage)) if raw_coverage is not None else None,
             source_breakdown=data.get("source_breakdown", {}),
             stale_data_count=data.get("stale_data_count", 0),
             interpolation_count=data.get("interpolation_count", 0),
