@@ -41,14 +41,8 @@ if TYPE_CHECKING:
     from ..teardown.models import TeardownResult, TeardownState
     from .runner_models import IterationResult, StrategyProtocol
 
-# Use the same logger as runner_teardown so existing log-capture tests keep
-# working after extraction.
+# Share runner_teardown's logger so teardown events stay on one operator stream.
 logger = logging.getLogger("almanak.framework.runner.strategy_runner")
-
-
-# =============================================================================
-# Phase 1: Compiler + positions resolution (with fallback branches)
-# =============================================================================
 
 
 async def resolve_compiler_or_fallback(
@@ -75,7 +69,6 @@ async def resolve_compiler_or_fallback(
 
     deployment_id = strategy.deployment_id
 
-    # Call through runner method so instance-level mock patching in tests works.
     compiler = runner._build_teardown_compiler(strategy, teardown_market)
     if compiler is not None:
         return compiler, None
@@ -131,13 +124,8 @@ async def fetch_positions_or_fallback(
 
     deployment_id = strategy.deployment_id
     try:
-        # VIB-5459 / TD-01: reconcile the strategy's enumeration against the
-        # position_registry WARM read path so safety validation + closure
-        # verification see the cut-over LP set the registry still remembers
-        # after a restart. Additive (never drops a strategy-reported position);
-        # non-LP / non-cut-over primitives fall through to get_open_positions
-        # unchanged, and the read degrades to legacy enumeration on a backend
-        # without cutover storage.
+        # Additive registry reconciliation preserves cut-over LP positions across
+        # restarts; unsupported backends and other primitives retain strategy enumeration.
         positions = await resolve_open_positions_with_registry(strategy)
     except Exception as pos_err:
         strategy_hook = f"{type(strategy).__module__}.{type(strategy).__qualname__}.get_open_positions()"
@@ -170,11 +158,6 @@ async def fetch_positions_or_fallback(
     return positions, None
 
 
-# =============================================================================
-# Phase 2: TeardownManager construction
-# =============================================================================
-
-
 def _teardown_config_from_request(request: Any | None, strategy: Any | None = None) -> Any:
     """Build the :class:`TeardownConfig` for a teardown run from the operator's
     ``TeardownRequest`` (VIB-5011).
@@ -200,11 +183,8 @@ def _teardown_config_from_request(request: Any | None, strategy: Any | None = No
         if callable(get_config):
             configured = get_config("teardown", None)
     if isinstance(configured, dict):
-        # Teardown is the risk-reducing safety path — a malformed strategy
-        # ``teardown`` block must NEVER block it. ``from_dict`` ends in
-        # ``cls(**data)``, so any unknown key (custom metadata, a deprecated
-        # setting) raises TypeError; parse defensively and fall back to the
-        # production default rather than abort teardown (VIB-5844 review, gemini).
+        # Malformed strategy config must not block risk-reducing teardown; use
+        # production defaults instead.
         try:
             cfg = TeardownConfig.from_dict(dict(configured))
         except Exception as exc:
@@ -218,22 +198,15 @@ def _teardown_config_from_request(request: Any | None, strategy: Any | None = No
     else:
         cfg = TeardownConfig.default()
 
-    # A strategy may set ``token_consolidation``/``chain_consolidation`` to null;
-    # ``from_dict`` only rebuilds them when they are dicts, leaving None otherwise.
-    # Downstream code dereferences both (e.g. ``cfg.token_consolidation.enabled``),
-    # so coerce back to defaults rather than crash teardown (VIB-5844 review, gemini).
+    # Explicit null nested configs survive parsing, but downstream code requires
+    # concrete consolidation settings.
     if not isinstance(cfg.token_consolidation, TokenConsolidationConfig):
         cfg.token_consolidation = TokenConsolidationConfig()
     if not isinstance(cfg.chain_consolidation, ChainConsolidationConfig):
         cfg.chain_consolidation = ChainConsolidationConfig()
 
-    # ``from_dict`` coerces the dust floor to a Decimal but does not range-check
-    # it, so a strategy config of ``"-1"`` (every positive residual becomes
-    # "worth swapping") or ``"NaN"`` (breaks the ``<= floor`` comparison) is
-    # accepted verbatim. Neither is a valid floor — reset to the production
-    # default rather than let malformed input drive real consolidation swaps
-    # (VIB-5844 review, coderabbit). Coerce-and-validate rather than type-branch
-    # on the value (VIB-4062 caller-bifurcation contract).
+    # Parsing does not range-check the dust floor. Reject negative or non-finite
+    # values so malformed config cannot drive real consolidation swaps.
     raw_floor = cfg.token_consolidation.min_swap_value_usd
     try:
         floor = Decimal(str(raw_floor))
@@ -250,19 +223,9 @@ def _teardown_config_from_request(request: Any | None, strategy: Any | None = No
         cfg.token_consolidation.min_swap_value_usd = DEFAULT_MIN_SWAP_VALUE_USD
 
     if request is None:
-        # No operator request → NO token consolidation (pr-auditor blocker).
-        # Consolidation swaps are wallet-scoped per token (``amount="all"``);
-        # on a wallet shared across deployments that includes sibling
-        # strategies' balances of the same token. An explicit TeardownRequest
-        # carries the operator's asset policy and is the consent for that
-        # sweep semantic (the same consent model as the long-standing
-        # strategy-emitted ``amount="all"`` teardown sweeps, VIB-4587).
-        # Self-signalled teardowns have no such consent — they keep the
-        # pre-VIB-5011 close-only behaviour. Disable BOTH consolidation phases:
-        # a strategy config could set ``chain_consolidation.enabled=true``, and
-        # cross-chain bridging without operator consent is an even stronger
-        # violation of the close-only contract than a token sweep (VIB-5844
-        # review, coderabbit).
+        # Consolidation sweeps wallet-wide token balances, so only an explicit
+        # operator request grants consent. Self-signalled teardowns stay close-only,
+        # including cross-chain consolidation.
         cfg.token_consolidation.enabled = False
         cfg.chain_consolidation.enabled = False
         logger.info(
@@ -280,24 +243,16 @@ def _teardown_config_from_request(request: Any | None, strategy: Any | None = No
             raw_policy,
         )
         asset_policy = TeardownAssetPolicy.TARGET_TOKEN
-    # Carried through VERBATIM, sentinel included (VIB-5727). Resolution is
-    # deliberately NOT done here: this runs before the teardown plan exists, so
-    # the chain is not yet known, and collapsing the sentinel to "USDC" here
-    # would re-create the bug — every writer (CLI, hosted STOP bridge, dashboard
-    # API) funnels through this config, and the chain-aware choice happens at
-    # the consolidation seam where the chain is authoritative.
+    # Preserve the sentinel until consolidation, where chain context makes target
+    # resolution authoritative.
     target_token = getattr(request, "target_token", None) or TARGET_TOKEN_CHAIN_DEFAULT
 
     cfg.asset_policy = asset_policy
     cfg.target_token = target_token
     cfg.token_consolidation.target_token = target_token
-    # An explicit operator TeardownRequest IS the consent to consolidate. The
-    # request's ``asset_policy`` alone decides whether/where to consolidate —
-    # ``KEEP_OUTPUTS`` (and emergency mode, which overrides to it) skips the phase
-    # downstream. A strategy's own ``token_consolidation.enabled`` must NOT be able
-    # to veto an explicit operator request (pre-VIB-5844 the request lane always
-    # ran with ``enabled=True``); strategy config governs the dust FLOOR, not
-    # operator consent. Force it on to preserve that contract (VIB-5844 review, codex).
+    # The request's asset policy is operator consent; strategy config controls the
+    # dust floor but cannot veto consolidation. KEEP_OUTPUTS and emergency policy
+    # skip the phase downstream.
     cfg.token_consolidation.enabled = True
     return cfg
 
@@ -346,11 +301,6 @@ def build_teardown_manager(
     return teardown_mgr, teardown_state_adapter
 
 
-# =============================================================================
-# Phase 3: Safety validation
-# =============================================================================
-
-
 def validate_safety_or_error(
     runner: Any,
     teardown_mgr: Any,
@@ -392,11 +342,6 @@ def validate_safety_or_error(
     )
 
 
-# =============================================================================
-# Phase 4: Cancel window + state persist
-# =============================================================================
-
-
 async def run_cancel_window_and_persist(
     runner: Any,
     teardown_mgr: Any,
@@ -430,7 +375,6 @@ async def run_cancel_window_and_persist(
         intents=teardown_intents,
     )
 
-    # Run cancel window — gives operator time to abort
     cancel_result = await teardown_mgr.cancel_window.run_cancel_window(
         teardown_id=teardown_id,
         is_auto_mode=is_auto_mode,
@@ -446,16 +390,10 @@ async def run_cancel_window_and_persist(
         )
         return None, short_circuit
 
-    # Update state to EXECUTING after cancel window
     teardown_state.status = TeardownStatus.EXECUTING
     if teardown_mgr.state_manager:
         await teardown_mgr.state_manager.save_teardown_state(teardown_state)
     return teardown_state, None
-
-
-# =============================================================================
-# Phase 5: Price oracle resolution (pure helper)
-# =============================================================================
 
 
 def resolve_price_oracle(teardown_market: Any | None) -> dict | None:
@@ -475,11 +413,6 @@ def resolve_price_oracle(teardown_market: Any | None) -> dict | None:
     if not price_oracle:
         price_oracle = get_fallback_teardown_prices(teardown_market)
     return price_oracle
-
-
-# =============================================================================
-# Phase 6: Execute intents + post-execution verify
-# =============================================================================
 
 
 def _warm_teardown_pt_yt_prices(
@@ -661,27 +594,14 @@ async def execute_and_verify(
 
     deployment_id = strategy.deployment_id
 
-    # VIB-6341: one physical perp position must be closed ONCE. Applied HERE and
-    # not in ``runner_teardown``'s plan build, because this function holds BOTH
-    # the dispatch below and gate site G1 — and the collapsed plan may only reach
-    # the dispatch. ``for_coverage`` (the plan as built) is what G1 is shown; the
-    # withheld intent is the proof the plan accounted for its position, and
-    # coverage's intent<->position predicate is strictly weaker than this guard's
-    # intent<->intent one, so withholding it from G1 would report a covered
-    # position UNCOVERED and stamp a working teardown FAILED (#3574 audit).
+    # Dispatch one close per physical perp position, but run coverage against the
+    # original plan so omitted duplicates still prove the position was accounted for.
     _single_close = collapse_duplicate_perp_closes(teardown_intents)
     _coverage_intents = _single_close.for_coverage
     teardown_intents = _single_close.dispatch
 
-    # Build approval callback for slippage escalation (VIB-2927).
-    # Only wire for manual mode — auto mode uses hard slippage limits.
-    # Both local SQLite and hosted Postgres adapters publish the
-    # approval channel through the same Protocol (VIB-4049), so the
-    # callback wires the same way in both modes.
-    #
-    # If a manual teardown reaches this point without an adapter, we must NOT
-    # silently downgrade the request — slippage escalation has to be gated by
-    # operator consent. Fail fast instead.
+    # Manual slippage escalation requires operator consent through the state
+    # adapter; never silently downgrade when that channel is unavailable.
     approval_callback = None
     if not is_auto_mode:
         if teardown_state_adapter is None:
@@ -693,12 +613,9 @@ async def execute_and_verify(
             )
         approval_callback = _make_approval_callback(runner, teardown_state_adapter)
 
-    # VIB-5537: warm PT/YT prices into the runner-supplied price oracle before
-    # _execute_intents fires the VIB-2928 price guard. See
-    # _warm_teardown_pt_yt_prices for the rationale (best-effort, Empty != Zero).
+    # Warm before the price guard; failures leave its fail-closed behavior intact.
     _warm_teardown_pt_yt_prices(strategy, teardown_market, teardown_intents, price_oracle)
 
-    # Execute intents with escalating slippage
     if resume_accepted_async:
         teardown_result = await teardown_mgr.resume(
             deployment_id,
@@ -724,15 +641,9 @@ async def execute_and_verify(
             market=teardown_market,
         )
 
-    # Post-execution verification: check positions are actually closed.
     if teardown_result.success:
         verify_error_msg: str | None = None
         try:
-            # VIB-3742: thread the pre-execution ``positions`` snapshot so
-            # protocol-specific on-chain post-condition checks can run for
-            # each position the teardown should have closed.
-            # VIB-5085: use the detailed verifier so lifecycle counters report
-            # how many *positions* (not intents) actually closed.
             verification = await teardown_mgr._verify_closure_detailed(
                 strategy,
                 pre_execution_positions=positions,
@@ -752,15 +663,8 @@ async def execute_and_verify(
             )
             verify_error_msg = f"Post-teardown verification error: {verify_err}. Manual check required."
 
-        # TD-15 (VIB-5473): fail-closed on-chain POST-teardown verification. After
-        # every closing intent has fired (risk reduction FIRST — inverted
-        # semantics preserved), re-read the KNOWN position set on-chain. A
-        # position the chain still reports OPEN flips the teardown to FAILED
-        # (catching the hook-less lending strand the post-condition path counts
-        # closed-by-execution); the PRE-teardown TD-08 reconciliation
-        # (``runner._teardown_reconciliation``) folds in so a never-existed /
-        # stale-enumeration closure is never certified CHAIN_VERIFIED. Composes
-        # with TD-14's status (only ever lowers confidence), never raises.
+        # Re-read known positions after execution and only lower confidence;
+        # pre-teardown reconciliation prevents stale enumeration from certifying closure.
         verification = await teardown_mgr.verify_closure_against_chain(
             strategy,
             verification=verification,
@@ -769,49 +673,19 @@ async def execute_and_verify(
             pre_teardown_reconciliation=getattr(runner, "_teardown_reconciliation", None),
         )
 
-        # TD-11 (VIB-5469): fold the pre-execution intent-coverage check into the
-        # verification result. A KNOWN tracked-open position with no closing
-        # intent must FAIL the teardown even when every emitted intent executed
-        # and on-chain verification of the COVERED positions passed — the gap is
-        # in coverage, not execution. Forcing FAILED routes it through the same
-        # fail-closed persistence below (mark_failed + status=FAILED). Applied
-        # AFTER the TD-15 chain re-read so the coverage gap is the final, loudest
-        # word — an uncovered KNOWN position FAILs regardless of what the chain
-        # says about the positions that DID get a closing intent.
-        # VIB-5494 Item 1: thread the Phase-2 consolidation target so a held
-        # STAKE/TOKEN position already denominated in the target (for which
-        # full_close emits no swap) is credited a no-op close, not false-failed.
-        # VIB-5727: strategy + intents supply the CHAIN, without which the
-        # "no preference" sentinel resolves to legacy USDC and this gate credits
-        # the wrong token on a USDC-less chain (robinhood holds USDG, not USDC).
-        # VIB-6316: thread the SAME wallet resolver the enumeration used
-        # (``resolve_open_positions_with_registry`` →
-        # ``registry_enumeration``). The registry-union positions reaching this
-        # gate carry venue-derived identity that only resolves with the owning
-        # account; without it a registry row's adopted venue key cannot match the
-        # strategy's symbol-shaped closing intent, the union stays split, and a
-        # teardown that closed every position reports FAILED (mainnet-proven, R5).
-        # This is gate site G1 — ``teardown_manager.py`` has the twin, and wiring
-        # only one of them leaves the CLI lane broken.
+        # Fold coverage after chain verification so any uncovered known-open
+        # position remains the final fail-closed verdict. Use the original plan
+        # and the same chain and wallet identity as enumeration.
         completeness = check_intent_coverage(
             positions,
-            # PRE-COLLAPSE plan — see the VIB-6341 note at the top of this
-            # function. Never ``teardown_intents``, which is dispatch-only.
             _coverage_intents,
             consolidation_target_token=teardown_mgr._consolidation_noop_target(strategy, teardown_intents),
             wallet_for_chain=lambda c: _teardown_wallet_for_chain(strategy, c) or None,
         )
         if not completeness.complete:
-            # The uncovered positions are definitively NOT closed (no intent even
-            # targeted them), so cap positions_closed so the persisted
-            # positions_failed = total - closed reflects them rather than reading
-            # 0 failed on a FAILED teardown (VIB-5469).
             uncovered_count = len(completeness.uncovered)
-            # Carry the uncovered positions into the denominator: if the
-            # verifier had no position breakdown (positions_total=0), the
-            # downstream mark_failed (positions_failed = total - closed) would
-            # otherwise record 0 failed on a teardown that FAILED specifically
-            # because known-open positions had no closing intent (VIB-5469).
+            # Include uncovered positions in the denominator and cap the closed
+            # count so a failed teardown cannot persist zero failed positions.
             positions_total = max(verification.positions_total, completeness.total_enforceable)
             adjusted_closed = max(
                 min(verification.positions_closed, positions_total - uncovered_count),
@@ -827,15 +701,8 @@ async def execute_and_verify(
             )
             verify_error_msg = completeness.error_message()
 
-        # VIB-5085: stamp the verified position counts onto the result so the
-        # success result_json + the Phase-2 progress mark + any failure mark
-        # source ``positions_closed`` from positions, not ``intents_succeeded``.
-        # ``has_position_breakdown`` is only True when the verifier had a real
-        # pre-execution snapshot — on the in-memory fallback (empty snapshot)
-        # it stays False so callers fall back to the intent count rather than
-        # persist a misleading ``positions_closed=0`` on a successful teardown.
-        # VIB-2932 / VIB-5472: also stamp the verification confidence so the
-        # lifecycle surface can flag an unverifiable closure.
+        # Only measured position breakdowns replace intent-based fallback counts;
+        # propagate verification confidence from the same snapshot.
         teardown_result = replace(
             teardown_result,
             positions_total=verification.positions_total,
@@ -844,27 +711,17 @@ async def execute_and_verify(
             verification_status=verification.verification_status,
         )
 
-        # ALM-3109: stash the FULL composed chain verdict for lanes that need to
-        # distinguish "the chain proved closure" from "the teardown finished".
-        # Written here — AFTER the TD-15 chain re-read AND the TD-11 coverage fold
-        # — so it reflects the final verification, never an intermediate one that
-        # a later gate would have downgraded. Reset to None at the top of every
-        # teardown (``runner_teardown``), mirroring ``_teardown_reconciliation``,
-        # so a REUSED runner can never let a prior teardown's proof certify this
-        # one. The FAILURE lanes deliberately leave it None: absence of evidence
-        # must never read as evidence of closure.
+        # Publish only the final verdict after all downgrade gates. The caller
+        # resets this field each run, and failure paths leave it unset so prior
+        # evidence cannot certify the current teardown.
         runner._teardown_closure_verification = closure_chain_evidence(verification)
 
-        # VIB-5478: structured VERIFY decision entry (runner signal-driven lane).
-        # Mirrors the CLI lane's entry in TeardownManager.execute so both lanes
-        # produce the same auditable closure-confidence record (TD-14 + TD-15).
+        # Match the CLI lane's auditable closure-confidence record.
         log_teardown_decision(
             deployment_id=deployment_id,
             teardown_id=teardown_state.teardown_id,
             phase=TeardownDecisionPhase.VERIFY,
-            # VIB-6285: three-way — an UNMEASURED closure must not be recorded as
-            # ``verified`` in the audit trail, and must not be recorded as
-            # ``verify_failed`` either (nothing measured open).
+            # Unmeasured closure is neither verified nor evidence of an open position.
             outcome=(
                 "verify_failed"
                 if not verification.all_closed
@@ -881,12 +738,6 @@ async def execute_and_verify(
             verification_status=verification.verification_status.value,
         )
 
-        # VIB-6285 (W0.1): a teardown nothing measured must not certify. A
-        # SEPARATE branch from ``all_closed`` on purpose — ``all_closed=False``
-        # asserts residual on-chain risk, ``closure_unknown`` asserts only that
-        # closure was not proven, and the two must never share a message
-        # (conflating them is the VIB-6198 false-failure class). Ordered second so
-        # a measured residual — the actionable, louder signal — wins the error slot.
         verify_error_msg, must_refuse = _resolve_closure_refusal(
             verification, deployment_id=deployment_id, verify_error_msg=verify_error_msg
         )
@@ -898,12 +749,8 @@ async def execute_and_verify(
                 error=verify_error_msg,
                 recovery_options=["Verify positions on-chain", "Re-run teardown"],
             )
-            # Persist the failure so the SQLite row reflects reality —
-            # `_execute_intents` already set status=COMPLETED; flip it to
-            # FAILED so a postmortem reader doesn't see a row claiming
-            # success while the teardown actually failed. Hosted mode has
-            # no SQLite adapter (build_teardown_manager returns None);
-            # the platform owns teardown lifecycle tracking there.
+            # Execution may already have persisted COMPLETED; overwrite it so
+            # durable state reflects the verification failure.
             teardown_state.status = TeardownStatus.FAILED
             teardown_state.updated_at = datetime.now(UTC)
             if teardown_state_adapter is not None:
@@ -916,14 +763,9 @@ async def execute_and_verify(
                         exc_info=True,
                     )
             if request:
-                # VIB-5085: this is the mark_failed that actually persists — the
-                # row is still active here, so it must carry the breakdown. The
-                # terminal mark_failed in ``map_teardown_result`` runs later
-                # against an already-inactive row (get_active_request returns
-                # None) and is a no-op for persistence; relying on it would drop
-                # these counts (Codex). When the verifier had a real snapshot,
-                # report positions; otherwise fall back to the intent-landing
-                # signal rather than a misleading 0/0.
+                # Persist counts while the request is still active; the later
+                # terminal mark is idempotent. Fall back to intent counts when no
+                # position breakdown was measured.
                 if verification.has_position_breakdown:
                     _fail_closed = verification.positions_closed
                     _fail_failed = max(verification.positions_total - _fail_closed, 0)
@@ -939,19 +781,12 @@ async def execute_and_verify(
                     positions_failed=_fail_failed,
                 )
 
-    # VIB-5011: token-consolidation phase (Phase 2) — runs ONLY when closure
-    # AND verification both succeeded. This is the runner-lane hook; the CLI
-    # execute lane gets the same phase from ``TeardownManager.execute`` Step
-    # 7.5 (this lane calls ``_execute_intents`` directly, so the two hooks
-    # never overlap for one teardown). Failure semantics are inverted by
-    # contract: a failed consolidation swap keeps ``success=True`` — the
-    # closure already removed on-chain risk — and surfaces via the
-    # ``consolidation_*`` result fields + ``result_json["consolidation"]``.
+    # Consolidate only after closure verification. A consolidation failure warns
+    # without reopening risk that was already closed successfully.
     if teardown_result.success:
         from ..teardown.consolidation import fold_consolidation_outcome
         from ..teardown.models import TeardownPhase
 
-        # VIB-5085: report verified positions closed, not intents landed.
         _safe_mark(
             state_manager,
             "update_progress",
@@ -994,11 +829,6 @@ async def send_alert_and_cleanup(teardown_mgr: Any, teardown_result: TeardownRes
             logger.warning(f"Failed to clean up teardown state: {cleanup_err}")
 
 
-# =============================================================================
-# Phase 7: Exception-handler for the outer try
-# =============================================================================
-
-
 async def handle_executor_exception(
     runner: Any,
     strategy: StrategyProtocol,
@@ -1026,9 +856,8 @@ async def handle_executor_exception(
     if request:
         _safe_mark(state_manager, "mark_failed", deployment_id, error=str(exc))
 
-    # Best effort: reflect the failure in the adapter's row so postmortem
-    # readers don't see an EXECUTING teardown_execution_state row paired
-    # with a FAILED teardown_requests row.
+    # Keep execution-state persistence aligned with the failed request when both
+    # rows exist.
     try:
         if teardown_state is not None and teardown_state_adapter is not None:
             teardown_state.status = _TS.FAILED
@@ -1042,11 +871,6 @@ async def handle_executor_exception(
         )
     runner._request_teardown_failure_shutdown(str(exc))
     return runner._create_error_result(deployment_id, IterationStatus.STRATEGY_ERROR, str(exc), start_time)
-
-
-# =============================================================================
-# Phase 8: Final TeardownResult -> IterationResult mapping
-# =============================================================================
 
 
 def map_teardown_result(
@@ -1071,10 +895,8 @@ def map_teardown_result(
     mode_str = "graceful" if teardown_mode == TeardownMode.SOFT else "emergency"
 
     if teardown_result.completed_at is None and teardown_result.async_settlement_pending:
-        # The createOrder transaction is durable and still live. Keep the
-        # request active and the runner alive so the next teardown tick enters
-        # the correlated resume path. A terminal mark_failed/shutdown here
-        # would orphan the marker and allow a fresh request to resubmit.
+        # The async order remains live; keep the request and runner active so a
+        # correlated resume reuses it instead of resubmitting.
         logger.warning(
             "🛑 %s teardown is awaiting terminal async settlement; keeping request active for correlated resume",
             deployment_id,
@@ -1099,9 +921,6 @@ def map_teardown_result(
                 deployment_id,
                 teardown_result.intents_skipped,
             )
-        # VIB-5011: surface the token-consolidation summary. Consolidation
-        # failure never flips success — log loud so the operator knows the
-        # wallet holds residual non-target tokens.
         if teardown_result.consolidation_failed > 0:
             logger.warning(
                 "🛑 %s teardown completed with consolidation warnings: "
@@ -1130,30 +949,17 @@ def map_teardown_result(
             and teardown_result.consolidation_succeeded == 0
             and teardown_result.consolidation_warnings
         ):
-            # VIB-5393 (Case A): a below-dust material residual produces
-            # planned=succeeded=failed=0, so it hits neither branch above. On a
-            # hosted run the passive operator surface IS this runner log — the
-            # CLI `teardown status` / --wait render is only seen by someone who
-            # actively polls. Surface the consolidation warnings loud here so a
-            # stranded sub-floor residual (e.g. ~$4 WETH) is visible without an
-            # operator sweep. Non-failure warnings only — the failure case is
-            # handled by the first branch.
+            # Below-dust residuals may warn without attempting a swap; surface
+            # them for unattended runs.
             logger.warning(
                 "🛑 %s teardown completed with consolidation warnings (no swap failed): %s",
                 deployment_id,
                 "; ".join(teardown_result.consolidation_warnings) or "none",
             )
-        # VIB-2932 / VIB-5472: surface the closure-verification confidence on the
-        # passive operator log. An UNVERIFIED success means positions were closed
-        # by execution but NOT chain-confirmed (no on-chain post-condition for the
-        # protocol, or no pre-exec snapshot) — flag it loud so the count is never
-        # read as proven. CHAIN_VERIFIED stays at info; FAILED never reaches this
-        # success branch (it flips success=False upstream).
+        # Unverified success is execution evidence, not chain proof; warn
+        # unattended operators.
         if teardown_result.verification_status == VerificationStatus.UNVERIFIED:
-            # Only quote the position counts when the verifier had a trustworthy
-            # pre-exec breakdown — on the in-memory fallback they are 0/0 and
-            # ``positions_closed`` falls back to the intent count for persistence,
-            # so quoting "0/0 closed" here would be misleading (CodeRabbit).
+            # Avoid misleading 0/0 counts when no position breakdown was measured.
             if teardown_result.has_position_breakdown:
                 logger.warning(
                     "🛑 %s teardown closure UNVERIFIED: %d/%d position(s) reported closed "
@@ -1171,14 +977,8 @@ def map_teardown_result(
         runner.request_shutdown()
         runner._lifecycle_write_state(deployment_id, LifecycleState.TERMINATED)
         if request:
-            # VIB-5085: ``positions_closed`` reports verified positions closed,
-            # not intents landed. ``mark_completed`` lifts ``result["positions_closed"]``
-            # onto the column (preferring it over the legacy ``result["intents"]``).
-            # The intent signal is preserved alongside under intent-named keys.
-            # VIB-5993: keep the legacy successful-intent fallback until skip
-            # outcomes carry typed reasons. A zero-balance skip may already be
-            # closed, while a clamp skip may be stranded; the aggregate skipped
-            # count cannot truthfully decide a position count between them.
+            # Use measured position counts when available; skipped intent totals
+            # cannot distinguish already-flat from stranded positions.
             positions_closed_count = (
                 teardown_result.positions_closed
                 if teardown_result.has_position_breakdown
@@ -1191,35 +991,22 @@ def map_teardown_result(
                 result={
                     "positions_closed": positions_closed_count,
                     "positions_total": teardown_result.positions_total,
-                    # VIB-2932 / VIB-5472: closure-verification confidence rides
-                    # the existing result_json (no proto / schema change) so the
-                    # CLI `status` / --wait surface can flag an unverifiable
-                    # closure rather than present the count as chain-confirmed.
                     "verification_status": teardown_result.verification_status.value,
-                    "intents": teardown_result.intents_succeeded,  # back-compat alias
+                    "intents": teardown_result.intents_succeeded,  # compatibility alias
                     "intents_succeeded": teardown_result.intents_succeeded,
                     "intents_skipped": teardown_result.intents_skipped,
                     "intents_executed": teardown_result.intents_executed,
                     "intents_total": teardown_result.intents_total,
                     "mode": mode_str,
                     "duration_s": teardown_result.duration_seconds,
-                    # VIB-5011: consolidation summary for result_json — read
-                    # back by the CLI --wait terminal print + `status`.
                     "consolidation": {
                         "planned": teardown_result.consolidation_planned,
                         "succeeded": teardown_result.consolidation_succeeded,
                         "skipped": teardown_result.consolidation_skipped,
                         "failed": teardown_result.consolidation_failed,
                         "warnings": list(teardown_result.consolidation_warnings),
-                        # The target the phase ACTUALLY consolidated into, read
-                        # from the result rather than echoed back from the
-                        # request (VIB-5727). The request is not a truthful
-                        # source: it may carry the "no preference" sentinel, and
-                        # the real target is only chosen at consolidation time
-                        # once the chain is known. `None` = no target was
-                        # resolved (phase skipped, or nothing usable on the
-                        # chain) — Empty ≠ Zero, so it is NOT defaulted to a
-                        # symbol that was never used.
+                        # Record the resolved target, not the request sentinel.
+                        # None means no target was used.
                         "target_token": teardown_result.consolidation_target,
                     },
                 },
@@ -1233,15 +1020,8 @@ def map_teardown_result(
         )
 
     logger.warning(f"🛑 {deployment_id} teardown incomplete via TeardownManager: {teardown_result.error}")
-    # VIB-6285: mirror the closure-confidence signal onto the FAILURE branch. The
-    # equivalent warning above lives inside ``if teardown_result.success:``, so
-    # before this it went silent on exactly the runs W0.1 exists to flag — an
-    # unproven closure now sets success=False, which skipped the only passive
-    # operator surface a hosted run has. Emitted here so a failure caused by
-    # *absence of proof* is never mistaken for a failure caused by residual risk.
-    # The persisted row carries the same reason via ``error_message`` (rendered by
-    # the CLI FAILED branch); ``verification_status`` is NOT persisted on the
-    # failure path — ``mark_failed`` takes no result payload. See the PR report.
+    # An unverified failure can mean absence of proof rather than residual risk;
+    # keep that distinction visible to unattended operators.
     if teardown_result.verification_status in (VerificationStatus.UNVERIFIED, VerificationStatus.NOT_RUN):
         logger.warning(
             "🛑 %s teardown closure was NOT chain-confirmed (verification_status=%s). If the error "
@@ -1252,17 +1032,11 @@ def map_teardown_result(
         )
     if request:
         if teardown_result.has_position_breakdown:
-            # VIB-5085: verification ran (e.g. a verify-fail flipped success to
-            # failure) — report the position-level breakdown, not intents.
             closed = teardown_result.positions_closed
             failed = max(teardown_result.positions_total - closed, 0)
         else:
-            # VIB-4542 fallback: execution failed before verification ran, so
-            # there is no position-level breakdown. Preserve the intent-landing
-            # signal ("6 of 7 landed") instead of "0 / 0" — better than nothing
-            # for a postmortem reader. ``intents_total / intents_succeeded`` are
-            # populated by ``_execute_intents`` on both partial-success and
-            # full-failure terminal paths.
+            # If verification never ran, preserve intent-landing evidence for
+            # postmortems instead of reporting an unmeasured 0/0.
             closed = teardown_result.intents_succeeded or 0
             failed = max((teardown_result.intents_total or 0) - closed, 0)
         _safe_mark(
