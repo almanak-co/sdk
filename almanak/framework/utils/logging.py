@@ -38,7 +38,6 @@ import logging
 import sys
 from contextlib import AbstractContextManager
 from contextvars import ContextVar
-from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -71,36 +70,6 @@ _log_context: ContextVar[dict[str, Any] | None] = ContextVar("log_context", defa
 _logging_configured: bool = False
 
 
-def _add_timestamp(logger: WrappedLogger, method_name: str, event_dict: EventDict) -> EventDict:
-    """Add ISO 8601 timestamp to log event.
-
-    Args:
-        logger: The wrapped logger instance
-        method_name: The logging method name (info, error, etc.)
-        event_dict: The event dictionary
-
-    Returns:
-        Event dictionary with timestamp added
-    """
-    event_dict["timestamp"] = datetime.now(UTC).isoformat()
-    return event_dict
-
-
-def _add_log_level(logger: WrappedLogger, method_name: str, event_dict: EventDict) -> EventDict:
-    """Add log level to event dictionary.
-
-    Args:
-        logger: The wrapped logger instance
-        method_name: The logging method name (info, error, etc.)
-        event_dict: The event dictionary
-
-    Returns:
-        Event dictionary with level added
-    """
-    event_dict["level"] = method_name
-    return event_dict
-
-
 def _add_context_vars(logger: WrappedLogger, method_name: str, event_dict: EventDict) -> EventDict:
     """Add context variables to log event.
 
@@ -119,51 +88,6 @@ def _add_context_vars(logger: WrappedLogger, method_name: str, event_dict: Event
             if key not in event_dict:
                 event_dict[key] = value
     return event_dict
-
-
-def _rename_event_to_message(logger: WrappedLogger, method_name: str, event_dict: EventDict) -> EventDict:
-    """Rename 'event' key to 'message' for clarity.
-
-    Args:
-        logger: The wrapped logger instance
-        method_name: The logging method name (info, error, etc.)
-        event_dict: The event dictionary
-
-    Returns:
-        Event dictionary with event renamed to message
-    """
-    if "event" in event_dict:
-        event_dict["message"] = event_dict.pop("event")
-    return event_dict
-
-
-def _order_keys(logger: WrappedLogger, method_name: str, event_dict: EventDict) -> EventDict:
-    """Order keys for consistent output.
-
-    Standard order: timestamp, level, logger, message, then alphabetical extras.
-
-    Args:
-        logger: The wrapped logger instance
-        method_name: The logging method name (info, error, etc.)
-        event_dict: The event dictionary
-
-    Returns:
-        Ordered event dictionary
-    """
-    ordered: dict[str, Any] = {}
-    standard_keys = ["timestamp", "level", "logger", "message"]
-
-    # Add standard keys first in order
-    for key in standard_keys:
-        if key in event_dict:
-            ordered[key] = event_dict[key]
-
-    # Add remaining keys alphabetically
-    for key in sorted(event_dict.keys()):
-        if key not in standard_keys:
-            ordered[key] = event_dict[key]
-
-    return ordered
 
 
 def _load_plugin_processors() -> list[Processor]:
