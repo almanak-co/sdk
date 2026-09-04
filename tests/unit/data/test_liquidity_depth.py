@@ -21,7 +21,7 @@ from __future__ import annotations
 import math
 from decimal import Decimal
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -699,80 +699,26 @@ class TestSlippageEstimatorV3:
 
         return registry
 
-    def test_estimate_slippage_with_pool_address(self):
-        """Test slippage estimation when pool address is provided."""
-        from datetime import UTC, datetime
-
-        from almanak.framework.data.pools.reader import PoolPrice
-
-        pool_price = PoolPrice(
-            price=Decimal("1800"),
-            tick=0,
-            liquidity=10**18,
-            fee_tier=3000,
-            block_number=100,
-            timestamp=datetime.now(UTC),
-            pool_address="0xpool",
-            token0_decimals=18,
-            token1_decimals=6,
+    def test_estimate_slippage_without_quoter_never_reads_tick_depth(self):
+        """Execution-grade estimates require a quoter and never fall back to ticks."""
+        liq_reader = MagicMock(spec=LiquidityDepthReader)
+        estimator = SlippageEstimator(
+            liquidity_reader=liq_reader,
+            pool_reader_registry=self._make_pool_reader_registry(pool_address="0xpool"),
+            token_resolver=_WethUsdcResolver(),
         )
 
-        registry = self._make_pool_reader_registry(pool_price=pool_price, pool_address="0xpool")
-
-        # token0() reads must return a real address so _is_zero_for_one can
-        # resolve swap direction (VIB-5933); USDC is token0.
-        def mock_rpc(chain, to, calldata):
-            return _token0_word(_USDC_ARB)
-
-        liq_reader = LiquidityDepthReader(rpc_call=mock_rpc, tick_range_multiplier=5)
-
-        # Patch read_liquidity_depth to return known data
-        depth = LiquidityDepth(
-            ticks=[
-                TickData(tick_index=-120, liquidity_net=10**15, price_at_tick=Decimal("1750")),
-                TickData(tick_index=-60, liquidity_net=10**15, price_at_tick=Decimal("1790")),
-                TickData(tick_index=60, liquidity_net=-(10**15), price_at_tick=Decimal("1810")),
-                TickData(tick_index=120, liquidity_net=-(10**15), price_at_tick=Decimal("1850")),
-            ],
-            total_liquidity=10**18,
-            current_tick=0,
-            current_price=Decimal("1800"),
-            pool_address="0xpool",
-            token0_decimals=18,
-            token1_decimals=6,
-            tick_spacing=60,
-        )
-        from almanak.framework.data.models import DataMeta
-
-        depth_envelope = DataEnvelope(
-            value=depth,
-            meta=DataMeta(
-                source="test",
-                observed_at=datetime.now(UTC),
-                finality="latest",
-            ),
-            classification=DataClassification.EXECUTION_GRADE,
-        )
-
-        with patch.object(liq_reader, "read_liquidity_depth", return_value=depth_envelope):
-            estimator = SlippageEstimator(
-                liquidity_reader=liq_reader,
-                pool_reader_registry=registry,
-                token_resolver=_WethUsdcResolver(),
-            )
-
-            envelope = estimator.estimate_slippage(
+        with pytest.raises(DataUnavailableError, match="No execution-grade quote"):
+            estimator.estimate_slippage(
                 token_in="WETH",
                 token_out="USDC",
                 amount=Decimal("1"),
                 chain="arbitrum",
+                protocol="uniswap_v3",
                 pool_address="0xpool",
             )
 
-        assert isinstance(envelope, DataEnvelope)
-        assert envelope.classification == DataClassification.EXECUTION_GRADE
-        assert isinstance(envelope.value, SlippageEstimate)
-        assert envelope.value.expected_price > Decimal("0")
+        liq_reader.read_liquidity_depth.assert_not_called()
 
     def test_no_pool_found_raises(self):
         """Test that missing pool raises DataUnavailableError."""
@@ -783,7 +729,7 @@ class TestSlippageEstimatorV3:
             pool_reader_registry=registry,
         )
 
-        with pytest.raises(DataUnavailableError, match="No pool found"):
+        with pytest.raises(DataUnavailableError, match="explicit protocol"):
             estimator.estimate_slippage(
                 token_in="RARE_TOKEN",
                 token_out="USDC",
@@ -806,65 +752,29 @@ class TestSlippageEstimatorV3:
 
     def test_high_slippage_warning(self, caplog):
         """Test that high slippage triggers a warning log."""
-        from datetime import UTC, datetime
-
-        from almanak.framework.data.pools.reader import PoolPrice
-
-        pool_price = PoolPrice(
-            price=Decimal("1800"),
-            tick=0,
-            liquidity=100,  # Very low liquidity
-            fee_tier=3000,
-            block_number=100,
-            timestamp=datetime.now(UTC),
-            pool_address="0xpool",
-            token0_decimals=18,
-            token1_decimals=6,
+        estimator = SlippageEstimator(
+            liquidity_reader=MagicMock(spec=LiquidityDepthReader),
+            high_slippage_threshold_bps=50,
+        )
+        estimate = SlippageEstimate(
+            expected_price=Decimal("0.9"),
+            price_impact_bps=1000,
+            effective_slippage_bps=1000,
+            recommended_max_size=Decimal("1"),
         )
 
-        registry = self._make_pool_reader_registry(pool_price=pool_price, pool_address="0xpool")
-        # token0() returns USDC so _is_zero_for_one resolves direction (VIB-5933).
-        liq_reader = LiquidityDepthReader(rpc_call=lambda *a: _token0_word(_USDC_ARB))
-
-        # Return empty liquidity -> will give max slippage
-        depth = LiquidityDepth(
-            ticks=[],
-            total_liquidity=0,
-            current_tick=0,
-            current_price=Decimal("1800"),
-            pool_address="0xpool",
-            token0_decimals=18,
-            token1_decimals=6,
-            tick_spacing=60,
-        )
-        from almanak.framework.data.models import DataMeta
-
-        depth_envelope = DataEnvelope(
-            value=depth,
-            meta=DataMeta(source="test", observed_at=datetime.now(UTC), finality="latest"),
-            classification=DataClassification.EXECUTION_GRADE,
-        )
-
-        with patch.object(liq_reader, "read_liquidity_depth", return_value=depth_envelope):
-            estimator = SlippageEstimator(
-                liquidity_reader=liq_reader,
-                pool_reader_registry=registry,
-                high_slippage_threshold_bps=50,
-                token_resolver=_WethUsdcResolver(),
+        with caplog.at_level("WARNING", logger="almanak.framework.data.pools.liquidity"):
+            estimator._finalize_quote_envelope(
+                estimate,
+                "WETH",
+                "USDC",
+                Decimal("1"),
+                "arbitrum",
+                0,
+                source="test_quoter",
             )
 
-            with caplog.at_level("WARNING", logger="almanak.framework.data.pools.liquidity"):
-                envelope = estimator.estimate_slippage(
-                    token_in="WETH",
-                    token_out="USDC",
-                    amount=Decimal("1000"),
-                    chain="arbitrum",
-                    pool_address="0xpool",
-                )
-
-            # Should have logged a warning about high slippage
-            assert envelope.value.effective_slippage_bps > 0 or envelope.value.price_impact_bps >= 10000
-            assert any("slippage" in msg.lower() for msg in caplog.messages), "Expected high slippage warning log"
+        assert any("slippage" in msg.lower() for msg in caplog.messages)
 
 
 # ---------------------------------------------------------------------------
@@ -1046,13 +956,22 @@ class TestMarketSnapshotLiquidity:
             slippage_estimator=mock_estimator,
         )
 
-        snapshot.estimate_slippage("WETH", "USDC", Decimal("10"), protocol="pancakeswap_v3")
+        snapshot.estimate_slippage(
+            "WETH",
+            "USDC",
+            Decimal("10"),
+            protocol="pancakeswap_v3",
+            pool_address="0xpool",
+            fee_tier=2500,
+        )
         mock_estimator.estimate_slippage.assert_called_once_with(
             token_in="WETH",
             token_out="USDC",
             amount=Decimal("10"),
             chain="arbitrum",
             protocol="pancakeswap_v3",
+            pool_address="0xpool",
+            fee_tier=2500,
         )
 
     def test_estimate_slippage_forwards_exact_pool_discriminators(self):
@@ -1500,8 +1419,8 @@ class TestFeeUnitConversion:
         assert values == sorted(values, reverse=True)
         assert len(set(values)) == len(values), "distinct tiers collapsed onto one fee"
 
-    def test_fee_contribution_end_to_end_is_the_pool_fee_not_a_hundred_x_it(self):
-        """END-TO-END negative control on the hand-off, not on either function.
+    def test_fee_contribution_is_the_pool_fee_not_a_hundred_x_it(self):
+        """Negative control for the retained local V3 math helper.
 
         Holds the pool fixture constant and varies ONLY ``fee_tier``, so the
         tick-walk's own contribution cancels: what remains is exactly what the
@@ -1517,63 +1436,23 @@ class TestFeeUnitConversion:
         (invariant to liquidity, so not a depth artefact) that this change does
         not claim to fix. An absolute assertion would fail for a reason that
         has nothing to do with fee units."""
-        from datetime import UTC, datetime
-
-        from almanak.framework.data.models import DataMeta
-        from almanak.framework.data.pools.reader import PoolPrice
-
-        def _meta() -> DataMeta:
-            return DataMeta(source="test", observed_at=datetime.now(UTC), finality="latest")
-
         est = _make_v3_estimator()
-        pool = "0x" + "11" * 20
-        tier = 3000  # 0.3% pool, Uniswap-native pips
 
-        # Deep, flat book around the current tick so tick-walk impact is ~0
-        # and the fee is the only cost the simulator can attribute.
         ticks = _tick_band(-6000, 6000, 10**24, _tick_to_price(-6000, 18, 18), _tick_to_price(6000, 18, 18))
 
-        est._resolve_pool = lambda *a, **kw: pool  # type: ignore[method-assign]
-        est._is_zero_for_one = lambda *a, **kw: True  # type: ignore[method-assign]
-        est._read_pool_price = lambda *a, **kw: DataEnvelope(  # type: ignore[method-assign]
-            value=PoolPrice(
-                price=Decimal("1"),
-                tick=0,
-                liquidity=10**24,
-                fee_tier=tier,
-                block_number=1,
-                timestamp=datetime(2026, 1, 1, tzinfo=UTC),
-                pool_address=pool,
-                token0_decimals=18,
-                token1_decimals=18,
-            ),
-            meta=_meta(),
-            classification=DataClassification.EXECUTION_GRADE,
-        )
-        est._liquidity_reader.read_liquidity_depth = lambda **kw: DataEnvelope(  # type: ignore[method-assign]
-            value=LiquidityDepth(
-                ticks=ticks,
-                total_liquidity=10**24,
-                current_tick=0,
-                current_price=Decimal("1"),
-                pool_address=pool,
-                token0_decimals=18,
-                token1_decimals=18,
-                tick_spacing=60,
-            ),
-            meta=_meta(),
-            classification=DataClassification.EXECUTION_GRADE,
-        )
-
         def _slippage_at(fee_pips: int) -> int:
-            nonlocal tier
-            tier = fee_pips
-            return est.estimate_slippage(
-                token_in="0x" + "aa" * 20,
-                token_out="0x" + "bb" * 20,
+            return est._simulate_v3_swap(
                 amount=Decimal("0.01"),
-                chain="optimism",
-            ).value.effective_slippage_bps
+                zero_for_one=True,
+                mid_price=Decimal("1"),
+                current_tick=0,
+                current_liquidity=10**24,
+                ticks=ticks,
+                tick_spacing=60,
+                token0_decimals=18,
+                token1_decimals=18,
+                fee_pips=fee_pips,
+            ).effective_slippage_bps
 
         fee_cost_bps = _slippage_at(3000) - _slippage_at(0)
 

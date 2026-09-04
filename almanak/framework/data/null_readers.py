@@ -217,8 +217,8 @@ class NullLiquidityDepthReader:
 class NullSlippageEstimator:
     """Always-raises ``estimate_slippage`` stub for backtest factories (VIB-4845).
 
-    The live estimator reads pool price + tick depth over the gateway eth_call
-    proxy and simulates the swap; a live read at replay time would be
+    The live estimator calls an on-chain quoter over the gateway eth_call proxy;
+    a live read at replay time would be
     nondeterministic. Backtest factories inject this stub so
     ``estimate_slippage(...)`` fails with the backtest-determinism signal.
     Thin shell — constructs NO primitives.

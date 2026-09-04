@@ -16,6 +16,9 @@ from typing import Any, ClassVar, Protocol, TypeVar, runtime_checkable
 from almanak.connectors._base.types import ProtocolKind, ProtocolName
 
 __all__ = [
+    "SLIPPAGE_REFERENCE_STABLE_PARITY",
+    "SLIPPAGE_REFERENCE_UNSUPPORTED",
+    "SLIPPAGE_REFERENCE_V3_SPOT",
     "SWAP_QUOTE_REGISTRY",
     "SwapQuoteCapability",
     "SwapQuoteConnector",
@@ -25,6 +28,10 @@ __all__ = [
     "SwapQuoteResult",
     "SwapQuoteUnavailable",
 ]
+
+SLIPPAGE_REFERENCE_V3_SPOT = "v3_slot0_spot"
+SLIPPAGE_REFERENCE_STABLE_PARITY = "stable_parity"
+SLIPPAGE_REFERENCE_UNSUPPORTED = "unsupported"
 
 
 class SwapQuoteRegistryError(Exception):
@@ -74,7 +81,13 @@ class SwapQuoteRequest:
 
 @dataclass(frozen=True, kw_only=True)
 class SwapQuoteResult:
-    """Exact-input quote result in token base units."""
+    """Exact-input quote result in token base units.
+
+    Providers used for slippage estimation declare ``slippage_reference`` in
+    metadata. Supported values are ``v3_slot0_spot`` for an exact V3-family
+    pool, ``stable_parity`` for a connector-vouched pegged pair, and
+    ``unsupported`` when no safe pre-trade reference is available.
+    """
 
     amount_out: int
     source: str
@@ -100,6 +113,7 @@ class SwapQuoteConnector:
     """Base class for strategy-side swap quote connectors."""
 
     protocol: ClassVar[ProtocolName]
+    protocol_aliases: ClassVar[tuple[ProtocolName, ...]] = ()
     kind: ClassVar[ProtocolKind]
 
 
@@ -126,17 +140,18 @@ class SwapQuoteRegistry:
                 f"in addition to SwapQuoteConnector; {type(connector).__qualname__!s} "
                 "is missing quote_swap()."
             )
-        proto = connector.protocol
-        existing = self._connectors.get(proto)
-        if existing is not None:
-            if type(existing) is type(connector):
-                return
-            raise SwapQuoteRegistryError(
-                f"protocol {proto!r} already registered by "
-                f"{type(existing).__qualname__}; refusing to overwrite with "
-                f"{type(connector).__qualname__}"
-            )
-        self._connectors[proto] = connector
+        protocols = (connector.protocol, *connector.protocol_aliases)
+        for proto in protocols:
+            existing = self._connectors.get(proto)
+            if existing is not None and type(existing) is not type(connector):
+                raise SwapQuoteRegistryError(
+                    f"protocol {proto!r} already registered by "
+                    f"{type(existing).__qualname__}; refusing to overwrite with "
+                    f"{type(connector).__qualname__}"
+                )
+        registered = next((self._connectors[proto] for proto in protocols if proto in self._connectors), connector)
+        for proto in protocols:
+            self._connectors[proto] = registered
 
     def get(self, protocol: str) -> SwapQuoteConnector | None:
         """Return the provider for ``protocol`` if registered."""
@@ -153,11 +168,15 @@ class SwapQuoteRegistry:
 
     def all(self) -> tuple[SwapQuoteConnector, ...]:
         """Return every registered connector in registration order."""
-        return tuple(self._connectors.values())
+        connectors: list[SwapQuoteConnector] = []
+        for connector in self._connectors.values():
+            if not any(existing is connector for existing in connectors):
+                connectors.append(connector)
+        return tuple(connectors)
 
     def with_capability(self, capability: type[T]) -> tuple[T, ...]:
         """Return every registered connector implementing ``capability``."""
-        return tuple(c for c in self._connectors.values() if isinstance(c, capability))
+        return tuple(c for c in self.all() if isinstance(c, capability))
 
     def clear(self) -> None:
         """Test helper: clear registrations."""

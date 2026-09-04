@@ -6,6 +6,8 @@ from typing import ClassVar
 
 from almanak.connectors._base.types import ProtocolKind, ProtocolName
 from almanak.connectors._strategy_base.swap_quote_registry import (
+    SLIPPAGE_REFERENCE_STABLE_PARITY,
+    SLIPPAGE_REFERENCE_UNSUPPORTED,
     SwapQuoteCapability,
     SwapQuoteConnector,
     SwapQuoteRequest,
@@ -47,6 +49,17 @@ class CurveSwapQuoteConnector(SwapQuoteConnector, SwapQuoteCapability):
                     f"No Curve pool for {request.token_in}->{request.token_out} on {request.chain}"
                 )
 
+            pool_info = adapter.get_pool_info(pool_address, refresh=False)
+            pool_type = pool_info.pool_type.value if pool_info is not None else "unknown"
+            reference = SLIPPAGE_REFERENCE_UNSUPPORTED
+            if pool_type == "stableswap":
+                for pool_data in adapter.pools.values():
+                    if pool_data["address"].lower() != pool_address.lower():
+                        continue
+                    if pool_data.get("slippage_reference") == SLIPPAGE_REFERENCE_STABLE_PARITY:
+                        reference = SLIPPAGE_REFERENCE_STABLE_PARITY
+                    break
+
             amount_out = adapter.quote_swap_output(
                 pool_address=pool_address,
                 token_in=request.token_in,
@@ -61,7 +74,11 @@ class CurveSwapQuoteConnector(SwapQuoteConnector, SwapQuoteCapability):
         return SwapQuoteResult(
             amount_out=amount_out,
             source="curve_pool_get_dy",
-            metadata={"pool_address": pool_address},
+            metadata={
+                "pool_address": pool_address,
+                "pool_type": pool_type,
+                "slippage_reference": reference,
+            },
         )
 
     @staticmethod

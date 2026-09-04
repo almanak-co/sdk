@@ -599,10 +599,11 @@ def _build_gateway_price_providers(
 
 @dataclass(frozen=True)
 class _SlippageQuoteCtx:
-    """Context passed to connector swap-quote providers for the ALM-2896
-    AMM-slippage fallback. Carries only the attributes the providers read via
-    ``getattr(ctx, ...)`` — ``wallet_address``, ``rpc_url`` (None: gateway-only,
-    no egress), ``gateway_client``, ``token_resolver``.
+    """Context passed to connector swap-quote providers.
+
+    Carries only the attributes providers read via ``getattr(ctx, ...)``:
+    ``wallet_address``, ``rpc_url`` (None means gateway-only),
+    ``gateway_client``, and ``token_resolver``.
     """
 
     wallet_address: str
@@ -700,11 +701,8 @@ def _build_gateway_rpc_readers(
         if liquidity_depth_reader is None:
             liquidity_depth_reader = LiquidityDepthReader(rpc_call=rpc_call, source_name="gateway_rpc")
         if slippage_estimator is None:
-            # ALM-2896: wire the connector-owned swap-quote fallback so
-            # estimate_slippage() works for AMM/stableswap protocols (Curve)
-            # that have no V3 tick reader. The quote routes through the gateway
-            # client (no strategy-container egress); rpc_url=None forces the
-            # gateway path inside the connector adapters.
+            # Quotes route through the gateway client; rpc_url=None prevents
+            # connector adapters from opening direct strategy-container egress.
             from almanak.connectors._strategy_swap_quote_registry import (
                 SWAP_QUOTE_REGISTRY,
                 ensure_swap_quote_registry_loaded,

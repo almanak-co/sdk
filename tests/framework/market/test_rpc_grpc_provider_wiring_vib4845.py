@@ -30,6 +30,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from almanak.framework.data.defi.gateway_pool_reader import GatewayPoolReserveReader
+from almanak.framework.data.exceptions import DataUnavailableError
 from almanak.framework.data.interfaces import DataSourceUnavailable
 from almanak.framework.data.null_readers import (
     NullLiquidityDepthReader,
@@ -375,11 +376,30 @@ def test_live_estimate_slippage_delegates_to_wired_estimator():
     assert captured["amount"] == Decimal("2.5")
 
 
-def test_live_estimator_reads_real_data_through_gateway():
-    # End-to-end through the REAL SlippageEstimator + LiquidityDepthReader +
-    # PoolReaderRegistry over the crafted gateway eth_call. token0=6dec,
-    # token1=18dec, empty tick bitmap so the v3 walk completes against in-range
-    # liquidity only — proving the eth_call-backed estimator produces real data.
+def test_live_estimator_routes_through_connector_quote_registry(monkeypatch):
+    from almanak.connectors.curve.adapter import CurveAdapter
+
+    monkeypatch.setattr(CurveAdapter, "quote_swap_output", lambda self, **kwargs: 4_995_000)
+    strategy = SimpleNamespace(chain="arbitrum", wallet_address="0x" + "0" * 40)
+    gw = _FakeGatewayClient(eth_call_fn=_crafted_eth_call)
+    snap = MarketSnapshotBuilder.for_strategy_runner(strategy=strategy, gateway_client=gw, chain="arbitrum")
+
+    envelope = snap.estimate_slippage(
+        "0xff970a61a04b1ca14834a43f5de4533ebddb5cc8",
+        "0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9",
+        Decimal("5"),
+        protocol="curve",
+        pool_address="0x7f90122BF0700F9E7e1F688fe926940E8839F353",
+    )
+
+    assert envelope.value.expected_price == Decimal("0.999")
+    assert envelope.value.effective_slippage_bps == 10
+    assert envelope.meta.source == "curve_pool_get_dy"
+
+
+def test_live_estimator_without_quoter_does_not_scan_tick_depth(monkeypatch):
+    # Slippage uses executable connector quotes; missing quote wiring fails
+    # without falling back to the expensive tick-distribution reader.
     from almanak.framework.data.pools.reader import PoolReaderRegistry
 
     rpc_call = lambda chain, to, data: _to_bytes(_crafted_eth_call(chain, to, data))  # noqa: E731
@@ -388,16 +408,20 @@ def test_live_estimator_reads_real_data_through_gateway():
     estimator = SlippageEstimator(
         liquidity_reader=depth_reader, pool_reader_registry=registry, source_name="gateway_rpc"
     )
-    env = estimator.estimate_slippage(
-        token_in=_TOKEN0_ADDR,
-        token_out=_TOKEN1_ADDR,
-        amount=Decimal("100"),
-        chain="base",
-        protocol="uniswap_v3",
-        pool_address="0xpool00000000000000000000000000000000000a",
-    )
-    assert env.value is not None
-    assert env.meta.source == "gateway_rpc"
+    read_depth = MagicMock()
+    monkeypatch.setattr(depth_reader, "read_liquidity_depth", read_depth)
+
+    with pytest.raises(DataUnavailableError, match="No execution-grade quote"):
+        estimator.estimate_slippage(
+            token_in=_TOKEN0_ADDR,
+            token_out=_TOKEN1_ADDR,
+            amount=Decimal("100"),
+            chain="base",
+            protocol="uniswap_v3",
+            pool_address="0xpool00000000000000000000000000000000000a",
+        )
+
+    read_depth.assert_not_called()
 
 
 def _to_bytes(raw: str) -> bytes:

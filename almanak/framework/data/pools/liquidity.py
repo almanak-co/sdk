@@ -1,8 +1,7 @@
 """Liquidity depth reader and slippage estimator for concentrated-liquidity DEX pools.
 
-Reads tick-level liquidity distribution from Uniswap V3-compatible pools
-(Uniswap V3, Aerodrome CL, PancakeSwap V3) and simulates swaps to
-estimate price impact and slippage before execution.
+Reads tick-level liquidity distribution from Uniswap V3-compatible pools for
+analytics and estimates price impact from connector-owned executable quotes.
 
 All returns are wrapped in DataEnvelope with EXECUTION_GRADE classification
 (fail-closed semantics -- no off-chain fallback).
@@ -16,7 +15,9 @@ Example:
     print(envelope.ticks[0].price_at_tick)
 
     estimator = SlippageEstimator(reader, pool_reader_registry=registry)
-    slip = estimator.estimate_slippage("WETH", "USDC", Decimal("10"), "arbitrum")
+    slip = estimator.estimate_slippage(
+        "WETH", "USDC", Decimal("10"), "arbitrum", protocol="uniswap_v3"
+    )
     print(slip.value.price_impact_bps)
 """
 
@@ -198,7 +199,7 @@ class SlippageEstimate:
 # Plausible band for a *stable* 2-coin realized rate (token_out per token_in).
 # A quote landing outside this band is not a stableswap-pegged pair (e.g. a
 # tricrypto USDT/WBTC/WETH leg), so the 1.0-mid impact model does not apply and
-# the swap-quote slippage fallback declines (returns None) rather than emitting
+# the swap-quote slippage estimate becomes unavailable rather than emitting
 # a nonsense estimate.
 _STABLE_QUOTE_RATE_LOWER = Decimal("0.5")
 _STABLE_QUOTE_RATE_UPPER = Decimal("1.5")
@@ -218,7 +219,7 @@ def _slippage_estimate_from_stable_quote(
     effective slippage coincide.
 
     Returns ``None`` when the realized rate is outside the stable band (not a
-    pegged pair) — the caller then declines the fallback. A favourable quote
+    pegged pair) — the caller then rejects the estimate. A favourable quote
     (exec_price > 1, e.g. rounding/depeg-in-your-favour) is floored at zero
     impact rather than reported negative; this never fabricates a successful
     zero out of a *failed* quote, since a failed quote never reaches here.
@@ -230,23 +231,35 @@ def _slippage_estimate_from_stable_quote(
     if not (_STABLE_QUOTE_RATE_LOWER <= exec_price <= _STABLE_QUOTE_RATE_UPPER):
         return None
 
-    slip = Decimal(1) - exec_price
-    if slip < 0:
-        slip = Decimal(0)
+    return _slippage_estimate_from_quote(
+        amount_in_human=amount_in_human,
+        amount_out_human=amount_out_human,
+        mid_price=Decimal(1),
+    )
+
+
+def _slippage_estimate_from_quote(
+    *,
+    amount_in_human: Decimal,
+    amount_out_human: Decimal,
+    mid_price: Decimal,
+) -> SlippageEstimate | None:
+    """Derive caller-oriented slippage from an executable amount-out quote."""
+    if amount_in_human <= 0 or amount_out_human <= 0 or mid_price <= 0:
+        return None
+
+    exec_price = amount_out_human / amount_in_human
+    slip = max(Decimal(0), Decimal(1) - exec_price / mid_price)
     price_impact_bps = int(slip * 10000)
-    effective_slippage_bps = price_impact_bps
-
-    if price_impact_bps > 0:
-        # Linear extrapolation to the 1% (100 bps) budget — mirrors the V2/V3
-        # ``recommended_max`` convention.
-        recommended_max = amount_in_human * Decimal(100) / Decimal(price_impact_bps)
-    else:
-        recommended_max = amount_in_human * Decimal(10)
-
+    recommended_max = (
+        amount_in_human * Decimal(100) / Decimal(price_impact_bps)
+        if price_impact_bps > 0
+        else amount_in_human * Decimal(10)
+    )
     return SlippageEstimate(
         expected_price=exec_price,
         price_impact_bps=price_impact_bps,
-        effective_slippage_bps=effective_slippage_bps,
+        effective_slippage_bps=price_impact_bps,
         recommended_max_size=recommended_max,
     )
 
@@ -856,8 +869,8 @@ def _finalize_slippage_estimate(
 class SlippageEstimator:
     """Estimates price impact and slippage for potential swaps.
 
-    For concentrated-liquidity pools (Uniswap V3, Aerodrome, PancakeSwap V3),
-    simulates the swap through tick ranges using the liquidity distribution.
+    Live estimates use connector-owned on-chain quoters so the protocol's swap
+    implementation, rather than a local tick walk, determines executable output.
 
     For constant-product (V2-style) pools, uses the x*y=k formula.
 
@@ -883,10 +896,8 @@ class SlippageEstimator:
         self._pool_reader_registry = pool_reader_registry
         self._high_slippage_threshold_bps = high_slippage_threshold_bps
         self._source_name = source_name
-        # ALM-2896: connector-owned swap-quote fallback for AMM/stableswap
-        # protocols (e.g. Curve) that have no V3 tick reader. When any of these
-        # is None (backtest / V3-only construction), the fallback short-circuits
-        # and behaviour is identical to the V3-only estimator.
+        # Connector-owned quoters route through the gateway and execute the
+        # venue's real swap math in a read-only eth_call.
         self._swap_quote_registry = swap_quote_registry
         self._quote_ctx = quote_ctx
         self._token_resolver = token_resolver
@@ -903,21 +914,18 @@ class SlippageEstimator:
     ) -> DataEnvelope[SlippageEstimate]:
         """Estimate slippage for a swap.
 
-        For concentrated-liquidity pools, simulates the swap through tick
-        ranges using actual on-chain liquidity data.
+        Simulates the swap through the protocol's connector-owned on-chain
+        quoter. Full tick distributions remain available via liquidity_depth().
 
         Args:
             token_in: Input token symbol or address.
             token_out: Output token symbol or address.
             amount: Amount of token_in to swap (in human-readable units).
             chain: Chain name.
-            protocol: Protocol name (e.g., "uniswap_v3"). Auto-detected if None.
-            pool_address: Explicit pool address. Resolved if None.
-            fee_tier: Explicit discriminator for pool resolution (fee tier for
-                Uniswap-style DEXs, tick spacing for Aerodrome Slipstream). When
-                None (default), the deepest pool is auto-resolved by sweeping the
-                protocol's candidate keys — so a blind 3000 no longer wrongly
-                fails tick-spacing-keyed pools (e.g. Slipstream USDC/CBBTC).
+            protocol: Explicit protocol name (e.g., "uniswap_v3").
+            pool_address: Optional exact pool binding for the quote.
+            fee_tier: Optional route discriminator: fee tier for Uniswap-style
+                DEXs or tick spacing for Aerodrome Slipstream.
 
         Returns:
             DataEnvelope[SlippageEstimate] with EXECUTION_GRADE classification.
@@ -927,84 +935,42 @@ class SlippageEstimator:
         """
         start_time = time.monotonic()
         chain_lower = chain.lower()
+        if protocol is not None:
+            from almanak.connectors._strategy_base.protocol_aliases import normalize_protocol
+
+            protocol = normalize_protocol(chain_lower, protocol)
 
         try:
-            # Resolve pool if not provided
-            if pool_address is None:
-                pool_address = self._resolve_pool(token_in, token_out, chain_lower, protocol, fee_tier)
-
-            if pool_address is None:
-                # ALM-2896: no V3 tick reader resolved a pool. Before failing,
-                # try the connector-owned swap-quote fallback — this covers
-                # AMM/stableswap protocols (Curve) that publish a
-                # SwapQuoteCapability but have no tick-based reader. A genuine
-                # quote failure still raises (fail-loud); only "no quoter
-                # registered for this protocol" falls through to the raise below.
-                quote_estimate = self._estimate_via_swap_quote(token_in, token_out, amount, chain_lower, protocol)
-                if quote_estimate is not None:
-                    return self._finalize_quote_envelope(
-                        quote_estimate, token_in, token_out, amount, chain_lower, start_time
-                    )
+            quote_estimate = self._estimate_via_swap_quote(
+                token_in,
+                token_out,
+                amount,
+                chain_lower,
+                protocol,
+                pool_address,
+                fee_tier,
+            )
+            if quote_estimate is None:
+                reason = (
+                    "An explicit protocol with a registered executable quoter is required"
+                    if protocol is None
+                    else f"No execution-grade quote available for protocol {protocol}"
+                )
                 raise DataUnavailableError(
                     data_type="slippage_estimate",
                     instrument=f"{token_in}/{token_out}",
-                    reason=f"No pool found for {token_in}/{token_out} on {chain_lower}",
+                    reason=reason,
                 )
-
-            # Read current pool state
-            pool_price_envelope = self._read_pool_price(pool_address, chain_lower, protocol)
-            pool_price = pool_price_envelope.value
-            mid_price = pool_price.price
-            current_tick = pool_price.tick
-            current_liquidity = pool_price.liquidity
-            token0_decimals = pool_price.token0_decimals
-            token1_decimals = pool_price.token1_decimals
-
-            # Determine swap direction (token0->token1 or token1->token0)
-            zero_for_one = self._is_zero_for_one(token_in, token_out, pool_address, chain_lower, protocol)
-
-            # Read liquidity depth
-            depth_envelope = self._liquidity_reader.read_liquidity_depth(
-                pool_address=pool_address,
-                chain=chain_lower,
-                current_tick=current_tick,
-                current_liquidity=current_liquidity,
-                current_price=mid_price,
-                token0_decimals=token0_decimals,
-                token1_decimals=token1_decimals,
-                fee_tier=pool_price.fee_tier,
+            estimate, quote_source = quote_estimate
+            return self._finalize_quote_envelope(
+                estimate,
+                token_in,
+                token_out,
+                amount,
+                chain_lower,
+                start_time,
+                source=quote_source,
             )
-            depth = depth_envelope.value
-
-            # Simulate swap through tick ranges
-            estimate = self._simulate_v3_swap(
-                amount=amount,
-                zero_for_one=zero_for_one,
-                mid_price=mid_price,
-                current_tick=current_tick,
-                current_liquidity=current_liquidity,
-                ticks=depth.ticks,
-                tick_spacing=depth.tick_spacing,
-                token0_decimals=token0_decimals,
-                token1_decimals=token1_decimals,
-                # Native pips, same unit `read_liquidity_depth` takes above
-                # and the same unit the pool reports — no conversion, so no
-                # rounding can shave or inflate a non-canonical fee tier.
-                fee_pips=pool_price.fee_tier,
-            )
-
-            if estimate.effective_slippage_bps > self._high_slippage_threshold_bps:
-                logger.warning(
-                    "high_slippage_warning",
-                    extra={
-                        "token_in": token_in,
-                        "token_out": token_out,
-                        "amount": str(amount),
-                        "chain": chain_lower,
-                        "slippage_bps": estimate.effective_slippage_bps,
-                        "threshold_bps": self._high_slippage_threshold_bps,
-                    },
-                )
 
         except DataUnavailableError:
             raise
@@ -1015,25 +981,6 @@ class SlippageEstimator:
                 reason=f"Slippage estimation failed: {e}",
             ) from e
 
-        latency_ms = int((time.monotonic() - start_time) * 1000)
-
-        meta = DataMeta(
-            source=self._source_name,
-            observed_at=datetime.now(UTC),
-            block_number=None,
-            finality=DataFinality.LATEST,
-            staleness_ms=0,
-            latency_ms=latency_ms,
-            confidence=1.0,
-            cache_hit=False,
-        )
-
-        return DataEnvelope(
-            value=estimate,
-            meta=meta,
-            classification=DataClassification.EXECUTION_GRADE,
-        )
-
     def _estimate_via_swap_quote(
         self,
         token_in: str,
@@ -1041,22 +988,10 @@ class SlippageEstimator:
         amount: Decimal,
         chain: str,
         protocol: str | None,
-    ) -> SlippageEstimate | None:
-        """Estimate slippage for an AMM protocol via its connector swap quoter.
-
-        Returns ``None`` when the fallback is not wired or no quoter is
-        registered for ``protocol`` (so the caller re-raises the original
-        "no pool found"). A registered-but-failing quoter raises (fail-loud):
-        the connector's ``SwapQuoteUnavailable`` / a resolution ``ValueError``
-        propagates out and is wrapped as ``DataUnavailableError`` by the caller,
-        so a strategy that wants fail-closed still sees an unavailable signal.
-
-        For stableswap 2-coin pairs the mid price is ~1.0; price impact is the
-        realized deviation of (amount_out / amount_in) from parity. The estimate
-        is only produced when the realized rate is inside a plausible stable
-        band — a non-stable pool (e.g. tricrypto) returns ``None`` rather than a
-        nonsense 1.0-mid result.
-        """
+        pool_address: str | None,
+        fee_tier: int | None,
+    ) -> tuple[SlippageEstimate, str] | None:
+        """Estimate slippage from a connector-owned executable quote."""
         if protocol is None or self._swap_quote_registry is None or self._quote_ctx is None:
             return None
         if self._token_resolver is None:
@@ -1064,7 +999,11 @@ class SlippageEstimator:
         if self._swap_quote_registry.get(protocol) is None:
             return None
 
-        from almanak.connectors._strategy_base.swap_quote_registry import SwapQuoteRequest
+        from almanak.connectors._strategy_base.swap_quote_registry import (
+            SLIPPAGE_REFERENCE_STABLE_PARITY,
+            SLIPPAGE_REFERENCE_V3_SPOT,
+            SwapQuoteRequest,
+        )
 
         in_token = self._token_resolver.resolve_for_swap(token_in, chain)
         out_token = self._token_resolver.resolve_for_swap(token_out, chain)
@@ -1091,6 +1030,8 @@ class SlippageEstimator:
             token_out_symbol=token_out,
             token_in_decimals=in_decimals,
             token_out_decimals=out_decimals,
+            fee_tier=fee_tier,
+            pool_address=pool_address,
         )
 
         result = self._swap_quote_registry.quote_swap(self._quote_ctx, request)
@@ -1098,8 +1039,176 @@ class SlippageEstimator:
             return None
 
         amount_out_human = Decimal(result.amount_out) / (Decimal(10) ** out_decimals)
+        amount_in_human = Decimal(amount_in_wei) / (Decimal(10) ** in_decimals)
+        reference = result.metadata.get("slippage_reference")
+
+        if reference == SLIPPAGE_REFERENCE_V3_SPOT:
+            estimate = self._estimate_v3_quote(
+                token_in=token_in,
+                token_out=token_out,
+                executable_token_in=in_token.address,
+                executable_token_out=out_token.address,
+                chain=chain,
+                protocol=protocol,
+                requested_pool=pool_address,
+                requested_pool_key=fee_tier,
+                amount_in_human=amount_in_human,
+                amount_out_human=amount_out_human,
+                result=result,
+            )
+        elif reference == SLIPPAGE_REFERENCE_STABLE_PARITY:
+            estimate = self._estimate_stable_quote(
+                token_in=token_in,
+                token_out=token_out,
+                protocol=protocol,
+                requested_pool=pool_address,
+                amount_in_human=amount_in_human,
+                amount_out_human=amount_out_human,
+                result=result,
+            )
+        else:
+            raise DataUnavailableError(
+                data_type="slippage_estimate",
+                instrument=f"{token_in}/{token_out}",
+                reason=f"Protocol {protocol} did not provide a supported slippage reference",
+            )
+
+        return (estimate, result.source) if estimate is not None else None
+
+    def _estimate_v3_quote(
+        self,
+        *,
+        token_in: str,
+        token_out: str,
+        executable_token_in: str,
+        executable_token_out: str,
+        chain: str,
+        protocol: str,
+        requested_pool: str | None,
+        requested_pool_key: int | None,
+        amount_in_human: Decimal,
+        amount_out_human: Decimal,
+        result: Any,
+    ) -> SlippageEstimate | None:
+        """Compare a V3-family quote with its factory-verified pool spot."""
+        instrument = f"{token_in}/{token_out}"
+        pool_reader_registry = self._pool_reader_registry
+        if pool_reader_registry is None or not self._is_tick_simulatable(protocol):
+            raise DataUnavailableError(
+                data_type="slippage_estimate",
+                instrument=instrument,
+                reason=f"No V3-compatible spot reader is registered for protocol {protocol}",
+            )
+
+        pool_key = result.metadata.get("pool_key")
+        if isinstance(pool_key, bool) or not isinstance(pool_key, int) or pool_key <= 0:
+            raise DataUnavailableError(
+                data_type="slippage_estimate",
+                instrument=instrument,
+                reason=f"Quote for protocol {protocol} did not identify a valid pool discriminator",
+            )
+
+        pool_key_kind = result.metadata.get("pool_key_kind")
+        expected_pool_key_kind = pool_reader_registry.pool_key_kind(protocol)
+        if pool_key_kind != expected_pool_key_kind:
+            raise DataUnavailableError(
+                data_type="slippage_estimate",
+                instrument=instrument,
+                reason=(
+                    f"Quote for protocol {protocol} identified pool discriminator as "
+                    f"{pool_key_kind!r}, expected {expected_pool_key_kind!r}"
+                ),
+            )
+        if requested_pool_key is not None and pool_key != requested_pool_key:
+            raise DataUnavailableError(
+                data_type="slippage_estimate",
+                instrument=instrument,
+                reason=(
+                    f"Quoted pool discriminator {pool_key} does not match requested "
+                    f"{expected_pool_key_kind} {requested_pool_key}"
+                ),
+            )
+
+        resolved_pool = self._resolve_pool(
+            executable_token_in,
+            executable_token_out,
+            chain,
+            protocol,
+            pool_key,
+        )
+        if resolved_pool is None:
+            reason = (
+                f"Cannot verify requested pool {requested_pool} against the quoted route"
+                if requested_pool is not None
+                else "Cannot bind executable quote to a concentrated-liquidity pool"
+            )
+            raise DataUnavailableError(data_type="slippage_estimate", instrument=instrument, reason=reason)
+        if requested_pool is not None and resolved_pool.lower() != requested_pool.lower():
+            raise DataUnavailableError(
+                data_type="slippage_estimate",
+                instrument=instrument,
+                reason=f"Quoted route does not match requested pool {requested_pool}",
+            )
+
+        quoted_pool = result.metadata.get("pool_address")
+        if quoted_pool is not None and (
+            not isinstance(quoted_pool, str) or quoted_pool.lower() != resolved_pool.lower()
+        ):
+            raise DataUnavailableError(
+                data_type="slippage_estimate",
+                instrument=instrument,
+                reason=f"Quote metadata does not match the resolved pool for protocol {protocol}",
+            )
+
+        pool_price = self._read_pool_price(resolved_pool, chain, protocol).value
+        zero_for_one = self._is_zero_for_one(
+            executable_token_in,
+            executable_token_out,
+            resolved_pool,
+            chain,
+            protocol,
+        )
+        if pool_price.price <= 0:
+            raise DataUnavailableError(
+                data_type="slippage_estimate",
+                instrument=resolved_pool,
+                reason="Quoted pool returned a non-positive spot price",
+            )
+        mid_price = pool_price.price if zero_for_one else Decimal(1) / pool_price.price
+        return _slippage_estimate_from_quote(
+            amount_in_human=amount_in_human,
+            amount_out_human=amount_out_human,
+            mid_price=mid_price,
+        )
+
+    @staticmethod
+    def _estimate_stable_quote(
+        *,
+        token_in: str,
+        token_out: str,
+        protocol: str,
+        requested_pool: str | None,
+        amount_in_human: Decimal,
+        amount_out_human: Decimal,
+        result: Any,
+    ) -> SlippageEstimate | None:
+        """Interpret a connector-vouched pegged-pair quote against parity."""
+        instrument = f"{token_in}/{token_out}"
+        quoted_pool = result.metadata.get("pool_address")
+        if not isinstance(quoted_pool, str):
+            raise DataUnavailableError(
+                data_type="slippage_estimate",
+                instrument=instrument,
+                reason=f"Stable quote for protocol {protocol} did not identify its pool",
+            )
+        if requested_pool is not None and quoted_pool.lower() != requested_pool.lower():
+            raise DataUnavailableError(
+                data_type="slippage_estimate",
+                instrument=instrument,
+                reason=f"Quoted route does not match requested pool {requested_pool}",
+            )
         return _slippage_estimate_from_stable_quote(
-            amount_in_human=amount,
+            amount_in_human=amount_in_human,
             amount_out_human=amount_out_human,
         )
 
@@ -1111,6 +1220,7 @@ class SlippageEstimator:
         amount: Decimal,
         chain: str,
         start_time: float,
+        source: str,
     ) -> DataEnvelope[SlippageEstimate]:
         """Wrap a swap-quote-derived estimate in an EXECUTION_GRADE envelope."""
         if estimate.effective_slippage_bps > self._high_slippage_threshold_bps:
@@ -1128,7 +1238,7 @@ class SlippageEstimator:
 
         latency_ms = int((time.monotonic() - start_time) * 1000)
         meta = DataMeta(
-            source=self._source_name,
+            source=source,
             observed_at=datetime.now(UTC),
             block_number=None,
             finality=DataFinality.LATEST,
@@ -1218,16 +1328,22 @@ class SlippageEstimator:
     def _is_tick_simulatable(self, protocol: str) -> bool:
         """True when the connector advertises concentrated tick liquidity.
 
-        The estimator's pool lane is the V3 tick-walk simulation; any other
-        pool-data capability is excluded so those protocols route through the
-        connector swap-quote fallback instead. Registries without a
-        capability accessor (e.g. the backtest null registry) predate the
-        interface and are all-v3 by construction.
+        Concentrated-liquidity quotes use the selected pool's spot price as
+        their reference. Unknown protocols and registries without the typed
+        capability contract fail closed.
         """
         from almanak.connectors._strategy_base.pool_data import PoolDataFacet
 
+        if self._pool_reader_registry is None:
+            return False
         supports = getattr(self._pool_reader_registry, "supports", None)
-        return supports is None or bool(supports(protocol, PoolDataFacet.TICK_LIQUIDITY))
+        supported = getattr(self._pool_reader_registry, "supported_protocols", None)
+        if not callable(supports) or supported is None or protocol.lower() not in supported:
+            return False
+        try:
+            return bool(supports(protocol, PoolDataFacet.TICK_LIQUIDITY))
+        except Exception:
+            return False
 
     def _resolve_pool(
         self,
@@ -1237,7 +1353,7 @@ class SlippageEstimator:
         protocol: str | None,
         fee_tier: int | None,
     ) -> str | None:
-        """Resolve a pool address for the given pair.
+        """Resolve the exact quoted pool for the given pair and discriminator.
 
         With an explicit ``fee_tier`` the exact pool for that discriminator is
         returned. With ``fee_tier=None`` (the default path) the deepest pool is
@@ -1245,11 +1361,9 @@ class SlippageEstimator:
         Uniswap-style DEXs, tick spacings for Aerodrome Slipstream — so a blind
         ``fee_tier=3000`` no longer wrongly fails tick-spacing-keyed pools.
 
-        Only tick-liquidity-capable protocols participate in resolution: the
-        estimator's downstream math is the V3 tick-walk simulation, and a
-        resolved non-slot0 pool (e.g. Curve, ``tick=None``) would be fed into
-        the tick reads INSTEAD of reaching the connector swap-quote fallback
-        (ALM-2896), which only engages when no pool resolves here.
+        Only tick-liquidity-capable protocols participate because this
+        resolution binds a concentrated-liquidity quote to the pool used for
+        its spot reference.
         """
         if self._pool_reader_registry is None:
             return None
@@ -1286,10 +1400,8 @@ class SlippageEstimator:
                 reason="No pool reader registry available",
             )
 
-        # Try all protocols for the chain. Same v3_slot0 gate as
-        # _resolve_pool: the returned PoolPrice feeds the tick-walk
-        # simulation, so a non-slot0 reader's envelope (tick=None) must
-        # never be served here even for an explicitly passed pool address.
+        # The spot reference must come from the same V3-compatible protocol as
+        # the executable quote.
         protocols = [protocol] if protocol else self._pool_reader_registry.protocols_for_chain(chain)
 
         for proto in protocols:
@@ -1386,7 +1498,7 @@ class SlippageEstimator:
         token resolver; any resolver failure (unknown token, no resolver wired,
         non-conforming ``None`` return) yields ``None`` so the caller fails
         honestly rather than guessing swap direction. Uses ``resolve_for_swap``
-        to match the swap-quote fallback wiring, which auto-wraps native tokens
+        to match the swap-quote wiring, which auto-wraps native tokens
         to their wrapped ERC-20 (the form the pool contract actually holds).
         """
         if token.startswith("0x") and len(token) == 42:

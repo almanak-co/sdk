@@ -94,6 +94,31 @@ CURVE_ADDRESSES: dict[str, dict[str, str]] = {
     },
 }
 
+# Only these reviewed pegged StableSwap pools may advertise a parity reference.
+# Exact-address and deployment-injected pool data remain the source of pool shape.
+_STABLE_PARITY_POOLS: dict[str, frozenset[str]] = {
+    "ethereum": frozenset(
+        {
+            "0xbEbc44782C7dB0a1A60Cb6fe97d0b483032FF1C7",  # 3pool
+            "0xDcEF968d416a41Cdac0ED8702fAC8128A64241A2",  # FRAX/USDC
+        }
+    ),
+    "arbitrum": frozenset({"0x7f90122BF0700F9E7e1F688fe926940E8839F353"}),  # 2pool
+    "base": frozenset({"0xf6C5F01C7F3148891ad0e19DF78743D31E390D1f"}),  # 4pool
+    "optimism": frozenset(
+        {
+            "0x1337BedC9D22ecbe766dF105c9623922A27963EC",  # 3pool
+            "0x03771e24b7C9172d163Bf447490B142a15be3485",  # crvUSD/USDC
+        }
+    ),
+    "polygon": frozenset({"0x5BC930b8f81F4cEEE3E3527159C3bDF453BcaAe9"}),  # frxUSD/USDT
+}
+# Lowercased lookup view: pool addresses compare case-insensitively on-chain,
+# so membership checks normalize both sides instead of relying on checksum case.
+_STABLE_PARITY_POOLS_LOWER: dict[str, frozenset[str]] = {
+    chain: frozenset(address.lower() for address in pools) for chain, pools in _STABLE_PARITY_POOLS.items()
+}
+
 # Conservative fallback floors when live gateway gas estimation is unavailable.
 # Limits are deliberately high because unused gas is refunded and under-sizing can OOG.
 CURVE_GAS_ESTIMATES: dict[str, int] = {
@@ -525,7 +550,10 @@ class CurveAdapter:
         self._force_is_ng = config.force_is_ng
 
         self.addresses = CURVE_ADDRESSES[self.chain]
-        self.pools = dict(config.permission_pool_overrides)
+        self.pools = {
+            name: self._with_curated_slippage_reference(pool_data)
+            for name, pool_data in config.permission_pool_overrides.items()
+        }
 
         if token_resolver is not None:
             self._token_resolver = token_resolver
@@ -540,6 +568,23 @@ class CurveAdapter:
         self._pool_refresh_cache: dict[str, PoolInfo] = {}
 
         logger.info(f"CurveAdapter initialized for chain={self.chain}, wallet={self.wallet_address[:10]}...")
+
+    def _with_curated_slippage_reference(self, pool_data: dict[str, Any]) -> dict[str, Any]:
+        annotated = dict(pool_data)
+        annotated.pop("slippage_reference", None)
+        address = str(annotated.get("address", "")).lower()
+        if str(
+            annotated.get("pool_type", "")
+        ).lower() == PoolType.STABLESWAP.value and address in _STABLE_PARITY_POOLS_LOWER.get(self.chain, frozenset()):
+            annotated["slippage_reference"] = "stable_parity"
+        return annotated
+
+    def _record_resolved_pool(self, pool_info: PoolInfo) -> None:
+        pool_data = self._with_curated_slippage_reference(pool_info.to_dict())
+        if pool_data.get("slippage_reference") != "stable_parity":
+            return
+        pool_data["virtual_price"] = pool_info.virtual_price
+        self.pools[f"resolved:{pool_info.address.lower()}"] = pool_data
 
     @staticmethod
     def _build_cold_start_pool_info(name: str, pool_data: dict[str, Any]) -> PoolInfo:
@@ -616,7 +661,9 @@ class CurveAdapter:
         """
         cached = self._pool_refresh_cache.get(pool_address.lower())
         if cached is not None:
-            return self._resolve_pool_info(cached, refresh=refresh)
+            resolved = self._resolve_pool_info(cached, refresh=refresh)
+            self._record_resolved_pool(resolved)
+            return resolved
 
         from almanak.connectors.curve.pool_resolver import resolve_pool_metadata
 
@@ -644,7 +691,9 @@ class CurveAdapter:
                 list(meta.base_pool_coin_addresses) if meta.base_pool_coin_addresses is not None else None
             ),
         )
-        return self._resolve_pool_info(cold_start, refresh=refresh)
+        resolved = self._resolve_pool_info(cold_start, refresh=refresh)
+        self._record_resolved_pool(resolved)
+        return resolved
 
     def get_pool_by_name(self, name: str, *, refresh: bool = True) -> PoolInfo | None:
         """Get pool info by name.

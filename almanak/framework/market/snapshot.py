@@ -5662,19 +5662,19 @@ class MarketSnapshot:
     ) -> DataEnvelope[SlippageEstimate]:
         """Estimate price impact and slippage for a potential swap.
 
-        Simulates the swap through tick ranges using actual on-chain liquidity.
+        Simulates the swap through the protocol's on-chain quoter.
 
         Args:
             token_in: Input token symbol or address.
             token_out: Output token symbol or address.
             amount: Amount of token_in to swap (human-readable units).
             chain: Chain name. Defaults to this snapshot's chain.
-            protocol: Protocol name. Auto-detected if None.
-            pool_address: Exact pool to simulate. Pass the same address used in
-                ``SwapIntent.swap_params["pool"]`` so the risk check and the
-                compiled swap cannot silently evaluate different pools.
-            fee_tier: Exact pool discriminator when ``pool_address`` is omitted.
-                Pass the same value used in ``SwapIntent.swap_params["fee_tier"]``.
+            protocol: Protocol name for quote dispatch. Required for live quotes;
+                omission fails closed because there is no execution route to bind.
+            pool_address: Optional exact pool binding. Pass the same address used
+                by execution so the risk check cannot evaluate a different pool.
+            fee_tier: Optional exact fee tier or protocol-specific pool
+                discriminator used by execution.
 
         Returns:
             DataEnvelope[SlippageEstimate] with price impact data.
@@ -5693,25 +5693,19 @@ class MarketSnapshot:
 
         target_chain = (chain or self._chain).lower()
         try:
-            # Preserve compatibility with pre-ALM-3223 estimator capabilities.
-            # Exact discriminators are opt-in; the legacy call shape remains
-            # valid when neither discriminator was requested.
-            if pool_address is None and fee_tier is None:
-                return self._slippage_estimator.estimate_slippage(
-                    token_in=token_in,
-                    token_out=token_out,
-                    amount=amount,
-                    chain=target_chain,
-                    protocol=protocol,
-                )
+            quote_kwargs: dict[str, Any] = {
+                "token_in": token_in,
+                "token_out": token_out,
+                "amount": amount,
+                "chain": target_chain,
+                "protocol": protocol,
+            }
+            if pool_address is not None:
+                quote_kwargs["pool_address"] = pool_address
+            if fee_tier is not None:
+                quote_kwargs["fee_tier"] = fee_tier
             return self._slippage_estimator.estimate_slippage(
-                token_in=token_in,
-                token_out=token_out,
-                amount=amount,
-                chain=target_chain,
-                protocol=protocol,
-                pool_address=pool_address,
-                fee_tier=fee_tier,
+                **quote_kwargs,
             )
         except SlippageEstimateUnavailableError:
             raise

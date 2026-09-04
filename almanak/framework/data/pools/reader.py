@@ -1560,6 +1560,11 @@ class PoolReaderRegistry:
             return facet in custom
         return POOL_DATA_REGISTRY.supports_from(protocol, facet, PoolDataSource.LIVE_PRICE_READER)
 
+    def pool_key_kind(self, protocol: str) -> str:
+        """Semantic type of the protocol's factory pool discriminator."""
+        spec = self._protocol_specs.get(protocol.lower())
+        return spec.pool_key_kind if spec is not None else "fee_tier"
+
     def protocols_for_chain(self, chain: str) -> list[str]:
         """List protocols whose reader can accept pools on a given chain.
 

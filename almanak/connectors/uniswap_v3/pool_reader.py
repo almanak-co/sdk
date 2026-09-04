@@ -93,6 +93,7 @@ AGNI_POOL_READER_SPEC = PoolReaderSpec(
         attribute="UniswapV3PoolPriceReader",
     ),
     get_pool_selector=V3_GET_POOL_SELECTOR,
+    candidate_pool_keys=(100, 500, 2500, 3000, 10000),
     # Same shared CLAMM probe: reverse-verification runs against Agni's own
     # factory, so the fork disambiguates from canonical V3 by provenance.
     identity_probe=ImportRef(

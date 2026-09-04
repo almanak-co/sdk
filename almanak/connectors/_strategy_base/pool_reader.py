@@ -100,6 +100,11 @@ class PoolReaderSpec:
         """Return canonical protocol plus any lookup aliases."""
         return (self.protocol, *self.aliases)
 
+    @property
+    def pool_key_kind(self) -> str:
+        """Return the wire-facing name of the typed pool discriminator."""
+        return self.discriminator_kind.value
+
     def factories_for(self, chain: str) -> tuple[str, ...]:
         """Every factory that may own this protocol's pools on ``chain``."""
         chain_lower = chain.lower()

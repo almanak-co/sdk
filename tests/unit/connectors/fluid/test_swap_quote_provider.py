@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from almanak.connectors._strategy_base.swap_quote_registry import (
+    SLIPPAGE_REFERENCE_UNSUPPORTED,
     SwapQuoteRequest,
     SwapQuoteUnavailable,
 )
@@ -96,6 +97,7 @@ class TestQuoteSwapSuccess:
         assert result.source == "fluid_dex_reserves_resolver"
         assert result.metadata["pool"] == POOL
         assert result.metadata["swap0to1"] is False
+        assert result.metadata["slippage_reference"] == SLIPPAGE_REFERENCE_UNSUPPORTED
         sdk.get_swap_quote.assert_called_once_with(POOL, False, 50_000_000)
 
     def test_sdk_constructed_with_ctx_transport(self):

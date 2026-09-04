@@ -6,6 +6,8 @@ from typing import ClassVar
 
 from almanak.connectors._base.types import ProtocolKind, ProtocolName
 from almanak.connectors._strategy_base.swap_quote_registry import (
+    SLIPPAGE_REFERENCE_UNSUPPORTED,
+    SLIPPAGE_REFERENCE_V3_SPOT,
     SwapQuoteCapability,
     SwapQuoteConnector,
     SwapQuoteRequest,
@@ -24,10 +26,11 @@ class AerodromeSwapQuoteConnector(SwapQuoteConnector, SwapQuoteCapability):
     """
 
     protocol: ClassVar[ProtocolName] = ProtocolName("aerodrome")
+    protocol_aliases: ClassVar[tuple[ProtocolName, ...]] = (ProtocolName("aerodrome_slipstream"),)
     kind: ClassVar[ProtocolKind] = ProtocolKind.LP
 
     def quote_swap(self, ctx, request: SwapQuoteRequest) -> SwapQuoteResult:
-        if request.protocol != "aerodrome":
+        if request.protocol not in {"aerodrome", "aerodrome_slipstream"}:
             raise SwapQuoteUnavailable(f"AerodromeSwapQuoteConnector cannot quote {request.protocol}")
 
         from almanak.connectors.aerodrome.adapter import AerodromeAdapter, AerodromeConfig
@@ -45,13 +48,18 @@ class AerodromeSwapQuoteConnector(SwapQuoteConnector, SwapQuoteCapability):
         )
         adapter = AerodromeAdapter(config, token_resolver=getattr(ctx, "token_resolver", None))
         stable = bool(request.extra.get("stable", False))
-        use_cl = (
+        use_cl = request.protocol == "aerodrome_slipstream" or (
             bool(request.extra["use_cl"])
             if "use_cl" in request.extra
             else any(deployment.swap_router for deployment in slipstream_lp_deployments(request.chain))
         )
         try:
-            tick_spacing = int(request.extra.get("tick_spacing", 100))
+            raw_tick_spacing = request.fee_tier if request.fee_tier is not None else request.extra.get("tick_spacing")
+            if use_cl and request.pool_address is None and raw_tick_spacing is None:
+                raise ValueError("Symbolic Aerodrome Slipstream quotes require tick spacing")
+            tick_spacing = 100 if raw_tick_spacing is None else int(raw_tick_spacing)
+            if tick_spacing <= 0:
+                raise ValueError(f"Invalid tick spacing {tick_spacing}")
             deployment = None
             if use_cl:
                 deployment, tick_spacing = _resolve_cl_venue(
@@ -70,10 +78,20 @@ class AerodromeSwapQuoteConnector(SwapQuoteConnector, SwapQuoteCapability):
         except Exception as exc:
             raise SwapQuoteUnavailable(f"Aerodrome quote unavailable: {exc}") from exc
 
-        metadata = {"stable": stable, "use_cl": use_cl, "tick_spacing": tick_spacing}
+        metadata: dict[str, bool | int | str] = {
+            "stable": stable,
+            "use_cl": use_cl,
+            "tick_spacing": tick_spacing,
+            "slippage_reference": SLIPPAGE_REFERENCE_V3_SPOT if use_cl else SLIPPAGE_REFERENCE_UNSUPPORTED,
+        }
+        if use_cl:
+            metadata["pool_key"] = tick_spacing
+            metadata["pool_key_kind"] = "tick_spacing"
         if deployment is not None:
             metadata["slipstream_deployment"] = deployment.generation
             metadata["quoter"] = deployment.quoter
+        if request.pool_address is not None:
+            metadata["pool_address"] = request.pool_address
         return SwapQuoteResult(
             amount_out=amount_out,
             source="aerodrome_cl_quoter" if use_cl else "aerodrome_router_getAmountsOut",

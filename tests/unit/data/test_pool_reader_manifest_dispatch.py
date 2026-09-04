@@ -16,7 +16,7 @@ import pytest
 import almanak.framework.data.pools.reader as reader_module
 from almanak.connectors._connector import ImportRef
 from almanak.connectors._strategy_base.pool_data import PoolDataFacet
-from almanak.connectors._strategy_base.pool_reader import PoolReaderSpec
+from almanak.connectors._strategy_base.pool_reader import PoolDiscriminatorKind, PoolReaderSpec
 from almanak.connectors._strategy_pool_reader_registry import POOL_READER_REGISTRY
 from almanak.framework.data.pools.reader import (
     CurvePoolReader,
@@ -126,6 +126,20 @@ def test_registry_capability_accessor() -> None:
     assert registry.supports("customswap", PoolDataFacet.TICK_LIQUIDITY)
     registry.register_protocol("customcurve", CurvePoolReader, supported_facets=())
     assert not registry.supports("customcurve", PoolDataFacet.TICK_LIQUIDITY)
+
+
+def test_registry_pool_key_kind_accessor_uses_typed_discriminator() -> None:
+    registry = PoolReaderRegistry(rpc_call=_noop_rpc)
+    uniswap = POOL_READER_REGISTRY.require("uniswap_v3")
+    slipstream = POOL_READER_REGISTRY.require("aerodrome_slipstream")
+    assert uniswap.discriminator_kind is PoolDiscriminatorKind.FEE_TIER
+    assert slipstream.discriminator_kind is PoolDiscriminatorKind.TICK_SPACING
+    assert uniswap.pool_key_kind == uniswap.discriminator_kind.value
+    assert slipstream.pool_key_kind == slipstream.discriminator_kind.value
+    assert registry.pool_key_kind("uniswap_v3") == "fee_tier"
+    assert registry.pool_key_kind("aerodrome_slipstream") == "tick_spacing"
+    registry.register_protocol("customswap", UniswapV3PoolPriceReader)
+    assert registry.pool_key_kind("customswap") == "fee_tier"
 
 
 def test_curve_dispatches_via_connector_binding() -> None:

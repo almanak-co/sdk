@@ -6,6 +6,7 @@ from typing import ClassVar
 
 from almanak.connectors._base.types import ProtocolKind, ProtocolName
 from almanak.connectors._strategy_base.swap_quote_registry import (
+    SLIPPAGE_REFERENCE_UNSUPPORTED,
     SwapQuoteCapability,
     SwapQuoteConnector,
     SwapQuoteRequest,
@@ -47,7 +48,7 @@ class UniswapV4SwapQuoteConnector(SwapQuoteConnector, SwapQuoteCapability):
             amount_out=quote.amount_out,
             gas_estimate=quote.gas_estimate,
             source="uniswap_v4_quoter",
-            metadata={"fee_tier": quote.fee_tier},
+            metadata={"fee_tier": quote.fee_tier, "slippage_reference": SLIPPAGE_REFERENCE_UNSUPPORTED},
         )
 
 

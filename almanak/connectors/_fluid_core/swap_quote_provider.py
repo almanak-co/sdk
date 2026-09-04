@@ -6,6 +6,7 @@ from typing import ClassVar
 
 from almanak.connectors._base.types import ProtocolKind, ProtocolName
 from almanak.connectors._strategy_base.swap_quote_registry import (
+    SLIPPAGE_REFERENCE_UNSUPPORTED,
     SwapQuoteCapability,
     SwapQuoteConnector,
     SwapQuoteRequest,
@@ -61,6 +62,7 @@ class FluidSwapQuoteConnector(SwapQuoteConnector, SwapQuoteCapability):
             metadata={
                 "pool": pool_address,
                 "swap0to1": swap0to1,
+                "slippage_reference": SLIPPAGE_REFERENCE_UNSUPPORTED,
             },
         )
 

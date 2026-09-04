@@ -1,4 +1,4 @@
-"""ALM-2896: SlippageEstimator AMM/stableswap fallback via connector swap quote.
+"""SlippageEstimator routing through connector-owned executable quotes.
 
 A Curve 2crv LP strategy gates LP_OPEN on ``market.estimate_slippage(..., protocol="curve")``
 and fails closed (permanent HOLD) when it raises. Curve has no V3 tick reader, so the
@@ -7,7 +7,7 @@ V3-only estimator could never produce an estimate. These tests pin:
 1. The pre-fix failure on the no-quote-wiring path (regression guard).
 2. The fix: a registered connector swap quoter yields a usable SlippageEstimate.
 3. Fail-loud preserved: a failing/absent quoter does NOT fabricate zero slippage.
-4. The V3 path is untouched (the quote fallback is not consulted when a V3 pool resolves).
+4. Concentrated-liquidity estimates use quotes without loading tick depth.
 """
 
 from __future__ import annotations
@@ -16,6 +16,11 @@ from decimal import Decimal
 
 import pytest
 
+from almanak.connectors._strategy_base.swap_quote_registry import (
+    SLIPPAGE_REFERENCE_STABLE_PARITY,
+    SLIPPAGE_REFERENCE_UNSUPPORTED,
+    SLIPPAGE_REFERENCE_V3_SPOT,
+)
 from almanak.framework.data.exceptions import DataUnavailableError
 from almanak.framework.data.pools.liquidity import (
     LiquidityDepthReader,
@@ -39,7 +44,10 @@ class _StubTokenResolver:
 
     _MAP = {
         "USDC.E": ("0xff970a61a04b1ca14834a43f5de4533ebddb5cc8", 6),
+        "USDC": ("0xaf88d065e77c8cc2239327c5edb3a432268e5831", 6),
         "USDT": ("0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9", 6),
+        "WETH": ("0x82af49447d8a07e3bd95bd0d56f35241523fbab1", 18),
+        "ETH": ("0x82af49447d8a07e3bd95bd0d56f35241523fbab1", 18),
     }
 
     def resolve_for_swap(self, token: str, chain: str) -> _StubResolved:  # noqa: ARG002
@@ -48,10 +56,10 @@ class _StubTokenResolver:
 
 
 class _FakeQuoteResult:
-    def __init__(self, amount_out: int) -> None:
+    def __init__(self, amount_out: int, *, metadata: dict | None = None) -> None:
         self.amount_out = amount_out
         self.source = "fake"
-        self.metadata: dict = {}
+        self.metadata = {} if metadata is None else metadata
 
 
 class _FakeSwapQuoteRegistry:
@@ -62,12 +70,14 @@ class _FakeSwapQuoteRegistry:
         self._result = result
         self._raises = raises
         self.call_count = 0
+        self.last_request = None
 
     def get(self, protocol: str):  # noqa: ARG002
         return object() if self._registered else None
 
     def quote_swap(self, ctx, request):  # noqa: ARG002
         self.call_count += 1
+        self.last_request = request
         if self._raises is not None:
             raise self._raises
         return self._result
@@ -80,6 +90,18 @@ _CURVE = {
     "chain": "arbitrum",
     "protocol": "curve",
 }
+_CURVE_POOL = "0x7f90122BF0700F9E7e1F688fe926940E8839F353"
+
+
+def _stable_curve_quote(amount_out: int) -> _FakeQuoteResult:
+    return _FakeQuoteResult(
+        amount_out=amount_out,
+        metadata={
+            "pool_address": _CURVE_POOL,
+            "pool_type": "stableswap",
+            "slippage_reference": SLIPPAGE_REFERENCE_STABLE_PARITY,
+        },
+    )
 
 
 class _StubRegistryTokenResolver:
@@ -129,7 +151,7 @@ def test_curve_without_quote_wiring_raises_unavailable():
 
 def test_curve_with_quote_fallback_returns_estimate():
     """5 USDC.e -> 4.995 USDT (6 dec) => 10 bps impact, finite slippage."""
-    registry = _FakeSwapQuoteRegistry(registered=True, result=_FakeQuoteResult(amount_out=4_995_000))
+    registry = _FakeSwapQuoteRegistry(registered=True, result=_stable_curve_quote(4_995_000))
     est = _estimator(
         swap_quote_registry=registry,
         quote_ctx=object(),
@@ -164,7 +186,7 @@ def test_curve_catalog_free_resolution_uses_quote_fallback():
     curve_reader = pool_registry.get_reader("arbitrum", "curve")
     assert curve_reader.resolve_pool_address("USDC.e", "USDT", "arbitrum") is None
 
-    quote_registry = _FakeSwapQuoteRegistry(registered=True, result=_FakeQuoteResult(amount_out=4_995_000))
+    quote_registry = _FakeSwapQuoteRegistry(registered=True, result=_stable_curve_quote(4_995_000))
     est = _estimator(
         swap_quote_registry=quote_registry,
         quote_ctx=object(),
@@ -197,7 +219,7 @@ def test_protocol_sweep_never_returns_non_v3_pool():
 
 def test_favourable_quote_floored_at_zero_impact():
     """exec_price > 1 (got more than 1:1) reports zero impact, not negative."""
-    registry = _FakeSwapQuoteRegistry(registered=True, result=_FakeQuoteResult(amount_out=5_001_000))
+    registry = _FakeSwapQuoteRegistry(registered=True, result=_stable_curve_quote(5_001_000))
     est = _estimator(
         swap_quote_registry=registry,
         quote_ctx=object(),
@@ -261,7 +283,7 @@ def test_unresolvable_token_declines_fallback():
 def test_non_stable_rate_declines_fallback():
     """A wildly off rate (non-stable pool) is not modelled with a 1.0 mid -> raises."""
     # 5 token_in -> 0.0001 token_out (rate 0.00002) is outside the stable band.
-    registry = _FakeSwapQuoteRegistry(registered=True, result=_FakeQuoteResult(amount_out=100))
+    registry = _FakeSwapQuoteRegistry(registered=True, result=_stable_curve_quote(100))
     est = _estimator(
         swap_quote_registry=registry,
         quote_ctx=object(),
@@ -271,31 +293,300 @@ def test_non_stable_rate_declines_fallback():
         est.estimate_slippage(**_CURVE)
 
 
-# ---------------------------------------------------------------------------
-# 4. V3 path untouched — the quote fallback is not consulted for V3 protocols
-# ---------------------------------------------------------------------------
-
-
-def test_v3_path_does_not_consult_quote_fallback(monkeypatch):
-    """When a V3 pool resolves, the quote registry is never called."""
-    registry = _FakeSwapQuoteRegistry(registered=True, result=_FakeQuoteResult(amount_out=4_995_000))
+@pytest.mark.parametrize("protocol", ["uniswap_v4", "fluid", "aerodrome"])
+def test_in_band_quote_without_safe_reference_fails_closed(protocol: str):
+    """A near-parity execution rate is not proof that an arbitrary AMM is stable."""
+    registry = _FakeSwapQuoteRegistry(
+        registered=True,
+        result=_FakeQuoteResult(
+            amount_out=4_995_000,
+            metadata={"slippage_reference": SLIPPAGE_REFERENCE_UNSUPPORTED},
+        ),
+    )
     est = _estimator(
         swap_quote_registry=registry,
         quote_ctx=object(),
         token_resolver=_StubTokenResolver(),
     )
 
-    # Force _resolve_pool to return a pool so the V3 branch is taken; then make
-    # _read_pool_price raise so we stay off the network but still prove the
-    # quote fallback was never reached (call_count stays 0).
-    monkeypatch.setattr(est, "_resolve_pool", lambda *a, **k: "0xpool")
+    with pytest.raises(DataUnavailableError, match="supported slippage reference"):
+        est.estimate_slippage(**(_CURVE | {"protocol": protocol}))
 
-    with pytest.raises(DataUnavailableError):
+
+def test_missing_slippage_reference_fails_closed():
+    registry = _FakeSwapQuoteRegistry(
+        registered=True,
+        result=_FakeQuoteResult(amount_out=4_995_000),
+    )
+    est = _estimator(
+        swap_quote_registry=registry,
+        quote_ctx=object(),
+        token_resolver=_StubTokenResolver(),
+    )
+
+    with pytest.raises(DataUnavailableError, match="supported slippage reference"):
+        est.estimate_slippage(**_CURVE)
+
+
+# ---------------------------------------------------------------------------
+# 4. Concentrated-liquidity quotes bypass tick loading
+# ---------------------------------------------------------------------------
+
+
+def test_v3_quote_bypasses_tick_depth_and_preserves_exact_route(monkeypatch):
+    """A pinned V3 quote uses executable output without loading any ticks."""
+    from datetime import UTC, datetime
+
+    from almanak.framework.data.models import DataClassification, DataEnvelope, DataMeta
+    from almanak.framework.data.pools.reader import PoolPrice
+
+    pool = "0x1111111111111111111111111111111111111111"
+    registry = _FakeSwapQuoteRegistry(
+        registered=True,
+        result=_FakeQuoteResult(
+            amount_out=499_000_000_000_000,
+            metadata={
+                "fee_tier": 500,
+                "pool_address": pool,
+                "pool_key": 500,
+                "pool_key_kind": "fee_tier",
+                "slippage_reference": SLIPPAGE_REFERENCE_V3_SPOT,
+            },
+        ),
+    )
+    est = _estimator(
+        swap_quote_registry=registry,
+        quote_ctx=object(),
+        token_resolver=_StubTokenResolver(),
+    )
+    monkeypatch.setattr(est, "_resolve_pool", lambda *a, **k: pool)
+    monkeypatch.setattr(est, "_is_zero_for_one", lambda *a, **k: True)
+    monkeypatch.setattr(
+        est,
+        "_read_pool_price",
+        lambda *a, **k: DataEnvelope(
+            value=PoolPrice(
+                price=Decimal("0.0005"),
+                tick=0,
+                liquidity=10**18,
+                fee_tier=500,
+                block_number=1,
+                timestamp=datetime.now(UTC),
+                pool_address=pool,
+                token0_decimals=6,
+                token1_decimals=18,
+            ),
+            meta=DataMeta(source="test", observed_at=datetime.now(UTC), finality="latest"),
+            classification=DataClassification.EXECUTION_GRADE,
+        ),
+    )
+    monkeypatch.setattr(
+        est._liquidity_reader,
+        "read_liquidity_depth",
+        lambda **kwargs: pytest.fail(f"tick depth must not be read: {kwargs}"),
+    )
+
+    envelope = est.estimate_slippage(
+        token_in="USDC",
+        token_out="WETH",
+        amount=Decimal("1"),
+        chain="arbitrum",
+        protocol="uniswap_v3",
+        pool_address=pool,
+        fee_tier=500,
+    )
+
+    assert registry.call_count == 1
+    assert registry.last_request.pool_address == pool
+    assert registry.last_request.fee_tier == 500
+    assert envelope.value.expected_price == Decimal("0.000499")
+    assert envelope.value.effective_slippage_bps == 20
+    assert envelope.meta.source == "fake"
+
+
+def test_v3_quote_metadata_pool_mismatch_fails_before_spot_read(monkeypatch):
+    requested_pool = "0x1111111111111111111111111111111111111111"
+    quoted_pool = "0x2222222222222222222222222222222222222222"
+    registry = _FakeSwapQuoteRegistry(
+        registered=True,
+        result=_FakeQuoteResult(
+            amount_out=499_000_000_000_000,
+            metadata={
+                "pool_address": quoted_pool,
+                "pool_key": 500,
+                "pool_key_kind": "fee_tier",
+                "slippage_reference": SLIPPAGE_REFERENCE_V3_SPOT,
+            },
+        ),
+    )
+    est = _estimator(
+        swap_quote_registry=registry,
+        quote_ctx=object(),
+        token_resolver=_StubTokenResolver(),
+    )
+    monkeypatch.setattr(est, "_resolve_pool", lambda *args, **kwargs: requested_pool)
+    monkeypatch.setattr(
+        est,
+        "_read_pool_price",
+        lambda *args, **kwargs: pytest.fail("spot must not be read for a mismatched route"),
+    )
+
+    with pytest.raises(DataUnavailableError, match="metadata does not match"):
         est.estimate_slippage(
             token_in="USDC",
             token_out="WETH",
             amount=Decimal("1"),
             chain="arbitrum",
             protocol="uniswap_v3",
+            pool_address=requested_pool,
+            fee_tier=500,
         )
-    assert registry.call_count == 0
+
+
+def test_v3_quote_discriminator_mismatch_fails_before_pool_resolution(monkeypatch):
+    pool = "0x1111111111111111111111111111111111111111"
+    registry = _FakeSwapQuoteRegistry(
+        registered=True,
+        result=_FakeQuoteResult(
+            amount_out=499_000_000_000_000,
+            metadata={
+                "pool_address": pool,
+                "pool_key": 3000,
+                "pool_key_kind": "fee_tier",
+                "slippage_reference": SLIPPAGE_REFERENCE_V3_SPOT,
+            },
+        ),
+    )
+    est = _estimator(
+        swap_quote_registry=registry,
+        quote_ctx=object(),
+        token_resolver=_StubTokenResolver(),
+    )
+    monkeypatch.setattr(
+        est,
+        "_resolve_pool",
+        lambda *args, **kwargs: pytest.fail("pool must not resolve for a mismatched discriminator"),
+    )
+
+    with pytest.raises(DataUnavailableError, match="does not match requested fee_tier 500"):
+        est.estimate_slippage(
+            token_in="USDC",
+            token_out="WETH",
+            amount=Decimal("1"),
+            chain="arbitrum",
+            protocol="uniswap_v3",
+            pool_address=pool,
+            fee_tier=500,
+        )
+
+
+def test_v3_quote_discriminator_kind_mismatch_fails_closed(monkeypatch):
+    registry = _FakeSwapQuoteRegistry(
+        registered=True,
+        result=_FakeQuoteResult(
+            amount_out=499_000_000_000_000,
+            metadata={
+                "pool_key": 500,
+                "pool_key_kind": "tick_spacing",
+                "slippage_reference": SLIPPAGE_REFERENCE_V3_SPOT,
+            },
+        ),
+    )
+    est = _estimator(
+        swap_quote_registry=registry,
+        quote_ctx=object(),
+        token_resolver=_StubTokenResolver(),
+    )
+    monkeypatch.setattr(
+        est,
+        "_resolve_pool",
+        lambda *args, **kwargs: pytest.fail("pool must not resolve for a mismatched discriminator kind"),
+    )
+
+    with pytest.raises(DataUnavailableError, match="expected 'fee_tier'"):
+        est.estimate_slippage(
+            token_in="USDC",
+            token_out="WETH",
+            amount=Decimal("1"),
+            chain="arbitrum",
+            protocol="uniswap_v3",
+            fee_tier=500,
+        )
+
+
+def test_v3_native_input_uses_wrapped_address_and_reverse_spot(monkeypatch):
+    from datetime import UTC, datetime
+
+    from almanak.framework.data.models import DataClassification, DataEnvelope, DataMeta
+    from almanak.framework.data.pools.reader import PoolPrice
+
+    pool = "0x1111111111111111111111111111111111111111"
+    registry = _FakeSwapQuoteRegistry(
+        registered=True,
+        result=_FakeQuoteResult(
+            amount_out=1_998_000_000,
+            metadata={
+                "pool_address": pool,
+                "pool_key": 500,
+                "pool_key_kind": "fee_tier",
+                "slippage_reference": SLIPPAGE_REFERENCE_V3_SPOT,
+            },
+        ),
+    )
+    est = _estimator(
+        swap_quote_registry=registry,
+        quote_ctx=object(),
+        token_resolver=_StubTokenResolver(),
+    )
+    resolved_pairs: list[tuple[str, str]] = []
+    direction_pairs: list[tuple[str, str]] = []
+
+    def resolve_pool(token_in, token_out, *args):
+        resolved_pairs.append((token_in, token_out))
+        return pool
+
+    def is_zero_for_one(token_in, token_out, *args):
+        direction_pairs.append((token_in, token_out))
+        return False
+
+    monkeypatch.setattr(est, "_resolve_pool", resolve_pool)
+    monkeypatch.setattr(est, "_is_zero_for_one", is_zero_for_one)
+    monkeypatch.setattr(
+        est,
+        "_read_pool_price",
+        lambda *args, **kwargs: DataEnvelope(
+            value=PoolPrice(
+                price=Decimal("0.0005"),
+                tick=0,
+                liquidity=10**18,
+                fee_tier=500,
+                block_number=1,
+                timestamp=datetime.now(UTC),
+                pool_address=pool,
+                token0_decimals=6,
+                token1_decimals=18,
+            ),
+            meta=DataMeta(source="test", observed_at=datetime.now(UTC), finality="latest"),
+            classification=DataClassification.EXECUTION_GRADE,
+        ),
+    )
+
+    envelope = est.estimate_slippage(
+        token_in="ETH",
+        token_out="USDC",
+        amount=Decimal("1"),
+        chain="arbitrum",
+        protocol="uniswap_v3",
+        pool_address=pool,
+        fee_tier=500,
+    )
+
+    executable_pair = (
+        _StubTokenResolver._MAP["WETH"][0],
+        _StubTokenResolver._MAP["USDC"][0],
+    )
+    assert resolved_pairs == [executable_pair]
+    assert direction_pairs == [executable_pair]
+    assert registry.last_request.token_in == executable_pair[0]
+    assert envelope.value.expected_price == Decimal("1998")
+    assert envelope.value.effective_slippage_bps == 10
