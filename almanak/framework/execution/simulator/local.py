@@ -183,7 +183,6 @@ class LocalSimulator(Simulator):
             name: Identifier for this simulator instance (default: "local")
         """
         self._rpc_url = rpc_url
-        self._gas_buffer = gas_buffer
         self._name = name
         self._web3: AsyncWeb3 | None = None
 

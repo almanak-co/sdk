@@ -466,7 +466,6 @@ class RateHistoryReader:
     ) -> None:
         self._cache = cache or VersionedDataCache(data_type="rate_history")
         self._request_timeout = request_timeout
-        self._thegraph_api_key = thegraph_api_key
         # Pre-W7 metrics surface preserved for operators that key on the
         # provider name. The new dispatcher only emits "gateway" and
         # "cache" categories, but the legacy keys exist as zeros so

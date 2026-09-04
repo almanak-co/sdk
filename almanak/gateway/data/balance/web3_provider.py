@@ -438,7 +438,6 @@ class Web3BalanceProvider:
             max_attempts=max(1, block_lag_max_retries),
             initial_delay_seconds=retry_delay,
         )
-        self._block_lag_max_retries = self._block_lag_retry_policy.max_attempts
 
         # Initialize Web3 with async HTTP provider
         # Use certifi SSL context to avoid macOS system-cert issues (e.g. xlayer public RPC)

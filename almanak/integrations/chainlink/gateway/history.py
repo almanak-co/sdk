@@ -93,7 +93,6 @@ class ChainlinkHistoryReader:
         self._batch_size = min(batch_size, max_scanned_rounds)
         self._request_timeout_seconds = request_timeout_seconds
         self._history_timeout_seconds = history_timeout_seconds
-        self._rpc_retries = rpc_retries
         self._rpc_retry_policy = RetryPolicy(
             max_attempts=rpc_retries + 1,
             initial_delay_seconds=0.1,

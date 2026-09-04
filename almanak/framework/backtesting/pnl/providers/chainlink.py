@@ -270,7 +270,6 @@ class ChainlinkDataProvider:
         self._cache = PriceCache(max(cache_ttl_seconds, 0))
         self._archive_access_verified = False
         self._has_archive_access = False
-        self._price_feeds = CHAINLINK_PRICE_FEEDS[self._chain]
         self._load_persistent_cache()
 
     @property
