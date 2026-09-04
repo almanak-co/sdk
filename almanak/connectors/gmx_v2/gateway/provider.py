@@ -11,8 +11,9 @@ and truthfully reports the completed observation as historical rather than
 pretending it is realtime. The gateway servicer contributes its shared HTTP
 session and premium RPC-backed market verification; the connector owns GMX
 identity and rate semantics.
-The complete ``getMarketInfo`` ABI remains here for the separate on-chain
-audit surface and is pinned by ``tests/audit/test_gmx_v2_funding_reader_abi.py``.
+The exported ``getMarketInfo`` ABI remains available for direct on-chain calls;
+``tests/audit/test_gmx_v2_funding_reader_abi.py`` checks selected field
+positions against live readers.
 
 W1 (VIB-4853) adds:
 
@@ -61,13 +62,9 @@ from ..addresses import GMX_V2
 
 logger = logging.getLogger(__name__)
 
-# ``Reader.getMarketInfo`` ABI. The output struct must be declared in FULL:
-# eth-abi decodes strictly, so a partial ``MarketInfo`` (the pre-consolidation
-# gateway copy declared 9 words; every deployed reader returns 29) raises
-# ``BadFunctionCallOutput`` on each call — which the fetch's broad exception
-# handler converts into a permanent, silent default-rate fallback. Layout is
-# pinned against the live readers by
-# ``tests/audit/test_gmx_v2_funding_reader_abi.py``.
+# Public module ABI for direct ``Reader.getMarketInfo`` calls, with the complete
+# currently documented output. The live-reader audit verifies selected fields
+# still decode at their expected positions on each supported deployment.
 _GMX_COLLATERAL_TYPE = [
     {"name": "longToken", "type": "uint256"},
     {"name": "shortToken", "type": "uint256"},
