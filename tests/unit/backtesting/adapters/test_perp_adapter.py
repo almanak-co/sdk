@@ -24,10 +24,6 @@ from almanak.framework.backtesting.pnl.portfolio import (
     SimulatedPosition,
 )
 
-# =============================================================================
-# Mock Classes
-# =============================================================================
-
 
 @dataclass
 class MockMarketState:
@@ -90,11 +86,6 @@ def create_perp_short_position(
     )
 
 
-# =============================================================================
-# PerpBacktestConfig Tests
-# =============================================================================
-
-
 class TestPerpBacktestConfig:
     """Tests for PerpBacktestConfig."""
 
@@ -154,15 +145,12 @@ class TestPerpBacktestConfig:
 
     def test_invalid_margin_ratios(self) -> None:
         """Test validation rejects invalid margin ratios."""
-        # Zero initial margin
         with pytest.raises(ValueError, match="initial_margin_ratio must be > 0"):
             PerpBacktestConfig(strategy_type="perp", initial_margin_ratio=Decimal("0"))
 
-        # Zero maintenance margin
         with pytest.raises(ValueError, match="maintenance_margin_ratio must be > 0"):
             PerpBacktestConfig(strategy_type="perp", maintenance_margin_ratio=Decimal("0"))
 
-        # Maintenance > Initial
         with pytest.raises(ValueError, match="maintenance_margin_ratio .* cannot exceed"):
             PerpBacktestConfig(
                 strategy_type="perp",
@@ -217,11 +205,6 @@ class TestPerpBacktestConfig:
         assert restored.liquidation_penalty == original.liquidation_penalty
 
 
-# =============================================================================
-# Funding Accumulation Tests
-# =============================================================================
-
-
 class TestFundingAccumulationOverTime:
     """Tests for funding accumulation over multiple update_position calls."""
 
@@ -251,7 +234,6 @@ class TestFundingAccumulationOverTime:
 
         market = MockMarketState(prices={"ETH": Decimal("2000")})
 
-        # Simulate 24 hourly updates
         for _ in range(24):
             adapter.update_position(position, market, elapsed_seconds=3600)
 
@@ -290,7 +272,6 @@ class TestFundingAccumulationOverTime:
 
         market = MockMarketState(prices={"ETH": Decimal("2000")})
 
-        # Simulate 24 hourly updates
         for _ in range(24):
             adapter.update_position(position, market, elapsed_seconds=3600)
 
@@ -321,7 +302,6 @@ class TestFundingAccumulationOverTime:
 
         market = MockMarketState(prices={"ETH": Decimal("2000")})
 
-        # Simulate 12 hours of updates (every 30 minutes)
         for _ in range(24):
             adapter.update_position(position, market, elapsed_seconds=1800)
 
@@ -349,7 +329,6 @@ class TestFundingAccumulationOverTime:
 
         market = MockMarketState(prices={"ETH": Decimal("2000")})
 
-        # Simulate 24 hours in 4-hour increments
         for _ in range(6):
             adapter.update_position(position, market, elapsed_seconds=14400)
 
@@ -378,9 +357,8 @@ class TestFundingAccumulationOverTime:
 
         market = MockMarketState(prices={"BTC": Decimal("40000")})
 
-        # Simulate 7 days with 4-hour intervals
-        for _ in range(7 * 6):  # 42 updates
-            adapter.update_position(position, market, elapsed_seconds=14400)  # 4 hours
+        for _ in range(7 * 6):
+            adapter.update_position(position, market, elapsed_seconds=14400)
 
         # Expected: $100,000 * 0.0001 * 168 hours = $1,680
         expected_funding = Decimal("100000") * Decimal("0.0001") * Decimal("168")
@@ -406,7 +384,6 @@ class TestFundingAccumulationOverTime:
 
         market = MockMarketState(prices={"ETH": Decimal("2000")})
 
-        # Simulate 12 hours
         for _ in range(12):
             adapter.update_position(position, market, elapsed_seconds=3600)
 
@@ -433,7 +410,6 @@ class TestFundingAccumulationOverTime:
 
         adapter.update_position(position, market, elapsed_seconds=86400)
 
-        # No funding should be applied
         assert position.accumulated_funding == Decimal("0")
         assert position.cumulative_funding_paid == Decimal("0")
         assert position.cumulative_funding_received == Decimal("0")
@@ -516,11 +492,6 @@ class TestFundingAccumulationOverTime:
         assert source == "fallback:no_data"
 
 
-# =============================================================================
-# Liquidation Tests
-# =============================================================================
-
-
 class TestLiquidationTriggeredByPriceMove:
     """Tests for liquidation triggered by adverse price moves."""
 
@@ -549,11 +520,9 @@ class TestLiquidationTriggeredByPriceMove:
             entry_time=entry_time,
         )
 
-        # Verify liquidation price is set
         assert position.liquidation_price is not None
         liq_price = position.liquidation_price
 
-        # Price drops below liquidation
         crash_price = liq_price - Decimal("100")
         crash_time = entry_time + timedelta(hours=24)
 
@@ -563,7 +532,6 @@ class TestLiquidationTriggeredByPriceMove:
             timestamp=crash_time,
         )
 
-        # Liquidation should have occurred
         assert event is not None
         assert position.is_liquidated is True
         assert event.position_id == position.position_id
@@ -596,11 +564,9 @@ class TestLiquidationTriggeredByPriceMove:
             entry_time=entry_time,
         )
 
-        # Verify liquidation price is set
         assert position.liquidation_price is not None
         liq_price = position.liquidation_price
 
-        # Price rises above liquidation
         pump_price = liq_price + Decimal("100")
         pump_time = entry_time + timedelta(hours=24)
 
@@ -610,7 +576,6 @@ class TestLiquidationTriggeredByPriceMove:
             timestamp=pump_time,
         )
 
-        # Liquidation should have occurred
         assert event is not None
         assert position.is_liquidated is True
         assert event.position_id == position.position_id
@@ -636,7 +601,6 @@ class TestLiquidationTriggeredByPriceMove:
         liq_price = position.liquidation_price
         assert liq_price is not None
 
-        # Price drops but stays above liquidation
         safe_price = liq_price + Decimal("100")
         check_time = entry_time + timedelta(hours=24)
 
@@ -668,7 +632,6 @@ class TestLiquidationTriggeredByPriceMove:
         liq_price = position.liquidation_price
         assert liq_price is not None
 
-        # Price rises but stays below liquidation
         safe_price = liq_price - Decimal("100")
         check_time = entry_time + timedelta(hours=24)
 
@@ -702,7 +665,6 @@ class TestLiquidationTriggeredByPriceMove:
             timestamp=entry_time + timedelta(hours=1),
         )
 
-        # Should be liquidated at exact price
         assert event is not None
         assert position.is_liquidated is True
 
@@ -725,7 +687,6 @@ class TestLiquidationTriggeredByPriceMove:
         liq_price = position.liquidation_price
         assert liq_price is not None
 
-        # Price crashes below liquidation
         crash_price = liq_price - Decimal("500")
 
         event = adapter.check_and_simulate_liquidation(
@@ -734,7 +695,6 @@ class TestLiquidationTriggeredByPriceMove:
             timestamp=entry_time + timedelta(hours=24),
         )
 
-        # No liquidation because disabled
         assert event is None
         assert position.is_liquidated is False
 
@@ -745,7 +705,6 @@ class TestLiquidationTriggeredByPriceMove:
         entry_time = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
         position = create_perp_long_position(entry_time=entry_time)
 
-        # Manually mark as liquidated
         position.is_liquidated = True
 
         event = adapter.check_and_simulate_liquidation(
@@ -776,7 +735,6 @@ class TestLiquidationTriggeredByPriceMove:
         liq_price = position.liquidation_price
         assert liq_price is not None
 
-        # Trigger liquidation
         event = adapter.check_and_simulate_liquidation(
             position=position,
             current_price=liq_price - Decimal("100"),
@@ -787,7 +745,6 @@ class TestLiquidationTriggeredByPriceMove:
         assert position.is_liquidated is True
 
         # Collateral should be reduced due to penalty
-        # Metadata should contain penalty info
         assert "liquidation_penalty" in position.metadata
 
     def test_liquidation_with_high_leverage(self) -> None:
@@ -810,7 +767,6 @@ class TestLiquidationTriggeredByPriceMove:
         assert liq_price > Decimal("1800")
         assert liq_price < Decimal("2000")
 
-        # Price drops just below liquidation
         event = adapter.check_and_simulate_liquidation(
             position=position,
             current_price=liq_price - Decimal("50"),
@@ -852,11 +808,6 @@ class TestLiquidationTriggeredByPriceMove:
         assert event.loss_usd > Decimal("0")
 
 
-# =============================================================================
-# Position Valuation Tests
-# =============================================================================
-
-
 class TestPositionValuation:
     """Tests for position valuation including unrealized PnL and funding."""
 
@@ -872,7 +823,6 @@ class TestPositionValuation:
             entry_time=entry_time,
         )
 
-        # Price increases 10%
         market = MockMarketState(prices={"ETH": Decimal("2200")})
 
         value = adapter.value_position(position, market)
@@ -894,7 +844,6 @@ class TestPositionValuation:
             entry_time=entry_time,
         )
 
-        # Price decreases 10%
         market = MockMarketState(prices={"ETH": Decimal("1800")})
 
         value = adapter.value_position(position, market)
@@ -916,7 +865,6 @@ class TestPositionValuation:
             entry_time=entry_time,
         )
 
-        # Price decreases 10%
         market = MockMarketState(prices={"ETH": Decimal("1800")})
 
         value = adapter.value_position(position, market)
@@ -938,7 +886,6 @@ class TestPositionValuation:
             entry_time=entry_time,
         )
 
-        # Price increases 10%
         market = MockMarketState(prices={"ETH": Decimal("2200")})
 
         value = adapter.value_position(position, market)
@@ -966,11 +913,9 @@ class TestPositionValuation:
 
         market = MockMarketState(prices={"ETH": Decimal("2000")})
 
-        # Apply 24 hours of funding
         for _ in range(24):
             adapter.update_position(position, market, elapsed_seconds=3600)
 
-        # Get value - should include funding received
         value = adapter.value_position(position, market)
 
         # Value = collateral + unrealized PnL (0) + funding received
@@ -1042,11 +987,6 @@ class TestPositionValuation:
             adapter.value_position(position, market)
 
 
-# =============================================================================
-# Should Rebalance Tests
-# =============================================================================
-
-
 class TestShouldRebalance:
     """Tests for should_rebalance method based on liquidation proximity."""
 
@@ -1114,11 +1054,6 @@ class TestShouldRebalance:
         assert should_rebalance is False
 
 
-# =============================================================================
-# Margin Validation Tests
-# =============================================================================
-
-
 class TestMarginValidation:
     """Tests for margin validation on position opening."""
 
@@ -1172,11 +1107,6 @@ class TestMarginValidation:
         assert short_liq == Decimal("2300")
 
 
-# =============================================================================
-# Integration Tests - Combined Scenarios
-# =============================================================================
-
-
 class TestIntegrationScenarios:
     """Integration tests combining multiple adapter features."""
 
@@ -1197,7 +1127,6 @@ class TestIntegrationScenarios:
             entry_time=entry_time,
         )
 
-        # Price increases 5% over 24 hours
         market = MockMarketState(prices={"ETH": Decimal("2100")})
 
         for _ in range(24):
@@ -1240,7 +1169,6 @@ class TestIntegrationScenarios:
             market = MockMarketState(prices={"ETH": price})
             adapter.update_position(position, market, elapsed_seconds=28800)  # 8 hours
 
-            # Check for liquidation at each step
             if not position.is_liquidated:
                 event = adapter.check_and_simulate_liquidation(
                     position=position,
@@ -1251,7 +1179,6 @@ class TestIntegrationScenarios:
             if event is not None:
                 break
 
-        # Should have been liquidated at some point
         assert position.is_liquidated is True
         assert event is not None
 
@@ -1273,11 +1200,6 @@ class TestIntegrationScenarios:
         assert data["config"]["protocol"] == "hyperliquid"
 
 
-# =============================================================================
-# Historical Funding Rate Tests
-# =============================================================================
-
-
 class TestHistoricalFundingRateIntegration:
     """Tests for historical funding rate integration (US-053b, US-028)."""
 
@@ -1291,7 +1213,6 @@ class TestHistoricalFundingRateIntegration:
         )
         adapter = PerpBacktestAdapter(config)
 
-        # New providers are lazy-initialized, so check the use_historical_funding flag instead
         assert adapter._use_historical_funding() is True
 
         # When data_config is None and config.funding_rate_source=='historical',
@@ -1308,7 +1229,6 @@ class TestHistoricalFundingRateIntegration:
         )
         adapter = PerpBacktestAdapter(config)
 
-        # Provider should NOT be initialized
         assert adapter._funding_rate_provider is None
 
     def test_protocol_funding_rate_no_provider(self) -> None:
@@ -1319,14 +1239,12 @@ class TestHistoricalFundingRateIntegration:
         )
         adapter = PerpBacktestAdapter(config)
 
-        # Provider should NOT be initialized
         assert adapter._funding_rate_provider is None
 
     def test_historical_rate_fallback_on_error(self) -> None:
         """Test that historical rate falls back to default on provider error."""
         from almanak.framework.backtesting.config import BacktestDataConfig
 
-        # Use BacktestDataConfig to enable historical funding with fallback rate
         data_config = BacktestDataConfig(
             use_historical_funding=True,
             funding_fallback_rate=Decimal("0.0002"),
@@ -1355,7 +1273,6 @@ class TestHistoricalFundingRateIntegration:
             timestamp=entry_time,
         )
 
-        # Should fall back to default rate
         assert rate == Decimal("0.0002")  # Uses data_config.funding_fallback_rate
         assert confidence == "low"
         assert "fallback" in source
@@ -1379,13 +1296,11 @@ class TestHistoricalFundingRateIntegration:
             protocol="gmx",
         )
 
-        # Call without timestamp
         rate, source = adapter._get_historical_funding_rate(
             position=position,
             timestamp=None,
         )
 
-        # Should fall back to default rate
         assert rate == Decimal("0.00001")
         assert source == "fallback:no_timestamp"
 
@@ -1419,7 +1334,6 @@ class TestHistoricalFundingRateIntegration:
 
         market = MockMarketState(prices={"ETH": Decimal("2000")})
 
-        # Create mock funding result with higher rate
         mock_funding_result = FundingResult(
             rate=Decimal("0.0005"),  # 0.05% per hour (5x default)
             source_info=DataSourceInfo(
@@ -1431,7 +1345,6 @@ class TestHistoricalFundingRateIntegration:
             ),
         )
 
-        # Create a mock provider
         mock_provider = MagicMock()
         mock_provider.get_funding_rates = AsyncMock(return_value=[mock_funding_result])
 
@@ -1439,7 +1352,6 @@ class TestHistoricalFundingRateIntegration:
 
         adapter._seed_injected_provider("gmx_v2", mock_provider)
         with caplog.at_level(logging.DEBUG, logger="almanak.framework.backtesting.adapters.perp_adapter"):
-            # Apply 1 hour of funding
             adapter.update_position(position, market, elapsed_seconds=3600, timestamp=entry_time)
 
             # With 0.05% rate and $50,000 notional for 1 hour:
@@ -1450,7 +1362,6 @@ class TestHistoricalFundingRateIntegration:
             assert position.accumulated_funding < Decimal("0")
             assert abs(position.accumulated_funding) == pytest.approx(expected_funding, rel=Decimal("0.01"))
 
-            # Verify position tracks funding confidence
             assert position.funding_confidence == "high"
             assert position.funding_data_source is not None
             assert "historical" in position.funding_data_source
@@ -1554,7 +1465,6 @@ class TestHistoricalFundingRateIntegration:
             ),
         )
 
-        # Create a mock provider
         mock_provider = MagicMock()
         mock_provider.get_funding_rates = AsyncMock(return_value=[mock_funding_result])
 
@@ -1681,10 +1591,6 @@ class TestHistoricalFundingRateIntegration:
         adapter._funding_rate_provider.get_historical_funding_rate.assert_not_awaited()
 
 
-# =============================================================================
-# execute_intent margin validation against the REAL SimulatedPortfolio
-# =============================================================================
-#
 # Regression tests for the perp adapter referencing `portfolio.cash_balance`,
 # an attribute that does not exist on SimulatedPortfolio (the real model only
 # has `cash_usd`). The bug was masked because earlier tests only exercised
@@ -1920,21 +1826,18 @@ class TestFundingProviderChainRouting:
         wildcard seam."""
         from unittest.mock import MagicMock
 
-        # Explicit scope to an undeclared chain: rejected at seeding.
         adapter = self._adapter()
         chainless = MagicMock(spec=[])
         chainless.chain = None
         adapter._seed_injected_provider("gmx_v2:ethereum", chainless)
         assert ("gmx_v2", "ethereum") not in adapter._provider_cache
 
-        # Public chain reporting an undeclared chain: rejected at seeding.
         adapter2 = self._adapter()
         eth_reporting = MagicMock(spec=[])
         eth_reporting.chain = "ethereum"
         adapter2._seed_injected_provider("gmx_v2", eth_reporting)
         assert ("gmx_v2", "ethereum") not in adapter2._provider_cache
 
-        # Wildcard seam serves declared chains only.
         adapter3 = self._adapter()
         wildcard = MagicMock(spec=[])
         wildcard.chain = None
@@ -2645,9 +2548,9 @@ class TestPrewarmHistory:
         position = create_perp_long_position(token="ETH", protocol="gmx_v2")
         lookup = adapter._funding_lookup(position, datetime(2024, 1, 1, 0, 30, tzinfo=UTC), "arbitrum")
 
-        assert provider.calls[0]["market"] == lookup.market  # fetched what the reader will ask for
+        assert provider.calls[0]["market"] == lookup.market
         cache_key = ("gmx_v2", lookup.market, datetime(2024, 1, 1, 0, tzinfo=UTC))
-        assert cache_key in adapter._funding_cache  # the per-tick read is a cache HIT
+        assert cache_key in adapter._funding_cache
 
     @pytest.mark.asyncio
     async def test_address_native_prewarm_hits_exact_position_cache(self, monkeypatch):
@@ -2695,7 +2598,7 @@ class TestPrewarmHistory:
         monkeypatch.setattr(adapter, "_get_provider_for_protocol", lambda protocol, chain=None: provider)
         start, end = self._window()
 
-        await adapter.prewarm_history(self._intent(), "arbitrum", start, end)  # must not raise
+        await adapter.prewarm_history(self._intent(), "arbitrum", start, end)
 
         assert not [k for k in adapter._funding_cache if k[0] == "gmx_v2"]
 
