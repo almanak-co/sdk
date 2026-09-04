@@ -8,6 +8,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Explicit price timeframes stay strict without preflight.** When
+  `preflight_validation` is off (the hosted lane), an explicit `timeframe`
+  is now probed against the provider's native cadence before the run starts;
+  a coarser native series raises the same `PRICE_TIMEFRAME_TOO_FINE` preflight
+  error readiness reports instead of silently serving it, and a verified
+  request records `resolved_timeframe`. The platform runner echoes both
+  cadence axes (`decision_interval_seconds`, `price_timeframe_requested`,
+  `price_timeframe_resolved`) under `result_summary.simulation` for completed,
+  failed and preflight-refused runs. (ALM-3010, ALM-3129, ALM-3531)
 - **Backtest run-validity verdict.** Every finished PnL backtest now carries
   `result.run_validity` (`VALID | NOT_EVALUABLE | INVALID | PARTIAL_LIFECYCLE`
   with typed reasons), computed before institutional compliance. Zero-tick,

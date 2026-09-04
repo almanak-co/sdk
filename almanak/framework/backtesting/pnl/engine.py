@@ -59,6 +59,7 @@ Examples:
 """
 
 import copy
+import dataclasses
 import functools
 import inspect as _inspect
 import logging
@@ -3349,6 +3350,30 @@ def _coverage_cadence_mismatches(
     return mismatches
 
 
+def _explicit_cadence_conflicts_as_partial(
+    discoveries: list[_TokenCoverageDiscovery],
+) -> list[_TokenCoverageDiscovery]:
+    """Treat a coarser native cadence as incomplete coverage of the requested grid.
+
+    Range coverage can report ``full`` for the requested window even when the
+    provider's observed spacing is coarser than the requested interval; the
+    provider can serve the window, not the cadence. An explicit timeframe is a
+    cadence claim, so such a result must fail the same way a partial one does.
+    """
+    normalized: list[_TokenCoverageDiscovery] = []
+    for item in discoveries:
+        coverage = item.coverage
+        observed = coverage.observed_interval_seconds
+        if (
+            coverage.status == "full"
+            and observed is not None
+            and cadence_is_coarser(observed, coverage.interval_seconds)
+        ):
+            coverage = dataclasses.replace(coverage, status="partial")
+        normalized.append(_TokenCoverageDiscovery(token=item.token, coverage=coverage))
+    return normalized
+
+
 def _partial_history_cadence_feedback(
     discoveries: list[_TokenCoverageDiscovery],
     common_range: dict[str, str] | None,
@@ -5319,6 +5344,46 @@ class PnLBacktester:
         if callable(begin_batch):
             begin_batch()
 
+    async def enforce_explicit_price_timeframe(
+        self,
+        config: PnLBacktestConfig,
+        *,
+        bt_logger: BacktestLogger | None = None,
+    ) -> None:
+        """Keep an explicit ``timeframe`` strict when preflight is disabled.
+
+        Preflight already refuses a requested cadence the provider cannot serve
+        natively; with it off (the hosted lane) the request used to fall through
+        to whatever the provider returned, so a 15m request ran on hourly
+        candles and ``resolved_timeframe`` stayed unset. This probes the same
+        range coverage and raises the same ``PRICE_TIMEFRAME_TOO_FINE`` error
+        on a coarser native cadence. A range gap without a cadence conflict is
+        left to the run's own data-quality accounting, as before. Providers
+        without range coverage cannot report native spacing and are skipped.
+        """
+        requested = config.timeframe
+        if requested is None or requested == "auto" or config.resolved_timeframe is not None:
+            return
+        if not callable(getattr(self.data_provider, "get_price_coverage", None)):
+            if bt_logger is not None:
+                bt_logger.warning(
+                    f"Explicit timeframe {requested!r} cannot be verified: the price provider "
+                    "does not report native cadence"
+                )
+            return
+        tokens = self._required_price_tokens(config)
+        self._begin_price_coverage_batch()
+        discoveries = _explicit_cadence_conflicts_as_partial(
+            await self._discover_required_price_coverage(config, tokens, config.price_interval_seconds)
+        )
+        if _coverage_cadence_mismatches(discoveries):
+            self._raise_for_failed_price_coverage(discoveries)
+        measured = [item for item in discoveries if item.coverage.provider != "cash_equivalent"]
+        if measured and all(item.coverage.observed_interval_seconds is not None for item in measured):
+            config.apply_resolved_timeframe(requested, config.price_interval_seconds)
+            if bt_logger is not None:
+                bt_logger.info(f"Explicit timeframe {requested!r} verified against the provider's native cadence")
+
     @staticmethod
     def _raise_for_failed_price_coverage(discoveries: list[_TokenCoverageDiscovery]) -> None:
         """Raise the structured preflight error for blocking coverage results."""
@@ -5568,6 +5633,8 @@ class PnLBacktester:
             bt_logger=bt_logger,
             strategy=strategy,
         )
+        if preflight_report is None:
+            await self.enforce_explicit_price_timeframe(config, bt_logger=bt_logger)
 
         # Initialization phase: build the shared BacktestState.
         state = _engine_helpers.initialize_backtest(

@@ -48,6 +48,7 @@ def serialize_result(result: BacktestResult) -> dict[str, Any]:
         "metrics": result.metrics.to_dict(),
         "decision_input_failures": result.decision_input_failures or [],
         "run_validity": result.run_validity.to_dict() if result.run_validity is not None else None,
+        "resolved_timeframe": result.resolved_timeframe,
         "equity_curve": [_serialize_equity_point(point) for point in (result.equity_curve or [])],
         "trades": [
             {

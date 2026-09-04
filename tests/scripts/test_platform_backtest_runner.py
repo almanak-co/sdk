@@ -5,7 +5,7 @@ import importlib
 import json
 import sys
 from collections.abc import AsyncIterator
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -1800,6 +1800,28 @@ def test_cloud_run_retry_keeps_run_validity_on_redelivered_engine_failure(
     assert payload["result_summary"]["run_validity"] == verdict
 
 
+def test_cloud_run_retry_keeps_the_cadence_echo_on_redelivered_engine_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env = _env(GCS_RESULT_PATH="gs://bucket/backtests/test-123/result.json")
+    simulation = {
+        "decision_interval_seconds": 900,
+        "price_timeframe_requested": "15m",
+        "price_timeframe_resolved": None,
+    }
+    artifact = {
+        "backtest_id": env.backtest_id,
+        "commit_sha": env.commit_sha,
+        "result_summary": {"total_trades": 0, "simulation": simulation},
+        "result": {"success": False},
+    }
+    _patch_result_blob(monkeypatch, json.dumps(artifact).encode())
+
+    payload = _redelivered_failed_payload(monkeypatch, env, error_message="historical price provider failed")
+
+    assert payload["result_summary"]["simulation"] == simulation
+
+
 def test_cloud_run_retry_derives_run_validity_from_the_artifact_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2224,3 +2246,53 @@ def test_build_run_failure_summary_carries_run_validity() -> None:
     assert summary["run_validity"] == verdict
     assert "run_validity" not in runner.build_run_failure_summary("plain failure")
     assert "decision_summary" not in summary
+
+
+def test_result_summary_carries_both_cadence_axes() -> None:
+    """The platform row sees the decision grid and the price plane it actually got."""
+    from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
+    from tests.backtesting_funding import pnl_token_funding
+
+    config = PnLBacktestConfig(
+        start_time=datetime(2026, 6, 25, tzinfo=UTC),
+        end_time=datetime(2026, 9, 1, tzinfo=UTC),
+        interval_seconds=900,
+        timeframe="15m",
+        token_funding=pnl_token_funding(Decimal("1000")),
+        tokens=["WETH", "USDC"],
+    )
+
+    summary = runner.build_result_summary(
+        {"metrics": {}, "trades": [], "resolved_timeframe": "15m"},
+        elapsed_seconds=1.0,
+        backtest_config=config,
+    )
+    failure = runner.build_run_failure_summary("boom", simulation=summary["simulation"])
+
+    assert summary["simulation"] == {
+        "decision_interval_seconds": 900,
+        "price_timeframe_requested": "15m",
+        "price_timeframe_resolved": "15m",
+    }
+    assert failure["simulation"] == summary["simulation"]
+
+
+def test_result_summary_shows_an_unverified_price_request() -> None:
+    from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
+    from tests.backtesting_funding import pnl_token_funding
+
+    config = PnLBacktestConfig(
+        start_time=datetime(2026, 6, 25, tzinfo=UTC),
+        end_time=datetime(2026, 9, 1, tzinfo=UTC),
+        token_funding=pnl_token_funding(Decimal("1000")),
+        tokens=["WETH", "USDC"],
+    )
+
+    summary = runner.build_result_summary({"metrics": {}, "trades": []}, elapsed_seconds=1.0, backtest_config=config)
+
+    assert summary["simulation"] == {
+        "decision_interval_seconds": 3600,
+        "price_timeframe_requested": None,
+        "price_timeframe_resolved": None,
+    }
+    assert "simulation" not in runner.build_result_summary({"metrics": {}, "trades": []}, elapsed_seconds=1.0)

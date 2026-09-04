@@ -2416,6 +2416,9 @@ class BacktestResult:
     # None only on artifacts written before the verdict existed; the engine
     # always attaches one.
     run_validity: RunValidityVerdict | None = None
+    # Provider-validated price cadence the run actually used; None when the
+    # request was never verified against the provider's native spacing.
+    resolved_timeframe: str | None = None
     data_source_capabilities: dict[str, "HistoricalDataCapability"] = field(default_factory=dict)
     data_source_warnings: list[str] = field(default_factory=list)
     data_quality: DataQualityReport | None = None
@@ -2841,6 +2844,7 @@ class BacktestResult:
             "crisis_results": self.crisis_results.to_dict() if self.crisis_results else None,
             "decision_input_failures": self.decision_input_failures,
             "run_validity": self.run_validity.to_dict() if self.run_validity else None,
+            "resolved_timeframe": self.resolved_timeframe,
             "errors": self.errors,
             "backtest_id": self.backtest_id,
             "phase_timings": self.phase_timings,
@@ -3204,6 +3208,7 @@ class BacktestResult:
             crisis_results=CrisisMetrics.from_dict(data["crisis_results"]) if data.get("crisis_results") else None,
             decision_input_failures=data.get("decision_input_failures"),
             run_validity=RunValidityVerdict.from_dict(data["run_validity"]) if data.get("run_validity") else None,
+            resolved_timeframe=data.get("resolved_timeframe"),
             errors=data.get("errors", []),
             backtest_id=data.get("backtest_id"),
             phase_timings=data.get("phase_timings", []),
