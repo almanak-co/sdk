@@ -29,33 +29,17 @@ from almanak.framework.accounting.processor import AccountingProcessor
 from almanak.framework.accounting.vault_accounting import VaultAccountingEvent
 from almanak.framework.models.run_mode import RunMode, RunModeStamp
 
-# Real token addresses for the resolver doubles below (VIB-6100 review of PR
-# #3472). ``FakeToken`` requires a non-empty address because ``ResolvedToken``
-# does, and because address-order-dependent code — ``realign_token_pair_by_address``
-# in particular — is silently inert against an empty one, which is how a test
-# can "cover" a path it never entered. Values are the static registry's own,
-# lowercase as the resolver emits them.
-#
-# CHAIN CHOICE IS LOAD-BEARING in the LP fixtures below, because V3-family pools
-# order ``token0``/``token1`` by numeric address and receipt parsers emit
-# ``amount0``/``amount1`` in that same **chain** order. A fixture that labels
-# ``token0="USDC"`` while supplying a USDC ``amount0`` is only self-consistent on
-# a chain where USDC really is the lower address:
+# Real registry addresses keep address-dependent resolver paths active. V3-family
+# pools order tokens numerically by address, and receipt amounts use that chain
+# order. A USDC ``amount0`` is valid only where USDC has the lower address:
 #
 #     ethereum  USDC 0xa0b8… < WETH 0xc02a…   -> (USDC, WETH) IS chain order
 #     arbitrum  WETH 0x82af… < USDC 0xaf88…   -> (USDC, WETH) is NOT chain order
 #     base      WETH 0x4200… < USDC 0x8335…   -> (USDC, WETH) is NOT chain order
 #
-# The IL/basis fixtures below therefore run on **ethereum**. They previously said
-# "arbitrum" while describing a USDC-first pool, i.e. a pool that cannot exist —
-# harmless only for as long as the empty-address double kept the realignment
-# inert. With real addresses the seam correctly transposes the symbols (amounts
-# are authoritative and are never moved), which mis-pairs decimals and prices and
-# produced a $4e10 "cost basis" from a $240 close — the VIB-5851 / VIB-5983
-# phantom-basis class reproducing itself inside its own regression suite.
-#
-# The transposing direction is covered deliberately and separately by
-# ``TestLpPairRealignment`` rather than by accident here.
+# The IL/basis fixtures therefore run on Ethereum. Amounts are authoritative and
+# never move during symbol realignment, so wrong labels mis-pair decimals and
+# prices. ``TestLpPairRealignment`` covers the transposing direction separately.
 _ADDRESSES: dict[str, dict[str, str]] = {
     "ethereum": {
         "USDC": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
@@ -74,10 +58,7 @@ _ADDRESSES: dict[str, dict[str, str]] = {
     },
 }
 
-# The chain the USDC-first LP fixtures run on. Named rather than inlined so the
-# invariant "USDC must be the lower address here" is stated once and asserted
-# once, instead of being an unstated property of a string literal repeated at a
-# dozen call sites.
+# Centralize and explicitly assert the USDC-first address-order invariant.
 _IL_CHAIN = "ethereum"
 
 
@@ -119,11 +100,6 @@ def test_il_fixture_chain_really_is_usdc_first() -> None:
         f"{_IL_CHAIN} no longer sorts USDC before WETH; the USDC-first LP fixtures "
         "must move to a chain that does, or be rewritten in chain order."
     )
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Common builder helpers (mirror the style from test_accounting_processor.py)
-# ──────────────────────────────────────────────────────────────────────────────
 
 
 def _make_outbox_row(
@@ -303,11 +279,6 @@ async def test_drain_pending_isolates_invalid_mode_to_affected_row() -> None:
     assert any(call.args[0] == good_outbox["id"] and call.args[1] == "processed" for call in updates)
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Regression: drain_one must write events (not no-ops) for LP/Perp/Vault
-# ──────────────────────────────────────────────────────────────────────────────
-
-
 class TestDrainOneWritesLPEvent:
     @pytest.mark.asyncio
     async def test_drain_one_writes_lp_open_event(self) -> None:
@@ -337,7 +308,6 @@ class TestDrainOneWritesLPEvent:
         result = await proc.drain_one(led_id)
 
         assert result is True, "drain_one must return True for LP_OPEN"
-        # The regression: previously handler returned None → no write. Now it must write.
         store.save_accounting_event.assert_awaited_once()
         written_event = store.save_accounting_event.call_args[0][0]
         assert isinstance(written_event, LPAccountingEvent)
@@ -500,13 +470,7 @@ class TestDrainOneWritesVaultEvent:
         store.save_accounting_event.assert_awaited_once()
         written_event = store.save_accounting_event.call_args[0][0]
         assert isinstance(written_event, VaultAccountingEvent)
-        # VAULT_REDEEM maps to VAULT_WITHDRAW (matching legacy builder)
         assert written_event.event_type == VaultEventType.VAULT_WITHDRAW.value
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Unit tests: handle_lp
-# ──────────────────────────────────────────────────────────────────────────────
 
 
 class TestHandleLpOpen:
@@ -578,7 +542,7 @@ class TestHandleLpOpen:
         outbox_row = _make_outbox_row(
             led_id,
             intent_type="LP_OPEN",
-            position_key="",  # empty — no last segment
+            position_key="",
             market_id="",
         )
         ledger_row = _make_ledger_row(led_id, intent_type="LP_OPEN", protocol="aerodrome")
@@ -621,16 +585,8 @@ class TestHandleLpOpen:
             position_key="lp:aerodrome:base:0xwallet:0x1111111111111111111111111111111111111111",
             market_id="0x1111111111111111111111111111111111111111",
         )
-        # Legs are in CHAIN order, which on base means DAI first: DAI 0x50c5… <
-        # USDC 0x8335…, so a real aerodrome DAI/USDC pool reports token0=DAI and
-        # its parser emits amount0 as the DAI leg. This fixture used to say
-        # token0=USDC with a USDC amount0 — a pool that cannot exist on base —
-        # and only passed because the resolver double returned empty addresses,
-        # which left ``realign_token_pair_by_address`` inert. With real addresses
-        # the seam correctly transposes the symbols (amounts are authoritative
-        # and never move), mis-pairing the 6-dec and 18-dec legs. Stating the
-        # legs in chain order is what makes the pair realignment a *verified*
-        # no-op here rather than an unexercised one. (VIB-6100 review of #3472.)
+        # Base orders DAI before USDC. Keeping amounts in chain order makes pair
+        # realignment a verified no-op and preserves each leg's decimals.
         extracted = json.dumps({
             "lp_open_data": {
                 "_type": "LPOpenData",
@@ -652,9 +608,6 @@ class TestHandleLpOpen:
             extracted_data_json=extracted,
         )
 
-        # VIB-6100: shared double — the inline one accepted neither
-        # ``log_errors`` nor ``skip_gateway``, so its TypeError was swallowed as
-        # an ordinary resolver miss. Real addresses (see ``_patch_token_resolver``).
         from tests.support.token_resolver import FakeToken, FakeTokenResolver
 
         mock_resolver = FakeTokenResolver(
@@ -668,16 +621,13 @@ class TestHandleLpOpen:
             }
         )
 
-        # Precondition: the labels above really are chain order on base.
         assert _chain_token0("base", "DAI", "USDC") == "DAI"
 
         with patch("almanak.framework.data.tokens.resolver.get_token_resolver", return_value=mock_resolver):
             result = handle_lp(outbox_row, ledger_row)
 
         assert result is not None
-        # amount0 = 50_000_000_000_000_000_000 / 1e18 = 50 DAI
         assert result.amount0 == Decimal("50")
-        # amount1 = 100_000_000 / 1e6 = 100 USDC
         assert result.amount1 == Decimal("100")
 
     def test_pool_address_parsed_from_multi_segment_position_key(self) -> None:
@@ -705,18 +655,14 @@ class TestHandleLpOpen:
         ("position_key", "market_id", "expected_pool_address"),
         [
             pytest.param(
-                # Aerodrome / V2-family — position-key tail IS the pool address.
+                # V2-family keys end in the canonical pool address.
                 "lp:aerodrome:base:0xwallet:0x1111111111111111111111111111111111111111",
                 "",
                 "0x1111111111111111111111111111111111111111",
                 id="aerodrome_v2_address_in_position_key",
             ),
             pytest.param(
-                # Uniswap V3-style — position-key tail is a token-fee descriptor
-                # ("weth/usdc/500"). Pre-VIB-4274 the descriptor was written
-                # verbatim into ``accounting_events.pool_address`` (no fallback,
-                # silent data corruption). Now the handler detects the ``/`` and
-                # falls back to ``outbox_row.market_id``.
+                # V3 keys end in a token-fee descriptor, so market_id is canonical.
                 "lp:uniswap_v3:arbitrum:0xwallet:weth/usdc/500",
                 "0xc6962004f452be9203591991d15f6b388e09e8d0",
                 "0xc6962004f452be9203591991d15f6b388e09e8d0",
@@ -757,7 +703,6 @@ class TestHandleLpOpen:
 
         assert result is not None
         assert result.pool_address == expected_pool_address
-        # Hard invariant: never the descriptor.
         assert "/" not in result.pool_address
 
     def test_vib4396_lp_open_reads_pool_address_from_receipt(self) -> None:
@@ -778,7 +723,6 @@ class TestHandleLpOpen:
             led_id,
             intent_type="LP_OPEN",
             position_key="lp:uniswap_v3:arbitrum:0xwallet:weth/usdc/500",
-            # Same live bug: market_id also carries the descriptor.
             market_id="weth/usdc/500",
         )
         extracted = json.dumps({
@@ -807,7 +751,6 @@ class TestHandleLpOpen:
 
         assert result is not None
         assert result.pool_address == real_pool
-        # Hard invariant from VIB-4274 — never the descriptor.
         assert "/" not in result.pool_address
 
     def test_vib4396_lp_close_uses_receipt_pool_address(self) -> None:
@@ -906,8 +849,6 @@ class TestHandleLpOpen:
             token_out="WETH",
             extracted_data_json="",
         )
-        # Prior OPEN's payload carries the descriptor (pre-fix data) AND
-        # the position_reference (always written correctly via VIB-4262).
         prior_open = {
             "pool_address": "weth/usdc/500",
             "position_reference": {
@@ -1028,8 +969,7 @@ class TestHandleLpOpen:
             position_key="lp:uniswap_v3:arbitrum:0xwallet:weth/usdc/500",
             market_id="weth/usdc/500",
         )
-        # Unrecognised ``_type`` forces the dict fallback in
-        # ``deserialize_extracted_data``.
+        # An unrecognized type deliberately forces the deserializer's dict fallback.
         extracted = json.dumps({
             "lp_open_data": {
                 "_type": "UnknownVariant",
@@ -1075,7 +1015,6 @@ class TestHandleLpOpen:
         real_pool = "0xc6962004f452be9203591991d15f6b388e09e8d0"
         position_key = "lp:uniswap_v3:arbitrum:0xwallet:weth/usdc/500"
 
-        # OPEN side — receipt-side priority 1.
         open_id = str(uuid.uuid4())
         open_outbox = _make_outbox_row(
             open_id,
@@ -1106,7 +1045,6 @@ class TestHandleLpOpen:
         )
         open_event = handle_lp(open_outbox, open_ledger)
 
-        # CLOSE side — receipt-side priority 1 (VIB-3940).
         close_id = str(uuid.uuid4())
         close_outbox = _make_outbox_row(
             close_id,
@@ -1138,7 +1076,6 @@ class TestHandleLpOpen:
         assert open_event is not None
         assert close_event is not None
         assert open_event.pool_address == close_event.pool_address == real_pool
-        # Hard invariant: descriptor never reaches the payload on either side.
         assert "/" not in open_event.pool_address
         assert "/" not in close_event.pool_address
 
@@ -1151,7 +1088,6 @@ class TestHandleLpOpen:
         real_pool = "0xc6962004f452be9203591991d15f6b388e09e8d0"
         position_key = "lp:uniswap_v3:arbitrum:0xwallet:weth/usdc/500"
 
-        # OPEN — receipt priority 1.
         open_id = str(uuid.uuid4())
         open_outbox = _make_outbox_row(
             open_id,
@@ -1180,7 +1116,6 @@ class TestHandleLpOpen:
         )
         open_event = handle_lp(open_outbox, open_ledger)
 
-        # CLOSE — no receipt extraction; recover via prior_open_payload.
         close_id = str(uuid.uuid4())
         close_outbox = _make_outbox_row(
             close_id,
@@ -1218,9 +1153,6 @@ class TestHandleLpOpen:
             position_key="lp:uniswap_v3:arbitrum:0xwallet:0x1111111111111111111111111111111111111111",
             market_id="0x1111111111111111111111111111111111111111",
         )
-        # Receipt-parser shape: position_id, amounts, ticks, liquidity, and
-        # the slot0-derived current_tick. Bracket [-1000, +1000] with
-        # current_tick=0 should mark in_range=True.
         extracted = json.dumps({
             "lp_open_data": {
                 "_type": "LPOpenData",
@@ -1252,7 +1184,6 @@ class TestHandleLpOpen:
         assert result.current_tick == 0
         assert result.in_range is True
 
-        # The serialized payload (what the writer persists) carries them too.
         payload = json.loads(result.to_payload_json())
         assert payload["tick_lower"] == -1000
         assert payload["tick_upper"] == 1000
@@ -1276,9 +1207,6 @@ class TestHandleLpOpen:
             position_key="lp:uniswap_v3:arbitrum:0xwallet:0x1111111111111111111111111111111111111111",
             market_id="0x1111111111111111111111111111111111111111",
         )
-        # Receipt-parser shape for a close: principal collected, fees, the
-        # liquidity removed, plus the new VIB-3940 fields current_tick +
-        # pool_address. Bracket [-1000, +1000] with current_tick=0 ⇒ in_range=True.
         extracted = json.dumps({
             "lp_close_data": {
                 "_type": "LPCloseData",
@@ -1300,10 +1228,7 @@ class TestHandleLpOpen:
             token_out="WETH",
             extracted_data_json=extracted,
         )
-        # Bracket comes from the prior OPEN — the close receipt does not
-        # re-emit it. Pass it explicitly via the handler's prior_open_payload
-        # parameter (the production processor wires this from the prior
-        # accounting_event row for the same position_key).
+        # Close receipts do not re-emit the tick bracket; it comes from the prior open.
         prior_open = {
             "tick_lower": -1000,
             "tick_upper": 1000,
@@ -1322,7 +1247,6 @@ class TestHandleLpOpen:
             f"got {result.in_range!r}"
         )
 
-        # Serialized payload carries the fields too — Trade Tape reads from JSON.
         payload = json.loads(result.to_payload_json())
         assert payload["current_tick"] == 0
         assert payload["in_range"] is True
@@ -1345,7 +1269,7 @@ class TestHandleLpOpen:
                 "fees0": "0",
                 "fees1": "0",
                 "liquidity_removed": "12345",
-                "current_tick": 1000,  # equal to tick_upper -> OUT
+                "current_tick": 1000,
                 "pool_address": "0x1111111111111111111111111111111111111111",
             }
         })
@@ -1385,8 +1309,7 @@ class TestHandleLpOpen:
                 "fees0": "0",
                 "fees1": "0",
                 "liquidity_removed": "12345",
-                # current_tick deliberately omitted (defaults to None)
-                # pool_address omitted too — no slot0 fallback would fire
+                # Deliberately omit current_tick and pool_address to disable slot0 fallback.
             }
         })
         ledger_row = _make_ledger_row(
@@ -1426,7 +1349,7 @@ class TestHandleLpOpen:
                 "tick_lower": -1000,
                 "tick_upper": 1000,
                 "liquidity": 12345,
-                "current_tick": 1000,  # equal to tick_upper -> OUT
+                "current_tick": 1000,
             }
         })
         ledger_row = _make_ledger_row(
@@ -1484,11 +1407,6 @@ class TestHandleLpOpen:
         assert result.in_range is None
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# VIB-3756: cost_basis_usd computation from price_inputs_json
-# ──────────────────────────────────────────────────────────────────────────────
-
-
 class TestHandleLpCostBasisUsd:
     """Regression: LP_OPEN events used to hard-code ``cost_basis_usd=None`` so
     LP NFT mints rendered as deployed_usd=$0 in QA dashboards. The handler
@@ -1505,7 +1423,6 @@ class TestHandleLpCostBasisUsd:
             position_key="lp:aerodrome:base:0xwallet:0x1111111111111111111111111111111111111111",
             market_id="0x1111111111111111111111111111111111111111",
         )
-        # USDC ≈ $1.00, WETH ≈ $3000.00; 100 USDC + 0.05 WETH = $250.
         ledger_row = _make_ledger_row(
             led_id,
             intent_type="LP_OPEN",
@@ -1536,7 +1453,6 @@ class TestHandleLpCostBasisUsd:
             position_key="lp:aerodrome:base:0xwallet:0x1111111111111111111111111111111111111111",
             market_id="0x1111111111111111111111111111111111111111",
         )
-        # WETH is missing from the oracle.
         ledger_row = _make_ledger_row(
             led_id,
             intent_type="LP_OPEN",
@@ -1554,10 +1470,6 @@ class TestHandleLpCostBasisUsd:
         assert result is not None
         assert result.cost_basis_usd is None, "Missing leg price must produce None, not 0"
         assert "WETH" in result.unavailable_reason
-        # VIB-3886: pricing failure degrades confidence to ESTIMATED so
-        # downstream consumers (Accountant Test G6, dashboard cells) can
-        # tell the USD field is incomplete. Pre-VIB-3886 the LP path
-        # contradicted itself with HIGH+unavailable_reason simultaneously.
         assert result.confidence.value == "ESTIMATED"
 
     def test_lp_open_single_sided_zero_leg_unpriced_still_ties(self) -> None:
@@ -1575,8 +1487,6 @@ class TestHandleLpCostBasisUsd:
             position_key="lp:aerodrome:base:0xwallet:0x1111111111111111111111111111111111111111",
             market_id="0x1111111111111111111111111111111111111111",
         )
-        # token_in (token0) = SUSDAI funded $0; token_out (token1) = USDC $50.
-        # SUSDAI is ABSENT from price_inputs_json — by-symbol unpriceable.
         ledger_row = _make_ledger_row(
             led_id,
             intent_type="LP_OPEN",
@@ -1593,7 +1503,6 @@ class TestHandleLpCostBasisUsd:
 
         assert result is not None
         assert result.cost_basis_usd == Decimal("50.00")
-        # The zero SUSDAI leg must NOT be reported as a missing price.
         assert "SUSDAI" not in result.unavailable_reason
         assert result.unavailable_reason == ""
         assert result.confidence.value == "HIGH"
@@ -1634,14 +1543,13 @@ class TestHandleLpCostBasisUsd:
             position_key="lp:aerodrome:base:0xwallet:0x1111111111111111111111111111111111111111",
             market_id="0x1111111111111111111111111111111111111111",
         )
-        # Lowercase tokens in the row, uppercase in the oracle.
         ledger_row = _make_ledger_row(
             led_id,
             intent_type="LP_OPEN",
             protocol="aerodrome",
             chain="base",
-            token_in="usdc",  # gets uppercased to USDC
-            token_out="dai",  # → DAI
+            token_in="usdc",
+            token_out="dai",
             amount_in="100.0",
             amount_out="100.0",
             price_inputs_json=json.dumps({"USDC": "1.00", "DAI": "1.00"}),
@@ -1677,7 +1585,6 @@ class TestHandleLpCostBasisUsd:
 
         assert result is not None
         assert result.event_type == LPEventType.LP_CLOSE.value
-        # 120 USDC + 0.04 * 3000 WETH = 240
         assert result.cost_basis_usd == Decimal("240.00")
 
     def test_lp_open_with_decimals_assumed_skips_pricing(self) -> None:
@@ -1694,9 +1601,8 @@ class TestHandleLpCostBasisUsd:
             position_key="lp:aerodrome:base:0xwallet:0x1111111111111111111111111111111111111111",
             market_id="0x1111111111111111111111111111111111111111",
         )
-        # extracted_data_json forces the resolver path; empty FakeTokenResolver
-        # raises TokenNotFoundError (the production miss shape) →
-        # assumed_decimals = True. Returning None is a VIB-6100 defect.
+        # An empty resolver forces the production TokenNotFoundError path and
+        # marks decimals as assumed.
         extracted = json.dumps({
             "lp_open_data": {
                 "_type": "LPOpenData",
@@ -1717,14 +1623,13 @@ class TestHandleLpCostBasisUsd:
 
         from tests.support.token_resolver import FakeTokenResolver
 
-        # Empty registry → every resolve is TokenNotFoundError → assumed_decimals
         mock_resolver = FakeTokenResolver()
 
         with patch("almanak.framework.data.tokens.resolver.get_token_resolver", return_value=mock_resolver):
             result = handle_lp(outbox_row, ledger_row)
 
         assert result is not None
-        # Pricing intentionally skipped because decimals are unreliable.
+        # Pricing must remain unset because assumed decimals can distort amounts.
         assert result.cost_basis_usd is None
         assert result.confidence.value == "ESTIMATED"
 
@@ -1746,7 +1651,7 @@ class TestHandleLpCostBasisUsd:
             chain="base",
             token_in="USDC",
             token_out="DAI",
-            amount_in="",  # empty
+            amount_in="",
             amount_out="",
             price_inputs_json=json.dumps({"USDC": "1.00", "DAI": "1.00"}),
         )
@@ -1756,9 +1661,6 @@ class TestHandleLpCostBasisUsd:
         assert result is not None
         assert result.cost_basis_usd is None
         assert result.unavailable_reason is not None
-        # VIB-5131: empty/None amounts are now reported as unmeasured legs
-        # (Empty≠Zero) rather than the older generic "no resolvable amount legs"
-        # catch-all. The core contract (cost_basis_usd is None) is unchanged.
         assert "unmeasured amount leg" in result.unavailable_reason
 
     def test_lp_open_with_invalid_price_returns_none_and_reason(self) -> None:
@@ -1790,9 +1692,6 @@ class TestHandleLpCostBasisUsd:
 
         assert result is not None
         assert result.cost_basis_usd is None
-        # VIB-3886: invalid-price degrades confidence to ESTIMATED, same as
-        # the missing-price case. The HIGH+unavailable_reason contradiction
-        # was the regression that hid this bug class on the May 2 dashboard.
         assert result.confidence.value == "ESTIMATED"
         assert result.unavailable_reason is not None
         assert "invalid prices" in result.unavailable_reason
@@ -1828,11 +1727,6 @@ class TestHandleLpCostBasisUsd:
         assert result.unavailable_reason is not None
         assert "invalid prices" in result.unavailable_reason
         assert "WETH" in result.unavailable_reason
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Unit tests: handle_perp
-# ──────────────────────────────────────────────────────────────────────────────
 
 
 class TestHandlePerp:
@@ -1923,7 +1817,7 @@ class TestHandlePerp:
             led_id,
             intent_type="PERP_OPEN",
             position_key="perp:drift:solana:0xwallet:sol-perp",
-            market_id="",  # empty market_id
+            market_id="",
         )
         ledger_row = _make_ledger_row(
             led_id,
@@ -1980,11 +1874,6 @@ class TestHandlePerp:
         assert result.leverage == Decimal("10.0")
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Unit tests: handle_vault
-# ──────────────────────────────────────────────────────────────────────────────
-
-
 class TestHandleVault:
     def test_vault_deposit_returns_event(self) -> None:
         led_id = str(uuid.uuid4())
@@ -2034,7 +1923,6 @@ class TestHandleVault:
         result = handle_vault(outbox_row, ledger_row)
 
         assert result is not None
-        # Matches old builder: VaultEventType.VAULT_WITHDRAW
         assert result.event_type == VaultEventType.VAULT_WITHDRAW.value
 
     def test_vault_redeem_all_string_returns_none_amount(self) -> None:
@@ -2098,7 +1986,7 @@ class TestHandleVault:
             led_id,
             intent_type="VAULT_DEPOSIT",
             position_key="vault:yearn:mainnet:0xwallet:0xyvault",
-            market_id="",  # empty market_id
+            market_id="",
         )
         ledger_row = _make_ledger_row(
             led_id,
@@ -2138,11 +2026,6 @@ class TestHandleVault:
         assert result.shares_amount is None
         assert result.share_price is None
         assert result.yield_usd is None
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# VIB-4262 — LP wallet-basis hooks (regression guard)
-# ──────────────────────────────────────────────────────────────────────────────
 
 
 class TestHandleLpWalletBasisHooks:
@@ -2200,7 +2083,6 @@ class TestHandleLpWalletBasisHooks:
         """
         led_id = str(uuid.uuid4())
         basis = FIFOBasisStore()
-        # Pre-mint wallet inventory: 100 USDC + 0.04 WETH from a prior SWAP.
         basis.record_swap_acquisition(
             deployment_id="dep-1",
             position_key="swap:arbitrum:0xwallet",
@@ -2244,11 +2126,8 @@ class TestHandleLpWalletBasisHooks:
         after_weth = self._wallet_lot_remaining(basis, "dep-1", "arbitrum", "0xwallet", "WETH")
 
         assert result is not None
-        # V3 position key tail is "USDC/WETH/500" (descriptor, not address) —
-        # pool_address must come from outbox.market_id, not the position-key
-        # tail. Locks in the _resolve_lp_pool_address fix (CodeRabbit 2026-05-11).
+        # A V3 descriptor is not a pool address; market_id is canonical here.
         assert result.pool_address == "0x1111111111111111111111111111111111111111"
-        # Both token legs were drained from the wallet-basis pool.
         assert after_usdc == before_usdc - Decimal("50"), (
             f"USDC remaining: {before_usdc} → {after_usdc}; expected −50"
         )
@@ -2265,7 +2144,7 @@ class TestHandleLpWalletBasisHooks:
         """
         led_id = str(uuid.uuid4())
         basis = FIFOBasisStore()
-        # Need a prior_open_payload so the close has a cost basis to anchor.
+        # The prior open supplies the close's basis anchor.
         prior_open = {
             "cost_basis_usd": "100",
             "tick_lower": -1000,
@@ -2281,8 +2160,7 @@ class TestHandleLpWalletBasisHooks:
             position_key="lp:uniswap_v3:arbitrum:0xwallet:USDC/WETH/500",
             market_id="0x1111111111111111111111111111111111111111",
         )
-        # LP_CLOSE has no token_in/token_out (returns BOTH tokens) — handler
-        # falls back to position-key descriptor.
+        # LP_CLOSE returns both tokens, so its symbols come from the position key.
         ledger = _make_ledger_row(
             led_id,
             intent_type="LP_CLOSE",
@@ -2301,11 +2179,8 @@ class TestHandleLpWalletBasisHooks:
         after_weth = self._wallet_lot_count(basis, "dep-1", "arbitrum", "0xwallet", "WETH")
 
         assert result is not None
-        # Both token legs minted exactly one new acquisition lot.
         assert after_usdc == before_usdc + 1
         assert after_weth == before_weth + 1
-        # Lot remainings reflect the LP_CLOSE amounts (fees0/fees1 are None
-        # in the fallback path so amount alone is recorded).
         assert self._wallet_lot_remaining(basis, "dep-1", "arbitrum", "0xwallet", "USDC") == Decimal("50")
         assert self._wallet_lot_remaining(basis, "dep-1", "arbitrum", "0xwallet", "WETH") == Decimal("0.02")
 
@@ -2323,8 +2198,6 @@ class TestHandleLpWalletBasisHooks:
         the test from passing with a broken LP_CLOSE record.
         """
         basis = FIFOBasisStore()
-        # Pre-mint 100 USDC + 0.01 WETH (post-SWAP state). WETH is intentionally
-        # less than the LP_OPEN draw (0.02) so the original lot fully drains.
         basis.record_swap_acquisition(
             deployment_id="dep-1",
             position_key="swap:arbitrum:0xwallet",
@@ -2344,11 +2217,8 @@ class TestHandleLpWalletBasisHooks:
             lot_id="WETH_INITIAL_LOT",
         )
 
-        # Frozen-Anvil pricing: USDC=$1, WETH=$2500 (so 0.02 WETH = $50,
-        # 50 USDC = $50, total cost basis = $100, per-leg = $50).
         prices_json = json.dumps({"USDC": "1.00", "WETH": "2500.00"})
 
-        # LP_OPEN consumes 50 USDC + 0.02 WETH.
         open_id = str(uuid.uuid4())
         handle_lp(
             _make_outbox_row(
@@ -2371,7 +2241,6 @@ class TestHandleLpWalletBasisHooks:
             basis_store=basis,
         )
 
-        # LP_CLOSE returns 50 USDC + 0.02 WETH (Anvil frozen, no fees).
         close_id = str(uuid.uuid4())
         prior_open = {"cost_basis_usd": "100", "tick_lower": -1000, "tick_upper": 1000}
         handle_lp(
@@ -2396,9 +2265,6 @@ class TestHandleLpWalletBasisHooks:
             basis_store=basis,
         )
 
-        # Follow-up SWAP WETH→USDC of the LP-returned 0.02 WETH must FIFO-match
-        # the LP_CLOSE-minted lot (the pre-mint lot was fully drained by LP_OPEN
-        # because pre-mint=0.01 < LP_OPEN draw=0.02).
         cost_basis_consumed, unmatched = basis.match_swap_disposal(
             deployment_id="dep-1",
             position_key="swap:arbitrum:0xwallet",
@@ -2408,14 +2274,7 @@ class TestHandleLpWalletBasisHooks:
         assert unmatched == Decimal("0"), (
             f"Follow-up SWAP could not match LP-returned WETH; unmatched={unmatched}"
         )
-        # LP_CLOSE wrote a 0.02 WETH lot at per-leg-basis = $50. With
-        # VIB-4264 value-weighting this is the symmetric case: USDC leg =
-        # 50 × $1 = $50, WETH leg = 0.02 × $2500 = $50, total $100 ⇒ each leg
-        # weights to exactly 50% ⇒ $100 × $50/$100 = $50 (degenerates to the
-        # old equal split). The disposal of the full 0.02 must consume exactly
-        # that lot at exactly that basis — proves the LP_CLOSE record actually
-        # fired and stamped the right cost, and that value-weighting preserves
-        # the symmetric result.
+        # Equal-value legs split the $100 basis evenly, so returned WETH carries $50.
         assert cost_basis_consumed == Decimal("50"), (
             f"LP_CLOSE-minted lot basis was {cost_basis_consumed}; expected $50"
         )
@@ -2457,15 +2316,12 @@ class TestHandleLpWalletBasisHooks:
             basis_store=basis,
         )
 
-        # USDC leg (index 0) takes the value-weighted share; WETH (last leg)
-        # takes the residual. Σ == $120 exactly.
         usdc_cost = self._wallet_lot_cost(basis, "dep-1", "arbitrum", "0xwallet", "USDC")
         weth_cost = self._wallet_lot_cost(basis, "dep-1", "arbitrum", "0xwallet", "WETH")
         assert usdc_cost == Decimal("100"), f"USDC lot basis {usdc_cost}; expected $100"
         assert weth_cost == Decimal("20"), f"WETH lot basis {weth_cost}; expected $20 (was $60 on main)"
         assert usdc_cost + weth_cost == Decimal("120"), "Σ per-leg basis must equal total_val_usd exactly"
 
-        # End-to-end: disposing the full 0.01 WETH consumes the lot at exactly $20.
         cost_basis_consumed, unmatched = basis.match_swap_disposal(
             deployment_id="dep-1",
             position_key="swap:arbitrum:0xwallet",
@@ -2489,7 +2345,6 @@ class TestHandleLpWalletBasisHooks:
         basis = FIFOBasisStore()
         close_id = str(uuid.uuid4())
         prior_open = {"cost_basis_usd": "100", "tick_lower": -1000, "tick_upper": 1000}
-        # WETH price omitted entirely ⇒ WETH leg is unpriced.
         prices_json = json.dumps({"USDC": "1.00"})
         result = handle_lp(
             _make_outbox_row(
@@ -2514,17 +2369,13 @@ class TestHandleLpWalletBasisHooks:
         )
         assert result is not None
 
-        # Both lots recorded (neither leg dropped)...
         assert self._wallet_lot_remaining(basis, "dep-1", "arbitrum", "0xwallet", "USDC") == Decimal("50")
         assert self._wallet_lot_remaining(basis, "dep-1", "arbitrum", "0xwallet", "WETH") == Decimal("0.02")
-        # ...but BOTH carry cost_usd=None — the priced USDC leg is NOT stamped
-        # total/2 (that would fabricate the unmeasurable denominator).
         assert self._wallet_lot_cost(basis, "dep-1", "arbitrum", "0xwallet", "USDC") is None, (
             "USDC lot must be cost_usd=None (whole-hook None); main would stamp total/2"
         )
         assert self._wallet_lot_cost(basis, "dep-1", "arbitrum", "0xwallet", "WETH") is None
 
-        # Disposing the WETH leg yields a None cost basis (fail-closed).
         cost_basis_consumed, _ = basis.match_swap_disposal(
             deployment_id="dep-1",
             position_key="swap:arbitrum:0xwallet",
@@ -2559,7 +2410,7 @@ class TestHandleLpWalletBasisHooks:
                 token_in="",
                 token_out="",
                 amount_in="80",
-                amount_out="0",  # WETH leg returns 0 ⇒ single active leg (USDC)
+                amount_out="0",
                 price_inputs_json=prices_json,
             ),
             prior_open_payload=prior_open,
@@ -2587,9 +2438,8 @@ class TestHandleLpWalletBasisHooks:
             amount_in="50",
             amount_out="0.02",
         )
-        # No basis_store argument → explicit None default.
         result = handle_lp(outbox, ledger, basis_store=None)
-        assert result is not None  # event still emits; only basis hook is skipped
+        assert result is not None
 
     def test_lp_collect_fees_records_basis_when_principal_zero(self) -> None:
         """LP_COLLECT_FEES has amount0/amount1 == 0 by design (fees-only event).
@@ -2603,20 +2453,14 @@ class TestHandleLpWalletBasisHooks:
         led_id = str(uuid.uuid4())
         basis = FIFOBasisStore()
 
-        # Fee-only event: lp_close_data.amount0_collected = amount1_collected = 0,
-        # fees0/fees1 > 0 (typical post-VIB-3494 LP_COLLECT_FEES shape).
         class _LpCloseData:
             amount0_collected = 0
             amount1_collected = 0
             fees0 = 1_000_000  # raw, 6 decimals → 1.0 USDC
             fees1 = 5_000_000_000_000_000  # raw, 18 decimals → 0.005 WETH
 
-        # ``_IL_CHAIN`` (ethereum), not arbitrum: the ``USDC/WETH/500`` position
-        # key puts USDC first, which is only a real pool on a chain where USDC is
-        # the lower address. See ``_ADDRESSES`` for why this matters — on
-        # arbitrum this fixture describes a pool that cannot exist, and with real
-        # addresses the pair realignment correctly transposes the symbols away
-        # from the fee legs, mis-pairing 6-dec USDC with 18-dec WETH.
+        # Ethereum is required because this descriptor and its raw fee legs put
+        # USDC first; Arbitrum address order would transpose the token labels.
         outbox = _make_outbox_row(
             led_id,
             intent_type="LP_COLLECT_FEES",
@@ -2637,7 +2481,6 @@ class TestHandleLpWalletBasisHooks:
         from unittest.mock import MagicMock as _MM
         from unittest.mock import patch as _patch
 
-        # VIB-6100: shared double (see ``_patch_token_resolver``).
         from tests.support.token_resolver import FakeToken, FakeTokenResolver
 
         resolver = FakeTokenResolver(
@@ -2664,15 +2507,11 @@ class TestHandleLpWalletBasisHooks:
             result = handle_lp(outbox, ledger, basis_store=basis)
 
         assert result is not None
-        # Both fee legs minted a basis lot — pre-fix, neither did because
-        # amount0==0 and amount1==0 short-circuited the per-leg branches.
-        # Scope key follows the ledger row's chain, which is ``_IL_CHAIN`` here.
         wallet_scope = f"swap:{_IL_CHAIN}:0xwallet"
         usdc_lots = basis._lots.get(basis._key("dep-1", wallet_scope, "USDC"), [])
         weth_lots = basis._lots.get(basis._key("dep-1", wallet_scope, "WETH"), [])
         assert len(usdc_lots) == 1, "USDC fee lot must be minted on LP_COLLECT_FEES"
         assert len(weth_lots) == 1, "WETH fee lot must be minted on LP_COLLECT_FEES"
-        # Lot amount = principal (0) + fees (resolved to human decimal).
         assert usdc_lots[0]["amount"] == Decimal("1.0")
         assert weth_lots[0]["amount"] == Decimal("0.005")
 
@@ -2685,20 +2524,19 @@ class TestHandleLpWalletBasisHooks:
             led_id,
             intent_type="LP_OPEN",
             protocol="uniswap_v3",
-            chain="",  # also empty
+            chain="",
             token_in="USDC",
             token_out="WETH",
             amount_in="50",
             amount_out="0.02",
         )
-        # Force pool resolution to succeed via market_id.
+        # Keep pool resolution valid so only wallet-hook preconditions fail.
         outbox["market_id"] = "0x1111111111111111111111111111111111111111"
         outbox["position_key"] = "lp:uniswap_v3::0xwallet:0x1111111111111111111111111111111111111111"
 
         result = handle_lp(outbox, ledger, basis_store=basis)
 
         assert result is not None
-        # No lots minted because swap_wallet_key couldn't resolve.
         assert len(basis._lots) == 0
 
 
@@ -2777,19 +2615,8 @@ class TestLpImpermanentLoss:
         decimals via :func:`get_token_resolver` to scale raw integers to
         human-decimal Decimals.
         """
-        # VIB-6100: use the SHARED double. The hand-rolled one this replaced
-        # accepted neither ``log_errors`` nor ``skip_gateway``, so every call
-        # raised TypeError — swallowed by the old fail-open ``except Exception``
-        # and reported as an ordinary resolver miss. These tests were green
-        # while the resolver leg they set up never resolved anything.
-        #
-        # Addresses are REAL (VIB-6100 review of PR #3472). They were briefly
-        # left empty here, which fixed the raise but not the false green: an
-        # empty address is a token ``ResolvedToken`` cannot construct, and it
-        # left every address-dependent branch — ``realign_token_pair_by_address``
-        # above all — silently inert. The fallback branch stayed the branch
-        # under test; only the swallow it fell into changed. ``FakeToken`` now
-        # rejects an empty address so this cannot regress.
+        # Complete tokens with real addresses keep resolver and pair-realignment
+        # paths active instead of failing open or remaining inert.
         from tests.support.token_resolver import FakeToken, FakeTokenResolver
 
         resolver = FakeTokenResolver()
@@ -2855,7 +2682,6 @@ class TestLpImpermanentLoss:
             "amount1": "0.05",
             "cost_basis_usd": "250.0",
         }
-        # Close recovers identical entry amounts at identical prices: V_lp == V_hodl == 250.
         outbox, ledger = self._close_inputs(
             prices={"USDC": "1.00", "WETH": "3000.00"},
             prior_open=prior_open,
@@ -2904,7 +2730,6 @@ class TestLpImpermanentLoss:
             "amount1": "0.05",
             "cost_basis_usd": "200.0",
         }
-        # WETH price absent from close-time oracle.
         outbox, ledger = self._close_inputs(
             prices={"USDC": "1.00"},
             prior_open=prior_open,
@@ -2932,10 +2757,7 @@ class TestLpImpermanentLoss:
             "amount1": "0.05",
             "cost_basis_usd": "200.0",
         }
-        # Force the close handler down the ``assumed_decimals`` path so
-        # cost_basis_usd is skipped. Empty FakeTokenResolver raises
-        # TokenNotFoundError on every miss (production shape) →
-        # assumed_decimals = True. Returning None is a VIB-6100 defect.
+        # An empty resolver forces assumed decimals, making close value unmeasurable.
         extracted = json.dumps({
             "lp_close_data": {
                 "_type": "LPCloseData",
@@ -2972,11 +2794,8 @@ class TestLpImpermanentLoss:
             result = handle_lp(outbox, ledger, prior_open_payload=prior_open)
 
         assert result is not None
-        # assumed_decimals fired ⇒ cost_basis_usd is None.
         assert result.cost_basis_usd is None
-        # V_hodl is still measurable from prior_open amounts + close-time prices.
         assert result.hodl_value_usd == Decimal("250.00")
-        # IL is None because V_lp is None.
         assert result.il_usd is None
 
     def test_lp_open_does_not_emit_il(self) -> None:
@@ -3076,7 +2895,6 @@ class TestLpImpermanentLoss:
         true IL of 0.
         """
         self._patch_token_resolver(monkeypatch, {"USDC": 6, "WETH": 18})
-        # Entry: 100 USDC ($1) + 0.05 WETH ($2000) = $200.
         prior_open = {
             "event_type": "LP_OPEN",
             "token0": "USDC",
@@ -3102,14 +2920,10 @@ class TestLpImpermanentLoss:
         result = handle_lp(outbox, ledger, prior_open_payload=prior_open)
 
         assert result is not None
-        # Sanity-check the building blocks: V_lp gross-of-fees = 210;
-        # fees_total_usd = 10; V_hodl = 200.
         assert result.cost_basis_usd == Decimal("210.00")
         assert result.fees_total_usd == Decimal("10.00")
         assert result.hodl_value_usd == Decimal("200.00")
-        # The bug under fix: il_usd MUST be 0 (true IL), NOT +10 (which is
-        # what the pre-fix formula would have emitted by counting fee
-        # income as positive IL gain).
+        # Fee income is excluded from IL; including it would report +$10 here.
         assert result.il_usd == Decimal("0"), (
             "il_usd is computed gross of fees — fee income is leaking into IL. "
             "See _compute_lp_impermanent_loss docstring (Codex review)."
@@ -3142,8 +2956,7 @@ class TestLpImpermanentLoss:
             "amount1": "0.05",
             "cost_basis_usd": "200.0",
         }
-        # Build a close ledger row WITHOUT typed lp_close_data so the
-        # handler hits the fallback path that returns fees0=fees1=None.
+        # Omitting typed close data deliberately leaves both fee legs unmeasured.
         led_id = str(uuid.uuid4())
         outbox = _make_outbox_row(
             led_id,
@@ -3167,18 +2980,13 @@ class TestLpImpermanentLoss:
         result = handle_lp(outbox, ledger, prior_open_payload=prior_open)
 
         assert result is not None
-        # cost_basis_usd is computable via the fallback (ledger strings + oracle).
         assert result.cost_basis_usd == Decimal("240.00")
-        # But fees are unmeasured ⇒ fees_total_usd is None.
         assert result.fees_total_usd is None
-        # Empty ≠ Zero: il_usd MUST be None (we cannot back out the fee
-        # portion). Pre-fix this branch would have emitted il_usd = -10
-        # (treating fees as zero), which is wrong.
+        # Empty != Zero: without measured fees, principal-only value and IL are unknowable.
         assert result.il_usd is None, (
             "il_usd MUST fail closed when fees_total_usd is None — "
             "fabricating fees=0 violates Empty ≠ Zero (Codex review)."
         )
-        # hodl_value_usd is principal-side and stays measurable.
         assert result.hodl_value_usd == Decimal("250.00")
 
     def test_il_usd_none_on_lp_collect_fees(
@@ -3193,7 +3001,6 @@ class TestLpImpermanentLoss:
         realised when principal is unwound; LP_COLLECT_FEES does not unwind.
         """
         self._patch_token_resolver(monkeypatch, {"USDC": 6, "WETH": 18})
-        # Prior LP_OPEN: 100 USDC + 0.05 WETH ($200 at $1 / $2000).
         prior_open = {
             "event_type": "LP_OPEN",
             "token0": "USDC",
@@ -3202,8 +3009,6 @@ class TestLpImpermanentLoss:
             "amount1": "0.05",
             "cost_basis_usd": "200.0",
         }
-        # Fee-collect event: amount*_collected = fees only (no principal
-        # unwound). Production LP_COLLECT_FEES shape per VIB-3494.
         led_id = str(uuid.uuid4())
         outbox = _make_outbox_row(
             led_id,
@@ -3235,8 +3040,6 @@ class TestLpImpermanentLoss:
         result = handle_lp(outbox, ledger, prior_open_payload=prior_open)
 
         assert result is not None
-        # Pre-fix this would have emitted il_usd ≈ -200 (= 0 − V_hodl_200).
-        # Post-fix LP_COLLECT_FEES is OUT OF SCOPE for IL emission.
         assert result.il_usd is None, (
             "LP_COLLECT_FEES must NOT emit il_usd — principal is still on-chain "
             "so IL is not realised. Pre-fix this leaked a bogus -V_hodl number."
@@ -3260,9 +3063,6 @@ class TestLpImpermanentLoss:
         emit a misleading ``il_usd``.
         """
         self._patch_token_resolver(monkeypatch, {"USDC": 6, "WETH": 18})
-        # amount1 unparseable ⇒ data integrity issue. Pre-fix the helper
-        # would have computed hodl from amount0 alone (partial V_hodl) and
-        # subtracted it from a full cost_basis_usd.
         prior_open = {
             "event_type": "LP_OPEN",
             "token0": "USDC",
@@ -3307,8 +3107,6 @@ class TestLpImpermanentLoss:
             "amount0": "100.0",
             "amount1": "100.0",
             "cost_basis_usd": "300.0",
-            # The 3-coin universe (VIB-5429) — the third coin's amount is
-            # structurally absent from the 2-slot payload.
             "coin_symbols": ["DAI", "USDC", "USDT"],
         }
         outbox, ledger = self._close_inputs(
@@ -3359,11 +3157,6 @@ class TestLpImpermanentLoss:
         assert result.il_usd == Decimal("-10.00")
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# VIB-5553 — Curve crypto-numeraire close: fee-unavailability reason + ESTIMATED
-# ──────────────────────────────────────────────────────────────────────────────
-
-
 class TestCurveCloseFeeUnavailabilityStamp:
     """VIB-5553 — a Curve close whose crypto-numeraire principal basis IS measured
     but whose per-coin FEE USD is genuinely unavailable (parser stamped BUNDLED /
@@ -3374,13 +3167,9 @@ class TestCurveCloseFeeUnavailabilityStamp:
 
     @staticmethod
     def _patch_resolver(monkeypatch, decimals: dict[str, int]) -> None:
-        # VIB-6100: full ResolvedToken shape + TokenNotFoundError on miss.
-        # The prior MagicMock returned None / omitted address+chain, which the
-        # defect observer correctly fails at teardown.
         from tests.support.token_resolver import FakeToken, FakeTokenResolver
 
-        # Curve tricrypto fixtures run on ethereum; real registry addresses so
-        # address-order code is not inert against empty placeholders.
+        # Real Ethereum addresses keep address-order logic active in these fixtures.
         eth_addrs = {
             "USDT": "0xdac17f958d2ee523a2206206994597c13d831ec7",
             "WBTC": "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",
@@ -3461,8 +3250,7 @@ class TestCurveCloseFeeUnavailabilityStamp:
         """fees genuinely UNMEASURED (BUNDLED / None) with a measured basis ⇒
         ESTIMATED + curve_fee_usd_unavailable reason (schema-valid)."""
         self._patch_resolver(monkeypatch, {"USDT": 6, "WBTC": 8, "WETH": 18})
-        # fees0/fees1 dropped entirely AND no additional_fees ⇒ all_fees are None
-        # ⇒ the Curve fee valuation returns None (unmeasured, Empty≠Zero).
+        # Omitting every fee field represents unmeasured fees, not measured zero.
         outbox, ledger = self._curve_close(fees0=None, fees1=None, additional_fees=None)
 
         result = handle_lp(outbox, ledger)
@@ -3470,11 +3258,8 @@ class TestCurveCloseFeeUnavailabilityStamp:
         from almanak.framework.accounting.models import AccountingConfidence
 
         assert result is not None
-        # The crypto-numeraire principal basis IS measured (VIB-5429 path).
         assert result.cost_basis_usd is not None and result.cost_basis_usd > 0
-        # Fees are genuinely unmeasured (BUNDLED) — never fabricated to $0.
         assert result.fees_total_usd is None
-        # VIB-5553: explicit fee-unavailability reason + ESTIMATED (VIB-3886 invariant).
         assert result.confidence == AccountingConfidence.ESTIMATED
         assert result.unavailable_reason.startswith("curve_fee_usd_unavailable")
 
@@ -3482,7 +3267,6 @@ class TestCurveCloseFeeUnavailabilityStamp:
         """A close with MEASURED fees (even a measured $0 balanced removal) books
         fees_total_usd and must NOT stamp the fee-unavailability reason."""
         self._patch_resolver(monkeypatch, {"USDT": 6, "WBTC": 8, "WETH": 18})
-        # Measured-zero fee legs for all three coins (balanced proportional removal).
         outbox, ledger = self._curve_close(fees0="0", fees1="0", additional_fees={"2": "0"})
 
         result = handle_lp(outbox, ledger)
@@ -3491,19 +3275,13 @@ class TestCurveCloseFeeUnavailabilityStamp:
 
         assert result is not None
         assert result.cost_basis_usd is not None and result.cost_basis_usd > 0
-        # Measured-zero fees ⇒ fees_total_usd is a measured Decimal("0"), not None.
         assert result.fees_total_usd == Decimal("0")
-        # No fee-unavailability reason; basis measured ⇒ HIGH.
         assert result.unavailable_reason == ""
         assert result.confidence == AccountingConfidence.HIGH
 
     def test_existing_reason_is_not_overwritten(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The VIB-5553 stamp only fills an EMPTY reason slot — a pre-existing
         (basis-unavailability) reason on an ESTIMATED close is never clobbered."""
-        # Decimals for BTC/WETH unresolvable ⇒ the Curve principal valuation fails
-        # closed (a non-zero leg it cannot scale) ⇒ basis stays None ⇒ the base
-        # resolver stamps a basis-unavailability reason + ESTIMATED. The VIB-5553
-        # block must then see a non-empty reason and leave it untouched.
         self._patch_resolver(monkeypatch, {"USDT": 6})  # WBTC / WETH unresolvable
         outbox, ledger = self._curve_close(fees0=None, fees1=None, additional_fees=None)
 
@@ -3513,12 +3291,8 @@ class TestCurveCloseFeeUnavailabilityStamp:
 
         assert result is not None
         assert result.confidence == AccountingConfidence.ESTIMATED
-        assert result.unavailable_reason  # non-empty
-        # Whatever the base resolver recorded, it is NOT the fee-unavailability
-        # stamp (the slot was already occupied by the basis-unavailability reason).
+        assert result.unavailable_reason
         assert not result.unavailable_reason.startswith("curve_fee_usd_unavailable")
-
-    # ── direct unit coverage on the extracted _curve_fee_unavailability helper ──
 
     def test_helper_stamps_when_all_conditions_hold(self) -> None:
         """Positive: close-like + coin_symbols + fees None + empty reason ⇒ (reason, ESTIMATED)."""
@@ -3535,15 +3309,10 @@ class TestCurveCloseFeeUnavailabilityStamp:
     @pytest.mark.parametrize(
         ("intent_type_str", "lp_data", "fees_total_usd", "unavailable_reason"),
         [
-            # Not a close (LP_OPEN) — no stamp.
             ("LP_OPEN", SimpleNamespace(coin_symbols=["USDT", "WBTC"]), None, ""),
-            # No pool-coin symbols (non-Curve / not stamped) — no stamp.
             ("LP_CLOSE", SimpleNamespace(coin_symbols=None), None, ""),
-            # lp_data is None — no stamp.
             ("LP_CLOSE", None, None, ""),
-            # Fees ARE measured (even a measured $0) — no stamp.
             ("LP_CLOSE", SimpleNamespace(coin_symbols=["USDT"]), Decimal("0"), ""),
-            # Reason slot already occupied — never overwrite.
             ("LP_CLOSE", SimpleNamespace(coin_symbols=["USDT"]), None, "basis unavailable"),
         ],
     )
