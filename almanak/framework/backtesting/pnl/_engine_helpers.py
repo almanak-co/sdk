@@ -104,6 +104,7 @@ from almanak.framework.backtesting.pnl.portfolio import (
     SimulatedPortfolio,
 )
 from almanak.framework.backtesting.pnl.run_context import BacktestRunContext
+from almanak.framework.backtesting.pnl.run_validity import classify_run_validity, engine_error_verdict, terminal_errors
 from almanak.framework.data.interfaces import DataSourceError
 from almanak.framework.market.errors import PoolPriceUnavailableError, PriceUnavailableError
 
@@ -2495,6 +2496,7 @@ def build_error_result(
         final_capital_usd=state.portfolio.initial_capital_usd,
         chain=config.chain,
         decision_input_failures=_decision_input_failure_report(state) or None,
+        run_validity=engine_error_verdict(error),
         run_started_at=run_started_at,
         run_ended_at=run_ended_at,
         run_duration_seconds=(run_ended_at - run_started_at).total_seconds(),
@@ -2637,67 +2639,6 @@ def _log_decision_input_classification(
     return executed_fills, non_warm_up
 
 
-def _unsupported_data_error(
-    *,
-    state: BacktestState,
-    decision_summary: dict[str, Any],
-    executed_fills: list[Any],
-    non_warm_up: list[dict[str, Any]],
-) -> str | None:
-    """Return the strict failure for a run-wide required-input outage."""
-    run_wide = [
-        failure
-        for failure in non_warm_up
-        if failure["pattern"] == "persistent" and state.tick_count > 0 and failure["ticks"] >= state.tick_count
-    ]
-    if not run_wide or executed_fills or decision_summary["intent_ticks"] != 0:
-        return None
-    blocking = "; ".join(
-        f"{failure['source']}:{failure['key']} ({failure['ticks']}/{state.tick_count} ticks: {failure['detail']})"
-        for failure in run_wide[:3]
-    )
-    return (
-        "BACKTEST_UNSUPPORTED_DATA: no executable simulation was performed. "
-        f"{len(run_wide)} required decision input(s) were unavailable on every one of "
-        f"{state.tick_count} tick(s), and the strategy emitted zero intents. "
-        f"Blocking input(s): {blocking}. Any return, PnL, Sharpe, or drawdown in the "
-        "diagnostic artifact describes passive mark-to-market of funded assets, not strategy performance."
-    )
-
-
-def _rejected_execution_error(decision_summary: dict[str, Any]) -> str | None:
-    """Reject a run when an emitted intent family never reaches a fill.
-
-    A busy secondary leg must not hide a completely unmodeled/rejected core
-    leg. Intermittent failures remain valid once that same intent family has a
-    successful fill; only 100%-rejected families make the result non-publishable.
-    """
-    blocked = [
-        (intent_type, counts)
-        for intent_type, counts in decision_summary.get("execution_by_intent_type", {}).items()
-        if counts.get("rejected", 0) > 0 and counts.get("fills", 0) == 0
-    ]
-    if not blocked:
-        return None
-    blocked_types = {intent_type for intent_type, _counts in blocked}
-    dominant: dict[str, Any] = next(
-        (
-            rejection
-            for rejection in decision_summary.get("rejections", [])
-            if rejection.get("intent_type") in blocked_types
-        ),
-        {},
-    )
-    families = ", ".join(f"{intent_type} ({counts['rejected']} rejected)" for intent_type, counts in blocked[:5])
-    reason = dominant.get("example", "fill rejected")
-    return (
-        "BACKTEST_EXECUTION_REJECTED: no successful execution was modeled for emitted intent family/families "
-        f"{families}. Dominant rejection: {reason}. Headline return, PnL, Sharpe, and drawdown are invalid "
-        "because at least one strategy action lane never executed. See decision_summary.rejections for the "
-        "bounded structured breakdown."
-    )
-
-
 def finalize_backtest_result(
     *,
     backtester: PnLBacktester,
@@ -2785,32 +2726,32 @@ def finalize_backtest_result(
     #   RSI warm-up is not why a 2161-tick run held);
     # - a run that DID trade but starved one input persistently gets its own
     #   warning (a dead strategy leg hides behind a busy one).
-    executed_fills, non_warm_up = _log_decision_input_classification(
+    executed_fills, _non_warm_up = _log_decision_input_classification(
         state=state,
         decision_summary=decision_summary,
         decision_input_failures=decision_input_failures,
         bt_logger=bt_logger,
     )
 
-    # ALM-3245: a run-wide required-input outage with no emitted or executed
-    # action did not evaluate the strategy.  Make the existing hollow-run
-    # detector load-bearing so the hosted runner returns FAILED and omits the
-    # headline metric summary.  The predicate is deliberately narrow: an
-    # intermittent failure, a warm-up, or a strategy that simply chose to hold
-    # remains a valid completed run.
-    unsupported_data_error = _unsupported_data_error(
-        state=state,
+    # The verdict is derived before compliance so a run that did not evaluate
+    # the strategy can never certify as institutionally compliant, and its
+    # unpublishable reasons become the result error (hosted outcome FAILED).
+    verdict = classify_run_validity(
+        tick_count=state.tick_count,
+        initial_capital_usd=state.portfolio.initial_capital_usd,
         decision_summary=decision_summary,
-        executed_fills=executed_fills,
-        non_warm_up=non_warm_up,
+        decision_input_failures=decision_input_failures,
+        executed_fills=len(executed_fills),
     )
-    terminal_error = unsupported_data_error or _rejected_execution_error(decision_summary)
-    if terminal_error is not None:
-        state.compliance_violations.append(terminal_error)
-        bt_logger.error(terminal_error)
-
-    # Compliance is derived only after hollow-run classification so a run
-    # rejected as unsupported data cannot certify as institutionally compliant.
+    violations = terminal_errors(verdict)
+    terminal_error = violations[0] if violations else None
+    for violation in violations:
+        state.compliance_violations.append(violation)
+        bt_logger.error(violation)
+    verdict_note = f" ({', '.join(verdict.reason_codes)})" if verdict.reasons else ""
+    if verdict.passive_only:
+        verdict_note += " — no executed fills; metrics are passive mark-to-market of funded assets"
+    bt_logger.info(f"Run validity: {verdict.validity.value}{verdict_note}")
     institutional_compliance = len(state.compliance_violations) == 0
 
     if terminal_error is None:
@@ -2850,6 +2791,7 @@ def finalize_backtest_result(
         chain=config.chain,
         error=terminal_error,
         decision_input_failures=decision_input_failures or None,
+        run_validity=verdict,
         run_started_at=run_started_at,
         run_ended_at=run_ended_at,
         run_duration_seconds=(run_ended_at - run_started_at).total_seconds(),

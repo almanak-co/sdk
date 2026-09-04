@@ -20,11 +20,12 @@ from typing import Any
 
 import pytest
 
-from almanak.framework.backtesting.pnl._engine_helpers import _invoke_strategy_decide, _rejected_execution_error
+from almanak.framework.backtesting.pnl._engine_helpers import _invoke_strategy_decide
 from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
 from almanak.framework.backtesting.pnl.data_provider import normalize_token_key
 from almanak.framework.backtesting.pnl.decision_log import DecisionLog
 from almanak.framework.backtesting.pnl.engine import DefaultFeeModel, DefaultSlippageModel, PnLBacktester
+from almanak.framework.backtesting.pnl.run_validity import build_verdict, family_all_rejected_reason, terminal_errors
 from almanak.framework.intents import Intent
 from almanak.services.backtest.serialization import serialize_result
 from tests.unit.backtesting.pnl._mocks import MockDataProvider
@@ -145,9 +146,11 @@ class TestDecisionLog:
             ),
         ]
 
-        error = _rejected_execution_error(log.summary(trades=trades))
+        reason = family_all_rejected_reason(log.summary(trades=trades))
 
-        assert error is not None and error.startswith("BACKTEST_EXECUTION_REJECTED:")
+        assert reason is not None and reason.code == "FAMILY_ALL_REJECTED"
+        error = terminal_errors(build_verdict([reason], executed_fills=0))[0]
+        assert error.startswith("BACKTEST_EXECUTION_REJECTED:")
         assert "PERP_OPEN" in error
 
     def test_string_intent_type_and_serialize_fallback(self):

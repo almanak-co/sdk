@@ -135,14 +135,18 @@ def _parse_approval_response(response_json: str, teardown_id: str) -> Any:
         )
 
     action = data.get("action")
-    if action not in _VALID_APPROVAL_ACTIONS:
+    if not isinstance(action, str) or action not in _VALID_APPROVAL_ACTIONS:
         logger.error(
             "Approval response for teardown %s has unknown action %r; treating as %s",
             teardown_id,
             action,
             _SAFE_DEFAULT_APPROVAL_ACTION,
         )
-        action = _SAFE_DEFAULT_APPROVAL_ACTION
+        return ApprovalResponse(
+            approved=False,
+            teardown_id=teardown_id,
+            action=_SAFE_DEFAULT_APPROVAL_ACTION,
+        )
 
     # Parse `approved` explicitly so `{"approved": "false"}` does not collapse
     # to True via bool() on a non-empty string. Accept bool / canonical string

@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from almanak.framework.runner.runner_teardown import _parse_approval_response
 from almanak.framework.teardown.config import TeardownConfig
 from almanak.framework.teardown.slippage_manager import EscalatingSlippageManager, ExecutionAttempt
 
@@ -119,3 +120,44 @@ class TestSlippageStillEscalates:
         assert result.status == "paused_awaiting_approval"
         assert slippages[:3] == [Decimal("0.02")] * 3
         assert slippages[3:5] == [Decimal("0.03")] * 2
+
+
+class TestApprovalValidation:
+    @pytest.mark.parametrize(
+        "response_json",
+        [
+            '{"action":"unknown","approved":true}',
+            '{"action":[],"approved":true}',
+            '{"action":{},"approved":true}',
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_invalid_action_cannot_approve_escalation(self, response_json: str) -> None:
+        manager = _manager()
+
+        async def execute(_intent: object, slippage: Decimal) -> ExecutionAttempt:
+            return ExecutionAttempt(
+                success=slippage == Decimal("0.05"),
+                slippage_used=slippage,
+                error="needs more slippage",
+            )
+
+        async def approval(request):
+            return _parse_approval_response(
+                response_json,
+                request.teardown_id,
+            )
+
+        result = await manager.execute_with_escalation(
+            intent=MagicMock(),
+            position_value=Decimal("100"),
+            execute_func=execute,
+            on_approval_needed=approval,
+            teardown_id="td-approval-validation",
+        )
+
+        assert result.status == "failed_manual_intervention_required"
+        assert {attempt.slippage_used for attempt in result.attempts} == {
+            Decimal("0.02"),
+            Decimal("0.03"),
+        }

@@ -508,8 +508,7 @@ async def test_final_pnl_includes_delayed_trade_impact():
 
     # The metrics should reflect the executed trades
     assert result.metrics.total_trades == len(result.trades), (
-        f"Metrics mismatch: total_trades={result.metrics.total_trades}, "
-        f"actual trades={len(result.trades)}"
+        f"Metrics mismatch: total_trades={result.metrics.total_trades}, actual trades={len(result.trades)}"
     )
 
 
@@ -546,9 +545,7 @@ async def test_delayed_trade_pnl_affects_final_portfolio():
     assert result.error is None, f"Backtest failed: {result.error}"
 
     # All 2 trades should be delayed at end
-    assert result.execution_delayed_at_end == 2, (
-        f"Expected 2 delayed trades, got {result.execution_delayed_at_end}"
-    )
+    assert result.execution_delayed_at_end == 2, f"Expected 2 delayed trades, got {result.execution_delayed_at_end}"
 
     # Verify each trade has positive amount
     for i, trade in enumerate(result.trades):
@@ -568,7 +565,6 @@ async def test_delayed_trade_pnl_affects_final_portfolio():
         # This accounts for the fact that:
         # - Each intent queued at tick T executes at tick T + delay + 1
         # - Intents that would execute after the last tick are delayed to end
-
         # delay=0, 5 ticks: normal=4, delayed=1 (last tick's intent)
         (0, 5, 1),
         # delay=1, 5 ticks: normal=3, delayed=2 (ticks 4,5)
@@ -648,8 +644,7 @@ async def test_various_inclusion_delay_values(
     # Verify the delayed trades have the flag set
     delayed_trades = [t for t in result.trades if t.delayed_at_end]
     assert len(delayed_trades) == expected_delayed, (
-        f"Expected {expected_delayed} trades with delayed_at_end=True, "
-        f"but found {len(delayed_trades)}"
+        f"Expected {expected_delayed} trades with delayed_at_end=True, but found {len(delayed_trades)}"
     )
 
 
@@ -699,8 +694,7 @@ async def test_metrics_correctly_track_delayed_executions():
 
     # Verify total trades metric matches
     assert result.metrics.total_trades == len(result.trades), (
-        f"Metrics total_trades={result.metrics.total_trades} "
-        f"doesn't match len(trades)={len(result.trades)}"
+        f"Metrics total_trades={result.metrics.total_trades} doesn't match len(trades)={len(result.trades)}"
     )
 
     # Verify we have both types
@@ -708,9 +702,7 @@ async def test_metrics_correctly_track_delayed_executions():
     assert len(delayed_trades) > 0, "Expected some delayed trades"
 
     # Verify all trades (normal + delayed) = total
-    assert len(normal_trades) + len(delayed_trades) == len(result.trades), (
-        "Normal + delayed should equal total trades"
-    )
+    assert len(normal_trades) + len(delayed_trades) == len(result.trades), "Normal + delayed should equal total trades"
 
 
 # =============================================================================
@@ -1059,7 +1051,7 @@ async def test_drain_missing_data_without_handler_remains_fail_loud(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_hollow_guard_warns_when_emitted_intent_has_no_terminal_record(monkeypatch, caplog):
+async def test_ledger_drop_without_input_failures_invalidates_the_run(monkeypatch, caplog):
     """Future ledger drops are visible even without decision-input failures."""
     start_time = datetime.now(UTC)
     data_provider = MockDataProviderWithTicks(num_ticks=2, start_time=start_time)
@@ -1096,8 +1088,14 @@ async def test_hollow_guard_warns_when_emitted_intent_has_no_terminal_record(mon
 
     result = await backtester.backtest(strategy, config)
 
-    assert result.error is None
     assert result.decision_summary is not None
     assert result.decision_summary["intent_ticks"] == 1
     assert result.decision_summary["executions"] == {"fills": 0, "rejected": 0}
     assert "0 reached a terminal fill-or-rejection outcome" in caplog.text
+    # A ledger drop is not a warning: the run cannot be published as strategy performance.
+    assert result.run_validity is not None
+    assert result.run_validity.validity.value == "INVALID"
+    assert result.run_validity.reason_codes == ("INTENTS_UNRECORDED",)
+    assert result.error is not None and result.error.startswith("BACKTEST_INVALID:")
+    assert result.success is False
+    assert result.institutional_compliance is False

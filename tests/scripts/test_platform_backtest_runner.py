@@ -1774,6 +1774,53 @@ def test_cloud_run_retry_rebuilds_run_stage_summary_for_engine_failure_artifact(
     assert payload["result_summary"]["code"] == "STRATEGY_ERROR"
 
 
+def test_cloud_run_retry_keeps_run_validity_on_redelivered_engine_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env = _env(GCS_RESULT_PATH="gs://bucket/backtests/test-123/result.json")
+    verdict = {
+        "schema_version": 1,
+        "validity": "INVALID",
+        "reason_codes": ["ZERO_INITIAL_CAPITAL"],
+        "executed_fills": 0,
+        "passive_only": False,
+    }
+    artifact = {
+        "backtest_id": env.backtest_id,
+        "commit_sha": env.commit_sha,
+        "result_summary": {"total_trades": 0, "run_validity": verdict},
+        "result": {"success": False},
+    }
+    _patch_result_blob(monkeypatch, json.dumps(artifact).encode())
+
+    payload = _redelivered_failed_payload(monkeypatch, env, error_message="BACKTEST_INVALID: no capital")
+
+    # The redelivered callback must not be poorer than the one that was lost.
+    assert payload["result_summary"]["code"] == "STRATEGY_ERROR"
+    assert payload["result_summary"]["run_validity"] == verdict
+
+
+def test_cloud_run_retry_derives_run_validity_from_the_artifact_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env = _env(GCS_RESULT_PATH="gs://bucket/backtests/test-123/result.json")
+    artifact = {
+        "backtest_id": env.backtest_id,
+        "commit_sha": env.commit_sha,
+        "result_summary": {"total_trades": 0},
+        "result": {
+            "success": False,
+            "run_validity": {"validity": "NOT_EVALUABLE", "reasons": [{"code": "INPUT_STARVED"}], "warnings": []},
+        },
+    }
+    _patch_result_blob(monkeypatch, json.dumps(artifact).encode())
+
+    payload = _redelivered_failed_payload(monkeypatch, env, error_message="BACKTEST_UNSUPPORTED_DATA: starved")
+
+    assert payload["result_summary"]["run_validity"]["validity"] == "NOT_EVALUABLE"
+    assert payload["result_summary"]["run_validity"]["reason_codes"] == ["INPUT_STARVED"]
+
+
 @pytest.mark.parametrize(
     "download",
     [TimeoutError("GCS read timed out"), b"{truncated", b'"not an object"'],
@@ -2099,4 +2146,81 @@ def test_build_result_summary_echoes_compact_decision_summary() -> None:
 
 def test_build_result_summary_omits_decision_block_when_absent() -> None:
     summary = runner.build_result_summary({"metrics": {}, "trades": []}, elapsed_seconds=1.0)
+    assert "run_validity" not in summary
+
+
+def test_build_result_summary_echoes_compact_run_validity() -> None:
+    serialized = {
+        "metrics": {},
+        "trades": [],
+        "run_validity": {
+            "schema_version": 1,
+            "validity": "INVALID",
+            "reasons": [{"code": "ZERO_INITIAL_CAPITAL", "message": "no capital", "details": {"tick_count": 4}}],
+            "warnings": [{"code": "INPUT_STARVED_LANE", "message": "lane", "details": {}}],
+            "executed_fills": 0,
+            "passive_only": False,
+        },
+    }
+
+    summary = runner.build_result_summary(serialized, elapsed_seconds=1.0)
+
+    # Codes only: the reason table stays in the artifact.
+    assert summary["run_validity"] == {
+        "schema_version": 1,
+        "validity": "INVALID",
+        "reason_codes": ["ZERO_INITIAL_CAPITAL"],
+        "warning_codes": ["INPUT_STARVED_LANE"],
+        "executed_fills": 0,
+        "passive_only": False,
+    }
+
+
+def test_build_result_summary_never_forwards_an_unknown_verdict() -> None:
+    serialized = {
+        "metrics": {},
+        "trades": [],
+        "run_validity": {
+            "validity": "SOMETHING_NEW",
+            "reasons": [],
+            "warnings": [],
+            "executed_fills": 0,
+            "passive_only": True,
+        },
+    }
+
+    summary = runner.build_result_summary(serialized, elapsed_seconds=1.0)
+
+    assert summary["run_validity"]["validity"] == "INVALID"
+    assert summary["run_validity"]["passive_only"] is False
+
+
+def test_cloud_run_retry_normalizes_a_persisted_unknown_verdict(monkeypatch: pytest.MonkeyPatch) -> None:
+    env = _env(GCS_RESULT_PATH="gs://bucket/backtests/test-123/result.json")
+    artifact = {
+        "backtest_id": env.backtest_id,
+        "commit_sha": env.commit_sha,
+        "result_summary": {
+            "total_trades": 0,
+            "run_validity": {"validity": "SOMETHING_NEW", "reason_codes": ["NEW_CODE"], "passive_only": True},
+        },
+        "result": {"success": False},
+    }
+    _patch_result_blob(monkeypatch, json.dumps(artifact).encode())
+
+    payload = _redelivered_failed_payload(monkeypatch, env, error_message="BACKTEST_INVALID: something new")
+
+    assert payload["result_summary"]["run_validity"]["validity"] == "INVALID"
+    assert payload["result_summary"]["run_validity"]["passive_only"] is False
+    assert payload["result_summary"]["run_validity"]["reason_codes"] == ["NEW_CODE"]
+
+
+def test_build_run_failure_summary_carries_run_validity() -> None:
+    verdict = {"schema_version": 1, "validity": "NOT_EVALUABLE", "reason_codes": ["INPUT_STARVED"]}
+
+    summary = runner.build_run_failure_summary("BACKTEST_UNSUPPORTED_DATA: starved", run_validity=verdict)
+
+    assert summary["code"] == "STRATEGY_ERROR"
+    assert summary["run_validity"] == verdict
+    assert "run_validity" not in runner.build_run_failure_summary("plain failure")
     assert "decision_summary" not in summary

@@ -495,13 +495,15 @@ class TestRunBacktestErrorHandling:
 
     @pytest.mark.asyncio
     async def test_empty_data_range_produces_result_without_trades(self, make_backtester, make_config):
-        """A data provider that yields nothing returns a well-formed zero-trade result."""
+        """A data provider that yields nothing returns a well-formed zero-trade result that is not VALID."""
         backtester = make_backtester(EmptyDataProvider())
         config = make_config()
 
         result = await backtester.backtest(HoldStrategy(), config)
 
-        assert result.error is None
+        assert result.run_validity is not None
+        assert result.run_validity.reason_codes == ("NO_TICKS",)
+        assert result.error is not None and result.error.startswith("BACKTEST_INVALID: ")
         assert len(result.trades) == 0
         assert len(result.equity_curve) == 0
         # With no first tick, the token-funded startup value cannot be derived.

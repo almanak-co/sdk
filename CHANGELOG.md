@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Backtest run-validity verdict.** Every finished PnL backtest now carries
+  `result.run_validity` (`VALID | NOT_EVALUABLE | INVALID | PARTIAL_LIFECYCLE`
+  with typed reasons), computed before institutional compliance. Zero-tick,
+  zero-capital, and ledger-drop runs are `INVALID`, a persistently starved hold
+  is `NOT_EVALUABLE`, and both of those set `result.error` so the hosted
+  outcome is `FAILED` with a diagnostic artifact instead of `COMPLETED` with
+  headline metrics (`PARTIAL_LIFECYCLE` is reserved and keeps `success`). A
+  `VALID` run with no fills is flagged `passive_only`.
+  The platform runner echoes the verdict in `result_summary.run_validity`.
+  (ALM-3045, epic ALM-3471)
+
 ## [2.27.0] - 2026-09-03
 
 ### Added

@@ -2165,6 +2165,121 @@ class AggregatedPortfolioView:
                 self.avg_risk_score = total / Decimal(len(self.risk_score_history))
 
 
+RUN_VALIDITY_SCHEMA_VERSION = 1
+
+
+class RunValidity(StrEnum):
+    """Whether a finished simulation's metrics describe the strategy.
+
+    - ``VALID``: the strategy was evaluated; metrics are strategy performance
+      (``passive_only`` on the verdict flags a zero-fill run whose metrics are
+      passive mark-to-market of the funded assets).
+    - ``NOT_EVALUABLE``: the strategy could not be exercised (required decision
+      inputs were unavailable), so its metrics describe nothing about it.
+    - ``INVALID``: the run's own bookkeeping is broken (no ticks, no capital,
+      intents lost from the ledger, an action lane that never executed); the
+      metrics must not be published as strategy performance.
+    - ``PARTIAL_LIFECYCLE``: the strategy ran, but a declared exit path lay
+      outside the window; metrics cover entry-and-hold only.
+    """
+
+    VALID = "VALID"
+    NOT_EVALUABLE = "NOT_EVALUABLE"
+    INVALID = "INVALID"
+    PARTIAL_LIFECYCLE = "PARTIAL_LIFECYCLE"
+
+    @property
+    def severity(self) -> int:
+        """Ordering used to pick the verdict when several reasons apply."""
+        return _RUN_VALIDITY_SEVERITY[self]
+
+
+_RUN_VALIDITY_SEVERITY: dict[RunValidity, int] = {
+    RunValidity.VALID: 0,
+    RunValidity.PARTIAL_LIFECYCLE: 1,
+    RunValidity.NOT_EVALUABLE: 2,
+    RunValidity.INVALID: 3,
+}
+
+
+@dataclass(frozen=True)
+class RunValidityReason:
+    """One typed cause behind a verdict (or an advisory warning on a VALID run)."""
+
+    code: str
+    message: str
+    details: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to dictionary."""
+        return {"code": self.code, "message": self.message, "details": dict(self.details)}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "RunValidityReason":
+        """Deserialize from dictionary, tolerating missing fields."""
+        details = data.get("details")
+        return cls(
+            code=str(data.get("code", "")),
+            message=str(data.get("message", "")),
+            details=dict(details) if isinstance(details, dict) else {},
+        )
+
+
+@dataclass(frozen=True)
+class RunValidityVerdict:
+    """The run-validity verdict attached to every finished ``BacktestResult``.
+
+    ``reasons`` drive ``validity`` (the highest-severity reason wins);
+    ``warnings`` never change it. ``passive_only`` is true when the run is
+    ``VALID`` but executed no fills, so its return is inventory mark-to-market.
+    """
+
+    validity: RunValidity
+    reasons: tuple[RunValidityReason, ...] = ()
+    warnings: tuple[RunValidityReason, ...] = ()
+    executed_fills: int = 0
+    passive_only: bool = False
+    schema_version: int = RUN_VALIDITY_SCHEMA_VERSION
+
+    @property
+    def is_valid(self) -> bool:
+        """True only for ``VALID``; every other verdict withholds the metrics."""
+        return self.validity is RunValidity.VALID
+
+    @property
+    def reason_codes(self) -> tuple[str, ...]:
+        """Reason codes in classification order."""
+        return tuple(reason.code for reason in self.reasons)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to dictionary."""
+        return {
+            "schema_version": self.schema_version,
+            "validity": self.validity.value,
+            "reasons": [reason.to_dict() for reason in self.reasons],
+            "warnings": [warning.to_dict() for warning in self.warnings],
+            "executed_fills": self.executed_fills,
+            "passive_only": self.passive_only,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "RunValidityVerdict":
+        """Rehydrate a stored verdict; a value this reader does not know is never read as VALID."""
+        try:
+            validity = RunValidity(str(data.get("validity", RunValidity.VALID.value)))
+        except ValueError:
+            validity = RunValidity.INVALID
+        executed_fills = int(data.get("executed_fills", 0) or 0)
+        return cls(
+            validity=validity,
+            reasons=tuple(RunValidityReason.from_dict(r) for r in data.get("reasons", []) if isinstance(r, dict)),
+            warnings=tuple(RunValidityReason.from_dict(w) for w in data.get("warnings", []) if isinstance(w, dict)),
+            executed_fills=executed_fills,
+            passive_only=validity is RunValidity.VALID and executed_fills == 0,
+            schema_version=int(data.get("schema_version", RUN_VALIDITY_SCHEMA_VERSION) or RUN_VALIDITY_SCHEMA_VERSION),
+        )
+
+
 @dataclass
 class BacktestResult:
     """Complete results from a backtest run.
@@ -2221,6 +2336,9 @@ class BacktestResult:
         data_quality: Data quality metrics for the backtest run. Includes coverage ratio,
             source breakdown, stale data count, and interpolation count. Useful for
             understanding data reliability and identifying potential accuracy issues.
+        run_validity: Whether the metrics describe the strategy at all. A non-VALID
+            verdict sets ``error`` (so ``success`` is False) and fails compliance; see
+            RunValidity for the vocabulary and RunValidityVerdict for the reasons.
         institutional_compliance: Whether the backtest run meets institutional standards.
             Set to False when any strict reproducibility, data quality, or compliance
             check fails. Use compliance_violations to see which checks failed.
@@ -2292,6 +2410,9 @@ class BacktestResult:
     # Aggregated decide()-time market-data failures (ALM-2951): entries of
     # {source, key, ticks, detail}. Zero fills + entries here = HOLLOW run.
     decision_input_failures: list[dict[str, Any]] | None = None
+    # None only on artifacts written before the verdict existed; the engine
+    # always attaches one.
+    run_validity: RunValidityVerdict | None = None
     data_source_capabilities: dict[str, "HistoricalDataCapability"] = field(default_factory=dict)
     data_source_warnings: list[str] = field(default_factory=list)
     data_quality: DataQualityReport | None = None
@@ -2716,6 +2837,7 @@ class BacktestResult:
             "monte_carlo_results": self.monte_carlo_results.to_dict() if self.monte_carlo_results else None,
             "crisis_results": self.crisis_results.to_dict() if self.crisis_results else None,
             "decision_input_failures": self.decision_input_failures,
+            "run_validity": self.run_validity.to_dict() if self.run_validity else None,
             "errors": self.errors,
             "backtest_id": self.backtest_id,
             "phase_timings": self.phase_timings,
@@ -3078,6 +3200,7 @@ class BacktestResult:
             monte_carlo_results=cls._parse_monte_carlo_results(data.get("monte_carlo_results")),
             crisis_results=CrisisMetrics.from_dict(data["crisis_results"]) if data.get("crisis_results") else None,
             decision_input_failures=data.get("decision_input_failures"),
+            run_validity=RunValidityVerdict.from_dict(data["run_validity"]) if data.get("run_validity") else None,
             errors=data.get("errors", []),
             backtest_id=data.get("backtest_id"),
             phase_timings=data.get("phase_timings", []),
