@@ -66,26 +66,6 @@ from ..teardown import (
     get_teardown_state_manager,
 )
 
-# =============================================================================
-# Strategy-folder resolution (VIB-3835)
-# =============================================================================
-#
-# Every teardown subcommand that reads/writes ``teardown_requests`` needs to
-# know which strategy folder owns the SQLite DB. The local-DB rule is folder-
-# scoped (1 strategy = 1 folder = 1 DB = 1 gateway, plan §B / VIB-3761) so the
-# CLI must resolve the folder explicitly — silently falling through to the
-# per-user utility DB caused the May 1 mainnet teardown failure.
-#
-# Resolution order (mirrors `strat run` / VIB-3835):
-#   1. Explicit ``-d / --working-dir`` flag.
-#   2. ``ALMANAK_STRATEGY_FOLDER`` env var (set by `strat run` in its own process,
-#      so a teardown run from inside that process inherits the right folder).
-#   3. ``./`` (cwd) if it contains config.json (or strategy.py).
-#   4. HARD FAIL — no fallback to utility DB.
-#
-# The resolver exports ``ALMANAK_STRATEGY_FOLDER`` so any downstream code that
-# reads ``local_paths.local_strategy_db_path()`` sees the same folder.
-
 _STRATEGY_FOLDER_HINT = (
     "Pass --working-dir / -d <path>, or run from a strategy folder.\n"
     "  A strategy folder must contain config.json, config.yaml, "
@@ -115,7 +95,6 @@ def _resolve_and_export_strategy_folder(working_dir: str | None) -> Path:
     """
     from almanak.framework.local_paths import set_strategy_folder
 
-    # Step 1: explicit -d flag wins.
     if working_dir is not None:
         candidate = Path(working_dir).expanduser().resolve()
         if not candidate.is_dir():
@@ -125,34 +104,24 @@ def _resolve_and_export_strategy_folder(working_dir: str | None) -> Path:
                 f"--working-dir does not look like a strategy folder: {candidate}\n  {_STRATEGY_FOLDER_HINT}"
             )
         set_strategy_folder(candidate)
-        # Reset any singleton state managers cached from a prior path so the
-        # exported folder takes effect for this invocation.
         _reset_teardown_state_singleton()
         return candidate
 
-    # Step 2: respect a folder already exported by a parent process (e.g. a
-    # `strat run` that shells out to `teardown` for some scripted flow).
     from almanak.framework.local_paths import strategy_folder_env
 
     env_folder = strategy_folder_env()
     if env_folder and env_folder.strip():
         candidate = Path(env_folder.strip()).expanduser().resolve()
         if candidate.is_dir() and _looks_like_strategy_folder(candidate):
-            # Mirror Steps 1 and 3: reset the singleton so a parent process
-            # that imported `get_teardown_state_manager` before exporting the
-            # env var doesn't cache the wrong DB path.
             _reset_teardown_state_singleton()
             return candidate
-        # Fall through — env var is stale or points at a non-strategy dir.
 
-    # Step 3: try cwd.
     cwd = Path.cwd().resolve()
     if _looks_like_strategy_folder(cwd):
         set_strategy_folder(cwd)
         _reset_teardown_state_singleton()
         return cwd
 
-    # Step 4: hard-fail.
     raise click.ClickException(f"no strategy folder resolved.\n  {_STRATEGY_FOLDER_HINT}")
 
 
@@ -203,26 +172,6 @@ def _get_teardown_state_manager_or_die():
         raise click.ClickException(str(exc)) from exc
 
 
-# =============================================================================
-# CLI accounting wiring (VIB-3839)
-# =============================================================================
-#
-# The CLI ``teardown execute`` lane needs to drive the same per-intent commit
-# pipeline (enrich → ledger → outbox+fire → sidecar) and pre/post snapshot
-# brackets the runner-loop lane already drives via VIB-3773. Without this
-# wiring, every closing tx (LP_CLOSE, REPAY, swap-back, …) lands on-chain
-# but the SDK records zero rows in transaction_ledger / position_events /
-# portfolio_snapshots / portfolio_metrics / accounting_events — the operator
-# sees "Teardown completed" with an empty audit trail.
-#
-# ``runner_helpers`` is ``functools.partial(fn, runner)`` for two callables;
-# both need a real :class:`StrategyRunner` to read attributes like
-# ``_write_ledger_entry``, ``_portfolio_valuer``, ``_last_cycle_id``, etc.
-# So the CLI lane builds a minimal runner from the gateway-backed pieces it
-# already has (price_oracle, balance_provider, execution_orchestrator,
-# state_manager) and passes it through ``build_runner_helpers``.
-
-
 async def _build_cli_teardown_runner(
     *,
     gateway_client: "GatewayClient",
@@ -259,24 +208,12 @@ async def _build_cli_teardown_runner(
     )
 
     runner_config = RunnerConfig(
-        # Interval is irrelevant — there is no iteration loop. Pick the
-        # default to avoid surfacing a magic value.
         default_interval_seconds=30,
         dry_run=False,
         enable_state_persistence=True,
-        # CLI teardown writes to the deferred-write log on accounting failure
-        # (VIB-3773 inverted contract — never block the next risk-reducing
-        # intent). No alerts are routed through the runner from this lane.
         enable_alerting=False,
     )
 
-    # ``GatewayExecutionOrchestrator`` and ``GatewayStateManager`` are
-    # duck-compatible with ``ExecutionOrchestrator`` and ``StateManager``
-    # respectively (the runner only calls a narrow set of methods that
-    # both share). The StrategyRunner ctor's nominal types don't reflect
-    # this duck-typing, so we annotate the call rather than widen the
-    # ctor — the runner-loop's CLI fallback (cli/run_helpers.py) does
-    # the same.
     runner = StrategyRunner(
         price_oracle=price_oracle,  # type: ignore[arg-type]
         balance_provider=balance_provider,
@@ -285,11 +222,6 @@ async def _build_cli_teardown_runner(
         config=runner_config,
     )
     return runner
-
-
-# =============================================================================
-# Helper Functions
-# =============================================================================
 
 
 def format_status(status: TeardownStatus) -> str:
@@ -320,10 +252,6 @@ def format_datetime(dt: datetime | None) -> str:
     return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
-# VIB-5778: the honest render for an unmeasured count. A FAILED teardown that
-# never reached ``mark_started`` (``started_at IS NULL``) has NO measured
-# position accounting — its count columns are schema 0-defaults, not zeros.
-# UNKNOWN is not zero.
 _UNKNOWN_COUNT = "unknown"
 
 
@@ -354,8 +282,6 @@ def format_target_token(target_token: str | None) -> str:
 
 def format_progress(request: TeardownRequest) -> str:
     """Format teardown progress."""
-    # VIB-5778: a FAILED teardown with unmeasured counts renders "unknown", not a
-    # success-shaped "-" / "0/0" that hides a stranded position.
     if request.counts_unmeasured:
         return _UNKNOWN_COUNT
 
@@ -371,11 +297,6 @@ def format_progress(request: TeardownRequest) -> str:
         progress += click.style(f" ({failed} failed)", fg="red")
 
     return progress
-
-
-# =============================================================================
-# Strategy Loading Helpers
-# =============================================================================
 
 
 def load_strategy_from_file(file_path: Path) -> tuple[type | None, str | None]:
@@ -400,7 +321,6 @@ def load_strategy_from_file(file_path: Path) -> tuple[type | None, str | None]:
         if spec is None or spec.loader is None:
             return None, f"Could not load module spec from {file_path}"
 
-        # Add strategy directory to sys.path so local imports resolve
         strategy_dir = str(file_path.parent)
         sys.path.insert(0, strategy_dir)
         try:
@@ -410,8 +330,6 @@ def load_strategy_from_file(file_path: Path) -> tuple[type | None, str | None]:
         finally:
             sys.path.remove(strategy_dir)
 
-        # Find concrete IntentStrategy subclasses (skip abstract base classes
-        # like StatelessStrategy that may be imported but not instantiable).
         strategy_classes = []
         for name in dir(module):
             obj = getattr(module, name)
@@ -426,7 +344,6 @@ def load_strategy_from_file(file_path: Path) -> tuple[type | None, str | None]:
         if not strategy_classes:
             return None, "No concrete IntentStrategy subclass found in file"
 
-        # Prefer the most-derived class (defined in this file, not just imported)
         if len(strategy_classes) > 1:
             local_classes = [c for c in strategy_classes if c.__module__ == module.__name__]
             if local_classes:
@@ -458,13 +375,8 @@ def _build_deployment_id_candidates(
     _add_candidate(config_dict.get("deployment_id"))
     _add_candidate(getattr(strategy, "deployment_id", ""))
 
-    # A cold `teardown execute` with no persisted/explicit deployment_id must
-    # self-resolve the same deterministic id `--discover` already trusts, or
-    # state restore below is skipped and teardown reports "nothing to close"
-    # on a real open position. For a multi-chain strategy, hash the same
-    # sorted comma-joined chain signature the runner's boot-time identity
-    # resolution uses (`resolve_identity_chain()`) — a bare scalar `chain`
-    # recomputes a different, wrong deployment_id.
+    # Cold teardowns must match runner identity; multi-chain identity uses the
+    # canonical chain signature rather than the scalar CLI chain.
     if strategy_class is not None and (wallet_address or chain):
         try:
             from ..runner.identity import resolve_deployment_id
@@ -561,7 +473,6 @@ def _inject_balance_provider(
             chain=chain,
         )
 
-        # Create a price oracle for USD conversion (best-effort)
         price_oracle = None
         try:
             from ..data.price.gateway_oracle import GatewayPriceOracle
@@ -572,31 +483,14 @@ def _inject_balance_provider(
 
         if price_oracle:
             strategy._balance_provider = create_sync_balance_func(balance_provider, price_oracle)
-            # VIB-5520: wire the SAME gateway price oracle onto the strategy so the
-            # teardown market snapshot (``MarketSnapshotBuilder.for_strategy_runner``
-            # reads ``strategy._price_oracle``) can resolve token prices. Without
-            # this, ``market.price()`` has no oracle and TD-17's
-            # ``warm_and_validate_oracle`` raises ``TeardownPriceOracleError`` —
-            # blocking Plan-B break-glass before any closing intent compiles. The
-            # sync wrapper mirrors the runner's ``_wire_core_providers``; the
-            # validation hard-stop is untouched (a genuinely unpriceable token
-            # still raises). Set unconditionally (mirroring ``_balance_provider``
-            # just above): ``IntentStrategy.__init__`` always assigns
-            # ``self._price_oracle``, so a ``hasattr`` gate is always True for
-            # real strategies — but gating on it would silently skip the oracle
-            # for any future strategy type that doesn't pre-declare the attr,
-            # which is the exact VIB-5520 failure class. Wire it unconditionally.
+            # The teardown snapshot must share this oracle; existing validation
+            # still hard-stops before compilation when a token cannot be priced.
             strategy._price_oracle = create_sync_price_oracle_func(price_oracle)
             logger.info("Injected gateway balance provider and price oracle for teardown (chain=%s)", chain)
         else:
             logger.debug("Skipped balance provider injection -- no price oracle available")
     except Exception as e:
         logger.warning("Could not inject balance provider for teardown: %s", e)
-
-
-# =============================================================================
-# CLI Commands
-# =============================================================================
 
 
 @click.group()
@@ -758,22 +652,13 @@ def execute_teardown(  # noqa: C901
     click.echo("ALMANAK STRATEGY TEARDOWN")
     click.echo("=" * 60)
 
-    # Fail fast on incompatible option combinations before any filesystem or
-    # resolver work. This is a pure option validator — it must fire before
-    # the strategy-folder resolver so `--no-gateway --network anvil <bad-d>`
-    # surfaces the option conflict, not the folder error.
+    # Validate incompatible options before folder errors can mask them.
     from .teardown_helpers import validate_teardown_options
 
     validate_teardown_options(no_gateway, network, discover=discover, wallet_wide=wallet_wide)
 
-    # VIB-3838: route -d through the same resolver as request/status/list/
-    # cancel. Validates is_dir + _looks_like_strategy_folder, exports
-    # ALMANAK_STRATEGY_FOLDER, resets the cached singleton. Hard-fails with
-    # the canonical "does not look like a strategy folder" message instead
-    # of falling through to a noisier failure later in strategy loading.
     working_path = _resolve_and_export_strategy_folder(working_dir)
 
-    # Load environment from .env through the boundary helper.
     from almanak.config.env import _load_dotenv_once
     from almanak.core.redaction import install_redaction
 
@@ -785,47 +670,32 @@ def execute_teardown(  # noqa: C901
     # Install secret redaction after env is loaded so all secrets are registered.
     install_redaction()
 
-    # Find strategy.py
     strategy_file = working_path / "strategy.py"
     if not strategy_file.exists():
         raise click.ClickException(f"No strategy.py found in {working_dir}")
 
-    # Load strategy class
     strategy_class, error = load_strategy_from_file(strategy_file)
     if error or strategy_class is None:
         raise click.ClickException(f"Failed to load strategy: {error}")
 
     click.echo(f"Loaded strategy: {strategy_class.__name__}")
 
-    # Load config (auto-discovers config.{json,yaml,yml} when -c not given).
     from .teardown_helpers import load_strategy_config_dict
 
     config_dict, config_file = load_strategy_config_dict(working_path, config_file)
     if config_file:
         click.echo(f"Loaded config from: {config_file}")
 
-    # Resolve chain: config.json override first, then decorator metadata
     from .run import get_default_chain
 
     chain = config_dict.get("chain") or get_default_chain(strategy_class)
 
-    # Resolve wallet address up-front (VIB-3819): the managed-gateway path
-    # below needs it to pre-fund the Anvil fork during boot. Both gateway
-    # paths (--no-gateway and managed) and the strategy-instantiation block
-    # below consume it.
-    # Missing wallet_address is non-fatal here — managed gateway can still
-    # boot (only Anvil pre-funding is skipped). Hard-fail happens at
-    # strategy instantiation.
+    # A missing wallet only skips local-fork funding during gateway startup;
+    # strategy instantiation remains the hard failure boundary.
     from .teardown_helpers import resolve_wallet_address, setup_gateway
 
     wallet_address = resolve_wallet_address(config_dict)
 
-    # Gateway setup: connect to an existing gateway (--no-gateway) or
-    # auto-start a managed one. The helper handles --no-gateway connect/
-    # health-check, managed-gateway port discovery, auth-token generation,
-    # Anvil chain dispatch, atexit registration, and the final health
-    # check. Returns GatewaySetupResult bundling the artifacts the rest of
-    # the function consumes.
     _gw_setup = setup_gateway(
         no_gateway=no_gateway,
         gateway_host=gateway_host,
@@ -840,11 +710,7 @@ def execute_teardown(  # noqa: C901
     gateway_port = _gw_setup.gateway_port
     solana_anvil_needed = _gw_setup.solana_anvil_needed
 
-    # VIB-3878: spin up solana-test-validator for Solana strategies under
-    # --network anvil. Funds the wallet and registers atexit cleanup. Returns
-    # None when not needed (i.e. solana_anvil_needed=False, e.g. --no-gateway
-    # or pure-EVM strategy). The handle's stop() is idempotent so the
-    # finally block + atexit safety-net won't double-stop.
+    # Local Solana forks fund the wallet and register idempotent cleanup.
     from .teardown_helpers import setup_solana_fork
 
     solana_handle = (
@@ -868,15 +734,10 @@ def execute_teardown(  # noqa: C901
         print_no_op_if_empty_and_signal_return,
     )
 
-    # Stash the resolver up-front so the cleanup `finally` always has it,
-    # even when an exception fires before strategy instantiation completes.
+    # Resolve before entering try so cleanup survives partial initialization.
     resolver = get_resolver_for_cleanup()
 
     try:
-        # Phase 6: TokenResolver wiring → strategy instantiation → balance
-        # provider injection → state restoration. Hard-fails on missing
-        # wallet_address (VIB-3819 — managed-gateway boot survives without
-        # it but strategy instantiation does not).
         strategy = instantiate_strategy_with_state(
             strategy_class=strategy_class,
             config_dict=config_dict,
@@ -895,9 +756,6 @@ def execute_teardown(  # noqa: C901
         click.echo(f"Mode: {mode}")
         click.echo("-" * 60)
 
-        # Phase 7: positions via --discover NPM scan or strategy's own
-        # tracking. VIB-3705 no-op early return — print canonical no-op
-        # message + (when not --discover) the discovery tip and exit 0.
         positions = discover_positions(
             strategy=strategy,
             strategy_class=strategy_class,
@@ -917,15 +775,12 @@ def execute_teardown(  # noqa: C901
         ):
             return
 
-        # Phase 8a: positions table + SafetyGuard warning when --discover
-        # couldn't price them (PR #1522 CodeRabbit major).
         total_value, unknown_value_count = display_position_summary(positions)
         display_unknown_value_warning(unknown_value_count)
 
-        # Phase 8b: market snapshot early so preview matches execution.
+        # Build the market before preview so preview and execution share a snapshot.
         market, price_oracle = build_market_and_oracle(strategy)
 
-        # Phase 8c: intents via --discover synthesis or strategy method.
         intents = generate_teardown_intents_for_cli(
             strategy=strategy,
             mode_str=mode,
@@ -938,15 +793,11 @@ def execute_teardown(  # noqa: C901
             click.echo("\n[PREVIEW MODE] No changes will be made.")
             return
 
-        # Confirmation
         from .teardown_helpers import prompt_teardown_confirmation
 
         if not prompt_teardown_confirmation(force):
             return
 
-        # Phase 9b: build the synchronous teardown machinery (orchestrator,
-        # compiler, state adapter, cycle ids) + emit the --no-accounting
-        # operator warning if applicable.
         click.echo("\nExecuting teardown...")
         from .teardown_helpers import build_teardown_machinery, run_teardown_with_brackets
 
@@ -959,10 +810,8 @@ def execute_teardown(  # noqa: C901
             network=_gw_setup.network,
         )
 
-        # Phase 9c: run the teardown end-to-end inside an async context with
-        # the VIB-3773 accounting boundary preserved (cycle-id swap on both
-        # surfaces, pre/post snapshot brackets with degraded-but-continue
-        # contract, restore cycle ids in finally).
+        # Preserve pre/post accounting brackets and restore cycle IDs even when
+        # accounting degrades; accounting failures must not block risk reduction.
         try:
             result = asyncio.run(
                 run_teardown_with_brackets(
@@ -985,7 +834,6 @@ def execute_teardown(  # noqa: C901
             logger.error("Teardown execution failed", exc_info=True)
             raise click.ClickException(f"Teardown execution failed: {e}") from e
 
-        # Display results + record lifecycle in teardown_requests (VIB-3920).
         from .teardown_helpers import (
             display_teardown_result,
             update_teardown_requests_lifecycle,
@@ -1130,7 +978,6 @@ def request(
     if timeout <= 0:
         raise click.ClickException("--timeout must be a positive number of seconds")
 
-    # Map asset policy
     policy_map = {
         "target": TeardownAssetPolicy.TARGET_TOKEN,
         "entry": TeardownAssetPolicy.ENTRY_TOKEN,
@@ -1138,34 +985,26 @@ def request(
     }
     asset_policy_enum = policy_map[asset_policy]
 
-    # Map mode
     mode_enum = TeardownMode.from_cli_string(mode)
 
-    # Show confirmation
     click.echo()
     click.echo(click.style("Teardown Request Summary", bold=True, fg="cyan"))
     click.echo(f"  Strategy:     {strategy}")
     click.echo(f"  Mode:         {format_mode(mode_enum)}")
     click.echo(f"  Asset Policy: {asset_policy_enum.value}")
     if asset_policy_enum == TeardownAssetPolicy.TARGET_TOKEN:
-        # Do not print a token the runner may not actually use: with no -t the
-        # target is resolved per-chain at teardown time (VIB-5727), so naming a
-        # symbol here would be a guess the operator could reasonably act on.
         click.echo(f"  Target Token: {format_target_token(target_token)}")
     if reason:
         click.echo(f"  Reason:       {reason}")
     click.echo()
 
-    # Confirm unless forced
     if not force:
         if not click.confirm("Create this teardown request?"):
             click.echo("Cancelled.")
             return
 
-    # Create the request
     manager = _get_teardown_state_manager_or_die()
 
-    # Check for existing active request
     existing = manager.get_active_request(strategy)
     if existing:
         click.echo(
@@ -1183,11 +1022,8 @@ def request(
         deployment_id=strategy,
         mode=mode_enum,
         asset_policy=asset_policy_enum,
-        # No -t → persist the "no preference" sentinel, NOT a token symbol. The
-        # runner resolves it per-chain (VIB-5727). Persisting "USDC" here is
-        # what made every USDC-less chain fail: it is indistinguishable from an
-        # operator explicitly asking for USDC, so nothing downstream was allowed
-        # to substitute the chain's actual dollar.
+        # Persist "no preference" rather than a guessed token; explicit symbols
+        # must never be substituted when the runner resolves this per chain.
         target_token=target_token or TARGET_TOKEN_CHAIN_DEFAULT,
         reason=reason,
         requested_by="cli",
@@ -1203,7 +1039,6 @@ def request(
         click.echo(f"Use 'almanak strat teardown status -d <folder> -s {strategy}' to monitor progress.")
         return
 
-    # --wait: poll until terminal state or timeout.
     exit_code = _wait_for_terminal_state(manager, strategy, timeout)
     if exit_code != 0:
         sys.exit(exit_code)
@@ -1292,8 +1127,7 @@ def _render_consolidation_summary(manager: Any, deployment_id: str) -> None:
             fg="yellow",
         )
     if failed or succeeded or skipped:
-        # Warnings can describe any mixture of landed, failed, and skipped
-        # swaps. Emit them once after rendering every applicable count.
+        # Shared warnings follow every applicable outcome count and render once.
         _echo_warnings(warnings, "    - ")
     elif not consolidation.get("planned"):
         _echo_warnings(warnings, "  consolidation: ")
@@ -1324,15 +1158,8 @@ def _wait_for_terminal_state(manager: Any, deployment_id: str, timeout: int) -> 
     try:
         return _poll_for_terminal_state(manager, deployment_id, timeout, poll_interval, deadline)
     except KeyboardInterrupt:
-        # VIB-3837: the runner is the only writer of the teardown_requests
-        # row, so interrupting the CLI's wait does NOT cancel or partially
-        # commit the teardown — it just stops the local poll. Tell the
-        # operator how to pick the wait back up and exit 130 (128+SIGINT).
-        # The resume hint must include ``-d <folder>`` because the in-process
-        # ``ALMANAK_STRATEGY_FOLDER`` export dies with this CLI process; a
-        # follow-up command from another cwd would otherwise hard-fail at the
-        # resolver. Read the folder we exported earlier (always populated by
-        # ``_resolve_and_export_strategy_folder``).
+        # Interrupting the poll does not cancel the runner's teardown. Include
+        # the folder because the exported environment dies with this process.
         from almanak.framework.local_paths import strategy_folder_env
 
         strategy_folder = strategy_folder_env() or "<folder>"
@@ -1367,13 +1194,8 @@ def _poll_for_terminal_state(
     while True:
         request_row = manager.get_request(deployment_id)
         if request_row is None:
-            # Production code never deletes terminal rows — `mark_completed` /
-            # `mark_failed` / `mark_cancelled` preserve them. So a missing row
-            # mid-wait means one of: (a) external process pruned the table,
-            # (b) the resolver is reading a different DB than the runner,
-            # (c) the row was never created. None of these are safe to report
-            # as "COMPLETED — exit 0"; that masks exactly the silent-failure
-            # class VIB-3835 closes. Surface as a non-zero error instead.
+            # Terminal rows persist, so disappearance indicates the wrong DB or
+            # out-of-band deletion and must never be reported as success.
             click.echo()
             click.secho(
                 f"Error: teardown_requests row for {deployment_id} disappeared while waiting.",
@@ -1386,14 +1208,12 @@ def _poll_for_terminal_state(
             )
             return 1
 
-        # Acknowledged transition.
         if not seen_acknowledged and request_row.acknowledged_at is not None:
             seen_acknowledged = True
             click.echo(
                 f"  acknowledged — runner picked up the request at {format_datetime(request_row.acknowledged_at)}"
             )
 
-        # Started transition.
         if not seen_started and request_row.started_at is not None:
             seen_started = True
             click.echo(
@@ -1402,7 +1222,6 @@ def _poll_for_terminal_state(
                 f"({request_row.positions_total} position(s) total)"
             )
 
-        # Phase / progress lines, only on change.
         if request_row.current_phase is not None and request_row.current_phase != last_phase:
             last_phase = request_row.current_phase
             click.echo(f"  phase — {last_phase.value}")
@@ -1416,7 +1235,6 @@ def _poll_for_terminal_state(
             last_progress = progress
             click.echo(f"  progress — closed={progress[0]}, failed={progress[1]}, total={progress[2]}")
 
-        # Terminal states.
         status = request_row.status
         if status == TeardownStatus.COMPLETED:
             click.echo()
@@ -1426,19 +1244,14 @@ def _poll_for_terminal_state(
                 f"positions_failed={request_row.positions_failed}, "
                 f"total={request_row.positions_total}"
             )
-            # VIB-2932 / VIB-5472: surface the closure-verification confidence so
-            # an UNVERIFIED (reported-but-not-chain-confirmed) closure is visible.
             _render_verification_status(manager, deployment_id)
-            # VIB-5011: render the token-consolidation outcome. Exit code
-            # stays 0 even when consolidation swaps failed — the closure
-            # itself succeeded and on-chain risk is removed.
+            # Consolidation failure does not change a successful closure's exit code.
             _render_consolidation_summary(manager, deployment_id)
             return 0
         if status == TeardownStatus.FAILED:
             click.echo()
             click.secho(f"Teardown FAILED for {deployment_id}.", fg="red", bold=True)
-            # VIB-5778: render unmeasured counts as "unknown" (never a
-            # success-shaped 0) and always surface the persisted error_message.
+            # Unstarted failures have unmeasured counts; never render defaults as zero.
             click.echo(
                 f"  positions_closed={format_count(request_row, request_row.positions_closed)}, "
                 f"positions_failed={format_count(request_row, request_row.positions_failed)}, "
@@ -1452,9 +1265,7 @@ def _poll_for_terminal_state(
             click.secho(f"Teardown CANCELLED for {deployment_id}.", fg="yellow", bold=True)
             return 1
 
-        # Timeout. Distinguish "runner never picked up" from "runner is
-        # working but didn't finish" — the operator needs different
-        # remediations for each.
+        # Pickup and execution timeouts require different operator remediation.
         if time.monotonic() >= deadline:
             click.echo()
             if seen_acknowledged or seen_started:
@@ -1525,31 +1336,23 @@ def status(working_dir: str | None, strategy: str, as_json: bool):
         click.echo(json.dumps(request.to_dict(), indent=2))
         return
 
-    # Display formatted status
     click.echo()
     click.echo(click.style(f"Teardown Status: {strategy}", bold=True, fg="cyan"))
     click.echo(f"  Status:       {format_status(request.status)}")
     click.echo(f"  Mode:         {format_mode(request.mode)}")
     click.echo(f"  Asset Policy: {request.asset_policy.value}")
     if request.asset_policy == TeardownAssetPolicy.TARGET_TOKEN:
-        # Never surface the sentinel raw (VIB-5727). Until the phase runs there
-        # is genuinely no target to report — the chain-aware choice happens at
-        # consolidation time — and the resolved value is reported from
-        # result_json by `_render_consolidation_status` once it exists.
+        # Before consolidation, the chain-specific target is unresolved; never
+        # expose the sentinel as a token the operator could act on.
         click.echo(f"  Target Token: {format_target_token(request.target_token)}")
     if request.current_phase:
         click.echo(f"  Phase:        {request.current_phase.value}")
     click.echo(f"  Progress:     {format_progress(request)}")
-    # Terminal payload (from result_json) — only present on COMPLETED rows
-    # (mark_completed writes result_json; mark_failed does not).
+    # result_json is written only for completed requests.
     if request.status == TeardownStatus.COMPLETED:
-        # VIB-2932 / VIB-5472: closure-verification confidence.
         _render_verification_status(manager, strategy)
-        # VIB-5011: terminal consolidation summary.
         _render_consolidation_summary(manager, strategy)
-    # VIB-5778: a FAILED teardown must always surface its persisted error_message
-    # here — the field incident printed success-shaped counts and dropped the
-    # error entirely, hiding a stranded live position.
+    # Failure output must include the persisted error, not only count fields.
     if request.status == TeardownStatus.FAILED and request.error_message:
         click.secho(f"  Error:        {request.error_message}", fg="red")
     click.echo()
@@ -1563,7 +1366,6 @@ def status(working_dir: str | None, strategy: str, as_json: bool):
         click.echo(f"  Reason: {request.reason}")
     click.echo()
 
-    # Show actions
     if request.is_active:
         if request.can_cancel:
             click.echo(
@@ -1624,19 +1426,16 @@ def cancel(working_dir: str | None, strategy: str, force: bool):
         )
         return
 
-    # Show current state
     click.echo()
     click.echo(f"Current teardown status: {format_status(request.status)}")
     click.echo(f"Mode: {format_mode(request.mode)}")
     click.echo()
 
-    # Confirm
     if not force:
         if not click.confirm("Cancel this teardown?"):
             click.echo("Cancelled.")
             return
 
-    # Request cancellation
     success = manager.request_cancel(strategy)
 
     if success:
@@ -1701,12 +1500,10 @@ def list_teardowns(working_dir: str | None, show_all: bool, as_json: bool):
         click.echo(json.dumps([r.to_dict() for r in requests], indent=2))
         return
 
-    # Display table
     click.echo()
     click.echo(click.style("Active Teardown Requests", bold=True, fg="cyan"))
     click.echo()
 
-    # Header
     click.echo(f"{'Strategy':<25} {'Status':<15} {'Mode':<12} {'Phase':<20} {'Progress':<15}")
     click.echo("-" * 90)
 
@@ -1720,18 +1517,11 @@ def list_teardowns(working_dir: str | None, show_all: bool, as_json: bool):
             f"{phase:<20} "
             f"{progress:<15}"
         )
-        # VIB-5778: surface the failure detail for FAILED rows so the table never
-        # renders a failure as a silent bare row (progress already shows
-        # "unknown" when the counts are unmeasured).
+        # Keep failure details visible beside potentially unmeasured counts.
         if req.status == TeardownStatus.FAILED and req.error_message:
             click.secho(f"    error: {req.error_message}", fg="red")
 
     click.echo()
-
-
-# =============================================================================
-# CLI Entry Point
-# =============================================================================
 
 
 def main():

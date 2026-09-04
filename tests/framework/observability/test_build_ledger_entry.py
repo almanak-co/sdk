@@ -44,11 +44,6 @@ from almanak.framework.observability.ledger import (
     deserialize_extracted_data,
 )
 
-# ---------------------------------------------------------------------------
-# Duck-typed helpers (matches the ``_Attrs`` pattern used in
-# tests/framework/observability/test_position_events.py).
-# ---------------------------------------------------------------------------
-
 
 class _Attrs:
     """Attribute holder that exposes ONLY attributes explicitly set on it.
@@ -82,11 +77,6 @@ def _make_tx_result(tx_hash: str = "0xabc", gas_used: int = 0, success: bool = T
     return SimpleNamespace(tx_hash=tx_hash, gas_used=gas_used, success=success)
 
 
-# ---------------------------------------------------------------------------
-# Phase α — intent-type dispatch (lines 122-125).
-# ---------------------------------------------------------------------------
-
-
 class TestIntentTypeDispatch:
     """``intent_type`` is read from ``intent.intent_type``; enum-with-.value
     and raw-string shapes are both supported; missing attr → ''.
@@ -101,7 +91,7 @@ class TestIntentTypeDispatch:
         """A plain-string intent_type (no .value) is stringified directly."""
 
         class StrTypeIntent:
-            intent_type = "LP_OPEN"  # not an enum
+            intent_type = "LP_OPEN"
             protocol = "uniswap_v3"
 
         entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=StrTypeIntent(), result=None)
@@ -113,11 +103,6 @@ class TestIntentTypeDispatch:
 
         entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=NoType(), result=None)
         assert entry.intent_type == ""
-
-
-# ---------------------------------------------------------------------------
-# Happy-path tests, one per intent-type family.
-# ---------------------------------------------------------------------------
 
 
 class TestHappyPathsPerIntentType:
@@ -212,14 +197,11 @@ class TestHappyPathsPerIntentType:
         assert entry.protocol == "uniswap_v3"
         assert entry.token_in == "WETH"
         assert entry.token_out == "USDC"
-        # VIB-3450: amount_in/amount_out come from LPOpenData on-chain actuals.
-        # VIB-5036: scaled to human units via token decimals (WETH 18, USDC 6).
         assert entry.amount_in == "1"
         assert entry.amount_out == "20"
         assert entry.tx_hash == "0xlpo"
         assert entry.gas_used == 300_000
         assert entry.gas_usd == "1.25"
-        # extracted_data serialization captured it.
         assert entry.extracted_data_json
         restored = deserialize_extracted_data(entry.extracted_data_json)
         assert isinstance(restored["lp_open_data"], LPOpenData)
@@ -256,10 +238,9 @@ class TestHappyPathsPerIntentType:
         assert entry.intent_type == "LP_CLOSE"
         assert entry.token_in == "NFT-12345"
         assert entry.token_out == "USDC"
-        # Regression for issue #1768 (sibling of #1710 fixed in #1751).
         # Decimal("0") is falsy so truthiness coercion would silently drop
-        # a measured-zero amount_in to "". The fix uses ``is not None``
-        # checks so "measured zero" is distinguishable from "unknown".
+        # a measured-zero amount_in to "". ``is not None`` checks keep
+        # "measured zero" distinguishable from "unknown".
         assert entry.amount_in == "0"
         assert entry.amount_out == "500"
 
@@ -350,9 +331,7 @@ class TestHappyPathsPerIntentType:
             to_token="USDC",
             amount_usd=Decimal("2.00"),
         )
-        entry = build_ledger_entry(
-            deployment_id="s", cycle_id="c", intent=intent, result=result, success=False
-        )
+        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result, success=False)
         assert entry.token_in == "WBTC"
         assert entry.token_out == "USDC"
         assert entry.amount_in == ""
@@ -374,9 +353,7 @@ class TestHappyPathsPerIntentType:
             to_token="USDC",
             amount=Decimal("0.0001"),
         )
-        entry = build_ledger_entry(
-            deployment_id="s", cycle_id="c", intent=intent, result=result, success=False
-        )
+        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result, success=False)
         assert entry.amount_in == "0.0001"
 
     def test_borrow_happy_path(self):
@@ -427,11 +404,6 @@ class TestHappyPathsPerIntentType:
         assert entry.amount_in == "500"
 
 
-# ---------------------------------------------------------------------------
-# VIB-3450 -- LP_OPEN token/amount extraction (dedicated coverage).
-# ---------------------------------------------------------------------------
-
-
 class TestLPOpenExtraction:
     """LP_OPEN intents carry amounts in ``LPOpenData.amount0/amount1``
     (raw on-chain integers) stored under ``result.extracted_data["lp_open_data"]``.
@@ -462,7 +434,6 @@ class TestLPOpenExtraction:
         )
         intent = _make_intent("LP_OPEN", protocol="uniswap_v3", from_token="WETH", to_token="USDC")
         entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result, chain="arbitrum")
-        # VIB-5036: raw on-chain integers are scaled to human units at write.
         assert entry.amount_in == "1"
         assert entry.amount_out == "2.5"
 
@@ -615,15 +586,8 @@ class TestLPOpenExtraction:
             amount1=Decimal("999"),  # should NOT win; lp_open_data.amount1 = 250 USDC
         )
         entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result, chain="arbitrum")
-        # token0 side: lp_open_data.amount0 is None → fallback to intent.amount0 (human)
         assert entry.amount_in == "3.5"
-        # token1 side: lp_open_data.amount1 is 250 USDC raw → scaled, on-chain wins
         assert entry.amount_out == "250"
-
-
-# ---------------------------------------------------------------------------
-# Phase β — SwapAmounts extraction branch (lines 136-144).
-# ---------------------------------------------------------------------------
 
 
 class TestSwapAmountsExtraction:
@@ -637,7 +601,7 @@ class TestSwapAmountsExtraction:
         Documents the `or getattr(intent, "from_token", "")` branch on line 138.
         """
         swap = _Attrs(
-            token_in="",  # falsy → fallback fires
+            token_in="",
             token_out="ETH",
             amount_in_decimal=Decimal("1"),
             amount_out_decimal=Decimal("2"),
@@ -654,7 +618,6 @@ class TestSwapAmountsExtraction:
         intent = _make_intent("SWAP", from_token="FALLBACK_IN", to_token="SHOULDNT_SEE")
         entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
         assert entry.token_in == "FALLBACK_IN"
-        # token_out already set on swap_amounts, does NOT fall back.
         assert entry.token_out == "ETH"
 
     def test_swap_amounts_amount_in_decimal_none_yields_empty_string(self):
@@ -690,7 +653,7 @@ class TestSwapAmountsExtraction:
             token_out="ETH",
             amount_in_decimal=Decimal("1"),
             amount_out_decimal=Decimal("2"),
-            effective_price=None,  # explicit None → skip branch
+            effective_price=None,
             slippage_bps=7,
         )
         result = SimpleNamespace(
@@ -742,11 +705,11 @@ class TestSwapAmountsExtraction:
         swap = _Attrs(
             token_in="USDC",
             token_out="ETH",
-            amount_in_decimal=Decimal(0),  # sentinel, not measured
+            amount_in_decimal=Decimal(0),  # unresolved sentinel, not measured zero
             amount_out_decimal=Decimal("0.5"),
             effective_price=None,
             slippage_bps=None,
-            amount_in_decimal_resolved=False,  # <-- the new signal
+            amount_in_decimal_resolved=False,
             amount_out_decimal_resolved=True,
         )
         result = SimpleNamespace(
@@ -758,9 +721,7 @@ class TestSwapAmountsExtraction:
         )
         intent = _make_intent("SWAP")
         entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
-        # Unresolved side: suppressed to "" regardless of Decimal value.
         assert entry.amount_in == ""
-        # Resolved side: measured value preserved.
         assert entry.amount_out == "0.5"
 
     def test_swap_amounts_measured_zero_still_records_as_zero(self):
@@ -775,7 +736,7 @@ class TestSwapAmountsExtraction:
             amount_out_decimal=Decimal("0.5"),
             effective_price=None,
             slippage_bps=None,
-            amount_in_decimal_resolved=True,  # <-- resolved
+            amount_in_decimal_resolved=True,
             amount_out_decimal_resolved=True,
         )
         result = SimpleNamespace(
@@ -802,12 +763,11 @@ class TestSwapAmountsExtraction:
         swap = _Attrs(
             token_in="USDC",
             token_out="ETH",
-            amount_in_decimal=Decimal(0),  # legacy parser: legit measured zero
+            amount_in_decimal=Decimal(0),  # parser-measured zero
             amount_out_decimal=Decimal("0.5"),
             effective_price=None,
             slippage_bps=None,
-            # NOTE: amount_in_decimal_resolved / amount_out_decimal_resolved
-            # deliberately OMITTED — simulates a pre-#1778 parser.
+            # Resolved flags are omitted to model parsers that do not emit them.
         )
         result = SimpleNamespace(
             swap_amounts=swap,
@@ -818,14 +778,8 @@ class TestSwapAmountsExtraction:
         )
         intent = _make_intent("SWAP")
         entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
-        # getattr fallback => both sides treated as resolved.
         assert entry.amount_in == "0"
         assert entry.amount_out == "0.5"
-
-
-# ---------------------------------------------------------------------------
-# Phase β' — fallback extraction when swap_amounts is absent (lines 146-164).
-# ---------------------------------------------------------------------------
 
 
 class TestFallbackExtraction:
@@ -883,8 +837,7 @@ class TestFallbackExtraction:
             ("amount", Decimal("100"), "100"),
             ("borrow_amount", Decimal("200"), "200"),
             ("supply_amount", Decimal("300"), "300"),
-            # amount_usd is deliberately NOT a link (VIB-5060): USD is the
-            # wrong unit for the token-units amount_in column; USD-only
+            # USD is the wrong unit for the token-units amount_in column; USD-only
             # sizing means the token amount is unmeasured (Empty != Zero).
             ("amount_usd", Decimal("400.50"), ""),
         ],
@@ -910,7 +863,7 @@ class TestFallbackExtraction:
             gas_cost_usd=None,
             extracted_data={},
         )
-        intent = _make_intent("HOLD")  # no token attrs, no amount attrs
+        intent = _make_intent("HOLD")
         entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
         assert entry.token_in == ""
         assert entry.token_out == ""
@@ -935,11 +888,6 @@ class TestFallbackExtraction:
         entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
         assert entry.token_in == "USDC"
         assert entry.token_out == "ETH"
-
-
-# ---------------------------------------------------------------------------
-# Phase γ — tx_hash / gas extraction (lines 171-177).
-# ---------------------------------------------------------------------------
 
 
 class TestTxAndGasExtraction:
@@ -1045,11 +993,6 @@ class TestTxAndGasExtraction:
         assert entry.gas_usd == ""
 
 
-# ---------------------------------------------------------------------------
-# Phase δ — error-coalescing (lines 179-180).
-# ---------------------------------------------------------------------------
-
-
 class TestErrorCoalescing:
     """If ``success=False`` AND the caller didn't supply an ``error``, fall
     back to ``result.error``. Otherwise, the caller-supplied value wins.
@@ -1105,7 +1048,7 @@ class TestErrorCoalescing:
             total_gas_used=0,
             gas_cost_usd=None,
             extracted_data={},
-            error="ghost-error",  # should be ignored
+            error="ghost-error",
         )
         intent = _make_intent("SWAP")
         entry = build_ledger_entry(
@@ -1152,11 +1095,6 @@ class TestErrorCoalescing:
             error="",
         )
         assert entry.error == ""
-
-
-# ---------------------------------------------------------------------------
-# Phase ε — extracted_data serialization (lines 183-185).
-# ---------------------------------------------------------------------------
 
 
 class TestExtractedDataSerialization:
@@ -1245,11 +1183,6 @@ class TestExtractedDataSerialization:
         intent = _make_intent("SWAP")
         entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
         assert entry.extracted_data_json == ""
-
-
-# ---------------------------------------------------------------------------
-# Phase ζ — multi-tx bundle capture (lines 188-207).
-# ---------------------------------------------------------------------------
 
 
 class TestMultiTxBundle:
@@ -1355,7 +1288,7 @@ class TestMultiTxBundle:
         """
 
         class BareTx:
-            pass  # no tx_hash, no gas_used, no success
+            pass
 
         result = SimpleNamespace(
             swap_amounts=None,
@@ -1367,7 +1300,6 @@ class TestMultiTxBundle:
         intent = _make_intent("SUPPLY")
         entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
         parsed = json.loads(entry.extracted_data_json)
-        # Second (bare) tx surfaces the three getattr defaults.
         assert parsed["all_tx_results"][1] == {
             "tx_hash": "",
             "gas_used": 0,
@@ -1404,16 +1336,9 @@ class TestMultiTxBundle:
         intent = _make_intent("SUPPLY")
         entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
 
-        # Except branch hit: original (unparseable) serialization preserved
-        # byte-for-byte -- no "all_tx_results" key injected, no reserialization.
         assert entry.extracted_data_json == sentinel
         with pytest.raises(json.JSONDecodeError):
             json.loads(entry.extracted_data_json)
-
-
-# ---------------------------------------------------------------------------
-# Edge cases — None result, missing intent attrs.
-# ---------------------------------------------------------------------------
 
 
 class TestResultNoneEdgeCases:
@@ -1487,11 +1412,6 @@ class TestProtocolFallback:
         assert entry.protocol == ""
 
 
-# ---------------------------------------------------------------------------
-# Wiring — deployment_id / cycle_id / chain threaded into the entry verbatim.
-# ---------------------------------------------------------------------------
-
-
 class TestWiringFields:
     """Strategy/cycle/chain are pass-through, not extracted."""
 
@@ -1528,18 +1448,11 @@ class TestWiringFields:
         assert entry.success is True
 
 
-# ---------------------------------------------------------------------------
-# Phase 5k-golden — LedgerEntry serialization contract lock.
-#
 # The SQLite INSERT at backends/sqlite.py:2291-2322 is a NAMED column list,
 # but each column maps to a specific ``entry.<attribute>`` read. Silent field
 # renames here would break the write path at runtime. Pin the dataclass
 # keyset + field count so any intentional change has to also touch this test
 # (and, by extension, the INSERT column list) in the SAME PR.
-# ---------------------------------------------------------------------------
-
-
-# Order-insensitive golden keyset — post-Phase 4 (deployment_id + execution_mode).
 _LEDGER_ENTRY_GOLDEN_KEYS: frozenset[str] = frozenset(
     {
         "id",
@@ -1562,7 +1475,6 @@ _LEDGER_ENTRY_GOLDEN_KEYS: frozenset[str] = frozenset(
         "success",
         "error",
         "extracted_data_json",
-        # VIB-3480: audit-grade replay columns (added to DDL, INSERT, and proto in same PR)
         "price_inputs_json",
         "pre_state_json",
         "post_state_json",
@@ -1643,16 +1555,10 @@ class TestPerpOpenExtraction:
         assert entry.amount_in == ""
 
 
-# ---------------------------------------------------------------------------
-# VIB-4275 — _stamp_lp_close_discriminator branch coverage.
-#
 # The close RECEIPT cannot carry the closing NFT's token id; the close INTENT
 # can. This helper stamps intent.position_id onto the result's frozen
 # LPCloseData just before serialization so the close-side accounting resolver
-# can attribute a co-pool close to its OWN prior open. Every guard below is a
-# fail-closed / no-op branch — exercise them all (the function is otherwise
-# only indirectly covered, which the CRAP gate flags).
-# ---------------------------------------------------------------------------
+# can attribute a co-pool close to its own prior open.
 
 
 def _lp_close_result(position_id=None, *, extracted="dict"):
@@ -1688,7 +1594,7 @@ class TestStampLpCloseDiscriminator:
 
     @pytest.mark.parametrize("intent_type", ["LP_CLOSE", "LP_COLLECT_FEES"])
     def test_fungible_lp_protocol_skips_stamp(self, intent_type):
-        # VIB-4968: on Curve the close intent's position_id is the LP-token
+        # On Curve the close intent's position_id is the LP-token
         # *amount* to burn (a human-decimal string), NOT an NFT id. It must NOT
         # be stamped as a per-position discriminator — fungible LP has no co-leg
         # to disambiguate, so the close event must carry position_id=None.
@@ -1698,7 +1604,7 @@ class TestStampLpCloseDiscriminator:
         assert result.extracted_data["lp_close_data"].position_id is None
 
     def test_nft_lp_protocol_still_stamps(self):
-        # Non-fungible venues (e.g. uniswap_v3) keep the VIB-4275 discriminator.
+        # Non-fungible venues use position_id as the per-position discriminator.
         intent = _make_intent("LP_CLOSE", position_id="5467895")
         result = _lp_close_result(position_id=None)
         _stamp_lp_close_discriminator(intent, result, "LP_CLOSE", protocol="uniswap_v3")
@@ -1706,8 +1612,7 @@ class TestStampLpCloseDiscriminator:
 
     @pytest.mark.parametrize("degenerate", [None, "", 0, "0", "  0  "])
     def test_degenerate_intent_position_id_is_noop(self, degenerate):
-        # None/""/0/"0" (and whitespace-padded "0") are never stamped — they are
-        # exactly what the resolver would discard (gemini review on #2459).
+        # These degenerate values are exactly what the resolver discards.
         intent = _make_intent("LP_CLOSE", position_id=degenerate)
         result = _lp_close_result(position_id=None)
         _stamp_lp_close_discriminator(intent, result, "LP_CLOSE")
@@ -1721,7 +1626,6 @@ class TestStampLpCloseDiscriminator:
 
     def test_none_result_is_noop(self):
         intent = _make_intent("LP_CLOSE", position_id="5467895")
-        # Must not raise when there is no result to stamp onto.
         _stamp_lp_close_discriminator(intent, None, "LP_CLOSE")
 
     def test_non_dict_extracted_data_is_noop(self):
@@ -1744,8 +1648,7 @@ class TestStampLpCloseDiscriminator:
         assert result.extracted_data["lp_close_data"] is stub
 
     def test_existing_discriminator_is_preserved_not_clobbered(self):
-        # Empty ≠ Zero: a real parser-emitted id must not be overwritten by the
-        # intent's. Idempotent stamp.
+        # Preserve a parser-emitted discriminator; stamping is idempotent.
         intent = _make_intent("LP_CLOSE", position_id="111")
         result = _lp_close_result(position_id="999")
         _stamp_lp_close_discriminator(intent, result, "LP_CLOSE")
@@ -1763,16 +1666,12 @@ class TestStampLpCloseDiscriminator:
         assert result.extracted_data["lp_close_data"].position_id is None
 
 
-# ---------------------------------------------------------------------------
-# VIB-4482 (P-V1-A) — _stamp_v4_lp_close_fees branch coverage.
-#
 # Uniswap V4's ModifyLiquidity burn carries no amounts and bundles fees into the
 # single withdrawal Transfer, so the receipt parser emits fees0=fees1=None
 # ("BUNDLED" taxonomy). The runner reads tokens_owed0/1 on-chain BEFORE the burn
 # (a post-burn read returns zero liquidity) and threads the pair here; the helper
 # stamps it onto the frozen LPCloseData so the LP accounting handler emits
 # MEASURED fees. Empty != Zero throughout: a failed/absent read leaves None.
-# ---------------------------------------------------------------------------
 
 
 def _v4_close_result(*, fees0=None, fees1=None, extracted="dict"):
@@ -1880,13 +1779,11 @@ class TestStampV4LpCloseFees:
         assert result.extracted_data["lp_close_data"].fees0 is None
 
     def test_none_fees_pair_is_noop_short_circuit(self):
-        # Earliest guard: fees is None => return immediately.
         result = _v4_close_result(fees0=None, fees1=None)
         _stamp_v4_lp_close_fees(result, "LP_CLOSE", None)
         assert result.extracted_data["lp_close_data"].fees0 is None
 
     def test_none_result_is_noop(self):
-        # Must not raise when there is no result to stamp onto.
         _stamp_v4_lp_close_fees(None, "LP_CLOSE", (1, 2))
 
     def test_non_dict_extracted_data_is_noop(self):
@@ -1916,8 +1813,6 @@ class TestStampV4LpCloseFees:
         assert result.extracted_data["lp_close_data"].fees0 is None
 
     def test_build_ledger_entry_threads_v4_fees_end_to_end(self):
-        # Integration through the public entrypoint: a V4 LP_CLOSE with a
-        # gateway-read fee pair lands measured fees on the serialized row.
         intent = _make_intent("LP_CLOSE", protocol="uniswap_v4", position_id="5467895")
         result = _v4_close_result(fees0=None, fees1=None)
         entry = build_ledger_entry(
@@ -2024,9 +1919,7 @@ class TestMeasuredZeroPreservation:
             to_token="USDC",
             amount=Decimal("0"),
         )
-        entry = build_ledger_entry(
-            deployment_id="s", cycle_id="c", intent=intent, result=result, success=False
-        )
+        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result, success=False)
         assert entry.amount_in == "0", "measured zero must persist as '0', never collapse to ''"
 
     def test_unmeasured_amount_still_empty(self):
@@ -2038,22 +1931,16 @@ class TestMeasuredZeroPreservation:
             extracted_data={},
         )
         intent = _make_intent("SWAP", protocol="uniswap_v3", from_token="WBTC", to_token="USDC")
-        entry = build_ledger_entry(
-            deployment_id="s", cycle_id="c", intent=intent, result=result, success=False
-        )
+        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result, success=False)
         assert entry.amount_in == ""
 
 
-# ---------------------------------------------------------------------------
-# VIB-4483 (P-V1-B) — _stamp_lp_open_native_amounts branch coverage.
-#
 # A native-ETH V4 pool deposits its ETH leg via msg.value (no ERC-20 Transfer),
 # so the receipt parser leaves that leg None. The runner reads the freshly-minted
 # position state on-chain and derives (amount0, amount1) via the framework's
 # concentrated-liquidity math; this stamp fills ONLY the unmeasured (None) native
 # leg onto the frozen LPOpenData, never clobbering a measured ERC-20 leg. Empty !=
 # Zero throughout: a failed/absent read leaves the leg None.
-# ---------------------------------------------------------------------------
 
 _NATIVE_ADDR = "0x0000000000000000000000000000000000000000"
 
@@ -2082,18 +1969,13 @@ class TestStampV4LpOpenNativeAmounts:
     """Direct branch coverage for ``_stamp_lp_open_native_amounts`` (VIB-4483)."""
 
     def test_native_leg_filled_when_unmeasured(self):
-        # currency0 native, amount0 None (parser couldn't see the ETH Transfer),
-        # amount1 measured. The stamp fills amount0 from the gateway-derived pair
-        # and preserves the measured amount1.
         result = _v4_open_result_for_stamp(amount0=None, amount1=1_000_000_000)
         _stamp_lp_open_native_amounts(result, "LP_OPEN", (777_000, 9_999))
         open_data = result.extracted_data["lp_open_data"]
-        assert open_data.amount0 == 777_000  # native leg filled
-        assert open_data.amount1 == 1_000_000_000  # measured ERC-20 leg preserved (not clobbered)
+        assert open_data.amount0 == 777_000
+        assert open_data.amount1 == 1_000_000_000
 
     def test_measured_erc20_leg_not_clobbered(self):
-        # The measured leg (amount1) must survive even though the derived pair
-        # carries a different value for it.
         result = _v4_open_result_for_stamp(amount0=None, amount1=1_000_000_000)
         _stamp_lp_open_native_amounts(result, "LP_OPEN", (777_000, 42))
         open_data = result.extracted_data["lp_open_data"]
@@ -2123,7 +2005,6 @@ class TestStampV4LpOpenNativeAmounts:
             amount0=None,
             amount1=1_000_000_000,
             pool_address="0x" + "a" * 40,
-            # currency0 / currency1 left None → not V4-shaped.
         )
         result = SimpleNamespace(extracted_data={"lp_open_data": open_data})
         _stamp_lp_open_native_amounts(result, "LP_OPEN", (1, 2))
@@ -2144,13 +2025,10 @@ class TestStampV4LpOpenNativeAmounts:
         assert result.extracted_data == ["not", "a", "dict"]
 
 
-# ---------------------------------------------------------------------------
-# VIB-5121 — _stamp_lp_close_native_amounts branch coverage. A FLUID/fungible
-# native-ETH leg returned on close emits no ERC-20 Transfer, so the parser left
-# amountN_collected None; the runner measures it from a balance bracket and this
-# stamp fills ONLY the None leg whose currency is the non-V4 (ERC-7528) native
-# sentinel, never clobbering a measured ERC-20 leg or a V4 leg.
-# ---------------------------------------------------------------------------
+# A FLUID/fungible native-ETH leg returned on close emits no ERC-20 Transfer, so
+# the parser leaves amountN_collected as None. The runner measures it with a
+# balance bracket; this stamp fills only the None leg whose currency is the
+# non-V4 (ERC-7528) native sentinel, never clobbering a measured ERC-20 or V4 leg.
 
 _EEEE_ADDR = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 
@@ -2175,13 +2053,12 @@ class TestStampLpCloseNativeAmounts:
         result = _close_result_for_stamp(a0=683_000_000_000_000_000_000, a1=None)
         _stamp_lp_close_native_amounts(result, "LP_CLOSE", (None, 480_000_000_000_000_000))
         close = result.extracted_data["lp_close_data"]
-        assert close.amount1_collected == 480_000_000_000_000_000  # native leg filled
-        assert close.amount0_collected == 683_000_000_000_000_000_000  # measured ERC-20 preserved
+        assert close.amount1_collected == 480_000_000_000_000_000
+        assert close.amount0_collected == 683_000_000_000_000_000_000
 
     def test_measured_erc20_leg_not_clobbered(self):
         result = _close_result_for_stamp(a0=100, a1=None)
         _stamp_lp_close_native_amounts(result, "LP_CLOSE", (999, 5))
-        # amount0 was measured (100) → preserved; amount1 was None → filled with 5.
         assert result.extracted_data["lp_close_data"].amount0_collected == 100
         assert result.extracted_data["lp_close_data"].amount1_collected == 5
 
@@ -2208,14 +2085,14 @@ class TestStampLpCloseNativeAmounts:
         assert result.extracted_data["lp_close_data"].amount1_collected is None
 
     def test_lp_collect_fees_stamps_native_leg(self):
-        # VIB-5121 (Codex P2) — LP_COLLECT_FEES carries LPCloseData and is a
-        # close-like intent (parity with _stamp_lp_close_discriminator /
-        # _stamp_v4_lp_close_fees). A native fee-collect leg the parser left
+        # LP_COLLECT_FEES carries LPCloseData and is close-like for
+        # _stamp_lp_close_discriminator and
+        # _stamp_v4_lp_close_fees. A native fee-collect leg the parser left
         # None must be filled by the runner-measured bracket, not discarded.
         result = _close_result_for_stamp(a0=100, a1=None)
         _stamp_lp_close_native_amounts(result, "LP_COLLECT_FEES", (None, 7))
-        assert result.extracted_data["lp_close_data"].amount0_collected == 100  # ERC-20 preserved
-        assert result.extracted_data["lp_close_data"].amount1_collected == 7  # native leg filled
+        assert result.extracted_data["lp_close_data"].amount0_collected == 100
+        assert result.extracted_data["lp_close_data"].amount1_collected == 7
 
     def test_none_result_is_noop(self):
         _stamp_lp_close_native_amounts(None, "LP_CLOSE", (1, 2))
@@ -2226,18 +2103,13 @@ class TestStampLpCloseNativeAmounts:
         assert result.extracted_data == ["x"]
 
 
-# ---------------------------------------------------------------------------
-# VIB-5117 — _stamp_v4_lp_close_native_principal branch coverage.
-#
 # A native-ETH V4 pool returns its ETH leg to the wallet as raw ETH (TAKE_PAIR,
 # no ERC-20 Transfer) on close, so the burn-receipt parser leaves that leg's
 # amount{0,1}_collected None. The runner reads the PRE-burn position state on-
 # chain and derives (amount0, amount1) via the framework's concentrated-liquidity
 # math; this stamp fills ONLY the unmeasured (None) native leg onto the frozen
 # LPCloseData, never clobbering a measured ERC-20 leg. Empty != Zero throughout:
-# a failed/absent read leaves the leg None (never a fabricated zero). The exact
-# close-side mirror of TestStampV4LpOpenNativeAmounts.
-# ---------------------------------------------------------------------------
+# a failed/absent read leaves the leg None (never a fabricated zero).
 
 
 def _v4_close_result_for_principal(
@@ -2264,25 +2136,20 @@ class TestStampV4LpCloseNativePrincipal:
     """Direct branch coverage for ``_stamp_v4_lp_close_native_principal`` (VIB-5117)."""
 
     def test_native_leg_filled_when_unmeasured(self):
-        # currency0 native, amount0_collected None (parser couldn't see the ETH
-        # withdrawal). The stamp fills amount0 from the gateway-derived pair and
-        # preserves the measured ERC-20 amount1.
         result = _v4_close_result_for_principal(amount0_collected=None, amount1_collected=170_000)
         _stamp_v4_lp_close_native_principal(result, "LP_CLOSE", (888_000, 9_999))
         close = result.extracted_data["lp_close_data"]
-        assert close.amount0_collected == 888_000  # native principal filled
-        assert close.amount1_collected == 170_000  # measured ERC-20 leg preserved
+        assert close.amount0_collected == 888_000
+        assert close.amount1_collected == 170_000
 
     def test_measured_erc20_leg_not_clobbered(self):
-        # The measured leg (amount1_collected) must survive even though the derived
-        # pair carries a different value for it (Empty != Zero idempotence).
         result = _v4_close_result_for_principal(amount0_collected=None, amount1_collected=170_000)
         _stamp_v4_lp_close_native_principal(result, "LP_CLOSE", (888_000, 42))
         assert result.extracted_data["lp_close_data"].amount1_collected == 170_000
 
     def test_none_amounts_pair_is_noop_short_circuit(self):
         # A failed / unavailable read => leave the native leg None (unmeasured),
-        # never fabricate a zero — the whole point of VIB-5117.
+        # never fabricate a zero.
         result = _v4_close_result_for_principal(amount0_collected=None, amount1_collected=170_000)
         _stamp_v4_lp_close_native_principal(result, "LP_CLOSE", None)
         assert result.extracted_data["lp_close_data"].amount0_collected is None
@@ -2308,20 +2175,17 @@ class TestStampV4LpCloseNativePrincipal:
         _stamp_v4_lp_close_native_principal(result, "LP_CLOSE", (888_000, 9_999))
         close = result.extracted_data["lp_close_data"]
         assert close.amount0_collected == 888_000
-        assert close.amount1_collected == 0  # measured zero never clobbered
+        assert close.amount1_collected == 0
 
     def test_non_native_currency_none_leg_not_filled(self):
-        # Defense-in-depth (Codex/pr-auditor hardening, VIB-5117): a None leg whose
-        # PoolKey currency is NOT the native sentinel must NOT receive a derived
-        # value — an ERC-20 leg's true amount comes from its Transfer, never from
-        # the pre-burn liquidity math. The parser never emits this shape today (it
-        # leaves None only for the native leg); this guards a future regression.
+        # A None ERC-20 leg must not receive a value derived from pre-burn
+        # liquidity math; its true amount comes from its Transfer.
         result = _v4_close_result_for_principal(
             amount0_collected=None, amount1_collected=170_000, currency0="0x" + "1" * 40
         )
         _stamp_v4_lp_close_native_principal(result, "LP_CLOSE", (888_000, 9_999))
         close = result.extracted_data["lp_close_data"]
-        assert close.amount0_collected is None  # non-native None leg left unmeasured
+        assert close.amount0_collected is None
         assert close.amount1_collected == 170_000
 
     def test_non_v4_shaped_close_is_noop(self):
@@ -2333,7 +2197,6 @@ class TestStampV4LpCloseNativePrincipal:
             fees1=None,
             liquidity_removed=1_000_000,
             pool_address="0x" + "a" * 40,
-            # currency0 / currency1 left None → not V4-shaped.
         )
         result = SimpleNamespace(extracted_data={"lp_close_data": close})
         _stamp_v4_lp_close_native_principal(result, "LP_CLOSE", (1, 2))
