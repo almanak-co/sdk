@@ -41,11 +41,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# =============================================================================
-# Phase 1: option validation
-# =============================================================================
-
-
 def validate_teardown_options(
     no_gateway: bool,
     network: str | None,
@@ -80,11 +75,6 @@ def validate_teardown_options(
         )
 
 
-# =============================================================================
-# Phase 2: config loading
-# =============================================================================
-
-
 def load_strategy_config_dict(
     working_path: Path,
     config_file: str | None,
@@ -107,10 +97,7 @@ def load_strategy_config_dict(
     if resolved is None:
         return {}, None
 
-    # Explicit encoding for cross-platform safety (CR nitpick PR #2093):
-    # Windows defaults to a non-utf-8 locale codec, which would fail on
-    # config files containing non-ASCII content. utf-8 is the de-facto
-    # standard for json/yaml so pin it.
+    # Windows may otherwise use a locale codec that rejects non-ASCII config.
     with open(resolved, encoding="utf-8") as fh:
         if resolved.endswith((".yaml", ".yml")):
             import yaml
@@ -120,11 +107,6 @@ def load_strategy_config_dict(
             config_dict = json.load(fh)
 
     return config_dict, resolved
-
-
-# =============================================================================
-# Phase 3: wallet resolution
-# =============================================================================
 
 
 def resolve_wallet_address(
@@ -148,14 +130,7 @@ def resolve_wallet_address(
     if env is not None:
         private_key = env.get("ALMANAK_PRIVATE_KEY", "")
     else:
-        # No explicit env dict supplied — read the typed boundary value.
-        # We narrow to ``gateway_config_from_env`` instead of ``load_config``
-        # so an unrelated submodel validation error (e.g. a malformed
-        # ``ANVIL_*_PORT``) cannot strand teardown — wallet derivation only
-        # needs the gateway's private key (PR #2152 review). The typed
-        # ``GatewayConfig.private_key`` is populated by the Phase 1
-        # ``_apply_gateway_env_fallbacks`` ladder which honours
-        # ``ALMANAK_PRIVATE_KEY``.
+        # Read only gateway config so unrelated validation errors cannot strand teardown.
         from almanak.config.env import gateway_config_from_env
 
         private_key = gateway_config_from_env().private_key or ""
@@ -164,11 +139,6 @@ def resolve_wallet_address(
     from eth_account import Account
 
     return Account.from_key(private_key).address
-
-
-# =============================================================================
-# Phase 4: gateway setup
-# =============================================================================
 
 
 @dataclass
@@ -192,7 +162,6 @@ class GatewaySetupResult:
     managed_gateway: ManagedGateway | None
     gateway_port: int
     solana_anvil_needed: bool
-    # Positive network declaration used by downstream money-path guards.
     # ``None`` is intentional for --no-gateway: the CLI cannot attest to the
     # externally managed gateway's environment, so consumers fail closed.
     network: str | None
@@ -225,19 +194,13 @@ def setup_gateway(
     """
     import atexit
 
-    # Lazy imports to keep the top-level cost low and to mirror the
-    # original execute_teardown lazy-import pattern (VIB-522).
     from almanak.config.env import gateway_config_from_env
     from almanak.gateway.managed import ManagedGateway, find_available_gateway_port
 
     from ..gateway_client import GatewayClient, GatewayClientConfig
 
-    # Normalize "localhost" to "127.0.0.1" (gateway binds to 127.0.0.1).
     effective_host = "127.0.0.1" if gateway_host == "localhost" else gateway_host
     managed_gateway: ManagedGateway | None = None
-    # solana_anvil_needed only gets a real value on the managed path; for
-    # --no-gateway we leave it False so the Solana-fork bring-up below
-    # short-circuits cleanly.
     solana_anvil_needed = False
 
     if no_gateway:
@@ -267,7 +230,6 @@ def setup_gateway(
             network=None,
         )
 
-    # Default: auto-start a managed gateway.
     try:
         gateway_port = find_available_gateway_port(effective_host, gateway_port)
     except RuntimeError as e:
@@ -286,26 +248,19 @@ def setup_gateway(
         raise click.ClickException(str(e)) from e
 
     # Random session token so the managed gateway is never running without
-    # authentication on mainnet (matches run.py pattern).
+    # authentication on mainnet.
     import uuid
 
     session_auth_token = uuid.uuid4().hex
 
-    # VIB-5920: same shared resolver as `strat run`, so a teardown launched
-    # without `--network` against an Anvil-declaring config does not silently
-    # target mainnet. `--anvil-port` is not a teardown flag, hence no inference.
+    # Honor an Anvil-declaring config so an omitted flag cannot silently target mainnet.
     from ._network_resolution import resolve_network
 
     resolved = resolve_network(flag_network=network, strategy_config=config_dict)
     resolved_network = resolved.network
-    # VIB-5920 (audit round): dropping gateway auth on Anvil is a local-dev
-    # convenience that stays tied to an explicit `--network anvil`. A
-    # config-sourced anvil keeps the AuthInterceptor on (allow_insecure=False +
-    # the session token above, which this CLI's own client already sends) so a
-    # copied config.json can never disarm a gateway holding the real key.
+    # Only an explicit Anvil flag may disable auth; config alone must not disarm
+    # a gateway that could hold a real key.
     allow_insecure = resolved_network == "anvil" and resolved.operator_signalled
-    # Phase 1: route through the config service so the same env-fallback
-    # ladders apply here as for the gateway subcommand and managed gateway.
     gateway_settings = gateway_config_from_env(
         grpc_host=effective_host,
         grpc_port=gateway_port,
@@ -317,23 +272,9 @@ def setup_gateway(
         auth_token=session_auth_token,
     )
 
-    # VIB-3819: when running against --network anvil, the gateway must boot
-    # an Anvil fork for the strategy's chain (and pre-fund the wallet) — the
-    # `strat run` path does this via run_helpers; teardown was missing it,
-    # causing the balance provider to hit a dead RPC port (8548) and the
-    # strategy's get_open_positions() to swallow the error and report "no
-    # positions". VIB-3705's no-op branch then exits 0 while WETH (or any
-    # held position) is silently stranded on-chain. Mirror the run-helpers
-    # pattern: pass anvil_chains, wallet_address, anvil_funding so the fork
-    # actually starts and is pre-funded for the close swap.
-    #
-    # Multi-chain teardown: prefer config["chains"] (a list, possibly with
-    # multiple entries) over the scalar `chain`, so a strategy holding
-    # positions on more than one chain has every fork started. Falls back
-    # to [chain] for the common single-chain case. Mirrors the
-    # run_helpers.py:882-897 derivation order so behavior between
-    # `strat run` and `strat teardown` stays identical (Codex review,
-    # multi-chain teardown gap).
+    # Start and fund every configured fork. A missing RPC can otherwise look like
+    # an empty position set and strand assets; multi-chain strategies need every
+    # configured chain rather than only the scalar fallback.
     from .run_helpers import _normalize_anvil_funding, _resolve_anvil_chain_dispatch
 
     anvil_chains, solana_anvil_needed = _resolve_anvil_chain_dispatch(resolved_network, chain, config_dict)
@@ -359,8 +300,7 @@ def setup_gateway(
         anvil_funding=anvil_funding,
     )
 
-    # Per-chain Anvil startup-timeout policy lives in _anvil_timeout.py
-    # (VIB-3877) so the run + teardown CLI paths can never drift.
+    # Share the per-chain timeout policy with the run path to prevent drift.
     from ._anvil_timeout import compute_anvil_startup_timeout
 
     startup_timeout = compute_anvil_startup_timeout(anvil_chains)
@@ -374,12 +314,11 @@ def setup_gateway(
         click.echo()
         raise click.ClickException("Managed gateway startup failed") from e
 
-    # Register atexit handler as safety net for sys.exit() paths that skip cleanup
+    # Cover sys.exit() paths that skip normal cleanup.
     atexit.register(managed_gateway.stop)
 
     click.secho(f"Managed gateway started on {effective_host}:{gateway_port}", fg="green")
 
-    # Connect client to the managed gateway.
     gateway_config = GatewayClientConfig(host=effective_host, port=gateway_port, auth_token=session_auth_token)
     gateway_client = GatewayClient(gateway_config)
     gateway_client.connect()
@@ -398,11 +337,6 @@ def setup_gateway(
         solana_anvil_needed=solana_anvil_needed,
         network=resolved_network,
     )
-
-
-# =============================================================================
-# Phase 5: Solana fork bring-up
-# =============================================================================
 
 
 class SolanaForkHandle:
@@ -437,8 +371,7 @@ class SolanaForkHandle:
         if self._stopped:
             return
         self._stopped = True
-        # Local import: same reasoning as the original (avoid pinning a
-        # stale event-loop reference).
+        # Avoid pinning an event loop that may already be closed at cleanup time.
         import asyncio as _aio
 
         try:
@@ -516,11 +449,7 @@ def setup_solana_fork(
     )
     click.echo("  Starting local solana-test-validator...")
 
-    # Use asyncio.run() (not get_event_loop().run_until_complete()) so we
-    # don't accidentally pin a stale loop reference. The finally + atexit
-    # cleanup also use asyncio.run(), which fails on Python 3.12+ when a
-    # loop is already running but works correctly outside any loop — the
-    # exact post-asyncio.run() state the cleanup code runs in.
+    # Do not retain a loop reference: cleanup runs after this loop has closed.
     try:
         started = _aio.run(fork_mgr.start())
     except Exception as exc:
@@ -540,10 +469,7 @@ def setup_solana_fork(
     handle = SolanaForkHandle(fork_mgr)
 
     if wallet_address:
-        # ``fund_wallet`` and ``fund_tokens`` return bool. Capture the
-        # results — a silent funding failure (airdrop quota, validator
-        # hiccup) would otherwise surface as a confusing "insufficient
-        # balance" mid-teardown. CodeRabbit P_major.
+        # Surface silent funding failures before they become misleading balance errors.
         sol_funded = _aio.run(fork_mgr.fund_wallet(wallet_address, _Decimal("100")))
         tokens_funded = _aio.run(
             fork_mgr.fund_tokens(
@@ -560,19 +486,10 @@ def setup_solana_fork(
                 fg="yellow",
             )
 
-    # atexit safety-net for Ctrl-C / sys.exit() paths that skip the
-    # finally block. The handle's stop() is idempotent so the success-
-    # path finally cleanup doesn't get followed by a second stop() at
-    # interpreter shutdown (which would re-enter the now-closed loop on
-    # Py 3.12+).
+    # Idempotence prevents normal cleanup plus atexit from re-entering a closed loop.
     atexit.register(lambda: handle.stop(swallow=True))
 
     return handle
-
-
-# =============================================================================
-# Phase 11: cleanup
-# =============================================================================
 
 
 def cleanup_teardown_resources(
@@ -597,11 +514,6 @@ def cleanup_teardown_resources(
         solana_handle.stop(swallow=False, echo_on_success=True)
     if managed_gateway is not None:
         managed_gateway.stop()
-
-
-# =============================================================================
-# Phase 6: strategy instantiation + state restoration
-# =============================================================================
 
 
 def instantiate_strategy_with_state(
@@ -638,23 +550,13 @@ def instantiate_strategy_with_state(
             "Could not determine wallet address. Set config.wallet_address or ALMANAK_PRIVATE_KEY."
         )
 
-    # Coerce the raw config dict the same way the runner does. The runner
-    # routes through ``coerce_strategy_config`` (``_strategy_config.py`` — the
-    # single dict->config path, "extracted so the two surfaces cannot drift"),
-    # which resolves the strategy's declared config dataclass from
-    # ``__orig_bases__`` and instantiates it WITH dataclass defaults applied.
-    # Teardown previously wrapped the raw dict in ``DictConfigWrapper``, which
-    # raises ``AttributeError`` on any field absent from ``config.json`` (e.g.
-    # ``uniswap_lp`` omits the optional ``force_action`` / ``position_id``).
-    # Using the canonical coercion fixes missing optional fields for ALL
-    # strategies (VIB-5520). Strategies without a dataclass generic still get a
-    # ``DictConfigWrapper`` from ``coerce_strategy_config`` — same behaviour as
-    # before for those.
+    # Canonical coercion applies declared dataclass defaults while retaining the
+    # wrapper fallback for strategies without a config dataclass.
     from ._strategy_config import coerce_strategy_config
 
-    # enforce_market_identity intentionally omitted (stays False): a position
+    # Market identity enforcement is intentionally omitted: a position
     # already opened must still be closeable even if its market id was later
-    # blanked by a hosted override -- a risk-reducing intent must never be
+    # blanked by a hosted override; a risk-reducing intent must never be
     # blocked by a config-identity check.
     config_obj = coerce_strategy_config(strategy_class, config_dict)
 
@@ -668,15 +570,7 @@ def instantiate_strategy_with_state(
         logger.error("Failed to instantiate strategy", exc_info=True)
         raise click.ClickException(f"Failed to instantiate strategy: {e}") from e
 
-    # VIB-5520: wire the gateway client onto the strategy so the teardown market
-    # snapshot can build gateway-routed providers (price aggregator, position
-    # health, pool analytics, twap/lwap). ``MarketSnapshotBuilder.for_strategy_runner``
-    # reads ``strategy._gateway_client``; without it the snapshot has no gateway
-    # and ``warm_and_validate_oracle`` (TD-17) cannot price required tokens, so
-    # Plan-B break-glass teardown can never compile closing intents. Mirrors the
-    # runner, which sets this unconditionally (``_run_components.py``): methods
-    # that need it null-check at call time. The price oracle itself is wired by
-    # ``inject_balance_provider`` below (mirrors the runner's ``_wire_core_providers``).
+    # Snapshot providers read this attribute and null-check it only at call time.
     strategy._gateway_client = gateway_client
 
     inject_balance_provider(strategy, gateway_client, chain, wallet_address)
@@ -696,11 +590,6 @@ def get_resolver_for_cleanup() -> Any:
     from ..data.tokens import get_token_resolver
 
     return get_token_resolver()
-
-
-# =============================================================================
-# Phase 7: position discovery
-# =============================================================================
 
 
 def _resolve_teardown_deployment_id(*, strategy: Any, wallet_address: str | None, chain: str | None) -> str:
@@ -724,9 +613,6 @@ def _resolve_teardown_deployment_id(*, strategy: Any, wallet_address: str | None
     try:
         resolved = resolve_deployment_id(wallet_address=wallet_address or "", chain=chain or "")
     except FatalBootError as exc:
-        # Replace the old blanket error with an actionable, mode-agnostic one:
-        # discovery now CAN self-resolve, so the only remaining failures are a
-        # missing local key (wallet+chain) or a blank hosted ALMANAK_DEPLOYMENT_ID.
         raise click.ClickException(
             "Teardown --discover could not resolve a deployment_id. In local mode, "
             "provide a resolved wallet and chain; in hosted mode, ensure the platform "
@@ -829,7 +715,6 @@ def _apply_plan_b_attribution_gate(
         )
         return full
 
-    # Default sharp boundary: close only provably-owned; refuse + report the rest.
     if scope.unattributable:
         if not scope.ownership_available:
             click.secho(
@@ -857,8 +742,6 @@ def _apply_plan_b_attribution_gate(
                 "but NONE are provably owned by this deployment. Re-run with --wallet-wide to "
                 "force-close them (break-glass consent)."
             )
-        # Genuinely nothing on-chain — return the empty summary; the caller's
-        # no-op path reports it and exits 0.
         return full
 
     click.secho(
@@ -903,14 +786,8 @@ def discover_positions(
         click.echo("\nDiscovering LP positions on-chain...")
 
         async def _do_discover():
-            # Mypy: chain/wallet are typed `str | None` here while the
-            # underlying functions require `str`. The original inline code
-            # passed without complaint because the variables were inferred
-            # as Any (from `dict.get(...) or default(...)`); the explicit
-            # annotation here is more precise and preserves the original
-            # runtime behavior — when None flows in, the underlying call
-            # raises just as it did pre-refactor. type: ignore retains
-            # parity rather than adding a new ClickException early-fail.
+            # Keep the established downstream failure path instead of validating
+            # these optional values at a new boundary.
             return await discover_lp_positions(
                 client=gateway_client,
                 chain=chain,  # type: ignore[arg-type]
@@ -926,8 +803,6 @@ def discover_positions(
             logger.error("On-chain discovery failed", exc_info=True)
             raise click.ClickException(f"On-chain discovery failed: {e}") from e
 
-        # VIB-5476 / TD-18: self-resolve the deployment_id from the key so the
-        # break-glass lever works after a crash with NO prior local state.
         deployment_id = _resolve_teardown_deployment_id(strategy=strategy, wallet_address=wallet_address, chain=chain)
         _ensure_strategy_deployment_id(strategy, deployment_id, gateway_client)
 
@@ -938,8 +813,6 @@ def discover_positions(
         )
         click.echo(f"  Found {len(discovered)} on-chain LP position(s).")
 
-        # VIB-5476 / TD-18: sharp attribution gate — close only provably-owned
-        # positions by default; the ambiguous remainder requires --wallet-wide.
         return _apply_plan_b_attribution_gate(
             full=full,
             deployment_id=deployment_id,
@@ -948,36 +821,18 @@ def discover_positions(
             wallet_wide=wallet_wide,
         )
 
-    # VIB-5459 / TD-01: reconcile the strategy's own enumeration against the
-    # ``position_registry`` WARM read path so the CLI teardown lane (preview +
-    # execute) also surfaces cut-over LP (UniV3 + UniV4) the registry still
-    # remembers after a restart. Additive (never drops a strategy-reported
-    # position). The registry-capable state manager was injected onto the
-    # strategy via ``set_state_manager`` during CLI setup; absent it the read
-    # degrades to the strategy's own enumeration. This is the non-``--discover``
-    # (Plan A) lane — a precise, deployment-scoped registry read, never a
-    # wallet-wide scan.
+    # Registry reconciliation is additive and deployment-scoped: it recovers
+    # positions remembered after restart without widening to a wallet scan.
     import asyncio
 
     from ..teardown.registry_enumeration import resolve_open_positions_with_registry
 
-    # VIB-5679: self-resolve + stamp the canonical deployment_id BEFORE the
-    # deployment-scoped ``position_registry`` WARM read, exactly as the Plan-B
-    # branch above does. Without this, a COLD ``teardown execute`` (no live
-    # runner, no config or stamped ``strategy.deployment_id``) leaves it empty,
-    # so the WARM read is scoped to "" and returns zero rows even when the
-    # registry holds an ``open`` row — a silent "no open positions … Exiting 0"
-    # false-success on a live position (VIB-5456 Path-1). ``_resolve_teardown_
-    # deployment_id`` prefers an already-stamped id (hosted-safe) and only
-    # self-resolves ``deployment:sha256(wallet:chain)[:12]`` — the SAME id the
-    # runner mints at boot — when blank. The Plan-A read is deployment-scoped
-    # (never wallet-wide), so no attribution gate is required here.
+    # Stamp the canonical deployment id before the registry read; an empty scope
+    # could otherwise report false success while a live position remains open.
     try:
         deployment_id = _resolve_teardown_deployment_id(strategy=strategy, wallet_address=wallet_address, chain=chain)
     except click.ClickException as exc:
-        # The shared helper's resolve-failure message says "Teardown --discover …";
-        # in the Plan-A (no --discover) path that flag reference misleads the
-        # operator, so keep the message flag-agnostic here.
+        # This path is not discovery, so keep the shared error flag-agnostic.
         raise click.ClickException(str(exc.message).replace("Teardown --discover", "Teardown")) from exc
     _ensure_strategy_deployment_id(strategy, deployment_id, gateway_client)
 
@@ -1023,11 +878,6 @@ def print_no_op_if_empty_and_signal_return(
             "rerun with --discover to scan NPM contracts on-chain."
         )
     return True
-
-
-# =============================================================================
-# Phase 8a: position display
-# =============================================================================
 
 
 def display_position_summary(positions: Any) -> tuple[Decimal, int]:
@@ -1083,11 +933,6 @@ def display_unknown_value_warning(unknown_value_count: int) -> None:
     )
 
 
-# =============================================================================
-# Phase 8b: market snapshot + price oracle
-# =============================================================================
-
-
 def build_market_and_oracle(strategy: Any) -> tuple[Any | None, Any | None]:
     """Create the market snapshot up-front so the preview intents match
     what will execute. Returns ``(market, price_oracle)``; either may be
@@ -1108,11 +953,6 @@ def build_market_and_oracle(strategy: Any) -> tuple[Any | None, Any | None]:
     except Exception as e:
         click.echo(f"\n  Warning: Could not get market prices ({e}), using placeholders")
     return market, price_oracle
-
-
-# =============================================================================
-# Phase 8c: teardown intent generation + display
-# =============================================================================
 
 
 def _apply_lending_unwind_guard_cli(intents: list[Any], market: Any, mode: Any = None) -> list[Any]:
@@ -1286,11 +1126,6 @@ def generate_teardown_intents_for_cli(
             logger.error("Failed to generate teardown intents", exc_info=True)
             raise click.ClickException(f"Failed to generate teardown intents: {e}") from e
 
-    # VIB-5139: universal fresh-state guard for lending unwind. Drops stale
-    # REPAY 0 / withdraw_all-when-flat / withdraw-before-repay using a FRESH
-    # gateway-backed exposure read; degrades conservatively on an unmeasured
-    # read (Empty ≠ Zero). LP_CLOSE / discover-path intents pass through. Pure
-    # list transform — dispatch funnel + commit pairing unchanged.
     intents = _apply_lending_unwind_guard_cli(intents, market, internal_mode)
 
     click.echo(f"\nTeardown Steps ({len(intents)}):")
@@ -1301,11 +1136,6 @@ def generate_teardown_intents_for_cli(
         click.echo(f"  {i}. {intent_type}")
 
     return intents
-
-
-# =============================================================================
-# Phase 9a: confirmation
-# =============================================================================
 
 
 def prompt_teardown_confirmation(force: bool) -> bool:
@@ -1323,11 +1153,6 @@ def prompt_teardown_confirmation(force: bool) -> bool:
         click.echo("Teardown cancelled.")
         return False
     return True
-
-
-# =============================================================================
-# Phase 9b: teardown machinery (orchestrator + compiler + state adapter)
-# =============================================================================
 
 
 @dataclass
@@ -1379,19 +1204,13 @@ def build_teardown_machinery(
     from ..execution.gateway_orchestrator import GatewayExecutionOrchestrator
     from ..intents.compiler import IntentCompiler, IntentCompilerConfig
 
-    # Mypy: chain/wallet typed `str | None` here, but the orchestrator and
-    # compiler require `str`. The original inline code passed without
-    # complaint because the variables were inferred as Any (see the same
-    # note on discover_positions._do_discover). type: ignore preserves
-    # original runtime behavior — None values would crash here just as
-    # they did pre-refactor.
+    # Preserve the established downstream failure path for optional values.
     orchestrator = GatewayExecutionOrchestrator(
         client=gateway_client,
         chain=chain,  # type: ignore[arg-type]
         wallet_address=wallet_address,
     )
 
-    # Create compiler with real prices if available.
     # gateway_client is mandatory: LP_CLOSE compilation queries on-chain state
     # (ERC20 LP balances for Aerodrome, position liquidity for Uniswap V3).
     # Without it every on-chain query returns None and compilation fails silently.
@@ -1402,21 +1221,17 @@ def build_teardown_machinery(
     compiler = IntentCompiler(
         chain=chain,  # type: ignore[arg-type]
         wallet_address=wallet_address,  # type: ignore[arg-type]
-        rpc_url=None,  # Will use gateway
+        rpc_url=None,
         price_oracle=price_oracle,
         config=compiler_config,
         gateway_client=gateway_client,
     )
 
-    # VIB-3835: TeardownStateAdapter() resolves through the strict
-    # strategy-scoped path resolver. Surface LocalPathError as a clean CLI
-    # error rather than a raw traceback.
     try:
         state_adapter = TeardownStateAdapter()
     except LocalPathError as exc:
         raise click.ClickException(str(exc)) from exc
 
-    # VIB-3839 cycle-id alignment.
     cli_teardown_id = f"td_{_uuid.uuid4().hex[:12]}"
     teardown_cycle_id = f"teardown-{cli_teardown_id}"
 
@@ -1438,11 +1253,6 @@ def build_teardown_machinery(
         cli_teardown_id=cli_teardown_id,
         teardown_cycle_id=teardown_cycle_id,
     )
-
-
-# =============================================================================
-# Phase 9c: async run_teardown with VIB-3839 cycle-id swap + pre/post brackets
-# =============================================================================
 
 
 async def run_teardown_with_brackets(
@@ -1491,13 +1301,8 @@ async def run_teardown_with_brackets(
     async def on_progress(pct: int, msg: str):
         click.echo(f"  [{pct}%] {msg}")
 
-    # VIB-3839 + VIB-3892: build the minimal StrategyRunner inside the
-    # async context (state_manager.initialize() is async). The runner
-    # exists only to host the runner_helpers callables — it is never
-    # started as an iteration loop. Failures here propagate as
-    # ClickException — never silently fall back to a runner_helpers=None
-    # bypass (audit B2: books and on-chain reality must not diverge
-    # silently).
+    # Never fall back to missing accounting helpers: that would let the books
+    # diverge silently from on-chain execution.
     runner = None
     runner_helpers_for_manager = None
     if not no_accounting:
@@ -1523,17 +1328,8 @@ async def run_teardown_with_brackets(
                 "(operator opt-in for known-broken environments only)."
             ) from exc
 
-    # Original click body had a `# type: ignore[arg-type]` on this kwarg
-    # because the inline orchestrator was typed precisely as
-    # `GatewayExecutionOrchestrator` while TeardownManager expects a
-    # protocol-shaped duck. Inside the helper, machinery.orchestrator is
-    # `Any` (dataclass field), so mypy doesn't need the ignore — and
-    # complains if it's left in.
-    # VIB-5011: the execute lane surfaces no asset-routing knobs (those live
-    # on the request lane), so token consolidation is DISABLED here — the
-    # wallet-scoped ``amount="all"`` consolidation sweep requires the
-    # operator's explicit asset policy as consent (pr-auditor blocker).
-    # ``teardown request -a target`` is the consolidating path.
+    # A wallet-wide consolidation sweep requires explicit asset-policy consent,
+    # which this execute lane does not collect.
     from ..teardown.config import TeardownConfig as _TC
 
     _execute_lane_config = _TC.default()
@@ -1557,15 +1353,11 @@ async def run_teardown_with_brackets(
         kwargs["precomputed_positions"] = positions
         kwargs["precomputed_intents"] = intents
 
-    # When --no-accounting is set, skip the cycle-id swap and pre/post
-    # brackets entirely; the pipeline is intentionally bypassed so there
-    # are no accounting writers to align cycle ids for.
+    # With accounting disabled there are no writers or snapshots to align.
     if no_accounting or runner is None:
         return await teardown_manager.execute(**kwargs)
 
-    # VIB-3839: cycle-id swap on BOTH surfaces (P1-4 — runner_state.py
-    # reads ``runner._last_cycle_id`` first, then falls back to the
-    # contextvar). Mirrors ``execute_teardown_via_manager`` Phase 6.5.
+    # Keep the runner field and context variable aligned for every bracket write.
     from ..observability.context import (
         clear_cycle_id,
         get_cycle_id,
@@ -1577,13 +1369,10 @@ async def run_teardown_with_brackets(
     runner._last_cycle_id = machinery.teardown_cycle_id
     set_cycle_id(machinery.teardown_cycle_id)
 
-    # Hoist the local once so the type narrows for the rest of the block —
-    # Mypy can't follow the ``has_snapshot`` property across the boundary,
-    # but it can narrow ``capture_snapshot`` itself.
+    # The local lets the type checker retain its narrowing across the block.
     capture_snapshot = teardown_manager.runner_helpers.capture_snapshot
     try:
-        # VIB-3839 pre-bracket: degraded-but-continue (failures land in
-        # the deferred-write log but never abort the teardown).
+        # Snapshot accounting failures are loud but never block risk reduction.
         if capture_snapshot is not None:
             pre_outcome = await capture_snapshot(
                 strategy,
@@ -1599,7 +1388,6 @@ async def run_teardown_with_brackets(
 
         result = await teardown_manager.execute(**kwargs)
 
-        # VIB-3839 post-bracket: same degraded-but-continue contract.
         if capture_snapshot is not None:
             post_outcome = await capture_snapshot(
                 strategy,
@@ -1620,11 +1408,6 @@ async def run_teardown_with_brackets(
             set_cycle_id(saved_ctx_cycle_id)
 
     return result
-
-
-# =============================================================================
-# Phase 10a: result display
-# =============================================================================
 
 
 def display_teardown_result(
@@ -1663,11 +1446,6 @@ def display_teardown_result(
     click.echo("=" * 60)
 
 
-# =============================================================================
-# Phase 10b: VIB-3920 — teardown_requests lifecycle update
-# =============================================================================
-
-
 def update_teardown_requests_lifecycle(
     deployment_id: str,
     mode: str,
@@ -1693,8 +1471,6 @@ def update_teardown_requests_lifecycle(
     when this runs.
     """
     try:
-        # Local alias-imports to avoid shadowing the outer-scope
-        # ``TeardownMode`` reference in the parent module.
         from ..teardown.models import TARGET_TOKEN_CHAIN_DEFAULT as _TARGET_TOKEN_CHAIN_DEFAULT
         from ..teardown.models import TeardownAssetPolicy as _TAP
         from ..teardown.models import TeardownMode as _TM
@@ -1704,42 +1480,29 @@ def update_teardown_requests_lifecycle(
         tsm = state_manager_provider()
         existing = tsm.get_active_request(deployment_id)
         if existing is None:
-            # Create-then-mark to keep the lifecycle queryable. Use the
-            # asset_policy default; the execute lane doesn't surface
-            # asset-routing knobs at the CLI level (those live on the
-            # request lane), so the safe default mirrors the request-
-            # lane DEFAULTS.
+            # Create a missing request so direct executions remain queryable.
             existing = _TR(
                 deployment_id=deployment_id,
-                # The bare ``_TM(mode)`` constructor only accepts "SOFT"/"HARD",
-                # but `mode` here is always the CLI-facing "graceful"/"emergency"
-                # string — `from_cli_string` is the single canonical conversion
-                # every teardown-mode call site shares, so this never raises.
+                # CLI mode names require the canonical conversion, not enum construction.
                 mode=_TM.from_cli_string(mode),
                 asset_policy=_TAP.TARGET_TOKEN,
-                # Mirrors the request-lane default, which is now the "no
-                # preference" sentinel resolved per-chain (VIB-5727) — the
-                # execute lane surfaces no asset-routing knobs, so it has no
-                # operator preference to honour.
+                # This lane collects no target-token preference; resolve it per chain.
                 target_token=_TARGET_TOKEN_CHAIN_DEFAULT,
                 requested_by="cli-execute",
                 reason="execute_teardown CLI invocation",
                 positions_total=result.positions_total if result.has_position_breakdown else result.intents_total,
             )
             tsm.create_request(existing)
-        # VIB-5085: ``positions_*`` columns must count positions, not intents.
-        # ``execute()`` stamps the verified position breakdown onto the result;
-        # when verification ran, use it. Otherwise fall back to the intent
-        # counts (the pre-VIB-5085 behaviour) so the columns are never blank.
+        # Prefer verified position counts; intent counts are only a fallback when
+        # no position breakdown exists.
         if result.has_position_breakdown:
             existing.positions_total = max(existing.positions_total, result.positions_total)
             existing.positions_closed = result.positions_closed
             existing.positions_failed = max(result.positions_total - result.positions_closed, 0)
         else:
             existing.positions_total = max(existing.positions_total, result.intents_total)
-            # VIB-5993: aggregate skips cannot distinguish an already-flat
-            # zero-balance no-op from a clamp-stranded position. Preserve the
-            # legacy fallback until typed skip reasons can drive this count.
+            # Aggregate skips cannot distinguish an already-flat no-op from a
+            # clamp-stranded position, so only explicit failures count here.
             existing.positions_closed = result.intents_succeeded
             existing.positions_failed = result.intents_failed
         existing.completed_at = datetime.now(UTC)
