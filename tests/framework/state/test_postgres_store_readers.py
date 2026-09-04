@@ -37,6 +37,11 @@ from almanak.framework.state.state_manager import (
 _DEPLOYMENT_ID = "AccountingQuantLPStrategy:abc123"
 
 
+# =============================================================================
+# Fake asyncpg pool
+# =============================================================================
+
+
 class _FakeConn:
     """Records the SQL + args of each call; returns canned rows."""
 
@@ -84,6 +89,11 @@ def _make_store(conn: _FakeConn) -> PostgresStore:
     return store
 
 
+# =============================================================================
+# Snapshot readers
+# =============================================================================
+
+
 def _snapshot_row(**overrides):
     base = {
         "deployment_id": _DEPLOYMENT_ID,
@@ -126,6 +136,8 @@ async def test_get_latest_snapshot_keys_on_deployment_id_orders_desc():
     assert snap.deployed_capital_usd == Decimal("1100.00")
     assert snap.chain == "arbitrum"
 
+    # SQL shape — deployment_id filter + DESC + LIMIT 1 (VIB-4721/4722:
+    # portfolio_snapshots has a single identity column, deployment_id).
     assert len(conn.calls) == 1
     kind, sql, args = conn.calls[0]
     assert kind == "fetchrow"
@@ -185,11 +197,12 @@ async def test_get_recent_snapshots_orders_desc_and_reverses_to_oldest_first():
         timestamp=datetime(2026, 5, 4, 1, 0, 0, tzinfo=UTC),
         total_value_usd="2.43",
     )
-    conn = _FakeConn(fetch_rows=[newest, older_in_window])
+    conn = _FakeConn(fetch_rows=[newest, older_in_window])  # DESC order from DB
     store = _make_store(conn)
 
     snaps = await store.get_recent_snapshots(_DEPLOYMENT_ID, limit=168)
 
+    # Reversed to oldest-first → [-1] is the true latest.
     assert [s.iteration_number for s in snaps] == [33, 200]
     assert snaps[-1].total_value_usd == Decimal("4.93")
 
@@ -209,7 +222,7 @@ async def test_get_recent_snapshots_empty_limit_short_circuits():
     store = _make_store(conn)
 
     assert await store.get_recent_snapshots(_DEPLOYMENT_ID, limit=0) == []
-    assert conn.calls == []
+    assert conn.calls == []  # never touches the pool
 
 
 @pytest.mark.asyncio
@@ -226,6 +239,11 @@ async def test_get_snapshot_at_uses_at_or_before_filter():
     assert "ORDER BY timestamp DESC" in sql
     assert "LIMIT 1" in sql
     assert args == (_DEPLOYMENT_ID, ts)
+
+
+# =============================================================================
+# Portfolio metrics
+# =============================================================================
 
 
 def _metrics_row(**overrides):
@@ -273,6 +291,11 @@ async def test_get_portfolio_metrics_returns_none_on_empty():
     store = _make_store(conn)
 
     assert await store.get_portfolio_metrics(_DEPLOYMENT_ID) is None
+
+
+# =============================================================================
+# Ledger entries
+# =============================================================================
 
 
 def _ledger_row(**overrides):
@@ -324,7 +347,7 @@ async def test_get_ledger_entries_minimal_filters():
     assert "FROM transaction_ledger" in sql
     assert "WHERE deployment_id = $1" in sql
     assert "agent_id" not in sql
-    assert "LIMIT $2" in sql
+    assert "LIMIT $2" in sql  # limit is the only extra param
     assert "ORDER BY timestamp DESC" in sql
     assert args == (_DEPLOYMENT_ID, 50)
 
@@ -352,6 +375,11 @@ async def test_get_ledger_entries_with_all_filters():
     assert "intent_type = $4" in sql
     assert "LIMIT $5" in sql
     assert args == (_DEPLOYMENT_ID, since, before, "LP_OPEN", 100)
+
+
+# =============================================================================
+# Accounting events
+# =============================================================================
 
 
 def _ae_row(**overrides):
@@ -389,6 +417,7 @@ async def test_get_accounting_events_keys_on_deployment_id():
     assert r["event_type"] == "LP_OPEN"
     assert r["payload_json"] == '{"cost_basis_usd":"1000"}'
     assert r["timestamp"].startswith("2026-05-04T")
+    # SQLite parity: deployment_id, agent_id, deployment_id all present in dict
     assert r["deployment_id"] == _DEPLOYMENT_ID
     assert r["deployment_id"] == _DEPLOYMENT_ID
 
@@ -417,6 +446,11 @@ async def test_get_accounting_events_with_filters():
     assert "position_key = $3" in sql
     assert "LIMIT $4" in sql
     assert args == (_DEPLOYMENT_ID, "LP_OPEN", "some_pos", 10)
+
+
+# =============================================================================
+# Position events
+# =============================================================================
 
 
 def _pe_row(**overrides):
@@ -472,12 +506,14 @@ async def test_get_position_events_dict_keys_on_deployment_id():
     assert r["event_type"] == "OPEN"
     assert r["in_range"] is True
     assert r["timestamp"].startswith("2026-05-04T")
+    # VIB-3966: column now exists on metrics_db, real value passes through.
     assert r["protocol_fees_usd"] == "0.0125"
 
     _, sql, args = conn.calls[0]
     assert "FROM position_events" in sql
     assert "WHERE deployment_id = $1" in sql
     assert "ORDER BY timestamp ASC" in sql
+    # VIB-3966: protocol_fees_usd must be in the SELECT list now.
     assert "protocol_fees_usd" in sql
     assert args == (_DEPLOYMENT_ID,)
 
@@ -500,6 +536,11 @@ async def test_get_position_events_dict_with_all_filters():
     assert "position_type = $3" in sql
     assert "event_type = $4" in sql
     assert args == (_DEPLOYMENT_ID, "42", "LP", "CLOSE")
+
+
+# =============================================================================
+# Position events — write/read parity (VIB-4315)
+# =============================================================================
 
 
 def _make_position_event(**overrides):
@@ -585,14 +626,17 @@ async def test_save_position_event_writes_all_columns_from_deployment_id(monkeyp
         "attribution_version",
     ):
         assert col in sql, f"column {col!r} missing from save_position_event INSERT"
+    # The legacy agent_id column is gone.
     assert "agent_id" not in sql
     # First-write-wins idempotency (matches SQLite INSERT OR IGNORE).
     assert "ON CONFLICT (id) DO NOTHING" in sql
     # JSONB column must be cast on the wire.
     assert "$31::jsonb" in sql
 
-    assert args[0] == "pe-1"
-    assert args[1] == _DEPLOYMENT_ID
+    # Blueprint 29 §4: one identity column — deployment_id gets
+    # event.deployment_id, no hosted-env translation.
+    assert args[0] == "pe-1"  # id
+    assert args[1] == _DEPLOYMENT_ID  # canonical deployment_id column
 
 
 @pytest.mark.asyncio
@@ -606,7 +650,7 @@ async def test_save_position_event_uses_deployment_id_in_local_mode(monkeypatch)
     await store.save_position_event(_make_position_event())
 
     _, _, args = conn.calls[0]
-    assert args[1] == _DEPLOYMENT_ID
+    assert args[1] == _DEPLOYMENT_ID  # deployment_id column
 
 
 @pytest.mark.asyncio
@@ -639,7 +683,8 @@ async def test_save_position_event_preserves_tri_state_optionals(monkeypatch):
     await store.save_position_event(_make_position_event(tick_lower=None, tick_upper=None, in_range=None, is_long=None))
 
     _, _, args = conn.calls[0]
-    # Positional order matches the INSERT VALUES list:
+    # Positional order matches the INSERT VALUES list (VIB-4721/4722: no
+    # agent_id column, so indices shift down by one from the legacy shape):
     # ..., $16 tick_lower, $17 tick_upper, $18 liquidity, $19 in_range, ...
     # ..., $26 unrealized_pnl, $27 is_long, ...
     assert args[15] is None  # tick_lower
@@ -666,6 +711,7 @@ async def test_save_position_event_binds_datetime_not_string(monkeypatch):
     await store.save_position_event(_make_position_event(timestamp=ts))
 
     _, _, args = conn.calls[0]
+    # $8 timestamp position (VIB-4721/4722: no agent_id column).
     assert args[7] == ts
     assert isinstance(args[7], datetime)
     assert args[7].tzinfo is not None
@@ -769,6 +815,7 @@ async def test_update_position_attribution_unscoped_when_deployment_id_empty():
         event_id="pe-1",
         attribution_json="{}",
         attribution_version=1,
+        # deployment_id omitted → defaults to ""
     )
 
     assert ok is True
@@ -797,6 +844,11 @@ async def test_update_position_attribution_scoped_returns_false_on_deployment_mi
     assert args[3] == "wrong-deployment"
 
 
+# =============================================================================
+# Row-conversion parity (no DB needed)
+# =============================================================================
+
+
 def test_pg_row_to_portfolio_snapshot_handles_envelope_payload():
     payload = (
         '{"schema_version":1,"positions":[{"position_type":"LP","protocol":"u3",'
@@ -822,12 +874,18 @@ def test_pg_row_to_portfolio_snapshot_handles_envelope_payload():
     snap = _pg_row_to_portfolio_snapshot(row)
     assert snap.deployment_id == _DEPLOYMENT_ID
     assert len(snap.positions) == 1
+    # Envelope metadata round-trips into snapshot_metadata
     assert snap.snapshot_metadata.get("source") == "test"
 
 
 def test_pg_row_to_portfolio_snapshot_hydrates_populated_wallet_columns():
-    # Dedicated columns must recover current wallet composition and its audit record
-    # independently of the positions envelope.
+    # VIB-5007 — the four wallet-side columns the PG WRITE path now binds must
+    # round-trip on the READ path into the snapshot's typed fields. This is the
+    # consumer half of the end-to-end chain: ``snapshot.wallet_balances`` is the
+    # PRIMARY source for the dashboard "Current Position" panel
+    # (``build_position_proto`` → ``token_balances``), and it is the per-snapshot
+    # audit record of token composition. Both must be recoverable from the
+    # dedicated columns alone — not only from the positions_json envelope.
     wallet_balances = [
         {
             "symbol": "WBTC",
@@ -857,6 +915,9 @@ def test_pg_row_to_portfolio_snapshot_hydrates_populated_wallet_columns():
 
     snap = _pg_row_to_portfolio_snapshot(row)
 
+    # Per-token composition recovered (not merely "non-empty") — this is what
+    # makes snapshot↔trade-tape reconciliation a DB read instead of on-chain
+    # forensics.
     assert [b.symbol for b in snap.wallet_balances] == ["WBTC", "USDC"]
     wbtc, usdc = snap.wallet_balances
     assert wbtc.balance == Decimal("0.00009864")
@@ -864,6 +925,7 @@ def test_pg_row_to_portfolio_snapshot_hydrates_populated_wallet_columns():
     assert wbtc.price_usd == Decimal("63251.0")
     assert wbtc.address == "0x2f2a2543b76a4166549f7aab2e75bef0aefc5b0f"
     assert usdc.balance == Decimal("1.978059")
+    # Scalar + price-map columns hydrate too.
     assert snap.wallet_total_value_usd == Decimal("8.218059")
     assert snap.deployed_capital_usd == Decimal("0")
     assert snap.token_prices == token_prices
@@ -908,7 +970,7 @@ def test_pg_row_to_ledger_entry_preserves_jsonb_text_passthrough():
             "token_out": "aUSDC",
             "amount_out": "100",
             "effective_price": "1",
-            "slippage_bps": None,
+            "slippage_bps": None,  # optional field
             "gas_used": 100000,
             "gas_usd": "0.50",
             "tx_hash": "0xa",
@@ -924,7 +986,7 @@ def test_pg_row_to_ledger_entry_preserves_jsonb_text_passthrough():
     )
     entry = _pg_row_to_ledger_entry(row)
     assert entry.id == "tx-1"
-    assert entry.slippage_bps is None
+    assert entry.slippage_bps is None  # tri-state preserved
     assert entry.extracted_data_json.startswith("{")
     assert entry.price_inputs_json == '{"USDC":"1.0"}'
 
@@ -959,7 +1021,8 @@ def test_pg_row_to_accounting_event_dict_matches_sqlite_keys():
 def test_pg_row_to_position_event_dict_preserves_tri_state_in_range():
     row = _pe_row(in_range=None)
     d = _pg_row_to_position_event_dict(row)
-    # None is an unmeasured range state, not False.
+    # in_range tri-state matters for the dashboard's primary-risk gauge
+    # (VIB-3893): None must not collapse to False.
     assert d["in_range"] is None
 
 
@@ -970,13 +1033,19 @@ def test_pg_row_to_position_event_dict_passes_protocol_fees_through():
     ``TEXT NOT NULL DEFAULT ''``. The SDK converter now reads the value
     off the row instead of emitting the sentinel.
     """
+    # Real value present on the row — round-trips.
     assert _pg_row_to_position_event_dict(_pe_row())["protocol_fees_usd"] == "0.0125"
 
-    # Parser-silent empty text, legacy NULL, and measured zero remain distinct.
+    # Empty string from the DEFAULT survives as "" (parser-did-not-emit
+    # semantic per AGENTS.md "Empty ≠ zero", distinct from "0").
     assert _pg_row_to_position_event_dict(_pe_row(protocol_fees_usd=""))["protocol_fees_usd"] == ""
 
+    # Defensive: the row.get(...) or "" fallback collapses NULL legacy rows
+    # (shouldn't happen with NOT NULL DEFAULT, but cheap to defend) to "".
     assert _pg_row_to_position_event_dict(_pe_row(protocol_fees_usd=None))["protocol_fees_usd"] == ""
 
+    # Measured zero passes through without being collapsed to "" — important
+    # because "0" and "" mean different things in the accounting contract.
     assert _pg_row_to_position_event_dict(_pe_row(protocol_fees_usd="0"))["protocol_fees_usd"] == "0"
 
 
@@ -1040,6 +1109,11 @@ def test_position_event_dict_keyset_parity_pg_vs_sqlite():
     )
 
 
+# =============================================================================
+# Dashboard dispatch — VIB-3933 review finding #2
+# =============================================================================
+
+
 @pytest.mark.asyncio
 async def test_dashboard_dispatch_prefers_sqlite_sync_for_accounting_events():
     """SQLite-side dashboard reads must use the sync ASC/no-LIMIT contract.
@@ -1073,7 +1147,7 @@ async def test_dashboard_dispatch_prefers_sqlite_sync_for_accounting_events():
 
     assert rows == [{"id": "from-sync"}]
     assert sync_calls == [("dep-1", None)]
-    assert async_calls == []
+    assert async_calls == []  # async path must NOT be reached on SQLite
 
 
 @pytest.mark.asyncio
@@ -1130,6 +1204,11 @@ async def test_dashboard_dispatch_prefers_sqlite_sync_for_position_events():
     assert async_calls == []
 
 
+# =============================================================================
+# PG metrics writer parity — VIB-3933 review finding #1
+# =============================================================================
+
+
 def test_pg_upsert_query_includes_total_value_and_positions_columns():
     """The PG UPSERT must persist total_value_usd and positions_json (VIB-3933 finding #1).
 
@@ -1139,6 +1218,7 @@ def test_pg_upsert_query_includes_total_value_and_positions_columns():
     """
     from almanak.gateway.services._save_metrics_helpers import PG_UPSERT_QUERY
 
+    # INSERT column list must include both fields.
     assert "total_value_usd" in PG_UPSERT_QUERY
     assert "positions_json" in PG_UPSERT_QUERY
     # The provenance-aware conflict path refreshes both fields. The separate
@@ -1192,11 +1272,15 @@ def test_build_pg_upsert_args_appends_total_value_and_positions():
 
     args = build_pg_upsert_args(inputs, request, RunMode.PAPER, now, Decimal("12345.67"))
 
+    # Length matches $1..$12 placeholders in PG_UPSERT_QUERY (VIB-4721/4722:
+    # portfolio_metrics has a single identity column, deployment_id — the
+    # separate request.deployment_id arg was dropped).
     assert len(args) == 12
-    assert args[0] == _DEPLOYMENT_ID
+    assert args[0] == _DEPLOYMENT_ID  # deployment_id column (canonical wire id)
     assert args[10] == "12345.67"  # total_value_usd
     assert args[11] is None  # omitted older-client field preserves existing row
 
+    # Validated explicit positions_json is carried by ParsedMetricsInputs.
     inputs2 = ParsedMetricsInputs(
         deployment_id=_DEPLOYMENT_ID,
         initial_value_usd=Decimal("100"),
@@ -1267,6 +1351,11 @@ def test_build_pg_upsert_args_rejects_noncanonical_provenance_schema():
             datetime(2026, 5, 4, tzinfo=UTC),
             Decimal("4"),
         )
+
+
+# =============================================================================
+# position_registry readers + backfill writer (VIB-4794)
+# =============================================================================
 
 
 def _registry_row(**overrides):
@@ -1448,9 +1537,9 @@ async def test_insert_position_registry_row_if_absent_inserts_new():
     assert "DO NOTHING" in sql
     # 16 positional placeholders matching the SQLite column order.
     assert len(args) == 16
-    assert args[0] == _DEPLOYMENT_ID
-    assert args[2] == "lp"
-    assert args[3] == "lp"
+    assert args[0] == _DEPLOYMENT_ID  # deployment_id
+    assert args[2] == "lp"  # primitive
+    assert args[3] == "lp"  # accounting_category
 
 
 @pytest.mark.asyncio
@@ -1475,8 +1564,16 @@ async def test_insert_position_registry_row_if_absent_returns_false_on_unexpecte
     assert inserted is False
 
 
-# Guard text-numeric casts so invalid and non-finite gas values contribute zero
-# instead of failing the aggregate. Anchor reads stay ascending and bounded.
+# =============================================================================
+# Ledger quant stats + anchor candidates (VIB-5059 Phase 1 — SQL half)
+# =============================================================================
+#
+# UAT card D2.M2 (docs/internal/uat-cards/VIB-5059-p1sql.md): the aggregate
+# SQL computes COUNT/SUM server-side, selects NO JSON-blob column, casts the
+# text-numeric gas_usd to exact numeric ONLY behind a finite-numeric-literal
+# guard (NULL / '' / garbage / NaN / Infinity contribute zero, never raise),
+# and coalesces the zero-row sum to 0; the anchor SQL is ascending,
+# LIMIT-bounded, and projects only the three columns the anchor walk reads.
 
 
 def _quant_stats_row(**overrides):
@@ -1500,6 +1597,7 @@ async def test_get_ledger_quant_stats_sql_shape_and_conversion():
 
     stats = await store.get_ledger_quant_stats(_DEPLOYMENT_ID)
 
+    # Row → stats conversion: counts as ints, sum as exact Decimal.
     assert stats.total == 13
     assert stats.with_tx_hash == 12
     assert stats.with_cycle_id == 12
@@ -1639,9 +1737,17 @@ async def test_get_ledger_anchor_candidates_zero_limit_short_circuits():
     assert conn.calls == []
 
 
-# Full scans keep the newest capped window before reversing to oldest-first;
-# incremental reads continue after the composite cursor in oldest-first order.
-# Both modes preserve the SQLite-compatible text and tuple field semantics.
+# =============================================================================
+# get_nav_series PG twin — lifetime drawdown full scan + incremental cursor
+# (VIB-5118 / VIB-5134 — closes part of VIB-5099's hosted-PG coverage gap)
+# =============================================================================
+#
+# The SQLite reader runs end-to-end in tests/unit/dashboard/; this pins the
+# Postgres twin's SQL SHAPE without a live daemon: the projected columns
+# (two NAV columns ::text + raw id), the ::text Empty≠Zero cast, the two fetch
+# modes (full-scan DESC newest-kept+reversed vs. incremental ASC since-cursor),
+# and the parameter binding. The contract MUST match the SQLite twin so the
+# StateManager facade stays backend-agnostic.
 
 _NAV_BASE_TS = datetime(2026, 6, 1, 0, 0, 0, tzinfo=UTC)
 
@@ -1661,8 +1767,10 @@ def _nav_row(
             "total_value_text": total,
             "available_cash_text": cash,
             "id": id_,
-            # The final tuple fields support per-row debt netting and unavailable-NAV filtering.
+            # VIB-5170: positions_json::text rides along for per-row debt netting.
             "positions_text": positions,
+            # VIB-5408: value_confidence::text rides along (6th element) so the fold
+            # can skip an UNAVAILABLE (deflated) NAV.
             "value_confidence_text": confidence,
         }
     )
@@ -1679,6 +1787,9 @@ async def test_get_nav_series_full_scan_sql_shape_and_oldest_first():
     rows, truncated = await store.get_nav_series(_DEPLOYMENT_ID)
 
     assert truncated is False
+    # Reversed to oldest-first; 6-tuple shape (ts, total_text, cash_text, id,
+    # positions_json_text, value_confidence_text) — VIB-5170 adds positions_json for
+    # per-row debt netting; VIB-5408 adds value_confidence for the UNAVAILABLE skip gate.
     assert [r[3] for r in rows] == [1, 3]
     assert rows[0] == (_NAV_BASE_TS, "100", "0", 1, "[]", "HIGH")
 
@@ -1692,8 +1803,10 @@ async def test_get_nav_series_full_scan_sql_shape_and_oldest_first():
     assert "available_cash_usd::text AS available_cash_text" in select_clause
     # id projected raw (it is the cursor tiebreaker, not a money value → no cast).
     assert "id" in select_clause
-    # Other JSON blobs remain excluded to bound transfer size.
+    # VIB-5170: positions_json::text projected for debt netting; other JSON blobs
+    # still excluded (transfer-size discipline).
     assert "positions_json::text AS positions_text" in select_clause
+    # VIB-5408: value_confidence::text projected for the UNAVAILABLE skip gate.
     assert "value_confidence::text AS value_confidence_text" in select_clause
     assert "token_prices_json" not in sql
     assert "wallet_balances_json" not in sql
@@ -1737,9 +1850,9 @@ async def test_get_nav_series_full_scan_truncates_newest_kept():
     rows, truncated = await store.get_nav_series(_DEPLOYMENT_ID, scan_cap=2)
 
     assert truncated is True
-    assert [r[3] for r in rows] == [2, 3]
+    assert [r[3] for r in rows] == [2, 3]  # newest two (ids 2,3), oldest-first
     _, _, args = conn.calls[0]
-    assert args == (_DEPLOYMENT_ID, 3)
+    assert args == (_DEPLOYMENT_ID, 3)  # scan_cap + 1
 
 
 @pytest.mark.asyncio
@@ -1752,12 +1865,14 @@ async def test_get_nav_series_incremental_truncates_oldest_after_cursor():
     rows, truncated = await store.get_nav_series(_DEPLOYMENT_ID, since=(_NAV_BASE_TS, 5), scan_cap=2)
 
     assert truncated is True
-    assert [r[3] for r in rows] == [6, 7]
+    assert [r[3] for r in rows] == [6, 7]  # oldest two after the cursor, NOT reversed
 
 
 @pytest.mark.asyncio
 async def test_get_nav_series_projects_value_confidence_sixth_element_pg_twin():
-    # Confidence remains the sixth tuple field so the fold can skip unavailable NAV.
+    # VIB-5408: the PG twin must carry value_confidence::text through to the 6th
+    # tuple element (byte-identical to the SQLite twin) so the fold can skip an
+    # UNAVAILABLE (deflated) NAV on hosted Postgres too.
     high = _nav_row(0, "100", "0", 1, confidence="HIGH")
     degraded = _nav_row(1, "5", "0", 2, confidence="UNAVAILABLE")
     # DB yields DESC (newest-first); the reader reverses to oldest-first.
@@ -1767,6 +1882,7 @@ async def test_get_nav_series_projects_value_confidence_sixth_element_pg_twin():
     rows, _truncated = await store.get_nav_series(_DEPLOYMENT_ID)
 
     assert all(len(r) == 6 for r in rows)
+    # Oldest-first: HIGH row 1 then UNAVAILABLE row 2.
     assert rows[0] == (_NAV_BASE_TS, "100", "0", 1, "[]", "HIGH")
     assert rows[1][5] == "UNAVAILABLE"
 
@@ -1778,4 +1894,4 @@ async def test_get_nav_series_rejects_nonpositive_scan_cap():
 
     with pytest.raises(ValueError):
         await store.get_nav_series(_DEPLOYMENT_ID, scan_cap=0)
-    assert conn.calls == []
+    assert conn.calls == []  # validated before touching the pool
