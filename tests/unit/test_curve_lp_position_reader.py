@@ -29,14 +29,13 @@ from almanak.framework.valuation.curve_lp_position_reader import (
 from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
 from tests.support.curve_pool_catalog import curve_test_metadata
 
-# 3pool (ethereum) addresses
+# Ethereum 3pool addresses.
 POOL_3POOL = "0xbEbc44782C7dB0a1A60Cb6fe97d0b483032FF1C7"
 LP_3POOL = "0x6c3F90f043a72FA612cbac8115EE7e52BDe6E490"
 WALLET = "0x1234567890123456789012345678901234567890"
 
-# Base 4pool — USDC / USDbC / axlUSDC / crvUSD. StableSwap NG: LP == pool address.
-# Plain USD-stable pool that was falsely excluded before audit P0-3 (USDbC and
-# axlUSDC missing from the allowlist).
+# Base 4pool: USDC / USDbC / axlUSDC / crvUSD. StableSwap NG uses the pool as its LP token.
+# USDbC and axlUSDC are 1:1 USDC wrappers.
 POOL_4POOL_BASE = "0xf6C5F01C7F3148891ad0e19DF78743D31E390D1f"
 LP_4POOL_BASE = "0xf6C5F01C7F3148891ad0e19DF78743D31E390D1f"
 
@@ -45,7 +44,7 @@ VIRTUAL_PRICE_ALIAS = "0x0c46b72a"
 BALANCE_OF = "0x70a08231"
 BALANCES_UINT256 = "0x4903b0d1"
 BALANCES_INT128 = "0x065a80d8"
-COINS_UINT256 = "0xc6610657"  # coins(uint256) — verified on real fork (VIB-5539)
+COINS_UINT256 = "0xc6610657"  # coins(uint256), verified against the deployed pool
 COINS_INT128 = "0x23746eb8"  # coins(int128)
 TOTAL_SUPPLY = "0x18160ddd"
 DECIMALS = "0x313ce567"
@@ -62,13 +61,13 @@ def _addr_word(address: str) -> int:
     return int(address, 16)
 
 
-# steth (ethereum) — ETH / stETH crypto-family pool
+# Ethereum steth crypto-family pool: ETH / stETH.
 POOL_STETH = "0xDC24316b9AE028F1497c275EB9192a3Ea0f67022"
 LP_STETH = "0x06325440D014e39736583c165C2963BA99fAf14E"
 ETH_NATIVE = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
 STETH_ADDR = "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84"
 
-# frax_3crv (ethereum) — USD metapool [FRAX, 3CRV] over the 3pool base
+# Ethereum frax_3crv USD metapool: [FRAX, 3CRV] over the 3pool base.
 POOL_FRAX3CRV = "0xd632f22692FaC7611d2AA1C0D552930D43CAEd3B"
 LP_FRAX3CRV = "0xd632f22692FaC7611d2AA1C0D552930D43CAEd3B"
 FRAX_ADDR = "0x853d955aCEf822Db058eb8505911ED77F175b99e"
@@ -167,11 +166,6 @@ def _make_replies(*, lp_balance_wei: int | None, virtual_price_wei: int | None) 
     }
 
 
-# ---------------------------------------------------------------------------
-# Pool-metadata resolver
-# ---------------------------------------------------------------------------
-
-
 @pytest.fixture(autouse=True)
 def _explicit_live_pool_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
     """Feed address-selected fixtures through the production live-resolver seam."""
@@ -198,21 +192,14 @@ def test_resolve_pool_meta_unknown_returns_none() -> None:
 
 
 def test_resolve_pool_meta_stale_lp_token_falls_back_to_pool_address() -> None:
-    # A stale/unknown lp_token address must NOT mask a resolvable pool address
-    # (Gemini robustness fix): both candidate addresses are tried sequentially.
     meta = _resolve_curve_pool_meta(
         "ethereum",
-        pool=POOL_3POOL,  # valid pool address
-        lp_token="0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",  # unknown address
+        pool=POOL_3POOL,
+        lp_token="0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
         gateway_client=object(),
     )
     assert meta is not None
     assert meta["address"].lower() == POOL_3POOL.lower()
-
-
-# ---------------------------------------------------------------------------
-# CurveLpPositionReader
-# ---------------------------------------------------------------------------
 
 
 def test_supports_only_curve() -> None:
@@ -238,7 +225,6 @@ def test_read_position_no_gateway_returns_none() -> None:
 
 
 def test_read_position_3pool_live_virtual_price() -> None:
-    # 10 LP tokens, virtual_price 1.0196 -> value ~ 10.196
     reader = CurveLpPositionReader(
         _StubGatewayClient(_make_replies(lp_balance_wei=10 * 10**18, virtual_price_wei=1_019_566_780_337_011_070))
     )
@@ -271,7 +257,7 @@ def test_read_position_measured_zero_balance() -> None:
 
 
 def test_read_position_unmeasured_balance_returns_none() -> None:
-    # balanceOf read fails -> None (Empty != Zero), never a fabricated 0.
+    # Empty != Zero: an unreadable balance is unavailable, never a fabricated zero.
     reader = CurveLpPositionReader(_StubGatewayClient(_make_replies(lp_balance_wei=None, virtual_price_wei=10**18)))
     assert (
         reader.read_position(
@@ -300,11 +286,11 @@ def test_read_position_unmeasured_virtual_price_returns_none() -> None:
 
 
 def test_read_position_virtual_price_alias_fallback() -> None:
-    # Primary get_virtual_price() unreadable; alias virtual_price() succeeds.
+    # Some pools expose virtual_price() instead of get_virtual_price().
     replies = {
         (LP_3POOL.lower(), BALANCE_OF): 5 * 10**18,
         (POOL_3POOL.lower(), GET_VIRTUAL_PRICE): None,
-        (POOL_3POOL.lower(), VIRTUAL_PRICE_ALIAS): 10**18,  # 1.0
+        (POOL_3POOL.lower(), VIRTUAL_PRICE_ALIAS): 10**18,
     }
     reader = CurveLpPositionReader(_StubGatewayClient(replies))
     pos = reader.read_position(
@@ -319,10 +305,6 @@ def test_read_position_virtual_price_alias_fallback() -> None:
 
 
 def test_read_position_base_4pool_usdbc_axlusdc_values() -> None:
-    # Audit P0-3 regression: Base 4pool (USDC/USDbC/axlUSDC/crvUSD) is a PLAIN
-    # USD-stable pool. USDbC and axlUSDC are 1:1 USDC wrappers, so it must now
-    # value at lp_balance * virtual_price * $1 — previously fail-closed because
-    # the two wrapped-USDC symbols were missing from the allowlist.
     reader = CurveLpPositionReader(
         _StubGatewayClient(
             {
@@ -347,7 +329,7 @@ def test_read_position_base_4pool_usdbc_axlusdc_values() -> None:
 
 
 def test_usdbc_and_axlusdc_in_usd_stable_allowlist() -> None:
-    # Peg justification (audit P0-3) now lives on exact Base identities.
+    # Peg resolution uses exact Base token identities, not symbols alone.
     pos = CurveLpPositionReader(
         _StubGatewayClient(_make_replies(lp_balance_wei=0, virtual_price_wei=10**18))
     ).read_position(protocol="curve", chain="base", pool="4pool", lp_token=LP_4POOL_BASE, wallet_address=WALLET)
@@ -356,9 +338,6 @@ def test_usdbc_and_axlusdc_in_usd_stable_allowlist() -> None:
         is_pegged(TokenRef(chain="base", address=address, decimals=0, symbol=symbol)) == Decimal("1")
         for symbol, address in zip(pos.coins, pos.coin_addresses, strict=True)
     )
-
-
-# ── VIB-5428 — crypto / non-USD pool spot-reserves reads ──────────────────────
 
 
 def _steth_crypto_replies(
@@ -371,14 +350,9 @@ def _steth_crypto_replies(
     coin0_addr: str | None = ETH_NATIVE,
     coin1_addr: str | None = STETH_ADDR,
 ) -> dict[tuple[str, str], int | None]:
-    # Real steth resolves on balances(uint256) AND coins(uint256); the int128
-    # overloads revert (None) on this pool — matches the real-fork report. ETH
-    # (coin 0) is the native sentinel, so its decimals are NOT read (18 by
-    # definition) and coins(0) returns the native-ETH placeholder. The coins(i)
-    # replies feed the VIB-5539 on-chain coin-order validation; ``coin0_addr`` /
-    # ``coin1_addr`` let a test transpose or drop a coin read to exercise the
-    # fail-closed path. (The coins(int128) selector fallback is covered separately
-    # by test_crypto_coins_int128_selector_fallback below.)
+    # Deployed steth exposes balances(uint256) and coins(uint256); its int128
+    # overloads revert. Native ETH uses the sentinel and fixed 18 decimals.
+    # coin*_addr permits transposed or missing on-chain coin-order fixtures.
     return {
         (LP_STETH, BALANCE_OF + WALLET.lower().removeprefix("0x").zfill(64)): lp_balance_wei,
         (LP_STETH, TOTAL_SUPPLY): total_supply_wei,
@@ -395,9 +369,7 @@ def _steth_crypto_replies(
 
 
 def test_read_position_steth_crypto_family_reads_reserves() -> None:
-    # steth (ETH/stETH) is now a CRYPTO-family pool (VIB-5428): the reader reads
-    # spot reserves + supply + decimals via the gateway seam and returns a
-    # crypto-family position (was fail-closed "out of scope" before).
+    # Crypto-family valuation reads on-chain spot reserves, supply, and decimals.
     reader = CurveLpPositionReader(_FullCalldataGatewayClient(_steth_crypto_replies()))
     pos = reader.read_position(
         protocol="curve",
@@ -410,23 +382,18 @@ def test_read_position_steth_crypto_family_reads_reserves() -> None:
     assert pos.family == "crypto"
     assert pos.lp_balance_wei == 2 * 10**18
     assert pos.total_supply_wei == 200 * 10**18
-    assert pos.reserves_wei == [100 * 10**18, 110 * 10**18]  # balances(uint256) resolved
-    assert pos.coin_decimals == [18, 18]  # native ETH → 18 without a call
+    assert pos.reserves_wei == [100 * 10**18, 110 * 10**18]
+    assert pos.coin_decimals == [18, 18]  # Native ETH is fixed at 18 without an RPC read.
     assert pos.coins == ["ETH", "stETH"]
 
 
 def _int128_fallback_replies() -> dict[tuple[str, str], int | None]:
-    # SYNTHETIC selector scenario (NOT real steth — see
-    # test_read_position_steth_crypto_family_reads_reserves, where real steth
-    # resolves on balances(uint256)). Models a hypothetical pre-NG pool that
-    # exposes ONLY balances(int128): balances(uint256) reverts (None), so the
-    # reader's selector-probe must fall back to the int128 overload. Reuses the
-    # steth registry fixture purely for its pool/coin wiring.
+    # Synthetic pre-NG shape: balances(uint256) reverts and balances(int128)
+    # succeeds. The steth metadata fixture supplies only pool/coin wiring.
     return {
         (LP_STETH, BALANCE_OF + WALLET.lower().removeprefix("0x").zfill(64)): 2 * 10**18,
         (LP_STETH, TOTAL_SUPPLY): 200 * 10**18,
-        # coins resolve on uint256 (the int128-balances overload is the variable
-        # under test here, not the coins selector).
+        # Keep coins on uint256 so only the balances selector varies.
         (POOL_STETH, _balances_call(COINS_UINT256, 0)): _addr_word(ETH_NATIVE),
         (POOL_STETH, _balances_call(COINS_UINT256, 1)): _addr_word(STETH_ADDR),
         (POOL_STETH, _balances_call(BALANCES_UINT256, 0)): None,
@@ -438,9 +405,6 @@ def _int128_fallback_replies() -> dict[tuple[str, str], int | None]:
 
 
 def test_crypto_balances_int128_selector_fallback() -> None:
-    # Exercises the reader's balances(uint256)→balances(int128) selector-probe
-    # fallback for a hypothetical pre-NG pool (real steth uses uint256). The mark
-    # must come out identical regardless of which overload the pool exposes.
     reader = CurveLpPositionReader(_FullCalldataGatewayClient(_int128_fallback_replies()))
     pos = reader.read_position(
         protocol="curve",
@@ -451,21 +415,20 @@ def test_crypto_balances_int128_selector_fallback() -> None:
     )
     assert pos is not None
     assert pos.family == "crypto"
-    assert pos.reserves_wei == [100 * 10**18, 110 * 10**18]  # balances(int128) overload resolved
+    assert pos.reserves_wei == [100 * 10**18, 110 * 10**18]
 
 
 @pytest.mark.parametrize(
     "override",
     [
-        {"total_supply_wei": None},  # supply unreadable
-        {"total_supply_wei": 0},  # non-positive supply
-        {"reserve_steth_wei": None},  # a reserve leg unreadable
-        {"steth_decimals": None},  # a coin's decimals unreadable
+        {"total_supply_wei": None},
+        {"total_supply_wei": 0},
+        {"reserve_steth_wei": None},
+        {"steth_decimals": None},
     ],
 )
 def test_read_position_crypto_fails_closed_on_unreadable_input(override: dict[str, int | None]) -> None:
-    # Empty ≠ Zero: any missing spot-reserves input → None (UNAVAILABLE), never a
-    # partial / fabricated mark.
+    # Empty != Zero: any missing reserve input makes the mark unavailable.
     replies = _steth_crypto_replies(**override)  # type: ignore[arg-type]
     reader = CurveLpPositionReader(_FullCalldataGatewayClient(replies))
     assert (
@@ -480,14 +443,7 @@ def test_read_position_crypto_fails_closed_on_unreadable_input(override: dict[st
     )
 
 
-# ── VIB-5539 — on-chain coins(i) order validation (fail-closed) ───────────────
-
-
 def test_crypto_coin_order_match_returns_position_unchanged() -> None:
-    # (a) When on-chain coins(i) match the registry coin_addresses order, the
-    # position is returned exactly as before this gate existed — the reserves,
-    # decimals, supply and coin set are untouched. Validation is a pure
-    # safety gate, a no-op on the happy path.
     reader = CurveLpPositionReader(_FullCalldataGatewayClient(_steth_crypto_replies()))
     pos = reader.read_position(
         protocol="curve", chain="ethereum", pool=POOL_STETH, lp_token=LP_STETH, wallet_address=WALLET
@@ -501,10 +457,7 @@ def test_crypto_coin_order_match_returns_position_unchanged() -> None:
 
 
 def test_crypto_native_eth_placeholder_coin0_validates() -> None:
-    # (d) The steth pool's coins(0) is the native-ETH sentinel 0xEeee…EEeE, which
-    # the registry carries verbatim; a lowercased compare matches with no special
-    # case. (The reply uses the checksummed literal — the reader lowercases both
-    # sides — so this proves the case-insensitive compare, not a same-case fluke.)
+    # The registry stores the native-ETH sentinel; order validation is case-insensitive.
     reader = CurveLpPositionReader(_FullCalldataGatewayClient(_steth_crypto_replies(coin0_addr=ETH_NATIVE.lower())))
     pos = reader.read_position(
         protocol="curve", chain="ethereum", pool=POOL_STETH, lp_token=LP_STETH, wallet_address=WALLET
@@ -514,9 +467,7 @@ def test_crypto_native_eth_placeholder_coin0_validates() -> None:
 
 
 def test_crypto_coin_order_transposed_fails_closed() -> None:
-    # (b) On-chain coins(i) transposed vs the registry (coins(0)=stETH while the
-    # registry says coins(0)=ETH) → None. A confident wrong mark (an 18-dec stETH
-    # reserve priced as ETH and vice-versa) is worse than UNAVAILABLE.
+    # A registry/on-chain coin-order mismatch makes valuation unavailable.
     replies = _steth_crypto_replies(coin0_addr=STETH_ADDR, coin1_addr=ETH_NATIVE)
     reader = CurveLpPositionReader(_FullCalldataGatewayClient(replies))
     assert (
@@ -528,9 +479,7 @@ def test_crypto_coin_order_transposed_fails_closed() -> None:
 
 
 def test_crypto_coin_read_miss_fails_closed() -> None:
-    # (c) A coins(i) read miss (gateway blip — neither uint256 nor int128 resolves)
-    # → None. Empty ≠ Zero: an unmeasured coin address cannot confirm the order,
-    # so the mark must not be produced.
+    # Empty != Zero: if neither coins(i) overload resolves, order is unmeasured.
     replies = _steth_crypto_replies(coin1_addr=None)
     reader = CurveLpPositionReader(_FullCalldataGatewayClient(replies))
     assert (
@@ -542,10 +491,8 @@ def test_crypto_coin_read_miss_fails_closed() -> None:
 
 
 def _coins_int128_fallback_replies() -> dict[tuple[str, str], int | None]:
-    # SYNTHETIC selector scenario: a hypothetical pre-NG pool that exposes ONLY
-    # coins(int128) (coins(uint256) reverts → None), so the reader's coins
-    # selector-probe must fall back to the int128 overload. Reserves resolve on
-    # uint256 (orthogonal to the coins selector under test).
+    # Synthetic pre-NG shape: coins(uint256) reverts and coins(int128) succeeds.
+    # Reserves stay on uint256 so only the coin selector varies.
     return {
         (LP_STETH, BALANCE_OF + WALLET.lower().removeprefix("0x").zfill(64)): 2 * 10**18,
         (LP_STETH, TOTAL_SUPPLY): 200 * 10**18,
@@ -560,9 +507,6 @@ def _coins_int128_fallback_replies() -> dict[tuple[str, str], int | None]:
 
 
 def test_crypto_coins_int128_selector_fallback() -> None:
-    # (e) Exercises the coins(uint256)→coins(int128) selector-probe fallback for a
-    # hypothetical pre-NG pool. Validation must pass identically regardless of
-    # which coins overload the pool exposes.
     reader = CurveLpPositionReader(_FullCalldataGatewayClient(_coins_int128_fallback_replies()))
     pos = reader.read_position(
         protocol="curve", chain="ethereum", pool=POOL_STETH, lp_token=LP_STETH, wallet_address=WALLET
@@ -574,10 +518,7 @@ def test_crypto_coins_int128_selector_fallback() -> None:
 
 
 def test_crypto_coin_order_validated_once_then_cached() -> None:
-    # Coin order is immutable post-deployment, so a SUCCESSFUL validation is
-    # memoised per (chain, pool): the second valuation must NOT re-read coins(i)
-    # (zero new information, N gateway RPCs saved per snapshot). steth has 2 coins
-    # → 2 coins(i) reads on the first valuation, 0 on the second.
+    # Deployed coin order is immutable, so successful validation is cached per (chain, pool).
     reader = CurveLpPositionReader(_FullCalldataGatewayClient(_steth_crypto_replies()))
     calls = {"n": 0}
     orig = reader._read_pool_coin_address
@@ -597,16 +538,14 @@ def test_crypto_coin_order_validated_once_then_cached() -> None:
     }
     assert reader.read_position(**kw) is not None
     first = calls["n"]
-    assert first == 2  # coins(0), coins(1)
+    assert first == 2
     assert ("ethereum", POOL_STETH.lower()) in reader._validated_coin_order
     assert reader.read_position(**kw) is not None
-    assert calls["n"] == first  # cache hit — no further coins(i) reads
+    assert calls["n"] == first
 
 
 def test_crypto_coin_order_failure_not_cached() -> None:
-    # A mismatch must NOT be memoised: it stays fail-closed AND is re-validated on
-    # the next valuation (a transient gateway blip / a wrong order must never be
-    # remembered as a pass). Transposed coins → fails at index 0 each time.
+    # Failed order checks are never cached; transient read misses and mismatches must be retried.
     replies = _steth_crypto_replies(coin0_addr=STETH_ADDR, coin1_addr=ETH_NATIVE)
     reader = CurveLpPositionReader(_FullCalldataGatewayClient(replies))
     calls = {"n": 0}
@@ -629,13 +568,8 @@ def test_crypto_coin_order_failure_not_cached() -> None:
     after_first = calls["n"]
     assert after_first >= 1
     assert ("ethereum", POOL_STETH.lower()) not in reader._validated_coin_order
-    assert reader.read_position(**kw) is None  # still fail-closed
-    assert calls["n"] > after_first  # re-validated, NOT cached
-
-
-# ---------------------------------------------------------------------------
-# PortfolioValuer._reprice_curve_lp_enriched
-# ---------------------------------------------------------------------------
+    assert reader.read_position(**kw) is None
+    assert calls["n"] > after_first
 
 
 def _curve_position(details: dict[str, Any]) -> PositionInfo:
@@ -662,9 +596,7 @@ class _StubMarket:
         self._prices = {k.upper(): v for k, v in prices.items()}
 
     def price(self, token: str, quote: str = "USD", *, chain: str | None = None) -> Decimal:
-        # Mirrors the real MarketSnapshot.price signature (chain keyword-only,
-        # VIB-5722): the chain-threaded ``_price_curve_coins`` passes chain=. The
-        # stub prices by symbol and ignores chain — behaviour unchanged.
+        # Match MarketSnapshot.price's keyword-only chain argument; symbol pricing ignores it.
         value = self._prices.get(str(token).upper())
         if value is None:
             raise KeyError(token)
@@ -692,26 +624,20 @@ def test_valuer_curve_branch_values_with_virtual_price() -> None:
     pos = _curve_position(
         {"pool": POOL_3POOL, "lp_token": LP_3POOL, "coins": ["DAI", "USDC", "USDT"], "wallet": WALLET}
     )
-    # VIB-5426: a healthy USD pool (oracle confirms the $1 peg) marks at par as
-    # before. The cross-check now requires an independent oracle, so the test
-    # supplies one — the par-mark behaviour is unchanged on a confirmed peg.
+    # An independent oracle must confirm the $1 peg before virtual-price valuation at par.
     value_usd, details, repriced = valuer._reprice_lp_enriched_dispatch(pos, "ethereum", market=_usd_market())  # type: ignore[arg-type]
     assert repriced is True
-    # 10 * 1.019566... ~= 10.1957
     assert value_usd == Decimal("10") * (Decimal("1019566780337011070") / Decimal(10**18))
     assert details["valuation_source"] == "curve_virtual_price"
     assert details["virtual_price"] == str(Decimal("1019566780337011070") / Decimal(10**18))
     assert details["liquidity"] == str(10 * 10**18)
     assert details["peg_usd"] == "1"
-    # The peg was actively verified against the oracle, not assumed.
     assert details["oracle_peg_usd"] == "1.0"
     assert details["depeg_divergence_bps"] == "0"
-    assert "valuation_status" not in details  # HIGH confidence, no degradation
+    assert "valuation_status" not in details
 
 
 def test_valuer_curve_branch_uses_strategy_wallet_fallback() -> None:
-    # Details omit a wallet (the lp_curve fixture's get_open_positions shape);
-    # the valuer falls back to the cached strategy wallet.
     valuer = PortfolioValuer(_StubGatewayClient(_make_replies(lp_balance_wei=10**18, virtual_price_wei=10**18)))
     valuer._strategy_wallet_address = WALLET
     pos = _curve_position({"pool": POOL_3POOL, "lp_token": LP_3POOL, "coins": ["DAI", "USDC", "USDT"]})
@@ -721,7 +647,7 @@ def test_valuer_curve_branch_uses_strategy_wallet_fallback() -> None:
 
 
 def test_valuer_curve_branch_no_wallet_fails_closed() -> None:
-    # No wallet anywhere -> UNAVAILABLE (repriced False), never a stale estimate.
+    # Missing wallet identity makes the mark unavailable rather than stale.
     valuer = PortfolioValuer(_StubGatewayClient(_make_replies(lp_balance_wei=10**18, virtual_price_wei=10**18)))
     pos = _curve_position({"pool": POOL_3POOL, "lp_token": LP_3POOL, "coins": ["DAI", "USDC", "USDT"]})
     value_usd, details, repriced = valuer._reprice_lp_enriched_dispatch(pos, "ethereum", market=None)  # type: ignore[arg-type]
@@ -741,8 +667,7 @@ def test_valuer_curve_branch_empty_position_measured_zero() -> None:
 
 
 def test_valuer_curve_branch_unmeasured_fails_closed_not_zero() -> None:
-    # virtual_price unreadable -> the position is NOT booked as $0; it is
-    # UNAVAILABLE (repriced False). Empty != Zero.
+    # Empty != Zero: an unreadable virtual price is unavailable, not a zero mark.
     valuer = PortfolioValuer(_StubGatewayClient(_make_replies(lp_balance_wei=10**18, virtual_price_wei=None)))
     pos = _curve_position(
         {"pool": POOL_3POOL, "lp_token": LP_3POOL, "coins": ["DAI", "USDC", "USDT"], "wallet": WALLET}
@@ -753,13 +678,7 @@ def test_valuer_curve_branch_unmeasured_fails_closed_not_zero() -> None:
 
 
 def test_valuer_metapool_shape_usd_pegged_values() -> None:
-    # A crvUSD/USDC StableSwap pool (USD-pegged base + coin) values identically.
-    # Resolve a real USD-stable pool from the registry if one exists; otherwise
-    # this asserts the Ethereum identities are peg-authorized.
     assert is_pegged(TokenRef(chain="ethereum", address=USDC_ADDR, decimals=0, symbol="USDC")) == Decimal("1")
-
-
-# ── VIB-5426 / audit P0-2 — oracle-vs-pool depeg cross-check ──────────────────
 
 
 def _active_3pool_valuer() -> PortfolioValuer:
@@ -773,17 +692,15 @@ def _3pool_pos() -> PositionInfo:
 
 
 def test_curve_depeg_fires_unavailable() -> None:
-    # USDT depegs to $0.90 (1000 bps off the $1 peg) — virtual_price is blind to
-    # it, but the oracle cross-check fires: the position degrades to a no_path
-    # marker (value 0, NOT par), never booking $10 of bleeding value at par.
+    # virtual_price cannot observe a USDT depeg; oracle divergence makes the mark unavailable.
     valuer = _active_3pool_valuer()
     value_usd, details, repriced = valuer._reprice_lp_enriched_dispatch(
         _3pool_pos(),
         "ethereum",
         market=_usd_market(USDT="0.90"),  # type: ignore[arg-type]
     )
-    assert repriced is True  # a marker tuple, not a None fall-through
-    assert value_usd == Decimal("0")  # kept OUT of the NAV sum (Empty ≠ Zero)
+    assert repriced is True  # Marker tuple, not dispatch fall-through.
+    assert value_usd == Decimal("0")  # Excluded from NAV as unmeasured, not measured zero.
     assert details["valuation_status"] == "no_path"
     assert details["mark_unmeasured"] is True
     assert details["unavailable_reason"] == "curve_oracle_depeg_divergence"
@@ -792,9 +709,7 @@ def test_curve_depeg_fires_unavailable() -> None:
 
 
 def test_curve_systemic_depeg_fires() -> None:
-    # ALL coins fall to $0.90 together — the inter-coin spread is 0 (median moves
-    # with them), so only the peg-LEVEL check vs the expected $1 numeraire catches
-    # it. Proves the systemic guard the median-relative check alone would miss.
+    # The absolute $1 peg check catches systemic depeg even when inter-coin spread is zero.
     valuer = _active_3pool_valuer()
     value_usd, details, repriced = valuer._reprice_lp_enriched_dispatch(
         _3pool_pos(),
@@ -808,8 +723,7 @@ def test_curve_systemic_depeg_fires() -> None:
 
 
 def test_curve_oracle_miss_distinct_from_depeg() -> None:
-    # One coin unpriceable (oracle outage) — degrade to UNAVAILABLE, but with the
-    # honest reason "price_unavailable", NEVER mis-blamed as a depeg.
+    # An oracle miss is unavailable data, not evidence of a depeg.
     valuer = _active_3pool_valuer()
     value_usd, details, repriced = valuer._reprice_lp_enriched_dispatch(
         _3pool_pos(),
@@ -847,9 +761,7 @@ def test_curve_exact_address_zero_cannot_fall_back_to_symbol_peg() -> None:
 
 
 def test_curve_no_market_fails_closed() -> None:
-    # No oracle at all — the cross-check cannot run, so the position is unmeasured
-    # (UNAVAILABLE), never par-marked. A valuation path that trusts par without an
-    # oracle is exactly the P0-2 anti-pattern.
+    # Without an independent oracle, the pool cannot be safely marked at par.
     valuer = _active_3pool_valuer()
     value_usd, details, repriced = valuer._reprice_lp_enriched_dispatch(
         _3pool_pos(),
@@ -862,8 +774,7 @@ def test_curve_no_market_fails_closed() -> None:
 
 
 def test_curve_intent_threshold_override() -> None:
-    # 150 bps divergence: fires under the 100-bps default, passes under a 200-bps
-    # per-intent override (a deployment that knowingly tolerates a wider band).
+    # A per-intent threshold may explicitly widen the accepted oracle peg band.
     valuer = _active_3pool_valuer()
     market = _usd_market(USDT="0.985")  # 150 bps off the $1 peg
 
@@ -890,15 +801,13 @@ def test_curve_intent_threshold_override() -> None:
         market=market,  # type: ignore[arg-type]
     )
     assert repriced is True
-    assert value_usd == Decimal("10")  # par mark — peg within the tolerated band
+    assert value_usd == Decimal("10")
     assert details["depeg_threshold_bps"] == "200"
     assert "valuation_status" not in details
 
 
 def test_curve_depeg_marker_forces_snapshot_unavailable() -> None:
-    # The marker's job is to force the WHOLE snapshot to UNAVAILABLE so the
-    # drawdown fold sees "blind", not "safe at par". Confirm the confidence fold
-    # keys on the no_path the depeg path stamps.
+    # A no_path marker makes the whole snapshot unavailable rather than safe at par.
     from almanak.framework.valuation.portfolio_valuer import PositionValue, ValueConfidence
 
     depegged = PositionValue(
@@ -919,14 +828,11 @@ def test_curve_depeg_marker_forces_snapshot_unavailable() -> None:
     assert conf == ValueConfidence.UNAVAILABLE
 
 
-# ── VIB-5427 — USD metapool base-LP decomposition ─────────────────────────────
-
-
 def _frax3crv_replies(
     *,
     lp_balance_wei: int | None = 10 * 10**18,
-    metapool_vp_wei: int | None = 1_020_500_000_000_000_000,  # 1.0205
-    base_vp_wei: int | None = 1_030_000_000_000_000_000,  # 1.03
+    metapool_vp_wei: int | None = 1_020_500_000_000_000_000,
+    base_vp_wei: int | None = 1_030_000_000_000_000_000,
 ) -> dict[tuple[str, str], int | None]:
     return {
         (LP_FRAX3CRV.lower(), BALANCE_OF): lp_balance_wei,
@@ -959,7 +865,7 @@ def _frax3crv_position() -> PositionInfo:
 
 
 def test_read_position_metapool_family_expands_underlying() -> None:
-    # balanceOf calldata carries the wallet arg → use the full-calldata stub.
+    # balanceOf calldata includes the wallet argument, requiring full-calldata routing.
     replies = _frax3crv_replies()
     replies.pop((LP_FRAX3CRV.lower(), BALANCE_OF))
     replies[(LP_FRAX3CRV.lower(), BALANCE_OF + WALLET.lower().removeprefix("0x").zfill(64))] = 10 * 10**18
@@ -971,8 +877,7 @@ def test_read_position_metapool_family_expands_underlying() -> None:
     assert pos.family == "metapool_usd"
     assert pos.virtual_price == Decimal("1.0205")
     assert pos.base_pool_virtual_price == Decimal("1.03")
-    # The base-LP leg (3CRV) is expanded into the 3pool's underlying stables; the
-    # un-priceable LP token symbol is NOT in the depeg coin set.
+    # Expand 3CRV into ordered 3pool stables; the LP token itself is not oracle-priced.
     assert pos.underlying_coins == ["FRAX", "DAI", "USDC", "USDT"]
     assert "3CRV" not in pos.underlying_coins
     assert pos.underlying_coin_addresses == [FRAX_ADDR, DAI_ADDR, USDC_ADDR, USDT_ADDR]
@@ -984,8 +889,7 @@ def test_valuer_metapool_values_at_metapool_virtual_price() -> None:
         _frax3crv_position(), "ethereum", market=_frax3crv_market()
     )
     assert repriced is True
-    # lp(10) × metapool vp(1.0205) × $1 — the metapool vp already incorporates the
-    # base pool, so we do NOT multiply by base_vp again.
+    # Metapool virtual price already incorporates the base pool; multiplying base_vp would double-count.
     assert value_usd == Decimal("10") * Decimal("1.0205")
     assert details["valuation_source"] == "curve_virtual_price"
     assert details["base_pool_virtual_price"] == "1.03"
@@ -994,8 +898,7 @@ def test_valuer_metapool_values_at_metapool_virtual_price() -> None:
 
 
 def test_valuer_metapool_depeg_on_base_coin_fires() -> None:
-    # A base-pool coin (USDT) depegs to $0.90 — caught only because the metapool
-    # path expands the base-LP leg into [DAI, USDC, USDT]; degrade to UNAVAILABLE.
+    # Base-LP expansion exposes underlying USDT to the oracle depeg check.
     valuer = PortfolioValuer(_StubGatewayClient(_frax3crv_replies()))
     value_usd, details, repriced = valuer._reprice_lp_enriched_dispatch(
         _frax3crv_position(), "ethereum", market=_frax3crv_market(USDT="0.90")
@@ -1003,14 +906,12 @@ def test_valuer_metapool_depeg_on_base_coin_fires() -> None:
     assert repriced is True
     assert value_usd == Decimal("0")
     assert details["valuation_status"] == "no_path"
-    # depeg (not oracle_unavailable) proves the base coins WERE priced and 3CRV
-    # was not required.
+    # A depeg result confirms that underlying base coins, not 3CRV, were oracle-priced.
     assert details["unavailable_reason"] == "curve_oracle_depeg_divergence"
     assert details["depeg_divergence_bps"] == "1000"
 
 
 def test_valuer_metapool_meta_coin_depeg_fires() -> None:
-    # The meta coin (FRAX) itself depegs — also caught.
     valuer = PortfolioValuer(_StubGatewayClient(_frax3crv_replies()))
     value_usd, details, repriced = valuer._reprice_lp_enriched_dispatch(
         _frax3crv_position(), "ethereum", market=_frax3crv_market(FRAX="0.92")
@@ -1018,9 +919,6 @@ def test_valuer_metapool_meta_coin_depeg_fires() -> None:
     assert repriced is True
     assert value_usd == Decimal("0")
     assert details["unavailable_reason"] == "curve_oracle_depeg_divergence"
-
-
-# ── VIB-5428 — crypto pool spot-reserves valuation (valuer) ───────────────────
 
 
 def _steth_position() -> PositionInfo:
@@ -1039,8 +937,6 @@ def test_valuer_crypto_values_from_spot_reserves() -> None:
     market = _StubMarket({"ETH": Decimal("3000"), "STETH": Decimal("2990")})
     value_usd, details, repriced = valuer._reprice_lp_enriched_dispatch(_steth_position(), "ethereum", market=market)
     assert repriced is True
-    # ownership = 2/200 = 1%; reserves $ = 100×3000 + 110×2990 = 628_900;
-    # value = 0.01 × 628_900 = 6_289.
     assert value_usd == Decimal("6289")
     assert details["valuation_source"] == "curve_spot_reserves"
     assert details["total_supply"] == str(200 * 10**18)
@@ -1049,23 +945,19 @@ def test_valuer_crypto_values_from_spot_reserves() -> None:
 
 
 def test_valuer_crypto_native_eth_prices_via_weth_fallback() -> None:
-    # The steth pool's coin 0 is native ETH (sentinel address, symbol "ETH") —
-    # not an ERC-20 the oracle prices by address. With ONLY a WETH price in the
-    # oracle (no "ETH" key), the native-ETH leg must still resolve via the WETH
-    # fallback (ETH ≈ WETH), never silently dropped (a dropped leg under-values).
+    # Native-sentinel ETH uses WETH as its oracle fallback; dropping the leg would under-value the pool.
     valuer = PortfolioValuer(_FullCalldataGatewayClient(_steth_crypto_replies()))
-    market = _StubMarket({"WETH": Decimal("3000"), "STETH": Decimal("2990")})  # no "ETH" key
+    market = _StubMarket({"WETH": Decimal("3000"), "STETH": Decimal("2990")})
     value_usd, details, repriced = valuer._reprice_lp_enriched_dispatch(_steth_position(), "ethereum", market=market)
     assert repriced is True
-    # ownership 1% × (100×3000 + 110×2990) = 0.01 × 628_900 = 6_289 — ETH leg priced off WETH.
     assert value_usd == Decimal("6289")
     assert details["coin_prices_usd"] == ["3000", "2990"]
 
 
 def test_valuer_crypto_native_eth_unpriceable_fails_closed() -> None:
-    # Neither ETH nor WETH priceable → fail closed, NOT a dropped leg.
+    # Without ETH or WETH oracle data, the native leg is unmeasured.
     valuer = PortfolioValuer(_FullCalldataGatewayClient(_steth_crypto_replies()))
-    market = _StubMarket({"STETH": Decimal("2990")})  # no ETH and no WETH
+    market = _StubMarket({"STETH": Decimal("2990")})
     value_usd, details, repriced = valuer._reprice_lp_enriched_dispatch(_steth_position(), "ethereum", market=market)
     assert repriced is True
     assert value_usd == Decimal("0")
@@ -1073,21 +965,19 @@ def test_valuer_crypto_native_eth_unpriceable_fails_closed() -> None:
 
 
 def test_price_curve_coins_real_address_eth_does_not_proxy_weth() -> None:
-    # A REAL ERC-20 named "ETH" (non-sentinel address) must NOT take the WETH
-    # proxy (CodeRabbit #2) — it must price by its own address only. With only a
-    # WETH price in the oracle, it stays unpriced (None), never mis-priced as WETH.
+    # A non-sentinel ERC-20 named ETH must price by its own address, never proxy WETH.
     valuer = PortfolioValuer(_StubGatewayClient({}))
-    real_eth_token = "0x1111111111111111111111111111111111111111"  # NOT a native sentinel
+    real_eth_token = "0x1111111111111111111111111111111111111111"  # Non-sentinel address.
     prices = valuer._price_curve_coins(["ETH"], [real_eth_token], "ethereum", _StubMarket({"WETH": Decimal("3000")}))
-    assert prices == [None]  # no proxy — real-address token doesn't borrow the WETH price
+    assert prices == [None]
 
 
 def test_price_curve_coins_sentinel_eth_proxies_weth() -> None:
-    # A native-sentinel-address ETH leg DOES proxy to WETH.
+    # Native-sentinel ETH proxies to WETH.
     valuer = PortfolioValuer(_StubGatewayClient({}))
     prices = valuer._price_curve_coins(["ETH"], [ETH_NATIVE], "ethereum", _StubMarket({"WETH": Decimal("3000")}))
     assert prices == [Decimal("3000")]
-    # A missing/empty address also proxies (genuinely unknown native leg).
+    # An empty address represents an unknown native leg and also proxies to WETH.
     prices_empty = valuer._price_curve_coins(["ETH"], [""], "ethereum", _StubMarket({"WETH": Decimal("3000")}))
     assert prices_empty == [Decimal("3000")]
 
@@ -1110,10 +1000,9 @@ def _crypto_position_obj(**overrides: Any) -> CurveLpPosition:
 
 
 def test_value_curve_crypto_length_mismatch_fails_closed_no_path() -> None:
-    # reserves/decimals not aligned with coins → no_path marker (NOT bare None,
-    # which would let the stale strategy estimate leak into NAV). Audit #2 / CR #1.
+    # Misaligned reserve metadata emits no_path so a stale strategy estimate cannot enter NAV.
     valuer = PortfolioValuer(_StubGatewayClient({}))
-    on_chain = _crypto_position_obj(coin_decimals=[18])  # 1 decimal for 2 coins
+    on_chain = _crypto_position_obj(coin_decimals=[18])
     market = _StubMarket({"ETH": Decimal("3000"), "STETH": Decimal("2990"), "WETH": Decimal("3000")})
     value_usd, details = valuer._value_curve_crypto(_steth_position(), on_chain, "ethereum", market)  # type: ignore[misc]
     assert value_usd == Decimal("0")
@@ -1122,7 +1011,7 @@ def test_value_curve_crypto_length_mismatch_fails_closed_no_path() -> None:
 
 
 def test_value_curve_crypto_nonpositive_fails_closed_no_path() -> None:
-    # All reserves zero → gross value 0 → no_path marker (NOT bare None).
+    # Nonpositive gross reserves emit no_path rather than dispatch fall-through.
     valuer = PortfolioValuer(_StubGatewayClient({}))
     on_chain = _crypto_position_obj(reserves_wei=[0, 0])
     market = _StubMarket({"ETH": Decimal("3000"), "STETH": Decimal("2990"), "WETH": Decimal("3000")})
@@ -1133,8 +1022,7 @@ def test_value_curve_crypto_nonpositive_fails_closed_no_path() -> None:
 
 
 def test_valuer_crypto_unpriceable_coin_fails_closed() -> None:
-    # stETH unpriceable (oracle miss) — no $1 peg to fall back on, so degrade to a
-    # no_path UNAVAILABLE marker, never a partial mark.
+    # An unpriceable crypto leg emits an unavailable no_path marker, never a partial mark.
     valuer = PortfolioValuer(_FullCalldataGatewayClient(_steth_crypto_replies()))
     market = _StubMarket({"ETH": Decimal("3000"), "STETH": None})
     value_usd, details, repriced = valuer._reprice_lp_enriched_dispatch(_steth_position(), "ethereum", market=market)
@@ -1153,18 +1041,13 @@ def test_valuer_crypto_no_market_fails_closed() -> None:
     assert details["unavailable_reason"] == "curve_oracle_price_unavailable"
 
 
-# ── _classify_family unit coverage (fail-closed branches) ─────────────────────
-
-
 def test_classify_family_branches() -> None:
     classify = CurveLpPositionReader._classify_family
-    # plain USD stable
     plain = {
         "coins": ["DAI", "USDC", "USDT"],
         "coin_addresses": [DAI_ADDR, USDC_ADDR, USDT_ADDR],
     }
     assert classify(plain, ["DAI", "USDC", "USDT"], chain="ethereum", coins_overridden=False) == "usd_stable"
-    # USD metapool
     meta_usd = {
         "is_metapool": True,
         "base_pool": POOL_3POOL,
@@ -1174,24 +1057,21 @@ def test_classify_family_branches() -> None:
         "coin_addresses": [FRAX_ADDR, LP_3POOL],
     }
     assert classify(meta_usd, ["FRAX", "3CRV"], chain="ethereum", coins_overridden=False) == "metapool_usd"
-    # crypto (non-USD) with full addresses
     meta_crypto = {"coins": ["USDT", "WBTC", "WETH"], "coin_addresses": [USDT_ADDR, "0xb", "0xc"]}
     assert classify(meta_crypto, ["USDT", "WBTC", "WETH"], chain="ethereum", coins_overridden=False) == "crypto"
 
 
 def test_classify_family_fails_closed() -> None:
     classify = CurveLpPositionReader._classify_family
-    # metapool whose BASE is non-USD → fail closed (never mis-marked at $1)
     meta_bad_base = {
         "is_metapool": True,
         "base_pool": "0xbase",
-        "base_pool_coins": ["WETH", "USDC"],  # not all USD
+        "base_pool_coins": ["WETH", "USDC"],
         "base_pool_coin_addresses": [WETH_ADDR, USDC_ADDR],
         "coins": ["MIM", "crvFRAX"],
         "coin_addresses": [MIM_ADDR, LP_3POOL],
     }
     assert classify(meta_bad_base, ["MIM", "crvFRAX"], chain="ethereum", coins_overridden=False) is None
-    # metapool whose META coin is non-USD → fail closed
     meta_bad_meta = {
         "is_metapool": True,
         "base_pool": POOL_3POOL,
@@ -1201,38 +1081,28 @@ def test_classify_family_fails_closed() -> None:
         "coin_addresses": [WETH_ADDR, LP_3POOL],
     }
     assert classify(meta_bad_meta, ["WETH", "3CRV"], chain="ethereum", coins_overridden=False) is None
-    # non-USD pool MISSING coin addresses → cannot price → fail closed
     meta_no_addr = {"coins": ["WETH", "WBTC"], "coin_addresses": []}
     assert classify(meta_no_addr, ["WETH", "WBTC"], chain="ethereum", coins_overridden=False) is None
-    # empty coins → fail closed
     assert classify({"coins": []}, [], chain="ethereum", coins_overridden=False) is None
 
 
-# ── VIB-5428 — uint256 over-long-return decode (FRAX/3CRV metapool quirk) ──────
-
-
 def test_decode_uint256_word_handles_overlong_return() -> None:
-    # The FRAX/3CRV metapool (its own integrated-ERC20 Vyper LP token) returns
-    # MORE than 32 bytes from balanceOf/get_virtual_price on-chain: word 0 is the
-    # real value, the tail is leftover memory. int(whole_hex,16) would read
-    # megabyte-wide garbage; we must decode word 0 only (every ABI decoder does).
+    # The integrated-ERC20 FRAX/3CRV Vyper pool returns trailing memory after the
+    # first ABI word for balanceOf/get_virtual_price; only word 0 is the value.
     from almanak.framework.valuation.lp_position_reader import _decode_uint256_word
 
-    value = 4892_002_300_000_000_000_000  # ~4892e18
+    value = 4892_002_300_000_000_000_000
     word = hex(value)[2:].zfill(64)
-    # normal 32-byte return
     assert _decode_uint256_word("0x" + word) == value
-    # over-long return: word 0 + 127 trailing junk words
     assert _decode_uint256_word("0x" + word + "ab" * 32 * 127) == value
-    # Empty ≠ Zero: empty / malformed → None, never a fabricated 0
+    # Empty != Zero: empty or malformed return data never fabricates zero.
     assert _decode_uint256_word("0x") is None
     assert _decode_uint256_word("") is None
     assert _decode_uint256_word(None) is None
 
 
 def test_classify_family_override_cannot_reclassify_crypto() -> None:
-    # A coins override that breaks 1:1 registry alignment forfeits the crypto
-    # family (the valuer would mis-map an address to the wrong coin).
+    # Crypto classification requires one-to-one ordered alignment with registry addresses.
     classify = CurveLpPositionReader._classify_family
     meta_crypto = {"coins": ["USDT", "WBTC", "WETH"], "coin_addresses": [USDT_ADDR, "0xb", "0xc"]}
     assert classify(meta_crypto, ["WBTC", "WETH"], chain="ethereum", coins_overridden=True) is None
@@ -1279,7 +1149,6 @@ class TestResolveCurvePoolMetaDynamic:
         )
 
     def test_no_hex_address_fails_closed(self) -> None:
-        # Neither pool nor lp_token is a 0x address -> nothing to query on.
         assert _resolve_curve_pool_meta_dynamic("ethereum", pool="3pool", lp_token="", gateway_client=object()) is None
 
     def test_falls_back_to_lp_token_address(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1290,7 +1159,6 @@ class TestResolveCurvePoolMetaDynamic:
             return self._meta()
 
         monkeypatch.setattr("almanak.connectors.curve.pool_resolver.resolve_pool_metadata", _fake)
-        # pool is a name (not 0x); the lp_token address must be used to query.
         out = _resolve_curve_pool_meta_dynamic(
             "ethereum", pool="crvusd_usdc", lp_token=self.LP_ADDR, gateway_client=object()
         )
@@ -1343,6 +1211,6 @@ class TestResolveCurvePoolMetaDynamic:
         out = _resolve_curve_pool_meta_dynamic("ethereum", pool=self.UNCURATED, lp_token="", gateway_client=object())
         assert out is not None
         assert out["is_metapool"] is True
-        # base_pool_coins (SYMBOLS) must be threaded through — the classifier keys on it.
+        # The classifier keys on ordered base-pool symbols, not only their addresses.
         assert out["base_pool_coins"] == ["DAI", "USDC", "USDT"]
         assert out["base_pool_coin_addresses"] == ["0x6b17", "0xa0b8", "0xdac1"]
