@@ -20,7 +20,7 @@ import pytest
 from almanak.connectors._strategy_base.perp_price_history_registry import PerpPriceHistoryRegistry
 from almanak.framework.backtesting.pnl import _engine_helpers
 from almanak.framework.backtesting.pnl._engine_helpers import (
-    _prewarm_declared_funding_history,
+    _prewarm_funding_history,
     coverage_aware_default_timeframe,
     hinted_perp_price_history_targets,
     prepare_perp_price_history,
@@ -236,7 +236,10 @@ def _config() -> PnLBacktestConfig:
 
 
 @pytest.mark.asyncio
-async def test_perp_hint_prewarms_the_venue_plane_like_a_declaration(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_perp_hint_prewarms_the_venue_plane_like_a_declaration(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     monkeypatch.setattr(
         PerpPriceHistoryRegistry, "backtest_provider", classmethod(lambda cls, protocol: _PreparedProvider)
     )
@@ -248,6 +251,8 @@ async def test_perp_hint_prewarms_the_venue_plane_like_a_declaration(monkeypatch
     await prepare_perp_price_history(backtester, strategy, _config(), SimpleNamespace(info=Mock(), warning=Mock()))
     assert backtester.data_provider.price_history_target == ("gmx_v2", "arbitrum", GMX_ETH)
     prepared = backtester._prepared_perp_price_history_targets
+    assert backtester._prepared_perp_declared_targets == ()
+    assert backtester._prepared_perp_hint_targets == prepared
     assert [(target.protocol, target.market, target.market_address) for target in prepared] == [
         ("gmx_v2", "ETH/USD", GMX_ETH)
     ]
@@ -263,8 +268,18 @@ async def test_perp_hint_prewarms_the_venue_plane_like_a_declaration(monkeypatch
             return 2
 
     source = _FundingSource()
-    await _prewarm_declared_funding_history(source, strategy, {}, prepared_targets=prepared)
+    await _prewarm_funding_history(source, strategy, {}, prepared_targets=prepared)
     assert source.calls == [("gmx_v2", "ETH/USD", GMX_ETH)]
+
+    class _BrokenFundingSource:
+        history_capable = True
+
+        async def materialize_history(self, protocol: str, market: str, market_address: str) -> int:
+            raise RuntimeError("provider defect")
+
+    with caplog.at_level("WARNING", logger=_engine_helpers.__name__):
+        await _prewarm_funding_history(_BrokenFundingSource(), strategy, {}, prepared_targets=prepared)
+    assert "continuing without prewarm: provider defect" in caplog.text
 
 
 @pytest.mark.asyncio

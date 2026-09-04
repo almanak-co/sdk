@@ -10,6 +10,8 @@ from types import SimpleNamespace
 import pytest
 
 from almanak.core.finality import DataFinality
+from almanak.framework.backtesting.pnl import _engine_helpers
+from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
 from almanak.framework.backtesting.pnl.data_manifest import LANE_TWAP, RunDataManifest
 from almanak.framework.backtesting.pnl.providers.snapshot_twap import (
     HistoricalTWAPTarget,
@@ -34,6 +36,57 @@ def _fetcher(**kwargs):
         HistoricalTWAPPoint(1_000, Decimal("1.002"), 2, "on_chain_archive", 100),
         HistoricalTWAPPoint(4_590, Decimal("1.003"), 2, "on_chain_archive", 460),
     ]
+
+
+def test_target_and_source_share_canonical_chain_identity() -> None:
+    target = HistoricalTWAPTarget("arb", "uniswap-v3", POOL, 1_800)
+    assert target.chain == "arbitrum"
+    assert target.key == ("arbitrum", "uniswap_v3", POOL, 1_800)
+
+    source = SnapshotTWAPSource(
+        start_time=START,
+        end_time=END,
+        sample_interval_seconds=3_600,
+        fetcher=_fetcher,
+    )
+    asyncio.run(source.materialize_history(HistoricalTWAPTarget("eth", "uniswap_v3", POOL, 1_800)))
+
+    resolved, _point = source._resolve(
+        chain="ethereum",
+        protocol="uniswap_v3",
+        pool_address=POOL,
+        window_seconds=1_800,
+        tick_ts=1_000,
+    )
+    assert resolved.chain == "ethereum"
+
+
+@pytest.mark.asyncio
+async def test_declared_prewarm_accepts_an_equivalent_run_chain_alias(monkeypatch: pytest.MonkeyPatch) -> None:
+    target = HistoricalTWAPTarget("arbitrum", "uniswap_v3", POOL, 1_800)
+    strategy = SimpleNamespace(backtest_twap_targets=[target])
+    config = PnLBacktestConfig(
+        start_time=START,
+        end_time=END,
+        interval_seconds=3_600,
+        chain="arb",
+    )
+    monkeypatch.setattr(
+        "almanak.framework.backtesting.pnl.providers.snapshot_twap.fetch_historical_twap_points",
+        _fetcher,
+    )
+
+    source = await _engine_helpers._prepare_declared_historical_twap(strategy, {}, config, None)
+
+    assert source is not None
+    resolved, _point = source._resolve(
+        chain="arb",
+        protocol="uniswap_v3",
+        pool_address=POOL,
+        window_seconds=1_800,
+        tick_ts=1_000,
+    )
+    assert resolved.chain == "arbitrum"
 
 
 def test_typed_declaration_is_the_only_declaration() -> None:

@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, cast
 
+from almanak.core.constants import canonical_chain_name
 from almanak.core.finality import DataFinality
 from almanak.framework.backtesting.pnl.data_manifest import (
     CONSUMER_STRATEGY_DECISION,
@@ -58,7 +59,7 @@ class HistoricalPoolStateTarget:
     fee_tier: int | None = None
 
     def __post_init__(self) -> None:
-        chain = self.chain.strip().lower()
+        chain = canonical_chain_name(self.chain.strip()).strip().lower()
         protocol = self.protocol.strip().lower().replace("-", "_")
         pool = self.pool_address.strip().lower()
         if not chain or not protocol:
@@ -431,7 +432,7 @@ class SnapshotPoolStateSource:
     @staticmethod
     def _first_use_key(chain: str, protocol: str, pool_address: str) -> tuple[str, str, str]:
         return (
-            chain.strip().lower(),
+            canonical_chain_name(chain.strip()).strip().lower(),
             protocol.strip().lower().replace("-", "_"),
             pool_address.strip().lower(),
         )
@@ -448,6 +449,11 @@ class SnapshotPoolStateSource:
         """
         self._first_use_failures.setdefault(self._first_use_key(chain, protocol, pool_address), reason)
 
+    def enforce_first_use_feasibility(self) -> None:
+        """Apply the run's shared feasibility policy before a lazy fetch."""
+        if self._first_use_feasibility is not None:
+            self._first_use_feasibility()
+
     def resolve_or_materialize(
         self,
         chain: str,
@@ -462,14 +468,13 @@ class SnapshotPoolStateSource:
         keep their existing fallback: there is no factory to authenticate
         against without one.
         """
-        key = (chain.strip().lower(), protocol.strip().lower().replace("-", "_"), pool_address.strip().lower())
+        key = self._first_use_key(chain, protocol, pool_address)
         if key not in self._series:
             failed = self._first_use_failures.get(key)
             if failed is None:
                 try:
                     _require_historical_pool_state(key[1])
-                    if self._first_use_feasibility is not None:
-                        self._first_use_feasibility()
+                    self.enforce_first_use_feasibility()
                     self.materialize_history_blocking(HistoricalPoolStateTarget(*key))
                 except Exception as exc:  # noqa: BLE001 — fail-closed refusal, remembered for the run
                     failed = f"first-use exact-pool state fetch failed for {key[0]}:{key[1]}:{key[2]}: {exc}"
@@ -480,6 +485,10 @@ class SnapshotPoolStateSource:
         return self._resolve(*key, tick_ts)
 
     async def materialize_history(self, target: HistoricalPoolStateTarget) -> int:
+        existing = self._series.get(target.key)
+        if existing is not None:
+            self._validate_target_identity(target, existing.points)
+            return len(existing.points)
         points = await run_sync_gateway_call(self._fetcher, **self._fetch_kwargs(target))
         return self._install_points(target, points)
 
@@ -489,8 +498,10 @@ class SnapshotPoolStateSource:
         Same fetch and validation as :meth:`materialize_history`, run inline
         because decide() cannot await inside the engine's iteration task.
         """
-        if target.key in self._series:
-            return len(self._series[target.key].points)
+        existing = self._series.get(target.key)
+        if existing is not None:
+            self._validate_target_identity(target, existing.points)
+            return len(existing.points)
         points = self._fetcher(**self._fetch_kwargs(target))
         return self._install_points(target, points)
 
@@ -514,14 +525,8 @@ class SnapshotPoolStateSource:
         for sample, point in zip(samples, points, strict=True):
             if point.timestamp > sample or sample - point.timestamp > self._interval:
                 raise ValueError(f"stale/future pool state for {target.manifest_key} at {sample}")
-            if target.token_addresses is not None and {point.token0, point.token1} != set(target.token_addresses):
-                raise ValueError(
-                    f"pool token identity mismatch for {target.manifest_key}: expected={target.token_addresses}, got={(point.token0, point.token1)}"
-                )
-            if target.fee_tier is not None and point.fee_tier != target.fee_tier:
-                raise ValueError(
-                    f"pool fee mismatch for {target.manifest_key}: expected={target.fee_tier}, got={point.fee_tier}"
-                )
+        self._validate_target_identity(target, points)
+
         observed_token_metadata = {
             (point.token0, point.token1, point.token0_decimals, point.token1_decimals) for point in points
         }
@@ -532,9 +537,24 @@ class SnapshotPoolStateSource:
         self._series[target.key] = _Series(target, samples, tuple(points))
         return len(points)
 
+    @staticmethod
+    def _validate_target_identity(
+        target: HistoricalPoolStateTarget,
+        points: Iterable[HistoricalPoolStatePoint],
+    ) -> None:
+        for point in points:
+            if target.token_addresses is not None and {point.token0, point.token1} != set(target.token_addresses):
+                raise ValueError(
+                    f"pool token identity mismatch for {target.manifest_key}: expected={target.token_addresses}, got={(point.token0, point.token1)}"
+                )
+            if target.fee_tier is not None and point.fee_tier != target.fee_tier:
+                raise ValueError(
+                    f"pool fee mismatch for {target.manifest_key}: expected={target.fee_tier}, got={point.fee_tier}"
+                )
+
     def pool_descriptor(self, chain: str, protocol: str, pool_address: str) -> PoolDescriptor | None:
         """Return the archive-authenticated immutable identity for one pool."""
-        key = (chain.strip().lower(), protocol.strip().lower().replace("-", "_"), pool_address.strip().lower())
+        key = self._first_use_key(chain, protocol, pool_address)
         series = self._series.get(key)
         if series is None:
             return None
@@ -579,7 +599,7 @@ class SnapshotPoolStateSource:
     def _resolve(
         self, chain: str, protocol: str, pool_address: str, tick_ts: int
     ) -> tuple[HistoricalPoolStateTarget, HistoricalPoolStatePoint]:
-        key = (chain.strip().lower(), protocol.strip().lower().replace("-", "_"), pool_address.strip().lower())
+        key = self._first_use_key(chain, protocol, pool_address)
         series = self._series.get(key)
         if series is None:
             raise PoolPriceUnavailableError(
@@ -641,7 +661,8 @@ class SnapshotPoolStateView:
         self._snapshot: Any | None = None
 
     def protocols_for_chain(self, chain: str) -> list[str]:
-        protocols = {key[1] for key in self._source._series if key[0] == chain.strip().lower()}
+        chain_key = canonical_chain_name(chain.strip()).strip().lower()
+        protocols = {key[1] for key in self._source._series if key[0] == chain_key}
         if self._fallback is not None:
             protocols.update(self._fallback.protocols_for_chain(chain))
         return sorted(protocols)
@@ -657,7 +678,7 @@ class SnapshotPoolStateView:
 
     def resolve_pool_address(self, token_a: str, token_b: str, chain: str, fee_tier: int = 3000) -> str | None:
         requested = {token_a.strip().lower(), token_b.strip().lower()}
-        chain_key = chain.strip().lower()
+        chain_key = canonical_chain_name(chain.strip()).strip().lower()
         match = next(
             (
                 series.target.pool_address

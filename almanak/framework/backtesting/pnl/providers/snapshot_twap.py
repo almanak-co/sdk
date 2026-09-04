@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
+from almanak.core.constants import canonical_chain_name
 from almanak.core.finality import DataFinality
 from almanak.framework.backtesting.pnl.data_manifest import (
     CONSUMER_STRATEGY_DECISION,
@@ -64,7 +65,7 @@ class HistoricalTWAPTarget:
     window_seconds: int
 
     def __post_init__(self) -> None:
-        chain = self.chain.strip().lower()
+        chain = canonical_chain_name(self.chain.strip()).strip().lower()
         protocol = self.protocol.strip().lower().replace("-", "_")
         pool_address = self.pool_address.strip().lower()
         if not chain:
@@ -248,7 +249,7 @@ class SnapshotTWAPSource:
         tick_ts: int,
     ) -> tuple[HistoricalTWAPTarget, HistoricalTWAPPoint]:
         key = (
-            chain.strip().lower(),
+            canonical_chain_name(chain.strip()).strip().lower(),
             protocol.strip().lower().replace("-", "_"),
             pool_address.strip().lower(),
             window_seconds,

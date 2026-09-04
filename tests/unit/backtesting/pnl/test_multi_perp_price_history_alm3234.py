@@ -15,7 +15,7 @@ from almanak.connectors.gmx_v2.backtest_prices import (
     GMXPriceHistoryCoverageError,
 )
 from almanak.framework.backtesting.pnl._engine_helpers import (
-    _prewarm_declared_funding_history,
+    _prewarm_funding_history,
     coverage_aware_default_timeframe,
     declared_perp_price_history_targets,
     prepare_perp_price_history,
@@ -210,7 +210,7 @@ async def test_funding_prewarm_materializes_every_exact_market_identity() -> Non
 
     strategy = SimpleNamespace(backtest_perp_price_history_targets=_staging_basket_targets)
 
-    await _prewarm_declared_funding_history(source, strategy, {})
+    await _prewarm_funding_history(source, strategy, {})
 
     assert [call.args for call in source.materialize_history.await_args_list] == [
         ("gmx_v2", "SOL/USD", "0x09400d9db990d5ed3f35d7be61dfaeb900af03c9"),

@@ -39,7 +39,7 @@ from __future__ import annotations
 import logging
 import pickle
 import tempfile
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import closing, nullcontext
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -49,9 +49,9 @@ from typing import TYPE_CHECKING, Any
 
 from almanak.core.chains import DEFAULT_CHAIN, ChainRegistry
 from almanak.core.chains._helpers import native_symbols_for
+from almanak.core.constants import canonical_chain_name
 from almanak.core.intent_types import IntentType
 from almanak.core.perp_markets import perp_market_base
-from almanak.framework.backtesting.exceptions import NoAcceptableDataSourceError
 from almanak.framework.backtesting.models import (
     BacktestEngine,
     BacktestMetrics,
@@ -124,6 +124,10 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+
+def _canonical_run_chain(config: PnLBacktestConfig) -> str:
+    return canonical_chain_name(config.chain.strip()).strip().lower()
 
 
 def _registered_token_addresses(backtester: PnLBacktester) -> dict[str, tuple[str, str]]:
@@ -558,6 +562,9 @@ def _install_perp_price_history_provider(
                 warning_count=0,
             )
         provider = factory(fallback=current_provider, chain=chain, markets=markets, venue=venue)
+    remember_provider = getattr(backtester, "_remember_engine_perp_provider", None)
+    if callable(remember_provider):
+        remember_provider(provider, current_provider, True)
     backtester.data_provider = provider
     return provider
 
@@ -579,6 +586,8 @@ async def prepare_perp_price_history(
     # run, or a reused fixture). Never carry accepted identities from an
     # earlier attempt into the funding plane for this one.
     backtester._prepared_perp_price_history_targets = ()
+    backtester._prepared_perp_declared_targets = ()
+    backtester._prepared_perp_hint_targets = ()
 
     targets = _preflight_perp_price_history_targets(strategy, strategy_config)
     hinted = False
@@ -594,6 +603,7 @@ async def prepare_perp_price_history(
         try:
             await _install_and_prepare_perp_plane(backtester, config, bt_logger, targets)
             backtester._prepared_perp_price_history_targets = tuple(dict.fromkeys(targets))
+            backtester._prepared_perp_hint_targets = backtester._prepared_perp_price_history_targets
         except Exception as exc:  # noqa: BLE001 — a hint can never refuse the run
             # Deliberately every exception, not just PreflightValidationError:
             # the provider factory, the venue catalogue and chain resolution
@@ -645,9 +655,10 @@ async def prepare_perp_price_history(
         return
     await _install_and_prepare_perp_plane(backtester, config, bt_logger, targets)
     backtester._prepared_perp_price_history_targets = tuple(dict.fromkeys(targets))
+    backtester._prepared_perp_declared_targets = backtester._prepared_perp_price_history_targets
 
 
-async def _prewarm_declared_funding_history(
+async def _prewarm_funding_history(
     source: SnapshotFundingRateSource,
     strategy: BacktestableStrategy,
     strategy_config: Mapping[str, Any],
@@ -657,9 +668,9 @@ async def _prewarm_declared_funding_history(
 ) -> None:
     """Materialize accepted snapshot funding series before data iteration.
 
-    ``prepared_targets`` is the price plane that actually passed preflight,
-    including config-only hints. ``None`` preserves the standalone helper's
-    declaration-discovery contract for callers that have not prepared prices.
+    ``prepared_targets`` is one accepted price-plane class: declarations may
+    be required while config-only hints must remain best-effort. ``None``
+    preserves declaration discovery for standalone callers.
     """
     if not source.history_capable:
         return
@@ -675,7 +686,7 @@ async def _prewarm_declared_funding_history(
                 target.market,
                 target.market_address or "",
             )
-        except DataSourceError as exc:
+        except Exception as exc:  # noqa: BLE001 — config hints must never become execution gates
             if require_complete:
                 raise
             logger.warning(
@@ -742,7 +753,7 @@ async def _prepare_declared_historical_twap(
     if not targets:
         return None
 
-    run_chain = config.chain.strip().lower()
+    run_chain = _canonical_run_chain(config)
     mismatched = [target.chain for target in targets if target.chain != run_chain]
     if mismatched:
         raise PreflightValidationError(
@@ -761,7 +772,7 @@ async def _prepare_declared_historical_twap(
         end_time=config.end_time,
         sample_interval_seconds=config.interval_seconds,
         manifest=manifest,
-        first_use_feasibility=partial(enforce_window_feasibility, config, target_count=1),
+        first_use_feasibility=_first_use_feasibility(config, strategy_config),
     )
     for target in targets:
         try:
@@ -805,17 +816,17 @@ async def _prewarm_hinted_pool_state(
     )
 
     hint = hinted_historical_pool_state_target(strategy, strategy_config, default_chain=config.chain)
-    if hint is None or hint.chain != config.chain.strip().lower():
+    if hint is None or hint.chain != _canonical_run_chain(config):
         return None
     source = SnapshotPoolStateSource(
         start_time=config.start_time,
         end_time=config.end_time,
         sample_interval_seconds=config.interval_seconds,
         manifest=manifest,
-        first_use_feasibility=partial(enforce_window_feasibility, config, target_count=1),
+        first_use_feasibility=_first_use_feasibility(config, strategy_config),
     )
     try:
-        enforce_window_feasibility(config, target_count=1)
+        source.enforce_first_use_feasibility()
         count = await source.materialize_history(hint)
     except Exception as exc:  # noqa: BLE001 — a hint must never refuse a run
         logger.warning(
@@ -843,6 +854,19 @@ def _strategy_cadence_seconds(strategy_config: Mapping[str, Any] | None) -> int 
         return parse_ohlcv_timeframe(configured, field_name="strategy config data_granularity").seconds
     except (TypeError, ValueError):
         return None
+
+
+def _first_use_feasibility(
+    config: PnLBacktestConfig,
+    strategy_config: Mapping[str, Any] | None,
+) -> Callable[[], Any]:
+    """Build the shared one-target feasibility check for lazy data planes."""
+    return partial(
+        enforce_window_feasibility,
+        config,
+        target_count=1,
+        strategy_cadence_seconds=_strategy_cadence_seconds(strategy_config),
+    )
 
 
 async def _prepare_declared_historical_pool_state(
@@ -915,7 +939,7 @@ async def _prepare_declared_historical_pool_state(
     targets = tuple(targets_by_key.values())
     if not targets:
         return await _prewarm_hinted_pool_state(strategy, strategy_config, config, manifest)
-    run_chain = config.chain.strip().lower()
+    run_chain = _canonical_run_chain(config)
     mismatched = [target.chain for target in targets if target.chain != run_chain]
     if mismatched:
         raise PreflightValidationError(
@@ -938,7 +962,7 @@ async def _prepare_declared_historical_pool_state(
         end_time=config.end_time,
         sample_interval_seconds=config.interval_seconds,
         manifest=manifest,
-        first_use_feasibility=partial(enforce_window_feasibility, config, target_count=1),
+        first_use_feasibility=_first_use_feasibility(config, strategy_config),
     )
     for target in targets:
         try:
@@ -1049,6 +1073,9 @@ async def _install_and_prepare_perp_plane(
             error_count=1,
             warning_count=0,
         ) from exc
+    mark_prepared = getattr(backtester, "_mark_perp_provider_prepared", None)
+    if callable(mark_prepared):
+        mark_prepared(provider)
     bt_logger.info(
         f"Resolved {venue} {markets!r} to one atomic native {resolved} price-candle plane "
         f"for the complete {config.duration_days:.1f}-day window"
@@ -1778,7 +1805,7 @@ def _ensure_run_twap_source(twap_source: Any | None, config: PnLBacktestConfig, 
         end_time=config.end_time,
         sample_interval_seconds=config.interval_seconds,
         manifest=state.data_broker.manifest if state.data_broker is not None else None,
-        first_use_feasibility=partial(enforce_window_feasibility, config, target_count=1),
+        first_use_feasibility=_first_use_feasibility(config, state.strategy_config),
     )
 
 
@@ -1802,7 +1829,7 @@ def _bind_run_pool_state_source(
             start_time=config.start_time,
             end_time=config.end_time,
             sample_interval_seconds=config.interval_seconds,
-            first_use_feasibility=partial(enforce_window_feasibility, config, target_count=1),
+            first_use_feasibility=_first_use_feasibility(config, state.strategy_config),
             manifest=state.data_broker.manifest if state.data_broker is not None else None,
         )
     bind = getattr(backtester, "_bind_pool_state_source", None)
@@ -1811,7 +1838,10 @@ def _bind_run_pool_state_source(
     return pool_state_source
 
 
-def _apply_first_use_overlays(backtester: PnLBacktester, market_state: MarketState) -> None:
+def _apply_first_use_overlays(
+    backtester: PnLBacktester,
+    market_state: MarketState,
+) -> None:
     """Overlay perp markets discovered at first use before anything reads the tick.
 
     The streaming provider cannot be re-wrapped mid-run, so venue index prices
@@ -1856,7 +1886,6 @@ async def execute_iteration_loop(
     # before any pending fill can trigger lazy discovery.
     backtester._active_indicator_engine = state.indicator_engine
     backtester._funding_prepared_perp_markets.clear()
-    backtester._perp_market_overlays.clear()
 
     # Strategy-facing funding lane: one source per run; each tick binds it to
     # the tick's simulated timestamp so decide()'s market.funding_rate(...)
@@ -1873,12 +1902,19 @@ async def execute_iteration_loop(
         manifest=state.data_broker.manifest if state.data_broker is not None else None,
     )
     backtester._bind_funding_history_source(funding_rate_source)
-    await _prewarm_declared_funding_history(
+    await _prewarm_funding_history(
         funding_rate_source,
         strategy,
         state.strategy_config,
         require_complete=_requires_complete_funding_history(backtester),
-        prepared_targets=backtester._prepared_perp_price_history_targets,
+        prepared_targets=backtester._prepared_perp_declared_targets,
+    )
+    await _prewarm_funding_history(
+        funding_rate_source,
+        strategy,
+        state.strategy_config,
+        require_complete=False,
+        prepared_targets=backtester._prepared_perp_hint_targets,
     )
     twap_source = await _prepare_declared_historical_twap(
         strategy,
@@ -2466,85 +2502,28 @@ async def _drain_pending_intents_at_end(
     bt_logger: BacktestLogger,
     state: BacktestState,
 ) -> None:
-    """Execute any remaining pending intents using ``last_market_state``.
-
-    Mirrors the post-loop block that either drains queued intents against
-    the final market state or warns that no valid market state is
-    available. Mutates ``state.execution_delayed_at_end``.
-    """
+    """Execute remaining pending intents through the normal sequence-aware path."""
     if state.pending_intents and state.last_market_state is not None:
         bt_logger.warning(
             f"Executing {len(state.pending_intents)} pending intent(s) at simulation end "
             f"(delayed execution using last market state from {state.last_market_state.timestamp})"
         )
         for intent, decision_time, _ in state.pending_intents:
-            trades_before_execution = len(state.portfolio.trades)
-            try:
-                trade_record = await backtester._execute_intent(
-                    intent=intent,
-                    portfolio=state.portfolio,
-                    market_state=state.last_market_state,
-                    timestamp=state.last_market_state.timestamp,
-                    config=config,
-                    delayed_at_end=True,
-                    data_quality_tracker=state.data_quality_tracker,
-                )
-                state.execution_delayed_at_end += 1
-                # The portfolio may reject a fill (insufficient balance,
-                # producer-failed) — trade_record.success is authoritative.
-                if trade_record.success:
-                    # Record successful execution in error handler
-                    if backtester._error_handler:
-                        backtester._error_handler.record_success()
-                    bt_logger.debug(
-                        f"Executed pending intent at simulation end "
-                        f"(decided at {decision_time}): "
-                        f"type={trade_record.intent_type.value}, "
-                        f"amount=${trade_record.amount_usd:,.2f}"
-                    )
-                else:
-                    bt_logger.warning(
-                        f"Pending intent rejected by portfolio at simulation end "
-                        f"(decided at {decision_time}): "
-                        f"type={trade_record.intent_type.value}, "
-                        f"reason={trade_record.metadata.get('failure_reason', 'fill rejected')}"
-                    )
-                notify_intent_outcome(backtester, strategy, intent, trade_record, bt_logger)
-            except NoAcceptableDataSourceError as exc:
-                backtester._handle_pending_missing_data(
-                    intent,
-                    strategy,
-                    state.portfolio,
-                    state.last_market_state.timestamp,
-                    exc,
-                    trades_before_execution=trades_before_execution,
-                    delayed_at_end=True,
-                )
-                state.execution_delayed_at_end += 1
-                continue
-            except Exception as e:
-                # Use error handler for intent execution errors
-                if backtester._error_handler:
-                    result = backtester._error_handler.handle_error(
-                        e,
-                        context=f"execute_pending_intent:end:{type(intent).__name__}",
-                    )
-                    if result.should_stop:
-                        backtester._notify_intent_failure(strategy, intent, e)
-                        bt_logger.error(f"Fatal error executing pending intent at simulation end: {e}")
-                        raise
-                trade_record = backtester._record_intent_execution_rejection(
-                    intent,
-                    state.portfolio,
-                    state.last_market_state.timestamp,
-                    e,
-                    trades_before_execution=trades_before_execution,
-                    delayed_at_end=True,
-                )
-                state.execution_delayed_at_end += 1
-                notify_intent_outcome(backtester, strategy, intent, trade_record, bt_logger)
-                suffix = " - skipping" if backtester._error_handler else ""
-                bt_logger.warning(f"Failed to execute pending intent at simulation end: {e}{suffix}")
+            terminal_count = await backtester._execute_ready_pending_intent(
+                intent=intent,
+                decision_time=decision_time,
+                portfolio=state.portfolio,
+                market_state=state.last_market_state,
+                config=config,
+                data_quality_tracker=state.data_quality_tracker,
+                strategy=strategy,
+                delayed_at_end=True,
+            )
+            state.execution_delayed_at_end += terminal_count
+            bt_logger.info(
+                f"Finished delayed pending item decided at {decision_time} with "
+                f"{terminal_count} terminal trade outcome(s)"
+            )
     elif state.pending_intents:
         # No tick ever produced a market state, so nothing can be priced. The
         # intents still need terminal outcomes: a dropped intent reads as a
@@ -2715,14 +2694,15 @@ def enforce_data_quality_gate(
 
 
 _PERP_INTEGRITY_INTENT_TYPES = ("PERP_OPEN", "PERP_CLOSE")
+_HEDGE_MANDATE_TAGS = frozenset({"hedge", "hedged", "hedged-lp", "delta-neutral"})
 
 
 def _strategy_declares_hedge(strategy: BacktestableStrategy) -> bool:
-    """Whether registration metadata explicitly describes a hedged mandate."""
+    """Whether registration metadata explicitly declares a hedged mandate."""
     metadata = _strategy_metadata(strategy)
     tags = getattr(metadata, "tags", ()) if metadata is not None else ()
     normalized = {str(tag).strip().lower().replace("_", "-").replace(" ", "-") for tag in tags or ()}
-    return any("hedge" in tag or tag == "delta-neutral" for tag in normalized)
+    return bool(normalized & _HEDGE_MANDATE_TAGS)
 
 
 def _hedge_integrity_violation(
@@ -2730,7 +2710,7 @@ def _hedge_integrity_violation(
     *,
     hedge_mandate: bool = False,
 ) -> str | None:
-    """Name a completed run whose perp intents were partly rejected.
+    """Report rejected perp decisions as compliance evidence.
 
     Every partial perp rejection compromises execution integrity. It is a
     *hedge* integrity failure only when strategy metadata explicitly declares

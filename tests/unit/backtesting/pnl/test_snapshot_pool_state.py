@@ -11,6 +11,8 @@ from types import SimpleNamespace
 import grpc
 import pytest
 
+from almanak.framework.backtesting.pnl import _engine_helpers
+from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
 from almanak.framework.backtesting.pnl.data_manifest import LANE_POOL_STATE, LANE_POOL_TVL, RunDataManifest
 from almanak.framework.backtesting.pnl.data_provider import HistoricalPriceObservation, MarketState
 from almanak.framework.backtesting.pnl.providers.snapshot_pool_state import (
@@ -63,6 +65,59 @@ def _gateway_point(timestamp: int, block_number: int) -> SimpleNamespace:
     )
 
 
+def test_target_and_source_share_canonical_chain_identity() -> None:
+    target = HistoricalPoolStateTarget("arb", "uniswap-v3", POOL)
+    assert target.chain == "arbitrum"
+    assert target.key == ("arbitrum", "uniswap_v3", POOL)
+
+
+def test_async_materialization_is_idempotent_across_chain_aliases() -> None:
+    fetches = 0
+
+    def counting_fetcher(**kwargs):
+        nonlocal fetches
+        fetches += 1
+        return _fetcher(**kwargs)
+
+    source = SnapshotPoolStateSource(
+        start_time=START,
+        end_time=END,
+        sample_interval_seconds=3_600,
+        fetcher=counting_fetcher,
+    )
+    target = HistoricalPoolStateTarget("matic", "uniswap_v3", POOL, (TOKEN0, TOKEN1), 500)
+
+    asyncio.run(source.materialize_history(target))
+    asyncio.run(
+        source.materialize_history(HistoricalPoolStateTarget("polygon", "uniswap_v3", POOL, (TOKEN0, TOKEN1), 500))
+    )
+    with pytest.raises(ValueError, match="pool fee mismatch"):
+        asyncio.run(source.materialize_history(HistoricalPoolStateTarget("polygon", "uniswap_v3", POOL, fee_tier=3000)))
+
+    assert fetches == 1
+    assert source._resolve("matic", "uniswap_v3", POOL, 1_000)[0].chain == "polygon"
+
+
+@pytest.mark.asyncio
+async def test_declared_prewarm_accepts_an_equivalent_run_chain_alias(monkeypatch: pytest.MonkeyPatch) -> None:
+    strategy = SimpleNamespace(backtest_pool_state_targets=[TARGET])
+    config = PnLBacktestConfig(
+        start_time=START,
+        end_time=END,
+        interval_seconds=3_600,
+        chain="matic",
+    )
+    monkeypatch.setattr(
+        "almanak.framework.backtesting.pnl.providers.snapshot_pool_state.fetch_historical_pool_state_points",
+        _fetcher,
+    )
+
+    source = await _engine_helpers._prepare_declared_historical_pool_state(strategy, {}, config, None)
+
+    assert source is not None
+    assert source.pool_descriptor("matic", "uniswap_v3", POOL) is not None
+
+
 def test_typed_pool_state_declaration_is_the_only_declaration() -> None:
     custom_target = HistoricalPoolStateTarget("ethereum", "custom_pool_provider", POOL)
     strategy = SimpleNamespace(
@@ -108,6 +163,8 @@ def test_snapshot_serves_execution_grade_pool_price_and_reserves() -> None:
     assert reserves.reserve1 == 5
     assert reserves.fee_tier == 500
     assert reserves.sqrt_price_x96 == 2**97
+    assert view.protocols_for_chain("matic") == ["uniswap_v3"]
+    assert view.resolve_pool_address(TOKEN1, TOKEN0, "matic", 500) == POOL
     assert view.resolve_pool_address(TOKEN1, TOKEN0, "POLYGON", 500) == POOL
     assert view.resolve_pool_address(TOKEN0, TOKEN1, "polygon", 3000) is None
     untiered = HistoricalPoolStateTarget("polygon", "uniswap_v3", POOL)
@@ -611,13 +668,19 @@ def _tvl_market_state() -> MarketState:
 def test_tvl_read_materializes_undeclared_exact_pool_at_first_use() -> None:
     """A protocol-scoped TVL read on an undeclared pool fetches its archive state inline, once."""
     calls: list[dict] = []
+    events: list[str] = []
 
     def counting_fetcher(**kwargs):
+        events.append("fetch")
         calls.append(kwargs)
         return _fetcher(**kwargs)
 
     source = SnapshotPoolStateSource(
-        start_time=START, end_time=END, sample_interval_seconds=3_600, fetcher=counting_fetcher
+        start_time=START,
+        end_time=END,
+        sample_interval_seconds=3_600,
+        fetcher=counting_fetcher,
+        first_use_feasibility=lambda: events.append("feasibility"),
     )
     assert source.is_empty
 
@@ -625,6 +688,7 @@ def test_tvl_read_materializes_undeclared_exact_pool_at_first_use() -> None:
     second = source.view_at(END).read_pool_tvl_usd(POOL, "polygon", "uniswap_v3", _tvl_market_state())
 
     assert len(calls) == 1 and calls[0]["pool_address"] == POOL
+    assert events == ["feasibility", "fetch"]
     assert first.value.tvl_usd == second.value.tvl_usd == Decimal("11")
     assert not source.is_empty
     assert source.pool_descriptor("polygon", "uniswap_v3", POOL) is not None

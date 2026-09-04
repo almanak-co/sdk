@@ -181,6 +181,114 @@ async def test_readiness_checks_full_price_grid_without_calling_strategy() -> No
     assert strategy.decide_calls == 0
 
 
+@pytest.mark.asyncio
+async def test_readiness_warns_about_dependencies_it_cannot_verify() -> None:
+    strategy = _Strategy()
+    strategy.STRATEGY_METADATA = SimpleNamespace(
+        intent_types=["PERP_OPEN", "LP_OPEN"],
+        supported_protocols=[],
+        tags=[],
+    )
+
+    result = await _backtester(_Provider()).check_readiness(strategy, _config())
+
+    assert result.status == "ready_with_warnings"
+    assert result.checks == (
+        "support_matrix",
+        "funded_price_coverage",
+        "perp_price_history",
+        "funding_history",
+        "historical_exact_pool_twap",
+        "historical_exact_pool_state",
+        "historical_pool_analytics",
+    )
+    dynamic_warning = next(warning for warning in result.warnings if "Not discoverable" in warning)
+    assert "connector-native perp markets" in dynamic_warning
+    assert "exact-pool TWAP" in dynamic_warning
+    assert "emitted LP intents" in dynamic_warning
+    assert strategy.decide_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_readiness_warns_when_optional_hint_funding_is_not_certified(monkeypatch: pytest.MonkeyPatch) -> None:
+    hinted_target = SimpleNamespace(protocol="gmx_v2", market="ETH/USD", market_address="")
+
+    async def prepare(*, backtester: PnLBacktester, **_kwargs: object) -> None:
+        backtester._prepared_perp_price_history_targets = (hinted_target,)
+        backtester._prepared_perp_hint_targets = (hinted_target,)
+
+    async def skip_optional_funding(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(_engine_helpers, "prepare_perp_price_history", prepare)
+    monkeypatch.setattr(_engine_helpers, "_prewarm_funding_history", skip_optional_funding)
+    strategy = _Strategy()
+    strategy.STRATEGY_METADATA = SimpleNamespace(intent_types=["PERP_OPEN"], supported_protocols=[], tags=[])
+
+    result = await _backtester(_Provider()).check_readiness(strategy, _config())
+
+    assert result.status == "ready_with_warnings"
+    assert "perp_price_history" in result.checks
+    assert any("complete funding coverage for config-hinted perp markets" in warning for warning in result.warnings)
+
+
+@pytest.mark.parametrize("iteration_fails", [False, True])
+@pytest.mark.asyncio
+async def test_readiness_restores_and_closes_engine_installed_provider(
+    monkeypatch: pytest.MonkeyPatch,
+    iteration_fails: bool,
+) -> None:
+    base_provider = _Provider()
+    backtester = _backtester(base_provider)
+    backtester.data_config = BacktestDataConfig(strict_historical_mode=False)
+
+    class _OverlayProvider:
+        provider_name = "readiness_overlay_fixture"
+        historical_capability = HistoricalDataCapability.FULL
+
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def iterate(self, config: Any):
+            if iteration_fails:
+                raise RuntimeError("overlay iteration failed")
+            async for item in base_provider.iterate(config):
+                yield item
+
+        async def close_backtest_overlay(self) -> None:
+            self.closed = True
+
+    overlay = _OverlayProvider()
+
+    async def prepare(*, backtester: PnLBacktester, **_kwargs: object) -> None:
+        backtester._remember_engine_perp_provider(overlay, base_provider, True)
+        backtester.data_provider = overlay
+
+    real_initialize = _engine_helpers.initialize_backtest
+
+    def initialize_with_strictness_mutation(**kwargs: Any) -> Any:
+        state = real_initialize(**kwargs)
+        assert backtester.data_config is not None
+        backtester.data_config.strict_historical_mode = True
+        return state
+
+    monkeypatch.setattr(_engine_helpers, "prepare_perp_price_history", prepare)
+    monkeypatch.setattr(_engine_helpers, "initialize_backtest", initialize_with_strictness_mutation)
+
+    result = await backtester.check_readiness(_Strategy(), _config())
+
+    if iteration_fails:
+        assert result.status == "not_ready"
+    else:
+        assert result.ready
+    assert backtester.data_provider is base_provider
+    assert overlay.closed
+    assert backtester._engine_owned_perp_providers == []
+    assert backtester._prepared_perp_price_history_targets == ()
+    assert backtester._funding_rate_source is None
+    assert backtester.data_config.strict_historical_mode is False
+
+
 @pytest.mark.parametrize("cash_token", ["USDC", _ARBITRUM_USDC])
 @pytest.mark.asyncio
 async def test_readiness_skips_missing_cash_equivalent_prices(cash_token: str) -> None:
@@ -221,19 +329,29 @@ async def test_readiness_fails_closed_on_later_missing_price_without_running_str
 
 @pytest.mark.asyncio
 async def test_readiness_requires_complete_declared_funding_coverage(monkeypatch: pytest.MonkeyPatch) -> None:
-    require_complete_values: list[bool] = []
+    calls: list[tuple[bool, tuple[object, ...]]] = []
+    declared_target = object()
+    hint_target = object()
+
+    async def prepare(*, backtester, **_kwargs: object) -> None:
+        backtester._prepared_perp_declared_targets = (declared_target,)
+        backtester._prepared_perp_hint_targets = (hint_target,)
 
     async def prewarm(
         _source, _strategy, _strategy_config, *, require_complete: bool = False, prepared_targets=()
     ) -> None:
-        require_complete_values.append(require_complete)
+        calls.append((require_complete, prepared_targets))
 
-    monkeypatch.setattr(_engine_helpers, "_prewarm_declared_funding_history", prewarm)
+    monkeypatch.setattr(_engine_helpers, "prepare_perp_price_history", prepare)
+    monkeypatch.setattr(_engine_helpers, "_prewarm_funding_history", prewarm)
 
-    result = await _backtester(_Provider()).check_readiness(_Strategy(), _config())
+    backtester = _backtester(_Provider())
+    result = await backtester.check_readiness(_Strategy(), _config())
 
     assert result.ready
-    assert require_complete_values == [True]
+    assert len(calls) == 2
+    assert calls[0] == (True, (declared_target,))
+    assert calls[1] == (False, (hint_target,))
 
 
 @pytest.mark.asyncio
@@ -681,7 +799,7 @@ async def test_strict_runner_repeats_funding_coverage_before_decide(monkeypatch:
         require_complete_values.append(require_complete)
         raise RuntimeError("declared GMX funding coverage unavailable")
 
-    monkeypatch.setattr(_engine_helpers, "_prewarm_declared_funding_history", unavailable)
+    monkeypatch.setattr(_engine_helpers, "_prewarm_funding_history", unavailable)
 
     with pytest.raises(RuntimeError, match="declared GMX funding coverage unavailable"):
         await _engine_helpers.execute_iteration_loop(

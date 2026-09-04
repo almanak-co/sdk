@@ -91,6 +91,7 @@ INVARIANT_ROWS: tuple[str, ...] = (
     "intent_sequence_stops_on_rejection",
     "intent_sequence_chains_amount_all",
     "intent_sequence_chains_lp_position",
+    "intent_sequence_delayed_at_end",
     "rejected_perp_flags_compliance",
     "lp_fee_unit_normalization",
     "snapshot_total_counts_cash_once",
@@ -316,6 +317,12 @@ CELLS: tuple[TrustCell, ...] = (
         'A Pendle LP_OPEN followed by LP_CLOSE amount="all" in one Intent.sequence targets the exact '
         "simulated position created by the prior member. The LP identity lane stays separate from token "
         "amount chaining, matching the live runner's separate minted-LP-wei lane.",
+    ),
+    _cell(
+        "intent_sequence_delayed_at_end",
+        "swap",
+        "A sequence emitted on the final decision tick executes through the same ordered path; every terminal "
+        "member record is marked delayed and counted exactly once.",
     ),
     _cell(
         "rejected_perp_flags_compliance",

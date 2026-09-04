@@ -2285,13 +2285,10 @@ class BacktestPoolAnalyticsReader:
             # Exact state is served pool-by-pool. A pool the archive could not
             # serve at first use (or one nobody declared, when first-use is
             # unavailable) must not disable completed-day history fallback for
-            # the analytics read itself. The producers flag that case; the
-            # legacy prose checks stay as a fallback for any raiser that has
-            # not been migrated to the flag yet.
-            if (
-                getattr(exc, "exact_pool_unavailable", False)
-                or exc.reason == "exact pool was not declared and prewarmed"
-                or exc.reason.startswith("first-use exact-pool state fetch failed")
+            # the analytics read itself. Producers flag that case explicitly;
+            # the exact legacy reason remains for older caller-provided views.
+            if exc.fields.get("exact_pool_unavailable") is True or exc.reason == (
+                "exact pool was not declared and prewarmed"
             ):
                 return None
             raise
@@ -3897,6 +3894,20 @@ class _NoFallbackProvider:
         yield  # pragma: no cover — unreachable; makes this an async generator
 
 
+@dataclass(slots=True)
+class _PerpRouteState:
+    """Current-run result of preparing one connector-native perp market."""
+
+    provider: Any | None
+    apply_overlay: bool = False
+    failure_reason: str | None = None
+    last_overlay_at: datetime | None = None
+
+    @property
+    def ready(self) -> bool:
+        return self.provider is not None and self.failure_reason is None
+
+
 @dataclass
 class PnLBacktester:
     """Main PnL backtesting engine for historical strategy simulation.
@@ -4057,6 +4068,11 @@ class PnLBacktester:
     #: owned asset's earlier fallback observations without touching other
     #: tokens.
     _active_indicator_engine: BacktestIndicatorEngine | None = field(default=None, init=False, repr=False)
+    _funding_rate_source: Any | None = field(default=None, init=False, repr=False)
+    _prepared_perp_provider: Any | None = field(default=None, init=False, repr=False)
+    _engine_installed_perp_provider: Any | None = field(default=None, init=False, repr=False)
+    _engine_perp_base_provider: Any | None = field(default=None, init=False, repr=False)
+    _engine_owned_perp_providers: list[Any] = field(default_factory=list, init=False, repr=False)
     #: Exact perp targets whose connector-native price plane completed
     #: preparation for this run. This is deliberately the *prepared* set,
     #: not a second pass over declaration hooks: config-only prewarm hints can
@@ -4068,14 +4084,17 @@ class PnLBacktester:
         init=False,
         repr=False,
     )
+    _prepared_perp_declared_targets: tuple[Any, ...] = field(default_factory=tuple, init=False, repr=False)
+    _prepared_perp_hint_targets: tuple[Any, ...] = field(default_factory=tuple, init=False, repr=False)
     #: Exact funding identities registered/materialized after the funding
     #: source is bound. Kept inside the preparation boundary so repeated
     #: direct or routed first-use calls remain idempotent.
     _funding_prepared_perp_markets: set[tuple[str, str, str]] = field(default_factory=set, init=False, repr=False)
-    #: Per-tick price overlays for perp markets discovered at first use, keyed
-    #: by (chain, protocol, market); a failed discovery is memoized as None.
-    #: Run-scoped like the funding set above, so a reused backtester rediscovers.
-    _perp_market_overlays: dict[tuple[str, str, str], Any] = field(default_factory=dict, init=False, repr=False)
+    _perp_market_routes: dict[tuple[str, str, str], _PerpRouteState] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
     #: Positions whose accrual update already reported a data gap (log-once
     #: bookkeeping for the non-strict skip path, ALM-2930).
     _accrual_data_gap_positions: set[str] = field(default_factory=set)
@@ -4454,11 +4473,17 @@ class PnLBacktester:
             bind(source)
 
     def _apply_perp_market_overlays(self, market_state: MarketState) -> None:
-        """Overlay every perp market discovered at first use onto this tick's state."""
-        for provider in self._perp_market_overlays.values():
-            overlay = getattr(provider, "overlay_market_state", None) if provider is not None else None
-            if overlay is not None:
-                overlay(market_state)
+        """Apply connector-native overlays prepared during the current run.
+
+        Route installation repairs retained indicator history once. Later
+        overlaid ticks are appended by the normal iteration loop, so replaying
+        retained history here would make long runs quadratic.
+        """
+        for route in self._perp_market_routes.values():
+            if not route.ready or not route.apply_overlay or route.last_overlay_at == market_state.timestamp:
+                continue
+            self._overlay_first_use_perp_provider(route.provider, market_state)
+            route.last_overlay_at = market_state.timestamp
 
     @staticmethod
     def _first_use_perp_identity(
@@ -4466,12 +4491,14 @@ class PnLBacktester:
         market_state: MarketState,
         config: PnLBacktestConfig,
     ) -> tuple[str, str, str, str] | None:
-        """``(canonical, venue, chain, market)`` for a perp intent on a venue with native history."""
+        """Return the connector, venue, chain, and exact market for a native perp route."""
         from almanak.connectors._strategy_base.perp_price_history_registry import PerpPriceHistoryRegistry
 
         market = str(getattr(intent, "market", "") or "").strip()
         protocol = str(getattr(intent, "protocol", "") or "").strip().lower().replace("-", "_")
-        if not market or not protocol:
+        if not market or not protocol or not is_address_like(market):
+            return None
+        if not PerpPriceHistoryRegistry.has(protocol):
             return None
         canonical = PerpPriceHistoryRegistry.canonical(protocol)
         if canonical is None:
@@ -4481,67 +4508,102 @@ class PnLBacktester:
             str(getattr(intent, "chain", None) or getattr(market_state, "chain", None) or config.chain)
         )
         if chain != run_chain:
-            return None  # the generic lane names this cross-chain rejection itself
-        # Both sides are canonical registry names, so a run or intent naming a
-        # registered alias ("avax") matches a connector that declares
-        # "avalanche" instead of silently leaving the market unprepared.
-        declared_chains = {
-            ChainRegistry.resolve(value).name for value in PerpPriceHistoryRegistry.declared_chains(canonical)
-        }
-        if declared_chains and chain not in declared_chains:
-            logger.warning(
-                "%s declares venue-native price history on %s, not %r; perp market %s stays unprepared",
-                canonical,
-                sorted(declared_chains),
-                chain,
-                market,
-            )
             return None
         return canonical, PerpPriceHistoryRegistry.venue_for(canonical), chain, market
 
+    def _reset_run_scoped_perp_routes(self) -> None:
+        """Clear every object that can certify connector-native readiness for a run."""
+        self._restore_engine_perp_provider()
+        self._active_indicator_engine = None
+        self._funding_rate_source = None
+        self._prepared_perp_provider = None
+        self._prepared_perp_price_history_targets = ()
+        self._prepared_perp_declared_targets = ()
+        self._prepared_perp_hint_targets = ()
+        self._funding_prepared_perp_markets.clear()
+        self._perp_market_routes.clear()
+
+    def _remember_engine_perp_provider(self, provider: Any, fallback: Any, installed: bool) -> None:
+        """Track an engine-created provider separately from its caller-owned fallback."""
+        if not any(owned is provider for owned in self._engine_owned_perp_providers):
+            self._engine_owned_perp_providers.append(provider)
+        if installed:
+            self._engine_installed_perp_provider = provider
+            self._engine_perp_base_provider = fallback
+
+    def _restore_engine_perp_provider(self) -> None:
+        """Restore the caller's provider after an engine-installed run wrapper."""
+        installed = getattr(self, "_engine_installed_perp_provider", None)
+        base_provider = getattr(self, "_engine_perp_base_provider", None)
+        if installed is not None and base_provider is not None and self.data_provider is installed:
+            self.data_provider = base_provider
+        self._engine_installed_perp_provider = None
+        self._engine_perp_base_provider = None
+
+    async def _release_engine_perp_providers(self) -> None:
+        """Close only wrapper-owned resources, then restore the caller's provider."""
+        owned_providers = getattr(self, "_engine_owned_perp_providers", None)
+        try:
+            for provider in reversed(owned_providers or ()):
+                close_overlay = getattr(provider, "close_backtest_overlay", None)
+                if not callable(close_overlay):
+                    continue
+                try:
+                    result = close_overlay()
+                    if _inspect.isawaitable(result):
+                        await result
+                except Exception:  # noqa: BLE001 — cleanup must not strand the caller's provider
+                    logger.debug("Error during perp overlay cleanup", exc_info=True)
+        finally:
+            self._restore_engine_perp_provider()
+            if owned_providers is not None:
+                owned_providers.clear()
+
+    def _mark_perp_provider_prepared(self, provider: Any) -> None:
+        """Mark a declaration- or hint-driven provider as prepared for this run."""
+        self._prepared_perp_provider = provider
+
     def _run_provider_serves_market(self, key: tuple[str, str, str]) -> bool:
-        """Whether the run's installed price-history provider already owns ``key``."""
-        declared = getattr(self.data_provider, "price_history_targets", None)
-        if declared is None:
-            single = getattr(self.data_provider, "price_history_target", None)
-            declared = (single,) if single is not None else ()
-        return any(tuple(str(part).lower() for part in target) == key for target in declared)
+        """Whether the installed current-run provider owns an exact venue market."""
+        if self._prepared_perp_provider is not self.data_provider:
+            return False
+        targets = getattr(self.data_provider, "price_history_targets", None)
+        if targets is None:
+            target = getattr(self.data_provider, "price_history_target", None)
+            targets = (target,) if target is not None else ()
+        normalized = (tuple(str(part).strip().lower() for part in target) for target in targets if target is not None)
+        return key in normalized
 
     async def _prepare_first_use_funding_market(self, provider: Any, venue: str, market: str) -> None:
-        """Register the verified market address AND materialize its funding series.
-
-        A declared market had its funding series prewarmed before tick 1.
-        Registering the address alone would leave a market discovered at first
-        use reading the configured fallback rate for every hour, so accrual on
-        an identical position would differ from the declared path. The fetch is
-        best effort: a venue without measured funding keeps the existing lazy
-        behaviour rather than failing the run.
-        """
-        funding_source = getattr(self, "_funding_rate_source", None)
-        register = getattr(funding_source, "_register_market_address", None) if funding_source is not None else None
-        if register is None:
+        """Best-effort funding preparation for a verified current-run market."""
+        source = self._funding_rate_source
+        register = getattr(source, "_register_market_address", None) if source is not None else None
+        if not callable(register):
             return
-        materialize = getattr(funding_source, "materialize_history", None)
-        for source in getattr(provider, "_sources", ()):
-            label = str(getattr(source, "resolved_market", None) or market).upper()
-            address = getattr(source, "market_token", None)
+        materialize = getattr(source, "materialize_history", None)
+        for resolved_market, market_address in getattr(provider, "resolved_price_history_markets", ()):
+            label = str(resolved_market or market).upper()
+            address = str(market_address or "")
             if not address:
                 continue
-            funding_key = (venue.lower(), label, str(address).lower())
-            if funding_key in self._funding_prepared_perp_markets:
+            key = (venue.lower(), label, address.lower())
+            if key in self._funding_prepared_perp_markets:
+                continue
+            self._funding_prepared_perp_markets.add(key)
+            try:
+                register(venue, label, address)
+            except Exception as exc:  # noqa: BLE001 — funding reads retain their configured fallback
+                logger.warning(
+                    "Funding market %s could not be registered at first use; accrual falls back to the "
+                    "configured rate: %s",
+                    market,
+                    exc,
+                )
+                continue
+            if not callable(materialize):
                 continue
             try:
-                register(venue, label, str(address))
-            except Exception as exc:  # noqa: BLE001 — funding reads stay lazy; registration is a hint
-                logger.debug("Funding market registration skipped for %s: %s", market, exc)
-                continue
-            # Registration succeeded. Mark before the optional fetch so a
-            # transient historical-data failure is not retried on every tick.
-            self._funding_prepared_perp_markets.add(funding_key)
-            if materialize is None:
-                continue
-            try:
-                points = await materialize(venue, label, str(address))
+                points = await materialize(venue, label, address)
             except Exception as exc:  # noqa: BLE001 — measured funding is best effort at first use
                 logger.warning(
                     "Funding history could not be materialized for %s %s at first use; "
@@ -4553,6 +4615,29 @@ class PnLBacktester:
                 continue
             if points:
                 logger.info("Materialized %d funding points for %s %s at first use", points, venue, label)
+
+    @staticmethod
+    def _overlay_first_use_perp_provider(provider: Any, market_state: MarketState) -> None:
+        """Overlay one lazy provider and record every dynamic price identity served."""
+        overlay = getattr(provider, "overlay_market_state", None)
+        if not callable(overlay):
+            return
+        overlaid = overlay(market_state) or ()
+        from almanak.framework.backtesting.pnl.data_broker import record_data_serve
+        from almanak.framework.backtesting.pnl.data_manifest import LANE_PRICE, OUTCOME_SERVED
+
+        for token in overlaid:
+            observation = market_state.get_price_observation(token)
+            if observation is None:
+                raise ValueError(f"perp overlay reported {token_ref_display(token)} without a price observation")
+            record_data_serve(
+                lane=LANE_PRICE,
+                key=token_ref_display(token),
+                source=observation.source,
+                outcome=OUTCOME_SERVED,
+                at=market_state.timestamp,
+                detail="connector-native perp price overlay",
+            )
 
     def _backfill_first_use_perp_history(
         self,
@@ -4575,66 +4660,65 @@ class PnLBacktester:
             interval_seconds=config.interval_seconds,
         ).items():
             indicator_engine.replace_price_history(token, prices)
-        measured = getattr(provider, "measured_granularity_seconds", None)
-        indicator_engine.set_data_granularity(measured, config.interval_seconds)
+        indicator_engine.set_data_granularity(
+            getattr(provider, "measured_granularity_seconds", None),
+            config.interval_seconds,
+        )
 
     async def _ensure_perp_market_route(
         self,
         intent: Any,
         market_state: MarketState,
         config: PnLBacktestConfig,
-    ) -> None:
-        """Prepare a venue candle plane for a perp market the first time an intent names it.
-
-        Identity comes from the intent (``market``, ``protocol``, ``chain``),
-        never from config keys or declaration hooks. The connector's own
-        price-history provider does exactly what declaration-driven preflight
-        did — resolve the market through the venue catalogue, fetch one
-        complete native candle series for the run window, remember the
-        verified identity for the fill-pricing lane — but for one market, at
-        the fill's await point, kept aside as an overlay because the run's
-        streaming provider cannot be re-wrapped. A market that cannot be
-        served stays unprepared and the fill lane keeps its named
-        "not priceable" rejection: nothing is guessed.
-        """
+    ) -> "SizingRejection | None":
+        """Prepare a venue market, or return a typed current-run rejection."""
         if self._get_intent_type(intent) not in (IntentType.PERP_OPEN, IntentType.PERP_CLOSE):
-            return
+            return None
+        if self._active_indicator_engine is None:
+            return None
         identity = self._first_use_perp_identity(intent, market_state, config)
         if identity is None:
-            return
+            return None
         canonical, venue, chain, market = identity
-        # Address-form markets only: a pair label prices through the run's
-        # own symbol plane already, and an address is the one identity the
-        # venue catalogue can verify. Skip when this tick can already price
-        # the market's base — nothing to discover.
-        if not is_address_like(market):
-            return
-        key = (venue, chain, market.lower())
-        overlays = self._perp_market_overlays
-        if key in overlays:
-            return
-        if self._run_provider_serves_market(key):
-            # The run provider may have been installed from a config-only
-            # prewarm hint. Its price series is ready, but the funding source
-            # is bound later; register/materialize the verified address once
-            # before returning from the first-use fast path.
-            await self._prepare_first_use_funding_market(self.data_provider, venue, market)
-            return
-        from .intent_extraction import resolve_perp_base_price
+        key = (venue.strip().lower(), chain, market.lower())
 
-        _, priced_symbol, _ = resolve_perp_base_price(
-            market, market_state, self._registered_token_addresses(), protocol=getattr(intent, "protocol", None)
-        )
-        if priced_symbol is not None:
-            return
         from almanak.connectors._strategy_base.perp_price_history_registry import PerpPriceHistoryRegistry
+        from almanak.framework.backtesting.pnl.sizing import RejectionCode, SizingRejection
+
+        def rejection(reason: str) -> SizingRejection:
+            return SizingRejection(RejectionCode.UNPRICEABLE, reason)
+
+        declared_chains = {
+            _canonical_chain_name(value) for value in PerpPriceHistoryRegistry.declared_chains(canonical)
+        }
+        if declared_chains and chain not in declared_chains:
+            reason = f"{canonical} provides native price history on {sorted(declared_chains)}, not {chain!r}"
+            self._perp_market_routes[key] = _PerpRouteState(provider=None, failure_reason=reason)
+            logger.warning(reason)
+            return rejection(reason)
+
+        cached = self._perp_market_routes.get(key)
+        if cached is not None:
+            if not cached.ready:
+                return rejection(cached.failure_reason or f"perp market {market!r} has no current-run venue route")
+            if cached.apply_overlay and cached.last_overlay_at != market_state.timestamp:
+                self._overlay_first_use_perp_provider(cached.provider, market_state)
+                cached.last_overlay_at = market_state.timestamp
+            await self._prepare_first_use_funding_market(cached.provider, venue, market)
+            return None
+
+        if self._run_provider_serves_market(key):
+            route = _PerpRouteState(provider=self.data_provider)
+            self._perp_market_routes[key] = route
+            await self._prepare_first_use_funding_market(route.provider, venue, market)
+            return None
 
         provider_cls = PerpPriceHistoryRegistry.backtest_provider(canonical)
         if provider_cls is None:
-            return
-        # Resolve the market's own native cadence: never pin it to the cadence
-        # the spot plane already negotiated, and never rewrite the run's
-        # recorded cadence from inside a tick.
+            reason = f"perp market {market!r} has no connector-native historical provider for {canonical}"
+            self._perp_market_routes[key] = _PerpRouteState(provider=None, failure_reason=reason)
+            return rejection(reason)
+
         probe_config = copy.copy(config)
         probe_config.resolved_timeframe = None
         if probe_config.timeframe is None:
@@ -4644,25 +4728,22 @@ class PnLBacktester:
                 fallback=_NoFallbackProvider(), chain=chain, market=market, venue=venue
             )
             resolved = await provider.prepare_backtest(probe_config)
-        except Exception as exc:  # noqa: BLE001 — best effort: the fill lane keeps its named rejection
-            # Remember the miss so the run never re-attempts venue history on
-            # every tick that names this market.
-            overlays[key] = None
-            logger.warning(
-                "Perp market %s (%s on %s) could not be prepared from venue history at first use; "
-                "perp intents on it stay unpriceable: %s",
-                market,
-                canonical,
-                chain,
-                exc,
-            )
-            return
-        overlays[key] = provider
+            if not callable(getattr(provider, "overlay_market_state", None)):
+                raise TypeError(f"{canonical} historical provider does not implement overlay_market_state()")
+            if not callable(getattr(provider, "tick_close_history_before", None)):
+                raise TypeError(f"{canonical} historical provider does not implement tick_close_history_before()")
+        except Exception as exc:  # noqa: BLE001 — a failed route is a typed fill rejection
+            reason = f"perp market {market!r} could not be prepared from {canonical} history: {exc}"
+            self._perp_market_routes[key] = _PerpRouteState(provider=None, failure_reason=reason)
+            logger.warning(reason)
+            return rejection(reason)
+
+        route = _PerpRouteState(provider=provider, apply_overlay=True)
+        self._perp_market_routes[key] = route
+        self._remember_engine_perp_provider(provider, None, False)
         self._backfill_first_use_perp_history(provider, market_state, config)
-        # The fill that triggered discovery prices from THIS tick's state.
-        overlay = getattr(provider, "overlay_market_state", None)
-        if overlay is not None:
-            overlay(market_state)
+        self._overlay_first_use_perp_provider(provider, market_state)
+        route.last_overlay_at = market_state.timestamp
         await self._prepare_first_use_funding_market(provider, venue, market)
         logger.info(
             "Prepared perp market %s (%s on %s) at first use: native cadence %s",
@@ -4671,6 +4752,7 @@ class PnLBacktester:
             chain,
             resolved,
         )
+        return None
 
     def _bind_pool_descriptors(self, descriptors: Iterable[Any]) -> None:
         """Bind preflight-authenticated exact pool identities to the adapter."""
@@ -4733,7 +4815,6 @@ class PnLBacktester:
             HistoricalPoolStateTarget,
             require_historical_pool_state,
         )
-        from almanak.framework.data.interfaces import DataSourceError
 
         remembered = getattr(source, "first_use_failure", None)
         if remembered is not None and remembered(chain, protocol, pool) is not None:
@@ -4744,7 +4825,7 @@ class PnLBacktester:
             target = HistoricalPoolStateTarget(chain, protocol, pool)
             enforce_window_feasibility(config, target_count=1)
             count = await source.materialize_history(target)
-        except (DataSourceError, PreflightValidationError, ValueError) as exc:
+        except Exception as exc:  # noqa: BLE001 — provider and validation failures reject this intent fail-closed
             reason = f"first-use exact-pool authentication failed for {chain}:{protocol}:{pool}: {exc}"
             remember = getattr(source, "remember_first_use_failure", None)
             if remember is not None:
@@ -5580,6 +5661,7 @@ class PnLBacktester:
         finally:
             if self.data_config is not None and original_strict_historical is not None:
                 self.data_config.strict_historical_mode = original_strict_historical
+            await self._release_engine_perp_providers()
             if self.close_providers_on_finish:
                 try:
                     await self.close()
@@ -5617,6 +5699,7 @@ class PnLBacktester:
         # each position's first accrual data gap in every run — a stale entry
         # here would silently suppress the once-per-position warning.
         self._accrual_data_gap_positions.clear()
+        self._reset_run_scoped_perp_routes()
 
         # Run preflight validation if enabled (no BacktestState yet, so a
         # PreflightValidationError propagates straight to the caller -- matches
@@ -5936,53 +6019,71 @@ class PnLBacktester:
         config: PnLBacktestConfig,
         data_quality_tracker: DataQualityTracker | None,
         strategy: Any,
-    ) -> None:
+        *,
+        delayed_at_end: bool = False,
+    ) -> int:
+        """Execute one pending item and return its number of terminal trade records."""
         from almanak.framework.intents.vocabulary import IntentSequence
 
-        if isinstance(intent, IntentSequence):
-            # Runner parity: members execute in order at this fill point, a
-            # dependent member's amount="all" comes from the PREVIOUS member's
-            # output (never the wallet), and the sequence stops at the first
-            # member that does not fill. Callbacks fire for exactly the
-            # members that were attempted.
-            previous_output = _SequenceMemberOutput()
-            for index, member in enumerate(intent.intents):
-                to_execute = self._sequence_member_with_chained_amount(member, index, previous_output)
-                if to_execute is None:
+        if not isinstance(intent, IntentSequence):
+            record = await self._execute_single_pending_intent(
+                intent,
+                decision_time,
+                portfolio,
+                market_state,
+                config,
+                data_quality_tracker,
+                strategy,
+                delayed_at_end=delayed_at_end,
+            )
+            return int(record is not None)
+
+        terminal_count = 0
+        previous_output = _SequenceMemberOutput()
+        for index, member in enumerate(intent.intents):
+            resolved = self._sequence_member_with_chained_amount(member, index, previous_output)
+            if resolved is None:
+                logger.warning(
+                    "Intent sequence %s stopped at member %d/%d at %s: amount='all' could not be "
+                    "resolved under runner-compatible chaining rules (intent_type=%s, protocol=%s)",
+                    getattr(intent, "sequence_id", "?"),
+                    index + 1,
+                    len(intent.intents),
+                    market_state.timestamp,
+                    self._get_intent_type(member).value,
+                    getattr(member, "protocol", None),
+                )
+                return terminal_count
+
+            record = await self._execute_single_pending_intent(
+                resolved,
+                decision_time,
+                portfolio,
+                market_state,
+                config,
+                data_quality_tracker,
+                strategy,
+                delayed_at_end=delayed_at_end,
+            )
+            if record is not None:
+                terminal_count += 1
+            if record is None or not record.success:
+                remaining = len(intent.intents) - index - 1
+                if remaining:
                     logger.warning(
-                        "Intent sequence %s stopped at member %d/%d at %s: amount='all' has no prior "
-                        "member output to resolve from",
+                        "Intent sequence %s stopped at member %d/%d at %s; %d dependent member(s) not executed",
                         getattr(intent, "sequence_id", "?"),
                         index + 1,
                         len(intent.intents),
                         market_state.timestamp,
+                        remaining,
                     )
-                    return
-                record = await self._execute_single_pending_intent(
-                    to_execute, decision_time, portfolio, market_state, config, data_quality_tracker, strategy
-                )
-                if record is None or not record.success:
-                    remaining = len(intent.intents) - index - 1
-                    if remaining:
-                        logger.warning(
-                            "Intent sequence %s stopped at member %d/%d at %s; %d dependent member(s) not executed",
-                            getattr(intent, "sequence_id", "?"),
-                            index + 1,
-                            len(intent.intents),
-                            market_state.timestamp,
-                            remaining,
-                        )
-                    return
-                previous_output = _SequenceMemberOutput(
-                    token_amount=record.actual_amount_out,
-                    lp_position_id=record.position_id
-                    if self._get_intent_type(to_execute) is IntentType.LP_OPEN
-                    else None,
-                )
-            return
-        await self._execute_single_pending_intent(
-            intent, decision_time, portfolio, market_state, config, data_quality_tracker, strategy
-        )
+                return terminal_count
+            previous_output = _SequenceMemberOutput(
+                token_amount=record.actual_amount_out,
+                lp_position_id=record.position_id if self._get_intent_type(resolved) is IntentType.LP_OPEN else None,
+            )
+        return terminal_count
 
     def _sequence_member_with_chained_amount(
         self,
@@ -6018,7 +6119,8 @@ class PnLBacktester:
                 lp_close_amount_chaining_supported,
             )
 
-            if not lp_close_amount_chaining_supported(getattr(member, "protocol", None)):
+            protocol = getattr(member, "protocol", None)
+            if not lp_close_amount_chaining_supported(protocol):
                 return None
             if index == 0 or not previous_output.lp_position_id:
                 return None
@@ -6042,8 +6144,10 @@ class PnLBacktester:
         config: PnLBacktestConfig,
         data_quality_tracker: DataQualityTracker | None,
         strategy: Any,
+        *,
+        delayed_at_end: bool = False,
     ) -> TradeRecord | None:
-        """Execute one canonical intent; ``None`` when an execution error was absorbed."""
+        """Execute one canonical intent and return its terminal record, if any."""
         trades_before_execution = len(portfolio.trades)
         try:
             trade_record = await self._execute_intent(
@@ -6052,18 +6156,19 @@ class PnLBacktester:
                 market_state=market_state,
                 timestamp=market_state.timestamp,
                 config=config,
+                delayed_at_end=delayed_at_end,
                 data_quality_tracker=data_quality_tracker,
             )
         except NoAcceptableDataSourceError as exc:
-            self._handle_pending_missing_data(
+            return self._handle_pending_missing_data(
                 intent,
                 strategy,
                 portfolio,
                 market_state.timestamp,
                 exc,
                 trades_before_execution=trades_before_execution,
+                delayed_at_end=delayed_at_end,
             )
-            return None
         except Exception as exc:
             self._handle_pending_execution_error(
                 intent,
@@ -6072,8 +6177,9 @@ class PnLBacktester:
                 market_state.timestamp,
                 exc,
                 trades_before_execution=trades_before_execution,
+                delayed_at_end=delayed_at_end,
             )
-            return None
+            return portfolio.trades[-1] if len(portfolio.trades) > trades_before_execution else None
 
         self._log_pending_trade_outcome(trade_record, decision_time, market_state.timestamp)
         # Notify strategy with the real outcome so state machines do not advance
@@ -6170,6 +6276,7 @@ class PnLBacktester:
         exc: Exception,
         *,
         trades_before_execution: int,
+        delayed_at_end: bool = False,
     ) -> None:
         if self._error_handler is None:
             trade_record = self._record_intent_execution_rejection(
@@ -6178,6 +6285,7 @@ class PnLBacktester:
                 timestamp,
                 exc,
                 trades_before_execution=trades_before_execution,
+                delayed_at_end=delayed_at_end,
             )
             _engine_helpers.notify_intent_outcome(self, strategy, intent, trade_record, logger)
             logger.warning(f"Failed to execute intent at {timestamp}: {exc}")
@@ -6196,6 +6304,7 @@ class PnLBacktester:
             timestamp,
             exc,
             trades_before_execution=trades_before_execution,
+            delayed_at_end=delayed_at_end,
         )
         _engine_helpers.notify_intent_outcome(self, strategy, intent, trade_record, logger)
         logger.warning(f"Failed to execute intent at {timestamp}: {exc} - skipping")
@@ -6341,7 +6450,9 @@ class PnLBacktester:
             # authenticated from archive state here, before the sync adapter
             # lane runs, so live-correct intents need no backtest declaration.
             await self._ensure_exact_pool_descriptor(intent, market_state, config)
-            await self._ensure_perp_market_route(intent, market_state, config)
+            route_rejection = await self._ensure_perp_market_route(intent, market_state, config)
+            if route_rejection is not None:
+                sizing_rejection = route_rejection
         adapter_record = (
             None
             if sizing_rejection is not None

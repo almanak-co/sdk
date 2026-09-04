@@ -6,9 +6,11 @@ runtime catalogue is the source of truth for which markets exist.
 
 from __future__ import annotations
 
+from datetime import datetime
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol, cast, runtime_checkable
 
-from almanak.framework.backtesting.pnl.data_provider import HistoricalDataProvider
+from almanak.framework.backtesting.pnl.data_provider import HistoricalDataProvider, MarketState, TokenRef
 
 if TYPE_CHECKING:
     from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
@@ -33,6 +35,27 @@ class PerpPriceHistoryProvider(HistoricalDataProvider, Protocol):
 
     @property
     def price_history_targets(self) -> tuple[tuple[str, str, str], ...]: ...
+
+    @property
+    def resolved_price_history_markets(self) -> tuple[tuple[str, str], ...]:
+        """Return authenticated ``(market_label, market_address)`` pairs."""
+        ...
+
+    def tick_close_history_before(
+        self,
+        *,
+        start_time: datetime,
+        end_time: datetime,
+        interval_seconds: int,
+    ) -> dict[str, list[Decimal]]: ...
+
+    def overlay_market_state(self, state: MarketState) -> tuple[TokenRef, ...]:
+        """Overlay venue marks and return every token identity written."""
+        ...
+
+    async def close_backtest_overlay(self) -> None:
+        """Release resources owned by this wrapper without closing its fallback."""
+        ...
 
 
 class PerpPriceHistoryProviderFactory(Protocol):

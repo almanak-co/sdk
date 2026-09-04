@@ -128,6 +128,33 @@ class TestClassifier:
         assert "PERP_OPEN (2 rejected)" in error
         assert verdict.reasons[0].details["families"] == {"PERP_OPEN": {"fills": 0, "rejected": 2}}
 
+    def test_partial_perp_rejection_remains_valid_after_same_family_filled(self):
+        summary = _summary(
+            intent_ticks=2,
+            fills=1,
+            rejected=1,
+            by_type={"PERP_OPEN": {"fills": 1, "rejected": 1}},
+            rejections=[{"intent_type": "PERP_OPEN", "rejection_code": "INSUFFICIENT_MARGIN"}],
+        )
+        verdict = _classify(decision_summary=summary, executed_fills=1)
+
+        assert verdict.validity is RunValidity.VALID
+        assert verdict.reasons == ()
+        assert terminal_errors(verdict) == []
+
+    def test_partial_non_perp_rejection_remains_valid(self):
+        summary = _summary(
+            intent_ticks=2,
+            fills=1,
+            rejected=1,
+            by_type={"SWAP": {"fills": 1, "rejected": 1}},
+            rejections=[{"intent_type": "SWAP", "rejection_code": "INSUFFICIENT_BALANCE"}],
+        )
+        verdict = _classify(decision_summary=summary, executed_fills=1)
+
+        assert verdict.validity is RunValidity.VALID
+        assert verdict.reasons == ()
+
     def test_persistent_starvation_without_action_is_not_evaluable(self):
         # 9 of 10 ticks is "persistent" but not 100%: the old predicate let
         # this run through as a successful hold.

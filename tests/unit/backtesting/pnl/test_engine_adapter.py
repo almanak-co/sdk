@@ -220,7 +220,7 @@ async def test_snapshot_funding_is_prewarmed_from_declared_strategy_target() -> 
             calls.append((venue, market, market_address))
             return 1
 
-    await _engine_helpers._prewarm_declared_funding_history(
+    await _engine_helpers._prewarm_funding_history(
         _FundingSource(),
         strategy,
         {"funding_market": "ETH-USD"},
@@ -249,7 +249,7 @@ async def test_snapshot_funding_prewarm_isolates_data_source_failure_per_target(
             return 1
 
     with caplog.at_level("WARNING", logger=_engine_helpers.__name__):
-        await _engine_helpers._prewarm_declared_funding_history(
+        await _engine_helpers._prewarm_funding_history(
             _FundingSource(),
             strategy,
             {"funding_market": "ETH-USD"},
@@ -271,11 +271,31 @@ async def test_readiness_funding_prewarm_propagates_data_source_failure() -> Non
             raise DataSourceUnavailable(source=venue, reason="archive unavailable")
 
     with pytest.raises(DataSourceUnavailable, match="archive unavailable"):
-        await _engine_helpers._prewarm_declared_funding_history(
+        await _engine_helpers._prewarm_funding_history(
             _FundingSource(),
             strategy,
             {"funding_market": "ETH-USD"},
             require_complete=True,
+        )
+
+
+@pytest.mark.asyncio
+async def test_strict_funding_prewarm_propagates_unexpected_provider_failure() -> None:
+    strategy = MockStrategy(protocols=["gmx_v2"])
+
+    class _FundingSource:
+        history_capable = True
+
+        async def materialize_history(self, venue: str, _market: str, _market_address: str) -> int:
+            raise RuntimeError(f"{venue} provider defect")
+
+    with pytest.raises(RuntimeError, match="gmx_v2 provider defect"):
+        await _engine_helpers._prewarm_funding_history(
+            _FundingSource(),
+            strategy,
+            {},
+            require_complete=True,
+            prepared_targets=(PerpPriceHistoryTarget(protocol="gmx_v2", market="ETH-USD"),),
         )
 
 
@@ -295,9 +315,7 @@ async def test_first_use_funding_materialization_is_idempotent() -> None:
             materializations.append((venue, market, market_address))
             return 24
 
-    provider = SimpleNamespace(
-        _sources=(SimpleNamespace(resolved_market="ETH/USD", market_token=address),),
-    )
+    provider = SimpleNamespace(resolved_price_history_markets=(("ETH/USD", address),))
     backtester = PnLBacktester(
         data_provider=MockDataProvider(),
         fee_models={"default": DefaultFeeModel()},
@@ -313,6 +331,77 @@ async def test_first_use_funding_materialization_is_idempotent() -> None:
     assert registrations == expected
     assert materializations == expected
     assert backtester._funding_prepared_perp_markets == {("gmx_v2", "ETH/USD", address)}
+
+
+@pytest.mark.asyncio
+async def test_first_use_funding_failure_uses_fallback_and_is_memoized() -> None:
+    from almanak.framework.backtesting.config import BacktestDataConfig
+
+    address = "0x" + "7" * 40
+    attempts = 0
+
+    class _FundingSource:
+        def _register_market_address(self, venue: str, market: str, market_address: str) -> None:
+            pass
+
+        async def materialize_history(self, venue: str, market: str, market_address: str) -> int:
+            nonlocal attempts
+            attempts += 1
+            raise RuntimeError("provider bug")
+
+    provider = SimpleNamespace(resolved_price_history_markets=(("ETH/USD", address),))
+    backtester = PnLBacktester(
+        data_provider=MockDataProvider(),
+        fee_models={"default": DefaultFeeModel()},
+        slippage_models={"default": DefaultSlippageModel()},
+        data_config=BacktestDataConfig(use_historical_funding=True),
+    )
+    backtester._bind_funding_history_source(_FundingSource())
+
+    await backtester._prepare_first_use_funding_market(provider, "gmx_v2", address)
+    await backtester._prepare_first_use_funding_market(provider, "gmx_v2", address)
+
+    assert attempts == 1
+    assert backtester._funding_prepared_perp_markets == {("gmx_v2", "ETH/USD", address)}
+
+
+@pytest.mark.asyncio
+async def test_first_use_funding_registration_failure_uses_fallback_and_is_memoized() -> None:
+    from almanak.framework.backtesting.config import BacktestDataConfig
+
+    address = "0x" + "8" * 40
+    attempts = 0
+
+    class _FundingSource:
+        def _register_market_address(self, venue: str, market: str, market_address: str) -> None:
+            nonlocal attempts
+            attempts += 1
+            raise RuntimeError("invalid market metadata")
+
+    provider = SimpleNamespace(resolved_price_history_markets=(("ETH/USD", address),))
+    backtester = PnLBacktester(
+        data_provider=MockDataProvider(),
+        fee_models={"default": DefaultFeeModel()},
+        slippage_models={"default": DefaultSlippageModel()},
+        data_config=BacktestDataConfig(use_historical_funding=True),
+    )
+    backtester._bind_funding_history_source(_FundingSource())
+
+    await backtester._prepare_first_use_funding_market(provider, "gmx_v2", address)
+    await backtester._prepare_first_use_funding_market(provider, "gmx_v2", address)
+
+    assert attempts == 1
+    assert backtester._funding_prepared_perp_markets == {("gmx_v2", "ETH/USD", address)}
+
+
+def test_symbolic_perp_market_keeps_the_existing_price_plane() -> None:
+    identity = PnLBacktester._first_use_perp_identity(
+        SimpleNamespace(market="ETH/USD", protocol="gmx_v2", chain="arbitrum"),
+        SimpleNamespace(chain="arbitrum"),
+        SimpleNamespace(chain="arbitrum"),
+    )
+
+    assert identity is None
 
 
 def test_detect_strategy_type_perp(backtester, registered_adapters):
@@ -1532,9 +1621,11 @@ def test_perp_integrity_wording_requires_an_explicit_hedge_mandate() -> None:
     assert hedged is not None and hedged.startswith("Hedge integrity:")
 
 
-def test_hedge_mandate_is_detected_only_from_explicit_metadata_tags() -> None:
+def test_hedge_mandate_uses_exact_normalized_metadata_tags() -> None:
     directional = SimpleNamespace(STRATEGY_METADATA=SimpleNamespace(tags=["directional", "perp"]))
-    hedged = SimpleNamespace(STRATEGY_METADATA=SimpleNamespace(tags=["delta-neutral", "hedged-lp"]))
+    hedged = SimpleNamespace(STRATEGY_METADATA=SimpleNamespace(tags=["delta_neutral", "hedged lp"]))
+    misleading = SimpleNamespace(STRATEGY_METADATA=SimpleNamespace(tags=["unhedged", "hedgeless"]))
 
     assert _engine_helpers._strategy_declares_hedge(directional) is False
     assert _engine_helpers._strategy_declares_hedge(hedged) is True
+    assert _engine_helpers._strategy_declares_hedge(misleading) is False

@@ -1046,7 +1046,7 @@ def test_unprovable_exact_pool_stays_fail_closed_at_first_use(monkeypatch: pytes
 
     def archive_fetch(**kwargs):
         fetch_calls.append(kwargs)
-        raise ValueError("archive RPC unavailable for the requested window")
+        raise RuntimeError("archive RPC unavailable for the requested window")
 
     result, _strategy, bound_descriptors, _tokens = _first_use_exact_pool_run(
         monkeypatch, archive_fetch, exact_pool=exact_pool
@@ -1064,7 +1064,7 @@ _GMX_ETH_MARKET = "0x70d95587d40a2caf56bd97485ab3eec10bee6336"
 _ARB_WETH = "0x82af49447d8a07e3bd95bd0d56f35241523fbab1"
 
 
-def _first_use_perp_strategy():
+def _first_use_perp_strategy(*, intent_market: str = _GMX_ETH_MARKET, repeat: bool = False):
     """Perp strategy that names its GMX market only in the intent — no config key, no hook."""
     from almanak.framework.intents import Intent
 
@@ -1085,9 +1085,9 @@ def _first_use_perp_strategy():
                 self.weth_reads.append(market.price(_ARB_WETH))
             except Exception as exc:  # noqa: BLE001 — unpriced before first use, by design
                 self.weth_reads.append(exc)
-            if self.ticks == 2:
+            if self.ticks == 2 or (repeat and self.ticks > 2):
                 return Intent.perp_open(
-                    market=_GMX_ETH_MARKET,
+                    market=intent_market,
                     collateral_token=USDC_ARBITRUM,
                     collateral_amount=Decimal("1000"),
                     size_usd=Decimal("5000"),
@@ -1154,7 +1154,8 @@ def _gmx_page(timeframe: str, opens: list, close: str = "2000") -> SimpleNamespa
 
 @pytest.mark.trust_cell("perp:market_first_use_discovery")
 def test_perp_market_is_prepared_at_first_use_without_declaration(
-    monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
 ) -> None:
     """An undeclared GMX market is prepared from venue candles when the PERP_OPEN names it."""
     hours = 4
@@ -1189,10 +1190,16 @@ def test_perp_market_is_prepared_at_first_use_without_declaration(
     assert "1h" in fetch_calls  # the venue plane was fetched, triggered by the intent, not preflight
     assert len(result.trades) == 1 and result.trades[0].success
     assert result.trades[0].executed_price == Decimal("2000")  # the venue close, never a $1 mark
-    # Before first use the index was unpriced (same as before this change); after it, every
-    # tick's snapshot serves the venue series under the index token's address.
     assert not isinstance(strategy.weth_reads[-1], Exception)
     assert Decimal(str(strategy.weth_reads[-1])) == Decimal("2000")
+    assert result.data_manifest is not None
+    dynamic_prices = [
+        entry
+        for entry in result.data_manifest["entries"]
+        if entry["lane"] == LANE_PRICE and entry["source"] == "gmx_oracle_candles"
+    ]
+    assert len(dynamic_prices) == 1
+    assert dynamic_prices[0]["key"] == f"arbitrum:{_ARB_WETH}"
     from almanak.connectors.gmx_v2 import market_catalog
 
     assert market_catalog.by_address("arbitrum", _GMX_ETH_MARKET) is not None
@@ -1204,27 +1211,52 @@ def test_unservable_perp_market_stays_fail_closed_at_first_use(
 ) -> None:
     """Venue history failing at first use overlays nothing; the open keeps its named rejection."""
     hours = 4
+    fetch_calls: list[str] = []
 
     async def fetch_page(self, *, timeframe: str, before_ts: int, limit: int) -> SimpleNamespace:
         from almanak.connectors.gmx_v2.backtest_prices import GMXPriceHistoryCoverageError
 
+        fetch_calls.append(timeframe)
         raise GMXPriceHistoryCoverageError("no native cadence covers the window")
 
     _stub_gmx_first_use_plane(monkeypatch, request, fetch_page=fetch_page)
-    strategy = _first_use_perp_strategy()
+    from almanak.connectors.gmx_v2 import market_catalog
+    from almanak.connectors.gmx_v2.market_metadata import ResolvedGmxMarket
+
+    market_catalog.remember(
+        "arbitrum",
+        ResolvedGmxMarket(
+            label="ETH/USD",
+            market_token=_GMX_ETH_MARKET,
+            index_token=_ARB_WETH,
+            index_symbol="ETH",
+            index_token_decimals=18,
+            long_token=_ARB_WETH,
+            long_token_symbol="WETH",
+            long_token_decimals=18,
+            short_token=USDC_ARBITRUM,
+            short_token_symbol="USDC",
+            short_token_decimals=6,
+        ),
+    )
+    strategy = _first_use_perp_strategy(repeat=True)
     result = run_backtest(
         strategy,
-        {"USDC": [Decimal("1")] * (hours + 1)},
+        {
+            "USDC": [Decimal("1")] * (hours + 1),
+            ("arbitrum", _ARB_WETH): [Decimal("999")] * (hours + 1),
+        },
         hours,
         strategy_type="perp",
         data_config=BacktestDataConfig(use_historical_funding=False, funding_fallback_rate=Decimal("0")),
-        tokens=[("arbitrum", USDC_ARBITRUM)],
+        token_addresses={"WETH": ("arbitrum", _ARB_WETH)},
     )
     assert not result.success
     assert result.error is not None and result.error.startswith("BACKTEST_EXECUTION_REJECTED:")
-    assert len(result.trades) == 1 and not result.trades[0].success
-    assert "not priceable" in str(result.trades[0].metadata.get("failure_reason", ""))
-    assert all(isinstance(read, Exception) for read in strategy.weth_reads)
+    assert len(result.trades) == hours and all(not trade.success for trade in result.trades)
+    assert result.trades[0].metadata["rejection_code"] == "UNPRICEABLE"
+    assert {Decimal(str(read)) for read in strategy.weth_reads} == {Decimal("999")}
+    assert fetch_calls and len(fetch_calls) == len(set(fetch_calls))
 
 
 def _usdc_to_weth(amount_usd: str):
@@ -1360,9 +1392,50 @@ def test_intent_sequence_chains_lp_close_to_the_opened_simulated_position() -> N
     }
 
 
-@pytest.mark.trust_cell("perp:rejected_perp_flags_compliance")
-def test_rejected_directional_perp_open_is_typed_and_flags_execution_integrity() -> None:
+@pytest.mark.trust_cell("swap:intent_sequence_delayed_at_end")
+def test_intent_sequence_executes_through_final_tick_drain() -> None:
     from almanak.framework.intents import Intent
+
+    sequence = Intent.sequence([_usdc_to_weth("1000"), _usdc_to_weth("500")])
+    strategy = _CallbackRecorder([None, sequence])
+    result = run_backtest(strategy, flat_series(3), hours=1)
+
+    assert result.success, result.error
+    assert [trade.success for trade in result.trades] == [True, True]
+    assert all(trade.delayed_at_end for trade in result.trades)
+    assert result.execution_delayed_at_end == 2
+    assert [ok for _, ok in strategy.callbacks] == [True, True]
+
+
+def test_intent_sequence_unresolved_output_stops_without_a_fabricated_terminal_record() -> None:
+    from almanak.framework.intents import Intent
+
+    unsupported_close = Intent.lp_close(
+        position_id="missing",
+        pool="WETH/USDC/500",
+        protocol="uniswap_v3",
+        chain="arbitrum",
+        amount="all",
+    )
+    strategy = _CallbackRecorder([Intent.sequence([_usdc_to_weth("1000"), unsupported_close])])
+    result = run_backtest(strategy, flat_series(6), hours=3)
+
+    assert result.success, result.error
+    assert [trade.success for trade in result.trades] == [True]
+    assert [ok for _, ok in strategy.callbacks] == [True]
+    assert "LP_CLOSE" not in result.decision_summary["execution_by_intent_type"]
+
+
+@pytest.mark.trust_cell("perp:rejected_perp_flags_compliance")
+def test_rejected_directional_perp_open_is_typed_and_flags_execution_integrity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from almanak.connectors._strategy_base.perp_price_history_registry import PerpPriceHistoryRegistry
+    from almanak.framework.intents import Intent
+
+    # Connector-native history has dedicated first-use cells. Keep this one a
+    # network-free proof of the independent portfolio-margin rejection lane.
+    monkeypatch.setattr(PerpPriceHistoryRegistry, "has", classmethod(lambda cls, protocol: False))
 
     def gmx_open(size_usd: str, collateral: str):
         return Intent.perp_open(
@@ -1380,9 +1453,10 @@ def test_rejected_directional_perp_open_is_typed_and_flags_execution_integrity()
         ScriptedStrategy([gmx_open("5000", "1000"), None, gmx_open("100000", "20000")]),
         flat_series(10),
         hours=5,
-        strategy_type="perp",  # the perp adapter's margin validator is the lane that rejected on prod
+        strategy_type="perp",
     )
-    assert result.success, result.error  # one hedge filled, so the family is not all-rejected
+
+    assert result.success, result.error  # one perp open filled, so the family is not all-rejected
     rejected = [trade for trade in result.trades if not trade.success]
     assert len(rejected) == 1
     assert rejected[0].metadata["rejection_code"] == "INSUFFICIENT_CAPITAL"

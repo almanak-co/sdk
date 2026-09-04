@@ -268,7 +268,9 @@ class MockPerpOpenIntent:
     token: str
     collateral_usd: Decimal
     leverage: Decimal
-    protocol: str = "gmx_v2"
+    market: str = "ETH/USD"
+    side: str = "long"
+    protocol: str = "default"
 
     @classmethod
     def long(cls, token: str, collateral_usd: Decimal, leverage: Decimal) -> "MockPerpOpenIntent":
@@ -277,6 +279,7 @@ class MockPerpOpenIntent:
             token=token,
             collateral_usd=collateral_usd,
             leverage=leverage,
+            side="long",
         )
 
     @classmethod
@@ -286,6 +289,7 @@ class MockPerpOpenIntent:
             token=token,
             collateral_usd=collateral_usd,
             leverage=leverage,
+            side="short",
         )
 
 
@@ -295,6 +299,9 @@ class MockPerpCloseIntent:
 
     intent_type: str = "PERP_CLOSE"
     position_id: str = ""
+    market: str = "ETH/USD"
+    side: str = "long"
+    protocol: str = "default"
 
 
 @dataclass
@@ -433,7 +440,7 @@ class SMACrossoverPerpStrategy:
                     liquidation_price=self._calculate_liquidation_price(entry or eth_price, is_long=True),
                 )
             )
-            return MockPerpCloseIntent()
+            return MockPerpCloseIntent(side="long")
 
         elif self._current_position == "SHORT" and price_above_sma:
             # Close short - price crossed above SMA
@@ -451,7 +458,7 @@ class SMACrossoverPerpStrategy:
                     liquidation_price=self._calculate_liquidation_price(entry or eth_price, is_long=False),
                 )
             )
-            return MockPerpCloseIntent()
+            return MockPerpCloseIntent(side="short")
 
         # If no position, check for open signal
         if self._current_position is None:

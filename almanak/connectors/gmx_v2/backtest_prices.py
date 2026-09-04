@@ -966,7 +966,7 @@ class GMXOracleDataProvider:
             current += interval
         return history
 
-    def overlay_market_state(self, state: MarketState) -> None:
+    def overlay_market_state(self, state: MarketState) -> tuple[TokenRef, ...]:
         """Merge this provider's venue-owned index prices into an existing tick state.
 
         First-use discovery (an undeclared perp market named by an intent
@@ -983,6 +983,7 @@ class GMXOracleDataProvider:
         """
         aliases: dict[str, Any] = {}
         provenance: list[dict[str, str | None]] = []
+        overlaid: list[TokenRef] = []
         for source in self._sources:
             if source.index_token is None or source.timeframe is None:
                 continue
@@ -998,6 +999,7 @@ class GMXOracleDataProvider:
                 source="gmx_oracle_candles",
                 confidence=DataConfidence.HIGH,
             )
+            overlaid.append(key)
             alias_symbol = source.alias_symbol()
             if alias_symbol is not None:
                 aliases[alias_symbol] = key
@@ -1006,6 +1008,7 @@ class GMXOracleDataProvider:
             state.register_symbol_aliases(aliases)
         if provenance:
             state.metadata.setdefault("gmx_oracles_first_use", []).extend(provenance)
+        return tuple(dict.fromkeys(overlaid))
 
     async def iterate(self, config: HistoricalDataConfig) -> AsyncIterator[tuple[datetime, MarketState]]:
         self._cache = await self._prefetch(config)
@@ -1023,6 +1026,9 @@ class GMXOracleDataProvider:
             result = close()
             if asyncio.iscoroutine(result):
                 await result
+
+    async def close_backtest_overlay(self) -> None:
+        """GMX wrappers own no resources independently of their fallback."""
 
     @property
     def provider_name(self) -> str:
@@ -1065,6 +1071,12 @@ class GMXOracleDataProvider:
     @property
     def price_history_targets(self) -> tuple[tuple[str, str, str], ...]:
         return tuple((source.venue, self._chain, source.requested_market) for source in self._sources)
+
+    @property
+    def resolved_price_history_markets(self) -> tuple[tuple[str, str], ...]:
+        return tuple(
+            (source.resolved_market or source.requested_market, source.market_token or "") for source in self._sources
+        )
 
     @property
     def required_price_tokens(self) -> tuple[TokenRef, ...]:

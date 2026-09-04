@@ -68,6 +68,7 @@ from almanak.framework.backtesting.pnl.calculators.liquidation import (
     LiquidationCalculator,
 )
 from almanak.framework.backtesting.pnl.calculators.margin import (
+    MarginRejection,
     MarginValidator,
 )
 from almanak.framework.backtesting.pnl.data_provider import (
@@ -82,6 +83,7 @@ from almanak.framework.backtesting.pnl.providers.funding_rates import (
     DEFAULT_FUNDING_RATE,
     FundingRateProvider,
 )
+from almanak.framework.backtesting.pnl.sizing import RejectionCode
 from almanak.framework.data.funding import FundingRateUnavailableError
 
 if TYPE_CHECKING:
@@ -103,6 +105,12 @@ logger = logging.getLogger(__name__)
 
 # Wildcard chain key for injected funding providers (chain-agnostic seam).
 _ANY_CHAIN = "*"
+
+_MARGIN_REJECTION_CODES = {
+    MarginRejection.INSUFFICIENT_MARGIN: RejectionCode.INSUFFICIENT_MARGIN,
+    MarginRejection.INSUFFICIENT_CAPITAL: RejectionCode.INSUFFICIENT_CAPITAL,
+    MarginRejection.MARGIN_UTILIZATION_EXCEEDED: RejectionCode.MARGIN_UTILIZATION_EXCEEDED,
+}
 
 
 @dataclass
@@ -878,19 +886,7 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
         )
 
         if not can_open:
-            from almanak.framework.backtesting.pnl.calculators.margin import MarginRejection
-            from almanak.framework.backtesting.pnl.sizing import RejectionCode
-
-            # The validator names the check that refused; rewording its message
-            # must never change what the decision log and the compliance lane
-            # read back.
-            typed_codes = {
-                MarginRejection.INSUFFICIENT_MARGIN: RejectionCode.INSUFFICIENT_MARGIN,
-                MarginRejection.INSUFFICIENT_CAPITAL: RejectionCode.INSUFFICIENT_CAPITAL,
-                MarginRejection.MARGIN_UTILIZATION_EXCEEDED: RejectionCode.MARGIN_UTILIZATION_EXCEEDED,
-            }
-            resolved = typed_codes.get(margin_rejection) if margin_rejection is not None else None
-            rejection_code = (resolved or RejectionCode.INSUFFICIENT_BALANCE).value
+            rejection_code = _MARGIN_REJECTION_CODES.get(margin_rejection, RejectionCode.INSUFFICIENT_BALANCE).value
             return self._perp_margin_failure_fill(
                 params,
                 market_state,

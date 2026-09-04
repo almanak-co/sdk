@@ -97,14 +97,20 @@ class _SelectiveExactStateView(_ExactStateView):
         declared_pool: str,
         *,
         failure_reason: str = "exact pool was not declared and prewarmed",
+        exact_pool_unavailable: bool = False,
     ) -> None:
         self.declared_pool = declared_pool.lower()
         self.failure_reason = failure_reason
+        self.exact_pool_unavailable = exact_pool_unavailable
 
     def read_pool_tvl_usd(self, *, pool_address: str, **kwargs):
         del kwargs
         if pool_address.lower() != self.declared_pool:
-            raise PoolPriceUnavailableError(pool_address, self.failure_reason)
+            raise PoolPriceUnavailableError(
+                pool_address,
+                self.failure_reason,
+                exact_pool_unavailable=self.exact_pool_unavailable,
+            )
         return super().read_pool_tvl_usd()
 
 
@@ -218,7 +224,11 @@ class TestServeContract:
         reader.bind(
             TICK,
             market_state=MarketState(timestamp=TICK, prices={}, chain="ethereum"),
-            pool_state_view=_SelectiveExactStateView(BSC_POOL),
+            pool_state_view=_SelectiveExactStateView(
+                BSC_POOL,
+                failure_reason="archive identity is unavailable",
+                exact_pool_unavailable=True,
+            ),
         )
 
         envelope = reader.get_pool_analytics(POOL, "ethereum", protocol="uniswap_v3")

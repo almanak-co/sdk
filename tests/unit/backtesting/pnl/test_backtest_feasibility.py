@@ -357,6 +357,25 @@ def test_strategy_cadence_is_read_from_data_granularity() -> None:
     assert _engine_helpers._strategy_cadence_seconds({"data_granularity": 14400}) is None
 
 
+def test_first_use_feasibility_forwards_strategy_cadence(monkeypatch: pytest.MonkeyPatch) -> None:
+    config = _config(1)
+    calls: list[tuple[PnLBacktestConfig, int, int | None]] = []
+
+    def capture(
+        received_config: PnLBacktestConfig,
+        *,
+        target_count: int,
+        strategy_cadence_seconds: int | None,
+    ) -> None:
+        calls.append((received_config, target_count, strategy_cadence_seconds))
+
+    monkeypatch.setattr(_engine_helpers, "enforce_window_feasibility", capture)
+
+    _engine_helpers._first_use_feasibility(config, {"data_granularity": "4h"})()
+
+    assert calls == [(config, 1, 4 * _HOUR)]
+
+
 def test_more_targets_shrink_the_recommended_window() -> None:
     knobs = _knobs()
     ticks_one = max_feasible_ticks(target_count=1, knobs=knobs)
