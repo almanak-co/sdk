@@ -223,7 +223,9 @@ async def test_readiness_fails_closed_on_later_missing_price_without_running_str
 async def test_readiness_requires_complete_declared_funding_coverage(monkeypatch: pytest.MonkeyPatch) -> None:
     require_complete_values: list[bool] = []
 
-    async def prewarm(_source, _strategy, _strategy_config, *, require_complete: bool = False) -> None:
+    async def prewarm(
+        _source, _strategy, _strategy_config, *, require_complete: bool = False, prepared_targets=()
+    ) -> None:
         require_complete_values.append(require_complete)
 
     monkeypatch.setattr(_engine_helpers, "_prewarm_declared_funding_history", prewarm)
@@ -673,7 +675,9 @@ async def test_strict_runner_repeats_funding_coverage_before_decide(monkeypatch:
     )
     require_complete_values: list[bool] = []
 
-    async def unavailable(_source, _strategy, _strategy_config, *, require_complete: bool = False) -> None:
+    async def unavailable(
+        _source, _strategy, _strategy_config, *, require_complete: bool = False, prepared_targets=()
+    ) -> None:
         require_complete_values.append(require_complete)
         raise RuntimeError("declared GMX funding coverage unavailable")
 

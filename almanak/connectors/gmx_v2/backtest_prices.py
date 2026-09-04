@@ -492,11 +492,20 @@ class _GMXOracleMarketSource:
             raise ValueError("GMX oracle request falls outside the prepared backtest window")
 
     def price_at(self, timestamp: datetime) -> Decimal:
+        return self.candle_at(timestamp).close
+
+    def candle_at(self, timestamp: datetime) -> Any:
+        """The candle in force at ``timestamp`` -- the latest at or before it.
+
+        Callers that publish an observation need the candle's OWN timestamp:
+        when the venue cadence is coarser than the simulation tick, stamping
+        the tick would make an older mark look freshly measured.
+        """
         target = _utc(timestamp)
         index = bisect.bisect_right(self._series_timestamps, target) - 1
         if index < 0:
             raise ValueError(f"No GMX oracle price for {self.index_symbol} at {target.isoformat()}")
-        return self._series[index].close
+        return self._series[index]
 
     @property
     def provenance(self) -> dict[str, str | None]:
@@ -598,6 +607,7 @@ class GMXOracleDataProvider:
                 end=config.end_time,
             )
         resolved_seconds = parse_ohlcv_timeframe(resolved, field_name="resolved GMX timeframe").seconds
+        self.measured_granularity_seconds = resolved_seconds
         config.apply_resolved_timeframe(resolved, resolved_seconds)
         # Sole priming path for the process perps-read catalog, which only the
         # (never-run-in-backtest) compiler otherwise populates. Deliberately
@@ -921,6 +931,81 @@ class GMXOracleDataProvider:
         if "coingecko" in source_lower:
             return DataConfidence.MEDIUM
         return DataConfidence.LOW
+
+    def tick_close_history_before(
+        self,
+        *,
+        start_time: datetime,
+        end_time: datetime,
+        interval_seconds: int,
+    ) -> dict[str, list[Decimal]]:
+        """Return venue closes on the simulation grid strictly before ``end_time``.
+
+        This is the lazy-route counterpart of ``iterate()``. It deliberately
+        samples each already-prepared native candle with ``candle_at`` so a 4h
+        series under 1h ticks has the same flat-within-period shape as a market
+        declared before tick 1. No observation at or after the active tick is
+        exposed, preserving the normal loop's no-lookahead boundary.
+        """
+        if interval_seconds <= 0:
+            raise ValueError("simulation interval_seconds must be positive")
+        history: dict[str, list[Decimal]] = {}
+        current = _utc(start_time)
+        boundary = _utc(end_time)
+        interval = timedelta(seconds=interval_seconds)
+        while current < boundary:
+            for source in self._sources:
+                if source.index_token is None:
+                    continue
+                key = token_ref_display(normalize_token_key(self._chain, source.index_token))
+                try:
+                    candle = source.candle_at(current)
+                except ValueError:
+                    continue
+                history.setdefault(key, []).append(candle.close)
+            current += interval
+        return history
+
+    def overlay_market_state(self, state: MarketState) -> None:
+        """Merge this provider's venue-owned index prices into an existing tick state.
+
+        First-use discovery (an undeclared perp market named by an intent
+        mid-run) cannot re-wrap the run's data provider, whose ``iterate()`` is
+        already streaming. The engine instead keeps the lazily prepared
+        provider aside and asks it to overlay each tick: the same
+        address-native key, provenance and read alias ``_market_state_at``
+        publishes. The venue-owned index series is authoritative — it replaces
+        a spot-provider price for the same identity exactly as the declared
+        path's ``_prefetch`` discards the fallback series for an owned key
+        (blueprint 31: the GMX index asset never stitches or falls back) — so a
+        market discovered at first use marks identically to one declared up
+        front.
+        """
+        aliases: dict[str, Any] = {}
+        provenance: list[dict[str, str | None]] = []
+        for source in self._sources:
+            if source.index_token is None or source.timeframe is None:
+                continue
+            key = normalize_token_key(self._chain, source.index_token)
+            try:
+                candle = source.candle_at(state.timestamp)
+            except ValueError:
+                continue
+            state.prices[key] = candle.close
+            state.price_observations[key] = HistoricalPriceObservation(
+                price=candle.close,
+                timestamp=candle.timestamp,
+                source="gmx_oracle_candles",
+                confidence=DataConfidence.HIGH,
+            )
+            alias_symbol = source.alias_symbol()
+            if alias_symbol is not None:
+                aliases[alias_symbol] = key
+            provenance.append(source.provenance)
+        if aliases:
+            state.register_symbol_aliases(aliases)
+        if provenance:
+            state.metadata.setdefault("gmx_oracles_first_use", []).extend(provenance)
 
     async def iterate(self, config: HistoricalDataConfig) -> AsyncIterator[tuple[datetime, MarketState]]:
         self._cache = await self._prefetch(config)

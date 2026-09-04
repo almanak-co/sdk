@@ -657,6 +657,11 @@ class MultiProtocolBacktestAdapter(StrategyBacktestAdapter):
         if bind is not None:
             bind(descriptors)
 
+    def has_pool_descriptor(self, intent: "Intent") -> bool:
+        """Whether the LP sub-adapter already holds the intent's exact-pool descriptor."""
+        query = getattr(self._sub_adapters.get("lp"), "has_pool_descriptor", None)
+        return bool(query(intent)) if query is not None else False
+
     async def prewarm_history(
         self,
         intent: "Intent",

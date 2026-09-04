@@ -371,6 +371,34 @@ Two contract points that are easy to get wrong:
 - **Teardown is one-shot.** The list returned by `generate_teardown_intents()` is the *entire* unwind plan — the framework executes it and stops. There are no follow-up `decide()` iterations, and no "next pass" that continues a partial unwind. A strategy that returns only its LP close and assumes the borrow/supply legs get repaid "on a subsequent iteration" strands live debt and collateral. If exact downstream amounts aren't knowable up front (e.g. how much WETH an LP close returns), use `amount="all"` / `repay_full=True` style intents rather than deferring legs to an iteration that will never run. For leveraged positions, `almanak.framework.teardown.generate_lending_unwind(...)` builds the sanctioned repay-and-withdraw sequence — compose it: `[lp_close_intent, *generate_lending_unwind(...)]`.
 - **Report every leg in `get_open_positions()`.** A leveraged LP strategy holds three positions — the LP (`PositionType.LP`), the debt (`PositionType.BORROW`), and the collateral (`PositionType.SUPPLY`) — and all of them belong in the `TeardownPositionSummary`. The framework's teardown-completeness verification compares closed positions against this summary; omitting the lending legs blinds that check, and a half-unwound position gets reported as cleanly COMPLETED.
 
+## Backtesting Exact Pools and Perp Markets
+
+If your config already names the pool (`pool` or `swap_pool`) or the perp market (`market`
+and `market_address`), the backtester uses that as a hint to load the venue's history before the first tick.
+The hint is optional and can never fail a run: anything it misses is resolved the first time an intent or a
+read names it.
+
+Write your strategy for live execution and backtest the same code. The
+backtester learns which pool or perp market you trade from the intents you
+emit — the `pool` on `Intent.lp_open()` and the `market` on
+`Intent.perp_open()` — not from config keys, so name your config fields however
+you like.
+
+- An exact pool address is authenticated from archive state the first time an
+  LP intent names it (token pair, fee tier, and the factory round-trip). If the
+  archive cannot prove the pool, the intent is rejected with
+  `POOL_METADATA_UNAVAILABLE`; nothing silently falls back to another pool.
+  Symbolic pools (`"WETH/USDC/500"`) work as well.
+- A GMX market address is resolved through the venue catalogue and its candle
+  and funding history is loaded the first time a perp intent names it.
+- `market.twap(...)` and pool-analytics reads that name an exact pool fetch its
+  history inline on first use, like a live RPC.
+
+Declaring targets up front is optional. Implement
+`get_backtest_pool_state_targets()` (or set a `backtest_pool_state_targets`
+attribute) and `backtest_perp_price_history_targets()` if you want the
+readiness check to verify them before the run starts.
+
 ## Unit Testing Strategies
 
 Build test snapshots with the real `MarketSnapshot` seeding API — not `unittest.mock.MagicMock`:

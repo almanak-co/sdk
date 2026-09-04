@@ -60,27 +60,26 @@ STAGING_BASKET_CONFIG: dict[str, object] = {
 }
 
 
-def test_generated_basket_decoder_preserves_market_order_and_address_identity() -> None:
-    config = dict(STAGING_BASKET_CONFIG)
-    # Discovery order comes only from pair labels; this deliberately disagrees.
-    config["market_order"] = ["AVAX", "DOGE", "SOL"]
-
-    targets = declared_perp_price_history_targets(SimpleNamespace(), config)
-
-    assert [(target.protocol, target.market, target.market_address) for target in targets] == [
-        ("gmx_v2", "SOL/USD", "0x09400d9db990d5ed3f35d7be61dfaeb900af03c9"),
-        ("gmx_v2", "DOGE/USD", "0x6853ea96ff216fab11d2d930ce3c508556a4bdc4"),
-        ("gmx_v2", "AVAX/USD", "0x7bbbf946883a5701350007320f525c5379b8178a"),
+def _staging_basket_targets() -> list[PerpPriceHistoryTarget]:
+    return [
+        PerpPriceHistoryTarget(
+            protocol="gmx_v2",
+            market=f"{base}/USD",
+            market_address=STAGING_BASKET_CONFIG["perp_markets"][base]["market_token"],  # type: ignore[index]
+        )
+        for base in ("SOL", "DOGE", "AVAX")
     ]
 
 
 def test_hosted_omitted_price_timeframe_defaults_basket_to_atomic_auto() -> None:
-    strategy = SimpleNamespace(config=STAGING_BASKET_CONFIG)
+    strategy = SimpleNamespace(
+        config=STAGING_BASKET_CONFIG, backtest_perp_price_history_targets=_staging_basket_targets
+    )
 
     assert coverage_aware_default_timeframe(strategy) == "auto"
 
 
-def test_typed_hook_is_canonical_and_outranks_legacy_config() -> None:
+def test_typed_hook_is_canonical_and_config_keys_are_ignored() -> None:
     declared = PerpPriceHistoryTarget(
         protocol="GMX-V2",
         market="SOL/USD",
@@ -95,21 +94,6 @@ def test_typed_hook_is_canonical_and_outranks_legacy_config() -> None:
 
     assert targets == (declared,)
     assert targets[0].protocol == "gmx_v2"
-
-
-def test_legacy_scalar_declaration_remains_address_first() -> None:
-    targets = declared_perp_price_history_targets(
-        SimpleNamespace(),
-        {
-            "protocol": "gmx_v2",
-            "market": "SOL/USD",
-            "market_address": "0x09400d9db990d5ed3f35d7be61dfaeb900af03c9",
-        },
-    )
-
-    assert len(targets) == 1
-    assert targets[0].market == "SOL/USD"
-    assert targets[0].price_market == "0x09400d9db990d5ed3f35d7be61dfaeb900af03c9"
 
 
 @pytest.mark.parametrize(
@@ -131,14 +115,25 @@ def test_legacy_scalar_declaration_remains_address_first() -> None:
         (lambda config: config["perp_markets"]["SOL"].update({"index_symbol": "DOGE"}), "must match"),
     ],
 )
-def test_generated_basket_decoder_refuses_partial_or_ambiguous_shapes(mutation: object, message: str) -> None:
-    import copy
+def test_malformed_generated_basket_is_a_non_gating_hint(mutation, message: str) -> None:
+    config = {
+        key: ({nested: dict(value) for nested, value in raw.items()} if key == "perp_markets" else list(raw))
+        for key, raw in STAGING_BASKET_CONFIG.items()
+        if key in {"markets", "perp_markets"}
+    }
+    config["protocol"] = "gmx_v2"
+    mutation(config)
 
-    config = copy.deepcopy(STAGING_BASKET_CONFIG)
-    mutation(config)  # type: ignore[operator]
+    # The strict decoder still names the malformed generated shape, while
+    # the public hint boundary drops it so first-use intent routing can decide.
+    from almanak.framework.backtesting.pnl._engine_helpers import (
+        _generated_basket_perp_price_history_targets,
+        hinted_perp_price_history_targets,
+    )
 
     with pytest.raises(ValueError, match=message):
-        declared_perp_price_history_targets(SimpleNamespace(), config)
+        _generated_basket_perp_price_history_targets(config)
+    assert hinted_perp_price_history_targets(SimpleNamespace(), config) == ()
 
 
 class _PreparedBasketProvider:
@@ -163,7 +158,7 @@ class _PreparedBasketProvider:
 
 
 @pytest.mark.asyncio
-async def test_engine_installs_one_provider_for_every_generated_basket_target(
+async def test_engine_installs_one_provider_for_every_declared_basket_target(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -176,6 +171,15 @@ async def test_engine_installs_one_provider_for_every_generated_basket_target(
         data_provider=fallback,
         _get_strategy_config_dict=lambda strategy: STAGING_BASKET_CONFIG,
     )
+    basket = [
+        PerpPriceHistoryTarget(
+            protocol="gmx_v2",
+            market=f"{base}/USD",
+            market_address=STAGING_BASKET_CONFIG["perp_markets"][base]["market_token"],  # type: ignore[index]
+        )
+        for base in ("SOL", "DOGE", "AVAX")
+    ]
+    strategy = SimpleNamespace(backtest_perp_price_history_targets=lambda: basket)
     start = datetime(2025, 1, 1, tzinfo=UTC)
     config = PnLBacktestConfig(
         start_time=start,
@@ -186,7 +190,7 @@ async def test_engine_installs_one_provider_for_every_generated_basket_target(
 
     await prepare_perp_price_history(
         backtester,
-        SimpleNamespace(),
+        strategy,
         config,
         SimpleNamespace(info=Mock(), warning=Mock()),
     )
@@ -204,7 +208,9 @@ async def test_engine_installs_one_provider_for_every_generated_basket_target(
 async def test_funding_prewarm_materializes_every_exact_market_identity() -> None:
     source = SimpleNamespace(history_capable=True, materialize_history=AsyncMock(return_value=12))
 
-    await _prewarm_declared_funding_history(source, SimpleNamespace(), STAGING_BASKET_CONFIG)
+    strategy = SimpleNamespace(backtest_perp_price_history_targets=_staging_basket_targets)
+
+    await _prewarm_declared_funding_history(source, strategy, {})
 
     assert [call.args for call in source.materialize_history.await_args_list] == [
         ("gmx_v2", "SOL/USD", "0x09400d9db990d5ed3f35d7be61dfaeb900af03c9"),

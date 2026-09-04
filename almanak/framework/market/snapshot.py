@@ -5369,6 +5369,18 @@ class MarketSnapshot:
         if self._price_aggregator is None:
             self._record_critical_data_failure("twap", "unconfigured", "twap unavailable: no provider configured")
             raise ValueError("No price aggregator configured for MarketSnapshot")
+        if pool_address is None and getattr(self._price_aggregator, "symbolic_pairs_supported", True) is False:
+            # A backtest TWAP plane serves exact, archive-authenticated pools
+            # only (declared or discovered at first use); a bare pair has no
+            # pool to authenticate. Same recorded refusal as an unconfigured
+            # provider so the run report attributes the hold to data, not to
+            # the strategy.
+            self._record_critical_data_failure(
+                "twap",
+                "unconfigured",
+                "twap unavailable: backtest TWAP serves exact pool addresses only; pass pool_address",
+            )
+            raise ValueError("Backtest TWAP requires an explicit pool_address; symbolic pairs are not resolvable")
 
         target_chain = (chain or self._chain).lower()
         inst = resolve_instrument(token_pair, target_chain)

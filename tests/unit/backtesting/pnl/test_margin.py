@@ -534,9 +534,7 @@ class TestSimulatedPortfolioMarginValidation:
         )
 
         # Add an equity point so get_metrics doesn't return early
-        portfolio.equity_curve.append(
-            EquityPoint(timestamp=datetime.now(UTC), value_usd=Decimal("10000"))
-        )
+        portfolio.equity_curve.append(EquityPoint(timestamp=datetime.now(UTC), value_usd=Decimal("10000")))
 
         # Add a perp position for 50% utilization
         perp = SimulatedPosition.perp_long(
@@ -717,3 +715,61 @@ class TestMarginEdgeCases:
         # = 6000 / (6000 + 14000) = 30%
         assert portfolio.get_margin_utilization() == Decimal("0.3")
         assert portfolio._max_margin_utilization == Decimal("0.3")
+
+
+class TestTypedRejectionReasons:
+    """The rejection code names the check that refused, not the message wording.
+
+    The decision log and the perp-execution-integrity compliance lane both read that
+    code, so rewording a validator message must never reclassify a rejection.
+    """
+
+    def test_insufficient_initial_margin_is_typed(self) -> None:
+        from almanak.framework.backtesting.pnl.calculators.margin import MarginRejection
+
+        validator = MarginValidator()
+        can_open, reason, code = validator.evaluate_open(
+            position_size=Decimal("10000"),
+            collateral=Decimal("50"),
+            available_capital=Decimal("10000"),
+        )
+        assert can_open is False
+        assert code is MarginRejection.INSUFFICIENT_MARGIN
+        assert reason.startswith("Insufficient margin")
+
+    def test_insufficient_capital_is_typed(self) -> None:
+        from almanak.framework.backtesting.pnl.calculators.margin import MarginRejection
+
+        validator = MarginValidator()
+        can_open, reason, code = validator.evaluate_open(
+            position_size=Decimal("10000"),
+            collateral=Decimal("1000"),
+            available_capital=Decimal("500"),
+        )
+        assert can_open is False
+        assert code is MarginRejection.INSUFFICIENT_CAPITAL
+        assert reason.startswith("Insufficient available capital")
+
+    def test_margin_utilization_exceeded_is_typed(self) -> None:
+        from almanak.framework.backtesting.pnl.calculators.margin import MarginRejection
+
+        validator = MarginValidator(max_margin_utilization_ratio=Decimal("0.5"))
+        can_open, reason, code = validator.evaluate_open(
+            position_size=Decimal("10000"),
+            collateral=Decimal("2000"),
+            available_capital=Decimal("2000"),
+            margin_ratio=Decimal("0.2"),
+        )
+        assert can_open is False
+        assert code is MarginRejection.MARGIN_UTILIZATION_EXCEEDED
+        assert reason.startswith("Would exceed max margin utilization")
+
+    def test_a_permitted_open_carries_no_code(self) -> None:
+        validator = MarginValidator()
+        can_open, _reason, code = validator.evaluate_open(
+            position_size=Decimal("1000"),
+            collateral=Decimal("500"),
+            available_capital=Decimal("5000"),
+        )
+        assert can_open is True
+        assert code is None

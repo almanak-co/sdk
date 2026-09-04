@@ -37,6 +37,7 @@ References:
 import logging
 from dataclasses import dataclass, field
 from decimal import Decimal
+from enum import StrEnum
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -101,6 +102,19 @@ class MarginUtilization:
             "available_capital": str(self.available_capital),
             "utilization_ratio": str(self.utilization_ratio),
         }
+
+
+class MarginRejection(StrEnum):
+    """Why an open was refused, decided by the check that refused it.
+
+    Callers classify on this instead of matching the human-readable reason:
+    rewording a message must never change a rejection's machine-readable
+    meaning (the decision log and compliance metadata both read that code).
+    """
+
+    INSUFFICIENT_MARGIN = "insufficient_margin"
+    INSUFFICIENT_CAPITAL = "insufficient_capital"
+    MARGIN_UTILIZATION_EXCEEDED = "margin_utilization_exceeded"
 
 
 @dataclass
@@ -406,6 +420,25 @@ class MarginValidator:
         current_margin_used: Decimal = Decimal("0"),
         margin_ratio: Decimal | None = None,
     ) -> tuple[bool, str]:
+        """Back-compat wrapper: the ``(can_open, reason)`` shape without the typed code."""
+        can_open, reason, _code = self.evaluate_open(
+            position_size=position_size,
+            collateral=collateral,
+            available_capital=available_capital,
+            current_margin_used=current_margin_used,
+            margin_ratio=margin_ratio,
+        )
+        return can_open, reason
+
+    def evaluate_open(
+        self,
+        *,
+        position_size: Decimal,
+        collateral: Decimal,
+        available_capital: Decimal,
+        current_margin_used: Decimal = Decimal("0"),
+        margin_ratio: Decimal | None = None,
+    ) -> tuple[bool, str, "MarginRejection | None"]:
         """Check if a new position can be opened given capital constraints.
 
         This combines margin validation with utilization checks to determine
@@ -427,32 +460,37 @@ class MarginValidator:
             margin_ratio: Required margin ratio
 
         Returns:
-            Tuple of (can_open: bool, reason: str)
+            Tuple of ``(can_open, reason, rejection)``. ``rejection`` is
+            ``None`` when the position is permitted.
 
         Example:
-            can_open, reason = validator.can_open_position(
+            can_open, reason, rejection = validator.evaluate_open(
                 position_size=Decimal("10000"),
                 collateral=Decimal("1000"),
                 available_capital=Decimal("2000"),
                 current_margin_used=Decimal("1500"),
             )
             if not can_open:
-                print(f"Cannot open position: {reason}")
+                print(f"Cannot open position ({rejection}): {reason}")
         """
         required_ratio = margin_ratio or self.default_initial_margin_ratio
 
         # Check 1: Is collateral sufficient for position size?
         margin_result = self.validate_margin(position_size, collateral, required_ratio)
         if not margin_result.is_valid:
-            return False, margin_result.message
+            return False, margin_result.message, MarginRejection.INSUFFICIENT_MARGIN
 
         # Check 2: Is there enough available capital?
         if collateral > available_capital:
             # Full precision: a near-miss must show its true delta, never
             # round both sides to the same figure.
-            return False, (
-                f"Insufficient available capital: need ${collateral:.6f} but only "
-                f"${available_capital:.6f} available (short ${collateral - available_capital:.6f})"
+            return (
+                False,
+                (
+                    f"Insufficient available capital: need ${collateral:.6f} but only "
+                    f"${available_capital:.6f} available (short ${collateral - available_capital:.6f})"
+                ),
+                MarginRejection.INSUFFICIENT_CAPITAL,
             )
 
         # Check 3: Would this exceed max utilization?
@@ -482,14 +520,18 @@ class MarginValidator:
             # Say what the cap MEANS: required margin as a share of margin
             # capital. "100.0% > 90.0% max" alone reads like a leverage rule
             # and sends users hunting through funding instead of sizing.
-            return False, (
-                f"Would exceed max margin utilization: this open requires "
-                f"${required_margin:.6f} margin, {utilization.utilization_ratio * 100:.4f}% of the "
-                f"account's margin capital — above the {self.max_margin_utilization_ratio * 100:.6g}% cap "
-                f"(keep a cash buffer or reduce size)"
+            return (
+                False,
+                (
+                    f"Would exceed max margin utilization: this open requires "
+                    f"${required_margin:.6f} margin, {utilization.utilization_ratio * 100:.4f}% of the "
+                    f"account's margin capital — above the {self.max_margin_utilization_ratio * 100:.6g}% cap "
+                    f"(keep a cash buffer or reduce size)"
+                ),
+                MarginRejection.MARGIN_UTILIZATION_EXCEEDED,
             )
 
-        return True, "Position can be opened"
+        return True, "Position can be opened", None
 
     def get_margin_for_protocol(self, protocol: str) -> dict[str, Decimal]:
         """Get margin requirements for a specific protocol.

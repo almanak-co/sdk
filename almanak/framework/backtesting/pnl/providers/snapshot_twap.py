@@ -4,18 +4,17 @@ The live ``MarketSnapshot.twap`` surface reads a named pool's native
 ``observe()`` oracle. Backtests must preserve that identity and observation
 semantics: a ratio of two independently sourced USD prices is not a pool TWAP.
 
-Strategies declare their prewarm requirements with
-:class:`HistoricalTWAPTarget` through ``get_backtest_twap_targets()`` or a
-``backtest_twap_targets`` attribute. A deliberately narrow compatibility
-decoder recognizes the generated strategy shape that predates that typed
-contract (``swap_pool`` / ``protocol`` plus
-``pool_twap_window_seconds``, ``twap_window_seconds``, or the generated
-``twap_window_minutes`` shape and matching pool/protocol instance attributes).
-It never searches arbitrary config or discovers pools from pair labels.
+Strategies may declare prewarm targets with :class:`HistoricalTWAPTarget`
+through ``get_backtest_twap_targets()`` or a ``backtest_twap_targets``
+attribute. Nothing is read from config keys: a pool/window that no hook
+declared is fetched inline the first time a ``market.twap(...)`` read names
+it (ALM-3467), and a failed fetch is refused for the rest of the run. Pair
+labels are never resolved to pools on this plane.
 """
 
 from __future__ import annotations
 
+import logging
 from bisect import bisect_right
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
@@ -38,6 +37,8 @@ from almanak.framework.market.errors import PoolPriceUnavailableError
 
 if TYPE_CHECKING:
     from almanak.framework.backtesting.pnl.data_manifest import RunDataManifest
+
+logger = logging.getLogger(__name__)
 
 
 _ARCHIVE_LADDER = ("archive_observe",)
@@ -105,81 +106,6 @@ def _require_historical_twap(protocol: str) -> None:
     raise ValueError(f"protocol {protocol!r} does not support historical pool TWAP: {reason}")
 
 
-def _legacy_exact_pool_target(
-    strategy: Any,
-    strategy_config: Mapping[str, Any],
-    *,
-    default_chain: str,
-) -> HistoricalTWAPTarget | None:
-    """Decode only the pre-contract generated exact-pool strategy shape.
-
-    Compatibility is intentionally conjunctive: the exact pool, protocol, and
-    one recognized window key must be present (including the generated
-    ``twap_window_minutes`` + initialized ``twap_window_seconds`` shape);
-    initialized pool and protocol
-    attributes must match them; and strategy metadata must declare the same
-    protocol.  The current generator emits ``pool_twap_window_seconds`` as a
-    config-only dependency while passing its value literally to ``market.twap``;
-    if a same-named strategy attribute is present, it remains an assertion.
-    This supports both generated artifacts without treating an arbitrary
-    ``swap_pool`` key as permission to fetch archive data.
-    """
-    if "swap_pool" not in strategy_config or "protocol" not in strategy_config:
-        return None
-    raw_pool = strategy_config.get("swap_pool")
-    raw_protocol = strategy_config.get("protocol")
-    window_key = next(
-        (
-            key
-            for key in ("pool_twap_window_seconds", "twap_window_seconds", "twap_window_minutes")
-            if key in strategy_config
-        ),
-        None,
-    )
-    if window_key is None:
-        return None
-    raw_window = strategy_config.get(window_key)
-    if not isinstance(raw_pool, str) or not isinstance(raw_protocol, str) or raw_window is None:
-        return None
-    try:
-        window = int(raw_window) * (60 if window_key == "twap_window_minutes" else 1)
-    except (TypeError, ValueError):
-        return None
-    pool = raw_pool.strip().lower()
-    protocol = raw_protocol.strip().lower().replace("-", "_")
-    strategy_pool_matches = any(
-        str(getattr(strategy, attribute, "")).strip().lower() == pool for attribute in ("swap_pool", "pool")
-    )
-    missing = object()
-    strategy_window_attribute = "twap_window_seconds" if window_key == "twap_window_minutes" else window_key
-    strategy_window = getattr(strategy, strategy_window_attribute, missing)
-    strategy_window_matches = strategy_window == window if window_key != "pool_twap_window_seconds" else True
-    if window_key == "pool_twap_window_seconds" and strategy_window is not missing:
-        strategy_window_matches = strategy_window == window
-    if (
-        not strategy_pool_matches
-        or str(getattr(strategy, "protocol", "")).strip().lower().replace("-", "_") != protocol
-        or not strategy_window_matches
-    ):
-        return None
-    metadata = getattr(strategy, "STRATEGY_METADATA", None)
-    if metadata is None:
-        get_metadata = getattr(strategy, "get_metadata", None)
-        metadata = get_metadata() if callable(get_metadata) else None
-    supported = {
-        str(value).strip().lower().replace("-", "_") for value in (getattr(metadata, "supported_protocols", None) or ())
-    }
-    if protocol not in supported:
-        return None
-    _require_historical_twap(protocol)
-    return HistoricalTWAPTarget(
-        chain=default_chain,
-        protocol=protocol,
-        pool_address=pool,
-        window_seconds=window,
-    )
-
-
 def declared_historical_twap_targets(
     strategy: Any,
     strategy_config: Mapping[str, Any],
@@ -200,14 +126,14 @@ def declared_historical_twap_targets(
         targets = tuple(values)
         if not all(isinstance(target, HistoricalTWAPTarget) for target in targets):
             raise ValueError("every backtest TWAP declaration must be a HistoricalTWAPTarget")
-        # Explicit typed declarations remain the highest-precedence extension
-        # seam.  They may be served by a caller-provided provider that is not a
-        # connector-manifest capability, so only generated/config-shape
-        # discovery is gated by POOL_DATA_REGISTRY.
+        # Explicit typed declarations may be served by a caller-provided
+        # provider that is not a connector-manifest capability, so they are
+        # not gated by POOL_DATA_REGISTRY here (first-use discovery is).
         return tuple(dict.fromkeys(cast(tuple[HistoricalTWAPTarget, ...], targets)))
 
-    legacy = _legacy_exact_pool_target(strategy, strategy_config, default_chain=default_chain)
-    return (legacy,) if legacy is not None else ()
+    # No config-key discovery: identity comes from the typed hook above or, at
+    # first use, from the TWAP read that names the pool.
+    return ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -228,6 +154,7 @@ class SnapshotTWAPSource:
         sample_interval_seconds: int,
         manifest: RunDataManifest | None = None,
         fetcher: Callable[..., list[HistoricalTWAPPoint]] | None = None,
+        first_use_feasibility: Callable[[], Any] | None = None,
     ) -> None:
         self._start_ts = _unix_seconds(start_time)
         self._end_ts = _unix_seconds(end_time)
@@ -238,22 +165,45 @@ class SnapshotTWAPSource:
         self._sample_interval_seconds = sample_interval_seconds
         self._manifest = manifest
         self._fetcher = fetcher or fetch_historical_twap_points
+        # A decide()-time fetch pages the whole run window serially on the
+        # iteration task, the same cost the declared prewarm bounds up front.
+        self._first_use_feasibility = first_use_feasibility
         self._series: dict[tuple[str, str, str, int], _TWAPSeries] = {}
+        self._first_use_failures: dict[tuple[str, str, str, int], str] = {}
 
     async def materialize_history(self, target: HistoricalTWAPTarget) -> int:
         """Load and validate complete one-observation-per-grid-point history."""
         if target.key in self._series:
             return len(self._series[target.key].points)
-        points = await run_sync_gateway_call(
-            self._fetcher,
-            protocol=target.protocol,
-            chain=target.chain,
-            pool_address=target.pool_address,
-            start_ts=self._start_ts,
-            end_ts=self._end_ts,
-            interval_secs=self._sample_interval_seconds,
-            window_secs=target.window_seconds,
-        )
+        points = await run_sync_gateway_call(self._fetcher, **self._fetch_kwargs(target))
+        return self._install_points(target, points)
+
+    def materialize_history_blocking(self, target: HistoricalTWAPTarget) -> int:
+        """Load one series synchronously, for a decide()-time read that names an undeclared pool.
+
+        decide() runs inside the engine's iteration task, where the async
+        materialization cannot be awaited. Live, a TWAP read is a blocking
+        RPC that returns the number; this mirrors that by running the same
+        gateway fetch and the same validation inline. The fetcher is a plain
+        synchronous gateway call, so no event loop is re-entered.
+        """
+        if target.key in self._series:
+            return len(self._series[target.key].points)
+        points = self._fetcher(**self._fetch_kwargs(target))
+        return self._install_points(target, points)
+
+    def _fetch_kwargs(self, target: HistoricalTWAPTarget) -> dict[str, Any]:
+        return {
+            "protocol": target.protocol,
+            "chain": target.chain,
+            "pool_address": target.pool_address,
+            "start_ts": self._start_ts,
+            "end_ts": self._end_ts,
+            "interval_secs": self._sample_interval_seconds,
+            "window_secs": target.window_seconds,
+        }
+
+    def _install_points(self, target: HistoricalTWAPTarget, points: list[HistoricalTWAPPoint]) -> int:
         sample_targets = tuple(range(self._start_ts, self._end_ts + 1, self._sample_interval_seconds))
         if len(points) != len(sample_targets):
             raise ValueError(
@@ -305,18 +255,7 @@ class SnapshotTWAPSource:
         )
         series = self._series.get(key)
         if series is None:
-            reason = (
-                "exact pool/window was not declared and prewarmed; declare a HistoricalTWAPTarget "
-                "via get_backtest_twap_targets()"
-            )
-            try:
-                requested = HistoricalTWAPTarget(*key)
-            except ValueError:
-                manifest_key = f"{key[0]}:{key[1]}:{key[2]}:window={key[3]}"
-                self._record_key(manifest_key, tick_ts, source="none", outcome=OUTCOME_REFUSED, detail=reason)
-                raise PoolPriceUnavailableError(pool_address, reason) from None
-            self._record(requested, tick_ts, source="none", outcome=OUTCOME_REFUSED, detail=reason)
-            raise PoolPriceUnavailableError(pool_address, reason)
+            series = self._materialize_at_first_use(key, pool_address, tick_ts)
         index = bisect_right(series.sample_targets, tick_ts) - 1
         if index < 0:
             reason = "no historical TWAP sample exists at or before this backtest tick"
@@ -332,6 +271,40 @@ class SnapshotTWAPSource:
             self._record(series.target, tick_ts, source=point.source, outcome=OUTCOME_REFUSED, detail=reason)
             raise PoolPriceUnavailableError(pool_address, reason)
         return series.target, point
+
+    def _materialize_at_first_use(
+        self,
+        key: tuple[str, str, str, int],
+        pool_address: str,
+        tick_ts: int,
+    ) -> _TWAPSeries:
+        """Fetch an undeclared pool/window the first time a read names it, or refuse fail-closed.
+
+        A miss is remembered for the run so a pool the archive cannot serve is
+        refused instantly on every later tick instead of re-fetched.
+        """
+        try:
+            requested = HistoricalTWAPTarget(*key)
+        except ValueError:
+            reason = "exact pool/window is not a valid historical TWAP target"
+            manifest_key = f"{key[0]}:{key[1]}:{key[2]}:window={key[3]}"
+            self._record_key(manifest_key, tick_ts, source="none", outcome=OUTCOME_REFUSED, detail=reason)
+            raise PoolPriceUnavailableError(pool_address, reason) from None
+        failed = self._first_use_failures.get(key)
+        if failed is None:
+            try:
+                _require_historical_twap(requested.protocol)
+                if self._first_use_feasibility is not None:
+                    self._first_use_feasibility()
+                self.materialize_history_blocking(requested)
+            except Exception as exc:  # noqa: BLE001 — fail-closed refusal, remembered for the run
+                failed = f"first-use historical TWAP fetch failed for {requested.manifest_key}: {exc}"
+                self._first_use_failures[key] = failed
+                logger.warning(failed)
+        if failed is not None:
+            self._record(requested, tick_ts, source="none", outcome=OUTCOME_REFUSED, detail=failed)
+            raise PoolPriceUnavailableError(pool_address, failed)
+        return self._series[key]
 
     def _record(
         self,
@@ -377,6 +350,8 @@ class SnapshotTWAPView:
     """Synchronous price-aggregator view bound to one simulated timestamp."""
 
     requires_decimals = False
+    #: Exact pools only: a symbolic pair cannot be archive-authenticated.
+    symbolic_pairs_supported = False
 
     def __init__(self, source: SnapshotTWAPSource, tick_ts: int) -> None:
         self._source = source

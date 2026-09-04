@@ -63,7 +63,7 @@ import functools
 import inspect as _inspect
 import logging
 import uuid
-from collections.abc import Iterable, Mapping
+from collections.abc import AsyncIterator, Iterable, Mapping
 from dataclasses import dataclass, field
 
 # Note: There's a naming conflict between fee_models.py (module) and fee_models/ (package)
@@ -182,6 +182,17 @@ class _TokenAvailabilityConfig:
     use_membership: bool
     resolution_based: bool
     membership_upper: frozenset[str]
+
+
+@dataclass(frozen=True)
+class _SequenceMemberOutput:
+    """Typed outputs available to the immediately following sequence member."""
+
+    token_amount: Decimal | None = None
+    # Backtests track LPs by a synthetic position identity, while the live
+    # runner transports fungible LP-token wei. Both name the exact LP_OPEN
+    # output the following close must consume; the lanes must never cross.
+    lp_position_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -2232,9 +2243,16 @@ class BacktestPoolAnalyticsReader:
         *,
         market_state: Any | None = None,
         pool_state_view: Any | None = None,
+        pool_state_source: Any | None = None,
     ) -> None:
         self._timestamp = timestamp
         self._market_state = market_state
+        # An empty run-scoped source still serves first-use TVL: the view is
+        # only promoted once a pool is materialized, so fall through to the
+        # source's own view when the loop handed none.
+        if pool_state_view is None and pool_state_source is not None:
+            view_at = getattr(pool_state_source, "view_at", None)
+            pool_state_view = view_at(timestamp) if view_at is not None else None
         self._pool_state_view = pool_state_view
 
     def _validated_context(self, chain: str, protocol: str | None) -> tuple[datetime, str, str]:
@@ -2263,9 +2281,17 @@ class BacktestPoolAnalyticsReader:
                 market_state=self._market_state,
             )
         except PoolPriceUnavailableError as exc:
-            # Exact state is declared pool-by-pool.  A reader bound for pool A
-            # must not disable completed-day history fallback for pool B.
-            if exc.reason == "exact pool was not declared and prewarmed":
+            # Exact state is served pool-by-pool. A pool the archive could not
+            # serve at first use (or one nobody declared, when first-use is
+            # unavailable) must not disable completed-day history fallback for
+            # the analytics read itself. The producers flag that case; the
+            # legacy prose checks stay as a fallback for any raiser that has
+            # not been migrated to the flag yet.
+            if (
+                getattr(exc, "exact_pool_unavailable", False)
+                or exc.reason == "exact pool was not declared and prewarmed"
+                or exc.reason.startswith("first-use exact-pool state fetch failed")
+            ):
                 return None
             raise
 
@@ -3791,6 +3817,61 @@ class _GenericExecutionCosts:
     estimated_mev_cost_usd: Decimal | None
 
 
+def _canonical_chain_name(chain: str) -> str:
+    """Registry-canonical chain name, falling back to the cleaned input.
+
+    Chain identity reaches the engine from three places (run config, intent,
+    market state) and any of them may carry a registered alias. Comparisons
+    between them, and against connector-declared chains, only hold once every
+    side is canonical.
+    """
+    cleaned = chain.strip().lower()
+    if not cleaned:
+        return cleaned
+    descriptor = ChainRegistry.try_resolve(cleaned)
+    return str(descriptor.name).strip().lower() if descriptor is not None else cleaned
+
+
+class _NoFallbackProvider:
+    """Fallback for a first-use perp overlay: it serves only its own index series.
+
+    Satisfies :class:`HistoricalDataProvider` so the connector factory can take
+    it as the fallback argument, but every method refuses: a market prepared at
+    first use must be priced by its own venue series or not at all, and the
+    overlay never drives the run's iteration.
+    """
+
+    @property
+    def provider_name(self) -> str:
+        return "first_use_overlay"
+
+    @property
+    def supported_tokens(self) -> list[str]:
+        return []
+
+    @property
+    def supported_chains(self) -> list[str]:
+        return []
+
+    @property
+    def min_timestamp(self) -> datetime | None:
+        return None
+
+    @property
+    def max_timestamp(self) -> datetime | None:
+        return None
+
+    async def get_price(self, token: Any, timestamp: datetime) -> Decimal:
+        raise KeyError(token)
+
+    async def get_ohlcv(self, token: Any, start: datetime, end: datetime, interval_seconds: int = 3600) -> list[Any]:
+        raise ValueError(f"no fallback price history for {token!r}")
+
+    async def iterate(self, config: Any) -> AsyncIterator[tuple[datetime, MarketState]]:
+        raise RuntimeError("the first-use overlay fallback never drives the run's iteration")
+        yield  # pragma: no cover — unreachable; makes this an async generator
+
+
 @dataclass
 class PnLBacktester:
     """Main PnL backtesting engine for historical strategy simulation.
@@ -3946,6 +4027,30 @@ class PnLBacktester:
         init=False,
         repr=False,
     )
+    #: Indicator plane for the active run. Bound before data iteration so a
+    #: connector route discovered at a pending fill can replace the newly
+    #: owned asset's earlier fallback observations without touching other
+    #: tokens.
+    _active_indicator_engine: BacktestIndicatorEngine | None = field(default=None, init=False, repr=False)
+    #: Exact perp targets whose connector-native price plane completed
+    #: preparation for this run. This is deliberately the *prepared* set,
+    #: not a second pass over declaration hooks: config-only prewarm hints can
+    #: install the same authoritative plane, and the funding source is created
+    #: later than price preparation. Retaining the accepted identities keeps
+    #: price and funding prewarm on one contract.
+    _prepared_perp_price_history_targets: tuple[Any, ...] = field(
+        default_factory=tuple,
+        init=False,
+        repr=False,
+    )
+    #: Exact funding identities registered/materialized after the funding
+    #: source is bound. Kept inside the preparation boundary so repeated
+    #: direct or routed first-use calls remain idempotent.
+    _funding_prepared_perp_markets: set[tuple[str, str, str]] = field(default_factory=set, init=False, repr=False)
+    #: Per-tick price overlays for perp markets discovered at first use, keyed
+    #: by (chain, protocol, market); a failed discovery is memoized as None.
+    #: Run-scoped like the funding set above, so a reused backtester rediscovers.
+    _perp_market_overlays: dict[tuple[str, str, str], Any] = field(default_factory=dict, init=False, repr=False)
     #: Positions whose accrual update already reported a data gap (log-once
     #: bookkeeping for the non-strict skip path, ALM-2930).
     _accrual_data_gap_positions: set[str] = field(default_factory=set)
@@ -4316,11 +4421,231 @@ class PnLBacktester:
 
     def _bind_funding_history_source(self, source: "SnapshotFundingRateSource") -> None:
         """Bind the engine-owned funding plane into the active perp adapter."""
+        self._funding_rate_source = source
         if self._adapter is None:
             return
         bind = getattr(self._adapter, "bind_funding_history_source", None)
         if bind is not None:
             bind(source)
+
+    def _apply_perp_market_overlays(self, market_state: MarketState) -> None:
+        """Overlay every perp market discovered at first use onto this tick's state."""
+        for provider in self._perp_market_overlays.values():
+            overlay = getattr(provider, "overlay_market_state", None) if provider is not None else None
+            if overlay is not None:
+                overlay(market_state)
+
+    @staticmethod
+    def _first_use_perp_identity(
+        intent: Any,
+        market_state: MarketState,
+        config: PnLBacktestConfig,
+    ) -> tuple[str, str, str, str] | None:
+        """``(canonical, venue, chain, market)`` for a perp intent on a venue with native history."""
+        from almanak.connectors._strategy_base.perp_price_history_registry import PerpPriceHistoryRegistry
+
+        market = str(getattr(intent, "market", "") or "").strip()
+        protocol = str(getattr(intent, "protocol", "") or "").strip().lower().replace("-", "_")
+        if not market or not protocol:
+            return None
+        canonical = PerpPriceHistoryRegistry.canonical(protocol)
+        if canonical is None:
+            return None
+        run_chain = _canonical_chain_name(str(config.chain))
+        chain = _canonical_chain_name(
+            str(getattr(intent, "chain", None) or getattr(market_state, "chain", None) or config.chain)
+        )
+        if chain != run_chain:
+            return None  # the generic lane names this cross-chain rejection itself
+        # Both sides are canonical registry names, so a run or intent naming a
+        # registered alias ("avax") matches a connector that declares
+        # "avalanche" instead of silently leaving the market unprepared.
+        declared_chains = {
+            ChainRegistry.resolve(value).name for value in PerpPriceHistoryRegistry.declared_chains(canonical)
+        }
+        if declared_chains and chain not in declared_chains:
+            logger.warning(
+                "%s declares venue-native price history on %s, not %r; perp market %s stays unprepared",
+                canonical,
+                sorted(declared_chains),
+                chain,
+                market,
+            )
+            return None
+        return canonical, PerpPriceHistoryRegistry.venue_for(canonical), chain, market
+
+    def _run_provider_serves_market(self, key: tuple[str, str, str]) -> bool:
+        """Whether the run's installed price-history provider already owns ``key``."""
+        declared = getattr(self.data_provider, "price_history_targets", None)
+        if declared is None:
+            single = getattr(self.data_provider, "price_history_target", None)
+            declared = (single,) if single is not None else ()
+        return any(tuple(str(part).lower() for part in target) == key for target in declared)
+
+    async def _prepare_first_use_funding_market(self, provider: Any, venue: str, market: str) -> None:
+        """Register the verified market address AND materialize its funding series.
+
+        A declared market had its funding series prewarmed before tick 1.
+        Registering the address alone would leave a market discovered at first
+        use reading the configured fallback rate for every hour, so accrual on
+        an identical position would differ from the declared path. The fetch is
+        best effort: a venue without measured funding keeps the existing lazy
+        behaviour rather than failing the run.
+        """
+        funding_source = getattr(self, "_funding_rate_source", None)
+        register = getattr(funding_source, "_register_market_address", None) if funding_source is not None else None
+        if register is None:
+            return
+        materialize = getattr(funding_source, "materialize_history", None)
+        for source in getattr(provider, "_sources", ()):
+            label = str(getattr(source, "resolved_market", None) or market).upper()
+            address = getattr(source, "market_token", None)
+            if not address:
+                continue
+            funding_key = (venue.lower(), label, str(address).lower())
+            if funding_key in self._funding_prepared_perp_markets:
+                continue
+            try:
+                register(venue, label, str(address))
+            except Exception as exc:  # noqa: BLE001 — funding reads stay lazy; registration is a hint
+                logger.debug("Funding market registration skipped for %s: %s", market, exc)
+                continue
+            # Registration succeeded. Mark before the optional fetch so a
+            # transient historical-data failure is not retried on every tick.
+            self._funding_prepared_perp_markets.add(funding_key)
+            if materialize is None:
+                continue
+            try:
+                points = await materialize(venue, label, str(address))
+            except Exception as exc:  # noqa: BLE001 — measured funding is best effort at first use
+                logger.warning(
+                    "Funding history could not be materialized for %s %s at first use; "
+                    "accrual falls back to the configured rate: %s",
+                    venue,
+                    label,
+                    exc,
+                )
+                continue
+            if points:
+                logger.info("Materialized %d funding points for %s %s at first use", points, venue, label)
+
+    def _backfill_first_use_perp_history(
+        self,
+        provider: Any,
+        market_state: MarketState,
+        config: PnLBacktestConfig,
+    ) -> None:
+        """Replace pre-discovery fallback closes with authoritative venue marks."""
+        indicator_engine = self._active_indicator_engine
+        history = getattr(provider, "tick_close_history_before", None)
+        if indicator_engine is None or not callable(history):
+            return
+        retained_start = max(
+            config.start_time,
+            market_state.timestamp - timedelta(seconds=config.interval_seconds * indicator_engine.max_history),
+        )
+        for token, prices in history(
+            start_time=retained_start,
+            end_time=market_state.timestamp,
+            interval_seconds=config.interval_seconds,
+        ).items():
+            indicator_engine.replace_price_history(token, prices)
+        measured = getattr(provider, "measured_granularity_seconds", None)
+        indicator_engine.set_data_granularity(measured, config.interval_seconds)
+
+    async def _ensure_perp_market_route(
+        self,
+        intent: Any,
+        market_state: MarketState,
+        config: PnLBacktestConfig,
+    ) -> None:
+        """Prepare a venue candle plane for a perp market the first time an intent names it.
+
+        Identity comes from the intent (``market``, ``protocol``, ``chain``),
+        never from config keys or declaration hooks. The connector's own
+        price-history provider does exactly what declaration-driven preflight
+        did — resolve the market through the venue catalogue, fetch one
+        complete native candle series for the run window, remember the
+        verified identity for the fill-pricing lane — but for one market, at
+        the fill's await point, kept aside as an overlay because the run's
+        streaming provider cannot be re-wrapped. A market that cannot be
+        served stays unprepared and the fill lane keeps its named
+        "not priceable" rejection: nothing is guessed.
+        """
+        if self._get_intent_type(intent) not in (IntentType.PERP_OPEN, IntentType.PERP_CLOSE):
+            return
+        identity = self._first_use_perp_identity(intent, market_state, config)
+        if identity is None:
+            return
+        canonical, venue, chain, market = identity
+        # Address-form markets only: a pair label prices through the run's
+        # own symbol plane already, and an address is the one identity the
+        # venue catalogue can verify. Skip when this tick can already price
+        # the market's base — nothing to discover.
+        if not is_address_like(market):
+            return
+        key = (venue, chain, market.lower())
+        overlays = self._perp_market_overlays
+        if key in overlays:
+            return
+        if self._run_provider_serves_market(key):
+            # The run provider may have been installed from a config-only
+            # prewarm hint. Its price series is ready, but the funding source
+            # is bound later; register/materialize the verified address once
+            # before returning from the first-use fast path.
+            await self._prepare_first_use_funding_market(self.data_provider, venue, market)
+            return
+        from .intent_extraction import resolve_perp_base_price
+
+        _, priced_symbol, _ = resolve_perp_base_price(
+            market, market_state, self._registered_token_addresses(), protocol=getattr(intent, "protocol", None)
+        )
+        if priced_symbol is not None:
+            return
+        from almanak.connectors._strategy_base.perp_price_history_registry import PerpPriceHistoryRegistry
+
+        provider_cls = PerpPriceHistoryRegistry.backtest_provider(canonical)
+        if provider_cls is None:
+            return
+        # Resolve the market's own native cadence: never pin it to the cadence
+        # the spot plane already negotiated, and never rewrite the run's
+        # recorded cadence from inside a tick.
+        probe_config = copy.copy(config)
+        probe_config.resolved_timeframe = None
+        if probe_config.timeframe is None:
+            probe_config.timeframe = "auto"
+        try:
+            provider = provider_cls.for_backtest(
+                fallback=_NoFallbackProvider(), chain=chain, market=market, venue=venue
+            )
+            resolved = await provider.prepare_backtest(probe_config)
+        except Exception as exc:  # noqa: BLE001 — best effort: the fill lane keeps its named rejection
+            # Remember the miss so the run never re-attempts venue history on
+            # every tick that names this market.
+            overlays[key] = None
+            logger.warning(
+                "Perp market %s (%s on %s) could not be prepared from venue history at first use; "
+                "perp intents on it stay unpriceable: %s",
+                market,
+                canonical,
+                chain,
+                exc,
+            )
+            return
+        overlays[key] = provider
+        self._backfill_first_use_perp_history(provider, market_state, config)
+        # The fill that triggered discovery prices from THIS tick's state.
+        overlay = getattr(provider, "overlay_market_state", None)
+        if overlay is not None:
+            overlay(market_state)
+        await self._prepare_first_use_funding_market(provider, venue, market)
+        logger.info(
+            "Prepared perp market %s (%s on %s) at first use: native cadence %s",
+            market,
+            canonical,
+            chain,
+            resolved,
+        )
 
     def _bind_pool_descriptors(self, descriptors: Iterable[Any]) -> None:
         """Bind preflight-authenticated exact pool identities to the adapter."""
@@ -4329,6 +4654,96 @@ class PnLBacktester:
         bind = getattr(self._adapter, "bind_pool_descriptors", None)
         if bind is not None:
             bind(descriptors)
+
+    def _bind_pool_state_source(self, source: Any) -> None:
+        """Keep the run's exact-pool state plane reachable for first-use discovery."""
+        self._pool_state_source = source
+
+    async def _ensure_exact_pool_descriptor(
+        self,
+        intent: Any,
+        market_state: MarketState,
+        config: PnLBacktestConfig,
+    ) -> None:
+        """Authenticate an address-form LP pool the first time an intent names it.
+
+        Identity comes from the intent itself (``pool``, ``protocol``,
+        ``chain``) — never from config keys or declaration hooks. The archive
+        read, fee/token identity checks and descriptor materialization are the
+        same ones preflight runs for a declared target; they run here, at the
+        fill's await point, so the sync adapter lane sees a bound descriptor
+        for a pool nobody pre-declared. A pool that cannot be proven stays
+        unbound and the adapter rejects it fail-closed exactly as before —
+        nothing is ever fabricated from a static registry.
+        """
+        if self._get_intent_type(intent) is not IntentType.LP_OPEN:
+            return
+        adapter = self._adapter
+        has_descriptor = getattr(adapter, "has_pool_descriptor", None) if adapter is not None else None
+        if has_descriptor is None or has_descriptor(intent):
+            return
+        pool = str(getattr(intent, "pool", "") or "").strip().lower()
+        if "/" in pool or not is_address_like(pool):
+            return
+        source = getattr(self, "_pool_state_source", None)
+        if source is None:
+            return
+        run_chain = _canonical_chain_name(str(config.chain))
+        chain = _canonical_chain_name(
+            str(getattr(intent, "chain", None) or getattr(market_state, "chain", None) or config.chain)
+        )
+        protocol = str(getattr(intent, "protocol", "") or "").strip().lower().replace("-", "_")
+        if not protocol:
+            return
+        if chain != run_chain:
+            logger.warning(
+                "Exact pool %s names chain %r but the backtest runs on %r; leaving it unauthenticated",
+                pool,
+                chain,
+                run_chain,
+            )
+            return
+        from almanak.framework.backtesting.pnl.feasibility import enforce_window_feasibility
+        from almanak.framework.backtesting.pnl.providers.snapshot_pool_state import (
+            HistoricalPoolStateTarget,
+            require_historical_pool_state,
+        )
+        from almanak.framework.data.interfaces import DataSourceError
+
+        remembered = getattr(source, "first_use_failure", None)
+        if remembered is not None and remembered(chain, protocol, pool) is not None:
+            return  # already proven unservable this run; the adapter rejects it fail-closed
+
+        try:
+            require_historical_pool_state(protocol)
+            target = HistoricalPoolStateTarget(chain, protocol, pool)
+            enforce_window_feasibility(config, target_count=1)
+            count = await source.materialize_history(target)
+        except (DataSourceError, PreflightValidationError, ValueError) as exc:
+            reason = f"first-use exact-pool authentication failed for {chain}:{protocol}:{pool}: {exc}"
+            remember = getattr(source, "remember_first_use_failure", None)
+            if remember is not None:
+                remember(chain, protocol, pool, reason)
+            logger.warning(
+                "Exact pool %s (%s/%s) could not be authenticated from archive state at first use; "
+                "the LP intent is rejected fail-closed: %s",
+                pool,
+                chain,
+                protocol,
+                exc,
+            )
+            return
+        descriptor = source.pool_descriptor(chain, protocol, pool)
+        if descriptor is None:
+            return
+        self._bind_pool_descriptors((descriptor,))
+        logger.info(
+            "Authenticated exact pool %s (%s/%s) at first use from %d archive observations",
+            pool,
+            chain,
+            protocol,
+            count,
+        )
 
     def _init_mev_simulator(self, config: PnLBacktestConfig) -> None:
         """Initialize MEV simulator based on config.
@@ -5455,6 +5870,113 @@ class PnLBacktester:
         data_quality_tracker: DataQualityTracker | None,
         strategy: Any,
     ) -> None:
+        from almanak.framework.intents.vocabulary import IntentSequence
+
+        if isinstance(intent, IntentSequence):
+            # Runner parity: members execute in order at this fill point, a
+            # dependent member's amount="all" comes from the PREVIOUS member's
+            # output (never the wallet), and the sequence stops at the first
+            # member that does not fill. Callbacks fire for exactly the
+            # members that were attempted.
+            previous_output = _SequenceMemberOutput()
+            for index, member in enumerate(intent.intents):
+                to_execute = self._sequence_member_with_chained_amount(member, index, previous_output)
+                if to_execute is None:
+                    logger.warning(
+                        "Intent sequence %s stopped at member %d/%d at %s: amount='all' has no prior "
+                        "member output to resolve from",
+                        getattr(intent, "sequence_id", "?"),
+                        index + 1,
+                        len(intent.intents),
+                        market_state.timestamp,
+                    )
+                    return
+                record = await self._execute_single_pending_intent(
+                    to_execute, decision_time, portfolio, market_state, config, data_quality_tracker, strategy
+                )
+                if record is None or not record.success:
+                    remaining = len(intent.intents) - index - 1
+                    if remaining:
+                        logger.warning(
+                            "Intent sequence %s stopped at member %d/%d at %s; %d dependent member(s) not executed",
+                            getattr(intent, "sequence_id", "?"),
+                            index + 1,
+                            len(intent.intents),
+                            market_state.timestamp,
+                            remaining,
+                        )
+                    return
+                previous_output = _SequenceMemberOutput(
+                    token_amount=record.actual_amount_out,
+                    lp_position_id=record.position_id
+                    if self._get_intent_type(to_execute) is IntentType.LP_OPEN
+                    else None,
+                )
+            return
+        await self._execute_single_pending_intent(
+            intent, decision_time, portfolio, market_state, config, data_quality_tracker, strategy
+        )
+
+    def _sequence_member_with_chained_amount(
+        self,
+        member: Any,
+        index: int,
+        previous_output: _SequenceMemberOutput,
+    ) -> Any | None:
+        """Resolve a sequence member's ``amount="all"`` from its typed predecessor output.
+
+        The runner substitutes the amount the previous step actually received
+        (post-fee, post-slippage) into a following step's chained amount. The
+        generic all-sizing path instead reads the whole simulated wallet, so a
+        swap-then-supply sequence would supply a pre-existing balance plus the
+        swap output while live supplies only the swap output. Returns the
+        member to execute, or ``None`` when the chain cannot be resolved and
+        the sequence must stop.
+
+        LP opens are a separate lane: live carries minted fungible-LP wei;
+        simulation carries the exact synthetic position identity created by
+        the fill. Rewriting the close to that identity preserves the economic
+        contract without pretending concentrated-liquidity units are LP-token
+        wei.
+
+        A non-LP first member sizes from the wallet exactly as a standalone
+        intent does. LP_CLOSE amount="all" always requires a prior LP_OPEN.
+        """
+        from almanak.framework.intents.vocabulary import Intent as _Intent
+
+        if not _Intent.has_chained_amount(member):
+            return member
+        if self._get_intent_type(member) is IntentType.LP_CLOSE:
+            from almanak.framework.strategies.lp_position_tracker import (
+                lp_close_amount_chaining_supported,
+            )
+
+            if not lp_close_amount_chaining_supported(getattr(member, "protocol", None)):
+                return None
+            if index == 0 or not previous_output.lp_position_id:
+                return None
+            data = member.serialize()
+            data["position_id"] = previous_output.lp_position_id
+            data["amount"] = None
+            return _Intent.deserialize(data)
+        if index == 0:
+            return member
+        if previous_output.token_amount is None or previous_output.token_amount <= 0:
+            return None
+
+        return _Intent.set_resolved_amount(member, previous_output.token_amount)
+
+    async def _execute_single_pending_intent(
+        self,
+        intent: Any,
+        decision_time: datetime,
+        portfolio: SimulatedPortfolio,
+        market_state: MarketState,
+        config: PnLBacktestConfig,
+        data_quality_tracker: DataQualityTracker | None,
+        strategy: Any,
+    ) -> TradeRecord | None:
+        """Execute one canonical intent; ``None`` when an execution error was absorbed."""
         trades_before_execution = len(portfolio.trades)
         try:
             trade_record = await self._execute_intent(
@@ -5474,7 +5996,7 @@ class PnLBacktester:
                 exc,
                 trades_before_execution=trades_before_execution,
             )
-            return
+            return None
         except Exception as exc:
             self._handle_pending_execution_error(
                 intent,
@@ -5484,12 +6006,13 @@ class PnLBacktester:
                 exc,
                 trades_before_execution=trades_before_execution,
             )
-            return
+            return None
 
         self._log_pending_trade_outcome(trade_record, decision_time, market_state.timestamp)
         # Notify strategy with the real outcome so state machines do not advance
         # past a trade that never applied.
         _engine_helpers.notify_intent_outcome(self, strategy, intent, trade_record, logger)
+        return trade_record
 
     def _log_pending_trade_outcome(
         self,
@@ -5746,6 +6269,12 @@ class PnLBacktester:
         elif isinstance(resolution, SizingRejection):
             sizing_rejection = resolution
 
+        if sizing_rejection is None:
+            # First-use identity: an address-form LP pool nobody declared is
+            # authenticated from archive state here, before the sync adapter
+            # lane runs, so live-correct intents need no backtest declaration.
+            await self._ensure_exact_pool_descriptor(intent, market_state, config)
+            await self._ensure_perp_market_route(intent, market_state, config)
         adapter_record = (
             None
             if sizing_rejection is not None

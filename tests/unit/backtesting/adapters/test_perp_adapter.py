@@ -1739,6 +1739,23 @@ class TestExecuteIntentUsesRealPortfolioCash:
         # None means validation passed and default execution proceeds.
         assert fill is None
 
+    def test_open_with_insufficient_initial_margin_is_typed(self) -> None:
+        """Collateral below required margin must not collapse to a balance code."""
+        from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
+
+        adapter = PerpBacktestAdapter(PerpBacktestConfig(strategy_type="perp"))
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("10000"))
+
+        fill = adapter.execute_intent(
+            self._open_intent(Decimal("50"), size_usd="10000"),
+            portfolio,
+            self._market_state(),
+        )
+
+        assert fill is not None and fill.success is False
+        assert fill.metadata["rejection_code"] == "INSUFFICIENT_MARGIN"
+        assert fill.metadata["validation_type"] == "margin"
+
     def test_open_with_insufficient_cash_returns_failed_fill(self) -> None:
         """Collateral above available cash must fail margin validation, not crash."""
         from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
@@ -1808,6 +1825,19 @@ class TestExecuteIntentUsesRealPortfolioCash:
                 portfolio,
                 market,
             )
+
+    def test_open_all_without_spendable_collateral_preserves_sizing_code(self) -> None:
+        from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
+
+        adapter = PerpBacktestAdapter(PerpBacktestConfig(strategy_type="perp"))
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("0"))
+
+        fill = adapter.execute_intent(self._open_intent("all"), portfolio, self._market_state())
+
+        assert fill is not None and fill.success is False
+        assert fill.metadata["validation_type"] == "sizing"
+        assert fill.metadata["rejection_code"] == "INSUFFICIENT_BALANCE"
+        assert 'cannot size amount="all"' in fill.metadata["failure_reason"]
 
     def test_open_all_collateral_resolves_from_spendable_balance(self) -> None:
         """collateral_amount='all' sizes from the shared resolver (phase 5).

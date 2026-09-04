@@ -854,6 +854,7 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
                 reason = (
                     resolution.detail if isinstance(resolution, SizingRejection) else "unsupported collateral sizing"
                 )
+                rejection_code = resolution.code.value if isinstance(resolution, SizingRejection) else None
                 return self._perp_margin_failure_fill(
                     params,
                     market_state,
@@ -861,13 +862,14 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
                     required_margin_ratio=self._config.initial_margin_ratio,
                     reason=reason,
                     validation_type="sizing",
+                    rejection_code=rejection_code,
                 )
 
         collateral_usd = self._perp_collateral_usd(params, market_state)
         required_margin_ratio = self._perp_required_margin_ratio(params.leverage, params.protocol)
         available_collateral = self._perp_available_collateral(params, portfolio, market_state)
 
-        can_open, reason = self._margin_validator.can_open_position(
+        can_open, reason, margin_rejection = self._margin_validator.evaluate_open(
             position_size=params.size_usd,
             collateral=collateral_usd,
             available_capital=available_collateral,
@@ -876,12 +878,26 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
         )
 
         if not can_open:
+            from almanak.framework.backtesting.pnl.calculators.margin import MarginRejection
+            from almanak.framework.backtesting.pnl.sizing import RejectionCode
+
+            # The validator names the check that refused; rewording its message
+            # must never change what the decision log and the compliance lane
+            # read back.
+            typed_codes = {
+                MarginRejection.INSUFFICIENT_MARGIN: RejectionCode.INSUFFICIENT_MARGIN,
+                MarginRejection.INSUFFICIENT_CAPITAL: RejectionCode.INSUFFICIENT_CAPITAL,
+                MarginRejection.MARGIN_UTILIZATION_EXCEEDED: RejectionCode.MARGIN_UTILIZATION_EXCEEDED,
+            }
+            resolved = typed_codes.get(margin_rejection) if margin_rejection is not None else None
+            rejection_code = (resolved or RejectionCode.INSUFFICIENT_BALANCE).value
             return self._perp_margin_failure_fill(
                 params,
                 market_state,
                 collateral_usd,
                 required_margin_ratio,
                 reason,
+                rejection_code=rejection_code,
             )
 
         self._log_perp_open_success(intent, market_state, params, collateral_usd, required_margin_ratio)
@@ -977,6 +993,7 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
         required_margin_ratio: Decimal,
         reason: str,
         validation_type: str = "margin",
+        rejection_code: str | None = None,
     ) -> "SimulatedFill":
         from almanak.core.intent_types import IntentType
         from almanak.framework.backtesting.pnl.portfolio import SimulatedFill
@@ -1004,6 +1021,7 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
             metadata={
                 "failure_reason": reason,
                 "validation_type": validation_type,
+                **({"rejection_code": rejection_code} if rejection_code else {}),
                 "required_margin_ratio": str(required_margin_ratio),
                 "collateral_usd": str(collateral_usd),
                 "attempted_collateral_amount": str(params.collateral_amount),

@@ -83,6 +83,15 @@ INVARIANT_ROWS: tuple[str, ...] = (
     "historical_price_provenance",
     "historical_exact_pool_twap",
     "historical_exact_pool_state",
+    "exact_pool_first_use_discovery",
+    "exact_pool_first_use_unprovable",
+    "market_first_use_discovery",
+    "market_first_use_unprovable",
+    "intent_sequence_in_order",
+    "intent_sequence_stops_on_rejection",
+    "intent_sequence_chains_amount_all",
+    "intent_sequence_chains_lp_position",
+    "rejected_perp_flags_compliance",
     "lp_fee_unit_normalization",
     "snapshot_total_counts_cash_once",
     "trade_pnl_attribution",
@@ -252,6 +261,68 @@ CELLS: tuple[TrustCell, ...] = (
         "An exact Uniswap V3 pool address is factory-authenticated and prewarmed from archive "
         "slot0/liquidity/balanceOf state, then executes LP_OPEN from its canonical descriptor without "
         "static-registry membership or a token/USD proxy (ALM-3225/ALM-3244/ALM-3245/ALM-3301).",
+    ),
+    _cell(
+        "exact_pool_first_use_discovery",
+        "lp",
+        "An exact pool address that no config key or hook declared is authenticated from archive state "
+        "the first time an LP_OPEN names it — identity from the intent, the same factory/fee/token checks "
+        "as preflight, no static registry — and executes from the bound descriptor; earlier decide()-time "
+        "reads fall back exactly as an undeclared pool did before (ALM-3467).",
+    ),
+    _cell(
+        "exact_pool_first_use_unprovable",
+        "lp",
+        "When first-use archive authentication of an undeclared exact pool fails, no descriptor is bound, "
+        "no pair is fabricated, the LP_OPEN rejects POOL_METADATA_UNAVAILABLE and the all-rejected family "
+        "fails the run — fail-closed survives the move from preflight to first use (ALM-3467).",
+    ),
+    _cell(
+        "market_first_use_discovery",
+        "perp",
+        "A perp market that no config key or hook declared is prepared from the venue's native candle "
+        "history the first time a PERP_OPEN names it — identity from the intent, the market verified and "
+        "remembered for the fill-pricing lane, its index series overlaid on every later tick — and the open "
+        "prices from that series, never a $1 mark (ALM-3467).",
+    ),
+    _cell(
+        "market_first_use_unprovable",
+        "perp",
+        "When venue history cannot serve an undeclared perp market at first use, nothing is overlaid and the "
+        "PERP_OPEN keeps its named not-priceable rejection; the all-rejected family fails the run (ALM-3467).",
+    ),
+    _cell(
+        "intent_sequence_in_order",
+        "swap",
+        "An Intent.sequence returned by decide() executes its members in order at one fill point, each "
+        "member recorded and notified individually, matching the live runner (ALM-3467).",
+    ),
+    _cell(
+        "intent_sequence_stops_on_rejection",
+        "swap",
+        "A sequence stops at the first member that does not fill: dependent members after it are never "
+        "attempted, and only attempted members produce trades and callbacks (ALM-3467).",
+    ),
+    _cell(
+        "intent_sequence_chains_amount_all",
+        "swap",
+        'A sequence member with amount="all" is sized from the PREVIOUS member\'s received amount, as the '
+        "live runner does -- never from the whole simulated wallet, so a pre-existing balance is not spent "
+        "twice (ALM-3467).",
+    ),
+    _cell(
+        "intent_sequence_chains_lp_position",
+        "lp",
+        'A Pendle LP_OPEN followed by LP_CLOSE amount="all" in one Intent.sequence targets the exact '
+        "simulated position created by the prior member. The LP identity lane stays separate from token "
+        "amount chaining, matching the live runner's separate minted-LP-wei lane.",
+    ),
+    _cell(
+        "rejected_perp_flags_compliance",
+        "perp",
+        "A completed run with a rejected PERP_OPEN carries a typed rejection code (INSUFFICIENT_MARGIN / "
+        "INSUFFICIENT_CAPITAL / MARGIN_UTILIZATION_EXCEEDED) and a perp-execution compliance violation. "
+        "Hedge wording is reserved for strategies that explicitly declare a hedged mandate.",
     ),
     # --- LP column ---
     _cell(

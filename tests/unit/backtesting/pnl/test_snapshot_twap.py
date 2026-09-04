@@ -24,7 +24,6 @@ POOL = "0xc756bba710d45647715079ce50aa16aab36ded42"
 START = datetime.fromtimestamp(1_000, UTC)
 END = datetime.fromtimestamp(4_600, UTC)
 TARGET = HistoricalTWAPTarget("ethereum", "uniswap_v3", POOL, 1_800)
-GENERATED_TARGET = HistoricalTWAPTarget("bsc", "pancakeswap_v3", POOL, 300)
 
 
 def _fetcher(**kwargs):
@@ -37,7 +36,7 @@ def _fetcher(**kwargs):
     ]
 
 
-def test_typed_declaration_takes_precedence() -> None:
+def test_typed_declaration_is_the_only_declaration() -> None:
     custom_target = HistoricalTWAPTarget("ethereum", "custom_pool_provider", POOL, 1_800)
     strategy = SimpleNamespace(
         backtest_twap_targets=[custom_target],
@@ -45,76 +44,6 @@ def test_typed_declaration_takes_precedence() -> None:
     )
 
     assert declared_historical_twap_targets(strategy, {}, default_chain="ethereum") == (custom_target,)
-
-
-def test_narrow_legacy_decoder_accepts_only_matching_generated_shape() -> None:
-    config = {"swap_pool": POOL, "protocol": "uniswap_v3", "twap_window_seconds": 1_800}
-    strategy = SimpleNamespace(
-        pool=POOL,
-        protocol="uniswap_v3",
-        twap_window_seconds=1_800,
-        STRATEGY_METADATA=SimpleNamespace(supported_protocols=["uniswap_v3"]),
-    )
-    assert declared_historical_twap_targets(strategy, config, default_chain="ethereum") == (TARGET,)
-
-    strategy.pool = "0x0000000000000000000000000000000000000001"
-    assert declared_historical_twap_targets(strategy, config, default_chain="ethereum") == ()
-
-
-def test_decoder_accepts_current_generated_pool_and_window_names() -> None:
-    config = {
-        "swap_pool": POOL,
-        "protocol": "pancakeswap_v3",
-        "pool_twap_window_seconds": 300,
-    }
-    strategy = SimpleNamespace(
-        swap_pool=POOL,
-        protocol="pancakeswap_v3",
-        STRATEGY_METADATA=SimpleNamespace(supported_protocols=["pancakeswap_v3"]),
-    )
-
-    assert declared_historical_twap_targets(strategy, config, default_chain="bsc") == (GENERATED_TARGET,)
-
-    # The generated strategy passes ``window_seconds=300`` literally.  A
-    # same-named instance attribute is optional, but when present it remains a
-    # consistency assertion against the config declaration.
-    strategy.pool_twap_window_seconds = 301
-    assert declared_historical_twap_targets(strategy, config, default_chain="bsc") == ()
-
-
-def test_decoder_accepts_generated_minute_window_with_seconds_attribute() -> None:
-    config = {
-        "swap_pool": POOL,
-        "protocol": "pancakeswap_v3",
-        "twap_window_minutes": 5,
-    }
-    strategy = SimpleNamespace(
-        swap_pool=POOL,
-        protocol="pancakeswap_v3",
-        twap_window_seconds=300,
-        STRATEGY_METADATA=SimpleNamespace(supported_protocols=["pancakeswap_v3"]),
-    )
-
-    assert declared_historical_twap_targets(strategy, config, default_chain="bsc") == (GENERATED_TARGET,)
-
-    strategy.twap_window_seconds = 301
-    assert declared_historical_twap_targets(strategy, config, default_chain="bsc") == ()
-
-
-def test_decoder_fails_preflight_for_curve_twap() -> None:
-    config = {
-        "swap_pool": POOL,
-        "protocol": "curve",
-        "pool_twap_window_seconds": 300,
-    }
-    strategy = SimpleNamespace(
-        swap_pool=POOL,
-        protocol="curve",
-        STRATEGY_METADATA=SimpleNamespace(supported_protocols=["curve"]),
-    )
-
-    with pytest.raises(ValueError, match="Curve pools do not expose one uniform native TWAP"):
-        declared_historical_twap_targets(strategy, config, default_chain="ethereum")
 
 
 def test_snapshot_view_serves_exact_archived_pool_observation_with_provenance() -> None:
@@ -161,7 +90,9 @@ def test_snapshot_view_serves_exact_archived_pool_observation_with_provenance() 
         {"pool_address": "PAXG/XAUT"},
         {"window_seconds": 300},
         {"window_seconds": 0},
-        {"protocol": "sushiswap_v3"},
+        # A different protocol on the same pool is no longer a refusal: it is a
+        # distinct identity fetched at first use, and this fixture's fetcher
+        # serves it (see test_snapshot_view_serves_undeclared_pool_at_first_use).
     ],
 )
 def test_snapshot_view_refuses_undeclared_identity(kwargs) -> None:
@@ -181,9 +112,59 @@ def test_snapshot_view_refuses_undeclared_identity(kwargs) -> None:
         "protocol": "uniswap_v3",
     }
     call.update(kwargs)
-    with pytest.raises(PoolPriceUnavailableError, match="not declared and prewarmed"):
+    # An undeclared identity is fetched at first use; this fixture's fetcher
+    # only serves TARGET, so the archive "cannot serve" it and the read is
+    # refused fail-closed (an invalid identity never reaches the fetcher).
+    with pytest.raises(
+        PoolPriceUnavailableError,
+        match="first-use historical TWAP fetch failed|not a valid historical TWAP target",
+    ):
         source.view_at(END).twap(**call)
     assert manifest.entries()[-1]["outcome"] == "refused"
+
+
+def test_snapshot_view_serves_undeclared_pool_at_first_use() -> None:
+    """A decide()-time TWAP read that names an undeclared pool/window fetches it inline, once."""
+    calls: list[dict] = []
+
+    def permissive_fetcher(**kwargs):
+        calls.append(kwargs)
+        return _fetcher(**{**kwargs, "pool_address": POOL, "window_secs": 1_800})
+
+    manifest = RunDataManifest()
+    source = SnapshotTWAPSource(
+        start_time=START,
+        end_time=END,
+        sample_interval_seconds=3_600,
+        manifest=manifest,
+        fetcher=permissive_fetcher,
+    )
+    # Nothing declared, nothing prewarmed.
+    assert not source._series
+
+    first = source.view_at(END).twap(pool_address=POOL, chain="ethereum", protocol="uniswap_v3", window_seconds=300)
+    second = source.view_at(END).twap(pool_address=POOL, chain="ethereum", protocol="uniswap_v3", window_seconds=300)
+
+    assert len(calls) == 1
+    assert calls[0]["pool_address"] == POOL and calls[0]["window_secs"] == 300
+    assert first.value.price == second.value.price > 0
+    assert first.classification is DataClassification.EXECUTION_GRADE
+    assert manifest.entries()[-1]["outcome"] == "served"
+
+
+def test_snapshot_view_remembers_first_use_fetch_failure() -> None:
+    """An archive that cannot serve the pool is asked once; every later read refuses instantly."""
+    calls: list[dict] = []
+
+    def failing_fetcher(**kwargs):
+        calls.append(kwargs)
+        raise ValueError("archive RPC unavailable")
+
+    source = SnapshotTWAPSource(start_time=START, end_time=END, sample_interval_seconds=3_600, fetcher=failing_fetcher)
+    for _ in range(2):
+        with pytest.raises(PoolPriceUnavailableError, match="first-use historical TWAP fetch failed"):
+            source.view_at(END).twap(pool_address=POOL, chain="ethereum", protocol="uniswap_v3", window_seconds=300)
+    assert len(calls) == 1
 
 
 def test_materialize_rejects_stale_grid_point() -> None:

@@ -93,6 +93,101 @@ def _address_from_token_config(value: object) -> str | None:
     return address.strip().lower() if isinstance(address, str) and is_address_like(address.strip()) else None
 
 
+def _fee_tier_assertion(protocol: str, value: Any) -> int | None:
+    """Decode ``fee_tier`` only when the connector says it means a fee tier.
+
+    Some configs reuse this field for a different factory discriminator
+    (Aerodrome Slipstream stores tick spacing there); the archive-authenticated
+    ``fee()`` stays authoritative and a malformed value never suppresses the
+    hint.
+    """
+    from almanak.connectors._strategy_base.pool_reader import PoolDiscriminatorKind
+    from almanak.connectors._strategy_pool_data_registry import POOL_DATA_REGISTRY
+
+    pool_data = POOL_DATA_REGISTRY.require(protocol)
+    reader = pool_data.price_reader
+    if reader is None or reader.discriminator_kind is not PoolDiscriminatorKind.FEE_TIER:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+# Exactly the keys the former config-key bridge read: a hint may only prewarm what main
+# already prewarmed, so no result changes for a config that ran before. Any other key
+# (``pool_address``, bespoke names) is the strategy's business and resolves at first use.
+_POOL_HINT_KEYS = ("swap_pool", "pool")
+
+
+def hinted_historical_pool_state_target(
+    strategy: Any,
+    config: Mapping[str, Any],
+    *,
+    default_chain: str,
+) -> HistoricalPoolStateTarget | None:
+    """A prewarm HINT read only from generated ``pool`` / ``swap_pool`` keys.
+
+    Hints only decide what readiness prewarms before tick 1 so a strategy that
+    names its pool in config keeps the exact-pool plane from tick 0. They never
+    gate anything: a missing, malformed or unservable hint costs nothing,
+    because the pool is authenticated at first use from the intent or read
+    that names it. This function therefore never raises.
+    """
+    try:
+        pool = next(
+            (
+                str(value).strip().lower()
+                for value in (config.get(key) for key in _POOL_HINT_KEYS)
+                if isinstance(value, str) and is_address_like(value.strip())
+            ),
+            None,
+        )
+        if pool is None:
+            return None
+        candidates: list[str] = []
+        for value in (config.get("protocol"), getattr(strategy, "protocol", None)):
+            if isinstance(value, str) and value.strip():
+                candidates.append(value.strip().lower().replace("-", "_"))
+        metadata = getattr(strategy, "STRATEGY_METADATA", None)
+        if metadata is None:
+            get_metadata = getattr(strategy, "get_metadata", None)
+            metadata = get_metadata() if callable(get_metadata) else None
+        for value in getattr(metadata, "supported_protocols", None) or ():
+            candidates.append(str(value).strip().lower().replace("-", "_"))
+        supported = []
+        for protocol in dict.fromkeys(candidates):
+            try:
+                _require_historical_pool_state(protocol)
+            except ValueError:
+                continue
+            supported.append(protocol)
+        if len(supported) != 1:
+            return None  # ambiguous or unsupported: first use resolves it from the intent
+        protocol = supported[0]
+        base = _address_from_token_config(config.get("base_token"))
+        quote = _address_from_token_config(config.get("quote_token"))
+        return HistoricalPoolStateTarget(
+            chain=default_chain,
+            protocol=protocol,
+            pool_address=pool,
+            token_addresses=(base, quote) if base is not None and quote is not None else None,
+            fee_tier=_fee_tier_assertion(protocol, config.get("fee_tier")),
+        )
+    except Exception as exc:  # noqa: BLE001 — a hint must never refuse a run
+        logger.debug("Ignoring unusable exact-pool prewarm hint: %s", exc)
+        return None
+
+
+def require_historical_pool_state(protocol: str) -> None:
+    """Require the connector's historical-state facet with its own reason.
+
+    Public so the engine's first-use exact-pool discovery applies the same
+    support gate as declaration-driven preflight.
+    """
+    _require_historical_pool_state(protocol)
+
+
 def _require_historical_pool_state(protocol: str) -> None:
     """Require the connector's historical-state facet with its own reason."""
     from almanak.connectors._strategy_base.pool_data import PoolDataFacet, PoolDataSource
@@ -106,93 +201,6 @@ def _require_historical_pool_state(protocol: str) -> None:
         return
     reason = POOL_DATA_REGISTRY.unsupported_reason(protocol, PoolDataFacet.HISTORICAL_STATE)
     raise ValueError(f"protocol {protocol!r} does not support historical pool state: {reason}")
-
-
-def _legacy_fee_tier_assertion(protocol: str, value: Any) -> int | None:
-    """Decode ``fee_tier`` only when the connector says it means a fee tier.
-
-    Some compatibility configs reuse this field for a different factory
-    discriminator.  Aerodrome Slipstream, for example, stores tick spacing in
-    ``fee_tier``.  Its archive provider separately authenticates that spacing
-    through the factory, while the returned pool metadata correctly reports
-    the economic ``fee()`` value.  Comparing those two quantities would reject
-    a canonical pool.
-    """
-    from almanak.connectors._strategy_base.pool_reader import PoolDiscriminatorKind
-    from almanak.connectors._strategy_pool_data_registry import POOL_DATA_REGISTRY
-
-    pool_data = POOL_DATA_REGISTRY.require(protocol)
-    reader = pool_data.price_reader
-    if reader is None or reader.discriminator_kind is not PoolDiscriminatorKind.FEE_TIER:
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        # The archive-authenticated fee remains authoritative.  A malformed
-        # redundant compatibility field must not suppress address discovery.
-        return None
-
-
-def _legacy_target(
-    strategy: Any,
-    config: Mapping[str, Any],
-    *,
-    default_chain: str,
-) -> HistoricalPoolStateTarget | None:
-    """Decode the two generated exact-pool config shapes.
-
-    Pool identity is address-first: token addresses and the fee tier are
-    optional assertions, never prerequisites for archive prewarm.  The newer
-    generated shape stores the address as ``swap_pool`` / ``self.swap_pool``;
-    the original compatibility shape used ``pool`` / ``self.pool``.
-    """
-    protocol = config.get("protocol")
-    if not isinstance(protocol, str):
-        return None
-
-    pool: str | None = None
-    for config_key, strategy_attributes in (
-        ("swap_pool", ("swap_pool", "pool")),
-        ("pool", ("pool",)),
-    ):
-        candidate = config.get(config_key)
-        if not isinstance(candidate, str):
-            continue
-        normalized_candidate = candidate.strip().lower()
-        if any(
-            str(getattr(strategy, attribute, "")).strip().lower() == normalized_candidate
-            for attribute in strategy_attributes
-        ):
-            pool = candidate
-            break
-    if pool is None:
-        return None
-
-    normalized_protocol = protocol.strip().lower().replace("-", "_")
-    if str(getattr(strategy, "protocol", "")).strip().lower().replace("-", "_") != normalized_protocol:
-        return None
-    metadata = getattr(strategy, "STRATEGY_METADATA", None)
-    if metadata is None:
-        get_metadata = getattr(strategy, "get_metadata", None)
-        metadata = get_metadata() if callable(get_metadata) else None
-    supported = {
-        str(value).strip().lower().replace("-", "_") for value in (getattr(metadata, "supported_protocols", None) or ())
-    }
-    if normalized_protocol not in supported:
-        return None
-    _require_historical_pool_state(normalized_protocol)
-
-    base = _address_from_token_config(config.get("base_token"))
-    quote = _address_from_token_config(config.get("quote_token"))
-    token_addresses = (base, quote) if base is not None and quote is not None else None
-    fee_tier = _legacy_fee_tier_assertion(normalized_protocol, config.get("fee_tier"))
-    return HistoricalPoolStateTarget(
-        chain=default_chain,
-        protocol=protocol,
-        pool_address=pool,
-        token_addresses=token_addresses,
-        fee_tier=fee_tier,
-    )
 
 
 def declared_historical_pool_state_targets(
@@ -213,13 +221,13 @@ def declared_historical_pool_state_targets(
         targets = tuple(values)
         if not all(isinstance(target, HistoricalPoolStateTarget) for target in targets):
             raise ValueError("every pool-state declaration must be a HistoricalPoolStateTarget")
-        # Explicit typed declarations remain the highest-precedence extension
-        # seam.  They may be served by a caller-provided provider that is not a
-        # connector-manifest capability, so only generated/config-shape
-        # discovery is gated by POOL_DATA_REGISTRY.
+        # Explicit typed declarations may be served by a caller-provided
+        # provider that is not a connector-manifest capability, so they are
+        # not gated by POOL_DATA_REGISTRY here (first-use discovery is).
         return tuple(dict.fromkeys(cast(tuple[HistoricalPoolStateTarget, ...], targets)))
-    legacy = _legacy_target(strategy, strategy_config, default_chain=default_chain)
-    return (legacy,) if legacy is not None else ()
+    # No config-key discovery: identity comes from the typed hook above or, at
+    # first use, from the intent/read that names the pool.
+    return ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -405,24 +413,98 @@ class SnapshotPoolStateSource:
         sample_interval_seconds: int,
         manifest: Any | None = None,
         fetcher: Callable[..., list[HistoricalPoolStatePoint]] | None = None,
+        first_use_feasibility: Callable[[], Any] | None = None,
     ) -> None:
         self._start_ts = _unix_seconds(start_time)
         self._end_ts = _unix_seconds(end_time)
         self._interval = sample_interval_seconds
         self._manifest = manifest
         self._fetcher = fetcher or fetch_historical_pool_state_points
+        # The declared and hinted prewarm paths bound the window before their
+        # first gateway page; a decide()-time fetch pays the same serial paging
+        # cost on the iteration task, so it is bounded by the same estimate
+        # instead of stalling the run past the job budget.
+        self._first_use_feasibility = first_use_feasibility
         self._series: dict[tuple[str, str, str], _Series] = {}
+        self._first_use_failures: dict[tuple[str, str, str], str] = {}
+
+    @staticmethod
+    def _first_use_key(chain: str, protocol: str, pool_address: str) -> tuple[str, str, str]:
+        return (
+            chain.strip().lower(),
+            protocol.strip().lower().replace("-", "_"),
+            pool_address.strip().lower(),
+        )
+
+    def first_use_failure(self, chain: str, protocol: str, pool_address: str) -> str | None:
+        """The remembered reason this pool could not be served, if it already failed once."""
+        return self._first_use_failures.get(self._first_use_key(chain, protocol, pool_address))
+
+    def remember_first_use_failure(self, chain: str, protocol: str, pool_address: str, reason: str) -> None:
+        """Record a failed authentication so later ticks refuse instantly instead of re-fetching.
+
+        Without this, a strategy that keeps emitting an intent for a pool the
+        archive cannot serve pays the whole run-window fetch on every attempt.
+        """
+        self._first_use_failures.setdefault(self._first_use_key(chain, protocol, pool_address), reason)
+
+    def resolve_or_materialize(
+        self,
+        chain: str,
+        protocol: str,
+        pool_address: str,
+        tick_ts: int,
+    ) -> tuple[HistoricalPoolStateTarget, HistoricalPoolStatePoint]:
+        """``_resolve`` that fetches an undeclared exact pool the first time a protocol-scoped read names it.
+
+        A miss is remembered for the run so an unservable pool refuses
+        instantly on later ticks. Reads without a protocol (``pool_price``)
+        keep their existing fallback: there is no factory to authenticate
+        against without one.
+        """
+        key = (chain.strip().lower(), protocol.strip().lower().replace("-", "_"), pool_address.strip().lower())
+        if key not in self._series:
+            failed = self._first_use_failures.get(key)
+            if failed is None:
+                try:
+                    _require_historical_pool_state(key[1])
+                    if self._first_use_feasibility is not None:
+                        self._first_use_feasibility()
+                    self.materialize_history_blocking(HistoricalPoolStateTarget(*key))
+                except Exception as exc:  # noqa: BLE001 — fail-closed refusal, remembered for the run
+                    failed = f"first-use exact-pool state fetch failed for {key[0]}:{key[1]}:{key[2]}: {exc}"
+                    self._first_use_failures[key] = failed
+                    logger.warning(failed)
+            if failed is not None:
+                raise PoolPriceUnavailableError(pool_address, failed, exact_pool_unavailable=True)
+        return self._resolve(*key, tick_ts)
 
     async def materialize_history(self, target: HistoricalPoolStateTarget) -> int:
-        points = await run_sync_gateway_call(
-            self._fetcher,
-            protocol=target.protocol,
-            chain=target.chain,
-            pool_address=target.pool_address,
-            start_ts=self._start_ts,
-            end_ts=self._end_ts,
-            interval_secs=self._interval,
-        )
+        points = await run_sync_gateway_call(self._fetcher, **self._fetch_kwargs(target))
+        return self._install_points(target, points)
+
+    def materialize_history_blocking(self, target: HistoricalPoolStateTarget) -> int:
+        """Load one exact pool synchronously, for a decide()-time read that names an undeclared pool.
+
+        Same fetch and validation as :meth:`materialize_history`, run inline
+        because decide() cannot await inside the engine's iteration task.
+        """
+        if target.key in self._series:
+            return len(self._series[target.key].points)
+        points = self._fetcher(**self._fetch_kwargs(target))
+        return self._install_points(target, points)
+
+    def _fetch_kwargs(self, target: HistoricalPoolStateTarget) -> dict[str, Any]:
+        return {
+            "protocol": target.protocol,
+            "chain": target.chain,
+            "pool_address": target.pool_address,
+            "start_ts": self._start_ts,
+            "end_ts": self._end_ts,
+            "interval_secs": self._interval,
+        }
+
+    def _install_points(self, target: HistoricalPoolStateTarget, points: list[HistoricalPoolStatePoint]) -> int:
         samples = tuple(range(self._start_ts, self._end_ts + 1, self._interval))
         if len(points) != len(samples):
             raise ValueError(f"incomplete historical pool-state coverage for {target.manifest_key}")
@@ -474,6 +556,17 @@ class SnapshotPoolStateSource:
             factory=factory,
         )
 
+    @property
+    def is_empty(self) -> bool:
+        """True until at least one exact pool has been materialized.
+
+        The run keeps one source alive even when nothing was declared so a
+        pool discovered at first use has somewhere to land; the loop only
+        promotes it to the decide()-time exact-pool view once it holds a
+        series, so an empty source is behaviourally identical to no source.
+        """
+        return not self._series
+
     def descriptors(self) -> tuple[PoolDescriptor, ...]:
         """Return every materialized descriptor in deterministic key order."""
         return tuple(
@@ -489,7 +582,9 @@ class SnapshotPoolStateSource:
         key = (chain.strip().lower(), protocol.strip().lower().replace("-", "_"), pool_address.strip().lower())
         series = self._series.get(key)
         if series is None:
-            raise PoolPriceUnavailableError(pool_address, "exact pool was not declared and prewarmed")
+            raise PoolPriceUnavailableError(
+                pool_address, "exact pool was not declared and prewarmed", exact_pool_unavailable=True
+            )
         index = bisect_right(series.samples, tick_ts) - 1
         if index < 0:
             raise PoolPriceUnavailableError(pool_address, "no historical pool state exists at this tick")
@@ -585,7 +680,9 @@ class SnapshotPoolStateView:
                 return self._source._resolve(chain, protocol, pool_address, self._tick_ts)
             except PoolPriceUnavailableError:
                 continue
-        raise PoolPriceUnavailableError(pool_address, "exact pool was not declared and prewarmed")
+        raise PoolPriceUnavailableError(
+            pool_address, "exact pool was not declared and prewarmed", exact_pool_unavailable=True
+        )
 
     @staticmethod
     def _pool_price(
@@ -675,7 +772,7 @@ class SnapshotPoolStateView:
         this exact pool's same-block spot ratio.  No current reserve or price
         is ever backfilled into a historical tick.
         """
-        target, point = self._source._resolve(chain, protocol, pool_address, self._tick_ts)
+        target, point = self._source.resolve_or_materialize(chain, protocol, pool_address, self._tick_ts)
         chain_key = target.chain
         reserve0 = Decimal(point.reserve0_raw) / Decimal(10**point.token0_decimals)
         reserve1 = Decimal(point.reserve1_raw) / Decimal(10**point.token1_decimals)

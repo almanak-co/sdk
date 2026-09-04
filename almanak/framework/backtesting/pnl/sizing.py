@@ -46,6 +46,16 @@ class RejectionCode(StrEnum):
     #: fails closed on (observed: a fluid/ethereum open filled against a
     #: surrogate rate).
     UNDECLARED_LENDING_CHAIN = "UNDECLARED_LENDING_CHAIN"
+    #: A perp open whose posted collateral is below the venue's required
+    #: initial margin for the requested notional.
+    INSUFFICIENT_MARGIN = "INSUFFICIENT_MARGIN"
+    #: A perp open whose required collateral exceeds the wallet's available
+    #: capital at execution. Typed so a rejected risk-critical action stops
+    #: bucketing as UNCLASSIFIED in the decision log.
+    INSUFFICIENT_CAPITAL = "INSUFFICIENT_CAPITAL"
+    #: A perp open whose initial-margin requirement would push margin
+    #: utilization above the venue cap.
+    MARGIN_UTILIZATION_EXCEEDED = "MARGIN_UTILIZATION_EXCEEDED"
 
 
 @dataclass(frozen=True, slots=True)

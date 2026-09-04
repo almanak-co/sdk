@@ -196,6 +196,61 @@ class TestDecisionLog:
         assert summary["hold_reasons"][0]["reason_code"] == "TELEMETRY_EXTRACTION_ERROR"
         json.dumps(log.events())
 
+    @pytest.mark.parametrize(
+        ("intent", "expected"),
+        [
+            (SimpleNamespace(intents=(1, 2)), [1, 2]),
+            (SimpleNamespace(intents=[]), []),
+            (SimpleNamespace(intents=3), None),
+            (None, None),
+            (SimpleNamespace(intent_type="SEQUENCE", intents=[1]), None),
+        ],
+    )
+    def test_sequence_member_detection_is_defensive(self, intent: Any, expected: list[Any] | None) -> None:
+        assert DecisionLog._sequence_members(intent) == expected
+
+    def test_sequence_event_serializes_every_member_and_counts_each_type(self) -> None:
+        class SerializableMember:
+            intent_type = SimpleNamespace(value="LP_OPEN")
+
+            @staticmethod
+            def serialize() -> dict[str, Any]:
+                return {"amount": Decimal("1"), "created_at": _ts()}
+
+        class BrokenMember:
+            intent_type = "LP_CLOSE"
+
+            @staticmethod
+            def serialize() -> dict[str, Any]:
+                raise RuntimeError("broken serializer")
+
+            def __str__(self) -> str:
+                return "broken-member"
+
+        log = DecisionLog()
+        event = log._build_sequence_event(
+            tick=4,
+            timestamp=_ts(3),
+            members=[SerializableMember(), BrokenMember()],
+            source="strategy",
+        )
+
+        assert event == {
+            "event": "decision",
+            "tick": 4,
+            "timestamp": _ts(3).isoformat(),
+            "source": "strategy",
+            "decision": "SEQUENCE",
+            "intents": [
+                {"amount": "1", "created_at": _ts().isoformat()},
+                "broken-member",
+            ],
+        }
+        summary = log.summary()
+        assert summary["intent_ticks"] == 1
+        assert summary["intent_types"] == {"LP_CLOSE": 1, "LP_OPEN": 1}
+        json.dumps(event)
+
     def test_executions_counted_from_trades(self):
         log = DecisionLog()
         trades = [SimpleNamespace(success=True), SimpleNamespace(success=True), SimpleNamespace(success=False)]

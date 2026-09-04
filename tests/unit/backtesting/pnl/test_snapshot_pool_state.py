@@ -63,72 +63,7 @@ def _gateway_point(timestamp: int, block_number: int) -> SimpleNamespace:
     )
 
 
-def test_legacy_generated_pool_binding_is_decoded_address_first() -> None:
-    config = {
-        "pool": POOL,
-        "protocol": "uniswap_v3",
-        "fee_tier": 500,
-        "base_token": {"symbol": "WMATIC", "address": TOKEN0},
-        "quote_token": {"symbol": "USDT", "address": TOKEN1},
-    }
-    strategy = SimpleNamespace(
-        pool=POOL,
-        protocol="uniswap_v3",
-        STRATEGY_METADATA=SimpleNamespace(supported_protocols=["uniswap_v3"]),
-    )
-
-    assert declared_historical_pool_state_targets(strategy, config, default_chain="polygon") == (TARGET,)
-
-    strategy.pool = "0x0000000000000000000000000000000000000001"
-    assert declared_historical_pool_state_targets(strategy, config, default_chain="polygon") == ()
-
-
-def test_generated_swap_pool_binding_derives_metadata_from_address() -> None:
-    config = {"swap_pool": POOL, "protocol": "pancakeswap_v3"}
-    strategy = SimpleNamespace(
-        swap_pool=POOL,
-        protocol="pancakeswap_v3",
-        STRATEGY_METADATA=SimpleNamespace(supported_protocols=["pancakeswap_v3"]),
-    )
-
-    assert declared_historical_pool_state_targets(strategy, config, default_chain="bsc") == (ADDRESS_ONLY_TARGET,)
-
-    strategy.swap_pool = "0x0000000000000000000000000000000000000001"
-    assert declared_historical_pool_state_targets(strategy, config, default_chain="bsc") == ()
-
-
-def test_slipstream_legacy_fee_tier_is_not_an_economic_fee_assertion() -> None:
-    config = {
-        "swap_pool": POOL,
-        "protocol": "aerodrome_slipstream",
-        # Slipstream's legacy config calls this a fee tier, but the factory
-        # discriminator is tick spacing.  The archive reader derives fee().
-        "fee_tier": 200,
-    }
-    strategy = SimpleNamespace(
-        swap_pool=POOL,
-        protocol="aerodrome_slipstream",
-        STRATEGY_METADATA=SimpleNamespace(supported_protocols=["aerodrome_slipstream"]),
-    )
-
-    assert declared_historical_pool_state_targets(strategy, config, default_chain="base") == (
-        HistoricalPoolStateTarget("base", "aerodrome_slipstream", POOL),
-    )
-
-
-def test_generated_swap_pool_binding_fails_preflight_for_curve_state() -> None:
-    config = {"swap_pool": POOL, "protocol": "curve"}
-    strategy = SimpleNamespace(
-        swap_pool=POOL,
-        protocol="curve",
-        STRATEGY_METADATA=SimpleNamespace(supported_protocols=["curve"]),
-    )
-
-    with pytest.raises(ValueError, match="Curve archive state has not been migrated"):
-        declared_historical_pool_state_targets(strategy, config, default_chain="ethereum")
-
-
-def test_typed_pool_state_declaration_takes_precedence_over_generated_shape() -> None:
+def test_typed_pool_state_declaration_is_the_only_declaration() -> None:
     custom_target = HistoricalPoolStateTarget("ethereum", "custom_pool_provider", POOL)
     strategy = SimpleNamespace(
         backtest_pool_state_targets=[custom_target],
@@ -655,3 +590,66 @@ def test_undeclared_pool_refuses_instead_of_using_token_ratio() -> None:
     asyncio.run(source.materialize_history(TARGET))
     with pytest.raises(PoolPriceUnavailableError, match="not declared and prewarmed"):
         source.view_at(END).read_pool_price("0x0000000000000000000000000000000000000001", "polygon")
+
+
+def _tvl_market_state() -> MarketState:
+    return MarketState(
+        timestamp=END,
+        prices={("polygon", TOKEN0): Decimal("2"), ("polygon", TOKEN1): Decimal("1")},
+        price_observations={
+            ("polygon", TOKEN0): HistoricalPriceObservation(
+                price=Decimal("2"), timestamp=END, source="coingecko", confidence=DataConfidence.MEDIUM
+            ),
+            ("polygon", TOKEN1): HistoricalPriceObservation(
+                price=Decimal("1"), timestamp=END, source="coingecko", confidence=DataConfidence.MEDIUM
+            ),
+        },
+        chain="polygon",
+    )
+
+
+def test_tvl_read_materializes_undeclared_exact_pool_at_first_use() -> None:
+    """A protocol-scoped TVL read on an undeclared pool fetches its archive state inline, once."""
+    calls: list[dict] = []
+
+    def counting_fetcher(**kwargs):
+        calls.append(kwargs)
+        return _fetcher(**kwargs)
+
+    source = SnapshotPoolStateSource(
+        start_time=START, end_time=END, sample_interval_seconds=3_600, fetcher=counting_fetcher
+    )
+    assert source.is_empty
+
+    first = source.view_at(END).read_pool_tvl_usd(POOL, "polygon", "uniswap_v3", _tvl_market_state())
+    second = source.view_at(END).read_pool_tvl_usd(POOL, "polygon", "uniswap_v3", _tvl_market_state())
+
+    assert len(calls) == 1 and calls[0]["pool_address"] == POOL
+    assert first.value.tvl_usd == second.value.tvl_usd == Decimal("11")
+    assert not source.is_empty
+    assert source.pool_descriptor("polygon", "uniswap_v3", POOL) is not None
+
+
+def test_tvl_read_remembers_first_use_fetch_failure() -> None:
+    """An archive that cannot serve the pool is asked once; later reads refuse without refetching."""
+    calls: list[dict] = []
+
+    def failing_fetcher(**kwargs):
+        calls.append(kwargs)
+        raise ValueError("archive RPC unavailable")
+
+    source = SnapshotPoolStateSource(
+        start_time=START, end_time=END, sample_interval_seconds=3_600, fetcher=failing_fetcher
+    )
+    for _ in range(2):
+        with pytest.raises(PoolPriceUnavailableError, match="first-use exact-pool state fetch failed"):
+            source.view_at(END).read_pool_tvl_usd(POOL, "polygon", "uniswap_v3", _tvl_market_state())
+    assert len(calls) == 1
+    assert source.is_empty
+
+
+def test_pool_price_read_without_protocol_keeps_fallback_semantics() -> None:
+    """``pool_price`` carries no protocol, so it cannot authenticate a pool: unchanged refusal."""
+    source = SnapshotPoolStateSource(start_time=START, end_time=END, sample_interval_seconds=3_600, fetcher=_fetcher)
+    with pytest.raises(PoolPriceUnavailableError, match="not declared and prewarmed"):
+        source.view_at(END).read_pool_price(POOL, "polygon")

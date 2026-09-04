@@ -747,11 +747,24 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         )
 
     def _pool_descriptor_for_intent(self, intent: "LPOpenIntent") -> Any | None:
-        """Resolve an exact-pool descriptor by its complete execution identity."""
+        """Resolve an exact-pool descriptor by its complete execution identity.
+
+        The chain resolves through the registry first: descriptors are bound
+        under the canonical name, so an intent naming a registered alias
+        ("avax" for "avalanche") must not miss its own authenticated pool.
+        """
+        from almanak.core.chains import ChainRegistry
+
         pool = str(getattr(intent, "pool", "") or "").strip().lower()
-        chain = str(getattr(intent, "chain", None) or self._config.chain).strip().lower()
+        raw_chain = str(getattr(intent, "chain", None) or self._config.chain).strip().lower()
+        descriptor_chain = ChainRegistry.try_resolve(raw_chain)
+        chain = str(descriptor_chain.name).strip().lower() if descriptor_chain is not None else raw_chain
         protocol = str(getattr(intent, "protocol", "") or "").strip().lower().replace("-", "_")
         return self._pool_descriptors.get((chain, protocol, pool))
+
+    def has_pool_descriptor(self, intent: "LPOpenIntent") -> bool:
+        """Whether the intent's exact pool already has an authenticated descriptor."""
+        return self._pool_descriptor_for_intent(intent) is not None
 
     @property
     def adapter_name(self) -> str:

@@ -15,6 +15,7 @@ from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
 from almanak.framework.backtesting.pnl.data_provider import HistoricalCoverage
 from almanak.framework.backtesting.pnl.engine import PnLBacktester
 from almanak.framework.backtesting.pnl.error_handling import PreflightValidationError
+from almanak.framework.backtesting.pnl.perp_targets import PerpPriceHistoryTarget
 
 
 class _PreparedProvider:
@@ -54,9 +55,11 @@ async def test_engine_installs_manifest_provider_without_changing_strategy_ticks
     fallback = object()
     backtester = SimpleNamespace(
         data_provider=fallback,
-        _get_strategy_config_dict=lambda strategy: {"protocol": "gmx_v2", "market": "DOGE/USD"},
+        _get_strategy_config_dict=lambda strategy: {},
     )
-    strategy = SimpleNamespace()
+    strategy = SimpleNamespace(
+        backtest_perp_price_history_targets=lambda: [PerpPriceHistoryTarget(protocol="gmx_v2", market="DOGE/USD")]
+    )
     start = datetime(2025, 1, 1, tzinfo=UTC)
     config = PnLBacktestConfig(
         start_time=start,
@@ -230,40 +233,12 @@ async def test_declared_market_address_outranks_the_pair_label(monkeypatch: pyte
         "backtest_provider",
         classmethod(lambda cls, protocol: _PreparedProvider),
     )
-    backtester = SimpleNamespace(
-        data_provider=object(),
-        _get_strategy_config_dict=lambda strategy: {
-            "protocol": "gmx_v2",
-            "market": "WETH/USD",
-            "market_address": GMX_ETH_MARKET_ADDRESS,
-        },
+    backtester = SimpleNamespace(data_provider=object(), _get_strategy_config_dict=lambda strategy: {})
+    strategy = SimpleNamespace(
+        backtest_perp_price_history_targets=lambda: [
+            PerpPriceHistoryTarget(protocol="gmx_v2", market="WETH/USD", market_address=GMX_ETH_MARKET_ADDRESS)
+        ]
     )
-    start = datetime(2025, 1, 1, tzinfo=UTC)
-    config = PnLBacktestConfig(
-        start_time=start,
-        end_time=start + timedelta(days=200),
-        chain="arbitrum",
-        timeframe="auto",
-    )
-
-    await prepare_perp_price_history(backtester, SimpleNamespace(), config, SimpleNamespace(info=Mock()))
-
-    assert backtester.data_provider.price_history_target == ("gmx_v2", "arbitrum", GMX_ETH_MARKET_ADDRESS)
-
-
-@pytest.mark.asyncio
-async def test_strategy_attribute_market_address_is_discovered(monkeypatch: pytest.MonkeyPatch) -> None:
-    _PreparedProvider.constructed.clear()
-    monkeypatch.setattr(
-        PerpPriceHistoryRegistry,
-        "backtest_provider",
-        classmethod(lambda cls, protocol: _PreparedProvider),
-    )
-    backtester = SimpleNamespace(
-        data_provider=object(),
-        _get_strategy_config_dict=lambda strategy: {"protocol": "gmx_v2", "market": "ETH/USD"},
-    )
-    strategy = SimpleNamespace(market_address=GMX_ETH_MARKET_ADDRESS)
     start = datetime(2025, 1, 1, tzinfo=UTC)
     config = PnLBacktestConfig(
         start_time=start,
@@ -279,14 +254,12 @@ async def test_strategy_attribute_market_address_is_discovered(monkeypatch: pyte
 
 @pytest.mark.asyncio
 async def test_malformed_market_address_fails_preflight_instead_of_label_fallback() -> None:
-    backtester = SimpleNamespace(
-        data_provider=object(),
-        _get_strategy_config_dict=lambda strategy: {
-            "protocol": "gmx_v2",
-            "market": "ETH/USD",
-            "market_address": "ETH/USD",
-        },
-    )
+    backtester = SimpleNamespace(data_provider=object(), _get_strategy_config_dict=lambda strategy: {})
+
+    def malformed_hook():
+        return [PerpPriceHistoryTarget(protocol="gmx_v2", market="ETH/USD", market_address="ETH/USD")]
+
+    strategy = SimpleNamespace(backtest_perp_price_history_targets=malformed_hook)
     start = datetime(2025, 1, 1, tzinfo=UTC)
     config = PnLBacktestConfig(
         start_time=start,
@@ -296,17 +269,19 @@ async def test_malformed_market_address_fails_preflight_instead_of_label_fallbac
     )
 
     with pytest.raises(PreflightValidationError, match="address-first market contract"):
-        await prepare_perp_price_history(backtester, SimpleNamespace(), config, SimpleNamespace(info=Mock()))
+        await prepare_perp_price_history(backtester, strategy, config, SimpleNamespace(info=Mock()))
 
 
 def test_funding_targets_keep_the_pair_label_when_an_address_is_declared() -> None:
     """The funding-history lane is symbol-keyed; the address never leaks into it."""
     from almanak.framework.backtesting.pnl._engine_helpers import declared_perp_price_history_targets
 
-    targets = declared_perp_price_history_targets(
-        SimpleNamespace(),
-        {"protocol": "gmx_v2", "market": "ETH/USD", "market_address": GMX_ETH_MARKET_ADDRESS},
+    strategy = SimpleNamespace(
+        backtest_perp_price_history_targets=lambda: [
+            PerpPriceHistoryTarget(protocol="gmx_v2", market="ETH/USD", market_address=GMX_ETH_MARKET_ADDRESS)
+        ]
     )
+    targets = declared_perp_price_history_targets(strategy, {})
 
     assert [(target.protocol, target.market, target.market_address) for target in targets] == [
         ("gmx_v2", "ETH/USD", GMX_ETH_MARKET_ADDRESS)
@@ -320,9 +295,9 @@ async def test_manifest_chain_metadata_resolves_strictly(monkeypatch: pytest.Mon
         "declared_chains",
         classmethod(lambda cls, protocol: ("arbitrium",)),
     )
-    backtester = SimpleNamespace(
-        data_provider=object(),
-        _get_strategy_config_dict=lambda strategy: {"protocol": "gmx_v2", "market": "DOGE/USD"},
+    backtester = SimpleNamespace(data_provider=object(), _get_strategy_config_dict=lambda strategy: {})
+    strategy = SimpleNamespace(
+        backtest_perp_price_history_targets=lambda: [PerpPriceHistoryTarget(protocol="gmx_v2", market="DOGE/USD")]
     )
     start = datetime(2025, 1, 1, tzinfo=UTC)
     config = PnLBacktestConfig(
@@ -335,7 +310,7 @@ async def test_manifest_chain_metadata_resolves_strictly(monkeypatch: pytest.Mon
     with pytest.raises(ValueError, match="Unknown chain: 'arbitrium'"):
         await prepare_perp_price_history(
             backtester,
-            SimpleNamespace(),
+            strategy,
             config,
             SimpleNamespace(info=Mock(), warning=Mock()),
         )

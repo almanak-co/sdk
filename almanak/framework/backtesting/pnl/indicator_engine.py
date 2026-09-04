@@ -238,6 +238,16 @@ class BacktestIndicatorEngine:
             self._price_buffers[token] = deque(maxlen=self._max_history)
         self._price_buffers[token].append(price)
 
+    def replace_price_history(self, token: str, prices: Sequence[Decimal]) -> None:
+        """Replace one token's retained closes with an authoritative history.
+
+        First-use venue discovery uses this to remove any fallback observations
+        already buffered for the newly owned asset. The caller supplies only
+        observations strictly before the active tick; the normal loop appends
+        that tick exactly once after overlays have been applied.
+        """
+        self._price_buffers[token] = deque(prices, maxlen=self._max_history)
+
     def ensure_capacity(self, min_history: int) -> None:
         """Raise the per-token retention to at least ``min_history`` ticks.
 
@@ -258,6 +268,11 @@ class BacktestIndicatorEngine:
         self._price_buffers = {
             token: deque(buffer, maxlen=self._max_history) for token, buffer in self._price_buffers.items()
         }
+
+    @property
+    def max_history(self) -> int:
+        """Maximum retained tick closes per token."""
+        return self._max_history
 
     def get_buffer_size(self, token: str) -> int:
         """Return number of prices buffered for a token."""
@@ -868,6 +883,14 @@ class BacktestIndicatorEngine:
         message directs callers to. Existing buffers are rebuilt with the
         scaled capacity.
         """
+        # First-use venue routes are discovered after the initial provider
+        # resolution. Cadence can only become more restrictive: lowering it
+        # later would certify a finer plane than one of the run's authoritative
+        # sources actually measures.
+        if granularity_seconds is None:
+            granularity_seconds = self._data_granularity_seconds
+        elif self._data_granularity_seconds is not None:
+            granularity_seconds = max(self._data_granularity_seconds, granularity_seconds)
         self._data_granularity_seconds = granularity_seconds
         self._tick_interval_seconds = tick_interval_seconds
         if (

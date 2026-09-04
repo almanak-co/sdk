@@ -161,6 +161,9 @@ class DecisionLog:
         # Tolerate both intent shapes the engine accepts: enum intent_type
         # (canonical intents — read .value) and plain-string intent_type
         # (duck-typed strategy intents).
+        members = self._sequence_members(intent)
+        if members is not None:
+            return self._build_sequence_event(tick, timestamp, members, source)
         raw_type = getattr(intent, "intent_type", None)
         intent_type = getattr(raw_type, "value", raw_type)
         intent_type = str(intent_type) if intent_type is not None else None
@@ -193,6 +196,47 @@ class DecisionLog:
             else:
                 event["intents"] = [str(intent)]
         return event
+
+    @staticmethod
+    def _sequence_members(intent: Any) -> list[Any] | None:
+        """Members of an ``IntentSequence`` (any object exposing ``intents``), else None."""
+        if intent is None or hasattr(intent, "intent_type"):
+            return None
+        members = getattr(intent, "intents", None)
+        if members is None:
+            return None
+        try:
+            return list(members)
+        except TypeError:
+            return None
+
+    def _build_sequence_event(
+        self,
+        tick: int,
+        timestamp: datetime,
+        members: list[Any],
+        source: str,
+    ) -> dict[str, Any]:
+        """One decision event carrying every member of a sequence, counted per member type."""
+        self._intent_ticks += 1
+        serialized: list[Any] = []
+        for member in members:
+            raw_type = getattr(member, "intent_type", None)
+            member_type = str(getattr(raw_type, "value", raw_type) or "UNKNOWN")
+            self._intent_types[member_type] = self._intent_types.get(member_type, 0) + 1
+            serialize = getattr(member, "serialize", None)
+            try:
+                serialized.append(_json_safe(serialize()) if callable(serialize) else str(member))
+            except Exception:  # noqa: BLE001 — a broken serialize() must not lose the record
+                serialized.append(str(member))
+        return {
+            "event": "decision",
+            "tick": tick,
+            "timestamp": timestamp.isoformat(),
+            "source": source,
+            "decision": "SEQUENCE",
+            "intents": serialized,
+        }
 
     def _count_reason(self, source: str, reason_code: str | None, reason: str | None, tick: int) -> None:
         reason_text = reason if reason else "(no reason given)"

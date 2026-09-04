@@ -1,12 +1,11 @@
-"""Preflight guard for perp strategies with no discoverable market declaration.
+"""Perp price-history preparation without config-key declarations.
 
-A perp-trading strategy on a connector-native price venue whose market is
-declared under a non-standard key (found live: ``hedge_market_address``) used
-to sail through preflight with no candle route at all — the venue market
-catalog was never primed, so every PERP_OPEN was rejected at fill time as
-unpriceable. These tests pin the guard that names that misconfiguration in
-one line at preflight, and pin that properly declared, non-perp, and
-non-registry-venue strategies are unaffected.
+Identity is never read from config keys: a typed
+``backtest_perp_price_history_targets()`` hook prewarms declared markets
+before tick 1, and any market only an intent names is prepared at first use
+(ALM-3467). These tests pin that undeclared, non-perp, and non-registry-venue
+strategies pass preparation untouched, and that a typed declaration is
+installed as before.
 """
 
 from __future__ import annotations
@@ -21,7 +20,7 @@ from almanak.connectors._strategy_base.perp_price_history_registry import PerpPr
 from almanak.core.intent_types import IntentType
 from almanak.framework.backtesting.pnl._engine_helpers import prepare_perp_price_history
 from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
-from almanak.framework.backtesting.pnl.error_handling import PreflightValidationError
+from almanak.framework.backtesting.pnl.perp_targets import PerpPriceHistoryTarget
 
 GMX_ETH_MARKET_ADDRESS = "0x70d95587d40a2caf56bd97485ab3eec10bee6336"
 
@@ -67,25 +66,29 @@ def _config(**overrides: object) -> PnLBacktestConfig:
 
 
 @pytest.mark.asyncio
-async def test_perp_strategy_without_market_declaration_fails_preflight() -> None:
-    """The incident shape: perp intents + gmx_v2 + a bespoke market key only.
+async def test_perp_strategy_without_market_declaration_proceeds_to_first_use_discovery() -> None:
+    """The former incident shape: perp intents + gmx_v2 + a bespoke market key only.
 
-    The explicit (non-auto) timeframe is the lane the gap lived in — the
-    timeframe='auto' lane already raised.
+    Preflight no longer blocks it. The market is prepared from the venue's
+    native history the first time a perp intent names it
+    (``PnLBacktester._ensure_perp_market_route``), so a strategy that is
+    live-correct needs no backtest declaration. Nothing is installed here.
     """
     strategy = SimpleNamespace(
         STRATEGY_METADATA=_perp_metadata(["gmx_v2"]),
         hedge_market_address=GMX_ETH_MARKET_ADDRESS,
     )
     backtester = _backtester({"hedge_market_address": GMX_ETH_MARKET_ADDRESS})
+    provider_before = backtester.data_provider
 
-    with pytest.raises(PreflightValidationError, match="'market_address'"):
-        await prepare_perp_price_history(
-            backtester,
-            strategy,
-            _config(),
-            SimpleNamespace(info=Mock(), warning=Mock()),
-        )
+    await prepare_perp_price_history(
+        backtester,
+        strategy,
+        _config(),
+        SimpleNamespace(info=Mock(), warning=Mock()),
+    )
+
+    assert backtester.data_provider is provider_before
 
 
 @pytest.mark.asyncio
@@ -95,8 +98,13 @@ async def test_properly_declared_perp_strategy_is_unaffected(monkeypatch: pytest
         "backtest_provider",
         classmethod(lambda cls, protocol: _PreparedProvider),
     )
-    strategy = SimpleNamespace(STRATEGY_METADATA=_perp_metadata(["gmx_v2"]))
-    backtester = _backtester({"market": "ETH/USD", "market_address": GMX_ETH_MARKET_ADDRESS})
+    strategy = SimpleNamespace(
+        STRATEGY_METADATA=_perp_metadata(["gmx_v2"]),
+        backtest_perp_price_history_targets=lambda: [
+            PerpPriceHistoryTarget(protocol="gmx_v2", market="ETH/USD", market_address=GMX_ETH_MARKET_ADDRESS)
+        ],
+    )
+    backtester = _backtester({})
     logger = SimpleNamespace(info=Mock(), warning=Mock())
 
     await prepare_perp_price_history(backtester, strategy, _config(), logger)
@@ -144,58 +152,6 @@ async def test_perp_strategy_on_non_registry_venue_is_unaffected() -> None:
 
 
 @pytest.mark.asyncio
-async def test_explicit_foreign_protocol_masking_the_perp_venue_fails_preflight() -> None:
-    """A declared market routed to a non-perp protocol is the same dead end.
-
-    An explicit ``protocol`` declaration outranks strategy metadata in the
-    ladder, so a dual-protocol strategy that pins its LP protocol silently
-    loses the candle route even with 'market'/'market_address' declared.
-    """
-    strategy = SimpleNamespace(STRATEGY_METADATA=_perp_metadata(["uniswap_v3", "gmx_v2"]))
-    backtester = _backtester(
-        {
-            "protocol": "uniswap_v3",
-            "market": "ETH/USD",
-            "market_address": GMX_ETH_MARKET_ADDRESS,
-        }
-    )
-
-    with pytest.raises(PreflightValidationError, match="did not resolve to a perp-capable protocol"):
-        await prepare_perp_price_history(
-            backtester,
-            strategy,
-            _config(),
-            SimpleNamespace(info=Mock(), warning=Mock()),
-        )
-
-
-@pytest.mark.asyncio
-async def test_disabled_price_plane_seam_disables_the_guard(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The guard gates on has() — the route filter's own predicate.
-
-    Network-free tiers (the trust matrix's observation-lifecycle cell) disable
-    the venue-native price plane by patching ``PerpPriceHistoryRegistry.has``
-    to False and price fills off a synthetic provider with a hand-primed
-    market catalog. The guard must follow that seam, not re-derive
-    perp-capability through ``canonical()`` and fail a tier the filter
-    deliberately routed away from the candle lane.
-    """
-    monkeypatch.setattr(PerpPriceHistoryRegistry, "has", classmethod(lambda cls, protocol: False))
-    strategy = SimpleNamespace(STRATEGY_METADATA=_perp_metadata(["gmx_v2"]))
-    backtester = _backtester({"market": "ETH/USD"})
-    fallback = backtester.data_provider
-
-    await prepare_perp_price_history(
-        backtester,
-        strategy,
-        _config(),
-        SimpleNamespace(info=Mock(), warning=Mock()),
-    )
-
-    assert backtester.data_provider is fallback
-
-
-@pytest.mark.asyncio
 async def test_label_only_declaration_warns_but_proceeds(monkeypatch: pytest.MonkeyPatch) -> None:
     """'market' without 'market_address' works but earns an address-first nudge."""
     monkeypatch.setattr(
@@ -203,8 +159,11 @@ async def test_label_only_declaration_warns_but_proceeds(monkeypatch: pytest.Mon
         "backtest_provider",
         classmethod(lambda cls, protocol: _PreparedProvider),
     )
-    strategy = SimpleNamespace(STRATEGY_METADATA=_perp_metadata(["gmx_v2"]))
-    backtester = _backtester({"market": "ETH/USD"})
+    strategy = SimpleNamespace(
+        STRATEGY_METADATA=_perp_metadata(["gmx_v2"]),
+        backtest_perp_price_history_targets=lambda: [PerpPriceHistoryTarget(protocol="gmx_v2", market="ETH/USD")],
+    )
+    backtester = _backtester({})
     logger = SimpleNamespace(info=Mock(), warning=Mock())
 
     await prepare_perp_price_history(backtester, strategy, _config(), logger)

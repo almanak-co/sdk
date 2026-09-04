@@ -28,6 +28,7 @@ from almanak.framework.backtesting.pnl.engine import (
     DefaultSlippageModel,
     PnLBacktester,
 )
+from almanak.framework.backtesting.pnl.perp_targets import PerpPriceHistoryTarget
 from almanak.framework.data.interfaces import DataSourceUnavailable
 from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
@@ -209,6 +210,7 @@ def test_detect_strategy_type_lp(backtester, registered_adapters):
 @pytest.mark.asyncio
 async def test_snapshot_funding_is_prewarmed_from_declared_strategy_target() -> None:
     strategy = MockStrategy(protocols=["gmx_v2"])
+    strategy.backtest_perp_price_history_targets = lambda: [PerpPriceHistoryTarget(protocol="gmx_v2", market="ETH-USD")]
     calls: list[tuple[str, str, str]] = []
 
     class _FundingSource:
@@ -232,6 +234,9 @@ async def test_snapshot_funding_prewarm_isolates_data_source_failure_per_target(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     strategy = MockStrategy(protocols=["gmx_v2", "hyperliquid"])
+    strategy.backtest_perp_price_history_targets = lambda: [
+        PerpPriceHistoryTarget(protocol=protocol, market="ETH-USD") for protocol in ("gmx_v2", "hyperliquid")
+    ]
     calls: list[tuple[str, str, str]] = []
 
     class _FundingSource:
@@ -257,6 +262,7 @@ async def test_snapshot_funding_prewarm_isolates_data_source_failure_per_target(
 @pytest.mark.asyncio
 async def test_readiness_funding_prewarm_propagates_data_source_failure() -> None:
     strategy = MockStrategy(protocols=["gmx_v2"])
+    strategy.backtest_perp_price_history_targets = lambda: [PerpPriceHistoryTarget(protocol="gmx_v2", market="ETH-USD")]
 
     class _FundingSource:
         history_capable = True
@@ -271,6 +277,42 @@ async def test_readiness_funding_prewarm_propagates_data_source_failure() -> Non
             {"funding_market": "ETH-USD"},
             require_complete=True,
         )
+
+
+@pytest.mark.asyncio
+async def test_first_use_funding_materialization_is_idempotent() -> None:
+    from almanak.framework.backtesting.config import BacktestDataConfig
+
+    address = "0x" + "7" * 40
+    registrations: list[tuple[str, str, str]] = []
+    materializations: list[tuple[str, str, str]] = []
+
+    class _FundingSource:
+        def _register_market_address(self, venue: str, market: str, market_address: str) -> None:
+            registrations.append((venue, market, market_address))
+
+        async def materialize_history(self, venue: str, market: str, market_address: str) -> int:
+            materializations.append((venue, market, market_address))
+            return 24
+
+    provider = SimpleNamespace(
+        _sources=(SimpleNamespace(resolved_market="ETH/USD", market_token=address),),
+    )
+    backtester = PnLBacktester(
+        data_provider=MockDataProvider(),
+        fee_models={"default": DefaultFeeModel()},
+        slippage_models={"default": DefaultSlippageModel()},
+        data_config=BacktestDataConfig(use_historical_funding=True),
+    )
+    backtester._bind_funding_history_source(_FundingSource())
+
+    await backtester._prepare_first_use_funding_market(provider, "gmx_v2", address)
+    await backtester._prepare_first_use_funding_market(provider, "gmx_v2", address)
+
+    expected = [("gmx_v2", "ETH/USD", address)]
+    assert registrations == expected
+    assert materializations == expected
+    assert backtester._funding_prepared_perp_markets == {("gmx_v2", "ETH/USD", address)}
 
 
 def test_detect_strategy_type_perp(backtester, registered_adapters):
@@ -1474,3 +1516,25 @@ def test_initialize_backtest_hands_run_context_chain_to_adapter(backtester):
     assert state.run_context.chain == "ethereum"
     assert backtester._adapter.config.chain == "ethereum"
     assert backtester._adapter.get_sub_adapter("lp").config.chain == "ethereum"
+
+
+def test_perp_integrity_wording_requires_an_explicit_hedge_mandate() -> None:
+    summary = {
+        "execution_by_intent_type": {"PERP_OPEN": {"fills": 1, "rejected": 1}},
+        "rejections": [{"intent_type": "PERP_OPEN", "rejection_code": "INSUFFICIENT_MARGIN"}],
+    }
+
+    directional = _engine_helpers._hedge_integrity_violation(summary)
+    hedged = _engine_helpers._hedge_integrity_violation(summary, hedge_mandate=True)
+
+    assert directional is not None and directional.startswith("Perp execution integrity:")
+    assert "not hedged" not in directional
+    assert hedged is not None and hedged.startswith("Hedge integrity:")
+
+
+def test_hedge_mandate_is_detected_only_from_explicit_metadata_tags() -> None:
+    directional = SimpleNamespace(STRATEGY_METADATA=SimpleNamespace(tags=["directional", "perp"]))
+    hedged = SimpleNamespace(STRATEGY_METADATA=SimpleNamespace(tags=["delta-neutral", "hedged-lp"]))
+
+    assert _engine_helpers._strategy_declares_hedge(directional) is False
+    assert _engine_helpers._strategy_declares_hedge(hedged) is True

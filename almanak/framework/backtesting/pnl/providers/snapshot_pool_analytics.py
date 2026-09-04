@@ -61,56 +61,13 @@ def _typed_declarations(strategy: Any) -> object | None:
     return getattr(strategy, "backtest_pool_analytics_targets", None)
 
 
-def _legacy_exact_pool_analytics_target(
-    strategy: Any,
-    strategy_config: Mapping[str, Any],
-    *,
-    default_chain: str,
-) -> HistoricalPoolAnalyticsTarget | None:
-    """Decode the generated liquidity-guard shape that predates declarations.
-
-    The conjunction is intentionally narrow: a configured minimum pool TVL
-    plus the already authenticated generated exact-pool state target.  An
-    arbitrary address or protocol string never triggers archive work.
-    """
-    if "minimum_pool_liquidity_usd" not in strategy_config:
-        return None
-    try:
-        minimum = Decimal(str(strategy_config["minimum_pool_liquidity_usd"]))
-    except Exception:  # noqa: BLE001 - declaration validation owns the message
-        return None
-    if not minimum.is_finite() or minimum < 0:
-        return None
-
-    from almanak.framework.backtesting.pnl.providers.snapshot_pool_state import (
-        declared_historical_pool_state_targets,
-    )
-
-    state_targets = declared_historical_pool_state_targets(
-        strategy,
-        strategy_config,
-        default_chain=default_chain,
-    )
-    if len(state_targets) != 1:
-        return None
-    target = state_targets[0]
-    require_fresh = strategy_config.get("require_fresh_pool_observation") is True
-    return HistoricalPoolAnalyticsTarget(
-        chain=target.chain,
-        protocol=target.protocol,
-        pool_address=target.pool_address,
-        required_fields=frozenset({"tvl_usd"}),
-        max_staleness_seconds=60 if require_fresh else None,
-    )
-
-
 def declared_historical_pool_analytics_targets(
     strategy: Any,
     strategy_config: Mapping[str, Any],
     *,
     default_chain: str,
 ) -> tuple[HistoricalPoolAnalyticsTarget, ...]:
-    """Return typed declarations, or the narrow generated-strategy bridge."""
+    """Return the strategy's typed pool-analytics declarations (config keys are never read)."""
     raw = _typed_declarations(strategy)
     if raw is not None:
         if isinstance(raw, HistoricalPoolAnalyticsTarget):
@@ -123,8 +80,9 @@ def declared_historical_pool_analytics_targets(
         if not all(isinstance(target, HistoricalPoolAnalyticsTarget) for target in targets):
             raise ValueError("every pool-analytics declaration must be a HistoricalPoolAnalyticsTarget")
         return tuple(dict.fromkeys(cast(tuple[HistoricalPoolAnalyticsTarget, ...], targets)))
-    legacy = _legacy_exact_pool_analytics_target(strategy, strategy_config, default_chain=default_chain)
-    return (legacy,) if legacy is not None else ()
+    # No config-key discovery: identity comes from the typed hook above or, at
+    # first use, from the analytics read that names the pool.
+    return ()
 
 
 def validate_historical_pool_analytics(

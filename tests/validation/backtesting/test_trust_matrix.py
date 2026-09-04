@@ -38,6 +38,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -82,7 +83,11 @@ from almanak.framework.backtesting.pnl.metrics_calculator import (
 from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
 from almanak.framework.backtesting.pnl.position_models import PositionType, SimulatedPosition
 from almanak.framework.backtesting.pnl.providers.perp._gateway_history import FundingHistoryPoint
-from almanak.framework.backtesting.pnl.providers.snapshot_pool_state import HistoricalPoolStatePoint
+from almanak.framework.backtesting.pnl.providers.snapshot_pool_state import (
+    HistoricalPoolStatePoint,
+    HistoricalPoolStateTarget,
+)
+from almanak.framework.backtesting.pnl.providers.snapshot_twap import HistoricalTWAPTarget
 from almanak.framework.backtesting.pnl.providers.twap import HistoricalTWAPPoint
 from almanak.framework.backtesting.pnl.types import DataConfidence
 from almanak.framework.data.models import DataClassification
@@ -653,9 +658,11 @@ def test_historical_exact_pool_twap_reaches_unchanged_strategy_call(monkeypatch:
 
     class ExactPoolTWAPProbe:
         deployment_id = "exact_pool_twap_probe"
-        config = {"swap_pool": exact_pool, "protocol": "uniswap_v3", "pool_twap_window_seconds": 1_800}
+        config: dict = {}
         swap_pool = exact_pool
         protocol = "uniswap_v3"
+        backtest_twap_targets = (HistoricalTWAPTarget("ethereum", "uniswap_v3", exact_pool, 1_800),)
+        backtest_pool_state_targets = (HistoricalPoolStateTarget("ethereum", "uniswap_v3", exact_pool),)
         STRATEGY_METADATA = SimpleNamespace(
             tags=["swap"],
             supported_protocols=["uniswap_v3"],
@@ -794,10 +801,8 @@ def test_historical_exact_pool_state_reaches_unchanged_lp_calls(monkeypatch: pyt
         deployment_id = "exact_pool_state_probe"
         swap_pool = exact_pool
         protocol = "uniswap_v3"
-        config = {
-            "swap_pool": exact_pool,
-            "protocol": "uniswap_v3",
-        }
+        config: dict = {}
+        backtest_pool_state_targets = (HistoricalPoolStateTarget("ethereum", "uniswap_v3", exact_pool),)
         STRATEGY_METADATA = SimpleNamespace(
             tags=["lp"], supported_protocols=["uniswap_v3"], intent_types=["LP_OPEN", "HOLD"]
         )
@@ -868,6 +873,524 @@ def test_historical_exact_pool_state_reaches_unchanged_lp_calls(monkeypatch: pyt
     assert len(entries) == 1
     assert entries[0]["count"] == 6
     assert entries[0]["outcome"] == OUTCOME_SERVED
+
+
+def _first_use_exact_pool_probe(exact_pool: str):
+    """LP strategy that names an exact pool only in its intent — no config key, no hook."""
+
+    class FirstUseExactPoolProbe:
+        deployment_id = "exact_pool_first_use_probe"
+        config: dict = {}
+        STRATEGY_METADATA = SimpleNamespace(
+            tags=["lp"], supported_protocols=["uniswap_v3"], intent_types=["LP_OPEN", "HOLD"]
+        )
+
+        def __init__(self) -> None:
+            self.observations = []
+
+        def decide(self, market):
+            try:
+                price = market.pool_price(exact_pool, chain="ethereum")
+            except Exception as exc:  # noqa: BLE001 — undeclared before first use, by design
+                price = exc
+            try:
+                reserves = market.pool_reserves(exact_pool, chain="ethereum")
+            except Exception as exc:  # noqa: BLE001
+                reserves = exc
+            self.observations.append((price, reserves))
+            if len(self.observations) == 2:
+                return LPOpenIntent(
+                    pool=exact_pool,
+                    amount0=Decimal("0.1"),
+                    amount1=Decimal("0.1"),
+                    range_lower=Decimal("0.5"),
+                    range_upper=Decimal("2"),
+                    protocol="uniswap_v3",
+                    chain="ethereum",
+                    fee_tier_units=3_000,
+                )
+            return None
+
+    return FirstUseExactPoolProbe()
+
+
+def _first_use_exact_pool_run(monkeypatch: pytest.MonkeyPatch, archive_fetch, *, exact_pool: str):
+    link = "0x514910771af9ca656af840dff83e8264ecf986ca"
+    weth = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+    bound_descriptors = []
+    monkeypatch.setattr(
+        "almanak.framework.backtesting.pnl.providers.snapshot_pool_state.fetch_historical_pool_state_points",
+        archive_fetch,
+    )
+    monkeypatch.setattr(
+        "almanak.framework.data.pools.reader.known_pool_pair",
+        lambda *_args: pytest.fail("first-use exact-pool discovery must not consult the static pool registry"),
+    )
+    original_bind_pool_descriptors = LPBacktestAdapter.bind_pool_descriptors
+
+    def capture_bound_descriptors(adapter, descriptors):
+        descriptor_batch = tuple(descriptors)
+        bound_descriptors.extend(descriptor_batch)
+        original_bind_pool_descriptors(adapter, descriptor_batch)
+
+    monkeypatch.setattr(LPBacktestAdapter, "bind_pool_descriptors", capture_bound_descriptors)
+
+    class Provider:
+        provider_name = "synthetic"
+
+        async def iterate(self, config):
+            for hour in range(4):
+                timestamp = config.start_time + timedelta(hours=hour)
+                yield (
+                    timestamp,
+                    MarketState(
+                        timestamp=timestamp,
+                        prices={token: Decimal("10") for token in config.tokens},
+                        chain="ethereum",
+                    ),
+                )
+
+    config = PnLBacktestConfig(
+        start_time=START,
+        end_time=START + timedelta(hours=3),
+        interval_seconds=3_600,
+        chain="ethereum",
+        tokens=[link, weth],
+        token_funding=[
+            {"symbol": "LINK", "address": link, "chain": "ethereum", "amount": "1", "amount_type": "token"},
+            {"symbol": "WETH", "address": weth, "chain": "ethereum", "amount": "1", "amount_type": "token"},
+        ],
+        include_gas_costs=False,
+        preflight_validation=False,
+        inclusion_delay_blocks=0,
+    )
+    strategy = _first_use_exact_pool_probe(exact_pool)
+    result = asyncio.run(
+        PnLBacktester(
+            data_provider=Provider(),
+            fee_models={"default": DefaultFeeModel()},
+            slippage_models={"default": DefaultSlippageModel()},
+            token_addresses={"LINK": ("ethereum", link), "WETH": ("ethereum", weth)},
+            data_config=BacktestDataConfig(explicit_pool_volume_usd_daily=Decimal("0")),
+        ).backtest(strategy, config)
+    )
+    return result, strategy, bound_descriptors, (link, weth)
+
+
+@pytest.mark.trust_cell("lp:exact_pool_first_use_discovery")
+def test_exact_pool_is_authenticated_at_first_use_without_declaration(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An undeclared exact pool is proven from archive state when the LP_OPEN names it."""
+    exact_pool = "0xa6cc3c2531fdaa6ae1a3ca84c2855806728693e8"
+    fetch_calls = []
+
+    def archive_fetch(**kwargs):
+        fetch_calls.append(kwargs)
+        link = "0x514910771af9ca656af840dff83e8264ecf986ca"
+        weth = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        targets = range(kwargs["start_ts"], kwargs["end_ts"] + 1, kwargs["interval_secs"])
+        return [
+            HistoricalPoolStatePoint(
+                timestamp=target - 10,
+                block_number=19_000_000 + index,
+                sqrt_price_x96=2**96,
+                tick=0,
+                liquidity=100_000 + index,
+                token0=link,
+                token1=weth,
+                token0_decimals=18,
+                token1_decimals=18,
+                fee_tier=3_000,
+                reserve0_raw=10**20,
+                reserve1_raw=2 * 10**19,
+                source="on_chain_archive",
+            )
+            for index, target in enumerate(targets)
+        ]
+
+    result, strategy, bound_descriptors, (link, weth) = _first_use_exact_pool_run(
+        monkeypatch, archive_fetch, exact_pool=exact_pool
+    )
+    assert result.success, result.error
+    # Discovery happened exactly once, triggered by the LP_OPEN fill — not at preflight.
+    assert len(fetch_calls) == 1 and fetch_calls[0]["pool_address"] == exact_pool
+    assert len(bound_descriptors) == 1
+    assert bound_descriptors[0].key == ("ethereum", "uniswap_v3", exact_pool)
+    assert bound_descriptors[0].factory == UNISWAP_V3["ethereum"]["factory"].lower()
+    # The fill executed from the authenticated descriptor, never a fabricated pair.
+    assert len(result.trades) == 1 and result.trades[0].success
+    assert result.trades[0].tokens == [f"ethereum:{link}", f"ethereum:{weth}"]
+    assert Decimal(result.trades[0].metadata["fee_tier"]) == Decimal("0.003")
+    # decide()-time reads: an undeclared pool reads exactly as before this change (fallback /
+    # unavailable) until it is materialized. The probe emits its LP_OPEN on the second tick; the
+    # fill lands during the third tick's pending-intent pass, which runs BEFORE that tick's
+    # snapshot is built, so decide() sees the authenticated pool (EXECUTION_GRADE) on the very
+    # tick the fill landed and on every tick after it.
+    assert len(strategy.observations) == 4
+    for price, _reserves in strategy.observations[:2]:
+        assert getattr(price, "classification", None) is not DataClassification.EXECUTION_GRADE
+    for after_price, after_reserves in strategy.observations[2:]:
+        assert after_price.classification is DataClassification.EXECUTION_GRADE
+        assert after_price.value.pool_address == exact_pool
+        assert after_reserves.pool_address == exact_pool
+        assert {after_reserves.token0.address, after_reserves.token1.address} == {link, weth}
+    assert result.data_manifest is not None
+    entries = [entry for entry in result.data_manifest["entries"] if entry["lane"] == LANE_POOL_STATE]
+    assert len(entries) == 1 and entries[0]["outcome"] == OUTCOME_SERVED
+
+
+@pytest.mark.trust_cell("lp:exact_pool_first_use_unprovable")
+def test_unprovable_exact_pool_stays_fail_closed_at_first_use(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Archive authentication failing at first use binds nothing and rejects the LP_OPEN."""
+    exact_pool = "0xa6cc3c2531fdaa6ae1a3ca84c2855806728693e8"
+    fetch_calls = []
+
+    def archive_fetch(**kwargs):
+        fetch_calls.append(kwargs)
+        raise ValueError("archive RPC unavailable for the requested window")
+
+    result, _strategy, bound_descriptors, _tokens = _first_use_exact_pool_run(
+        monkeypatch, archive_fetch, exact_pool=exact_pool
+    )
+    assert len(fetch_calls) == 1
+    assert bound_descriptors == []
+    assert not result.success
+    assert result.error is not None and result.error.startswith("BACKTEST_EXECUTION_REJECTED:")
+    assert "POOL_METADATA_UNAVAILABLE" in result.error
+    assert len(result.trades) == 1 and not result.trades[0].success
+    assert result.trades[0].metadata["rejection_code"] == "POOL_METADATA_UNAVAILABLE"
+
+
+_GMX_ETH_MARKET = "0x70d95587d40a2caf56bd97485ab3eec10bee6336"
+_ARB_WETH = "0x82af49447d8a07e3bd95bd0d56f35241523fbab1"
+
+
+def _first_use_perp_strategy():
+    """Perp strategy that names its GMX market only in the intent — no config key, no hook."""
+    from almanak.framework.intents import Intent
+
+    class FirstUsePerpProbe:
+        deployment_id = "perp_market_first_use_probe"
+        config: dict = {}
+        STRATEGY_METADATA = SimpleNamespace(
+            tags=["perp"], supported_protocols=["gmx_v2"], intent_types=["PERP_OPEN", "HOLD"]
+        )
+
+        def __init__(self) -> None:
+            self.ticks = 0
+            self.weth_reads: list[Any] = []
+
+        def decide(self, market):
+            self.ticks += 1
+            try:
+                self.weth_reads.append(market.price(_ARB_WETH))
+            except Exception as exc:  # noqa: BLE001 — unpriced before first use, by design
+                self.weth_reads.append(exc)
+            if self.ticks == 2:
+                return Intent.perp_open(
+                    market=_GMX_ETH_MARKET,
+                    collateral_token=USDC_ARBITRUM,
+                    collateral_amount=Decimal("1000"),
+                    size_usd=Decimal("5000"),
+                    is_long=True,
+                    leverage=Decimal("5"),
+                    protocol="gmx_v2",
+                    chain="arbitrum",
+                )
+            return None
+
+    return FirstUsePerpProbe()
+
+
+def _stub_gmx_first_use_plane(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest, *, fetch_page):
+    """Stub the GMX venue surface (candles + verified identity) for a network-free run."""
+    from almanak.connectors.gmx_v2 import market_catalog
+    from almanak.connectors.gmx_v2.market_metadata import ResolvedGmxMarket
+
+    # The catalog is process-global: leaving this run's verified entries behind
+    # would let a later test observe a pre-populated catalog and pass or fail on
+    # ordering alone.
+    market_catalog.clear()
+    request.addfinalizer(market_catalog.clear)
+    monkeypatch.setattr(_GMXOracleMarketSource, "_fetch_page", fetch_page)
+
+    def remember_verified_market(self) -> None:
+        if self.market_token is None:
+            return
+        market_catalog.remember(
+            self.chain,
+            ResolvedGmxMarket(
+                label="ETH/USD",
+                market_token=self.market_token,
+                index_token=self.index_token,
+                index_symbol=self.index_symbol,
+                index_token_decimals=18,
+                long_token=self.index_token,
+                long_token_symbol="WETH",
+                long_token_decimals=18,
+                short_token=USDC_ARBITRUM,
+                short_token_symbol="USDC",
+                short_token_decimals=6,
+            ),
+        )
+
+    monkeypatch.setattr(_GMXOracleMarketSource, "remember_verified_market", remember_verified_market)
+
+
+def _gmx_page(timeframe: str, opens: list, close: str = "2000") -> SimpleNamespace:
+    return SimpleNamespace(
+        success=True,
+        error="",
+        market="ETH/USD",
+        market_token=_GMX_ETH_MARKET,
+        index_token=_ARB_WETH,
+        index_symbol="ETH",
+        timeframe=timeframe,
+        candles=[
+            SimpleNamespace(timestamp=int(opened.timestamp()), open=close, high=close, low=close, close=close)
+            for opened in opens
+        ],
+    )
+
+
+@pytest.mark.trust_cell("perp:market_first_use_discovery")
+def test_perp_market_is_prepared_at_first_use_without_declaration(
+    monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> None:
+    """An undeclared GMX market is prepared from venue candles when the PERP_OPEN names it."""
+    hours = 4
+    fetch_calls: list[str] = []
+    counts: dict[str, int] = {}
+
+    async def fetch_page(self, *, timeframe: str, before_ts: int, limit: int) -> SimpleNamespace:
+        fetch_calls.append(timeframe)
+        counts[timeframe] = counts.get(timeframe, 0) + 1
+        if timeframe != "1h":
+            from almanak.connectors.gmx_v2.backtest_prices import GMXPriceHistoryCoverageError
+
+            raise GMXPriceHistoryCoverageError("retention")
+        if counts[timeframe] > 1:
+            return _gmx_page(timeframe, [])
+        opens = [START - timedelta(hours=1) + timedelta(hours=index) for index in range(hours + 2)]
+        return _gmx_page(timeframe, opens)
+
+    _stub_gmx_first_use_plane(monkeypatch, request, fetch_page=fetch_page)
+    strategy = _first_use_perp_strategy()
+    # Only USDC is in the run's token set: the ETH index price can come from nowhere but the
+    # venue series discovered at first use.
+    result = run_backtest(
+        strategy,
+        {"USDC": [Decimal("1")] * (hours + 1)},
+        hours,
+        strategy_type="perp",
+        data_config=BacktestDataConfig(use_historical_funding=False, funding_fallback_rate=Decimal("0")),
+        tokens=[("arbitrum", USDC_ARBITRUM)],
+    )
+    assert result.success, result.error
+    assert "1h" in fetch_calls  # the venue plane was fetched, triggered by the intent, not preflight
+    assert len(result.trades) == 1 and result.trades[0].success
+    assert result.trades[0].executed_price == Decimal("2000")  # the venue close, never a $1 mark
+    # Before first use the index was unpriced (same as before this change); after it, every
+    # tick's snapshot serves the venue series under the index token's address.
+    assert not isinstance(strategy.weth_reads[-1], Exception)
+    assert Decimal(str(strategy.weth_reads[-1])) == Decimal("2000")
+    from almanak.connectors.gmx_v2 import market_catalog
+
+    assert market_catalog.by_address("arbitrum", _GMX_ETH_MARKET) is not None
+
+
+@pytest.mark.trust_cell("perp:market_first_use_unprovable")
+def test_unservable_perp_market_stays_fail_closed_at_first_use(
+    monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> None:
+    """Venue history failing at first use overlays nothing; the open keeps its named rejection."""
+    hours = 4
+
+    async def fetch_page(self, *, timeframe: str, before_ts: int, limit: int) -> SimpleNamespace:
+        from almanak.connectors.gmx_v2.backtest_prices import GMXPriceHistoryCoverageError
+
+        raise GMXPriceHistoryCoverageError("no native cadence covers the window")
+
+    _stub_gmx_first_use_plane(monkeypatch, request, fetch_page=fetch_page)
+    strategy = _first_use_perp_strategy()
+    result = run_backtest(
+        strategy,
+        {"USDC": [Decimal("1")] * (hours + 1)},
+        hours,
+        strategy_type="perp",
+        data_config=BacktestDataConfig(use_historical_funding=False, funding_fallback_rate=Decimal("0")),
+        tokens=[("arbitrum", USDC_ARBITRUM)],
+    )
+    assert not result.success
+    assert result.error is not None and result.error.startswith("BACKTEST_EXECUTION_REJECTED:")
+    assert len(result.trades) == 1 and not result.trades[0].success
+    assert "not priceable" in str(result.trades[0].metadata.get("failure_reason", ""))
+    assert all(isinstance(read, Exception) for read in strategy.weth_reads)
+
+
+def _usdc_to_weth(amount_usd: str):
+    from almanak.framework.intents import Intent
+
+    return Intent.swap("USDC", "WETH", amount_usd=Decimal(amount_usd), protocol="uniswap_v3", chain="arbitrum")
+
+
+class _CallbackRecorder(ScriptedStrategy):
+    def __init__(self, intents: list[Any]) -> None:
+        super().__init__(intents)
+        self.callbacks: list[tuple[str, bool]] = []
+
+    def on_intent_executed(self, intent: Any, success: bool, result: Any) -> None:
+        self.callbacks.append((str(getattr(intent, "intent_type", "?")), bool(success)))
+
+
+@pytest.mark.trust_cell("swap:intent_sequence_in_order")
+def test_intent_sequence_executes_members_in_order() -> None:
+    from almanak.framework.intents import Intent
+
+    strategy = _CallbackRecorder([Intent.sequence([_usdc_to_weth("1000"), _usdc_to_weth("500")])])
+    result = run_backtest(strategy, flat_series(6), hours=3)
+    assert result.success, result.error
+    assert [trade.amount_usd for trade in result.trades] == [Decimal("1000"), Decimal("500")]
+    assert all(trade.success for trade in result.trades)
+    assert [ok for _, ok in strategy.callbacks] == [True, True]
+    assert result.decision_summary["intent_types"]["SWAP"] == 2
+    assert result.decision_summary["executions"] == {"fills": 2, "rejected": 0}
+    assert result.decision_summary["execution_by_intent_type"]["SWAP"] == {"fills": 2, "rejected": 0}
+    # Zero fees/slippage: value neutral, both legs applied.
+    assert result.equity_curve[-1].value_usd == INITIAL_CAPITAL
+
+
+@pytest.mark.trust_cell("swap:intent_sequence_stops_on_rejection")
+def test_intent_sequence_stops_at_first_rejected_member() -> None:
+    from almanak.framework.intents import Intent
+
+    strategy = _CallbackRecorder(
+        [Intent.sequence([_usdc_to_weth("1000"), _usdc_to_weth("1000000"), _usdc_to_weth("500")])]
+    )
+    result = run_backtest(strategy, flat_series(6), hours=3)
+    assert result.success, result.error  # the family had a fill, so the run is valid
+    assert [trade.amount_usd for trade in result.trades] == [Decimal("1000"), Decimal("1000000")]
+    assert [trade.success for trade in result.trades] == [True, False]
+    assert [ok for _, ok in strategy.callbacks] == [True, False]  # the third member was never attempted
+    assert result.decision_summary["intent_types"]["SWAP"] == 3  # all members were decided
+    assert result.decision_summary["executions"] == {"fills": 1, "rejected": 1}  # only two were attempted
+    assert result.decision_summary["execution_by_intent_type"]["SWAP"] == {"fills": 1, "rejected": 1}
+
+
+@pytest.mark.trust_cell("swap:intent_sequence_chains_amount_all")
+def test_intent_sequence_chains_amount_all_from_the_previous_member() -> None:
+    """A chained member spends the previous member's output, not the wallet's whole balance."""
+    from almanak.framework.intents import Intent
+
+    # Leg 1 buys WETH with $1,000 of USDC; leg 2 sells "all" WETH back. The
+    # wallet is seeded with WETH as well, so sizing leg 2 from the wallet would
+    # sell that pre-existing balance on top of the swap output.
+    chained = Intent.swap("WETH", "USDC", amount="all", protocol="uniswap_v3", chain="arbitrum")
+    strategy = _CallbackRecorder([Intent.sequence([_usdc_to_weth("1000"), chained])])
+    series = flat_series(6)
+    series[("arbitrum", _WETH_ARBITRUM.lower())] = [Decimal("2000")] * 6
+    result = run_backtest(
+        strategy,
+        series,
+        hours=3,
+        token_addresses={
+            "WETH": ("arbitrum", _WETH_ARBITRUM.lower()),
+            "USDC": ("arbitrum", USDC_ARBITRUM),
+        },
+        token_funding=[
+            {
+                "symbol": "USDC",
+                "address": USDC_ARBITRUM,
+                "chain": "arbitrum",
+                "amount": "10000",
+                "amount_type": "token",
+            },
+            {
+                "symbol": "WETH",
+                "address": _WETH_ARBITRUM.lower(),
+                "chain": "arbitrum",
+                "amount": "1",
+                "amount_type": "token",
+            },
+        ],
+    )
+    assert result.success, result.error
+    assert [trade.success for trade in result.trades] == [True, True], [
+        (t.intent_type, t.success, t.error, t.metadata) for t in result.trades
+    ]
+    bought, sold = result.trades[0], result.trades[1]
+    assert bought.actual_amount_out is not None and bought.actual_amount_out > 0
+    # The sell leg spends exactly the buy leg's output; the pre-seeded 1 WETH stays put.
+    assert sold.actual_amount_in == bought.actual_amount_out
+    assert result.decision_summary["intent_types"]["SWAP"] == 2
+    assert result.decision_summary["executions"] == {"fills": 2, "rejected": 0}
+
+
+@pytest.mark.trust_cell("lp:intent_sequence_chains_lp_position")
+def test_intent_sequence_chains_lp_close_to_the_opened_simulated_position() -> None:
+    """Pendle close-all consumes the immediately preceding simulated LP open."""
+    from almanak.framework.intents import Intent
+
+    lp_open = Intent.lp_open(
+        pool="WETH/USDC",
+        amount0=Decimal("0.5"),
+        amount1=Decimal("1000"),
+        range_lower=Decimal("0.0001"),
+        range_upper=Decimal("999999.5"),
+        protocol="pendle",
+        chain="arbitrum",
+    )
+    lp_close = Intent.lp_close(
+        position_id="0",
+        pool="WETH/USDC",
+        protocol="pendle",
+        chain="arbitrum",
+        amount="all",
+    )
+    strategy = _CallbackRecorder([Intent.sequence([lp_open, lp_close])])
+    result = run_backtest(strategy, flat_series(6), hours=3)
+
+    assert result.success, result.error
+    assert [trade.success for trade in result.trades] == [True, True]
+    assert result.trades[0].position_id == result.trades[1].position_id
+    assert result.trades[1].position_id != "0"
+    assert [ok for _, ok in strategy.callbacks] == [True, True]
+    assert result.decision_summary["execution_by_intent_type"] == {
+        "LP_CLOSE": {"fills": 1, "rejected": 0},
+        "LP_OPEN": {"fills": 1, "rejected": 0},
+    }
+
+
+@pytest.mark.trust_cell("perp:rejected_perp_flags_compliance")
+def test_rejected_directional_perp_open_is_typed_and_flags_execution_integrity() -> None:
+    from almanak.framework.intents import Intent
+
+    def gmx_open(size_usd: str, collateral: str):
+        return Intent.perp_open(
+            market="ETH/USD",
+            collateral_token=USDC_ARBITRUM,
+            collateral_amount=Decimal(collateral),
+            size_usd=Decimal(size_usd),
+            is_long=True,
+            leverage=Decimal("5"),
+            protocol="gmx_v2",
+            chain="arbitrum",
+        )
+
+    result = run_backtest(
+        ScriptedStrategy([gmx_open("5000", "1000"), None, gmx_open("100000", "20000")]),
+        flat_series(10),
+        hours=5,
+        strategy_type="perp",  # the perp adapter's margin validator is the lane that rejected on prod
+    )
+    assert result.success, result.error  # one hedge filled, so the family is not all-rejected
+    rejected = [trade for trade in result.trades if not trade.success]
+    assert len(rejected) == 1
+    assert rejected[0].metadata["rejection_code"] == "INSUFFICIENT_CAPITAL"
+    assert result.institutional_compliance is False
+    assert any(
+        violation.startswith("Perp execution integrity: 1 PERP_OPEN rejected (INSUFFICIENT_CAPITAL)")
+        for violation in result.compliance_violations
+    ), result.compliance_violations
 
 
 @pytest.mark.trust_cell("swap:rejection_no_state_change")

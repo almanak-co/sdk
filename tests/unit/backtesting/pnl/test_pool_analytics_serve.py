@@ -22,7 +22,6 @@ from almanak.framework.backtesting.pnl.engine import (
 from almanak.framework.backtesting.pnl.providers.pool_history_fallback import DailyPoolHistory
 from almanak.framework.backtesting.pnl.providers.snapshot_pool_analytics import (
     HistoricalPoolAnalyticsTarget,
-    declared_historical_pool_analytics_targets,
     validate_historical_pool_analytics,
 )
 from almanak.framework.backtesting.pnl.providers.snapshot_pool_state import (
@@ -243,33 +242,6 @@ class TestServeContract:
 
 
 class TestHistoricalAnalyticsDeclarations:
-    def test_generated_liquidity_guard_declares_tvl_and_freshness(self):
-        config = {
-            "protocol": "pancakeswap_v3",
-            "swap_pool": POOL,
-            "minimum_pool_liquidity_usd": "500000",
-            "require_fresh_pool_observation": True,
-        }
-        strategy = type(
-            "Strategy",
-            (),
-            {
-                "protocol": "pancakeswap_v3",
-                "swap_pool": POOL,
-                "STRATEGY_METADATA": type("Metadata", (), {"supported_protocols": ["pancakeswap_v3"]})(),
-            },
-        )()
-
-        assert declared_historical_pool_analytics_targets(strategy, config, default_chain="bsc") == (
-            HistoricalPoolAnalyticsTarget(
-                "bsc",
-                "pancakeswap_v3",
-                POOL,
-                frozenset({"tvl_usd"}),
-                60,
-            ),
-        )
-
     def test_required_field_validation_accepts_archive_tvl_without_volume(self):
         reader = BacktestPoolAnalyticsReader(_FakeProvider({}), "ethereum")
         reader.bind(

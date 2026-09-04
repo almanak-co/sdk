@@ -131,6 +131,7 @@ async def check_backtest_readiness(
                 strategy,
                 state.strategy_config,
                 require_complete=True,
+                prepared_targets=backtester._prepared_perp_price_history_targets,
             )
             await _engine_helpers._prepare_declared_historical_twap(
                 strategy,
