@@ -43,13 +43,6 @@ def run_async[T](coro: Coroutine[Any, Any, T]) -> T:
         loop.close()
 
 
-# =============================================================================
-# Test Data with Known RSI Values
-# =============================================================================
-
-
-# Sample price data with known RSI
-# This data is designed to produce predictable RSI values
 SAMPLE_PRICES_UPTREND = [
     Decimal("100"),
     Decimal("101"),
@@ -66,7 +59,7 @@ SAMPLE_PRICES_UPTREND = [
     Decimal("112"),
     Decimal("113"),
     Decimal("114"),
-]  # 15 prices (need 14+1 for period=14)
+]  # RSI(14) needs 15 prices to produce 14 deltas.
 
 SAMPLE_PRICES_DOWNTREND = [
     Decimal("114"),
@@ -88,24 +81,22 @@ SAMPLE_PRICES_DOWNTREND = [
 
 SAMPLE_PRICES_MIXED = [
     Decimal("100"),
-    Decimal("102"),  # +2
-    Decimal("101"),  # -1
-    Decimal("103"),  # +2
-    Decimal("102"),  # -1
-    Decimal("104"),  # +2
-    Decimal("103"),  # -1
-    Decimal("105"),  # +2
-    Decimal("104"),  # -1
-    Decimal("106"),  # +2
-    Decimal("105"),  # -1
-    Decimal("107"),  # +2
-    Decimal("106"),  # -1
-    Decimal("108"),  # +2
-    Decimal("107"),  # -1
+    Decimal("102"),
+    Decimal("101"),
+    Decimal("103"),
+    Decimal("102"),
+    Decimal("104"),
+    Decimal("103"),
+    Decimal("105"),
+    Decimal("104"),
+    Decimal("106"),
+    Decimal("105"),
+    Decimal("107"),
+    Decimal("106"),
+    Decimal("108"),
+    Decimal("107"),
 ]
 
-# Real-world example from BTC historical data
-# Known RSI(14) = approximately 55-60 for this data
 SAMPLE_PRICES_REAL = [
     Decimal("42000"),
     Decimal("42150"),
@@ -123,11 +114,6 @@ SAMPLE_PRICES_REAL = [
     Decimal("42750"),
     Decimal("42900"),
 ]
-
-
-# =============================================================================
-# OHLCVData Tests
-# =============================================================================
 
 
 class TestOHLCVData:
@@ -199,11 +185,6 @@ class TestOHLCVData:
         assert result["volume"] == "1000000"
 
 
-# =============================================================================
-# OHLCVHealthMetrics Tests
-# =============================================================================
-
-
 class TestOHLCVHealthMetrics:
     """Tests for OHLCVHealthMetrics."""
 
@@ -235,11 +216,6 @@ class TestOHLCVHealthMetrics:
         assert metrics.average_latency_ms == 100.0
 
 
-# =============================================================================
-# RSI Calculation Tests (Core Algorithm)
-# =============================================================================
-
-
 class TestRSICalculation:
     """Tests for RSI calculation using known values."""
 
@@ -250,7 +226,6 @@ class TestRSICalculation:
         """
         rsi = RSICalculator.calculate_rsi_from_prices(SAMPLE_PRICES_UPTREND, period=14)
 
-        # Pure uptrend should give RSI = 100
         assert rsi == 100.0
 
     def test_rsi_downtrend_all_losses(self) -> None:
@@ -260,7 +235,6 @@ class TestRSICalculation:
         """
         rsi = RSICalculator.calculate_rsi_from_prices(SAMPLE_PRICES_DOWNTREND, period=14)
 
-        # Pure downtrend should give RSI = 0
         assert rsi == 0.0
 
     def test_rsi_mixed_movement(self) -> None:
@@ -271,31 +245,26 @@ class TestRSICalculation:
         """
         rsi = RSICalculator.calculate_rsi_from_prices(SAMPLE_PRICES_MIXED, period=14)
 
-        # Gains are +2, losses are -1, so avg_gain > avg_loss
-        # RSI should be above 50
         assert 50 < rsi < 100
 
     def test_rsi_real_world_data(self) -> None:
         """Test RSI with realistic price data."""
         rsi = RSICalculator.calculate_rsi_from_prices(SAMPLE_PRICES_REAL, period=14)
 
-        # RSI should be between 0 and 100
         assert 0 <= rsi <= 100
-        # With slight uptrend bias, expect RSI > 50
         assert rsi > 50
 
     def test_rsi_period_7(self) -> None:
         """Test RSI with shorter period."""
-        prices = SAMPLE_PRICES_UPTREND[:9]  # Need 8 prices for period=7 (7+1)
+        prices = SAMPLE_PRICES_UPTREND[:9]
         rsi = RSICalculator.calculate_rsi_from_prices(prices, period=7)
 
-        # Pure uptrend should still give RSI = 100
         assert rsi == 100.0
 
     def test_rsi_insufficient_data(self) -> None:
         """Test RSI raises error with insufficient data."""
-        # Need period + 1 = 15 data points for period=14
-        prices = SAMPLE_PRICES_UPTREND[:10]  # Only 10 points
+        # RSI(period) needs period + 1 prices to produce period deltas.
+        prices = SAMPLE_PRICES_UPTREND[:10]
 
         with pytest.raises(InsufficientDataError) as exc_info:
             RSICalculator.calculate_rsi_from_prices(prices, period=14)
@@ -306,7 +275,6 @@ class TestRSICalculation:
 
     def test_rsi_minimum_data(self) -> None:
         """Test RSI works with minimum required data."""
-        # Exactly period + 1 = 15 data points
         prices = SAMPLE_PRICES_UPTREND[:15]
         rsi = RSICalculator.calculate_rsi_from_prices(prices, period=14)
 
@@ -318,9 +286,7 @@ class TestRSICalculation:
 
         rsi = RSICalculator.calculate_rsi_from_prices(flat_prices, period=14)
 
-        # No gains or losses - avg_loss = 0, should return 100 (avoid division by zero)
-        # Actually with zero movement: avg_gain = 0, avg_loss = 0
-        # Our implementation returns 100 when avg_loss = 0
+        # The implementation maps avg_loss == 0 to 100, including the flat 0/0 case.
         assert rsi == 100.0
 
     def test_rsi_very_small_movements(self) -> None:
@@ -328,7 +294,6 @@ class TestRSICalculation:
         small_up = [Decimal("100") + Decimal("0.0001") * i for i in range(20)]
         rsi = RSICalculator.calculate_rsi_from_prices(small_up, period=14)
 
-        # Small uptrend should still give RSI = 100
         assert rsi == 100.0
 
 
@@ -341,26 +306,22 @@ class TestRSIWilderSmoothing:
         Wilder's smoothing: new_avg = ((prev_avg * (N-1)) + current) / N
         This is equivalent to an EMA with alpha = 1/N.
         """
-        # Create a specific sequence where we can verify the smoothing
         prices = [
             Decimal("100"),
-            Decimal("101"),  # +1 gain
-            Decimal("100"),  # -1 loss
-            Decimal("102"),  # +2 gain
-            Decimal("101"),  # -1 loss
-            Decimal("103"),  # +2 gain
-            Decimal("102"),  # -1 loss
+            Decimal("101"),
+            Decimal("100"),
+            Decimal("102"),
+            Decimal("101"),
+            Decimal("103"),
+            Decimal("102"),
         ]
 
-        # With period=3, we need 4 data points minimum
         rsi = RSICalculator.calculate_rsi_from_prices(prices, period=3)
 
-        # Verify RSI is in valid range
         assert 0 <= rsi <= 100
 
     def test_smoothing_reduces_volatility(self) -> None:
         """Test that Wilder's smoothing reduces RSI volatility over time."""
-        # Create oscillating prices
         oscillating = []
         for i in range(30):
             if i % 2 == 0:
@@ -370,14 +331,8 @@ class TestRSIWilderSmoothing:
 
         rsi = RSICalculator.calculate_rsi_from_prices(oscillating, period=14)
 
-        # With equal oscillation, RSI should be around 50
-        # The smoothing should make it relatively stable
+        # Equal-magnitude oscillations should remain near neutral after smoothing.
         assert 45 <= rsi <= 55
-
-
-# =============================================================================
-# CoinGeckoOHLCVProvider Tests
-# =============================================================================
 
 
 class TestCoinGeckoOHLCVProviderInit:
@@ -385,9 +340,7 @@ class TestCoinGeckoOHLCVProviderInit:
 
     def test_default_initialization(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test default initialization."""
-        # Without an explicit api_key, the constructor falls back to the
-        # COINGECKO_API_KEY env var; CI sets that secret, so isolate this
-        # default-state assertion from the runner environment.
+        # CI may set this fallback key, so isolate the constructor's default state.
         monkeypatch.delenv("COINGECKO_API_KEY", raising=False)
         provider = CoinGeckoOHLCVProvider()
 
@@ -436,7 +389,6 @@ class TestCoinGeckoOHLCVProviderCache:
         """Test get_cached returns data when not expired."""
         provider = CoinGeckoOHLCVProvider(cache_ttl=300)
 
-        # Pre-populate cache
         test_data = [
             OHLCVData(
                 timestamp=datetime.now(UTC),
@@ -463,7 +415,6 @@ class TestCoinGeckoOHLCVProviderCache:
         """Test get_cached returns None when cache is expired."""
         provider = CoinGeckoOHLCVProvider(cache_ttl=300)
 
-        # Pre-populate with expired data
         test_data = [
             OHLCVData(
                 timestamp=datetime.now(UTC),
@@ -475,7 +426,7 @@ class TestCoinGeckoOHLCVProviderCache:
         ]
         provider._cache["WETH:4h:30"] = OHLCVCacheEntry(
             data=test_data,
-            cached_at=datetime.now(UTC) - timedelta(seconds=600),  # Older than TTL
+            cached_at=datetime.now(UTC) - timedelta(seconds=600),
             token="WETH",
             timeframe="4h",
         )
@@ -488,7 +439,6 @@ class TestCoinGeckoOHLCVProviderCache:
         """Test cache clearing."""
         provider = CoinGeckoOHLCVProvider()
 
-        # Add some cached data
         test_data = [
             OHLCVData(
                 timestamp=datetime.now(UTC),
@@ -517,7 +467,7 @@ class TestCoinGeckoOHLCVProviderFetching:
         """Test successful OHLCV fetch."""
         provider = CoinGeckoOHLCVProvider()
 
-        # Mock response data (CoinGecko format: [[timestamp, open, high, low, close], ...])
+        # CoinGecko rows are [timestamp, open, high, low, close].
         mock_data = [
             [1705000000000, 2500, 2550, 2450, 2520],
             [1705003600000, 2520, 2560, 2510, 2540],
@@ -536,7 +486,6 @@ class TestCoinGeckoOHLCVProviderFetching:
             result = run_async(provider.get_ohlcv("WETH", "USD", "4h", limit=3))
 
         assert len(result) == 3
-        # Results are sorted by timestamp (oldest first) and returned as OHLCVCandle objects
         assert result[0].close == Decimal("2520")
         assert result[2].close == Decimal("2560")
 
@@ -649,7 +598,6 @@ class TestCoinGeckoOHLCVProviderFetching:
         """Test cache hit returns cached data without API call."""
         provider = CoinGeckoOHLCVProvider(cache_ttl=300)
 
-        # Pre-populate cache with more data than limit
         test_data = [
             OHLCVData(
                 timestamp=datetime.now(UTC) - timedelta(hours=i),
@@ -660,7 +608,6 @@ class TestCoinGeckoOHLCVProviderFetching:
             )
             for i in range(10)
         ]
-        # Sort oldest first
         test_data.sort(key=lambda x: x.timestamp)
 
         # The canonical CoinGecko plan requests 30 days for exact native 4h candles.
@@ -671,7 +618,6 @@ class TestCoinGeckoOHLCVProviderFetching:
             timeframe=OHLCVTimeframe.FOUR_HOURS,
         )
 
-        # Should return cached data (last 5 items based on limit)
         result = run_async(provider.get_ohlcv("WETH", "USD", "4h", limit=5))
 
         assert len(result) == 5
@@ -698,30 +644,23 @@ class TestCoinGeckoOHLCVProviderHealth:
         assert metrics["success_rate"] == 95.0
 
 
-# =============================================================================
-# RSICalculator Integration Tests
-# =============================================================================
-
-
 class TestRSICalculatorIntegration:
     """Integration tests for RSICalculator with mocked provider."""
 
     def test_calculate_rsi_success(self) -> None:
         """Test successful RSI calculation through the calculator."""
-        # Create mock OHLCV provider
         mock_provider = AsyncMock()
 
-        # Return enough OHLCV data for RSI(14) calculation
         ohlcv_data = []
         base_price = 2500
-        for i in range(30):  # 30 data points
+        for i in range(30):
             ohlcv_data.append(
                 OHLCVCandle(
                     timestamp=datetime.now(UTC) - timedelta(hours=30 - i),
                     open=Decimal(str(base_price + i)),
                     high=Decimal(str(base_price + i + 10)),
                     low=Decimal(str(base_price + i - 10)),
-                    close=Decimal(str(base_price + i + 5)),  # Uptrend
+                    close=Decimal(str(base_price + i + 5)),
                 )
             )
 
@@ -730,7 +669,6 @@ class TestRSICalculatorIntegration:
         calculator = RSICalculator(ohlcv_provider=mock_provider)
         rsi = run_async(calculator.calculate_rsi("WETH", period=14))
 
-        # With pure uptrend, RSI should be 100
         assert rsi == 100.0
         assert mock_provider.get_ohlcv.call_args.kwargs["timeframe"] is OHLCVTimeframe.FOUR_HOURS
 
@@ -747,7 +685,6 @@ class TestRSICalculatorIntegration:
         """Test RSI calculation with insufficient data."""
         mock_provider = AsyncMock()
 
-        # Return only 5 data points (need 15 for RSI(14))
         ohlcv_data = [
             OHLCVCandle(
                 timestamp=datetime.now(UTC),
@@ -785,7 +722,6 @@ class TestRSICalculatorIntegration:
         """Test RSI calculation with different periods."""
         mock_provider = AsyncMock()
 
-        # Return enough data
         ohlcv_data = []
         for i in range(50):
             ohlcv_data.append(
@@ -794,7 +730,7 @@ class TestRSICalculatorIntegration:
                     open=Decimal(str(100 + i)),
                     high=Decimal(str(100 + i + 5)),
                     low=Decimal(str(100 + i - 5)),
-                    close=Decimal(str(100 + i)),  # Uptrend
+                    close=Decimal(str(100 + i)),
                 )
             )
 
@@ -802,12 +738,10 @@ class TestRSICalculatorIntegration:
 
         calculator = RSICalculator(ohlcv_provider=mock_provider)
 
-        # Test with different periods
         rsi_7 = run_async(calculator.calculate_rsi("WETH", period=7))
         rsi_14 = run_async(calculator.calculate_rsi("WETH", period=14))
         rsi_21 = run_async(calculator.calculate_rsi("WETH", period=21))
 
-        # All should be 100 for pure uptrend
         assert rsi_7 == 100.0
         assert rsi_14 == 100.0
         assert rsi_21 == 100.0
@@ -823,11 +757,6 @@ class TestRSICalculatorIntegration:
         assert health["total_requests"] == 100
 
 
-# =============================================================================
-# Context Manager Tests
-# =============================================================================
-
-
 class TestCoinGeckoOHLCVProviderContextManager:
     """Tests for async context manager functionality."""
 
@@ -839,13 +768,7 @@ class TestCoinGeckoOHLCVProviderContextManager:
                 return provider
 
         provider = run_async(test_cm())
-        # Session should be closed after exiting context
         assert provider._session is None or provider._session.closed
-
-
-# =============================================================================
-# Known RSI Value Tests (Verification)
-# =============================================================================
 
 
 class TestKnownRSIValues:
@@ -862,65 +785,53 @@ class TestKnownRSIValues:
         smoothing weights recent values more. We test that balanced
         oscillations produce RSI in the neutral zone (30-70).
         """
-        # Create prices with equal up and down movements, ending on down
         prices = [
             Decimal("100"),
-            Decimal("101"),  # +1
-            Decimal("100"),  # -1
-            Decimal("101"),  # +1
-            Decimal("100"),  # -1
-            Decimal("101"),  # +1
-            Decimal("100"),  # -1
+            Decimal("101"),
+            Decimal("100"),
+            Decimal("101"),
+            Decimal("100"),
+            Decimal("101"),
+            Decimal("100"),
         ]
 
-        # With period=3, need 4 points minimum
         rsi = RSICalculator.calculate_rsi_from_prices(prices, period=3)
 
-        # With balanced oscillations and Wilder's smoothing, RSI should be
-        # in the neutral zone. Due to exponential nature of Wilder's method,
-        # exact 50 isn't guaranteed, but should be between 30-70.
+        # Wilder's weighting prevents balanced nominal moves from guaranteeing exactly 50.
         assert 30 <= rsi <= 70
 
     def test_rsi_extremes(self) -> None:
         """Test RSI at extreme values."""
-        # Pure gains = RSI 100
         all_gains = [Decimal(str(100 + i)) for i in range(20)]
         rsi_100 = RSICalculator.calculate_rsi_from_prices(all_gains, period=14)
         assert rsi_100 == 100.0
 
-        # Pure losses = RSI 0
         all_losses = [Decimal(str(200 - i)) for i in range(20)]
         rsi_0 = RSICalculator.calculate_rsi_from_prices(all_losses, period=14)
         assert rsi_0 == 0.0
 
     def test_rsi_oversold_threshold(self) -> None:
         """Test detecting oversold condition (RSI < 30)."""
-        # Create downtrending prices that should produce low RSI
         prices = [Decimal("100")]
-        # Mix of mostly losses
         for i in range(1, 20):
             if i % 5 == 0:
-                prices.append(prices[-1] + Decimal("0.5"))  # Small gain
+                prices.append(prices[-1] + Decimal("0.5"))
             else:
-                prices.append(prices[-1] - Decimal("1"))  # Larger loss
+                prices.append(prices[-1] - Decimal("1"))
 
         rsi = RSICalculator.calculate_rsi_from_prices(prices, period=14)
 
-        # Should be below 30 (oversold)
         assert rsi < 30
 
     def test_rsi_overbought_threshold(self) -> None:
         """Test detecting overbought condition (RSI > 70)."""
-        # Create uptrending prices that should produce high RSI
         prices = [Decimal("100")]
-        # Mix of mostly gains
         for i in range(1, 20):
             if i % 5 == 0:
-                prices.append(prices[-1] - Decimal("0.5"))  # Small loss
+                prices.append(prices[-1] - Decimal("0.5"))
             else:
-                prices.append(prices[-1] + Decimal("1"))  # Larger gain
+                prices.append(prices[-1] + Decimal("1"))
 
         rsi = RSICalculator.calculate_rsi_from_prices(prices, period=14)
 
-        # Should be above 70 (overbought)
         assert rsi > 70
