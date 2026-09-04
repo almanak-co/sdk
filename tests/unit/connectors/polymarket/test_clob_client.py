@@ -45,22 +45,13 @@ from almanak.connectors.polymarket.signer import (
     make_remote_signer,
 )
 
-# =============================================================================
-# Fixtures
-# =============================================================================
-
-
-# Deterministic test key shared across all fixtures + the module-level
-# ``_make_clob_client`` helper. Tests construct ``ClobClient`` via the helper
-# so the signer is injected once — keeps the diff for issue #1961 minimal
-# without sprinkling ``signer=`` across hundreds of call sites.
+# The fixture account and default local signer must share the same key.
 _TEST_PRIVATE_KEY = "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 
 @pytest.fixture
 def test_account():
     """Create a test Ethereum account."""
-    # Use a deterministic account for testing
     return Account.from_key(_TEST_PRIVATE_KEY)
 
 
@@ -72,11 +63,6 @@ def _make_clob_client(config: PolymarketConfig, *args, **kwargs) -> ClobClient:
     """
     kwargs.setdefault("signer", make_local_signer(_TEST_PRIVATE_KEY))
     return ClobClient(config, *args, **kwargs)
-
-
-# =============================================================================
-# Read-only mode (signer=None) — issue #1961
-# =============================================================================
 
 
 class TestReadOnlyMode:
@@ -94,9 +80,7 @@ class TestReadOnlyMode:
         from almanak.connectors.polymarket.models import LimitOrderParams
 
         client = ClobClient(config_with_credentials, signer=None)
-        # build_limit_order is a pure helper that does not sign — it should
-        # still work even in read-only mode. Only the explicit ``sign_order``
-        # call raises.
+        # Building is signer-independent; only the explicit signing step must fail.
         params = LimitOrderParams(
             token_id="12345",
             side="BUY",
@@ -167,7 +151,6 @@ def signer(test_account):
 @pytest.fixture
 def credentials():
     """Create test API credentials."""
-    # Generate a base64 secret
     secret = base64.b64encode(b"test_secret_key_123").decode()
     return ApiCredentials(
         api_key="test_api_key",
@@ -190,11 +173,6 @@ def config_with_credentials(config, credentials):
 def mock_http_client():
     """Create a mock HTTP client."""
     return MagicMock(spec=httpx.Client)
-
-
-# =============================================================================
-# L1 Authentication Tests
-# =============================================================================
 
 
 class TestL1Authentication:
@@ -228,7 +206,7 @@ class TestL1Authentication:
 
         signature = headers["POLY_SIGNATURE"]
         assert signature.startswith("0x")
-        # 65-byte signature = 130 hex chars + "0x" = 132 total
+        # A 65-byte signature is 130 hex characters plus the 0x prefix.
         assert len(signature) == 132
         assert all(c in "0123456789abcdef" for c in signature[2:])
 
@@ -240,7 +218,6 @@ class TestL1Authentication:
         timestamp = int(headers["POLY_TIMESTAMP"])
         current_time = int(time.time())
 
-        # Should be within 5 seconds
         assert abs(timestamp - current_time) < 5
 
     def test_build_l1_headers_nonce_default(self, config):
@@ -267,7 +244,6 @@ class TestL1Authentication:
         timestamp = headers["POLY_TIMESTAMP"]
         signature_hex = headers["POLY_SIGNATURE"]
 
-        # Reconstruct the typed data
         typed_data = {
             "types": {
                 "EIP712Domain": [
@@ -292,11 +268,6 @@ class TestL1Authentication:
         recovered = Account.recover_message(signable, signature=sig_bytes)
 
         assert recovered == test_account.address
-
-
-# =============================================================================
-# L2 Authentication Tests
-# =============================================================================
 
 
 class TestL2Authentication:
@@ -339,7 +310,6 @@ class TestL2Authentication:
         signature = headers["POLY_SIGNATURE"]
         try:
             decoded = base64.urlsafe_b64decode(signature)
-            # SHA256 produces 32 bytes
             assert len(decoded) == 32
         except Exception:
             pytest.fail("Signature is not valid URL-safe base64")
@@ -348,8 +318,7 @@ class TestL2Authentication:
         """L2 signature should be reproducible with same inputs."""
         client = _make_clob_client(config_with_credentials)
 
-        # Get the timestamp from first call
-        with patch("time.time", return_value=1704067200):  # Fixed timestamp
+        with patch("time.time", return_value=1704067200):
             headers1 = client._build_l2_headers("GET", "/test")
             headers2 = client._build_l2_headers("GET", "/test")
 
@@ -377,7 +346,6 @@ class TestL2Authentication:
         with patch("time.time", return_value=int(timestamp)):
             headers = client._build_l2_headers(method, path, body)
 
-        # Manually compute expected signature (URL-safe base64, matches CLOB server)
         secret = credentials.secret.get_secret_value()
         message = f"{timestamp}{method}{path}{body}"
         expected_sig = hmac.new(
@@ -388,11 +356,6 @@ class TestL2Authentication:
         expected_b64 = base64.urlsafe_b64encode(expected_sig).decode("utf-8")
 
         assert headers["POLY_SIGNATURE"] == expected_b64
-
-
-# =============================================================================
-# Credential Management Tests
-# =============================================================================
 
 
 class TestCredentialManagement:
@@ -476,15 +439,9 @@ class TestCredentialManagement:
         client = _make_clob_client(config, http_client=mock_http)
         credentials = client.get_or_create_credentials()
 
-        # Should have called derive (GET), not create (POST)
         mock_http.get.assert_called_once()
         mock_http.post.assert_not_called()
         assert credentials.api_key == "derived_api_key"
-
-
-# =============================================================================
-# Model Tests
-# =============================================================================
 
 
 class TestModels:
@@ -531,12 +488,10 @@ class TestModels:
         response = {
             "market": "token123",
             "asset_id": "token123",
-            # Bids ascend: worst (0.63) first, best (0.64) last.
             "bids": [
                 {"price": "0.63", "size": "2000"},
                 {"price": "0.64", "size": "1000"},
             ],
-            # Asks descend: worst (0.67) first, best (0.66) last.
             "asks": [
                 {"price": "0.67", "size": "2500"},
                 {"price": "0.66", "size": "1500"},
@@ -571,7 +526,7 @@ class TestModels:
         """Should create credentials from dict."""
         data = {
             "apiKey": "test_key",
-            "secret": "dGVzdF9zZWNyZXQ=",  # base64 of "test_secret"
+            "secret": "dGVzdF9zZWNyZXQ=",
             "passphrase": "test_pass",
         }
 
@@ -688,11 +643,6 @@ class TestOrderResponseFromApiResponse:
         assert upper.order_id == "0xupper"
 
 
-# =============================================================================
-# Signature Type Tests
-# =============================================================================
-
-
 class TestSignatureTypes:
     """Tests for different signature types."""
 
@@ -706,7 +656,6 @@ class TestSignatureTypes:
         client = _make_clob_client(config)
         headers = client._build_l1_headers()
 
-        # Should still produce valid signature ("0x" + 65-byte hex = 132 chars)
         assert headers["POLY_SIGNATURE"].startswith("0x")
         assert len(headers["POLY_SIGNATURE"]) == 132
 
@@ -715,11 +664,6 @@ class TestSignatureTypes:
         assert SignatureType.EOA.value == 0
         assert SignatureType.POLY_PROXY.value == 1
         assert SignatureType.POLY_GNOSIS_SAFE.value == 2
-
-
-# =============================================================================
-# Error Handling Tests
-# =============================================================================
 
 
 class TestErrorHandling:
@@ -736,8 +680,7 @@ class TestErrorHandling:
 
         client = _make_clob_client(config_with_credentials, http_client=mock_http)
 
-        # Patch time.sleep so the retry-backoff loop (Retry-After: 60s × max_retries)
-        # doesn't burn ~90s of real wall-clock waiting on mocked retries.
+        # Avoid waiting through mocked Retry-After backoffs.
         with patch("time.sleep"), pytest.raises(PolymarketRateLimitError) as exc_info:
             client._request("GET", "https://clob.polymarket.com/test")
 
@@ -763,11 +706,6 @@ class TestErrorHandling:
         assert exc_info.value.status_code == 400
 
 
-# =============================================================================
-# Caching Tests
-# =============================================================================
-
-
 class TestCaching:
     """Tests for response caching."""
 
@@ -784,10 +722,8 @@ class TestCaching:
         """Should return None for expired cache."""
         client = _make_clob_client(config_with_credentials)
 
-        # Set with very short TTL
         client._set_cached("test_key", {"data": "value"}, ttl=0)
 
-        # Sleep briefly to ensure expiration
         time.sleep(0.1)
 
         result = client._get_cached("test_key")
@@ -800,17 +736,11 @@ class TestCaching:
         assert result is None
 
 
-# =============================================================================
-# Market Data Tests (US-002)
-# =============================================================================
-
-
 class TestMarketData:
     """Tests for market data fetching functionality."""
 
     def test_get_markets_success(self, config_with_credentials):
         """Should fetch and parse markets from Gamma API."""
-        # Real API response format from Polymarket
         api_response = [
             {
                 "id": "0x1234",
@@ -870,7 +800,6 @@ class TestMarketData:
         filters = MarketFilters(active=True, closed=False, limit=50)
         client.get_markets(filters=filters)
 
-        # Verify the request was made with correct params
         call_args = mock_http.request.call_args
         params = call_args.kwargs.get("params", {})
         assert params.get("active") == "true"
@@ -935,13 +864,10 @@ class TestMarketData:
 
         client = _make_clob_client(config_with_credentials, http_client=mock_http)
 
-        # First call should hit API
         market1 = client.get_market("12345")
-        # Second call should use cache
         market2 = client.get_market("12345")
 
         assert market1.id == market2.id
-        # Should only have made one request
         assert mock_http.request.call_count == 1
 
     def test_get_orderbook(self, config_with_credentials):
@@ -949,13 +875,11 @@ class TestMarketData:
         api_response = {
             "market": "19045189272319329424023217822141741659150265216200539353252147725932663608488",
             "asset_id": "19045189272319329424023217822141741659150265216200539353252147725932663608488",
-            # Bids ascend (worst→best); best bid is the last entry.
             "bids": [
                 {"price": "0.62", "size": "5000"},
                 {"price": "0.63", "size": "2500"},
                 {"price": "0.64", "size": "1000"},
             ],
-            # Asks descend (worst→best); best ask is the last entry.
             "asks": [
                 {"price": "0.68", "size": "4500"},
                 {"price": "0.67", "size": "3000"},
@@ -1001,7 +925,6 @@ class TestMarketData:
 
         client = _make_clob_client(config_with_credentials, http_client=mock_http)
 
-        # First call hits API, second uses cache
         client.get_orderbook("token123")
         client.get_orderbook("token123")
 
@@ -1010,7 +933,6 @@ class TestMarketData:
     def test_get_price(self, config_with_credentials):
         """V2: /price requires side=BUY|SELL and returns {"price": ...} per
         side. get_price makes 2 calls and computes mid as (bid+ask)/2."""
-        # First call (side=BUY) → bid; second call (side=SELL) → ask.
         bid_response = MagicMock()
         bid_response.status_code = 200
         bid_response.content = b"data"
@@ -1029,10 +951,8 @@ class TestMarketData:
 
         assert price.bid == Decimal("0.64")
         assert price.ask == Decimal("0.66")
-        assert price.mid == Decimal("0.65")  # arithmetic mean
+        assert price.mid == Decimal("0.65")
 
-        # Verify both calls used the right side parameter (regression: V1
-        # passed only token_id and the V2 server returned "Invalid side").
         sides = [call.kwargs["params"]["side"] for call in mock_http.request.call_args_list]
         assert sides == ["BUY", "SELL"]
 
@@ -1049,7 +969,7 @@ class TestMarketData:
         ask_response = MagicMock()
         ask_response.status_code = 200
         ask_response.content = b"data"
-        ask_response.json.return_value = {"price": "0"}  # no asks resting
+        ask_response.json.return_value = {"price": "0"}
 
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.request.side_effect = [bid_response, ask_response]
@@ -1059,7 +979,7 @@ class TestMarketData:
 
         assert price.bid == Decimal("0.64")
         assert price.ask == Decimal("0")
-        assert price.mid == Decimal("0")  # NOT 0.32
+        assert price.mid == Decimal("0")
 
     def test_get_price_caching(self, config_with_credentials):
         """V2: cache key is per-token; cached result skips both BUY+SELL calls."""
@@ -1081,7 +1001,6 @@ class TestMarketData:
         client.get_price("token123")
         client.get_price("token123")
 
-        # First call → 2 HTTP requests (BUY + SELL); second call hits cache → 0.
         assert mock_http.request.call_count == 2
 
     def test_get_midpoint(self, config_with_credentials):
@@ -1197,7 +1116,7 @@ class TestMarketData:
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.content = b"1777384897"
-        mock_response.json.return_value = 1777384897  # raw int, not {"time": ...}
+        mock_response.json.return_value = 1777384897
 
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.request.return_value = mock_response
@@ -1245,17 +1164,14 @@ class TestMarketData:
         result = client.get_server_time()
         after = int(_time.time()) + 1
 
-        # Local clock fallback — must be a recent timestamp, not 0 / a crash.
         assert before <= result <= after
 
     def test_rate_limit_retry(self, config_with_credentials):
         """Should retry on rate limit with exponential backoff."""
-        # First response: rate limited
         rate_limit_response = MagicMock()
         rate_limit_response.status_code = 429
         rate_limit_response.headers = {"Retry-After": "1"}
 
-        # Second response: success
         success_response = MagicMock()
         success_response.status_code = 200
         success_response.content = b"data"
@@ -1266,17 +1182,11 @@ class TestMarketData:
 
         client = _make_clob_client(config_with_credentials, http_client=mock_http)
 
-        # Should succeed after retry
-        with patch("time.sleep"):  # Don't actually sleep in tests
+        with patch("time.sleep"):
             midpoint = client.get_midpoint("token123")
 
         assert midpoint == Decimal("0.65")
         assert mock_http.request.call_count == 2
-
-
-# =============================================================================
-# Order Management Tests (US-003)
-# =============================================================================
 
 
 class TestPositions:
@@ -1320,7 +1230,6 @@ class TestPositions:
 
         assert len(positions) == 2
 
-        # Check first position (YES)
         pos1 = positions[0]
         assert pos1.market_id == "0xmarket123"
         assert pos1.condition_id == "0xcondition456"
@@ -1330,14 +1239,11 @@ class TestPositions:
         assert pos1.avg_price == Decimal("0.65")
         assert pos1.current_price == Decimal("0.72")
         assert pos1.realized_pnl == Decimal("25.00")
-        # Unrealized PnL = (0.72 - 0.65) * 100.5 = 7.035
         assert pos1.unrealized_pnl == Decimal("7.035")
 
-        # Check second position (NO)
         pos2 = positions[1]
         assert pos2.outcome == "NO"
         assert pos2.size == Decimal("50.0")
-        # Unrealized PnL = (0.25 - 0.30) * 50 = -2.5
         assert pos2.unrealized_pnl == Decimal("-2.5")
 
     def test_get_positions_uses_config_wallet_by_default(self, config_with_credentials):
@@ -1353,7 +1259,6 @@ class TestPositions:
         client = _make_clob_client(config_with_credentials, http_client=mock_http)
         client.get_positions()
 
-        # Verify request was made with config wallet address
         call_args = mock_http.request.call_args
         params = call_args.kwargs.get("params", {})
         assert params.get("user") == config_with_credentials.wallet_address
@@ -1372,7 +1277,6 @@ class TestPositions:
         custom_wallet = "0x1234567890123456789012345678901234567890"
         client.get_positions(wallet=custom_wallet)
 
-        # Verify request was made with custom wallet
         call_args = mock_http.request.call_args
         params = call_args.kwargs.get("params", {})
         assert params.get("user") == custom_wallet
@@ -1393,7 +1297,6 @@ class TestPositions:
         filters = PositionFilters(market="0xmarket123", outcome="YES")
         client.get_positions(filters=filters)
 
-        # Verify request was made with filters
         call_args = mock_http.request.call_args
         params = call_args.kwargs.get("params", {})
         assert params.get("market") == "0xmarket123"
@@ -1428,7 +1331,6 @@ class TestPositions:
                 "realizedPnl": "0",
             },
             {
-                # Missing required fields - should be skipped
                 "market": "0xmarket456",
             },
         ]
@@ -1444,7 +1346,6 @@ class TestPositions:
         client = _make_clob_client(config_with_credentials, http_client=mock_http)
         positions = client.get_positions()
 
-        # Should still return the valid position
         assert len(positions) >= 1
         assert positions[0].market_id == "0xmarket123"
 
@@ -1492,7 +1393,6 @@ class TestTrades:
 
         assert len(trades) == 2
 
-        # Check first trade
         trade1 = trades[0]
         assert trade1.id == "trade123"
         assert trade1.market_id == "0xmarket456"
@@ -1503,7 +1403,6 @@ class TestTrades:
         assert trade1.fee == Decimal("0.50")
         assert trade1.status.value == "CONFIRMED"
 
-        # Check second trade
         trade2 = trades[1]
         assert trade2.side == "SELL"
         assert trade2.status.value == "MATCHED"
@@ -1528,7 +1427,6 @@ class TestTrades:
         filters = TradeFilters(market="0xmarket123", after=after_date, limit=50)
         client.get_trades(filters=filters)
 
-        # Verify request was made with filters
         call_args = mock_http.request.call_args
         params = call_args.kwargs.get("params", {})
         assert params.get("market") == "0xmarket123"
@@ -1595,16 +1493,10 @@ class TestBalanceAllowance:
 
         assert balance.balance == Decimal("500.0")
 
-        # Verify request included token_id
         call_args = mock_http.request.call_args
         params = call_args.kwargs.get("params", {})
         assert params.get("asset_type") == "CONDITIONAL"
         assert params.get("token_id") == "token123"
-
-
-# =============================================================================
-# Market-Specific Minimum Order Size Tests (US-111)
-# =============================================================================
 
 
 class TestConfigurableUrls:
@@ -1649,7 +1541,6 @@ class TestConfigurableUrls:
 
         monkeypatch.setenv("POLYMARKET_WALLET_ADDRESS", test_account.address)
         monkeypatch.setenv("POLYMARKET_PRIVATE_KEY", test_account.key.hex())
-        # Don't set POLYMARKET_DATA_API_URL
 
         config = PolymarketConfig.from_env()
 
@@ -1681,7 +1572,6 @@ class TestConfigurableUrls:
             data_api_base_url=custom_url,
         )
 
-        # Create mock HTTP client to capture the request URL
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.content = b"[]"
@@ -1692,10 +1582,8 @@ class TestConfigurableUrls:
 
         client = _make_clob_client(config, http_client=mock_http)
 
-        # Call _get_data_api and verify the URL
         client._get_data_api("/positions", params={"user": "0x123"})
 
-        # Check the request was made with the custom URL
         call_args = mock_http.request.call_args
         assert call_args is not None
         assert custom_url in call_args.kwargs.get("url", call_args.args[1] if len(call_args.args) > 1 else "")
@@ -1705,20 +1593,13 @@ class TestConfigurableUrls:
         docstring = PolymarketConfig.__doc__
         assert docstring is not None
 
-        # Check all URLs are documented
         assert "clob_base_url" in docstring
         assert "gamma_base_url" in docstring
         assert "data_api_base_url" in docstring
 
-        # Check env vars are documented
         assert "POLYMARKET_CLOB_URL" in docstring
         assert "POLYMARKET_GAMMA_URL" in docstring
         assert "POLYMARKET_DATA_API_URL" in docstring
-
-
-# =============================================================================
-# Rate Limiting Tests (US-117)
-# =============================================================================
 
 
 class TestTokenBucketRateLimiter:
@@ -1751,11 +1632,9 @@ class TestTokenBucketRateLimiter:
 
         limiter = TokenBucketRateLimiter(rate_per_second=10.0)
 
-        # Acquire 5 times
         for _ in range(5):
             assert limiter.acquire() is True
 
-        # Should have about 5 tokens left (some refill happens)
         assert limiter.available_tokens < 6.0
 
     def test_try_acquire_non_blocking(self):
@@ -1764,17 +1643,15 @@ class TestTokenBucketRateLimiter:
 
         limiter = TokenBucketRateLimiter(rate_per_second=10.0)
 
-        # Exhaust the bucket
         for _ in range(10):
             limiter.try_acquire()
 
-        # Next try_acquire should fail immediately without blocking
         start = time.time()
         result = limiter.try_acquire()
         elapsed = time.time() - start
 
         assert result is False
-        assert elapsed < 0.1  # Should return almost immediately
+        assert elapsed < 0.1
 
     def test_disabled_limiter_always_succeeds(self):
         """Disabled rate limiter should always allow requests."""
@@ -1782,7 +1659,6 @@ class TestTokenBucketRateLimiter:
 
         limiter = TokenBucketRateLimiter(rate_per_second=1.0, enabled=False)
 
-        # Even with rate=1, disabled limiter should allow many requests
         for _ in range(100):
             assert limiter.acquire() is True
             assert limiter.try_acquire() is True
@@ -1797,7 +1673,6 @@ class TestTokenBucketRateLimiter:
         limiter.enabled = False
         assert limiter.enabled is False
 
-        # When disabled, should always succeed
         for _ in range(10):
             assert limiter.acquire() is True
 
@@ -1810,15 +1685,13 @@ class TestTokenBucketRateLimiter:
 
         limiter = TokenBucketRateLimiter(rate_per_second=100.0)
 
-        # Exhaust the bucket
         for _ in range(100):
             limiter.try_acquire()
 
         tokens_before = limiter.available_tokens
-        time.sleep(0.05)  # Wait 50ms
+        time.sleep(0.05)
         tokens_after = limiter.available_tokens
 
-        # With rate=100/s, after 50ms should have ~5 tokens refilled
         assert tokens_after > tokens_before
 
     def test_bucket_caps_at_capacity(self):
@@ -1827,10 +1700,8 @@ class TestTokenBucketRateLimiter:
 
         limiter = TokenBucketRateLimiter(rate_per_second=10.0)
 
-        # Simulate long idle time by calling refill
         time.sleep(0.1)
 
-        # Tokens should be capped at capacity (rate_per_second)
         assert limiter.available_tokens <= 10.0
 
     def test_reset_restores_full_capacity(self):
@@ -1839,11 +1710,9 @@ class TestTokenBucketRateLimiter:
 
         limiter = TokenBucketRateLimiter(rate_per_second=10.0)
 
-        # Exhaust the bucket
         for _ in range(10):
             limiter.try_acquire()
 
-        # Reset
         limiter.reset()
 
         assert limiter.available_tokens == 10.0
@@ -1852,13 +1721,11 @@ class TestTokenBucketRateLimiter:
         """acquire() with timeout should succeed when token becomes available."""
         from almanak.connectors.polymarket import TokenBucketRateLimiter
 
-        limiter = TokenBucketRateLimiter(rate_per_second=100.0)  # Fast refill
+        limiter = TokenBucketRateLimiter(rate_per_second=100.0)
 
-        # Exhaust the bucket
         for _ in range(100):
             limiter.try_acquire()
 
-        # Should succeed within timeout as tokens refill quickly
         result = limiter.acquire(timeout=0.5)
         assert result is True
 
@@ -1866,18 +1733,16 @@ class TestTokenBucketRateLimiter:
         """acquire() should return False when timeout expires."""
         from almanak.connectors.polymarket import TokenBucketRateLimiter
 
-        limiter = TokenBucketRateLimiter(rate_per_second=1.0)  # Slow refill
+        limiter = TokenBucketRateLimiter(rate_per_second=1.0)
 
-        # Exhaust the bucket
         limiter.try_acquire()
 
-        # Should fail with very short timeout
         start = time.time()
         result = limiter.acquire(timeout=0.01)
         elapsed = time.time() - start
 
         assert result is False
-        assert elapsed < 0.1  # Should respect timeout
+        assert elapsed < 0.1
 
     def test_blocking_acquire_waits(self):
         """acquire() should block when bucket is empty."""
@@ -1885,17 +1750,15 @@ class TestTokenBucketRateLimiter:
 
         limiter = TokenBucketRateLimiter(rate_per_second=50.0)
 
-        # Exhaust the bucket
         for _ in range(50):
             limiter.try_acquire()
 
-        # Blocking acquire should wait for refill
         start = time.time()
-        result = limiter.acquire()  # No timeout, will block
+        result = limiter.acquire()
         elapsed = time.time() - start
 
         assert result is True
-        assert elapsed > 0.01  # Should have waited some time
+        assert elapsed > 0.01
 
 
 class TestClobClientRateLimiting:
@@ -1949,7 +1812,6 @@ class TestClobClientRateLimiting:
         """Each API request should acquire a rate limit token."""
         from almanak.connectors.polymarket import TokenBucketRateLimiter
 
-        # Use a mock rate limiter to track calls
         mock_limiter = MagicMock(spec=TokenBucketRateLimiter)
         mock_limiter.acquire.return_value = True
 
@@ -1963,10 +1825,8 @@ class TestClobClientRateLimiting:
 
         client = _make_clob_client(config, http_client=mock_http, rate_limiter=mock_limiter)
 
-        # Make a request
         client._get("/test")
 
-        # Verify rate limiter was called
         mock_limiter.acquire.assert_called_once()
 
     def test_multiple_requests_acquire_multiple_tokens(self, config):
@@ -1986,11 +1846,9 @@ class TestClobClientRateLimiting:
 
         client = _make_clob_client(config, http_client=mock_http, rate_limiter=mock_limiter)
 
-        # Make multiple requests
         for _ in range(5):
             client._get("/test")
 
-        # Verify rate limiter was called 5 times
         assert mock_limiter.acquire.call_count == 5
 
     def test_rate_limiting_applies_to_all_request_types(self, config_with_credentials):
@@ -2010,19 +1868,17 @@ class TestClobClientRateLimiting:
 
         client = _make_clob_client(config_with_credentials, http_client=mock_http, rate_limiter=mock_limiter)
 
-        # Make different types of requests
         client._get("/test")
         client._post("/test", json_body={})
         client._delete("/test")
 
-        # Verify rate limiter was called for each
         assert mock_limiter.acquire.call_count == 3
 
     def test_rate_limiting_with_real_limiter_throttles_requests(self, test_account):
         """Real rate limiter should throttle rapid requests."""
         config = PolymarketConfig(
             wallet_address=test_account.address,
-            rate_limit_requests_per_second=10.0,  # 10 req/s = 100ms between requests when exhausted
+            rate_limit_requests_per_second=10.0,
             rate_limit_enabled=True,
         )
 
@@ -2036,21 +1892,19 @@ class TestClobClientRateLimiting:
 
         client = _make_clob_client(config, http_client=mock_http)
 
-        # Make more requests than the bucket can hold
         start = time.time()
-        for _ in range(15):  # 15 requests with bucket of 10
+        for _ in range(15):
             client._get("/test")
         elapsed = time.time() - start
 
-        # Should take some time due to rate limiting (5 extra requests / 10 per second = ~0.5s)
-        assert elapsed > 0.3  # At least 300ms due to throttling
+        assert elapsed > 0.3
 
     def test_disabled_rate_limiting_allows_rapid_requests(self, test_account):
         """Disabled rate limiter should allow rapid requests without delay."""
         config = PolymarketConfig(
             wallet_address=test_account.address,
-            rate_limit_requests_per_second=1.0,  # Very slow limit
-            rate_limit_enabled=False,  # But disabled
+            rate_limit_requests_per_second=1.0,
+            rate_limit_enabled=False,
         )
 
         mock_response = MagicMock()
@@ -2063,13 +1917,11 @@ class TestClobClientRateLimiting:
 
         client = _make_clob_client(config, http_client=mock_http)
 
-        # Make many requests rapidly
         start = time.time()
         for _ in range(50):
             client._get("/test")
         elapsed = time.time() - start
 
-        # Should be very fast since rate limiting is disabled
         assert elapsed < 0.5
 
     def test_rate_limiter_accessible_via_property(self, config):
@@ -2077,11 +1929,9 @@ class TestClobClientRateLimiting:
         mock_http = MagicMock(spec=httpx.Client)
         client = _make_clob_client(config, http_client=mock_http)
 
-        # Access rate limiter
         limiter = client.rate_limiter
         assert limiter is not None
 
-        # Should be able to toggle enabled state at runtime
         original_enabled = limiter.enabled
         limiter.enabled = not original_enabled
         assert limiter.enabled != original_enabled
@@ -2101,11 +1951,6 @@ class TestClobClientRateLimiting:
         )
 
         assert config.rate_limit_requests_per_second == 30.0
-
-
-# =============================================================================
-# V2 EOA Signing — focused proof that V2 orders sign + recover correctly
-# =============================================================================
 
 
 def _make_test_market(neg_risk: bool) -> "GammaMarket":
@@ -2210,7 +2055,6 @@ class TestV2OrderSigning:
         unsigned = client.build_limit_order(params, market=market)
         struct = unsigned.to_struct()
 
-        # V2 keys present
         assert set(struct.keys()) == {
             "salt",
             "maker",
@@ -2224,12 +2068,10 @@ class TestV2OrderSigning:
             "metadata",
             "builder",
         }
-        # V1 fields gone
         assert "taker" not in struct
         assert "expiration" not in struct
         assert "nonce" not in struct
         assert "feeRateBps" not in struct
-        # Sanity on V2 additions
         assert isinstance(struct["timestamp"], int) and struct["timestamp"] > 0
         assert struct["metadata"].startswith("0x") and len(struct["metadata"]) == 66
         assert struct["builder"].startswith("0x") and len(struct["builder"]) == 66
@@ -2246,16 +2088,13 @@ class TestV2OrderSigning:
 
         assert set(payload.keys()) == {"order", "owner", "orderType"}
         order = payload["order"]
-        # V2 wire fields
         assert "timestamp" in order
         assert "metadata" in order
         assert "builder" in order
-        assert "expiration" in order  # API-level GTD; "0" when no expiration
-        # V1 wire fields removed
+        assert "expiration" in order  # GTD expiration is wire-only and defaults to "0".
         assert "feeRateBps" not in order
         assert "nonce" not in order
         assert "taker" not in order
-        # Side is the canonical string
         assert order["side"] == "SELL"
 
     def test_v2_build_limit_order_requires_market(self, config_with_credentials):
@@ -2341,14 +2180,6 @@ class TestV2OrderSigning:
         assert recovered == test_account.address
 
 
-# =============================================================================
-# V2 Order Building (ported from V1 + V2 adjustments)
-#
-# In V2 the build_*_order methods require a GammaMarket. We use the helper
-# fixtures below to build markets with specific tick / min-size combinations.
-# =============================================================================
-
-
 def _make_market(
     *,
     order_min_size: str = "5",
@@ -2398,8 +2229,8 @@ class TestV2OrderBuilding:
         assert order.signer == config_with_credentials.wallet_address
         assert order.side == 0  # BUY
         assert order.signature_type == 0  # EOA
-        assert order.maker_amount == 65_000_000  # 100 × 0.65 USDC
-        assert order.taker_amount == 100_000_000  # 100 shares
+        assert order.maker_amount == 65_000_000  # 100 * 0.65 pUSD, 6 decimals
+        assert order.taker_amount == 100_000_000  # 100 shares, 6 decimals
         assert order.token_id == int(params.token_id)
 
     def test_build_limit_order_sell(self, config_with_credentials):
@@ -2418,8 +2249,8 @@ class TestV2OrderBuilding:
         order = client.build_limit_order(params, market=market)
 
         assert order.side == 1  # SELL
-        assert order.maker_amount == 50_000_000  # 50 shares
-        assert order.taker_amount == 35_000_000  # 50 × 0.70 USDC
+        assert order.maker_amount == 50_000_000  # 50 shares, 6 decimals
+        assert order.taker_amount == 35_000_000  # 50 * 0.70 pUSD, 6 decimals
 
     def test_build_limit_order_with_expiration(self, config_with_credentials):
         """V2: LimitOrderParams.expiration routes to UnsignedOrder.api_expiration
@@ -2428,7 +2259,7 @@ class TestV2OrderBuilding:
         from almanak.connectors.polymarket.models import LimitOrderParams
 
         client = _make_clob_client(config_with_credentials)
-        expiration = int(time.time()) + 3600  # 1 hour out
+        expiration = int(time.time()) + 3600
         params = LimitOrderParams(
             token_id="123",
             side="BUY",
@@ -2488,7 +2319,7 @@ class TestV2OrderBuilding:
             token_id="123",
             side="BUY",
             price=Decimal("0.50"),
-            size=Decimal("4"),  # below market min of 5
+            size=Decimal("4"),
         )
         market = _make_market(order_min_size="5")
 
@@ -2512,8 +2343,7 @@ class TestV2OrderBuilding:
         order = client.build_market_order(params, market=market)
 
         assert order.side == 0
-        # 100 / 0.70 = 142.857… → snap to 142.85 shares (multiple of 0.01)
-        # → maker = 142.85 × 0.70 = 99.995 USDC.
+        # Snap 100 / 0.70 to 142.85 shares so the integer amount ratio remains exactly 0.70.
         assert order.taker_amount == 142_850_000
         assert order.maker_amount == 99_995_000
         assert Decimal(order.maker_amount) / Decimal(order.taker_amount) == Decimal("0.70")
@@ -2695,7 +2525,7 @@ class TestV2OrderSigningAdditional:
         signed = client.create_and_sign_market_order(params, market=market)
 
         assert signed.order is not None
-        assert signed.order.side == 1  # SELL
+        assert signed.order.side == 1
         assert signed.signature.startswith("0x")
         assert len(signed.signature) == 132
 
@@ -3526,17 +3356,13 @@ class TestV2OrderSigningRemote:
         assert body["signing_type"] == "EVM"
         assert mock_http.post.call_args.kwargs["headers"]["Authorization"] == "Bearer jwt-token"
 
-        # Explicit digest payload assertions: a regression that posts the
-        # full typed-data blob, the wrong key name, or a non-32-byte value
-        # would still pass the headers-only checks above.
+        # Signer Service accepts one 32-byte digest, not the full EIP-712 payload.
         assert "transaction_payload" in body
         assert isinstance(body["transaction_payload"], list)
         assert len(body["transaction_payload"]) == 1
         digest_hex = body["transaction_payload"][0]
         assert digest_hex.startswith("0x")
-        # 32-byte digest = 64 hex chars + "0x" prefix.
         assert len(digest_hex) == 2 + 64
-        # Must be valid hex.
         int(digest_hex, 16)
 
         assert headers["POLY_ADDRESS"] == test_account.address
@@ -3561,7 +3387,7 @@ class TestV2OrderSigningRemote:
         signed = client.sign_order(unsigned)
 
         assert mock_http.post.called
-        # Same digest-payload sanity checks as the L1 path above.
+        # Order signing uses the same digest-only contract as L1 authentication.
         body = mock_http.post.call_args.kwargs["json"]
         assert "transaction_payload" in body
         assert len(body["transaction_payload"]) == 1
