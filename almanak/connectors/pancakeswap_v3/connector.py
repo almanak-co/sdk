@@ -59,7 +59,6 @@ def _production_lifecycle_declarations():
                     chain=chain,
                     intent=IntentType.LP_CLOSE,
                     real_fork_ref=f"tests/intents/{folder}/test_pancakeswap_v3_lp.py",
-                    obligation_gap_refs=((ObligationId.AMOUNT_PROTECTION, "VIB-6220"),),
                 ),
                 AmmCoreExecutionCell(
                     chain=chain,
@@ -150,6 +149,10 @@ CONNECTOR = Connector(
     protocol_family=ImportRef(
         module="almanak.connectors.pancakeswap_v3.protocol_family",
         attribute="PROTOCOL_FAMILY",
+    ),
+    fixed_teardown_slippage=ImportRef(
+        module="almanak.connectors._strategy_base.base.cl_math",
+        attribute="resolve_fixed_lp_close_slippage",
     ),
     compiler=ImportRef(
         module="almanak.connectors.uniswap_v3.compiler",

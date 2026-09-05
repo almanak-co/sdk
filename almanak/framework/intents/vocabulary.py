@@ -912,23 +912,26 @@ class LPCloseIntent(BaseIntent):
             plain ``aerodrome`` (v2 ``removeLiquidity`` floors derived from
             the router's ``quoteRemoveLiquidity`` haircut by this tolerance).
             When ``None`` (the default), each consuming connector falls back
-            to its built-in 50 bps. Setting this on Aerodrome is not a no-op.
+            to its built-in default: 50 bps on Curve and Aerodrome v2, and
+            ``LP_CLOSE_SLIPPAGE_DEFAULT`` (0.99) on the Uniswap V3 family.
+            Setting this on Aerodrome is not a no-op.
 
-            The Uniswap V3 family still submits literal ZERO minimums on
-            ``decreaseLiquidity`` (``amount0Min``/``amount1Min``) and a
-            ``uint128``-max ``collect`` cap, ignoring this field entirely
-            (VIB-6220 — verified from decoded calldata on a real fork,
-            2026-08-20). Setting it on the V3 family does NOT tighten the
-            exit — a V3-shaped exit cannot currently be floored AT ALL, even
-            when one is explicitly requested. Do not read that as safe. A
-            zero minimum is unprotected in a way the OPEN side no longer is
-            (ALM-3186 gave the open default a real price band; the V3 close
-            lane still ships a literal zero — VIB-6220): a proportional burn
-            returns the split the live price implies, which is equivalent
-            value only while that price is HONEST. Under a manipulated price
-            the burn hands back the cheap leg and the minimums are the only
-            on-chain defence — on the V3 close lane there are none. See the
-            LP SLIPPAGE DOCTRINE in ``framework/intents/compiler.py``.
+            On the Uniswap V3 family (``uniswap_v3``, ``sushiswap_v3``,
+            ``pancakeswap_v3``, ``agni_finance``) the ``decreaseLiquidity``
+            floors are the position's own liquidity valued at the pool's live
+            ``sqrtPriceX96``, each leg haircut by this tolerance as a flat
+            fraction. The default is deliberately LOOSE and is a liveness
+            backstop, not a manipulation defence: ``amountMin`` on a burn
+            bounds what the wallet RECEIVES, a reverting burn strands the
+            position mid-teardown, and per-leg amounts are a 5x-400x amplified
+            function of price near a range edge, so a tight per-leg floor
+            reverts on ordinary block-to-block drift. Declaring a tight value
+            here is honoured and carries exactly that revert risk. A leg the
+            position does not hold at the current price floors at zero; a
+            position whose both floors truncate to zero is refused at compile
+            time rather than burned unfloored. Decision record:
+            ``docs/internal/plans/vib-6269-cl-lp-protective-minimum-decision.md``;
+            mint-side doctrine in ``framework/intents/compiler.py``.
         coin_index: Optional single-sided exit selector (VIB-5437). When set to a
             non-negative pool-coin index, the close withdraws the ENTIRE position
             into that one coin via Curve's ``remove_liquidity_one_coin`` (min-out

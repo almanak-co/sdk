@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
@@ -13,6 +14,112 @@ from almanak.framework.intents.min_out_guard import UnprotectedTradeError
 logger = logging.getLogger(__name__)
 
 _SLOT0_NOT_FETCHED = object()
+
+# Burn-lane tolerance. Deliberately NOT the mint default (`LP_SLIPPAGE_DEFAULT`,
+# a real 1% price band): `amountMin` on `decreaseLiquidity` bounds what the
+# wallet RECEIVES, and a reverting burn strands the position mid-teardown, so
+# the on-chain floor is a liveness backstop against gross failure (wrong
+# liquidity, broken adapter, unmodelled pool state), not a manipulation defence.
+# A per-leg floor tight enough to defend reverts on ordinary block-to-block
+# drift because leg amounts are a 5x-400x amplified function of price near a
+# range edge.
+LP_CLOSE_SLIPPAGE_DEFAULT: Decimal = Decimal("0.99")
+
+
+@dataclass(frozen=True)
+class LPCloseMinimums:
+    """Per-leg floors for a full ``decreaseLiquidity`` and the inputs that sized them."""
+
+    amount0_min: int
+    amount1_min: int
+    amount0_expected: int
+    amount1_expected: int
+    lp_slippage: Decimal
+    tolerance_declared: bool
+
+
+def resolve_lp_close_slippage(intent: Any) -> tuple[Decimal, bool]:
+    """Resolve the burn tolerance: ``protocol_params["lp_slippage"]`` > ``max_slippage`` > default.
+
+    Returns the tolerance and whether the caller declared it. Out-of-range values
+    fail closed (``UnprotectedTradeError``) rather than being clamped: a
+    tolerance of 1 sizes both floors at zero.
+    """
+    protocol_params = (
+        intent.get("protocol_params") if isinstance(intent, dict) else getattr(intent, "protocol_params", None)
+    )
+    protocol_lp_slippage = (protocol_params or {}).get("lp_slippage")
+    intent_max_slippage = (
+        intent.get("max_slippage") if isinstance(intent, dict) else getattr(intent, "max_slippage", None)
+    )
+    if protocol_lp_slippage is not None:
+        lp_slippage = Decimal(str(protocol_lp_slippage))
+        declared = True
+    elif intent_max_slippage is not None:
+        lp_slippage = Decimal(str(intent_max_slippage))
+        declared = True
+    else:
+        lp_slippage = LP_CLOSE_SLIPPAGE_DEFAULT
+        declared = False
+    if not lp_slippage.is_finite() or lp_slippage < Decimal("0") or lp_slippage >= Decimal("1"):
+        raise UnprotectedTradeError(
+            "LP close (lp_slippage)",
+            f"lp_slippage must be in [0, 1) (got {lp_slippage}); a tolerance of 1 or more "
+            "sizes both minimum amounts at zero, which accepts any withdrawal outcome.",
+        )
+    return lp_slippage, declared
+
+
+def resolve_fixed_lp_close_slippage(intent: Any) -> Decimal | None:
+    """Keep V3 burns on their own tolerance during teardown; swaps use the ladder."""
+    intent_type = (
+        intent.get("type", intent.get("intent_type"))
+        if isinstance(intent, dict)
+        else getattr(intent, "intent_type", None)
+    )
+    normalized_intent_type = getattr(intent_type, "value", intent_type)
+    if not isinstance(normalized_intent_type, str) or normalized_intent_type.rsplit(".", 1)[-1].upper() != "LP_CLOSE":
+        return None
+    return resolve_lp_close_slippage(intent)[0]
+
+
+def compute_lp_close_mins(
+    *,
+    intent: Any,
+    sqrt_price_x96: int,
+    tick_lower: int,
+    tick_upper: int,
+    liquidity: int,
+) -> LPCloseMinimums:
+    """Size ``amount0Min``/``amount1Min`` for a full-liquidity burn.
+
+    Decision record: ``docs/internal/plans/vib-6269-cl-lp-protective-minimum-decision.md``.
+    Expected legs come from the position's own liquidity at the pool's live
+    ``sqrtPriceX96`` (contract math, rounded down), each haircut by the burn
+    tolerance as a flat per-leg fraction. This is intentionally NOT the mint's
+    price-band instrument (``compute_lp_slippage_mins``): on a burn the floor is a
+    loose backstop, and the band construction's precision buys nothing the ABI
+    can enforce while its zero-leg semantics were designed for spend, not receipt.
+
+    A leg the position does not hold at this price (out of range) legitimately
+    floors at zero; the other leg must then carry the whole backstop. When BOTH
+    floors are zero the position is dust below the tolerance's resolution, and the
+    caller must refuse via ``require_protective_min(max(...))`` rather than ship
+    an unfloored burn -- the ``max()`` shape is what lets a one-sided position
+    through while still catching a fully unprotected encode.
+    """
+    from almanak.framework.intents.lp_math import amounts_for_liquidity
+
+    lp_slippage, declared = resolve_lp_close_slippage(intent)
+    amount0_expected, amount1_expected = amounts_for_liquidity(sqrt_price_x96, tick_lower, tick_upper, liquidity)
+    return LPCloseMinimums(
+        amount0_min=compute_min_amount_out(amount0_expected, lp_slippage),
+        amount1_min=compute_min_amount_out(amount1_expected, lp_slippage),
+        amount0_expected=amount0_expected,
+        amount1_expected=amount1_expected,
+        lp_slippage=lp_slippage,
+        tolerance_declared=declared,
+    )
 
 
 def maybe_recompute_lp_amounts_from_slot0(

@@ -2065,6 +2065,11 @@ class TeardownManager:
         ``replace`` then dict round-trip. Never raises: an unclonable intent
         keeps its original slippage loudly.
         """
+        from almanak.framework.teardown.slippage_policy import fixed_teardown_slippage
+
+        # Preserve omission and explicit LP limits; a ladder value is not a user declaration.
+        if fixed_teardown_slippage(intent_to_exec) is not None:
+            return intent_to_exec
         intent_with_slippage = intent_to_exec
         if not hasattr(intent_to_exec, "max_slippage"):
             return intent_with_slippage

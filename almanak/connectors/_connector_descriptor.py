@@ -1397,6 +1397,7 @@ class Connector:
     principal_token_market_reader: ImportRef | None = None
     swap_route_inference: ImportRef | None = None
     teardown_post_condition: ImportRef | None = None
+    fixed_teardown_slippage: ImportRef | None = None
     teardown_residual_discovery: ImportRef | None = None
     # VIB-6287: how THIS venue names a position — a set of opaque alias tokens,
     # every one of which the venue is CERTAIN names the position. The teardown
@@ -1735,6 +1736,8 @@ class Connector:
                 "Connector.teardown_residual_discovery must be None or an ImportRef, "
                 f"got {self.teardown_residual_discovery!r}"
             )
+        if self.fixed_teardown_slippage is not None and not isinstance(self.fixed_teardown_slippage, ImportRef):
+            raise ValueError("Connector.fixed_teardown_slippage must be None or an ImportRef")
         if self.perp_identity is not None and not isinstance(self.perp_identity, ImportRef):
             raise ValueError(f"Connector.perp_identity must be None or an ImportRef, got {self.perp_identity!r}")
 

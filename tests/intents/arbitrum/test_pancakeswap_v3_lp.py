@@ -33,6 +33,7 @@ from almanak.framework.intents import (
     SwapIntent,
 )
 from almanak.framework.intents.vocabulary import CollectFeesIntent, IntentType
+from tests.intents._parameter_fidelity import TxOutcome, check_calldata
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
     assert_accounting_persisted,
@@ -50,8 +51,8 @@ POSITION_MANAGER = LP_POSITION_MANAGERS["arbitrum"]["pancakeswap_v3"]
 # Pool: WETH/USDC 0.05% fee tier (PancakeSwap V3 uses 500 = 0.05%)
 # On Arbitrum with PancakeSwap V3: token0=WETH, token1=USDC (same sorting as Uniswap V3)
 POOL = "WETH/USDC/500"
-LP_AMOUNT_WETH = Decimal("0.1")   # amount0 (WETH)
-LP_AMOUNT_USDC = Decimal("250")   # amount1 (USDC)
+LP_AMOUNT_WETH = Decimal("0.1")  # amount0 (WETH)
+LP_AMOUNT_USDC = Decimal("250")  # amount1 (USDC)
 
 # Wide price range in USDC-per-WETH terms
 RANGE_LOWER = Decimal("200")
@@ -468,6 +469,13 @@ class TestPancakeSwapV3LPCloseIntent:
 
         assert compilation_result.status.value == "SUCCESS", f"LP Close compilation failed: {compilation_result.error}"
         assert compilation_result.action_bundle is not None
+        # The V3 forks share the Uniswap V3 compiler; the burn floors must reach the
+        # fork's calldata too, not just Uniswap's.
+        decrease = next(tx for tx in compilation_result.transactions if tx.tx_type == "lp_decrease_liquidity")
+        decrease_verdict = check_calldata(decrease.to, decrease.data)
+        assert decrease_verdict.outcome is TxOutcome.PROTECTED, (
+            f"decreaseLiquidity floors do not bind on {close_intent.protocol}: {decrease_verdict}"
+        )
 
         print(f"ActionBundle: {len(compilation_result.action_bundle.transactions)} transactions")
 
@@ -488,7 +496,9 @@ class TestPancakeSwapV3LPCloseIntent:
         lp_close_data = None
         for tx_result in execution_result.transaction_results:
             if tx_result.receipt:
-                data = parser.extract_lp_close_data(tx_result.receipt.to_dict())
+                receipt_dict = tx_result.receipt.to_dict()
+                assert parser.parse_receipt(receipt_dict).success, "LP close receipt parsing failed"
+                data = parser.extract_lp_close_data(receipt_dict)
                 if data:
                     lp_close_data = data
                     print(
@@ -602,7 +612,10 @@ class TestPancakeSwapV3CollectFeesIntent:
 
         # 1. Open an in-range position to accrue fees against.
         position_id, open_intent, open_result = await _open_position_for_accounting(
-            funded_wallet, orchestrator, price_oracle, anvil_rpc_url,
+            funded_wallet,
+            orchestrator,
+            price_oracle,
+            anvil_rpc_url,
         )
         open_accounting_row = await assert_accounting_persisted(
             layer5_accounting_harness,
@@ -636,8 +649,7 @@ class TestPancakeSwapV3CollectFeesIntent:
         )
         swap_compilation = compiler.compile(swap_intent)
         assert swap_compilation.status.value == "SUCCESS", (
-            f"Fee-accrual swap must compile to seed LP_COLLECT_FEES coverage. "
-            f"Error: {swap_compilation.error}"
+            f"Fee-accrual swap must compile to seed LP_COLLECT_FEES coverage. Error: {swap_compilation.error}"
         )
         assert swap_compilation.action_bundle is not None
         swap_result = await orchestrator.execute(swap_compilation.action_bundle)
@@ -665,8 +677,7 @@ class TestPancakeSwapV3CollectFeesIntent:
         compilation_result = compiler.compile(collect_intent)
 
         assert compilation_result.status.value == "SUCCESS", (
-            f"CollectFees compilation must succeed (pancakeswap_v3 LP_COLLECT_FEES). "
-            f"Error: {compilation_result.error}"
+            f"CollectFees compilation must succeed (pancakeswap_v3 LP_COLLECT_FEES). Error: {compilation_result.error}"
         )
         assert compilation_result.action_bundle is not None
 
@@ -693,8 +704,7 @@ class TestPancakeSwapV3CollectFeesIntent:
                 receipt_dict = tx_result.receipt.to_dict()
                 parse_result = parser.parse_receipt(receipt_dict)
                 assert parse_result.success, (
-                    f"Receipt parser must succeed on a confirmed receipt; "
-                    f"error={parse_result.error}"
+                    f"Receipt parser must succeed on a confirmed receipt; error={parse_result.error}"
                 )
                 lp_close_data = parser.extract_lp_close_data(receipt_dict)
                 if lp_close_data:
@@ -702,9 +712,7 @@ class TestPancakeSwapV3CollectFeesIntent:
                     parsed_amount1_collected += lp_close_data.amount1_collected
                     saw_collect = True
 
-        assert saw_collect, (
-            "Receipt must contain a Collect event from LP_COLLECT_FEES"
-        )
+        assert saw_collect, "Receipt must contain a Collect event from LP_COLLECT_FEES"
         assert parsed_amount0_collected > 0 or parsed_amount1_collected > 0, (
             f"Parser must report positive collected amounts. "
             f"amount0={parsed_amount0_collected}, amount1={parsed_amount1_collected}"
@@ -722,8 +730,7 @@ class TestPancakeSwapV3CollectFeesIntent:
         # 6. Verify principal liquidity is unchanged (fees-only, not LP_CLOSE).
         liquidity_after = _query_position_liquidity(web3, POSITION_MANAGER, position_id)
         assert liquidity_after == liquidity_before, (
-            f"LP_COLLECT_FEES must NOT remove liquidity. "
-            f"before={liquidity_before}, after={liquidity_after}"
+            f"LP_COLLECT_FEES must NOT remove liquidity. before={liquidity_before}, after={liquidity_after}"
         )
 
         # 7. Layer 4 strict: wallet deltas exactly equal parsed amounts.

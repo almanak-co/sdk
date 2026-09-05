@@ -15,9 +15,11 @@ from almanak.connectors._strategy_base.v3_pool_validation import (
     V3PoolBinding,
     V3PositionBinding,
     V3PositionBindingReadError,
+    V3PositionState,
     fetch_v3_pool_sqrt_price_x96,
     read_v3_pool_binding,
     read_v3_position_binding,
+    read_v3_position_state,
     validate_v3_pool,
 )
 
@@ -26,8 +28,10 @@ __all__ = [
     "V3PoolBinding",
     "V3PositionBinding",
     "V3PositionBindingReadError",
+    "V3PositionState",
     "fetch_v3_pool_sqrt_price_x96",
     "read_v3_pool_binding",
     "read_v3_position_binding",
+    "read_v3_position_state",
     "validate_v3_pool",
 ]

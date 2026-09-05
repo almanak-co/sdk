@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
-import pytest
 from web3 import Web3
 
 from almanak.connectors.uniswap_v3.addresses import UNISWAP_V3
@@ -598,13 +596,6 @@ async def run_uniswap_v3_lp_close_exact_proof(
     # Asserted only after the close landed and the receipts were sealed: the position is
     # closed and the funds are back, so a red here strands nothing on a live chain. The
     # false flag is already in the sealed receipt; this makes the pytest node red too.
-    if not decrease_minimums_bind and os.environ.get("ALMANAK_QA_STRICT_PROOFS") != "1":
-        # Excuse EXACTLY this known-red assertion, never the whole node: every
-        # assertion above stays a hard failure in CI. Self-healing — the moment
-        # the compiler binds the floors this branch is not taken and the assert
-        # below re-arms, with no marker left to remove. The QA Lab seal lane
-        # (ALMANAK_QA_STRICT_PROOFS=1) never takes this branch and stays FAIL.
-        pytest.xfail("VIB-6212: compiled decreaseLiquidity floors do not bind (as of 2026-09-01)")
     assert decrease_minimums_bind, (
         "LP_CLOSE declared a slippage tolerance but the compiled decreaseLiquidity floors do not bind "
         f"({decrease_minimums_witness}); the chain would accept any output."

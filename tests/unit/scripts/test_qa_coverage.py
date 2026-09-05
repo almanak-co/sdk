@@ -1300,9 +1300,33 @@ def test_safe_intent_seal_recomputes_permission_closure(modules, tmp_path: Path)
         (lambda p: p["tx"].update(hash="0x" + "cd" * 32), "hash is not entailed"),
         (lambda p: p["tx"].update(block_number=124), "block is not entailed"),
         (lambda p: p["fidelity"].update(flags={}), "fidelity.hard is not entailed"),
-        (lambda p: p.update(balance_checks={}), "non-empty all-true predicate"),
+        (lambda p: p.update(balance_checks={}), "non-empty boolean predicate set"),
+        (lambda p: p.update(balance_checks={"wallet_delta_matches_requested_amount": "yes"}), "boolean predicate set"),
+        (
+            lambda p: (
+                p.update(balance_checks={"wallet_delta_matches_requested_amount": False}),
+                p["layers"].update(balances="PASS"),
+            ),
+            "balance PASS is not entailed",
+        ),
+        (
+            lambda p: (
+                p.update(balance_checks={"wallet_delta_matches_requested_amount": False}),
+                p["layers"].update(balances="SOFT"),
+            ),
+            "must be FAIL when a balance predicate is false",
+        ),
     ],
-    ids=("status-zero", "hash-mismatch", "block-mismatch", "empty-fidelity", "empty-balances"),
+    ids=(
+        "status-zero",
+        "hash-mismatch",
+        "block-mismatch",
+        "empty-fidelity",
+        "empty-balances",
+        "non-boolean-balances",
+        "pass-over-false-predicate",
+        "false-predicate-not-graded-fail",
+    ),
 )
 def test_intent_seal_rederives_transaction_and_measurement_envelope(
     modules, tmp_path: Path, mutation, message: str
@@ -1320,6 +1344,134 @@ def test_intent_seal_rederives_transaction_and_measurement_envelope(
             network="anvil",
             contract_profile="lending.v1",
         )
+
+
+def _product_fail_receipt_payload(*, exec_path: str = "eoa") -> dict:
+    """A receipt that honestly records a false product predicate, graded FAIL."""
+    payload = _aave_supply_receipt_payload(exec_path=exec_path)
+    payload["fidelity"] = {
+        "hard": False,
+        "declared_hard": True,
+        "flags": {"amount_match": True, "decrease_minimums_bind": False},
+        "witnesses": [{"kind": "decoded_calldata", "amount0Min": "0", "amount1Min": "0"}],
+        "notes": [],
+    }
+    payload["balance_checks"] = {"value_and_state_contract": False}
+    payload["layers"]["balances"] = "FAIL"
+    return payload
+
+
+def test_intent_seal_admits_an_honest_false_predicate_as_fail_evidence(modules, tmp_path: Path) -> None:
+    """The sealer refuses inconsistency, not failure: a measured product FAIL is admissible."""
+    qa, _, _ = modules
+    payload = _product_fail_receipt_payload()
+    intent = {key: payload[key] for key in ("intent_cell_id", "protocol", "intent", "chain", "network", "exec_path")}
+
+    grade, layers, receipt_role, _ = qa._validate_receipt_payload(
+        payload,
+        source=tmp_path / "receipt.json",
+        intent=intent,
+        network="anvil",
+        contract_profile="lending.v1",
+    )
+
+    assert grade == "fail"
+    assert layers["balances"] == "FAIL"
+    assert receipt_role == "execution"
+
+
+def test_intent_junit_seal_keeps_a_product_fail_out_of_the_harness_failure_lane(
+    modules, catalog_path: Path, tmp_path: Path
+) -> None:
+    """A proof node that ran all four layers and failed on the product seals FAIL with its receipts.
+
+    Before this, one false predicate made the receipt inadmissible, the whole run
+    fell through to seal_intent_harness_failure, and the board showed HARNESS_FAIL
+    with zero receipts -- "run failed before evidence" -- for a run that had
+    complete evidence of a product defect.
+    """
+    qa, _, _ = modules
+    store = tmp_path / "store"
+    inventory = qa.build_intent_catalog()
+    cell = next(
+        cell
+        for cell in inventory["cells"]
+        if cell["protocol"] == "aave_v3" and cell["intent"] == "SUPPLY" and cell["chain"] == "arbitrum"
+    )
+    nodeid = "tests/intents/arbitrum/test_aave_v3_lending.py::TestAaveV3SupplyIntent::test_supply_usdc_using_intent"
+    junit = tmp_path / "results.xml"
+    junit.write_text(
+        '<testsuite tests="1" failures="1"><testcase '
+        'classname="tests.intents.arbitrum.test_aave_v3_lending.TestAaveV3SupplyIntent" '
+        'name="test_supply_usdc_using_intent" time="0.5">'
+        '<failure message="AssertionError: floors do not bind">traceback</failure>'
+        "</testcase></testsuite>"
+    )
+    evidence = tmp_path / "evidence"
+    receipts = evidence / "receipts"
+    receipts.mkdir(parents=True)
+    cell_id = f"{cell['id']}.anvil.safe"
+    (receipts / "01-fail.json").write_text(
+        json.dumps(
+            {
+                **_product_fail_receipt_payload(exec_path="safe"),
+                "balance_deltas": {"token": {"symbol": "USDC", "before": 1000, "after": 900, "delta": -100}},
+            }
+        )
+    )
+    (evidence / "evidence-manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "nodes": [
+                    {
+                        "nodeid": nodeid,
+                        "outcome": "FAIL",
+                        "duration_seconds": 0.5,
+                        "intents": [
+                            {
+                                "intent_cell_id": cell_id,
+                                "protocol": "aave_v3",
+                                "intent": "SUPPLY",
+                                "chain": "arbitrum",
+                                "network": "anvil",
+                                "exec_path": "safe",
+                                "outcome_class": "hard-fail",
+                                "receipt_expected": True,
+                                "receipt_artifacts": [{"path": "receipts/01-fail.json"}],
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+    )
+
+    target = qa.seal_intent_junit(
+        junit=junit,
+        store=store,
+        catalog_path=catalog_path,
+        chain=cell["chain"],
+        network="anvil",
+        exec_path="safe",
+        evidence_dir=evidence,
+        run_id="intent-product-fail-run",
+        sdk_provenance=TEST_SDK,
+        now=datetime(2026, 9, 5, 12, 0, tzinfo=UTC),
+    )
+
+    latest = json.loads((store / "index" / "intent_latest.json").read_text())
+    row = latest[cell_id]
+    assert row["status"] == "FAIL"
+    assert row["attribution_mode"] == "exact-runtime"
+    assert row["evidence_status"] == "FAIL"
+    assert row["receipt_counts"] == {"fail": 1, "hard": 0, "soft": 0}
+    assert len(row["receipt_paths"]) == 1
+    assert row["receipts"][0]["grade"] == "fail"
+    assert (target / "receipts" / "01-fail.json").is_file()
+    summary = json.loads((target / "summary.json").read_text())
+    assert summary["cells"][0]["evidence_status"] == "FAIL"
+    assert "last_pass_at" not in row or row["last_pass_at"] is None or row["last_pass_at"] < "2026-09-05"
 
 
 def test_intent_receipt_human_summary_surfaces_parser_metadata_divergence(modules) -> None:

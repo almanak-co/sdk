@@ -631,8 +631,13 @@ class IntentEvidenceRecorder:
                 payload["balance_deltas"] = balance_deltas
                 balance_checks = self._balance_checks_by_receipt_role.get(receipt_role, self._balance_checks)
                 payload["balance_checks"] = balance_checks
+                # A false predicate is a measured product failure, graded FAIL so the
+                # sealer admits the receipt as evidence; an empty set measured
+                # nothing and stays SOFT (inadmissible as a balance claim).
                 if balance_checks and all(balance_checks.values()):
                     payload["layers"]["balances"] = "PASS"
+                elif balance_checks:
+                    payload["layers"]["balances"] = "FAIL"
                 else:
                     payload["layers"]["balances"] = "SOFT"
             target = self.output_dir / relpath

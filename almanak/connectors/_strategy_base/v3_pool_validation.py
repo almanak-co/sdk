@@ -45,9 +45,11 @@ __all__ = [
     "V3PoolBinding",
     "V3PositionBinding",
     "V3PositionBindingReadError",
+    "V3PositionState",
     "fetch_v3_pool_sqrt_price_x96",
     "read_v3_pool_binding",
     "read_v3_position_binding",
+    "read_v3_position_state",
     "validate_v3_pool",
 ]
 
@@ -156,6 +158,20 @@ class V3PositionBinding:
     fee_tier: int
 
 
+@dataclass(frozen=True)
+class V3PositionState(V3PositionBinding):
+    """Pool identity plus the range and liquidity a V3 position NFT holds.
+
+    ``tick_lower``/``tick_upper`` are the ABI ``int24`` values, sign-extended.
+    ``liquidity`` is the ``uint128`` the position manager would burn on a full
+    ``decreaseLiquidity``.
+    """
+
+    tick_lower: int
+    tick_upper: int
+    liquidity: int
+
+
 class V3PositionBindingReadError(RuntimeError):
     """The position binding could not be measured from the configured RPC boundary."""
 
@@ -202,6 +218,75 @@ def read_v3_position_binding(
     if fee_tier <= 0 or fee_tier > _MAX_SANE_FEE:
         return None
     return V3PositionBinding(token0=token0, token1=token1, fee_tier=fee_tier)
+
+
+_TICK_MIN = -887272
+_TICK_MAX = 887272
+
+
+def _decode_int24_word(word: bytes) -> int:
+    value = int.from_bytes(word, "big")
+    return value - 2**256 if value >= 2**255 else value
+
+
+def read_v3_position_state(
+    position_manager: str,
+    token_id: int,
+    rpc_url: str | None,
+    *,
+    chain: str | None = None,
+    gateway_client: GatewayClient | None = None,
+) -> V3PositionState | None:
+    """Read pair, fee, tick range and liquidity for one V3 position NFT.
+
+    ``positions(uint256)`` lays the struct out as nonce, operator, token0, token1,
+    fee, tickLower, tickUpper, liquidity, ... at consecutive 32-byte words. A
+    successful but malformed response (short, zero token, insane fee or tick)
+    returns ``None``; transport and contract-call failures raise
+    :class:`V3PositionBindingReadError`, so a caller sizing a close can tell
+    "the chain says this is not a position" from "I could not ask the chain".
+    """
+    selector = "0x99fbab88"  # positions(uint256)
+    calldata = selector + token_id.to_bytes(32, "big").hex()
+    try:
+        raw = eth_call(
+            rpc_url or "",
+            position_manager,
+            calldata,
+            chain=chain,
+            gateway_client=gateway_client,
+            raise_errors=True,
+            gateway_raise_on_error=True,
+        )
+    except ValueError as exc:
+        raise V3PositionBindingReadError(
+            f"positions({token_id}) read unavailable for {position_manager} on {chain or 'unknown chain'}"
+        ) from exc
+    if raw is None or len(raw) < 8 * 32:
+        return None
+
+    token0 = decode_address(raw[2 * 32 : 3 * 32])
+    token1 = decode_address(raw[3 * 32 : 4 * 32])
+    fee_tier = int.from_bytes(raw[4 * 32 : 5 * 32], "big")
+    tick_lower = _decode_int24_word(raw[5 * 32 : 6 * 32])
+    tick_upper = _decode_int24_word(raw[6 * 32 : 7 * 32])
+    liquidity = int.from_bytes(raw[7 * 32 : 8 * 32], "big")
+    if token0 == ZERO_ADDRESS or token1 == ZERO_ADDRESS:
+        return None
+    if fee_tier <= 0 or fee_tier > _MAX_SANE_FEE:
+        return None
+    if not (_TICK_MIN <= tick_lower < tick_upper <= _TICK_MAX):
+        return None
+    if liquidity >= 2**128:
+        return None
+    return V3PositionState(
+        token0=token0,
+        token1=token1,
+        fee_tier=fee_tier,
+        tick_lower=tick_lower,
+        tick_upper=tick_upper,
+        liquidity=liquidity,
+    )
 
 
 def read_v3_pool_binding(

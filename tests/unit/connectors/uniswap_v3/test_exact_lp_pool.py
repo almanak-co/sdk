@@ -30,6 +30,17 @@ USDC = "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
 WETH = "0x82af49447d8a07e3bd95bd0d56f35241523fbab1"
 
 
+def _stub_close_minimums(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests exercise identity wiring; the floors have their own tests."""
+    from almanak.connectors._strategy_base.base.cl_math import LPCloseMinimums
+
+    monkeypatch.setattr(
+        UniswapV3Compiler,
+        "_resolve_lp_close_minimums",
+        staticmethod(lambda **_kwargs: (LPCloseMinimums(1, 1, 100, 100, Decimal("0.99"), False), {})),
+    )
+
+
 class _Gateway:
     is_connected = True
 
@@ -517,6 +528,7 @@ def test_compile_lp_close_wires_identity_only_for_active_exact_address(
     monkeypatch: pytest.MonkeyPatch, pool: str
 ) -> None:
     ctx = _ctx(gateway=_Gateway())
+    _stub_close_minimums(monkeypatch)
     adapter = MagicMock()
     adapter.get_position_manager_address.return_value = "0x3333333333333333333333333333333333333333"
     object.__setattr__(ctx, "lp_adapter_factory", lambda _protocol: adapter)
@@ -545,6 +557,7 @@ def test_active_exact_close_preserves_continuity_and_certifies_only_verified_bin
     monkeypatch: pytest.MonkeyPatch, verified: bool
 ) -> None:
     ctx = _ctx(gateway=_Gateway())
+    _stub_close_minimums(monkeypatch)
     adapter = MagicMock()
     adapter.get_position_manager_address.return_value = "0x3333333333333333333333333333333333333333"
     object.__setattr__(ctx, "lp_adapter_factory", lambda _protocol: adapter)
@@ -552,9 +565,7 @@ def test_active_exact_close_preserves_continuity_and_certifies_only_verified_bin
     ctx.services.query_position_tokens_owed.return_value = (0, 0)
     verified_binding = SimpleNamespace(
         binding=SimpleNamespace(binding_hash="a" * 64, to_preimage_wire=lambda: {"schemaVersion": 1}),
-        operational_refs=(
-            SimpleNamespace(to_wire=lambda: {"role": "position_manager", "reference": "0x" + "3" * 40}),
-        ),
+        operational_refs=(SimpleNamespace(to_wire=lambda: {"role": "position_manager", "reference": "0x" + "3" * 40}),),
         evidence=SimpleNamespace(
             block_number=123,
             block_hash="0x" + "b" * 64,

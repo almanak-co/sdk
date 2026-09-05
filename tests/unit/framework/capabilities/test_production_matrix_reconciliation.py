@@ -24,8 +24,8 @@ def test_p1b_production_matrix_has_exact_zero_undeclared_exit_shape() -> None:
     assert len(matrix.cells) == 174
     assert sum(len(cell.obligations) for cell in matrix.cells) == 1_218
     assert Counter(row.state for cell in matrix.cells for row in cell.obligations) == {
-        ReportedObligationState.SATISFIED: 838,
-        ReportedObligationState.UNSUPPORTED: 380,
+        ReportedObligationState.SATISFIED: 855,
+        ReportedObligationState.UNSUPPORTED: 363,
     }
     assert sum(cell.claim_satisfied for cell in matrix.cells) == 11
     assert matrix.to_json() == build_production_core_execution_matrix().to_json()
@@ -56,7 +56,6 @@ def test_p1b_production_matrix_has_only_reviewed_typed_dispositions() -> None:
         "VIB-5974": 14,
         "VIB-6016": 1,
         "VIB-6152": 2,
-        "VIB-6220": 17,
         "VIB-6223": 4,
         "VIB-6226": 2,
         "VIB-6235": 1,

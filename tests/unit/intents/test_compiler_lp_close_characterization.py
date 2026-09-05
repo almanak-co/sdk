@@ -29,6 +29,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from almanak.connectors._strategy_base.base.compiler import BaseCompilerContext
+from almanak.connectors._strategy_base.pool_validation_base import PoolValidationReason, PoolValidationResult
+from almanak.connectors._strategy_base.v3_pool_validation import V3PositionState
 from almanak.framework.intents.compiler import (
     CompilationStatus,
     IntentCompiler,
@@ -41,6 +43,36 @@ from almanak.framework.intents.vocabulary import Intent, LPCloseIntent
 # ---------------------------------------------------------------------------
 
 LP_ADAPTER_CLS = "almanak.connectors.uniswap_v3.adapter.UniswapV3LPAdapter"
+POOL_VALIDATION = "almanak.connectors.uniswap_v3.pool_validation"
+
+_IN_RANGE_STATE = V3PositionState(
+    token0="0x" + "aa" * 20,
+    token1="0x" + "bb" * 20,
+    fee_tier=3000,
+    tick_lower=-1000,
+    tick_upper=1000,
+    liquidity=1_000_000,
+)
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_v3_close_chain_state():
+    """Pin the positions()/factory/slot0 reads the close-minimum sizing performs.
+
+    Without these the compiler resolves a public RPC for the chain and the
+    "unit" test reads live Arbitrum state.
+    """
+    with (
+        patch(f"{POOL_VALIDATION}.read_v3_position_state", return_value=_IN_RANGE_STATE),
+        patch(
+            f"{POOL_VALIDATION}.validate_v3_pool",
+            return_value=PoolValidationResult(
+                exists=True, reason=PoolValidationReason.CONFIRMED, pool_address="0x" + "cc" * 20
+            ),
+        ),
+        patch(f"{POOL_VALIDATION}.fetch_v3_pool_sqrt_price_x96", return_value=(2**96, 0)),
+    ):
+        yield
 
 
 # ---------------------------------------------------------------------------
@@ -143,15 +175,17 @@ class TestCompileLPCloseV3HappyPaths:
         assert result.action_bundle.metadata["protocol"] == protocol
         tx_types = [tx.tx_type for tx in result.transactions]
         assert tx_types == ["lp_decrease_liquidity", "lp_collect", "lp_burn"]
+        decrease_kwargs = mock_adapter_cls.return_value.get_decrease_liquidity_calldata.call_args.kwargs
+        assert decrease_kwargs["amount0_min"] > 0 and decrease_kwargs["amount1_min"] > 0
+        assert result.action_bundle.metadata["amount0_min"] == str(decrease_kwargs["amount0_min"])
+        assert result.action_bundle.metadata["amount1_min"] == str(decrease_kwargs["amount1_min"])
         # Metadata pins
         assert result.action_bundle.metadata["position_id"] == "12345"
         assert result.action_bundle.metadata["token_id"] == 12345
         assert result.action_bundle.metadata["collect_fees"] is True
 
     @patch(LP_ADAPTER_CLS)
-    def test_collect_fees_false_still_collects_on_close(
-        self, mock_adapter_cls: MagicMock
-    ) -> None:
+    def test_collect_fees_false_still_collects_on_close(self, mock_adapter_cls: MagicMock) -> None:
         """collect_fees=False cannot suppress collect on a close.
 
         decreaseLiquidity moves principal into tokensOwed and burn() reverts
@@ -163,7 +197,7 @@ class TestCompileLPCloseV3HappyPaths:
         compiler = _make_compiler()
 
         with (
-            patch.object(compiler, "_query_position_liquidity", return_value=500),
+            patch.object(compiler, "_query_position_liquidity", return_value=5_000_000),
             patch.object(compiler, "_query_position_tokens_owed", return_value=(1, 2)),
         ):
             intent = _make_lp_close_intent(collect_fees=False)
@@ -206,9 +240,7 @@ class TestCompileLPClosePositionStates:
         assert any("0 liquidity" in w for w in result.warnings)
 
     @patch(LP_ADAPTER_CLS)
-    def test_already_closed_position_skips_everything(
-        self, mock_adapter_cls: MagicMock
-    ) -> None:
+    def test_already_closed_position_skips_everything(self, mock_adapter_cls: MagicMock) -> None:
         """0 liquidity AND 0 owed => decrease skipped, collect skipped, burn skipped."""
         mock_adapter_cls.return_value = _make_mock_lp_adapter()
         compiler = _make_compiler()
@@ -224,18 +256,14 @@ class TestCompileLPClosePositionStates:
         assert any("already closed" in w for w in result.warnings)
 
     @patch(LP_ADAPTER_CLS)
-    def test_unknown_tokens_owed_treats_as_activity(
-        self, mock_adapter_cls: MagicMock
-    ) -> None:
+    def test_unknown_tokens_owed_treats_as_activity(self, mock_adapter_cls: MagicMock) -> None:
         """tokens_owed=(None, None) => assume activity, emit warning, still collect."""
         mock_adapter_cls.return_value = _make_mock_lp_adapter()
         compiler = _make_compiler()
 
         with (
             patch.object(compiler, "_query_position_liquidity", return_value=0),
-            patch.object(
-                compiler, "_query_position_tokens_owed", return_value=(None, None)
-            ),
+            patch.object(compiler, "_query_position_tokens_owed", return_value=(None, None)),
         ):
             result = compiler.compile(_make_lp_close_intent())
 
@@ -247,15 +275,13 @@ class TestCompileLPClosePositionStates:
         assert any("Could not query tokens owed" in w for w in result.warnings)
 
     @patch(LP_ADAPTER_CLS)
-    def test_tokens_owed_zero_with_liquidity_still_warns(
-        self, mock_adapter_cls: MagicMock
-    ) -> None:
+    def test_tokens_owed_zero_with_liquidity_still_warns(self, mock_adapter_cls: MagicMock) -> None:
         """Liquidity > 0, tokens_owed == (0, 0) => pre-decrease warning, full chain."""
         mock_adapter_cls.return_value = _make_mock_lp_adapter()
         compiler = _make_compiler()
 
         with (
-            patch.object(compiler, "_query_position_liquidity", return_value=100),
+            patch.object(compiler, "_query_position_liquidity", return_value=1_000_000),
             patch.object(compiler, "_query_position_tokens_owed", return_value=(0, 0)),
         ):
             result = compiler.compile(_make_lp_close_intent())
@@ -285,9 +311,7 @@ class TestCompileLPCloseErrorPaths:
         assert "Invalid position ID" in (result.error or "")
 
     @patch(LP_ADAPTER_CLS)
-    def test_unknown_position_manager_fails(
-        self, mock_adapter_cls: MagicMock
-    ) -> None:
+    def test_unknown_position_manager_fails(self, mock_adapter_cls: MagicMock) -> None:
         mock_adapter_cls.return_value = _make_mock_lp_adapter(
             position_manager="0x0000000000000000000000000000000000000000"
         )
@@ -299,9 +323,7 @@ class TestCompileLPCloseErrorPaths:
         assert "Unknown position manager" in (result.error or "")
 
     @patch(LP_ADAPTER_CLS)
-    def test_liquidity_query_failure_fails(
-        self, mock_adapter_cls: MagicMock
-    ) -> None:
+    def test_liquidity_query_failure_fails(self, mock_adapter_cls: MagicMock) -> None:
         mock_adapter_cls.return_value = _make_mock_lp_adapter()
         compiler = _make_compiler()
 

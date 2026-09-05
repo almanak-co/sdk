@@ -248,6 +248,45 @@ def lp_mint_mins_for_price_band(
 # ---------------------------------------------------------------------------
 
 
+def amounts_for_liquidity(
+    sqrt_price_x96: int,
+    tick_lower: int,
+    tick_upper: int,
+    liquidity: int,
+) -> tuple[int, int]:
+    """Amounts a burn of ``liquidity`` returns at ``sqrt_price_x96`` (LiquidityAmounts.getAmountsForLiquidity).
+
+    Classification is on ``sqrtPriceX96`` against the range's sqrt bounds, exactly as
+    the contract does; the cached tick is never authoritative at a boundary. Both
+    legs round DOWN, matching ``Pool.burn`` (``_modifyPosition`` with negative
+    liquidity computes the owed deltas with ``roundUp = false``), so the result is
+    a floor on what the chain will credit, never an over-estimate.
+
+    Raises:
+        ValueError: on an out-of-bounds tick, a degenerate range, a non-positive
+            sqrt price, or negative liquidity. A close must fail closed on an
+            input it cannot model rather than emit a minimum derived from garbage.
+    """
+    if tick_lower >= tick_upper:
+        raise ValueError(f"Degenerate tick range [{tick_lower}, {tick_upper}]")
+    if liquidity < 0:
+        raise ValueError(f"Liquidity must be non-negative, got {liquidity}")
+    if sqrt_price_x96 <= 0:
+        raise ValueError(f"sqrtPriceX96 must be positive, got {sqrt_price_x96}")
+    sqrt_a = tick_to_sqrt_ratio_x96(tick_lower)
+    sqrt_b = tick_to_sqrt_ratio_x96(tick_upper)
+    if liquidity == 0:
+        return 0, 0
+    if sqrt_price_x96 <= sqrt_a:
+        return _amount0_for_liquidity(sqrt_a, sqrt_b, liquidity), 0
+    if sqrt_price_x96 >= sqrt_b:
+        return 0, _amount1_for_liquidity(sqrt_a, sqrt_b, liquidity)
+    return (
+        _amount0_for_liquidity(sqrt_price_x96, sqrt_b, liquidity),
+        _amount1_for_liquidity(sqrt_a, sqrt_price_x96, liquidity),
+    )
+
+
 def liquidity_for_amounts_at_sqrt_price(
     sqrt_price_x96: int,
     tick_lower: int,

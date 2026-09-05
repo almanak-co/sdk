@@ -224,15 +224,15 @@ def test_hosted_contract_requires_an_explicit_artifact_validator(ref: str) -> No
 def test_current_sealed_production_evidence_passes_the_central_policy() -> None:
     summary = validate_matrix_evidence(build_production_core_execution_matrix())
 
-    assert summary.satisfied_obligations == 838
-    assert summary.evidence_references == 869
+    assert summary.satisfied_obligations == 855
+    assert summary.evidence_references == 886
 
 
 def test_current_registered_matrix_evidence_passes_the_ci_policy() -> None:
     summary = validate_matrix_evidence(build_effective_capability_matrix())
 
-    assert summary.satisfied_obligations == 838
-    assert summary.evidence_references == 869
+    assert summary.satisfied_obligations == 855
+    assert summary.evidence_references == 886
 
 
 def test_matrix_evidence_validation_opens_no_network_or_provider_imports(
@@ -246,7 +246,7 @@ def test_matrix_evidence_validation_opens_no_network_or_provider_imports(
     monkeypatch.setattr(socket, "socket", forbidden)
     monkeypatch.setattr(ImportRef, "load", forbidden)
 
-    assert validate_matrix_evidence(matrix).evidence_references == 869
+    assert validate_matrix_evidence(matrix).evidence_references == 886
 
 
 def test_lifecycle_ratchet_entrypoint_runs_evidence_integrity(monkeypatch: pytest.MonkeyPatch) -> None:

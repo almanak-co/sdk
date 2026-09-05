@@ -572,7 +572,7 @@ NO_TYPED_LP_EVIDENCE: dict[str, str] = {
 # fixture whose whole value is that its expectations are trustworthy.
 NEEDS_SCENARIO: dict[str, tuple[str, str]] = {
     "pendle": (
-        "2026-09-04",
+        "2026-10-15",
         "PT/SY pair — 'inverted pool' is not yet defined for a PT/SY venue; "
         "needs the identity model settled before a scenario can state a "
         "trustworthy expectation. Tracked under VIB-6104.",

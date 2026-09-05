@@ -8,6 +8,8 @@ from decimal import Decimal
 from typing import Any, ClassVar, cast
 
 from almanak.connectors._strategy_base.base.cl_math import (
+    LPCloseMinimums,
+    compute_lp_close_mins,
     compute_lp_slippage_mins,
     lp_range_excludes_spot_warning,
     maybe_recompute_lp_amounts_from_slot0,
@@ -44,7 +46,7 @@ from almanak.framework.intents.compiler_constants import (
     get_gas_estimate,
 )
 from almanak.framework.intents.compiler_models import CompilationResult, CompilationStatus, TokenInfo, TransactionData
-from almanak.framework.intents.min_out_guard import UnprotectedTradeError
+from almanak.framework.intents.min_out_guard import UnprotectedTradeError, require_protective_min
 from almanak.framework.intents.vocabulary import CollectFeesIntent, IntentType, LPCloseIntent, LPOpenIntent, SwapIntent
 from almanak.framework.utils.log_formatters import _emojis_enabled, format_percentage, format_token_amount
 
@@ -588,6 +590,22 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
                     return exact_identity
                 verified_venue = exact_identity
 
+            close_minimums: LPCloseMinimums | None = None
+            close_pool_state: dict[str, Any] = {}
+            if liquidity > 0 and not ctx.permission_discovery:
+                minimums_or_fail = self._resolve_lp_close_minimums(
+                    ctx=ctx,
+                    protocol=protocol,
+                    intent=intent,
+                    position_manager=position_manager,
+                    token_id=token_id,
+                    liquidity=liquidity,
+                    warnings=warnings,
+                )
+                if isinstance(minimums_or_fail, CompilationResult):
+                    return minimums_or_fail
+                close_minimums, close_pool_state = minimums_or_fail
+
             self._extend_lp_close_transactions(
                 ctx=ctx,
                 transactions=transactions,
@@ -599,6 +617,11 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
                 position_has_activity=position_has_activity,
                 collect_fees=intent.collect_fees,
                 deadline=deadline,
+                # Permission discovery harvests selectors from calldata that is
+                # never submitted, so it carries no floors; every executable
+                # decrease has close_minimums resolved above.
+                amount0_min=close_minimums.amount0_min if close_minimums else 0,
+                amount1_min=close_minimums.amount1_min if close_minimums else 0,
             )
 
             total_gas = sum_transaction_gas(transactions)
@@ -614,6 +637,18 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
                 "chain": ctx.chain,
                 **self._verified_venue_metadata(verified_venue),
             }
+            if close_minimums is not None:
+                metadata.update(
+                    {
+                        "amount0_min": str(close_minimums.amount0_min),
+                        "amount1_min": str(close_minimums.amount1_min),
+                        "amount0_expected": str(close_minimums.amount0_expected),
+                        "amount1_expected": str(close_minimums.amount1_expected),
+                        "lp_slippage": str(close_minimums.lp_slippage),
+                        "lp_slippage_declared": close_minimums.tolerance_declared,
+                        **close_pool_state,
+                    }
+                )
             if no_op:
                 metadata["no_op"] = True
                 metadata["reason"] = f"Position #{token_id} already closed (0 liquidity, 0 tokens owed); LP_CLOSE no-op"
@@ -636,6 +671,14 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
                 tx_summary,
                 total_gas,
             )
+        except UnprotectedTradeError as e:
+            # A safety refusal, not a fault: zero transactions were built and the
+            # position is untouched. Without is_safety_refusal the runner bills
+            # this to the circuit breaker and a correctly-refusing close trips it.
+            logger.error("Refusing to compile LP_CLOSE without output protection: %s", e)
+            result.status = CompilationStatus.FAILED
+            result.is_safety_refusal = True
+            result.error = str(e)
         except Exception as e:
             logger.exception("Failed to compile LP_CLOSE intent: %s", e)
             result.status = CompilationStatus.FAILED
@@ -1767,6 +1810,115 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
         return liquidity, position_has_activity
 
     @staticmethod
+    def _resolve_lp_close_minimums(
+        *,
+        ctx: CLCompilerContext,
+        protocol: str,
+        intent: LPCloseIntent,
+        position_manager: str,
+        token_id: int,
+        liquidity: int,
+        warnings: list[str],
+    ) -> tuple[LPCloseMinimums, dict[str, Any]] | CompilationResult:
+        """Size the decreaseLiquidity floors from the position's range and the pool's live price.
+
+        Unreadable chain state fails closed as a TRANSIENT compile failure: the
+        teardown lane then retries at the same tolerance instead of escalating its
+        slippage ladder over a read error. A tolerance outside ``[0, 1)`` or a
+        position whose both floors truncate to zero raises ``UnprotectedTradeError``
+        (a safety refusal, handled by the caller).
+        """
+        from almanak.connectors.uniswap_v3.pool_validation import (
+            V3PositionBindingReadError,
+            fetch_v3_pool_sqrt_price_x96,
+            read_v3_position_state,
+            validate_v3_pool,
+        )
+
+        def transient(reason: str) -> CompilationResult:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"Cannot size LP_CLOSE minimums for position #{token_id} on {ctx.chain}: {reason}. "
+                    "Refusing to encode an unfloored decreaseLiquidity; retry when chain state is readable."
+                ),
+                is_transient=True,
+                intent_id=intent.intent_id,
+            )
+
+        gateway_connected = ctx.gateway_client is not None and bool(getattr(ctx.gateway_client, "is_connected", False))
+        if not (ctx.rpc_url or gateway_connected):
+            return transient("no RPC boundary is configured for positions()/slot0() reads")
+        try:
+            state = read_v3_position_state(
+                position_manager,
+                token_id,
+                ctx.rpc_url,
+                chain=ctx.chain,
+                gateway_client=ctx.gateway_client,
+            )
+        except V3PositionBindingReadError as exc:
+            return transient(f"positions(tokenId) read unavailable ({exc})")
+        if state is None:
+            return transient("positions(tokenId) returned an empty or malformed position")
+        if state.liquidity != liquidity:
+            warnings.append(
+                f"Position #{token_id} liquidity changed between reads ({liquidity} -> {state.liquidity}); "
+                f"floors are sized for the {liquidity} being burned"
+            )
+        pool_check = validate_v3_pool(
+            ctx.chain,
+            protocol,
+            state.token0,
+            state.token1,
+            state.fee_tier,
+            ctx.rpc_url,
+            gateway_client=ctx.gateway_client,
+        )
+        if not pool_check.exists or not pool_check.pool_address:
+            return transient(
+                f"factory could not resolve the {protocol} pool for {state.token0}/{state.token1} fee {state.fee_tier} "
+                f"({pool_check.reason.value if pool_check.reason else 'unknown'})"
+            )
+        slot0 = fetch_v3_pool_sqrt_price_x96(
+            pool_check.pool_address,
+            ctx.rpc_url,
+            chain=ctx.chain,
+            gateway_client=ctx.gateway_client,
+        )
+        if slot0 is None:
+            return transient(f"slot0() read failed for pool {pool_check.pool_address}")
+        sqrt_price_x96, current_tick = slot0
+        minimums = compute_lp_close_mins(
+            intent=intent,
+            sqrt_price_x96=sqrt_price_x96,
+            tick_lower=state.tick_lower,
+            tick_upper=state.tick_upper,
+            liquidity=liquidity,
+        )
+        # One legitimately-empty leg (price outside the range) passes; both zero
+        # means the position is dust below the tolerance's resolution and no floor
+        # would reach the chain.
+        require_protective_min(
+            max(minimums.amount0_min, minimums.amount1_min),
+            context=f"LP_CLOSE decreaseLiquidity position #{token_id} ({protocol} on {ctx.chain})",
+        )
+        if minimums.amount0_min == 0 or minimums.amount1_min == 0:
+            empty_leg = "token0" if minimums.amount0_min == 0 else "token1"
+            warnings.append(
+                f"Position #{token_id} is out of range at tick {current_tick} "
+                f"[{state.tick_lower}, {state.tick_upper}]; {empty_leg} floor is 0 because the position holds none of it"
+            )
+        pool_state = {
+            "pool_address": pool_check.pool_address,
+            "tick_lower": state.tick_lower,
+            "tick_upper": state.tick_upper,
+            "sqrt_price_x96": str(sqrt_price_x96),
+            "current_tick": current_tick,
+        }
+        return minimums, pool_state
+
+    @staticmethod
     def _extend_lp_close_transactions(
         *,
         ctx: CLCompilerContext,
@@ -1779,6 +1931,8 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
         position_has_activity: bool,
         collect_fees: bool,
         deadline: int,
+        amount0_min: int,
+        amount1_min: int,
     ) -> None:
         if liquidity == 0:
             warnings.append(f"Position #{token_id} has 0 liquidity - skipping decreaseLiquidity step")
@@ -1786,8 +1940,8 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
             decrease_calldata = adapter.get_decrease_liquidity_calldata(
                 token_id=token_id,
                 liquidity=liquidity,
-                amount0_min=0,
-                amount1_min=0,
+                amount0_min=amount0_min,
+                amount1_min=amount1_min,
                 deadline=deadline,
             )
             transactions.append(

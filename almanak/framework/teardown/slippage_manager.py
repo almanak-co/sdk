@@ -19,7 +19,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC
-from decimal import Decimal
+from decimal import Decimal, DecimalException
 from typing import Any, Protocol
 
 from almanak.framework.teardown.config import TeardownConfig
@@ -30,6 +30,7 @@ from almanak.framework.teardown.models import (
     EscalationLevel,
     calculate_max_acceptable_loss,
 )
+from almanak.framework.teardown.slippage_policy import fixed_teardown_slippage
 
 logger = logging.getLogger(__name__)
 
@@ -412,6 +413,30 @@ class EscalatingSlippageManager:
 
         return None
 
+    async def _execute_fixed_tolerance(
+        self, intent: Any, tolerance: Decimal, execute_func: ExecuteFunc
+    ) -> ExecutionResult:
+        """Retry a connector-owned tolerance without loosening it or asking swap-ladder approval."""
+        attempts: list[ExecutionAttempt] = []
+        level = EscalationConfig(
+            level=EscalationLevel.LEVEL_1,
+            slippage=tolerance,
+            auto_approve=True,
+            retries=self.levels[0].retries,
+        )
+        result = await self._dispatch_level(
+            intent=intent, level_config=level, execute_func=execute_func, attempts=attempts
+        )
+        if result is not None:
+            return result
+        return ExecutionResult(
+            success=False,
+            final_slippage=tolerance,
+            status="failed_fixed_tolerance",
+            attempts=attempts,
+            message="Close failed at its configured tolerance; the tolerance was preserved.",
+        )
+
     async def execute_with_escalation(
         self,
         intent: Any,
@@ -449,6 +474,19 @@ class EscalatingSlippageManager:
         Returns:
             ExecutionResult with outcome and details
         """
+        try:
+            fixed_tolerance = fixed_teardown_slippage(intent)
+        except (ValueError, DecimalException) as exc:
+            return ExecutionResult(
+                success=False,
+                final_slippage=Decimal(0),
+                status="failed_non_retryable",
+                attempts=[],
+                message=f"Invalid fixed teardown tolerance: {exc}",
+            )
+        if fixed_tolerance is not None:
+            return await self._execute_fixed_tolerance(intent, fixed_tolerance, execute_func)
+
         attempts: list[ExecutionAttempt] = []
         max_loss_percent = calculate_max_acceptable_loss(position_value)
         plan = self._prepare_escalation(intent_slippage)

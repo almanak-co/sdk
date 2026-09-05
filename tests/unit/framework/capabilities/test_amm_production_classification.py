@@ -137,8 +137,8 @@ def test_production_amm_projection_is_exact_and_has_zero_undeclared() -> None:
     assert len(cells) == 100
     assert sum(len(cell.obligations) for cell in cells) == 700
     assert Counter(row.state for cell in cells for row in cell.obligations) == {
-        ReportedObligationState.SATISFIED: 407,
-        ReportedObligationState.UNSUPPORTED: 293,
+        ReportedObligationState.SATISFIED: 424,
+        ReportedObligationState.UNSUPPORTED: 276,
     }
     assert not [row for cell in cells for row in cell.obligations if row.state is ReportedObligationState.UNDECLARED]
     assert [cell.key.sort_key() for cell in cells if cell.claim_satisfied] == [
@@ -158,7 +158,6 @@ def test_amm_unsupported_rows_preserve_exact_owned_gap_taxonomy() -> None:
         "VIB-5968": 112,
         "VIB-5974": 14,
         "VIB-6016": 1,
-        "VIB-6220": 17,
         "VIB-6223": 4,
         "VIB-6226": 2,
         "VIB-6235": 1,

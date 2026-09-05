@@ -41,6 +41,7 @@ from tests.intents._lp_setup_helpers import (
     decrease_all_liquidity,
     query_position_liquidity,
 )
+from tests.intents._parameter_fidelity import TxOutcome, check_calldata
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
     assert_accounting_persisted,
@@ -61,8 +62,8 @@ MAX_UINT128 = 2**128 - 1
 # After sorting by address on Arbitrum: token0=WETH (0x82aF...), token1=USDC (0xaf88...)
 # So amount0=WETH, amount1=USDC, range is in USDC-per-WETH terms
 POOL = "WETH/USDC/3000"
-LP_AMOUNT_WETH = Decimal("0.2")   # amount0 (WETH after sorting on Arbitrum)
-LP_AMOUNT_USDC = Decimal("500")   # amount1 (USDC after sorting on Arbitrum)
+LP_AMOUNT_WETH = Decimal("0.2")  # amount0 (WETH after sorting on Arbitrum)
+LP_AMOUNT_USDC = Decimal("500")  # amount1 (USDC after sorting on Arbitrum)
 
 # Wide price range in USDC-per-WETH terms to ensure both tokens are deposited
 # range_lower=200   -> ETH at $200
@@ -178,12 +179,8 @@ def _assert_parser_event_equality(payload: dict, lp_close_data, *, dec0: int, de
     """
     assert Decimal(payload["amount0"]) == _to_human(lp_close_data.amount0_collected, dec0)
     assert Decimal(payload["amount1"]) == _to_human(lp_close_data.amount1_collected, dec1)
-    _assert_fee_contract(
-        payload["fees0_collected"], _to_human(lp_close_data.fees0, dec0), field="fees0_collected"
-    )
-    _assert_fee_contract(
-        payload["fees1_collected"], _to_human(lp_close_data.fees1, dec1), field="fees1_collected"
-    )
+    _assert_fee_contract(payload["fees0_collected"], _to_human(lp_close_data.fees0, dec0), field="fees0_collected")
+    _assert_fee_contract(payload["fees1_collected"], _to_human(lp_close_data.fees1, dec1), field="fees1_collected")
 
 
 async def _open_position_for_accounting(
@@ -195,8 +192,8 @@ async def _open_position_for_accounting(
     """Open an LP position via LPOpenIntent; return (position_id, intent, enriched_result)."""
     intent = LPOpenIntent(
         pool=POOL,
-        amount0=LP_AMOUNT_WETH,   # WETH is token0 on Arbitrum
-        amount1=LP_AMOUNT_USDC,   # USDC is token1 on Arbitrum
+        amount0=LP_AMOUNT_WETH,  # WETH is token0 on Arbitrum
+        amount1=LP_AMOUNT_USDC,  # USDC is token1 on Arbitrum
         range_lower=RANGE_LOWER,
         range_upper=RANGE_UPPER,
         protocol="sushiswap_v3",
@@ -320,8 +317,8 @@ class TestSushiSwapV3LPOpenIntent:
         # 2. Create LPOpenIntent
         intent = LPOpenIntent(
             pool=POOL,
-            amount0=LP_AMOUNT_WETH,   # WETH is token0 on Arbitrum
-            amount1=LP_AMOUNT_USDC,   # USDC is token1 on Arbitrum
+            amount0=LP_AMOUNT_WETH,  # WETH is token0 on Arbitrum
+            amount1=LP_AMOUNT_USDC,  # USDC is token1 on Arbitrum
             range_lower=RANGE_LOWER,
             range_upper=RANGE_UPPER,
             protocol="sushiswap_v3",
@@ -526,6 +523,13 @@ class TestSushiSwapV3LPCloseIntent:
 
         assert compilation_result.status.value == "SUCCESS", f"LP Close compilation failed: {compilation_result.error}"
         assert compilation_result.action_bundle is not None
+        # The V3 forks share the Uniswap V3 compiler; the burn floors must reach the
+        # fork's calldata too, not just Uniswap's.
+        decrease = next(tx for tx in compilation_result.transactions if tx.tx_type == "lp_decrease_liquidity")
+        decrease_verdict = check_calldata(decrease.to, decrease.data)
+        assert decrease_verdict.outcome is TxOutcome.PROTECTED, (
+            f"decreaseLiquidity floors do not bind on {close_intent.protocol}: {decrease_verdict}"
+        )
 
         print(f"ActionBundle: {len(compilation_result.action_bundle.transactions)} transactions")
 
@@ -670,17 +674,23 @@ class TestSushiSwapV3LPCloseIntent:
 
         # 2. Decrease all liquidity directly
         await decrease_all_liquidity(
-            web3, orchestrator,
-            chain=CHAIN_NAME, protocol="sushiswap_v3",
-            position_manager=POSITION_MANAGER, token_id=position_id,
+            web3,
+            orchestrator,
+            chain=CHAIN_NAME,
+            protocol="sushiswap_v3",
+            position_manager=POSITION_MANAGER,
+            token_id=position_id,
         )
         print("Decreased all liquidity via direct call")
 
         # 3. Collect all owed tokens directly
         await collect_all_tokens(
-            web3, orchestrator,
-            chain=CHAIN_NAME, protocol="sushiswap_v3",
-            position_manager=POSITION_MANAGER, token_id=position_id,
+            web3,
+            orchestrator,
+            chain=CHAIN_NAME,
+            protocol="sushiswap_v3",
+            position_manager=POSITION_MANAGER,
+            token_id=position_id,
             recipient=funded_wallet,
         )
         print("Collected all owed tokens via direct call")
@@ -729,7 +739,9 @@ class TestSushiSwapV3LPCloseIntent:
         execution_result = await orchestrator.execute(compilation_result.action_bundle)
 
         assert execution_result.success, "LP Close on empty position is a no-op success (VIB-3644)"
-        assert compilation_result.action_bundle.metadata.get("no_op") is True, "Empty LP_CLOSE must carry no_op metadata"
+        assert compilation_result.action_bundle.metadata.get("no_op") is True, (
+            "Empty LP_CLOSE must carry no_op metadata"
+        )
         assert compilation_result.action_bundle.transactions == [], "No-op bundle must have 0 transactions"
         assert len(execution_result.transaction_results) == 0, "No-op execution must produce 0 executed transactions"
 
@@ -828,9 +840,12 @@ class TestSushiSwapV3LPCloseIntent:
         #    decreaseLiquidity itself moves the LP principal into tokensOwed0/1,
         #    so no swap-to-generate-fees step is required to populate owed tokens.
         await decrease_all_liquidity(
-            web3, orchestrator,
-            chain=CHAIN_NAME, protocol="sushiswap_v3",
-            position_manager=POSITION_MANAGER, token_id=position_id,
+            web3,
+            orchestrator,
+            chain=CHAIN_NAME,
+            protocol="sushiswap_v3",
+            position_manager=POSITION_MANAGER,
+            token_id=position_id,
         )
         print("Decreased all liquidity via direct call (tokens now owed)")
 
@@ -990,7 +1005,10 @@ class TestSushiSwapV3CollectFeesIntent:
 
         # 1. Open an in-range position to accrue fees against.
         position_id, open_intent, open_result = await _open_position_for_accounting(
-            funded_wallet, orchestrator, price_oracle, anvil_rpc_url,
+            funded_wallet,
+            orchestrator,
+            price_oracle,
+            anvil_rpc_url,
         )
         open_accounting_row = await assert_accounting_persisted(
             layer5_accounting_harness,
@@ -1024,8 +1042,7 @@ class TestSushiSwapV3CollectFeesIntent:
         )
         swap_compilation = compiler.compile(swap_intent)
         assert swap_compilation.status.value == "SUCCESS", (
-            f"Fee-accrual swap must compile to seed LP_COLLECT_FEES coverage. "
-            f"Error: {swap_compilation.error}"
+            f"Fee-accrual swap must compile to seed LP_COLLECT_FEES coverage. Error: {swap_compilation.error}"
         )
         assert swap_compilation.action_bundle is not None
         swap_result = await orchestrator.execute(swap_compilation.action_bundle)
@@ -1053,8 +1070,7 @@ class TestSushiSwapV3CollectFeesIntent:
         compilation_result = compiler.compile(collect_intent)
 
         assert compilation_result.status.value == "SUCCESS", (
-            f"CollectFees compilation must succeed (sushiswap_v3 LP_COLLECT_FEES). "
-            f"Error: {compilation_result.error}"
+            f"CollectFees compilation must succeed (sushiswap_v3 LP_COLLECT_FEES). Error: {compilation_result.error}"
         )
         assert compilation_result.action_bundle is not None
 
@@ -1081,8 +1097,7 @@ class TestSushiSwapV3CollectFeesIntent:
                 receipt_dict = tx_result.receipt.to_dict()
                 parse_result = parser.parse_receipt(receipt_dict)
                 assert parse_result.success, (
-                    f"Receipt parser must succeed on a confirmed receipt; "
-                    f"error={parse_result.error}"
+                    f"Receipt parser must succeed on a confirmed receipt; error={parse_result.error}"
                 )
                 lp_close_data = parser.extract_lp_close_data(receipt_dict)
                 if lp_close_data:
@@ -1090,9 +1105,7 @@ class TestSushiSwapV3CollectFeesIntent:
                     parsed_amount1_collected += lp_close_data.amount1_collected
                     saw_collect = True
 
-        assert saw_collect, (
-            "Receipt must contain a Collect event from LP_COLLECT_FEES"
-        )
+        assert saw_collect, "Receipt must contain a Collect event from LP_COLLECT_FEES"
         assert parsed_amount0_collected > 0 or parsed_amount1_collected > 0, (
             f"Parser must report positive collected amounts. "
             f"amount0={parsed_amount0_collected}, amount1={parsed_amount1_collected}"
@@ -1110,8 +1123,7 @@ class TestSushiSwapV3CollectFeesIntent:
         # 6. Verify principal liquidity is unchanged (fees-only, not LP_CLOSE).
         liquidity_after = query_position_liquidity(web3, POSITION_MANAGER, position_id)
         assert liquidity_after == liquidity_before, (
-            f"LP_COLLECT_FEES must NOT remove liquidity. "
-            f"before={liquidity_before}, after={liquidity_after}"
+            f"LP_COLLECT_FEES must NOT remove liquidity. before={liquidity_before}, after={liquidity_after}"
         )
 
         # 7. Layer 4 strict: wallet deltas exactly equal parsed amounts.

@@ -204,6 +204,31 @@ def test_recorder_calls_parser_once_and_emits_exact_cell_manifest(tmp_path: Path
     }
 
 
+def test_false_balance_predicate_grades_the_balance_layer_fail_not_soft(tmp_path: Path) -> None:
+    """A measured false predicate is product evidence (FAIL); only an empty set is SOFT."""
+    intent = SimpleNamespace(protocol="uniswap_v3", chain="arbitrum", intent_type=SimpleNamespace(value="LP_CLOSE"))
+    transaction = SimpleNamespace(receipt=_receipt(), tx_hash="0xabc", gas_used=99)
+    recorder = IntentEvidenceRecorder(
+        output_dir=tmp_path,
+        nodeid="tests/intents/arbitrum/test_uniswap_v3_exact_lp.py::TestProofs::test_lp_close_exact_safe",
+        network="anvil",
+        exec_path="eoa",
+        git_sha="abc1234",
+        declared_intents={"LP_CLOSE"},
+        observed_intents=[intent],
+    )
+    recorder.capture_parse(intent=intent, transaction_result=transaction, parser=lambda _receipt: Result(True, 1))
+    recorder.record_fidelity(hard=True, flags={"decrease_minimums_bind": False})
+    recorder.record_balance_deltas(checks={"decrease_value_and_state_contract": False}, token0={"delta": "0"})
+    recorder.finalize(outcome="FAIL", duration_seconds=0.1)
+    manifest = json.loads(build_evidence_manifest(tmp_path).read_text())
+    artifact = json.loads((tmp_path / manifest["nodes"][0]["intents"][0]["receipt_artifacts"][0]).read_text())
+
+    assert artifact["fidelity"]["hard"] is False
+    assert artifact["balance_checks"] == {"decrease_value_and_state_contract": False}
+    assert artifact["layers"]["balances"] == "FAIL"
+
+
 def test_recorder_keeps_fidelity_and_balances_scoped_to_receipt_role(tmp_path: Path) -> None:
     intent = SimpleNamespace(protocol="gmx_v2", chain="arbitrum", intent_type=SimpleNamespace(value="PERP_CLOSE"))
     transaction = SimpleNamespace(receipt=_receipt(), tx_hash="0xabc", gas_used=99)
