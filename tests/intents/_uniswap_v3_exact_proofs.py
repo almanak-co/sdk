@@ -62,11 +62,13 @@ async def run_uniswap_v3_swap_exact_proof(
     gateway_client: Any | None = None,
     max_slippage: Decimal = SWAP_MAX_SLIPPAGE,
     max_price_impact: Decimal | None = None,
+    from_symbol: str = "USDC",
+    to_symbol: str = "WETH",
 ) -> SwapTargetResult:
-    """Prove one exact USDC→WETH swap through receipt and bilateral state."""
+    """Prove one exact-pool swap through receipt and bilateral state."""
     tokens = CHAIN_CONFIGS[chain]["tokens"]
-    token_in = tokens["USDC"]
-    token_out = tokens["WETH"]
+    token_in = tokens[from_symbol]
+    token_out = tokens[to_symbol]
     factory = UNISWAP_V3[chain]["factory"]
     pool = compute_pool_address(factory, token_in, token_out, FEE_TIER)
     fail_if_v3_pool_missing(web3, chain, "uniswap_v3", token_in, token_out, FEE_TIER)

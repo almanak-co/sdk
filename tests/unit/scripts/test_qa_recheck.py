@@ -78,6 +78,7 @@ def _catalogs() -> tuple[dict, dict, dict]:
                         "recipe_id": "aave_v3.supply.arbitrum.eoa",
                         "recipe_sha256": "a" * 64,
                         "exec_path": "eoa",
+                        "runner": "qa_lab/run_mainnet_intent.py",
                     }
                 ],
             },
@@ -175,4 +176,6 @@ def test_read_only_and_anvil_routes_do_not_request_money_approval(recheck_module
     assert aave_mainnet["owner"] == "/test-intent"
     assert "run_mainnet_intent.py" in aave_mainnet["runbook"]
     assert any("ALMANAK_QA_MAINNET_LANE=enabled" in item for item in aave_mainnet["prerequisites"])
+    assert any("--i-authorize-live-mainnet-funds" in item for item in aave_mainnet["prerequisites"])
+    assert not any("ALMANAK_QA_MAINNET_LANE" in item for item in anvil["prerequisites"])
     assert any("single-use" in item for item in aave_mainnet["prerequisites"])

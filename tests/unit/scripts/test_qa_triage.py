@@ -14,6 +14,79 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 SCRIPT_DIR = REPO_ROOT / "qa_lab"
 
 
+@pytest.mark.parametrize(
+    ("classification", "label", "action"),
+    [
+        ("PRODUCT_DEFECT", "product defect", "product fix"),
+        ("TEST_DEFECT", "test defect", "Correct the test"),
+        ("HARNESS_DEFECT", "harness defect", "recorder or runner"),
+        ("INFRASTRUCTURE", "infrastructure issue", "infrastructure dependency"),
+        ("COVERAGE_GAP", "coverage gap", "missing declared proof"),
+        ("INSUFFICIENT_EVIDENCE", "insufficient evidence", "missing observations"),
+    ],
+)
+def test_current_disposition_assigns_the_recorded_layer(classification, label, action):
+    from qa_lab.qa_triage import intent_disposition
+
+    row = {"store_path": "intents/current", "status": "FAIL"}
+    decision = {
+        "classification": classification,
+        "approval": {"state": "APPROVED"},
+        "observation": "zero LP_CLOSE minima",
+        "evidence": [{"relpath": "intents/current/results.xml"}],
+        "ticket": {"identifier": "ALM-10001", "url": "https://linear.app/almanak/issue/ALM-10001"},
+        "report_path": "triage/decision/report.html",
+    }
+    result = intent_disposition(decision, row)
+    assert result["headline"] == f"Known {label}"
+    assert result["observation"] == "zero LP_CLOSE minima"
+    assert result["current_evidence"] is True
+    assert action in result["next_action"]
+    assert result["ticket"] == decision["ticket"]
+    assert result["report_path"] == decision["report_path"]
+    assert row == {"store_path": "intents/current", "status": "FAIL"}
+
+
+def test_old_product_disposition_does_not_classify_a_new_run():
+    from qa_lab.qa_triage import intent_disposition
+
+    decision = {
+        "classification": "PRODUCT_DEFECT",
+        "approval": {"state": "APPROVED"},
+        "evidence": [{"relpath": "intents/old/results.xml"}],
+    }
+    result = intent_disposition(decision, {"store_path": "intents/new", "status": "PASS"})
+    assert result["headline"] == "Previous product defect"
+    assert result["current_evidence"] is False
+    assert "not been bound to this seal" in result["next_action"]
+
+
+def test_proposed_and_rejected_dispositions_do_not_become_known_defects():
+    from qa_lab.qa_triage import intent_disposition
+
+    decision = {"classification": "PRODUCT_DEFECT", "approval": {"state": "DRAFT"}}
+    assert intent_disposition(decision, None)["headline"] == "Proposed product defect"
+    decision["approval"]["state"] = "REJECTED"
+    assert intent_disposition(decision, None) is None
+
+
+def test_known_issue_preserves_typed_cause_without_guessing_from_prose():
+    from qa_lab.qa_triage import intent_disposition
+
+    decision = {
+        "classification": "KNOWN_ISSUE",
+        "approval": {"state": "APPROVED"},
+        "fingerprint": "PRODUCT_DEFECT:LP_CLOSE_SLIPPAGE_FLOORS:zero_minima",
+    }
+    assert intent_disposition(decision, None)["headline"] == "Known product defect"
+    decision["cause_classification"] = "TEST_DEFECT"
+    assert intent_disposition(decision, None)["headline"] == "Known test defect"
+    del decision["cause_classification"]
+    decision["fingerprint"] = "arbitrary-fingerprint"
+    decision["observation"] = "Perhaps a product defect"
+    assert intent_disposition(decision, None)["classification"] == "KNOWN_ISSUE"
+
+
 def _load(name: str, filename: str):
     spec = importlib.util.spec_from_file_location(name, SCRIPT_DIR / filename)
     assert spec is not None and spec.loader is not None

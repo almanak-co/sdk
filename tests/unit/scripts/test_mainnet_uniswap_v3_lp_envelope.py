@@ -19,6 +19,7 @@ from qa_lab.mainnet_intent_envelope import (
 )
 from qa_lab.mainnet_intent_recipe import (
     UNISWAP_V3_ARBITRUM_LP_CLOSE_EOA,
+    UNISWAP_V3_ARBITRUM_LP_COLLECT_FEES_EOA,
     UNISWAP_V3_ARBITRUM_LP_OPEN_EOA,
     UNISWAP_V3_BASE_LP_CLOSE_EOA,
     UNISWAP_V3_BASE_LP_OPEN_EOA,
@@ -27,13 +28,18 @@ from qa_lab.mainnet_intent_recipe import (
 )
 from tests.unit.scripts.test_intent_semantic_contract import (
     ACCOUNT,
+    _address_topic,
+    _signed_word,
+    _topic,
     _v3_lp_close_payloads,
     _v3_lp_open_payload,
+    _word,
 )
 
 LP_RECIPES = (
     UNISWAP_V3_ARBITRUM_LP_OPEN_EOA,
     UNISWAP_V3_ARBITRUM_LP_CLOSE_EOA,
+    UNISWAP_V3_ARBITRUM_LP_COLLECT_FEES_EOA,
     UNISWAP_V3_BASE_LP_OPEN_EOA,
     UNISWAP_V3_BASE_LP_CLOSE_EOA,
 )
@@ -42,7 +48,7 @@ LP_RECIPES = (
 @pytest.mark.parametrize("recipe", LP_RECIPES)
 def test_lp_recipe_is_one_exact_dynamic_nft_lifecycle(recipe) -> None:
     assert recipe.exec_path == "eoa"
-    assert recipe.semantic_profile == "v3_lp.v1"
+    assert recipe.semantic_profile == "v3_lp.v2"
     assert recipe.resource_address
     assert recipe.pool_address
     assert recipe.factory_address
@@ -52,10 +58,15 @@ def test_lp_recipe_is_one_exact_dynamic_nft_lifecycle(recipe) -> None:
         assert recipe.setup == ()
         assert recipe.target[0].startswith("LP_OPEN:")
         assert recipe.cleanup[0] == "LP_CLOSE:SETUP_POSITION:FULL"
-    else:
+    elif recipe.intent == "LP_CLOSE":
         assert recipe.setup[0].startswith("LP_OPEN:")
         assert recipe.target == ("LP_CLOSE:SETUP_POSITION:FULL",)
         assert recipe.cleanup == ("SWEEP_TO_MASTER",)
+    else:
+        assert recipe.setup[0].startswith("LP_OPEN:")
+        assert recipe.setup[1].startswith("SWAP:WETH:USDC:")
+        assert recipe.target == ("LP_COLLECT_FEES:SETUP_POSITION",)
+        assert recipe.cleanup[0] == "LP_CLOSE:SETUP_POSITION:FULL"
 
 
 def _lp_identity(recipe) -> dict:
@@ -156,6 +167,67 @@ def test_lp_close_setup_receipt_proves_the_exact_bounded_nft_mint() -> None:
         _validate_uniswap_phase_action(
             payload=payload,
             action_spec=recipe.setup[0],
+            recipe=recipe,
+            wallet=ACCOUNT,
+        )
+
+
+def test_lp_collect_fee_accrual_setup_proves_exact_pool_and_bilateral_flow() -> None:
+    recipe = UNISWAP_V3_ARBITRUM_LP_COLLECT_FEES_EOA
+    amount_in = int(Decimal(recipe.fee_accrual_amount) * Decimal(10**recipe.asset_decimals))
+    amount_out = 200_000
+    payload = {
+        "raw_receipt": {
+            "transactionHash": "0x" + "11" * 32,
+            "blockNumber": 100,
+            "logs": [
+                {
+                    "address": recipe.pool_address,
+                    "topics": [
+                        _topic("Swap(address,address,int256,int256,uint160,uint128,int24)"),
+                        _address_topic(recipe.resource_address),
+                        _address_topic(ACCOUNT),
+                    ],
+                    "data": "0x"
+                    + _signed_word(amount_in)
+                    + _signed_word(-amount_out)
+                    + _word(1)
+                    + _word(1)
+                    + _word(0),
+                },
+                {
+                    "address": recipe.asset_address,
+                    "topics": [
+                        _topic("Transfer(address,address,uint256)"),
+                        _address_topic(ACCOUNT),
+                        _address_topic(recipe.pool_address),
+                    ],
+                    "data": "0x" + _word(amount_in),
+                },
+                {
+                    "address": recipe.output_asset_address,
+                    "topics": [
+                        _topic("Transfer(address,address,uint256)"),
+                        _address_topic(recipe.pool_address),
+                        _address_topic(ACCOUNT),
+                    ],
+                    "data": "0x" + _word(amount_out),
+                },
+            ],
+        }
+    }
+    _validate_uniswap_phase_action(
+        payload=payload,
+        action_spec=recipe.setup[1],
+        recipe=recipe,
+        wallet=ACCOUNT,
+    )
+
+    payload["raw_receipt"]["logs"].pop()
+    with pytest.raises(MainnetEnvelopeError, match="exact swap"):
+        _validate_uniswap_phase_action(
+            payload=payload,
+            action_spec=recipe.setup[1],
             recipe=recipe,
             wallet=ACCOUNT,
         )

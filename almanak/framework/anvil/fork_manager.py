@@ -412,6 +412,7 @@ class RollingForkManager:
     anvil_port: int = 8546
     startup_timeout_seconds: float = 30.0
     auto_impersonate: bool = True
+    disable_min_priority_fee: bool = False
     block_time: int | None = None
     fork_block_number: int | None = None
     cache_path: str | None = field(default_factory=_default_fork_cache_path)
@@ -1581,6 +1582,8 @@ class RollingForkManager:
         # This replaces the old --no-gas-cap flag which only existed in Anvil 0.4.x
         # and was removed in Foundry 1.x. Gas is always fake/free on Anvil forks.
         cmd.extend(["--block-base-fee-per-gas", "0"])
+        if self.disable_min_priority_fee:
+            cmd.append("--disable-min-priority-fee")
 
         # Override the block gas limit for chains with non-standard gas accounting
         # (VIB-3666 / VIB-3746 / #2103). See ``_CHAIN_BLOCK_GAS_LIMITS`` for the

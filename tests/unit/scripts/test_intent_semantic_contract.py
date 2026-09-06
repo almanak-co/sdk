@@ -512,7 +512,7 @@ def _v3_lp_open_payload() -> dict:
         },
         "semantic_contract": {
             "schema_version": 1,
-            "profile": "v3_lp.v1",
+            "profile": "v3_lp.v2",
             "intent": "LP_OPEN",
             "account": ACCOUNT,
             "pool_reference": pool,
@@ -586,7 +586,7 @@ def _v3_lp_open_payload() -> dict:
 
 
 def test_uniswap_v3_lp_open_contract_rederives_nft_pool_state_and_bilateral_flow() -> None:
-    result = validate_semantic_contract(_v3_lp_open_payload(), expected_profile="v3_lp.v1")
+    result = validate_semantic_contract(_v3_lp_open_payload(), expected_profile="v3_lp.v2")
 
     assert result["status"] == "VERIFIED"
     assert result["facts"]["position_id"] == "42"
@@ -611,7 +611,7 @@ def test_uniswap_v3_lp_open_mutations_cannot_inherit_green(mutation, message: st
     mutation(payload)
 
     with pytest.raises(ValueError, match=message):
-        validate_semantic_contract(payload, expected_profile="v3_lp.v1")
+        validate_semantic_contract(payload, expected_profile="v3_lp.v2")
 
 
 def _v3_lp_close_payloads() -> dict[str, dict]:
@@ -629,7 +629,12 @@ def _v3_lp_close_payloads() -> dict[str, dict]:
     compiled_calls = [
         {
             "to": npm,
-            "data": "0x0c49ccbe" + _word(token_id) + _word(liquidity) + _word(0) + _word(0) + _word(9999999999),
+            "data": "0x0c49ccbe"
+            + _word(token_id)
+            + _word(liquidity)
+            + _word(amount0 * 995 // 1000)
+            + _word(amount1 * 995 // 1000)
+            + _word(9999999999),
             "value": 0,
             "tx_type": "lp_decrease_liquidity",
         },
@@ -643,7 +648,7 @@ def _v3_lp_close_payloads() -> dict[str, dict]:
     ]
     common = {
         "schema_version": 1,
-        "profile": "v3_lp.v1",
+        "profile": "v3_lp.v2",
         "intent": "LP_CLOSE",
         "account": ACCOUNT,
         "pool_reference": pool,
@@ -678,6 +683,7 @@ def _v3_lp_close_payloads() -> dict[str, dict]:
         "pool_reference": pool,
         "position_id": str(token_id),
         "collect_fees": True,
+        "max_slippage": "0.005",
     }
     logs = {
         "decrease": [
@@ -722,6 +728,20 @@ def _v3_lp_close_payloads() -> dict[str, dict]:
             }
         ],
     }
+    common["close_quote"] = {
+        "method": "eth_call",
+        "to": npm,
+        "from": ACCOUNT,
+        "data": "0x0c49ccbe" + _word(token_id) + _word(liquidity) + _word(0) + _word(0) + _word(9999999999),
+        "result": "0x" + _word(amount0) + _word(amount1),
+        "block_number": 123,
+        "block_hash": common["pre_state_block_hash"],
+    }
+    common["wallet_balances"] = {
+        "token0": {"before": 7, "after": 7 + amount0},
+        "token1": {"before": 9, "after": 9 + amount1},
+    }
+    common["decrease_receipt"] = {"transactionHash": receipt_set["decrease"], "logs": deepcopy(logs["decrease"])}
     blocks = {"decrease": (124, "0x" + "ab" * 32), "collect": (125, "0x" + "bb" * 32), "burn": (126, "0x" + "cc" * 32)}
     return {
         role: {
@@ -744,7 +764,7 @@ def _v3_lp_close_payloads() -> dict[str, dict]:
 
 @pytest.mark.parametrize("role", ["decrease", "collect", "burn"])
 def test_uniswap_v3_lp_close_contract_rederives_every_target_receipt(role: str) -> None:
-    result = validate_semantic_contract(_v3_lp_close_payloads()[role], expected_profile="v3_lp.v1")
+    result = validate_semantic_contract(_v3_lp_close_payloads()[role], expected_profile="v3_lp.v2")
 
     assert result["status"] == "VERIFIED"
     assert result["facts"]["receipt_role"] == role
@@ -781,7 +801,90 @@ def test_uniswap_v3_lp_close_mutations_cannot_inherit_green(role, mutation, mess
     mutation(payload)
 
     with pytest.raises(ValueError, match=message):
-        validate_semantic_contract(payload, expected_profile="v3_lp.v1")
+        validate_semantic_contract(payload, expected_profile="v3_lp.v2")
+
+
+def _v3_lp_collect_fees_payload() -> dict:
+    payload = deepcopy(_v3_lp_close_payloads()["collect"])
+    contract = payload["semantic_contract"]
+    source = payload["source_request"]
+    position_state = contract["pre_position_state_raw"]
+    owner_state = contract["pre_owner_state_raw"]
+    collect_call = deepcopy(contract["compiled_calls"][1])
+    collect_call["tx_type"] = "lp_collect_fees"
+    payload["intent"] = "LP_COLLECT_FEES"
+    payload.pop("receipt_role")
+    source.update(intent="LP_COLLECT_FEES")
+    source.pop("collect_fees")
+    contract.update(
+        intent="LP_COLLECT_FEES",
+        compiled_calls=[collect_call],
+        pre_state_block=124,
+        pre_state_block_hash="0x" + "aa" * 32,
+        post_position_state_raw=position_state,
+        post_owner_state_raw=owner_state,
+        post_state_block=payload["raw_receipt"]["blockNumber"],
+        post_state_block_hash=payload["raw_receipt"]["blockHash"],
+    )
+    for field in (
+        "receipt_role_name",
+        "receipt_set",
+        "parser_liquidity_removed",
+        "terminal_position_response",
+        "terminal_owner_response",
+        "terminal_state_block",
+        "terminal_state_block_hash",
+    ):
+        contract.pop(field, None)
+    payload["balance_deltas"] = {
+        f"token{index}": {
+            "address": contract[f"token{index}"],
+            **contract["wallet_balances"][f"token{index}"],
+            "delta": contract[f"actual_amount{index}_raw"],
+        }
+        for index in (0, 1)
+    }
+    return payload
+
+
+@pytest.mark.parametrize("index", [0, 1])
+@pytest.mark.parametrize("field", ["address", "before", "after", "delta", "missing"])
+def test_fee_collection_rejects_independent_wallet_measurement_mutations(index, field) -> None:
+    payload = _v3_lp_collect_fees_payload()
+    row = payload["balance_deltas"][f"token{index}"]
+    if field == "missing":
+        row.pop("before")
+    elif field == "address":
+        row[field] = "0x" + "77" * 20
+    else:
+        row[field] += 1
+    with pytest.raises(ValueError, match="wallet"):
+        validate_semantic_contract(payload, expected_profile="v3_lp.v2")
+
+
+def test_uniswap_v3_lp_collect_fees_rederives_positive_fees_and_preserved_position() -> None:
+    result = validate_semantic_contract(_v3_lp_collect_fees_payload(), expected_profile="v3_lp.v2")
+
+    assert result["status"] == "VERIFIED"
+    assert result["facts"]["position_id"] == "42"
+    assert all(result["checks"].values())
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (lambda p: p["semantic_contract"].update(actual_amount0_raw=0, actual_amount1_raw=0), "positive fees"),
+        (lambda p: p["semantic_contract"].update(post_owner_state_raw=_address_topic("0x" + "77" * 20)), "ownership"),
+        (lambda p: p["semantic_contract"].update(post_state_block=124), "target receipt"),
+        (lambda p: p["raw_receipt"]["logs"].pop(), "wallet inflows"),
+    ],
+)
+def test_uniswap_v3_lp_collect_fees_mutations_cannot_inherit_green(mutation, message: str) -> None:
+    payload = _v3_lp_collect_fees_payload()
+    mutation(payload)
+
+    with pytest.raises(ValueError, match=message):
+        validate_semantic_contract(payload, expected_profile="v3_lp.v2")
 
 
 # ---------------------------------------------------------------------------
@@ -1031,7 +1134,7 @@ def _slipstream_lp_open_payload() -> dict:
 
 
 def test_slipstream_lp_open_is_rederived_from_reviewed_deployment_and_factory_lookup() -> None:
-    result = validate_semantic_contract(_slipstream_lp_open_payload(), expected_profile="v3_lp.v1")
+    result = validate_semantic_contract(_slipstream_lp_open_payload(), expected_profile="v3_lp.v2")
 
     assert result["status"] == "VERIFIED"
     assert result["facts"]["pool_key_kind"] == "tick_spacing"
@@ -1064,7 +1167,7 @@ def test_slipstream_lp_open_mutations_cannot_inherit_green(mutation, message: st
     mutation(payload)
 
     with pytest.raises(ValueError, match=message):
-        validate_semantic_contract(payload, expected_profile="v3_lp.v1")
+        validate_semantic_contract(payload, expected_profile="v3_lp.v2")
 
 
 def test_slipstream_close_is_not_admitted_to_the_burning_v3_close_contract() -> None:
@@ -1073,4 +1176,82 @@ def test_slipstream_close_is_not_admitted_to_the_burning_v3_close_contract() -> 
     payload["semantic_contract"]["intent"] = "LP_CLOSE"
 
     with pytest.raises(ValueError, match="No authoritative V3 LP event contract for aerodrome_slipstream.LP_CLOSE"):
+        validate_semantic_contract(payload, expected_profile="v3_lp.v2")
+
+
+@pytest.mark.parametrize(
+    "mutation,match",
+    [
+        (lambda p: p["source_request"].pop("max_slippage"), "caller tolerance"),
+        (lambda p: p["source_request"].update(max_slippage="0.01"), "minima differ"),
+        (lambda p: p["source_request"].update(protocol_lp_slippage="0.02"), "minima differ"),
+        (lambda p: p["semantic_contract"]["close_quote"].update(block_number=122), "quote is not bound"),
+        (lambda p: p["semantic_contract"]["close_quote"].update(result="0x"), "raw two-amount"),
+        (lambda p: p["semantic_contract"]["wallet_balances"]["token0"].update(after=7), "balances do not reconcile"),
+        (
+            lambda p: p["semantic_contract"]["decrease_receipt"].update(transactionHash="0x" + "ff" * 32),
+            "principal receipt",
+        ),
+    ],
+)
+def test_lp_close_policy_and_value_mutations_fail(mutation, match):
+    payload = _v3_lp_close_payloads()["collect"]
+    mutation(payload)
+    with pytest.raises(ValueError, match=match):
+        validate_semantic_contract(payload, expected_profile="v3_lp.v2")
+
+
+def test_lp_close_minimum_off_by_one_cannot_inherit_green():
+    payload = _v3_lp_close_payloads()["collect"]
+    call = payload["semantic_contract"]["compiled_calls"][0]
+    call["data"] = call["data"][:138] + _word(10**15 * 995 // 1000 + 1) + call["data"][202:]
+    with pytest.raises(ValueError, match="minima differ"):
+        validate_semantic_contract(payload, expected_profile="v3_lp.v2")
+
+
+def test_lp_close_policy_uses_floor_rounding_for_fractional_raw_unit():
+    payload = _v3_lp_close_payloads()["collect"]
+    payload["semantic_contract"]["close_quote"]["result"] = "0x" + _word(10**15) + _word(10**6 + 1)
+    result = validate_semantic_contract(payload, expected_profile="v3_lp.v2")
+    policy = result["facts"]["minimum_policy"]
+    assert policy["compiled_minima_raw"][1] == "995000"
+    assert policy["quoted_principal_raw"][1] == "1000001"
+
+
+def test_lp_close_reconciliation_reports_fees_separately_from_principal():
+    payload = _v3_lp_close_payloads()["collect"]
+    event = payload["semantic_contract"]["decrease_receipt"]["logs"][0]
+    event["data"] = "0x" + _word(987654321) + _word(10**15 - 100) + _word(10**6 - 100)
+    result = validate_semantic_contract(payload, expected_profile="v3_lp.v2")
+    reconciliation = result["facts"]["value_reconciliation"]
+    assert reconciliation["realized_fees_including_preexisting_owed_raw"] == ["100", "100"]
+    assert reconciliation["fee_growth_accrual_independently_verified"] is False
+
+
+@pytest.mark.parametrize("role", ["decrease", "collect", "burn"])
+@pytest.mark.parametrize("token", [0, 1])
+def test_lp_close_wallet_delta_cannot_substitute_for_collected_receipt_amount(role, token):
+    payload = _v3_lp_close_payloads()[role]
+    contract = payload["semantic_contract"]
+    contract[f"actual_amount{token}_raw"] += 1
+    contract["wallet_balances"][f"token{token}"]["after"] += 1
+
+    with pytest.raises(ValueError, match="balances do not reconcile"):
+        validate_semantic_contract(payload, expected_profile="v3_lp.v2")
+
+
+def test_lp_close_unrelated_transfer_cannot_substitute_for_pool_payment():
+    payload = _v3_lp_close_payloads()["collect"]
+    payload["raw_receipt"]["logs"][1]["topics"][1] = _address_topic(ACCOUNT)
+    with pytest.raises(ValueError, match="inflow is not from the exact pool"):
+        validate_semantic_contract(payload, expected_profile="v3_lp.v2")
+
+
+@pytest.mark.parametrize("role", ["decrease", "collect", "burn"])
+def test_lp_v1_receipt_cannot_be_reinterpreted_as_v2(role):
+    payload = _v3_lp_close_payloads()[role]
+    payload["semantic_contract"]["profile"] = "v3_lp.v1"
+    with pytest.raises(ValueError, match="must use 'v3_lp.v2'"):
+        validate_semantic_contract(payload, expected_profile="v3_lp.v2")
+    with pytest.raises(ValueError, match="Unsupported Intent semantic contract profile"):
         validate_semantic_contract(payload, expected_profile="v3_lp.v1")

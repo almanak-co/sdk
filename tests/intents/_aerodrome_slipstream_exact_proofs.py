@@ -37,7 +37,7 @@ from tests.intents.conftest import CHAIN_CONFIGS, get_token_balance, get_token_d
 from tests.intents.intent_evidence import decode_explorer_view
 
 PROTOCOL = "aerodrome_slipstream"
-CONTRACT_PROFILE = "v3_lp.v1"
+CONTRACT_PROFILE = "v3_lp.v2"
 WETH_AMOUNT = Decimal("0.001")
 USDC_AMOUNT = Decimal("3")
 MAX_SLIPPAGE = Decimal("0.005")

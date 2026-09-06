@@ -1,0 +1,180 @@
+{
+  "plan": {
+    "artifact_kind": "almanak.mainnet_intent_plan",
+    "cell_id": "intent.uniswap_v3.arbitrum.SWAP.anvil.eoa",
+    "created_at": "2026-09-05T22:39:44.320992Z",
+    "execution_attestation": {
+      "almanak": "/private/var/folders/v3/fw0clgwj4g3d_9s1ls_36tjr0000gn/T/almanak-mi-20260905T223914Z-5102a91f-n5au0us4/repo/almanak/__init__.py",
+      "artifact_kind": "almanak.mainnet_intent_execution_attestation",
+      "distributions_sha256": "1466fd7531ad0e48449dcc97c092e267b865c2ee172640c9634263885ac6ba37",
+      "git_sha": "56c62bc1bec71c567327c5d3c92aac47519b3314",
+      "git_tree": "c1e8cf2137909f6a7a10c433ac921351e7e2aa74",
+      "platform": "macOS-26.5.2-arm64-arm-64bit",
+      "python": "3.12.12 (main, Oct  9 2025, 11:07:00) [Clang 17.0.0 (clang-1700.0.13.3)]",
+      "qa_lab": "/private/var/folders/v3/fw0clgwj4g3d_9s1ls_36tjr0000gn/T/almanak-mi-20260905T223914Z-5102a91f-n5au0us4/repo/qa_lab/__init__.py",
+      "schema_version": 1,
+      "source_sha256": "ab077f65f2b94d1f97d50cca6622d2390d4b0b450059952eea7669b00dd8f71c",
+      "uv_lock_sha256": "3a52cf590e1e9854d4f210c59ac6634fcdf549130a0be51011501ee9b28c1d0b",
+      "uv_version": "uv 0.7.9 (13a86a23b 2025-05-30)"
+    },
+    "execution_context": {
+      "chain": "arbitrum",
+      "chain_id": 42161,
+      "context_id": "fork-c63bd895d565d48eed0d625d",
+      "fork_block": 502145149,
+      "fork_hash": "0x7af35f54ad561554bcb560f32c0f0ed0c9eec05dbe2b78bbd657ddf8094f0813",
+      "instance_id": "0xf1a8b7d2eeb55ec473eb350e580c9d612d917486293a9a3455964b7592a4db88",
+      "mode": "managed_fork_acceptance",
+      "network": "anvil"
+    },
+    "funding": {
+      "acceptance_native_reserve": {
+        "formula": "floor_wei(0.95 * unchanged_recipe_gas_budget_usd / fork_pool_native_price_usd)",
+        "gas_budget_usd": "2.50",
+        "mode": "managed_fork_acceptance",
+        "native_funding": "0.000956199290369251",
+        "native_funding_wei": "956199290369251",
+        "native_price_usd": "2483.791845403751132810789369",
+        "original_recipe_native_funding": "0.0005",
+        "price_provenance": "price-provenance.json; measured fork pool quote with explicit USDC peg assumption",
+        "quote_sha256": "ee0b74b42c97b0310ac444ac322549ba475dd1a7365814e3b82372ed0c7c37f5",
+        "quote_witness": {
+          "block_hash": "0xc1390fbceb427e0a5f80bd3f7fb951880ab6cd315c2a02880290cec31164fe09",
+          "block_number": 502145150,
+          "chain_id": 42161,
+          "formula": "sqrtPriceX96^2 / 2^192 * 10^12",
+          "network": "anvil",
+          "observed_at": "2026-09-05T22:39:41.629362+00:00",
+          "pool": "0xc6962004f452be9203591991d15f6b388e09e8d0",
+          "pool_quote_status": "MEASURED",
+          "price_usd": "2483.791845403751132810789369",
+          "raw_response": "0x000000000000000000000000000000000000000000034423190ecd084c5d96d2fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffcf9ff00000000000000000000000000000000000000000000000000000000000017e10000000000000000000000000000000000000000000000000000000000002328000000000000000000000000000000000000000000000000000000000000232800000000000000000000000000000000000000000000000000000000000000440000000000000000000000000000000000000000000000000000000000000001",
+          "status": "ASSUMPTION",
+          "surface": "managed-fork eth_call slot0",
+          "usd_anchor": "USDC USD1 assumption; no external market API claim"
+        },
+        "reason": "Fund upfront lifecycle gas capacity through the existing funder under unchanged caps"
+      },
+      "approval_digest": "8792bd107ab73ef05dd78731bae05d3a7ff5a3f49f2dbaf8fe934d9fd0fcdf07",
+      "caps_usd": {
+        "gas": "2.50",
+        "total_wallet": "5.00",
+        "trading": "0.60"
+      },
+      "cell_id": "intent.uniswap_v3.arbitrum.SWAP.anvil.eoa",
+      "chain": "arbitrum",
+      "exec_path": "eoa",
+      "existing_wallet_usd": "0E-24",
+      "funding": {
+        "native": "0.000956199290369251",
+        "tokens": [
+          "USDC:0.5"
+        ]
+      },
+      "gates": {
+        "funding_executed": false,
+        "human_approval_required": true,
+        "post_funding_cap_gate_required": true,
+        "post_run_sweep_required": true
+      },
+      "network": "anvil",
+      "pool_index": 0,
+      "projected_wallet_usd": "2.874999999999999219237553009",
+      "proposed_funding_usd": "2.874999999999999219237553009",
+      "purpose": "mainnet_intent_wallet_setup",
+      "schema_version": 1,
+      "wallet": "0xD0eFa2E1807DFa671a003087D08bCd40758Ec5D1"
+    },
+    "git_sha": "56c62bc1bec71c567327c5d3c92aac47519b3314",
+    "network": "anvil",
+    "plan_sha256": "43ba3d6f33ff4fa9593de6457b83ee712b8c43bb7a36a4d078288ec294d6b303",
+    "pool_index": 0,
+    "recipe": {
+      "asset_address": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+      "asset_decimals": 6,
+      "asset_symbol": "USDC",
+      "cell_id": "intent.uniswap_v3.arbitrum.SWAP.anvil.eoa",
+      "chain": "arbitrum",
+      "cleanup": [
+        "SWAP_BACK:WETH:USDC:MEASURED:500:0xc6962004f452be9203591991d15f6b388e09e8d0",
+        "SWEEP_TO_MASTER"
+      ],
+      "exec_path": "eoa",
+      "factory_address": "0x1F98431c8aD98523631AE4a59f267346ea31F984",
+      "fee_tier": 500,
+      "funding_tokens": [
+        "USDC:0.5"
+      ],
+      "gas_budget_usd": "2.50",
+      "intent": "SWAP",
+      "max_price_impact": "0.02",
+      "max_slippage": "0.005",
+      "native_funding": "0.0005",
+      "nodeid": "tests/intents/arbitrum/test_uniswap_v3_exact_swap.py::TestUniswapV3ExactSwapProof::test_swap_exact_eoa",
+      "output_asset_address": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+      "output_asset_decimals": 18,
+      "output_asset_symbol": "WETH",
+      "protocol": "uniswap_v3",
+      "recipe_id": "uniswap_v3.swap.arbitrum.eoa",
+      "recipe_version": 1,
+      "resource_address": "0xc6962004f452be9203591991d15f6b388e09e8d0",
+      "schema_version": 1,
+      "semantic_profile": "swap.v1",
+      "setup": [],
+      "sha256": "26cecadcd75242dafce68810a0828c5c3b98abf4859a5f58803ff7fb063c1fee",
+      "target": [
+        "SWAP:USDC:WETH:0.5:500:0xc6962004f452be9203591991d15f6b388e09e8d0"
+      ],
+      "target_amount": "0.5",
+      "terminal": [
+        "TOKEN_BALANCE_ZERO:WETH",
+        "NO_RESIDUAL_ALLOWANCES",
+        "POOL_WALLET_RELEASED"
+      ],
+      "total_wallet_cap_usd": "5.00",
+      "trading_cap_usd": "0.60"
+    },
+    "request_id": "mi-20260905T223914Z-5102a91f",
+    "schema_version": 1,
+    "wallet": "0xD0eFa2E1807DFa671a003087D08bCd40758Ec5D1"
+  },
+  "receipt": {
+    "blobGasPrice": 1,
+    "blockHash": "0x72ff5a1e3c0ba2de5847f854925ea4ebf8bd6efbf03af0b31c6e5a4f5c052328",
+    "blockNumber": 502145151,
+    "contractAddress": null,
+    "cumulativeGasUsed": 21000,
+    "effectiveGasPrice": 100000000,
+    "from": "0xCF97AcA17638039FdcEd3cF03138B80450c57C89",
+    "gasUsed": 21000,
+    "logs": [],
+    "logsBloom": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+    "status": 1,
+    "to": "0xD0eFa2E1807DFa671a003087D08bCd40758Ec5D1",
+    "transactionHash": "0x4f953dd5b29527f3f16e4a13101462ad74d5f7fe2312d120ea4b99dbbf2e6907",
+    "transactionIndex": 0,
+    "type": 2
+  },
+  "transaction": {
+    "accessList": [],
+    "blockHash": "0x72ff5a1e3c0ba2de5847f854925ea4ebf8bd6efbf03af0b31c6e5a4f5c052328",
+    "blockNumber": 502145151,
+    "chainId": 42161,
+    "from": "0xCF97AcA17638039FdcEd3cF03138B80450c57C89",
+    "gas": 31500,
+    "gasPrice": 100000000,
+    "hash": "0x4f953dd5b29527f3f16e4a13101462ad74d5f7fe2312d120ea4b99dbbf2e6907",
+    "input": "0x",
+    "maxFeePerGas": 100000000,
+    "maxPriorityFeePerGas": 100000000,
+    "nonce": 0,
+    "r": "0x53ff563e3fbcc19ee49f3e9e94e45fa939c6c984286c0fd26899c9f393ce2cdc",
+    "s": "0x536b3ac22760820fe9359c6effcc5c3ae5a7eb214accbeffe083f631b61322ba",
+    "to": "0xD0eFa2E1807DFa671a003087D08bCd40758Ec5D1",
+    "transactionIndex": 0,
+    "type": 2,
+    "v": 0,
+    "value": 956199290369251,
+    "yParity": 0
+  }
+}

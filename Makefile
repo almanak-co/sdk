@@ -341,7 +341,7 @@ security:
 # Run local pre-push test suite. Requires Anvil (Foundry) for tests/framework.
 # Excludes intent tests (separate target) and visual/nightly.
 test-unit: ## Unit suite (excludes intents and visual/nightly); needs Anvil
-	uv run pytest tests/ --ignore=tests/intents --ignore=tests/visual/nightly -m "not integration" -v --import-mode=importlib
+	uv run python -m pytest tests/ --ignore=tests/intents --ignore=tests/visual/nightly -m "not integration" -v --import-mode=importlib
 
 # Alias for test-unit
 test: test-unit ## Alias for test-unit
@@ -777,6 +777,10 @@ test-teardown-matrix: ## Teardown seam x primitive regression matrix (VIB-5479)
 # target is the narrow gate both documents already told operators to run.
 test-qa-invariants: ## Foundational semantic invariant matrix (narrow gate)
 	uv run pytest tests/unit/testing/test_foundational_invariant_matrix.py -q --import-mode=importlib
+
+.PHONY: test-qa-lifecycle-acceptance
+test-qa-lifecycle-acceptance: ## Exercise the live Intent lifecycle on an isolated managed fork
+	ALMANAK_QA_LIFECYCLE_ACCEPTANCE=1 uv run python -m pytest tests/qa_lab/test_lifecycle_acceptance.py -n0 -v --import-mode=importlib
 
 # Execute every permanent user-ticket counterexample registered in
 # qa_lab/docs/catalog/v1/ticket-counterexamples.json. The registry is an

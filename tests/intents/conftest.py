@@ -1974,6 +1974,14 @@ def intent_evidence(  # type: ignore[no-untyped-def]
         for value in marker.args
     }
 
+    def read_provenance(receipt: dict[str, Any]) -> dict[str, Any]:
+        from qa_lab.qa_external_provenance import capture_provenance
+
+        web3_instance = request.node.funcargs.get("web3")
+        if web3_instance is None:
+            return {"status": "UNMEASURED", "reason": "node did not expose its Web3 fixture"}
+        return capture_provenance(web3_instance, receipt, network=network)
+
     recorder = IntentEvidenceRecorder(
         output_dir=output_dir,
         nodeid=request.node.nodeid,
@@ -1984,6 +1992,7 @@ def intent_evidence(  # type: ignore[no-untyped-def]
         declared_intents=declared_intents,
         # The intents that COMPILED, not the ones compile was attempted on.
         observed_intents=_zodiac_intent_recorder.succeeded,
+        provenance_reader=read_provenance,
     )
     request.node._intent_evidence_recorder = recorder  # type: ignore[attr-defined]
     return recorder

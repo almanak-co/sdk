@@ -2,21 +2,26 @@
 
 from __future__ import annotations
 
+import json
+from copy import deepcopy
 from dataclasses import dataclass
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any
 
+from hexbytes import HexBytes
 from web3 import Web3
 
 from almanak.connectors.uniswap_v3.addresses import UNISWAP_V3
 from almanak.connectors.uniswap_v3.receipt_parser import EVENT_TOPICS, UniswapV3ReceiptParser
 from almanak.connectors.uniswap_v3.sdk import compute_pool_address
 from almanak.framework.execution.orchestrator import ExecutionContext, ExecutionOrchestrator
-from almanak.framework.intents import LPCloseIntent, LPOpenIntent
+from almanak.framework.intents import CollectFeesIntent, LPCloseIntent, LPOpenIntent
 from almanak.framework.intents.compiler import IntentCompiler
 from almanak.framework.intents.compiler_models import IntentCompilerConfig
 from tests.intents._parameter_fidelity import TxOutcome, check_calldata
-from tests.intents.conftest import CHAIN_CONFIGS, get_token_balance, get_token_decimals
+from tests.intents._uniswap_v3_exact_proofs import SwapTargetResult, run_uniswap_v3_swap_exact_proof
+from tests.intents.conftest import CHAIN_CONFIGS, AnvilEthCallAdapter, get_token_balance, get_token_decimals
 from tests.intents.intent_evidence import DisabledIntentEvidenceRecorder, decode_explorer_view
 from tests.intents.pool_helpers import fail_if_v3_pool_missing
 
@@ -26,6 +31,62 @@ USDC_AMOUNT = Decimal("1")
 RANGE_LOWER = Decimal("1000")
 RANGE_UPPER = Decimal("3000")
 MAX_SLIPPAGE = Decimal("0.005")
+FEE_ACCRUAL_WETH_AMOUNT = Decimal("0.0001")
+
+
+class _PinnedCompileGateway:
+    """Keep compiler reads and the independent quote on one observed chain state."""
+
+    def __init__(self, gateway: Any, block: int):
+        if not gateway.is_connected:
+            raise ValueError("LP_CLOSE pinned compiler gateway is not connected")
+        self._gateway = gateway
+        self._block = block
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._gateway, name)
+
+    @property
+    def rpc(self) -> Any:
+        return self
+
+    def block_number(self, chain: str) -> int:
+        return self._block
+
+    def eth_call(self, chain: str, to: str, data: str, **kwargs: Any) -> Any:
+        kwargs["block"] = self._block
+        return self._gateway.eth_call(chain=chain, to=to, data=data, **kwargs)
+
+    def _position_words(self, chain: str, position_manager: str, token_id: int) -> tuple[int, ...]:
+        raw = HexBytes(self.eth_call(chain, position_manager, "0x99fbab88" + f"{token_id:064x}", raise_on_error=True))
+        if len(raw) != 12 * 32:
+            raise ValueError("Pinned compiler position response must contain twelve ABI words")
+        return tuple(int.from_bytes(raw[i : i + 32], "big") for i in range(0, len(raw), 32))
+
+    def query_position_liquidity(self, chain: str, position_manager: str, token_id: int) -> int:
+        return self._position_words(chain, position_manager, token_id)[7]
+
+    def QueryPositionTokensOwed(self, request: Any, timeout: float | None = None) -> Any:  # noqa: N802
+        words = self._position_words(request.chain, request.position_manager, request.token_id)
+        return SimpleNamespace(success=True, tokens_owed0=str(words[10]), tokens_owed1=str(words[11]))
+
+    def Call(self, request: Any, timeout: float | None = None) -> Any:  # noqa: N802
+        pinned = deepcopy(request)
+        params = json.loads(request.params or "[]")
+        block_index = {
+            "eth_call": 1,
+            "eth_getCode": 1,
+            "eth_getBalance": 1,
+            "eth_getStorageAt": 2,
+            "eth_getBlockByNumber": 0,
+        }.get(request.method)
+        if block_index is not None:
+            if len(params) == block_index:
+                params.append(hex(self._block))
+            else:
+                params[block_index] = hex(self._block)
+            pinned.params = json.dumps(params)
+        return self._gateway.rpc.Call(pinned, timeout=timeout)
 
 
 def _canonical_weth_usdc_pair(weth: str, usdc: str) -> tuple[str, str, Decimal, Decimal, Decimal, Decimal]:
@@ -72,6 +133,20 @@ class LPCloseTargetResult:
     pool_address: str
     compile_metadata: dict[str, Any]
     receipt_set: dict[str, str]
+
+
+@dataclass(frozen=True)
+class LPCollectFeesTargetResult:
+    intent: CollectFeesIntent
+    execution_result: Any
+    transaction_result: Any
+    setup_result: LPOpenTargetResult
+    fee_accrual_result: SwapTargetResult
+    position_id: int
+    amount0_collected: int
+    amount1_collected: int
+    pool_address: str
+    compile_metadata: dict[str, Any]
 
 
 def _single_event_transaction(execution: Any, topic: str, label: str) -> Any:
@@ -134,6 +209,21 @@ def _is_execution_revert(response: dict[str, Any]) -> bool:
         return False
     message = str(response["error"].get("message") or "").lower()
     return "execution reverted" in message or message.startswith("revert")
+
+
+def _terminal_position_evidence(
+    web3: Web3, *, position_manager: str, position_id: int, burn_receipt: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any], Any]:
+    block = int(burn_receipt.get("blockNumber", burn_receipt.get("block_number")))
+    position = _raw_position_call(web3, position_manager=position_manager, position_id=position_id, block=block)
+    owner = _raw_owner_call(web3, position_manager=position_manager, position_id=position_id, block=block)
+    header = web3.eth.get_block(block)
+    assert HexBytes(header["hash"]) == HexBytes(burn_receipt.get("blockHash", burn_receipt.get("block_hash"))), (
+        "Burn receipt block hash differs from terminal state block"
+    )
+    assert _is_execution_revert(position), position
+    assert _is_execution_revert(owner), owner
+    return position, owner, header
 
 
 def _position_state(raw: bytes) -> dict[str, Any]:
@@ -277,7 +367,7 @@ async def run_uniswap_v3_lp_open_exact_proof(
     block_hash = web3.eth.get_block(block)["hash"]
     intent_evidence.record_semantic_contract(
         schema_version=1,
-        profile="v3_lp.v1",
+        profile="v3_lp.v2",
         intent="LP_OPEN",
         account=funded_wallet,
         pool_reference=Web3.to_checksum_address(pool),
@@ -383,6 +473,209 @@ def _decrease_minimums(call: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
     return verdict.outcome is TxOutcome.PROTECTED, witness
 
 
+def _zero_minimum_quote_data(data: str) -> str:
+    selector = Web3.to_hex(Web3.keccak(text="decreaseLiquidity((uint256,uint128,uint256,uint256,uint256))")[:4])
+    assert (
+        isinstance(data, str)
+        and len(data) == 330
+        and data[:10].lower() == selector
+        and all(char in "0123456789abcdefABCDEF" for char in data[2:])
+    ), "Quote requires direct decreaseLiquidity calldata with exactly five static words"
+    return data[:138] + "0" * 128 + data[266:]
+
+
+async def run_uniswap_v3_lp_collect_fees_exact_proof(
+    *,
+    chain: str,
+    web3: Web3,
+    funded_wallet: str,
+    orchestrator: ExecutionOrchestrator,
+    price_oracle: dict[str, Decimal],
+    intent_evidence: Any,
+    execution_context: ExecutionContext | None = None,
+    compiler_config: IntentCompilerConfig | None = None,
+    rpc_url: str | None = None,
+    gateway_client: Any | None = None,
+    fee_accrual_amount: Decimal = FEE_ACCRUAL_WETH_AMOUNT,
+) -> LPCollectFeesTargetResult:
+    """Create fees, collect them, and prove the NFT remains unchanged."""
+    setup = await run_uniswap_v3_lp_open_exact_proof(
+        chain=chain,
+        web3=web3,
+        funded_wallet=funded_wallet,
+        orchestrator=orchestrator,
+        price_oracle=price_oracle,
+        intent_evidence=DisabledIntentEvidenceRecorder(),
+        execution_context=execution_context,
+        compiler_config=compiler_config,
+        rpc_url=rpc_url,
+        gateway_client=gateway_client,
+    )
+    fee_accrual = await run_uniswap_v3_swap_exact_proof(
+        chain=chain,
+        web3=web3,
+        funded_wallet=funded_wallet,
+        orchestrator=orchestrator,
+        price_oracle=price_oracle,
+        intent_evidence=DisabledIntentEvidenceRecorder(),
+        amount=fee_accrual_amount,
+        execution_context=execution_context,
+        compiler_config=compiler_config,
+        rpc_url=rpc_url,
+        gateway_client=gateway_client,
+        max_slippage=MAX_SLIPPAGE,
+        from_symbol="WETH",
+        to_symbol="USDC",
+    )
+
+    npm = UNISWAP_V3[chain]["position_manager"]
+    factory = UNISWAP_V3[chain]["factory"]
+    pre_block = web3.eth.block_number
+    pre_header = web3.eth.get_block(pre_block)
+    pre_position_raw, pre_owner_raw = _position_calls(
+        web3, position_manager=npm, position_id=setup.position_id, block=pre_block
+    )
+    pre_state = _position_state(pre_position_raw)
+    assert pre_state["liquidity"] == setup.liquidity > 0
+    assert pre_owner_raw[-20:].hex() == funded_wallet.lower().removeprefix("0x")
+    token0, token1 = pre_state["token0"], pre_state["token1"]
+    token0_before = get_token_balance(web3, token0, funded_wallet)
+    token1_before = get_token_balance(web3, token1, funded_wallet)
+
+    intent = CollectFeesIntent(
+        pool=Web3.to_checksum_address(setup.pool_address),
+        protocol="uniswap_v3",
+        chain=chain,
+        protocol_params={"position_id": setup.position_id},
+    )
+    intent_evidence.bind(intent)
+    compiled = IntentCompiler(
+        chain=chain,
+        wallet_address=funded_wallet,
+        price_oracle=price_oracle,
+        config=compiler_config,
+        rpc_url=rpc_url,
+        gateway_client=gateway_client,
+    ).compile(intent)
+    assert compiled.status.value == "SUCCESS", f"LP_COLLECT_FEES compilation failed: {compiled.error}"
+    assert compiled.action_bundle is not None
+    compiled_calls = [
+        {
+            "to": str(transaction["to"]),
+            "data": str(transaction["data"]),
+            "value": int(transaction["value"]),
+            "tx_type": str(transaction["tx_type"]),
+        }
+        for transaction in compiled.action_bundle.transactions
+    ]
+    assert len(compiled_calls) == 1 and compiled_calls[0]["tx_type"] == "lp_collect_fees"
+    executed = await orchestrator.execute(compiled.action_bundle, execution_context)
+    assert executed.success, f"LP_COLLECT_FEES execution failed: {executed.error}"
+
+    transaction = _single_event_transaction(executed, EVENT_TOPICS["Collect"], "Collect")
+    parsed = intent_evidence.capture_parse(
+        intent=intent,
+        transaction_result=transaction,
+        parser=lambda receipt: UniswapV3ReceiptParser(chain=chain).extract_lp_close_data(receipt),
+        parser_method="extract_lp_close_data:collect_fees",
+    )
+    assert parsed is not None and parsed.source == "collect"
+    token0_after = get_token_balance(web3, token0, funded_wallet)
+    token1_after = get_token_balance(web3, token1, funded_wallet)
+    amount0 = token0_after - token0_before
+    amount1 = token1_after - token1_before
+    assert amount0 > 0 or amount1 > 0, "Same-pool setup swap did not accrue a collectible fee"
+    assert parsed.amount0_collected == amount0 and parsed.amount1_collected == amount1
+    currency0_matches = amount0 == 0 or (parsed.currency0 is not None and parsed.currency0.lower() == token0.lower())
+    currency1_matches = amount1 == 0 or (parsed.currency1 is not None and parsed.currency1.lower() == token1.lower())
+    assert currency0_matches and currency1_matches
+
+    receipt = transaction.receipt.to_dict()
+    block = int(receipt.get("blockNumber", receipt.get("block_number")))
+    post_position_raw, post_owner_raw = _position_calls(
+        web3, position_manager=npm, position_id=setup.position_id, block=block
+    )
+    post_state = _position_state(post_position_raw)
+    assert post_state["liquidity"] == pre_state["liquidity"]
+    assert post_owner_raw == pre_owner_raw
+    logs = decode_explorer_view(receipt)["logs"]
+    inflows = {token0.lower(): 0, token1.lower(): 0}
+    for log in logs:
+        address = str(log.get("address") or "").lower()
+        args = log.get("args") or {}
+        if (
+            log.get("name") == "Transfer"
+            and address in inflows
+            and str(args.get("to") or "").lower() == funded_wallet.lower()
+        ):
+            inflows[address] += int(args.get("value", 0))
+    flags = {
+        "positive_fees": amount0 > 0 or amount1 > 0,
+        "parser_amount0_eq_wallet_delta": parsed.amount0_collected == amount0,
+        "parser_amount1_eq_wallet_delta": parsed.amount1_collected == amount1,
+        "currency0_matches_or_zero": currency0_matches,
+        "currency1_matches_or_zero": currency1_matches,
+        "erc20_transfers_match": inflows == {token0.lower(): amount0, token1.lower(): amount1},
+        "position_owner_preserved": post_owner_raw == pre_owner_raw,
+        "liquidity_unchanged": post_state["liquidity"] == pre_state["liquidity"],
+    }
+    assert all(flags.values()), f"LP_COLLECT_FEES exact proof predicates failed: {flags}"
+    intent_evidence.record_fidelity(
+        hard=True,
+        flags=flags,
+        witnesses=[
+            {"kind": "position_state_before", "position_id": setup.position_id, **pre_state},
+            {"kind": "position_state_after", "position_id": setup.position_id, **post_state},
+        ],
+    )
+    intent_evidence.record_balance_deltas(
+        checks={"bilateral_fee_inflows_verified": all(flags.values())},
+        token0={"address": token0, "before": token0_before, "after": token0_after, "delta": amount0},
+        token1={"address": token1, "before": token1_before, "after": token1_after, "delta": amount1},
+    )
+    block_hash = web3.eth.get_block(block)["hash"]
+    intent_evidence.record_semantic_contract(
+        schema_version=1,
+        profile="v3_lp.v2",
+        intent="LP_COLLECT_FEES",
+        account=funded_wallet,
+        pool_reference=Web3.to_checksum_address(setup.pool_address),
+        resource_address=npm,
+        factory_address=factory,
+        pool_address=setup.pool_address,
+        token0=token0,
+        token1=token1,
+        fee_tier=pre_state["fee"],
+        position_id=setup.position_id,
+        pre_liquidity=pre_state["liquidity"],
+        pre_position_state_raw="0x" + pre_position_raw.hex(),
+        pre_owner_state_raw="0x" + pre_owner_raw.hex(),
+        pre_state_block=pre_block,
+        pre_state_block_hash=pre_header["hash"].hex(),
+        compiled_calls=compiled_calls,
+        parser_amount0_raw=parsed.amount0_collected,
+        parser_amount1_raw=parsed.amount1_collected,
+        actual_amount0_raw=amount0,
+        actual_amount1_raw=amount1,
+        post_position_state_raw="0x" + post_position_raw.hex(),
+        post_owner_state_raw="0x" + post_owner_raw.hex(),
+        post_state_block=block,
+        post_state_block_hash=block_hash.hex(),
+    )
+    return LPCollectFeesTargetResult(
+        intent=intent,
+        execution_result=executed,
+        transaction_result=transaction,
+        setup_result=setup,
+        fee_accrual_result=fee_accrual,
+        position_id=setup.position_id,
+        amount0_collected=amount0,
+        amount1_collected=amount1,
+        pool_address=setup.pool_address,
+        compile_metadata=dict(compiled.action_bundle.metadata),
+    )
+
+
 async def run_uniswap_v3_lp_close_exact_proof(
     *,
     chain: str,
@@ -440,6 +733,7 @@ async def run_uniswap_v3_lp_close_exact_proof(
         position_id=str(setup.position_id),
         pool=Web3.to_checksum_address(setup.pool_address),
         collect_fees=True,
+        max_slippage=Decimal("0.005"),
         protocol="uniswap_v3",
         chain=chain,
     )
@@ -450,11 +744,28 @@ async def run_uniswap_v3_lp_close_exact_proof(
         price_oracle=price_oracle,
         config=compiler_config,
         rpc_url=rpc_url,
-        gateway_client=gateway_client,
+        gateway_client=_PinnedCompileGateway(gateway_client or AnvilEthCallAdapter(web3), pre_block),
     ).compile(close_intent)
     assert compiled.status.value == "SUCCESS", f"LP_CLOSE compilation failed: {compiled.error}"
     assert compiled.action_bundle is not None
     compiled_calls = _compiled_close_calls(compiled.action_bundle)
+    quote_call = compiled_calls[0]
+    quote_data = _zero_minimum_quote_data(quote_call["data"])
+    quote_result = web3.eth.call(
+        {"to": quote_call["to"], "from": funded_wallet, "data": quote_data}, block_identifier=pre_block
+    )
+    close_quote = {
+        "method": "eth_call",
+        "to": quote_call["to"],
+        "from": funded_wallet,
+        "data": quote_data,
+        "block_number": pre_block,
+        "block_hash": pre_header["hash"].hex(),
+        "result": "0x" + bytes(quote_result).hex(),
+    }
+    assert web3.eth.get_block(pre_block)["hash"] == pre_header["hash"], (
+        "LP_CLOSE pre-state block changed during compilation"
+    )
     decrease_minimums_bind, decrease_minimums_witness = _decrease_minimums(compiled_calls[0])
     executed = await orchestrator.execute(compiled.action_bundle, execution_context)
     assert executed.success, f"LP_CLOSE execution failed: {executed.error}"
@@ -515,25 +826,16 @@ async def run_uniswap_v3_lp_close_exact_proof(
     assert collect.currency0.lower() == token0.lower()
     assert collect.currency1.lower() == token1.lower()
 
-    terminal_position = _raw_position_call(
+    terminal_position, terminal_owner, terminal_header = _terminal_position_evidence(
         web3,
         position_manager=npm,
         position_id=setup.position_id,
-        block="latest",
+        burn_receipt=burn_tx.receipt.to_dict(),
     )
-    terminal_owner = _raw_owner_call(
-        web3,
-        position_manager=npm,
-        position_id=setup.position_id,
-        block="latest",
-    )
-    assert _is_execution_revert(terminal_position), terminal_position
-    assert _is_execution_revert(terminal_owner), terminal_owner
-    terminal_header = web3.eth.get_block("latest")
 
     common_contract = {
         "schema_version": 1,
-        "profile": "v3_lp.v1",
+        "profile": "v3_lp.v2",
         "intent": "LP_CLOSE",
         "account": funded_wallet,
         "pool_reference": Web3.to_checksum_address(setup.pool_address),
@@ -551,6 +853,12 @@ async def run_uniswap_v3_lp_close_exact_proof(
         "pre_state_block_hash": pre_header["hash"].hex(),
         "compiled_calls": compiled_calls,
         "receipt_set": receipt_set,
+        "close_quote": close_quote,
+        "decrease_receipt": decrease_tx.receipt.to_dict(),
+        "wallet_balances": {
+            "token0": {"before": token0_before, "after": token0_after},
+            "token1": {"before": token1_before, "after": token1_after},
+        },
         "parser_liquidity_removed": decrease.liquidity_removed,
         "parser_amount0_raw": collect.amount0_collected,
         "parser_amount1_raw": collect.amount1_collected,
@@ -616,8 +924,10 @@ async def run_uniswap_v3_lp_close_exact_proof(
 
 
 __all__ = [
+    "LPCollectFeesTargetResult",
     "LPCloseTargetResult",
     "LPOpenTargetResult",
+    "run_uniswap_v3_lp_collect_fees_exact_proof",
     "run_uniswap_v3_lp_close_exact_proof",
     "run_uniswap_v3_lp_open_exact_proof",
 ]

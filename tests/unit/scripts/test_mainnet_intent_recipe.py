@@ -17,6 +17,7 @@ from qa_lab.mainnet_intent_recipe import (
     AAVE_V3_ARBITRUM_SUPPLY_EOA,
     MAINNET_ASSET_DECIMALS,
     TRADERJOE_V2_AVALANCHE_SWAP_EOA,
+    UNISWAP_V3_ARBITRUM_LP_COLLECT_FEES_EOA,
     UNISWAP_V3_ARBITRUM_SWAP_EOA,
     UNISWAP_V3_BASE_SWAP_EOA,
     asset_decimals,
@@ -55,7 +56,8 @@ def _plan() -> dict:
     return build_run_plan(recipe=AAVE_V3_ARBITRUM_SUPPLY_EOA, funding_plan=_funding(), git_sha="a" * 40)
 
 
-def test_aave_arbitrum_supply_recipe_has_no_setup_and_mandatory_cleanup() -> None:
+def test_aave_arbitrum_supply_recipe_has_no_setup_and_mandatory_cleanup(monkeypatch) -> None:
+    monkeypatch.delenv("ALMANAK_QA_FORK_CONTEXT", raising=False)
     recipe = resolve_recipe("intent.aave_v3.arbitrum.SUPPLY.mainnet.eoa")
 
     assert recipe.target == ("SUPPLY:USDC:1",)
@@ -116,6 +118,20 @@ def test_uniswap_swap_recipe_is_exact_pool_and_inverse_cleanup(recipe) -> None:
         recipe.output_asset_address,
         recipe.fee_tier,
     )
+
+
+def test_uniswap_arbitrum_collect_fees_recipe_separates_fee_setup_target_and_close() -> None:
+    recipe = UNISWAP_V3_ARBITRUM_LP_COLLECT_FEES_EOA
+
+    assert recipe.nodeid.endswith("test_lp_collect_fees_exact_eoa")
+    assert recipe.setup == (
+        f"LP_OPEN:WETH:0.001:USDC:1:{recipe.fee_tier}:{recipe.pool_address}",
+        f"SWAP:WETH:USDC:{recipe.fee_accrual_amount}:{recipe.fee_tier}:{recipe.pool_address}",
+    )
+    assert recipe.target == ("LP_COLLECT_FEES:SETUP_POSITION",)
+    assert recipe.cleanup == ("LP_CLOSE:SETUP_POSITION:FULL", "SWEEP_TO_MASTER")
+    assert recipe.funding_tokens == ("WETH:0.0011", "USDC:1")
+    assert resolve_recipe(recipe.cell_id) is recipe
 
 
 def test_traderjoe_swap_recipe_is_exact_pair_and_inverse_cleanup() -> None:
@@ -543,6 +559,7 @@ def test_runner_call_sites_bind_every_required_proof_helper_argument() -> None:
             "run_traderjoe_v2_swap_exact_proof",
             "run_uniswap_v3_lp_open_exact_proof",
             "run_uniswap_v3_lp_close_exact_proof",
+            "run_uniswap_v3_lp_collect_fees_exact_proof",
             "execute_aave_lending_target",
         )
     }
@@ -585,7 +602,7 @@ def test_hygiene_unwind_attempts_every_item_and_never_raises(tmp_path: Path, mon
     pairs = [("0x" + "aa" * 20, "0x" + "bb" * 20), ("0x" + "cc" * 20, "0x" + "dd" * 20)]
     attempted: list[tuple[str, str]] = []
 
-    def send(web3, *, account, token, spender, chain_id):
+    def send(web3, *, account, token, spender, chain_id, journal=None):
         attempted.append((token, spender))
         if token == pairs[0][0]:
             raise RuntimeError("revoke reverted")
@@ -669,7 +686,7 @@ def test_hygiene_unwind_recovers_pairs_from_the_chain_when_rows_were_lost(tmp_pa
     monkeypatch.setattr(
         runner,
         "_send_allowance_revoke",
-        lambda web3, *, account, token, spender, chain_id: (
+        lambda web3, *, account, token, spender, chain_id, journal=None: (
             sent.append((token, spender)),
             (SimpleNamespace(), "0x" + "e" * 64),
         )[1],

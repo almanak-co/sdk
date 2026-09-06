@@ -5,6 +5,8 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import subprocess
+import sys
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,6 +15,20 @@ import pytest
 from eth_account import Account
 
 REPO = Path(__file__).resolve().parents[3]
+
+
+def test_standalone_preflight_help_without_pythonpath(tmp_path):
+    env = {key: value for key, value in os.environ.items() if key not in {"PYTHONPATH", "ALMANAK_QA_FORK_CONTEXT"}}
+    result = subprocess.run(
+        [sys.executable, "-I", "-S", str(REPO / "qa_lab/preflight_pool_wallet.py"), "--help"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "--pool-index" in result.stdout
 
 
 def _load(name: str):

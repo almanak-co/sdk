@@ -218,7 +218,8 @@ def runner():
 
 @pytest.fixture
 def harness(runner, monkeypatch, tmp_path: Path):
-    monkeypatch.setenv("ALMANAK_QA_MAINNET_LANE", "enabled")
+    monkeypatch.setattr(runner, "_assert_coordinator_execution", lambda **kwargs: None)
+    monkeypatch.setattr(runner, "assert_mainnet_lane_enabled", lambda *args, **kwargs: None)
     monkeypatch.setattr(runner, "_git_sha", lambda: GIT_SHA)
     ledger = tmp_path / "approvals-consumed.jsonl"
     monkeypatch.setattr(runner, "APPROVAL_LEDGER_PATH", ledger)
@@ -248,7 +249,6 @@ def harness(runner, monkeypatch, tmp_path: Path):
                 plan_path=plan_path,
                 approval_path=approval_path,
                 output=tmp_path / next(runs),
-                operator_authorized=True,
             )
         )
 
@@ -277,7 +277,7 @@ def test_a_replayed_approval_is_refused_before_the_funder_launches(harness) -> N
 
 
 def test_an_expired_approval_is_refused_at_the_import_surface(runner, monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("ALMANAK_QA_MAINNET_LANE", "enabled")
+    monkeypatch.setattr(runner, "assert_mainnet_lane_enabled", lambda *args, **kwargs: None)
     plan = _plan()
     approval = build_approval(plan=plan, approver="qa-owner", approved_at="2020-01-01T00:00:00Z")
     (tmp_path / "plan.json").write_text(json.dumps(plan))
@@ -289,7 +289,6 @@ def test_an_expired_approval_is_refused_at_the_import_surface(runner, monkeypatc
                 plan_path=tmp_path / "plan.json",
                 approval_path=tmp_path / "approval.json",
                 output=tmp_path / "b",
-                operator_authorized=True,
             )
         )
     assert not (tmp_path / "b").exists(), "an expired approval must not even create a bundle"

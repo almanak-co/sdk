@@ -1,0 +1,136 @@
+{
+  "approval": {
+    "approved_at": "2026-09-05T22:19:49Z",
+    "approver": "fork-acceptance",
+    "artifact_kind": "almanak.mainnet_intent_approval",
+    "cell_id": "intent.uniswap_v3.arbitrum.SWAP.anvil.eoa",
+    "expires_at": "2026-09-05T23:19:49Z",
+    "git_sha": "755955c90bd8e8aeaf57888930020f4937d9b3d8",
+    "nonce": "6181a3559080d362bd315e15a1d84186",
+    "plan_sha256": "75ecde61e9cd485e73d8286ccfc325d241c3a0d00eee1fc2ebcc041cb4b719b4",
+    "pool_index": 0,
+    "schema_version": 2,
+    "wallet": "0x2C0d4a3E890033175413C3F025b312491187c2A3"
+  },
+  "plan": {
+    "artifact_kind": "almanak.mainnet_intent_plan",
+    "cell_id": "intent.uniswap_v3.arbitrum.SWAP.anvil.eoa",
+    "created_at": "2026-09-05T22:19:47.035398Z",
+    "execution_attestation": {
+      "almanak": "/private/var/folders/v3/fw0clgwj4g3d_9s1ls_36tjr0000gn/T/almanak-mi-20260905T221912Z-ae615756-lo_iseuc/repo/almanak/__init__.py",
+      "artifact_kind": "almanak.mainnet_intent_execution_attestation",
+      "distributions_sha256": "1466fd7531ad0e48449dcc97c092e267b865c2ee172640c9634263885ac6ba37",
+      "git_sha": "755955c90bd8e8aeaf57888930020f4937d9b3d8",
+      "git_tree": "c1b3971d62132ad904179a76afa013cc73a974b2",
+      "platform": "macOS-26.5.2-arm64-arm-64bit",
+      "python": "3.12.12 (main, Oct  9 2025, 11:07:00) [Clang 17.0.0 (clang-1700.0.13.3)]",
+      "qa_lab": "/private/var/folders/v3/fw0clgwj4g3d_9s1ls_36tjr0000gn/T/almanak-mi-20260905T221912Z-ae615756-lo_iseuc/repo/qa_lab/__init__.py",
+      "schema_version": 1,
+      "source_sha256": "b1bd161b0bc4700bbcc812a886aa23bd1f2743175a61315b22f2fb5e450bf137",
+      "uv_lock_sha256": "3a52cf590e1e9854d4f210c59ac6634fcdf549130a0be51011501ee9b28c1d0b",
+      "uv_version": "uv 0.7.9 (13a86a23b 2025-05-30)"
+    },
+    "execution_context": {
+      "chain": "arbitrum",
+      "chain_id": 42161,
+      "context_id": "fork-fd84afd461937c5108928244",
+      "fork_block": 502140449,
+      "fork_hash": "0x593de0e0bedc3d9762bafcb0fb51be6d79f40fe91a5159f4ea90d1bb09989ec2",
+      "instance_id": "0xfab8454e29e323fc214ccc8d34d140d1ff5044e6656fde0db8817c007ff72189",
+      "mode": "managed_fork_acceptance",
+      "network": "anvil"
+    },
+    "funding": {
+      "approval_digest": "5271d49a05b804589c9d4bf947712fb9fe6931b8237f09d1ec9e68b0868a3a0e",
+      "caps_usd": {
+        "gas": "2.50",
+        "total_wallet": "5.00",
+        "trading": "0.60"
+      },
+      "cell_id": "intent.uniswap_v3.arbitrum.SWAP.anvil.eoa",
+      "chain": "arbitrum",
+      "exec_path": "eoa",
+      "existing_wallet_usd": "0E-24",
+      "funding": {
+        "native": "0.0005",
+        "tokens": [
+          "USDC:0.5"
+        ]
+      },
+      "gates": {
+        "funding_executed": false,
+        "human_approval_required": true,
+        "post_funding_cap_gate_required": true,
+        "post_run_sweep_required": true
+      },
+      "network": "anvil",
+      "pool_index": 0,
+      "projected_wallet_usd": "1.743642310889742525107459259",
+      "proposed_funding_usd": "1.743642310889742525107459259",
+      "purpose": "mainnet_intent_wallet_setup",
+      "schema_version": 1,
+      "wallet": "0x2C0d4a3E890033175413C3F025b312491187c2A3"
+    },
+    "git_sha": "755955c90bd8e8aeaf57888930020f4937d9b3d8",
+    "network": "anvil",
+    "plan_sha256": "75ecde61e9cd485e73d8286ccfc325d241c3a0d00eee1fc2ebcc041cb4b719b4",
+    "pool_index": 0,
+    "recipe": {
+      "asset_address": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+      "asset_decimals": 6,
+      "asset_symbol": "USDC",
+      "cell_id": "intent.uniswap_v3.arbitrum.SWAP.anvil.eoa",
+      "chain": "arbitrum",
+      "cleanup": [
+        "SWAP_BACK:WETH:USDC:MEASURED:500:0xc6962004f452be9203591991d15f6b388e09e8d0",
+        "SWEEP_TO_MASTER"
+      ],
+      "exec_path": "eoa",
+      "factory_address": "0x1F98431c8aD98523631AE4a59f267346ea31F984",
+      "fee_tier": 500,
+      "funding_tokens": [
+        "USDC:0.5"
+      ],
+      "gas_budget_usd": "2.50",
+      "intent": "SWAP",
+      "max_price_impact": "0.02",
+      "max_slippage": "0.005",
+      "native_funding": "0.0005",
+      "nodeid": "tests/intents/arbitrum/test_uniswap_v3_exact_swap.py::TestUniswapV3ExactSwapProof::test_swap_exact_eoa",
+      "output_asset_address": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+      "output_asset_decimals": 18,
+      "output_asset_symbol": "WETH",
+      "protocol": "uniswap_v3",
+      "recipe_id": "uniswap_v3.swap.arbitrum.eoa",
+      "recipe_version": 1,
+      "resource_address": "0xc6962004f452be9203591991d15f6b388e09e8d0",
+      "schema_version": 1,
+      "semantic_profile": "swap.v1",
+      "setup": [],
+      "sha256": "26cecadcd75242dafce68810a0828c5c3b98abf4859a5f58803ff7fb063c1fee",
+      "target": [
+        "SWAP:USDC:WETH:0.5:500:0xc6962004f452be9203591991d15f6b388e09e8d0"
+      ],
+      "target_amount": "0.5",
+      "terminal": [
+        "TOKEN_BALANCE_ZERO:WETH",
+        "NO_RESIDUAL_ALLOWANCES",
+        "POOL_WALLET_RELEASED"
+      ],
+      "total_wallet_cap_usd": "5.00",
+      "trading_cap_usd": "0.60"
+    },
+    "request_id": "mi-20260905T221912Z-ae615756",
+    "schema_version": 1,
+    "wallet": "0x2C0d4a3E890033175413C3F025b312491187c2A3"
+  },
+  "request": {
+    "cell_id": "intent.uniswap_v3.arbitrum.SWAP.anvil.eoa",
+    "git_sha": "755955c90bd8e8aeaf57888930020f4937d9b3d8",
+    "plan_sha256": "75ecde61e9cd485e73d8286ccfc325d241c3a0d00eee1fc2ebcc041cb4b719b4",
+    "pool_index": 0,
+    "request_id": "mi-20260905T221912Z-ae615756",
+    "state": "FAILED_DISPATCH",
+    "wallet": "0x2C0d4a3E890033175413C3F025b312491187c2A3"
+  }
+}

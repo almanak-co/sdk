@@ -545,7 +545,7 @@ class TestUniswapV3LPOpenIntent:
         pool_address = compute_pool_address(factory, token0, token1, state["fee"])
         intent_evidence.record_semantic_contract(
             schema_version=1,
-            profile="v3_lp.v1",
+            profile="v3_lp.v2",
             intent="LP_OPEN",
             account=funded_wallet,
             pool_reference=POOL,

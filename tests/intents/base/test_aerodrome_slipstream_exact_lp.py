@@ -52,7 +52,7 @@ class TestAerodromeSlipstreamLPExactProofs:
             compiler_config=compiler_config,
         )
 
-    @pytest.mark.qa_proof(protocol="aerodrome_slipstream", contract="v3_lp.v1")
+    @pytest.mark.qa_proof(protocol="aerodrome_slipstream", contract="v3_lp.v2")
     @pytest.mark.intent(IntentType.LP_OPEN)
     @pytest.mark.asyncio
     async def test_lp_open_exact_safe(
@@ -77,7 +77,7 @@ class TestAerodromeSlipstreamLPExactProofs:
             anvil_eth_call_adapter,
         )
 
-    @pytest.mark.qa_proof(protocol="aerodrome_slipstream", contract="v3_lp.v1")
+    @pytest.mark.qa_proof(protocol="aerodrome_slipstream", contract="v3_lp.v2")
     @pytest.mark.no_zodiac(reason="Exact-axis QA parity: exercise the same LP_OPEN contract through EOA")
     @pytest.mark.intent(IntentType.LP_OPEN)
     @pytest.mark.asyncio

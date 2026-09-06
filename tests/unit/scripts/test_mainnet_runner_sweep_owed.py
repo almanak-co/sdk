@@ -46,8 +46,9 @@ def _write(path: Path, payload: dict) -> Path:
 
 @pytest.fixture
 def harness(runner, monkeypatch, tmp_path: Path):
-    """Open the lane for this process only and stub every seam that touches a chain or a key."""
-    monkeypatch.setenv("ALMANAK_QA_MAINNET_LANE", "enabled")
+    """Stub every seam that touches a chain or a key."""
+    monkeypatch.setattr(runner, "_assert_coordinator_execution", lambda **kwargs: None)
+    monkeypatch.setattr(runner, "assert_mainnet_lane_enabled", lambda *args, **kwargs: None)
     monkeypatch.setattr(runner, "_git_sha", lambda: GIT_SHA)
     funding = {
         "schema_version": 1,
@@ -83,7 +84,7 @@ def harness(runner, monkeypatch, tmp_path: Path):
     def run() -> dict:
         return asyncio.run(
             runner.execute_plan(
-                plan_path=plan_path, approval_path=approval_path, output=tmp_path / "bundle", operator_authorized=True
+                plan_path=plan_path, approval_path=approval_path, output=tmp_path / "bundle"
             )
         )
 
@@ -209,7 +210,6 @@ def test_a_relative_output_still_matches_the_funder_claim_from_a_foreign_cwd(
             plan_path=tmp_path / "plan.json",
             approval_path=tmp_path / "approval.json",
             output=Path("bundle-rel"),
-            operator_authorized=True,
         )
     )
 

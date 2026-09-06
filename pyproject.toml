@@ -214,6 +214,8 @@ dev = [
     # across N runners and combines coverage afterward on PRs and Main.
     "pytest-split>=0.9.0",
     "asgi-lifespan>=2.1.0",
+    # Broad CLI/service import coverage includes the HTTP server entrypoints.
+    "uvicorn[standard]>=0.30.0",
     # CRAP/complexity tooling (Phase 0, see docs/internal/coverage-improvement-plan.md §8)
     "radon>=6.0.1",
     "xenon>=0.9.1",

@@ -289,6 +289,13 @@ def _source_request(intent: Any) -> dict[str, Any] | None:
         if intent_name == "LP_CLOSE":
             request["position_id"] = str(getattr(intent, "position_id", ""))
             request["collect_fees"] = bool(getattr(intent, "collect_fees", False))
+            for field_name in ("max_slippage", "protocol_lp_slippage"):
+                value = (
+                    (getattr(intent, "protocol_params", None) or {}).get("lp_slippage")
+                    if field_name == "protocol_lp_slippage"
+                    else getattr(intent, field_name, None)
+                )
+                request[field_name] = str(value) if value is not None else None
         return request
     if intent_name == "SWAP":
         amount_field = "amount"
@@ -336,6 +343,7 @@ class IntentEvidenceRecorder:
         observed_intents: list[Any] | None = None,
         source_provenance: Mapping[str, Any] | None = None,
         explorer_tx_base: str | None = None,
+        provenance_reader: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     ) -> None:
         if network not in {"anvil", "mainnet"} or exec_path not in {"safe", "eoa"}:
             raise ValueError("Intent evidence axes must be anvil|mainnet and safe|eoa")
@@ -345,6 +353,7 @@ class IntentEvidenceRecorder:
         self.exec_path = exec_path
         self.git_sha = git_sha
         self.chain_id = chain_id
+        self.provenance_reader = provenance_reader
         #: When set, every capture_parse without an explicit explorer_url derives
         #: one from this base. Mainnet seal admission requires an HTTPS explorer
         #: URL on every receipt artifact; only the Aave proof threaded a base
@@ -421,6 +430,7 @@ class IntentEvidenceRecorder:
             self._fidelity = fidelity
         else:
             self._fidelity_by_receipt_role[self._receipt_role(receipt_role)] = fidelity
+        self._checkpoint_receipts()
 
     def record_balance_deltas(
         self,
@@ -442,6 +452,7 @@ class IntentEvidenceRecorder:
             role = self._receipt_role(receipt_role)
             self._balance_deltas_by_receipt_role[role] = normalized
             self._balance_checks_by_receipt_role[role] = normalized_checks
+        self._checkpoint_receipts()
 
     def record_semantic_contract(self, *, receipt_role: str = "execution", **contract: Any) -> None:
         """Record raw scientific measurements for seal-time re-derivation.
@@ -457,6 +468,17 @@ class IntentEvidenceRecorder:
         if role in self._semantic_contract_by_receipt_role:
             raise ValueError(f"Intent semantic contract already recorded for receipt role {role!r}")
         self._semantic_contract_by_receipt_role[role] = normalized
+        self._checkpoint_receipts()
+
+    def _checkpoint_receipts(self) -> None:
+        """Keep partial observations durable even when the proof never returns."""
+        for relpath, payload in self._artifact_payloads:
+            role = payload["receipt_role"]
+            payload["fidelity"] = dict(self._fidelity_by_receipt_role.get(role, self._fidelity))
+            payload["balance_deltas"] = self._balance_deltas_by_receipt_role.get(role, self._balance_deltas)
+            payload["balance_checks"] = self._balance_checks_by_receipt_role.get(role, self._balance_checks)
+            payload["semantic_contract"] = self._semantic_contract_by_receipt_role.get(role)
+            _atomic_json(self.output_dir / relpath, payload)
 
     def capture_parse(
         self,
@@ -477,6 +499,25 @@ class IntentEvidenceRecorder:
             raise ValueError("Transaction receipt must serialize to an object")
         self._invocations += 1
         invocation = self._invocations
+        raw_path = (
+            self.output_dir
+            / "observed-receipts"
+            / hashlib.sha256(self.nodeid.encode()).hexdigest()
+            / f"{invocation:04d}.json"
+        )
+        _atomic_json(raw_path, {"raw_receipt": receipt, "parser_status": "NOT_RUN", "nodeid": self.nodeid})
+        external_provenance: dict[str, Any] = {"status": "UNMEASURED"}
+        if self.provenance_reader is not None:
+            try:
+                external_provenance = self.provenance_reader(receipt)
+            except Exception as exc:
+                from qa_lab.qa_external_provenance import redact_diagnostic
+
+                external_provenance = {
+                    "status": "UNMEASURED",
+                    "error_type": type(exc).__name__,
+                    "reason": redact_diagnostic(str(exc)),
+                }
         parser_error: dict[str, str] | None = None
         parser_exception: Exception | None = None
         permission_error: dict[str, str] | None = None
@@ -527,7 +568,8 @@ class IntentEvidenceRecorder:
             "exec_path": self.exec_path,
             "protocol": self._intents[cell_id].payload["protocol"],
             "chain": self._intents[cell_id].payload["chain"],
-            "chain_id": self.chain_id,
+            "chain_id": self.chain_id or external_provenance.get("chain_id"),
+            "external_provenance": external_provenance,
             "intent": self._intents[cell_id].payload["intent"],
             "outcome_class": outcome_class,
             "source_request": self._intents[cell_id].payload["source_request"],
@@ -566,6 +608,7 @@ class IntentEvidenceRecorder:
         }
         self._intents[cell_id].receipt_artifacts.append(relpath.as_posix())
         self._artifact_payloads.append((relpath, payload))
+        self._checkpoint_receipts()
         if parser_exception is not None and permission_exception is not None:
             raise ExceptionGroup(
                 "Receipt parsing and permission-attestation validation both failed",
@@ -636,7 +679,7 @@ class IntentEvidenceRecorder:
                 # nothing and stays SOFT (inadmissible as a balance claim).
                 if balance_checks and all(balance_checks.values()):
                     payload["layers"]["balances"] = "PASS"
-                elif balance_checks:
+                elif balance_checks and any(value is False for value in balance_checks.values()):
                     payload["layers"]["balances"] = "FAIL"
                 else:
                     payload["layers"]["balances"] = "SOFT"
@@ -701,5 +744,8 @@ def build_evidence_manifest(output_dir: Path) -> Path:
 def _atomic_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    temp.write_text(json.dumps(json_safe(payload), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    with temp.open("w", encoding="utf-8") as stream:
+        stream.write(json.dumps(json_safe(payload), indent=2, sort_keys=True) + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
     os.replace(temp, path)

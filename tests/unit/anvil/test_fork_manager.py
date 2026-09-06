@@ -1163,3 +1163,10 @@ class TestFundTokensReport:
             )
 
         assert failed == [bad]
+
+
+def test_priority_fee_suggestion_override_requires_explicit_configuration():
+    manager = RollingForkManager(rpc_url="https://example.invalid", chain="arbitrum", cache_path=None)
+    assert "--disable-min-priority-fee" not in manager._build_anvil_command()
+    manager.disable_min_priority_fee = True
+    assert "--disable-min-priority-fee" in manager._build_anvil_command()

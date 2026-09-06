@@ -515,3 +515,58 @@ def test_recorder_derives_https_explorer_urls_for_every_capture(tmp_path: Path) 
 
     bare = artifact_for(recorder(None, "bare"))
     assert bare["tx"]["explorer_url"] is None, "no base means unchanged behaviour"
+
+
+def test_parser_failure_is_durable_before_finalize(tmp_path: Path) -> None:
+    intent = SimpleNamespace(
+        protocol="aave_v3", chain="arbitrum", intent_type="SUPPLY", token="USDC", amount=Decimal("1")
+    )
+    recorder = IntentEvidenceRecorder(
+        output_dir=tmp_path, nodeid="test.py::test_failure", network="mainnet", exec_path="eoa"
+    )
+
+    def broken_parser(_receipt):
+        assert list((tmp_path / "observed-receipts").rglob("*.json"))
+        raise ValueError("semantic parser failure")
+
+    with pytest.raises(ValueError, match="semantic parser failure"):
+        recorder.capture_parse(
+            intent=intent, transaction_result=SimpleNamespace(receipt=_receipt()), parser=broken_parser
+        )
+    receipt_path = next((tmp_path / "receipts").rglob("*.json"))
+    payload = json.loads(receipt_path.read_text())
+    assert payload["raw_receipt"]["status"] == 1
+    assert payload["almanak"]["error"]["message"] == "semantic parser failure"
+    assert payload["layers"]["compile"] == "UNMEASURED"
+    recorder.record_balance_deltas(before="10", after="9", checks={"conserved": False})
+    assert json.loads(receipt_path.read_text())["balance_checks"] == {"conserved": False}
+    assert not (tmp_path / "nodes").exists(), "partial evidence must not masquerade as a completed node"
+
+
+def test_provenance_error_retains_redacted_reason_in_receipt(tmp_path):
+    def broken(receipt):
+        raise ValueError("block witness unavailable at HTTPS://provider.invalid/v2/PRIVATE_RPC_KEY")
+
+    intent = SimpleNamespace(protocol="uniswap_v3", chain="arbitrum", intent_type=SimpleNamespace(value="SWAP"))
+    recorder = IntentEvidenceRecorder(
+        output_dir=tmp_path,
+        nodeid="tests/intents/arbitrum/test_swap.py::TestSwap::test_swap",
+        network="anvil",
+        exec_path="eoa",
+        git_sha="abc1234",
+        declared_intents={"SWAP"},
+        provenance_reader=broken,
+    )
+    recorder.capture_parse(
+        intent=intent,
+        transaction_result=SimpleNamespace(receipt=_receipt(), tx_hash="0xabc", gas_used=99),
+        parser=lambda receipt: Result(True, Decimal("123")),
+    )
+    recorder.finalize(outcome="FAIL", duration_seconds=0.1)
+    manifest = json.loads(build_evidence_manifest(tmp_path).read_text())
+    artifact = manifest["nodes"][0]["intents"][0]["receipt_artifacts"][0]
+    witness = json.loads((tmp_path / artifact).read_text())["external_provenance"]
+    assert witness["status"] == "UNMEASURED"
+    assert witness["error_type"] == "ValueError"
+    assert "block witness unavailable" in witness["reason"]
+    assert "PRIVATE_RPC_KEY" not in json.dumps(witness)

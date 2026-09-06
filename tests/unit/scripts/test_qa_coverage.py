@@ -1798,7 +1798,7 @@ def test_uniswap_v3_lp_mainnet_eoa_is_routable_only_with_exact_lifecycle_recipe(
 
     plan = qa.intent_cell_plan(cell_id=f"intent.uniswap_v3.{chain}.{intent}.mainnet.eoa")
 
-    assert plan["proof_recipe"]["contract_profile"] == "v3_lp.v1"
+    assert plan["proof_recipe"]["contract_profile"] == "v3_lp.v2"
     assert plan["proof_recipe"]["runner"] == "qa_lab/run_mainnet_intent.py"
     assert len(plan["proof_recipe"]["nodeids"]) == 1
 
@@ -4003,6 +4003,12 @@ def test_the_intent_board_legend_help_and_painter_share_one_vocabulary(modules) 
         assert html.escape(meaning) in legend, f"{label}'s legend swatch has no hover definition"
         # the swatch is painted by the same class as the cell, so it cannot drift
         assert f'class="sw c-{key}"' in legend, f"{label}'s swatch does not use its own cell colour"
+        assert f'data-intent-status="{_id}"' in legend, f"{label} cannot filter the matrix"
+
+    assert 'data-intent-status="all"' in legend
+    assert ".id===statusFilter" in qa.INTENT_JS
+    assert "dataset.intentStatusCount" in qa.INTENT_JS
+    assert "initialParams.get('cell')" in qa.INTENT_JS
 
     for group in qa.INTENT_STATUS_GROUPS:
         assert group in help_html, f"the help omits the {group!r} group entirely"
@@ -4098,7 +4104,8 @@ def test_fidelity_checklist_html_marks_failures_and_unregistered_names(modules) 
     assert "nothing outside the parser corroborates" in qa_coverage.fidelity_witness_html([], esc=str)
 
 
-def test_harness_failure_seal_retracts_a_stale_green(modules, catalog_path: Path, tmp_path: Path) -> None:
+@pytest.mark.parametrize("log_bytes", [b"fixture skip: Anvil could not start\n", b"fixture failure: \xff\xfe\n"])
+def test_harness_failure_seal_retracts_a_stale_green(modules, catalog_path: Path, tmp_path: Path, log_bytes) -> None:
     """A run that fails before producing evidence must retract the cell, not vanish.
 
     Before seal_intent_harness_failure existed, this exact shape — pytest exits, no
@@ -4136,7 +4143,7 @@ def test_harness_failure_seal_retracts_a_stale_green(modules, catalog_path: Path
     # and NO evidence manifest
     workspace = tmp_path / "work"
     workspace.mkdir()
-    (workspace / "run.log").write_text("fixture skip: Anvil could not start\n")
+    (workspace / "run.log").write_bytes(log_bytes)
     (workspace / "plan.json").write_text(json.dumps(plan))
 
     target = qa.seal_intent_harness_failure(
@@ -4353,6 +4360,9 @@ def test_mainnet_failure_seal_retracts_the_cell_from_a_failed_bundle(
         json.dumps({"overall": "FAIL", "error": "TypeError: missing 1 required keyword-only argument"})
     )
     (bundle / "runner.log").write_text("boom\n")
+    (bundle / "anchors.json").write_text('{"funded_txs": ["0x123"]}')
+    (bundle / "sweep.json").write_text('{"status": "FAIL"}')
+    (bundle / "hygiene.json").write_text('{"status": "INCOMPLETE"}')
 
     target = qa.seal_mainnet_intent_failure(store=store, catalog_path=catalog_path, bundle=bundle)
 
@@ -4365,3 +4375,153 @@ def test_mainnet_failure_seal_retracts_the_cell_from_a_failed_bundle(
     assert summary["network"] == "mainnet"
     assert (target / "run.log").is_file(), "runner.log must reach the retraction as run.log"
     assert target.name.endswith("-retraction")
+    envelope = json.loads((target / "failure-envelope.json").read_text())
+    assert envelope["observations"]["sweep.json"] == "PRESERVED"
+    assert (target / "failure-bundle/anchors.json").is_file()
+    assert "failure-bundle/hygiene.json" in (target / "report.html").read_text()
+    manifest = json.loads((target / "manifest.json").read_text())
+    assert any(item["relpath"].endswith("failure-bundle/sweep.json") for item in manifest["artifacts"])
+
+
+def test_false_balance_predicate_is_sealable_failure_not_discarded_evidence(modules, tmp_path: Path) -> None:
+    qa, _, _ = modules
+    payload = _aave_supply_receipt_payload(exec_path="eoa")
+    intent = {key: payload[key] for key in ("intent_cell_id", "protocol", "intent", "chain", "network", "exec_path")}
+    payload["balance_checks"] = {"wallet_conservation": False}
+    payload["layers"]["balances"] = "FAIL"
+    grade, layers, _, _ = qa._validate_receipt_payload(
+        payload, source=tmp_path / "receipt.json", intent=intent, network="anvil", contract_profile="lending.v1"
+    )
+    assert grade == "fail"
+    assert layers["balances"] == "FAIL"
+    payload["layers"]["balances"] = "PASS"
+    with pytest.raises(ValueError, match="balance PASS is not entailed"):
+        qa._validate_receipt_payload(
+            payload, source=tmp_path / "receipt.json", intent=intent, network="anvil", contract_profile="lending.v1"
+        )
+
+
+@pytest.mark.parametrize("key", ["minimum_policy", "value_reconciliation"])
+def test_composite_lp_close_cannot_change_policy_or_principal_between_receipts(modules, key):
+    qa, _, _ = modules
+    receipt_set = {"decrease": "0x" + "11" * 32, "collect": "0x" + "22" * 32, "burn": "0x" + "33" * 32}
+    receipts = [
+        {
+            "receipt_role": role,
+            "transaction_hash": tx_hash,
+            "semantic_verification": {
+                "profile": "v3_lp.v2",
+                "receipt_set": receipt_set,
+                "facts": {"minimum_policy": {"minima": [1, 2]}, "value_reconciliation": {"principal": [3, 4]}},
+            },
+        }
+        for role, tx_hash in receipt_set.items()
+    ]
+    qa._validate_composite_semantic_receipts(receipts, nodeid="consistent-close")
+    receipts[1]["semantic_verification"]["facts"][key] = {"forged": True}
+    with pytest.raises(ValueError, match=key):
+        qa._validate_composite_semantic_receipts(receipts, nodeid="forged-collect")
+
+
+def test_lp_contract_upgrade_changes_catalog_identity_but_line_moves_do_not(modules):
+    qa, _, _ = modules
+    old = _intent_catalog_stub(contract="v3_lp.v1")
+    upgraded = _intent_catalog_stub(contract="v3_lp.v2")
+    moved = _intent_catalog_stub(contract="v3_lp.v2", line=999)
+    assert qa.intent_catalog_fingerprint(old) != qa.intent_catalog_fingerprint(upgraded)
+    assert qa.intent_catalog_fingerprint(upgraded) == qa.intent_catalog_fingerprint(moved)
+
+
+def test_canary_attestation_binds_redacted_sealed_junit(modules, catalog_path, tmp_path):
+    from xml.sax.saxutils import quoteattr
+
+    from qa_lab.qa_canary import MESSAGE, health
+
+    qa, _, _ = modules
+    store = tmp_path / "store"
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    plan = qa.intent_cell_plan(cell_id="intent.harness_control.arbitrum.CANARY.anvil.safe")
+    junit = workspace / "results.xml"
+    junit.write_text(
+        '<testsuite><testcase classname="tests.qa_lab.test_harness_canary" '
+        'name="test_harness_canary_must_fail_safe">'
+        f"<failure message={quoteattr('AssertionError: ' + MESSAGE)}/>"
+        "<system-out>RPC https://rpc.example.invalid/private-token</system-out></testcase></testsuite>"
+    )
+    stamp = datetime(2026, 9, 5, 12, tzinfo=UTC)
+    target = qa.seal_intent_harness_failure(
+        store=store,
+        catalog_path=catalog_path,
+        plan=plan,
+        run_id="redacted-canary",
+        workspace=workspace,
+        returncode=1,
+        sdk=TEST_SDK,
+        now=stamp,
+    )
+    assert junit.read_bytes() != (target / "results.xml").read_bytes()
+    assert "private-token" not in (target / "results.xml").read_text()
+    records = qa._load_history_module().read_history(store)
+    qa._load_history_module().verify_history(store)
+    assert health(store=store, catalog_sha256=plan["catalog_sha256"], records=records, now=stamp)[plan["cell_id"]][
+        "healthy"
+    ]
+
+
+@pytest.mark.parametrize("result", [[], "scalar", 7])
+def test_mainnet_failure_result_requires_an_object(modules, catalog_path, tmp_path, result):
+    qa, _, _ = modules
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "plan.json").write_text(json.dumps({"cell_id": "intent.uniswap_v3.arbitrum.SWAP.mainnet.eoa"}))
+    (bundle / "result.json").write_text(json.dumps(result))
+    with pytest.raises(ValueError, match="result.json must contain an object"):
+        qa.seal_mainnet_intent_failure(store=tmp_path / "store", catalog_path=catalog_path, bundle=bundle)
+
+
+@pytest.mark.parametrize(
+    "raw_status,filter_id", [("FAIL", "fail"), ("ERROR", "index_unverified"), ("MYSTERY", "index_unverified")]
+)
+def test_intent_status_filter_keeps_complete_fail_and_unknown_rows_visible(modules, raw_status, filter_id):
+    import subprocess
+
+    qa, _, _ = modules
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node is required to execute the dashboard status-filter regression")
+    cell = {"id": "intent.uni.arbitrum.SWAP", "protocol": "uni", "intent": "SWAP", "chain": "arbitrum"}
+    cell_id = cell["id"] + ".anvil.safe"
+    data = {
+        "catalog": [cell],
+        "chains": ["arbitrum"],
+        "catalog_sha256": "catalog",
+        "eligibility": {"authenticated_cell_ids": [cell_id]},
+        "index": {
+            cell_id: {
+                "status": raw_status,
+                "evidence_status": "COMPLETE",
+                "catalog_sha256": "catalog",
+                "attribution_mode": "exact-runtime",
+                "contract_status": "VERIFIED",
+                "provenance_status": "VERIFIED",
+            }
+        },
+    }
+    script = (
+        """
+const root={innerHTML:'',children:[],appendChild(node){this.children.push(node.innerHTML)}};
+const document={getElementById(){return root},createElement(){return {innerHTML:''}}};
+const location={search:''};
+function triageMarker(){return ''}
+"""
+        + f"const INTENT_DATA={json.dumps(data)};const INTENT_STATUS={qa._intent_status_js()};\n"
+    )
+    script += qa.INTENT_JS.split("if(!openLinkedCell())render();", 1)[0]
+    script += f"\nstatusFilter={json.dumps(filter_id)};renderMatrices();console.log(JSON.stringify({{state:cellState(catalog[0]),html:root.children.join('')+root.innerHTML}}));"
+    result = subprocess.run([node, "-e", script], text=True, capture_output=True, check=True)
+    rendered = json.loads(result.stdout)
+    assert rendered["state"]["id"] == filter_id
+    assert f'data-cell="{cell_id}"' in rendered["html"]
+    assert "No Intent rows match" not in rendered["html"]
+    assert rendered["state"]["key"] != "pass"

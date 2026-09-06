@@ -67,7 +67,7 @@ class TestUniswapV3ExactLPProofs:
             rpc_url=str(web3.provider.endpoint_uri),
         )
 
-    @pytest.mark.qa_proof(protocol="uniswap_v3", contract="v3_lp.v1")
+    @pytest.mark.qa_proof(protocol="uniswap_v3", contract="v3_lp.v2")
     @pytest.mark.intent(IntentType.LP_OPEN)
     @pytest.mark.asyncio
     async def test_lp_open_exact_safe(
@@ -90,7 +90,7 @@ class TestUniswapV3ExactLPProofs:
             anvil_eth_call_adapter,
         )
 
-    @pytest.mark.qa_proof(protocol="uniswap_v3", contract="v3_lp.v1")
+    @pytest.mark.qa_proof(protocol="uniswap_v3", contract="v3_lp.v2")
     @pytest.mark.no_zodiac(reason="Exact-axis QA parity: exercise the same LP_OPEN contract through EOA")
     @pytest.mark.intent(IntentType.LP_OPEN)
     @pytest.mark.asyncio
@@ -114,7 +114,7 @@ class TestUniswapV3ExactLPProofs:
             anvil_eth_call_adapter,
         )
 
-    @pytest.mark.qa_proof(protocol="uniswap_v3", contract="v3_lp.v1")
+    @pytest.mark.qa_proof(protocol="uniswap_v3", contract="v3_lp.v2")
     @pytest.mark.intent(IntentType.LP_CLOSE)
     @pytest.mark.asyncio
     async def test_lp_close_exact_safe(
@@ -137,7 +137,7 @@ class TestUniswapV3ExactLPProofs:
             anvil_eth_call_adapter,
         )
 
-    @pytest.mark.qa_proof(protocol="uniswap_v3", contract="v3_lp.v1")
+    @pytest.mark.qa_proof(protocol="uniswap_v3", contract="v3_lp.v2")
     @pytest.mark.no_zodiac(reason="Exact-axis QA parity: exercise the same LP_CLOSE contract through EOA")
     @pytest.mark.intent(IntentType.LP_CLOSE)
     @pytest.mark.asyncio
