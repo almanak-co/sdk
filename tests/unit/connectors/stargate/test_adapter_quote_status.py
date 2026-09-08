@@ -108,7 +108,7 @@ class TestGetQuote:
         assert quote.relayer_fee_amount == Decimal("0.6")
         # LZ fee: arbitrum base 0.001 * 3x safety = 0.003 (gas portion).
         assert quote.gas_fee_amount == Decimal("0.003")
-        assert quote.fee_amount == Decimal("0.603")
+        assert quote.fee_amount == Decimal("0.6")
         # Output only subtracts the token-denominated protocol fee.
         assert quote.output_amount == Decimal("999.4")
         assert quote.estimated_time_seconds == 60

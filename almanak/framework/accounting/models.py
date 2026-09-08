@@ -682,8 +682,8 @@ class PredictionAccountingEvent:
     # Per-trade fields. shares_delta and usd_delta are the absolute trade
     # sizes (always >= 0); the sign is implied by event_type. realized_pnl_usd
     # is populated only on SELL/REDEEM (None on BUY).
-    shares_delta: Decimal
-    usd_delta: Decimal
+    shares_delta: Decimal | None
+    usd_delta: Decimal | None
     realized_pnl_usd: Decimal | None
     # Post-trade aggregate snapshot (used by reconstruct_from_events).
     position_size_after: Decimal
@@ -692,18 +692,15 @@ class PredictionAccountingEvent:
     # (gas + fees folded into the fully-loaded basis). Replay must restore this
     # alongside size/basis or a cross-restart SELL/REDEEM prices realized PnL
     # against bare basis and overstates it by Σ loaded_extras. Decimal("0") =
-    # measured zero / no extras; legacy payloads without the field default to 0.
-    position_loaded_extras_after: Decimal = Decimal("0")
+    # measured zero / no extras; None = the adjustment is unmeasured. Legacy
+    # payloads without the field default to 0.
+    position_loaded_extras_after: Decimal | None = Decimal("0")
     gas_usd: Decimal | None = None
     confidence: AccountingConfidence = AccountingConfidence.HIGH
     unavailable_reason: str = ""
     schema_version: int = 1
-    # VIB-4166 (T6) — see module docstring for bump policy.
-    # #2146: bumped 1→2 alongside PRIMITIVE_VERSIONS[Primitive.PREDICTION] (the
-    # payload now carries position_loaded_extras_after). Mirrors the
-    # SwapAccountingEvent precedent (VIB-4905) so a directly-serialized event's
-    # default matches the writer-stamped per-primitive value.
-    primitive_version: int = 2
+    # Unmeasured trade deltas and loaded costs serialize as null.
+    primitive_version: int = 3
 
     def to_payload_json(self) -> str:
         def _enc(v: Any) -> Any:
@@ -749,8 +746,8 @@ class PredictionAccountingEvent:
             market_id=d.get("market_id", ""),
             outcome=d.get("outcome", ""),
             intent_type=d.get("intent_type", ""),
-            shares_delta=Decimal(d["shares_delta"]) if d.get("shares_delta") is not None else Decimal("0"),
-            usd_delta=Decimal(d["usd_delta"]) if d.get("usd_delta") is not None else Decimal("0"),
+            shares_delta=_dec(d.get("shares_delta")),
+            usd_delta=_dec(d.get("usd_delta")),
             realized_pnl_usd=_dec(d.get("realized_pnl_usd")),
             position_size_after=(
                 Decimal(d["position_size_after"]) if d.get("position_size_after") is not None else Decimal("0")
@@ -758,11 +755,9 @@ class PredictionAccountingEvent:
             position_basis_after=(
                 Decimal(d["position_basis_after"]) if d.get("position_basis_after") is not None else Decimal("0")
             ),
-            # #2146: legacy payloads (pre-field) default to Decimal("0").
+            # Legacy omission means zero; explicit null preserves unknown costs.
             position_loaded_extras_after=(
-                Decimal(d["position_loaded_extras_after"])
-                if d.get("position_loaded_extras_after") is not None
-                else Decimal("0")
+                _dec(d.get("position_loaded_extras_after")) if "position_loaded_extras_after" in d else Decimal("0")
             ),
             gas_usd=_dec(d.get("gas_usd")),
             confidence=AccountingConfidence(d.get("confidence", AccountingConfidence.HIGH.value)),

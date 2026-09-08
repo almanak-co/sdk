@@ -310,6 +310,34 @@ class MyStrategy(IntentStrategy):
 
 Si votre stratégie détient plusieurs types de positions, fermez-les dans l'ordre : **perpétuels -> emprunts -> fournitures -> LPs -> tokens**. Consultez le [CLI de démontage](cli/strat-teardown.md) pour savoir comment les opérateurs déclenchent le démontage.
 
+## Backtest de pools exacts et de marchés perpétuels
+
+Si votre configuration indique déjà le pool (`pool` ou `swap_pool`) ou le marché perpétuel (`market`
+et `market_address`), le backtester s'en sert comme indice pour charger l'historique du marché avant le premier tick.
+Cet indice est facultatif et ne peut jamais faire échouer une exécution : tout élément manquant est résolu la
+première fois qu'un intent ou une lecture le désigne.
+
+Écrivez votre stratégie pour l'exécution en production et backtestez le même code. Le
+backtester détermine le pool ou le marché perpétuel que vous négociez à partir des intents que vous
+émettez — le `pool` de `Intent.lp_open()` et le `market` de
+`Intent.perp_open()` — et non à partir des clés de configuration ; vous pouvez donc nommer vos
+champs de configuration comme vous le souhaitez.
+
+- L'adresse exacte d'un pool est authentifiée à partir de l'état archivé la première fois qu'un
+  intent LP la désigne (paire de tokens, niveau de frais et validation aller-retour par la factory). Si
+  l'archive ne peut pas prouver le pool, l'intent est rejeté avec
+  `POOL_METADATA_UNAVAILABLE` ; aucun autre pool n'est utilisé silencieusement.
+  Les pools symboliques (`"WETH/USDC/500"`) fonctionnent également.
+- L'adresse d'un marché GMX est résolue à l'aide du catalogue du protocole, puis son historique
+  de bougies et de funding est chargé la première fois qu'un intent perpétuel la désigne.
+- `market.twap(...)` et les lectures d'analyse de pools qui désignent un pool exact récupèrent son
+  historique en ligne à la première utilisation, comme une RPC en production.
+
+La déclaration préalable des cibles est facultative. Implémentez
+`get_backtest_pool_state_targets()` (ou définissez un attribut `backtest_pool_state_targets`)
+et `backtest_perp_price_history_targets()` si vous souhaitez que le contrôle de disponibilité
+les vérifie avant le début de l'exécution.
+
 ## Génération du manifeste de permissions (portefeuilles Safe)
 
 Lors du déploiement d'une stratégie via un portefeuille Safe avec des restrictions Zodiac Roles, l'agent a besoin d'un ensemble explicite de permissions de contrats. Le SDK peut générer ce manifeste automatiquement en inspectant quels contrats et sélecteurs de fonctions les intents de votre stratégie compilent :

@@ -51,8 +51,10 @@ from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import BridgeIntent
 from almanak.framework.intents.compiler import IntentCompiler
 from almanak.framework.intents.vocabulary import IntentType
+from tests.intents._stargate_helpers import assert_stargate_native_fee
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
+    AnvilEthCallAdapter,
     format_token_amount,
     get_token_balance,
     get_token_decimals,
@@ -165,6 +167,7 @@ class TestStargateBridgeIntent:
             wallet_address=funded_wallet,
             price_oracle=price_oracle,
             rpc_url=anvil_rpc_url,
+            gateway_client=AnvilEthCallAdapter(web3),
         )
 
         print("Compiling BridgeIntent to ActionBundle...")
@@ -229,19 +232,7 @@ class TestStargateBridgeIntent:
             f"got {encoded_dst_eid}"
         )
 
-        # Native fee (LZ messaging) must be attached as tx value for ERC-20 bridges
-        # and must be within a sane bound. The Stargate adapter applies a 3x
-        # safety multiplier on a base fee (~0.003 ETH source-chain default)
-        # plus a size bump for transfers >1e24 wei; for a 5 USDC bridge that
-        # budget is ~0.01 ETH. We cap at 0.1 ETH to catch a class of bugs
-        # where the compiler accidentally sets value to the bridged amount.
-        deposit_value = int(deposit_tx.get("value", 0))
-        assert deposit_value > 0, "Stargate deposit must carry a nonzero native value (LayerZero fee)"
-        max_reasonable_fee_wei = int(Decimal("0.1") * Decimal(10**18))
-        assert deposit_value < max_reasonable_fee_wei, (
-            f"Stargate native fee looks unreasonable: {deposit_value} wei >= {max_reasonable_fee_wei} wei "
-            f"(0.1 ETH). Possible compiler bug setting value to the bridged token amount."
-        )
+        assert_stargate_native_fee(web3, deposit_tx)
 
         metadata = bundle.metadata
         assert metadata["bridge"].lower() == "stargate", f"Expected Stargate bridge, got {metadata['bridge']}"

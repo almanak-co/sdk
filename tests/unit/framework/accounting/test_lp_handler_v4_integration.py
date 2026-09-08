@@ -19,8 +19,9 @@ import re
 import pytest
 
 from almanak.framework.accounting.category_handlers.lp_handler import handle_lp
-from almanak.framework.execution.extracted_data import LPCloseData, LPOpenData
+from almanak.framework.accounting.models import AccountingConfidence
 from almanak.framework.data.tokens.exceptions import TokenNotFoundError
+from almanak.framework.execution.extracted_data import LPCloseData, LPOpenData
 
 POOL_ID_32_BYTE = "0x" + "be" * 32
 POOL_ID_REGEX = re.compile(r"^0x[0-9a-f]{64}$")
@@ -420,6 +421,21 @@ class TestV4RealignTokenPair:
         lp_data = {"currency0": self.WETH, "currency1": self.USDC}
         assert self._realign()(lp_data, "polygon", "USDC", "WETH") == ("WETH", "USDC", True)
 
+    @pytest.mark.parametrize("data_cls", [LPOpenData, LPCloseData], ids=["open", "close"])
+    def test_v4_native_zero_currency_resolves_to_chain_native(self, monkeypatch, data_cls):
+        """V4's zero-address Currency is a measured native identity, not a miss."""
+        from almanak.framework.data.tokens.defaults import NATIVE_SENTINEL
+
+        zero_address = "0x0000000000000000000000000000000000000000"
+        usdt = "0x" + "33" * 20
+        self._patch_resolver(monkeypatch, {NATIVE_SENTINEL: "BNB", usdt: "USDT"}, chain="bsc")
+        if data_cls is LPOpenData:
+            lp_data = data_cls(position_id=1, currency0=zero_address, currency1=usdt)
+        else:
+            lp_data = data_cls(currency0=zero_address, currency1=usdt)
+
+        assert self._realign()(lp_data, "bsc", "BNB", "USDT") == ("BNB", "USDT", True)
+
     def test_missing_currency_returns_inputs_unchanged(self, monkeypatch):
         """V3 / single-sided opens carry no currency pair → pass through, NOT realigned."""
         self._patch_resolver(monkeypatch, {})
@@ -532,7 +548,8 @@ class TestV4ResolverFailureNoLongerShipsLabelOrder:
 
     USDC_ADDR = "0x" + "11" * 20
     WETH_ADDR = "0x" + "cc" * 20
-    DECIMALS = {"USDC": 6, "WETH": 18}
+    DAI_ADDR = "0x" + "33" * 20
+    DECIMALS = {"USDC": 6, "WETH": 18, "DAI": 18}
 
     # The G6-sweep magnitudes, in the receipt's own slot order (slot 0 = USDC).
     USDC_RAW = 2_185_779  # 6 dp -> 2.185779 USDC
@@ -557,7 +574,7 @@ class TestV4ResolverFailureNoLongerShipsLabelOrder:
 
         from almanak.framework.data.tokens.exceptions import TokenNotFoundError
 
-        book = {"USDC": self.USDC_ADDR, "WETH": self.WETH_ADDR}
+        book = {"USDC": self.USDC_ADDR, "WETH": self.WETH_ADDR, "DAI": self.DAI_ADDR}
         addresses = {v.lower() for v in book.values()}
 
         class _FakeResolver:
@@ -627,12 +644,37 @@ class TestV4ResolverFailureNoLongerShipsLabelOrder:
             token1=t1,
             v4_realigned=v4_realigned,
         )
-        assert out != ("WETH", "USDC"), (
+        assert out[:2] != ("WETH", "USDC"), (
             "label order shipped against PoolKey-ordered amounts — VIB-6476 regression"
         )
-        assert out == ("USDC", "WETH"), (
+        assert out == ("USDC", "WETH", False), (
             "the receipt observed USDC in slot 0; placement must put it there"
         )
+
+    @pytest.mark.parametrize("address_lookup", ["none", "raise"])
+    @pytest.mark.expects_resolver_defect
+    def test_unmatched_observed_identity_is_unmeasured(self, monkeypatch, address_lookup: str):
+        """If observed slots do not match the declared pair, do not book raw
+        amounts using the declared pair's otherwise-resolvable decimals."""
+        from almanak.framework.observability.ledger import serialize_extracted_data
+
+        self._patch_resolver(monkeypatch, address_lookup=address_lookup)
+        ledger = _ledger_row_open(protocol="uniswap_v4", extracted_data={})
+        ledger["chain"] = "ethereum"
+        ledger["token_in"] = "DAI"
+        ledger["token_out"] = "WETH"
+        ledger["extracted_data_json"] = serialize_extracted_data({"lp_open_data": self._lp_open()})
+        ledger["price_inputs_json"] = json.dumps({"DAI": "1", "WETH": "1917"})
+        outbox = _outbox_row(position_key=f"lp:uniswap_v4:ethereum:{WALLET}:{POOL_ID_32_BYTE}")
+
+        event = handle_lp(outbox, ledger)
+
+        assert event is not None
+        assert event.amount0 is None
+        assert event.amount1 is None
+        assert event.cost_basis_usd is None
+        assert event.confidence == AccountingConfidence.UNAVAILABLE
+        assert "identity unresolved" in event.unavailable_reason
 
     @pytest.mark.parametrize("address_lookup", ["none", "raise"])
     @pytest.mark.expects_resolver_defect

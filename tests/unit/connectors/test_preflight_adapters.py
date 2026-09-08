@@ -272,7 +272,7 @@ def _bridge_ctx(native_balance_wei):
         chain="arbitrum",
         wallet_address="0x" + "1" * 40,
         rpc_url=None,
-        gateway_client=None,
+        gateway_client=SimpleNamespace(is_connected=True),
         token_resolver=None,
         services=services,
     )
@@ -294,7 +294,7 @@ def _bridge_intent():
 
 def _stub_selection(bridge_name, lz_fee_wei):
     quote = SimpleNamespace(route_data={"lz_fee_wei": str(lz_fee_wei)}, gas_fee_amount=None)
-    bridge = SimpleNamespace(name=bridge_name)
+    bridge = SimpleNamespace(name=bridge_name, refresh_quote_for_execution=lambda quote, recipient, eth_call: quote)
     return SimpleNamespace(is_success=True, bridge=bridge, quote=quote)
 
 
@@ -351,7 +351,7 @@ def _native_bridge_ctx(native_balance_wei):
         chain="arbitrum",
         wallet_address="0x" + "1" * 40,
         rpc_url=None,
-        gateway_client=None,
+        gateway_client=SimpleNamespace(is_connected=True),
         token_resolver=None,
         services=services,
     )

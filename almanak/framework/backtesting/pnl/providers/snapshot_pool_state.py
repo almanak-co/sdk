@@ -352,9 +352,15 @@ def fetch_historical_pool_state_points(
     targets = list(range(start_ts, end_ts + 1, interval_secs))
     normalized = (protocol.strip().lower(), chain.strip().lower(), pool_address.strip().lower())
     points: list[HistoricalPoolStatePoint] = []
-    for offset in range(0, len(targets), _MAX_POINTS_PER_REQUEST):
-        chunk = targets[offset : offset + _MAX_POINTS_PER_REQUEST]
-        points.extend(_fetch_pool_state_page(client, gateway_pb2, normalized, chunk, interval_secs))
+    from almanak.framework.backtesting.pnl.progress import loading_batches
+
+    with loading_batches(
+        "pool_state", (len(targets) + _MAX_POINTS_PER_REQUEST - 1) // _MAX_POINTS_PER_REQUEST
+    ) as batch_done:
+        for offset in range(0, len(targets), _MAX_POINTS_PER_REQUEST):
+            chunk = targets[offset : offset + _MAX_POINTS_PER_REQUEST]
+            points.extend(_fetch_pool_state_page(client, gateway_pb2, normalized, chunk, interval_secs))
+            batch_done()
     return points
 
 

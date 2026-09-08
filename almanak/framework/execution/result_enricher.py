@@ -1041,7 +1041,8 @@ class ResultEnricher:
         present:
 
           - ``setup_tx_count`` (int): number of approval / wrap txs the gateway
-            submitted before this order.
+            submitted before this order. An authoritative empty list records
+            zero count and zero native/USD gas without needing a price.
           - ``gas_cost_native_wei`` (Decimal): aggregate MATIC wei spent on
             setup transactions. Present only when every ``setup_txs`` entry
             carries a parseable ``total_cost_wei``; omitted (unmeasured)
@@ -1062,8 +1063,12 @@ class ResultEnricher:
         """
         extracted: set[str] = set()
 
-        setup_txs = getattr(prediction_fill, "setup_txs", None) or ()
-        if setup_txs:
+        setup_txs = getattr(prediction_fill, "setup_txs", None)
+        if setup_txs is not None and len(setup_txs) == 0:
+            # An authoritative empty setup list measures zero gas without a price.
+            result.extracted_data.update(setup_tx_count=0, gas_cost_native_wei=Decimal("0"), gas_cost_usd=Decimal("0"))
+            extracted.update(("setup_tx_count", "gas_cost_native_wei", "gas_cost_usd"))
+        elif setup_txs:
             result.extracted_data["setup_tx_count"] = len(setup_txs)
             extracted.add("setup_tx_count")
 

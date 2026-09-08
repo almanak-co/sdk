@@ -3954,8 +3954,8 @@ class SQLiteStore:
             await self.initialize()
 
         def _sync_sum() -> Decimal:
-            # Sum Decimal text in Python because SQLite REAL would silently lose accounting precision.
-
+            # Stream Decimal text: SQLite REAL loses precision, while fetchall()
+            # allocates one retained Python row per ledger entry before summing.
             with self._db_lock:
                 cursor = self._conn.execute(  # type: ignore[union-attr]
                     """
@@ -3965,16 +3965,16 @@ class SQLiteStore:
                     """,
                     (deployment_id,),
                 )
-                rows = cursor.fetchall()
-            total = Decimal("0")
-            for row in rows:
-                raw = row["gas_usd"]
-                if raw is None or raw == "":
-                    # Missing gas contributes zero without dropping the ledger row.
-
-                    continue
-                total += Decimal(str(raw))
-            return total
+                total = Decimal("0")
+                try:
+                    for row in cursor:
+                        raw = row["gas_usd"]
+                        if raw is None or raw == "":
+                            continue
+                        total += Decimal(str(raw))
+                    return total
+                finally:
+                    cursor.close()
 
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _sync_sum)

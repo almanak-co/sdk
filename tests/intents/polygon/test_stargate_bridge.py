@@ -51,8 +51,10 @@ from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import BridgeIntent
 from almanak.framework.intents.compiler import IntentCompiler
 from almanak.framework.intents.vocabulary import IntentType
+from tests.intents._stargate_helpers import assert_stargate_native_fee
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
+    AnvilEthCallAdapter,
     format_token_amount,
     get_token_balance,
     get_token_decimals,
@@ -165,6 +167,7 @@ class TestStargateBridgeIntent:
             wallet_address=funded_wallet,
             price_oracle=price_oracle,
             rpc_url=anvil_rpc_url,
+            gateway_client=AnvilEthCallAdapter(web3),
         )
 
         print("Compiling BridgeIntent to ActionBundle...")
@@ -229,28 +232,7 @@ class TestStargateBridgeIntent:
             f"got {encoded_dst_eid}"
         )
 
-        # Native fee (LZ messaging) must be attached as tx value for ERC-20 bridges
-        # and must be within a sane bound. The Stargate adapter applies a 3x
-        # safety multiplier on the route base fee
-        # (`_estimate_layerzero_fee`); for polygon -> arbitrum the route base
-        # is 0.5 POL so the produced value is 1.5 POL = 1.5e18 wei.
-        #
-        # Cap: 3 POL (3e18 wei). The cap is intended to catch a class of
-        # compiler bugs that misread the bridged USDC amount as a
-        # native-decimal value: `value = bridge_amount * 10^18 = 5 POL =
-        # 5e18 wei` would trip a `value < 3e18` check, while the legitimate
-        # 1.5 POL fee sits comfortably under it. POL's per-unit price
-        # (~$0.30 in mid-2026) means a 3 POL bound is ~$1 -- still tiny
-        # compared to the ~$15k a 5 ETH bug-bound would represent, but
-        # the right shape for Polygon's expensive-in-native-units LZ fee
-        # economics.
-        deposit_value = int(deposit_tx.get("value", 0))
-        assert deposit_value > 0, "Stargate deposit must carry a nonzero native value (LayerZero fee)"
-        max_reasonable_fee_wei = int(Decimal("3") * Decimal(10**18))
-        assert deposit_value < max_reasonable_fee_wei, (
-            f"Stargate native fee looks unreasonable: {deposit_value} wei >= {max_reasonable_fee_wei} wei "
-            f"(3 POL). Possible compiler bug setting value to the bridged token amount."
-        )
+        assert_stargate_native_fee(web3, deposit_tx)
 
         metadata = bundle.metadata
         assert metadata["bridge"].lower() == "stargate", f"Expected Stargate bridge, got {metadata['bridge']}"

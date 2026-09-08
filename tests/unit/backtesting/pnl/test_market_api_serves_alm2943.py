@@ -31,6 +31,7 @@ from almanak.framework.backtesting.pnl.engine import (
     create_market_snapshot_from_state,
 )
 from almanak.framework.backtesting.pnl.indicator_engine import BacktestIndicatorEngine
+from almanak.framework.data.pools.descriptor import ResolvedPoolDescriptor
 from almanak.framework.market.errors import (
     PoolPriceUnavailableError,
     SlippageEstimateUnavailableError,
@@ -57,6 +58,33 @@ USDC_USD = D("1")
 # served price is USDC expressed in WETH units (matches the live reader's
 # "price of token0 in terms of token1" contract).
 EXPECTED_PAIR_RATIO = USDC_USD / WETH_USD
+
+
+def _resolved_pool_descriptor(
+    *,
+    chain: str = CHAIN,
+    address: str = UNI_V3_POOL_500,
+    token0: str = USDC_ADDR,
+    token1: str = WETH_ADDR,
+    token0_decimals: int = 6,
+    token1_decimals: int = 18,
+    factory: str = "0x1f98431c8ad98523631ae4a59f267346ea31f984",
+) -> ResolvedPoolDescriptor:
+    return ResolvedPoolDescriptor(
+        chain=chain,
+        protocol="uniswap_v3",
+        address=address,
+        token0=token0,
+        token1=token1,
+        token0_decimals=token0_decimals,
+        token1_decimals=token1_decimals,
+        fee_tier_units=500,
+        provenance="historical:test",
+        factory=factory,
+        discriminator_kind="fee_tier",
+        discriminator=500,
+        deployment_block=1,
+    )
 
 
 class _StubBacktester:
@@ -127,15 +155,56 @@ class TestPoolPricePairRatioProxy:
         assert a.value.price == b.value.price == EXPECTED_PAIR_RATIO
 
     def test_pool_address_scoped_known_pool_serves(self):
-        view = BacktestPoolPriceView(CHAIN, TOKEN_ADDRESSES)
+        view = BacktestPoolPriceView(
+            CHAIN,
+            TOKEN_ADDRESSES,
+            resolved_pool_descriptors=(_resolved_pool_descriptor(),),
+        )
         snapshot = _snapshot(pool_price_view=view)
 
         envelope = snapshot.pool_price(UNI_V3_POOL_500)
         assert envelope.value.price == EXPECTED_PAIR_RATIO
-        assert envelope.value.pool_address == UNI_V3_POOL_500
+        assert envelope.value.pool_address == UNI_V3_POOL_500.lower()
         assert envelope.value.fee_tier == 500
         # No unconfigured ledger entry — the accessor served.
         assert ("pool_price", "unconfigured") not in snapshot._critical_data_failures
+
+    def test_unknown_vnxau_pool_uses_only_job_descriptor(self, monkeypatch: pytest.MonkeyPatch):
+        from almanak.connectors._strategy_pool_reader_registry import POOL_READER_REGISTRY
+
+        pool = "0xaff8" + "0" * 36
+        usdc = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+        vnxau = "0xac3fe22294beaed9d1fd752323a6d06d12ff3098"
+        descriptor = _resolved_pool_descriptor(
+            chain="base",
+            address=pool,
+            token0=usdc,
+            token1=vnxau,
+            token0_decimals=6,
+            token1_decimals=18,
+            factory="0x33128a8fc17869897dce68ed026d694621f6fdfd",
+        )
+        # Any accidental fallback to enumerated connector pools fails this
+        # test immediately. VNXAU is served solely from the run's pinned map.
+        monkeypatch.setattr(POOL_READER_REGISTRY, "all", lambda: pytest.fail("static pool registry was consulted"))
+        view = BacktestPoolPriceView(
+            "base",
+            {"USDC": ("base", usdc), "VNXAU": ("base", vnxau)},
+            resolved_pool_descriptors=(descriptor,),
+        )
+        state = MarketState(
+            timestamp=TS,
+            prices={("base", usdc): D("1"), ("base", vnxau): D("2500")},
+            chain="base",
+        )
+        state.register_symbol_aliases({"USDC": ("base", usdc), "VNXAU": ("base", vnxau)})
+        view.bind(state, TS)
+
+        envelope = view.read_pool_price(pool, "base")
+
+        assert envelope.value.price == D("1") / D("2500")
+        assert envelope.value.pool_address == pool
+        assert envelope.value.liquidity is None
 
     def test_proxy_provenance_marked_and_warned_once(self, caplog):
         view = BacktestPoolPriceView(CHAIN, TOKEN_ADDRESSES)

@@ -847,7 +847,7 @@ def test_bootstrap_renders_empty_lab_with_all_four_views(modules, catalog_path: 
     accounting_page = store / "lab" / "accounting.html"
     assert accounting_page.is_file()
     accounting_html = accounting_page.read_text()
-    assert "Dedicated Accounting truth" in accounting_html
+    assert "Dedicated Accounting admission and observations" in accounting_html
     assert "Neither can create a Dedicated PASS" in accounting_html
     # The board still identifies itself, but through the destination map and the
     # lane switcher rather than a top-level tab of its own.
@@ -2290,157 +2290,55 @@ def test_books_index_preserves_last_pass_without_cross_painting_dedicated(
 
 
 def test_accounting_seal_is_immutable_fail_closed_and_repaints_lab(modules, catalog_path: Path, tmp_path: Path) -> None:
+    from tests.unit.scripts.test_accounting_admission import make_bundle
+
     qa, _, _ = modules
-    bundle = tmp_path / "accounting-row"
-    strategy = bundle / "strategy"
-    strategy.mkdir(parents=True)
-    (bundle / "status.json").write_text(
-        json.dumps(
-            {
-                "row_id": "lp-uniswap_v3-arbitrum",
-                "chain": "arbitrum",
-                "status": "PASS",
-            }
-        )
-    )
-    accountant = {
-        "scores": {"passed": 20, "failed": 1, "xfailed": 1, "total": 22},
-        "cell_details": [
-            {"id": "G1", "description": "Money trail", "status": "PASS", "diagnostic": "4 rows"},
-            {
-                "id": "G6",
-                "description": "Reconciliation",
-                "status": "FAIL",
-                "diagnostic": "gap=$0.42 > epsilon=$0.10",
-            },
-        ],
-        "g6_decomposition": {
-            "wallet_pnl_usd": "-1.00",
-            "component_pnl_usd": "-1.42",
-            "gap_usd": "0.42",
-            "epsilon_threshold_usd": "0.10",
-        },
-    }
-    (bundle / "accountant.json").write_text(json.dumps(accountant))
-    _write_dedicated_evidence(bundle)
-    (bundle / "strat.log").write_text("strategy evidence\n")
-    (bundle / "teardown.log").write_text("completed\n")
-    db = strategy / "almanak_state.db"
-    connection = sqlite3.connect(db)
-    connection.executescript(
-        """
-        CREATE TABLE transaction_ledger (
-          id TEXT, timestamp TEXT, cycle_id TEXT, intent_type TEXT, token_in TEXT,
-          amount_in TEXT, token_out TEXT, amount_out TEXT, effective_price TEXT,
-          slippage_bps TEXT, gas_used INTEGER, gas_usd TEXT, tx_hash TEXT,
-              chain TEXT, protocol TEXT, success INTEGER, error TEXT, deployment_id TEXT
-        );
-        CREATE TABLE accounting_events (
-          id TEXT, timestamp TEXT, cycle_id TEXT, event_type TEXT, position_key TEXT,
-              tx_hash TEXT, confidence TEXT, payload_json TEXT, schema_version INTEGER,
-              deployment_id TEXT
-        );
-        CREATE TABLE position_events (
-          id TEXT, timestamp TEXT, cycle_id TEXT, position_id TEXT, position_type TEXT,
-          event_type TEXT, protocol TEXT, chain TEXT, token0 TEXT, token1 TEXT,
-          amount0 TEXT, amount1 TEXT, value_usd TEXT, tick_lower INTEGER,
-          tick_upper INTEGER, liquidity TEXT, in_range INTEGER, fees_token0 TEXT,
-          fees_token1 TEXT, gas_usd TEXT, tx_hash TEXT, attribution_json TEXT
-        );
-        CREATE TABLE portfolio_snapshots (
-          id INTEGER, timestamp TEXT, cycle_id TEXT, iteration_number INTEGER,
-          total_value_usd TEXT, available_cash_usd TEXT, value_confidence TEXT,
-              positions_json TEXT, wallet_balances_json TEXT, deployment_id TEXT
-            );
-            CREATE TABLE portfolio_metrics (id INTEGER, deployment_id TEXT);
-        INSERT INTO transaction_ledger VALUES (
-          'l1','2026-08-04T00:00:00Z','cycle-1','LP_OPEN','WETH','1','USDC','2',
-              '2','0','100','0.1','0xabc','arbitrum','uniswap_v3',1,'','deployment:test'
-        );
-        INSERT INTO accounting_events VALUES (
-          'a1','2026-08-04T00:00:00Z','cycle-1','LP_OPEN','lp:key','0xabc','HIGH',
-              '{"cost_basis_usd":"2","fees_total_usd":"0"}',1,'deployment:test'
-        );
-        INSERT INTO position_events VALUES (
-          'p1','2026-08-04T00:00:00Z','cycle-1','42','LP','OPEN','uniswap_v3',
-          'arbitrum','WETH','USDC','1','2','2','-1','1','100',1,'0','0','0.1',
-          '0xabc','{}'
-        );
-        INSERT INTO portfolio_snapshots VALUES (
-          1,'2026-08-04T00:00:00Z','cycle-1',1,'2','98','HIGH',
-              '{"schema_version":1,"positions":[{"position_type":"LP"}],"metadata":{},"reconciliation":{}}','[]',
-              'deployment:test'
-            );
-            INSERT INTO portfolio_metrics VALUES (1, 'deployment:test');
-        """
-    )
-    connection.commit()
-    connection.close()
+    bundle, sdk = make_bundle(tmp_path)
     store = tmp_path / "store"
-    now = datetime(2026, 8, 4, 12, 30, tzinfo=UTC)
-
-    target = qa.seal_accounting_bundle(
-        bundle=bundle,
-        store=store,
-        catalog_path=catalog_path,
-        books_id="books.uniswap_v3.lp_simple.arbitrum",
-        network="anvil",
-        exec_path="eoa",
-        sdk_provenance=TEST_SDK,
-        now=now,
-    )
-
-    assert target.is_dir()
-    books_history = (store / "index" / "accounting_dedicated_runs.jsonl").read_text().splitlines()
-    assert [json.loads(row)["run_id"] for row in books_history] == [target.name]
-    assert (target / "almanak_state.db").is_file()
-    assert (target / "positions.json").is_file()
-    assert (target / "costs.json").is_file()
-    assert (target / "fees.json").is_file()
-    assert (target / "pnl.json").is_file()
-    fees = json.loads((target / "fees.json").read_text())
-    assert fees["gas_by_lane"]["iteration"] == {
-        "measured_usd": "0.1",
-        "measured_rows": 1,
-        "null_rows": 0,
-        "complete": True,
+    kwargs = {
+        "bundle": bundle,
+        "store": store,
+        "catalog_path": catalog_path,
+        "books_id": "books.matrix.lp-uniswap_v3-arbitrum",
+        "network": "anvil",
+        "exec_path": "eoa",
+        "sdk_provenance": sdk,
+        "run_id": "admission-regression",
     }
-    assert fees["gas_by_lane"]["unknown"]["measured_usd"] == "0"
-    assert json.loads((target / "pnl.json").read_text())["evidence_status"] == "MEASURED"
+    target = qa.seal_accounting_bundle(**kwargs)
+    manifest = json.loads((target / "manifest.json").read_text())
+    assert manifest["admission_version"] == 2
+    assert manifest["accountant_rescored"] is True
+    assert manifest["status"] != "PASS"
+    assert manifest["sdk_amount_reconciliation_status"] == "UNMEASURED"
+    fees = json.loads((target / "fees.json").read_text())
+    assert any(row["fee_type"] == "gas" and row["raw_amount"] for row in fees["rows"])
+    assert fees["gas_by_lane"]["teardown"]["measured_rows"] > 0
+    pnl = json.loads((target / "pnl.json").read_text())
+    assert pnl["evidence_status"] == "MEASURED"
     report = (target / "report.html").read_text()
-    assert "Sealed dedicated Accounting proof" in report
-    assert "dedicated stage contract" in report
-    assert "Money trail" in report
-    assert "Positions and lifecycle" in report
-    assert "PnL reconciliation" in report
-    assert "gap=$0.42" in report
-    # The snapshots table must carry the fixture's position count. The original
-    # guard was the bare cell position_count() rendered (`>1</td>`); the report
-    # formatting commits replaced that with _positions_cell(), which shows the
-    # same count plus its type breakdown — assert the same fact in that markup.
-    assert "<td>1<small>LP" in report
-    cell_id = "books.uniswap_v3.lp_simple.arbitrum.anvil.eoa"
-    latest = json.loads((store / "index" / qa.ACCOUNTING_DEDICATED_INDEX).read_text())[cell_id]
-    assert latest["source"] == "accounting"
-    assert latest["status"] == "FAIL"
-    assert latest["matrix_gate_status"] == "PASS"
-    assert latest["last_pass_at"] is None
-    assert latest["report_path"].endswith("/report.html")
-    lab = (store / "lab" / "accounting.html").read_text()
-    assert "Accounting Test report" in lab
-    assert "Latest dedicated proofs" in lab
-    assert "matrix row" in lab
+    assert "Money trail · transaction ledger" in report
+    assert "PnL reconciliation · G6" in report
+    assert "SDK amount comparison: UNMEASURED" in report
+    extracts = qa._accounting_rows(target / "almanak_state.db")
+    accountant = json.loads((target / "accountant.json").read_text())
+    for amount, expected in [(None, "—<small>unmeasured</small>"), (0, "raw units; decimals unmeasured")]:
+        extracts["positions"] = [{"token0": "TOKEN0", "amount0": "1", "token1": "TOKEN1", "amount1": amount}]
+        rendered = qa._render_accounting_report(manifest=manifest, accountant=accountant, extracts=extracts)
+        positions = rendered.split("Positions and lifecycle", 1)[1].split("</section>", 1)[0]
+        assert "<br>" in positions
+        assert expected in positions
+        if amount == 0:
+            assert positions.count("raw units; decimals unmeasured") == 2
+    assert (target / "recipe.json").is_file()
+    assert (target / "runtime.json").is_file()
+    assert "Positions and lifecycle" in (target / "report.html").read_text()
+    assert "NO RECIPE" in (store / "lab/accounting.html").read_text()
+    latest = json.loads((store / "index" / qa.ACCOUNTING_DEDICATED_INDEX).read_text())
+    assert latest["books.matrix.lp-uniswap_v3-arbitrum.anvil.eoa"]["status"] != "PASS"
+    assert latest["books.matrix.lp-uniswap_v3-arbitrum.anvil.eoa"]["last_pass_at"] is None
     with pytest.raises(FileExistsError, match="Immutable Accounting dedicated run"):
-        qa.seal_accounting_bundle(
-            bundle=bundle,
-            store=store,
-            catalog_path=catalog_path,
-            books_id="books.uniswap_v3.lp_simple.arbitrum",
-            network="anvil",
-            exec_path="eoa",
-            sdk_provenance=TEST_SDK,
-            now=now,
-        )
+        qa.seal_accounting_bundle(**kwargs)
 
 
 def test_plan_markdown_requires_quant_test_only(modules) -> None:

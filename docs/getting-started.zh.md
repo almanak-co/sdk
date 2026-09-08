@@ -306,6 +306,30 @@ class MyStrategy(IntentStrategy):
 
 如果您的策略持有多种头寸类型，请按以下顺序关闭：**永续合约 -> 借款 -> 供应 -> LP -> 代币**。参阅[拆卸 CLI](cli/strat-teardown.md)了解运营者如何触发拆卸。
 
+## 回测指定池和永续合约市场
+
+如果配置已经指定了池（`pool` 或 `swap_pool`）或永续合约市场（`market`
+和 `market_address`），回测器会将其作为提示，在第一个 tick 之前加载该交易场所的历史数据。
+该提示是可选的，绝不会导致回测失败：任何未能预先加载的目标，都会在 intent 或读取操作
+首次指定它时解析。
+
+请为实盘执行编写策略，并使用相同的代码进行回测。回测器通过策略发出的 intent
+了解其交易的池或永续合约市场——即 `Intent.lp_open()` 中的 `pool` 和
+`Intent.perp_open()` 中的 `market`——而不是通过配置键；因此配置字段可以任意命名。
+
+- 当 LP intent 首次指定某个池的准确地址时，系统会根据归档状态验证该地址
+  （代币对、费率层级以及 factory 往返验证）。如果归档无法证明该池，intent 将以
+  `POOL_METADATA_UNAVAILABLE` 被拒绝；系统绝不会静默回退到其他池。
+  符号形式的池（`"WETH/USDC/500"`）同样受支持。
+- GMX 市场地址通过交易场所目录解析；永续合约 intent 首次指定该地址时，
+  系统会加载其 K 线和资金费率历史。
+- `market.twap(...)` 以及指定准确池的池分析读取操作，会在首次使用时在线获取其历史数据，
+  与实盘 RPC 的行为一致。
+
+无需预先声明目标。如果希望就绪检查在回测开始前验证这些目标，请实现
+`get_backtest_pool_state_targets()`（或设置 `backtest_pool_state_targets` 属性）和
+`backtest_perp_price_history_targets()`。
+
 ## 生成权限清单（Safe 钱包）
 
 通过带有 Zodiac Roles 限制的 Safe 钱包部署策略时，代理需要一组明确的合约权限。SDK 可以通过检查策略的 intent 编译到哪些合约和函数选择器来自动生成此清单：

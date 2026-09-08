@@ -272,3 +272,63 @@ def test_compile_bridge_fails_cleanly_for_unsupported_route(monkeypatch: pytest.
     assert result.status == CompilationStatus.FAILED
     assert result.error is not None
     assert "No bridge supports this token/route" in result.error
+
+
+@pytest.mark.parametrize("available,native_balance", [(True, 10**20), (False, 10**20), (True, 10**16)])
+def test_stargate_compilation_requires_measured_gateway_fee(monkeypatch, available, native_balance):
+    from unittest.mock import Mock
+
+    from eth_abi import encode
+
+    from almanak.connectors.stargate.adapter import StargateBridgeAdapter
+
+    compiler = _make_compiler()
+    adapter = StargateBridgeAdapter()
+    quote = adapter.get_quote("USDC", Decimal("5"), "arbitrum", "optimism")
+    selection = BridgeSelectionResult(bridge=adapter, quote=quote, selection_reasoning="test")
+    monkeypatch.setattr(BridgeCompiler, "_build_selector", lambda self, ctx: _MockSelector(selection))
+    # Exercise the gateway-first service path, rather than mocking fee refresh itself.
+    gateway = Mock()
+    gateway.eth_call.return_value = "0x" + encode(["uint256", "uint256"], [10**16, 0]).hex() if available else None
+    gateway.query_allowance.return_value = 0
+    gateway.query_native_balance.return_value = native_balance
+    compiler._gateway_client = gateway
+    intent = BridgeIntent(token="USDC", amount=Decimal("5"), from_chain="arbitrum", to_chain="optimism")
+    result = compiler.compile(intent)
+    assert gateway.eth_call.called
+    assert all(call.kwargs["chain"] == "arbitrum" for call in gateway.eth_call.call_args_list)
+    if available and native_balance >= 12_000_000_000_000_000:
+        assert result.status == CompilationStatus.SUCCESS, result.error
+        assert int(result.action_bundle.transactions[-1]["value"]) == 12_000_000_000_000_000
+    else:
+        assert result.status == CompilationStatus.FAILED
+        expected = "STARGATE_INSUFFICIENT_NATIVE_FEE" if available else "Cannot measure Stargate native fee"
+        assert expected in result.error
+        assert result.action_bundle is None
+
+
+@pytest.mark.parametrize("gateway_internal", [False, True])
+def test_stargate_live_fee_blocks_framework_direct_rpc(monkeypatch, gateway_internal):
+    from unittest.mock import Mock
+
+    from eth_abi import encode
+
+    from almanak.connectors.stargate.adapter import StargateBridgeAdapter
+
+    compiler = _make_compiler()
+    compiler._config.gateway_internal_preflight = gateway_internal
+    adapter = StargateBridgeAdapter()
+    quote = adapter.get_quote("USDC", Decimal("5"), "arbitrum", "optimism")
+    selection = BridgeSelectionResult(bridge=adapter, quote=quote, selection_reasoning="test")
+    monkeypatch.setattr(BridgeCompiler, "_build_selector", lambda self, ctx: _MockSelector(selection))
+    call = Mock(return_value="0x" + encode(["uint256", "uint256"], [10**16, 0]).hex())
+    monkeypatch.setattr(compiler._queries, "eth_call", call)
+    intent = BridgeIntent(token="USDC", amount=Decimal("5"), from_chain="arbitrum", to_chain="optimism")
+    result = compiler.compile(intent)
+    if gateway_internal:
+        assert result.status == CompilationStatus.SUCCESS, result.error
+        assert call.called
+    else:
+        assert result.status == CompilationStatus.FAILED
+        assert "requires a gateway client" in result.error
+        call.assert_not_called()

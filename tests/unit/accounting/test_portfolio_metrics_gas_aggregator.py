@@ -310,10 +310,10 @@ async def test_happy_path_stamps_ok() -> None:
 @pytest.mark.benchmark
 @pytest.mark.asyncio
 async def test_aggregator_perf_10k_rows(sqlite_store: SQLiteStore) -> None:
-    """D2.5.2 perf: SUM over 10k mixed-empty rows completes in < 100 ms.
+    """D2.5.2 perf: exact sum over 10k mixed-empty rows completes in < 100 ms.
 
-    Pins the aggregator against accidental N+1 / per-row Python-loop regressions
-    (the SUM happens at SQLite level via a single CAST(NULLIF(gas_usd, '')) AS REAL).
+    Pins one streaming SELECT plus Decimal accumulation. SQLite REAL sums are
+    deliberately avoided because ledger text must retain Decimal precision.
     """
     import time
 
@@ -346,7 +346,7 @@ async def test_aggregator_perf_10k_rows(sqlite_store: SQLiteStore) -> None:
     # 1/3 of 10k rows have "0.0001" → ~3334 rows × 0.0001 = ~0.3334.
     expected = Decimal("0.0001") * (10_000 // 3 + (1 if 10_000 % 3 > 0 else 0))
     assert abs(total - expected) < Decimal("0.001"), f"SUM={total}, expected~{expected}"
-    assert elapsed_ms < 100, f"aggregator took {elapsed_ms:.1f}ms (> 100ms threshold — regressed to per-row loop?)"
+    assert elapsed_ms < 100, f"aggregator took {elapsed_ms:.1f}ms (> 100ms threshold)"
 
 
 @pytest.mark.asyncio
@@ -365,3 +365,24 @@ async def test_legacy_backend_without_aggregator() -> None:
     )
     assert metrics.gas_spent_usd == Decimal("0")
     assert snapshot.snapshot_metadata["gas_aggregator_status"] == "hosted_unsupported"
+
+
+@pytest.mark.asyncio
+async def test_gas_sum_preserves_decimal_precision_and_deployment_filter(sqlite_store: SQLiteStore) -> None:
+    values = ["9007199254740993.000000000001", "0.000000000002", "-9007199254740993", "", None]
+    for index, value in enumerate(values):
+        _insert_ledger_row(sqlite_store, _FakeLedgerRow(id=f"exact-{index}", deployment_id="exact", gas_usd=value))
+    _insert_ledger_row(sqlite_store, _FakeLedgerRow(id="other", deployment_id="other", gas_usd="99"))
+    assert await sqlite_store.sum_ledger_gas_usd("exact") == Decimal("0.000000000003")
+    assert await sqlite_store.sum_ledger_gas_usd("missing") == Decimal("0")
+
+
+@pytest.mark.asyncio
+async def test_gas_sum_releases_cursor_and_lock_after_invalid_decimal(sqlite_store: SQLiteStore) -> None:
+    from decimal import InvalidOperation
+
+    _insert_ledger_row(sqlite_store, _FakeLedgerRow(id="bad", deployment_id="bad", gas_usd="invalid"))
+    with pytest.raises(InvalidOperation):
+        await sqlite_store.sum_ledger_gas_usd("bad")
+    _insert_ledger_row(sqlite_store, _FakeLedgerRow(id="good", deployment_id="good", gas_usd="0.12"))
+    assert await sqlite_store.sum_ledger_gas_usd("good") == Decimal("0.12")

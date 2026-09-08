@@ -270,17 +270,17 @@
         "market_id": "",
         "outcome": "",
         "intent_type": "PREDICTION_BUY",
-        "shares_delta": "0",
-        "usd_delta": "0",
+        "shares_delta": null,
+        "usd_delta": null,
         "realized_pnl_usd": null,
         "position_size_after": "0",
         "position_basis_after": "0",
         "position_loaded_extras_after": "0",
         "gas_usd": null,
         "confidence": "UNAVAILABLE",
-        "unavailable_reason": "PREDICTION_BUY missing market_id, outcome, shares, usd_value on extracted_data",
+        "unavailable_reason": "PREDICTION_BUY missing/invalid market_id, outcome, shares, usd_value on extracted_data",
         "schema_version": 1,
-        "primitive_version": 2
+        "primitive_version": 3
       }
     }
   ]

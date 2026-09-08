@@ -124,6 +124,18 @@ class RunDataManifest:
         self.source_ladder: tuple[str, ...] = tuple(source_ladder)
         self._entries: dict[tuple[str, str, str, str, str, tuple[str, ...]], _ManifestAggregate] = {}
         self._dropped = 0
+        self._resolved_pool_descriptors: dict[tuple[str, str, str], dict[str, Any]] = {}
+
+    def pin_pool_descriptors(self, descriptors: Sequence[Any]) -> None:
+        """Attach immutable preflight pool identities to this run manifest."""
+        with self._lock:
+            for descriptor in descriptors:
+                payload = descriptor.to_dict()
+                key = (payload["chain"], payload["protocol"], payload["address"])
+                previous = self._resolved_pool_descriptors.get(key)
+                if previous is not None and previous != payload:
+                    raise ValueError(f"conflicting resolved pool descriptor for {':'.join(key)}")
+                self._resolved_pool_descriptors[key] = payload
 
     def record(
         self,
@@ -197,6 +209,10 @@ class RunDataManifest:
     def to_dict(self) -> dict[str, Any]:
         """JSON-safe manifest payload (str/int/list/None leaves only)."""
         entries = self.entries()
+        with self._lock:
+            descriptors = [
+                dict(self._resolved_pool_descriptors[key]) for key in sorted(self._resolved_pool_descriptors)
+            ]
         counts: dict[tuple[str, str], dict[str, int | str]] = {}
         for entry in entries:
             summary_key = (entry["lane"], entry["consumer"])
@@ -218,10 +234,11 @@ class RunDataManifest:
                 summary[outcome] = int(summary[outcome]) + count
 
         payload: dict[str, Any] = {
-            "schema_version": 2,
+            "schema_version": 3,
             "source_ladder": list(self.source_ladder),
             "summary": [counts[key] for key in sorted(counts)],
             "entries": entries,
+            "resolved_pool_descriptors": descriptors,
         }
         with self._lock:
             if self._dropped:

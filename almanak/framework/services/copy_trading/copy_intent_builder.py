@@ -138,8 +138,10 @@ class CopyIntentBuilder:
         if scale <= 0:
             return CopyIntentBuildResult(intent=None, reason_code="lp_size_invalid")
 
-        amount0 = (payload.amount0 or Decimal("0")) * scale
-        amount1 = (payload.amount1 or Decimal("0")) * scale
+        # Copy-LP schema defines an omitted side as "do not deposit that leg";
+        # these are action instructions, not observations of on-chain money.
+        amount0 = (payload.amount0 or Decimal("0")) * scale  # decimal-policy-exempt: absent copy-LP leg
+        amount1 = (payload.amount1 or Decimal("0")) * scale  # decimal-policy-exempt: absent copy-LP leg
         if amount0 <= 0 and amount1 <= 0:
             return CopyIntentBuildResult(intent=None, reason_code="lp_amount_missing")
 

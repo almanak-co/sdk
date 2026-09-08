@@ -1545,26 +1545,30 @@ class CoinGeckoDataProvider:
         seen_ts: set[float] = set()
         chunk_start = start_ts
         chunk_count = 0
-        while chunk_start < end_ts or chunk_count == 0:
-            chunk_end = min(chunk_start + chunk_size, end_ts)
-            params = {
-                "vs_currency": "usd",
-                "from": str(chunk_start),
-                "to": str(chunk_end),
-            }
-            endpoint = f"/coins/{token_id}/market_chart/range"
-            data = (
-                await self._make_gateway_only_request(endpoint, params)
-                if effective_gateway_only
-                else await self._make_request(endpoint, params)
-            )
-            chunk_count += 1
-            for row in data.get("prices", []):
-                # Chunk edges are inclusive both sides — dedup the seam candle.
-                if row[0] not in seen_ts:
-                    seen_ts.add(row[0])
-                    prices.append(row)
-            chunk_start = chunk_end
+        from almanak.framework.backtesting.pnl.progress import loading_batches
+
+        with loading_batches("prices", max(1, (end_ts - start_ts + chunk_size - 1) // chunk_size)) as batch_done:
+            while chunk_start < end_ts or chunk_count == 0:
+                chunk_end = min(chunk_start + chunk_size, end_ts)
+                params = {
+                    "vs_currency": "usd",
+                    "from": str(chunk_start),
+                    "to": str(chunk_end),
+                }
+                endpoint = f"/coins/{token_id}/market_chart/range"
+                data = (
+                    await self._make_gateway_only_request(endpoint, params)
+                    if effective_gateway_only
+                    else await self._make_request(endpoint, params)
+                )
+                chunk_count += 1
+                for row in data.get("prices", []):
+                    # Chunk edges are inclusive both sides — dedup the seam candle.
+                    if row[0] not in seen_ts:
+                        seen_ts.add(row[0])
+                        prices.append(row)
+                chunk_start = chunk_end
+                batch_done()
         if chunk_count > 1:
             logger.info(
                 "Fetched %s in %d chunks (%d points) to keep hourly granularity over a %.0f-day range (ALM-2957)",

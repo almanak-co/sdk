@@ -427,36 +427,40 @@ class SnapshotExactPoolOHLCVSource:
         pending: dict[int, OHLCVCandle] = {}
         source: str | None = None
         cursor = start_ts
-        while cursor < end_ts:
-            page_end = min(end_ts, cursor + page_candles * timeframe.seconds)
-            request = ExactVenueFeatureRequest(
-                verified_binding=binding,
-                parameters=OhlcvParameters(
-                    base_asset_index=cache_key[3],
-                    quote_asset_index=cache_key[4],
-                    timeframe=timeframe,
-                    start_at=datetime.fromtimestamp(cursor, tz=UTC),
-                    end_at=datetime.fromtimestamp(page_end, tz=UTC),
-                ),
-                feature_contract_version=OHLCV_FEATURE_CONTRACT_VERSION,
-            )
-            result = observe_exact_venue_data(request, client)
-            if isinstance(result, VenueDataFailure):
-                raise ValueError(f"{result.reason_code.value}: {result.detail}")
-            if type(result) is not ExactVenueObservation:
-                raise ValueError("exact-pool OHLCV provider returned an invalid observation")
-            if type(result.value) is not tuple or any(type(candle) is not OHLCVCandle for candle in result.value):
-                raise ValueError("exact-pool OHLCV provider returned an invalid candle collection")
-            page_source = result.provenance.source
-            if source is not None and page_source != source:
-                raise ValueError("exact-pool OHLCV provider source changed during materialization")
-            source = page_source
-            for candle in result.value:
-                candle_ts = _unix_seconds(candle.timestamp)
-                if candle_ts in pending:
-                    raise ValueError("exact-pool OHLCV provider returned a duplicate candle timestamp")
-                pending[candle_ts] = candle
-            cursor = page_end
+        from almanak.framework.backtesting.pnl.progress import loading_batches
+
+        with loading_batches("pool_ohlcv", requests) as batch_done:
+            while cursor < end_ts:
+                page_end = min(end_ts, cursor + page_candles * timeframe.seconds)
+                request = ExactVenueFeatureRequest(
+                    verified_binding=binding,
+                    parameters=OhlcvParameters(
+                        base_asset_index=cache_key[3],
+                        quote_asset_index=cache_key[4],
+                        timeframe=timeframe,
+                        start_at=datetime.fromtimestamp(cursor, tz=UTC),
+                        end_at=datetime.fromtimestamp(page_end, tz=UTC),
+                    ),
+                    feature_contract_version=OHLCV_FEATURE_CONTRACT_VERSION,
+                )
+                result = observe_exact_venue_data(request, client)
+                if isinstance(result, VenueDataFailure):
+                    raise ValueError(f"{result.reason_code.value}: {result.detail}")
+                if type(result) is not ExactVenueObservation:
+                    raise ValueError("exact-pool OHLCV provider returned an invalid observation")
+                if type(result.value) is not tuple or any(type(candle) is not OHLCVCandle for candle in result.value):
+                    raise ValueError("exact-pool OHLCV provider returned an invalid candle collection")
+                page_source = result.provenance.source
+                if source is not None and page_source != source:
+                    raise ValueError("exact-pool OHLCV provider source changed during materialization")
+                source = page_source
+                for candle in result.value:
+                    candle_ts = _unix_seconds(candle.timestamp)
+                    if candle_ts in pending:
+                        raise ValueError("exact-pool OHLCV provider returned a duplicate candle timestamp")
+                    pending[candle_ts] = candle
+                cursor = page_end
+                batch_done()
 
         expected = tuple(range(start_ts, end_ts, timeframe.seconds))
         if tuple(sorted(pending)) != expected:

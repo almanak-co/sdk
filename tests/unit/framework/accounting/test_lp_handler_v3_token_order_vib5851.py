@@ -256,7 +256,13 @@ class TestV3TokenOrderRealignment:
 class TestV3RealignHelperGatesAndFailOpen:
     """Unit-level contracts for ``_v3_realign_token_pair``: fires only on the
     on-chain-ordered raw-int branch, and fails open (keeps label order) for every
-    shape whose amounts are NOT address-sorted or whose order cannot be proven."""
+    shape whose amounts are NOT address-sorted or whose order cannot be proven.
+
+    The helper's third return value is ``identity_unresolved``. Most fail-open
+    gates lack contradictory slot observations and therefore return ``False``;
+    a complete-but-unplaceable observation returns ``True`` so the caller keeps
+    slot-derived money unmeasured instead of guessing.
+    """
 
     @staticmethod
     def _realign():
@@ -281,7 +287,7 @@ class TestV3RealignHelperGatesAndFailOpen:
             token0="WETH",
             token1="USDC",
         )
-        assert out == ("USDC", "WETH")
+        assert out == ("USDC", "WETH", False)
 
     def test_keeps_symbols_when_label_order_matches(self, monkeypatch):
         _patch_resolver(monkeypatch, "arb_like")  # WETH < USDC
@@ -293,7 +299,7 @@ class TestV3RealignHelperGatesAndFailOpen:
             token0="WETH",
             token1="USDC",
         )
-        assert out == ("WETH", "USDC")
+        assert out == ("WETH", "USDC", False)
 
     def test_empty_symbol_passes_through(self, monkeypatch):
         _patch_resolver(monkeypatch, "eth_like")
@@ -305,7 +311,7 @@ class TestV3RealignHelperGatesAndFailOpen:
             token0="",
             token1="USDC",
         )
-        assert out == ("", "USDC")
+        assert out == ("", "USDC", False)
 
     def test_primitive_money_legs_open_not_reordered(self, monkeypatch):
         """Declared money legs (Curve etc.) align amounts to token_in/out — must
@@ -319,7 +325,7 @@ class TestV3RealignHelperGatesAndFailOpen:
             token0="WETH",
             token1="USDC",
         )
-        assert out == ("WETH", "USDC")
+        assert out == ("WETH", "USDC", False)
 
     def test_string_fallback_open_not_reordered(self, monkeypatch):
         """No typed lp_open_data raw amounts → string fallback (token_in/out
@@ -333,7 +339,7 @@ class TestV3RealignHelperGatesAndFailOpen:
             token0="WETH",
             token1="USDC",
         )
-        assert out == ("WETH", "USDC")
+        assert out == ("WETH", "USDC", False)
 
     def test_v4_currency_pair_skipped(self, monkeypatch):
         """A pair the V4 path ESTABLISHED is left alone — but only when it says so.
@@ -354,7 +360,7 @@ class TestV3RealignHelperGatesAndFailOpen:
         }
 
         # V4 established the pair -> untouched, regardless of what the addresses say.
-        assert self._realign()(**kwargs, v4_realigned=True) == ("WETH", "USDC")
+        assert self._realign()(**kwargs, v4_realigned=True) == ("WETH", "USDC", False)
 
         # V4 did NOT establish it, so the gate no longer short-circuits. In ``eth_like``
         # USDC IS _addr("11") and WETH IS _addr("cc"), so the observed currencies match
@@ -362,7 +368,7 @@ class TestV3RealignHelperGatesAndFailOpen:
         # The value coincides with what the address sort would give on this chain, so it
         # does NOT exercise the fallthrough — TestBothObservedButUnplaceable covers the
         # case where placement fails and the two mechanisms diverge.
-        assert self._realign()(**kwargs, v4_realigned=False) == ("USDC", "WETH")
+        assert self._realign()(**kwargs, v4_realigned=False) == ("USDC", "WETH", False)
 
     def test_both_observed_but_unplaceable_keeps_label_order(self, monkeypatch):
         """VIB-6484 / delta review — both slots observed but the addresses match
@@ -397,14 +403,18 @@ class TestV3RealignHelperGatesAndFailOpen:
             token1="USDC",
             v4_realigned=False,
         )
-        assert out == ("WETH", "USDC"), "unplaceable observation must keep label order"
+        assert out == (
+            "WETH",
+            "USDC",
+            True,
+        ), "unplaceable observation must keep label order and mark identity unresolved"
 
         # And it must genuinely DIVERGE from the address sort — otherwise this test
         # would pass even if the fallthrough were still live.
         from almanak.framework.data.tokens.pair_order import realign_token_pair_by_address
 
         assert realign_token_pair_by_address("WETH", "USDC", "ethereum") == ("USDC", "WETH")
-        assert out != realign_token_pair_by_address("WETH", "USDC", "ethereum")
+        assert out[:2] != realign_token_pair_by_address("WETH", "USDC", "ethereum")
 
     def test_fungible_coin_symbols_skipped(self, monkeypatch):
         """N-coin fungible pools order coins by pool index, not address."""
@@ -418,8 +428,7 @@ class TestV3RealignHelperGatesAndFailOpen:
             token0="WETH",
             token1="USDC",
         )
-        assert out == ("WETH", "USDC")
-
+        assert out == ("WETH", "USDC", False)
 
     @pytest.mark.expects_resolver_defect
     def test_resolver_exception_fails_open(self, monkeypatch):
@@ -439,7 +448,7 @@ class TestV3RealignHelperGatesAndFailOpen:
             token0="WETH",
             token1="USDC",
         )
-        assert out == ("WETH", "USDC")
+        assert out == ("WETH", "USDC", False)
 
     @pytest.mark.expects_resolver_defect
     def test_missing_address_fails_open(self, monkeypatch):
@@ -459,14 +468,18 @@ class TestV3RealignHelperGatesAndFailOpen:
             token0="WETH",
             token1="USDC",
         )
-        assert out == ("WETH", "USDC")
+        assert out == ("WETH", "USDC", False)
 
     def test_close_dict_fallback_reads_currency_keys(self, monkeypatch):
         """dict-shaped lp_data (deserialize fallback) must still see currency
         keys and skip (V4-owned)."""
         _patch_resolver(monkeypatch, "eth_like")
-        lp_data = {"amount0_collected": USDC_RAW, "amount1_collected": WETH_RAW,
-                   "currency0": _addr("11"), "currency1": _addr("cc")}
+        lp_data = {
+            "amount0_collected": USDC_RAW,
+            "amount1_collected": WETH_RAW,
+            "currency0": _addr("11"),
+            "currency1": _addr("cc"),
+        }
         kwargs = {
             "lp_data": lp_data,
             "intent_type_str": "LP_CLOSE",
@@ -477,8 +490,8 @@ class TestV3RealignHelperGatesAndFailOpen:
         }
         # The dict shape must still be READ (the point of this test): both currency
         # keys are seen, so a V4-established pair is skipped...
-        assert self._realign()(**kwargs, v4_realigned=True) == ("WETH", "USDC")
+        assert self._realign()(**kwargs, v4_realigned=True) == ("WETH", "USDC", False)
         # ...and an unestablished one is no longer waved through on presence alone
         # (VIB-6476): the dict-read currencies match the ``eth_like`` labels, so
         # positional placement binds slot 0 -> USDC, slot 1 -> WETH.
-        assert self._realign()(**kwargs, v4_realigned=False) == ("USDC", "WETH")
+        assert self._realign()(**kwargs, v4_realigned=False) == ("USDC", "WETH", False)

@@ -18,6 +18,7 @@ from almanak.framework.intents.vocabulary import IntentType
 from almanak.framework.models.reproduction_bundle import ActionBundle
 
 if TYPE_CHECKING:
+    from almanak.connectors._strategy_base.bridge_base import BridgeAdapter, BridgeQuote
     from almanak.framework.intents.bridge import BridgeIntent
     from almanak.framework.intents.bridge_selector import BridgeSelector
 
@@ -55,12 +56,9 @@ class BridgeCompiler(BaseBridgeCompiler):
         compares the quote's native fee against the wallet's actual native
         balance.
 
-        The native fee is read from the selected Stargate quote
-        (``route_data['lz_fee_wei']``), which today is a conservative 3x
-        overestimate (``StargateBridgeAdapter._estimate_layerzero_fee``). The
-        ``ctx.services.eth_call`` seam (VIB-5374) is wired so a follow-up can
-        replace this with an exact on-chain ``quoteSend`` read; the overestimate
-        is strictly fail-safe in the meantime (it over-, never under-, rejects).
+        The selected quote is refreshed with an on-chain quoteSend read for the
+        actual recipient and send parameters, including bounded fee headroom.
+        If that read is unavailable, preflight defers and compilation fails closed.
         """
         if getattr(intent, "intent_type", None) != IntentType.BRIDGE:
             return PreflightVerdict.feasible()
@@ -105,7 +103,9 @@ class BridgeCompiler(BaseBridgeCompiler):
         if selection.bridge.name.lower() != "stargate":
             return PreflightVerdict.feasible()  # Across et al. carry no native messaging fee
 
-        lz_fee_wei = self._extract_lz_fee_wei(selection.quote)
+        recipient = getattr(intent, "destination_address", None) or ctx.services.resolve_dest_wallet(to_chain)
+        quote = self._refresh_stargate_quote(ctx, selection.bridge, selection.quote, recipient, from_chain)
+        lz_fee_wei = self._extract_lz_fee_wei(quote)
         if lz_fee_wei is None:
             # No native-fee number to compare against → defer (fail-open).
             return PreflightVerdict.feasible()
@@ -133,6 +133,18 @@ class BridgeCompiler(BaseBridgeCompiler):
                 ),
             )
         return PreflightVerdict.feasible()
+
+    @staticmethod
+    def _refresh_stargate_quote(
+        ctx: BaseCompilerContext, bridge: BridgeAdapter, quote: BridgeQuote, recipient: str, from_chain: str
+    ) -> BridgeQuote:
+        # The shared eth_call seam has a legacy direct-RPC fallback. Only a
+        # compiler explicitly running inside the gateway may reach that branch.
+        if ctx.gateway_client is None and not getattr(ctx, "gateway_internal_preflight", False):
+            raise ValueError("Stargate live fee requires a gateway client or gateway-internal compiler")
+        return bridge.refresh_quote_for_execution(
+            quote, recipient, lambda to, data: ctx.services.eth_call(to, data, chain=from_chain)
+        )
 
     @staticmethod
     def _extract_lz_fee_wei(quote: Any) -> int | None:
@@ -200,6 +212,8 @@ class BridgeCompiler(BaseBridgeCompiler):
             quote = selection.quote
             bridge = selection.bridge
             dest_wallet = getattr(intent, "destination_address", None) or ctx.services.resolve_dest_wallet(to_chain)
+            if bridge.name.lower() == "stargate":
+                quote = self._refresh_stargate_quote(ctx, bridge, quote, dest_wallet, from_chain)
             bridge_tx = bridge.build_deposit_tx(quote=quote, recipient=dest_wallet)
 
             amount_in_wei: int | None = None

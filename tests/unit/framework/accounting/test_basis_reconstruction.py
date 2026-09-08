@@ -1115,6 +1115,42 @@ class TestVIB4078ReplayHelpers:
         assert unmatched == Decimal("0")
         assert cost_consumed == pytest.approx(Decimal("10.00"), abs=Decimal("0.001"))
 
+    def test_withdraw_missing_interest_keeps_replayed_wallet_basis_unmeasured(self):
+        """A measured principal plus unmeasured interest is not a measured total."""
+        dep = "dep-w-unmeasured-interest"
+        chain = "arbitrum"
+        wallet = "0xwallet"
+        lending_pk = f"lending:{chain}:aave_v3:{wallet}:USDC"
+        swap_pk = f"swap:{chain}:{wallet}"
+        payload = {
+            "event_type": "WITHDRAW",
+            "position_key": lending_pk,
+            "asset": "USDC",
+            "amount_token": "10",
+            "principal_delta_usd": "9.50",
+            "interest_delta_usd": None,
+        }
+        row = {
+            "event_type": "WITHDRAW",
+            "deployment_id": dep,
+            "position_key": lending_pk,
+            "chain": chain,
+            "wallet_address": wallet,
+            "timestamp": "2026-04-27T10:00:00+00:00",
+            "payload_json": json.dumps(payload),
+        }
+        store = FIFOBasisStore()
+        store.reconstruct_from_events([row])
+
+        cost_consumed, unmatched = store.match_swap_disposal(
+            deployment_id=dep,
+            position_key=swap_pk,
+            token="USDC",
+            amount=Decimal("10"),
+        )
+        assert unmatched == Decimal("0")
+        assert cost_consumed is None
+
     def test_match_repay_after_reconstruct_pins_matching_policy_version(self):
         """Per CLAUDE.md: matching_policy_version is stamped on every typed
         event. After reconstruction the basis store must continue to surface
@@ -1240,7 +1276,7 @@ def _prediction_snapshot_row(
     position_key: str,
     position_size_after: Decimal,
     position_basis_after: Decimal,
-    position_loaded_extras_after: Decimal,
+    position_loaded_extras_after: Decimal | None,
     drop_extras_field: bool = False,
     timestamp: str = "2026-04-27T10:00:00+00:00",
 ) -> dict:
@@ -1409,3 +1445,26 @@ class TestPredictionLoadedExtrasReconstruction:
         )
         # Bare basis (50), extras treated as 0: 60 - 50 = 10.
         assert realized == Decimal("10")
+
+    def test_explicit_null_extras_remain_unmeasured_across_restart(self) -> None:
+        restarted = FIFOBasisStore()
+        restarted.reconstruct_from_events(
+            [
+                _prediction_snapshot_row(
+                    event_type="PREDICTION_OPEN",
+                    deployment_id=self.DEP,
+                    position_key=self.PK,
+                    position_size_after=Decimal("100"),
+                    position_basis_after=Decimal("50"),
+                    position_loaded_extras_after=None,
+                )
+            ]
+        )
+        assert restarted.get_prediction_loaded_extras(self.DEP, self.PK) is None
+        realized, _, _, _ = restarted.match_prediction_sell(
+            deployment_id=self.DEP,
+            position_key=self.PK,
+            shares_sold=Decimal("100"),
+            proceeds_usd=Decimal("60"),
+        )
+        assert realized is None

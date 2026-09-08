@@ -359,8 +359,9 @@ class TestLPAccountingBuilder:
         assert event.position_id == expected_position_id
         assert json.loads(event.to_payload_json())["position_id"] == expected_position_id
 
-    def test_v4_resolution_miss_preserves_intent_order(self, monkeypatch, caplog) -> None:
+    def test_v4_resolution_miss_preserves_unmeasured_amounts(self, monkeypatch) -> None:
         from almanak.framework.accounting import lp_accounting
+        from almanak.framework.accounting.models import AccountingConfidence
 
         monkeypatch.setattr(lp_accounting, "resolve_token_best_effort", lambda *args, **kwargs: None)
         lp_open = _lp_data(
@@ -378,7 +379,10 @@ class TestLPAccountingBuilder:
 
         assert event is not None
         assert (event.token0, event.token1) == ("USDC", "WETH")
-        assert "falling back to user-intent token order" in caplog.text
+        assert event.amount0 is None
+        assert event.amount1 is None
+        assert event.cost_basis_usd is None
+        assert event.confidence == AccountingConfidence.UNAVAILABLE
 
     def test_token0_token1_parsed_from_pool_string_when_bare_attrs_missing(self) -> None:
         """VIB-3584: token0/token1 are parsed from pool string when intent lacks bare attrs."""

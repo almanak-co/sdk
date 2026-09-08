@@ -366,10 +366,8 @@ def test_primitive_versions_explicit_per_primitive_pinning() -> None:
         Primitive.SETTLEMENT: 1,
         Primitive.STAKING: 1,
         Primitive.BRIDGE: 1,
-        # #2146: bumped 1→2 — PredictionAccountingEvent payload now carries
-        # ``position_loaded_extras_after`` so replay restores the VIB-3710
-        # loaded-extras accumulator across a runner restart.
-        Primitive.PREDICTION: 2,
+        # Unmeasured trade deltas remain null instead of measured zero.
+        Primitive.PREDICTION: 3,
         Primitive.FLASH_LOAN: 1,
     }
     for member, want in expected.items():

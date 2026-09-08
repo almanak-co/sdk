@@ -10,7 +10,7 @@ exercise the happy live path through the builder. These pin the reader's
 - the error contract: a failed chain read surfaces as ``DataUnavailableError``
   (transient), not a generic ``DataSourceError``;
 - TVL best-effort fallbacks: no oracle, unresolved symbol, and a sync oracle
-  returning ``None`` all yield ``Decimal("0")`` without crashing.
+  returning ``None`` all preserve ``None`` (unmeasured) without crashing.
 """
 
 from __future__ import annotations
@@ -288,12 +288,24 @@ def test_tvl_computed_from_oracle():
     assert _read(reader).tvl_usd == Decimal("14000")
 
 
-def test_tvl_zero_without_oracle():
+def test_tvl_unmeasured_without_oracle():
     reader = GatewayPoolReserveReader(rpc_call=_make_rpc_call(), token_resolver=_Resolver())
-    assert _read(reader).tvl_usd == Decimal("0")
+    assert _read(reader).tvl_usd is None
 
 
-def test_tvl_zero_and_unpriced_when_symbol_unknown():
+def test_tvl_zero_leg_needs_no_symbol_or_price():
+    oracle = _AsyncOracle({"WETH": Decimal("3000")})
+    reader = GatewayPoolReserveReader(rpc_call=_make_rpc_call(), token_resolver=_Resolver(), price_oracle=oracle)
+    assert reader._calculate_tvl_usd(Decimal("0"), Decimal("3"), "UNKNOWN", "WETH", "base") == Decimal("9000")
+    assert oracle.calls == 1
+
+
+def test_tvl_both_zero_is_measured_without_oracle():
+    reader = GatewayPoolReserveReader(rpc_call=_make_rpc_call(), token_resolver=_Resolver())
+    assert reader._calculate_tvl_usd(Decimal("0"), Decimal("0"), "UNKNOWN", "UNKNOWN", "base") == Decimal("0")
+
+
+def test_tvl_unmeasured_and_unpriced_when_symbol_unknown():
     oracle = _AsyncOracle({"USDC": Decimal("1")})
     # token1 unresolved -> symbol "UNKNOWN" -> oracle must NOT be called.
     reader = GatewayPoolReserveReader(
@@ -301,11 +313,11 @@ def test_tvl_zero_and_unpriced_when_symbol_unknown():
         token_resolver=_Resolver(resolve_token1=False),
         price_oracle=oracle,
     )
-    assert _read(reader).tvl_usd == Decimal("0")
+    assert _read(reader).tvl_usd is None
     assert oracle.calls == 0
 
 
-def test_tvl_zero_when_oracle_price_is_none():
+def test_tvl_unmeasured_when_oracle_price_is_none():
     class _NonePriceOracle:
         async def get_aggregated_price(self, token: str, quote: str = "USD", *, chain: str | None = None):  # noqa: ARG002
             return SimpleNamespace(price=None)  # price miss — must not become Decimal("None")
@@ -315,12 +327,12 @@ def test_tvl_zero_when_oracle_price_is_none():
         token_resolver=_Resolver(),
         price_oracle=_NonePriceOracle(),
     )
-    assert _read(reader).tvl_usd == Decimal("0")
+    assert _read(reader).tvl_usd is None
 
 
-def test_tvl_zero_when_oracle_lacks_aggregated_price():
+def test_tvl_unmeasured_when_oracle_lacks_aggregated_price():
     # An injected object without the documented async get_aggregated_price cannot
-    # price TVL — best-effort 0 (no sync get_price guessing).
+    # price TVL — preserve it as unmeasured (no sync get_price guessing).
     class _WrongShapeOracle:
         def get_price(self, token: str, quote: str = "USD"):  # noqa: ARG002
             return Decimal("1")
@@ -330,7 +342,7 @@ def test_tvl_zero_when_oracle_lacks_aggregated_price():
         token_resolver=_Resolver(),
         price_oracle=_WrongShapeOracle(),
     )
-    assert _read(reader).tvl_usd == Decimal("0")
+    assert _read(reader).tvl_usd is None
 
 
 # --------------------------------------------------------------------------- #

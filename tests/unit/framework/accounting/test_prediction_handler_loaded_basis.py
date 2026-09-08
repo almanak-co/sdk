@@ -14,8 +14,8 @@ the VIB-3710 fix:
   d. BUY then REDEEM with fees -> realized_pnl includes fees in cost.
   e. Average-up: BUY then BUY -> both gas/fees accumulate.
   f. Missing matic_price: gas_cost_native recorded, gas_cost_usd is None,
-     warning logged on the enricher; the handler tolerates the missing USD
-     value and folds only fees + cost into the basis (gas_cost_usd = 0).
+     warning logged on the enricher; the handler preserves the loaded-cost
+     accumulator and future realized PnL as unmeasured.
 
 No live chain calls, no SQLite, no gateway.
 """
@@ -32,7 +32,7 @@ import pytest
 
 from almanak.framework.accounting.basis import FIFOBasisStore
 from almanak.framework.accounting.category_handlers.prediction_handler import handle_prediction
-from almanak.framework.accounting.models import PredictionEventType
+from almanak.framework.accounting.models import AccountingConfidence, PredictionEventType
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -106,8 +106,8 @@ def _buy_event(
     *,
     shares: str,
     cost_basis: str,
-    gas_cost_usd: str | None = None,
-    fee_pusd: str | None = None,
+    gas_cost_usd: str | None = "0",
+    fee_pusd: str | None = "0",
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     extracted: dict[str, Any] = {
         "outcome_tokens_received": shares,
@@ -124,7 +124,7 @@ def _buy_event(
     )
 
 
-def _sell_event(*, shares: str, proceeds: str, fee_pusd: str | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
+def _sell_event(*, shares: str, proceeds: str, fee_pusd: str | None = "0") -> tuple[dict[str, Any], dict[str, Any]]:
     extracted: dict[str, Any] = {
         "outcome_tokens_sold": shares,
         "proceeds": proceeds,
@@ -138,12 +138,14 @@ def _sell_event(*, shares: str, proceeds: str, fee_pusd: str | None = None) -> t
     )
 
 
-def _redeem_event(*, shares: str, payout: str) -> tuple[dict[str, Any], dict[str, Any]]:
+def _redeem_event(*, shares: str, payout: str, fee_pusd: str | None = "0") -> tuple[dict[str, Any], dict[str, Any]]:
     extracted = {
         "redemption_amount": shares,
         "payout": payout,
         "market_id": _MARKET_ID,
     }
+    if fee_pusd is not None:
+        extracted["fee_pusd"] = fee_pusd
     return (
         _make_outbox_row("PREDICTION_REDEEM"),
         _make_ledger_row("PREDICTION_REDEEM", extracted_data_json=_extracted_data_json(extracted)),
@@ -158,7 +160,7 @@ def _redeem_event(*, shares: str, payout: str) -> tuple[dict[str, Any], dict[str
 class TestBuyWithFeeOnlyNoGas:
     """Allowances were already in place from a prior trade and no wrap was
     needed for this BUY -> the gateway records zero setup_txs -> gas_cost_usd
-    arrives as 0 (or omitted). The fee remains the only "loaded extra"."""
+    arrives as measured zero. The fee remains the only "loaded extra"."""
 
     def test_buy_records_fee_in_loaded_extras(self) -> None:
         basis = FIFOBasisStore()
@@ -299,27 +301,31 @@ class TestSellFeePusdDeductedFromRealizedPnl:
         # Gross proceeds preserved on the event for audit traceability.
         assert ev.usd_delta == Decimal("6.00")
 
-    def test_sell_with_zero_fee_matches_no_fee_path(self) -> None:
-        """fee_pusd == "0" -> identical PnL to no fee_pusd at all (both -> 0)."""
+    def test_sell_with_missing_fee_degrades_while_zero_fee_is_measured(self) -> None:
+        """Missing and measured-zero fees have intentionally different semantics."""
         basis_a = FIFOBasisStore()
         basis_b = FIFOBasisStore()
         handle_prediction(*_buy_event(shares="10", cost_basis="5.00"), basis_a)
         handle_prediction(*_buy_event(shares="10", cost_basis="5.00"), basis_b)
 
-        ev_a = handle_prediction(*_sell_event(shares="10", proceeds="6.00"), basis_a)
+        ev_a = handle_prediction(*_sell_event(shares="10", proceeds="6.00", fee_pusd=None), basis_a)
         ev_b = handle_prediction(*_sell_event(shares="10", proceeds="6.00", fee_pusd="0"), basis_b)
         assert ev_a is not None and ev_b is not None
-        assert ev_a.realized_pnl_usd == ev_b.realized_pnl_usd == Decimal("1.00")
+        assert ev_a.realized_pnl_usd is None
+        assert ev_a.confidence == AccountingConfidence.UNAVAILABLE
+        assert basis_a.get_prediction_position(_DEPLOYMENT_ID, _position_key()) is None
+        assert ev_b.realized_pnl_usd == Decimal("1.00")
 
-    def test_sell_with_negative_fee_clamped_to_zero(self) -> None:
-        """A buggy upstream sending a negative fee must NOT inflate PnL."""
+    def test_sell_with_negative_fee_remains_unmeasured(self) -> None:
+        """A negative fee must neither inflate PnL nor masquerade as measured zero."""
         basis = FIFOBasisStore()
         handle_prediction(*_buy_event(shares="10", cost_basis="5.00"), basis)
         sell_outbox, sell_ledger = _sell_event(shares="10", proceeds="6.00", fee_pusd="-0.10")
         ev = handle_prediction(sell_outbox, sell_ledger, basis)
         assert ev is not None
-        # Negative fee clamped to 0 -> realized PnL unchanged from no-fee case.
-        assert ev.realized_pnl_usd == Decimal("1.00")
+        assert ev.realized_pnl_usd is None
+        assert ev.confidence == AccountingConfidence.UNAVAILABLE
+        assert basis.get_prediction_position(_DEPLOYMENT_ID, _position_key()) is None
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -384,30 +390,35 @@ class TestAverageUpAccumulatesLoadedExtras:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# (f) Missing matic_price: gas_cost_usd absent -> handler folds 0 USD gas
+# (f) Missing matic_price: gas_cost_usd absent -> loaded costs stay unmeasured
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 class TestMissingMaticPrice:
     """The result enricher records gas_cost_native_wei always, but
     gas_cost_usd is omitted when MATIC USD price is unavailable. The handler
-    must tolerate that (treat as 0 USD gas) without crashing — under-attributing
-    cost is far safer than fabricating a USD figure from nothing."""
+    must tolerate that without crashing, but cannot fabricate a zero USD gas
+    adjustment or a fully measured realized PnL."""
 
     def test_buy_with_missing_gas_cost_usd_does_not_crash(self) -> None:
         basis = FIFOBasisStore()
         # extracted_data has fee_pusd but NOT gas_cost_usd (and no
         # gas_cost_native_wei either — we test the handler's read here, not
         # the enricher; the enricher test covers the warning path).
-        outbox, ledger = _buy_event(shares="10", cost_basis="5.00", fee_pusd="0.05")
+        outbox, ledger = _buy_event(
+            shares="10",
+            cost_basis="5.00",
+            gas_cost_usd=None,
+            fee_pusd="0.05",
+        )
         ev = handle_prediction(outbox, ledger, basis)
         assert ev is not None
         assert ev.event_type == PredictionEventType.PREDICTION_OPEN
         assert ev.position_basis_after == Decimal("5.00")
-        # Only fee was loaded — gas was unavailable, so loaded_extras = 0.05.
-        assert basis.get_prediction_loaded_extras(_DEPLOYMENT_ID, _position_key()) == Decimal("0.05")
+        assert ev.confidence == AccountingConfidence.UNAVAILABLE
+        assert basis.get_prediction_loaded_extras(_DEPLOYMENT_ID, _position_key()) is None
 
-    def test_buy_with_negative_gas_cost_usd_clamped_to_zero(self) -> None:
+    def test_buy_with_negative_gas_cost_usd_remains_unmeasured(self) -> None:
         # Defensive: a buggy upstream measurement that sends a negative
         # gas_cost_usd must NOT silently subtract from realized PnL.
         basis = FIFOBasisStore()
@@ -419,41 +430,47 @@ class TestMissingMaticPrice:
         )
         ev = handle_prediction(outbox, ledger, basis)
         assert ev is not None
-        assert basis.get_prediction_loaded_extras(_DEPLOYMENT_ID, _position_key()) == Decimal("0.05")
+        assert ev.confidence == AccountingConfidence.UNAVAILABLE
+        assert basis.get_prediction_loaded_extras(_DEPLOYMENT_ID, _position_key()) is None
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Backward-compat: old extracted_data without VIB-3710 fields still works
+# Missing cost measurements remain unavailable
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-class TestBackwardCompat:
-    def test_buy_without_any_loaded_extras_keys_records_zero_extras(self) -> None:
+class TestMissingLoadedExtras:
+    def test_buy_without_any_loaded_extras_keys_records_unmeasured_extras(self) -> None:
         basis = FIFOBasisStore()
-        outbox, ledger = _buy_event(shares="5", cost_basis="2.50")
+        outbox, ledger = _buy_event(shares="5", cost_basis="2.50", gas_cost_usd=None, fee_pusd=None)
         ev = handle_prediction(outbox, ledger, basis)
         assert ev is not None
         assert ev.position_basis_after == Decimal("2.50")
-        assert basis.get_prediction_loaded_extras(_DEPLOYMENT_ID, _position_key()) == Decimal("0")
+        assert ev.confidence == AccountingConfidence.UNAVAILABLE
+        assert basis.get_prediction_loaded_extras(_DEPLOYMENT_ID, _position_key()) is None
 
-        # Sell behaves identically to pre-VIB-3710 when no extras loaded.
+        # Principal can still close, but realized PnL cannot be fabricated.
         sell_outbox, sell_ledger = _sell_event(shares="5", proceeds="3.00")
         sev = handle_prediction(sell_outbox, sell_ledger, basis)
         assert sev is not None
-        assert sev.realized_pnl_usd == Decimal("0.50")
+        assert sev.realized_pnl_usd is None
+        assert sev.confidence == AccountingConfidence.UNAVAILABLE
 
 
 @pytest.mark.parametrize(
     "shares,cost_basis,gas,fee,proceeds,expected_pnl",
     [
-        # Plain (no extras): 10 @ 0.50 -> sold @ 0.55 -> 0.50 realized
-        ("10", "5.00", None, None, "5.50", "0.50"),
+        # Explicit measured zero: 10 @ 0.50 -> sold @ 0.55 -> 0.50 realized
+        ("10", "5.00", "0", "0", "5.50", "0.50"),
         # Fees only: same trade, $0.10 fee on BUY -> 0.40 realized
         ("10", "5.00", "0", "0.10", "5.50", "0.40"),
         # Gas only: $0.20 gas -> 0.30 realized
         ("10", "5.00", "0.20", "0", "5.50", "0.30"),
         # Gas + fees: $0.10 gas + $0.10 fee -> 0.30 realized
         ("10", "5.00", "0.10", "0.10", "5.50", "0.30"),
+        # Either missing component makes fully-loaded basis unmeasured.
+        ("10", "5.00", None, "0", "5.50", None),
+        ("10", "5.00", "0", None, "5.50", None),
     ],
 )
 def test_realized_pnl_parametric(
@@ -462,7 +479,7 @@ def test_realized_pnl_parametric(
     gas: str | None,
     fee: str | None,
     proceeds: str,
-    expected_pnl: str,
+    expected_pnl: str | None,
 ) -> None:
     """Parametric coverage of the loaded-basis subtraction across combinations."""
     basis = FIFOBasisStore()
@@ -473,4 +490,15 @@ def test_realized_pnl_parametric(
     sell_outbox, sell_ledger = _sell_event(shares=shares, proceeds=proceeds)
     ev = handle_prediction(sell_outbox, sell_ledger, basis)
     assert ev is not None
-    assert ev.realized_pnl_usd == Decimal(expected_pnl)
+    assert ev.realized_pnl_usd == (Decimal(expected_pnl) if expected_pnl is not None else None)
+
+
+@pytest.mark.parametrize("clob_fee", [None, "0", "0.25"])
+def test_redemption_payout_is_received_collateral_without_clob_fee(clob_fee):
+    basis = FIFOBasisStore()
+    handle_prediction(*_buy_event(shares="10", cost_basis="5"), basis)
+    event = handle_prediction(*_redeem_event(shares="10", payout="6", fee_pusd=clob_fee), basis)
+    assert event is not None
+    assert event.realized_pnl_usd == Decimal("1")
+    assert event.position_size_after == Decimal("0")
+    assert event.confidence == AccountingConfidence.HIGH

@@ -48,7 +48,7 @@ COPY --from=builder --chown=almanak:almanak /app/almanak /app/almanak
 COPY --from=builder --chown=almanak:almanak /app/pyproject.toml /app/
 # The sweep entrypoint reuses the backtest runner's clone / discovery /
 # callback machinery, imported as `scripts.platform_backtest_runner`.
-COPY --chown=almanak:almanak scripts/__init__.py scripts/platform_backtest_runner.py /app/scripts/
+COPY --chown=almanak:almanak scripts/__init__.py scripts/platform_backtest_progress.py scripts/platform_backtest_runner.py /app/scripts/
 COPY --chown=almanak:almanak scripts/platform_sweep_runner.py /app/runner.py
 
 USER almanak

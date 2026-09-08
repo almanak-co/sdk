@@ -10,10 +10,11 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
-from almanak.framework.data.defi.pools import PoolReserves
+from almanak.framework.data.defi.pools import PoolReserves, UniswapV3PoolReader
 from almanak.framework.data.tokens.models import ChainToken, Token
 
 _POOL = "0x3333333333333333333333333333333333333333"
@@ -81,6 +82,71 @@ def test_stable_flag_survives_serialization_round_trip():
 
     volatile = _solidly_pool(stable=False, reserve0="1000", reserve1="1000")
     assert PoolReserves.from_dict(volatile.to_dict()).stable is False
+
+
+def test_unmeasured_tvl_survives_serialization_round_trip():
+    pool = _solidly_pool(stable=True, reserve0="1000", reserve1="1000")
+    pool.tvl_usd = None
+    encoded = pool.to_dict()
+    assert encoded["tvl_usd"] is None
+    assert PoolReserves.from_dict(encoded).tvl_usd is None
+
+
+@pytest.mark.parametrize("raw_tvl", ["NaN", "Infinity", "-Infinity"])
+def test_non_finite_tvl_is_normalized_to_unmeasured(raw_tvl: str):
+    encoded = _solidly_pool(stable=True, reserve0="1000", reserve1="1000").to_dict()
+    encoded["tvl_usd"] = raw_tvl
+
+    restored = PoolReserves.from_dict(encoded)
+
+    assert restored.tvl_usd is None
+    assert restored.to_dict()["tvl_usd"] is None
+
+
+class _PoolPriceOracle:
+    def __init__(self, prices: dict[str, Decimal], fail_for: str | None = None):
+        self.prices = prices
+        self.fail_for = fail_for
+
+    async def get_aggregated_price(self, token: str, quote: str = "USD"):
+        if token == self.fail_for:
+            raise RuntimeError("price unavailable")
+        return SimpleNamespace(price=self.prices[token])
+
+
+@pytest.mark.asyncio
+async def test_direct_pool_reader_does_not_emit_partial_tvl_on_one_price_failure():
+    reader = UniswapV3PoolReader(
+        rpc_urls={"ethereum": "http://unused.invalid"},
+        price_oracle=_PoolPriceOracle({"USDC": Decimal("1")}, fail_for="WETH"),
+    )
+    assert await reader._calculate_tvl_usd(Decimal("5000"), Decimal("3"), "USDC", "WETH") is None
+
+
+@pytest.mark.asyncio
+async def test_direct_pool_reader_zero_leg_needs_no_price():
+    reader = UniswapV3PoolReader(
+        rpc_urls={"ethereum": "http://unused.invalid"},
+        price_oracle=_PoolPriceOracle({"WETH": Decimal("3000")}, fail_for="UNKNOWN"),
+    )
+    assert await reader._calculate_tvl_usd(Decimal("0"), Decimal("3"), "UNKNOWN", "WETH") == Decimal("9000")
+
+
+@pytest.mark.asyncio
+async def test_direct_pool_reader_both_zero_is_measured_without_oracle():
+    reader = UniswapV3PoolReader(rpc_urls={"ethereum": "http://unused.invalid"})
+    assert await reader._calculate_tvl_usd(Decimal("0"), Decimal("0"), "UNKNOWN", "UNKNOWN") == Decimal("0")
+
+
+@pytest.mark.asyncio
+async def test_direct_pool_reader_preserves_full_decimal_tvl_precision():
+    prices = {"USDC": Decimal("1.001234"), "WETH": Decimal("3000.123456")}
+    reader = UniswapV3PoolReader(
+        rpc_urls={"ethereum": "http://unused.invalid"},
+        price_oracle=_PoolPriceOracle(prices),
+    )
+    tvl = await reader._calculate_tvl_usd(Decimal("5000"), Decimal("3"), "USDC", "WETH")
+    assert tvl == Decimal("5000") * prices["USDC"] + Decimal("3") * prices["WETH"]
 
 
 def test_v3_price_decimal_adjustment_sign():

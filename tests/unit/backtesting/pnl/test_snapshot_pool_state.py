@@ -367,14 +367,25 @@ def test_gateway_fetch_pages_long_windows_below_the_gateway_deadline(monkeypatch
     gateway_pb2 = SimpleNamespace(GetDexPoolStateSeriesRequest=lambda **values: SimpleNamespace(**values))
     monkeypatch.setattr(twap, "_twap_get_connected_gateway_client", lambda: (client, gateway_pb2))
 
-    points = fetch_historical_pool_state_points(
-        protocol="uniswap_v3",
-        chain="polygon",
-        pool_address=POOL,
-        start_ts=1_000,
-        end_ts=1_000 + 128 * 3_600,
-        interval_secs=3_600,
-    )
+    from almanak.framework.backtesting.pnl.progress import progress_scope, report_progress
+
+    seen = []
+    with progress_scope(seen.append):
+        report_progress("loading_data")
+        points = fetch_historical_pool_state_points(
+            protocol="uniswap_v3",
+            chain="polygon",
+            pool_address=POOL,
+            start_ts=1_000,
+            end_ts=1_000 + 128 * 3_600,
+            interval_secs=3_600,
+        )
+    assert [(p.loading.completed_batches, p.loading.total_batches) for p in seen if p.loading] == [
+        (0, 2),
+        (1, 2),
+        (2, 2),
+    ]
+    assert seen[-1].loading is None
 
     assert len(points) == 129
     assert [(request.end_ts - request.start_ts) // request.interval_secs + 1 for request in requests] == [128, 1]

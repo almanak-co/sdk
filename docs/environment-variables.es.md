@@ -178,6 +178,10 @@ Necesarias para datos históricos on-chain (precios de Chainlink, cálculos TWAP
 
 Patrón: `ARCHIVE_RPC_URL_{CHAIN}` (ej: `ARCHIVE_RPC_URL_ARBITRUM`, `ARCHIVE_RPC_URL_ETHEREUM`, `ARCHIVE_RPC_URL_BASE`, `ARCHIVE_RPC_URL_OPTIMISM`, `ARCHIVE_RPC_URL_POLYGON`, `ARCHIVE_RPC_URL_AVALANCHE`)
 
+### Estimación de viabilidad de OHLCV para pools exactos
+
+`ALMANAK_BACKTEST_OHLCV_PAGE_LATENCY_ESTIMATE_SECONDS` controla la latencia estimada por página de OHLCV de un pool exacto que usa la comprobación de viabilidad previa. Su valor predeterminado es `10.0` segundos. Es un ajuste avanzado; modifícalo únicamente cuando cambie la latencia de página observada en el runner alojado.
+
 ### Claves API de exploradores de bloques
 
 Opcionales, para datos históricos de precio de gas. Patrón: `{EXPLORER}_API_KEY`

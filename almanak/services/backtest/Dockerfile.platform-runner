@@ -45,6 +45,7 @@ RUN groupadd --gid 1000 almanak && \
 COPY --from=builder --chown=almanak:almanak /app/.venv /app/.venv
 COPY --from=builder --chown=almanak:almanak /app/almanak /app/almanak
 COPY --from=builder --chown=almanak:almanak /app/pyproject.toml /app/
+COPY --chown=almanak:almanak scripts/__init__.py scripts/platform_backtest_progress.py /app/scripts/
 COPY --chown=almanak:almanak scripts/platform_backtest_runner.py /app/runner.py
 COPY --chown=almanak:almanak scripts/platform_backtest_readiness_server.py /app/readiness_server.py
 

@@ -784,7 +784,7 @@ def bind_accounting(sc: Scenario) -> tuple[str, str]:
     token0, token1 = _resolve_lp_tokens({"token_in": token_in, "token_out": token_out}, position_key)
 
     token0, token1, v4_realigned = _v4_realign_token_pair(lp_data, sc.chain, token0, token1)
-    return _v3_realign_token_pair(
+    aligned0, aligned1, _identity_unresolved = _v3_realign_token_pair(
         lp_data=lp_data,
         intent_type_str=intent_type,
         extracted=extracted,
@@ -793,6 +793,7 @@ def bind_accounting(sc: Scenario) -> tuple[str, str]:
         token1=token1,
         v4_realigned=v4_realigned,
     )
+    return aligned0, aligned1
 
 
 def bind_position_events(sc: Scenario) -> tuple[str, str]:

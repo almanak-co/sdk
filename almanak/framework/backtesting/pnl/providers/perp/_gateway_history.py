@@ -16,6 +16,7 @@ import asyncio
 import logging
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from functools import partial
@@ -61,7 +62,7 @@ async def run_sync_gateway_call(
     """Run a blocking gateway client call without poisoning the default executor."""
     loop = asyncio.get_running_loop()
     call = partial(func, *args, **kwargs)
-    return await loop.run_in_executor(_GATEWAY_EXECUTOR, call)
+    return await loop.run_in_executor(_GATEWAY_EXECUTOR, copy_context().run, call)
 
 
 def get_connected_gateway_client() -> tuple[Any, Any]:
@@ -136,21 +137,26 @@ def fetch_funding_points(
 
     points: list[FundingHistoryPoint] = []
     chunk_start = start_ts
-    while chunk_start <= end_ts:
-        chunk_end = min(chunk_start + max_window_seconds - 1, end_ts)
-        points.extend(
-            _fetch_window(
-                client,
-                gateway_pb2,
-                venue=venue,
-                market=market,
-                market_address=market_address,
-                chain=chain,
-                start_ts=chunk_start,
-                end_ts=chunk_end,
+    from almanak.framework.backtesting.pnl.progress import loading_batches
+
+    total = max(0, (end_ts - start_ts + max_window_seconds) // max_window_seconds)
+    with loading_batches("funding", total) as batch_done:
+        while chunk_start <= end_ts:
+            chunk_end = min(chunk_start + max_window_seconds - 1, end_ts)
+            points.extend(
+                _fetch_window(
+                    client,
+                    gateway_pb2,
+                    venue=venue,
+                    market=market,
+                    market_address=market_address,
+                    chain=chain,
+                    start_ts=chunk_start,
+                    end_ts=chunk_end,
+                )
             )
-        )
-        chunk_start = chunk_end + 1
+            chunk_start = chunk_end + 1
+            batch_done()
 
     points.sort(key=lambda p: p.timestamp)
     return points

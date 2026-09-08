@@ -32,6 +32,7 @@ from almanak.connectors.uniswap_v4.receipt_parser import (
     UniswapV4ReceiptParser,
 )
 from almanak.connectors.uniswap_v4.sdk import PoolKey, _pad_int24, _pad_uint
+from almanak.framework.execution.extracted_data import LPCloseData, LPOpenData
 
 POOL_ID_32_BYTE = "0x" + "ab" * 32
 POOL_ID_REGEX = re.compile(r"^0x[0-9a-f]{64}$")
@@ -318,6 +319,91 @@ def test_v4_lp_accounting_aligns_tokens_to_canonical_currency_order(monkeypatch)
     # 1 WETH (10**18 raw / 10**18 decimals) = 1.0; not 10**12 from mis-scaling.
     assert event.amount0 == Dec("1"), f"expected amount0=1.0 (1 WETH); got {event.amount0}"
     assert event.amount1 == Dec("2000"), f"expected amount1=2000 (USDC); got {event.amount1}"
+
+
+def test_v4_lp_accounting_keeps_amounts_unmeasured_when_currency_resolution_fails(monkeypatch):
+    """The legacy builder must not apply user-label decimals to V4 slot amounts
+    when PoolKey currency identity cannot be resolved."""
+    from almanak.framework.accounting.lp_accounting import build_lp_accounting_event
+    from almanak.framework.execution.extracted_data import LPOpenData
+    from tests.support.token_resolver import FakeTokenResolver
+
+    monkeypatch.setattr(
+        "almanak.framework.data.tokens.resolver.get_token_resolver",
+        lambda: FakeTokenResolver(),
+    )
+
+    class _MockIntent:
+        intent_type = type("IT", (), {"value": "LP_OPEN"})()
+        protocol = "uniswap_v4"
+        pool = "USDC/WETH/3000"
+        token0 = "USDC"
+        token1 = "WETH"
+        token0_decimals = 6
+        token1_decimals = 18
+
+    class _MockResult:
+        lp_open_data = LPOpenData(
+            position_id=1,
+            amount0=10**18,
+            amount1=2000 * 10**6,
+            currency0=WETH.lower(),
+            currency1=USDC.lower(),
+        )
+
+    event = build_lp_accounting_event(
+        intent=_MockIntent(),
+        result=_MockResult(),
+        deployment_id="s",
+        cycle_id="c",
+        execution_mode="paper",
+        chain="arbitrum",
+        wallet_address=WALLET,
+        ledger_entry_id="le",
+    )
+
+    assert event is not None
+    assert event.amount0 is None
+    assert event.amount1 is None
+    assert event.cost_basis_usd is None
+    assert event.confidence == AccountingConfidence.UNAVAILABLE
+    assert "identity unresolved" in event.unavailable_reason
+
+
+@pytest.mark.parametrize("data_cls", [LPOpenData, LPCloseData], ids=["open", "close"])
+def test_legacy_v4_alignment_normalizes_native_zero_currency(monkeypatch, data_cls):
+    """The legacy builder recognizes V4's zero-address native Currency."""
+    from almanak.framework.accounting.lp_accounting import _v4_align_tokens_to_currency_order
+    from almanak.framework.data.tokens.defaults import NATIVE_SENTINEL
+    from tests.support.token_resolver import FakeToken, FakeTokenResolver
+
+    zero_address = "0x0000000000000000000000000000000000000000"
+    usdc = "0x" + "44" * 20
+    resolver = FakeTokenResolver(
+        {
+            NATIVE_SENTINEL: FakeToken(
+                symbol="AVAX", address=NATIVE_SENTINEL, decimals=18, chain="avalanche"
+            ),
+            usdc: FakeToken(symbol="USDC", address=usdc, decimals=6, chain="avalanche"),
+        }
+    )
+    monkeypatch.setattr(
+        "almanak.framework.data.tokens.resolver.get_token_resolver",
+        lambda: resolver,
+    )
+    if data_cls is LPOpenData:
+        lp_data = data_cls(position_id=1, currency0=zero_address, currency1=usdc)
+    else:
+        lp_data = data_cls(currency0=zero_address, currency1=usdc)
+
+    assert _v4_align_tokens_to_currency_order(lp_data, "avalanche", "AVAX", "USDC", 18, 6, False) == (
+        "AVAX",
+        "USDC",
+        18,
+        6,
+        False,
+        False,
+    )
 
 
 def test_v4_payload_carries_protocol_for_primitive_for_override():

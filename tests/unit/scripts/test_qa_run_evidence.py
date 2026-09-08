@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
+import sqlite3
 import sys
 from decimal import Decimal
 from pathlib import Path
@@ -287,6 +289,8 @@ def test_alm_3267_reverted_primary_receipt_is_retained_and_classified():
         "submitted_transaction_count": 1,
         "successful_transaction_hashes": [],
         "terminal_receipt_count": 1,
+        "unresolved_submission_control": "nonce reconciliation binds the wallet-originated count to these hashes",
+        "unresolved_submission_count": 0,
     }
 
 
@@ -340,3 +344,162 @@ def test_benqi_profile_cannot_be_inferred_as_looping_or_declared_inapplicable():
         module.accountant_profile_from_card(
             "ACCOUNTANT_PROFILE: N/A: lending rows were not inspected\n", demo="benqi_lending_lifecycle"
         )
+
+
+def _unbound_row(row_id: str, error: str) -> dict:
+    return {
+        "chain": "ethereum",
+        "id": row_id,
+        "intent_type": "BORROW",
+        "tx_hash": None,
+        "success": 0,
+        "gas_used": 0,
+        "gas_usd": "0",
+        "extracted_data_json": "",
+        "price_inputs_json": "{}",
+        "error": error,
+    }
+
+
+def test_intent_without_transaction_identity_is_listed_unbound_not_never_submitted():
+    module = _load()
+    submitted = _row(429_765, [429_765], row_id="swap")
+    lost_hash = _unbound_row(
+        "borrow",
+        "BROADCAST_RECONCILIATION_REQUIRED: execution crossed the submission boundary"
+        " without retaining a transaction identifier; refusing automatic replay until reconciled: x",
+    )
+    pre_submit = _unbound_row("borrow-2", "Insufficient ETH: need 2, have 1")
+    receipts = _receipts([submitted])
+    result = module.reconcile_receipts([submitted, lost_hash, pre_submit], receipt_lookup=receipts.get)
+    assert result["canonical_hash_count"] == 1
+    assert [x["intent_type"] for x in result["intents"]] == ["TEST"]
+    assert "not_submitted_intents" not in result
+    assert result["unbound_intents"] == [
+        {
+            "intent_id": "borrow",
+            "intent_type": "BORROW",
+            "ledger_execution_outcome": "SUBMISSION_UNRESOLVED",
+            "error": lost_hash["error"],
+        },
+        {
+            "intent_id": "borrow-2",
+            "intent_type": "BORROW",
+            "ledger_execution_outcome": "NO_TRANSACTION_IDENTITY",
+            "error": pre_submit["error"],
+        },
+    ]
+    integrity = result["submission_receipt_integrity"]
+    assert integrity["unresolved_submission_count"] == 1
+    assert "nonce reconciliation" in integrity["unresolved_submission_control"]
+    with pytest.raises(module.EvidenceError, match="at least one canonical ledger intent"):
+        module.reconcile_receipts([lost_hash], receipt_lookup=receipts.get)
+
+
+def test_identity_less_row_with_unmeasured_success_fails_closed():
+    module = _load()
+    submitted = _row(429_765, [429_765], row_id="swap")
+    unmeasured = _unbound_row("borrow", "BROADCAST_RECONCILIATION_REQUIRED: lost hash")
+    unmeasured["success"] = None
+    receipts = _receipts([submitted])
+    with pytest.raises(module.EvidenceError, match="no canonical transaction membership"):
+        module.reconcile_receipts([submitted, unmeasured], receipt_lookup=receipts.get)
+
+
+def test_ledger_rows_carry_the_error_an_unbound_record_reports(tmp_path):
+    module = _load()
+    db = tmp_path / "db.sqlite"
+    with sqlite3.connect(db) as connection:
+        connection.execute(
+            "CREATE TABLE transaction_ledger (id TEXT, deployment_id TEXT, timestamp TEXT, intent_type TEXT,"
+            " chain TEXT, protocol TEXT, tx_hash TEXT, gas_used INTEGER, gas_usd TEXT, success INTEGER,"
+            " error TEXT, extracted_data_json TEXT, price_inputs_json TEXT)"
+        )
+        connection.execute(
+            "INSERT INTO transaction_ledger VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "borrow",
+                "deployment:abc",
+                "2026-09-06T05:43:27+00:00",
+                "BORROW",
+                "robinhood",
+                "morpho_blue",
+                None,
+                0,
+                "0",
+                0,
+                "BROADCAST_RECONCILIATION_REQUIRED: insufficient funds for gas",
+                "",
+                "{}",
+            ),
+        )
+    rows = module.load_ledger_rows(
+        db, deployment_id="deployment:abc", run_start="2026-09-06T00:00:00+00:00", run_end="2026-09-07T00:00:00+00:00"
+    )
+    assert rows[0]["error"] == "BROADCAST_RECONCILIATION_REQUIRED: insufficient funds for gas"
+    assert module._unbound_intent_record(rows[0])["error"] == rows[0]["error"]
+
+
+def _reconciliation_result():
+    return {
+        "intents": [
+            {"transactions": [{"tx_hash": "0xaa", "raw_receipt": {"status": "0x1", "transactionHash": "0xaa"}}]},
+            {"transactions": [{"tx_hash": "0xbb", "raw_receipt": {"status": "0x1", "transactionHash": "0xbb"}}]},
+        ]
+    }
+
+
+def test_interrupted_publication_leaves_no_reconciliation(tmp_path):
+    module = _load()
+    receipt_dir = tmp_path / "receipts"
+    receipt_dir.mkdir()
+    receipt_dir.chmod(0o555)
+    try:
+        with pytest.raises(PermissionError):
+            module.publish_receipt_reconciliation(_reconciliation_result(), tmp_path / "out.json", receipt_dir)
+    finally:
+        receipt_dir.chmod(0o755)
+    assert not (tmp_path / "out.json").exists()
+    assert list(receipt_dir.iterdir()) == []
+    module.publish_receipt_reconciliation(_reconciliation_result(), tmp_path / "out.json", receipt_dir)
+    assert (tmp_path / "out.json").exists()
+    assert sorted(p.name for p in receipt_dir.iterdir()) == ["receipt-0xaa.json", "receipt-0xbb.json"]
+
+
+def test_interrupted_write_leaves_no_partial_file_at_a_final_name(tmp_path, monkeypatch):
+    module = _load()
+    receipt_dir = tmp_path / "receipts"
+    calls = []
+    real_replace = os.replace
+
+    def interrupted_replace(src, dst):
+        calls.append(dst)
+        if len(calls) == 2:
+            raise KeyboardInterrupt
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(module.os, "replace", interrupted_replace)
+    with pytest.raises(KeyboardInterrupt):
+        module.publish_receipt_reconciliation(_reconciliation_result(), tmp_path / "out.json", receipt_dir)
+    monkeypatch.undo()
+    assert sorted(p.name for p in receipt_dir.iterdir()) == ["receipt-0xaa.json"]
+    assert not (tmp_path / "out.json").exists()
+    assert not list(tmp_path.glob(".*.tmp.*")) and not list(receipt_dir.glob(".*.tmp.*"))
+    module.publish_receipt_reconciliation(_reconciliation_result(), tmp_path / "out.json", receipt_dir)
+    assert (tmp_path / "out.json").exists()
+    assert sorted(p.name for p in receipt_dir.iterdir()) == ["receipt-0xaa.json", "receipt-0xbb.json"]
+
+
+def test_publication_reuses_identical_receipts_and_refuses_different_ones(tmp_path):
+    module = _load()
+    receipt_dir = tmp_path / "receipts"
+    module.publish_receipt_reconciliation(_reconciliation_result(), tmp_path / "first.json", receipt_dir)
+    module.publish_receipt_reconciliation(_reconciliation_result(), tmp_path / "second.json", receipt_dir)
+    assert (tmp_path / "second.json").exists()
+    (receipt_dir / "receipt-0xbb.json").write_text("SENTINEL\n")
+    with pytest.raises(module.EvidenceError, match="refusing to overwrite canonical receipt"):
+        module.publish_receipt_reconciliation(_reconciliation_result(), tmp_path / "third.json", receipt_dir)
+    assert not (tmp_path / "third.json").exists()
+    assert (receipt_dir / "receipt-0xbb.json").read_text() == "SENTINEL\n"
+    with pytest.raises(module.EvidenceError, match="refusing to overwrite receipt reconciliation"):
+        module.publish_receipt_reconciliation(_reconciliation_result(), tmp_path / "first.json", receipt_dir)

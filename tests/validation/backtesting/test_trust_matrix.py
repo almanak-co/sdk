@@ -47,6 +47,7 @@ from almanak.connectors.gmx_v2.backtest_prices import (
     GMXPriceHistoryCoverageError,
     _GMXOracleMarketSource,
 )
+from almanak.connectors.pancakeswap_v3.addresses import PANCAKESWAP_V3
 from almanak.connectors.uniswap_v3.addresses import UNISWAP_V3
 from almanak.core.asset_identity import AssetIdentity, AssetNamespace
 from almanak.core.models.quote_asset import QuoteAsset
@@ -95,6 +96,7 @@ from almanak.framework.backtesting.pnl.providers.twap import HistoricalTWAPPoint
 from almanak.framework.backtesting.pnl.types import DataConfidence
 from almanak.framework.data.interfaces import OHLCVCandle
 from almanak.framework.data.models import DataClassification
+from almanak.framework.data.pools.descriptor import ResolvedPoolDescriptor
 from almanak.framework.data.timeframes import OHLCVTimeframe
 from almanak.framework.intents.lending_intents import (
     BorrowIntent,
@@ -145,6 +147,36 @@ def _market_state(hour: int, weth: str = "2000") -> MarketState:
         chain="arbitrum",
         block_number=1_000_000 + hour,
         gas_price_gwei=Decimal("30"),
+    )
+
+
+def _pinned_v3_pool(
+    *,
+    chain: str,
+    protocol: str,
+    address: str,
+    token0: str,
+    token1: str,
+    token0_decimals: int,
+    token1_decimals: int,
+    factory: str,
+    deployment_block: int,
+) -> ResolvedPoolDescriptor:
+    """Build a complete replay pin for a synthetic exact-pool fixture."""
+    return ResolvedPoolDescriptor(
+        chain=chain,
+        protocol=protocol,
+        address=address,
+        token0=token0,
+        token1=token1,
+        token0_decimals=token0_decimals,
+        token1_decimals=token1_decimals,
+        fee_tier_units=3_000,
+        factory=factory,
+        discriminator_kind="fee_tier",
+        discriminator=3_000,
+        deployment_block=deployment_block,
+        provenance="test_fixture:pinned_archive",
     )
 
 
@@ -709,6 +741,19 @@ def test_historical_exact_pool_twap_reaches_unchanged_strategy_call(monkeypatch:
         end_time=START + timedelta(hours=2),
         interval_seconds=3_600,
         chain="ethereum",
+        resolved_pool_descriptors=(
+            _pinned_v3_pool(
+                chain="ethereum",
+                protocol="uniswap_v3",
+                address=pool,
+                token0=paxg,
+                token1=xaut,
+                token0_decimals=18,
+                token1_decimals=6,
+                factory=UNISWAP_V3["ethereum"]["factory"],
+                deployment_block=19_000_000,
+            ),
+        ),
         tokens=["PAXG", "XAUT"],
         token_funding=[
             {"symbol": "PAXG", "address": paxg, "chain": "ethereum", "amount": "1", "amount_type": "token"},
@@ -919,6 +964,19 @@ def test_historical_exact_pool_ohlcv_reaches_unchanged_strategy_call(monkeypatch
         end_time=start + timedelta(hours=2),
         interval_seconds=3_600,
         chain="bsc",
+        resolved_pool_descriptors=(
+            _pinned_v3_pool(
+                chain="bsc",
+                protocol="pancakeswap_v3",
+                address=pool,
+                token0=token0,
+                token1=token1,
+                token0_decimals=18,
+                token1_decimals=18,
+                factory=PANCAKESWAP_V3["bsc"]["factory"],
+                deployment_block=deployment_block,
+            ),
+        ),
         tokens=[token0, token1],
         token_funding=[
             {"symbol": "GOOGLB", "address": token0, "chain": "bsc", "amount": "1", "amount_type": "token"},
@@ -1060,6 +1118,19 @@ def test_historical_exact_pool_state_reaches_unchanged_lp_calls(monkeypatch: pyt
         end_time=START + timedelta(hours=2),
         interval_seconds=3_600,
         chain="ethereum",
+        resolved_pool_descriptors=(
+            _pinned_v3_pool(
+                chain="ethereum",
+                protocol="uniswap_v3",
+                address=exact_pool,
+                token0=link,
+                token1=weth,
+                token0_decimals=18,
+                token1_decimals=18,
+                factory=UNISWAP_V3["ethereum"]["factory"],
+                deployment_block=19_000_000,
+            ),
+        ),
         tokens=[link, weth],
         token_funding=[
             {"symbol": "LINK", "address": link, "chain": "ethereum", "amount": "1", "amount_type": "token"},

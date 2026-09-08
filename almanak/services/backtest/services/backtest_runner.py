@@ -33,6 +33,7 @@ from almanak.framework.backtesting.pnl.engine import (
 )
 from almanak.framework.backtesting.pnl.initial_portfolio import canonical_token_funding_entries
 from almanak.framework.backtesting.pnl.providers.coingecko import CoinGeckoDataProvider
+from almanak.framework.data.pools.descriptor import ResolvedPoolDescriptor
 from almanak.framework.data.tokens import get_token_resolver
 from almanak.framework.data.tokens.exceptions import TokenResolutionError
 from almanak.framework.data.tokens.models import ResolvedToken
@@ -470,6 +471,7 @@ def create_backtester(
     *,
     close_providers_on_finish: bool = True,
     data_config_overrides: Mapping[str, Any] | None = None,
+    resolved_pool_descriptors: Mapping[Any, ResolvedPoolDescriptor] | Iterable[ResolvedPoolDescriptor] | None = None,
 ) -> PnLBacktester:
     """Create a PnLBacktester wired with the full engine capabilities.
 
@@ -542,6 +544,7 @@ def create_backtester(
         strategy_type="auto",
         data_config=data_config,
         token_addresses=token_addresses,
+        resolved_pool_descriptors=resolved_pool_descriptors,
         close_providers_on_finish=close_providers_on_finish,
     )
 

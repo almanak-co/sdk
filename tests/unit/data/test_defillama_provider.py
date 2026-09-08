@@ -569,6 +569,22 @@ class TestYieldPools:
         assert len(result) == 1
         assert result[0].pool_id == "good-pool"
 
+    def test_unmeasured_required_fields_are_skipped_but_measured_zero_is_retained(
+        self, provider: DefiLlamaProvider
+    ):
+        pools = [
+            {"pool": "missing-tvl", "chain": "Arbitrum", "project": "aave-v3", "apy": 1},
+            {"pool": "missing-apy", "chain": "Arbitrum", "project": "aave-v3", "tvlUsd": 1},
+            {"pool": "nan-tvl", "chain": "Arbitrum", "project": "aave-v3", "tvlUsd": "NaN", "apy": 1},
+            {"pool": "zero", "chain": "Arbitrum", "project": "aave-v3", "tvlUsd": 0, "apy": 0},
+        ]
+
+        result = provider._parse_yield_pools({"data": pools})
+
+        assert [pool.pool_id for pool in result] == ["zero"]
+        assert result[0].tvl_usd == Decimal("0")
+        assert result[0].apy == 0.0
+
 
 # ---------------------------------------------------------------------------
 # TVL tests
@@ -633,6 +649,29 @@ class TestTvl:
         result = asyncio.run(provider.get_tvl("aave-v3"))
 
         assert result.tvl_usd == Decimal("5000000000")
+
+    def test_explicit_zero_total_is_not_replaced_by_chain_sum(self, provider: DefiLlamaProvider):
+        result = provider._parse_tvl(
+            "zero-protocol",
+            {"currentChainTvls": {"total": 0, "Ethereum": 123}},
+        )
+        assert result.tvl_usd == Decimal("0")
+        assert result.chain_tvls == {"ethereum": Decimal("123")}
+
+    def test_missing_chain_value_prevents_partial_total(self, provider: DefiLlamaProvider):
+        result = provider._parse_tvl(
+            "partial-protocol",
+            {"currentChainTvls": {"Ethereum": 123, "Arbitrum": None}},
+        )
+        assert result.tvl_usd is None
+        assert result.chain_tvls == {"ethereum": Decimal("123")}
+
+    def test_explicit_null_total_remains_unmeasured(self, provider: DefiLlamaProvider):
+        result = provider._parse_tvl(
+            "null-total",
+            {"currentChainTvls": {"total": None, "Ethereum": 123}},
+        )
+        assert result.tvl_usd is None
 
     def test_tvl_empty_protocol_raises(self, provider: DefiLlamaProvider):
         """Test that empty protocol name raises."""

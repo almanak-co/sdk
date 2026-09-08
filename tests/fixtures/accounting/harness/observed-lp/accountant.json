@@ -1,0 +1,300 @@
+{
+  "cell_details": [
+    {
+      "description": "Money trail",
+      "diagnostic": "4 ledger rows (4 successful, 2 SWAP); all tx_hashes present; SWAP/PT rows carry token amounts AND USD valuations",
+      "id": "G1",
+      "primitive": "",
+      "status": "PASS"
+    },
+    {
+      "description": "Cost ledger",
+      "diagnostic": "gas_usd populated on 4/4 ledger rows",
+      "id": "G2",
+      "primitive": "",
+      "status": "PASS"
+    },
+    {
+      "description": "Yield ledger",
+      "diagnostic": "4 yield-emitting events found",
+      "id": "G3",
+      "primitive": "",
+      "status": "PASS"
+    },
+    {
+      "description": "Capital deployed right now",
+      "diagnostic": "deployed=$0 cash=$251263.84886896347 debt_mark=$0 equity=$251263.84886896347 unreadable_payload_rows=0 missing_debt_leg_rows=0",
+      "id": "G4",
+      "primitive": "",
+      "status": "PASS"
+    },
+    {
+      "description": "Initial vs current",
+      "diagnostic": "opening_equity=$251267.00 current=$251263.84886896347 delta=$-3.15113103653; baseline_source=strategy_allocation_usd schema_version=1",
+      "id": "G5",
+      "primitive": "",
+      "status": "PASS"
+    },
+    {
+      "description": "Reconciliation",
+      "diagnostic": "wallet=$-3.15113103653 component=$-3.150623028968588648876000000 gap=$0.000508007561411351124000000 (\u03b5=$0.10 = 0.0025 \u00d7 notional_traded=$12.36577968820070823002, floor=$0.10)",
+      "id": "G6",
+      "primitive": "",
+      "status": "PASS"
+    },
+    {
+      "description": "Attribution (cycle_id everywhere)",
+      "diagnostic": "all rows tagged: ledger=4 pos=2 acct=4",
+      "id": "G7",
+      "primitive": "",
+      "status": "PASS"
+    },
+    {
+      "description": "Time-series",
+      "diagnostic": "6 snapshots with measured equity (positions + cash)",
+      "id": "G8",
+      "primitive": "",
+      "status": "PASS"
+    },
+    {
+      "description": "Confidence on every USD",
+      "diagnostic": "all USD-bearing rows have confidence (6 snapshots, 4 acct events)",
+      "id": "G9",
+      "primitive": "",
+      "status": "PASS"
+    },
+    {
+      "description": "Multi-tx atomicity",
+      "diagnostic": "4 ledger rows; no duplicates; 1/3 cycles span multiple intents and all are uniform-status",
+      "id": "G10",
+      "primitive": "",
+      "status": "PASS"
+    },
+    {
+      "description": "Failed intents",
+      "diagnostic": "no failed intents in this run \u2014 cell is N/A but writer contract was unexercised",
+      "id": "G11",
+      "primitive": "",
+      "status": "SKIP"
+    },
+    {
+      "description": "Oracle consistency",
+      "diagnostic": "all 4 ledger rows have shaped price_inputs_json",
+      "id": "G12",
+      "primitive": "",
+      "status": "PASS"
+    },
+    {
+      "description": "Lot-matching policy",
+      "diagnostic": "per-primitive: {'swap': 4, 'lp': 6}",
+      "id": "G13",
+      "primitive": "",
+      "status": "PASS"
+    },
+    {
+      "description": "SDK \u2261 on-chain reconciliation",
+      "diagnostic": "2 position_state row(s) present but 0 carried a comparable delta_vs_protocol_pct (unmeasured=2 not-emitted=0 unparseable=0) \u2014 nothing was compared against on-chain state, so this cell asserts nothing. Needs a producer that computes the delta (declared position_state.py:87, written only gateway-side today).",
+      "id": "G14",
+      "primitive": "",
+      "status": "XFAIL"
+    },
+    {
+      "description": "Multi-period MtM self-consistency",
+      "diagnostic": "every snapshot with open positions has Track C coverage (2 snapshots, 2 Track C rows)",
+      "id": "G15",
+      "primitive": "",
+      "status": "PASS"
+    },
+    {
+      "description": "Range exposure (tick_lower/upper/current_tick at every snapshot)",
+      "diagnostic": "found tick_lower/upper on position_events",
+      "id": "LP1",
+      "primitive": "",
+      "status": "PASS"
+    },
+    {
+      "description": "In-range time (fraction over hold)",
+      "diagnostic": "2/2 samples in-range (100.00%); track-c rows present",
+      "id": "LP2",
+      "primitive": "",
+      "status": "PASS"
+    },
+    {
+      "description": "Fees earned per position",
+      "diagnostic": "position_events.fees_token0/1 populated",
+      "id": "LP3",
+      "primitive": "",
+      "status": "PASS"
+    },
+    {
+      "description": "Impermanent loss (diagnostic, NOT in net PnL)",
+      "diagnostic": "il_usd in LP_CLOSE payload within sanity bound",
+      "id": "LP4",
+      "primitive": "",
+      "status": "PASS"
+    },
+    {
+      "description": "LP open\u2192close delta decomposition",
+      "diagnostic": "CLOSE attribution_json carries LP decomposition (net_pnl_usd, principal_deposited_usd, principal_recovered_usd, price_pnl_usd)",
+      "id": "LP5",
+      "primitive": "",
+      "status": "PASS"
+    },
+    {
+      "description": "Liquidity over time",
+      "diagnostic": "2/2 LP rows carry non-zero liquidity",
+      "id": "LP6",
+      "primitive": "",
+      "status": "PASS"
+    },
+    {
+      "description": "Native lane (cost stack == native balance delta)",
+      "diagnostic": "ETH outflow 0.001254459 == gas 0.001254459 + venue fee 0 (residual 0E-9, tolerance 0.00006272295)",
+      "id": "G16",
+      "primitive": "",
+      "status": "PASS"
+    },
+    {
+      "description": "Receipt-set integrity (typed legs, identity, status, exact execution resource)",
+      "diagnostic": "4 landed row(s), 10 unique successful sub-transaction(s): parent ACTION identity and exact aggregate gas verified; nonce completeness not asserted",
+      "id": "G17",
+      "primitive": "",
+      "status": "PASS"
+    },
+    {
+      "description": "Registry coherence (accounting_events \u2194 position_registry, bidirectional)",
+      "diagnostic": "bidirectional coherence holds: 1 CLOSE event(s) with hash, 1 closed registry row(s); zero orphans on either side",
+      "id": "L5_22",
+      "primitive": "",
+      "status": "PASS"
+    }
+  ],
+  "cells": {
+    "G1": "PASS",
+    "G10": "PASS",
+    "G11": "SKIP",
+    "G12": "PASS",
+    "G13": "PASS",
+    "G14": "XFAIL",
+    "G15": "PASS",
+    "G16": "PASS",
+    "G17": "PASS",
+    "G2": "PASS",
+    "G3": "PASS",
+    "G4": "PASS",
+    "G5": "PASS",
+    "G6": "PASS",
+    "G7": "PASS",
+    "G8": "PASS",
+    "G9": "PASS",
+    "L5_22": "PASS",
+    "LP1": "PASS",
+    "LP2": "PASS",
+    "LP3": "PASS",
+    "LP4": "PASS",
+    "LP5": "PASS",
+    "LP6": "PASS"
+  },
+  "cells_blocked_by_payload_errors": [],
+  "db_dump_path": "/private/tmp/qa-accounting-dogfood-3931/docs/internal/notes/.tmp/harness-fixed-anvil-isolated/lp-uniswap_v3-arbitrum/strategy/almanak_state.db",
+  "deployment_id": "deployment:1abdf790144a",
+  "formula_version": 1,
+  "g6_decomposition": {
+    "capital_usd": "251267.00",
+    "component_pnl_usd": "-3.150623028968588648876000000",
+    "gap_usd": "0.000508007561411351124000000",
+    "gas_usd_before_initial_endpoint": "0",
+    "gas_usd_before_initial_endpoint_unmeasured_count": "0",
+    "il_diagnostic_usd_NOT_in_PnL": "-0.00000100000000251182",
+    "initial_endpoint_covers_run": "True",
+    "initial_snapshot_cycle_id": "boot-deployment:1abdf790144a",
+    "inventory_reval_confidence": "measured",
+    "inventory_reval_excluded_tokens": [
+      "USDC",
+      "WETH"
+    ],
+    "inventory_reval_per_token": {
+      "<open_swap_lots_total>": "0.000000"
+    },
+    "ledger_rows_before_initial_endpoint": "0",
+    "ledger_rows_without_timestamp": "0",
+    "missing_debt_leg_rows": "0",
+    "unreadable_payload_rows": "0",
+    "wallet_pnl_usd": "-3.15113103653",
+    "window_residual_usd": "0.000508007561411351124000000",
+    "\u03a3_fees_usd": "0.00",
+    "\u03a3_funding_usd": "0",
+    "\u03a3_funding_usd_null_count": "0",
+    "\u03a3_gas_usd": "-3.15061397413",
+    "\u03a3_interest_borrow_null_count": "0",
+    "\u03a3_interest_supply_null_count": "0",
+    "\u03a3_interest_usd": "0",
+    "\u03a3_inventory_reval_usd": "0E-11",
+    "\u03a3_inventory_reval_usd_null_count": "0",
+    "\u03a3_lp_fees_null_count": "0",
+    "\u03a3_lp_usd": "-0.00000888362505927616",
+    "\u03a3_lp_usd_null_count": "0",
+    "\u03a3_perp_keeper_fee_unmeasured_count": "0",
+    "\u03a3_perp_keeper_fee_usd": "0",
+    "\u03a3_perp_trading_fee_unmeasured_count": "0",
+    "\u03a3_perp_trading_fee_usd": "0",
+    "\u03a3_perp_usd": "0",
+    "\u03a3_perp_usd_null_count": "0",
+    "\u03a3_pt_amount_null_count": "0",
+    "\u03a3_pt_no_prior_basis_count": "0",
+    "\u03a3_pt_realized_usd_null_count": "0",
+    "\u03a3_swaps_no_prior_basis_count": "1",
+    "\u03a3_swaps_usd": "-1.71213529372716000000E-7",
+    "\u03a3_swaps_usd_null_count": "0",
+    "\u03b5_floor_usd": "$0.10",
+    "\u03b5_pct": "0.0025",
+    "\u03b5_scaled_over_capital": "1.230342592560971817829241405E-7",
+    "\u03b5_scaling_base_label": "notional_traded",
+    "\u03b5_scaling_base_usd": "12.36577968820070823002",
+    "\u03b5_threshold_usd": "0.10",
+    "\u03b5_vacuous": "False"
+  },
+  "matching_policy_version": 3,
+  "network": "arbitrum",
+  "nleg_invariant_findings": [],
+  "on_chain_footprint": [
+    {
+      "chain": "arbitrum",
+      "gas_used": 202324,
+      "intent_type": "SWAP",
+      "success": true,
+      "tx_hash": "0xc16706e88b10fe4c56d89eaf8a04fcb0dde76daf0e9f02fa6c08dbe1be6ee420"
+    },
+    {
+      "chain": "arbitrum",
+      "gas_used": 540820,
+      "intent_type": "LP_OPEN",
+      "success": true,
+      "tx_hash": "0xf7899635d18401bf6d6c22f5797cc9a7684d17759379235cc512062fc6873755"
+    },
+    {
+      "chain": "arbitrum",
+      "gas_used": 331983,
+      "intent_type": "LP_CLOSE",
+      "success": true,
+      "tx_hash": "0xa346d1f042a6320cb7acb04160299df9968543d7589453f874d4f1f565317d31"
+    },
+    {
+      "chain": "arbitrum",
+      "gas_used": 179332,
+      "intent_type": "SWAP",
+      "success": true,
+      "tx_hash": "0x78cfbd5e83903b5caaee126a2cdb3d23e91de05d2902e16c6a9107e19a82d824"
+    }
+  ],
+  "payload_validation_errors": [],
+  "primitive": "lp",
+  "schema_version": 1,
+  "scores": {
+    "failed": 0,
+    "passed": 22,
+    "total": 24,
+    "xfailed": 1
+  },
+  "timestamp": "2026-09-06T06:05:31.186284+00:00"
+}

@@ -130,6 +130,8 @@ def _buy_event(shares: str, cost_basis: str) -> tuple[dict[str, Any], dict[str, 
     extracted = {
         "outcome_tokens_received": shares,
         "cost_basis": cost_basis,
+        "gas_cost_usd": "0",
+        "fee_pusd": "0",
         "market_id": _MARKET_ID,
     }
     return (
@@ -142,6 +144,7 @@ def _sell_event(shares: str, proceeds: str) -> tuple[dict[str, Any], dict[str, A
     extracted = {
         "outcome_tokens_sold": shares,
         "proceeds": proceeds,
+        "fee_pusd": "0",
         "market_id": _MARKET_ID,
     }
     return (
@@ -154,6 +157,7 @@ def _redeem_event(shares: str, payout: str) -> tuple[dict[str, Any], dict[str, A
     extracted = {
         "redemption_amount": shares,
         "payout": payout,
+        "fee_pusd": "0",
         "market_id": _MARKET_ID,
     }
     return (
@@ -457,6 +461,29 @@ class TestReconstruction:
         # Closed -> row absent
         assert fresh.get_prediction_position(_DEPLOYMENT_ID, _position_key()) is None
 
+    def test_unavailable_buy_snapshot_preserves_prior_aggregate_on_restart(self) -> None:
+        """A non-mutating unavailable BUY must not erase an existing position."""
+        basis = FIFOBasisStore()
+        valid = handle_prediction(*_buy_event(shares="10", cost_basis="5.00"), basis)
+        unavailable = handle_prediction(*_buy_event(shares="-1", cost_basis="2.00"), basis)
+        assert valid is not None and unavailable is not None
+        assert unavailable.confidence == AccountingConfidence.UNAVAILABLE
+        assert unavailable.shares_delta is None
+        assert unavailable.usd_delta == Decimal("2.00")
+        assert unavailable.position_size_after == Decimal("10")
+        assert unavailable.position_basis_after == Decimal("5.00")
+        assert unavailable.position_loaded_extras_after == Decimal("0")
+
+        fresh = FIFOBasisStore()
+        assert (
+            fresh.reconstruct_from_events([_row_for_reconstruction(valid), _row_for_reconstruction(unavailable)]) == 2
+        )
+        assert fresh.get_prediction_position(_DEPLOYMENT_ID, _position_key()) == (
+            Decimal("10"),
+            Decimal("5.00"),
+        )
+        assert fresh.get_prediction_loaded_extras(_DEPLOYMENT_ID, _position_key()) == Decimal("0")
+
 
 def _row_for_reconstruction(event: PredictionAccountingEvent) -> dict[str, Any]:
     """Build the row shape reconstruct_from_events expects from a built event."""
@@ -492,6 +519,186 @@ class TestPayloadRoundtrip:
         assert restored.position_size_after == Decimal("5")
         assert restored.position_basis_after == Decimal("2.50")
         assert restored.realized_pnl_usd is None
+
+    def test_unavailable_trade_deltas_round_trip_as_null(self) -> None:
+        basis = FIFOBasisStore()
+        outbox = _make_outbox_row("PREDICTION_BUY")
+        ledger = _make_ledger_row(
+            "PREDICTION_BUY",
+            extracted_data_json=_extracted_data_json(
+                {
+                    # shares intentionally absent
+                    "cost_basis": "2.50",
+                    "market_id": _MARKET_ID,
+                }
+            ),
+        )
+
+        ev = handle_prediction(outbox, ledger, basis)
+
+        assert ev is not None
+        assert ev.confidence == AccountingConfidence.UNAVAILABLE
+        assert ev.shares_delta is None
+        assert ev.usd_delta == Decimal("2.50")
+        decoded = json.loads(ev.to_payload_json())
+        assert decoded["shares_delta"] is None
+        assert decoded["usd_delta"] == "2.50"
+        assert decoded["primitive_version"] == 3
+        restored = PredictionAccountingEvent.from_payload_json(ev.identity, ev.to_payload_json())
+        assert restored.shares_delta is None
+        assert restored.usd_delta == Decimal("2.50")
+        assert restored.primitive_version == 3
+
+
+class TestPredictionAdjustmentMeasurements:
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            (None, None),
+            ("", None),
+            ("invalid", None),
+            ("-1", None),
+            ("NaN", None),
+            ("Infinity", None),
+            ("0", Decimal("0")),
+            ("1.25", Decimal("1.25")),
+        ],
+    )
+    def test_non_negative_adjustment_preserves_measurement_state(self, raw: Any, expected: Decimal | None) -> None:
+        from almanak.framework.accounting.category_handlers.prediction_handler import (
+            _non_negative_adjustment,
+        )
+
+        assert _non_negative_adjustment(raw) == expected
+
+    def test_unmeasured_buy_adjustment_poison_survives_payload_round_trip(self) -> None:
+        outbox, ledger = _buy_event(shares="10", cost_basis="5.00")
+        extracted = json.loads(ledger["extracted_data_json"])
+        extracted.pop("gas_cost_usd")
+        ledger["extracted_data_json"] = _extracted_data_json(extracted)
+        basis = FIFOBasisStore()
+
+        event = handle_prediction(outbox, ledger, basis)
+
+        assert event is not None
+        assert event.confidence == AccountingConfidence.UNAVAILABLE
+        assert event.position_loaded_extras_after is None
+        assert basis.get_prediction_loaded_extras(_DEPLOYMENT_ID, _position_key()) is None
+        restored = PredictionAccountingEvent.from_payload_json(event.identity, event.to_payload_json())
+        assert restored.position_loaded_extras_after is None
+
+        disposal = handle_prediction(*_sell_event(shares="10", proceeds="6.00"), basis)
+        assert disposal is not None
+        assert disposal.realized_pnl_usd is None
+        assert disposal.confidence == AccountingConfidence.UNAVAILABLE
+
+    def test_unmeasured_disposal_fee_consumes_known_shares(self) -> None:
+        basis = FIFOBasisStore()
+        handle_prediction(*_buy_event(shares="10", cost_basis="5.00"), basis)
+        outbox, ledger = _sell_event(shares="5", proceeds="3.00")
+        extracted = json.loads(ledger["extracted_data_json"])
+        extracted.pop("fee_pusd")
+        ledger["extracted_data_json"] = _extracted_data_json(extracted)
+
+        event = handle_prediction(outbox, ledger, basis)
+
+        assert event is not None
+        assert event.confidence == AccountingConfidence.UNAVAILABLE
+        assert event.shares_delta == Decimal("5")
+        assert event.usd_delta == Decimal("3.00")
+        assert event.realized_pnl_usd is None
+        assert basis.get_prediction_position(_DEPLOYMENT_ID, _position_key()) == (
+            Decimal("5"),
+            Decimal("2.50"),
+        )
+
+        assert event.position_size_after == Decimal("5")
+        replayed = FIFOBasisStore()
+        assert replayed.reconstruct_from_events([{
+            "event_type": event.event_type.value,
+            "deployment_id": _DEPLOYMENT_ID,
+            "position_key": _position_key(),
+            "timestamp": ledger["timestamp"],
+            "payload_json": event.to_payload_json(),
+        }]) == 1
+        for store in (basis, replayed):
+            final = handle_prediction(*_sell_event(shares="5", proceeds="3.00"), store)
+            assert final is not None
+            assert final.event_type == PredictionEventType.PREDICTION_CLOSE
+            assert final.position_size_after == Decimal("0")
+            assert final.position_basis_after == Decimal("0")
+            assert final.realized_pnl_usd == Decimal("0.50")
+            assert store.get_prediction_position(_DEPLOYMENT_ID, _position_key()) is None
+
+    @pytest.mark.parametrize("event_factory,value_field", [(_sell_event, "proceeds"), (_redeem_event, "payout")])
+    @pytest.mark.parametrize("missing_field", ["fee_pusd", "value"])
+    def test_unmeasured_disposal_value_still_closes_known_position(self, event_factory, value_field, missing_field):
+        basis = FIFOBasisStore()
+        handle_prediction(*_buy_event(shares="10", cost_basis="5.00"), basis)
+        outbox, ledger = event_factory(shares="10", **{value_field: "6.00"})
+        extracted = json.loads(ledger["extracted_data_json"])
+        extracted.pop(value_field if missing_field == "value" else missing_field)
+        ledger["extracted_data_json"] = _extracted_data_json(extracted)
+        event = handle_prediction(outbox, ledger, basis)
+        assert event is not None
+        assert event.position_size_after == Decimal("0")
+        assert event.position_basis_after == Decimal("0")
+        if event_factory is _redeem_event and missing_field == "fee_pusd":
+            assert event.realized_pnl_usd == Decimal("1.00")
+            assert event.confidence == AccountingConfidence.HIGH
+        else:
+            assert event.realized_pnl_usd is None
+            assert event.confidence == AccountingConfidence.UNAVAILABLE
+        assert basis.get_prediction_position(_DEPLOYMENT_ID, _position_key()) is None
+
+
+class TestInvalidPredictionDeltas:
+    @pytest.mark.parametrize(
+        ("shares", "cost_basis", "expected_shares", "expected_usd"),
+        [
+            ("-1", "2.00", None, Decimal("2.00")),
+            ("1", "-2.00", Decimal("1"), None),
+        ],
+    )
+    def test_invalid_buy_values_do_not_cross_event_boundary(
+        self,
+        shares: str,
+        cost_basis: str,
+        expected_shares: Decimal | None,
+        expected_usd: Decimal | None,
+    ) -> None:
+        event = handle_prediction(*_buy_event(shares=shares, cost_basis=cost_basis), FIFOBasisStore())
+        assert event is not None
+        assert event.confidence == AccountingConfidence.UNAVAILABLE
+        assert event.shares_delta == expected_shares
+        assert event.usd_delta == expected_usd
+
+    @pytest.mark.parametrize(
+        ("event_factory", "value_field"),
+        [
+            (_sell_event, "proceeds"),
+            (_redeem_event, "payout"),
+        ],
+    )
+    def test_invalid_disposal_shares_do_not_cross_event_boundary(
+        self,
+        event_factory: Any,
+        value_field: str,
+    ) -> None:
+        basis = FIFOBasisStore()
+        handle_prediction(*_buy_event(shares="10", cost_basis="5.00"), basis)
+        outbox, ledger = event_factory(shares="-1", **{value_field: "2.00"})
+
+        event = handle_prediction(outbox, ledger, basis)
+
+        assert event is not None
+        assert event.confidence == AccountingConfidence.UNAVAILABLE
+        assert event.shares_delta is None
+        assert event.usd_delta == Decimal("2.00")
+        assert basis.get_prediction_position(_DEPLOYMENT_ID, _position_key()) == (
+            Decimal("10"),
+            Decimal("5.00"),
+        )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -691,75 +898,21 @@ class TestEmptyPositionKeyShortCircuit:
 # CodeRabbit thread 4 (round 2): negative gross proceeds/payout never reach
 # match_prediction_sell.
 #
-# Pre-fix a malformed enrichment payload sending ``proceeds=-5`` would flow
-# straight into match_prediction_sell and book a synthetic loss against the
-# live aggregate. The BUY branch already clamps negative ``cost_basis`` to
-# UNAVAILABLE; SELL/REDEEM now mirrors that contract — gross proceeds < 0
-# emits an UNAVAILABLE event, leaves the aggregate intact, and never consumes
-# basis.
-# ──────────────────────────────────────────────────────────────────────────────
-
-
 class TestNegativeProceedsRejected:
-    def test_sell_with_negative_proceeds_short_circuits_without_consuming_basis(self) -> None:
-        # Real basis store with prior position so we can prove the aggregate
-        # is left intact.
+    @pytest.mark.parametrize("factory,value_field,shares,remaining", [
+        (_sell_event, "proceeds", "5", "5"),
+        (_redeem_event, "payout", "10", "0"),
+    ])
+    def test_negative_proceeds_do_not_erase_measured_quantity(self, factory, value_field, shares, remaining):
         basis = FIFOBasisStore()
         handle_prediction(*_buy_event(shares="10", cost_basis="5.00"), basis)
-        prior_size, prior_basis = basis.get_prediction_position(_DEPLOYMENT_ID, _position_key())
-        assert (prior_size, prior_basis) == (Decimal("10"), Decimal("5.00"))
-
-        # Now spy on match_prediction_sell to assert it is NEVER called.
-        # Use the spy alongside the real store by calling the handler with the
-        # spy and pre-seeding the spy's get_prediction_position response so the
-        # ``prior is None`` short-circuit doesn't hide the real concern.
-        spy = MagicMock(spec=FIFOBasisStore)
-        spy.get_prediction_position.return_value = (prior_size, prior_basis)
-        spy.match_prediction_sell.return_value = (
-            None,
-            Decimal("0"),
-            Decimal("0"),
-            True,
-        )
-        spy.record_prediction_buy.return_value = (Decimal("0"), Decimal("0"), True)
-
-        sell_outbox, sell_ledger = _sell_event(shares="5", proceeds="-5.0")
-        ev = handle_prediction(sell_outbox, sell_ledger, spy)
-
-        assert ev is not None
-        assert ev.confidence == AccountingConfidence.UNAVAILABLE
-        assert ev.realized_pnl_usd is None
-        assert "invalid" in ev.unavailable_reason or "proceeds" in ev.unavailable_reason
-        # The aggregate snapshot on the event is the prior, untouched aggregate.
-        assert ev.position_size_after == prior_size
-        assert ev.position_basis_after == prior_basis
-        # CRITICAL: match_prediction_sell was never invoked — the negative
-        # proceeds did not reach the basis store mutation path.
-        spy.match_prediction_sell.assert_not_called()
-
-    def test_redeem_with_negative_payout_short_circuits_without_consuming_basis(self) -> None:
-        spy = MagicMock(spec=FIFOBasisStore)
-        spy.get_prediction_position.return_value = (Decimal("10"), Decimal("4.00"))
-        spy.match_prediction_sell.return_value = (
-            None,
-            Decimal("0"),
-            Decimal("0"),
-            True,
-        )
-        spy.record_prediction_buy.return_value = (Decimal("0"), Decimal("0"), True)
-
-        red_outbox, red_ledger = _redeem_event(shares="10", payout="-2.0")
-        ev = handle_prediction(red_outbox, red_ledger, spy)
-
-        assert ev is not None
-        assert ev.confidence == AccountingConfidence.UNAVAILABLE
-        assert ev.realized_pnl_usd is None
-        assert ev.event_type == PredictionEventType.PREDICTION_REDEEM
-        # Prior aggregate preserved on the event payload.
-        assert ev.position_size_after == Decimal("10")
-        assert ev.position_basis_after == Decimal("4.00")
-        # CRITICAL: match_prediction_sell never reached.
-        spy.match_prediction_sell.assert_not_called()
+        event = handle_prediction(*factory(shares=shares, **{value_field: "-2.00"}), basis)
+        assert event is not None
+        assert event.confidence == AccountingConfidence.UNAVAILABLE
+        assert event.usd_delta is None
+        assert event.realized_pnl_usd is None
+        assert event.position_size_after == Decimal(remaining)
+        assert event.position_basis_after == Decimal(remaining) / 2
 
     def test_sell_with_zero_proceeds_still_processes_normally(self) -> None:
         """Regression guard: zero proceeds is a real (worthless) sale — it

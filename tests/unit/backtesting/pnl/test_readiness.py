@@ -22,6 +22,7 @@ from almanak.framework.backtesting.pnl.providers.snapshot_pool_analytics import 
 from almanak.framework.backtesting.pnl.providers.snapshot_pool_ohlcv import HistoricalPoolOHLCVTarget
 from almanak.framework.backtesting.pnl.providers.snapshot_pool_state import HistoricalPoolTVL
 from almanak.framework.data.models import DataClassification, DataEnvelope, DataMeta
+from almanak.framework.data.pools.descriptor import ResolvedPoolDescriptor
 from almanak.framework.data.timeframes import OHLCVTimeframe
 from almanak.framework.market.errors import PoolPriceUnavailableError
 from tests.backtesting_funding import pnl_token_funding
@@ -197,6 +198,7 @@ async def test_readiness_warns_about_dependencies_it_cannot_verify() -> None:
     assert result.checks == (
         "support_matrix",
         "funded_price_coverage",
+        "resolved_pool_identity",
         "perp_price_history",
         "funding_history",
         "historical_exact_pool_twap",
@@ -408,7 +410,26 @@ async def test_readiness_materializes_config_discoverable_exact_pool_ohlcv(
         _PoolOHLCVSource,
     )
 
-    result = await _backtester(_Provider()).check_readiness(strategy, _config())
+    config = _config()
+    config.resolved_pool_descriptors = (
+        ResolvedPoolDescriptor(
+            chain="arbitrum",
+            protocol="uniswap_v3",
+            address=_ARBITRUM_POOL,
+            token0=_ARBITRUM_WETH,
+            token1=_ARBITRUM_USDC,
+            token0_decimals=18,
+            token1_decimals=6,
+            fee_tier_units=500,
+            provenance="pinned:test",
+            factory="0x1f98431c8ad98523631ae4a59f267346ea31f984",
+            discriminator_kind="fee_tier",
+            discriminator=500,
+            deployment_block=1,
+        ),
+    )
+
+    result = await _backtester(_Provider()).check_readiness(strategy, config)
 
     assert result.ready
     assert [target.key for target in materialized] == [("arbitrum", "uniswap_v3", _ARBITRUM_POOL)]

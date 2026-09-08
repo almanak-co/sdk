@@ -1,5 +1,7 @@
 {
     "chain": "robinhood",
+    "collateral_token_address": "0x5d3a1Ff2b6BAb83b63cd9AD0787074081a52ef34",
+    "borrow_token_address": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
     "quote_asset": {
         "type": "token",
         "chain_id": 4663,

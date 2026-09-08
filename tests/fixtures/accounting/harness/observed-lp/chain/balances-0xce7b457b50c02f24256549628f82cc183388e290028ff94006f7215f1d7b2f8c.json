@@ -1,0 +1,30 @@
+[
+  {
+    "actual_delta_raw": "788362505676433",
+    "balance_after_raw": "796325925647257",
+    "balance_before_raw": "7963419970824",
+    "block_after": "0x1defb36d",
+    "block_before": "0x1defb36c",
+    "reconciliation_mode": "exact_transfer",
+    "status": "PASS",
+    "token": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
+    "token_decimals": 18,
+    "token_symbol": "WETH",
+    "transfer_log_delta_raw": "788362505676433",
+    "wallet": "0xa0b273b5b2ecc1021604c842650a6b5e931532c6"
+  },
+  {
+    "actual_delta_raw": "2202547",
+    "balance_after_raw": "97999999",
+    "balance_before_raw": "95797452",
+    "block_after": "0x1defb36d",
+    "block_before": "0x1defb36c",
+    "reconciliation_mode": "exact_transfer",
+    "status": "PASS",
+    "token": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+    "token_decimals": 6,
+    "token_symbol": "USDC",
+    "transfer_log_delta_raw": "2202547",
+    "wallet": "0xa0b273b5b2ecc1021604c842650a6b5e931532c6"
+  }
+]

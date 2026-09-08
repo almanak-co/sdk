@@ -75,6 +75,7 @@ from typing import Any
 
 from almanak.core.chains import DEFAULT_CHAIN, LEGACY_SERIALIZED_CHAIN, ChainRegistry
 from almanak.framework.backtesting.pnl.data_provider import TokenRef, is_token_key, normalize_token_key
+from almanak.framework.data.pools.descriptor import ResolvedPoolDescriptor
 from almanak.framework.data.timeframes import parse_ohlcv_timeframe
 
 
@@ -138,6 +139,20 @@ def _tokens_for_hash(tokens: Sequence[Any]) -> list[Any]:
 def _tokens_for_serialization(tokens: Sequence[Any]) -> list[Any]:
     """Return a JSON-safe token list while preserving user-provided order."""
     return [_stable_json_value(token) for token in tokens]
+
+
+def _normalize_resolved_pool_descriptors(
+    values: Sequence[ResolvedPoolDescriptor | dict[str, Any]] | None,
+) -> tuple[ResolvedPoolDescriptor, ...]:
+    """Validate, deduplicate, and deterministically order pinned pool identities."""
+    resolved: dict[tuple[str, str, str], ResolvedPoolDescriptor] = {}
+    for value in values or ():
+        descriptor = value if isinstance(value, ResolvedPoolDescriptor) else ResolvedPoolDescriptor.from_dict(value)
+        previous = resolved.get(descriptor.key)
+        if previous is not None and previous != descriptor:
+            raise ValueError(f"conflicting resolved pool descriptors for {descriptor.manifest_key}")
+        resolved[descriptor.key] = descriptor
+    return tuple(resolved[key] for key in sorted(resolved))
 
 
 @dataclass
@@ -257,6 +272,8 @@ class PnLBacktestConfig:
     # existing list[str] callers remain valid while exact contracts can retain
     # their chain-qualified TokenRef identity.
     tokens: Sequence[TokenRef] = field(default_factory=lambda: ["WETH", "USDC"])
+    resolved_pool_descriptors: tuple[ResolvedPoolDescriptor, ...] = field(default_factory=tuple, kw_only=True)
+    """Immutable pool identities resolved during preflight and pinned for replay."""
 
     # Metrics configuration
     benchmark_token: str = "WETH"
@@ -527,6 +544,7 @@ class PnLBacktestConfig:
 
     def __post_init__(self) -> None:
         """Validate configuration after initialization."""
+        self.resolved_pool_descriptors = _normalize_resolved_pool_descriptors(self.resolved_pool_descriptors)
         self._validate_time_config()
         self._validate_token_funding_config()
         self._resolve_and_validate_gas_price()
@@ -596,6 +614,15 @@ class PnLBacktestConfig:
 
         run_descriptor = ChainRegistry.try_resolve(self.chain)
         run_chain = run_descriptor.name if run_descriptor is not None else self.chain.lower()
+        for descriptor in self.resolved_pool_descriptors:
+            descriptor_chain = ChainRegistry.try_resolve(descriptor.chain)
+            resolved_descriptor_chain = (
+                descriptor_chain.name if descriptor_chain is not None else descriptor.chain.lower()
+            )
+            if resolved_descriptor_chain != run_chain:
+                raise ValueError(
+                    f"Resolved pool descriptor chain {descriptor.chain!r} does not match backtest chain {self.chain!r}"
+                )
         normalized: list[TokenRef] = []
         for token in self.tokens:
             if isinstance(token, str):
@@ -728,6 +755,7 @@ class PnLBacktestConfig:
             "inclusion_delay_blocks": self.inclusion_delay_blocks,
             "chain": self.chain,
             "tokens": _tokens_for_serialization(self.tokens),
+            "resolved_pool_descriptors": [descriptor.to_dict() for descriptor in self.resolved_pool_descriptors],
             "benchmark_token": self.benchmark_token,
             "risk_free_rate": str(self.risk_free_rate),
             "trading_days_per_year": self.trading_days_per_year,
@@ -869,6 +897,10 @@ class PnLBacktestConfig:
             "preflight_validation": self.preflight_validation,
             "fail_on_preflight_error": self.fail_on_preflight_error,
         }
+        if self.resolved_pool_descriptors:
+            hash_dict["resolved_pool_descriptors"] = [
+                descriptor.to_dict() for descriptor in self.resolved_pool_descriptors
+            ]
 
         # Create a deterministic JSON string (sorted keys, no extra whitespace)
         json_str = json.dumps(hash_dict, sort_keys=True, separators=(",", ":"))
@@ -971,6 +1003,7 @@ class PnLBacktestConfig:
                 tuple(token) if isinstance(token, list) and len(token) == 2 else token
                 for token in data.get("tokens", ["WETH", "USDC"])
             ],
+            resolved_pool_descriptors=_normalize_resolved_pool_descriptors(data.get("resolved_pool_descriptors")),
             benchmark_token=data.get("benchmark_token", "WETH"),
             risk_free_rate=risk_free_rate,
             trading_days_per_year=data.get("trading_days_per_year", 365),

@@ -77,6 +77,14 @@ DexType = str
 VALID_DEX_TYPES: set[str] = {"uniswap_v2", "uniswap_v3", "sushiswap", "solidly_v2"}
 
 
+def _normalize_optional_decimal(value: Any) -> Decimal | None:
+    """Preserve an unmeasured value while normalizing measured numerics."""
+    if value is None:
+        return None
+    normalized = value if isinstance(value, Decimal) else Decimal(str(value))
+    return normalized if normalized.is_finite() else None
+
+
 @dataclass
 class PoolReserves:
     """DEX pool reserve data with support for various AMM protocols.
@@ -95,7 +103,7 @@ class PoolReserves:
         - reserve1: Reserve of token1 in human-readable units
         - fee_tier: Pool fee in hundredths of a basis point (e.g., 3000 = 0.3%);
           None when the fee is not on-chain readable (plain V2 pairs)
-        - tvl_usd: Total value locked in USD
+        - tvl_usd: Total value locked in USD; None when either price is unmeasured
         - last_updated: Timestamp when data was fetched
 
     Uniswap V3 specific fields:
@@ -121,7 +129,7 @@ class PoolReserves:
         tick: V3 current tick (None for V2)
         liquidity: V3 in-range liquidity (None for V2)
         stable: Solidly pool-type flag (None for non-Solidly pools)
-        tvl_usd: Total value locked in USD
+        tvl_usd: Total value locked in USD, or None when it could not be measured
         last_updated: When the data was observed
     """
 
@@ -132,7 +140,7 @@ class PoolReserves:
     reserve0: Decimal
     reserve1: Decimal
     fee_tier: int | None
-    tvl_usd: Decimal
+    tvl_usd: Decimal | None
     last_updated: datetime
     sqrt_price_x96: int | None = None
     tick: int | None = None
@@ -165,10 +173,11 @@ class PoolReserves:
             raise ValueError(f"stable must be None for dex='{self.dex}'")
 
         # Convert numeric types to Decimal if needed
-        for field_name in ("reserve0", "reserve1", "tvl_usd"):
+        for field_name in ("reserve0", "reserve1"):
             val = getattr(self, field_name)
             if not isinstance(val, Decimal):
                 object.__setattr__(self, field_name, Decimal(str(val)))
+        object.__setattr__(self, "tvl_usd", _normalize_optional_decimal(self.tvl_usd))
 
         # Validate reserves are non-negative
         if self.reserve0 < 0:
@@ -270,7 +279,7 @@ class PoolReserves:
             "reserve0": str(self.reserve0),
             "reserve1": str(self.reserve1),
             "fee_tier": self.fee_tier,
-            "tvl_usd": str(self.tvl_usd),
+            "tvl_usd": str(self.tvl_usd) if self.tvl_usd is not None else None,
             "last_updated": self.last_updated.isoformat(),
         }
 
@@ -304,7 +313,7 @@ class PoolReserves:
             reserve0=Decimal(data["reserve0"]),
             reserve1=Decimal(data["reserve1"]),
             fee_tier=data["fee_tier"],
-            tvl_usd=Decimal(data["tvl_usd"]),
+            tvl_usd=Decimal(data["tvl_usd"]) if data.get("tvl_usd") is not None else None,
             last_updated=datetime.fromisoformat(data["last_updated"]),
             sqrt_price_x96=data.get("sqrt_price_x96"),
             tick=data.get("tick"),
@@ -466,7 +475,7 @@ class UniswapV3PoolReader:
         Args:
             rpc_urls: Dict mapping chain names to RPC URLs
             price_oracle: Optional PriceOracle for USD TVL calculation.
-                          If not provided, tvl_usd will be Decimal("0").
+                          If not provided, tvl_usd will be None (unmeasured).
             request_timeout: HTTP request timeout in seconds (default 10.0)
         """
         self._rpc_urls = {k.lower(): v for k, v in rpc_urls.items()}
@@ -738,7 +747,7 @@ class UniswapV3PoolReader:
         reserve1: Decimal,
         token0_symbol: str,
         token1_symbol: str,
-    ) -> Decimal:
+    ) -> Decimal | None:
         """Calculate total value locked in USD.
 
         Args:
@@ -748,47 +757,55 @@ class UniswapV3PoolReader:
             token1_symbol: Symbol of token1
 
         Returns:
-            TVL in USD, or Decimal("0") if price oracle unavailable
+            TVL in USD, or None if a non-zero reserve's price is unavailable.
         """
-        if self._price_oracle is None:
+        if reserve0 == 0 and reserve1 == 0:
             return Decimal("0")
+        price_oracle = self._price_oracle
+        if price_oracle is None:
+            return None
 
         try:
-            # Fetch prices for both tokens
-            price0_task = self._price_oracle.get_aggregated_price(token0_symbol, "USD")
-            price1_task = self._price_oracle.get_aggregated_price(token1_symbol, "USD")
 
-            price0_result, price1_result = await asyncio.gather(price0_task, price1_task, return_exceptions=True)
+            async def _leg_value(reserve: Decimal, symbol: str) -> Decimal | None:
+                # A measured-zero reserve contributes exactly zero and needs no
+                # price observation. Empty != Zero applies to the reserve too.
+                if reserve == 0:
+                    return Decimal("0")
+                result = await price_oracle.get_aggregated_price(symbol, "USD")
+                price = getattr(result, "price", None)
+                return None if price is None else reserve * price
 
-            # Calculate value for each token
-            tvl_usd = Decimal("0")
+            value0_result, value1_result = await asyncio.gather(
+                _leg_value(reserve0, token0_symbol),
+                _leg_value(reserve1, token1_symbol),
+                return_exceptions=True,
+            )
 
-            if not isinstance(price0_result, BaseException):
-                tvl_usd += reserve0 * price0_result.price
-            else:
+            if isinstance(value0_result, BaseException):
                 logger.warning(
                     "Failed to get price for %s: %s",
                     token0_symbol,
-                    str(price0_result),
+                    str(value0_result),
                 )
-
-            if not isinstance(price1_result, BaseException):
-                tvl_usd += reserve1 * price1_result.price
-            else:
+            if isinstance(value1_result, BaseException):
                 logger.warning(
                     "Failed to get price for %s: %s",
                     token1_symbol,
-                    str(price1_result),
+                    str(value1_result),
                 )
-
-            return tvl_usd.quantize(Decimal("0.01"))  # Round to 2 decimal places
+            if isinstance(value0_result, BaseException) or isinstance(value1_result, BaseException):
+                return None
+            if value0_result is None or value1_result is None:
+                return None
+            return value0_result + value1_result
 
         except Exception as e:
             logger.warning(
                 "Failed to calculate TVL: %s",
                 str(e),
             )
-            return Decimal("0")
+            return None
 
 
 __all__ = [

@@ -228,7 +228,6 @@ FROZEN_WHALE_FUNDED_TOKENS: dict[str, dict[str, str]] = {
     "robinhood": {
         "WETH": "0x07aE8551Be970cB1cCa11Dd7a11F47Ae82e70E67",
         "USDG": "0x2d4d2A025b10C09BDbd794B4FCe4F7ea8C7d7bB4",
-        "USDE": "0x70aC345AB736ce145E0D4B5deCEd7A8bcB0E4033",
     },
 }
 

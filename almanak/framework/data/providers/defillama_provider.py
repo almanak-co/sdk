@@ -37,6 +37,7 @@ Example:
 from __future__ import annotations
 
 import logging
+import math
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -154,13 +155,35 @@ class LlamaTvl:
 
     Attributes:
         protocol: Protocol name.
-        tvl_usd: Current total value locked in USD.
+        tvl_usd: Current total value locked in USD, or None when unmeasured.
         chain_tvls: TVL breakdown by chain.
     """
 
     protocol: str
-    tvl_usd: Decimal
+    tvl_usd: Decimal | None
     chain_tvls: dict[str, Decimal] = field(default_factory=dict)
+
+
+def _finite_decimal(value: Any) -> Decimal | None:
+    """Parse an upstream numeric value without converting absence into zero."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+    return parsed if parsed.is_finite() else None
+
+
+def _finite_float(value: Any) -> float | None:
+    """Parse a finite upstream float while preserving missing/invalid as None."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = float(value)
+    except (ValueError, TypeError):
+        return None
+    return parsed if math.isfinite(parsed) else None
 
 
 class DefiLlamaProvider:
@@ -559,6 +582,8 @@ class DefiLlamaProvider:
         llama_chain = _CHAIN_TO_LLAMA.get(chain.lower()) if chain else None
 
         for pool in raw_pools:
+            if not isinstance(pool, dict):
+                continue
             pool_chain = str(pool.get("chain", "")).lower()
 
             # Apply chain filter
@@ -569,6 +594,12 @@ class DefiLlamaProvider:
             if project is not None and str(pool.get("project", "")).lower() != project.lower():
                 continue
 
+            tvl_usd = _finite_decimal(pool.get("tvlUsd"))
+            apy = _finite_float(pool.get("apy"))
+            if tvl_usd is None or apy is None:
+                logger.debug("Skipping yield pool with unmeasured TVL/APY: %s", pool.get("pool"))
+                continue
+
             try:
                 results.append(
                     LlamaYieldPool(
@@ -576,10 +607,10 @@ class DefiLlamaProvider:
                         chain=pool_chain,
                         project=str(pool.get("project", "")),
                         symbol=str(pool.get("symbol", "")),
-                        tvl_usd=Decimal(str(pool.get("tvlUsd", 0))),
-                        apy=float(pool.get("apy", 0) or 0),
-                        apy_base=pool.get("apyBase"),
-                        apy_reward=pool.get("apyReward"),
+                        tvl_usd=tvl_usd,
+                        apy=apy,
+                        apy_base=_finite_float(pool.get("apyBase")),
+                        apy_reward=_finite_float(pool.get("apyReward")),
                         il_risk=bool(pool.get("ilRisk", False)),
                         exposure=pool.get("exposure"),
                     )
@@ -657,9 +688,9 @@ class DefiLlamaProvider:
                 self._metrics.total_latency_ms += latency_ms
 
                 logger.debug(
-                    "Fetched DeFi Llama TVL for %s: $%.2f (latency: %.1fms)",
+                    "Fetched DeFi Llama TVL for %s: %s (latency: %.1fms)",
                     protocol,
-                    result.tvl_usd,
+                    f"${result.tvl_usd:.2f}" if result.tvl_usd is not None else "unmeasured",
                     latency_ms,
                 )
 
@@ -688,29 +719,28 @@ class DefiLlamaProvider:
                 ...
             }
         """
-        current_tvl = Decimal(str(data.get("currentChainTvls", {}).get("total", 0) or 0))
-
-        # If no "total", sum all chain TVLs (excluding staking/borrowed variants)
-        chain_tvls_raw = data.get("currentChainTvls", {})
+        chain_tvls_raw_value = data.get("currentChainTvls")
+        chain_tvls_raw = chain_tvls_raw_value if isinstance(chain_tvls_raw_value, dict) else {}
         chain_tvls: dict[str, Decimal] = {}
 
-        if current_tvl == 0:
-            total = Decimal(0)
-            for chain_name, tvl in chain_tvls_raw.items():
-                # Skip derived categories like "Ethereum-staking", "Arbitrum-borrowed"
-                if "-" in chain_name:
-                    continue
-                chain_val = Decimal(str(tvl or 0))
-                chain_tvls[chain_name.lower()] = chain_val
-                total += chain_val
-            current_tvl = total
+        complete_chain_breakdown = True
+        for chain_name, tvl in chain_tvls_raw.items():
+            if chain_name == "total" or "-" in chain_name:
+                continue
+            chain_val = _finite_decimal(tvl)
+            if chain_val is None:
+                complete_chain_breakdown = False
+                continue
+            chain_tvls[chain_name.lower()] = chain_val
+
+        if "total" in chain_tvls_raw:
+            # Presence matters: an explicit measured zero must not be replaced by
+            # a chain sum, while null/invalid remains unmeasured.
+            current_tvl = _finite_decimal(chain_tvls_raw.get("total"))
+        elif chain_tvls and complete_chain_breakdown:
+            current_tvl = sum(chain_tvls.values(), Decimal("0"))
         else:
-            for chain_name, tvl in chain_tvls_raw.items():
-                if "-" in chain_name and chain_name != "total":
-                    continue
-                if chain_name == "total":
-                    continue
-                chain_tvls[chain_name.lower()] = Decimal(str(tvl or 0))
+            current_tvl = None
 
         return LlamaTvl(
             protocol=protocol,

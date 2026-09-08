@@ -165,6 +165,32 @@ class TestYieldOpportunity:
 
 
 class TestYieldAggregatorBasic:
+    def test_unmeasured_tvl_or_apy_is_excluded_but_measured_zero_is_valid(self):
+        agg = YieldAggregator()
+        base = {
+            "chain": "Arbitrum",
+            "project": "aave-v3",
+            "symbol": "USDC",
+            "ilRisk": False,
+        }
+
+        assert agg._parse_pool({**base, "pool": "missing-tvl", "apy": 1}, "USDC", None, 0) is None
+        assert agg._parse_pool({**base, "pool": "missing-apy", "tvlUsd": 1}, "USDC", None, 0) is None
+        assert (
+            agg._parse_pool({**base, "pool": "infinite", "tvlUsd": 1, "apy": "Infinity"}, "USDC", None, 0)
+            is None
+        )
+
+        measured_zero = agg._parse_pool(
+            {**base, "pool": "zero", "tvlUsd": 0, "apy": 0},
+            "USDC",
+            None,
+            0,
+        )
+        assert measured_zero is not None
+        assert measured_zero.tvl_usd == Decimal("0")
+        assert measured_zero.apy == 0.0
+
     def test_get_yield_opportunities_usdc_arbitrum(self):
         agg = YieldAggregator()
         response = _mock_aiohttp_response({"data": _ALL_POOLS})

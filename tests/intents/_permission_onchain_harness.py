@@ -26,6 +26,7 @@ don't exercise this harness.
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -35,6 +36,7 @@ from typing import Any
 import pytest
 from eth_account import Account
 from web3 import Web3
+from web3.exceptions import ContractLogicError
 
 from almanak.framework.execution.signer.safe.constants import (
     ZODIAC_EXEC_TRANSACTION_WITH_ROLE_ABI,
@@ -100,6 +102,24 @@ _ZODIAC_WRAPPER_OVERHEAD_GAS = 500_000
 def _zodiac_outer_gas(inner_gas: int | None) -> int:
     """Size the outer Roles transaction without truncating the inner call."""
     return max(_ZODIAC_MIN_WRAPPER_GAS, int(inner_gas or 0) + _ZODIAC_WRAPPER_OVERHEAD_GAS)
+
+
+def _estimate_zodiac_outer_gas(web3: Web3, transaction: dict, inner_gas: int | None) -> int:
+    """Estimate the complete Roles/Safe call after preceding bundle txs mine."""
+    # Do not constrain estimation by the compiler's inner-call gas hint.
+    estimate_params = {key: value for key, value in transaction.items() if key != "gas"}
+    block_limit = int(web3.eth.get_block("latest")["gasLimit"])
+    try:
+        estimate = int(web3.eth.estimate_gas(estimate_params))
+    except ContractLogicError:
+        # Negative permission/protocol cases must still mine a failing receipt.
+        # Transport and RPC availability errors propagate instead of being hidden.
+        logging.getLogger(__name__).warning("Roles gas estimation reverted; mining for revert evidence")
+        return min(_zodiac_outer_gas(inner_gas), block_limit)
+    if estimate <= 0 or estimate > block_limit:
+        raise ValueError(f"Invalid Roles gas estimate {estimate}; block limit {block_limit}")
+    buffered = (estimate * 120 + 99) // 100
+    return min(max(_zodiac_outer_gas(inner_gas), buffered), block_limit)
 
 
 def _inner_gas_hint(tx: Any) -> int | None:
@@ -651,6 +671,7 @@ def _exec_bundle_via_zodiac(
                 "gas": _zodiac_outer_gas(inner_gas),
             }
         )
+        built["gas"] = _estimate_zodiac_outer_gas(web3, built, inner_gas)
         signed = Account.sign_transaction(built, member_private_key)
         tx_hash = web3.eth.send_raw_transaction(signed.raw_transaction)
         receipt = web3.eth.wait_for_transaction_receipt(tx_hash)
@@ -2621,6 +2642,7 @@ class ZodiacOrchestrator:
                     "gas": _zodiac_outer_gas(inner_gas),
                 }
             )
+            built["gas"] = _estimate_zodiac_outer_gas(self.web3, built, inner_gas)
             signed = Account.sign_transaction(built, self.member_private_key)
             tx_hash_bytes = self.web3.eth.send_raw_transaction(signed.raw_transaction)
             tx_hash_hex = self.web3.to_hex(tx_hash_bytes)

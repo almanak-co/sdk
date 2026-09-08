@@ -17,7 +17,7 @@ import uuid
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:  # pragma: no cover — typing-only; runtime lookups stay function-level.
@@ -279,8 +279,8 @@ class FIFOBasisStore:
         if withdraw_amount_usd is None:
             principal_usd = _parse_decimal(ctx.payload.get("principal_delta_usd"))
             interest_usd = _parse_decimal(ctx.payload.get("interest_delta_usd"))
-            if principal_usd is not None:
-                withdraw_amount_usd = principal_usd + (interest_usd or Decimal("0"))
+            if principal_usd is not None and interest_usd is not None:
+                withdraw_amount_usd = principal_usd + interest_usd
         if ctx.swap_wallet_key:
             self.record_swap_acquisition(
                 deployment_id=ctx.deployment_id,
@@ -707,8 +707,13 @@ class FIFOBasisStore:
         basis_after = _parse_decimal(ctx.payload.get("position_basis_after"))
         if size_after is None or basis_after is None:
             return 0
-        # Missing loaded extras default to zero to preserve the recorded basis.
-        extras_after = _parse_decimal(ctx.payload.get("position_loaded_extras_after")) or Decimal("0")
+        # Legacy payloads omit extras; explicit null preserves unknown loaded
+        # costs across restart rather than fabricating a fully measured basis.
+        extras_after = (
+            _parse_decimal(ctx.payload.get("position_loaded_extras_after"))
+            if "position_loaded_extras_after" in ctx.payload
+            else Decimal("0")
+        )
         k = self._prediction_key(ctx.deployment_id, pos_key)
         # Remove closed positions so future sells report no prior basis.
         if size_after <= Decimal("0"):
@@ -1306,8 +1311,8 @@ class FIFOBasisStore:
         position_key: str,
         shares: Decimal,
         cost_basis_usd: Decimal,
-        gas_cost_usd: Decimal = Decimal("0"),
-        fee_pusd: Decimal = Decimal("0"),
+        gas_cost_usd: Decimal | None = Decimal("0"),
+        fee_pusd: Decimal | None = Decimal("0"),
     ) -> tuple[Decimal, Decimal, bool]:
         """Apply a PREDICTION_BUY to the weighted-average aggregate.
 
@@ -1326,15 +1331,17 @@ class FIFOBasisStore:
         PnL — proportionally consumed on partial sells the same way the bare
         basis is. Defaults to ``Decimal("0")`` so existing callers (and
         replay paths that lack the new fields) keep their current arithmetic
-        unchanged. None / negative values are clamped to 0 to keep the
-        invariant that fully_loaded_basis ≥ basis.
+        unchanged. None / negative values remain unmeasured rather than being
+        collapsed to zero. Any unmeasured component poisons the aggregate
+        loaded-extras value so a later disposal cannot fabricate realized PnL.
         """
-        # Negative extras cannot reduce fully loaded basis.
-        if gas_cost_usd is None or gas_cost_usd < 0:
-            gas_cost_usd = Decimal("0")
-        if fee_pusd is None or fee_pusd < 0:
-            fee_pusd = Decimal("0")
-        loaded_extras_delta = gas_cost_usd + fee_pusd
+        gas_cost_usd = _parse_decimal(gas_cost_usd)
+        fee_pusd = _parse_decimal(fee_pusd)
+        if gas_cost_usd is not None and gas_cost_usd < 0:
+            gas_cost_usd = None
+        if fee_pusd is not None and fee_pusd < 0:
+            fee_pusd = None
+        loaded_extras_delta = gas_cost_usd + fee_pusd if gas_cost_usd is not None and fee_pusd is not None else None
 
         key = self._prediction_key(deployment_id, position_key)
         existing = self._lots.get(key)
@@ -1359,25 +1366,27 @@ class FIFOBasisStore:
             old_size = Decimal(str(old_size))
         if not isinstance(old_basis, Decimal):
             old_basis = Decimal(str(old_basis))
-        if not isinstance(old_extras, Decimal):
-            old_extras = Decimal(str(old_extras))
+        if old_extras is not None and not isinstance(old_extras, Decimal):
+            old_extras = _parse_decimal(old_extras)
         new_size = old_size + shares
         new_basis = old_basis + cost_basis_usd
         row["size"] = new_size
         row["basis"] = new_basis
-        row["loaded_extras"] = old_extras + loaded_extras_delta
+        row["loaded_extras"] = (
+            old_extras + loaded_extras_delta if old_extras is not None and loaded_extras_delta is not None else None
+        )
         return new_size, new_basis, False
 
     def get_prediction_loaded_extras(
         self,
         deployment_id: str,
         position_key: str,
-    ) -> Decimal:
+    ) -> Decimal | None:
         """Return the per-position cumulative gas + fee accumulator (VIB-3710).
 
         Returns ``Decimal("0")`` when no aggregate row exists or when an
-        existing row predates VIB-3710 (no ``loaded_extras`` key) — both
-        cases are equivalent to "no extras attributed yet".
+        existing row predates VIB-3710 (no ``loaded_extras`` key). Returns
+        None when any loaded-cost component was unmeasured.
         """
         key = self._prediction_key(deployment_id, position_key)
         existing = self._lots.get(key)
@@ -1385,27 +1394,26 @@ class FIFOBasisStore:
             return Decimal("0")
         row = existing[0]
         extras = row.get("loaded_extras", Decimal("0"))
-        if not isinstance(extras, Decimal):
-            try:
-                extras = Decimal(str(extras))
-            except (InvalidOperation, ValueError):
-                return Decimal("0")
-        return extras
+        if extras is None:
+            return None
+        if isinstance(extras, Decimal):
+            return extras if extras.is_finite() else None
+        return _parse_decimal(extras)
 
     def match_prediction_sell(
         self,
         deployment_id: str,
         position_key: str,
         shares_sold: Decimal,
-        proceeds_usd: Decimal,
+        proceeds_usd: Decimal | None,
     ) -> tuple[Decimal | None, Decimal, Decimal, bool]:
         """Apply a PREDICTION_SELL (or REDEEM) to the aggregate.
 
         Returns (realized_pnl_usd, new_size, new_basis_usd, is_close).
 
-        - realized_pnl_usd is None when no prior basis was recorded — the
-          caller MUST surface this as an accounting gap (e.g. the strategy
-          was deployed with an existing on-chain position).
+        - realized_pnl_usd is None when prior basis, loaded costs, or disposal
+          proceeds are unmeasured. Measured shares still consume known basis;
+          the caller must surface the unavailable PnL.
         - Proportional basis consumption: cost_consumed =
           (shares_sold/old_size) * fully_loaded_basis  where
           fully_loaded_basis = basis + loaded_extras (gas + fees) [VIB-3710].
@@ -1433,8 +1441,8 @@ class FIFOBasisStore:
             old_size = Decimal(str(old_size))
         if not isinstance(old_basis, Decimal):
             old_basis = Decimal(str(old_basis))
-        if not isinstance(old_extras, Decimal):
-            old_extras = Decimal(str(old_extras))
+        if old_extras is not None and not isinstance(old_extras, Decimal):
+            old_extras = _parse_decimal(old_extras)
 
         if old_size <= 0:
             # A stale zero row has no usable prior basis.
@@ -1444,15 +1452,15 @@ class FIFOBasisStore:
         # Over-sells consume at most the full basis and never create negative size.
         consumed_shares = min(shares_sold, old_size)
         share_fraction = consumed_shares / old_size
-        # Basis and loaded extras use the same fraction so split sales realize
-        # the same total PnL as one full sale.
-        fully_loaded_basis = old_basis + old_extras
-        cost_consumed = share_fraction * fully_loaded_basis
-        realized_pnl = proceeds_usd - cost_consumed
+        # Quantity and basis consumption are independent of measured proceeds.
+        # Split sales consume the same loaded costs as a single full sale.
+        fully_loaded_basis = old_basis + old_extras if old_extras is not None else None
+        cost_consumed = share_fraction * fully_loaded_basis if fully_loaded_basis is not None else None
+        realized_pnl = proceeds_usd - cost_consumed if proceeds_usd is not None and cost_consumed is not None else None
 
         new_size = old_size - consumed_shares
         new_basis = old_basis - (share_fraction * old_basis)
-        new_extras = old_extras - (share_fraction * old_extras)
+        new_extras = old_extras - (share_fraction * old_extras) if old_extras is not None else None
 
         # This epsilon is below the market's four-decimal share precision.
         epsilon = Decimal("1e-9")

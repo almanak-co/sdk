@@ -41,6 +41,48 @@ logger = logging.getLogger(__name__)
 _PREDICTION_INTENT_TYPES = frozenset({"PREDICTION_BUY", "PREDICTION_SELL", "PREDICTION_REDEEM"})
 
 
+def _non_negative_adjustment(value: Any) -> Decimal | None:
+    """Parse a measured additive cost without collapsing gaps to zero."""
+    parsed = _parse_decimal(value)
+    return parsed if parsed is not None and parsed >= 0 else None
+
+
+def _measured_trade_deltas(
+    shares: Decimal | None,
+    usd_value: Decimal | None,
+) -> tuple[Decimal | None, Decimal | None]:
+    """Return only domain-valid values for the prediction event boundary."""
+    measured_shares = shares if shares is not None and shares > 0 else None
+    measured_usd = usd_value if usd_value is not None and usd_value >= 0 else None
+    return measured_shares, measured_usd
+
+
+def _degrade_for_unmeasured_adjustments(
+    *,
+    confidence: AccountingConfidence,
+    unavailable_reason: str,
+    adjustments: dict[str, Decimal | None],
+) -> tuple[AccountingConfidence, str]:
+    """Degrade accounting when any basis/proceeds adjustment is unmeasured."""
+    missing = [name for name, value in adjustments.items() if value is None]
+    if not missing:
+        return confidence, unavailable_reason
+    return AccountingConfidence.UNAVAILABLE, f"unmeasured prediction adjustment(s): {', '.join(missing)}"
+
+
+def _prediction_position_snapshot(
+    basis_store: FIFOBasisStore,
+    *,
+    deployment_id: str,
+    position_key: str,
+) -> tuple[Decimal, Decimal, Decimal | None]:
+    """Read the aggregate snapshot that a non-mutating event must preserve."""
+    prior = basis_store.get_prediction_position(deployment_id=deployment_id, position_key=position_key)
+    size, basis = prior or (Decimal("0"), Decimal("0"))
+    extras = basis_store.get_prediction_loaded_extras(deployment_id=deployment_id, position_key=position_key)
+    return size, basis, extras
+
+
 def handle_prediction(
     outbox_row: dict[str, Any],
     ledger_row: dict[str, Any],
@@ -190,6 +232,7 @@ def _handle_buy(
 ) -> PredictionAccountingEvent:
     shares = _parse_decimal(extracted.get("outcome_tokens_received"))
     cost_basis = _parse_decimal(extracted.get("cost_basis"))
+    shares_delta, cost_basis_delta = _measured_trade_deltas(shares, cost_basis)
 
     confidence, unavailable_reason = _confidence_for_fields(
         intent_type="PREDICTION_BUY",
@@ -235,8 +278,8 @@ def _handle_buy(
             market_id=market_id,
             outcome=outcome or "",
             intent_type="PREDICTION_BUY",
-            shares_delta=shares or Decimal("0"),
-            usd_delta=cost_basis or Decimal("0"),
+            shares_delta=shares_delta,
+            usd_delta=cost_basis_delta,
             realized_pnl_usd=None,
             position_size_after=Decimal("0"),
             position_basis_after=Decimal("0"),
@@ -248,6 +291,11 @@ def _handle_buy(
     # No usable shares/cost — emit a measurable-gap event so downstream
     # pipelines see the BUY happened. Aggregate is left untouched.
     if shares is None or shares <= 0 or cost_basis is None or cost_basis < 0:
+        prior_size, prior_basis, prior_extras = _prediction_position_snapshot(
+            basis_store,
+            deployment_id=deployment_id,
+            position_key=position_key,
+        )
         return _build_event(
             event_type=PredictionEventType.PREDICTION_OPEN,
             deployment_id=deployment_id,
@@ -263,11 +311,12 @@ def _handle_buy(
             market_id=market_id,
             outcome=outcome or "",
             intent_type="PREDICTION_BUY",
-            shares_delta=shares or Decimal("0"),
-            usd_delta=cost_basis or Decimal("0"),
+            shares_delta=shares_delta,
+            usd_delta=cost_basis_delta,
             realized_pnl_usd=None,
-            position_size_after=Decimal("0"),
-            position_basis_after=Decimal("0"),
+            position_size_after=prior_size,
+            position_basis_after=prior_basis,
+            position_loaded_extras_after=prior_extras,
             gas_usd=gas_usd,
             confidence=AccountingConfidence.UNAVAILABLE,
             unavailable_reason=unavailable_reason or "missing outcome_tokens_received / cost_basis on BUY",
@@ -276,17 +325,16 @@ def _handle_buy(
     # VIB-3710: fold gateway-side setup-tx gas + operator fee into the basis
     # row so realized PnL on a future SELL/REDEEM uses a fully-loaded cost.
     # Extracted_data populates these via ResultEnricher's
-    # _extract_offchain_prediction_costs helper. Missing values default to
-    # Decimal("0") (NOT None) — the handler must never silently convert a
-    # missing measurement into a basis adjustment, but the basis-store API
-    # already guards by clamping non-positive extras to 0, so we route the
-    # parser's None / negative into the same guard explicitly.
-    gas_cost_usd_extras = _parse_decimal(extracted.get("gas_cost_usd")) or Decimal("0")
-    fee_pusd_extras = _parse_decimal(extracted.get("fee_pusd")) or Decimal("0")
-    if gas_cost_usd_extras < 0:
-        gas_cost_usd_extras = Decimal("0")
-    if fee_pusd_extras < 0:
-        fee_pusd_extras = Decimal("0")
+    # _extract_offchain_prediction_costs helper. Missing, invalid, or negative
+    # values remain None so the fully-loaded basis and future realized PnL stay
+    # unmeasured rather than silently omitting a real cost.
+    gas_cost_usd_extras = _non_negative_adjustment(extracted.get("gas_cost_usd"))
+    fee_pusd_extras = _non_negative_adjustment(extracted.get("fee_pusd"))
+    confidence, unavailable_reason = _degrade_for_unmeasured_adjustments(
+        confidence=confidence,
+        unavailable_reason=unavailable_reason,
+        adjustments={"gas_cost_usd": gas_cost_usd_extras, "fee_pusd": fee_pusd_extras},
+    )
 
     new_size, new_basis, is_open = basis_store.record_prediction_buy(
         deployment_id=deployment_id,
@@ -317,8 +365,8 @@ def _handle_buy(
         market_id=market_id,
         outcome=outcome or "",
         intent_type="PREDICTION_BUY",
-        shares_delta=shares,
-        usd_delta=cost_basis,
+        shares_delta=shares_delta,
+        usd_delta=cost_basis_delta,
         realized_pnl_usd=None,
         position_size_after=new_size,
         position_basis_after=new_basis,
@@ -331,37 +379,31 @@ def _handle_buy(
 
 def _parse_disposal_fields(
     intent_type: str, extracted: dict[str, Any]
-) -> tuple[Decimal | None, Decimal | None, Decimal | None]:
-    """Parse ``(shares, gross usd_value, net_proceeds)`` for a SELL/REDEEM disposal.
+) -> tuple[Decimal | None, Decimal | None, Decimal | None, Decimal | None]:
+    """Parse ``(shares, gross usd_value, net_proceeds, fee)`` for a disposal.
 
     Extracted from ``_handle_sell_or_redeem`` to keep that handler within the
-    cyclomatic-complexity gate. Behaviour is unchanged.
+    cyclomatic-complexity gate.
 
-    VIB-3710: the SELL/REDEEM operator fee (``fee_pusd``) is subtracted from the
-    gross before realized PnL so the bookkeeping matches what the wallet actually
-    received. Missing fee → 0; negatives clamped to 0 (mirrors the BUY guard).
-    The gross ``usd_value`` is returned separately and preserved on the event
-    payload for audit traceability — only ``net_proceeds`` flows into
-    ``match_prediction_sell``.
-
-    CodeRabbit thread 4: a negative gross from a malformed enrichment payload
-    would otherwise book a synthetic loss against the live aggregate. The BUY
-    branch already rejects negative ``cost_basis``; here a negative (or missing)
-    gross yields ``net_proceeds=None`` so the caller's missing-fields guard
-    short-circuits to UNAVAILABLE without mutating the basis store.
+    Fees are deducted from gross proceeds only when both are measured. Missing,
+    invalid, or negative measurements leave net proceeds unavailable. Gross
+    values remain separate for the audit trail; known shares can still consume
+    basis when net proceeds are unavailable.
     """
     if intent_type == "PREDICTION_SELL":
         shares = _parse_decimal(extracted.get("outcome_tokens_sold"))
         usd_value = _parse_decimal(extracted.get("proceeds"))
+        sell_fee = _non_negative_adjustment(extracted.get("fee_pusd"))
     else:  # PREDICTION_REDEEM
         shares = _parse_decimal(extracted.get("redemption_amount"))
         usd_value = _parse_decimal(extracted.get("payout"))
-
-    sell_fee = _parse_decimal(extracted.get("fee_pusd")) or Decimal("0")
-    if sell_fee < 0:
+        # CTF redemption pays collateral on-chain; it does not execute a CLOB
+        # trade. The receipt payout is received collateral, with no operator fee.
         sell_fee = Decimal("0")
-    net_proceeds: Decimal | None = None if usd_value is None or usd_value < 0 else usd_value - sell_fee
-    return shares, usd_value, net_proceeds
+    net_proceeds: Decimal | None = (
+        usd_value - sell_fee if usd_value is not None and usd_value >= 0 and sell_fee is not None else None
+    )
+    return shares, usd_value, net_proceeds, sell_fee
 
 
 def _handle_sell_or_redeem(
@@ -383,7 +425,8 @@ def _handle_sell_or_redeem(
     outcome: str | None,
     gas_usd: Decimal | None,
 ) -> PredictionAccountingEvent:
-    shares, usd_value, net_proceeds = _parse_disposal_fields(intent_type, extracted)
+    shares, usd_value, net_proceeds, sell_fee = _parse_disposal_fields(intent_type, extracted)
+    shares_delta, usd_delta = _measured_trade_deltas(shares, usd_value)
 
     confidence, unavailable_reason = _confidence_for_fields(
         intent_type=intent_type,
@@ -391,6 +434,11 @@ def _handle_sell_or_redeem(
         outcome=outcome,
         shares=shares,
         usd_value=usd_value,
+    )
+    confidence, unavailable_reason = _degrade_for_unmeasured_adjustments(
+        confidence=confidence,
+        unavailable_reason=unavailable_reason,
+        adjustments={"fee_pusd": sell_fee},
     )
 
     position_key = _build_position_key(
@@ -429,8 +477,8 @@ def _handle_sell_or_redeem(
             market_id=market_id,
             outcome=outcome or "",
             intent_type=intent_type,
-            shares_delta=shares or Decimal("0"),
-            usd_delta=usd_value or Decimal("0"),
+            shares_delta=shares_delta,
+            usd_delta=usd_delta,
             realized_pnl_usd=None,
             position_size_after=Decimal("0"),
             position_basis_after=Decimal("0"),
@@ -475,8 +523,8 @@ def _handle_sell_or_redeem(
             market_id=market_id,
             outcome=outcome or "",
             intent_type=intent_type,
-            shares_delta=shares or Decimal("0"),
-            usd_delta=usd_value or Decimal("0"),
+            shares_delta=shares_delta,
+            usd_delta=usd_delta,
             realized_pnl_usd=None,
             position_size_after=Decimal("0"),
             position_basis_after=Decimal("0"),
@@ -485,15 +533,8 @@ def _handle_sell_or_redeem(
             unavailable_reason=(unavailable_reason or warning),
         )
 
-    # Missing per-trade fields — record the disposal at UNAVAILABLE confidence
-    # without mutating the aggregate. Future enrichment (manual or replay) can
-    # adjust by writing a corrective event.
-    #
-    # CodeRabbit thread 4 fix: ``usd_value < 0`` falls into the same bucket as
-    # ``usd_value is None``. A negative gross would have flowed into
-    # ``match_prediction_sell`` and booked a synthetic loss against the
-    # aggregate. Reject it here — gross proceeds/payout cannot be negative.
-    if shares is None or shares <= 0 or usd_value is None or usd_value < 0:
+    # Unknown quantity cannot safely consume basis; unknown proceeds can.
+    if shares is None or shares <= 0:
         event_type = (
             PredictionEventType.PREDICTION_REDEEM
             if intent_type == "PREDICTION_REDEEM"
@@ -519,8 +560,8 @@ def _handle_sell_or_redeem(
             market_id=market_id,
             outcome=outcome or "",
             intent_type=intent_type,
-            shares_delta=shares or Decimal("0"),
-            usd_delta=usd_value or Decimal("0"),
+            shares_delta=shares_delta,
+            usd_delta=usd_delta,
             realized_pnl_usd=None,
             position_size_after=prior_size,
             position_basis_after=prior_basis,
@@ -540,15 +581,15 @@ def _handle_sell_or_redeem(
     else:
         consume_shares = shares
 
-    # ``net_proceeds`` cannot be None here — the missing-shares/usd guard
-    # above already returned UNAVAILABLE for that case. ``or Decimal("0")`` is
-    # belt-and-suspenders for type narrowing.
     realized_pnl, new_size, new_basis, is_close = basis_store.match_prediction_sell(
         deployment_id=deployment_id,
         position_key=position_key,
         shares_sold=consume_shares,
-        proceeds_usd=net_proceeds or Decimal("0"),
+        proceeds_usd=net_proceeds,
     )
+    if realized_pnl is None:
+        confidence = AccountingConfidence.UNAVAILABLE
+        unavailable_reason = unavailable_reason or "prediction proceeds or loaded-cost adjustments are unmeasured"
     # #2146: snapshot the residual loaded-extras after the disposal. A full
     # close pops the row, so this reads Decimal("0"); a partial REDUCE leaves
     # the proportionally-shrunk accumulator that replay must restore.
@@ -578,8 +619,8 @@ def _handle_sell_or_redeem(
         market_id=market_id,
         outcome=outcome or "",
         intent_type=intent_type,
-        shares_delta=shares,
-        usd_delta=usd_value,
+        shares_delta=shares_delta,
+        usd_delta=usd_delta,
         realized_pnl_usd=realized_pnl,
         position_size_after=new_size,
         position_basis_after=new_basis,
@@ -611,15 +652,15 @@ def _build_event(
     market_id: str,
     outcome: str,
     intent_type: str,
-    shares_delta: Decimal,
-    usd_delta: Decimal,
+    shares_delta: Decimal | None,
+    usd_delta: Decimal | None,
     realized_pnl_usd: Decimal | None,
     position_size_after: Decimal,
     position_basis_after: Decimal,
     gas_usd: Decimal | None,
     confidence: AccountingConfidence,
     unavailable_reason: str,
-    position_loaded_extras_after: Decimal = Decimal("0"),
+    position_loaded_extras_after: Decimal | None = Decimal("0"),
 ) -> PredictionAccountingEvent:
     _id_seed = tx_hash or ledger_entry_id or position_key
     identity = AccountingIdentity(
@@ -722,13 +763,13 @@ def _confidence_for_fields(
         missing.append("outcome")
     if shares is None or shares <= 0:
         missing.append("shares")
-    if usd_value is None:
+    if usd_value is None or usd_value < 0:
         missing.append("usd_value")
     if not missing:
         return AccountingConfidence.HIGH, ""
     return (
         AccountingConfidence.ESTIMATED,
-        f"{intent_type} missing {', '.join(missing)} on extracted_data",
+        f"{intent_type} missing/invalid {', '.join(missing)} on extracted_data",
     )
 
 

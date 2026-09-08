@@ -104,25 +104,26 @@ _PROJECT_TYPE: dict[str, str] = {
 }
 
 
-def _safe_decimal(value: Any) -> Decimal:
-    if value is None:
-        return Decimal(0)
+def _safe_decimal(value: Any) -> Decimal | None:
+    if value is None or isinstance(value, bool):
+        return None
     try:
-        return Decimal(str(value))
+        result = Decimal(str(value))
     except (InvalidOperation, ValueError, TypeError):
-        return Decimal(0)
+        return None
+    return result if result.is_finite() else None
 
 
-def _safe_float(value: Any, default: float = 0.0) -> float:
-    if value is None:
-        return default
+def _safe_float(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
     try:
         result = float(value)
         if math.isnan(result) or math.isinf(result):
-            return default
+            return None
         return result
     except (ValueError, TypeError):
-        return default
+        return None
 
 
 # =============================================================================
@@ -295,10 +296,12 @@ class YieldAggregator:
 
         # TVL filter
         tvl = _safe_decimal(pool.get("tvlUsd"))
+        apy = _safe_float(pool.get("apy"))
+        if tvl is None or apy is None:
+            return None
         if float(tvl) < min_tvl:
             return None
 
-        apy = _safe_float(pool.get("apy"))
         apy_base = pool.get("apyBase")
         apy_reward = pool.get("apyReward")
         project = str(pool.get("project", ""))
@@ -317,8 +320,8 @@ class YieldAggregator:
             pool_id=pool_id,
             symbol=symbol,
             apy=apy,
-            apy_base=_safe_float(apy_base) if apy_base is not None else None,
-            apy_reward=_safe_float(apy_reward) if apy_reward is not None else None,
+            apy_base=_safe_float(apy_base),
+            apy_reward=_safe_float(apy_reward),
             tvl_usd=tvl,
             type=yield_type,
             risk_score=risk_score,

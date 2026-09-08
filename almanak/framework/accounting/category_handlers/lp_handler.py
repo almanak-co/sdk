@@ -16,7 +16,11 @@ from almanak.framework.accounting.category_handlers._price_helpers import (
     parse_price_inputs,
 )
 from almanak.framework.accounting.ids import make_accounting_event_id
-from almanak.framework.accounting.lp_accounting import LPAccountingEvent, compute_lp_cost_basis
+from almanak.framework.accounting.lp_accounting import (
+    LPAccountingEvent,
+    _normalize_v4_currency_for_resolution,
+    compute_lp_cost_basis,
+)
 from almanak.framework.accounting.models import AccountingConfidence, AccountingIdentity, LPEventType
 
 # VIB-6100 — imported at MODULE level, deliberately. A function-local ``from ...
@@ -462,8 +466,18 @@ def _v4_realign_token_pair(
     # inverted relative to parser slot order (Codex/pr-auditor #3694). The seam
     # still never raises; a miss/defect logs and returns None so VIB-6476's
     # realigned=False fallback remains the fail-open contract.
-    ti0 = resolve_token_best_effort(c0, chain, context="v4 LP realign currency0", allow_gateway=True)
-    ti1 = resolve_token_best_effort(c1, chain, context="v4 LP realign currency1", allow_gateway=True)
+    ti0 = resolve_token_best_effort(
+        _normalize_v4_currency_for_resolution(c0),
+        chain,
+        context="v4 LP realign currency0",
+        allow_gateway=True,
+    )
+    ti1 = resolve_token_best_effort(
+        _normalize_v4_currency_for_resolution(c1),
+        chain,
+        context="v4 LP realign currency1",
+        allow_gateway=True,
+    )
     if ti0 is None or ti1 is None:
         logger.warning(
             "V4 LP accounting: token resolver did not resolve currency pair (%s, %s) on %s; "
@@ -515,7 +529,7 @@ def _v3_realign_token_pair(
     token0: str,
     token1: str,
     v4_realigned: bool = False,
-) -> tuple[str, str]:
+) -> tuple[str, str, bool]:
     """VIB-5851 — re-pair ``(token0, token1)`` by on-chain ``token0()``/``token1()``
     (address-sorted) order for the V3-family concentrated-liquidity / Solidly path.
 
@@ -539,8 +553,13 @@ def _v3_realign_token_pair(
     deterministic; the in-repo pattern is ``sushiswap_v3.sdk.sort_tokens`` (sorts
     *and* re-pairs decimals — here decimals follow from the returned symbols).
 
-    Only fires when the amounts are the on-chain-ordered raw ints. Returns the
-    inputs unchanged (fail-open) for every other shape:
+    Only fires when the amounts are the on-chain-ordered raw ints. The third
+    return value is ``identity_unresolved``: it is True when the receipt supplied
+    both slot identities but neither V4 resolution nor positional placement
+    could prove how the user labels map to those slots. Callers must keep the
+    slot-derived money fields unmeasured in that state.
+
+    Returns the inputs unchanged for every other shape:
 
       * either symbol empty (nothing to sort);
       * ``LP_OPEN`` with declared ``primitive_money_legs`` or no typed
@@ -559,7 +578,7 @@ def _v3_realign_token_pair(
         so keep the label order (no worse than the pre-fix behaviour).
     """
     if not token0 or not token1:
-        return token0, token1
+        return token0, token1, False
 
     # ``deserialize_extracted_data`` normally returns a dict, but defend against
     # a non-dict shape so the ``primitive_money_legs`` gate below cannot raise.
@@ -568,13 +587,13 @@ def _v3_realign_token_pair(
     # Gate to the on-chain-ordered raw-int branch of ``_resolve_lp_amounts``.
     if intent_type_str == "LP_OPEN":
         if extracted_map.get("primitive_money_legs") is not None:
-            return token0, token1  # declared legs aligned to token_in/out
+            return token0, token1, False  # declared legs aligned to token_in/out
         if _lp_data_field(lp_data, "amount0") is None and _lp_data_field(lp_data, "amount1") is None:
             # No typed LP_OPEN raw amounts → string-fallback (token_in/out order).
-            return token0, token1
+            return token0, token1, False
     else:  # LP_CLOSE / LP_COLLECT_FEES
         if lp_data is None:
-            return token0, token1  # string-fallback close
+            return token0, token1, False  # string-fallback close
 
     # VIB-6383 / VIB-6471 / VIB-6476 — act on whether the observation SUCCEEDED,
     # not on whether it is present.
@@ -600,7 +619,7 @@ def _v3_realign_token_pair(
     #      sort, which is the pre-existing behaviour and remains correct-by-assumption
     #      for the V3 family.
     if v4_realigned:
-        return token0, token1
+        return token0, token1, False
 
     currency0 = _lp_data_field(lp_data, "currency0")
     currency1 = _lp_data_field(lp_data, "currency1")
@@ -616,7 +635,7 @@ def _v3_realign_token_pair(
         if identity_is_complete(currency0, currency1, amount0, amount1):
             placed = place_token_pair_by_observed_identity(token0, token1, chain, currency0, currency1)
             if placed is not None:
-                return placed
+                return placed[0], placed[1], False
 
         if currency0 and currency1:
             # BOTH slots were observed, and placement still could not prove an
@@ -639,7 +658,7 @@ def _v3_realign_token_pair(
             # fail. Two observations that name tokens outside this pair are
             # evidence the receipt and the label disagree, which is precisely
             # when guessing is least defensible.
-            return token0, token1
+            return token0, token1, True
 
     # KNOWN LIMITATION of the success-not-presence rule above — VIB-6484.
     #
@@ -658,13 +677,14 @@ def _v3_realign_token_pair(
 
     # Fungible N-coin pools order coins by pool index, not address.
     if _lp_data_field(lp_data, "coin_symbols"):
-        return token0, token1
+        return token0, token1, False
 
     # Shared pure sort (VIB-5851 / VIB-5983) — resolve symbols offline and
     # order so token0 is the lower address, matching on-chain amount0.
     from almanak.framework.data.tokens.pair_order import realign_token_pair_by_address
 
-    return realign_token_pair_by_address(token0, token1, chain)
+    aligned = realign_token_pair_by_address(token0, token1, chain)
+    return aligned[0], aligned[1], False
 
 
 def _resolve_lp_tokens(ledger_row: dict[str, Any], position_key: str) -> tuple[str, str]:
@@ -1799,6 +1819,32 @@ def _apply_lp_wallet_basis_hooks(
         )
 
 
+def _degrade_unresolved_lp_money(
+    *,
+    identity_unresolved: bool,
+    amount0: Decimal | None,
+    amount1: Decimal | None,
+    fees0: Decimal | None,
+    fees1: Decimal | None,
+) -> tuple[Decimal | None, Decimal | None, Decimal | None, Decimal | None]:
+    """Drop slot-derived money when the receipt cannot prove token identity."""
+    if identity_unresolved:
+        return None, None, None, None
+    return amount0, amount1, fees0, fees1
+
+
+def _degrade_unresolved_lp_confidence(
+    *,
+    identity_unresolved: bool,
+    confidence: AccountingConfidence,
+    unavailable_reason: str,
+) -> tuple[AccountingConfidence, str]:
+    """Mark an event unavailable when its observed token slots are unbound."""
+    if identity_unresolved:
+        return AccountingConfidence.UNAVAILABLE, "LP token identity unresolved; slot amounts are unmeasured"
+    return confidence, unavailable_reason
+
+
 def handle_lp(
     outbox_row: dict[str, Any],
     ledger_row: dict[str, Any],
@@ -1864,7 +1910,7 @@ def handle_lp(
     # decimals are resolved, so ``_resolve_lp_amounts`` scales each raw amount with
     # the matching decimals instead of mis-scaling by the config pool-label order.
     # No-op unless the amounts are the raw on-chain-ordered ints (gated inside).
-    token0, token1 = _v3_realign_token_pair(
+    token0, token1, token_identity_unresolved = _v3_realign_token_pair(
         lp_data=lp_data,
         intent_type_str=intent_type_str,
         extracted=extracted,
@@ -1882,6 +1928,16 @@ def handle_lp(
         chain=chain,
         amount_in_str=ledger_row.get("amount_in") or "",
         amount_out_str=ledger_row.get("amount_out") or "",
+    )
+
+    # The raw values are tied to venue slots. If their labels/decimals could
+    # not be proven, keeping either leg would be a guess.
+    amount0, amount1, fees0, fees1 = _degrade_unresolved_lp_money(
+        identity_unresolved=token_identity_unresolved,
+        amount0=amount0,
+        amount1=amount1,
+        fees0=fees0,
+        fees1=fees1,
     )
 
     cost_basis_usd, pricing_unavailable_reason, price_oracle = _compute_lp_pricing(
@@ -1906,6 +1962,11 @@ def handle_lp(
         cost_basis_usd=cost_basis_usd,
         assumed_decimals=assumed_decimals,
         pricing_unavailable_reason=pricing_unavailable_reason,
+    )
+    confidence, unavailable_reason = _degrade_unresolved_lp_confidence(
+        identity_unresolved=token_identity_unresolved,
+        confidence=confidence,
+        unavailable_reason=unavailable_reason,
     )
 
     # ── Identity ─────────────────────────────────────────────────────────────

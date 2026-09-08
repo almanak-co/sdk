@@ -6,17 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.28.0] - 2026-09-08
+
 ### Added
 
-- **Explicit price timeframes stay strict without preflight.** When
-  `preflight_validation` is off (the hosted lane), an explicit `timeframe`
-  is now probed against the provider's native cadence before the run starts;
-  a coarser native series raises the same `PRICE_TIMEFRAME_TOO_FINE` preflight
-  error readiness reports instead of silently serving it, and a verified
-  request records `resolved_timeframe`. The platform runner echoes both
-  cadence axes (`decision_interval_seconds`, `price_timeframe_requested`,
-  `price_timeframe_resolved`) under `result_summary.simulation` for completed,
-  failed and preflight-refused runs. (ALM-3010, ALM-3129, ALM-3531)
+- **Intent-driven exact venue discovery.** Backtests now discover pools and
+  perpetual markets from `Intent.lp_open()` and `Intent.perp_open()` at first
+  use, while configuration keys remain optional prewarm hints. `Intent.sequence`
+  executes dependent actions in order, and rejected perpetual actions remain
+  typed and visible in results. (#3837)
 - **Backtest run-validity verdict.** Every finished PnL backtest now carries
   `result.run_validity` (`VALID | NOT_EVALUABLE | INVALID | PARTIAL_LIFECYCLE`
   with typed reasons), computed before institutional compliance. Zero-tick,
@@ -26,7 +24,45 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   headline metrics (`PARTIAL_LIFECYCLE` is reserved and keeps `success`). A
   `VALID` run with no fills is flagged `passive_only`.
   The platform runner echoes the verdict in `result_summary.run_validity`.
-  (ALM-3045, epic ALM-3471)
+  (#3843)
+- **Exact-pool OHLCV history.** Exact pool addresses can load authenticated
+  candle history on demand, participate in feasibility estimates, and remain
+  distinct from symbol-adjacent aggregate series. (#3896)
+- **Dynamic pool resolution and replay.** Pools absent from the static registry
+  are resolved from historical state, authenticated and pinned with their
+  token, factory, deployment-block and provenance metadata. Schema-v3 manifests
+  preserve that identity so `--from-result` replays do not rediscover it.
+  (#3942)
+- **Hosted backtest progress.** Platform runs now report separate loading and
+  simulation progress, including batch or tick totals, elapsed time and bounded
+  update cadence, without making reporting failures block the run. (#3935,
+  #3936)
+- **Lending capacity preflight.** New `ax lending-capacity` verifies Morpho Blue
+  market identity, available borrow liquidity and both swap-route legs before
+  deployment, using the exact token addresses verified on-chain. (#3867)
+- **Robinhood Chain Uniswap V4.** The Uniswap V4 connector now supports
+  Robinhood Chain, including chain truth, compilation, receipt parsing and
+  catalogue demos. (#3922)
+- **Multi-generation Aerodrome Slipstream.** Exact and symbolic pools select
+  their factory generation's position manager, router and quoter across LP,
+  swap and permission-discovery lanes. (#3841)
+
+### Changed
+
+- **Explicit backtest timeframes stay strict.** Hosted runs now probe a
+  requested timeframe against native provider cadence even without full
+  preflight, rejecting overly fine series instead of silently substituting
+  them. Result summaries report requested and resolved price cadence alongside
+  the decision interval. (#3885)
+- **Authenticated, quote-first slippage estimates.** Slippage estimation now
+  uses connector-owned executable quotes with route and pool binding, and fails
+  closed when a reference is missing, ambiguous or unsafe. (#3923)
+- **Almanak Code updated to v1.0.65.** Bundled agent releases add backtest
+  progress support and the latest reliability improvements. (#3898, #3935,
+  #3940, #3941)
+- **Public backtesting guidance synchronized.** Exact-pool and perpetual-market
+  behavior is now documented consistently in English, Chinese, French and
+  Spanish, including the exact-pool OHLCV feasibility estimate.
 
 ### Fixed
 
@@ -42,7 +78,56 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `DataQualityReport.coverage_ratio` is `None` (serialized `null`) when no
   price lookup was made; the data-quality gate fails a ticked run that
   measured nothing and its institutional-mode raise is now an error result
-  rather than an exception escaping `backtest()`. (ALM-3496, epic ALM-3471)
+  rather than an exception escaping `backtest()`. (#3879)
+- **Intent-driven backtest boundaries are fail-closed.** Exact-pool identities
+  are canonicalized and revalidated, exact-address perpetual markets require a
+  current-run connector certificate, terminal sequences share the ordered
+  execution path, and owned providers are restored on every exit. (#3887)
+- **Unavailable reference prices are honest refusals.** `reference_price`
+  under `backtest_no_historical_plane` now records and raises the expected
+  typed data refusal rather than returning an unusable value. (#3851)
+- **Older Uniswap V4 pools resolve by targeted scan.** Pool-key resolution can
+  locate pools created before the historical event-query floor without
+  weakening factory authentication. (#3845)
+- **Unavailable accounting values remain unmeasured.** Missing amounts, fees,
+  basis, TVL and yield are no longer coerced to zero, while authoritative empty
+  transaction lists and measured zeroes retain their distinct meaning.
+  (#3764)
+- **Aave V3 E-mode liquidation prices use the effective threshold.** Health and
+  liquidation calculations apply the active E-mode collateral threshold rather
+  than the reserve's base threshold. (#3886)
+- **Reverted transactions preserve evidence.** Receipt, gas and transaction
+  identity survive revert handling for diagnosis and downstream accounting
+  instead of being discarded. (#3897)
+- **Token cache rows retain canonical addresses.** Symbol-based cache updates
+  no longer overwrite canonical symbol-and-address records. (#3865)
+- **Lending scaffolds enforce market identity.** Protocol-aware strategy
+  scaffolds emit required market IDs, and run/backtest boot rejects present but
+  empty identities while leaving teardown unblocked. (#3864)
+- **Teardown uncertainty is preserved.** Residual-position discovery failures
+  stay visible, and whitespace-only manager aliases can no longer override
+  stronger position-manager identity. (#3863, #3929)
+- **Runtime boundary values are validated consistently.** Malformed connector
+  payloads, persisted teardown plans, timeline cursors and nullable values now
+  produce controlled errors while explicit zero and empty values survive
+  hydration. (#3909)
+- **Robinhood demos launch on managed Anvil.** All three catalogue demos have
+  correct chain-aware funding, configuration and QA coverage. (#3933)
+- **Stargate messaging fees are refreshed live.** Compilation obtains
+  `quoteSend` immediately before funding checks, keeps fee currencies separate,
+  and applies bounded integer headroom instead of relying on stale constants.
+  (#3936)
+
+### Security
+
+- **V3-family LP closes enforce live-state minimums.** Uniswap V3, SushiSwap V3,
+  PancakeSwap V3 and Agni liquidity removal now derive per-token minimums from
+  the position's live pool state and fail closed if protective floors cannot be
+  established. (#3930)
+- **Unknown teardown approval actions are rejected.** Approval parsing now
+  refuses action names outside the supported teardown contract. (#3862)
+- **Tornado updated to 6.5.8.** The dependency includes the latest upstream
+  security and reliability fixes. (#3826)
 
 ## [2.27.0] - 2026-09-03
 

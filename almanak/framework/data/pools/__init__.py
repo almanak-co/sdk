@@ -17,7 +17,7 @@ from .analytics import (
     TokenPool,
     TokenPools,
 )
-from .descriptor import PoolDescriptor
+from .descriptor import PoolDescriptor, ResolvedPoolDescriptor
 from .history import PoolHistoryReader, PoolSnapshot
 from .liquidity import (
     LiquidityDepth,
@@ -48,6 +48,7 @@ __all__ = [
     "PoolHistoryReader",
     "PoolPrice",
     "PoolReaderRegistry",
+    "ResolvedPoolDescriptor",
     "PoolSnapshot",
     "PriceAggregator",
     "SlippageEstimate",

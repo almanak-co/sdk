@@ -147,6 +147,7 @@ async def check_backtest_readiness(
     checks = (
         "support_matrix",
         "funded_price_coverage",
+        "resolved_pool_identity",
         "perp_price_history",
         "funding_history",
         "historical_exact_pool_twap",
@@ -166,6 +167,10 @@ async def check_backtest_readiness(
         backtester.data_config.strict_historical_mode if backtester.data_config is not None else None
     )
     backtester._reset_run_scoped_perp_routes()
+    # Readiness may reuse the same backtester as another readiness check or a
+    # sweep run. Pool discoveries are job-scoped, so begin from constructor
+    # replay pins and let this readiness config merge through preflight.
+    backtester.resolved_pool_descriptors = dict(backtester._seed_pool_descriptors)
     try:
         try:
             await _engine_helpers.prepare_perp_price_history(

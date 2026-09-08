@@ -26,6 +26,7 @@ Example:
 """
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -439,6 +440,19 @@ class BridgeAdapter(ABC):
                               amount out of range, API error, etc.)
         """
         pass
+
+    def refresh_quote_for_execution(
+        self,
+        quote: BridgeQuote,
+        recipient: str,
+        eth_call: Callable[[str, str], str | None],
+    ) -> BridgeQuote:
+        """Refresh recipient-dependent fees using a source-chain-bound read callback.
+
+        Adapters with self-contained quotes can return them unchanged. Adapters
+        requiring live execution fees must raise when those fees are unavailable.
+        """
+        return quote
 
     @abstractmethod
     def build_deposit_tx(

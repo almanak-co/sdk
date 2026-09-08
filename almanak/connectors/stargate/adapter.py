@@ -30,15 +30,16 @@ Example:
 
 import logging
 import time
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import Decimal
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 import requests
-from eth_abi import encode
+from eth_abi import decode, encode
+from eth_utils import keccak
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -411,9 +412,6 @@ class StargateBridgeAdapter(BridgeAdapter):
             protocol_fee_wei = int(amount_wei * protocol_fee_rate)
             protocol_fee = Decimal(protocol_fee_wei) / Decimal(10**decimals)
 
-            # Total fee
-            total_fee = protocol_fee + lz_fee
-
             # Output amount after fees
             output_amount = amount - protocol_fee
             output_amount_wei = amount_wei - protocol_fee_wei
@@ -433,7 +431,7 @@ class StargateBridgeAdapter(BridgeAdapter):
                 output_amount=output_amount,
                 from_chain=from_chain.lower(),
                 to_chain=to_chain.lower(),
-                fee_amount=total_fee,
+                fee_amount=protocol_fee,
                 gas_fee_amount=lz_fee,
                 relayer_fee_amount=protocol_fee,
                 estimated_time_seconds=estimated_time,
@@ -454,7 +452,7 @@ class StargateBridgeAdapter(BridgeAdapter):
 
             logger.info(
                 f"Stargate quote: {amount} {token} {from_chain} -> {to_chain}, "
-                f"fee: {total_fee} ({quote.fee_percentage:.3f}%)"
+                f"fee: {protocol_fee} ({quote.fee_percentage:.3f}%)"
             )
 
             return quote
@@ -463,6 +461,46 @@ class StargateBridgeAdapter(BridgeAdapter):
             raise StargateQuoteError(f"API request failed: {e}") from e
         except (KeyError, ValueError) as e:
             raise StargateQuoteError(f"Failed to calculate quote: {e}") from e
+
+    def refresh_quote_for_execution(
+        self,
+        quote: BridgeQuote,
+        recipient: str,
+        eth_call: Callable[[str, str], str | None],
+    ) -> BridgeQuote:
+        """Quote the exact send parameters through the caller's chain-bound RPC seam.
+
+        Discovery quotes are indicative. Before checking funding or compiling a
+        send, replace their native messaging fee with quoteSend plus 20% headroom.
+        LayerZero refunds unused native fees to the send's refund address.
+        An unavailable quote must never silently fall back to the discovery fee.
+        """
+        transaction = self.build_deposit_tx(quote, recipient)
+        send_type = "(uint32,bytes32,uint256,uint256,bytes,bytes,bytes)"
+        send_param, _, _ = decode([send_type, "(uint256,uint256)", "address"], bytes.fromhex(transaction["data"][10:]))
+        selector = keccak(text=f"quoteSend({send_type},bool)")[:4]
+        calldata = "0x" + (selector + encode([send_type, "bool"], [send_param, False])).hex()
+        try:
+            raw = eth_call(transaction["to"], calldata)
+            if not isinstance(raw, str) or not raw.startswith("0x"):
+                raise ValueError("quoteSend unavailable")
+            payload = bytes.fromhex(raw[2:])
+            if len(payload) != 64:
+                raise ValueError("invalid quoteSend response length")
+            native_fee, lz_token_fee = decode(["uint256", "uint256"], payload)
+            if lz_token_fee != 0:
+                raise ValueError("quoteSend requires unsupported LZ token payment")
+        except Exception as exc:
+            raise StargateQuoteError(f"Cannot measure Stargate native fee: {exc}") from exc
+
+        buffered_fee = (native_fee * 120 + 99) // 100
+        native_amount = Decimal(buffered_fee) / Decimal(10**18)
+        return replace(
+            quote,
+            gas_fee_amount=native_amount,
+            fee_amount=quote.relayer_fee_amount,
+            route_data={**quote.route_data, "lz_fee_wei": str(buffered_fee)},
+        )
 
     def build_deposit_tx(
         self,

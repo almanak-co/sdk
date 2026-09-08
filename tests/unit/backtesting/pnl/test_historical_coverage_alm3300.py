@@ -645,14 +645,32 @@ async def test_preflight_preserves_chain_and_intersects_all_required_assets() ->
         "start": "2026-07-15T03:00:00Z",
         "end": "2026-07-15T05:00:00Z",
     }
-    assert token_check.details["suggested_backtest_config_patch"] == {
-        "start_time": "2026-07-15T03:00:00Z",
-        "end_time": "2026-07-15T05:00:00Z",
-    }
+    # The exact evidence is retained, but a date-only retry cannot be made
+    # safe when the common range ends before the next UTC day.
+    assert "suggested_backtest_config_patch" not in token_check.details
     assert ("arbitrum", _TOKEN_A) in provider.tokens_seen
     assert ("arbitrum", _TOKEN_B) in provider.tokens_seen
     asset_a = next(asset for asset in token_check.details["assets"] if asset.get("address") == _TOKEN_A)
     assert asset_a["chain"] == "arbitrum"
+
+
+@pytest.mark.asyncio
+async def test_partial_coverage_recommendation_rounds_start_up_to_safe_utc_day() -> None:
+    config = _config()
+    config.end_time = _START + timedelta(days=3)
+    backtester = PnLBacktester(data_provider=_CoverageProvider(), fee_models={}, slippage_models={})
+
+    report = await backtester.run_preflight_validation(config)
+
+    token_check = next(check for check in report.checks if check.check_name == "token_availability")
+    assert token_check.details["common_supported_range"] == {
+        "start": "2026-07-15T03:00:00Z",
+        "end": "2026-07-17T23:00:00Z",
+    }
+    assert token_check.details["suggested_backtest_config_patch"] == {
+        "start_time": "2026-07-16T00:00:00Z",
+        "end_time": "2026-07-17T23:00:00Z",
+    }
 
 
 @pytest.mark.asyncio
@@ -755,11 +773,7 @@ async def test_preflight_requires_combined_patch_for_cadence_and_range_gaps() ->
     error = raised.value
     assert error.details["reason_code"] == "MULTIPLE_PRICE_HISTORY_CONSTRAINTS"
     assert error.details["reason_codes"] == ["PRICE_TIMEFRAME_TOO_FINE", "PRICE_RANGE_INCOMPLETE"]
-    assert error.details["suggested_backtest_config_patch"] == {
-        "timeframe": "auto",
-        "start_time": "2026-07-15T02:00:00Z",
-        "end_time": "2026-07-15T06:00:00Z",
-    }
+    assert error.details["suggested_backtest_config_patch"] == {"timeframe": "auto"}
     assert "multiple constraints" in str(error)
 
 
@@ -872,7 +886,7 @@ async def test_structured_partial_patch_survives_readiness_blocker_boundary() ->
 
     blocker = _blocker(raised.value)
     assert blocker["code"] == "PARTIAL_PRICE_HISTORY"
-    assert blocker["details"]["suggested_backtest_config_patch"]["start_time"] == "2026-07-15T03:00:00Z"
+    assert "suggested_backtest_config_patch" not in blocker["details"]
 
 
 @pytest.mark.asyncio

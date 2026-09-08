@@ -160,6 +160,7 @@ from almanak.framework.backtesting.pnl.support_matrix import (
     evaluate_backtest_support,
 )
 from almanak.framework.backtesting.pnl.types import DataConfidence
+from almanak.framework.data.pools.descriptor import ResolvedPoolDescriptor
 from almanak.framework.data.timeframes import (
     CANONICAL_OHLCV_TIMEFRAMES,
     OHLCVTimeframe,
@@ -1809,9 +1810,10 @@ class BacktestPoolPriceView:
       ``meta.proxy_source`` mark the proxy, and a warn-once names it —
       the same doctrine as the pool-candle proxy
       (:meth:`BacktestOHLCVView.get_pool_ohlcv`).
-    - Pool-address-scoped calls resolve ONLY registry-known pools; unknown
-      addresses refuse + ledger. Unpriceable legs (no price in the run's
-      series) refuse + ledger, as the unconfigured accessor did.
+    - Pool-address-scoped calls resolve ONLY preflight-pinned job descriptors;
+      unknown addresses refuse + ledger. No process-global enumerated pool
+      table participates. Unpriceable legs (no price in the run's series)
+      refuse + ledger, as the unconfigured accessor did.
 
     Bound per tick via :meth:`bind`; :meth:`bind_snapshot` attaches the
     tick's snapshot so refusals land in the decision-input ledger.
@@ -1824,9 +1826,20 @@ class BacktestPoolPriceView:
         self,
         chain: str,
         token_addresses: Mapping[str, tuple[str, str]] | None = None,
+        *,
+        resolved_pool_descriptors: Iterable[ResolvedPoolDescriptor] = (),
     ) -> None:
-        self._chain = str(chain).lower()
+        self._chain = _canonical_chain_name(str(chain))
         self._token_addresses = _normalized_token_address_map(token_addresses) or {}
+        self._resolved_pools: dict[str, ResolvedPoolDescriptor] = {}
+        for descriptor in resolved_pool_descriptors:
+            if _canonical_chain_name(descriptor.chain) != self._chain:
+                continue
+            previous = self._resolved_pools.get(descriptor.address)
+            if previous is not None and previous != descriptor:
+                raise ValueError(f"conflicting resolved pool descriptors for {descriptor.address}")
+            self._resolved_pools[descriptor.address] = descriptor
+        self._requested_protocol: str | None = None
         self._market_state: MarketState | None = None
         self._timestamp: datetime | None = None
         self._snapshot: MarketSnapshot | None = None
@@ -1842,12 +1855,19 @@ class BacktestPoolPriceView:
     # ----- registry protocol -------------------------------------------------
 
     def protocols_for_chain(self, chain: str) -> list[str]:
-        return [self.PROTOCOL] if str(chain).lower() == self._chain else []
+        return [self.PROTOCOL] if _canonical_chain_name(str(chain)) == self._chain else []
 
     def get_reader(self, chain: str, protocol: str) -> "BacktestPoolPriceView":
         # The pair ratio is venue-independent; any requested protocol gets
         # the same labeled proxy.
-        _ = chain, protocol
+        _ = chain
+        requested = str(protocol).strip().lower().replace("-", "_")
+        if requested != self.PROTOCOL:
+            from almanak.connectors._strategy_pool_reader_registry import POOL_READER_REGISTRY
+
+            spec = POOL_READER_REGISTRY.lookup(requested)
+            requested = spec.protocol if spec is not None else requested
+        self._requested_protocol = requested
         return self
 
     # ----- reader protocol ---------------------------------------------------
@@ -1859,15 +1879,14 @@ class BacktestPoolPriceView:
         chain: str,
         fee_tier: int = 3000,
     ) -> str | None:
-        """Resolve to a registry-known pool address, or a pair sentinel.
+        """Resolve to a pinned pool address, or a pair sentinel.
 
-        Mirrors the live reader's resolution order (known-pool table keyed by
-        sorted addresses + fee) but never touches a chain; pairs without a
-        curated pool still serve — the proxy value is the pair ratio either
-        way. ``None`` (accessor-level refusal) only for unresolvable or
-        degenerate legs.
+        Pinned descriptors take precedence but this method never touches a
+        chain. Pairs not explicitly pinned still serve a venue-independent
+        sentinel — the proxy value is the pair ratio either way. ``None``
+        (accessor-level refusal) is only for unresolvable or degenerate legs.
         """
-        if str(chain).lower() != self._chain:
+        if _canonical_chain_name(str(chain)) != self._chain:
             return None
         addr_a = self._resolve_leg_address(token_a)
         addr_b = self._resolve_leg_address(token_b)
@@ -1887,9 +1906,9 @@ class BacktestPoolPriceView:
             )
             return None
         token0, token1 = (addr_a, addr_b) if addr_a < addr_b else (addr_b, addr_a)
-        known = self._known_pool_address(token0, token1, int(fee_tier))
-        if known is not None:
-            return known
+        resolved = self._resolved_pool_address(token0, token1, int(fee_tier))
+        if resolved is not None:
+            return resolved
         return f"{self._PAIR_SENTINEL}{token0}:{token1}:{int(fee_tier)}"
 
     def read_pool_price(self, pool_address: str, chain: str) -> Any:
@@ -1898,7 +1917,7 @@ class BacktestPoolPriceView:
         from almanak.framework.data.models import DataClassification, DataEnvelope, DataMeta
         from almanak.framework.data.pools.reader import PoolPrice
 
-        chain_lower = str(chain).lower()
+        chain_lower = _canonical_chain_name(str(chain))
         if self._market_state is None or self._timestamp is None:
             raise PoolPriceUnavailableError(pool_address, "backtest pool-price view is not bound to a tick")
         if chain_lower != self._chain:
@@ -1912,22 +1931,23 @@ class BacktestPoolPriceView:
             ledger_source = "pool_price_by_pair"
             venue_pool = ""
         else:
-            entry = self._known_pool_entry(pool_address)
-            if entry is None:
+            descriptor = self._known_pool_entry(pool_address)
+            if descriptor is None:
                 self._record(
                     "pool_price",
                     f"{pool_address}:unknown_pool",
-                    f"pool_price unavailable: {pool_address!r} is not a registry-known pool on "
-                    f"{self._chain!r}; the run has no venue data to price it",
+                    f"pool_price unavailable: {pool_address!r} has no preflight-resolved descriptor on "
+                    f"{self._chain!r}; the run has no immutable token orientation to price it",
                 )
                 raise PoolPriceUnavailableError(
                     pool_address,
-                    f"pool {pool_address!r} is not a registry-known pool on {self._chain!r}; "
-                    "the backtest serves only the pair-ratio proxy for known pools",
+                    f"pool {pool_address!r} has no preflight-resolved descriptor on {self._chain!r}; "
+                    "explicit pool addresses must resolve before simulation",
                 )
-            token0, token1, fee_tier = entry
+            token0, token1 = descriptor.token0, descriptor.token1
+            fee_tier = descriptor.fee_tier_units or 0
             ledger_source = "pool_price"
-            venue_pool = pool_address
+            venue_pool = descriptor.address
 
         price0 = self._usd_price(token0)
         price1 = self._usd_price(token1)
@@ -1955,8 +1975,12 @@ class BacktestPoolPriceView:
                 sym1,
             )
 
-        decimals = _lp_pair_decimals(token0, token1, self._chain)
-        token0_decimals, token1_decimals = decimals if decimals is not None else (18, 6)
+        if venue_pool:
+            descriptor = self._resolved_pools[venue_pool.lower()]
+            token0_decimals, token1_decimals = descriptor.token0_decimals, descriptor.token1_decimals
+        else:
+            decimals = _lp_pair_decimals(token0, token1, self._chain)
+            token0_decimals, token1_decimals = decimals if decimals is not None else (18, 6)
         value = PoolPrice(
             price=price0 / price1,
             tick=None,
@@ -2029,29 +2053,20 @@ class BacktestPoolPriceView:
         resolved_symbol = getattr(resolved, "symbol", None) if resolved is not None else None
         return str(resolved_symbol).upper() if resolved_symbol else address
 
-    def _known_pool_address(self, token0: str, token1: str, fee_tier: int) -> str | None:
-        from almanak.connectors._strategy_pool_reader_registry import POOL_READER_REGISTRY
+    def _resolved_pool_address(self, token0: str, token1: str, discriminator: int) -> str | None:
+        requested_protocol = self._requested_protocol
+        matches = [
+            descriptor.address
+            for descriptor in self._resolved_pools.values()
+            if {descriptor.token0, descriptor.token1} == {token0, token1}
+            and (requested_protocol in (None, self.PROTOCOL) or descriptor.protocol == requested_protocol)
+            and descriptor.discriminator == discriminator
+        ]
+        return matches[0] if len(matches) == 1 else None
 
-        for spec in POOL_READER_REGISTRY.all():
-            known = spec.known_pools.get(self._chain, {}).get((token0, token1, fee_tier))
-            if known:
-                return known
-        return None
-
-    def _known_pool_entry(self, pool_address: str) -> tuple[str, str, int] | None:
-        """Registry-only inverse lookup: pool address -> (token0, token1, fee)."""
-        from almanak.connectors._strategy_pool_reader_registry import POOL_READER_REGISTRY
-
-        target = pool_address.lower()
-        for spec in POOL_READER_REGISTRY.all():
-            for (token0, token1, fee), address in spec.known_pools.get(self._chain, {}).items():
-                if address.lower() == target:
-                    # Registry token keys are lowercase by convention, but
-                    # normalize here so downstream compares/lookups
-                    # (``_usd_price`` / ``_display_symbol``) never depend on
-                    # a connector author's casing.
-                    return token0.lower(), token1.lower(), int(fee)
-        return None
+    def _known_pool_entry(self, pool_address: str) -> ResolvedPoolDescriptor | None:
+        """Job-scoped inverse lookup retained under the reader compatibility name."""
+        return self._resolved_pools.get(pool_address.lower())
 
 
 class BacktestPoolHistoryReader:
@@ -3433,12 +3448,17 @@ def _partial_history_cadence_feedback(
         "reason_codes": reason_codes,
         "cadence_mismatches": cadence_mismatches,
     }
+    # A cadence-only patch would overclaim when the provider could not prove
+    # any continuous range.  When it did prove a (possibly short) range,
+    # ``timeframe=auto`` remains independently safe; attach calendar bounds
+    # only when rounding still leaves a usable interval.
     if common_range is not None:
-        cadence_details["suggested_backtest_config_patch"] = {
-            "timeframe": "auto",
-            "start_time": common_range["start"],
-            "end_time": common_range["end"],
-        }
+        cadence_details["suggested_backtest_config_patch"] = {"timeframe": "auto"}
+        if (safe_range := _safe_calendar_price_range(common_range)) is not None:
+            cadence_details["suggested_backtest_config_patch"].update(
+                start_time=safe_range["start"],
+                end_time=safe_range["end"],
+            )
     continuity_issue = (
         "the requested date range is not fully covered"
         if not has_unverified_resolved_coverage
@@ -3505,12 +3525,13 @@ def _build_historical_coverage_check(
     if cadence_feedback is not None:
         message, cadence_details, recommendations = cadence_feedback
         details.update(cadence_details)
-    elif common_range is not None:
-        patch = {"start_time": common_range["start"], "end_time": common_range["end"]}
+    elif (safe_range := _safe_calendar_price_range(common_range)) is not None:
+        patch = {"start_time": safe_range["start"], "end_time": safe_range["end"]}
         details["suggested_backtest_config_patch"] = patch
         recommendations = [
             "Price data is available for a shorter common range. Adjust the backtest window to "
-            f"{common_range['start']} through {common_range['end']}."
+            f"{safe_range['start']} through {safe_range['end']}. The start is rounded up to the next "
+            "fully covered UTC calendar day so a date-only retry cannot begin before coverage."
         ]
     elif code == "NO_PRICE_HISTORY":
         recommendations = [
@@ -3570,6 +3591,27 @@ def _common_supported_price_range(
         return None
 
     return {"start": utc_isoformat(start), "end": utc_isoformat(end)}
+
+
+def _safe_calendar_price_range(common_range: Mapping[str, str] | None) -> dict[str, str] | None:
+    """Convert an exact common range into a safe date-retry recommendation.
+
+    Backtest tools commonly expose date-only inputs. Recommending an exact
+    first observation such as ``03:00Z`` led callers to retry that date at
+    ``00:00Z`` and miss coverage again. Round the lower bound *up* to UTC
+    midnight; never emit a patch when that removes the entire usable range.
+    The exact evidence remains available in ``common_supported_range``.
+    """
+    if common_range is None:
+        return None
+    start = datetime.fromisoformat(common_range["start"].replace("Z", "+00:00")).astimezone(UTC)
+    end = datetime.fromisoformat(common_range["end"].replace("Z", "+00:00")).astimezone(UTC)
+    safe_start = start.replace(hour=0, minute=0, second=0, microsecond=0)
+    if safe_start < start:
+        safe_start += timedelta(days=1)
+    if safe_start >= end:
+        return None
+    return {"start": utc_isoformat(safe_start), "end": utc_isoformat(end)}
 
 
 def _token_availability_config(data_provider: Any) -> _TokenAvailabilityConfig:
@@ -4039,6 +4081,11 @@ class PnLBacktester:
     contract address. ``None`` is reserved for custom fixtures and unresolved
     token labels.
     """
+    resolved_pool_descriptors: Mapping[Any, ResolvedPoolDescriptor] | Iterable[ResolvedPoolDescriptor] | None = field(
+        default=None,
+        kw_only=True,
+    )
+    """Job-scoped immutable pool identities supplied by preflight or replay."""
     _mev_simulator: MEVSimulator | None = None
     _current_backtest_id: str = ""
     _adapter: StrategyBacktestAdapter | None = None
@@ -4093,9 +4140,26 @@ class PnLBacktester:
     #: Fill-time missing-data refusals awaiting the run's decision-input
     #: ledger, ``(source, key) -> detail``; drained by the iteration loop.
     _execution_input_failures: dict[tuple[str, str], str] = field(default_factory=dict, init=False, repr=False)
+    _seed_pool_descriptors: dict[tuple[str, str, str], ResolvedPoolDescriptor] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         """Validate configuration after initialization."""
+        raw_descriptors = self.resolved_pool_descriptors
+        descriptor_values = raw_descriptors.values() if isinstance(raw_descriptors, Mapping) else raw_descriptors or ()
+        normalized_descriptors: dict[tuple[str, str, str], ResolvedPoolDescriptor] = {}
+        for descriptor in descriptor_values:
+            if not isinstance(descriptor, ResolvedPoolDescriptor):
+                raise TypeError("resolved_pool_descriptors must contain ResolvedPoolDescriptor values")
+            previous = normalized_descriptors.get(descriptor.key)
+            if previous is not None and previous != descriptor:
+                raise ValueError(f"conflicting resolved pool descriptors for {descriptor.manifest_key}")
+            normalized_descriptors[descriptor.key] = descriptor
+        self.resolved_pool_descriptors = normalized_descriptors
+        self._seed_pool_descriptors = dict(normalized_descriptors)
         # Ensure we have at least a default fee model
         if "default" not in self.fee_models:
             self.fee_models["default"] = DefaultFeeModel()
@@ -4747,12 +4811,20 @@ class PnLBacktester:
         return None
 
     def _bind_pool_descriptors(self, descriptors: Iterable[Any]) -> None:
-        """Bind preflight-authenticated exact pool identities to the adapter."""
-        if self._adapter is None:
-            return
-        bind = getattr(self._adapter, "bind_pool_descriptors", None)
-        if bind is not None:
-            bind(descriptors)
+        """Bind preflight-authenticated identities to the job map and adapter."""
+        values = tuple(descriptors)
+        assert isinstance(self.resolved_pool_descriptors, dict)
+        for descriptor in values:
+            if not isinstance(descriptor, ResolvedPoolDescriptor):
+                raise TypeError("_bind_pool_descriptors requires ResolvedPoolDescriptor values")
+            previous = self.resolved_pool_descriptors.get(descriptor.key)
+            if previous is not None and previous != descriptor:
+                raise ValueError(f"conflicting resolved pool descriptors for {descriptor.manifest_key}")
+            self.resolved_pool_descriptors[descriptor.key] = descriptor
+        if self._adapter is not None:
+            bind = getattr(self._adapter, "bind_pool_descriptors", None)
+            if bind is not None:
+                bind(values)
 
     def _bind_pool_state_source(self, source: Any) -> None:
         """Keep the run's exact-pool state plane reachable for first-use discovery."""
@@ -5016,6 +5088,8 @@ class PnLBacktester:
         self,
         config: PnLBacktestConfig,
         strategy: BacktestableStrategy | None = None,
+        *,
+        _copy_config: bool = True,
     ) -> PreflightReport:
         """Run preflight validation checks before starting a backtest.
 
@@ -5035,6 +5109,10 @@ class PnLBacktester:
                 support-matrix strategy-type / protocol detection. ``None``
                 keeps the pre-existing behavior plus chain-level support
                 checks only.
+            _copy_config: Internal execution flag. Public callers retain the
+                default so validation cannot enrich their config in place;
+                the backtest engine disables the copy for its already-private
+                run-local config.
 
         Returns:
             PreflightReport with pass/fail status and detailed check results.
@@ -5047,6 +5125,9 @@ class PnLBacktester:
             else:
                 result = await backtester.backtest(strategy, config)
         """
+        if _copy_config:
+            config = copy.deepcopy(config)
+
         import time
 
         validation_started = time.time()
@@ -5076,6 +5157,7 @@ class PnLBacktester:
             )
 
         provider_result = self._preflight_provider_capability(provider_name)
+        pool_check, pool_recommendations = await self._preflight_resolved_pool_identities(config, strategy)
         (
             tokens_available,
             tokens_unavailable,
@@ -5090,6 +5172,8 @@ class PnLBacktester:
         )
 
         checks = [provider_result.check, token_check]
+        if pool_check is not None:
+            checks.append(pool_check)
         if archive_result.check is not None:
             checks.append(archive_result.check)
         checks.append(time_range_result.check)
@@ -5101,6 +5185,7 @@ class PnLBacktester:
         recommendations = [
             *provider_result.recommendations,
             *token_recommendations,
+            *pool_recommendations,
             *archive_result.recommendations,
             *time_range_result.recommendations,
             *institutional_recommendations,
@@ -5117,6 +5202,108 @@ class PnLBacktester:
             recommendations=recommendations,
             validation_time_seconds=time.time() - validation_started,
             support=support_report,
+        )
+
+    async def _preflight_resolved_pool_identities(
+        self,
+        config: PnLBacktestConfig,
+        strategy: BacktestableStrategy | None,
+    ) -> tuple[PreflightCheckResult | None, list[str]]:
+        """Resolve explicit pools before price coverage and pin their token universe."""
+        from almanak.framework.backtesting.pnl.resolved_pools import (
+            PoolResolutionError,
+            extract_configured_pool_references,
+            resolve_configured_pool_descriptors,
+        )
+
+        strategy_config = self._get_strategy_config_dict(strategy) if strategy is not None else {}
+        try:
+            references = extract_configured_pool_references(strategy, strategy_config, default_chain=config.chain)
+        except PoolResolutionError as exc:
+            return (
+                PreflightCheckResult(
+                    check_name="resolved_pool_identity",
+                    passed=False,
+                    message=f"Explicit pool reference is invalid: {exc}",
+                    details={"code": "POOL_RESOLUTION_FAILED", "error": str(exc)},
+                    severity="error",
+                ),
+                ["Provide one exact pool address or unambiguous token pair with a supported protocol."],
+            )
+
+        # Constructor-supplied job pins and persisted config pins are two
+        # entrances to the same replay contract. Move the current run's chain
+        # into config before resolution so either entrance suppresses RPC
+        # discovery and participates in the eventual config hash/result.
+        run_chain = _canonical_chain_name(config.chain)
+        pinned: dict[tuple[str, str, str], ResolvedPoolDescriptor] = {}
+        current = self.resolved_pool_descriptors
+        current_values = current.values() if isinstance(current, Mapping) else ()
+        for descriptor in (*current_values, *config.resolved_pool_descriptors):
+            if _canonical_chain_name(descriptor.chain) != run_chain:
+                continue
+            previous = pinned.get(descriptor.key)
+            if previous is not None and previous != descriptor:
+                return (
+                    PreflightCheckResult(
+                        check_name="resolved_pool_identity",
+                        passed=False,
+                        message=f"Conflicting pinned pool identities for {descriptor.manifest_key}",
+                        details={"code": "POOL_RESOLUTION_FAILED", "descriptor": descriptor.manifest_key},
+                        severity="error",
+                    ),
+                    ["Remove the stale descriptor and resolve the pool once against the requested window."],
+                )
+            pinned[descriptor.key] = descriptor
+        config.resolved_pool_descriptors = tuple(pinned[key] for key in sorted(pinned))
+
+        if not references and not config.resolved_pool_descriptors:
+            return None, []
+
+        try:
+            descriptors = await resolve_configured_pool_descriptors(strategy, strategy_config, config)
+        except Exception as exc:  # noqa: BLE001 — pool admission is a fail-closed preflight boundary
+            return (
+                PreflightCheckResult(
+                    check_name="resolved_pool_identity",
+                    passed=False,
+                    message=f"Explicit pool preflight failed before simulation: {exc}",
+                    details={
+                        "code": "POOL_RESOLUTION_FAILED",
+                        "error": str(exc),
+                        "references": [reference.display for reference in references],
+                    },
+                    severity="error",
+                ),
+                [
+                    "Verify the pool address/pair, connector factory metadata, archive-capable Gateway RPC, "
+                    "and choose a backtest start after the pool deployment."
+                ],
+            )
+
+        config.resolved_pool_descriptors = descriptors
+        self._bind_pool_descriptors(descriptors)
+        # The pair-ratio proxy needs both descriptor legs on the run's exact
+        # historical USD plane even when strategy config mentioned only the
+        # pool address. Add identities to this run-local config copy before
+        # token coverage discovery and hashing.
+        tokens = list(config.tokens)
+        identities = {normalize_token_ref(token, config.chain) for token in tokens}
+        for descriptor in descriptors:
+            for address in (descriptor.token0, descriptor.token1):
+                identity = (descriptor.chain, address)
+                if identity not in identities:
+                    tokens.append(identity)
+                    identities.add(identity)
+        config.tokens = tokens
+        return (
+            PreflightCheckResult(
+                check_name="resolved_pool_identity",
+                passed=True,
+                message=f"Resolved and pinned {len(descriptors)} immutable pool descriptor(s)",
+                details={"descriptors": [descriptor.to_dict() for descriptor in descriptors]},
+            ),
+            [],
         )
 
     @staticmethod
@@ -5690,8 +5877,15 @@ class PnLBacktester:
         # the same window, so position ids collide across runs) must re-log
         # each position's first accrual data gap in every run — a stale entry
         # here would silently suppress the once-per-position warning.
+        from almanak.framework.backtesting.pnl.progress import report_progress
+
+        report_progress("loading_data")
         self._accrual_data_gap_positions.clear()
         self._reset_run_scoped_perp_routes()
+        # A backtester may be reused by sweeps. Begin each run from only the
+        # constructor-supplied replay pins plus this run's persisted config;
+        # never leak discoveries from another parameter combination.
+        self.resolved_pool_descriptors = dict(self._seed_pool_descriptors)
 
         # Run preflight validation if enabled (no BacktestState yet, so a
         # PreflightValidationError propagates straight to the caller -- matches
@@ -5718,6 +5912,10 @@ class PnLBacktester:
             config=config,
             bt_logger=bt_logger,
         )
+        # Persist preflight identity before any later data-plane preparation
+        # can fail, so diagnostic result manifests retain the same replay pin
+        # as successful runs.
+        _engine_helpers._pin_manifest_pool_descriptors(state, config)
 
         # Institutional / strict-reproducibility mode records degraded
         # support-matrix lanes as compliance violations at boot (default
@@ -5772,6 +5970,7 @@ class PnLBacktester:
                 )
 
             # Metrics calculation + BacktestResult assembly
+            report_progress("calculating_results")
             return _engine_helpers.finalize_backtest_result(
                 backtester=self,
                 strategy=strategy,

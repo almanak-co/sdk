@@ -49,6 +49,10 @@ def test_descriptor_normalizes_complete_identity_and_provenance() -> None:
     assert descriptor.fee_rate == Decimal("0.0005")
 
 
+def test_descriptor_canonicalizes_registered_chain_alias() -> None:
+    assert _descriptor(chain="mainnet").chain == "ethereum"
+
+
 def test_descriptor_allows_non_factory_fee_to_remain_unmeasured() -> None:
     descriptor = _descriptor(protocol="curve", fee_tier_units=None, factory=None)
 
@@ -84,11 +88,17 @@ def test_descriptor_rejects_invalid_factory(factory: object) -> None:
     [
         ("token0_decimals", -1),
         ("token0_decimals", 37),
+        ("token0_decimals", True),
+        ("token0_decimals", 18.5),
+        ("token0_decimals", Decimal("18")),
         ("token1_decimals", -1),
         ("token1_decimals", 37),
+        ("token1_decimals", True),
+        ("token1_decimals", 18.5),
+        ("token1_decimals", Decimal("18")),
     ],
 )
-def test_descriptor_rejects_out_of_range_decimals(field: str, value: int) -> None:
+def test_descriptor_rejects_invalid_decimals(field: str, value: object) -> None:
     with pytest.raises(ValueError, match="interval"):
         _descriptor(**{field: value})
 

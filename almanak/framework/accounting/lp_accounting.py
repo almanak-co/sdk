@@ -21,12 +21,19 @@ from almanak.framework.accounting.ids import make_accounting_event_id
 from almanak.framework.accounting.measured import encode_money_payload
 from almanak.framework.accounting.models import AccountingConfidence, AccountingIdentity, LPEventType
 from almanak.framework.data.tokens.best_effort import resolve_token_best_effort
+from almanak.framework.data.tokens.defaults import NATIVE_SENTINEL
 from almanak.framework.market.price_store import lookup_price
 from almanak.framework.models.run_mode import RunMode
 
 logger = logging.getLogger(__name__)
 
 _LP_INTENT_TYPES = frozenset({"LP_OPEN", "LP_CLOSE"})
+_V4_NATIVE_CURRENCY = "0x0000000000000000000000000000000000000000"
+
+
+def _normalize_v4_currency_for_resolution(currency: str) -> str:
+    """Map Uniswap V4's zero-address native Currency to the SDK sentinel."""
+    return NATIVE_SENTINEL if currency.strip().lower() == _V4_NATIVE_CURRENCY else currency
 
 
 class LPAccountingEvent:
@@ -302,7 +309,7 @@ def _v4_align_tokens_to_currency_order(
     dec0: int,
     dec1: int,
     assumed_decimals: bool,
-) -> tuple[str, str, int, int, bool]:
+) -> tuple[str, str, int, int, bool, bool]:
     """VIB-4426 P1 #4 — re-pair (token, decimals) by canonical PoolKey address order.
 
     The V4 receipt parser emits ``amount0`` / ``amount1`` in PoolKey-sorted
@@ -315,9 +322,12 @@ def _v4_align_tokens_to_currency_order(
 
     This helper resolves the canonical currency addresses (when populated
     by the V4 receipt parser) into symbols + decimals via the token
-    resolver and returns ``(token0, token1, dec0, dec1, assumed_decimals)``
-    aligned to PoolKey order. If the resolver fails or the currency
-    addresses aren't present (V3 callers), returns the inputs unchanged.
+    resolver and returns ``(token0, token1, dec0, dec1, assumed_decimals,
+    identity_unresolved)`` aligned to PoolKey order. If the currency addresses
+    are absent (V3 callers), returns the inputs unchanged with
+    ``identity_unresolved=False``. If both addresses are present but resolution
+    fails, it returns the labels unchanged with ``identity_unresolved=True`` so
+    the caller can preserve the slot money as unmeasured instead of guessing.
 
     Args:
         lp_data: ``LPOpenData`` or ``LPCloseData`` carrying optional
@@ -336,30 +346,40 @@ def _v4_align_tokens_to_currency_order(
     # (CodeRabbit #3694).
     if not isinstance(c0, str) or not isinstance(c1, str) or not c0 or not c1:
         # V3 or single-sided V4 open — no canonical address pair available.
-        return token0, token1, dec0, dec1, assumed_decimals
+        return token0, token1, dec0, dec1, assumed_decimals, False
 
     # VIB-6100 — shared seam (total). Historical bare ``except Exception`` around
     # ``resolver.resolve`` laundered defects into label-order fallback. Gateway
     # stays allowed (main used log_errors=False only, not skip_gateway).
-    ti0 = resolve_token_best_effort(c0, chain, context="lp_accounting v4 currency0", allow_gateway=True)
-    ti1 = resolve_token_best_effort(c1, chain, context="lp_accounting v4 currency1", allow_gateway=True)
+    ti0 = resolve_token_best_effort(
+        _normalize_v4_currency_for_resolution(c0),
+        chain,
+        context="lp_accounting v4 currency0",
+        allow_gateway=True,
+    )
+    ti1 = resolve_token_best_effort(
+        _normalize_v4_currency_for_resolution(c1),
+        chain,
+        context="lp_accounting v4 currency1",
+        allow_gateway=True,
+    )
 
     if ti0 is None or ti1 is None:
         logger.warning(
             "V4 LP accounting: token resolver did not resolve currency pair (%s, %s) on %s; "
-            "falling back to user-intent token order — amounts may be misattributed",
+            "preserving slot-derived amounts as unmeasured",
             c0,
             c1,
             chain,
         )
-        return token0, token1, dec0, dec1, assumed_decimals
+        return token0, token1, dec0, dec1, assumed_decimals, True
 
     aligned_token0 = (ti0.symbol or c0).upper()
     aligned_token1 = (ti1.symbol or c1).upper()
     aligned_dec0 = int(ti0.decimals) if ti0.decimals is not None else dec0
     aligned_dec1 = int(ti1.decimals) if ti1.decimals is not None else dec1
     aligned_assumed = ti0.decimals is None or ti1.decimals is None
-    return aligned_token0, aligned_token1, aligned_dec0, aligned_dec1, aligned_assumed
+    return aligned_token0, aligned_token1, aligned_dec0, aligned_dec1, aligned_assumed, False
 
 
 def _to_human(raw: int | None, decimals: int) -> Decimal | None:
@@ -607,8 +627,9 @@ def build_lp_accounting_event(
     token0, token1 = _resolve_lp_tokens(intent, resolved_pool)
     dec0, dec1, assumed_decimals = _resolve_lp_decimals(intent)
     lp_data = _result_lp_data(intent_type_str, result)
+    token_identity_unresolved = False
     if lp_data is not None:
-        token0, token1, dec0, dec1, assumed_decimals = _v4_align_tokens_to_currency_order(
+        token0, token1, dec0, dec1, assumed_decimals, token_identity_unresolved = _v4_align_tokens_to_currency_order(
             lp_data, chain, token0, token1, dec0, dec1, assumed_decimals
         )
     amount0, amount1, fees0_collected, fees1_collected = _extract_lp_amounts(
@@ -617,9 +638,20 @@ def build_lp_accounting_event(
     position_hash = _lp_position_hash(intent_type_str, lp_data)
     position_id = _lp_position_id(lp_data)
 
-    confidence = AccountingConfidence.ESTIMATED if assumed_decimals else AccountingConfidence.HIGH
+    if token_identity_unresolved:
+        amount0 = amount1 = fees0_collected = fees1_collected = None
+
+    confidence = (
+        AccountingConfidence.UNAVAILABLE
+        if token_identity_unresolved
+        else AccountingConfidence.ESTIMATED
+        if assumed_decimals
+        else AccountingConfidence.HIGH
+    )
     unavailable_reason = ""
-    if assumed_decimals:
+    if token_identity_unresolved:
+        unavailable_reason = "LP token identity unresolved; slot amounts are unmeasured"
+    elif assumed_decimals:
         unavailable_reason = "token decimals assumed 18; LP amounts are estimated"
 
     position_key = f"lp:{protocol}:{chain.lower()}:{wallet_address.lower()}:{pool_address}"

@@ -422,6 +422,10 @@ Required for historical on-chain data (Chainlink prices, TWAP calculations). Sta
 
 Pattern: `ARCHIVE_RPC_URL_{CHAIN}` (e.g., `ARCHIVE_RPC_URL_ARBITRUM`, `ARCHIVE_RPC_URL_ETHEREUM`, `ARCHIVE_RPC_URL_BASE`, `ARCHIVE_RPC_URL_OPTIMISM`, `ARCHIVE_RPC_URL_POLYGON`, `ARCHIVE_RPC_URL_AVALANCHE`)
 
+### Exact-Pool OHLCV Feasibility Estimate
+
+`ALMANAK_BACKTEST_OHLCV_PAGE_LATENCY_ESTIMATE_SECONDS` controls the estimated latency per exact-pool OHLCV page used by the preflight feasibility gate. It defaults to `10.0` seconds. This is an advanced tuning knob; change it only when the hosted runner's observed page latency changes.
+
 ### Block Explorer API Keys
 
 Optional, for historical gas price data. Pattern: `{EXPLORER}_API_KEY`

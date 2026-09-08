@@ -356,7 +356,19 @@ def test_platform_numeraire_backtest_prices_address_keyed_data_and_coverage() ->
     asyncio.run(original_provider.close())
     backtester.data_provider = provider
 
-    result = asyncio.run(backtester.backtest(strategy, config))
+    from almanak.framework.backtesting.pnl.progress import progress_scope
+
+    progress = []
+    with progress_scope(progress.append):
+        result = asyncio.run(backtester.backtest(strategy, config))
+    assert progress[0].phase == "loading_data"
+    assert progress[-1].phase == "calculating_results"
+    assert (progress[-1].completed_ticks, progress[-1].total_ticks) == (4, 4)
+    ticks = [event.completed_ticks for event in progress if event.phase == "simulating"]
+    assert ticks == sorted(ticks)
+    assert ticks[0] == 0
+    assert ticks[-1] == 4
+    assert all(event.total_ticks == 4 for event in progress if event.phase == "simulating")
 
     assert config.tokens == ["CBBTC", "USDC"]
     # The run chain's native rides along unconditionally (ALM-3067).

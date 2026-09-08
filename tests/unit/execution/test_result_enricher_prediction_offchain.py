@@ -30,7 +30,7 @@ i. (Fix A) Setup tx with empty-string or None total_cost_wei: both gas
    keys omitted, setup_tx_count still recorded, warning names the tx index.
 j. (Fix B) Intent with protocol=None + context.protocol set: context
    fallback routes to the parser (prediction lane mirrors the main path).
-k. (boundary) setup_txs=() -> setup_tx_count and gas keys are NOT written
+k. Empty setup transactions measure zero gas; missing telemetry stays unmeasured.
    (empty tuple is not recorded — block is gated on truthiness of setup_txs).
 """
 
@@ -792,42 +792,59 @@ class TestContextProtocolFallbackOnPredictionLane:
 
 
 # ===========================================================================
-# (k) Boundary: setup_txs=() -> no setup_tx_count, no gas keys written
-#
-# The block is gated on `if setup_txs:` -- an empty tuple is falsy, so
-# no keys are written at all.  This test pins the current (intentional)
-# behavior so a future refactor cannot silently change it.
-# ===========================================================================
+class TestEmptySetupTxsMeasuredZero:
+    def test_no_setup_buy_retains_measured_pnl(self):
+        import json
 
+        from almanak.framework.accounting.basis import FIFOBasisStore
+        from almanak.framework.accounting.category_handlers.prediction_handler import handle_prediction
+        from tests.unit.framework.accounting.test_prediction_handler import _buy_event, _sell_event
 
-class TestEmptySetupTxsNotRecorded:
-    def test_empty_setup_txs_writes_no_count_and_no_gas_keys(self):
-        """setup_txs=() (the default) results in no setup_tx_count entry.
-
-        The `if setup_txs:` guard means an empty tuple does not produce any
-        gas-related keys.  Accounting downstream distinguishes "no setup
-        txs occurred" (key absent) from "setup txs occurred but cost was
-        unmeasured" (key absent + warning).  This test is a regression pin
-        against accidentally removing or relaxing that guard.
-        """
         fill = PredictionFill(
-            filled_shares=Decimal("5.45"),
-            requested_shares=Decimal("5.45"),
-            avg_fill_price=Decimal("0.55"),
+            filled_shares=Decimal("10"),
+            requested_shares=Decimal("10"),
+            avg_fill_price=Decimal("0.50"),
             order_id="clob-1",
             status="matched",
             setup_txs=(),
+            fee_pusd=Decimal("0"),
         )
         result = _FakeExecResult(transaction_results=[], prediction_fill=fill)
         intent = _FakePredictionIntent(intent_type="PREDICTION_BUY", market_id=MARKET_ID)
-        context = _FakeContext(chain="polygon", protocol="polymarket")
-
-        enricher = ResultEnricher()
-        enriched = enricher.enrich(result, intent, context, bundle_metadata=_bundle_meta())
-
-        # When setup_txs is empty, no gas-related keys are written.
-        assert "setup_tx_count" not in enriched.extracted_data
-        assert "gas_cost_native_wei" not in enriched.extracted_data
-        assert "gas_cost_usd" not in enriched.extracted_data
-        # No warnings about setup txs either.
+        enriched = ResultEnricher().enrich(result, intent, _FakeContext(), bundle_metadata={})
+        assert enriched.extracted_data["setup_tx_count"] == 0
+        assert enriched.extracted_data["gas_cost_native_wei"] == Decimal("0")
+        assert enriched.extracted_data["gas_cost_usd"] == Decimal("0")
         assert not any("setup_tx" in w for w in enriched.extraction_warnings)
+
+        outbox, ledger = _buy_event(shares="10", cost_basis="5.00")
+        fields = json.loads(ledger["extracted_data_json"])
+        fields.pop("gas_cost_usd")
+        fields.pop("fee_pusd")
+        fields.update(enriched.extracted_data)
+        ledger["extracted_data_json"] = json.dumps(fields, default=str)
+        basis = FIFOBasisStore()
+        buy = handle_prediction(outbox, ledger, basis)
+        assert buy is not None
+        assert buy.position_loaded_extras_after == Decimal("0")
+        sell_outbox, sell_ledger = _sell_event(shares="10", proceeds="6.00")
+        sell_fields = json.loads(sell_ledger["extracted_data_json"])
+        sell_fields["market_id"] = fields["market_id"]
+        sell_ledger["extracted_data_json"] = json.dumps(sell_fields)
+        sell = handle_prediction(sell_outbox, sell_ledger, basis)
+        assert sell is not None
+        assert sell.realized_pnl_usd == Decimal("1.00")
+
+    def test_missing_setup_telemetry_remains_unmeasured(self):
+        from types import SimpleNamespace
+
+        result = _FakeExecResult()
+        ResultEnricher()._extract_offchain_prediction_costs(
+            result=result,
+            intent_type="PREDICTION_BUY",
+            prediction_fill=SimpleNamespace(fee_pusd=Decimal("0")),
+            bundle_metadata={},
+        )
+        assert "gas_cost_usd" not in result.extracted_data
+        assert "gas_cost_native_wei" not in result.extracted_data
+        assert "setup_tx_count" not in result.extracted_data

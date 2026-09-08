@@ -104,6 +104,7 @@ from almanak.framework.backtesting.pnl.portfolio import (
     CASH_EQUIVALENT_STABLECOIN_SYMBOLS,
     SimulatedPortfolio,
 )
+from almanak.framework.backtesting.pnl.progress import report_progress
 from almanak.framework.backtesting.pnl.run_context import BacktestRunContext
 from almanak.framework.backtesting.pnl.run_validity import classify_run_validity, engine_error_verdict, terminal_errors
 from almanak.framework.data.interfaces import DataSourceError
@@ -1387,18 +1388,20 @@ async def run_preflight(
     bt_logger: BacktestLogger,
     strategy: BacktestableStrategy | None = None,
 ) -> tuple[PreflightReport | None, bool]:
-    """Execute preflight validation if enabled.
+    """Execute configured validation plus mandatory explicit-pool admission.
 
     Returns ``(preflight_report, preflight_passed)``. ``preflight_passed``
-    defaults to ``True`` when validation is disabled, mirroring the
-    pre-extraction behavior.
+    defaults to ``True`` when full validation is disabled. Explicit strategy
+    pool references are still resolved and authenticated: disabling general
+    price/provider checks must never defer an identity failure into the tick
+    loop.
 
     Raises:
         PreflightValidationError: if the support matrix reports a hard
             failure (unconditional — ``fail_on_preflight_error=False`` does
             not bypass it; a chain that cannot price any token has no
             degraded mode, and disabling ``preflight_validation`` entirely
-            is the only escape hatch), or if
+            is the only escape hatch), if explicit pool admission fails, or if
             ``config.fail_on_preflight_error`` is True and any check failed.
     """
     preflight_report: PreflightReport | None = None
@@ -1406,11 +1409,36 @@ async def run_preflight(
     if config.preflight_validation:
         with bt_logger.phase("preflight_validation"):
             bt_logger.info("Running preflight validation checks...")
-            preflight_report = await backtester.run_preflight_validation(config, strategy=strategy)
+            preflight_report = await backtester.run_preflight_validation(
+                config,
+                strategy=strategy,
+                _copy_config=False,
+            )
             preflight_passed = preflight_report.passed
 
             _log_support_matrix(preflight_report, bt_logger)
             _raise_on_support_hard_failures(preflight_report)
+            pool_failure = next(
+                (
+                    check
+                    for check in preflight_report.failed_checks
+                    if check.check_name == "resolved_pool_identity" and check.severity == "error"
+                ),
+                None,
+            )
+            if pool_failure is not None:
+                # ``fail_on_preflight_error=False`` is a price-data escape
+                # hatch, not permission to run thousands of ticks without an
+                # immutable identity for an explicitly named pool.
+                raise PreflightValidationError(
+                    message=pool_failure.message,
+                    failed_checks=[check.check_name for check in preflight_report.failed_checks],
+                    recommendations=preflight_report.recommendations,
+                    error_count=preflight_report.error_count,
+                    warning_count=preflight_report.warning_count,
+                    code=str(pool_failure.details.get("code", "POOL_RESOLUTION_FAILED")),
+                    details=pool_failure.details,
+                )
 
             if preflight_report.passed:
                 bt_logger.info(
@@ -1458,6 +1486,22 @@ async def run_preflight(
                         "Continuing in degraded mode (fail_on_preflight_error=False). "
                         "Results may be inaccurate due to data quality issues."
                     )
+    elif strategy is not None:
+        # Pool identity is structural input, not an optional data-quality
+        # check. Hosted runs historically disable the broader preflight by
+        # default, so perform this one bounded admission step regardless.
+        with bt_logger.phase("resolved_pool_identity"):
+            pool_check, pool_recommendations = await backtester._preflight_resolved_pool_identities(config, strategy)
+        if pool_check is not None and not pool_check.passed:
+            raise PreflightValidationError(
+                message=pool_check.message,
+                failed_checks=[pool_check.check_name],
+                recommendations=pool_recommendations,
+                error_count=1,
+                warning_count=0,
+                code=str(pool_check.details.get("code", "POOL_RESOLUTION_FAILED")),
+                details=pool_check.details,
+            )
     return preflight_report, preflight_passed
 
 
@@ -1858,13 +1902,36 @@ def _bind_historical_pool_descriptors(
     source: SnapshotPoolStateSource | None,
     strategy_config: Mapping[str, Any],
     *,
-    chain: str,
+    config: PnLBacktestConfig,
 ) -> None:
-    """Bind materialized exact-pool identities without growing loop branching."""
-    descriptors = list(source.descriptors()) if source is not None else []
-    descriptors.extend(_configured_pool_descriptors(strategy_config, chain=chain))
-    if descriptors:
-        backtester._bind_pool_descriptors(descriptors)
+    """Bind and pin every materialized/preflight exact-pool identity."""
+    existing = backtester.resolved_pool_descriptors
+    descriptors = dict(existing) if isinstance(existing, Mapping) else {}
+    for descriptor in source.descriptors() if source is not None else ():
+        descriptors.setdefault(descriptor.key, descriptor)
+    for descriptor in _configured_pool_descriptors(strategy_config, chain=config.chain):
+        descriptors.setdefault(descriptor.key, descriptor)
+    ordered = tuple(descriptors[key] for key in sorted(descriptors))
+    # Snapshot/permission adapters also expose runtime-only legacy descriptors
+    # that predate deployment-block pinning. They may bind the adapter for this
+    # run, but must not be serialized as replay-ready identities: a future run
+    # would correctly reject such an incomplete pin. Explicit-pool preflight
+    # descriptors are complete and therefore enter config/hash/result.
+    config.resolved_pool_descriptors = tuple(
+        descriptor for descriptor in ordered if descriptor.deployment_block is not None
+    )
+    if ordered:
+        backtester._bind_pool_descriptors(ordered)
+
+
+def _resolved_pool_descriptor_values(backtester: PnLBacktester) -> tuple[Any, ...]:
+    values = backtester.resolved_pool_descriptors
+    return tuple(values.values()) if isinstance(values, Mapping) else ()
+
+
+def _pin_manifest_pool_descriptors(state: BacktestState, config: PnLBacktestConfig) -> None:
+    if state.data_broker is not None:
+        state.data_broker.manifest.pin_pool_descriptors(config.resolved_pool_descriptors)
 
 
 def _ensure_run_twap_source(twap_source: Any | None, config: PnLBacktestConfig, state: BacktestState) -> Any:
@@ -2093,8 +2160,9 @@ async def execute_iteration_loop(
         backtester,
         pool_state_source,
         state.strategy_config,
-        chain=config.chain,
+        config=config,
     )
+    _pin_manifest_pool_descriptors(state, config)
     pool_analytics_targets = _declared_historical_pool_analytics(strategy, state.strategy_config, config)
 
     # Credits must land on the funding identity plane (ALM-2960) — same map
@@ -2156,7 +2224,11 @@ async def execute_iteration_loop(
     # proxy, estimate_slippage from the engine's own fill models, and
     # realized_vol / vol_cone over the run's close series — all data the
     # engine already owns; the accessors refused it at decide() time.
-    pool_price_view = BacktestPoolPriceView(config.chain, token_addresses)
+    pool_price_view = BacktestPoolPriceView(
+        config.chain,
+        token_addresses,
+        resolved_pool_descriptors=_resolved_pool_descriptor_values(backtester),
+    )
     slippage_view = SimulatedSlippageView(backtester)
     # Retention for the DEFAULT vol windows (review, #3346) is sized LAZILY by
     # the calculator on the first realized_vol/vol_cone call: sizing it eagerly
@@ -2208,6 +2280,9 @@ async def execute_iteration_loop(
     with bt_logger.phase("simulation"), _market_state_iterator_scope(market_state_iterator):
         # Iterate through historical data
         async for timestamp, market_state in market_state_iterator:
+            # Historical providers include both endpoints. Observation starts
+            # after the first market state arrives, excluding initial data loading.
+            report_progress("simulating", state.tick_count, int(config.estimated_ticks) + 1)
             state.tick_count += 1
             _apply_first_use_overlays(backtester, market_state)
 
@@ -2454,6 +2529,7 @@ async def execute_iteration_loop(
 
             # Store the market state for use after simulation completes
             state.last_market_state = market_state  # noqa: F841 (used in US-062b)
+            report_progress("simulating", state.tick_count, int(config.estimated_ticks) + 1)
 
         # Execute any remaining pending intents at end of simulation
         # (Use last market state for final execution)

@@ -1,0 +1,645 @@
+{
+  "artifacts": [
+    {
+      "kind": "rpc-receipt",
+      "path": "chain/receipt-0x2246536e78c4b28d9bccd0666ca920a5d936243e4f4da1218203e4ec1451b71c.json",
+      "sha256": "b81244930ed15affea5147b7582e215b4bd088dce6e8546796ad5caef3f68e26"
+    },
+    {
+      "kind": "rpc-transaction",
+      "path": "chain/transaction-0x2246536e78c4b28d9bccd0666ca920a5d936243e4f4da1218203e4ec1451b71c.json",
+      "sha256": "e8a454e31b796d6bf1a945f3ddfa53e48f11258b958ad280f2ff95190c6d4f05"
+    },
+    {
+      "kind": "rpc-balance-witness",
+      "path": "chain/balances-0x2246536e78c4b28d9bccd0666ca920a5d936243e4f4da1218203e4ec1451b71c.json",
+      "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
+    },
+    {
+      "kind": "rpc-receipt",
+      "path": "chain/receipt-0x255f93ca7481354390309487d4fe471355c72ec4267efbdca6b54ce0a4c3ffca.json",
+      "sha256": "39bca9a5372f17a7c291058cb16117d5bcd83294ed5b5ec3b6e4e7901381750c"
+    },
+    {
+      "kind": "rpc-transaction",
+      "path": "chain/transaction-0x255f93ca7481354390309487d4fe471355c72ec4267efbdca6b54ce0a4c3ffca.json",
+      "sha256": "c859473945d5b49debcf007e61ceec09a7d06fbaf5f2ab92f074d5b98db86311"
+    },
+    {
+      "kind": "rpc-balance-witness",
+      "path": "chain/balances-0x255f93ca7481354390309487d4fe471355c72ec4267efbdca6b54ce0a4c3ffca.json",
+      "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
+    },
+    {
+      "kind": "rpc-receipt",
+      "path": "chain/receipt-0x4504bfa47e5f5fe920cddad095d056dacacab86dd71c7b029d785b4cd59a3568.json",
+      "sha256": "fb5b93220a7ab6ec776895338fecef5c69c604e6e1104686b9da960841623db9"
+    },
+    {
+      "kind": "rpc-transaction",
+      "path": "chain/transaction-0x4504bfa47e5f5fe920cddad095d056dacacab86dd71c7b029d785b4cd59a3568.json",
+      "sha256": "2f23ec2b6b573596beb6caee70d2cc57a0a2196200903d87cc7a1a41fa307349"
+    },
+    {
+      "kind": "rpc-balance-witness",
+      "path": "chain/balances-0x4504bfa47e5f5fe920cddad095d056dacacab86dd71c7b029d785b4cd59a3568.json",
+      "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
+    },
+    {
+      "kind": "rpc-receipt",
+      "path": "chain/receipt-0x78cfbd5e83903b5caaee126a2cdb3d23e91de05d2902e16c6a9107e19a82d824.json",
+      "sha256": "630b449100cb2f4b2f68e60e01f901db734175665864febf25d05be70b177316"
+    },
+    {
+      "kind": "rpc-transaction",
+      "path": "chain/transaction-0x78cfbd5e83903b5caaee126a2cdb3d23e91de05d2902e16c6a9107e19a82d824.json",
+      "sha256": "a8f96b973edfdf407729e3a85136ab370c31423c39cbfa58faf9b6ce2823938f"
+    },
+    {
+      "kind": "rpc-balance-witness",
+      "path": "chain/balances-0x78cfbd5e83903b5caaee126a2cdb3d23e91de05d2902e16c6a9107e19a82d824.json",
+      "sha256": "2d5484f1c6a929c284ce111be2951d5c3d0a4ab38c19e9a95f7dacaab0b000c2"
+    },
+    {
+      "kind": "rpc-receipt",
+      "path": "chain/receipt-0xa346d1f042a6320cb7acb04160299df9968543d7589453f874d4f1f565317d31.json",
+      "sha256": "415569bda202c8665fda8a40578c473620acaedd13d01a1549ad51daa6027758"
+    },
+    {
+      "kind": "rpc-transaction",
+      "path": "chain/transaction-0xa346d1f042a6320cb7acb04160299df9968543d7589453f874d4f1f565317d31.json",
+      "sha256": "6d733a54425883c32a2c12ea5a4054f389bbae466b0792e6fc2ac39560b0fcc8"
+    },
+    {
+      "kind": "rpc-balance-witness",
+      "path": "chain/balances-0xa346d1f042a6320cb7acb04160299df9968543d7589453f874d4f1f565317d31.json",
+      "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
+    },
+    {
+      "kind": "rpc-receipt",
+      "path": "chain/receipt-0xc0b64f2911fcb0333b8cdf3d920c26c424c7eb41d6d7413d045131385566ea84.json",
+      "sha256": "364cedeffe6df7a10ea3b8c1985b576abf7b883c37d60490268379fb07fb437a"
+    },
+    {
+      "kind": "rpc-transaction",
+      "path": "chain/transaction-0xc0b64f2911fcb0333b8cdf3d920c26c424c7eb41d6d7413d045131385566ea84.json",
+      "sha256": "863f1860e4c238565117dc4cedefc0befcda2d84f1ef06712a4dd93aacd3c66a"
+    },
+    {
+      "kind": "rpc-balance-witness",
+      "path": "chain/balances-0xc0b64f2911fcb0333b8cdf3d920c26c424c7eb41d6d7413d045131385566ea84.json",
+      "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
+    },
+    {
+      "kind": "rpc-receipt",
+      "path": "chain/receipt-0xc16706e88b10fe4c56d89eaf8a04fcb0dde76daf0e9f02fa6c08dbe1be6ee420.json",
+      "sha256": "df3570aac4a5d0a9157274167c798b3b609b2e559ad8a64e7c46ed85c3f6ede1"
+    },
+    {
+      "kind": "rpc-transaction",
+      "path": "chain/transaction-0xc16706e88b10fe4c56d89eaf8a04fcb0dde76daf0e9f02fa6c08dbe1be6ee420.json",
+      "sha256": "e39993c9e90ebed91627af82c532855a117ac15c937527c679dd981b8f7c8245"
+    },
+    {
+      "kind": "rpc-balance-witness",
+      "path": "chain/balances-0xc16706e88b10fe4c56d89eaf8a04fcb0dde76daf0e9f02fa6c08dbe1be6ee420.json",
+      "sha256": "76a5aa8588934f5c41917ff62e85bc203daa23ddcb90b9d2a3611049f11a88a5"
+    },
+    {
+      "kind": "rpc-receipt",
+      "path": "chain/receipt-0xce7b457b50c02f24256549628f82cc183388e290028ff94006f7215f1d7b2f8c.json",
+      "sha256": "0e7592d6bfa3d2191cb32f957ce0f113a2da917052d346813161ee1a366f434e"
+    },
+    {
+      "kind": "rpc-transaction",
+      "path": "chain/transaction-0xce7b457b50c02f24256549628f82cc183388e290028ff94006f7215f1d7b2f8c.json",
+      "sha256": "b2da13fcd71881676527e2ec2f4f5c0837ee0c8365eda56774dd933b4869ef55"
+    },
+    {
+      "kind": "rpc-balance-witness",
+      "path": "chain/balances-0xce7b457b50c02f24256549628f82cc183388e290028ff94006f7215f1d7b2f8c.json",
+      "sha256": "989f39842cfc57fa272a3b42848b3514d253562c843e8ce33d805e9482ccc613"
+    },
+    {
+      "kind": "rpc-receipt",
+      "path": "chain/receipt-0xeae8824b7188028ebb62daa1469b43ffee5a6601fe68ecc6d11d077bc073176a.json",
+      "sha256": "cd44e91f289104d1e9a935108e81418718556d828965ccd69fe8d35918f14460"
+    },
+    {
+      "kind": "rpc-transaction",
+      "path": "chain/transaction-0xeae8824b7188028ebb62daa1469b43ffee5a6601fe68ecc6d11d077bc073176a.json",
+      "sha256": "f072a733b77521407a91b99829c7eddc34ca910083c3a6596e6aebf573fe956c"
+    },
+    {
+      "kind": "rpc-balance-witness",
+      "path": "chain/balances-0xeae8824b7188028ebb62daa1469b43ffee5a6601fe68ecc6d11d077bc073176a.json",
+      "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
+    },
+    {
+      "kind": "rpc-receipt",
+      "path": "chain/receipt-0xf7899635d18401bf6d6c22f5797cc9a7684d17759379235cc512062fc6873755.json",
+      "sha256": "82a7a1d3682edc98de783c53655b1dd81183452039b369fe617ea6a0f98f800c"
+    },
+    {
+      "kind": "rpc-transaction",
+      "path": "chain/transaction-0xf7899635d18401bf6d6c22f5797cc9a7684d17759379235cc512062fc6873755.json",
+      "sha256": "9de031be7f031b1021fee90634330b64ba14153287b2a8c5e7ac224b34e2f0be"
+    },
+    {
+      "kind": "rpc-balance-witness",
+      "path": "chain/balances-0xf7899635d18401bf6d6c22f5797cc9a7684d17759379235cc512062fc6873755.json",
+      "sha256": "557230d884a1ce3f0f69683549765be2d81574e51b68557b70f2f5893ee40052"
+    }
+  ],
+  "balance_check_count": 8,
+  "convergence": {
+    "completed_at": "2026-09-06T06:05:22.029835+00:00",
+    "consecutive_complete_observations": 2,
+    "landed_by_intent": {
+      "LP_OPEN": 1
+    },
+    "latest_ledger_at": "2026-09-06T06:05:21+00:00",
+    "ledger_tx_hashes": [
+      "0x2246536e78c4b28d9bccd0666ca920a5d936243e4f4da1218203e4ec1451b71c",
+      "0x255f93ca7481354390309487d4fe471355c72ec4267efbdca6b54ce0a4c3ffca",
+      "0x4504bfa47e5f5fe920cddad095d056dacacab86dd71c7b029d785b4cd59a3568",
+      "0x78cfbd5e83903b5caaee126a2cdb3d23e91de05d2902e16c6a9107e19a82d824",
+      "0xa346d1f042a6320cb7acb04160299df9968543d7589453f874d4f1f565317d31",
+      "0xc0b64f2911fcb0333b8cdf3d920c26c424c7eb41d6d7413d045131385566ea84",
+      "0xc16706e88b10fe4c56d89eaf8a04fcb0dde76daf0e9f02fa6c08dbe1be6ee420",
+      "0xce7b457b50c02f24256549628f82cc183388e290028ff94006f7215f1d7b2f8c",
+      "0xeae8824b7188028ebb62daa1469b43ffee5a6601fe68ecc6d11d077bc073176a",
+      "0xf7899635d18401bf6d6c22f5797cc9a7684d17759379235cc512062fc6873755"
+    ],
+    "polls": 3,
+    "quiescence_seconds": 7.7002270221710205,
+    "scope": "stable receipt set and SDK persistence; not independent position closure",
+    "status": "PASS",
+    "teardown_chain_verified": true,
+    "teardown_status": "COMPLETED",
+    "witnessed_tx_hashes": [
+      "0x2246536e78c4b28d9bccd0666ca920a5d936243e4f4da1218203e4ec1451b71c",
+      "0x255f93ca7481354390309487d4fe471355c72ec4267efbdca6b54ce0a4c3ffca",
+      "0x4504bfa47e5f5fe920cddad095d056dacacab86dd71c7b029d785b4cd59a3568",
+      "0x78cfbd5e83903b5caaee126a2cdb3d23e91de05d2902e16c6a9107e19a82d824",
+      "0xa346d1f042a6320cb7acb04160299df9968543d7589453f874d4f1f565317d31",
+      "0xc0b64f2911fcb0333b8cdf3d920c26c424c7eb41d6d7413d045131385566ea84",
+      "0xc16706e88b10fe4c56d89eaf8a04fcb0dde76daf0e9f02fa6c08dbe1be6ee420",
+      "0xce7b457b50c02f24256549628f82cc183388e290028ff94006f7215f1d7b2f8c",
+      "0xeae8824b7188028ebb62daa1469b43ffee5a6601fe68ecc6d11d077bc073176a",
+      "0xf7899635d18401bf6d6c22f5797cc9a7684d17759379235cc512062fc6873755"
+    ]
+  },
+  "failures": [],
+  "rpc_url": "http://127.0.0.1:51259",
+  "schema_version": 1,
+  "source": "anvil-json-rpc",
+  "status": "PASS",
+  "submission_census": {
+    "chain_id": 42161,
+    "fork_block": 502248293,
+    "last_block": 502248304,
+    "missing_tx_hashes": [],
+    "multi_transaction_blocks": [],
+    "status": "PASS",
+    "unattributed_tx_hashes": [],
+    "wallets": [
+      "0xa0b273b5b2ecc1021604c842650a6b5e931532c6"
+    ]
+  },
+  "submission_census_artifact": {
+    "kind": "rpc-submission-census",
+    "path": "chain/submission-census.json",
+    "sha256": "6647b439d7a7646f74eb8b683243caa632215d75236d11f9a4f79239651b5fe7"
+  },
+  "transaction_count": 10,
+  "transactions": [
+    {
+      "artifacts": [
+        {
+          "kind": "rpc-receipt",
+          "path": "chain/receipt-0x2246536e78c4b28d9bccd0666ca920a5d936243e4f4da1218203e4ec1451b71c.json",
+          "sha256": "b81244930ed15affea5147b7582e215b4bd088dce6e8546796ad5caef3f68e26"
+        },
+        {
+          "kind": "rpc-transaction",
+          "path": "chain/transaction-0x2246536e78c4b28d9bccd0666ca920a5d936243e4f4da1218203e4ec1451b71c.json",
+          "sha256": "e8a454e31b796d6bf1a945f3ddfa53e48f11258b958ad280f2ff95190c6d4f05"
+        },
+        {
+          "kind": "rpc-balance-witness",
+          "path": "chain/balances-0x2246536e78c4b28d9bccd0666ca920a5d936243e4f4da1218203e4ec1451b71c.json",
+          "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
+        }
+      ],
+      "balance_checks": [],
+      "block_hash": "0x1ad9f987a8b69c9893f5f2b9da001612024729ec5b8af010bdbed5a77fa2db36",
+      "block_number": 502248303,
+      "cycle_id": "teardown-td_2a8b2ab3c42f",
+      "deployment_id": "deployment:1abdf790144a",
+      "gas_cost_wei": "53452000000000",
+      "gas_used": 53452,
+      "id": "fa6040d4-ff76-40d2-9ef8-800c61f5a63f",
+      "intent_type": "SWAP",
+      "receipt_status": 1,
+      "tx_hash": "0x2246536e78c4b28d9bccd0666ca920a5d936243e4f4da1218203e4ec1451b71c",
+      "wallet": "0xa0b273b5b2ecc1021604c842650a6b5e931532c6"
+    },
+    {
+      "artifacts": [
+        {
+          "kind": "rpc-receipt",
+          "path": "chain/receipt-0x255f93ca7481354390309487d4fe471355c72ec4267efbdca6b54ce0a4c3ffca.json",
+          "sha256": "39bca9a5372f17a7c291058cb16117d5bcd83294ed5b5ec3b6e4e7901381750c"
+        },
+        {
+          "kind": "rpc-transaction",
+          "path": "chain/transaction-0x255f93ca7481354390309487d4fe471355c72ec4267efbdca6b54ce0a4c3ffca.json",
+          "sha256": "c859473945d5b49debcf007e61ceec09a7d06fbaf5f2ab92f074d5b98db86311"
+        },
+        {
+          "kind": "rpc-balance-witness",
+          "path": "chain/balances-0x255f93ca7481354390309487d4fe471355c72ec4267efbdca6b54ce0a4c3ffca.json",
+          "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
+        }
+      ],
+      "balance_checks": [],
+      "block_hash": "0x5cd6d00d87af13952dcf4cee5d7acd0bc6da40c26b4fb812196bf730cb43a5ed",
+      "block_number": 502248298,
+      "cycle_id": "0fefb0eb-b0db-4ed3-93b5-da04422af48c",
+      "deployment_id": "deployment:1abdf790144a",
+      "gas_cost_wei": "55437000000000",
+      "gas_used": 55437,
+      "id": "74a07f96-7751-4b3e-9b03-dd9d9f7ed481",
+      "intent_type": "LP_OPEN",
+      "receipt_status": 1,
+      "tx_hash": "0x255f93ca7481354390309487d4fe471355c72ec4267efbdca6b54ce0a4c3ffca",
+      "wallet": "0xa0b273b5b2ecc1021604c842650a6b5e931532c6"
+    },
+    {
+      "artifacts": [
+        {
+          "kind": "rpc-receipt",
+          "path": "chain/receipt-0x4504bfa47e5f5fe920cddad095d056dacacab86dd71c7b029d785b4cd59a3568.json",
+          "sha256": "fb5b93220a7ab6ec776895338fecef5c69c604e6e1104686b9da960841623db9"
+        },
+        {
+          "kind": "rpc-transaction",
+          "path": "chain/transaction-0x4504bfa47e5f5fe920cddad095d056dacacab86dd71c7b029d785b4cd59a3568.json",
+          "sha256": "2f23ec2b6b573596beb6caee70d2cc57a0a2196200903d87cc7a1a41fa307349"
+        },
+        {
+          "kind": "rpc-balance-witness",
+          "path": "chain/balances-0x4504bfa47e5f5fe920cddad095d056dacacab86dd71c7b029d785b4cd59a3568.json",
+          "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
+        }
+      ],
+      "balance_checks": [],
+      "block_hash": "0xb7443e4864e10c6146c2e38a614cf8e78a58dd3730cf14bc380be50e46347585",
+      "block_number": 502248297,
+      "cycle_id": "0fefb0eb-b0db-4ed3-93b5-da04422af48c",
+      "deployment_id": "deployment:1abdf790144a",
+      "gas_cost_wei": "53452000000000",
+      "gas_used": 53452,
+      "id": "74a07f96-7751-4b3e-9b03-dd9d9f7ed481",
+      "intent_type": "LP_OPEN",
+      "receipt_status": 1,
+      "tx_hash": "0x4504bfa47e5f5fe920cddad095d056dacacab86dd71c7b029d785b4cd59a3568",
+      "wallet": "0xa0b273b5b2ecc1021604c842650a6b5e931532c6"
+    },
+    {
+      "artifacts": [
+        {
+          "kind": "rpc-receipt",
+          "path": "chain/receipt-0x78cfbd5e83903b5caaee126a2cdb3d23e91de05d2902e16c6a9107e19a82d824.json",
+          "sha256": "630b449100cb2f4b2f68e60e01f901db734175665864febf25d05be70b177316"
+        },
+        {
+          "kind": "rpc-transaction",
+          "path": "chain/transaction-0x78cfbd5e83903b5caaee126a2cdb3d23e91de05d2902e16c6a9107e19a82d824.json",
+          "sha256": "a8f96b973edfdf407729e3a85136ab370c31423c39cbfa58faf9b6ce2823938f"
+        },
+        {
+          "kind": "rpc-balance-witness",
+          "path": "chain/balances-0x78cfbd5e83903b5caaee126a2cdb3d23e91de05d2902e16c6a9107e19a82d824.json",
+          "sha256": "2d5484f1c6a929c284ce111be2951d5c3d0a4ab38c19e9a95f7dacaab0b000c2"
+        }
+      ],
+      "balance_checks": [
+        {
+          "actual_delta_raw": "-796325925647257",
+          "balance_after_raw": "0",
+          "balance_before_raw": "796325925647257",
+          "block_after": "0x1defb370",
+          "block_before": "0x1defb36f",
+          "reconciliation_mode": "exact_transfer",
+          "status": "PASS",
+          "token": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
+          "token_decimals": 18,
+          "token_symbol": "WETH",
+          "transfer_log_delta_raw": "-796325925647257",
+          "wallet": "0xa0b273b5b2ecc1021604c842650a6b5e931532c6"
+        },
+        {
+          "actual_delta_raw": "1999657",
+          "balance_after_raw": "99999656",
+          "balance_before_raw": "97999999",
+          "block_after": "0x1defb370",
+          "block_before": "0x1defb36f",
+          "reconciliation_mode": "exact_transfer",
+          "status": "PASS",
+          "token": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+          "token_decimals": 6,
+          "token_symbol": "USDC",
+          "transfer_log_delta_raw": "1999657",
+          "wallet": "0xa0b273b5b2ecc1021604c842650a6b5e931532c6"
+        }
+      ],
+      "block_hash": "0xd80b64f7d21d35ee98e071a3c58f44851123c48e73987a7164ca48359b412419",
+      "block_number": 502248304,
+      "cycle_id": "teardown-td_2a8b2ab3c42f",
+      "deployment_id": "deployment:1abdf790144a",
+      "gas_cost_wei": "125880000000000",
+      "gas_used": 125880,
+      "id": "fa6040d4-ff76-40d2-9ef8-800c61f5a63f",
+      "intent_type": "SWAP",
+      "receipt_status": 1,
+      "tx_hash": "0x78cfbd5e83903b5caaee126a2cdb3d23e91de05d2902e16c6a9107e19a82d824",
+      "wallet": "0xa0b273b5b2ecc1021604c842650a6b5e931532c6"
+    },
+    {
+      "artifacts": [
+        {
+          "kind": "rpc-receipt",
+          "path": "chain/receipt-0xa346d1f042a6320cb7acb04160299df9968543d7589453f874d4f1f565317d31.json",
+          "sha256": "415569bda202c8665fda8a40578c473620acaedd13d01a1549ad51daa6027758"
+        },
+        {
+          "kind": "rpc-transaction",
+          "path": "chain/transaction-0xa346d1f042a6320cb7acb04160299df9968543d7589453f874d4f1f565317d31.json",
+          "sha256": "6d733a54425883c32a2c12ea5a4054f389bbae466b0792e6fc2ac39560b0fcc8"
+        },
+        {
+          "kind": "rpc-balance-witness",
+          "path": "chain/balances-0xa346d1f042a6320cb7acb04160299df9968543d7589453f874d4f1f565317d31.json",
+          "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
+        }
+      ],
+      "balance_checks": [],
+      "block_hash": "0x0269694c7a8f8d90973bc81d220b37b76eb296481bd7456fd0dbbfac420e5dc6",
+      "block_number": 502248300,
+      "cycle_id": "teardown-td_2a8b2ab3c42f",
+      "deployment_id": "deployment:1abdf790144a",
+      "gas_cost_wei": "158961000000000",
+      "gas_used": 158961,
+      "id": "f76acd13-c534-4258-9c58-ae336caaa3b3",
+      "intent_type": "LP_CLOSE",
+      "receipt_status": 1,
+      "tx_hash": "0xa346d1f042a6320cb7acb04160299df9968543d7589453f874d4f1f565317d31",
+      "wallet": "0xa0b273b5b2ecc1021604c842650a6b5e931532c6"
+    },
+    {
+      "artifacts": [
+        {
+          "kind": "rpc-receipt",
+          "path": "chain/receipt-0xc0b64f2911fcb0333b8cdf3d920c26c424c7eb41d6d7413d045131385566ea84.json",
+          "sha256": "364cedeffe6df7a10ea3b8c1985b576abf7b883c37d60490268379fb07fb437a"
+        },
+        {
+          "kind": "rpc-transaction",
+          "path": "chain/transaction-0xc0b64f2911fcb0333b8cdf3d920c26c424c7eb41d6d7413d045131385566ea84.json",
+          "sha256": "863f1860e4c238565117dc4cedefc0befcda2d84f1ef06712a4dd93aacd3c66a"
+        },
+        {
+          "kind": "rpc-balance-witness",
+          "path": "chain/balances-0xc0b64f2911fcb0333b8cdf3d920c26c424c7eb41d6d7413d045131385566ea84.json",
+          "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
+        }
+      ],
+      "balance_checks": [],
+      "block_hash": "0xd23d8c1c50e419b1a7d09f5277277a11249164910f247bbc00976b22d51d7844",
+      "block_number": 502248302,
+      "cycle_id": "teardown-td_2a8b2ab3c42f",
+      "deployment_id": "deployment:1abdf790144a",
+      "gas_cost_wei": "70557000000000",
+      "gas_used": 70557,
+      "id": "f76acd13-c534-4258-9c58-ae336caaa3b3",
+      "intent_type": "LP_CLOSE",
+      "receipt_status": 1,
+      "tx_hash": "0xc0b64f2911fcb0333b8cdf3d920c26c424c7eb41d6d7413d045131385566ea84",
+      "wallet": "0xa0b273b5b2ecc1021604c842650a6b5e931532c6"
+    },
+    {
+      "artifacts": [
+        {
+          "kind": "rpc-receipt",
+          "path": "chain/receipt-0xc16706e88b10fe4c56d89eaf8a04fcb0dde76daf0e9f02fa6c08dbe1be6ee420.json",
+          "sha256": "df3570aac4a5d0a9157274167c798b3b609b2e559ad8a64e7c46ed85c3f6ede1"
+        },
+        {
+          "kind": "rpc-transaction",
+          "path": "chain/transaction-0xc16706e88b10fe4c56d89eaf8a04fcb0dde76daf0e9f02fa6c08dbe1be6ee420.json",
+          "sha256": "e39993c9e90ebed91627af82c532855a117ac15c937527c679dd981b8f7c8245"
+        },
+        {
+          "kind": "rpc-balance-witness",
+          "path": "chain/balances-0xc16706e88b10fe4c56d89eaf8a04fcb0dde76daf0e9f02fa6c08dbe1be6ee420.json",
+          "sha256": "76a5aa8588934f5c41917ff62e85bc203daa23ddcb90b9d2a3611049f11a88a5"
+        }
+      ],
+      "balance_checks": [
+        {
+          "actual_delta_raw": "796325925647258",
+          "balance_after_raw": "796325925647258",
+          "balance_before_raw": "0",
+          "block_after": "0x1defb368",
+          "block_before": "0x1defb367",
+          "reconciliation_mode": "exact_transfer",
+          "status": "PASS",
+          "token": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
+          "token_decimals": 18,
+          "token_symbol": "WETH",
+          "transfer_log_delta_raw": "796325925647258",
+          "wallet": "0xa0b273b5b2ecc1021604c842650a6b5e931532c6"
+        },
+        {
+          "actual_delta_raw": "-2000000",
+          "balance_after_raw": "98000000",
+          "balance_before_raw": "100000000",
+          "block_after": "0x1defb368",
+          "block_before": "0x1defb367",
+          "reconciliation_mode": "exact_transfer",
+          "status": "PASS",
+          "token": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+          "token_decimals": 6,
+          "token_symbol": "USDC",
+          "transfer_log_delta_raw": "-2000000",
+          "wallet": "0xa0b273b5b2ecc1021604c842650a6b5e931532c6"
+        }
+      ],
+      "block_hash": "0x3a66c5d4a0bda631913d3d1a2099b795f9f0107eb1a83c6ba3a89c11d3ce626e",
+      "block_number": 502248296,
+      "cycle_id": "ff527bb2-c48b-4f27-a42c-4e4dacadda12",
+      "deployment_id": "deployment:1abdf790144a",
+      "gas_cost_wei": "146887000000000",
+      "gas_used": 146887,
+      "id": "a1839f0c-5031-4ce1-9d55-9e09ebcac737",
+      "intent_type": "SWAP",
+      "receipt_status": 1,
+      "tx_hash": "0xc16706e88b10fe4c56d89eaf8a04fcb0dde76daf0e9f02fa6c08dbe1be6ee420",
+      "wallet": "0xa0b273b5b2ecc1021604c842650a6b5e931532c6"
+    },
+    {
+      "artifacts": [
+        {
+          "kind": "rpc-receipt",
+          "path": "chain/receipt-0xce7b457b50c02f24256549628f82cc183388e290028ff94006f7215f1d7b2f8c.json",
+          "sha256": "0e7592d6bfa3d2191cb32f957ce0f113a2da917052d346813161ee1a366f434e"
+        },
+        {
+          "kind": "rpc-transaction",
+          "path": "chain/transaction-0xce7b457b50c02f24256549628f82cc183388e290028ff94006f7215f1d7b2f8c.json",
+          "sha256": "b2da13fcd71881676527e2ec2f4f5c0837ee0c8365eda56774dd933b4869ef55"
+        },
+        {
+          "kind": "rpc-balance-witness",
+          "path": "chain/balances-0xce7b457b50c02f24256549628f82cc183388e290028ff94006f7215f1d7b2f8c.json",
+          "sha256": "989f39842cfc57fa272a3b42848b3514d253562c843e8ce33d805e9482ccc613"
+        }
+      ],
+      "balance_checks": [
+        {
+          "actual_delta_raw": "788362505676433",
+          "balance_after_raw": "796325925647257",
+          "balance_before_raw": "7963419970824",
+          "block_after": "0x1defb36d",
+          "block_before": "0x1defb36c",
+          "reconciliation_mode": "exact_transfer",
+          "status": "PASS",
+          "token": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
+          "token_decimals": 18,
+          "token_symbol": "WETH",
+          "transfer_log_delta_raw": "788362505676433",
+          "wallet": "0xa0b273b5b2ecc1021604c842650a6b5e931532c6"
+        },
+        {
+          "actual_delta_raw": "2202547",
+          "balance_after_raw": "97999999",
+          "balance_before_raw": "95797452",
+          "block_after": "0x1defb36d",
+          "block_before": "0x1defb36c",
+          "reconciliation_mode": "exact_transfer",
+          "status": "PASS",
+          "token": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+          "token_decimals": 6,
+          "token_symbol": "USDC",
+          "transfer_log_delta_raw": "2202547",
+          "wallet": "0xa0b273b5b2ecc1021604c842650a6b5e931532c6"
+        }
+      ],
+      "block_hash": "0xf6a77e4a94ec1eeddd66fecd196d9d96a2ca9fcd9829225da1acd47fb3393b07",
+      "block_number": 502248301,
+      "cycle_id": "teardown-td_2a8b2ab3c42f",
+      "deployment_id": "deployment:1abdf790144a",
+      "gas_cost_wei": "102465000000000",
+      "gas_used": 102465,
+      "id": "f76acd13-c534-4258-9c58-ae336caaa3b3",
+      "intent_type": "LP_CLOSE",
+      "receipt_status": 1,
+      "tx_hash": "0xce7b457b50c02f24256549628f82cc183388e290028ff94006f7215f1d7b2f8c",
+      "wallet": "0xa0b273b5b2ecc1021604c842650a6b5e931532c6"
+    },
+    {
+      "artifacts": [
+        {
+          "kind": "rpc-receipt",
+          "path": "chain/receipt-0xeae8824b7188028ebb62daa1469b43ffee5a6601fe68ecc6d11d077bc073176a.json",
+          "sha256": "cd44e91f289104d1e9a935108e81418718556d828965ccd69fe8d35918f14460"
+        },
+        {
+          "kind": "rpc-transaction",
+          "path": "chain/transaction-0xeae8824b7188028ebb62daa1469b43ffee5a6601fe68ecc6d11d077bc073176a.json",
+          "sha256": "f072a733b77521407a91b99829c7eddc34ca910083c3a6596e6aebf573fe956c"
+        },
+        {
+          "kind": "rpc-balance-witness",
+          "path": "chain/balances-0xeae8824b7188028ebb62daa1469b43ffee5a6601fe68ecc6d11d077bc073176a.json",
+          "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
+        }
+      ],
+      "balance_checks": [],
+      "block_hash": "0x87dfe9caeda45c0e510fac3249978300145c8c360ef55616d8c818dc742f21d6",
+      "block_number": 502248295,
+      "cycle_id": "ff527bb2-c48b-4f27-a42c-4e4dacadda12",
+      "deployment_id": "deployment:1abdf790144a",
+      "gas_cost_wei": "55437000000000",
+      "gas_used": 55437,
+      "id": "a1839f0c-5031-4ce1-9d55-9e09ebcac737",
+      "intent_type": "SWAP",
+      "receipt_status": 1,
+      "tx_hash": "0xeae8824b7188028ebb62daa1469b43ffee5a6601fe68ecc6d11d077bc073176a",
+      "wallet": "0xa0b273b5b2ecc1021604c842650a6b5e931532c6"
+    },
+    {
+      "artifacts": [
+        {
+          "kind": "rpc-receipt",
+          "path": "chain/receipt-0xf7899635d18401bf6d6c22f5797cc9a7684d17759379235cc512062fc6873755.json",
+          "sha256": "82a7a1d3682edc98de783c53655b1dd81183452039b369fe617ea6a0f98f800c"
+        },
+        {
+          "kind": "rpc-transaction",
+          "path": "chain/transaction-0xf7899635d18401bf6d6c22f5797cc9a7684d17759379235cc512062fc6873755.json",
+          "sha256": "9de031be7f031b1021fee90634330b64ba14153287b2a8c5e7ac224b34e2f0be"
+        },
+        {
+          "kind": "rpc-balance-witness",
+          "path": "chain/balances-0xf7899635d18401bf6d6c22f5797cc9a7684d17759379235cc512062fc6873755.json",
+          "sha256": "557230d884a1ce3f0f69683549765be2d81574e51b68557b70f2f5893ee40052"
+        }
+      ],
+      "balance_checks": [
+        {
+          "actual_delta_raw": "-788362505676434",
+          "balance_after_raw": "7963419970824",
+          "balance_before_raw": "796325925647258",
+          "block_after": "0x1defb36b",
+          "block_before": "0x1defb36a",
+          "reconciliation_mode": "exact_transfer",
+          "status": "PASS",
+          "token": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
+          "token_decimals": 18,
+          "token_symbol": "WETH",
+          "transfer_log_delta_raw": "-788362505676434",
+          "wallet": "0xa0b273b5b2ecc1021604c842650a6b5e931532c6"
+        },
+        {
+          "actual_delta_raw": "-2202548",
+          "balance_after_raw": "95797452",
+          "balance_before_raw": "98000000",
+          "block_after": "0x1defb36b",
+          "block_before": "0x1defb36a",
+          "reconciliation_mode": "exact_transfer",
+          "status": "PASS",
+          "token": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+          "token_decimals": 6,
+          "token_symbol": "USDC",
+          "transfer_log_delta_raw": "-2202548",
+          "wallet": "0xa0b273b5b2ecc1021604c842650a6b5e931532c6"
+        }
+      ],
+      "block_hash": "0x98e91dc143cfc6a16d9f5448c64c8063026ffd1965556fc625950ec82c49e482",
+      "block_number": 502248299,
+      "cycle_id": "0fefb0eb-b0db-4ed3-93b5-da04422af48c",
+      "deployment_id": "deployment:1abdf790144a",
+      "gas_cost_wei": "431931000000000",
+      "gas_used": 431931,
+      "id": "74a07f96-7751-4b3e-9b03-dd9d9f7ed481",
+      "intent_type": "LP_OPEN",
+      "receipt_status": 1,
+      "tx_hash": "0xf7899635d18401bf6d6c22f5797cc9a7684d17759379235cc512062fc6873755",
+      "wallet": "0xa0b273b5b2ecc1021604c842650a6b5e931532c6"
+    }
+  ],
+  "unmeasured_balance_check_count": 0
+}

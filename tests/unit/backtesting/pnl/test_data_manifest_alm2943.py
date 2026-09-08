@@ -163,7 +163,7 @@ class TestRunDataManifest:
         )
         payload = manifest.to_dict()
         round_tripped = json.loads(json.dumps(payload))
-        assert round_tripped["schema_version"] == 2
+        assert round_tripped["schema_version"] == 3
         assert round_tripped["entries"][0]["lane"] == LANE_OHLCV
 
 
@@ -310,7 +310,7 @@ class TestManifestOnBacktestResult:
         assert result.error is None
         manifest = result.data_manifest
         assert manifest is not None
-        assert manifest["schema_version"] == 2
+        assert manifest["schema_version"] == 3
         assert manifest["source_ladder"] == list(DEFAULT_SOURCE_LADDER)
         lanes = {entry["lane"] for entry in manifest["entries"]}
         assert LANE_PRICE in lanes
