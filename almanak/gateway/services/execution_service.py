@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 import time
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
@@ -18,6 +19,9 @@ import pydantic
 
 from almanak.core.chains import ChainRegistry
 from almanak.core.enums import ChainFamily
+from almanak.framework.data.tokens import ResolvedToken
+from almanak.framework.data.tokens.address_resolution import looks_like_evm_address
+from almanak.framework.data.tokens.exceptions import SymbolTokenResolutionError
 from almanak.framework.execution.solana.route_refresh import (
     SolanaRouteRefresher,
     SolanaRouteRefreshRequest,
@@ -33,6 +37,11 @@ from almanak.framework.execution.submission import (
 )
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
+from almanak.gateway.services.swap_token_preparation import (
+    SwapTokenPreparationError,
+    discover_swap_tokens,
+    swap_token_inputs,
+)
 from almanak.gateway.validation import (
     ValidationError,
     validate_chain,
@@ -339,24 +348,29 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
                     key = token.upper()
                     prices[key] = Decimal(str(result.price))
                     sources[key] = source
+                    if expected_identity is not None and looks_like_evm_address(token):
+                        prices[expected_identity] = prices[key]
+                        sources[expected_identity] = source
             except Exception as e:
                 logger.warning("Self-serve price fetch failed for %s on %s: %s", token, chain, e)
         return _FetchedPriceBatch(prices, sources, frozenset(peg_tokens))
 
     @staticmethod
     def _extract_token_symbols_from_intent(intent: object, *, default_chain: str | None = None) -> list[str]:
-        """Extract token symbols from an intent object for price fetching.
+        """Extract price inputs, retaining exact contracts for same-chain EVM swaps.
 
-        Delegates to the canonical ``extract_token_symbols`` helper in
-        ``almanak.framework.runner.token_extraction`` — the same parser
-        StrategyRunner uses on the client side — so runner and gateway
-        cannot drift on which fields (or which pool suffixes) count as
-        token symbols. In particular, trailing pool-type suffixes like
-        ``"volatile"``/``"stable"``/``"concentrated"``/``"cl"`` are correctly
-        filtered out.
+        Other intents use the runner's canonical symbol/pool-field extractor.
         """
+        from almanak.framework.intents.vocabulary import SwapIntent
         from almanak.framework.runner.token_extraction import extract_token_symbols
 
+        if (
+            isinstance(intent, SwapIntent)
+            and not intent.is_cross_chain
+            and default_chain
+            and ChainRegistry.resolve(default_chain).family is ChainFamily.EVM
+        ):
+            return swap_token_inputs(intent, default_chain)
         return extract_token_symbols(intent, default_chain=default_chain)
 
     async def _ensure_initialized(self) -> None:
@@ -761,6 +775,11 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
             return "", "", gateway_pb2.CompilationResult(success=False, error=str(e))
 
         wallet_address = request.wallet_address
+        if not wallet_address and self._normalize_intent_type(request.intent_type) == "swap":
+            error = "wallet_address is required to compile a swap. For almanak ax, supply --wallet <address>."
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(error)
+            return "", "", gateway_pb2.CompilationResult(success=False, error=error, error_code="MISSING_WALLET")
         if wallet_address:
             try:
                 from almanak.gateway.validation import validate_address_for_chain
@@ -930,9 +949,10 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
         else:
             error_msg = (
                 f"No real prices available for {intent_type} compilation on mainnet. "
-                f"Price oracle returned no data (CoinGecko rate-limited or Chainlink "
-                f"unavailable). Refusing to compile with placeholder prices. "
-                f"Retry after price sources recover."
+                f"Missing or unsupported price source for: "
+                f"{', '.join(t for t in intent_tokens if t.upper() not in self_served.prices)}. "
+                f"Refusing to compile with placeholder prices. "
+                f"Provide prices keyed by token contract or configure a source for these exact tokens."
             )
             logger.warning(error_msg)
             return gateway_pb2.CompilationResult(
@@ -959,6 +979,48 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
         ):
             return await self._enforce_mainnet_price_gate(compiler, intent, intent_type)
         return None
+
+    async def _prepare_swap_metadata(
+        self, compiler: Any, intent: Any
+    ) -> tuple[AbstractContextManager, tuple[ResolvedToken, ...]]:
+        from almanak.framework.data.tokens import TokenResolver
+        from almanak.framework.intents.vocabulary import SwapIntent
+
+        resolver = getattr(compiler, "_token_resolver", None)
+        if not isinstance(intent, SwapIntent) or intent.is_cross_chain or not isinstance(resolver, TokenResolver):
+            return nullcontext(), ()
+        if ChainRegistry.resolve(compiler.chain).family is not ChainFamily.EVM:
+            return nullcontext(), ()
+        inputs = swap_token_inputs(intent, compiler.chain)
+        resolve_for_pricing = getattr(self.market_servicer, "_resolve_token_for_pricing", None)
+        discovered = await discover_swap_tokens(inputs, compiler.chain, resolver, resolve_for_pricing)
+        return resolver.scoped_metadata(discovered), discovered
+
+    async def _require_discovered_token_prices(self, compiler: Any, discovered: tuple[ResolvedToken, ...]) -> None:
+        from almanak.framework.market.price_store import lookup_price
+
+        missing = [
+            token
+            for token in discovered
+            if lookup_price(compiler.price_oracle, token=token.token_ref, infer_symbol_from_address=False) is None
+        ]
+        if missing:
+            batch = await self._fetch_prices_for_tokens([token.address for token in missing], compiler.chain)
+            prices = dict(compiler.price_oracle or {})
+            prices.update(batch.prices)
+            compiler.update_prices(prices)
+            if batch.peg_tokens:
+                compiler._seed_peg_fallbacks(batch.peg_tokens)
+        for token in discovered:
+            found = lookup_price(compiler.price_oracle, token=token.token_ref, infer_symbol_from_address=False)
+            if found is None or not found.price.is_finite() or found.price <= 0:
+                raise SwapTokenPreparationError(
+                    f"Missing reliable price for {token.chain}:{token.address} ({token.symbol}). "
+                    "A symbol-only price cannot price an unregistered swap contract. "
+                    "Provide an address-keyed price or configure a price source for this contract.",
+                    "NO_PRICES_AVAILABLE",
+                )
+            compiler.price_oracle[f"{token.chain}:{token.address.lower()}"] = found.price
 
     def _build_compilation_response(
         self,
@@ -1044,18 +1106,29 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
                 # exists to stop requests seeing each other's prices.
                 original_placeholders = getattr(compiler, "_using_placeholders", False)
 
-                gate_error = await self._apply_compile_prices(compiler, intent, intent_type, parsed_prices)
-                if gate_error is not None:
-                    return gate_error
-
+                metadata_scope, discovered = await self._prepare_swap_metadata(compiler, intent)
                 try:
-                    compilation_result = compiler.compile(intent=intent)
+                    with metadata_scope:
+                        gate_error = await self._apply_compile_prices(compiler, intent, intent_type, parsed_prices)
+                        if gate_error is not None:
+                            return gate_error
+                        await self._require_discovered_token_prices(compiler, discovered)
+                        compilation_result = compiler.compile(intent=intent)
                 finally:
                     if hasattr(compiler, "restore_prices"):
                         compiler.restore_prices(original_oracle, original_placeholders)
 
             return self._build_compilation_response(compilation_result, intent_type)
 
+        except SymbolTokenResolutionError as e:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(e))
+            return gateway_pb2.CompilationResult(success=False, error=str(e), error_code="INVALID_TOKEN")
+        except SwapTokenPreparationError as e:
+            if e.code in {"INVALID_CHAIN", "INVALID_TOKEN"}:
+                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                context.set_details(str(e))
+            return gateway_pb2.CompilationResult(success=False, error=str(e), error_code=e.code)
         except Exception as e:
             error_msg = str(e)
             logger.error(f"CompileIntent failed for {intent_type}: {error_msg}")

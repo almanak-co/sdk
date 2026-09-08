@@ -58,7 +58,9 @@ import logging
 import re
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Iterable, Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import replace
 from datetime import datetime
 from types import MappingProxyType
@@ -404,6 +406,9 @@ class TokenResolver:
 
     _instance: "TokenResolver | None" = None
     _instance_lock = threading.Lock()
+    _request_metadata: ContextVar[Mapping[tuple[str, str], ResolvedToken] | None] = ContextVar(
+        "token_request_metadata", default=None
+    )
 
     def __init__(
         self,
@@ -763,6 +768,31 @@ class TokenResolver:
         with cls._instance_lock:
             cls._instance = None
 
+    @contextmanager
+    def scoped_metadata(self, tokens: Iterable[ResolvedToken]) -> Iterator[None]:
+        """Supply gateway-discovered address metadata for one synchronous compile.
+
+        Only unresolved addresses enter the scope. Symbols, shared caches and
+        trust flags are unchanged. All resolver instances in this async context
+        see the scope, including connector code using the singleton. Gateway
+        lookups are disabled until the context exits to prevent self-RPC deadlocks.
+        """
+        metadata = dict(self._request_metadata.get() or {})
+        for token in tokens:
+            try:
+                self.resolve(token.address, token.chain, skip_gateway=True, log_errors=False)
+            except TokenNotFoundError:
+                identity = (
+                    token.chain,
+                    normalize_address(fold_native_address_alias(token.address, token.chain), token.chain),
+                )
+                metadata[identity] = token
+        scope = self._request_metadata.set(MappingProxyType(metadata))
+        try:
+            yield
+        finally:
+            self._request_metadata.reset(scope)
+
     def resolve_caip19(self, caip19: str, *, log_errors: bool = True, skip_gateway: bool = False) -> ResolvedToken:
         """Resolve a CAIP-19 asset id to a fully-resolved token.
 
@@ -844,6 +874,9 @@ class TokenResolver:
         if "/" in token:
             return self.resolve_caip19(token, log_errors=log_errors, skip_gateway=skip_gateway)
 
+        scoped_metadata = self._request_metadata.get()
+        if scoped_metadata is not None:
+            skip_gateway = True
         start_time = time.perf_counter()
         chain_lower = _normalize_chain(chain)
 
@@ -878,6 +911,10 @@ class TokenResolver:
                 # identity and the alias can never be negative-cached as an
                 # unknown ERC-20.
                 token = fold_native_address_alias(token, chain_lower)
+                if scoped_metadata is not None:
+                    scoped = scoped_metadata.get((chain_lower, normalize_address(token, chain_lower)))
+                    if scoped is not None:
+                        return scoped
             elif _looks_like_address(token):
                 _validate_address(token, chain_lower)
 
@@ -981,25 +1018,7 @@ class TokenResolver:
             if self._gateway_channel is None and self._gateway_client is None:
                 suggestions.append("Connect to gateway for on-chain token discovery")
 
-            # VIB-2715: remember this miss so the next request for the
-            # same (chain, key) returns instantly instead of hitting
-            # the gateway again. Only cache DEFINITIVE misses — the
-            # gateway helpers set ``_gateway_miss_state.definitive`` to
-            # True only when the gateway actually answered "token does
-            # not exist". Timeouts, UNAVAILABLE errors, and integrity-
-            # reject paths stay False, so transient gateway trouble
-            # doesn't get locked in for 5 minutes.
-            definitive_miss = getattr(self._gateway_miss_state, "definitive", False)
-            timed_out = getattr(self._gateway_miss_state, "timed_out", False)
-            gateway_attempted = self._gateway_channel is not None or self._gateway_client is not None
-            if gateway_attempted and definitive_miss:
-                self._store_negative_cache(neg_key)
-            elif gateway_attempted and timed_out:
-                # VIB-5746: a timed-out (not definitive) symbol lookup gets the
-                # short cooldown so the same lookup fails fast for a window
-                # instead of re-burning the full ~15s deadline every iteration,
-                # while still re-probing periodically for transient recovery.
-                self._store_negative_cache(neg_key, ttl_seconds=self._gateway_timeout_cooldown_seconds)
+            self._cache_gateway_miss(neg_key)
 
             raise TokenNotFoundError(
                 token=token,
@@ -2010,6 +2029,17 @@ class TokenResolver:
     # ------------------------------------------------------------------
     # Negative cache (VIB-2715)
     # ------------------------------------------------------------------
+
+    def _cache_gateway_miss(self, key: tuple[str, str]) -> None:
+        # Only explicit gateway misses or timeouts may suppress a retry;
+        # offline misses and integrity rejections must remain retryable.
+        definitive_miss = getattr(self._gateway_miss_state, "definitive", False)
+        timed_out = getattr(self._gateway_miss_state, "timed_out", False)
+        gateway_attempted = self._gateway_channel is not None or self._gateway_client is not None
+        if gateway_attempted and definitive_miss:
+            self._store_negative_cache(key)
+        elif gateway_attempted and timed_out:
+            self._store_negative_cache(key, ttl_seconds=self._gateway_timeout_cooldown_seconds)
 
     def _check_negative_cache(self, key: tuple[str, str]) -> bool:
         """Return True if this (chain, key) is still in the negative cache."""

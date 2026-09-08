@@ -55,6 +55,7 @@ from typing import TYPE_CHECKING, ClassVar, Protocol
 from almanak.connectors._strategy_base import concentrated_liquidity_math as cl_math
 from almanak.core.chains import ChainRegistry
 from almanak.core.chains._helpers import is_solana_chain, native_symbols_for
+from almanak.framework.data.tokens.address_resolution import looks_like_evm_address
 
 from .compiler_models import TokenInfo
 
@@ -513,7 +514,9 @@ class CompilerQueries:
             # is_native=True for a raw SPL mint that resolves to symbol
             # "SOL", bypassing the SPL-token path.
             input_is_address = isinstance(token, str) and (
-                token.startswith("0x") or (is_solana_chain(target_chain) and _is_solana_mint(token))
+                looks_like_evm_address(token)
+                or "/" in token
+                or (is_solana_chain(target_chain) and _is_solana_mint(token))
             )
             if not is_native and not input_is_address:
                 # Defense-in-depth: if the registry address for a chain's gas

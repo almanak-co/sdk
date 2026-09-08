@@ -1225,8 +1225,9 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
                     f"{impact_result.price_impact:.1%} price impact "
                     f"(oracle estimate: {oracle_estimate}, quoter: {quoter_amount}). "
                     f"Maximum allowed: {impact_result.effective_max_impact:.2%}. "
-                    f"Likely cause: pool has insufficient liquidity for "
-                    f"{intent.from_token}->{intent.to_token}."
+                    f"Quote/oracle deviation for {intent.from_token}->{intent.to_token}. "
+                    "Check reference-price contract identity, token decimals and price freshness, "
+                    "as well as pool liquidity. This comparison alone cannot identify the cause."
                 ),
             )
         if impact is PriceImpactDecision.QUOTER_MISSING_FAIL_CLOSED:

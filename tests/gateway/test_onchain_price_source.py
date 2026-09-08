@@ -933,3 +933,38 @@ class TestDerivedPricing:
         assert result1.price == result2.price
         assert call_count == 2  # Only 2 RPC calls (WSTETH/ETH + ETH/USD), second get_price cached
         await source.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("forward_metadata", [True, False])
+async def test_unregistered_contract_cannot_inherit_chainlink_ticker(tmp_path, forward_metadata):
+    from almanak.framework.data.interfaces import DataSourceUnavailable, PriceResult
+    from almanak.framework.data.tokens import create_token_resolver
+
+    resolver = create_token_resolver(cache_file=str(tmp_path / "tokens.json"))
+    foreign = ResolvedToken(
+        symbol="WETH",
+        address="0x1234567890123456789012345678901234567890",
+        decimals=18,
+        chain="arbitrum",
+        chain_id=42161,
+        source="on_chain",
+        is_verified=False,
+    )
+    source = ChainlinkPriceSource(chain="arbitrum")
+    source._rpc_url = "http://unused.invalid"
+    source._chain_id_validated = True
+    source._cache[f"arbitrum:{foreign.address}/USD"] = (
+        PriceResult(price=Decimal("2000"), source="onchain_chainlink", timestamp=datetime.now(UTC), confidence=1),
+        time.time(),
+    )
+    try:
+        with (
+            resolver.scoped_metadata([foreign]),
+            patch.object(source, "_fetch_chainlink", new_callable=AsyncMock) as fetch,
+        ):
+            with pytest.raises(DataSourceUnavailable, match="verified contract"):
+                await source.get_price(foreign.address, resolved_token=foreign if forward_metadata else None)
+            fetch.assert_not_called()
+    finally:
+        await source.close()

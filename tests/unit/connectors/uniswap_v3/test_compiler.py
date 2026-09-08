@@ -307,3 +307,22 @@ def test_uniswap_v3_swap_quote_registry_unavailable_falls_back(monkeypatch) -> N
 
     assert amount_out is None
     adapter.apply_external_quote_selection.assert_not_called()
+
+
+def test_robinhood_reported_oracle_quote_discrepancy_is_refused() -> None:
+    intent = _swap_intent()
+    intent.from_token = "0x5fc5360d0400a0fd4f2af552add042d716f1d168"
+    intent.to_token = "0x32ac8c1d7672667d5ebdea22935f7b06fc8d496f"
+    intent.max_price_impact = Decimal("0.10")
+    result = UniswapV3Compiler._apply_swap_slippage_and_impact(
+        ctx=_ctx(_Adapter()),
+        intent=intent,
+        oracle_estimate=13240062946902654867256,
+        quoter_amount=81165739476056398,
+    )
+    assert isinstance(result, CompilationResult)
+    assert result.status is CompilationStatus.FAILED
+    assert result.is_safety_refusal
+    assert "100.0%" in result.error
+    assert "13240062946902654867256" in result.error
+    assert "81165739476056398" in result.error

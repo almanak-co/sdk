@@ -4,7 +4,7 @@ Pins the behaviors that sit exactly on the decomposition boundaries: the
 try/finally restore_prices contract when compile() raises, the all-tokens
 coverage requirement of the mainnet self-serve gate, the branch-specific
 error message when no token symbols are extractable, and the
-empty-wallet-address validation skip.
+empty-wallet-address rejection for swaps.
 """
 
 import json
@@ -110,13 +110,14 @@ async def test_mainnet_no_extractable_tokens_uses_symbol_error_message():
 
 
 @pytest.mark.asyncio
-async def test_empty_wallet_address_skips_address_validation():
-    """Empty wallet_address bypasses chain-address validation and still compiles."""
+async def test_empty_wallet_address_rejects_swap_before_compilation():
+    """Swap compilation needs a recipient even when no transaction is submitted."""
     service = _service()
     compiler = _compiler(_success_result())
     service._get_compiler = MagicMock(return_value=compiler)
 
     result = await service.CompileIntent(_request(wallet=""), MagicMock())
 
-    assert result.success is True
-    service._get_compiler.assert_called_once_with("arbitrum", "")
+    assert result.success is False
+    assert result.error_code == "MISSING_WALLET"
+    service._get_compiler.assert_not_called()

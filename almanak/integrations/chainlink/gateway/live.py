@@ -39,7 +39,9 @@ from almanak.framework.data.interfaces import (
     PriceResult,
 )
 from almanak.framework.data.tokens import TokenResolutionError, get_token_resolver
+from almanak.framework.data.tokens.address_resolution import looks_like_evm_address
 from almanak.framework.data.tokens.pegs import is_pegged
+from almanak.framework.data.tokens.resolver import fold_native_address_alias
 from almanak.gateway.data.price.aggregator import is_stablecoin_for_fallback
 from almanak.gateway.utils import get_rpc_url
 from almanak.gateway.utils.ssl_context import build_ssl_context
@@ -273,6 +275,8 @@ class ChainlinkPriceSource(BasePriceSource):
                 reason=f"Only USD quote supported, got {quote}",
             )
 
+        resolved_token = self._verified_contract_for_price(token, resolved_token)
+
         token_upper = token.upper()
 
         # Check cache
@@ -449,6 +453,30 @@ class ChainlinkPriceSource(BasePriceSource):
         )
         self._cache[cache_key] = (result, time.time())
         return result
+
+    def _verified_contract_for_price(self, token: str, resolved_token: ResolvedToken | None) -> ResolvedToken | None:
+        if resolved_token is None and looks_like_evm_address(token):
+            try:
+                resolved_token = self._token_resolver.resolve(token, self._chain, skip_gateway=True, log_errors=False)
+            except TokenResolutionError as exc:
+                raise DataSourceUnavailable(
+                    source=self.source_name, reason=f"No verified contract-to-feed mapping for {self._chain}:{token}"
+                ) from exc
+        if resolved_token is not None and looks_like_evm_address(token):
+            requested = fold_native_address_alias(token.strip(), self._chain).lower()
+            resolved = fold_native_address_alias(resolved_token.address, self._chain).lower()
+            if requested != resolved or _canonical_chain(resolved_token.chain) != _canonical_chain(self._chain):
+                raise DataSourceUnavailable(
+                    source=self.source_name, reason=f"Contract metadata does not match {self._chain}:{token}"
+                )
+        # A ticker read from an arbitrary ERC-20 does not bind that contract to
+        # a Chainlink feed. Gate before cache reads as well as fresh feed reads.
+        if getattr(resolved_token, "is_verified", True) is False:
+            raise DataSourceUnavailable(
+                source=self.source_name, reason=f"No verified contract-to-feed mapping for {self._chain}:{token}"
+            )
+
+        return resolved_token
 
     def _resolve_pair(self, token: str) -> str | None:
         """Resolve symbol/address input to a Chainlink pair in this source."""
