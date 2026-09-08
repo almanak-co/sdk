@@ -7,11 +7,14 @@ Verifies that:
 3. Non-approve transactions that fail still cause simulation failure
 4. All approve selectors (ERC20, ERC1155, TraderJoe V2) are detected and skipped
 5. Approve TXs in multi-TX bundles are executed for state setup even when skipped
+6. Dependent (non-first) TXs are estimated against the fork state advanced by that
+   state setup; only a missing snapshot falls back to the compiler gas_limit
 """
 
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from hexbytes import HexBytes
 
 from almanak.framework.execution.interfaces import (
     TransactionType,
@@ -170,13 +173,13 @@ class TestApproveFallback:
 class TestMixedBundle:
     """Test approve + swap bundles (the most common multi-tx pattern).
 
-    Approve TXs skip estimation entirely (VIB-422). Non-first TXs also skip
-    estimation because they depend on state changes from prior TXs.
+    Approve TXs skip estimation entirely (VIB-422). The swap is estimated after
+    the approve has been executed on the snapshot, so its allowance exists.
     """
 
     @pytest.mark.asyncio
-    async def test_approve_then_swap_no_estimation_calls(self):
-        """In approve+swap bundle, approve skips estimation, swap skips as non-first."""
+    async def test_approve_then_swap_estimates_swap_after_approve(self):
+        """In approve+swap bundle, approve skips estimation, swap is estimated."""
         sim = LocalSimulator(rpc_url="http://localhost:8545", gas_buffer=1.0)
 
         mock_web3 = MagicMock()
@@ -193,10 +196,10 @@ class TestMixedBundle:
         result = await sim.simulate([approve_tx, swap_tx], chain="arbitrum")
 
         assert result.success
-        # Approve uses compiler gas_limit (65000), swap uses compiler gas_limit (200000)
-        assert result.gas_estimates == [65000, 200000]
-        # No RPC estimation calls — approve skipped, swap skipped as non-first
-        mock_web3.eth.estimate_gas.assert_not_called()
+        # Approve uses compiler gas_limit (65000), swap uses the live estimate (46000)
+        assert result.gas_estimates == [65000, 46000]
+        # One RPC estimation call: the swap, after the approve state setup
+        assert mock_web3.eth.estimate_gas.call_count == 1
 
     @pytest.mark.asyncio
     async def test_approve_executed_for_state_setup_in_bundle(self):
@@ -204,6 +207,7 @@ class TestMixedBundle:
         sim = LocalSimulator(rpc_url="http://localhost:8545", gas_buffer=1.0)
 
         mock_web3 = MagicMock()
+        mock_web3.eth.estimate_gas = AsyncMock(return_value=200000)
         mock_web3.to_checksum_address = lambda x: x
         mock_web3.provider.make_request = AsyncMock(return_value={"result": "0x1"})
         mock_web3.eth.send_transaction = AsyncMock(return_value=b"\x00" * 32)
@@ -249,10 +253,11 @@ class TestERC1155SetApprovalForAll:
 
     @pytest.mark.asyncio
     async def test_set_approval_for_all_then_remove_liquidity(self):
-        """setApprovalForAll + removeLiquidity: both use compiler gas_limits."""
+        """setApprovalForAll + removeLiquidity: approve skips, removeLiquidity is estimated."""
         sim = LocalSimulator(rpc_url="http://localhost:8545")
 
         mock_web3 = MagicMock()
+        mock_web3.eth.estimate_gas = AsyncMock(return_value=620000)
         mock_web3.to_checksum_address = lambda x: x
         mock_web3.provider.make_request = AsyncMock(return_value={"result": "0x1"})
         mock_web3.eth.send_transaction = AsyncMock(return_value=b"\x00" * 32)
@@ -260,14 +265,12 @@ class TestERC1155SetApprovalForAll:
         sim._web3 = mock_web3
 
         approve_for_all_tx = _make_set_approval_for_all_tx(gas_limit=450_000)
-        remove_liquidity_tx = _make_tx(
-            data="0xc2e3140e" + "0" * 56, gas_limit=500_000
-        )  # removeLiquidity
+        remove_liquidity_tx = _make_tx(data="0xc2e3140e" + "0" * 56, gas_limit=500_000)  # removeLiquidity
 
         result = await sim.simulate([approve_for_all_tx, remove_liquidity_tx], chain="avalanche")
 
         assert result.success
-        assert result.gas_estimates == [450_000, 500_000]
+        assert result.gas_estimates == [450_000, 620_000]
 
 
 class TestTraderJoeV2ApproveForAll:
@@ -309,6 +312,7 @@ class TestTraderJoeV2ApproveForAll:
         sim = LocalSimulator(rpc_url="http://localhost:8545")
 
         mock_web3 = MagicMock()
+        mock_web3.eth.estimate_gas = AsyncMock(return_value=470000)
         mock_web3.to_checksum_address = lambda x: x
         mock_web3.provider.make_request = AsyncMock(return_value={"result": "0x1"})
         mock_web3.eth.send_transaction = AsyncMock(return_value=b"\x00" * 32)
@@ -316,28 +320,26 @@ class TestTraderJoeV2ApproveForAll:
         sim._web3 = mock_web3
 
         approve_tx = _make_traderjoe_approve_for_all_tx(gas_limit=50_000)
-        remove_liquidity_tx = _make_tx(
-            data="0xc2e3140e" + "0" * 56, gas_limit=500_000
-        )  # removeLiquidity
+        remove_liquidity_tx = _make_tx(data="0xc2e3140e" + "0" * 56, gas_limit=500_000)  # removeLiquidity
 
         result = await sim.simulate([approve_tx, remove_liquidity_tx], chain="avalanche")
 
         assert result.success
-        assert result.gas_estimates == [50_000, 500_000]
+        assert result.gas_estimates == [50_000, 470_000]
 
 
 class TestMultiTxSimulationSkip:
-    """Multi-TX bundles skip estimation for non-first TXs.
+    """Which TXs of a multi-TX bundle are estimated.
 
-    Combined with the approve skip (VIB-422), this means:
-    - Approve TX at position 0: skipped (approve skip)
-    - Non-approve TX at position 0: estimated normally
-    - Any TX at position > 0: skipped (multi-TX skip)
+    - Approve TX at any position: skipped (approve skip, VIB-422)
+    - Non-approve TX: estimated, after earlier TXs were executed for state setup
+    - Non-first TX with no snapshot: compiler gas_limit (nothing was executed,
+      so the dependency it needs is absent and estimation would revert)
     """
 
     @pytest.mark.asyncio
-    async def test_multi_tx_approve_first_skips_all_estimation(self):
-        """When first TX is approve, no estimation calls are made at all."""
+    async def test_multi_tx_approve_first_only_swap_estimated(self):
+        """When first TX is approve, only the swap is estimated."""
         sim = LocalSimulator(rpc_url="http://localhost:8545")
 
         mock_web3 = MagicMock()
@@ -354,12 +356,13 @@ class TestMultiTxSimulationSkip:
         result = await sim.simulate([tx1, tx2], chain="arbitrum")
 
         assert result.success
-        # No estimation calls — approve skipped, swap skipped as non-first
-        mock_web3.eth.estimate_gas.assert_not_called()
+        # Approve skipped; swap estimated after the approve state setup
+        assert result.gas_estimates == [65000, 46000]
+        assert mock_web3.eth.estimate_gas.call_count == 1
 
     @pytest.mark.asyncio
     async def test_multi_tx_non_approve_first_still_estimated(self):
-        """When first TX is NOT approve, it should still be estimated normally."""
+        """When neither TX is an approve, both are estimated."""
         sim = LocalSimulator(rpc_url="http://localhost:8545")
 
         mock_web3 = MagicMock()
@@ -376,18 +379,18 @@ class TestMultiTxSimulationSkip:
         result = await sim.simulate([tx1, tx2], chain="arbitrum")
 
         assert result.success
-        # First TX estimated (180000), second uses compiler gas_limit (250000)
-        assert result.gas_estimates == [180000, 250000]
-        assert mock_web3.eth.estimate_gas.call_count == 1
+        assert result.gas_estimates == [180000, 180000]
+        assert mock_web3.eth.estimate_gas.call_count == 2
 
     @pytest.mark.asyncio
-    async def test_multi_tx_approve_uses_compiler_gas_limits(self):
-        """Approve first TX uses compiler gas_limit, second TX also uses compiler gas_limit."""
+    async def test_multi_tx_without_snapshot_uses_compiler_gas_limits(self):
+        """Without a snapshot nothing is executed, so the dependent TX keeps its compiler gas_limit."""
         sim = LocalSimulator(rpc_url="http://localhost:8545")
 
         mock_web3 = MagicMock()
+        mock_web3.eth.estimate_gas = AsyncMock(return_value=46000)
         mock_web3.to_checksum_address = lambda x: x
-        mock_web3.provider.make_request = AsyncMock(return_value={"result": "0x1"})
+        mock_web3.provider.make_request = AsyncMock(return_value={"result": None})
         mock_web3.eth.send_transaction = AsyncMock(return_value=b"\x00" * 32)
         mock_web3.eth.wait_for_transaction_receipt = AsyncMock(return_value={"status": 1})
         sim._web3 = mock_web3
@@ -399,6 +402,8 @@ class TestMultiTxSimulationSkip:
 
         assert result.success
         assert result.gas_estimates == [65000, 884_000]
+        mock_web3.eth.estimate_gas.assert_not_called()
+        mock_web3.eth.send_transaction.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_single_non_approve_tx_still_estimated(self):
@@ -419,11 +424,12 @@ class TestMultiTxSimulationSkip:
         assert mock_web3.eth.estimate_gas.call_count == 1
 
     @pytest.mark.asyncio
-    async def test_three_tx_bundle_approve_first_skips_all(self):
-        """In a 3-TX bundle starting with approve, all use compiler gas_limits."""
+    async def test_three_tx_bundle_approves_skipped_payload_estimated(self):
+        """In approve+approve+addLiquidity, both approves skip and addLiquidity is estimated."""
         sim = LocalSimulator(rpc_url="http://localhost:8545")
 
         mock_web3 = MagicMock()
+        mock_web3.eth.estimate_gas = AsyncMock(return_value=410000)
         mock_web3.to_checksum_address = lambda x: x
         mock_web3.provider.make_request = AsyncMock(return_value={"result": "0x1"})
         mock_web3.eth.send_transaction = AsyncMock(return_value=b"\x00" * 32)
@@ -437,8 +443,8 @@ class TestMultiTxSimulationSkip:
         result = await sim.simulate([tx1, tx2, tx3], chain="base")
 
         assert result.success
-        # All use compiler gas_limits (approve skip + multi-TX skip)
-        assert result.gas_estimates == [65000, 65000, 400000]
+        assert result.gas_estimates == [65000, 65000, 410_000]
+        assert mock_web3.eth.estimate_gas.call_count == 1
 
     @pytest.mark.asyncio
     async def test_three_tx_bundle_non_last_txs_executed_for_state(self):
@@ -446,6 +452,7 @@ class TestMultiTxSimulationSkip:
         sim = LocalSimulator(rpc_url="http://localhost:8545")
 
         mock_web3 = MagicMock()
+        mock_web3.eth.estimate_gas = AsyncMock(return_value=410000)
         mock_web3.to_checksum_address = lambda x: x
         mock_web3.provider.make_request = AsyncMock(return_value={"result": "0x1"})
         mock_web3.eth.send_transaction = AsyncMock(return_value=b"\x00" * 32)
@@ -481,6 +488,136 @@ class TestMultiTxSimulationSkip:
 
         assert not result.success
         assert "Approve transaction" in result.revert_reason
+
+
+class TestDependentTxEstimatedAfterStateSetup:
+    """A dependent TX is measured against the fork state its predecessors produced.
+
+    Regression for the Local E2E stimulus unwind (2026-09-08): a $3.5M V3 swap
+    behind a fresh approve was submitted with the 200k static swap constant
+    (x1.5 x1.5 = 450k) and burned the whole limit inside the pool, even though
+    the approve had already been executed on the snapshot and eth_estimateGas
+    would have returned ~1.94M. Same class as ALM-8811 on the Anvil path.
+    """
+
+    @staticmethod
+    def _bundle_web3(estimate_return, snapshot="0x1"):
+        calls: list[str] = []
+        mock_web3 = MagicMock()
+        mock_web3.to_checksum_address = lambda x: x
+        mock_web3.provider.make_request = AsyncMock(return_value={"result": snapshot})
+
+        async def send_tx(params):
+            calls.append("send")
+            return b"\x00" * 32
+
+        async def estimate(params):
+            calls.append("estimate")
+            if isinstance(estimate_return, Exception):
+                raise estimate_return
+            return estimate_return
+
+        mock_web3.eth.send_transaction = AsyncMock(side_effect=send_tx)
+        mock_web3.eth.wait_for_transaction_receipt = AsyncMock(return_value={"status": 1})
+        mock_web3.eth.estimate_gas = AsyncMock(side_effect=estimate)
+        return mock_web3, calls
+
+    @pytest.mark.asyncio
+    async def test_large_swap_behind_approve_gets_live_estimate(self):
+        sim = LocalSimulator(rpc_url="http://localhost:8545")
+        mock_web3, calls = self._bundle_web3(estimate_return=1_936_985)
+        sim._web3 = mock_web3
+
+        approve_tx = _make_approve_tx(gas_limit=120_000)
+        swap_tx = _make_tx(data="0x04e45aaf" + "0" * 56, gas_limit=300_000)
+
+        result = await sim.simulate([approve_tx, swap_tx], chain="arbitrum")
+
+        assert result.success
+        assert result.gas_estimates == [120_000, 1_936_985]
+        # The estimate must observe the approve: state setup first, estimate second
+        assert calls == ["send", "estimate"]
+        estimated = mock_web3.eth.estimate_gas.call_args.args[0]
+        assert estimated["data"] == HexBytes(swap_tx.data)
+
+    @pytest.mark.asyncio
+    async def test_dependent_estimate_never_below_zero_falls_to_compiler_only_without_snapshot(self):
+        sim = LocalSimulator(rpc_url="http://localhost:8545")
+        mock_web3, calls = self._bundle_web3(estimate_return=1_936_985, snapshot=None)
+        sim._web3 = mock_web3
+
+        approve_tx = _make_approve_tx(gas_limit=120_000)
+        swap_tx = _make_tx(data="0x04e45aaf" + "0" * 56, gas_limit=300_000)
+
+        result = await sim.simulate([approve_tx, swap_tx], chain="arbitrum")
+
+        assert result.success
+        assert result.gas_estimates == [120_000, 300_000]
+        assert calls == []
+        assert any("Snapshot unavailable" in w for w in result.warnings)
+
+    @pytest.mark.asyncio
+    async def test_dependent_estimate_revert_fails_closed(self):
+        """A dependent TX that reverts against the advanced state is not sent blind."""
+        sim = LocalSimulator(rpc_url="http://localhost:8545")
+        mock_web3, calls = self._bundle_web3(estimate_return=Exception("execution reverted: STF"))
+        sim._web3 = mock_web3
+
+        approve_tx = _make_approve_tx(gas_limit=120_000)
+        swap_tx = _make_tx(data="0x04e45aaf" + "0" * 56, gas_limit=300_000)
+
+        result = await sim.simulate([approve_tx, swap_tx], chain="arbitrum")
+
+        assert not result.success
+        assert result.simulated
+        assert "STF" in (result.revert_reason or "")
+        assert result.gas_estimates == [120_000]
+        assert calls == ["send", "estimate"]
+
+    @pytest.mark.asyncio
+    async def test_dependent_estimate_timeout_keeps_compiler_limit(self):
+        """An eth_estimateGas timeout is not a revert: the compiler limit stands."""
+        sim = LocalSimulator(rpc_url="http://localhost:8545")
+        mock_web3, calls = self._bundle_web3(estimate_return=TimeoutError())
+        sim._web3 = mock_web3
+
+        approve_tx = _make_approve_tx(gas_limit=120_000)
+        swap_tx = _make_tx(data="0x04e45aaf" + "0" * 56, gas_limit=300_000)
+
+        result = await sim.simulate([approve_tx, swap_tx], chain="arbitrum")
+
+        assert result.success
+        assert result.gas_estimates == [120_000, 300_000]
+
+    @pytest.mark.asyncio
+    async def test_middle_dependent_tx_state_setup_uses_its_estimate(self):
+        """decreaseLiquidity + collect + burn: collect is estimated and executed with that estimate."""
+        sim = LocalSimulator(rpc_url="http://localhost:8545")
+        sent: list[dict] = []
+        mock_web3 = MagicMock()
+        mock_web3.to_checksum_address = lambda x: x
+        mock_web3.provider.make_request = AsyncMock(return_value={"result": "0x1"})
+
+        async def send_tx(params):
+            sent.append(dict(params))
+            return b"\x00" * 32
+
+        mock_web3.eth.send_transaction = AsyncMock(side_effect=send_tx)
+        mock_web3.eth.wait_for_transaction_receipt = AsyncMock(return_value={"status": 1})
+        mock_web3.eth.estimate_gas = AsyncMock(side_effect=[210_000, 95_000, 60_000])
+        sim._web3 = mock_web3
+
+        txs = [
+            _make_tx(data="0x0c49ccbe" + "0" * 56, gas_limit=250_000),
+            _make_tx(data="0xfc6f7865" + "0" * 56, gas_limit=150_000),
+            _make_tx(data="0x42966c68" + "0" * 56, gas_limit=100_000),
+        ]
+
+        result = await sim.simulate(txs, chain="arbitrum")
+
+        assert result.success
+        assert result.gas_estimates == [210_000, 95_000, 60_000]
+        assert [p["gas"] for p in sent] == [int(210_000 * 1.2), int(95_000 * 1.2)]
 
 
 class TestStateSetupTimeout:
@@ -531,9 +668,7 @@ class TestExecuteTxGasPricing:
         assert success
         assert error is None
         # gasPrice must be explicitly set to bypass EIP-1559 middleware (VIB-1831)
-        assert "gasPrice" in captured_params, (
-            "_execute_tx must set gasPrice to bypass EIP-1559 middleware (VIB-1831)"
-        )
+        assert "gasPrice" in captured_params, "_execute_tx must set gasPrice to bypass EIP-1559 middleware (VIB-1831)"
         # Fallback is 1 gwei (not 0) to avoid Anvil 0.3.x rejection
         assert captured_params["gasPrice"] == 1_000_000_000
 
@@ -571,6 +706,7 @@ class TestExecuteTxGasPricing:
         sim = LocalSimulator(rpc_url="http://localhost:8545", gas_buffer=1.0)
 
         mock_web3 = MagicMock()
+        mock_web3.eth.estimate_gas = AsyncMock(return_value=410000)
         mock_web3.to_checksum_address = lambda x: x
         mock_web3.provider.make_request = AsyncMock(return_value={"result": "0x1"})
 
@@ -594,9 +730,7 @@ class TestExecuteTxGasPricing:
         # TX 1 and TX 2 are executed for state setup (TX 3 is last, not executed)
         assert len(sent_params_list) == 2
         for i, params in enumerate(sent_params_list):
-            assert "gasPrice" in params, (
-                f"State-setup TX {i} must set gasPrice to bypass EIP-1559 (VIB-1831)"
-            )
+            assert "gasPrice" in params, f"State-setup TX {i} must set gasPrice to bypass EIP-1559 (VIB-1831)"
             # Fallback is 1 gwei when baseFee query fails
             assert params["gasPrice"] == 1_000_000_000
 
@@ -668,32 +802,28 @@ class TestStateSetupGasBuffer:
         result = await sim.simulate([tx1, tx2, tx3], chain="ethereum")
 
         assert result.success
-        # TX1 is estimated via eth_estimateGas (first TX), then executed for state setup
-        # TX2 uses compiler gas_limit (multi-TX dependent), then executed for state setup
-        # TX3 is last (not executed for state setup)
+        # TX1 and TX2 are estimated via eth_estimateGas and executed for state setup
+        # TX3 is estimated and, being last, not executed
         assert len(sent_params_list) == 2
 
         # TX1 gas: eth_estimateGas returned 150000, buffered to 180000
         assert sent_params_list[0]["gas"] == 180000, (
             f"TX1 state-setup gas should be 150000 * 1.2 = 180000, got {sent_params_list[0]['gas']}"
         )
-        # TX2 gas: compiler gas_limit 100000, buffered to 120000
-        assert sent_params_list[1]["gas"] == 120000, (
-            f"TX2 state-setup gas should be 100000 * 1.2 = 120000, got {sent_params_list[1]['gas']}"
+        # TX2 gas: estimated 150000, buffered to 180000
+        assert sent_params_list[1]["gas"] == 180000, (
+            f"TX2 state-setup gas should be 150000 * 1.2 = 180000, got {sent_params_list[1]['gas']}"
         )
 
-        # Returned gas estimates should be RAW (unbuffered) for the orchestrator
-        # TX1: estimated at 150000, TX2: compiler gas_limit 100000, TX3: compiler gas_limit 100000
-        assert result.gas_estimates == [150000, 100000, 100000]
+        # Returned gas estimates are RAW (unbuffered) for the orchestrator
+        assert result.gas_estimates == [150000, 150000, 150000]
 
     @pytest.mark.asyncio
     async def test_gas_buffer_constant_value(self):
         """Verify the gas buffer constant is 1.2 (20%)."""
         from almanak.framework.execution.simulator.local import _STATE_SETUP_GAS_BUFFER
 
-        assert _STATE_SETUP_GAS_BUFFER == 1.2, (
-            f"Gas buffer should be 1.2 (20%), got {_STATE_SETUP_GAS_BUFFER}"
-        )
+        assert _STATE_SETUP_GAS_BUFFER == 1.2, f"Gas buffer should be 1.2 (20%), got {_STATE_SETUP_GAS_BUFFER}"
 
 
 class TestDecodeRevertPayload:
@@ -824,6 +954,4 @@ class TestEstimateGasDecodesCustomError:
         gas, error = await sim._estimate_gas(tx)
 
         assert gas == 0
-        assert error == "HealthFactorLowerThanLiquidationThreshold()", (
-            f"Expected decoded Aave error, got {error!r}"
-        )
+        assert error == "HealthFactorLowerThanLiquidationThreshold()", f"Expected decoded Aave error, got {error!r}"

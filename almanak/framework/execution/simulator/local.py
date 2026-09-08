@@ -579,37 +579,30 @@ class LocalSimulator(Simulator):
             revert_reason=f"{prefix} {index + 1} execution failed: {exec_error}",
         )
 
-    async def _handle_dependent_tx(
+    def _assign_compiler_gas_without_state_setup(
         self,
         tx: UnsignedTransaction,
         index: int,
         tx_count: int,
-        is_last: bool,
-        snapshot_id: Any,
         gas_estimates: list[int],
-    ) -> SimulationResult | None:
-        """Handle a non-first tx of a multi-TX bundle (skip estimation).
+    ) -> None:
+        """Use the compiler gas_limit for a non-first bundle tx when no snapshot exists.
 
-        Subsequent TXs depend on state changes from prior TXs (e.g., approve
-        must execute before addLiquidity/multicall), so eth_estimateGas against
-        the current chain state will revert even though the bundle would succeed
-        when executed sequentially. Use the compiler-provided gas_limit instead.
-        This mirrors the VIB-157 fix for _maybe_estimate_gas_limits().
-
-        Returns None to proceed with the next tx, else the failure result.
+        Without a snapshot the earlier txs were never executed, so the state this
+        tx depends on (an allowance, a freshly minted position) is absent and
+        eth_estimateGas would revert on the missing dependency instead of
+        measuring the tx. The compiler limit is the only honest number here.
+        When a snapshot exists the earlier txs HAVE been executed and the
+        dependent tx is estimated like any other; a static limit there is a
+        real gas ceiling that large swaps exceed (ALM-8811).
         """
         fallback_gas = tx.gas_limit if tx.gas_limit and tx.gas_limit > 0 else 300_000
         gas_estimates.append(fallback_gas)
         logger.info(
-            f"Transaction {index + 1}/{tx_count}: skipping estimation (multi-TX dependent), "
-            f"using compiler gas_limit={fallback_gas}",
+            f"Transaction {index + 1}/{tx_count}: skipping estimation (multi-TX dependent, "
+            f"no snapshot), using compiler gas_limit={fallback_gas}",
             extra={"tx_index": index, "to": tx.to},
         )
-
-        # Execute non-last txs for state setup (if snapshot available)
-        if not is_last and snapshot_id is not None:
-            return await self._execute_state_setup_tx(tx, fallback_gas, index, gas_estimates)
-        return None
 
     async def _handle_approve_skip(
         self,
@@ -768,10 +761,8 @@ class LocalSimulator(Simulator):
             for i, tx in enumerate(txs):
                 is_last = i == tx_count - 1
 
-                if is_multi_tx_bundle and i > 0:
-                    failure = await self._handle_dependent_tx(tx, i, tx_count, is_last, snapshot_id, gas_estimates)
-                    if failure is not None:
-                        return failure
+                if is_multi_tx_bundle and i > 0 and snapshot_id is None:
+                    self._assign_compiler_gas_without_state_setup(tx, i, tx_count, gas_estimates)
                     continue
 
                 if self._is_approve_tx(tx):
@@ -788,8 +779,9 @@ class LocalSimulator(Simulator):
                     return failure
 
                 gas_estimates.append(gas_estimate)
-                logger.debug(
-                    f"Transaction {i + 1}/{tx_count} estimated: {gas_estimate} gas",
+                logger.info(
+                    f"Transaction {i + 1}/{tx_count} estimated: {gas_estimate} gas"
+                    + (" (after state setup of earlier txs)" if i > 0 else ""),
                     extra={"tx_index": i, "to": tx.to, "gas_estimate": gas_estimate},
                 )
 
