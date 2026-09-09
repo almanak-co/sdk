@@ -225,10 +225,10 @@ def test_epoch_never_moves_a_fixed_pin_chain(tmp_path: Path, fake_curl: Path) ->
     result = run_resolver("robinhood", cache, fake_curl, github_env=github_env)
 
     assert result.returncode == 0, result.stderr
-    assert "Using fixed fork block pin: 5610000" in result.stdout
-    assert pin_path(cache, "robinhood").read_text().strip() == "5610000"
+    assert "Using fixed fork block pin: 57900000" in result.stdout
+    assert pin_path(cache, "robinhood").read_text().strip() == "57900000"
     written = _github_env_vars(github_env)
-    assert written.get("ANVIL_FORK_BLOCK_ROBINHOOD") == "5610000"
+    assert written.get("ANVIL_FORK_BLOCK_ROBINHOOD") == "57900000"
     assert written.get("ANVIL_FORK_PIN_REPINNED") == "true", (
         "a fixed-pin chain writing a pin file that did not exist must signal the "
         "cache-save gate, or the file is never archived"
@@ -239,14 +239,14 @@ def test_fixed_pin_reuse_does_not_write_the_cache_save_gate_variable(tmp_path: P
     """The other direction: an already-present fixed pin must not re-signal."""
     cache = tmp_path / "cache"
     cache.mkdir()
-    pin_path(cache, "robinhood").write_text("5610000\n")
+    pin_path(cache, "robinhood").write_text("57900000\n")
     github_env = tmp_path / "github_env"
     github_env.touch()
 
     result = run_resolver("robinhood", cache, fake_curl, github_env=github_env)
 
     assert result.returncode == 0, result.stderr
-    assert "Using fixed fork block pin: 5610000" in result.stdout
+    assert "Using fixed fork block pin: 57900000" in result.stdout
     assert "ANVIL_FORK_PIN_REPINNED" not in _github_env_vars(github_env)
 
 

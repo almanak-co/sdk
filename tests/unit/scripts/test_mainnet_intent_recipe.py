@@ -14,6 +14,7 @@ from web3 import Web3
 
 from almanak.connectors.uniswap_v3.sdk import compute_pool_address
 from qa_lab.mainnet_intent_recipe import (
+    RECIPES,
     AAVE_V3_ARBITRUM_SUPPLY_EOA,
     MAINNET_ASSET_DECIMALS,
     TRADERJOE_V2_AVALANCHE_SWAP_EOA,
@@ -571,10 +572,21 @@ def test_runner_call_sites_bind_every_required_proof_helper_argument() -> None:
         seen.add(node.func.id)
         assert not node.args, f"{node.func.id} must be called keyword-only at line {node.lineno}"
         keywords = {kw.arg for kw in node.keywords if kw.arg is not None}
+        parameters = inspect.signature(helpers[node.func.id]).parameters.values()
         required = {
             parameter.name
-            for parameter in inspect.signature(helpers[node.func.id]).parameters.values()
+            for parameter in parameters
             if parameter.kind is inspect.Parameter.KEYWORD_ONLY and parameter.default is inspect.Parameter.empty
+        }
+        # A defaulted parameter is invisible to the rule above, so an asset
+        # symbol left unpassed silently takes the helper's default -- which names
+        # a token the chain need not carry. Robinhood settles in USDG and has no
+        # USDC entry, so the USDC default raised KeyError in the target phase
+        # after the funding leg had already moved live funds.
+        required |= {
+            parameter.name
+            for parameter in parameters
+            if parameter.kind is inspect.Parameter.KEYWORD_ONLY and parameter.name.endswith("_symbol")
         }
         missing = sorted(required - keywords)
         assert not missing, f"{node.func.id} call at line {node.lineno} omits required arguments: {missing}"
@@ -798,6 +810,35 @@ def test_chain_approval_census_excludes_erc721_approvals(monkeypatch) -> None:
     pairs = runner._chain_approval_pairs(web3, wallet=wallet, from_block=1)
 
     assert pairs == [("0x" + "aa" * 20, "0x" + "bb" * 20)]
+
+
+@pytest.mark.parametrize("cell_id", sorted(RECIPES))
+def test_every_recipe_symbol_resolves_on_its_own_chain(cell_id: str) -> None:
+    """A recipe may only name assets its chain can actually resolve.
+
+    The swap helpers take symbols and look them up in the chain's token map. A
+    symbol the chain lacks raises KeyError inside the target phase -- after the
+    funding leg has already moved live funds to the pool wallet. Robinhood
+    settles in USDG and has no USDC entry, so the USDC default is a live-money
+    trap on any chain that does not carry it.
+    """
+    from tests.intents.conftest import CHAIN_CONFIGS
+
+    recipe = RECIPES[cell_id]
+    # Perp recipes name markets rather than a settlement symbol and never reach
+    # the symbol-keyed swap helpers.
+    symbols = {
+        symbol
+        for symbol in (getattr(recipe, "asset_symbol", None), getattr(recipe, "output_asset_symbol", None))
+        if symbol
+    }
+    if not symbols:
+        pytest.skip(f"{cell_id} names no settlement symbol")
+    tokens = CHAIN_CONFIGS.get(recipe.chain, {}).get("tokens")
+    if tokens is None:
+        pytest.skip(f"{recipe.chain} has no intent-test token map")
+    missing = sorted(symbol for symbol in symbols if symbol not in tokens)
+    assert not missing, f"{cell_id} names {missing} which {recipe.chain} cannot resolve"
 
 
 @pytest.mark.parametrize("rpc_url", ["https://rpc.invalid", "http://127.0.0.1:8545"])

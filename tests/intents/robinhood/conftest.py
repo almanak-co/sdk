@@ -12,12 +12,12 @@ Robinhood-specific notes:
   resolved from the chain descriptor, never from the periphery.
 - The chain's canonical stable is USDG (Global Dollar, Paxos, 6 dec). There is
   NO Circle-USDC / Tether-USDT with real liquidity on 4663.
-- The Anvil fork is pinned to block 5,610,000 (``anvil_robinhood`` in
-  ``tests/conftest_gateway.py``) — the block where the WETH/USDG fee-500 pool
-  liquidity and the canonical Safe + Zodiac Roles v2 stack (VIB-5708) were
-  verified on-chain. Every intent test therefore routes through
-  Safe + Roles + ``execTransactionWithRole`` by default (opt out with
-  ``@pytest.mark.no_zodiac``).
+- The Anvil fork is pinned to block 57,900,000 (``anvil_robinhood`` in
+  ``tests/conftest_gateway.py``) — a block where the WETH/USDG fee-500 pool
+  liquidity, the Uniswap V4 pools, the Morpho USDe/USDG market and the
+  canonical Safe + Zodiac Roles v2 stack are all live on-chain. Every intent
+  test therefore routes through Safe + Roles + ``execTransactionWithRole`` by
+  default (opt out with ``@pytest.mark.no_zodiac``).
 - Public RPC ``https://rpc.mainnet.chain.robinhood.com`` forks the chain when an
   Alchemy ``robinhood-mainnet`` app is not enabled on the local key.
 """

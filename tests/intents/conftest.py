@@ -1150,7 +1150,7 @@ CHAIN_CONFIGS = {
     },
     "robinhood": {
         # Robinhood Chain (4663, Arbitrum Orbit L2). Uniswap V3 WETH/USDG intent
-        # tests pin the fork to block 5,610,000 (see anvil_robinhood fixture),
+        # tests pin the fork to block 57,900,000 (see anvil_robinhood fixture),
         # the block at which the WETH/USDG fee-500 pool liquidity was verified.
         # USDG (Global Dollar, Paxos, 6 dec) is the chain's canonical stable —
         # there is NO Circle-USDC / Tether-USDT with real liquidity on 4663.
@@ -1164,7 +1164,8 @@ CHAIN_CONFIGS = {
             # exercised by test_morpho_blue_lending.py.
             "USDe": "0x5d3a1Ff2b6BAb83b63cd9AD0787074081a52ef34",
         },
-        # Balance slots verified on-chain @ block 5,610,000 (VIB-5706 AnvilProfile):
+        # Balance slots verified on-chain and re-exercised at
+        # the 57,900,000 pin by the Robinhood intent suite's storage-slot funding:
         # WETH & USDG are EIP-1967 proxies, so the storage write targets the proxy
         # address; standard keccak(abi.encode(holder, slot)) mapping. WETH also
         # funds via WETH9 deposit() (handled by the _NATIVE_WRAPPERS path).

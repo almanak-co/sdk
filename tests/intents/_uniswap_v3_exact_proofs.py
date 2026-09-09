@@ -220,16 +220,22 @@ async def execute_uniswap_v3_exact_reverse_cleanup(
     amount_in_raw: int,
     max_slippage: Decimal = SWAP_MAX_SLIPPAGE,
     max_price_impact: Decimal | None = None,
+    from_symbol: str = "WETH",
+    to_symbol: str = "USDC",
 ) -> SwapTargetResult:
-    """Reverse only the measured WETH output from the target swap."""
+    """Reverse only the measured target-swap output back into the funding asset.
+
+    ``to_symbol`` names the chain's canonical stable; it is not USDC everywhere
+    (Robinhood settles in USDG and has no liquid Circle USDC).
+    """
     tokens = CHAIN_CONFIGS[chain]["tokens"]
-    token_in = tokens["WETH"]
-    token_out = tokens["USDC"]
+    token_in = tokens[from_symbol]
+    token_out = tokens[to_symbol]
     factory = UNISWAP_V3[chain]["factory"]
     pool = compute_pool_address(factory, token_in, token_out, FEE_TIER)
     input_decimals = get_token_decimals(web3, token_in)
     if amount_in_raw <= 0:
-        raise AssertionError("Reverse cleanup requires a positive measured WETH output")
+        raise AssertionError(f"Reverse cleanup requires a positive measured {from_symbol} output")
     input_before = get_token_balance(web3, token_in, wallet)
     if input_before < amount_in_raw:
         raise AssertionError("Reverse cleanup output exceeds the wallet balance")

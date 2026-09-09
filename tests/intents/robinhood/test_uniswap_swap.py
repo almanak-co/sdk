@@ -9,7 +9,7 @@ Tests the full Intent -> Compile -> Execute -> Parse -> Verify flow:
 5. Verify balances changed correctly (bilateral deltas)
 
 Pair: WETH/USDG fee 500 — the chain's primary liquid V3 pool
-(0x69BfaF19C9f377BB306a89aEd9F6B07e2c1a8d9a, ~$3.5M TVL @ fork block 5,610,000).
+(0x69BfaF19C9f377BB306a89aEd9F6B07e2c1a8d9a, real depth @ the pinned fork block).
 USDG (Global Dollar, 6 dec) is the chain's canonical stable; there is NO
 Circle-USDC / Tether-USDT with real liquidity on 4663.
 

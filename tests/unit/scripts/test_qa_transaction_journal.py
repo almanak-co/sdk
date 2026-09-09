@@ -296,16 +296,18 @@ async def test_submit_result_does_not_archive_rpc_error_text(tmp_path, monkeypat
     assert next(event for event in _events(journal) if event["event"] == "SUBMISSION_RETURNED")["submitted"] is False
 
 
-def test_legacy_quote_numbers_and_stablecoin_assumptions_are_explicit(tmp_path):
+def test_legacy_quote_numbers_are_re_measured_not_relabelled(tmp_path, monkeypatch):
     from qa_lab import chains
 
     cache = tmp_path / "prices.json"
     cache.write_text('{"ETH": "2500"}')
-    assert str(chains.ax_price("ETH", "arbitrum", cache)) == "2500"
-    assert str(chains.ax_price("USDC", "arbitrum", cache)) == "1"
+    quote = {"status": "success", "data": {"token": "ETH", "price_usd": "2600", "source": "aggregated"}}
+    monkeypatch.setattr(
+        chains.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(stdout=json.dumps(quote))
+    )
+    assert str(chains.ax_price("ETH", "arbitrum", cache)) == "2600"
     sources = json.loads((tmp_path / "price-provenance.json").read_text())
-    assert sources["ETH"]["status"] == "UNMEASURED"
-    assert sources["USDC"]["status"] == "ASSUMPTION"
+    assert sources["ETH"]["status"] == "OBSERVED_API_RESPONSE"
 
 
 @pytest.mark.asyncio

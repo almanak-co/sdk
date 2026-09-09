@@ -16,6 +16,12 @@ from .models import PegClass, TokenRef, normalize_token_address_for_chain
 _PEG_CLASS_VALUES: MappingProxyType[PegClass, Decimal] = MappingProxyType({PegClass.USD: Decimal("1")})
 PEG_DEVIATION_THRESHOLD_BPS = Decimal("100")
 
+#: ``PriceResult.source`` values the price layer stamps on a value it manufactured
+#: from this registry instead of observing on a market. A response carrying one is
+#: an assumption whatever its transport status says, so a caller that must prove it
+#: measured a price has to reject it. Compared case-insensitively.
+SYNTHETIC_PEG_PRICE_SOURCES = frozenset({"stablecoin_peg", "stablecoin_fallback"})
+
 
 def _build_peg_registry() -> MappingProxyType[tuple[str, str], PegClass]:
     registry: dict[tuple[str, str], PegClass] = {}
@@ -79,6 +85,7 @@ def is_within_peg(price: Decimal, peg: Decimal) -> bool:
 __all__ = [
     "PEG_DEVIATION_THRESHOLD_BPS",
     "PEG_REGISTRY",
+    "SYNTHETIC_PEG_PRICE_SOURCES",
     "is_pegged",
     "is_within_peg",
     "peg_for_identity",

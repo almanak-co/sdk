@@ -10,8 +10,8 @@ LP Close test cases:
   #3: Position has no liquidity but owed tokens (decreased but not collected)
 
 Pair: WETH/USDG fee 500 — the chain's primary liquid V3 pool
-(0x69BfaF19C9f377BB306a89aEd9F6B07e2c1a8d9a, ~$3.5M TVL @ fork block 5,610,000,
-price sanity ~$1,745/WETH). Token ordering by address on Robinhood:
+(0x69BfaF19C9f377BB306a89aEd9F6B07e2c1a8d9a, real depth @ the pinned fork block,
+price sanity ~$2,500/WETH). Token ordering by address on Robinhood:
   WETH (0x0Bd7…AD73) < USDG (0x5fc5…d168)
 so WETH=token0, USDG=token1; range is in USDG-per-WETH terms.
 
@@ -57,12 +57,12 @@ CHAIN_NAME = "robinhood"
 # Uniswap V3 NonfungiblePositionManager on Robinhood (addresses.py).
 POSITION_MANAGER = "0x73991a25C818Bf1f1128dEAaB1492D45638DE0D3"
 
-# Pool: WETH/USDG 0.05% fee tier (the chain's deepest V3 pool, ~$3.5M TVL).
+# Pool: WETH/USDG 0.05% fee tier (the chain's deepest V3 pool).
 # WETH < USDG by address, so WETH=token0, USDG=token1; range is USDG-per-WETH.
 POOL = "WETH/USDG/500"
 # Funded balances on the Robinhood anvil fork: 10 WETH (wrap budget) + 100,000
 # USDG (storage-slot override) per tests/intents/robinhood/conftest.py. A wide
-# range at ~$1,745/WETH deposits a small fraction of each.
+# range at ~$2,500/WETH deposits a small fraction of each.
 LP_AMOUNT_WETH = Decimal("0.2")   # amount0 (WETH is token0)
 LP_AMOUNT_USDG = Decimal("500")   # amount1 (USDG is token1)
 

@@ -313,7 +313,7 @@ class TestUniswapV4LPOpenIntent:
 
         # Mandatory bilateral delta:
         # the position is opened with `range_lower=1000`, `range_upper=10000` and
-        # WETH/USDG at ~1,745 at the fork block — unambiguously in-range. Both tokens
+        # WETH/USDG at ~2,500 at the fork block — unambiguously in-range. Both tokens
         # MUST have been deposited. Permitting `or` here would let a V4 no-op
         # silently pass.
         assert weth_spent > 0 and usdg_spent > 0, (

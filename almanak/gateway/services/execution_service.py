@@ -22,6 +22,7 @@ from almanak.core.enums import ChainFamily
 from almanak.framework.data.tokens import ResolvedToken
 from almanak.framework.data.tokens.address_resolution import looks_like_evm_address
 from almanak.framework.data.tokens.exceptions import SymbolTokenResolutionError
+from almanak.framework.data.tokens.pegs import SYNTHETIC_PEG_PRICE_SOURCES
 from almanak.framework.execution.solana.route_refresh import (
     SolanaRouteRefresher,
     SolanaRouteRefreshRequest,
@@ -90,7 +91,6 @@ PRICE_SENSITIVE_INTENT_TYPES = frozenset(
 # inheriting a fabricated oracle. Must remain a subset of
 # PRICE_SENSITIVE_INTENT_TYPES — the gate never reaches it otherwise.
 PRICE_OPTIONAL_CLOSE_INTENT_TYPES = frozenset({"LPCLOSE", "PERPCLOSE"})
-_SYNTHETIC_PEG_PRICE_SOURCES = frozenset({"stablecoin_peg", "stablecoin_fallback"})
 
 
 @dataclass(frozen=True)
@@ -325,7 +325,7 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
                         if isinstance(raw_peg_tokens, list | tuple | set | frozenset)
                         else set()
                     )
-                    is_legacy_synthetic = source.lower() in _SYNTHETIC_PEG_PRICE_SOURCES
+                    is_legacy_synthetic = source.lower() in SYNTHETIC_PEG_PRICE_SOURCES
                     if reported_peg_tokens or is_legacy_synthetic:
                         # A synthetic price must name exactly the identity that
                         # this request resolved. Foreign or identity-free

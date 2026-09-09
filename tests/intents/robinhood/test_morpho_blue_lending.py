@@ -21,7 +21,7 @@ is exactly what this suite does. Every assertion here asserts correct behaviour
 (never a weaker/wrong one), so the 4-layer contract is fully met.
 
 NO MOCKING. All tests execute real on-chain transactions on an Anvil fork of
-Robinhood (forked at the pinned block 5,610,000, so the Safe/Zodiac stack deployed 2026-07-09 is
+Robinhood (forked at the pinned block, so the deployed Safe/Zodiac stack is
 present). Default-on Zodiac: every tx routes through ``execTransactionWithRole``.
 
 To run:

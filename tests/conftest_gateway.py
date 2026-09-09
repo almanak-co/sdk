@@ -30,17 +30,22 @@ Anvil Management:
 """
 
 import asyncio
+import http.client
+import json
 import logging
 import os
 import socket
 import threading
 import time
+import urllib.error
+import urllib.request
 from collections.abc import Generator
 from decimal import Decimal
 
 import pytest
 from web3 import Web3
 
+from almanak.core.chains import ChainRegistry
 from almanak.framework.anvil.fork_manager import RollingForkManager
 from almanak.framework.gateway_client import GatewayClient, GatewayClientConfig
 from almanak.framework.web3 import get_gateway_web3
@@ -556,6 +561,59 @@ class GatewayServerThread:
 # =============================================================================
 
 
+# Multicall3 is deployed deterministically at the same address on every
+# supported chain; getBlockNumber() reads state, so a reply proves the node can
+# serve that block rather than merely acknowledge it.
+_MULTICALL3_ADDRESS = "0xcA11bde05977b3631167028862bE2a173976CA11"
+_MULTICALL3_GET_BLOCK_NUMBER = "0x42cbb15c"
+
+
+def _rpc_result(url: str, method: str, params: list[object]) -> object:
+    """Return one JSON-RPC result, or None when the endpoint cannot answer."""
+    payload = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode()
+    request = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            body = json.loads(response.read())
+    except (urllib.error.URLError, TimeoutError, ValueError, OSError, http.client.HTTPException):
+        return None
+    if not isinstance(body, dict) or body.get("error") is not None:
+        return None
+    return body.get("result")
+
+
+def _endpoint_serves_fork_state(url: str, fork_block_number: int | None, *, chain_id: int | None = None) -> bool:
+    """Report whether ``url`` is the right chain and can serve the forked state.
+
+    A state-pruned node answers eth_blockNumber happily and only fails once a
+    test reads historical state ("missing trie node"), which surfaces as an
+    unrelated-looking setup error deep inside the run. eth_getBalance is not
+    enough to tell them apart -- scripts/ci/resolve-fork-block.sh records that it
+    answers from a pruned node -- so probe with a state-reading eth_call at the
+    exact depth the fork needs.
+
+    The chain id is checked first because a well-formed answer from the wrong
+    chain would otherwise be accepted, and every downstream address lookup would
+    then miss and skip rather than fail.
+    """
+    if chain_id is not None:
+        observed = _rpc_result(url, "eth_chainId", [])
+        if not isinstance(observed, str):
+            return False
+        try:
+            if int(observed, 16) != chain_id:
+                return False
+        except ValueError:
+            return False
+    block = "latest" if fork_block_number is None else hex(fork_block_number)
+    result = _rpc_result(
+        url,
+        "eth_call",
+        [{"to": _MULTICALL3_ADDRESS, "data": _MULTICALL3_GET_BLOCK_NUMBER}, block],
+    )
+    return isinstance(result, str) and result.startswith("0x") and len(result) > 2
+
+
 def _create_anvil_fixture(
     chain: str,
     public_rpc_fallback: str | None = None,
@@ -567,11 +625,16 @@ def _create_anvil_fixture(
         chain: Chain name (e.g., "arbitrum", "base")
         fork_block_number: Optional explicit block to pin the fork to. Used for
             newly-added chains whose intent-test pool/liquidity facts were
-            verified at a specific calibrated block (e.g. robinhood @ 5,610,000)
+            verified at a specific calibrated block (e.g. robinhood @ 57,900,000)
             rather than tracking the weekly CI head pin.
-        public_rpc_fallback: Optional public RPC URL to use if the chain is not
-            yet enabled on the user's Alchemy app. Seeded into ``<CHAIN>_RPC_URL``
-            env var so ``get_rpc_url`` picks it up via the chain-specific override.
+        public_rpc_fallback: Optional public RPC URL used only when the normally
+            resolved provider cannot serve state at ``fork_block_number`` (chain
+            not enabled on the Alchemy app, no key configured, endpoint down).
+            Seeded into ``<CHAIN>_RPC_URL`` so ``get_rpc_url`` picks it up via the
+            chain-specific override. This is a fallback, never an override: a
+            public endpoint is frequently state-pruned while the configured
+            provider serves archive depth, so preferring it unconditionally
+            breaks every test that reads historical state.
 
     Returns:
         A pytest fixture function
@@ -593,8 +656,24 @@ def _create_anvil_fixture(
         anvil: AnvilFixture | None = None
 
         if public_rpc_fallback and not restore_env:
-            os.environ[env_var] = public_rpc_fallback
-            set_env = True
+            try:
+                preferred = get_rpc_url(rpc_chain_name, network="mainnet")
+            except ValueError:
+                preferred = None
+            try:
+                expected_chain_id = ChainRegistry.get(chain).chain_id
+            except Exception:  # noqa: BLE001 — an unregistered chain simply skips the identity check
+                expected_chain_id = None
+            if preferred is None or not _endpoint_serves_fork_state(
+                preferred, fork_block_number, chain_id=expected_chain_id
+            ):
+                # Only seed a fallback that can actually serve the fork. Swapping
+                # one unusable endpoint for another buys nothing and moves the
+                # failure further from its cause; leaving the preferred URL in
+                # place at least fails against the endpoint the operator chose.
+                if _endpoint_serves_fork_state(public_rpc_fallback, fork_block_number, chain_id=expected_chain_id):
+                    os.environ[env_var] = public_rpc_fallback
+                    set_env = True
 
         try:
             try:
@@ -641,13 +720,16 @@ anvil_mantle = _create_anvil_fixture("mantle")
 anvil_monad = _create_anvil_fixture("monad", public_rpc_fallback="https://rpc.monad.xyz")
 anvil_xlayer = _create_anvil_fixture("xlayer")
 anvil_zerog = _create_anvil_fixture("zerog")
-# Robinhood Chain (4663, Arbitrum Orbit L2). Pinned to the calibrated block
-# 5,610,000 where the WETH/USDG V3 pool liquidity was verified (VIB-5709).
+# Robinhood Chain (4663, Arbitrum Orbit L2). The pin must name a block where the
+# V3 and V4 pools are initialised and the pool price agrees with the live oracle;
+# a stale pin reads as price impact rather than as staleness and the compiler
+# refuses oracle-bound swaps. Keep equal to FIXED_PIN in
+# scripts/ci/resolve-fork-block.sh.
 # Public RPC fallback for local runs without an Alchemy robinhood-mainnet app.
 anvil_robinhood = _create_anvil_fixture(
     "robinhood",
     public_rpc_fallback="https://rpc.mainnet.chain.robinhood.com",
-    fork_block_number=5_610_000,
+    fork_block_number=57_900_000,
 )
 
 

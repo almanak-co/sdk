@@ -256,11 +256,16 @@ async def run_uniswap_v3_lp_open_exact_proof(
     compiler_config: IntentCompilerConfig | None = None,
     rpc_url: str | None = None,
     gateway_client: Any | None = None,
+    stable_symbol: str = "USDC",
 ) -> LPOpenTargetResult:
-    """Compile, execute, and independently prove one exact-pool NFT mint."""
+    """Compile, execute, and independently prove one exact-pool NFT mint.
+
+    ``stable_symbol`` names the chain's canonical stable; it is not USDC
+    everywhere (Robinhood settles in USDG).
+    """
     tokens = CHAIN_CONFIGS[chain]["tokens"]
     weth = tokens["WETH"]
-    usdc = tokens["USDC"]
+    usdc = tokens[stable_symbol]
     factory = UNISWAP_V3[chain]["factory"]
     npm = UNISWAP_V3[chain]["position_manager"]
     pool = compute_pool_address(factory, weth, usdc, FEE_TIER)
@@ -497,6 +502,7 @@ async def run_uniswap_v3_lp_collect_fees_exact_proof(
     rpc_url: str | None = None,
     gateway_client: Any | None = None,
     fee_accrual_amount: Decimal = FEE_ACCRUAL_WETH_AMOUNT,
+    stable_symbol: str = "USDC",
 ) -> LPCollectFeesTargetResult:
     """Create fees, collect them, and prove the NFT remains unchanged."""
     setup = await run_uniswap_v3_lp_open_exact_proof(
@@ -510,6 +516,7 @@ async def run_uniswap_v3_lp_collect_fees_exact_proof(
         compiler_config=compiler_config,
         rpc_url=rpc_url,
         gateway_client=gateway_client,
+        stable_symbol=stable_symbol,
     )
     fee_accrual = await run_uniswap_v3_swap_exact_proof(
         chain=chain,
@@ -525,7 +532,7 @@ async def run_uniswap_v3_lp_collect_fees_exact_proof(
         gateway_client=gateway_client,
         max_slippage=MAX_SLIPPAGE,
         from_symbol="WETH",
-        to_symbol="USDC",
+        to_symbol=stable_symbol,
     )
 
     npm = UNISWAP_V3[chain]["position_manager"]
@@ -689,6 +696,7 @@ async def run_uniswap_v3_lp_close_exact_proof(
     rpc_url: str | None = None,
     gateway_client: Any | None = None,
     existing_position: LPOpenTargetResult | None = None,
+    stable_symbol: str = "USDC",
 ) -> LPCloseTargetResult:
     """Prove one exact full-close target, creating isolated setup when needed.
 
@@ -710,6 +718,7 @@ async def run_uniswap_v3_lp_close_exact_proof(
             compiler_config=compiler_config,
             rpc_url=rpc_url,
             gateway_client=gateway_client,
+            stable_symbol=stable_symbol,
         )
     factory = UNISWAP_V3[chain]["factory"]
     npm = UNISWAP_V3[chain]["position_manager"]

@@ -103,7 +103,7 @@ def test_concurrent_old_sweep_cannot_sign_after_wallet_reallocation(tmp_path, mo
     state = {"balance": 10**18}
     signed_by = []
 
-    def wallet_value(*args):
+    def wallet_value(*args, **kwargs):
         name = identities[threading.get_ident()]
         if name == "first" and not first_entered.is_set():
             first_entered.set()
