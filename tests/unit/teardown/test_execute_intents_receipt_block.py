@@ -30,10 +30,11 @@ from almanak.framework.teardown.models import (
     TeardownState,
     TeardownStatus,
 )
+from almanak.framework.teardown.slippage_manager import ExecutionAttempt, ExecutionResult
 from almanak.framework.teardown.teardown_manager import TeardownManager
 
 
-def _exec_result_with_block(block: int) -> SimpleNamespace:
+def _exec_result_with_block(block: int) -> ExecutionResult:
     """A successful execution result whose single receipt landed at ``block``.
 
     Shaped for ``strategy_runner._last_receipt_block``: a
@@ -42,14 +43,12 @@ def _exec_result_with_block(block: int) -> SimpleNamespace:
     """
     receipt = SimpleNamespace(block_number=block)
     tx = SimpleNamespace(success=True, receipt=receipt, tx_hash="0xabc")
-    return SimpleNamespace(
+    payload = SimpleNamespace(success=True, transaction_results=[tx], total_gas_used=21000)
+    return ExecutionResult(
         success=True,
         final_slippage=Decimal("0.005"),
-        total_gas_used=21000,
-        transaction_results=[tx],
-        status="success",
-        error=None,
-        approval_request=None,
+        status="completed",
+        attempts=[ExecutionAttempt(success=True, slippage_used=Decimal("0.005"), execution_result=payload)],
     )
 
 
@@ -103,9 +102,7 @@ async def _run(block_sequence: list[int]) -> int | None:
     results = [_exec_result_with_block(b) for b in block_sequence]
     mgr.slippage_manager.execute_with_escalation = AsyncMock(side_effect=results)
 
-    intents = [
-        SimpleNamespace(max_slippage=None, intent_type="SWAP") for _ in block_sequence
-    ]
+    intents = [SimpleNamespace(max_slippage=None, intent_type="SWAP") for _ in block_sequence]
     result = await mgr._execute_intents(
         teardown_id="teardown-test",
         strategy=_make_strategy(),

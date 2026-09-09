@@ -960,7 +960,10 @@ class IntentStrategy(StrategyBase[ConfigT]):
         Args:
             intent: The intent that was executed
             success: Whether execution succeeded
-            result: ExecutionResult with enriched data
+            result: ExecutionResult with enriched data, or None when teardown
+                observes successful asynchronous settlement without measured
+                terminal receipt data (including resumed settlement). Callbacks
+                must handle None without inferring fill amounts or ownership.
         """
         pass
 

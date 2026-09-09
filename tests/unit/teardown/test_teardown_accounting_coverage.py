@@ -325,9 +325,11 @@ async def test_async_submission_commits_before_waiting_for_settlement(
 
     state = _make_state(total_intents=1)
     state.pending_intents_json = json.dumps([_make_intent("PERP_CLOSE").to_dict()])
+    strategy = _make_strategy()
+    strategy.on_intent_executed = MagicMock()
     result = await mgr._execute_intents(
         teardown_id="td-settle-first",
-        strategy=_make_strategy(),
+        strategy=strategy,
         intents=[_make_intent("PERP_CLOSE")],
         positions=_make_position_summary(),
         mode=TeardownMode.SOFT,
@@ -339,6 +341,9 @@ async def test_async_submission_commits_before_waiting_for_settlement(
     assert events[:3] == ["commit", "marker+ledger", "settled"]
     assert "marker" not in events
     assert len(commit_calls) == 1
+
+    strategy.on_intent_executed.assert_called_once()
+    assert strategy.on_intent_executed.call_args.args[2] is None
 
 
 @pytest.mark.asyncio
@@ -1131,3 +1136,124 @@ async def test_no_runner_helpers_legacy_path_still_succeeds(fake_orchestrator, f
     assert result.success is True
     assert result.accounting_degraded is False
     assert result.accounting_degraded_count == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("callback_raises", [False, True])
+async def test_real_ladder_preserves_enriched_winner_and_continues(
+    fake_orchestrator, fake_compiler, state_manager_mock, callback_raises
+):
+    from almanak.framework.execution.orchestrator import ExecutionPhase, ExecutionResult, TransactionResult
+
+    originals = [
+        ExecutionResult(
+            success=True,
+            phase=ExecutionPhase.COMPLETE,
+            transaction_results=[
+                TransactionResult(tx_hash="0x" + str(i) * 64, success=True, receipt=SimpleNamespace(block_number=b))
+            ],
+        )
+        for i, b in [(1, 200), (2, 190)]
+    ]
+    fake_orchestrator.execute.side_effect = originals
+    callbacks = []
+    markers = [object(), object()]
+
+    async def commit(strategy, intent, *, execution_result, **kwargs):
+        index = originals.index(execution_result)
+        execution_result.extracted_data["receipt_marker"] = markers[index]
+        return TeardownCommitOutcome("ledger", False, None)
+
+    strategy = _make_strategy()
+
+    def callback(intent, success, execution_result):
+        callbacks.append((intent, execution_result, execution_result.extracted_data.get("receipt_marker"), success))
+        if callback_raises and len(callbacks) == 1:
+            raise ValueError("observer unavailable after landed close")
+
+    strategy.on_intent_executed = callback
+    intents = [_make_intent("LP_CLOSE"), _make_intent("LP_CLOSE")]
+    mgr = TeardownManager(
+        orchestrator=fake_orchestrator,
+        compiler=fake_compiler,
+        state_manager=state_manager_mock,
+        runner_helpers=TeardownRunnerHelpers(commit=commit),
+        config=TeardownConfig.default(),
+    )
+    state = _make_state(total_intents=2)
+    result = await mgr._execute_intents(
+        teardown_id=state.teardown_id,
+        strategy=strategy,
+        intents=intents,
+        positions=_make_position_summary(),
+        mode=TeardownMode.SOFT,
+        teardown_state=state,
+        is_auto_mode=True,
+    )
+    assert result.success and result.intents_succeeded == 2
+    assert len(callbacks) == 2 and all(pair[0] is intent for pair, intent in zip(callbacks, intents, strict=True))
+    assert fake_orchestrator.execute.await_count == 2
+    assert all(pair[1] is original for pair, original in zip(callbacks, originals, strict=True))
+    assert all(pair[2] is marker and pair[3] for pair, marker in zip(callbacks, markers, strict=True))
+    assert result.last_receipt_block == 200
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("settlement", ["terminal", "no_receipts", "pending"])
+async def test_real_settlement_helper_only_preserves_measured_terminal_payload(
+    fake_orchestrator, fake_compiler, state_manager_mock, monkeypatch, settlement
+):
+    from functools import partial
+
+    from almanak.framework.runner.strategy_runner import StrategyRunner
+    from almanak.framework.teardown.runner_helpers import _await_teardown_intent_settlement
+
+    original = fake_orchestrator.execute.return_value
+    original.transaction_results[0].receipt = SimpleNamespace(block_number=100, status=1)
+    receipt = {"transactionHash": "0x" + "42" * 32, "blockNumber": "0xc8", "status": "0x1"}
+    barrier = SimpleNamespace(
+        terminal=settlement != "pending",
+        status=SimpleNamespace(value="PENDING" if settlement == "pending" else "SETTLED"),
+        receipts=(receipt,) if settlement == "terminal" else (),
+        attempts=1,
+        reason="awaiting keeper",
+    )
+    observe = AsyncMock(return_value=barrier)
+    monkeypatch.setattr("almanak.framework.runner.async_settlement.await_async_settlement", observe)
+    runner = SimpleNamespace(
+        _get_gateway_client=lambda: object(),
+        config=SimpleNamespace(async_settlement_timeout_seconds=1, async_settlement_poll_interval_seconds=0),
+        _append_settlement_receipts=StrategyRunner._append_settlement_receipts,
+    )
+    helpers, _ = _make_helpers(await_intent_settlement=partial(_await_teardown_intent_settlement, runner))
+    mgr = TeardownManager(
+        orchestrator=fake_orchestrator,
+        compiler=fake_compiler,
+        state_manager=state_manager_mock,
+        runner_helpers=helpers,
+        config=TeardownConfig.default(),
+    )
+    strategy = _make_strategy()
+    strategy.on_intent_executed = MagicMock()
+    intent = _make_intent("PERP_CLOSE")
+    state = _make_state(total_intents=1)
+    state.pending_intents_json = json.dumps([intent.to_dict()])
+    result = await mgr._execute_intents(
+        teardown_id=state.teardown_id,
+        strategy=strategy,
+        intents=[intent],
+        positions=_make_position_summary(),
+        mode=TeardownMode.SOFT,
+        teardown_state=state,
+        is_auto_mode=True,
+    )
+    assert fake_orchestrator.execute.await_count == 1 and observe.await_count == 1
+    if settlement == "pending":
+        assert not result.success
+        strategy.on_intent_executed.assert_not_called()
+    else:
+        assert result.success
+        strategy.on_intent_executed.assert_called_once_with(
+            intent, True, original if settlement == "terminal" else None
+        )
+        assert result.last_receipt_block == (200 if settlement == "terminal" else None)

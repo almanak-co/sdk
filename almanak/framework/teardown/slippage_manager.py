@@ -20,7 +20,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC
 from decimal import Decimal, DecimalException
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from almanak.framework.teardown.config import TeardownConfig
 from almanak.framework.teardown.models import (
@@ -31,6 +31,9 @@ from almanak.framework.teardown.models import (
     calculate_max_acceptable_loss,
 )
 from almanak.framework.teardown.slippage_policy import fixed_teardown_slippage
+
+if TYPE_CHECKING:
+    from almanak.framework.execution.orchestrator import ExecutionResult as OrchestratorExecutionResult
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +75,7 @@ class ExecutionAttempt:
     retryable: bool = True
     retry_after_seconds: float | None = None
     disposition: str = "escalate"
+    execution_result: "OrchestratorExecutionResult | None" = None
 
 
 @dataclass
@@ -86,6 +90,12 @@ class ExecutionResult:
     current_level: EscalationLevel | None = None
     message: str | None = None
     approval_request: ApprovalRequest | None = None
+
+    @property
+    def execution_result(self) -> "OrchestratorExecutionResult | None":
+        if not self.success or not self.attempts or not self.attempts[-1].success:
+            return None
+        return self.attempts[-1].execution_result
 
     @property
     def total_attempts(self) -> int:

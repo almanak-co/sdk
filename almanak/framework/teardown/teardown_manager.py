@@ -536,6 +536,19 @@ def _fold_max_receipt_block(current: int | None, execution_result: Any) -> int |
     return max(current or 0, _last_receipt_block(execution_result) or 0) or None
 
 
+def _successful_attempt_payload(execution_result: Any, *, accepted_async: bool) -> Any | None:
+    if not accepted_async:
+        return execution_result
+    from .runner_helpers import _has_terminal_settlement_marker
+
+    receipts = getattr(execution_result, "settlement_receipts", None)
+    if not _has_terminal_settlement_marker(execution_result) or not receipts:
+        return None
+    if _fold_max_receipt_block(None, {"settlement_receipts": receipts}) is None:
+        return None
+    return execution_result
+
+
 @dataclass
 class AtomicBundle:
     """Represents a bundle of intents for atomic execution."""
@@ -1798,7 +1811,7 @@ class TeardownManager:
         MAX (not last-processed) is the correct receipt anchor under
         non-monotonic completion (VIB-5140).
         """
-        last_receipt_block = _fold_max_receipt_block(last_receipt_block, exec_result)
+        last_receipt_block = _fold_max_receipt_block(last_receipt_block, getattr(exec_result, "execution_result", None))
         actual_slippage = exec_result.final_slippage
         intent_value = positions.total_value_usd / n_intents
         total_costs += intent_value * actual_slippage
@@ -2732,6 +2745,7 @@ class TeardownManager:
                 success=True,
                 slippage_used=slippage,
                 actual_slippage=actual_slippage,
+                execution_result=_successful_attempt_payload(exec_result, accepted_async=accepted),
             )
 
         logger.error(
@@ -3197,7 +3211,9 @@ class TeardownManager:
                 len(intents),
                 totals.total_costs,
             )
-            await self._notify_intent_success(strategy, intent, exec_result, intent_index, len(intents))
+            await self._notify_intent_success(
+                strategy, intent, getattr(exec_result, "execution_result", None), intent_index, len(intents)
+            )
         else:
             revert_text = self._transient_retry_due(exec_result, intent, attempts)
             if revert_text is not None:

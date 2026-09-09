@@ -348,3 +348,27 @@ def test_fold_attempt_result_helper_matrix(
 
     assert decision.disposition == ("escalate" if success else disposition)
     assert (decision.result.status if decision.result is not None else None) == expected_status
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("has_payload", [False, True])
+async def test_ladder_exposes_only_winning_attempt_payload(has_payload):
+    from almanak.framework.execution.orchestrator import ExecutionPhase, ExecutionResult
+
+    failed = ExecutionResult(success=False, phase=ExecutionPhase.COMPLETE)
+    winner = ExecutionResult(success=True, phase=ExecutionPhase.COMPLETE) if has_payload else None
+    execute = AsyncMock(
+        side_effect=[
+            ExecutionAttempt(success=False, slippage_used=Decimal("0.02"), execution_result=failed),
+            ExecutionAttempt(success=True, slippage_used=Decimal("0.02"), execution_result=winner),
+        ]
+    )
+    manager = _manager(_level(EscalationLevel.LEVEL_1, "0.02", retries=2))
+    result = await manager.execute_with_escalation(
+        intent=object(),
+        position_value=Decimal("1"),
+        execute_func=execute,
+        is_auto_mode=True,
+    )
+    assert result.success and result.execution_result is winner
+    assert execute.await_count == 2

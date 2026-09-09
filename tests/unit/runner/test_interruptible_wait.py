@@ -11,7 +11,9 @@ event loop is never blocked; the tests patch to_thread with a synchronous
 delegate that records which callables were dispatched off-loop.
 """
 
+import asyncio
 from contextlib import contextmanager
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -55,22 +57,31 @@ def _patched_io(sleep_calls: list[float], to_thread_fns: list | None = None):
             to_thread_fns.append(fn)
         return fn(*args, **kwargs)
 
-    with (
-        patch(
-            "almanak.framework.runner.strategy_runner.asyncio.sleep",
-            new_callable=AsyncMock,
-            side_effect=lambda d: sleep_calls.append(d) or None,
-        ),
-        patch(
-            "almanak.framework.runner.strategy_runner.asyncio.to_thread",
-            new=fake_to_thread,
-        ),
-    ):
+    # Replacing asyncio's functions would also intercept unrelated gateway tasks.
+    runner_asyncio = SimpleNamespace(
+        sleep=AsyncMock(side_effect=lambda d: sleep_calls.append(d)),
+        to_thread=fake_to_thread,
+    )
+    with patch("almanak.framework.runner.strategy_runner.asyncio", new=runner_asyncio):
         yield
 
 
 class TestInterruptibleWait:
     """_interruptible_wait exits within one poll slice when a stop signal arrives."""
+
+    @pytest.mark.asyncio
+    async def test_wait_recorder_does_not_capture_other_asyncio_users(self):
+        runner = _make_runner()
+        strategy = _make_strategy()
+        runner._lifecycle_poll_command = MagicMock(return_value=None)
+        sleep_calls: list[float] = []
+
+        with _patched_io(sleep_calls):
+            await asyncio.sleep(0)
+            await runner._interruptible_wait(strategy.deployment_id, 30, strategy)
+            await asyncio.sleep(0)
+
+        assert sleep_calls == [15, 15]
 
     @pytest.mark.asyncio
     async def test_stop_command_during_wait_returns_early(self):
