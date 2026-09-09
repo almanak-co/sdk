@@ -111,11 +111,26 @@ class TestBuildIndices:
         assert eth["GTUSDC"].chain == "ethereum"
         assert eth["GTUSDC"].name == "Gauntlet USDC Prime"
 
-    def test_decimals_inherited_from_underlying(self):
-        """MetaMorpho vaults are ERC4626 and inherit underlying decimals."""
+    def test_share_decimals_are_at_least_18_never_the_underlying(self):
+        """A USDC (6-dec) vault mints 18-decimal shares — both Morpho generations add an offset to reach 18.
+
+        Copying ``asset.decimals`` onto the share token (the previous behaviour)
+        published 6 for an 18-decimal share, so a raw balance of 10**18 read as a
+        trillion shares to every resolver-scaled caller.
+        """
         lookup = MorphoVaultLookup()
         lookup._build_indices(SAMPLE_VAULTS)
-        assert lookup._symbol_indices["ethereum"]["GTUSDC"].decimals == 6
+        meta = lookup.lookup_by_symbol("gtUSDC", "ethereum")
+        assert meta is not None
+        assert meta.decimals == 18
+        assert meta.underlying_decimals == 6
+
+    def test_share_decimals_follow_an_18_plus_underlying(self):
+        from almanak.connectors.morpho_vault.gateway.vault_lookup import share_decimals_for
+
+        assert share_decimals_for(6) == 18
+        assert share_decimals_for(18) == 18
+        assert share_decimals_for(24) == 24
 
     def test_underlying_metadata_attached(self):
         lookup = MorphoVaultLookup()
@@ -162,7 +177,7 @@ class TestLookupAPI:
         meta = loaded_lookup.lookup_by_symbol("gtusdc", "ethereum")
         assert meta is not None
         assert meta.symbol == "gtUSDC"
-        assert meta.decimals == 6
+        assert meta.decimals == 18  # share decimals: max(18, underlying); the underlying is 6
 
     def test_lookup_by_symbol_chain_case_insensitive(self, loaded_lookup):
         meta = loaded_lookup.lookup_by_symbol("GTUSDC", "ETHEREUM")
@@ -174,9 +189,7 @@ class TestLookupAPI:
         assert loaded_lookup.lookup_by_symbol("gtUSDC", "arbitrum") is None
 
     def test_lookup_by_address_case_insensitive(self, loaded_lookup):
-        meta = loaded_lookup.lookup_by_address(
-            "0xdd0f28e19C1780eb6396170735D45153D261490d", "ethereum"
-        )
+        meta = loaded_lookup.lookup_by_address("0xdd0f28e19C1780eb6396170735D45153D261490d", "ethereum")
         assert meta is not None
         assert meta.symbol == "gtUSDC"
 
@@ -204,9 +217,7 @@ class TestDiskCache:
 
         os.utime(cache_path, (stale_mtime, stale_mtime))
 
-        monkeypatch.setattr(
-            "almanak.connectors.morpho_vault.gateway.vault_lookup.CACHE_PATH", cache_path
-        )
+        monkeypatch.setattr("almanak.connectors.morpho_vault.gateway.vault_lookup.CACHE_PATH", cache_path)
         lookup = MorphoVaultLookup()
         assert lookup._read_disk_cache() is None
 
@@ -214,9 +225,7 @@ class TestDiskCache:
         cache_path = tmp_path / "morpho_vault_cache.json"
         cache_path.write_text(json.dumps(SAMPLE_VAULTS))
 
-        monkeypatch.setattr(
-            "almanak.connectors.morpho_vault.gateway.vault_lookup.CACHE_PATH", cache_path
-        )
+        monkeypatch.setattr("almanak.connectors.morpho_vault.gateway.vault_lookup.CACHE_PATH", cache_path)
         lookup = MorphoVaultLookup()
         data = lookup._read_disk_cache()
         assert data is not None
@@ -226,17 +235,13 @@ class TestDiskCache:
     def test_read_disk_cache_rejects_malformed_json(self, tmp_path, monkeypatch):
         cache_path = tmp_path / "morpho_vault_cache.json"
         cache_path.write_text('{"not":"a list"}')
-        monkeypatch.setattr(
-            "almanak.connectors.morpho_vault.gateway.vault_lookup.CACHE_PATH", cache_path
-        )
+        monkeypatch.setattr("almanak.connectors.morpho_vault.gateway.vault_lookup.CACHE_PATH", cache_path)
         lookup = MorphoVaultLookup()
         assert lookup._read_disk_cache() is None
 
     def test_write_disk_cache_atomic(self, tmp_path, monkeypatch):
         cache_path = tmp_path / "morpho_vault_cache.json"
-        monkeypatch.setattr(
-            "almanak.connectors.morpho_vault.gateway.vault_lookup.CACHE_PATH", cache_path
-        )
+        monkeypatch.setattr("almanak.connectors.morpho_vault.gateway.vault_lookup.CACHE_PATH", cache_path)
 
         lookup = MorphoVaultLookup()
         lookup._write_disk_cache(SAMPLE_VAULTS)
@@ -254,9 +259,7 @@ class TestLoadFlow:
     def test_load_uses_disk_cache_when_fresh(self, tmp_path, monkeypatch):
         cache_path = tmp_path / "morpho_vault_cache.json"
         cache_path.write_text(json.dumps(SAMPLE_VAULTS))
-        monkeypatch.setattr(
-            "almanak.connectors.morpho_vault.gateway.vault_lookup.CACHE_PATH", cache_path
-        )
+        monkeypatch.setattr("almanak.connectors.morpho_vault.gateway.vault_lookup.CACHE_PATH", cache_path)
 
         lookup = MorphoVaultLookup()
 
@@ -321,3 +324,288 @@ class TestVaultTokenDataclass:
         )
         assert meta.address == "0xabc"
         assert meta.underlying_symbol == "USDC"
+
+
+# Morpho Vault V2 + schema-drift regression (session be5a3567).
+#
+# The Morpho API renamed the vault filter ``whitelisted`` -> ``listed``; the
+# old field is a hard GraphQL validation error, so a query still using it
+# indexed ZERO vaults (every vault symbol resolved ``not_found`` on staging
+# and prod). V2 vaults additionally live under ``vaultV2s``.
+
+from almanak.connectors.morpho_vault.gateway.vault_lookup import (  # noqa: E402
+    _MORPHO_VAULT_QUERIES,
+    _MORPHO_VAULTS_QUERY,
+    _MORPHO_VAULTS_V2_QUERY,
+    VAULT_VERSION_V1,
+    VAULT_VERSION_V2,
+    tag_vault_payload,
+)
+
+STEAK_V2_BASE = "0xbeef0e0834849acc03f0089f01f4f1eeb06873c9"  # Steakhouse Prime USDC (Vault V2)
+STEAK_V1_BASE = "0xbeef010f9cb27031ad51e3333f9af9c6b1228183"  # Steakhouse USDC (MetaMorpho v1)
+
+
+def _base_usdc_asset() -> dict:
+    return {"symbol": "USDC", "address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", "decimals": 6}
+
+
+class TestQuerySchema:
+    def test_queries_use_listed_filter_not_whitelisted(self):
+        for query in (_MORPHO_VAULTS_QUERY, _MORPHO_VAULTS_V2_QUERY):
+            assert "listed: true" in query
+            assert "whitelisted" not in query
+
+    def test_v2_query_targets_vaultv2s_root_field(self):
+        assert "vaultV2s(" in _MORPHO_VAULTS_V2_QUERY
+        assert "vaults(" in _MORPHO_VAULTS_QUERY
+        assert [(root, version) for root, _q, version in _MORPHO_VAULT_QUERIES] == [
+            ("vaults", VAULT_VERSION_V1),
+            ("vaultV2s", VAULT_VERSION_V2),
+        ]
+
+
+class TestTagVaultPayload:
+    def test_tags_items_with_version(self):
+        body = {"data": {"vaultV2s": {"items": [{"address": STEAK_V2_BASE, "symbol": "steakUSDC"}]}}}
+        tagged = tag_vault_payload(body, "vaultV2s", VAULT_VERSION_V2)
+        assert tagged == [{"address": STEAK_V2_BASE, "symbol": "steakUSDC", "vault_version": "v2"}]
+
+    def test_graphql_errors_yield_empty_list(self, caplog):
+        body = {
+            "errors": [{"message": 'Field "whitelisted" is not defined by type "VaultFilters". Did you mean "listed"?'}]
+        }
+        with caplog.at_level("WARNING"):
+            assert tag_vault_payload(body, "vaults", VAULT_VERSION_V1) == []
+        assert "whitelisted" in caplog.text  # the API's own message reaches the gateway log
+
+    def test_non_dict_body_and_missing_root_yield_empty(self):
+        assert tag_vault_payload(["not", "a", "dict"], "vaults", VAULT_VERSION_V1) == []
+        assert tag_vault_payload({"data": {}}, "vaults", VAULT_VERSION_V1) == []
+        assert tag_vault_payload({"data": {"vaults": {"items": "nope"}}}, "vaults", VAULT_VERSION_V1) == []
+
+
+class TestV2Indexing:
+    def _lookup(self, payload):
+        lookup = MorphoVaultLookup()
+        lookup._build_indices(payload)
+        return lookup
+
+    def test_v2_vault_indexed_with_version_by_address(self):
+        lookup = self._lookup(
+            [
+                {
+                    "address": STEAK_V2_BASE,
+                    "name": "Steakhouse Prime USDC",
+                    "symbol": "steakUSDC",
+                    "chain": {"id": 8453},
+                    "asset": _base_usdc_asset(),
+                    "vault_version": "v2",
+                }
+            ]
+        )
+        meta = lookup.lookup_by_address(STEAK_V2_BASE, "base")
+        assert meta is not None
+        assert meta.vault_version == VAULT_VERSION_V2
+        assert meta.underlying_symbol == "USDC"
+
+    def test_untagged_entry_defaults_to_v1(self):
+        # A disk cache written before the V2 query existed has no tag.
+        lookup = self._lookup(
+            [
+                {
+                    "address": STEAK_V1_BASE,
+                    "name": "Steakhouse USDC",
+                    "symbol": "steakUSDC",
+                    "chain": {"id": 8453},
+                    "asset": _base_usdc_asset(),
+                }
+            ]
+        )
+        meta = lookup.lookup_by_address(STEAK_V1_BASE, "base")
+        assert meta is not None
+        assert meta.vault_version == VAULT_VERSION_V1
+
+    def test_symbol_collision_across_generations_keeps_v1_but_addresses_stay_exact(self):
+        payload = [
+            {
+                "address": STEAK_V1_BASE,
+                "name": "Steakhouse USDC",
+                "symbol": "steakUSDC",
+                "chain": {"id": 8453},
+                "asset": _base_usdc_asset(),
+                "vault_version": "v1",
+            },
+            {
+                "address": STEAK_V2_BASE,
+                "name": "Steakhouse Prime USDC",
+                "symbol": "steakUSDC",
+                "chain": {"id": 8453},
+                "asset": _base_usdc_asset(),
+                "vault_version": "v2",
+            },
+        ]
+        lookup = self._lookup(payload)
+        by_symbol = lookup.lookup_by_symbol("steakUSDC", "base")
+        assert by_symbol is not None and by_symbol.address == STEAK_V1_BASE  # v1 fetched first wins
+        assert lookup.lookup_by_address(STEAK_V2_BASE, "base").vault_version == VAULT_VERSION_V2
+        assert lookup.lookup_by_address(STEAK_V1_BASE, "base").vault_version == VAULT_VERSION_V1
+
+
+class TestFetchMergesGenerations:
+    def test_fetch_merges_v1_and_v2_and_tolerates_one_failing_root(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("almanak.connectors.morpho_vault.gateway.vault_lookup.CACHE_PATH", tmp_path / "cache.json")
+        lookup = MorphoVaultLookup()
+        lookup._cache_path = tmp_path / "cache.json"
+
+        async def fake_generation(session, root_field, query, version):
+            if root_field == "vaults":
+                return None  # the v1 query failed (HTTP error / GraphQL errors / transport)
+            return tag_vault_payload(
+                {"data": {"vaultV2s": {"items": [{"address": STEAK_V2_BASE, "symbol": "steakUSDC"}]}}},
+                root_field,
+                version,
+            )
+
+        with patch.object(lookup, "_fetch_generation", side_effect=fake_generation):
+            merged = asyncio.run(lookup._fetch_from_network())
+
+        # The surviving generation is served in memory ...
+        assert merged == [{"address": STEAK_V2_BASE, "symbol": "steakUSDC", "vault_version": "v2"}]
+        # ... but a PARTIAL index is never persisted: a cached v2-only list would
+        # hide every v1 symbol/address for the 24h TTL, long after the API recovered.
+        assert not (tmp_path / "cache.json").exists()
+
+    def test_malformed_successful_payload_is_a_failed_generation_and_withholds_the_cache(self, tmp_path, monkeypatch):
+        """A 200 with ``{"data": {}}`` (or a non-list ``items``) must not count as an empty answer."""
+        import asyncio as _asyncio
+        from contextlib import asynccontextmanager
+
+        monkeypatch.setattr("almanak.connectors.morpho_vault.gateway.vault_lookup.CACHE_PATH", tmp_path / "cache.json")
+        lookup = MorphoVaultLookup()
+        lookup._cache_path = tmp_path / "cache.json"
+
+        class _Resp:
+            status = 200
+
+            def __init__(self, payload):
+                self._payload = payload
+
+            async def json(self, content_type=None):
+                return self._payload
+
+        class _Session:
+            def __init__(self, payloads):
+                self._payloads = payloads
+
+            @asynccontextmanager
+            async def post(self, url, json, timeout):
+                yield _Resp(self._payloads[json["query"]])
+
+        from almanak.connectors.morpho_vault.gateway.vault_lookup import _MORPHO_VAULT_QUERIES
+
+        (v1_root, v1_query, _), (v2_root, v2_query, _) = _MORPHO_VAULT_QUERIES
+        session = _Session(
+            {
+                v1_query: {"data": {}},  # structurally malformed "success"
+                v2_query: {"data": {v2_root: {"items": [{"address": STEAK_V2_BASE, "symbol": "steakUSDC"}]}}},
+            }
+        )
+        assert _asyncio.run(lookup._fetch_generation(session, v1_root, v1_query, "v1")) is None
+        assert _asyncio.run(lookup._fetch_generation(session, v2_root, v2_query, "v2")) == [
+            {"address": STEAK_V2_BASE, "symbol": "steakUSDC", "vault_version": "v2"}
+        ]
+        non_list = _Session({v1_query: {"data": {v1_root: {"items": {"oops": 1}}}}})
+        assert _asyncio.run(lookup._fetch_generation(non_list, v1_root, v1_query, "v1")) is None
+
+        real_fetch_generation = lookup._fetch_generation  # bound before patching, else the fake recurses
+
+        async def fake_generation(session_, root_field, query, version):
+            return await real_fetch_generation(session, root_field, query, version)
+
+        with patch.object(lookup, "_fetch_generation", side_effect=fake_generation):
+            merged = _asyncio.run(lookup._fetch_from_network())
+        assert merged == [{"address": STEAK_V2_BASE, "symbol": "steakUSDC", "vault_version": "v2"}]
+        assert not (tmp_path / "cache.json").exists()
+
+    def test_fetch_writes_cache_only_when_both_generations_answer(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("almanak.connectors.morpho_vault.gateway.vault_lookup.CACHE_PATH", tmp_path / "cache.json")
+        lookup = MorphoVaultLookup()
+        lookup._cache_path = tmp_path / "cache.json"
+
+        async def fake_generation(session, root_field, query, version):
+            if root_field == "vaults":
+                return []  # answered, genuinely empty
+            return tag_vault_payload(
+                {"data": {"vaultV2s": {"items": [{"address": STEAK_V2_BASE, "symbol": "steakUSDC"}]}}},
+                root_field,
+                version,
+            )
+
+        with patch.object(lookup, "_fetch_generation", side_effect=fake_generation):
+            merged = asyncio.run(lookup._fetch_from_network())
+
+        assert merged == [{"address": STEAK_V2_BASE, "symbol": "steakUSDC", "vault_version": "v2"}]
+        assert json.loads((tmp_path / "cache.json").read_text()) == merged
+
+    def test_fetch_returns_none_when_both_roots_fail(self, tmp_path, monkeypatch):
+        lookup = MorphoVaultLookup()
+        lookup._cache_path = tmp_path / "cache.json"
+
+        async def nothing(session, root_field, query, version):
+            return None
+
+        with patch.object(lookup, "_fetch_generation", side_effect=nothing):
+            assert asyncio.run(lookup._fetch_from_network()) is None
+        assert not (tmp_path / "cache.json").exists()
+
+
+class TestResolverPublishesShareDecimals:
+    """The gateway resolver must publish the SHARE token's decimals, not the underlying's."""
+
+    def test_resolved_token_carries_share_decimals_with_a_6_decimal_underlying(self):
+        from almanak.connectors.morpho_vault.gateway.vault_lookup import MorphoVaultToken, share_decimals_for
+        from almanak.gateway.services.token_service import TokenServiceServicer
+
+        meta = MorphoVaultToken(
+            address="0xbeef0e0834849acc03f0089f01f4f1eeb06873c9",
+            symbol="steakUSDC",
+            name="Steakhouse Prime USDC",
+            decimals=share_decimals_for(6),
+            chain="base",
+            underlying_symbol="USDC",
+            underlying_address="0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+            underlying_decimals=6,
+            vault_version="v2",
+        )
+        resolved = TokenServiceServicer._build_resolved_from_morpho(None, meta)  # the builder does not touch self
+        assert resolved.decimals == 18
+        assert resolved.symbol == "steakUSDC"
+        assert resolved.is_verified is True
+        # 10**18 raw shares is ONE share, not a trillion.
+        assert 10**18 / 10**resolved.decimals == 1
+
+
+class TestMissingUnderlyingDecimalsIsNotGuessed:
+    """Empty != Zero: an entry whose payload lacks the underlying's decimals is skipped, never defaulted."""
+
+    def test_entry_without_asset_decimals_is_skipped_loudly(self, caplog):
+        import copy
+        import logging
+
+        entry = copy.deepcopy(SAMPLE_VAULTS[0])
+        entry["asset"].pop("decimals")
+        lookup = MorphoVaultLookup()
+        with caplog.at_level(logging.WARNING):
+            lookup._build_indices([entry])
+        assert lookup.lookup_by_symbol(entry["symbol"], "ethereum") is None
+        assert any("underlying decimals missing" in rec.getMessage() for rec in caplog.records)
+
+    def test_boolean_decimals_is_treated_as_missing(self):
+        import copy
+
+        entry = copy.deepcopy(SAMPLE_VAULTS[0])
+        entry["asset"]["decimals"] = True
+        lookup = MorphoVaultLookup()
+        lookup._build_indices([entry])
+        assert lookup.lookup_by_symbol(entry["symbol"], "ethereum") is None

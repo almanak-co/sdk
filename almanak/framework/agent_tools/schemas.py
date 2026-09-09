@@ -265,11 +265,28 @@ class ResolvePoolAddressRequest(BaseModel):
 
 class ResolvePoolAddressResponse(BaseModel):
     address: str
-    kind: str = Field(default="unknown", description="pool | erc20 | unknown")
-    family: str | None = Field(default=None, description="clamm | solidly | curve (pools only)")
-    protocol: str | None = Field(
-        default=None, description="Factory-verified protocol slug; family-level hint when unverified"
+    kind: str = Field(default="unknown", description="pool | erc4626_vault | erc20 | unknown")
+    family: str | None = Field(
+        default=None, description="clamm | solidly | curve (pools) | erc4626 (vault share tokens)"
     )
+    protocol: str | None = Field(
+        default=None,
+        description=(
+            "Factory-verified protocol slug; family-level hint when unverified. "
+            "For erc4626_vault: 'metamorpho' when the contract answers a Morpho generation fingerprint."
+        ),
+    )
+    vault_version: str | None = Field(
+        default=None,
+        description=(
+            "erc4626_vault only: 'v1' (MetaMorpho, supported) | 'v2' (Morpho Vault V2, redeem path "
+            "not yet supported) | null (non-Morpho ERC-4626)"
+        ),
+    )
+    underlying_asset: str | None = Field(default=None, description="erc4626_vault only: asset() address")
+    underlying_symbol: str | None = None
+    underlying_decimals: int | None = None
+    total_assets: int | None = Field(default=None, description="erc4626_vault only: totalAssets() in underlying wei")
     token0: str | None = None
     token1: str | None = None
     fee_tier: int | None = None

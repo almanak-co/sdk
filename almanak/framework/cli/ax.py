@@ -1865,6 +1865,14 @@ def lending_reserves(ctx, protocol, asset, collateral, loan):
     ``morpho_market_id``); the LTV column is the market's LLTV. Never leave a
     market-id key empty in config: an empty id fails ``strat check``.
 
+    NOT every "Morpho" product is a market. A share/receipt token such as
+    ``steakUSDC`` / ``gtUSDC`` (DeFiLlama lists these under the same
+    "morpho-blue" project) is a curated VAULT that allocates across many
+    markets and has NO market id. Identify it with ``ax pool <address>``
+    (kind ``erc4626_vault``), verify it with ``ax vault <address>``, and
+    target it with ``Intent.vault_deposit(protocol="metamorpho",
+    vault_address=...)`` — never ask for a market id for a vault.
+
     Network follows the group-level ``--network`` (which also controls
     gateway auto-start): use ``almanak ax --network anvil lending-reserves``
     for a local Anvil fork.
@@ -1942,6 +1950,10 @@ def lending_market(ctx, protocol, market_id):
     a mismatch or non-existent market is a hard error, never a fabricated
     record. This is the ONLY supported path from a discovered candidate to a
     market_id you can safely pin in config (e.g. `morpho_market_id`).
+
+    Vaults are not markets: a Morpho vault share token (``steakUSDC``,
+    ``gtUSDC``, ...) has no market id to verify here. Its promotion step is
+    ``ax vault <address>`` and its intent is ``vault_deposit``.
 
     \b
     Examples:
@@ -3383,6 +3395,426 @@ def _pool_title_suffix(protocol: str, fee_tier: int) -> str:
     return f"{fee_tier / 10000:.2f}%"
 
 
+_VAULT_INCONCLUSIVE_HINT = (
+    "Inconclusive: the vault may still exist on-chain. Retry when the gateway is "
+    "reachable; report this as 'could not verify', never as 'this is not a vault'."
+)
+
+
+@ax.command("vault")
+@click.argument("address")
+@_chain_option
+@click.pass_context
+def vault(ctx, address):
+    """Verify one ERC-4626 vault address on-chain and print its generation + listing.
+
+    The vault counterpart of ``ax lending-market``. ``ax pool <address>``
+    (or the agent's ``resolve_pool_address`` tool) DISCOVERS that an address
+    is a vault share token (kind ``erc4626_vault``); this command is the
+    promotion step before you pin ``vault_address`` in a strategy config:
+
+    \b
+      1. on-chain: ``asset()`` / ``totalAssets()`` answer (ERC-4626 shape) and
+         the Morpho generation fingerprint — ``withdrawQueueLength()`` for
+         MetaMorpho v1, ``adaptersLength()`` for Morpho Vault V2 — is read
+         from the contract itself, never inferred from the symbol;
+      2. listing: the gateway's Morpho vault index (Morpho's own listed-vault
+         API, v1 + V2) is asked whether it knows this exact address;
+      3. allocation: v1 vaults enumerate their Morpho Blue markets on-chain
+         (``withdrawQueue``), each printed with its verified market id; V2
+         vaults hold markets behind adapters, which are listed by address.
+
+    A vault has NO market id. The intent for a verified vault is
+    ``Intent.vault_deposit(protocol="metamorpho", vault_address=<address>)``.
+    Morpho Vault V2 is reported but flagged: the morpho_vault connector's
+    redeem-all path reads ``maxRedeem()``, which V2 returns as 0 by design,
+    so V2 is NOT deployable until the connector is V2-aware.
+
+    \b
+    Examples:
+        almanak ax --chain base vault 0xbeef0e0834849acc03f0089f01f4f1eeb06873c9
+        almanak ax --chain base --json vault 0xc1256Ae5FF1cf2719D4937adb3bbCCab2E00A2Ca
+
+    \b
+    Exit codes:
+        0 -- ERC-4626 vault verified on-chain (record printed; check `listed`
+             and `deployable` before pinning).
+        1 -- the address is NOT an ERC-4626 vault (pool / plain ERC-20 / unknown).
+        2 -- invalid input (not a 0x-prefixed 20-byte address).
+        4 -- could not verify: gateway unavailable. NOT evidence the address
+             is not a vault.
+    """
+    import json as _json
+
+    from almanak.framework.cli.ax_render import render_error
+
+    json_output = ctx.obj["json_output"]
+    chain = ctx.obj["chain"]
+
+    def _emit_failure(status: str, error: str, exit_code: int, hint: str | None = None) -> NoReturn:
+        if json_output:
+            payload: dict = {"status": status, "chain": chain, "address": address, "error": error}
+            if hint:
+                payload["hint"] = hint
+            click.echo(_json.dumps(payload, indent=2))
+        else:
+            render_error(f"{status}: {error}", json_output=False)
+            if hint:
+                click.echo(hint, err=True)
+        sys.exit(exit_code)
+
+    body = address.removeprefix("0x").removeprefix("0X")
+    if body == address or len(body) != 40 or not all(c in "0123456789abcdefABCDEF" for c in body):
+        _emit_failure("invalid", f"{address!r} is not a 0x-prefixed 20-byte contract address", 2)
+    normalized = "0x" + body.lower()
+
+    try:
+        identity = _run_tool(ctx, "resolve_pool_address", {"address": normalized, "chain": chain})
+    except Exception as exc:
+        _emit_failure("unavailable", f"unexpected CLI failure: {exc}", 4, hint=_VAULT_INCONCLUSIVE_HINT)
+    if _response_is_error(identity):
+        err = identity.error
+        message = getattr(err, "message", None) or str(err)
+        _emit_failure("unavailable", message, 4, hint=_VAULT_INCONCLUSIVE_HINT)
+    data = identity.data if isinstance(identity.data, dict) else {}
+    if data.get("kind") != "erc4626_vault":
+        _emit_failure(
+            "not_a_vault",
+            f"{normalized} on {chain} identified as kind={data.get('kind', 'unknown')!r}"
+            + (f" (protocol {data['protocol']})" if data.get("protocol") else "")
+            + " — not an ERC-4626 vault. For a pool use `ax pool`; for a Morpho Blue market use `ax lending-market`.",
+            1,
+        )
+
+    listing = _vault_listing(ctx, normalized, chain, data.get("symbol"))
+    allocation = _vault_allocation(ctx, normalized, chain, data.get("vault_version"))
+
+    version = data.get("vault_version")
+    deployable = version == "v1"
+    if version == "v2":
+        deployable_note = (
+            "Morpho Vault V2: NOT deployable yet — the morpho_vault connector sizes redeem-all from "
+            "maxRedeem(), which V2 returns as 0 by design (deposit would succeed, every automated "
+            "redeem/teardown would fail). Offer a v1 vault or direct Morpho Blue market supply instead."
+        )
+    elif version == "v1":
+        deployable_note = "MetaMorpho v1: supported by the morpho_vault connector (vault_deposit / vault_redeem)."
+    else:
+        deployable_note = (
+            "Generic ERC-4626 vault (no Morpho fingerprint): check the supported vault connectors "
+            "(lagoon, yearn, beefy, ...) before targeting it."
+        )
+
+    record = {
+        "status": "found",
+        "chain": chain,
+        "address": normalized,
+        "kind": "erc4626_vault",
+        "protocol": data.get("protocol"),
+        "vault_version": version,
+        "symbol": data.get("symbol"),
+        "decimals": data.get("decimals"),
+        "underlying_asset": data.get("underlying_asset"),
+        "underlying_symbol": data.get("underlying_symbol"),
+        "underlying_decimals": data.get("underlying_decimals"),
+        "total_assets": data.get("total_assets"),
+        "listed": listing["listed"],
+        "listing": listing,
+        "allocation": allocation,
+        "deployable": deployable,
+        "deployable_note": deployable_note,
+        "intent": (
+            f'Intent.vault_deposit(protocol="metamorpho", vault_address="{normalized}", chain="{chain}", ...)'
+            if version in ("v1", "v2")
+            else None
+        ),
+        "verified_on_chain": True,
+    }
+    if json_output:
+        click.echo(_json.dumps(record, indent=2))
+    else:
+        _render_vault_human(record)
+
+
+def _vault_listing(ctx: click.Context, address: str, chain: str, symbol: str | None) -> dict:
+    """Ask the gateway's Morpho vault index whether it lists this exact address.
+
+    Goes through ``TokenService.ResolveToken`` with the vault *address*
+    (the gateway owns Morpho API egress and indexes listed vaults by
+    address). Symbol lookup is not used: curator-chosen symbols collide
+    (several ``steakUSDC`` vaults on Base) and would report a sibling.
+    ``listed`` is three-valued: ``True`` only when the Morpho index
+    returns this address, ``False`` when the index misses it, ``None``
+    when the address resolved through a non-Morpho source (cannot confirm
+    listing from that provenance).
+    """
+    result: dict = {"listed": None, "source": None, "resolved_address": None, "note": None}
+    try:
+        channel, error_note = _acquire_gateway_channel(ctx)
+    except Exception as exc:  # noqa: BLE001 — listing is advisory; the on-chain verdict stands
+        result["note"] = f"gateway unavailable: {exc}"
+        return result
+    if channel is None:
+        result["note"] = f"gateway unavailable: {error_note or 'no channel'}"
+        return result
+    try:
+        from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
+
+        stub = gateway_pb2_grpc.TokenServiceStub(channel)
+        response = stub.ResolveToken(gateway_pb2.ResolveTokenRequest(token=address, chain=chain), timeout=30.0)
+    except Exception as exc:  # noqa: BLE001 — advisory
+        result["note"] = f"listing lookup failed: {exc}"
+        return result
+    finally:
+        _close_channel(channel)
+
+    if not response.success:
+        result["listed"] = False
+        label = symbol or address
+        result["note"] = f"{label!r} not in the gateway's Morpho listed-vault index on {chain}"
+        return result
+    resolved = (response.address or "").lower()
+    result["source"] = response.source or None
+    result["resolved_address"] = resolved or None
+    if resolved == address.lower() and response.source == _MORPHO_VAULT_LOOKUP_SOURCE:
+        result["listed"] = True
+        return result
+    if resolved == address.lower():
+        # Resolved, but not via the Morpho listed-vault index — a static or
+        # on-chain cache hit cannot confirm Morpho listing of this address.
+        result["listed"] = None
+        result["note"] = f"address resolved via {response.source!r}, not the Morpho vault index"
+        return result
+    result["listed"] = None
+    result["note"] = (
+        f"address lookup resolved a different token ({resolved}) — listing of THIS address "
+        "cannot be confirmed; verify it on app.morpho.org"
+    )
+    return result
+
+
+# The generation fingerprints (withdrawQueueLength / adaptersLength) come from
+# the identity probe's canonical home so the CLI can never disagree with the
+# probe that decided the vault's generation.
+from almanak.connectors._strategy_base.pool_identity_base import (  # noqa: E402
+    METAMORPHO_V1_WITHDRAW_QUEUE_LENGTH_SELECTOR as _MORPHO_V1_WITHDRAW_QUEUE_LENGTH,
+)
+from almanak.connectors._strategy_base.pool_identity_base import (
+    MORPHO_BLUE_LENDING_PROTOCOL as _MORPHO_BLUE_LENDING_PROTOCOL,
+)
+from almanak.connectors._strategy_base.pool_identity_base import (
+    MORPHO_VAULT_LOOKUP_SOURCE as _MORPHO_VAULT_LOOKUP_SOURCE,
+)
+from almanak.connectors._strategy_base.pool_identity_base import (
+    MORPHO_VAULT_V2_ADAPTERS_LENGTH_SELECTOR as _MORPHO_V2_ADAPTERS_LENGTH,
+)
+
+_MORPHO_V1_WITHDRAW_QUEUE = "0x62518ddf"  # selector of withdrawQueue(uint256)
+_MORPHO_V2_ADAPTERS = "0x4ef501ac"  # selector of adapters(uint256)
+_MORPHO_V2_LIQUIDITY_ADAPTER = "0xad468d11"  # selector of liquidityAdapter()
+_MAX_ENUMERATED_ENTRIES = 32
+
+
+def _make_word_reader(client, chain: str, address: str):
+    """Return ``word(selector, index=None)`` → raw hex or ``None`` when the read reverts / is empty."""
+
+    def _word(selector: str, index: int | None = None) -> str | None:
+        data = selector if index is None else selector + f"{index:064x}"
+        try:
+            raw = client.eth_call(chain, address, data)
+        except Exception:  # noqa: BLE001 — a reverting read is "not enumerable", not a crash
+            return None
+        if not raw or raw == "0x":
+            return None
+        return raw
+
+    return _word
+
+
+def _enumerate_words(
+    word, length_selector: str, item_selector: str, width_hex: int
+) -> tuple[list[str] | None, bool, int]:
+    """Read ``length()`` then ``item(i)`` for i < min(length, cap).
+
+    Returns ``(entries, truncated, unread)``; ``entries`` is ``None`` when the
+    length read did not answer (the selector is not this generation's),
+    ``truncated`` is True when the on-chain length exceeded the enumeration
+    cap, and ``unread`` counts item reads that did not answer — an entry the
+    chain holds but this listing could not show. Callers must surface both so
+    a partial list is never presented as complete.
+    """
+    length_hex = word(length_selector)
+    if length_hex is None:
+        return None, False, 0
+    total = int(length_hex, 16)
+    count = min(total, _MAX_ENUMERATED_ENTRIES)
+    entries: list[str] = []
+    unread = 0
+    for i in range(count):
+        raw = word(item_selector, i)
+        if raw:
+            entries.append("0x" + raw.removeprefix("0x")[-width_hex:])
+        else:
+            unread += 1
+    return entries, total > count, unread
+
+
+def _partial_listing_note(label: str, truncated: bool, unread: int) -> str | None:
+    """One sentence naming why an enumerated list is incomplete, or ``None`` when it is complete."""
+    parts = []
+    if truncated:
+        parts.append(f"{label} truncated to the first {_MAX_ENUMERATED_ENTRIES} entries")
+    if unread:
+        noun, verb = (f"{label} entry", "is") if unread == 1 else (f"{label} entries", "are")
+        parts.append(f"{unread} {noun} did not answer and {verb} missing from this listing")
+    return "; ".join(parts) if parts else None
+
+
+def _vault_allocation(ctx: click.Context, address: str, chain: str, vault_version: str | None) -> dict:
+    """Enumerate what the vault holds, from the contract itself.
+
+    v1: ``withdrawQueue(i)`` market ids, each promoted through the gateway's
+    ``GetLendingMarket`` (the same recompute check as ``ax lending-market``)
+    over ONE channel. V2: ``adapters(i)`` + ``liquidityAdapter()`` — market-level
+    allocation is not readable on the vault for V2 (it lives in the adapter),
+    so only the adapter addresses are reported.
+    """
+    result: dict = {"source": "on-chain", "markets": [], "adapters": [], "liquidity_adapter": None, "note": None}
+    if vault_version not in ("v1", "v2"):
+        result["note"] = "allocation enumeration is only implemented for Morpho generations"
+        return result
+    try:
+        _executor, client = _get_executor(ctx)
+    except Exception as exc:  # noqa: BLE001 — advisory
+        result["note"] = f"gateway unavailable: {exc}"
+        return result
+    word = _make_word_reader(client, chain, address)
+
+    if vault_version == "v1":
+        market_ids, truncated, unread = _enumerate_words(
+            word, _MORPHO_V1_WITHDRAW_QUEUE_LENGTH, _MORPHO_V1_WITHDRAW_QUEUE, 64
+        )
+        if market_ids is None:
+            result["note"] = "withdrawQueueLength() did not answer"
+            return result
+        result["markets"] = _verify_markets(ctx, chain, market_ids)
+        result["note"] = _partial_listing_note("withdrawQueue", truncated, unread)
+        return result
+
+    adapters, truncated, unread = _enumerate_words(word, _MORPHO_V2_ADAPTERS_LENGTH, _MORPHO_V2_ADAPTERS, 40)
+    if adapters is None:
+        result["note"] = "adaptersLength() did not answer"
+        return result
+    result["adapters"] = adapters
+    liq = word(_MORPHO_V2_LIQUIDITY_ADAPTER)
+    if liq:
+        result["liquidity_adapter"] = "0x" + liq.removeprefix("0x")[-40:]
+    partial = _partial_listing_note("adapters", truncated, unread)
+    result["note"] = (
+        "Morpho Vault V2 holds its markets behind adapters; per-market allocation is not readable "
+        "on the vault (see the vault on app.morpho.org for the curator's breakdown)."
+    ) + (f" {partial}." if partial else "")
+    return result
+
+
+def _market_record(market_id: str, response) -> dict:
+    """Map one ``GetLendingMarket`` response onto the allocation record (never fabricate params)."""
+    record: dict = {"market_id": market_id, "verified": False}
+    if not response.success or not response.market.verified:
+        record["error"] = response.error or "unverified"
+        return record
+    item = response.market
+    record.update(
+        {
+            "verified": True,
+            "collateral_symbol": item.collateral_symbol or None,
+            "collateral_token": item.collateral_token or None,
+            "loan_symbol": item.loan_symbol or None,
+            "loan_token": item.loan_token or None,
+            "lltv_bps": item.lltv_bps,
+        }
+    )
+    return record
+
+
+def _verify_markets(ctx: click.Context, chain: str, market_ids: list[str]) -> list[dict]:
+    """Promote every enumerated market id through ``GetLendingMarket`` over one gateway channel."""
+    if not market_ids:
+        return []
+    try:
+        channel, error_note = _acquire_gateway_channel(ctx)
+    except Exception as exc:  # noqa: BLE001 — advisory
+        channel, error_note = None, str(exc)
+    if channel is None:
+        note = f"gateway unavailable: {error_note or 'no channel'}"
+        return [{"market_id": mid, "verified": False, "error": note} for mid in market_ids]
+    from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
+
+    stub = gateway_pb2_grpc.MarketServiceStub(channel)
+    records: list[dict] = []
+    try:
+        for market_id in market_ids:
+            try:
+                response = stub.GetLendingMarket(
+                    gateway_pb2.GetLendingMarketRequest(
+                        protocol=_MORPHO_BLUE_LENDING_PROTOCOL, chain=chain, market_id=market_id
+                    ),
+                    timeout=30.0,
+                )
+            except Exception as exc:  # noqa: BLE001 — advisory
+                details = getattr(exc, "details", None)
+                records.append(
+                    {
+                        "market_id": market_id,
+                        "verified": False,
+                        "error": str(details()) if callable(details) else str(exc),
+                    }
+                )
+                continue
+            records.append(_market_record(market_id, response))
+    finally:
+        _close_channel(channel)
+    return records
+
+
+def _render_vault_human(record: dict) -> None:
+    """Human-readable record for `ax vault`."""
+    gen = record.get("vault_version")
+    gen_label = "MetaMorpho v1" if gen == "v1" else "Morpho Vault V2" if gen == "v2" else "generic ERC-4626"
+    click.echo(f"{record['address']} on {record['chain']} — ERC-4626 vault verified on-chain [{gen_label}]")
+    click.echo(f"  symbol        {record.get('symbol') or '?'} ({record.get('decimals')} decimals)")
+    click.echo(
+        f"  underlying    {record.get('underlying_symbol') or '?'} ({record.get('underlying_asset')}, "
+        f"{record.get('underlying_decimals')} decimals)"
+    )
+    click.echo(f"  totalAssets   {record.get('total_assets')}")
+    listing = record.get("listing") or {}
+    listed = record.get("listed")
+    listed_label = "yes" if listed is True else "no" if listed is False else "unknown"
+    click.echo(f"  listed        {listed_label}" + (f" — {listing['note']}" if listing.get("note") else ""))
+    alloc = record.get("allocation") or {}
+    if alloc.get("markets"):
+        click.echo("  markets (withdrawQueue, verified via GetLendingMarket):")
+        for m in alloc["markets"]:
+            if m.get("verified"):
+                click.echo(
+                    f"    {m['market_id']}  {m.get('collateral_symbol') or '?'}/{m.get('loan_symbol') or '?'}  "
+                    f"lltv {m.get('lltv_bps', 0) / 100:.2f}%"
+                )
+            else:
+                click.echo(f"    {m['market_id']}  UNVERIFIED — {m.get('error')}")
+    if alloc.get("adapters"):
+        click.echo("  adapters      " + ", ".join(alloc["adapters"]))
+    if alloc.get("liquidity_adapter"):
+        click.echo(f"  liquidity     {alloc['liquidity_adapter']}")
+    if alloc.get("note"):
+        click.echo(f"  note          {alloc['note']}")
+    click.echo(f"  deployable    {'yes' if record.get('deployable') else 'NO'} — {record.get('deployable_note')}")
+    click.echo(
+        f"  intent        {record.get('intent') or '(no Almanak vault connector fingerprint — see deployable_note)'}"
+    )
+
+
 def _looks_like_pool_address(value: str) -> bool:
     body = value.removeprefix("0x").removeprefix("0X")
     if body == value:  # the documented contract requires the 0x prefix
@@ -3426,6 +3858,7 @@ def pool(ctx, token_a, token_b, fee_tier, protocol):
         almanak ax pool WBTC WETH                      # deepest WBTC-WETH pool
         almanak ax pool USDC ETH --fee-tier 500         # exactly the 0.05% tier
         almanak ax pool 0x0b1c...2d69                   # identify this address
+        almanak ax pool 0xbeef...73c9                   # -> kind erc4626_vault (a Morpho vault, not a market)
         almanak ax pool WBTC WETH --json                # JSON output
     """
     from almanak.framework.cli.ax_render import render_error, render_result

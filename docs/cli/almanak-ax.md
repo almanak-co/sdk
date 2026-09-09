@@ -233,5 +233,6 @@ Commands:
   swap              Swap tokens on a DEX.
   tools             List all available tools in the catalog.
   unwrap            Unwrap wrapped native tokens (e.g.
+  vault             Verify one ERC-4626 vault address on-chain and print...
 ```
 

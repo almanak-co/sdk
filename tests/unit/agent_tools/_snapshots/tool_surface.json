@@ -180,7 +180,7 @@
       "name": "get_pool_state"
     },
     {
-      "description": "Identify a pool/receipt address of unknown kind: which protocol it belongs to, its pair, fee tier or pool type, LP token, and whether the protocol's factory or registry acknowledges it.",
+      "description": "Identify a pool/receipt address of unknown kind: which protocol it belongs to, its pair, fee tier or pool type, LP token, and whether the protocol's factory or registry acknowledges it. Also recognises ERC-4626 vault share tokens (kind=erc4626_vault, e.g. Morpho vaults): the vault is the vault_deposit target, not a lending market \u2014 no market_id exists for it.",
       "inputSchema": {
         "description": "Identify and validate a pool/receipt address of unknown kind (ALM-3368).",
         "properties": {
@@ -1988,7 +1988,7 @@
     },
     {
       "function": {
-        "description": "Identify a pool/receipt address of unknown kind: which protocol it belongs to, its pair, fee tier or pool type, LP token, and whether the protocol's factory or registry acknowledges it.",
+        "description": "Identify a pool/receipt address of unknown kind: which protocol it belongs to, its pair, fee tier or pool type, LP token, and whether the protocol's factory or registry acknowledges it. Also recognises ERC-4626 vault share tokens (kind=erc4626_vault, e.g. Morpho vaults): the vault is the vault_deposit target, not a lending market \u2014 no market_id exists for it.",
         "name": "resolve_pool_address",
         "parameters": {
           "description": "Identify and validate a pool/receipt address of unknown kind (ALM-3368).",

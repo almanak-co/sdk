@@ -225,7 +225,9 @@ _BUILTIN_TOOLS: list[ToolDefinition] = [
         name="resolve_pool_address",
         description=(
             "Identify a pool/receipt address of unknown kind: which protocol it belongs to, its pair, "
-            "fee tier or pool type, LP token, and whether the protocol's factory or registry acknowledges it."
+            "fee tier or pool type, LP token, and whether the protocol's factory or registry acknowledges it. "
+            "Also recognises ERC-4626 vault share tokens (kind=erc4626_vault, e.g. Morpho vaults): the vault "
+            "is the vault_deposit target, not a lending market — no market_id exists for it."
         ),
         category=ToolCategory.DATA,
         risk_tier=RiskTier.NONE,

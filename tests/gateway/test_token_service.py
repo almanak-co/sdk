@@ -313,6 +313,35 @@ class TestResolveToken:
             assert response.decimals == 6
 
     @pytest.mark.asyncio
+    async def test_resolve_evm_address_miss_hits_morpho_listed_index(self, token_service, mock_context):
+        """ResolveToken consults the Morpho address index when the resolver misses an EVM address."""
+        vault = "0xbeef0e0834849acc03f0089f01f4f1eeb06873c9"
+        morpho_hit = gateway_pb2.TokenMetadataResponse(
+            success=True,
+            symbol="steakUSDC",
+            address=vault,
+            decimals=18,
+            name="Steakhouse USDC",
+            source="morpho_vault",
+        )
+        with (
+            patch.object(
+                token_service._resolver,
+                "resolve",
+                side_effect=TokenNotFoundError(token=vault, chain="base", reason="Not found"),
+            ),
+            patch.object(token_service, "_try_morpho_address_lookup", new=AsyncMock(return_value=morpho_hit)) as lookup,
+        ):
+            response = await token_service.ResolveToken(
+                gateway_pb2.ResolveTokenRequest(token=vault, chain="base"),
+                mock_context,
+            )
+
+        assert response is morpho_hit
+        lookup.assert_awaited_once_with(vault, "base")
+        mock_context.set_code.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_resolve_invalid_chain(self, token_service, mock_context):
         """ResolveToken returns error for invalid chain."""
         request = gateway_pb2.ResolveTokenRequest(token="USDC", chain="invalid_chain")

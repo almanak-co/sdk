@@ -1005,6 +1005,33 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
             logger.warning("Morpho symbol lookup failed for %s on %s: %s", symbol, chain, exc)
             return None
 
+    async def _try_morpho_address_lookup(self, address: str, chain: str) -> gateway_pb2.TokenMetadataResponse | None:
+        """Resolve a Morpho listed vault by exact contract address.
+
+        The Morpho vault index is address-keyed; symbol lookup collides when
+        several listed vaults share a curator symbol. Returns None on miss or
+        if the Morpho API is unavailable.
+        """
+        try:
+            morpho = await self._get_lookup("morpho_vault")
+            meta = morpho.lookup_by_address(address, chain)
+            if meta is None:
+                return None
+
+            resolved = self._build_resolved_from_morpho(meta)
+            self._resolver.register(resolved)
+            logger.info(
+                "token_dynamic_resolved_morpho address=%s chain=%s symbol=%s underlying=%s",
+                address,
+                chain,
+                meta.symbol,
+                meta.underlying_symbol,
+            )
+            return self._resolved_to_response(resolved)
+        except Exception as exc:
+            logger.warning("Morpho address lookup failed for %s on %s: %s", address, chain, exc)
+            return None
+
     def _build_resolved_from_morpho(self, meta: Any) -> ResolvedToken:
         """Build a ResolvedToken from MorphoVaultToken."""
         from datetime import UTC, datetime
@@ -1027,7 +1054,7 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
             canonical_symbol=meta.symbol,
             bridge_type=BridgeType.NATIVE,
             source="morpho_vault",
-            is_verified=True,  # Morpho whitelisted vaults are a trusted source
+            is_verified=True,  # Morpho listed vaults (v1 + V2) are a trusted source
             resolved_at=datetime.now(UTC),
         )
 
@@ -1504,11 +1531,17 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
             if result is not None:
                 return result
         else:
+            # EVM address: Morpho listed-vault index is address-keyed (symbol
+            # lookup collides across sibling vaults). Misses fall through to
+            # GetTokenMetadata / on-chain ERC-20. Symbols walk CoinGecko ->
+            # DexScreener (and protocol tiers).
             if is_evm_address:
+                morpho_response = await self._try_morpho_address_lookup(token, chain)
+                if morpho_response is not None:
+                    return morpho_response
                 return await self.GetTokenMetadata(
                     gateway_pb2.GetTokenMetadataRequest(address=token, chain=chain), context
                 )
-            # EVM: dynamic symbol lookup via CoinGecko -> DexScreener.
             try:
                 result = await self._try_evm_symbol_lookup(token, chain)
             except AmbiguousTokenError as exc:

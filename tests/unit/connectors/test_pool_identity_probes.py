@@ -254,3 +254,210 @@ def test_v4_probe_state_view_classification():
     # without any read.
     assert identify_pool_payload(spec, "base", "0x" + "11" * 20) is None
     assert identify_pool_payload(spec, "mantle", pool_id) is None
+
+
+# ERC-4626 vault probe: a Morpho vault share token must not be reported
+# as "ERC-20 only, not usable".
+
+VAULT = "0x" + "be" * 20
+UNDERLYING = "0x" + "0c" * 20
+
+
+def _string_word(text: str) -> bytes:
+    raw = text.encode()
+    return (32).to_bytes(32, "big") + len(raw).to_bytes(32, "big") + raw.ljust(32, b"\x00")
+
+
+def _erc4626_script(*, generation: str | None) -> dict:
+    from almanak.connectors._strategy_base.pool_identity_base import (
+        DECIMALS_SELECTOR,
+        ERC4626_ASSET_SELECTOR,
+        ERC4626_TOTAL_ASSETS_SELECTOR,
+        METAMORPHO_V1_WITHDRAW_QUEUE_LENGTH_SELECTOR,
+        MORPHO_VAULT_V2_ADAPTERS_LENGTH_SELECTOR,
+        SYMBOL_SELECTOR,
+    )
+
+    script = {
+        (VAULT, ERC4626_ASSET_SELECTOR): _addr(UNDERLYING),
+        (VAULT, ERC4626_TOTAL_ASSETS_SELECTOR): _word(429_847_842_881_293),
+        (VAULT, SYMBOL_SELECTOR): _string_word("steakUSDC"),
+        (VAULT, DECIMALS_SELECTOR): _word(18),
+        (UNDERLYING, SYMBOL_SELECTOR): _string_word("USDC"),
+        (UNDERLYING, DECIMALS_SELECTOR): _word(6),
+    }
+    if generation == "v1":
+        script[(VAULT, METAMORPHO_V1_WITHDRAW_QUEUE_LENGTH_SELECTOR)] = _word(5)
+    elif generation == "v2":
+        script[(VAULT, MORPHO_VAULT_V2_ADAPTERS_LENGTH_SELECTOR)] = _word(1)
+    return script
+
+
+def test_erc4626_probe_classifies_metamorpho_v1_vault():
+    from almanak.connectors._strategy_base.pool_identity_base import identify_erc4626_vault
+
+    with _patch_calls(_erc4626_script(generation="v1")):
+        payload = identify_erc4626_vault("base", VAULT)
+    assert payload is not None
+    assert payload["kind"] == "erc4626_vault"
+    assert payload["family"] == "erc4626"
+    assert payload["protocol"] == "metamorpho"
+    assert payload["vault_version"] == "v1"
+    assert payload["symbol"] == "steakUSDC"
+    assert payload["underlying_asset"] == UNDERLYING
+    assert payload["underlying_symbol"] == "USDC"
+    assert payload["underlying_decimals"] == 6
+    assert payload["total_assets"] == 429_847_842_881_293
+    assert payload["lp_token"] == VAULT
+    notes = " ".join(payload["notes"])
+    assert "vault_deposit" in notes
+    assert "market_id" in notes  # tells the agent NOT to look for one
+    assert "MetaMorpho v1" in notes
+
+
+def test_erc4626_probe_flags_morpho_vault_v2_as_not_deployable():
+    from almanak.connectors._strategy_base.pool_identity_base import identify_erc4626_vault
+
+    with _patch_calls(_erc4626_script(generation="v2")):
+        payload = identify_erc4626_vault("base", VAULT)
+    assert payload is not None
+    assert payload["protocol"] == "metamorpho"
+    assert payload["vault_version"] == "v2"
+    notes = " ".join(payload["notes"])
+    assert "Morpho Vault V2" in notes
+    assert "maxRedeem" in notes
+    assert "NOT YET SUPPORTED" in notes
+    # A V2 vault must not be handed an executable deposit intent at this scope.
+    assert 'Intent.vault_deposit(protocol="metamorpho"' not in notes
+    assert "NOT deployable yet" in notes
+
+
+def test_erc4626_probe_reports_generic_vault_without_morpho_fingerprint():
+    from almanak.connectors._strategy_base.pool_identity_base import identify_erc4626_vault
+
+    with _patch_calls(_erc4626_script(generation=None)):
+        payload = identify_erc4626_vault("base", VAULT)
+    assert payload is not None
+    assert payload["kind"] == "erc4626_vault"
+    assert payload["protocol"] is None
+    assert payload["vault_version"] is None
+    # No Morpho fingerprint ⇒ no connector is named for the deposit intent (a
+    # foreign ERC-4626 vault must not be routed to the MetaMorpho executor).
+    notes = " ".join(payload["notes"])
+    assert 'protocol="metamorpho"' not in notes
+    assert "which vault connector owns it is not established" in notes
+
+
+def test_erc4626_probe_abstains_on_plain_erc20():
+    from almanak.connectors._strategy_base.pool_identity_base import (
+        DECIMALS_SELECTOR,
+        TOTAL_SUPPLY_SELECTOR,
+        identify_erc4626_vault,
+    )
+
+    script = {
+        (WETH, DECIMALS_SELECTOR): _word(18),
+        (WETH, TOTAL_SUPPLY_SELECTOR): _word(10**24),
+    }
+    with _patch_calls(script):
+        assert identify_erc4626_vault("base", WETH) is None
+
+
+def test_erc4626_probe_abstains_when_asset_answers_but_total_assets_does_not():
+    from almanak.connectors._strategy_base.pool_identity_base import (
+        ERC4626_ASSET_SELECTOR,
+        identify_erc4626_vault,
+    )
+
+    script = {(VAULT, ERC4626_ASSET_SELECTOR): _addr(UNDERLYING)}
+    with _patch_calls(script):
+        assert identify_erc4626_vault("base", VAULT) is None
+
+
+def test_erc4626_probe_abstains_when_mandatory_read_reverts():
+    from almanak.connectors._strategy_base.pool_identity_base import (
+        ERC4626_ASSET_SELECTOR,
+        identify_erc4626_vault,
+        probe_call,
+    )
+
+    def fake_eth_call(rpc_url, to, data, timeout=10.0, *, chain=None, gateway_client=None, **kw):
+        if data == ERC4626_ASSET_SELECTOR:
+            raise ValueError("Gateway eth_call error for vault: execution reverted")
+        return None
+
+    with patch("almanak.connectors._strategy_base.pool_identity_base.eth_call", side_effect=fake_eth_call):
+        assert identify_erc4626_vault("base", VAULT) is None
+        assert probe_call("base", VAULT, ERC4626_ASSET_SELECTOR) is None
+
+
+def test_erc4626_probe_propagates_transport_failure_on_mandatory_read():
+    from almanak.connectors._strategy_base.pool_identity_base import (
+        ERC4626_ASSET_SELECTOR,
+        ERC4626_TOTAL_ASSETS_SELECTOR,
+        identify_erc4626_vault,
+        probe_call,
+    )
+
+    def fake_eth_call(rpc_url, to, data, timeout=10.0, *, chain=None, gateway_client=None, **kw):
+        if data == ERC4626_ASSET_SELECTOR:
+            return _addr(UNDERLYING)
+        if data == ERC4626_TOTAL_ASSETS_SELECTOR:
+            raise ValueError("Gateway eth_call transport error for vault: UNAVAILABLE timeout")
+        return None
+
+    with patch("almanak.connectors._strategy_base.pool_identity_base.eth_call", side_effect=fake_eth_call):
+        with pytest.raises(ValueError, match="transport"):
+            identify_erc4626_vault("base", VAULT)
+        with pytest.raises(ValueError, match="transport"):
+            probe_call("base", VAULT, ERC4626_TOTAL_ASSETS_SELECTOR)
+
+
+def test_erc4626_probe_abstains_on_malformed_gateway_payload_not_transport():
+    """A fake/broken gateway answer is not a downed RPC — fall through to ERC-20."""
+    from almanak.connectors._strategy_base.pool_identity_base import (
+        ERC4626_ASSET_SELECTOR,
+        identify_erc4626_vault,
+        probe_call,
+    )
+
+    def fake_eth_call(rpc_url, to, data, timeout=10.0, *, chain=None, gateway_client=None, **kw):
+        raise ValueError(f"Gateway eth_call failed for {to} on {chain}: fromhex() argument must be str, not MagicMock")
+
+    with patch("almanak.connectors._strategy_base.pool_identity_base.eth_call", side_effect=fake_eth_call):
+        assert identify_erc4626_vault("base", VAULT) is None
+        assert probe_call("base", VAULT, ERC4626_ASSET_SELECTOR) is None
+
+
+_HTTP_TRANSPORT_MARKERS = (
+    "too many requests",
+    "502 bad gateway",
+    "504 gateway timeout",
+    "connection aborted",
+    "server disconnected",
+    "cannot connect to host",
+    "max retries exceeded",
+)
+
+
+@pytest.mark.parametrize("marker", _HTTP_TRANSPORT_MARKERS)
+def test_looks_like_transport_classifies_http_gateway_failures(marker):
+    from almanak.connectors._strategy_base.rpc import looks_like_transport
+
+    assert looks_like_transport(f"Gateway eth_call failed: {marker}")
+    assert looks_like_transport(f"Gateway eth_call failed: {marker.upper()}")
+
+
+@pytest.mark.parametrize("marker", _HTTP_TRANSPORT_MARKERS)
+def test_probe_call_raises_on_http_gateway_transport_failures(marker):
+    from almanak.connectors._strategy_base.pool_identity_base import (
+        ERC4626_ASSET_SELECTOR,
+        probe_call,
+    )
+
+    def fake_eth_call(rpc_url, to, data, timeout=10.0, *, chain=None, gateway_client=None, **kw):
+        raise ValueError(f"Gateway eth_call failed: {marker.upper()}")
+
+    with patch("almanak.connectors._strategy_base.pool_identity_base.eth_call", side_effect=fake_eth_call):
+        with pytest.raises(ValueError, match="Gateway eth_call failed"):
+            probe_call("base", VAULT, ERC4626_ASSET_SELECTOR)

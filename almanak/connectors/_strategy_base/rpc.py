@@ -28,6 +28,7 @@ __all__ = [
     "eth_estimate_gas",
     "extract_revert_reason",
     "looks_like_revert",
+    "looks_like_transport",
 ]
 
 
@@ -244,6 +245,39 @@ def looks_like_revert(error_text: str) -> bool:
     if re.search(r"['\"]code['\"]\s*:\s*(3|-32015)\b", error_text):
         return True
     return bool(_REVERT_DATA_FIELD_RE.search(error_text))
+
+
+_TRANSPORT_MARKERS = (
+    "timeout",
+    "timed out",
+    "unavailable",
+    "transport error",
+    "rate limit",
+    "rate-limit",
+    "connection reset",
+    "connection refused",
+    "deadline_exceeded",
+    "resource_exhausted",
+    "too many requests",
+    "502 bad gateway",
+    "504 gateway timeout",
+    "connection aborted",
+    "server disconnected",
+    "cannot connect to host",
+    "max retries exceeded",
+)
+
+
+def looks_like_transport(error_text: str) -> bool:
+    """Whether a failed-call error text is a dropped question, not an EVM answer.
+
+    Identity probes must raise on these (so ``ax vault`` can exit 4) and
+    abstain on everything else — a MagicMock TypeError or a malformed hex
+    decode is not evidence the RPC is down, and treating it as transport
+    would blank ``resolve_pool_address`` instead of falling through to ERC-20.
+    """
+    lowered = error_text.lower()
+    return any(marker in lowered for marker in _TRANSPORT_MARKERS)
 
 
 def eth_call_static_probe(

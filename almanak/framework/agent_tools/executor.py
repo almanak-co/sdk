@@ -2655,9 +2655,11 @@ class ToolExecutor:
         registry — each probe claims only addresses its own factory/registry
         acknowledges, so ABI-identical forks disambiguate by provenance and a
         spoofed contract is never reported as ``verified``. Falls back to the
-        protocol-neutral ERC-20 classification, then ``unknown``.
+        protocol-neutral ERC-4626 vault classification (share tokens are the
+        vault_deposit target, never a lending market), then bare ERC-20, then
+        ``unknown``.
         """
-        from almanak.connectors._strategy_base.pool_identity_base import identify_erc20
+        from almanak.connectors._strategy_base.pool_identity_base import identify_erc20, identify_erc4626_vault
         from almanak.connectors._strategy_pool_reader_registry import POOL_READER_REGISTRY
 
         raw_address = str(args.get("address", "")).strip()
@@ -2710,9 +2712,29 @@ class ToolExecutor:
                 )
 
             if len(hex_body) == 40:
-                erc20 = identify_erc20(chain, address, gateway_client=self._client)
-                if erc20 is not None:
-                    return ToolResponse(status=ToolResponseStatus.SUCCESS, data={"address": address, **erc20})
+                # ERC-4626 before bare ERC-20: a vault share token answers the
+                # ERC-20 reads too, and the ERC-20 verdict ("receipt, not
+                # usable") is exactly the wrong answer for a vault — the vault
+                # is the vault_deposit target. Transport failures on the
+                # mandatory vault reads must not fall through to ERC-20.
+                try:
+                    vault = identify_erc4626_vault(chain, address, gateway_client=self._client)
+                    if vault is not None:
+                        return ToolResponse(status=ToolResponseStatus.SUCCESS, data={"address": address, **vault})
+                    erc20 = identify_erc20(chain, address, gateway_client=self._client)
+                    if erc20 is not None:
+                        return ToolResponse(status=ToolResponseStatus.SUCCESS, data={"address": address, **erc20})
+                except Exception:  # noqa: BLE001 — inconclusive transport, not "not a vault"
+                    logger.debug("vault/erc20 identity probe failed for %s on %s", address, chain, exc_info=True)
+                    return ToolResponse(
+                        status=ToolResponseStatus.ERROR,
+                        error=_error_payload(
+                            AgentErrorCode.RPC_FAILED,
+                            f"Identity probes could not answer for {address} on {chain} "
+                            "(vault/ERC-20 probe transport failed); retry before concluding it is not a vault.",
+                            recoverable=True,
+                        ),
+                    )
             return _UNKNOWN_SENTINEL
 
         # Hard total deadline: the serial sweep is many probes × several RPC
