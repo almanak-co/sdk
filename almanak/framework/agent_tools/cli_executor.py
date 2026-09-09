@@ -121,6 +121,13 @@ def create_cli_executor(
         default_chain=chain,
     )
 
+    # Without the channel the shared resolver is static-registry-only, so any
+    # token outside tokens.json (new issuer wrappers, long-tail ERC-20s) fails
+    # as "not found" even though the connected gateway can identify it on-chain.
+    from almanak.framework.data.tokens import get_token_resolver
+
+    get_token_resolver().set_gateway_channel(client.channel)
+
     return executor, client
 
 

@@ -333,3 +333,64 @@ class TestCreateCliExecutor:
 
         assert executor._wallet_address.startswith("0x")
         assert len(executor._wallet_address) == 42
+
+
+class TestTokenResolverGatewayWiring:
+    """``ax`` must let the shared TokenResolver reach the gateway it connected to."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh_resolver(self):
+        from almanak.framework.data.tokens.resolver import TokenResolver
+
+        TokenResolver.reset_instance()
+        yield
+        TokenResolver.reset_instance()
+
+    @patch("almanak.framework.agent_tools.cli_executor.GatewayClient")
+    def test_create_cli_executor_wires_channel(self, mock_client_cls):
+        from almanak.framework.data.tokens import get_token_resolver
+
+        mock_client = MagicMock()
+        mock_client.wait_for_ready.return_value = True
+        mock_client_cls.return_value = mock_client
+
+        create_cli_executor(chain="bsc")
+
+        assert get_token_resolver()._gateway_channel is mock_client.channel
+
+    def test_run_tool_unwires_channel_when_disconnecting_one_shot_client(self):
+        from unittest.mock import AsyncMock
+
+        from almanak.framework.cli.ax import _run_tool
+        from almanak.framework.data.tokens import get_token_resolver
+
+        get_token_resolver().set_gateway_channel(MagicMock())
+        executor = MagicMock()
+        executor.execute = AsyncMock(return_value="response")
+        client = MagicMock()
+        ctx = MagicMock()
+        ctx.obj = {"executor": executor, "client": client}
+
+        assert _run_tool(ctx, "get_pool_state", {}) == "response"
+
+        assert get_token_resolver()._gateway_channel is None
+        client.disconnect.assert_called_once()
+
+    def test_run_tool_keeps_channel_with_managed_gateway(self):
+        from unittest.mock import AsyncMock
+
+        from almanak.framework.cli.ax import _run_tool
+        from almanak.framework.data.tokens import get_token_resolver
+
+        channel = MagicMock()
+        get_token_resolver().set_gateway_channel(channel)
+        executor = MagicMock()
+        executor.execute = AsyncMock(return_value="response")
+        client = MagicMock()
+        ctx = MagicMock()
+        ctx.obj = {"executor": executor, "client": client, "managed_gateway": MagicMock()}
+
+        _run_tool(ctx, "get_pool_state", {})
+
+        assert get_token_resolver()._gateway_channel is channel
+        client.disconnect.assert_not_called()

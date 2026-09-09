@@ -233,3 +233,36 @@ class TestMcpServeGatewayMode:
 
         assert result.exit_code != 0
         assert "Invalid value" in result.output
+
+
+class TestMcpServeTokenResolverWiring:
+    """The server must run with the resolver attached to the gateway it connected to."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh_resolver(self):
+        from almanak.framework.data.tokens.resolver import TokenResolver
+
+        TokenResolver.reset_instance()
+        yield
+        TokenResolver.reset_instance()
+
+    @patch("almanak.framework.agent_tools.executor.ToolExecutor")
+    def test_channel_wired_during_run_and_cleared_on_exit(self, mock_executor_cls, fake_server, monkeypatch):
+        from almanak.framework.data.tokens import get_token_resolver
+
+        client = _mock_gateway(monkeypatch, ready=True)
+        seen: list = []
+
+        async def run(self):
+            seen.append(get_token_resolver()._gateway_channel)
+            self.ran = True
+
+        monkeypatch.setattr(fake_server, "run", run)
+
+        runner = CliRunner()
+        result = runner.invoke(almanak, ["mcp", "serve"])
+
+        assert result.exit_code == 0
+        assert seen == [client.channel]
+        assert get_token_resolver()._gateway_channel is None
+        client.disconnect.assert_called_once_with()

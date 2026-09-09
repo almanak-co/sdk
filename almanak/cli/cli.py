@@ -569,6 +569,12 @@ def mcp_serve(
             policy=policy,
         )
 
+        # Same reason as create_cli_executor: without the channel the resolver
+        # cannot identify addresses missing from the static registry on-chain.
+        from almanak.framework.data.tokens import get_token_resolver
+
+        get_token_resolver().set_gateway_channel(client.channel)
+
         server = AlmanakMCPStdioServer(executor=executor)
         asyncio.run(server.run())
     except KeyboardInterrupt:
@@ -577,6 +583,9 @@ def mcp_serve(
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
     finally:
+        from almanak.framework.data.tokens import get_token_resolver
+
+        get_token_resolver().set_gateway_channel(None)
         client.disconnect()
 
 

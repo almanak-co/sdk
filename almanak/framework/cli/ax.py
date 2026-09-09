@@ -608,6 +608,9 @@ def _run_tool(ctx: click.Context, tool_name: str, arguments: dict):
         # With a managed gateway, keep the connection alive for potential
         # follow-up commands in the same process.
         if "managed_gateway" not in ctx.obj:
+            from almanak.framework.data.tokens import get_token_resolver
+
+            get_token_resolver().set_gateway_channel(None)
             client.disconnect()
 
 
