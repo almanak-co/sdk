@@ -12,30 +12,45 @@ ERC-4626 function selectors:
 """
 
 from almanak.connectors._base.erc20_abi import ERC20_APPROVE_SELECTOR
-from almanak.connectors.morpho_vault.addresses import METAMORPHO_VAULTS
+from almanak.connectors.morpho_vault.addresses import METAMORPHO_PERMISSION_VAULTS, METAMORPHO_VAULTS
 from almanak.framework.permissions.hints import PermissionHints, StaticPermissionEntry
+
+
+def _permission_vault_rows() -> list[tuple[str, dict[str, str]]]:
+    rows = [(chain, addrs) for chain, addrs in METAMORPHO_VAULTS.items()]
+    rows.extend((extra["chain"], extra) for extra in METAMORPHO_PERMISSION_VAULTS)
+    return rows
 
 
 def _build_static_permissions() -> dict[str, list[StaticPermissionEntry]]:
     result: dict[str, list[StaticPermissionEntry]] = {}
-    for chain, addrs in METAMORPHO_VAULTS.items():
-        result[chain] = [
-            # Approve the vault to spend the underlying asset
-            StaticPermissionEntry(
-                target=addrs["underlying"].lower(),
-                label=f"ERC-20 ({addrs['underlying'][:6]}...{addrs['underlying'][-4:]})",
-                selectors={ERC20_APPROVE_SELECTOR: "approve(address,uint256)"},
-            ),
-            # Deposit into the vault
-            StaticPermissionEntry(
-                target=addrs["vault"].lower(),
-                label="MetaMorpho Vault",
-                selectors={
-                    "0x6e553f65": "deposit(uint256,address)",
-                    "0xba087652": "redeem(uint256,address,address)",
-                },
-            ),
-        ]
+    seen_targets: dict[str, set[str]] = {}
+    for chain, addrs in _permission_vault_rows():
+        chain_entries = result.setdefault(chain, [])
+        chain_seen = seen_targets.setdefault(chain, set())
+        underlying = addrs["underlying"].lower()
+        vault = addrs["vault"].lower()
+        if underlying not in chain_seen:
+            chain_seen.add(underlying)
+            chain_entries.append(
+                StaticPermissionEntry(
+                    target=underlying,
+                    label=f"ERC-20 ({addrs['underlying'][:6]}...{addrs['underlying'][-4:]})",
+                    selectors={ERC20_APPROVE_SELECTOR: "approve(address,uint256)"},
+                )
+            )
+        if vault not in chain_seen:
+            chain_seen.add(vault)
+            chain_entries.append(
+                StaticPermissionEntry(
+                    target=vault,
+                    label="MetaMorpho Vault",
+                    selectors={
+                        "0x6e553f65": "deposit(uint256,address)",
+                        "0xba087652": "redeem(uint256,address,address)",
+                    },
+                )
+            )
     return result
 
 

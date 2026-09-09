@@ -3425,14 +3425,15 @@ def vault(ctx, address):
          vaults hold markets behind adapters, which are listed by address.
 
     A vault has NO market id. The intent for a verified vault is
-    ``Intent.vault_deposit(protocol="metamorpho", vault_address=<address>)``.
-    Morpho Vault V2 is reported but flagged: the morpho_vault connector's
-    redeem-all path reads ``maxRedeem()``, which V2 returns as 0 by design,
-    so V2 is NOT deployable until the connector is V2-aware.
+    ``Intent.vault_deposit(protocol="metamorpho", vault_address=<address>)``
+    for both generations. On Morpho Vault V2 the connector sizes redeem-all
+    from ``balanceOf`` (V2's ``maxRedeem`` is 0 by design) and simulates the
+    redeem before sending; exit liquidity is served by the vault's liquidity
+    adapter and is not guaranteed, so an uncoverable redeem fails closed.
 
     \b
     Examples:
-        almanak ax --chain base vault 0xbeef0e0834849acc03f0089f01f4f1eeb06873c9
+        almanak ax --chain base vault 0xbeef0e0834849aCC03f0089F01f4F1Eeb06873C9
         almanak ax --chain base --json vault 0xc1256Ae5FF1cf2719D4937adb3bbCCab2E00A2Ca
 
     \b
@@ -3490,12 +3491,13 @@ def vault(ctx, address):
     allocation = _vault_allocation(ctx, normalized, chain, data.get("vault_version"))
 
     version = data.get("vault_version")
-    deployable = version == "v1"
+    deployable = version in ("v1", "v2")
     if version == "v2":
         deployable_note = (
-            "Morpho Vault V2: NOT deployable yet — the morpho_vault connector sizes redeem-all from "
-            "maxRedeem(), which V2 returns as 0 by design (deposit would succeed, every automated "
-            "redeem/teardown would fail). Offer a v1 vault or direct Morpho Blue market supply instead."
+            "Morpho Vault V2: supported by the morpho_vault connector (vault_deposit / vault_redeem; redeem-all "
+            "sizes from balanceOf and is simulated before send). Exit liquidity comes from idle assets plus one "
+            "liquidity adapter and is not guaranteed — an uncoverable redeem fails closed at compile time; "
+            "forceDeallocate is not automated."
         )
     elif version == "v1":
         deployable_note = "MetaMorpho v1: supported by the morpho_vault connector (vault_deposit / vault_redeem)."

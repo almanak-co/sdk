@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Morpho Vault V2 support in `morpho_vault`.** The connector now detects the
+  vault generation on-chain (`detect_vault_version`: `withdrawQueueLength()`
+  answers only on MetaMorpho v1, `adaptersLength()` only on Vault V2) and
+  round-trips V2 vaults: redeem-all sizes from `balanceOf` (V2 returns 0 from
+  every ERC-4626 `max*` view by design, so the old `maxRedeem` path reported
+  "No shares to redeem" for every funded wallet — ALM-10044), the redeem is
+  simulated from the owner before it is built and fails as `VaultIlliquidError`
+  when idle assets + the liquidity adapter cannot cover it, deposits check the
+  V2 receive-shares gate instead of `maxDeposit`, and `get_vault_info` reads
+  V2 performance/management fees, adapters and the liquidity adapter instead of
+  the v1 `fee()`/`timelock()`/queue selectors that revert on V2. The penalised
+  `forceDeallocate` escape hatch is not issued by the connector (follow-up).
+
 ## [2.28.0] - 2026-09-08
 
 ### Added

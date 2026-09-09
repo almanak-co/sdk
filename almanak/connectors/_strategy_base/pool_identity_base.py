@@ -244,19 +244,14 @@ def identify_erc4626_vault(
         protocol, vault_version = MORPHO_VAULT_PROTOCOL, MORPHO_VAULT_VERSION_V2
 
     label = symbol or address
-    if protocol is not None and vault_version == MORPHO_VAULT_VERSION_V1:
+    if protocol is not None:
+        # Both Morpho generations round-trip through the morpho_vault connector
+        # (V2 since the generation-aware redeem path); the generation note below
+        # carries the V2 liquidity caveat.
         target_note = (
             "The vault IS the execution target — use "
             f'Intent.vault_deposit(protocol="{protocol}", vault_address="{address}", ...) / '
             "Intent.vault_redeem(...)."
-        )
-    elif protocol is not None:
-        # Morpho Vault V2: identified, but the connector cannot round-trip it
-        # yet (see the generation note) — do not hand the agent an executable
-        # intent it must not deploy.
-        target_note = (
-            "The vault IS the execution target in principle (Intent.vault_deposit / Intent.vault_redeem with the "
-            "vault address), but this generation is NOT deployable yet — see the generation note before proposing anything."
         )
     else:
         # No Morpho fingerprint: naming a connector here would route a foreign
@@ -279,11 +274,11 @@ def identify_erc4626_vault(
         )
     elif vault_version == MORPHO_VAULT_VERSION_V2:
         notes.append(
-            "Morpho generation: Morpho Vault V2 (adapter-based). NOT YET SUPPORTED for automated exit: "
-            "the morpho_vault connector sizes redeem-all from maxRedeem(), which V2 returns as 0 by design, "
-            "so a deposit would succeed but every automated redeem/teardown would fail. Do not deploy "
-            "against a V2 vault until the connector is V2-aware; say so to the user and offer a v1 vault "
-            "or direct Morpho Blue market supply instead."
+            "Morpho generation: Morpho Vault V2 (adapter-based) — supported by the morpho_vault connector "
+            "(deposit + redeem; redeem-all sizes from balanceOf and is simulated before send). Exit liquidity "
+            "on V2 comes from idle assets plus one liquidity adapter and is NOT guaranteed: a redeem that "
+            "cannot be covered fails closed at compile time (VaultIlliquidError) rather than reverting on-chain; "
+            "the penalised forceDeallocate escape hatch is not automated. Size positions with that in mind."
         )
     else:
         notes.append(

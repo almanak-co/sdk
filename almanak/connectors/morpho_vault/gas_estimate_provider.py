@@ -38,10 +38,12 @@ class MetaMorphoGasEstimateConnector(GasEstimateConnector, GasEstimateCapability
     kind: ClassVar[ProtocolKind] = ProtocolKind.VAULT
 
     _ESTIMATES: ClassVar[dict[str, int]] = {
-        # MetaMorpho deposit (approve handled separately by the compiler).
-        "vault_deposit": 200000,
-        # MetaMorpho redeem (multi-market withdrawal).
-        "vault_redeem": 250000,
+        # Aligned with ``sdk.DEFAULT_GAS_ESTIMATES`` (450K). Measured on a Base
+        # fork against a Morpho Vault V2 (steakUSDC): deposit ~340K (approve +
+        # deposit 391,608 total), redeem-all 303,434 — both above the previous
+        # 200K / 250K, which were v1 numbers with no headroom.
+        "vault_deposit": 450000,
+        "vault_redeem": 450000,
     }
 
     def gas_estimate_keys(self) -> frozenset[str]:

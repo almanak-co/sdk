@@ -12,8 +12,8 @@ Key Features:
       rejected outright, so a query still using it indexes ZERO vaults.)
     - Both vault generations: MetaMorpho v1 (``vaults`` query) and Morpho
       Vault V2 (``vaultV2s`` query). Every entry is tagged ``vault_version``
-      (``"v1"`` / ``"v2"``) so callers can tell them apart — the SDK's
-      redeem path is v1-only today (V2 returns 0 for ``maxRedeem``).
+      (``"v1"`` / ``"v2"``) so callers can tell them apart (the connector
+      sizes V2 redeems from ``balanceOf`` because V2 returns 0 for ``maxRedeem``).
     - Vault share tokens are ERC4626; they carry the vault's own symbol
       (e.g., ``gtUSDC``, ``sparkUSDCbc``, ``steakUSDC``). Symbols are
       curator-chosen and DO collide across generations on one chain

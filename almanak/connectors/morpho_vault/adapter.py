@@ -33,6 +33,7 @@ from almanak.framework.data.tokens.exceptions import TokenResolutionError
 
 from .sdk import (
     SUPPORTED_CHAINS,
+    VAULT_VERSION_V2,
     DepositExceedsCapError,
     InsufficientSharesError,
     MetaMorphoSDK,
@@ -227,13 +228,18 @@ class MetaMorphoAdapter:
             if amount_wei <= 0:
                 return TransactionResult(success=False, error="Deposit amount must be positive")
 
-            # Check maxDeposit
-            max_deposit = self.sdk.get_max_deposit(vault_address, self.wallet_address)
-            if amount_wei > max_deposit:
-                raise DepositExceedsCapError(
-                    f"Deposit amount {amount_wei} exceeds maxDeposit {max_deposit} "
-                    f"for vault {vault_address} on {self.chain}"
-                )
+            if self.sdk.detect_vault_version(vault_address) == VAULT_VERSION_V2:
+                # V2: maxDeposit() is 0 by design, so the cap check would refuse
+                # every deposit; the deposit-side refusal on V2 is a gate.
+                self.sdk.check_deposit_gate(vault_address, self.wallet_address, self.wallet_address)
+            else:
+                # Check maxDeposit
+                max_deposit = self.sdk.get_max_deposit(vault_address, self.wallet_address)
+                if amount_wei > max_deposit:
+                    raise DepositExceedsCapError(
+                        f"Deposit amount {amount_wei} exceeds maxDeposit {max_deposit} "
+                        f"for vault {vault_address} on {self.chain}"
+                    )
 
             # Build approve TX (exact amount, not MAX_UINT256)
             approve_tx = self.sdk.build_approve_tx(
@@ -287,13 +293,14 @@ class MetaMorphoAdapter:
         """
         try:
             self._validate_address(vault_address)
+            is_v2 = self.sdk.detect_vault_version(vault_address) == VAULT_VERSION_V2
 
             if shares == "all":
-                # Query max redeemable shares (single RPC call)
-                shares_wei = self.sdk.get_max_redeem(vault_address, self.wallet_address)
+                # Single RPC read of the redeemable amount for this generation:
+                # v1 maxRedeem (a hair below balanceOf), V2 balanceOf (max* is 0).
+                shares_wei = self.sdk.get_redeemable_shares(vault_address, self.wallet_address)
                 if shares_wei <= 0:
                     return TransactionResult(success=False, error="No shares to redeem")
-                # No need to check maxRedeem again -- we already have the exact value
             else:
                 if not isinstance(shares, Decimal):
                     shares = Decimal(str(shares))
@@ -304,13 +311,19 @@ class MetaMorphoAdapter:
                 if shares_wei <= 0:
                     return TransactionResult(success=False, error="Redeem shares must be positive")
 
-                # Check maxRedeem
-                max_redeem = self.sdk.get_max_redeem(vault_address, self.wallet_address)
+                # Check against the redeemable amount for this generation
+                max_redeem = self.sdk.get_redeemable_shares(vault_address, self.wallet_address)
                 if shares_wei > max_redeem:
                     raise InsufficientSharesError(
-                        f"Redeem shares {shares_wei} exceeds maxRedeem {max_redeem} "
+                        f"Redeem shares {shares_wei} exceeds redeemable {max_redeem} "
                         f"for vault {vault_address} on {self.chain}"
                     )
+
+            if is_v2:
+                # V2 reverts when idle + liquidity adapter cannot cover the
+                # withdrawal; prove it before building the tx.
+                self.sdk.check_redeem_gates(vault_address, self.wallet_address, self.wallet_address)
+                self.sdk.simulate_redeem(vault_address, shares_wei, self.wallet_address, self.wallet_address)
 
             # Build redeem TX (no approve needed - redeeming own shares)
             redeem_tx = self.sdk.build_redeem_tx(

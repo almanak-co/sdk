@@ -279,8 +279,9 @@ class ResolvePoolAddressResponse(BaseModel):
     vault_version: str | None = Field(
         default=None,
         description=(
-            "erc4626_vault only: 'v1' (MetaMorpho, supported) | 'v2' (Morpho Vault V2, redeem path "
-            "not yet supported) | null (non-Morpho ERC-4626)"
+            "erc4626_vault only: 'v1' (MetaMorpho, supported) | 'v2' (Morpho Vault V2, supported: redeem-all "
+            "sizes from balanceOf and is simulated before send; exit liquidity is served by the vault's "
+            "liquidity adapter and not guaranteed) | null (non-Morpho ERC-4626; connector not established)"
         ),
     )
     underlying_asset: str | None = Field(default=None, description="erc4626_vault only: asset() address")

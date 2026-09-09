@@ -101,15 +101,16 @@ class TestAxVaultFound:
         assert 'Intent.vault_deposit(protocol="metamorpho", vault_address="' + VAULT in payload["intent"]
 
     @patch("almanak.framework.cli.ax._get_executor")
-    def test_v2_vault_is_reported_but_not_deployable(self, mock_get_exec, runner, monkeypatch):
+    def test_v2_vault_is_deployable_with_liquidity_caveat(self, mock_get_exec, runner, monkeypatch):
         mock_get_exec.return_value = _executor(_vault_identity("v2"))
         _quiet_advisories(monkeypatch)
         result = runner.invoke(almanak, ["ax", "-c", "base", "--json", "vault", VAULT])
         assert result.exit_code == 0, result.output
         payload = json.loads(result.output)
         assert payload["vault_version"] == "v2"
-        assert payload["deployable"] is False
-        assert "maxRedeem" in payload["deployable_note"]
+        assert payload["deployable"] is True
+        assert "balanceOf" in payload["deployable_note"]
+        assert "not guaranteed" in payload["deployable_note"]
 
     @patch("almanak.framework.cli.ax._get_executor")
     def test_human_output_names_generation_and_intent(self, mock_get_exec, runner, monkeypatch):

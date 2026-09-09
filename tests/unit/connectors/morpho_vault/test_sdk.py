@@ -154,10 +154,12 @@ class TestReadMethods:
     def test_get_share_price(self):
         price = 1_001_000  # ~1.001 USDC per share (6 dec underlying)
         # get_share_price calls get_decimals() first, then convertToAssets()
-        gw = _make_gateway_multi([
-            "0x" + _encode_uint256(18),     # decimals() -> 18
-            "0x" + _encode_uint256(price),  # convertToAssets(1e18) -> price
-        ])
+        gw = _make_gateway_multi(
+            [
+                "0x" + _encode_uint256(18),  # decimals() -> 18
+                "0x" + _encode_uint256(price),  # convertToAssets(1e18) -> price
+            ]
+        )
         sdk = MetaMorphoSDK(gw, "ethereum")
         assert sdk.get_share_price(VAULT_ADDR) == price
 
@@ -241,10 +243,12 @@ class TestMetaMorphoSpecificReads:
 
     def test_get_supply_queue(self):
         market_id = "0x" + "ab" * 32
-        gw = _make_gateway_multi([
-            "0x" + _encode_uint256(1),  # length = 1
-            market_id,
-        ])
+        gw = _make_gateway_multi(
+            [
+                "0x" + _encode_uint256(1),  # length = 1
+                market_id,
+            ]
+        )
         sdk = MetaMorphoSDK(gw, "ethereum")
         queue = sdk.get_supply_queue(VAULT_ADDR)
         assert len(queue) == 1
@@ -285,13 +289,23 @@ class TestCompositeReads:
         fee = "0x" + _encode_uint256(50_000_000_000_000_000)
         timelock = "0x" + _encode_uint256(86400)
 
-        # get_vault_info calls: asset, totalAssets, totalSupply,
-        # share_price (decimals + convertToAssets), decimals, curator, fee, timelock
-        gw = _make_gateway_multi([
-            asset_hex, total_assets, total_supply,
-            decimals, share_price,  # get_share_price: decimals() then convertToAssets()
-            decimals, curator_hex, fee, timelock,
-        ])
+        # get_vault_info calls: version probe (withdrawQueueLength answers -> v1),
+        # asset, totalAssets, totalSupply, share_price (decimals + convertToAssets),
+        # decimals, curator, fee, timelock
+        gw = _make_gateway_multi(
+            [
+                "0x" + _encode_uint256(3),  # withdrawQueueLength() -> MetaMorpho v1
+                asset_hex,
+                total_assets,
+                total_supply,
+                decimals,
+                share_price,  # get_share_price: decimals() then convertToAssets()
+                decimals,
+                curator_hex,
+                fee,
+                timelock,
+            ]
+        )
         sdk = MetaMorphoSDK(gw, "ethereum")
         info = sdk.get_vault_info(VAULT_ADDR)
 
@@ -301,15 +315,18 @@ class TestCompositeReads:
         assert info.decimals == 18
         assert info.fee == 50_000_000_000_000_000
         assert info.timelock == 86400
+        assert info.vault_version == "v1"
 
     def test_get_position(self):
         shares = 100 * 10**18
         assets = 100_500_000  # ~100.5 USDC
 
-        gw = _make_gateway_multi([
-            "0x" + _encode_uint256(shares),
-            "0x" + _encode_uint256(assets),
-        ])
+        gw = _make_gateway_multi(
+            [
+                "0x" + _encode_uint256(shares),
+                "0x" + _encode_uint256(assets),
+            ]
+        )
         sdk = MetaMorphoSDK(gw, "ethereum")
         pos = sdk.get_position(VAULT_ADDR, USER_ADDR)
 
@@ -456,3 +473,294 @@ class TestDataClasses:
             removable_at=0,
         )
         assert config.enabled is True
+
+
+# Morpho Vault V2 — generation fingerprinting, redeem sizing, simulation, gates.
+
+from almanak.connectors.morpho_vault.sdk import (  # noqa: E402
+    ASSET_SELECTOR,
+    BALANCE_OF_SELECTOR,
+    CONVERT_TO_ASSETS_SELECTOR,
+    CURATOR_SELECTOR,
+    DECIMALS_SELECTOR,
+    GATE_CAN_RECEIVE_SHARES_SELECTOR,
+    GATE_CAN_SEND_ASSETS_SELECTOR,
+    MAX_REDEEM_SELECTOR,
+    TOTAL_ASSETS_SELECTOR,
+    TOTAL_SUPPLY_SELECTOR,
+    V2_ADAPTERS_LENGTH_SELECTOR,
+    V2_SEND_ASSETS_GATE_SELECTOR,
+    VAULT_VERSION_V1,
+    VAULT_VERSION_V2,
+    WITHDRAW_QUEUE_LENGTH_SELECTOR,
+    UnsupportedVaultError,
+    VaultGatedError,
+    VaultIlliquidError,
+)
+
+_WORD_ZERO = "0x" + "0" * 64
+_WORD_ONE = "0x" + _encode_uint256(1)
+_GATE_ADDR = "0x" + "9a" * 20
+
+
+def _scripted_gateway(script):
+    """Gateway whose rpc.Call answers by calldata selector; unscripted selectors REVERT.
+
+    ``script`` maps ``(to.lower(), data)`` or ``(to.lower(), selector)`` -> hex
+    result. This mirrors the real chain, where a v1-only selector reverts on V2
+    and vice versa, so the fingerprint logic is exercised for real.
+    """
+    gw = MagicMock()
+
+    def call(request, timeout=None):
+        params = json.loads(request.params)
+        call_obj = params[0]
+        to, data = call_obj["to"].lower(), call_obj["data"]
+        resp = MagicMock()
+        value = script.get((to, data), script.get((to, data[:10])))
+        if value is None:
+            resp.success = False
+            resp.error = "execution reverted"
+            resp.result = ""
+        else:
+            resp.success = True
+            resp.error = ""
+            resp.result = json.dumps(value)
+        resp._call_obj = call_obj
+        return resp
+
+    gw.rpc.Call.side_effect = call
+    return gw
+
+
+def _v1_script(extra=None):
+    return {(VAULT_ADDR.lower(), WITHDRAW_QUEUE_LENGTH_SELECTOR): "0x" + _encode_uint256(5), **(extra or {})}
+
+
+def _v2_script(extra=None):
+    return {(VAULT_ADDR.lower(), V2_ADAPTERS_LENGTH_SELECTOR): _WORD_ONE, **(extra or {})}
+
+
+class TestGenerationDetection:
+    def test_v1_fingerprint(self):
+        sdk = MetaMorphoSDK(_scripted_gateway(_v1_script()), "base")
+        assert sdk.detect_vault_version(VAULT_ADDR) == VAULT_VERSION_V1
+        assert sdk.is_vault_v2(VAULT_ADDR) is False
+
+    def test_v2_fingerprint_when_v1_selector_reverts(self):
+        sdk = MetaMorphoSDK(_scripted_gateway(_v2_script()), "base")
+        assert sdk.detect_vault_version(VAULT_ADDR) == VAULT_VERSION_V2
+        assert sdk.is_vault_v2(VAULT_ADDR) is True
+
+    def test_transport_failure_is_not_read_as_a_reverting_selector(self):
+        """A timeout / unavailable node must surface as RPCError, never flip the generation verdict."""
+        gw = MagicMock()
+        resp = MagicMock()
+        resp.success = False
+        resp.error = "UNAVAILABLE: connection timed out"
+        resp.result = ""
+        gw.rpc.Call.return_value = resp
+        sdk = MetaMorphoSDK(gw, "base")
+        with pytest.raises(RPCError):
+            sdk.detect_vault_version(VAULT_ADDR)
+
+    def test_neither_fingerprint_is_refused_not_guessed(self):
+        sdk = MetaMorphoSDK(_scripted_gateway({}), "base")
+        with pytest.raises(UnsupportedVaultError):
+            sdk.detect_vault_version(VAULT_ADDR)
+
+    def test_fingerprint_is_cached_per_address(self):
+        gw = _scripted_gateway(_v2_script())
+        sdk = MetaMorphoSDK(gw, "base")
+        sdk.detect_vault_version(VAULT_ADDR)
+        sdk.detect_vault_version(VAULT_ADDR.lower())
+        sdk.detect_vault_version(VAULT_ADDR)
+        # one v1 probe (reverts) + one v2 probe, then cache hits
+        assert gw.rpc.Call.call_count == 2
+
+
+class TestRedeemableShares:
+    def test_v1_uses_max_redeem(self):
+        script = _v1_script({(VAULT_ADDR.lower(), MAX_REDEEM_SELECTOR): "0x" + _encode_uint256(41)})
+        script[(VAULT_ADDR.lower(), BALANCE_OF_SELECTOR)] = "0x" + _encode_uint256(42)
+        sdk = MetaMorphoSDK(_scripted_gateway(script), "base")
+        assert sdk.get_redeemable_shares(VAULT_ADDR, USER_ADDR) == 41
+
+    def test_v2_uses_balance_of_because_max_redeem_is_zero_by_design(self):
+        script = _v2_script({(VAULT_ADDR.lower(), MAX_REDEEM_SELECTOR): _WORD_ZERO})
+        script[(VAULT_ADDR.lower(), BALANCE_OF_SELECTOR)] = "0x" + _encode_uint256(8_605_857_896_403_843_614_675)
+        sdk = MetaMorphoSDK(_scripted_gateway(script), "base")
+        assert sdk.get_max_redeem(VAULT_ADDR, USER_ADDR) == 0
+        assert sdk.get_redeemable_shares(VAULT_ADDR, USER_ADDR) == 8_605_857_896_403_843_614_675
+
+
+class TestRedeemSimulation:
+    def test_simulation_is_sent_from_owner_and_returns_assets(self):
+        script = _v2_script({(VAULT_ADDR.lower(), REDEEM_SELECTOR): "0x" + _encode_uint256(99_000_000)})
+        gw = _scripted_gateway(script)
+        sdk = MetaMorphoSDK(gw, "base")
+        assets = sdk.simulate_redeem(VAULT_ADDR, 10**18, receiver=USER_ADDR, owner=USER_ADDR)
+        assert assets == 99_000_000
+        sent = json.loads(gw.rpc.Call.call_args.args[0].params)[0]
+        assert sent["from"].lower() == USER_ADDR.lower()
+        assert sent["data"].startswith(REDEEM_SELECTOR)
+        assert sent["data"].endswith(_encode_address(USER_ADDR))
+
+    def test_transport_failure_is_not_reported_as_illiquidity(self):
+        """A node outage during the dry-run must surface as RPCError, not as a liquidity verdict."""
+        gw = _scripted_gateway(_v2_script())
+        inner = gw.rpc.Call.side_effect
+
+        def call(request, timeout=None):
+            if json.loads(request.params)[0]["data"].startswith(REDEEM_SELECTOR):
+                resp = MagicMock()
+                resp.success = False
+                resp.error = "UNAVAILABLE: connection timed out"
+                resp.result = ""
+                return resp
+            return inner(request, timeout)
+
+        gw.rpc.Call.side_effect = call
+        sdk = MetaMorphoSDK(gw, "base")
+        with pytest.raises(RPCError):
+            sdk.simulate_redeem(VAULT_ADDR, 10**18, receiver=USER_ADDR, owner=USER_ADDR)
+
+    def test_revert_surfaces_as_illiquid_and_names_the_escape_hatch(self):
+        sdk = MetaMorphoSDK(_scripted_gateway(_v2_script()), "base")  # redeem selector unscripted -> revert
+        with pytest.raises(VaultIlliquidError) as excinfo:
+            sdk.simulate_redeem(VAULT_ADDR, 10**18, receiver=USER_ADDR, owner=USER_ADDR)
+        assert "forceDeallocate" in str(excinfo.value)
+        assert "NOT sent" in str(excinfo.value)
+
+
+class TestGates:
+    def _gate_word(self, address):
+        return "0x" + "0" * 24 + address[2:].lower()
+
+    def test_v1_vault_never_consults_gates(self):
+        gw = _scripted_gateway(_v1_script())
+        sdk = MetaMorphoSDK(gw, "base")
+        sdk.check_deposit_gate(VAULT_ADDR, USER_ADDR)
+        sdk.check_redeem_gates(VAULT_ADDR, USER_ADDR, USER_ADDR)
+        assert gw.rpc.Call.call_count == 1  # only the fingerprint
+
+    def test_v2_without_gates_is_open(self):
+        script = _v2_script(
+            {
+                (VAULT_ADDR.lower(), "0x7e729ac4"): _WORD_ZERO,  # receive-shares gate unset
+                (VAULT_ADDR.lower(), "0x93ab2ab7"): _WORD_ZERO,  # send-shares gate unset
+                (VAULT_ADDR.lower(), "0x54cde13e"): _WORD_ZERO,  # receive-assets gate unset
+                (VAULT_ADDR.lower(), V2_SEND_ASSETS_GATE_SELECTOR): _WORD_ZERO,  # send-assets gate unset
+            }
+        )
+        sdk = MetaMorphoSDK(_scripted_gateway(script), "base")
+        sdk.check_deposit_gate(VAULT_ADDR, USER_ADDR)
+        sdk.check_redeem_gates(VAULT_ADDR, USER_ADDR, USER_ADDR)
+
+    def test_v2_receive_gate_refusal_raises(self):
+        script = _v2_script(
+            {
+                (VAULT_ADDR.lower(), "0x7e729ac4"): self._gate_word(_GATE_ADDR),
+                (_GATE_ADDR.lower(), GATE_CAN_RECEIVE_SHARES_SELECTOR + _encode_address(USER_ADDR)): _WORD_ZERO,
+            }
+        )
+        sdk = MetaMorphoSDK(_scripted_gateway(script), "base")
+        with pytest.raises(VaultGatedError):
+            sdk.check_deposit_gate(VAULT_ADDR, USER_ADDR)
+
+    def test_v2_receive_gate_allow_passes(self):
+        script = _v2_script(
+            {
+                (VAULT_ADDR.lower(), "0x7e729ac4"): self._gate_word(_GATE_ADDR),
+                (_GATE_ADDR.lower(), GATE_CAN_RECEIVE_SHARES_SELECTOR + _encode_address(USER_ADDR)): _WORD_ONE,
+            }
+        )
+        sdk = MetaMorphoSDK(_scripted_gateway(script), "base")
+        sdk.check_deposit_gate(VAULT_ADDR, USER_ADDR)
+
+    def test_v2_gate_that_does_not_answer_fails_closed(self):
+        script = _v2_script({(VAULT_ADDR.lower(), "0x7e729ac4"): self._gate_word(_GATE_ADDR)})
+        sdk = MetaMorphoSDK(_scripted_gateway(script), "base")
+        with pytest.raises(VaultGatedError):
+            sdk.check_deposit_gate(VAULT_ADDR, USER_ADDR)
+
+    def test_v2_send_assets_gate_refusal_raises(self):
+        script = _v2_script(
+            {
+                (VAULT_ADDR.lower(), V2_SEND_ASSETS_GATE_SELECTOR): self._gate_word(_GATE_ADDR),
+                (VAULT_ADDR.lower(), "0x7e729ac4"): _WORD_ZERO,
+                (_GATE_ADDR.lower(), GATE_CAN_SEND_ASSETS_SELECTOR + _encode_address(USER_ADDR)): _WORD_ZERO,
+            }
+        )
+        sdk = MetaMorphoSDK(_scripted_gateway(script), "base")
+        with pytest.raises(VaultGatedError, match="send-assets gate"):
+            sdk.check_deposit_gate(VAULT_ADDR, USER_ADDR, USER_ADDR)
+
+    def test_v2_send_assets_gate_allow_still_checks_receive_shares(self):
+        script = _v2_script(
+            {
+                (VAULT_ADDR.lower(), V2_SEND_ASSETS_GATE_SELECTOR): self._gate_word(_GATE_ADDR),
+                (_GATE_ADDR.lower(), GATE_CAN_SEND_ASSETS_SELECTOR + _encode_address(USER_ADDR)): _WORD_ONE,
+                (VAULT_ADDR.lower(), "0x7e729ac4"): self._gate_word(_GATE_ADDR),
+                (_GATE_ADDR.lower(), GATE_CAN_RECEIVE_SHARES_SELECTOR + _encode_address(USER_ADDR)): _WORD_ZERO,
+            }
+        )
+        sdk = MetaMorphoSDK(_scripted_gateway(script), "base")
+        with pytest.raises(VaultGatedError, match="receive-shares gate"):
+            sdk.check_deposit_gate(VAULT_ADDR, USER_ADDR, USER_ADDR)
+
+    def test_gate_address_transport_failure_is_not_unset(self):
+        """A timeout reading the gate address must not proceed as 'no gate'."""
+        gw = _scripted_gateway(_v2_script())
+        inner = gw.rpc.Call.side_effect
+
+        def call(request, timeout=None):
+            data = json.loads(request.params)[0]["data"]
+            if data == V2_SEND_ASSETS_GATE_SELECTOR or data == "0x7e729ac4":
+                resp = MagicMock()
+                resp.success = False
+                resp.error = "UNAVAILABLE: connection timed out"
+                resp.result = ""
+                return resp
+            return inner(request, timeout)
+
+        gw.rpc.Call.side_effect = call
+        sdk = MetaMorphoSDK(gw, "base")
+        with pytest.raises(RPCError, match="timed out"):
+            sdk.check_deposit_gate(VAULT_ADDR, USER_ADDR)
+
+    def test_malformed_gate_address_fails_closed(self):
+        script = _v2_script({(VAULT_ADDR.lower(), V2_SEND_ASSETS_GATE_SELECTOR): "0x00"})
+        sdk = MetaMorphoSDK(_scripted_gateway(script), "base")
+        with pytest.raises(RPCError, match="malformed gate address"):
+            sdk.check_deposit_gate(VAULT_ADDR, USER_ADDR)
+
+
+class TestVaultInfoV2:
+    def test_get_vault_info_reads_v2_selectors_not_v1(self):
+        adapter_addr = "0x" + "ad" * 20
+        word = lambda addr: "0x" + "0" * 24 + addr[2:].lower()  # noqa: E731
+        script = _v2_script(
+            {
+                (VAULT_ADDR.lower(), ASSET_SELECTOR): word(ASSET_ADDR),
+                (VAULT_ADDR.lower(), TOTAL_ASSETS_SELECTOR): "0x" + _encode_uint256(429_000_000_000_000),
+                (VAULT_ADDR.lower(), TOTAL_SUPPLY_SELECTOR): "0x" + _encode_uint256(413 * 10**24),
+                (VAULT_ADDR.lower(), DECIMALS_SELECTOR): "0x" + _encode_uint256(18),
+                (VAULT_ADDR.lower(), CONVERT_TO_ASSETS_SELECTOR): "0x" + _encode_uint256(1_039_759),
+                (VAULT_ADDR.lower(), CURATOR_SELECTOR): word("0x" + "cc" * 20),
+                (VAULT_ADDR.lower(), "0xad468d11"): word(adapter_addr),  # the liquidity adapter read
+                (VAULT_ADDR.lower(), "0x87788782"): "0x" + _encode_uint256(0),  # performance fee read
+                (VAULT_ADDR.lower(), "0xa6f7f5d6"): "0x" + _encode_uint256(0),  # management fee read
+                (VAULT_ADDR.lower(), "0x4ef501ac" + _encode_uint256(0)): word(adapter_addr),  # first adapter entry
+                (VAULT_ADDR.lower(), "0x99e99183" + _encode_address(adapter_addr)): "0x" + _encode_uint256(10**13),
+            }
+        )
+        sdk = MetaMorphoSDK(_scripted_gateway(script), "base")
+        info = sdk.get_vault_info(VAULT_ADDR)
+        assert info.vault_version == VAULT_VERSION_V2
+        assert info.timelock == 0
+        assert info.management_fee == 0
+        assert info.liquidity_adapter == adapter_addr
+        assert info.adapters == [adapter_addr]
+        assert info.force_deallocate_penalty == 10**13
+        assert info.share_price == 1_039_759

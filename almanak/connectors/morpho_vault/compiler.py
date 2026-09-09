@@ -8,6 +8,12 @@ from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from almanak.connectors._strategy_base.base.compiler import BaseCompilerContext, BaseProtocolCompiler
 from almanak.connectors.morpho_vault.sdk import SUPPORTED_CHAINS as _METAMORPHO_SUPPORTED_CHAINS
+from almanak.connectors.morpho_vault.sdk import (
+    VAULT_VERSION_V1,
+    VAULT_VERSION_V2,
+    VaultGatedError,
+    VaultIlliquidError,
+)
 from almanak.framework.intents.compiler_models import CompilationResult, CompilationStatus, TransactionData
 from almanak.framework.intents.vocabulary import IntentType
 from almanak.framework.models.reproduction_bundle import ActionBundle
@@ -63,10 +69,19 @@ class MorphoVaultCompiler(BaseProtocolCompiler[BaseCompilerContext]):
                 return chain_error
 
             adapter = _build_adapter(ctx, intent.protocol)
+            vault_version = _vault_version(adapter, intent.vault_address)
             asset_address = adapter.sdk.get_vault_asset(intent.vault_address)
             asset_token = ctx.services.resolve_token(asset_address, ctx.chain)
             if asset_token is None:
                 return _failed(intent.intent_id, f"Cannot resolve vault asset token: {asset_address}")
+            if vault_version == VAULT_VERSION_V2:
+                # V2 has no maxDeposit signal (returns 0 by design); the
+                # deposit-side refusals are sendAssetsGate(sender) and
+                # receiveSharesGate(receiver).
+                try:
+                    adapter.sdk.check_deposit_gate(intent.vault_address, ctx.wallet_address, ctx.wallet_address)
+                except VaultGatedError as exc:
+                    return _failed(intent.intent_id, str(exc))
 
             amount_wei = int(amount_decimal * Decimal(10**asset_token.decimals))
             if amount_wei <= 0:
@@ -103,6 +118,7 @@ class MorphoVaultCompiler(BaseProtocolCompiler[BaseCompilerContext]):
                 metadata={
                     "protocol": intent.protocol,
                     "vault_address": intent.vault_address,
+                    "vault_version": vault_version,
                     "asset_address": asset_token.address,
                     "asset_symbol": asset_token.symbol,
                     "deposit_amount": str(amount_decimal),
@@ -136,8 +152,16 @@ class MorphoVaultCompiler(BaseProtocolCompiler[BaseCompilerContext]):
                 return chain_error
 
             adapter = _build_adapter(ctx, intent.protocol)
+            vault_version = _vault_version(adapter, intent.vault_address)
             if intent.shares == "all":
-                shares_wei = adapter.sdk.get_max_redeem(intent.vault_address, ctx.wallet_address)
+                # v1: maxRedeem (a hair below balanceOf; redeem(balanceOf) reverts).
+                # V2: balanceOf — V2's max* views return 0 by design, so maxRedeem
+                # would report "No shares to redeem" for every funded wallet;
+                # liquidity is proven by the simulation below instead.
+                if vault_version == VAULT_VERSION_V2:
+                    shares_wei = adapter.sdk.get_balance_of(intent.vault_address, ctx.wallet_address)
+                else:
+                    shares_wei = adapter.sdk.get_max_redeem(intent.vault_address, ctx.wallet_address)
                 if shares_wei <= 0:
                     return _failed(intent.intent_id, "No shares to redeem")
             else:
@@ -147,6 +171,15 @@ class MorphoVaultCompiler(BaseProtocolCompiler[BaseCompilerContext]):
 
             if shares_wei <= 0:
                 return _failed(intent.intent_id, "Redeem shares must be positive")
+
+            if vault_version == VAULT_VERSION_V2:
+                try:
+                    adapter.sdk.check_redeem_gates(intent.vault_address, ctx.wallet_address, ctx.wallet_address)
+                    adapter.sdk.simulate_redeem(
+                        intent.vault_address, shares_wei, receiver=ctx.wallet_address, owner=ctx.wallet_address
+                    )
+                except (VaultGatedError, VaultIlliquidError) as exc:
+                    return _failed(intent.intent_id, str(exc))
 
             redeem_tx_data = adapter.sdk.build_redeem_tx(
                 vault_address=intent.vault_address,
@@ -171,6 +204,7 @@ class MorphoVaultCompiler(BaseProtocolCompiler[BaseCompilerContext]):
                 metadata={
                     "protocol": intent.protocol,
                     "vault_address": intent.vault_address,
+                    "vault_version": vault_version,
                     "shares_wei": str(shares_wei),
                     "redeem_all": intent.shares == "all",
                     "chain": ctx.chain,
@@ -187,6 +221,21 @@ class MorphoVaultCompiler(BaseProtocolCompiler[BaseCompilerContext]):
             result.status = CompilationStatus.FAILED
             result.error = str(exc)
             return result
+
+
+def _vault_version(adapter: Any, vault_address: str) -> str:
+    """On-chain generation of ``vault_address`` via the adapter's SDK.
+
+    ``detect_vault_version`` raises ``UnsupportedVaultError`` for a contract
+    that is neither generation — that propagates as a FAILED compilation with
+    the SDK's own message, never a silent v1 default. Adapters whose SDK lacks
+    the probe (registry test doubles) are treated as v1, the legacy behaviour.
+    """
+    detect = getattr(adapter.sdk, "detect_vault_version", None)
+    if detect is None:
+        return VAULT_VERSION_V1
+    version = detect(vault_address)
+    return VAULT_VERSION_V2 if version == VAULT_VERSION_V2 else VAULT_VERSION_V1
 
 
 def _build_adapter(ctx: BaseCompilerContext, protocol: str) -> Any:

@@ -722,11 +722,13 @@ class TestPermissionHints:
         assert "ethereum" in hints.static_permissions
         assert "base" in hints.static_permissions
         eth_perms = hints.static_permissions["ethereum"]
-        assert len(eth_perms) == 2  # approve + vault
-        # Vault entry should have deposit and redeem selectors
+        assert len(eth_perms) == 2  # approve + v1 representative vault
         vault_entry = next(p for p in eth_perms if "Vault" in p.label)
         assert "0x6e553f65" in vault_entry.selectors  # deposit
         assert "0xba087652" in vault_entry.selectors  # redeem
+        base_vaults = {p.target.lower() for p in hints.static_permissions["base"] if "Vault" in p.label}
+        assert "0xc1256ae5ff1cf2719d4937adb3bbccab2e00a2ca" in base_vaults  # v1 representative
+        assert "0xbeef0e0834849acc03f0089f01f4f1eeb06873c9" in base_vaults  # V2 Steakhouse Prime USDC
 
     def test_hints_are_frozen(self):
         """PermissionHints should be immutable (frozen dataclass)."""

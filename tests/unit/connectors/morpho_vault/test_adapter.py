@@ -1,8 +1,7 @@
 """Tests for MetaMorpho Vault Adapter."""
 
-import json
 from decimal import Decimal
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -13,11 +12,8 @@ from almanak.connectors.morpho_vault.adapter import (
     create_test_adapter,
 )
 from almanak.connectors.morpho_vault.sdk import (
-    DepositExceedsCapError,
-    InsufficientSharesError,
     VaultInfo,
     VaultPosition,
-    _encode_uint256,
 )
 
 VAULT_ADDR = "0xBEEF01735c132Ada46AA9aA4c54623cAA92A64CB"
@@ -103,6 +99,7 @@ class TestDeposit:
 
         # Mock SDK methods
         mock_sdk = MagicMock()
+        mock_sdk.detect_vault_version.return_value = "v1"
         mock_sdk.get_vault_asset.return_value = ASSET_ADDR
         mock_sdk.get_max_deposit.return_value = 10**18  # Very large
         mock_sdk.build_approve_tx.return_value = {
@@ -172,7 +169,10 @@ class TestRedeem:
         adapter = MetaMorphoAdapter(config, gateway_client=gw)
 
         mock_sdk = MagicMock()
+        mock_sdk.detect_vault_version.return_value = "v1"
         mock_sdk.get_max_redeem.return_value = 500 * 10**18
+        # v1 dispatch: redeemable == maxRedeem (the adapter reads through this seam)
+        mock_sdk.get_redeemable_shares.return_value = 500 * 10**18
         mock_sdk.get_decimals.return_value = 18
         mock_sdk.build_redeem_tx.return_value = {
             "to": VAULT_ADDR,
@@ -197,12 +197,13 @@ class TestRedeem:
         result = adapter.redeem(VAULT_ADDR, "all")
 
         assert result.success is True
-        # "all" path should call get_max_redeem exactly once (no double RPC)
-        mock_sdk.get_max_redeem.assert_called_once()
+        # "all" path reads the redeemable amount exactly once (no double RPC)
+        mock_sdk.get_redeemable_shares.assert_called_once()
 
     def test_redeem_all_no_shares(self):
         adapter, mock_sdk = self._make_adapter_with_mock_sdk()
         mock_sdk.get_max_redeem.return_value = 0
+        mock_sdk.get_redeemable_shares.return_value = 0
         result = adapter.redeem(VAULT_ADDR, "all")
         assert result.success is False
         assert "No shares" in result.error
@@ -210,6 +211,7 @@ class TestRedeem:
     def test_redeem_exceeds_max(self):
         adapter, mock_sdk = self._make_adapter_with_mock_sdk()
         mock_sdk.get_max_redeem.return_value = 1  # Very small
+        mock_sdk.get_redeemable_shares.return_value = 1
         result = adapter.redeem(VAULT_ADDR, Decimal("1000"))
         assert result.success is False
 
@@ -319,3 +321,89 @@ class TestTransactionResult:
         result = TransactionResult(success=False, error="Something went wrong")
         assert result.tx_data is None
         assert result.error == "Something went wrong"
+
+
+# Morpho Vault V2: maxDeposit/maxRedeem are 0 by design; the adapter must not
+# gate on them, must size redeem-all from balanceOf (via the SDK seam) and
+# must simulate before building.
+
+from almanak.connectors.morpho_vault.sdk import VaultGatedError, VaultIlliquidError  # noqa: E402
+
+
+class TestVaultV2:
+    def _v2_adapter(self):
+        config = MetaMorphoConfig(chain="base", wallet_address=WALLET_ADDR)
+        resolver = MagicMock()
+        resolved = MagicMock()
+        resolved.address = ASSET_ADDR
+        resolved.decimals = 6
+        resolver.resolve.return_value = resolved
+        adapter = MetaMorphoAdapter(config, gateway_client=MagicMock(), token_resolver=resolver)
+        mock_sdk = MagicMock()
+        mock_sdk.detect_vault_version.return_value = "v2"
+        mock_sdk.get_vault_asset.return_value = ASSET_ADDR
+        mock_sdk.get_max_deposit.return_value = 0  # V2: by design
+        mock_sdk.get_max_redeem.return_value = 0  # V2: by design
+        mock_sdk.get_redeemable_shares.return_value = 7 * 10**18  # balanceOf on V2
+        mock_sdk.get_decimals.return_value = 18
+        mock_sdk.simulate_redeem.return_value = 7_000_000
+        mock_sdk.build_approve_tx.return_value = {
+            "to": ASSET_ADDR,
+            "data": "0xapprove",
+            "value": "0",
+            "gas_estimate": 60000,
+        }
+        mock_sdk.build_deposit_tx.return_value = {
+            "to": VAULT_ADDR,
+            "data": "0xdeposit",
+            "value": "0",
+            "gas_estimate": 450000,
+        }
+        mock_sdk.build_redeem_tx.return_value = {
+            "to": VAULT_ADDR,
+            "data": "0xredeem",
+            "value": "0",
+            "gas_estimate": 450000,
+        }
+        adapter._sdk = mock_sdk
+        return adapter, mock_sdk
+
+    def test_deposit_ignores_zero_max_deposit_and_checks_gate(self):
+        adapter, mock_sdk = self._v2_adapter()
+        result = adapter.deposit(VAULT_ADDR, Decimal("100"))
+        assert result.success, result.error
+        mock_sdk.check_deposit_gate.assert_called_once_with(VAULT_ADDR, WALLET_ADDR, WALLET_ADDR)
+        mock_sdk.get_max_deposit.assert_not_called()
+
+    def test_deposit_fails_closed_when_gated(self):
+        adapter, mock_sdk = self._v2_adapter()
+        mock_sdk.check_deposit_gate.side_effect = VaultGatedError("receive-shares gate refuses wallet")
+        result = adapter.deposit(VAULT_ADDR, Decimal("100"))
+        assert not result.success
+        assert "gate refuses" in result.error
+        mock_sdk.build_deposit_tx.assert_not_called()
+
+    def test_redeem_all_sizes_from_redeemable_and_simulates(self):
+        adapter, mock_sdk = self._v2_adapter()
+        result = adapter.redeem(VAULT_ADDR, "all")
+        assert result.success, result.error
+        mock_sdk.get_redeemable_shares.assert_called_once_with(VAULT_ADDR, WALLET_ADDR)
+        mock_sdk.check_redeem_gates.assert_called_once_with(VAULT_ADDR, WALLET_ADDR, WALLET_ADDR)
+        mock_sdk.simulate_redeem.assert_called_once_with(VAULT_ADDR, 7 * 10**18, WALLET_ADDR, WALLET_ADDR)
+        mock_sdk.build_redeem_tx.assert_called_once()
+        assert mock_sdk.build_redeem_tx.call_args.kwargs["shares"] == 7 * 10**18
+
+    def test_redeem_fails_closed_when_simulation_reverts(self):
+        adapter, mock_sdk = self._v2_adapter()
+        mock_sdk.simulate_redeem.side_effect = VaultIlliquidError("liquidity adapter short")
+        result = adapter.redeem(VAULT_ADDR, "all")
+        assert not result.success
+        assert "liquidity adapter short" in result.error
+        mock_sdk.build_redeem_tx.assert_not_called()
+
+    def test_explicit_shares_checked_against_balance_not_max_redeem(self):
+        adapter, mock_sdk = self._v2_adapter()
+        result = adapter.redeem(VAULT_ADDR, Decimal("8"))  # > balance of 7
+        assert not result.success
+        assert "exceeds redeemable" in result.error
+        mock_sdk.get_max_redeem.assert_not_called()

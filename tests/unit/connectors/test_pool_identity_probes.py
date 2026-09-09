@@ -315,7 +315,7 @@ def test_erc4626_probe_classifies_metamorpho_v1_vault():
     assert "MetaMorpho v1" in notes
 
 
-def test_erc4626_probe_flags_morpho_vault_v2_as_not_deployable():
+def test_erc4626_probe_reports_morpho_vault_v2_supported_with_liquidity_caveat():
     from almanak.connectors._strategy_base.pool_identity_base import identify_erc4626_vault
 
     with _patch_calls(_erc4626_script(generation="v2")):
@@ -325,11 +325,10 @@ def test_erc4626_probe_flags_morpho_vault_v2_as_not_deployable():
     assert payload["vault_version"] == "v2"
     notes = " ".join(payload["notes"])
     assert "Morpho Vault V2" in notes
-    assert "maxRedeem" in notes
-    assert "NOT YET SUPPORTED" in notes
-    # A V2 vault must not be handed an executable deposit intent at this scope.
-    assert 'Intent.vault_deposit(protocol="metamorpho"' not in notes
-    assert "NOT deployable yet" in notes
+    assert "supported by the morpho_vault connector" in notes
+    assert "balanceOf" in notes  # V2 redeem sizing, since maxRedeem is 0 by design
+    assert "VaultIlliquidError" in notes  # liquidity is not guaranteed; fails closed
+    assert 'Intent.vault_deposit(protocol="metamorpho"' in notes  # V2 is executable on this branch
 
 
 def test_erc4626_probe_reports_generic_vault_without_morpho_fingerprint():

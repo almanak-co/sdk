@@ -30,7 +30,6 @@ from almanak.framework.intents.compiler_constants import (
     get_gas_estimate,
 )
 
-
 # Pre-W6 ``DEFAULT_GAS_ESTIMATES`` snapshot (21 entries) — every protocol-
 # owned action and every baseline action. The owner column documents the
 # post-W6 owner; ``baseline`` means the value stays in
@@ -63,8 +62,11 @@ PRE_W6_DEFAULT_GAS_ESTIMATES: dict[str, tuple[int, str]] = {
     # on some destinations).
     "bridge_deposit": (800000, "across"),
     # MetaMorpho vaults — ERC-4626 deposit / multi-market redeem.
-    "vault_deposit": (200000, "metamorpho"),
-    "vault_redeem": (250000, "metamorpho"),
+    # Raised from 200000 / 250000 with Morpho Vault V2 support: measured on a
+    # Base fork against steakUSDC (deposit ~340K, redeem-all 303,434), aligned
+    # with ``morpho_vault.sdk.DEFAULT_GAS_ESTIMATES``.
+    "vault_deposit": (450000, "metamorpho"),
+    "vault_redeem": (450000, "metamorpho"),
 }
 
 
@@ -78,9 +80,7 @@ PRE_W6_DEFAULT_GAS_ESTIMATES: dict[str, tuple[int, str]] = {
     [(op, exp, owner) for op, (exp, owner) in PRE_W6_DEFAULT_GAS_ESTIMATES.items()],
     ids=list(PRE_W6_DEFAULT_GAS_ESTIMATES),
 )
-def test_get_gas_estimate_byte_equivalent_no_chain_override(
-    operation: str, expected: int, owner: str
-) -> None:
+def test_get_gas_estimate_byte_equivalent_no_chain_override(operation: str, expected: int, owner: str) -> None:
     """``get_gas_estimate`` returns the pre-W6 integer for every action.
 
     Uses ``arbitrum`` as the test chain because it has **no** per-chain
@@ -130,9 +130,7 @@ def test_registry_publishes_every_per_protocol_action() -> None:
         STRATEGY_GAS_ESTIMATE_REGISTRY,
     )
 
-    expected_per_protocol = {
-        op for op, (_value, owner) in PRE_W6_DEFAULT_GAS_ESTIMATES.items() if owner != "baseline"
-    }
+    expected_per_protocol = {op for op, (_value, owner) in PRE_W6_DEFAULT_GAS_ESTIMATES.items() if owner != "baseline"}
     registered = STRATEGY_GAS_ESTIMATE_REGISTRY.actions()
     missing = expected_per_protocol - registered
     assert not missing, (
@@ -154,9 +152,7 @@ def test_registry_publishes_no_baseline_action() -> None:
         STRATEGY_GAS_ESTIMATE_REGISTRY,
     )
 
-    baseline_keys = {
-        op for op, (_value, owner) in PRE_W6_DEFAULT_GAS_ESTIMATES.items() if owner == "baseline"
-    }
+    baseline_keys = {op for op, (_value, owner) in PRE_W6_DEFAULT_GAS_ESTIMATES.items() if owner == "baseline"}
     registered = STRATEGY_GAS_ESTIMATE_REGISTRY.actions()
     overlap = baseline_keys & registered
     assert not overlap, (
