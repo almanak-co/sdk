@@ -104,7 +104,7 @@ _DUST_THRESHOLD = Decimal("0.0001")
     supported_protocols=["lido", "uniswap_v3"],
     # Intent types this strategy may emit
     # STAKE: Stake ETH to receive stETH/wstETH
-    # SWAP: Teardown path to exit stETH/wstETH -> ETH
+    # SWAP: Teardown path to exit stETH/wstETH -> WETH
     # HOLD: No action
     intent_types=[IntentType.STAKE, IntentType.SWAP, IntentType.HOLD],
 )
@@ -391,7 +391,7 @@ class LidoStakerStrategy(IntentStrategy):
         """Return open stETH/wstETH positions for teardown.
 
         Lido withdrawals go through a 3-5 day queue, so teardown exits by
-        swapping stETH/wstETH back to ETH on Uniswap V3 (deep liquidity).
+        swapping stETH/wstETH into WETH on Uniswap V3 (deep liquidity).
         Queries on-chain balance when possible, falling back to tracked state.
         """
         from datetime import UTC, datetime
@@ -433,10 +433,10 @@ class LidoStakerStrategy(IntentStrategy):
         )
 
     def generate_teardown_intents(self, mode=None, market=None):
-        """Exit staked ETH via Uniswap V3 swap when a position exists.
+        """Exit the staking token into WETH via Uniswap V3 when a position exists.
 
         Direct Lido unstake has a 3-5 day queue, so teardown uses a spot swap
-        back to ETH. HARD mode allows wider slippage to guarantee exit. If the
+        into WETH for subsequent consolidation. HARD mode allows wider slippage. If the
         wallet holds no stETH/wstETH, returns `[]` so teardown isn't blocked
         by a zero-balance swap.
         """
@@ -464,7 +464,7 @@ class LidoStakerStrategy(IntentStrategy):
         return [
             Intent.swap(
                 from_token=output_token,
-                to_token="ETH",
+                to_token="WETH",
                 amount="all",
                 max_slippage=max_slippage,
                 protocol="uniswap_v3",

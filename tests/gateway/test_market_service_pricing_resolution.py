@@ -288,7 +288,8 @@ async def test_evm_fallback_import_failure_keeps_exact_log(
         resolved = await servicer._resolve_evm_address_for_pricing(UNKNOWN_EVM, "base")
 
     assert resolved is None
-    assert caplog.messages == ["Cannot import token models for address resolution: models unavailable"]
+    messages = [record.getMessage() for record in caplog.records if record.name == market_service_module.__name__]
+    assert messages == ["Cannot import token models for address resolution: models unavailable"]
 
 
 @pytest.mark.asyncio
