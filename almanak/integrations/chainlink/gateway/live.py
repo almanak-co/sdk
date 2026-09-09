@@ -348,7 +348,7 @@ class ChainlinkPriceSource(BasePriceSource):
             # No direct feed found -- try to resolve the canonical symbol via
             # the token resolver before falling back to the raw input.
             try:
-                resolved_info = self._token_resolver.resolve(token, self._chain, log_errors=False)
+                resolved_info = self._token_resolver.resolve(token, self._chain, log_errors=False, skip_gateway=True)
                 resolved_symbol = resolved_info.symbol.upper()
             except TokenResolutionError:
                 resolved_symbol = token_upper
@@ -376,7 +376,7 @@ class ChainlinkPriceSource(BasePriceSource):
             token_to_pair[token_upper] = pair
 
             try:
-                resolved = self._token_resolver.resolve(token_upper, self._chain, log_errors=False)
+                resolved = self._token_resolver.resolve(token_upper, self._chain, log_errors=False, skip_gateway=True)
             except TokenResolutionError:
                 continue
 
@@ -486,7 +486,7 @@ class ChainlinkPriceSource(BasePriceSource):
             return pair
 
         try:
-            resolved = self._token_resolver.resolve(token, self._chain)
+            resolved = self._token_resolver.resolve(token, self._chain, skip_gateway=True)
         except TokenResolutionError:
             return None
 

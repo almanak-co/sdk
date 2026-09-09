@@ -257,7 +257,7 @@ class SolanaBalanceProvider:
         # Resolve mint address and decimals
         resolver = self._get_token_resolver()
         try:
-            resolved = resolver.resolve(token, self._chain)
+            resolved = resolver.resolve(token, self._chain, skip_gateway=True)
             mint_address = resolved.address
             decimals = resolved.decimals
         except Exception:

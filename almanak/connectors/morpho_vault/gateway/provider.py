@@ -93,7 +93,7 @@ def _metamorpho_resolve_vault(chain: str, asset_symbol: str) -> str:
         try:
             from almanak.framework.data.tokens import get_token_resolver
 
-            resolved = get_token_resolver().resolve(asset_symbol, chain).address
+            resolved = get_token_resolver().resolve(asset_symbol, chain, skip_gateway=True).address
         except Exception as exc:  # noqa: BLE001 — resolver failure must fail closed
             # If the requested asset symbol cannot be resolved, we cannot prove
             # it matches the vault's underlying — fail closed (UNAVAILABLE)

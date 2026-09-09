@@ -2,12 +2,62 @@
 
 import time
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from almanak.framework.data.interfaces import DataSourceUnavailable, PriceResult
 from almanak.gateway.data.price.dexscreener import DexScreenerPriceSource
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("paper_consumer", [False, True])
+async def test_resolver_channel_policy_preserves_paper_discovery(paper_consumer):
+    from almanak.framework.data.tokens import TokenNotFoundError
+
+    address = "0x3f53de71c126bdabae20f9cd64848d317f6c3238"
+    resolver = MagicMock()
+
+    def resolve(token, chain, *, log_errors, skip_gateway):
+        if skip_gateway:
+            raise TokenNotFoundError(token, chain)
+        return SimpleNamespace(address=address)
+
+    resolver.resolve.side_effect = resolve
+    if paper_consumer:
+        from almanak.framework.backtesting.paper.engine import PaperTrader
+
+        trader = PaperTrader.__new__(PaperTrader)
+        trader.config = SimpleNamespace(chain="bsc")
+        with (
+            patch("almanak.framework.backtesting.paper.engine._get_resolver", return_value=resolver),
+            patch("almanak.framework.backtesting.paper.engine.CoinGeckoPriceSource"),
+            patch("almanak.framework.backtesting.paper.engine.BinancePriceSource"),
+        ):
+            source = trader._price_aggregator_sources()[-1]
+    else:
+        source = DexScreenerPriceSource(default_chain_id="bsc", token_resolver=resolver)
+    session = MagicMock()
+    pair = {"chainId": "bsc"}
+    with (
+        patch.object(source, "_get_session", new_callable=AsyncMock, return_value=session),
+        patch.object(source, "_fetch_token_pairs", new_callable=AsyncMock, return_value=[pair]) as by_address,
+        patch.object(source, "_search_pairs", new_callable=AsyncMock, return_value=[]) as search,
+        patch.object(source, "_pick_best_pair", return_value=(pair, Decimal("338"))),
+        patch.object(source, "_calculate_confidence", return_value=0.8),
+    ):
+        if paper_consumer:
+            result = await source.get_price("GOOGLB")
+            assert result.price == Decimal("338")
+            by_address.assert_awaited_once_with(session, "bsc", address)
+            search.assert_not_awaited()
+        else:
+            with pytest.raises(DataSourceUnavailable):
+                await source.get_price("GOOGLB")
+            by_address.assert_not_awaited()
+            search.assert_awaited_once()
+    resolver.resolve.assert_called_once_with("GOOGLB", "bsc", log_errors=False, skip_gateway=not paper_consumer)
 
 
 # ---------------------------------------------------------------------------

@@ -7,7 +7,7 @@ for discovering unknown tokens by querying their smart contracts directly.
 Key Features:
     - ResolveToken: Resolve by symbol or address using cache/static registry
     - GetTokenMetadata: On-chain ERC20 metadata query for unknown tokens
-    - GetTokenDecimals: Lightweight endpoint for decimals only
+    - GetTokenDecimals: Cached/static symbols and exact-address decimals
     - BatchResolveTokens: Resolve multiple tokens in a single call
     - Rate limiting: Prevents RPC abuse (max 10 on-chain lookups/second)
     - Timeout handling: Configurable timeout for on-chain queries
@@ -1433,7 +1433,7 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
             return self._error_response("Token is required")
 
         try:
-            resolved = self._resolver.resolve(token, chain)
+            resolved = self._resolver.resolve(token, chain, skip_gateway=True)
             return self._resolved_to_response(resolved)
 
         except InvalidTokenAddressError as e:
@@ -1504,26 +1504,28 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
             if result is not None:
                 return result
         else:
+            if is_evm_address:
+                return await self.GetTokenMetadata(
+                    gateway_pb2.GetTokenMetadataRequest(address=token, chain=chain), context
+                )
             # EVM: dynamic symbol lookup via CoinGecko -> DexScreener.
-            # Address lookups go through GetTokenMetadata / on-chain ERC20 instead.
-            if not is_evm_address:
-                try:
-                    result = await self._try_evm_symbol_lookup(token, chain)
-                except AmbiguousTokenError as exc:
-                    # DexScreener found multiple liquid contracts with no
-                    # dominant leader -- surface the candidate list so the
-                    # resolver can raise AmbiguousTokenError with the
-                    # addresses on the client side. The error payload is
-                    # prefixed with AMBIGUOUS_SYMBOL_MARKER so the resolver
-                    # can distinguish ambiguity from a plain NOT_FOUND and
-                    # avoid poisoning its negative cache on this path.
-                    candidates = ",".join(exc.matching_addresses)
-                    marker_error = f"{AMBIGUOUS_SYMBOL_MARKER}|addresses={candidates}|{exc}"
-                    context.set_code(grpc.StatusCode.NOT_FOUND)
-                    context.set_details(marker_error)
-                    return self._error_response(marker_error)
-                if result is not None:
-                    return result
+            try:
+                result = await self._try_evm_symbol_lookup(token, chain)
+            except AmbiguousTokenError as exc:
+                # DexScreener found multiple liquid contracts with no
+                # dominant leader -- surface the candidate list so the
+                # resolver can raise AmbiguousTokenError with the
+                # addresses on the client side. The error payload is
+                # prefixed with AMBIGUOUS_SYMBOL_MARKER so the resolver
+                # can distinguish ambiguity from a plain NOT_FOUND and
+                # avoid poisoning its negative cache on this path.
+                candidates = ",".join(exc.matching_addresses)
+                marker_error = f"{AMBIGUOUS_SYMBOL_MARKER}|addresses={candidates}|{exc}"
+                context.set_code(grpc.StatusCode.NOT_FOUND)
+                context.set_details(marker_error)
+                return self._error_response(marker_error)
+            if result is not None:
+                return result
 
         error_msg = f"Token '{token}' not found on {chain} (checked static registry and dynamic resolution)"
         context.set_code(grpc.StatusCode.NOT_FOUND)
@@ -1808,22 +1810,10 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
         request: gateway_pb2.GetTokenDecimalsRequest,
         context: grpc.aio.ServicerContext,
     ) -> gateway_pb2.GetTokenDecimalsResponse:
-        """Get token decimals (lightweight endpoint).
-
-        This is a convenience method when only decimals are needed.
-        Faster than full resolution as it doesn't need all metadata.
-
-        Args:
-            request: GetTokenDecimalsRequest with token and chain
-            context: gRPC context
-
-        Returns:
-            GetTokenDecimalsResponse with decimals
-        """
+        """Read cached/static symbol decimals or discover an exact address on the owned client."""
         token = request.token
         chain = request.chain
 
-        # Validate chain
         try:
             chain = validate_chain(chain or "arbitrum")
         except ValidationError as e:
@@ -1837,10 +1827,21 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
             return gateway_pb2.GetTokenDecimalsResponse(success=False, decimals=0, error="Token is required")
 
         try:
-            decimals = self._resolver.get_decimals(chain, token)
+            decimals = self._resolver.resolve(token, chain, skip_gateway=True).decimals
             return gateway_pb2.GetTokenDecimalsResponse(success=True, decimals=decimals, error="")
 
         except TokenNotFoundError as e:
+            try:
+                address = validate_address_for_chain(token, chain, "address")
+            except ValidationError:
+                address = None
+            if address is not None:
+                resolved = await self.GetTokenMetadata(
+                    gateway_pb2.GetTokenMetadataRequest(address=address, chain=chain), context
+                )
+                return gateway_pb2.GetTokenDecimalsResponse(
+                    success=resolved.success, decimals=resolved.decimals, error=resolved.error
+                )
             context.set_code(grpc.StatusCode.NOT_FOUND)
             context.set_details(str(e))
             return gateway_pb2.GetTokenDecimalsResponse(success=False, decimals=0, error=str(e))
@@ -1916,7 +1917,7 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
             try:
                 # Suppress per-token resolution warnings in batch context to avoid
                 # noisy logs for tokens that don't exist on a chain (e.g. USDT on Base)
-                resolved = self._resolver.resolve(token, chain, log_errors=False)
+                resolved = self._resolver.resolve(token, chain, log_errors=False, skip_gateway=True)
                 results.append(self._resolved_to_response(resolved))
 
             except TokenResolutionError as e:

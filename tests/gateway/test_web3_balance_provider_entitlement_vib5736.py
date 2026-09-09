@@ -41,7 +41,7 @@ class _HttpStatusError(Exception):
 def _resolver() -> MagicMock:
     resolver = MagicMock()
 
-    def _resolve(token: str, chain: str) -> ResolvedToken:
+    def _resolve(token: str, chain: str, *, skip_gateway: bool = False) -> ResolvedToken:
         if token.upper() == "ETH":
             return ResolvedToken(
                 symbol="ETH",

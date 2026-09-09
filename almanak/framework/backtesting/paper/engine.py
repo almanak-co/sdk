@@ -3193,6 +3193,7 @@ class PaperTrader:
                 default_chain_id=self.config.chain.lower(),
                 cache_ttl=30,
                 token_resolver=_get_resolver(),
+                skip_gateway_resolution=False,
             ),
         )
         return sources

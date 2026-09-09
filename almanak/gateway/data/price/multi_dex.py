@@ -627,7 +627,7 @@ class MultiDexPriceService:
         Uses the unified TokenResolver as the single source of truth.
         """
         try:
-            resolved = self._token_resolver.resolve(token, self._chain)
+            resolved = self._token_resolver.resolve(token, self._chain, skip_gateway=True)
             return resolved.address
         except Exception:
             logger.debug(
@@ -648,7 +648,7 @@ class MultiDexPriceService:
         Raises TokenNotSupportedError if the token cannot be resolved.
         """
         try:
-            resolved = self._token_resolver.resolve(token, self._chain)
+            resolved = self._token_resolver.resolve(token, self._chain, skip_gateway=True)
             return resolved.decimals
         except Exception as e:
             logger.warning(

@@ -45,6 +45,116 @@ def mock_context():
     return context
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_channel", [False, True])
+@pytest.mark.parametrize("endpoint", ["ResolveToken", "GetTokenDecimals"])
+async def test_unknown_evm_address_uses_owned_metadata_lookup(
+    token_service, mock_context, tmp_path, with_channel, endpoint
+):
+    from almanak.framework.data.tokens.resolver import TokenResolver
+
+    address = "0x1234567890123456789012345678901234567890"
+    channel = MagicMock() if with_channel else None
+    token_service._resolver = TokenResolver(cache_file=str(tmp_path / "tokens.json"), gateway_channel=channel)
+    lookup = MagicMock()
+    lookup.lookup = AsyncMock(
+        return_value=TokenMetadata(
+            address=address,
+            symbol="UNKNOWNTEST",
+            name="Unknown Test Token",
+            decimals=18,
+        )
+    )
+    with patch.object(token_service, "_get_onchain_lookup", new_callable=AsyncMock, return_value=lookup):
+        response = await getattr(token_service, endpoint)(
+            getattr(gateway_pb2, endpoint + "Request")(token=address, chain="bsc"),
+            mock_context,
+        )
+    assert response.success
+    if endpoint == "ResolveToken":
+        assert response.address.lower() == address
+    assert response.decimals == 18
+    lookup.lookup.assert_awaited_once_with("bsc", address)
+    mock_context.set_code.assert_not_called()
+    if channel is not None:
+        channel.unary_unary.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "status"),
+    [
+        (TimeoutError("RPC timeout"), grpc.StatusCode.DEADLINE_EXCEEDED),
+        (RuntimeError("RPC unavailable"), grpc.StatusCode.INTERNAL),
+    ],
+)
+@pytest.mark.parametrize("endpoint", ["ResolveToken", "GetTokenDecimals"])
+async def test_unknown_evm_address_owned_lookup_errors(token_service, mock_context, tmp_path, error, status, endpoint):
+    from almanak.framework.data.tokens.resolver import TokenResolver
+
+    address = "0x1234567890123456789012345678901234567890"
+    channel = MagicMock()
+    token_service._resolver = TokenResolver(cache_file=str(tmp_path / "tokens.json"), gateway_channel=channel)
+    lookup = MagicMock()
+    lookup.lookup = AsyncMock(side_effect=error)
+    with patch.object(token_service, "_get_onchain_lookup", new_callable=AsyncMock, return_value=lookup):
+        response = await getattr(token_service, endpoint)(
+            getattr(gateway_pb2, endpoint + "Request")(token=address, chain="bsc"), mock_context
+        )
+    assert not response.success
+    assert response.error
+    mock_context.set_code.assert_called_once_with(status)
+    lookup.lookup.assert_awaited_once_with("bsc", address)
+    channel.unary_unary.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("chain", ["arbitrum", "solana"])
+async def test_decimal_symbol_miss_never_selects_a_dynamic_contract(token_service, mock_context, tmp_path, chain):
+    from almanak.framework.data.tokens.resolver import TokenResolver
+
+    channel = MagicMock()
+    token_service._resolver = TokenResolver(cache_file=str(tmp_path / "tokens.json"), gateway_channel=channel)
+    candidate = gateway_pb2.TokenMetadataResponse(success=True, symbol="UNKNOWNTEST", decimals=9)
+    with (
+        patch.object(token_service, "_try_evm_symbol_lookup", new_callable=AsyncMock, return_value=candidate) as evm,
+        patch.object(
+            token_service, "_try_solana_symbol_lookup", new_callable=AsyncMock, return_value=candidate
+        ) as solana,
+        patch.object(token_service, "GetTokenMetadata", new_callable=AsyncMock) as metadata,
+    ):
+        response = await token_service.GetTokenDecimals(
+            gateway_pb2.GetTokenDecimalsRequest(token="UNKNOWNTEST", chain=chain), mock_context
+        )
+    assert not response.success and response.error
+    mock_context.set_code.assert_called_once_with(grpc.StatusCode.NOT_FOUND)
+    evm.assert_not_awaited()
+    solana.assert_not_awaited()
+    metadata.assert_not_awaited()
+    channel.unary_unary.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_decimal_exact_solana_mint_keeps_owned_discovery(token_service, mock_context, tmp_path):
+    from almanak.framework.data.tokens.resolver import TokenResolver
+
+    mint = "9" * 44
+    channel = MagicMock()
+    token_service._resolver = TokenResolver(cache_file=str(tmp_path / "tokens.json"), gateway_channel=channel)
+    with patch.object(
+        token_service,
+        "_try_solana_mint_lookup",
+        new_callable=AsyncMock,
+        return_value=gateway_pb2.TokenMetadataResponse(success=True, address=mint, decimals=6),
+    ) as lookup:
+        response = await token_service.GetTokenDecimals(
+            gateway_pb2.GetTokenDecimalsRequest(token=mint, chain="solana"), mock_context
+        )
+    assert response.success and response.decimals == 6
+    lookup.assert_awaited_once_with(mint)
+    channel.unary_unary.assert_not_called()
+
+
 @pytest.fixture
 def sample_resolved_token():
     """Create sample ResolvedToken for testing."""
@@ -267,7 +377,7 @@ class TestResolveToken:
             await token_service.ResolveToken(request, mock_context)
 
             # Verify arbitrum was used
-            mock_resolve.assert_called_once_with("USDC", "arbitrum")
+            mock_resolve.assert_called_once_with("USDC", "arbitrum", skip_gateway=True)
 
 
 # =============================================================================
@@ -446,7 +556,17 @@ class TestGetTokenDecimals:
     @pytest.mark.asyncio
     async def test_get_decimals_success(self, token_service, mock_context):
         """GetTokenDecimals returns decimals for known token."""
-        with patch.object(token_service._resolver, "get_decimals", return_value=6):
+        with patch.object(
+            token_service._resolver,
+            "resolve",
+            return_value=ResolvedToken(
+                symbol="USDC",
+                address="0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+                decimals=6,
+                chain="arbitrum",
+                chain_id=42161,
+            ),
+        ):
             request = gateway_pb2.GetTokenDecimalsRequest(token="USDC", chain="arbitrum")
             response = await token_service.GetTokenDecimals(request, mock_context)
 
@@ -457,7 +577,17 @@ class TestGetTokenDecimals:
     @pytest.mark.asyncio
     async def test_get_decimals_by_address(self, token_service, mock_context):
         """GetTokenDecimals works with address."""
-        with patch.object(token_service._resolver, "get_decimals", return_value=18):
+        with patch.object(
+            token_service._resolver,
+            "resolve",
+            return_value=ResolvedToken(
+                symbol="WETH",
+                address="0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+                decimals=18,
+                chain="arbitrum",
+                chain_id=42161,
+            ),
+        ):
             request = gateway_pb2.GetTokenDecimalsRequest(
                 token="0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
                 chain="arbitrum",
@@ -470,15 +600,7 @@ class TestGetTokenDecimals:
     @pytest.mark.asyncio
     async def test_get_decimals_not_found(self, token_service, mock_context):
         """GetTokenDecimals returns error for unknown token."""
-        with patch.object(
-            token_service._resolver,
-            "get_decimals",
-            side_effect=TokenNotFoundError(
-                token="UNKNOWN",
-                chain="arbitrum",
-                reason="Not found",
-            ),
-        ):
+        with patch.object(token_service, "_try_evm_symbol_lookup", new_callable=AsyncMock, return_value=None):
             request = gateway_pb2.GetTokenDecimalsRequest(token="UNKNOWN", chain="arbitrum")
             response = await token_service.GetTokenDecimals(request, mock_context)
 
@@ -543,8 +665,9 @@ class TestBatchResolveTokens:
             resolved_at=datetime.now(),
         )
 
-        def mock_resolve(token, chain, *, log_errors=True):
+        def mock_resolve(token, chain, *, log_errors=True, skip_gateway=False):
             assert log_errors is False
+            assert skip_gateway is True
             if token == "USDC":
                 return usdc
             return weth
@@ -567,8 +690,9 @@ class TestBatchResolveTokens:
     async def test_batch_resolve_partial_failure(self, token_service, mock_context, sample_resolved_token):
         """BatchResolveTokens returns partial success with errors."""
 
-        def mock_resolve(token, chain, *, log_errors=True):
+        def mock_resolve(token, chain, *, log_errors=True, skip_gateway=False):
             assert log_errors is False
+            assert skip_gateway is True
             if token == "USDC":
                 return sample_resolved_token
             raise TokenNotFoundError(token=token, chain=chain, reason="Not found")

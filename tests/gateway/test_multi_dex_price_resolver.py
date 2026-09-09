@@ -71,7 +71,7 @@ class TestMultiDexPriceServiceTokenResolver:
         """_resolve_token_address delegates to TokenResolver.resolve()."""
         result = service._resolve_token_address("WETH")
 
-        mock_resolver.resolve.assert_called_once_with("WETH", "ethereum")
+        mock_resolver.resolve.assert_called_once_with("WETH", "ethereum", skip_gateway=True)
         assert result == "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
 
     def test_resolve_token_address_by_symbol(self, service, mock_resolver):
@@ -96,7 +96,7 @@ class TestMultiDexPriceServiceTokenResolver:
         """_get_token_decimals delegates to TokenResolver.resolve()."""
         result = service._get_token_decimals("WETH")
 
-        mock_resolver.resolve.assert_called_once_with("WETH", "ethereum")
+        mock_resolver.resolve.assert_called_once_with("WETH", "ethereum", skip_gateway=True)
         assert result == 18
 
     def test_get_token_decimals_usdc(self, service, mock_resolver):
@@ -240,7 +240,7 @@ class TestMultiDexPriceServiceMultiChain:
         )
 
         result = service._resolve_token_address("WETH")
-        mock_resolver.resolve.assert_called_once_with("WETH", "arbitrum")
+        mock_resolver.resolve.assert_called_once_with("WETH", "arbitrum", skip_gateway=True)
         assert result == "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"
 
     def test_base_chain(self):

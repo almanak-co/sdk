@@ -249,6 +249,8 @@ class DexScreenerPriceSource(BasePriceSource):
         request_timeout: HTTP request timeout in seconds.
         min_liquidity_usd: Minimum pool liquidity to trust the price.
         token_resolver: Optional TokenResolver for dynamic address lookup.
+        skip_gateway_resolution: Keep resolver lookups local inside the gateway.
+            Out-of-gateway consumers can retain channel-based discovery with False.
     """
 
     def __init__(
@@ -263,6 +265,8 @@ class DexScreenerPriceSource(BasePriceSource):
         # so existing call sites don't regress during migration. Prefer
         # ``default_chain_id`` for new code.
         chain_id: str | None = None,
+        *,
+        skip_gateway_resolution: bool = True,
     ) -> None:
         # Caller misuse — both kwargs set — should fail loud. Silently
         # preferring one breaks incremental migrations that accidentally
@@ -300,6 +304,7 @@ class DexScreenerPriceSource(BasePriceSource):
         self._session: aiohttp.ClientSession | None = None
         self._session_loop: asyncio.AbstractEventLoop | None = None
         self._token_resolver = token_resolver or get_token_resolver()
+        self._skip_gateway_resolution = skip_gateway_resolution
 
     def _resolve_chain_for_call(
         self,
@@ -522,7 +527,9 @@ class DexScreenerPriceSource(BasePriceSource):
         # 3. Try token resolver for dynamic address lookup
         if not address and self._token_resolver is not None:
             try:
-                resolved = self._token_resolver.resolve(token, chain_name, log_errors=False)
+                resolved = self._token_resolver.resolve(
+                    token, chain_name, log_errors=False, skip_gateway=self._skip_gateway_resolution
+                )
                 if resolved and resolved.address:
                     address = resolved.address
             except Exception as e:

@@ -15,6 +15,36 @@ from almanak.gateway.data.balance.web3_provider import (
 )
 
 
+@pytest.mark.asyncio
+async def test_gateway_unknown_address_never_calls_its_own_grpc_channel(tmp_path):
+    from almanak.framework.data.tokens.resolver import TokenResolver
+    from almanak.gateway.services.onchain_lookup import TokenMetadata as OnChainTokenMetadata
+
+    address = "0x1234567890123456789012345678901234567890"
+    channel = MagicMock()
+    resolver = TokenResolver(cache_file=str(tmp_path / "tokens.json"), gateway_channel=channel)
+    provider = Web3BalanceProvider(
+        rpc_url="http://localhost:8545",
+        wallet_address="0x0000000000000000000000000000000000000001",
+        chain="bsc",
+        token_resolver=resolver,
+    )
+    lookup = MagicMock()
+    lookup.lookup = AsyncMock(
+        return_value=OnChainTokenMetadata(
+            address=address,
+            symbol="UNKNOWNTEST",
+            name="Unknown Test Token",
+            decimals=18,
+        )
+    )
+    with patch.object(provider, "_get_onchain_lookup", return_value=lookup):
+        result = await provider._resolve_token(address)
+    assert result.address == address
+    lookup.lookup.assert_awaited_once_with("bsc", address)
+    channel.unary_unary.assert_not_called()
+
+
 class TestWeb3BalanceProviderTokenResolver:
     """Tests for TokenResolver integration in Web3BalanceProvider."""
 
@@ -78,7 +108,7 @@ class TestWeb3BalanceProviderTokenResolver:
         """_resolve_token delegates to TokenResolver.resolve()."""
         result = await provider._resolve_token("WETH")
 
-        mock_resolver.resolve.assert_called_once_with("WETH", "arbitrum")
+        mock_resolver.resolve.assert_called_once_with("WETH", "arbitrum", skip_gateway=True)
         assert result is not None
         assert result.symbol == "WETH"
         assert result.decimals == 18
@@ -243,7 +273,7 @@ class TestWeb3BalanceProviderTokenResolver:
         await provider._resolve_token("weth")
 
         # TokenResolver.resolve should be called with the original token
-        mock_resolver.resolve.assert_called_once_with("weth", "arbitrum")
+        mock_resolver.resolve.assert_called_once_with("weth", "arbitrum", skip_gateway=True)
 
     def test_add_token_registers_with_resolver(self, provider, mock_resolver):
         """add_token() registers tokens with the TokenResolver."""
@@ -286,7 +316,7 @@ class TestWeb3BalanceProviderMultiChain:
         )
 
         result = await provider._resolve_token("WETH")
-        mock_resolver.resolve.assert_called_once_with("WETH", "ethereum")
+        mock_resolver.resolve.assert_called_once_with("WETH", "ethereum", skip_gateway=True)
         assert result is not None
         assert result.address == "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
 
@@ -313,7 +343,7 @@ class TestWeb3BalanceProviderMultiChain:
         )
 
         result = await provider._resolve_token("WAVAX")
-        mock_resolver.resolve.assert_called_once_with("WAVAX", "avalanche")
+        mock_resolver.resolve.assert_called_once_with("WAVAX", "avalanche", skip_gateway=True)
         assert result is not None
         assert result.address == "0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7"
 
@@ -379,9 +409,7 @@ class TestWeb3BalanceProviderOnChainFallback:
         assert result.address == "0xcb5ff7331193c45f61f05b035ddabe08f13f6ba3"
         assert result.is_native is False
 
-        fake_lookup.lookup.assert_awaited_once_with(
-            "base", "0xcb5ff7331193c45f61f05b035ddabe08f13f6ba3"
-        )
+        fake_lookup.lookup.assert_awaited_once_with("base", "0xcb5ff7331193c45f61f05b035ddabe08f13f6ba3")
         # register() must NOT be called: the contract-reported symbol is untrusted.
         static_miss_resolver.register.assert_not_called()
 
@@ -398,9 +426,7 @@ class TestWeb3BalanceProviderOnChainFallback:
         static_miss_resolver.register.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_static_miss_onchain_infrastructure_failure_propagates(
-        self, provider, static_miss_resolver
-    ):
+    async def test_static_miss_onchain_infrastructure_failure_propagates(self, provider, static_miss_resolver):
         """Unknown address -> OnChainLookup raises infra error -> exception propagates.
 
         OnChainLookup internally catches ContractLogicError (non-ERC20 contracts)
@@ -419,13 +445,9 @@ class TestWeb3BalanceProviderOnChainFallback:
         static_miss_resolver.register.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_static_miss_non_address_does_not_call_onchain(
-        self, provider, static_miss_resolver
-    ):
+    async def test_static_miss_non_address_does_not_call_onchain(self, provider, static_miss_resolver):
         """Symbol-like input -> _get_onchain_lookup is NOT called."""
-        with patch.object(
-            Web3BalanceProvider, "_get_onchain_lookup", autospec=True
-        ) as mock_get_lookup:
+        with patch.object(Web3BalanceProvider, "_get_onchain_lookup", autospec=True) as mock_get_lookup:
             result = await provider._resolve_token("OPENAGENTS")
 
         assert result is None
@@ -454,9 +476,7 @@ class TestWeb3BalanceProviderOnChainFallback:
             token_resolver=resolver,
         )
 
-        with patch.object(
-            Web3BalanceProvider, "_get_onchain_lookup", autospec=True
-        ) as mock_get_lookup:
+        with patch.object(Web3BalanceProvider, "_get_onchain_lookup", autospec=True) as mock_get_lookup:
             result = await provider._resolve_token("WETH")
 
         assert result is not None

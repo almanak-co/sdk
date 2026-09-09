@@ -896,7 +896,9 @@ class Web3BalanceProvider:
         # 1. Fast path: static / cached resolver
         static_failure_reason: str | None = None
         try:
-            resolved = self._token_resolver.resolve(token, self._chain)
+            # A managed gateway shares the strategy's resolver; recursing through
+            # its synchronous gRPC channel blocks this gateway's event loop.
+            resolved = self._token_resolver.resolve(token, self._chain, skip_gateway=True)
             return TokenMetadata(
                 symbol=resolved.symbol,
                 address=resolved.address,
