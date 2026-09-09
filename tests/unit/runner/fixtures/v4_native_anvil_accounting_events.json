@@ -1,0 +1,38 @@
+[
+  {
+    "id": "ffbab036-1c89-54a2-9558-a25763661f86",
+    "deployment_id": "deployment:a7e7ebacafd4",
+    "cycle_id": "582c3f21-48b4-41bb-87ec-2086d1ab6075",
+    "execution_mode": "live",
+    "timestamp": "2026-09-08T18:10:12+00:00",
+    "chain": "base",
+    "protocol": "uniswap_v4",
+    "wallet_address": "0xEc97A6a32676c4638827e2C45b3e47d18f2c4292",
+    "event_type": "SWAP",
+    "position_key": "",
+    "ledger_entry_id": "9f81d437-e6bc-4212-abe2-5b0373368fa4",
+    "tx_hash": "0x8c3d87fa99b79dafa60ff5c2329ba69753c4036d7ae07a11df2e534e8a6018a5",
+    "confidence": "ESTIMATED",
+    "payload_json": "{\"amount_in\": \"3.1\", \"amount_in_usd\": \"3.1\", \"amount_out\": \"0.001243074733433322\", \"amount_out_usd\": \"3.10229188924020438252\", \"confidence\": \"ESTIMATED\", \"cost_basis_recorded\": true, \"effective_price\": \"0.00040099184949462\", \"event_type\": \"SWAP\", \"formula_version\": 1, \"gas_usd\": \"0.51520654606\", \"matching_policy_version\": 4, \"price_observed_at\": \"2026-09-08T18:09:42+00:00\", \"price_out_observed_at\": \"2026-09-08T18:09:42+00:00\", \"price_out_source\": \"aggregated\", \"price_source\": \"stablecoin_peg\", \"primitive_version\": 7, \"protocol\": \"uniswap_v4\", \"realized_pnl_usd\": null, \"realized_pnl_usd_matched\": null, \"schema_version\": 1, \"slippage_bps\": 0, \"swap_position_key\": \"swap:base:0xec97a6a32676c4638827e2c45b3e47d18f2c4292\", \"token_in\": \"USDC\", \"token_out\": \"ETH\", \"unavailable_reason\": \"price provenance degraded: USDC=ESTIMATED, ETH=ESTIMATED\", \"unmatched_amount_in\": \"3.1\", \"unmatched_proceeds_usd\": \"3.1\"}",
+    "schema_version": 1,
+    "position_reference": null
+  },
+  {
+    "id": "be398658-93dd-59c7-ab18-01dd6f44052c",
+    "deployment_id": "deployment:a7e7ebacafd4",
+    "cycle_id": "teardown-td_a6fb520af8d1",
+    "execution_mode": "live",
+    "timestamp": "2026-09-08T18:12:11+00:00",
+    "chain": "base",
+    "protocol": "uniswap_v4",
+    "wallet_address": "0xEc97A6a32676c4638827e2C45b3e47d18f2c4292",
+    "event_type": "SWAP",
+    "position_key": "",
+    "ledger_entry_id": "f0bec7ae-c3f3-4f34-8094-ca038c17883a",
+    "tx_hash": "0x95ae2702e88514edc183cd9b73b2204fecb75dc455df7f3fdade06c027ec5e74",
+    "confidence": "ESTIMATED",
+    "payload_json": "{\"amount_in\": \"0.001243074733433322\", \"amount_in_usd\": \"3.10145902916880405678\", \"amount_out\": \"3.092607\", \"amount_out_usd\": \"3.092607\", \"confidence\": \"ESTIMATED\", \"cost_basis_recorded\": true, \"effective_price\": \"2487.868924387470163426266548\", \"event_type\": \"SWAP\", \"formula_version\": 1, \"gas_usd\": \"0.2872232488\", \"matching_policy_version\": 4, \"price_observed_at\": \"2026-09-08T18:11:54+00:00\", \"price_out_observed_at\": \"2026-09-08T18:11:54+00:00\", \"price_out_source\": \"stablecoin_peg\", \"price_source\": \"aggregated\", \"primitive_version\": 7, \"protocol\": \"uniswap_v4\", \"realized_pnl_usd\": \"-0.00083286007140032574\", \"realized_pnl_usd_matched\": \"-0.00083286007140032574\", \"schema_version\": 1, \"slippage_bps\": 0, \"swap_position_key\": \"swap:base:0xec97a6a32676c4638827e2c45b3e47d18f2c4292\", \"token_in\": \"ETH\", \"token_out\": \"USDC\", \"unavailable_reason\": \"price provenance degraded: ETH=ESTIMATED, USDC=ESTIMATED\", \"unmatched_amount_in\": \"0E-18\", \"unmatched_proceeds_usd\": \"0E-20\"}",
+    "schema_version": 1,
+    "position_reference": null
+  }
+]

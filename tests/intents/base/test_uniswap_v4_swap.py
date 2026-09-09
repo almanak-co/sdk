@@ -153,7 +153,10 @@ class TestUniswapV4SwapIntent:
                     field="swap_amounts",
                     bundle_metadata=bundle_metadata,
                 )
-                assert extract_kwargs == {"swap_token_meta": swap_token_meta}
+                assert extract_kwargs == {
+                    "swap_token_meta": swap_token_meta,
+                    "swap_pool_key": bundle_metadata["pool_key"],
+                }
                 parse_result = parser.parse_receipt(receipt, **extract_kwargs)
 
                 if parse_result.swap_result:

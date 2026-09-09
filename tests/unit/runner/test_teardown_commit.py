@@ -24,6 +24,7 @@ Plus a few smaller invariants:
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, datetime
 from pathlib import Path
@@ -110,6 +111,8 @@ def _make_runner(*, live_mode: bool = True, execution_mode: str | None = None) -
     runner._derive_execution_mode.return_value = execution_mode or ("live" if live_mode else "paper")
     runner._write_ledger_entry = AsyncMock(return_value="ledger-1")
     runner._write_outbox_and_fire_processor = AsyncMock(return_value=None)
+    runner._drain_batch = []
+    runner._pending_drain_tasks = set()
     runner.config = SimpleNamespace(chain="arbitrum")
     # VIB-4895 — Lane B now emits position_events. Wire the position-event
     # surface honestly: a real dict cache, an async save that succeeds, an
@@ -1628,3 +1631,121 @@ def test_capture_teardown_native_close_amounts_none_return_no_degrade():
     )
     assert out is None
     assert recorded == []  # an EXPECTED None (helper's own guard) is not a degrade
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("drain_success", [True, False])
+async def test_commit_waits_for_native_disposal_accounting(
+    local_db_dir, fake_strategy, patch_enricher_and_sidecar, drain_success
+):
+    from almanak.framework.accounting.basis import sum_open_wallet_basis_by_token
+    from almanak.framework.teardown.native_inventory_closure import tracked_raw
+
+    events = json.loads((Path(__file__).parent / "fixtures/v4_native_anvil_accounting_events.json").read_text())
+    visible = [events[0]]
+    deployment_id = events[0]["deployment_id"]
+    wallet = events[0]["wallet_address"]
+    fake_strategy.deployment_id = deployment_id
+    fake_strategy.chain = "base"
+    fake_strategy.wallet_address = wallet
+    runner = _make_runner()
+    runner.config.chain = "base"
+
+    def inventory():
+        return tracked_raw(
+            sum_open_wallet_basis_by_token(visible, deployment_id, chain="base", wallet_address=wallet),
+            "base",
+            allow_absent=True,
+        )
+
+    assert inventory() == 1243074733433322
+    release = asyncio.Event()
+    started = asyncio.Event()
+
+    async def drain():
+        started.set()
+        await release.wait()
+        if drain_success:
+            visible.append(events[1])
+        return drain_success
+
+    async def fire(*args, **kwargs):
+        task = asyncio.create_task(drain())
+        runner._drain_batch.append(task)
+        runner._pending_drain_tasks.add(task)
+
+    runner._write_outbox_and_fire_processor.side_effect = fire
+    task = asyncio.create_task(
+        commit_teardown_intent(
+            runner,
+            fake_strategy,
+            _make_intent("SWAP"),
+            execution_result=_make_execution_result(),
+            execution_context=SimpleNamespace(),
+            teardown_cycle_id="native-disposal-barrier",
+        )
+    )
+    await started.wait()
+    await asyncio.sleep(0)
+    assert not task.done()
+    assert inventory() == 1243074733433322
+    release.set()
+    outcome = await task
+    assert outcome.accounting_degraded is not drain_success
+    assert inventory() == (0 if drain_success else 1243074733433322)
+    assert not runner._pending_drain_tasks
+    if not drain_success:
+        assert "drain incomplete" in outcome.degraded_reason
+
+
+@pytest.mark.asyncio
+async def test_teardown_drain_timeout_degrades_without_cancelling_risk_reduction(
+    local_db_dir, fake_strategy, patch_enricher_and_sidecar, monkeypatch
+):
+    from almanak.framework.runner import _run_loop_helpers
+
+    barrier = _run_loop_helpers.await_drain_barrier
+
+    async def bounded(runner, tasks, **kwargs):
+        return await barrier(runner, tasks, timeout=0.001, **kwargs)
+
+    monkeypatch.setattr(_run_loop_helpers, "await_drain_barrier", bounded)
+    runner = _make_runner()
+    release = asyncio.Event()
+
+    async def drain():
+        await release.wait()
+        return True
+
+    async def fire(*args, **kwargs):
+        task = asyncio.create_task(drain())
+        runner._drain_batch.append(task)
+        runner._pending_drain_tasks.add(task)
+
+    runner._write_outbox_and_fire_processor.side_effect = fire
+    outcome = await commit_teardown_intent(
+        runner,
+        fake_strategy,
+        _make_intent("SWAP"),
+        execution_result=_make_execution_result(),
+        execution_context=SimpleNamespace(),
+        teardown_cycle_id="native-disposal-timeout",
+    )
+    assert outcome.accounting_degraded
+    assert "drain incomplete" in outcome.degraded_reason
+    pending = list(runner._pending_drain_tasks)
+    assert len(pending) == 1 and not pending[0].done()
+    release.set()
+    assert await pending[0] is True
+    # The next risk-reducing commit can run and consume retained successful tasks.
+    runner._write_outbox_and_fire_processor.side_effect = None
+    next_outcome = await commit_teardown_intent(
+        runner,
+        fake_strategy,
+        _make_intent("SWAP"),
+        execution_result=_make_execution_result(),
+        execution_context=SimpleNamespace(),
+        teardown_cycle_id="native-disposal-next",
+    )
+    assert not next_outcome.accounting_degraded
+    assert not runner._pending_drain_tasks

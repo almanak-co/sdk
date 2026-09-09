@@ -868,7 +868,8 @@ class TestBridgeWaitProcessIntent:
         state.orchestrator.execute.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_known_broadcast_failure_is_terminal_across_resume(self) -> None:
+    @pytest.mark.parametrize("prior_receipt", [False, True])
+    async def test_known_broadcast_failure_is_terminal_across_resume(self, prior_receipt) -> None:
         """Bridge/same-chain plan progress must never replay a known hash."""
         runner = _make_runner()
         runner._save_execution_progress = AsyncMock()
@@ -894,9 +895,13 @@ class TestBridgeWaitProcessIntent:
         state.orchestrator.execute.return_value = failed_result
 
         assert await runner._bridge_wait_process_intent(state, 0) is True
+        if prior_receipt:
+            state.leg_tx_results = [SimpleNamespace(gas_used=21000, gas_cost_wei=42000)]
         first = await runner._bridge_wait_finalize(state)
 
         assert first.status == IterationStatus.EXECUTION_FAILED
+        assert first.execution_result is None
+        assert "gas cost is unmeasured" in first.error
         assert state.progress.reconciliation_required_step_index == 0
         assert state.progress.failed_at_step_index is None
         assert state.orchestrator.execute.await_count == 1

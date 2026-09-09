@@ -68,6 +68,11 @@ def fetch_slot0_tick(
     """
     if not (gateway_client and chain and pool_address):
         return None
+    # V4 pools are bytes32 identities, not contracts exposing V3 slot0().
+    from web3 import Web3
+
+    if not Web3.is_address(pool_address):
+        return None
     try:
         result = gateway_client.eth_call(chain, pool_address, SLOT0_SELECTOR)
     except Exception:

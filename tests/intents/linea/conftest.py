@@ -14,11 +14,11 @@ signing for ``TEST_WALLET``).
 import pytest
 from web3 import Web3
 
-from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.execution.signer import LocalKeySigner
-from almanak.framework.execution.simulator import DirectSimulator
+from almanak.framework.execution.simulator.local import LocalSimulator
 from almanak.framework.execution.submitter import PublicMempoolSubmitter
 from tests.conftest_gateway import AnvilFixture
+from tests.intents._execution_harness import SimulatedIntentOrchestrator, prepare_fork_eoa
 from tests.intents._permission_onchain_harness import ZodiacOrchestrator
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
@@ -43,6 +43,7 @@ REQUIRED_CHAIN_ID = 59144
 
 def _seed_wallet_state(web3: Web3, rpc_url: str) -> str:
     """Seed test wallet balances for Linea on the current fork instance."""
+    prepare_fork_eoa(web3, TEST_WALLET)
     config = CHAIN_CONFIGS[CHAIN_NAME]
 
     # Fund with 100 native tokens (ETH on Linea)
@@ -163,6 +164,7 @@ def reseed_wallet_state(anvil_instance: AnvilFixture):
 
 @pytest.fixture
 def orchestrator(
+    anvil_eth_call_adapter,
     test_private_key: str,
     anvil_rpc_url: str,
     web3: Web3,
@@ -201,12 +203,13 @@ def orchestrator(
         max_retries=TEST_SUBMITTER_MAX_RETRIES,
         timeout_seconds=TEST_TX_TIMEOUT_SECONDS,
     )
-    simulator = DirectSimulator()
+    simulator = LocalSimulator(rpc_url=anvil_rpc_url)
 
-    return ExecutionOrchestrator(
+    return SimulatedIntentOrchestrator(
         signer=signer,
         submitter=submitter,
         simulator=simulator,
+        operation_observer_factory=lambda: anvil_eth_call_adapter,
         chain=CHAIN_NAME,
         rpc_url=anvil_rpc_url,
         tx_timeout_seconds=TEST_TX_TIMEOUT_SECONDS,

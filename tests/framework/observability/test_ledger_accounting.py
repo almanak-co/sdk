@@ -233,6 +233,7 @@ class TestBuildLedgerEntryExtractedData:
     def test_build_with_multi_tx_bundle(self):
         from unittest.mock import MagicMock
 
+        from almanak.framework.execution.orchestrator import TransactionResult
         from almanak.framework.observability.ledger import build_ledger_entry
 
         intent = MagicMock()
@@ -247,8 +248,8 @@ class TestBuildLedgerEntryExtractedData:
         result.swap_amounts = None
         result.extracted_data = {"supply": SupplyData(supply_amount=5000000, a_token_received=4999000)}
         # Multi-tx: approve + supply
-        tx1 = MagicMock(tx_hash="0xapprove", gas_used=50000, success=True)
-        tx2 = MagicMock(tx_hash="0xsupply", gas_used=200000, success=True)
+        tx1 = TransactionResult(tx_hash="0xapprove", gas_used=50000, success=True)
+        tx2 = TransactionResult(tx_hash="0xsupply", gas_used=200000, success=True)
         result.transaction_results = [tx1, tx2]
         result.total_gas_used = 250000
         result.gas_cost_usd = Decimal("3.75")

@@ -14,6 +14,7 @@ from almanak.connectors._connector import (
     ImportRef,
     StrategyMatrixEntry,
     SupportedChainsSpec,
+    VenueVerifierDecl,
 )
 from almanak.connectors._strategy_base.address_table import AbiFamily, AddressTableSpec
 from almanak.core.capability_obligations import ObligationId
@@ -97,6 +98,19 @@ def _production_lifecycle_declarations():
 CONNECTOR = Connector(
     name="uniswap_v4",
     kind=ProtocolKind.LP,
+    execution_evidence_keys=("v4_operation",),
+    execution_validator=ImportRef(module="almanak.connectors.uniswap_v4.operation", attribute="validate_execution"),
+    venue_verifiers=(
+        VenueVerifierDecl(
+            protocol="uniswap_v4",
+            verifier=ImportRef(module="almanak.connectors.uniswap_v4.venue_verifier", attribute="V4VenueVerifier"),
+            contract_version="v4_exact_pool.v1",
+            binding_policy_version=1,
+            chains=(ARBITRUM, AVALANCHE, BASE, BSC, ETHEREUM, OPTIMISM, POLYGON, ROBINHOOD),
+            primitives=(Primitive.LP, Primitive.SWAP),
+            component_names=("currency0", "currency1", "fee", "hooks", "pool_manager", "tick_spacing"),
+        ),
+    ),
     address_tables=(
         AddressTableSpec(
             protocol="uniswap_v4",

@@ -109,14 +109,27 @@ UNISWAP_V3_FORKS: frozenset[str] = frozenset(
 # Classic or a Slipstream CL pool; they pin CL spacing via their own
 # ``tick_spacing`` key and have no ``fee_tier`` concept.
 SWAP_PIN_KEY_SUPPORT: dict[str, frozenset[str]] = {
-    "fee_tier": UNISWAP_V3_FORKS,
+    "fee_tier": UNISWAP_V3_FORKS | frozenset({"uniswap_v4"}),
     "pool": UNISWAP_V3_FORKS | frozenset({"curve", "aerodrome", "aerodrome_slipstream"}),
+    "pool_id": frozenset({"uniswap_v4"}),
+    "pool_key": frozenset({"uniswap_v4"}),
+    "hooks": frozenset({"uniswap_v4"}),
+    "hook_data": frozenset({"uniswap_v4"}),
 }
 
 
 # =============================================================================
 # Public API
 # =============================================================================
+
+
+SWAP_PIN_INTEGER_MINIMUMS: dict[str, dict[str, int]] = {"uniswap_v4": {"fee_tier": 0}}
+
+
+def swap_pin_integer_minimum(protocol: str | None, key: str) -> int:
+    """Protocol-owned numeric exceptions; existing pins remain positive by default."""
+    canonical = (protocol or "").lower().replace("-", "_")
+    return SWAP_PIN_INTEGER_MINIMUMS.get(canonical, {}).get(key, 1)
 
 
 def normalize_protocol(chain: str, protocol: str) -> str:

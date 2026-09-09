@@ -1104,6 +1104,9 @@ def _coalesce_error(success: bool, error: str, result: Any) -> str:
 # Approval event topic marks approval transactions; receipts without one
 # are actions. Incidental is reserved for future refinement.
 _ERC20_APPROVAL_TOPIC = "0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925"
+# Permit2's allowance approval includes token, amount and expiration fields.
+_PERMIT2_APPROVAL_TOPIC = "0xda9fa7c1b00402c17d0161b249b1ab8bbec047c5a52207b9c112deffd817036b"
+_APPROVAL_TOPICS = frozenset({_ERC20_APPROVAL_TOPIC, _PERMIT2_APPROVAL_TOPIC})
 
 
 def _classify_sub_tx_role(tx_result: Any) -> str:
@@ -1168,7 +1171,7 @@ def _classify_sub_tx_role(tx_result: Any) -> str:
         first_str = first_str.lower()
         if not first_str.startswith("0x"):
             first_str = f"0x{first_str}"
-        if first_str == _ERC20_APPROVAL_TOPIC:
+        if first_str in _APPROVAL_TOPICS:
             saw_approval = True
         else:
             saw_other = True
@@ -1214,6 +1217,20 @@ def _build_sub_transactions(tx_results: list[Any]) -> list[dict[str, Any]]:
                 "gas_used": getattr(tr, "gas_used", 0) or 0,
                 "status": status,
                 "role": _classify_sub_tx_role(tr),
+                "receipt_evidence": {
+                    "block_number": getattr(receipt, "block_number", None),
+                    "block_hash": getattr(receipt, "block_hash", None),
+                    "from_address": getattr(receipt, "from_address", None),
+                    "to_address": getattr(receipt, "to_address", None),
+                    "status": getattr(receipt, "status", None),
+                    **{
+                        name: str(value) if isinstance(value, int) and not isinstance(value, bool) else None
+                        for name in ("gas_used", "effective_gas_price", "l1_fee_wei", "gas_cost_wei")
+                        for value in (getattr(receipt, name, None),)
+                    },
+                }
+                if receipt is not None
+                else None,
             }
         )
     return out

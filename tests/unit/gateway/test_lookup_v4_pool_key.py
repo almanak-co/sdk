@@ -19,13 +19,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import grpc
 import pytest
 
-from almanak.connectors.uniswap_v4.gateway_pool_key_client import (
-    V4PoolKeyNotFound,
-    _coerce_pool_id_bytes,
-    lookup_v4_pool_key,
-    make_sync_pool_key_lookup,
-)
-from almanak.connectors.uniswap_v4.sdk import PoolKey as FrameworkPoolKey
 from almanak.connectors.uniswap_v4.gateway.pool_key_cache import (
     INITIALIZE_EVENT_TOPIC,
     NO_HOOKS,
@@ -35,9 +28,15 @@ from almanak.connectors.uniswap_v4.gateway.pool_key_cache import (
     _is_response_size_error,
     _normalize_pool_id,
 )
+from almanak.connectors.uniswap_v4.gateway_pool_key_client import (
+    V4PoolKeyNotFound,
+    _coerce_pool_id_bytes,
+    lookup_v4_pool_key,
+    make_sync_pool_key_lookup,
+)
+from almanak.connectors.uniswap_v4.sdk import PoolKey as FrameworkPoolKey
 from almanak.gateway.proto import gateway_pb2
 from almanak.gateway.services.market_service import MarketServiceServicer
-
 
 # ----------------------------------------------------------------------------
 # Test fixtures
@@ -56,7 +55,7 @@ _HOOKS = NO_HOOKS
 # Synthetic but valid 32-byte pool id (real keccak of the encoded key is
 # not required for unit-level cache-shape tests; the gateway only asserts
 # the shape, not the hash).
-_POOL_ID_HEX = "ab" * 32
+_POOL_ID_HEX = FrameworkPoolKey(_C0, _C1, _FEE, _TICK_SPACING, _HOOKS).pool_id[2:]
 _POOL_ID_BYTES = bytes.fromhex(_POOL_ID_HEX)
 
 
@@ -93,6 +92,7 @@ def _make_initialize_log(
         "0x" + c0[2:].rjust(64, "0"),
         "0x" + c1[2:].rjust(64, "0"),
     ]
+
     # data: fee (uint24 in 32 bytes) + tickSpacing (int24 in 32 bytes,
     # two's complement on 256 bits) + hooks (address in 32 bytes) +
     # sqrtPriceX96 (uint160 in 32 bytes) + tick (int24 in 32 bytes).
@@ -101,14 +101,8 @@ def _make_initialize_log(
             x += 1 << 256
         return f"{x:064x}"
 
-    data = (
-        _i256(fee)
-        + _i256(tick_spacing)
-        + hooks[2:].rjust(64, "0")
-        + _i256(sqrt_price_x96)
-        + _i256(tick)
-    )
-    return {"topics": topics, "data": "0x" + data}
+    data = _i256(fee) + _i256(tick_spacing) + hooks[2:].rjust(64, "0") + _i256(sqrt_price_x96) + _i256(tick)
+    return {"address": "0x498581fF718922c3f8e6A244956aF099B2652b2b", "topics": topics, "data": "0x" + data}
 
 
 # ----------------------------------------------------------------------------
@@ -128,7 +122,7 @@ class TestCachedPoolKeyInvariants:
         assert int(pk.currency0, 16) < int(pk.currency1, 16)
 
     def test_rejects_unsorted_currencies(self) -> None:
-        with pytest.raises(ValueError, match="currency0 must be < currency1"):
+        with pytest.raises(ValueError, match="canonical order|distinct"):
             CachedPoolKey(
                 currency0=_USDC_BASE,  # 0x83... > WETH
                 currency1=_WETH_BASE,
@@ -138,7 +132,7 @@ class TestCachedPoolKeyInvariants:
             )
 
     def test_rejects_equal_currencies(self) -> None:
-        with pytest.raises(ValueError, match="currency0 must be < currency1"):
+        with pytest.raises(ValueError, match="canonical order|distinct"):
             CachedPoolKey(
                 currency0=_C0,
                 currency1=_C0,
@@ -149,7 +143,7 @@ class TestCachedPoolKeyInvariants:
 
     @pytest.mark.parametrize("fee", [-1, 1 << 24, 1 << 32])
     def test_rejects_fee_out_of_uint24(self, fee: int) -> None:
-        with pytest.raises(ValueError, match="fee out of uint24"):
+        with pytest.raises(ValueError, match="fee"):
             CachedPoolKey(
                 currency0=_C0,
                 currency1=_C1,
@@ -160,7 +154,7 @@ class TestCachedPoolKeyInvariants:
 
     @pytest.mark.parametrize("ts", [-(1 << 23) - 1, 1 << 23, 1 << 30])
     def test_rejects_tick_spacing_out_of_int24(self, ts: int) -> None:
-        with pytest.raises(ValueError, match="tick_spacing out of int24"):
+        with pytest.raises(ValueError, match="tickSpacing"):
             CachedPoolKey(
                 currency0=_C0,
                 currency1=_C1,
@@ -224,12 +218,10 @@ class TestDecodeInitializeLog:
         assert key.tick_spacing == _TICK_SPACING
         assert key.hooks == _HOOKS
 
-    def test_negative_tick_spacing_decoded(self) -> None:
+    def test_negative_tick_spacing_rejected(self) -> None:
         log = _make_initialize_log(tick_spacing=-60)
         result = _decode_initialize_log(log)
-        assert result is not None
-        _, key = result
-        assert key.tick_spacing == -60
+        assert result is None
 
     def test_wrong_topic0_returns_none(self) -> None:
         log = _make_initialize_log()
@@ -286,9 +278,7 @@ class TestV4PoolKeyCache:
         cache.register("base", _POOL_ID_BYTES, key)
         # Patch _refresh_chain to fail loudly if a hit accidentally triggers
         # a network call.
-        with patch.object(
-            cache, "_refresh_chain", side_effect=AssertionError("hit must not refresh")
-        ):
+        with patch.object(cache, "_refresh_chain", side_effect=AssertionError("hit must not refresh")):
             result = await cache.lookup("base", _POOL_ID_BYTES)
         assert result == key
 
@@ -382,10 +372,7 @@ class TestV4PoolKeyCache:
             span = hi - lo + 1
             # Provider rejects anything larger than 25k blocks.
             if span > 25_000:
-                raise RuntimeError(
-                    "Log response size exceeded. ... should work: ["
-                    f"{hex(lo)}, {hex(lo + 25_000)}]"
-                )
+                raise RuntimeError(f"Log response size exceeded. ... should work: [{hex(lo)}, {hex(lo + 25_000)}]")
             # Only the second half carries the target log; verifies that
             # bisection preserves the full range.
             if lo >= 25_000:
@@ -409,9 +396,7 @@ class TestV4PoolKeyCache:
         smaller = [c for c in call_log[1:] if c[1] - c[0] + 1 <= 25_000]
         assert smaller, f"no bisection observed; calls={call_log}"
         covered = sorted(smaller)
-        assert covered[0][0] == 0 and covered[-1][1] == 49_999, (
-            f"bisection lost coverage: {covered}"
-        )
+        assert covered[0][0] == 0 and covered[-1][1] == 49_999, f"bisection lost coverage: {covered}"
 
     @pytest.mark.asyncio
     async def test_populate_from_logs_returns_none_at_min_chunk(self) -> None:
@@ -443,10 +428,10 @@ class TestV4PoolKeyCache:
         cache = V4PoolKeyCache(historical_window=10, max_historical_blocks=100, backfill_blocks=10)
         # Forward tail (blocks 90..100) carries an unrelated pool only;
         # historical window (80..89) carries the lookup target.
-        other_pool = "0x" + "cd" * 32
+        other_pool = FrameworkPoolKey(_C0, _C1, 3000, 60).pool_id
         target_pool = "0x" + _POOL_ID_HEX
 
-        forward_log = _make_initialize_log(pool_id_hex="cd" * 32)
+        forward_log = _make_initialize_log(pool_id_hex=other_pool[2:], fee=3000, tick_spacing=60)
         target_log = _make_initialize_log(pool_id_hex=_POOL_ID_HEX)
 
         ranges_called: list[tuple[int, int]] = []
@@ -470,7 +455,10 @@ class TestV4PoolKeyCache:
 
         with (
             patch.object(cache, "_get_or_create_web3", return_value=w3),
-            patch("almanak.connectors.uniswap_v4.gateway.pool_key_cache.UNISWAP_V4", {"base": {"pool_manager": "0x498581fF718922c3f8e6A244956aF099B2652b2b"}}),
+            patch(
+                "almanak.connectors.uniswap_v4.gateway.pool_key_cache.UNISWAP_V4",
+                {"base": {"pool_manager": "0x498581fF718922c3f8e6A244956aF099B2652b2b"}},
+            ),
         ):
             # web3.py exposes block_number as an awaitable property; emulate that.
             w3.eth.block_number = _AwaitableInt(100)
@@ -488,9 +476,7 @@ class TestV4PoolKeyCache:
     async def test_refresh_chain_stops_at_historical_floor(self) -> None:
         """Historical expansion must not exceed ``max_historical_blocks`` —
         prevents a rogue lookup from DoS-ing the upstream archive node."""
-        cache = V4PoolKeyCache(
-            historical_window=10, max_historical_blocks=20, backfill_blocks=10
-        )
+        cache = V4PoolKeyCache(historical_window=10, max_historical_blocks=20, backfill_blocks=10)
         # Seed earliest watermark already at the floor; expansion must be a no-op.
         cache._last_scanned_block["base"] = 100
         cache._earliest_scanned_block["base"] = 80  # head - max_historical = 80
@@ -690,9 +676,7 @@ class TestLookupV4PoolKeyHandler:
     async def test_rejects_invalid_chain(self) -> None:
         servicer = _make_servicer()
         ctx = _make_context()
-        request = gateway_pb2.LookupV4PoolKeyRequest(
-            pool_id=_POOL_ID_BYTES, chain="not-a-chain"
-        )
+        request = gateway_pb2.LookupV4PoolKeyRequest(pool_id=_POOL_ID_BYTES, chain="not-a-chain")
         resp = await servicer.LookupV4PoolKey(request, ctx)
         ctx.set_code.assert_called_with(grpc.StatusCode.INVALID_ARGUMENT)
         assert resp.pool_key.currency0 == ""
@@ -716,9 +700,7 @@ class TestLookupV4PoolKeyHandler:
         )
         servicer._pool_key_cache = cache
 
-        request = gateway_pb2.LookupV4PoolKeyRequest(
-            pool_id=_POOL_ID_BYTES, chain="base"
-        )
+        request = gateway_pb2.LookupV4PoolKeyRequest(pool_id=_POOL_ID_BYTES, chain="base")
         resp = await servicer.LookupV4PoolKey(request, ctx)
 
         ctx.set_code.assert_not_called()
@@ -737,9 +719,7 @@ class TestLookupV4PoolKeyHandler:
         # No registration; lookup() will call _refresh_chain — stub it.
         with patch.object(cache, "_refresh_chain", AsyncMock()):
             servicer._pool_key_cache = cache
-            request = gateway_pb2.LookupV4PoolKeyRequest(
-                pool_id=_POOL_ID_BYTES, chain="base"
-            )
+            request = gateway_pb2.LookupV4PoolKeyRequest(pool_id=_POOL_ID_BYTES, chain="base")
             resp = await servicer.LookupV4PoolKey(request, ctx)
 
         ctx.set_code.assert_called_with(grpc.StatusCode.NOT_FOUND)
@@ -757,9 +737,7 @@ class TestLookupV4PoolKeyHandler:
         ctx = _make_context()
         cache = MagicMock()
         cache.lookup = AsyncMock(
-            side_effect=PoolKeyCacheError(
-                "no RPC URL configured for chain=base", code="failed_precondition"
-            )
+            side_effect=PoolKeyCacheError("no RPC URL configured for chain=base", code="failed_precondition")
         )
         servicer._pool_key_cache = cache
 
@@ -807,15 +785,11 @@ class TestLookupV4PoolKeyHandler:
         # Exception text below contains a path/URL-like fragment to prove the
         # gateway does NOT echo it back to the client.
         cache.lookup = AsyncMock(
-            side_effect=RuntimeError(
-                "kaboom: ssl handshake to https://archive.internal/rpc/secret-token failed"
-            )
+            side_effect=RuntimeError("kaboom: ssl handshake to https://archive.internal/rpc/secret-token failed")
         )
         servicer._pool_key_cache = cache
 
-        request = gateway_pb2.LookupV4PoolKeyRequest(
-            pool_id=_POOL_ID_BYTES, chain="base"
-        )
+        request = gateway_pb2.LookupV4PoolKeyRequest(pool_id=_POOL_ID_BYTES, chain="base")
         resp = await servicer.LookupV4PoolKey(request, ctx)
         ctx.set_code.assert_called_with(grpc.StatusCode.INTERNAL)
         assert resp.pool_key.currency0 == ""
@@ -863,7 +837,9 @@ class TestFrameworkClient:
             _coerce_pool_id_bytes(42)  # type: ignore[arg-type]
 
     @pytest.mark.asyncio
-    async def test_decodes_response(self) -> None:
+    @pytest.mark.parametrize("chain", ["base", "Base", "BASE", " base "])
+    @pytest.mark.parametrize("response_chain", ["base", "Base", "BASE", " base "])
+    async def test_decodes_response(self, chain, response_chain) -> None:
         client = MagicMock()
         client.market.LookupV4PoolKey = MagicMock(
             return_value=gateway_pb2.LookupV4PoolKeyResponse(
@@ -874,11 +850,12 @@ class TestFrameworkClient:
                     tick_spacing=_TICK_SPACING,
                     hooks=_HOOKS,
                 ),
-                chain="base",
+                chain=response_chain,
             )
         )
 
-        pk = await lookup_v4_pool_key(client, pool_id=_POOL_ID_BYTES, chain="base")
+        pk = await lookup_v4_pool_key(client, pool_id=_POOL_ID_BYTES, chain=chain)
+        assert client.market.LookupV4PoolKey.call_args.args[0].chain == "base"
         assert pk.currency0 == _C0
         assert pk.currency1 == _C1
         assert pk.fee == _FEE
@@ -886,11 +863,22 @@ class TestFrameworkClient:
         assert pk.hooks == _HOOKS
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("response_chain", ["ethereum", " Arbitrum ", " "])
+    async def test_rejects_other_response_chain(self, response_chain) -> None:
+        client = MagicMock()
+        client.market.LookupV4PoolKey.return_value = gateway_pb2.LookupV4PoolKeyResponse(
+            pool_key=gateway_pb2.PoolKey(
+                currency0=_C0, currency1=_C1, fee=_FEE, tick_spacing=_TICK_SPACING, hooks=_HOOKS
+            ),
+            chain=response_chain,
+        )
+        with pytest.raises(ValueError, match="different chain"):
+            await lookup_v4_pool_key(client, pool_id=_POOL_ID_BYTES, chain="base")
+
+    @pytest.mark.asyncio
     async def test_not_found_raises_typed(self) -> None:
         client = MagicMock()
-        client.market.LookupV4PoolKey = MagicMock(
-            side_effect=_StubRpcError(grpc.StatusCode.NOT_FOUND, "missing")
-        )
+        client.market.LookupV4PoolKey = MagicMock(side_effect=_StubRpcError(grpc.StatusCode.NOT_FOUND, "missing"))
         with pytest.raises(V4PoolKeyNotFound) as exc_info:
             await lookup_v4_pool_key(client, pool_id=_POOL_ID_BYTES, chain="base")
         assert exc_info.value.chain == "base"
@@ -961,9 +949,7 @@ class TestMakeSyncPoolKeyLookup:
         outer except treats it as a benign 'pool_key_not_found' drop rather
         than a structured error."""
         client = MagicMock()
-        client.market.LookupV4PoolKey = MagicMock(
-            side_effect=_StubRpcError(grpc.StatusCode.NOT_FOUND, "missing")
-        )
+        client.market.LookupV4PoolKey = MagicMock(side_effect=_StubRpcError(grpc.StatusCode.NOT_FOUND, "missing"))
         lookup = make_sync_pool_key_lookup(client)
         assert lookup("0x" + _POOL_ID_HEX, "base") is None
 
@@ -1030,9 +1016,7 @@ class TestMakeSyncPoolKeyLookup:
         import asyncio
 
         client = MagicMock()
-        client.market.LookupV4PoolKey = MagicMock(
-            side_effect=_StubRpcError(grpc.StatusCode.NOT_FOUND, "missing")
-        )
+        client.market.LookupV4PoolKey = MagicMock(side_effect=_StubRpcError(grpc.StatusCode.NOT_FOUND, "missing"))
         lookup = make_sync_pool_key_lookup(client)
 
         async def _runner() -> FrameworkPoolKey | None:
@@ -1142,9 +1126,7 @@ class TestBisectionErrorFamily:
         cache = V4PoolKeyCache()
         w3 = MagicMock()
         # A wide window that WOULD bisect many times if the error were size-shaped.
-        w3.eth.get_logs = AsyncMock(
-            side_effect=RuntimeError("-32603 Fork Error: Transport(HttpError)")
-        )
+        w3.eth.get_logs = AsyncMock(side_effect=RuntimeError("-32603 Fork Error: Transport(HttpError)"))
         added = await cache.populate_from_logs(
             chain="base",
             w3=w3,

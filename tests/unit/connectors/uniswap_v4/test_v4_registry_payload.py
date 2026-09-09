@@ -100,7 +100,7 @@ CLOSE_POOL_KEY = PoolKey(currency0=A_USDC, currency1=A_WETH, fee=500, tick_spaci
 
 
 def _burn_log(*, liquidity_delta: int = -500_000) -> dict:
-    data = "0x" + _pad_int24(-60000) + _pad_int24(60000) + _pad_uint((1 << 256) + liquidity_delta) + "0" * 64
+    data = "0x" + _pad_int24(-60000) + _pad_int24(60000) + _pad_uint((1 << 256) + liquidity_delta) + _pad_uint(777)
     return {
         "address": CLOSE_POOL_MANAGER,
         "topics": [EVENT_TOPICS["ModifyLiquidity"], CLOSE_POOL_ID, "0x" + "00" * 12 + CLOSE_PM.lower().replace("0x", "")],

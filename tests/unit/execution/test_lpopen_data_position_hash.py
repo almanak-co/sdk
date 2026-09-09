@@ -30,8 +30,7 @@ import json
 from decimal import Decimal
 from unittest.mock import MagicMock
 
-from almanak.framework.execution.extracted_data import LPOpenData
-
+from almanak.framework.execution.extracted_data import LPCloseData, LPOpenData
 
 # ---------------------------------------------------------------------------
 # LPOpenData dataclass contract
@@ -223,27 +222,19 @@ class TestLPAccountingThreadsPositionHash:
         assert payload["position_hash"] == hash_hex
 
     def test_lp_close_emits_none_position_hash(self) -> None:
-        """LP_CLOSE leaves position_hash None: close-side matches by position_key.
-
-        The close leg uses the prior LP_OPEN payload as its lot-matching
-        partner. position_hash is the OPEN-side anchor only.
-        """
+        """V3 close receipts leave the V4 position hash unmeasured."""
         from almanak.framework.accounting.lp_accounting import build_lp_accounting_event
 
         result = MagicMock()
         result.tx_hash = "0xtxhash"
         result.transaction_results = []
         result.lp_open_data = None
-        # Pin currency0/1=None: bare MagicMock is truthy for those attrs and
-        # incorrectly enters the V4 realign branch with non-str tokens
-        # (VIB-6100 / CodeRabbit #3694).
-        lp_close = MagicMock()
-        lp_close.currency0 = None
-        lp_close.currency1 = None
-        lp_close.amount0_collected = 95_000_000
-        lp_close.amount1_collected = 95 * 10**18
-        lp_close.fees0 = 500_000
-        lp_close.fees1 = 5 * 10**17
+        lp_close = LPCloseData(
+            amount0_collected=95_000_000,
+            amount1_collected=95 * 10**18,
+            fees0=500_000,
+            fees1=5 * 10**17,
+        )
         result.lp_close_data = lp_close
         result.extracted_data = {}
 

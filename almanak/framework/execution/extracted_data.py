@@ -228,6 +228,7 @@ class LPCloseData:
     additional_fees: dict[int, int] | None = None
     current_tick: int | None = None  # VIB-3940
     pool_address: str = ""  # VIB-3940 — for framework slot0 fallback
+    position_hash: str | None = None
     source: str | None = None  # VIB-4310 — "collect" | "decrease_liquidity" | None
     # VIB-4426 P1 #4 — V4 canonical currency addresses in PoolKey-sorted order
     # (``int(currency0, 16) < int(currency1, 16)``). The V4 receipt parser
@@ -256,8 +257,8 @@ class LPCloseData:
     # eligibility is keyed exclusively by these chain-scoped identities.
     coin_addresses: list[str] | None = None
     # VIB-4275 — per-position discriminator (closing leg's NFT token id). The
-    # close RECEIPT does not re-emit the token id (a Burn carries no NFT id),
-    # so parsers leave this ``None``; the runner stamps it from the close
+    # V4 derives this from the canonical ModifyLiquidity salt. For venues
+    # whose burn does not identify the NFT, the runner stamps it from the close
     # INTENT (``LPCloseIntent.position_id``) at ledger-build time. The
     # close-side resolver matches it against the prior OPEN payload's
     # ``position_id`` so a co-pool close attributes to its OWN open rather than
@@ -355,6 +356,7 @@ class LPCloseData:
             "coin_addresses": self.coin_addresses,
             # VIB-4275 — per-position discriminator (closing leg's token id).
             "position_id": self.position_id,
+            "position_hash": self.position_hash,
             # VIB-4848 (T8) — fee separation taxonomy.
             "fee_separation_method": self.fee_separation_method,
             "fee_confidence": self.fee_confidence,

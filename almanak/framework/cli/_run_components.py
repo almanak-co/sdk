@@ -778,6 +778,7 @@ def _build_multi_chain_providers(
         wallet_address=effective_wallet,
         max_gas_price_gwei=runtime_config.max_gas_price_gwei,
         chain_wallets=chain_wallets or None,
+        simulation_enabled=runtime_config.simulation_enabled,
     )
     multi_chain_balance_provider = MultiChainGatewayBalanceProvider(
         client=gateway_client,
@@ -1300,6 +1301,7 @@ def _build_runner(
     deployment_id: str,
     components: ComponentBundle,
     vault_lifecycle: Any,
+    simulation_enabled: bool = False,
 ) -> Any:
     """Construct the `StrategyRunner` with all safety components wired in.
 
@@ -1320,6 +1322,7 @@ def _build_runner(
     runner_config = RunnerConfig(
         default_interval_seconds=interval,
         dry_run=effective_dry_run,
+        simulation_enabled=simulation_enabled,
         enable_state_persistence=True,
         enable_alerting=False,  # No alert manager configured
         reconciliation_enforcement=_reconciliation_enforcement_from_env(),
@@ -1470,6 +1473,7 @@ def _build_components(
             deployment_id=deployment_id,
             components=components,
             vault_lifecycle=vault_lifecycle,
+            simulation_enabled=runtime_config.simulation_enabled,
         )
 
         click.echo("Components initialized successfully")

@@ -444,6 +444,7 @@ class TestFluidDexLpNativeLegArbitrum:
             wallet_address=funded_wallet,
             result=exec_result,
             gateway_client=anvil_eth_call_adapter,
+            declared_network="anvil",
         )
         assert native_amounts is not None, "native bracket capture must measure the ETH leg"
         _a0, a1 = native_amounts
@@ -480,6 +481,8 @@ class TestFluidDexLpNativeLegArbitrum:
         """
         from types import SimpleNamespace
 
+        from almanak.framework.execution.interfaces import TransactionReceipt
+        from almanak.framework.execution.orchestrator import TransactionResult
         from almanak.framework.runner.strategy_runner import StrategyRunner
 
         send_wei = int(Decimal("0.05") * Decimal(10**18))
@@ -510,7 +513,22 @@ class TestFluidDexLpNativeLegArbitrum:
         result = SimpleNamespace(
             lp_open_data=lp_open,
             extracted_data={"lp_open_data": lp_open},
-            transaction_results=[SimpleNamespace(success=True, receipt=SimpleNamespace(block_number=receipt["blockNumber"]))],
+            transaction_results=[
+                TransactionResult(
+                    tx_hash=tx_hash.hex(),
+                    success=True,
+                    receipt=TransactionReceipt(
+                        tx_hash=tx_hash.hex(),
+                        block_number=receipt["blockNumber"],
+                        block_hash=receipt["blockHash"].hex(),
+                        gas_used=receipt["gasUsed"],
+                        effective_gas_price=receipt["effectiveGasPrice"],
+                        status=receipt["status"],
+                        from_address=receipt["from"],
+                        to_address=receipt["to"],
+                    ),
+                )
+            ],
             total_gas_cost_wei=gas_wei,
         )
 
@@ -523,6 +541,7 @@ class TestFluidDexLpNativeLegArbitrum:
             wallet_address=funded_wallet,
             result=result,
             gateway_client=anvil_eth_call_adapter,
+            declared_network="anvil",
         )
         assert native_amounts is not None
         _a0, a1 = native_amounts

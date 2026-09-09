@@ -249,3 +249,11 @@ class TestExports:
         # keccak256("slot0()")[:4] = 0x3850c7bd — the selector the on-chain
         # call must use; encoding it wrong silently breaks every fallback.
         assert SLOT0_SELECTOR == "0x3850c7bd"
+
+
+def test_v4_pool_id_never_reaches_v3_address_rpc():
+    from unittest.mock import Mock
+
+    gateway = Mock()
+    assert fetch_slot0_tick(gateway, "base", "0x" + "12" * 32) is None
+    gateway.eth_call.assert_not_called()

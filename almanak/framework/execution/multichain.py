@@ -296,6 +296,7 @@ class MultiChainOrchestrator:
         _primary_chain: str | None = None,
         _max_gas_price_gwei: int = 0,
         chain_wallets: dict[str, str] | None = None,
+        simulation_enabled: bool = True,
     ) -> None:
         """Initialize the MultiChainOrchestrator.
 
@@ -316,6 +317,7 @@ class MultiChainOrchestrator:
 
         # Config mode (legacy)
         self._config = config
+        self._simulation_enabled = config.simulation_enabled if config is not None else simulation_enabled
         self._executors: dict[str, ChainExecutor] = {}
         self._compilers: dict[str, IntentCompiler] = {}
         self._compiler_locks: dict[str, asyncio.Lock] = {}
@@ -362,6 +364,7 @@ class MultiChainOrchestrator:
         primary_chain: str | None = None,
         max_gas_price_gwei: int = 0,
         chain_wallets: dict[str, str] | None = None,
+        simulation_enabled: bool = True,
     ) -> "MultiChainOrchestrator":
         """Create orchestrator backed by the gateway.
 
@@ -388,6 +391,7 @@ class MultiChainOrchestrator:
             _primary_chain=primary_chain,
             _max_gas_price_gwei=max_gas_price_gwei,
             chain_wallets=chain_wallets,
+            simulation_enabled=simulation_enabled,
         )
 
     # =========================================================================
@@ -568,7 +572,7 @@ class MultiChainOrchestrator:
         """
         orchestrator = self._get_gateway_orchestrator(chain)
         bundle = await orchestrator.compile_intent(intent, price_map=price_map)
-        return await orchestrator.execute(bundle)
+        return await orchestrator.execute(bundle, simulation_enabled=self._simulation_enabled)
 
     async def _compile_and_execute_intent(
         self,

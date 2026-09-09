@@ -29,7 +29,8 @@ fork. ``--network anvil`` / ``ALMANAK_NETWORK=anvil`` /
 :func:`is_managed_fork_network` maps to the boolean threaded through config as
 ``managed_fork``.
 
-There is deliberately **no runtime detection here.** An earlier revision of
+There is no direct runtime RPC probing here. Optional gateway confirmation
+requires the explicit declaration and can only strengthen it. An earlier revision of
 this module probed the endpoint with ``anvil_nodeInfo`` to auto-detect forks
 that nothing had declared. That was a gateway-boundary bypass and was removed:
 ``almanak/framework/`` is strategy-container code, whose only sanctioned egress
@@ -61,6 +62,7 @@ from almanak.core.rpc_network import Network
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "gateway_confirms_managed_fork",
     "is_managed_fork_network",
     "resolve_managed_fork",
 ]
@@ -109,3 +111,30 @@ def resolve_managed_fork(declared: bool | None) -> bool:
             type(declared).__name__,
         )
     return False
+
+
+def gateway_confirms_managed_fork(
+    gateway_client: object, chain: str, *, declared_network: Network | str | None
+) -> bool:
+    """Confirm an explicit managed fork through the gateway's network boundary.
+
+    The gateway refuses an Anvil override when configured for mainnet. The node
+    identity check additionally refuses a declared fork backed by a production
+    client. Failure never grants a fee-model or safety exception.
+    """
+    if not is_managed_fork_network(declared_network):
+        return False
+    try:
+        import json
+
+        from almanak.gateway.proto import gateway_pb2
+
+        response = gateway_client.rpc.Call(  # type: ignore[attr-defined]
+            gateway_pb2.RpcRequest(chain=chain, network="anvil", method="web3_clientVersion", params="[]"),
+            timeout=10,
+        )
+        version = json.loads(response.result) if response.success and response.result else None
+        return isinstance(version, str) and version.lower().startswith("anvil/")
+    except Exception:  # noqa: BLE001 — capability failure retains production requirements
+        logger.debug("Gateway could not confirm managed Anvil fee model", exc_info=True)
+        return False

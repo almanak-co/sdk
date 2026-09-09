@@ -1002,11 +1002,13 @@ class TestInitCopyTradingExtras:
         monkeypatch.setattr(run_mod, "create_sync_price_oracle_func", _boom_sync_price)
 
         # Stub the copy-trading factories so _init_copy_trading can progress.
+        from almanak.framework.services import wallet_monitor as wm_mod
         from almanak.framework.services.copy_trading import (
             copy_signal_engine as cse_mod,
+        )
+        from almanak.framework.services.copy_trading import (
             copy_trading_models as ctm_mod,
         )
-        from almanak.framework.services import wallet_monitor as wm_mod
 
         fake_v1 = MagicMock(leaders=[{"address": "0xleader", "chain": "arbitrum"}], monitoring={})
         monkeypatch.setattr(ctm_mod.CopyTradingConfig, "from_config", staticmethod(lambda _r: fake_v1))
@@ -1059,16 +1061,26 @@ class TestInitCopyTradingExtras:
         _patch_component_factories(monkeypatch)
         strategy_instance = _make_strategy_instance()
 
-        from almanak.framework.services.copy_trading import (
-            copy_circuit_breaker as ccb_mod,
-            copy_intent_builder as cib_mod,
-            copy_ledger as cl_mod,
-            copy_policy_engine as cpe_mod,
-            copy_signal_engine as cse_mod,
-            copy_trading_models as ctm_mod,
-        )
         from almanak.framework.services import (
             wallet_monitor as wm_mod,
+        )
+        from almanak.framework.services.copy_trading import (
+            copy_circuit_breaker as ccb_mod,
+        )
+        from almanak.framework.services.copy_trading import (
+            copy_intent_builder as cib_mod,
+        )
+        from almanak.framework.services.copy_trading import (
+            copy_ledger as cl_mod,
+        )
+        from almanak.framework.services.copy_trading import (
+            copy_policy_engine as cpe_mod,
+        )
+        from almanak.framework.services.copy_trading import (
+            copy_signal_engine as cse_mod,
+        )
+        from almanak.framework.services.copy_trading import (
+            copy_trading_models as ctm_mod,
         )
         from almanak.framework.testing import copy_replay as cr_mod
 
@@ -1147,16 +1159,26 @@ class TestInitCopyTradingExtras:
         _patch_component_factories(monkeypatch)
         strategy_instance = _make_strategy_instance()
 
-        from almanak.framework.services.copy_trading import (
-            copy_circuit_breaker as ccb_mod,
-            copy_intent_builder as cib_mod,
-            copy_ledger as cl_mod,
-            copy_policy_engine as cpe_mod,
-            copy_signal_engine as cse_mod,
-            copy_trading_models as ctm_mod,
-        )
         from almanak.framework.services import (
             wallet_monitor as wm_mod,
+        )
+        from almanak.framework.services.copy_trading import (
+            copy_circuit_breaker as ccb_mod,
+        )
+        from almanak.framework.services.copy_trading import (
+            copy_intent_builder as cib_mod,
+        )
+        from almanak.framework.services.copy_trading import (
+            copy_ledger as cl_mod,
+        )
+        from almanak.framework.services.copy_trading import (
+            copy_policy_engine as cpe_mod,
+        )
+        from almanak.framework.services.copy_trading import (
+            copy_signal_engine as cse_mod,
+        )
+        from almanak.framework.services.copy_trading import (
+            copy_trading_models as ctm_mod,
         )
 
         fake_v2 = MagicMock()
@@ -1576,6 +1598,7 @@ class TestSolanaForkInit:
 
         # Solana uses runtime_config.chain == "solana"
         class _SolanaConfig:
+            simulation_enabled = True
             chain = "solana"
             execution_address = "SolanaWallet11111111111111111111111"
             wallet_address = "SolanaWallet11111111111111111111111"
@@ -1653,6 +1676,7 @@ class TestSolanaForkInit:
         monkeypatch.setattr(sfm_mod, "SolanaForkManager", _FailingForkMgr)
 
         class _SolanaConfig:
+            simulation_enabled = True
             chain = "solana"
             execution_address = "Wallet111"
             wallet_address = "Wallet111"

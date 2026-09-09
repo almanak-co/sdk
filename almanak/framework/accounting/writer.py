@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from almanak.framework.accounting.lp_accounting import LPAccountingEvent
@@ -258,6 +259,7 @@ def augment_accounting_payload(
             protocol = d.get("protocol")
             if isinstance(protocol, str) and protocol:
                 primitive = primitive_for(event_type, protocol)
+                record = replace(record, primitive=primitive)
 
     d["schema_version"] = SCHEMA_VERSION
     d["formula_version"] = FORMULA_VERSION
@@ -463,6 +465,9 @@ def restamp_position_reference(
         # An unknown event_type cannot be proven to belong to this registry
         # row. Empty ≠ Zero: leave it unmeasured rather than guessing.
         return None
+    protocol = d.get("protocol")
+    if isinstance(protocol, str) and protocol:
+        record = replace(record, primitive=primitive_for(event_type, protocol))
     if record.event_kind not in (EventKind.OPEN, EventKind.CLOSE):
         return None
 

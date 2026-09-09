@@ -74,8 +74,8 @@ class TestSdkGetPositionPoolKey:
         # int24 -60 two's complement in the low 24 bits.
         payload = _pool_and_position_info_payload(tick_spacing=(-60) & ((1 << 24) - 1))
         with patch("almanak.connectors.uniswap_v4.sdk.eth_call_hex", return_value=payload):
-            pool_key = sdk.get_position_pool_key(1)
-        assert pool_key.tick_spacing == -60
+            with pytest.raises(ValueError, match="tickSpacing"):
+                sdk.get_position_pool_key(1)
 
     def test_short_payload_raises(self):
         sdk = self._sdk()

@@ -309,6 +309,8 @@ def test_collect_fees_preserves_identity_hook_data_transaction_and_warnings(warn
         currency0=CURRENCY0,
         currency1=CURRENCY1,
         hook_data=b"\x12\x34",
+        pool=intent.pool,
+        protocol_params=intent.protocol_params,
     )
 
 
@@ -335,7 +337,9 @@ def test_collect_fees_falls_back_to_intent_position_and_pool_currencies() -> Non
         position_id=23,
         currency0=CURRENCY0,
         currency1=CURRENCY1,
-        hook_data=b"",
+        hook_data=None,
+        pool=intent.pool,
+        protocol_params=intent.protocol_params,
     )
 
 
@@ -370,7 +374,7 @@ def test_collect_fees_contains_invalid_hook_data() -> None:
         result = compiler.compile_collect_fees(_ctx(), intent)
 
     assert result.status is CompilationStatus.FAILED
-    assert "non-hexadecimal number" in (result.error or "")
+    assert "0x-prefixed hex" in (result.error or "")
 
 
 @pytest.mark.parametrize(

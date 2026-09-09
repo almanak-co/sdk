@@ -1400,6 +1400,7 @@ def run(
         # flag was the split brain — gateway on Anvil, runtime on mainnet.
         gateway_network=gateway_network,
         fresh=fresh,
+        simulation_override=simulate_tx,
     )
 
     # Launch the dashboard sidecar AFTER ``deployment_id`` is resolved so

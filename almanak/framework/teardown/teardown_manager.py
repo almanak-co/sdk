@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 if TYPE_CHECKING:
     from almanak.framework.execution.orchestrator import ExecutionOrchestrator
     from almanak.framework.intents.compiler import IntentCompiler
+    from almanak.framework.teardown.native_inventory_closure import NativeClosureProof
     from almanak.framework.teardown.runner_helpers import TeardownRunnerHelpers
 
 from almanak.framework.teardown.cancel_window import CancelWindowManager
@@ -684,6 +685,7 @@ class TeardownManager:
         orchestrator: "ExecutionOrchestrator | None" = None,
         compiler: "IntentCompiler | None" = None,
         runner_helpers: "TeardownRunnerHelpers | None" = None,
+        simulation_enabled: bool = False,
     ):
         """Initialize the teardown manager.
 
@@ -711,6 +713,7 @@ class TeardownManager:
         self.orchestrator = orchestrator
         self.compiler = compiler
         self.runner_helpers = runner_helpers or TeardownRunnerHelpers()
+        self.simulation_enabled = simulation_enabled
 
         self.safety_guard = SafetyGuard(self.config)
         self.slippage_manager = EscalatingSlippageManager(self.config)
@@ -2386,6 +2389,7 @@ class TeardownManager:
         intent_chain = _intent_field(intent, "chain") or strategy.chain
         return ExecutionContext(
             deployment_id=strategy.deployment_id,
+            simulation_enabled=self.simulation_enabled,
             intent_id=f"teardown_{teardown_id}_{intent_index}",
             chain=intent_chain,
             intent_description=self._describe_intent(intent),
@@ -2411,6 +2415,7 @@ class TeardownManager:
         # Keep dispatch on self so static accounting validation can verify commit pairing.
         snapshots = await self._capture_pre_attempt_snapshots(strategy, intent)
         pre_snapshot, lending_pre, v4_fees, v4_native = snapshots
+        native_anchor = await asyncio.to_thread(self._capture_native_exit, strategy, intent, context)
         exec_result = await self.orchestrator.execute(compilation_result.action_bundle, context)
         if not exec_result.success:
             return exec_result, None, None
@@ -2469,7 +2474,68 @@ class TeardownManager:
                 intent_count,
                 outcome.degraded_reason or "unknown",
             )
+        if not outcome.accounting_degraded and native_anchor is not None:
+            await asyncio.to_thread(self._complete_native_exit, strategy, native_anchor, exec_result)
         return exec_result, outcome, async_submission
+
+    def _capture_native_exit(self, strategy: Any, intent: Any, context: Any) -> Any:
+        from .native_inventory_closure import capture_native_exit, native_input
+
+        if not native_input(_intent_field(intent, "from_token"), context.chain):
+            return None
+        reader = self.runner_helpers.get_native_closure_inventory
+        if reader is None:
+            return None
+        try:
+            return capture_native_exit(
+                strategy=strategy,
+                intent=intent,
+                positions=getattr(self, "_native_closure_positions", []),
+                tracked=reader(strategy, context.chain, context.wallet_address),
+                gateway=self._teardown_gateway_client(),
+            )
+        except Exception as exc:  # noqa: BLE001 — evidence failure must not block risk reduction
+            logger.warning("Native closure anchor unmeasured: %s", exc)
+            return None
+
+    def _complete_native_exit(self, strategy: Any, anchor: Any, result: Any) -> None:
+        from .native_inventory_closure import complete_native_exit
+
+        try:
+            reader = self.runner_helpers.get_native_closure_inventory
+            tracked = reader(strategy, anchor.key[1], anchor.wallet) if reader is not None else None
+            proof = complete_native_exit(anchor, result, tracked, self._teardown_gateway_client())
+            self._native_closure_proofs[anchor.key] = proof
+            logger.info(
+                "native_inventory_closure_proof deployment_id=%s wallet=%s position=%s amount_raw=%s gas_wei=%s transactions=%s pre_block=%s terminal_block=%s pre_hash=%s terminal_hash=%s pre_balance_raw=%s terminal_balance_raw=%s managed_fork=%s",
+                anchor.deployment_id,
+                anchor.wallet,
+                anchor.key,
+                anchor.amount,
+                proof.gas_paid,
+                proof.transaction_hashes,
+                anchor.block_number,
+                proof.terminal_block,
+                anchor.block_hash,
+                proof.terminal_hash,
+                anchor.balance,
+                proof.terminal_balance,
+                anchor.managed_fork,
+            )
+        except Exception as exc:  # noqa: BLE001 — retain unmeasured closure after successful risk reduction
+            logger.warning("Native closure proof unmeasured: %s", exc)
+
+    def _native_closure_check(
+        self, position: Any, wallet: str, gateway: Any, *, deployment_id: str = "", strategy: Any = None
+    ) -> Any:
+        from .native_inventory_closure import position_key
+
+        proof = getattr(self, "_native_closure_proofs", {}).get(position_key(position))
+        if proof is None:
+            return None
+        reader = self.runner_helpers.get_native_closure_inventory
+        tracked = reader(strategy, proof.anchor.key[1], wallet) if reader is not None and strategy is not None else None
+        return proof.verify(position, wallet, gateway, deployment_id=deployment_id, tracked=tracked)
 
     def _prepare_async_submission(
         self,
@@ -3205,6 +3271,8 @@ class TeardownManager:
             TeardownResult with execution outcome
         """
         del consolidation_consent
+        self._native_closure_positions = list(positions.positions)
+        self._native_closure_proofs: dict[tuple[str, str, str], NativeClosureProof] = {}
         started_at = teardown_state.started_at
         mode_str = "graceful" if mode == TeardownMode.SOFT else "emergency"
 
@@ -3493,13 +3561,21 @@ class TeardownManager:
                     _teardown_wallet_for_chain(strategy, str(getattr(position, "chain", "") or "")) or wallet_address
                 )
                 try:
-                    check = _resolve_and_run_post_condition(
+                    check = self._native_closure_check(
                         position,
-                        wallet_address=position_wallet,
-                        gateway_client=gateway_client,
-                        rpc_url=rpc_url,
-                        block=close_receipt_block,
+                        position_wallet,
+                        gateway_client,
+                        deployment_id=strategy.deployment_id,
+                        strategy=strategy,
                     )
+                    if check is None:
+                        check = _resolve_and_run_post_condition(
+                            position,
+                            wallet_address=position_wallet,
+                            gateway_client=gateway_client,
+                            rpc_url=rpc_url,
+                            block=close_receipt_block,
+                        )
                 except Exception as exc:  # noqa: BLE001 — fail-safe
                     # Read faults are unmeasured, not evidence of residual exposure.
                     logger.warning(
@@ -3683,7 +3759,10 @@ class TeardownManager:
            unconfirmable pre-teardown means the enumeration was stale or the
            position never existed; certifying CHAIN_VERIFIED off it would be a
            false success on a never-existed position (AC-(b)), so it lowers
-           CHAIN_VERIFIED → UNVERIFIED.
+           CHAIN_VERIFIED → UNVERIFIED. A transaction-bound native proof can
+           resolve an earlier unconfirmable native attribution for that exact
+           position only, after fresh POST revalidation. Measured PRE zero and
+           unrelated unknown positions still lower confidence.
 
         On top of those three it sets a fourth, orthogonal signal (VIB-6285 / W0.1):
         ``closure_unknown`` — True when NEITHER authority measured a single position
@@ -3701,6 +3780,29 @@ class TeardownManager:
             return verification
 
         deployment_id = getattr(strategy, "deployment_id", "") or ""
+
+        def _revalidate_native_closure(position: Any, wallet: str, gateway: Any) -> Any:
+            nonlocal verification
+            from .native_inventory_closure import position_key
+
+            key = position_key(position)
+            try:
+                return self._native_closure_check(
+                    position, wallet, gateway, deployment_id=deployment_id, strategy=strategy
+                )
+            except Exception:
+                # A rejected transaction-bound proof cannot survive as historical
+                # hook evidence through the unreadable burned-NFT fallback.
+                remaining_keys = tuple(k for k in verification.hook_proven_position_keys if k != key)
+                verification = replace(
+                    verification,
+                    all_closed=False,
+                    positions_closed=max(verification.positions_closed - 1, 0),
+                    verification_status=VerificationStatus.UNVERIFIED,
+                    hook_proven_position_keys=remaining_keys,
+                )
+                raise
+
         try:
             gateway_client = self._teardown_gateway_client()
             network = str(getattr(strategy, "_gateway_network", "") or "")
@@ -3714,6 +3816,7 @@ class TeardownManager:
                 wallet_address=self._teardown_wallet_address(strategy),
                 wallet_for_chain=getattr(strategy, "get_wallet_for_chain", None),
                 phase="post",
+                token_closure_authority=_revalidate_native_closure,
             )
         except Exception:  # noqa: BLE001 — the CHECK must never fault the teardown lane
             logger.exception(
@@ -3721,6 +3824,9 @@ class TeardownManager:
                 "post-condition verdict unchanged (fail-safe)",
                 deployment_id,
             )
+            return verification
+
+        if not verification.all_closed:
             return verification
 
         # Position-scoped zero proof outranks an unattributable whole-account residual.
@@ -3765,7 +3871,9 @@ class TeardownManager:
         # Reconciliation can only lower confidence; it never upgrades the hook verdict.
         status = post_report.apply_post_teardown_to_verification_status(verification.verification_status)
         if pre_teardown_reconciliation is not None:
-            status = pre_teardown_reconciliation.apply_to_verification_status(status)
+            status = self._apply_pre_reconciliation_with_native_proofs(
+                status, pre_teardown_reconciliation, post_report, proven_keys, deployment_id
+            )
 
         # Only measured open state is residual risk; an unverifiable read is not.
         if post_report.has_confirmed_open:
@@ -3835,6 +3943,35 @@ class TeardownManager:
             )
             return replace(verification, verification_status=status)
         return verification
+
+    def _apply_pre_reconciliation_with_native_proofs(
+        self,
+        status: VerificationStatus,
+        pre_report: Any,
+        post_report: Any,
+        hook_proven_keys: set[tuple[str, str, str]],
+        deployment_id: str,
+    ) -> VerificationStatus:
+        from .native_inventory_closure import position_key
+
+        # Native balance alone cannot separate inventory from gas principal.
+        # A freshly revalidated transaction proof resolves that attribution only
+        # for its exact position; a measured pre-existing zero remains stale.
+        fresh_keys = (
+            set(getattr(self, "_native_closure_proofs", {}))
+            & hook_proven_keys
+            & {position_key(entry) for entry in post_report.diverged}
+        )
+        if fresh_keys and pre_report.deployment_id == deployment_id:
+            pre_report = replace(
+                pre_report,
+                entries=tuple(
+                    entry
+                    for entry in pre_report.entries
+                    if not (entry.unverifiable and position_key(entry) in fresh_keys)
+                ),
+            )
+        return pre_report.apply_to_verification_status(status)
 
     @staticmethod
     def _fresh_post_execution_market(strategy: Any, fallback: Any | None) -> Any | None:

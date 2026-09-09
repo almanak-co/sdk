@@ -114,86 +114,42 @@ def test_decode_uint256_reads_first_word() -> None:
     assert decode_uint256(abi_encode(["uint256", "bool"], [123, True])) == 123
 
 
-def test_uniswap_v4_provider_uses_shared_eth_call(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("fee,decimals", [(3000, 18), (0, 0)])
+def test_uniswap_v4_provider_preserves_full_key_in_pinned_gateway_quote(fee, decimals):
     from almanak.connectors.uniswap_v4 import sdk as v4_sdk
     from almanak.connectors.uniswap_v4.swap_quote_provider import UniswapV4SwapQuoteConnector
+    from tests.unit.connectors.uniswap_v4.test_operation_contract import Gateway
 
-    calls: list[dict[str, object]] = []
+    calls = []
 
-    def fake_eth_call(**kwargs):
-        calls.append(kwargs)
-        return abi_encode(["uint256", "uint256"], [49_000_000_000_000_000, 123_456])
+    class QuoteGateway(Gateway):
+        def read(self, *, payload, **kwargs):
+            if payload[:4].hex() == v4_sdk.QUOTE_EXACT_INPUT_SINGLE_SELECTOR[2:]:
+                calls.append({"payload": payload, **kwargs})
+                return abi_encode(["uint256", "uint256"], [49_000_000_000_000_000, 123456])
+            return super().read(payload=payload, **kwargs)
 
-    monkeypatch.setattr(v4_sdk, "eth_call", fake_eth_call)
-
-    provider = UniswapV4SwapQuoteConnector()
-    result = provider.quote_swap(
-        SimpleNamespace(rpc_url="http://anvil.local", gateway_client=None),
+    gateway = QuoteGateway()
+    result = UniswapV4SwapQuoteConnector().quote_swap(
+        SimpleNamespace(rpc_url=None, gateway_client=None, venue_verification_gateway_factory=lambda: gateway),
         SwapQuoteRequest(
             chain="base",
             protocol="uniswap_v4",
             token_in="0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
             token_out="0x4200000000000000000000000000000000000006",
             amount_in=100_000_000,
-            token_in_decimals=6,
-            token_out_decimals=18,
-            fee_tier=3000,
+            token_in_decimals=decimals,
+            token_out_decimals=decimals,
+            fee_tier=fee,
+            extra={"tick_spacing": 60 if fee else 1},
         ),
     )
-
-    assert isinstance(provider, SwapQuoteConnector)
-    assert isinstance(result, SwapQuoteResult)
-    assert result.amount_out == 49_000_000_000_000_000
-    assert result.gas_estimate == 123_456
-    assert result.source == "uniswap_v4_quoter"
-    assert result.metadata["slippage_reference"] == SLIPPAGE_REFERENCE_UNSUPPORTED
-    assert calls == [
-        {
-            "chain": "base",
-            "to": "0x0d5e0F971ED27FBfF6c2837bf31316121532048D",
-            "data": calls[0]["data"],
-            "rpc_url": "http://anvil.local",
-            "gateway_client": None,
-            "timeout": v4_sdk.V4_QUOTER_DIRECT_RPC_TIMEOUT_SECONDS,
-        }
-    ]
-    assert str(calls[0]["data"]).startswith(v4_sdk.QUOTE_EXACT_INPUT_SINGLE_SELECTOR)
-
-
-def test_uniswap_v4_provider_preserves_explicit_zero_numeric_fields(monkeypatch: pytest.MonkeyPatch) -> None:
-    from almanak.connectors.uniswap_v4 import sdk as v4_sdk
-    from almanak.connectors.uniswap_v4.swap_quote_provider import UniswapV4SwapQuoteConnector
-
-    calls: list[dict[str, object]] = []
-
-    class FakeSDK:
-        def __init__(self, **kwargs):
-            calls.append({"init": kwargs})
-
-        def get_quote(self, **kwargs):
-            calls.append({"quote": kwargs})
-            return SimpleNamespace(amount_out=1, gas_estimate=2, fee_tier=kwargs["fee_tier"])
-
-    monkeypatch.setattr(v4_sdk, "UniswapV4SDK", FakeSDK)
-
-    result = UniswapV4SwapQuoteConnector().quote_swap(
-        SimpleNamespace(rpc_url="http://anvil.local", gateway_client=None),
-        SwapQuoteRequest(
-            chain="base",
-            protocol="uniswap_v4",
-            token_in="0x1111111111111111111111111111111111111111",
-            token_out="0x2222222222222222222222222222222222222222",
-            amount_in=100,
-            token_in_decimals=0,
-            token_out_decimals=0,
-            fee_tier=0,
-        ),
-    )
-
-    assert result.metadata["fee_tier"] == 0
-    assert calls[1]["quote"]["fee_tier"] == 0
-    assert calls[1]["quote"]["token_in_decimals"] == 0
-    assert calls[1]["quote"]["token_out_decimals"] == 0
+    assert result.amount_out == 49_000_000_000_000_000 and result.gas_estimate == 123456
+    assert result.metadata["fee_tier"] == fee
+    assert result.metadata["pool_key"]["fee"] == fee
+    assert result.venue_binding_hash
+    assert len(calls) == 1 and calls[0]["block_number"] == gateway.head
+    assert result.metadata["quote_block_hash"] == gateway.hash
 
 
 def test_uniswap_v3_provider_uses_default_swap_adapter(monkeypatch: pytest.MonkeyPatch) -> None:

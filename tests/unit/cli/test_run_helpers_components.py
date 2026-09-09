@@ -525,6 +525,7 @@ class TestBuildRuntimeConfig:
         assert isinstance(rt, GatewayRuntimeConfig)
         assert rt.chain == "arbitrum"
         assert rt.execution_address == "0xeoa"
+        assert rt.simulation_enabled is True
         assert chain_wallets == {}
 
     def test_gateway_wallets_registration_updates_runtime_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -925,16 +926,26 @@ class TestBuildComponents:
         strategy_instance = _make_strategy_instance()
 
         # Stub the copy-trading v2 config + supporting machinery.
-        from almanak.framework.services.copy_trading import (
-            copy_circuit_breaker as ccb_mod,
-            copy_intent_builder as cib_mod,
-            copy_ledger as cl_mod,
-            copy_policy_engine as cpe_mod,
-            copy_signal_engine as cse_mod,
-            copy_trading_models as ctm_mod,
-        )
         from almanak.framework.services import (
             wallet_monitor as wm_mod,
+        )
+        from almanak.framework.services.copy_trading import (
+            copy_circuit_breaker as ccb_mod,
+        )
+        from almanak.framework.services.copy_trading import (
+            copy_intent_builder as cib_mod,
+        )
+        from almanak.framework.services.copy_trading import (
+            copy_ledger as cl_mod,
+        )
+        from almanak.framework.services.copy_trading import (
+            copy_policy_engine as cpe_mod,
+        )
+        from almanak.framework.services.copy_trading import (
+            copy_signal_engine as cse_mod,
+        )
+        from almanak.framework.services.copy_trading import (
+            copy_trading_models as ctm_mod,
         )
 
         fake_v2 = MagicMock(name="ct_v2")
@@ -1001,11 +1012,13 @@ class TestBuildComponents:
         _patch_component_factories(monkeypatch)
         strategy_instance = _make_strategy_instance()
 
+        from almanak.framework.services import wallet_monitor as wm_mod
         from almanak.framework.services.copy_trading import (
             copy_signal_engine as cse_mod,
+        )
+        from almanak.framework.services.copy_trading import (
             copy_trading_models as ctm_mod,
         )
-        from almanak.framework.services import wallet_monitor as wm_mod
 
         fake_v1 = MagicMock(
             leaders=[{"address": "0xleader", "chain": "arbitrum"}],

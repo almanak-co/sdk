@@ -1811,7 +1811,7 @@ class GatewayStateManager:
         response = self._client.state.HasAccountingEventsForLedger(request, timeout=self._timeout)
         return bool(response.has_events)
 
-    async def get_ledger_entry_by_id(self, ledger_entry_id: str) -> dict | None:
+    async def get_ledger_entry_by_id(self, ledger_entry_id: str, *, strict: bool = False) -> dict | None:
         """Fetch a transaction_ledger row by id via gateway gRPC for AccountingProcessor."""
         try:
             request = gateway_pb2.GetLedgerEntryRequest(ledger_entry_id=ledger_entry_id)
@@ -1854,6 +1854,8 @@ class GatewayStateManager:
                 row["slippage_bps"] = e.slippage_bps
             return row
         except Exception as exc:
+            if strict:
+                raise
             logger.warning("get_ledger_entry_by_id failed for %s: %s", ledger_entry_id, exc)
             return None
 

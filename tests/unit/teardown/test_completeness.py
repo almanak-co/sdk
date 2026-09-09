@@ -1395,3 +1395,47 @@ def test_genuinely_market_less_lending_still_lenient_VIB_5494():
         {"intent_type": "WITHDRAW", "token": "DAI", "protocol": "aave_v3"},
     ]
     assert check_intent_coverage(_summary(legs), intents).complete
+
+
+def test_every_registered_evm_native_address_alias_covers_native_sale():
+    from almanak.core.chains import ChainRegistry
+    from almanak.core.enums import ChainFamily
+    from almanak.framework.data.tokens import NATIVE_SENTINEL
+
+    for chain in ChainRegistry.all():
+        if chain.family is not ChainFamily.EVM:
+            continue
+        for alias in ("0x" + "0" * 40, NATIVE_SENTINEL, *chain.native.address_aliases):
+            position = _held_token(
+                chain.native.symbol, chain=chain.name, details={"address": alias, "token": chain.native.symbol}
+            )
+            for symbol in (chain.native.symbol, *chain.native.accepted_symbols):
+                sale = {"intent_type": "SWAP", "from_token": symbol, "chain": chain.name}
+                assert check_intent_coverage([position], [sale]).complete is (chain.native.slip44 is not None), (
+                    chain.name,
+                    alias,
+                    symbol,
+                )
+            if chain.native.wrapped_address:
+                wrapped_sale = {"intent_type": "SWAP", "from_token": chain.native.wrapped_address, "chain": chain.name}
+                assert not check_intent_coverage([position], [wrapped_sale]).complete
+
+
+def test_native_zero_position_does_not_match_other_chain_or_wrapped_eth():
+    position = _held_token("ETH", chain="base", details={"asset": "ETH", "address": "0x" + "0" * 40, "token": "ETH"})
+    actual_sale = Intent.swap(
+        from_token="ETH", to_token="USDC", amount=Decimal(".001238647303996103"), protocol="uniswap_v4"
+    )
+    assert check_intent_coverage([position], [actual_sale]).complete
+    for token, chain in [("ETH", "arbitrum"), ("WETH", "base"), ("eip155:42161/slip44:60", "base")]:
+        assert not check_intent_coverage(
+            [position], [{"intent_type": "SWAP", "from_token": token, "chain": chain}]
+        ).complete
+
+
+def test_chain_specific_native_address_alias_is_not_global():
+    alias = "0x0000000000000000000000000000000000001010"
+    position = _held_token("ETH", chain="base", details={"address": alias, "token": "ETH"})
+    assert not check_intent_coverage(
+        [position], [{"intent_type": "SWAP", "from_token": "ETH", "chain": "base"}]
+    ).complete

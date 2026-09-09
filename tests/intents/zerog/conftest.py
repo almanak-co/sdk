@@ -12,9 +12,10 @@ from web3 import Web3
 
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.execution.signer import LocalKeySigner
-from almanak.framework.execution.simulator import DirectSimulator
+from almanak.framework.execution.simulator.local import LocalSimulator
 from almanak.framework.execution.submitter import PublicMempoolSubmitter
 from tests.conftest_gateway import AnvilFixture
+from tests.intents._execution_harness import SimulatedIntentOrchestrator, prepare_fork_eoa
 from tests.intents.conftest import (
     TEST_PRIVATE_KEY,
     TEST_SUBMITTER_MAX_RETRIES,
@@ -60,6 +61,7 @@ def funded_wallet(web3: Web3, anvil_rpc_url: str) -> str:
     tokens (W0G, USDC.e, ...) are not yet mapped. Tests must acquire ERC20s by
     swapping from native via Jaine.
     """
+    prepare_fork_eoa(web3, TEST_WALLET)
     fund_native_token(TEST_WALLET, 100 * 10**18, anvil_rpc_url)
     return TEST_WALLET
 
@@ -85,18 +87,19 @@ def price_oracle() -> dict[str, Decimal]:
 
 
 @pytest.fixture
-def orchestrator(test_private_key: str, anvil_rpc_url: str) -> ExecutionOrchestrator:
+def orchestrator(test_private_key: str, anvil_rpc_url: str, anvil_eth_call_adapter) -> ExecutionOrchestrator:
     signer = LocalKeySigner(private_key=test_private_key)
     submitter = PublicMempoolSubmitter(
         rpc_url=anvil_rpc_url,
         max_retries=TEST_SUBMITTER_MAX_RETRIES,
         timeout_seconds=TEST_TX_TIMEOUT_SECONDS,
     )
-    simulator = DirectSimulator()
-    return ExecutionOrchestrator(
+    simulator = LocalSimulator(rpc_url=anvil_rpc_url)
+    return SimulatedIntentOrchestrator(
         signer=signer,
         submitter=submitter,
         simulator=simulator,
+        operation_observer_factory=lambda: anvil_eth_call_adapter,
         chain=CHAIN_NAME,
         rpc_url=anvil_rpc_url,
         tx_timeout_seconds=TEST_TX_TIMEOUT_SECONDS,

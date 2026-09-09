@@ -817,12 +817,8 @@ def _normalized_lp_pair_inputs(
     opening: bool,
 ) -> tuple[str, str, str, dict[str, Any], Any] | None:
     """Return validated pair inputs and the lifecycle-matching LP payload."""
-    if not isinstance(event.token0, str) or not isinstance(event.token1, str):
-        return None
-    token0 = event.token0.strip()
-    token1 = event.token1.strip()
-    if not token0 or not token1:
-        return None
+    token0 = event.token0.strip() if isinstance(event.token0, str) else ""
+    token1 = event.token1.strip() if isinstance(event.token1, str) else ""
     # Amounts are raw text by contract, so "0" is measured and must enter the
     # precedence ladder. Malformed values fail open without inference.
     if not isinstance(event.amount0, str) or not isinstance(event.amount1, str):
@@ -971,7 +967,8 @@ def _realign_event_lp_pair_if_needed(event: PositionEvent, ctx: IntentEventConte
         )
         return
 
-    _apply_address_ordered_lp_pair(event, current_pair, chain)
+    if token0 and token1:
+        _apply_address_ordered_lp_pair(event, current_pair, chain)
 
 
 def _apply_lp_open(event: PositionEvent, ctx: IntentEventContext) -> None:

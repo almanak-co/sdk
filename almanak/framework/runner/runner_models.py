@@ -716,6 +716,7 @@ class RunnerConfig:
         enable_state_persistence: Whether to persist state between iterations
         enable_alerting: Whether to send alerts on errors
         dry_run: If True, compile but don't execute intents
+        simulation_enabled: Whether execution and teardown must actually simulate before submission.
         max_retries: Maximum number of automatic retries per intent (default 3)
         initial_retry_delay: Initial delay between retries in seconds (default 1.0)
         max_retry_delay: Maximum delay between retries in seconds (default 60.0)
@@ -772,6 +773,7 @@ class RunnerConfig:
     reconciliation_confirmation_timeout_seconds: float = 12.0
     async_settlement_timeout_seconds: int | None = None
     async_settlement_poll_interval_seconds: int | None = None
+    simulation_enabled: bool = False
 
 
 # =============================================================================

@@ -769,6 +769,7 @@ class GatewayRuntimeConfig:
     wallet_address: str
     is_safe: bool = False
     max_gas_price_gwei: int = 100
+    simulation_enabled: bool = True
 
     @property
     def execution_address(self) -> str:

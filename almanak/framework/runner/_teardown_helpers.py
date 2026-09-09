@@ -297,6 +297,7 @@ def build_teardown_manager(
         state_manager=teardown_state_adapter,
         config=_teardown_config_from_request(request, strategy=strategy),
         runner_helpers=build_runner_helpers(runner),
+        simulation_enabled=runner.config.simulation_enabled,
     )
     return teardown_mgr, teardown_state_adapter
 

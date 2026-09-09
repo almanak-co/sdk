@@ -23,7 +23,6 @@ from almanak.connectors.uniswap_v4.adapter import (
     UniswapV4UnsupportedPoolError,
 )
 
-
 # =============================================================================
 # Fixtures
 # =============================================================================
@@ -89,9 +88,6 @@ class TestLPOpenRejectsHooks:
 
         msg = str(exc_info.value)
         assert "hook" in msg.lower(), "Error must explain it's a hooks problem"
-        assert "V0" in msg, "Error must cite V0 scope"
-        assert "VIB-4485" in msg, "Error must cite the V1 lifting ticket VIB-4485"
-        assert "P-V1-D" in msg, "Error must cite the P-V1-D placeholder code"
 
     def test_rejects_uppercase_hooks_address(self, adapter):
         """Case-insensitive: an EIP-55 checksummed non-zero hooks still rejects."""
@@ -164,6 +160,7 @@ class TestLPCloseAcceptsNativeETH:
         intent = LPCloseIntent(
             position_id="42",
             protocol="uniswap_v4",
+            protocol_params={"amount0_min": 1, "amount1_min": 1},
         )
         # Must NOT raise — native-ETH close is supported. TAKE_PAIR returns the
         # native leg as raw ETH; the SDK encodes (currency0, currency1, recipient).
@@ -183,6 +180,7 @@ class TestLPCloseAcceptsNativeETH:
         intent = LPCloseIntent(
             position_id="42",
             protocol="uniswap_v4",
+            protocol_params={"amount0_min": 1, "amount1_min": 1},
         )
         # Should complete without raising the V0 guard. Other paths are
         # exercised by existing tests; here we only assert no guard fires.

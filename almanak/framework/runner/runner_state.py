@@ -2494,6 +2494,7 @@ async def reconcile_post_execution_balances(
     pre_snapshot: BalanceSnapshot | None = None,
     *,
     balance_provider: Any | None = None,
+    prior_attempt_receipts: tuple[dict[str, Any], ...] = (),
 ) -> dict[str, Any] | None:
     """Verify post-execution token balances match intent expectations.
 
@@ -2574,11 +2575,15 @@ async def reconcile_post_execution_balances(
             # SwapIntent expected-range enforcement.
             post_snapshot = BalanceSnapshot(timestamp=post_timestamp, balances=post_balances)
 
-            # Resolve the chain's native gas token + actual gas spend so the
-            # reconciliation can absorb gas outflow for native-from swaps
-            # (e.g. ETH->USDC on Arbitrum). Without this, successful
-            # native-gas-token swaps are falsely flagged as overspends.
-            gas_token, gas_cost_native = _resolve_gas_context(intent, execution_result)
+            gas_token, gas_cost_native = _resolve_gas_context(
+                intent,
+                execution_result,
+                chain=getattr(bp, "chain", None) or getattr(strategy, "chain", None),
+                wallet_address=getattr(bp, "wallet_address", None),
+                gateway_client=runner._get_gateway_client() if hasattr(runner, "_get_gateway_client") else None,
+                declared_network=getattr(strategy, "_gateway_network", None),
+                prior_attempt_receipts=prior_attempt_receipts,
+            )
 
             report = build_reconciliation_report(
                 pre=pre_snapshot,
@@ -2588,6 +2593,8 @@ async def reconcile_post_execution_balances(
                 gas_token=gas_token,
                 gas_cost_native=gas_cost_native,
             )
+            if gas_token in tokens and gas_cost_native is None:
+                report.warnings.append("Native wallet gas is unmeasured: receipt payer or fee evidence unavailable")
             recon = report.to_dict()
             # VIB-3350: expose the block the post-reads were pinned to (None when
             # unavailable) and whether the result is degraded (unpinned) so the
@@ -2710,47 +2717,121 @@ def extract_intent_tokens(intent: AnyIntent) -> list[str]:
     return tokens
 
 
+def _merge_bracket_receipts(prior: tuple[dict[str, Any], ...], current: list[Any]) -> list[dict[str, Any]] | None:
+    """Deduplicate acknowledged attempts without hiding conflicting receipt evidence."""
+    merged: dict[str, dict[str, Any]] = {}
+    for receipt in [*prior, *current]:
+        if receipt is None:
+            return None
+        data = receipt if isinstance(receipt, dict) else receipt.to_dict()
+        tx_hash = data.get("tx_hash") or data.get("transactionHash")
+        if not isinstance(tx_hash, str) or not tx_hash:
+            return None
+        identity = tx_hash.lower()
+        if identity in merged and merged[identity] != data:
+            return None
+        merged[identity] = data
+    return list(merged.values())
+
+
+def _wallet_receipt_gas_cost(
+    execution_result: Any,
+    wallet_address: str | None,
+    *,
+    chain: str,
+    gateway_client: Any = None,
+    declared_network: Any = None,
+    prior_attempt_receipts: tuple[dict[str, Any], ...] = (),
+) -> int | None:
+    """Sum measured fees only when the receipt sender paid from this wallet.
+
+    A Safe's outer transaction sender pays gas; its fee must not be charged
+    against the Safe's balance delta. Missing sender evidence is unmeasured.
+    """
+    from almanak.framework.execution.receipt_costs import measured_gas_cost_wei, receipt_l1_fee_wei
+
+    descriptor = ChainRegistry.try_resolve(chain)
+    if descriptor is None or not isinstance(wallet_address, str) or not wallet_address:
+        return None
+    read = (
+        execution_result.get
+        if isinstance(execution_result, dict)
+        else lambda name, default=None: getattr(execution_result, name, default)
+    )
+    receipts = read("receipts")
+    if receipts is None:
+        receipts = [
+            tx.get("receipt") if isinstance(tx, dict) else getattr(tx, "receipt", None)
+            for tx in (read("transaction_results", []) or [])
+        ]
+    if not receipts:
+        return None
+    if prior_attempt_receipts:
+        receipts = _merge_bracket_receipts(prior_attempt_receipts, receipts)
+        if receipts is None:
+            return None
+    total = 0
+    verified_fork: bool | None = None
+    for receipt in receipts:
+        if receipt is None:
+            return None
+        data = receipt if isinstance(receipt, dict) else receipt.to_dict()
+        sender = data.get("from_address") or data.get("from")
+        if not isinstance(sender, str) or not sender:
+            return None
+        if sender.lower() != wallet_address.lower():
+            continue
+        try:
+            gas = _receipt_gas_quantity(data.get("gas_used", data.get("gasUsed")))
+            price = _receipt_gas_quantity(data.get("effective_gas_price", data.get("effectiveGasPrice")))
+            l1_fee = receipt_l1_fee_wei(data)
+            if descriptor.gas.l1_fee_oracle_kind == "op_gaspriceoracle" and l1_fee is None:
+                from almanak.framework.execution.fork_signal import gateway_confirms_managed_fork
+
+                if verified_fork is None:
+                    verified_fork = gateway_confirms_managed_fork(
+                        gateway_client, chain, declared_network=declared_network
+                    )
+                if not verified_fork:
+                    return None
+            total += measured_gas_cost_wei(gas, price, l1_fee)
+        except (TypeError, ValueError):
+            return None
+    return total
+
+
+def _receipt_gas_quantity(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int | str):
+        raise ValueError("Missing or invalid measured gas quantity")
+    result = int(value, 16 if value.lower().startswith("0x") else 10) if isinstance(value, str) else value
+    if result < 0:
+        raise ValueError("Negative measured gas quantity")
+    return result
+
+
 def _resolve_gas_context(
     intent: AnyIntent,
     execution_result: ExecutionResult | None,
+    *,
+    chain: str | None = None,
+    wallet_address: str | None = None,
+    gateway_client: Any = None,
+    declared_network: Any = None,
+    prior_attempt_receipts: tuple[dict[str, Any], ...] = (),
 ) -> tuple[str | None, Decimal | None]:
-    """Resolve (native_gas_symbol, gas_cost_native) for the intent's chain.
-
-    Returns ``(None, None)`` when the chain is unknown, the execution result
-    lacks gas data, or the chain has no registered native-token entry. The
-    reconciliation logic only stretches the from-token bound when
-    ``gas_token == intent.from_token``, so a conservative default of ``None``
-    simply means "do not absorb gas" — which matches the prior behavior for
-    non-native-from swaps.
-    """
-    if execution_result is None:
+    """Resolve wallet-paid receipt gas for the chain of the balance bracket."""
+    descriptor = ChainRegistry.try_resolve(str(getattr(intent, "chain", None) or chain or ""))
+    if execution_result is None or descriptor is None or descriptor.family.value != "EVM":
         return None, None
-    chain = getattr(intent, "chain", None)
-    if not chain:
-        return None, None
-
-    gas_cost_wei = getattr(execution_result, "total_gas_cost_wei", 0) or 0
-    if gas_cost_wei <= 0:
-        return None, None
-
-    try:
-        from almanak.core.chains import ChainRegistry
-    except Exception:  # noqa: BLE001 — optional dep path
-        return None, None
-
-    descriptor = ChainRegistry.try_resolve(str(chain))
-    if descriptor is None:
-        return None, None
-
-    symbol = descriptor.native.symbol
-    if not symbol:
-        return None, None
-
-    # EVM native gas tokens are always 18 decimals by protocol design
-    # (gas_cost_wei is in wei); this is not the same as the ERC-20 "never
-    # default to 18 decimals" rule.
-    gas_cost_native = Decimal(gas_cost_wei) / Decimal(10**18)
-    return symbol, gas_cost_native
+    cost = _wallet_receipt_gas_cost(
+        execution_result,
+        wallet_address,
+        chain=descriptor.name,
+        gateway_client=gateway_client,
+        declared_network=declared_network,
+        prior_attempt_receipts=prior_attempt_receipts,
+    )
+    return descriptor.native.symbol, None if cost is None else Decimal(cost) / Decimal(10**18)
 
 
 # -------------------------------------------------------------------------

@@ -3348,46 +3348,67 @@ class SQLiteStore:
         if not self._initialized:
             await self.initialize()
 
+        from almanak.framework.state.failed_attempt_ledger import (
+            validate_failed_attempt_row,
+            verify_failed_attempt_replay,
+        )
+
+        incoming = entry.to_dict()
+        incoming["deployment_id"] = _canonical_deployment_id(entry)
+        validate_failed_attempt_row(incoming)
+
         def _sync_save() -> None:
             with self._db_lock:
-                self._conn.execute(  # type: ignore[union-attr]
-                    """
-                    INSERT OR REPLACE INTO transaction_ledger
-                    (id, cycle_id, deployment_id, execution_mode,
-                     timestamp, intent_type,
-                     token_in, amount_in, token_out, amount_out,
-                     effective_price, slippage_bps, gas_used, gas_usd,
-                     tx_hash, chain, protocol, success, error,
-                     extracted_data_json, price_inputs_json, pre_state_json, post_state_json)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        entry.id,
-                        entry.cycle_id,
-                        _canonical_deployment_id(entry),
-                        getattr(entry, "execution_mode", "") or "",
-                        entry.timestamp.isoformat(),
-                        entry.intent_type,
-                        entry.token_in,
-                        entry.amount_in,
-                        entry.token_out,
-                        entry.amount_out,
-                        entry.effective_price,
-                        entry.slippage_bps,
-                        entry.gas_used,
-                        entry.gas_usd,
-                        entry.tx_hash,
-                        entry.chain,
-                        entry.protocol,
-                        entry.success,
-                        entry.error,
-                        entry.extracted_data_json,
-                        entry.price_inputs_json,
-                        entry.pre_state_json,
-                        entry.post_state_json,
-                    ),
-                )
-                self._conn.commit()  # type: ignore[union-attr]
+                assert self._conn is not None
+                self._conn.execute("BEGIN IMMEDIATE")
+                try:
+                    existing = self._conn.execute(
+                        "SELECT * FROM transaction_ledger WHERE id = ?", (entry.id,)
+                    ).fetchone()
+                    if existing is not None and verify_failed_attempt_replay(dict(existing), incoming):
+                        self._conn.commit()
+                        return
+                    self._conn.execute(
+                        """
+                        INSERT OR REPLACE INTO transaction_ledger
+                        (id, cycle_id, deployment_id, execution_mode,
+                         timestamp, intent_type,
+                         token_in, amount_in, token_out, amount_out,
+                         effective_price, slippage_bps, gas_used, gas_usd,
+                         tx_hash, chain, protocol, success, error,
+                         extracted_data_json, price_inputs_json, pre_state_json, post_state_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            entry.id,
+                            entry.cycle_id,
+                            _canonical_deployment_id(entry),
+                            getattr(entry, "execution_mode", "") or "",
+                            entry.timestamp.isoformat(),
+                            entry.intent_type,
+                            entry.token_in,
+                            entry.amount_in,
+                            entry.token_out,
+                            entry.amount_out,
+                            entry.effective_price,
+                            entry.slippage_bps,
+                            entry.gas_used,
+                            entry.gas_usd,
+                            entry.tx_hash,
+                            entry.chain,
+                            entry.protocol,
+                            entry.success,
+                            entry.error,
+                            entry.extracted_data_json,
+                            entry.price_inputs_json,
+                            entry.pre_state_json,
+                            entry.post_state_json,
+                        ),
+                    )
+                    self._conn.commit()
+                except Exception:
+                    self._conn.rollback()
+                    raise
 
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, _sync_save)
@@ -4379,10 +4400,11 @@ class SQLiteStore:
         from almanak.framework.accounting.writer import restamp_position_reference
         from almanak.framework.primitives.taxonomy import (
             UnknownIntentTypeError,
+            primitive_for,
             record_for,
         )
 
-        def _belongs(event_type: Any, event_kind: str) -> bool:
+        def _belongs(candidate: dict[str, Any], event_kind: str) -> bool:
             """Does this accounting row's event_type belong to THIS registry row?
 
             Resolved through the canonical taxonomy only — never a protocol
@@ -4390,6 +4412,16 @@ class SQLiteStore:
             An unknown event_type cannot be *proven* to belong, so it is left
             unmeasured rather than guessed (CLAUDE.md "Empty ≠ Zero").
             """
+            event_type = candidate.get("event_type")
+            try:
+                payload = json.loads(candidate.get("payload_json") or "{}")
+            except (ValueError, TypeError):
+                return False
+            if not isinstance(payload, dict):
+                return False
+            protocol = payload.get("protocol") or ""
+            if not isinstance(protocol, str):
+                return False
             if not isinstance(event_type, str) or not event_type:
                 return False
             try:
@@ -4397,7 +4429,7 @@ class SQLiteStore:
             except UnknownIntentTypeError:
                 return False
             return (
-                record.primitive.value == primitive
+                primitive_for(event_type, protocol).value == primitive
                 and record.accounting_category.value == accounting_category
                 and record.event_kind.value == event_kind
             )
@@ -4438,7 +4470,7 @@ class SQLiteStore:
                 (deployment_id, chain, anchor_tx.strip().lower()),
             ).fetchall()
 
-            matching = [dict(c) for c in candidates if _belongs(dict(c).get("event_type"), event_kind)]
+            matching = [dict(c) for c in candidates if _belongs(dict(c), event_kind)]
             if len(matching) > 1:
                 # Registry rows for one transaction may arrive separately after multiple accounting events already exist.
                 # Do not stamp any event without a handle that proves which physical position it belongs to.
@@ -5034,13 +5066,15 @@ class SQLiteStore:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _sync)
 
-    async def get_ledger_entry_by_id(self, ledger_entry_id: str) -> dict | None:
+    async def get_ledger_entry_by_id(self, ledger_entry_id: str, *, strict: bool = False) -> dict | None:
         """Return the full transaction_ledger row for the given id, or None."""
         if not self._initialized:
             await self.initialize()
 
         def _sync() -> dict | None:
             if not self._conn:
+                if strict:
+                    raise RuntimeError("Ledger identity lookup has no SQLite connection")
                 return None
             with self._db_lock:
                 cursor = self._conn.execute(

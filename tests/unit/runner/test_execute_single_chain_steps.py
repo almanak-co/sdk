@@ -482,7 +482,8 @@ async def test_incomplete_gateway_receipt_set_with_known_hash_is_never_redispatc
 
 
 @pytest.mark.asyncio
-async def test_landed_approval_reverted_action_recompiles_fresh_bundle() -> None:
+@pytest.mark.parametrize("persistence_fails", [False, True])
+async def test_landed_approval_reverted_action_recompiles_fresh_bundle(persistence_fails: bool) -> None:
     """A mixed receipt set may recompile, but the original bundle is never replayed."""
 
     def _receipt(tx_hash: str, status: int) -> dict[str, object]:
@@ -510,28 +511,30 @@ async def test_landed_approval_reverted_action_recompiles_fresh_bundle() -> None
 
     first_result = GatewayExecutionResult(
         success=False,
-        tx_hashes=["0xapprove", "0xaction"],
+        tx_hashes=["0x" + "aa" * 32, "0x" + "bb" * 32],
         total_gas_used=42_000,
-        receipts=[_receipt("0xapprove", 1), _receipt("0xaction", 0)],
+        receipts=[_receipt("0x" + "aa" * 32, 1), _receipt("0x" + "bb" * 32, 0)],
         execution_id="mixed",
         error="action reverted",
         submission_provenance=SubmissionProvenance.ATTEMPTED,
         execution_plan_hash=execution_plan_hash(first_bundle),
         submission_transactions=[
-            SubmissionTransactionEvidence("0xapprove", TransactionRole.SETUP_APPROVAL, ReplayPolicy.RECOMPILE_ONLY),
-            SubmissionTransactionEvidence("0xaction", TransactionRole.ACTION, ReplayPolicy.NEVER),
+            SubmissionTransactionEvidence(
+                "0x" + "aa" * 32, TransactionRole.SETUP_APPROVAL, ReplayPolicy.RECOMPILE_ONLY
+            ),
+            SubmissionTransactionEvidence("0x" + "bb" * 32, TransactionRole.ACTION, ReplayPolicy.NEVER),
         ],
     )
     second_result = GatewayExecutionResult(
         success=True,
-        tx_hashes=["0xfreshaction"],
+        tx_hashes=["0x" + "cc" * 32],
         total_gas_used=21_000,
-        receipts=[_receipt("0xfreshaction", 1)],
+        receipts=[_receipt("0x" + "cc" * 32, 1)],
         execution_id="fresh",
         submission_provenance=SubmissionProvenance.ATTEMPTED,
         execution_plan_hash=execution_plan_hash(fresh_bundle),
         submission_transactions=[
-            SubmissionTransactionEvidence("0xfreshaction", TransactionRole.ACTION, ReplayPolicy.NEVER)
+            SubmissionTransactionEvidence("0x" + "cc" * 32, TransactionRole.ACTION, ReplayPolicy.NEVER)
         ],
     )
     orchestrator = MagicMock(tx_risk_config=None)
@@ -539,6 +542,12 @@ async def test_landed_approval_reverted_action_recompiles_fresh_bundle() -> None
     orchestrator.execute = AsyncMock(side_effect=[first_result, second_result])
     runner = _make_runner(execution_orchestrator=orchestrator)
     runner._save_execution_progress = AsyncMock()  # type: ignore[method-assign]
+    runner.state_manager.get_ledger_entry_by_id = AsyncMock(return_value=None)
+    runner._write_ledger_entry = AsyncMock(
+        side_effect=RuntimeError("database unavailable")
+        if persistence_fails
+        else lambda *args, **kwargs: kwargs["ledger_entry_id"]
+    )
     state = _make_state(_make_strategy())
     compiler = MagicMock(default_protocol=None)
     compiler.compile.side_effect = [
@@ -562,7 +571,19 @@ async def test_landed_approval_reverted_action_recompiles_fresh_bundle() -> None
 
     assert await runner._single_chain_state_machine_loop(state) is None
 
+    if persistence_fails:
+        assert not state.state_machine.success
+        assert compiler.compile.call_count == 1
+        orchestrator.execute.assert_awaited_once()
+        assert state.replay_barrier.effective_barrier_phase is ExecutionBarrierPhase.RECONCILIATION_REQUIRED
+        return
     assert state.state_machine.success
+    runner._write_ledger_entry.assert_awaited_once()
+    failed_write = runner._write_ledger_entry.await_args.kwargs
+    assert failed_write["success"] is False
+    assert failed_write["emit_position_event"] is False
+    assert len(failed_write["result"].extracted_data["failed_attempt"]["receipts"]) == 2
+    assert state.failed_attempt_ledger_id is None  # The subsequent successful attempt owns its own finalization.
     assert compiler.compile.call_count == 2
     assert [call.kwargs["action_bundle"] for call in orchestrator.execute.await_args_list] == [
         first_bundle,

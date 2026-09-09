@@ -227,7 +227,12 @@ class TestGetOrchestrator:
         assert result is orch_cls.return_value
         rpc.assert_called_once_with("arbitrum", network=service.settings.network)
         sub.assert_called_once_with(rpc_url=_RPC_URL)
-        sim.assert_called_once_with(rpc_url=_RPC_URL)
+        from almanak.framework.execution.simulator.config import SimulationConfig
+
+        simulation_config = sim.call_args.kwargs["config"]
+        assert isinstance(simulation_config, SimulationConfig)
+        assert simulation_config.enabled is True
+        sim.assert_called_once_with(config=simulation_config, rpc_url=_RPC_URL)
 
         kwargs = orch_cls.call_args.kwargs
         assert isinstance(kwargs["signer"], LocalKeySigner)

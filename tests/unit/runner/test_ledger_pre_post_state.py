@@ -12,6 +12,8 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
 
+import pytest
+
 from almanak.framework.runner.strategy_runner import (
     _build_post_state_for_ledger,
     _build_pre_state_for_ledger,
@@ -349,7 +351,6 @@ def test_lending_handler_reads_runner_serialized_post_state():
     outbox = {
         "ledger_entry_id": led_id,
         "intent_type": "SUPPLY",
-        "deployment_id": "d",
         "deployment_id": "s",
         "cycle_id": "c",
         "wallet_address": "0x" + "a" * 40,
@@ -359,7 +360,6 @@ def test_lending_handler_reads_runner_serialized_post_state():
     ledger = {
         "id": led_id,
         "intent_type": "SUPPLY",
-        "deployment_id": "d",
         "deployment_id": "s",
         "cycle_id": "c",
         "execution_mode": "live",
@@ -913,8 +913,21 @@ _EEEE = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 _FLUID = "0x61e030a56d33e8260fdd81f03b162a79fe3449cd"
 
 
-def _tx_result(block: int, *, success: bool = True):
-    return SimpleNamespace(success=success, receipt=SimpleNamespace(block_number=block))
+def _tx_result(block: int, *, success: bool = True, gas: int = 0):
+    from almanak.framework.execution.interfaces import TransactionReceipt
+
+    return SimpleNamespace(
+        success=success,
+        receipt=TransactionReceipt(
+            tx_hash="0xtx",
+            block_number=block,
+            block_hash="0xblock",
+            status=int(success),
+            gas_used=gas,
+            effective_gas_price=1,
+            from_address="0xabc",
+        ),
+    )
 
 
 def _native_open_result(*, currency0=_FLUID, currency1=_EEEE, amount0=0, amount1=None, blocks=(100, 100), gas=0):
@@ -923,7 +936,7 @@ def _native_open_result(*, currency0=_FLUID, currency1=_EEEE, amount0=0, amount1
     return SimpleNamespace(
         lp_open_data=lp_open,
         extracted_data={"lp_open_data": lp_open},
-        transaction_results=[_tx_result(b) for b in blocks],
+        transaction_results=[_tx_result(b, gas=gas if i == 0 else 0) for i, b in enumerate(blocks)],
         total_gas_cost_wei=gas,
     )
 
@@ -933,7 +946,7 @@ def _native_close_result(*, currency0=_FLUID, currency1=_EEEE, a0=0, a1=None, bl
     return SimpleNamespace(
         lp_close_data=lp_close,
         extracted_data={"lp_close_data": lp_close},
-        transaction_results=[_tx_result(b) for b in blocks],
+        transaction_results=[_tx_result(b, gas=gas if i == 0 else 0) for i, b in enumerate(blocks)],
         total_gas_cost_wei=gas,
     )
 
@@ -1123,7 +1136,10 @@ def _native_open_result_gateway_shape(*, blocks=(100, 100), gas=0):
     return SimpleNamespace(
         lp_open_data=lp_open,
         extracted_data={"lp_open_data": lp_open},
-        receipts=[{"blockNumber": b} for b in blocks],
+        receipts=[
+            {"blockNumber": b, "from": "0xabc", "gasUsed": gas if i == 0 else 0, "effectiveGasPrice": 1}
+            for i, b in enumerate(blocks)
+        ],
         total_gas_cost_wei=gas,
     )
 
@@ -1440,12 +1456,8 @@ def test_capture_v4_close_principal_partial_close_uses_requested_liquidity():
         chain="base",
         gateway_client=_Gateway(),
     )
-    expected_requested = get_token_amounts_from_sqrt_price(
-        requested_liquidity, tick_lower, tick_upper, sqrt_price_x96
-    )
-    expected_full = get_token_amounts_from_sqrt_price(
-        full_liquidity, tick_lower, tick_upper, sqrt_price_x96
-    )
+    expected_requested = get_token_amounts_from_sqrt_price(requested_liquidity, tick_lower, tick_upper, sqrt_price_x96)
+    expected_full = get_token_amounts_from_sqrt_price(full_liquidity, tick_lower, tick_upper, sqrt_price_x96)
     assert out == (int(expected_requested.amount0), int(expected_requested.amount1))
     # Guard against the bug this test exists for: the derived principal must be the
     # requested quarter, strictly less than the full-position principal.
@@ -1477,9 +1489,7 @@ def test_capture_v4_close_principal_full_close_ignores_absent_liquidity_param():
         chain="base",
         gateway_client=_Gateway(),
     )
-    expected_full = get_token_amounts_from_sqrt_price(
-        full_liquidity, tick_lower, tick_upper, sqrt_price_x96
-    )
+    expected_full = get_token_amounts_from_sqrt_price(full_liquidity, tick_lower, tick_upper, sqrt_price_x96)
     assert out == (int(expected_full.amount0), int(expected_full.amount1))
 
 
@@ -1509,9 +1519,7 @@ def test_capture_v4_close_principal_undeployed_chain_returns_none():
 
         def query_v4_position_state(self, **__):
             self.calls += 1
-            return SimpleNamespace(
-                liquidity=1, tick_lower=-1, tick_upper=1, current_tick=0, sqrt_price_x96=2**96
-            )
+            return SimpleNamespace(liquidity=1, tick_lower=-1, tick_upper=1, current_tick=0, sqrt_price_x96=2**96)
 
     gateway = _Gateway()
     out = StrategyRunner._capture_v4_lp_close_native_principal_safe(
@@ -1543,3 +1551,94 @@ def test_capture_v4_close_principal_degenerate_state_returns_none():
         gateway_client=_Gateway(),
     )
     assert out is None
+
+
+@pytest.mark.parametrize("is_open", [True, False])
+@pytest.mark.parametrize("payer", ["0xabc", "0xrelayer", None])
+@pytest.mark.parametrize("result_shape", ["gateway", "dict", "local"])
+def test_native_lp_gross_amount_uses_only_wallet_paid_receipt_fees(is_open, payer, result_shape):
+    from almanak.framework.execution.interfaces import TransactionReceipt
+    from almanak.framework.runner.strategy_runner import StrategyRunner
+
+    gross = 500_000
+    execution_gas, l1_fee = 21_000, 100
+    wallet_gas = execution_gas + l1_fee if payer == "0xabc" else 0
+    pre = 1_000_000
+    post = pre + (-gross if is_open else gross) - wallet_gas
+    result = (_native_open_result if is_open else _native_close_result)(blocks=(100,))
+    typed = TransactionReceipt("0xtx", 100, "0xblock", execution_gas, 1, 1, from_address=payer, l1_fee_wei=l1_fee)
+    if result_shape == "local":
+        result.transaction_results = [SimpleNamespace(success=True, receipt=typed)]
+    else:
+        result.receipts = [
+            {"blockNumber": 100, "from": payer, "gasUsed": execution_gas, "effectiveGasPrice": 1, "l1Fee": l1_fee}
+        ]
+        result.transaction_results = []
+        if result_shape == "dict":
+            result = vars(result)
+    gateway = _NativeBalGateway({99: pre, 100: post})
+    measured = StrategyRunner._measure_native_balance_delta(
+        chain="base", wallet_address="0xabc", result=result, gateway_client=gateway
+    )
+    if payer is None:
+        assert measured is None
+        assert gateway.reads == []
+    else:
+        delta, gas = measured
+        assert gas == wallet_gas
+        assert (delta - gas if is_open else -delta + gas) == gross
+        assert gateway.reads == [99, 100]
+
+
+def test_native_lp_aggregate_gas_without_payer_evidence_stays_unmeasured():
+    from almanak.framework.runner.strategy_runner import StrategyRunner
+
+    result = _native_open_result_gateway_shape(blocks=(100,), gas=100)
+    result.receipts = [{"blockNumber": 100}]
+    gateway = _NativeBalGateway({99: 1000, 100: 400})
+    assert (
+        StrategyRunner._measure_native_balance_delta(
+            chain="base", wallet_address="0xabc", result=result, gateway_client=gateway
+        )
+        is None
+    )
+    assert gateway.reads == []
+
+
+def test_native_lp_op_missing_additive_fee_keeps_gross_amount_unmeasured():
+    from almanak.framework.runner.strategy_runner import StrategyRunner
+
+    result = _native_open_result_gateway_shape(blocks=(100,), gas=100)
+    gateway = _NativeBalGateway({99: 1000, 100: 400})
+    assert (
+        StrategyRunner._measure_native_balance_delta(
+            chain="base", wallet_address="0xabc", result=result, gateway_client=gateway
+        )
+        is None
+    )
+    assert gateway.reads == []
+
+
+@pytest.mark.parametrize("declared_network", [None, "mainnet", "anvil"])
+@pytest.mark.parametrize("client_version", ["anvil/v1.0", "Geth/v1.0"])
+def test_native_lp_missing_l1_fee_requires_declared_and_verified_fork(declared_network, client_version):
+    import json
+    from unittest.mock import Mock
+
+    from almanak.framework.runner.strategy_runner import StrategyRunner
+
+    result = _native_open_result_gateway_shape(blocks=(100,), gas=100)
+    result.receipts = [{"blockNumber": 100, "from": "0xabc", "gasUsed": 100, "effectiveGasPrice": 1}]
+    gateway = _NativeBalGateway({99: 1000, 100: 400})
+    gateway.rpc = SimpleNamespace(Call=Mock(return_value=SimpleNamespace(success=True, result=json.dumps(client_version))))
+    measured = StrategyRunner._measure_native_balance_delta(
+        chain="base", wallet_address="0xabc", result=result, gateway_client=gateway, declared_network=declared_network
+    )
+    if declared_network == "anvil" and client_version.startswith("anvil/"):
+        assert measured == (600, 100)
+        assert gateway.reads == [99, 100]
+        request = gateway.rpc.Call.call_args.args[0]
+        assert request.network == "anvil" and request.chain == "base"
+    else:
+        assert measured is None
+        assert gateway.reads == []

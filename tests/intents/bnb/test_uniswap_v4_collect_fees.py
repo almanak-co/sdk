@@ -1,89 +1,11 @@
-"""4-layer intent tests for Uniswap V4 LP_COLLECT_FEES on BNB Chain Anvil fork.
+"""Prove V4 LP fee collection on a managed BNB Chain fork.
 
-Tests the full Intent -> Compile -> Execute -> Parse -> Verify flow for
-collecting fees from V4 LP positions via PositionManager on BNB Chain:
-1. Open a BNB/USDT LP position (LP_OPEN as setup -- ``BNB`` symbol so
-   currency0 resolves to ``address(0)``, matching the V4 swap router's
-   WBNB -> native BNB remapping)
-2. Generate fees by counter-swapping (USDT -> WBNB) through the SAME
-   native-BNB pool (WBNB resolves to NATIVE at the pool key layer)
-3. Create CollectFeesIntent with position_id and protocol_params
-4. Compile to ActionBundle using IntentCompiler (routes to V4 adapter)
-5. Execute via ExecutionOrchestrator (full production pipeline)
-6. Parse receipts -- fees (Transfer from PoolManager for USDT, native
-   delta for BNB) separate from principal (ModifyLiquidity delta == 0)
-7. Verify position liquidity is unchanged on-chain after collection
-8. Verify at least one side of the position accrued strictly positive
-   fees (bilateral no-op guard)
-
-NO MOCKING. All tests execute real on-chain LP operations and verify state changes.
-
-Pool selection: ``BNB/USDT/3000``. The native-keyed
-``(NATIVE_BNB, USDT, 3000, 60, 0x0)`` pool was probed against BSC
-mainnet on 2026-05-14 with sqrtPriceX96 ~= 2.057e30, tick=65133 (~673
-USDT per BNB) and liquidity ~= 5.587e21. Same tier the LP_CLOSE
-sibling (VIB-4372) uses.
-
-WHY fee=3000 not fee=500: the ``UniswapV4Adapter.default_fee_tier`` is
-3000, and ``SwapIntent`` does NOT carry a fee-tier parameter — the
-counter-swap below routes through the fee=3000 pool regardless of
-what tier LP_OPEN uses. Opening the LP at fee=500 (the deepest
-native-keyed BNB pool, ~38x the fee=3000 tier, used by the swap
-VIB-4370 and LP_OPEN VIB-4371 siblings that don't need a same-pool
-round-trip) would put LP and swap on DIFFERENT pool keys, the
-position would accrue zero fees from the counter-swap, and the
-parser's ``usdt_fees_from_transfers > 0`` assertion would fail with
-a misleading "no fee transfer" error rather than the actual
-wrong-pool-key cause. fee=3000 matches the Avalanche (VIB-4369) and
-Base (VIB-4357) collect_fees siblings' convention.
-
-Using ``BNB`` symbol means
-``UniswapV4Adapter._resolve_token(for_v4_pool=True)`` resolves
-currency0 to ``address(0)`` at LP_OPEN time (BNB is in the adapter's
-``native_symbols = {"ETH", "AVAX", "MATIC", "BNB"}`` set), and the V4
-SwapIntent path remaps WBNB -> native BNB at the pool layer
-(``UniswapV4SDK.build_swap_tx``). This is the same VIB-4413
-workaround used in the Base (VIB-4357), Optimism (VIB-4361), Polygon
-(VIB-4365) and Avalanche (VIB-4369) siblings — picking the
-wrapped-native side avoids the ERC20<>ERC20 V4 swap revert.
-
-Counter-swap direction: USDT -> WBNB (single leg, mirroring the
-Avalanche VIB-4369 and Polygon VIB-4365 sibling pattern). ``WBNB`` is
-the wrapped-native side; the V4 SDK substitutes NATIVE for the pool
-key at swap-build time so the swap routes through the same
-native-keyed pool as LP_OPEN. The reverse leg (BNB -> USDT) is
-skipped because the LP only needs the input-side fees to be
-verifiable: a USDT -> WBNB swap charges fees on USDT (the input
-token), which surface as a PoolManager -> wallet Transfer during
-COLLECT_FEES. Using "WBNB" rather than the bare "BNB" symbol mirrors
-the BNB swap (VIB-4370) sibling and avoids the native-output
-UNWRAP+SWEEP code path entirely.
-
-The bilateral fee assertion uses OR across the two sides (BNB fee OR
-USDT fee strictly positive) — matches the Avalanche VIB-4369 and
-Optimism VIB-4361 sibling pattern where the native-fee leg may not
-reach the wallet on every V4 deployment (PositionManager edge case
-noted in VIB-4360). As long as at least one fee leg fires, the
-COLLECT_FEES flow is exercised end-to-end and the no-op bug class is
-caught.
-
-BNB-mainnet-state quirk (EIP-7702): ``TEST_WALLET = 0xf39F...`` (Anvil
-account #0) has signed an EIP-7702 SetCode delegation
-(``0xef0100<delegate>``) on BNB mainnet that auto-forwards incoming
-native BNB to an external address. Inherited by the Anvil fork, this
-swallows the COLLECT_FEES TAKE_PAIR native-fee payout silently — the
-wallet's ``eth.get_balance`` does not change. The test clears that
-delegation via ``anvil_setCode`` before LP_OPEN; this matches the
-LP_CLOSE sibling (VIB-4372) and is consistent with production
-user-wallet behaviour (no delegation set).
-
-BSC USDT (and USDC) are 18-decimal Binance-Peg tokens — unlike most
-chains where USDT/USDC are 6-decimal. The adapter resolves decimals
-via the token resolver so the wei math works without any test-side
-override.
-
-To run:
-    uv run pytest tests/intents/bnb/test_uniswap_v4_collect_fees.py -v -s
+Open a native BNB/USDT position, counter-swap USDT into native BNB through
+that exact 3000/60 pool, and collect without removing liquidity. Receipt
+transfers measure the USDT fees; gas-adjusted native balance deltas measure
+BNB. A wrapped BNB swap would use a different PoolKey and accrue no fees
+for this position. Every assertion uses actual compilation, execution,
+receipts, balances, or persisted accounting evidence.
 """
 
 import json
@@ -108,6 +30,7 @@ from tests.intents.conftest import (
     CHAIN_CONFIGS,
     assert_accounting_persisted,
     assert_no_accounting_on_failure,
+    capture_v4_position_hash,
     format_token_amount,
     get_token_balance,
     get_token_decimals,
@@ -160,16 +83,7 @@ CHAIN_NAME = "bsc"
 # the VIB-4413 ERC20<>ERC20 revert.
 LP_POOL = "BNB/USDT/3000"
 
-# Token symbols for the fee-generation counter-swap. ``WBNB`` symbol in
-# the SwapIntent path resolves directly to the WBNB ERC-20 address;
-# ``UniswapV4SDK.build_swap_tx`` then detects WBNB as the wrapped native
-# and substitutes NATIVE for the pool key at swap-build time -- so the
-# swap routes through the SAME ``(NATIVE_BNB, USDT, 3000, 60, 0x0)``
-# pool key as LP_OPEN. Using ``WBNB`` (not the bare ``BNB`` symbol)
-# mirrors the BNB swap (VIB-4370) sibling exactly, avoiding the
-# native-output UNWRAP+SWEEP code path (the SETTLE leg returns the
-# wallet to base state cleanly when the output stays as WBNB).
-SWAP_TOKEN_NATIVE_SYMBOL = "WBNB"
+SWAP_TOKEN_NATIVE_SYMBOL = "BNB"
 SWAP_TOKEN_STABLE_SYMBOL = "USDT"
 
 # LP amounts and price range for setup. The bnb conftest funds the EOA
@@ -202,26 +116,7 @@ LP_AMOUNT_USDT = Decimal("1400")
 LP_RANGE_LOWER = Decimal("200")  # 200 USDT per BNB
 LP_RANGE_UPPER = Decimal("2000")  # 2000 USDT per BNB
 
-# Counter-swap amount -- a single USDT -> WBNB swap through the same
-# pool key as LP_OPEN forces the LP position to accrue USDT-side fees.
-# We intentionally do only ONE direction (USDT -> WBNB; WBNB is the
-# wrapped native -- SDK substitutes NATIVE for the pool key, so this
-# routes through the same (NATIVE, USDT, 3000, 60, 0x0) pool as
-# LP_OPEN) so the LP accrues fees in USDT (the input token of the
-# swap), which surface as a PoolManager -> wallet Transfer event
-# during COLLECT_FEES. Matches the Avalanche VIB-4369 and Polygon
-# VIB-4365 sibling pattern -- the reverse leg is unnecessary for
-# proving fee-accrual end-to-end.
-#
-# Size at 2,000 USDT (~3 BNB at fork price) -- this is the largest
-# single-direction counter-swap that consistently lands under the
-# 0.10 slippage tolerance configured below; a 5,000 USDT swap reverted
-# on Anvil with "Invalid revert data: 0x" (V4 router slippage abort
-# with no bubbled selector). Combined with the LP position above
-# (2 BNB / 1,400 USDT in a fee=3000 pool with ~5.587e21 liquidity),
-# 2,000 USDT generates ~7.8 mUSDT of fees for our position — a
-# positive integer-wei USDT Transfer from PoolManager to the wallet
-# during COLLECT_FEES, well above the rounding floor.
+# USDT is the swap input, so the position must accrue observable USDT fees.
 COUNTER_SWAP_USDT = Decimal("2000")
 SWAP_MAX_SLIPPAGE = Decimal("0.10")
 
@@ -379,16 +274,11 @@ async def _counter_swap_to_generate_fees(
     orchestrator: ExecutionOrchestrator,
     price_oracle: dict[str, Decimal],
 ) -> bool:
-    """Run a USDT -> WBNB swap through the V4 connector to accrue fees.
+    """Run a USDT -> native BNB swap through the same pool as the LP.
 
-    Single direction USDT -> WBNB SwapIntent routed via the V4
-    UniversalRouter. The SDK routes the swap through the
-    ``(NATIVE_BNB, USDT, 3000, 60, 0x0)`` pool key (V4's swap path
-    always remaps WBNB -> native BNB), which is the SAME pool key
-    LP_OPEN used (the adapter's ``default_fee_tier = 3000`` matches
-    our LP's fee=3000). The position then accrues fees in USDT (the
-    input token of the swap), which surface as a PoolManager -> wallet
-    Transfer event during the subsequent COLLECT_FEES.
+    Explicit native identity selects the LP's
+    ``(NATIVE_BNB, USDT, 3000, 60, 0x0)`` key. A WBNB output selects
+    a different pool and cannot generate fees for this native position.
 
     Single-direction (not round-trip) mirrors the Avalanche VIB-4369
     and Polygon VIB-4365 sibling pattern -- the USDT-side fee leg
@@ -407,6 +297,7 @@ async def _counter_swap_to_generate_fees(
         from_token=SWAP_TOKEN_STABLE_SYMBOL,
         to_token=SWAP_TOKEN_NATIVE_SYMBOL,
         amount=COUNTER_SWAP_USDT,
+        swap_params={"fee_tier": 3000, "tick_spacing": 60},
         max_slippage=SWAP_MAX_SLIPPAGE,
         protocol="uniswap_v4",
         chain=CHAIN_NAME,
@@ -470,18 +361,9 @@ def _assert_no_lot_id(row: dict, payload: dict) -> None:
     assert "lot_id" not in payload
 
 
-def _assert_v4_close_position_hash(payload: dict) -> None:
-    """V4 LP_CLOSE / LP_COLLECT_FEES leave ``position_hash`` ``None``.
-
-    The close leg matches against the prior OPEN payload by ``position_key``
-    (not by re-reading the hash off the burn receipt), so the handler
-    forwards ``position_hash=None`` for the close-like events even on V4.
-    See ``lp_accounting.py`` VIB-4473 comment.
-    """
-    assert payload["position_hash"] is None, (
-        "V4 LP_CLOSE/LP_COLLECT_FEES match by position_key; position_hash "
-        "must stay None (not re-read off the burn receipt)"
-    )
+def _assert_v4_close_position_hash(payload: dict, opening_hash: str) -> None:
+    """Fee collection must retain the independently measured opening anchor."""
+    assert payload["position_hash"] == opening_hash
 
 
 def _payload_fee(raw) -> Decimal | None:
@@ -634,6 +516,9 @@ class TestUniswapV4CollectFeesIntent:
         print("\n--- Setup: Opening LP position ---")
         position_id, liquidity_before, currency0, currency1 = await _open_v4_position(
             web3, funded_wallet, orchestrator, prices_with_native,
+        )
+        opening_hash = capture_v4_position_hash(
+            anvil_eth_call_adapter, chain=CHAIN_NAME, token_id=position_id, wallet=funded_wallet
         )
         print(f"Opened position: id={position_id}, liquidity={liquidity_before}")
         print(f"Currencies: {currency0[:10]}.../{currency1[:10]}...")
@@ -933,7 +818,7 @@ class TestUniswapV4CollectFeesIntent:
         collect_payload = _payload(collect_accounting_row)
         assert collect_payload["position_key"] == collect_accounting_row["position_key"]
         _assert_no_lot_id(collect_accounting_row, collect_payload)
-        _assert_v4_close_position_hash(collect_payload)
+        _assert_v4_close_position_hash(collect_payload, opening_hash)
         if lp_close_data is not None:
             tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
             dec0 = (

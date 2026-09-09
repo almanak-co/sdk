@@ -255,7 +255,7 @@ class TestGatewayExecutionResultToOutcome:
             ],
             execution_id="exec-2",
         )
-        assert result.total_gas_cost_wei == 50_000_000_000_000
+        assert result.total_gas_cost_wei is None
 
     def test_success_with_incomplete_receipt_set_fails_closed(self):
         from almanak.framework.execution.gateway_orchestrator import GatewayExecutionResult

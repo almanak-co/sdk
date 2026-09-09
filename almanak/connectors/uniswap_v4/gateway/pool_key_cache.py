@@ -200,6 +200,19 @@ class CachedPoolKey:
     hooks: str
 
     def __post_init__(self) -> None:
+        from ..pool_key import PoolKey
+
+        key = PoolKey.from_wire(
+            {
+                "currency0": self.currency0,
+                "currency1": self.currency1,
+                "fee": self.fee,
+                "tick_spacing": self.tick_spacing,
+                "hooks": self.hooks,
+            }
+        )
+        for name, value in key.to_wire().items():
+            object.__setattr__(self, name, value)
         if int(self.currency0, 16) >= int(self.currency1, 16):
             raise ValueError(f"currency0 must be < currency1 (got {self.currency0} vs {self.currency1})")
         if not 0 <= self.fee < (1 << 24):
@@ -237,6 +250,8 @@ def _decode_initialize_log(log: dict) -> tuple[str, CachedPoolKey] | None:
 
     Returns None on any decode failure so the caller can skip and continue.
     """
+    if log.get("removed"):
+        return None
     topics = log.get("topics") or []
     if len(topics) < 4:
         return None
@@ -287,6 +302,10 @@ def _decode_initialize_log(log: dict) -> tuple[str, CachedPoolKey] | None:
             tick_spacing=tick_spacing,
             hooks=hooks,
         )
+        from ..pool_key import PoolKey
+
+        if PoolKey(currency0, currency1, fee, tick_spacing, hooks).pool_id != pool_id:
+            return None
         return pool_id, key
     except Exception as exc:  # noqa: BLE001 - swallow per-log decode failures
         logger.debug("V4PoolKeyCache: failed to decode Initialize log: %s", exc)
@@ -650,6 +669,8 @@ class V4PoolKeyCache:
             # mypy sees the LogReceipt TypedDict). Normalize to a plain dict
             # unconditionally so the decoder's dict[Any, Any] contract holds.
             log: dict[Any, Any] = dict(raw)
+            if str(log.get("address", "")).lower() != pool_manager.lower():
+                continue
             decoded = _decode_initialize_log(log)
             if decoded is None:
                 continue
@@ -698,6 +719,8 @@ class V4PoolKeyCache:
         chain_l = chain.lower()
         idx = self._index.setdefault(chain_l, {})
         for raw in raw_logs:
+            if str(raw.get("address", "")).lower() != pool_manager.lower():
+                continue
             decoded = _decode_initialize_log(dict(raw))
             if decoded is None:
                 continue

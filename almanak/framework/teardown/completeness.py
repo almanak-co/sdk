@@ -50,7 +50,7 @@ from typing import Any
 from almanak.core.asset_identity import AssetIdentity, AssetNamespace, NativeIdentityUnavailable
 from almanak.core.chains import ChainRegistry
 from almanak.core.enums import ChainFamily
-from almanak.framework.data.tokens import TokenResolutionError, get_token_resolver
+from almanak.framework.data.tokens import NATIVE_SENTINEL, TokenResolutionError, get_token_resolver
 from almanak.framework.teardown.models import (
     PositionInfo,
     PositionType,
@@ -366,6 +366,14 @@ def _historical_string_identity(token: str, chain: str | None) -> AssetIdentity 
         return AssetIdentity.from_caip19(normalized)
     if not chain:
         return None
+    descriptor = ChainRegistry.resolve(chain)
+    native_aliases = {descriptor.native.symbol.lower(), *(s.lower() for s in descriptor.native.accepted_symbols)}
+    if descriptor.family is ChainFamily.EVM:
+        native_aliases.update(
+            {NATIVE_SENTINEL.lower(), "0x" + "0" * 40, *(a.lower() for a in descriptor.native.address_aliases)}
+        )
+    if normalized.lower() in native_aliases:
+        return AssetIdentity.native(descriptor.name)
     try:
         resolved = get_token_resolver().resolve(normalized, chain, log_errors=False, skip_gateway=True)
     except TokenResolutionError:

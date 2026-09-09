@@ -120,7 +120,7 @@ def test_guard_fires_on_hooks_via_helper():
         currency1="0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
         hooks="0x0000000000000000000000000000000000000800",
     )
-    with pytest.raises(UniswapV4UnsupportedPoolError, match="VIB-4485"):
+    with pytest.raises(UniswapV4UnsupportedPoolError, match="hook"):
         UniswapV4Adapter._reject_unsupported_v0_pool(pool_key)
 
 
@@ -139,3 +139,54 @@ def test_guard_does_not_fire_on_native_currency0():
     )
     # No raise — native-ETH currency0 is in scope (VIB-4483 lifted the guard).
     UniswapV4Adapter._reject_unsupported_v0_pool(pool_key)
+
+
+@pytest.mark.parametrize("pool_id", [None, 7, "0x" + "00" * 32])
+def test_lp_open_rejects_conflicting_redundant_pool_id(adapter, pool_id):
+    from almanak.framework.intents.vocabulary import LPOpenIntent
+
+    intent = LPOpenIntent(
+        pool="WETH/USDC/3000",
+        amount0=Decimal("0.1"),
+        amount1=Decimal("200"),
+        range_lower=Decimal("1500"),
+        range_upper=Decimal("2500"),
+        protocol="uniswap_v4",
+        protocol_params={"pool_id": pool_id},
+    )
+    with pytest.raises(ValueError, match="pool_id conflicts"):
+        adapter._prepare_lp_open_pool(intent)
+
+
+def test_lp_open_accepts_matching_redundant_pool_id(adapter):
+    from almanak.framework.intents.vocabulary import LPOpenIntent
+
+    intent = LPOpenIntent(
+        pool="WETH/USDC/3000",
+        amount0=Decimal("0.1"),
+        amount1=Decimal("200"),
+        range_lower=Decimal("1500"),
+        range_upper=Decimal("2500"),
+        protocol="uniswap_v4",
+    )
+    pool = adapter._prepare_lp_open_pool(intent)
+    pinned = intent.model_copy(update={"protocol_params": {"pool_id": pool.pool_id}})
+    assert adapter._prepare_lp_open_pool(pinned).pool_key == pool.pool_key
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"fee_tier": 31100},
+        {"fee_tier": True},
+        {"tick_spacing": 17},
+        {"hooks": "0x" + "1" * 40},
+        {"pool_id": "0x" + "0" * 64},
+    ],
+)
+def test_owned_lp_identity_rejects_conflicting_pins(params):
+    from almanak.connectors.uniswap_v4.pool_key import PoolKey
+
+    key = PoolKey("0x" + "0" * 40, "0x" + "2" * 40, 777, 10)
+    with pytest.raises(ValueError, match="conflicts"):
+        UniswapV4Adapter._validate_lp_pool_pins(key, params)

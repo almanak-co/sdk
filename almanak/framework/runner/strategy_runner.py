@@ -655,6 +655,8 @@ class SingleChainExecutionState:
     last_execution_context: Any | None = None
     last_bundle_metadata: dict[str, Any] | None = None
     replay_barrier: ExecutionProgress | None = None
+    failed_attempt_ledger_id: str | None = None
+    failed_attempt_receipts: dict[str, tuple[dict[str, Any], ...]] = field(default_factory=dict)
 
 
 @dataclass
@@ -3832,6 +3834,7 @@ class StrategyRunner:
         # ``strategy``/``config`` derivation → byte-identical to the pre-5670 path.
         chain: str | None = None,
         wallet_address: str | None = None,
+        ledger_entry_id: str | None = None,
     ) -> str | None:
         """Returns the persisted LedgerEntry.id on success, None on non-live failure."""
         """Write a structured trade record to the transaction ledger.
@@ -3862,9 +3865,12 @@ class StrategyRunner:
         """
 
         try:
+            from almanak.framework.execution.failed_attempt import retain_execution_intent_id
+
             from ..observability.context import get_cycle_id
             from ..observability.ledger import build_ledger_entry
 
+            retain_execution_intent_id(result, intent)
             cycle_id = get_cycle_id() or ""
             # VIB-5670: prefer the explicit per-leg chain / wallet when the
             # multi-chain lane supplies them; fall back to the single-chain
@@ -3919,6 +3925,9 @@ class StrategyRunner:
                 v4_lp_close_native_principal=v4_lp_close_native_principal,
                 lp_close_native_amounts=lp_close_native_amounts,
             )
+
+            if ledger_entry_id is not None:
+                entry.id = ledger_entry_id
 
             # Phase 4: stamp deployment_id and execution_mode onto the entry (VIB-2835/2837).
             # VIB-3157: tri-state (dry_run / live / paper) via the shared
@@ -4192,7 +4201,10 @@ class StrategyRunner:
         else:
             parser_key = "uniswap_v3"
         try:
-            parser = get_parser(parser_key, chain=chain)
+            parser_kwargs: dict[str, Any] = {"chain": chain}
+            if protocol_norm in _UNIV4_LP_PROTOCOLS:
+                parser_kwargs["pool_key_lookup"] = self._build_pool_key_lookup()
+            parser = get_parser(parser_key, **parser_kwargs)
         except Exception:  # noqa: BLE001 — defensive: parser import/construction failure
             return None
         if parser is None:
@@ -4490,6 +4502,11 @@ class StrategyRunner:
                 chain,
                 strategy.deployment_id,
             )
+        identity_check = getattr(parser, "registry_close_identity_matches", None)
+        if callable(identity_check) and not identity_check(receipt, open_payload):
+            if open_payload is not None:
+                logger.error("V4 close receipt does not bind the matched OPEN NFT identity; refusing registry closure")
+            return None
         payload = parser.extract_registry_payload_close(
             receipt,
             open_payload=open_payload,
@@ -6729,6 +6746,9 @@ class StrategyRunner:
         tx_result = getattr(leg, "tx_result", None)
 
         if isinstance(tx_result, GatewayExecutionResult):
+            gas_cost_wei = tx_result.total_gas_cost_wei
+            if gas_cost_wei is None:
+                raise ValueError("Gateway execution gas cost is unmeasured; receipt reconciliation is required")
             tx_results = list(tx_result.transaction_results)
             if not tx_results and tx_result.tx_hashes:
                 tx_results = [
@@ -6740,7 +6760,7 @@ class StrategyRunner:
                 phase=ExecutionPhase.COMPLETE if tx_result.success else ExecutionPhase.CONFIRMATION,
                 transaction_results=tx_results,
                 total_gas_used=int(getattr(tx_result, "total_gas_used", 0) or 0),
-                total_gas_cost_wei=int(getattr(tx_result, "total_gas_cost_wei", 0) or 0),
+                total_gas_cost_wei=gas_cost_wei,
                 error=tx_result.error,
                 error_phase=None if tx_result.success else ExecutionPhase.CONFIRMATION,
                 submission_provenance=tx_result.submission_provenance,
@@ -6837,6 +6857,23 @@ class StrategyRunner:
             failed_tx_results,
         )
 
+    def _failed_leg_terminal_result(
+        self,
+        leg: Any,
+        prior_results: list[TransactionResult],
+        total_gas_used: int,
+        total_gas_cost_wei: int,
+        error: str,
+    ) -> tuple[ExecutionResult | None, list[TransactionResult], str, bool]:
+        """Preserve terminal failure callbacks without fabricating missing receipt costs."""
+        try:
+            result, transactions = self._failed_leg_execution_result(
+                leg, prior_results, total_gas_used, total_gas_cost_wei, error
+            )
+            return result, transactions, error, True
+        except ValueError as exc:
+            return None, [], f"{error}; {exc}", False
+
     @staticmethod
     def _failed_iteration_execution_result(
         current: ExecutionResult | None,
@@ -6844,7 +6881,11 @@ class StrategyRunner:
         total_gas_used: int,
         total_gas_cost_wei: int,
         error: str,
+        *,
+        costs_measured: bool = True,
     ) -> ExecutionResult | None:
+        if not costs_measured:
+            return None
         if current is not None or not transaction_results:
             return current
         return ExecutionResult(
@@ -8177,6 +8218,7 @@ class StrategyRunner:
         wallet_address: str,
         result: Any,
         gateway_client: Any,
+        declared_network: Any = None,
     ) -> tuple[int, int] | None:
         """Block-pinned wallet native-balance bracket + summed bundle gas (VIB-5121).
 
@@ -8195,29 +8237,20 @@ class StrategyRunner:
         unavailable; the PRE read is NEVER allowed to fall back to ``"latest"``
         (that would read the POST balance and fabricate a near-zero amount).
 
-        ``gas_cost_wei`` is the BUNDLE-level ``total_gas_cost_wei`` — it sums gas
-        across every tx the wallet paid for (an ERC-20-leg approve AND the
-        deposit), which is the correct figure for a bracket spanning the whole
-        bundle's block range.
+        Gas includes only receipts paid by this wallet, including measured L1
+        charges. An external sender's gas does not reduce a Safe's balance.
+        Unknown fee or payer evidence leaves the gross LP leg unmeasured.
         """
+        from .runner_state import _wallet_receipt_gas_cost
+
         first_block = _first_receipt_block(result)
         last_block = _last_receipt_block(result)
         if first_block is None or last_block is None:
             return None
-        # Gas total is dict-shaped on Gateway results, attr-shaped on local
-        # ``ExecutionResult`` — read both (snake + camel) so the bracket is not
-        # silently dropped on a Gateway-backed run.
-        if isinstance(result, dict):
-            gas_cost_wei = result.get("total_gas_cost_wei", result.get("totalGasCostWei"))
-        else:
-            gas_cost_wei = getattr(result, "total_gas_cost_wei", None)
+        gas_cost_wei = _wallet_receipt_gas_cost(
+            result, wallet_address, chain=chain, gateway_client=gateway_client, declared_network=declared_network
+        )
         if gas_cost_wei is None:
-            return None
-        try:
-            gas_cost_wei = int(gas_cost_wei)
-        except (TypeError, ValueError):
-            return None
-        if gas_cost_wei < 0:
             return None
         pre = gateway_client.query_native_balance(chain, wallet_address, block=first_block - 1)
         post = gateway_client.query_native_balance(chain, wallet_address, block=last_block)
@@ -8234,6 +8267,7 @@ class StrategyRunner:
         wallet_address: str,
         result: Any,
         gateway_client: Any | None,
+        declared_network: Any = None,
     ) -> tuple[int | None, int | None] | None:
         """Best-effort native-balance-bracket measurement of an LP_OPEN native leg.
 
@@ -8259,6 +8293,7 @@ class StrategyRunner:
             wallet_address=wallet_address,
             result=result,
             gateway_client=gateway_client,
+            declared_network=declared_network,
             opening=True,
         )
 
@@ -8271,6 +8306,7 @@ class StrategyRunner:
         wallet_address: str,
         result: Any,
         gateway_client: Any | None,
+        declared_network: Any = None,
     ) -> tuple[int | None, int | None] | None:
         """Best-effort native-balance-bracket measurement of an LP_CLOSE native leg.
 
@@ -8287,6 +8323,7 @@ class StrategyRunner:
             wallet_address=wallet_address,
             result=result,
             gateway_client=gateway_client,
+            declared_network=declared_network,
             opening=False,
         )
 
@@ -8299,6 +8336,7 @@ class StrategyRunner:
         wallet_address: str,
         result: Any,
         gateway_client: Any | None,
+        declared_network: Any = None,
         opening: bool,
     ) -> tuple[int | None, int | None] | None:
         """Shared native-leg balance-bracket capture for LP open/close (VIB-5121)."""
@@ -8317,6 +8355,7 @@ class StrategyRunner:
                 wallet_address=wallet_address,
                 result=result,
                 gateway_client=gateway_client,
+                declared_network=declared_network,
             )
             if measured is None:
                 return None
@@ -8355,6 +8394,7 @@ class StrategyRunner:
         wallet_address: str,
         result: Any,
         gateway_client: Any | None,
+        declared_network: Any = None,
     ) -> tuple[tuple[int | None, int | None] | None, tuple[int | None, int | None] | None]:
         """Measure the native-ETH LP open + close legs for a LANDED tx (VIB-5121).
 
@@ -8386,6 +8426,7 @@ class StrategyRunner:
             wallet_address=wallet_address,
             result=result,
             gateway_client=gateway_client,
+            declared_network=declared_network,
         )
         lp_close_native_amounts = cls._capture_native_lp_close_amounts_safe(
             intent=intent,
@@ -8393,6 +8434,7 @@ class StrategyRunner:
             wallet_address=wallet_address,
             result=result,
             gateway_client=gateway_client,
+            declared_network=declared_network,
         )
         return lp_open_native_amounts, lp_close_native_amounts
 
@@ -9167,6 +9209,7 @@ class StrategyRunner:
         execution_context = ExecutionContext(
             deployment_id=deployment_id,
             chain=strategy.chain,
+            simulation_enabled=self.config.simulation_enabled,
             wallet_address=strategy.wallet_address,
             correlation_id=intent.intent_id,
             cycle_id=get_cycle_id() or "",
@@ -9228,6 +9271,7 @@ class StrategyRunner:
             if reconciliation_required:
                 receipt_error = reconciliation_required_error(execution_result)
                 execution_result.error = receipt_error
+            await self._single_chain_persist_failed_attempt(state, execution_result)
             await self._single_chain_seal_broadcast_marker(
                 deployment_id=deployment_id,
                 marker=broadcast_marker,
@@ -9700,7 +9744,99 @@ class StrategyRunner:
             context=execution_context,
         )
         state.last_execution_result = execution_result
+        state.failed_attempt_ledger_id = None
         return execution_result
+
+    async def _single_chain_persist_failed_attempt(
+        self, state: SingleChainExecutionState, result: ExecutionResult
+    ) -> None:
+        """Persist receipt costs before any retry barrier can be released."""
+        from almanak.framework.execution.failed_attempt import (
+            confirmed_failed_attempt_id,
+            retain_execution_intent_id,
+            retain_failed_attempt_receipts,
+        )
+        from almanak.framework.execution.reconciliation import (
+            RECONCILIATION_REQUIRED_PREFIX,
+            failed_submission_allows_recompile,
+            failed_submission_proves_revert,
+        )
+
+        retryable = failed_submission_proves_revert(result) or failed_submission_allows_recompile(
+            result, expected_plan_hash=getattr(result, "execution_plan_hash", "")
+        )
+        if not retryable:
+            return
+        try:
+            attempt_id = confirmed_failed_attempt_id(
+                result, deployment_id=state.deployment_id, chain=state.strategy.chain
+            )
+            if attempt_id is None:
+                raise ValueError("Retryable failed attempt lacks a valid scoped identity")
+            if state.last_execution_context is None:
+                raise ValueError("Failed attempt execution context is unmeasured")
+            intent_identity = retain_execution_intent_id(result, state.intent, required=True)
+            ResultEnricher(live_mode=self._is_live_mode()).enrich(
+                result,
+                state.intent,
+                state.last_execution_context,
+                bundle_metadata=state.last_bundle_metadata,
+            )
+            retain_failed_attempt_receipts(result, attempt_id=attempt_id)
+            existing = await self.state_manager.get_ledger_entry_by_id(attempt_id, strict=True)
+            if existing is not None:
+                import json
+
+                from almanak.framework.observability.ledger import serialize_extracted_data
+
+                saved = json.loads(existing.get("extracted_data_json") or "{}")
+                expected = json.loads(serialize_extracted_data(result.extracted_data))
+                if (
+                    existing.get("deployment_id") != state.deployment_id
+                    or existing.get("chain") != state.strategy.chain
+                    or existing.get("success") not in (False, 0)
+                    or saved.get("failed_attempt") != expected["failed_attempt"]
+                    or saved.get("compiler_evidence") != expected.get("compiler_evidence")
+                    or saved.get("execution_intent_id") != intent_identity
+                ):
+                    raise ValueError("Persisted failed attempt conflicts with execution evidence")
+                state.failed_attempt_ledger_id = attempt_id
+                state.failed_attempt_receipts[attempt_id] = tuple(saved["failed_attempt"]["receipts"])
+                return
+            persisted = await self._write_ledger_entry(
+                state.strategy,
+                state.intent,
+                result=result,
+                success=False,
+                error=result.error or "Confirmed transaction reverted",
+                price_oracle=self._merge_oracle_for_ledger(state, state.intent, result=result),
+                emit_position_event=False,
+                ledger_entry_id=attempt_id,
+            )
+            if persisted != attempt_id:
+                raise RuntimeError("Confirmed failed attempt ledger was not durably acknowledged")
+            state.failed_attempt_ledger_id = persisted
+            from copy import deepcopy
+
+            state.failed_attempt_receipts[attempt_id] = tuple(
+                deepcopy(result.extracted_data["failed_attempt"]["receipts"])
+            )
+        except Exception as exc:
+            error = (
+                f"{RECONCILIATION_REQUIRED_PREFIX}: confirmed failed attempt accounting is not durable; "
+                "replay barrier retained"
+            )
+            if state.replay_barrier is not None:
+                from almanak.framework.execution.reconciliation import submitted_transaction_hashes
+
+                await self._single_chain_seal_broadcast_marker(
+                    deployment_id=state.deployment_id,
+                    marker=state.replay_barrier,
+                    execution_result=result,
+                    submitted_hashes=submitted_transaction_hashes(result),
+                    reconciliation_error=error,
+                )
+            raise RuntimeError(error) from exc
 
     def _single_chain_enrich_execution_result(
         self,
@@ -9784,8 +9920,13 @@ class StrategyRunner:
         # downstream. Without this gate, operators would see a green
         # iteration summary while the strategy confidently traded on
         # corrupted accounting.
+        retry_gas_kwargs = {}
+        if state.failed_attempt_receipts:
+            retry_gas_kwargs["prior_attempt_receipts"] = tuple(
+                receipt for receipts in state.failed_attempt_receipts.values() for receipt in receipts
+            )
         recon = await self._reconcile_post_execution_balances(
-            strategy, intent, state.last_execution_result, pre_snapshot=state.pre_snapshot
+            strategy, intent, state.last_execution_result, pre_snapshot=state.pre_snapshot, **retry_gas_kwargs
         )
         recon_incident = bool(recon and recon.get("incident"))
         recon_degraded = bool(recon and recon.get("reconciliation_degraded"))
@@ -9891,6 +10032,7 @@ class StrategyRunner:
             wallet_address=strategy.wallet_address,
             result=state.last_execution_result,
             gateway_client=state.gateway_client,
+            declared_network=getattr(strategy, "_gateway_network", None),
         )
         ledger_entry_id = await self._write_ledger_entry(
             strategy,
@@ -10370,6 +10512,7 @@ class StrategyRunner:
             wallet_address=strategy.wallet_address,
             result=last_execution_result,
             gateway_client=state.gateway_client,
+            declared_network=getattr(strategy, "_gateway_network", None),
         )
 
         # Record failed trade in ledger (VIB-2402) -- on-chain state
@@ -10498,7 +10641,9 @@ class StrategyRunner:
         if last_execution_result is not None and not getattr(last_execution_result, "error", ""):
             last_execution_result.error = error_msg
         timeline_result = last_execution_result or SimpleNamespace(error=error_msg)
-        failed_ledger_id = await self._write_ledger_entry(
+        if last_execution_result is not None and state.failed_attempt_ledger_id is None:
+            await self._single_chain_persist_failed_attempt(state, last_execution_result)
+        failed_ledger_id = state.failed_attempt_ledger_id or await self._write_ledger_entry(
             strategy,
             intent,
             result=last_execution_result,
@@ -11220,6 +11365,7 @@ class StrategyRunner:
         error_summary = ""
         persisted_count = 0
         failed_execution_result: ExecutionResult | None = None
+        failed_costs_measured = True
 
         await self._flush_strategy_pending_save_strict(strategy)
         if resume_progress is None:
@@ -11302,12 +11448,10 @@ class StrategyRunner:
                         f"Multi-chain leg failed at intent {intent_to_execute.intent_id[:8]}..., "
                         f"chain={leg.chain}: {leg.error}"
                     )
-                    failed_execution_result, failed_tx_results = self._failed_leg_execution_result(
-                        leg,
-                        leg_tx_results,
-                        total_gas_used,
-                        total_gas_cost_wei,
-                        classified_error,
+                    failed_execution_result, failed_tx_results, error_summary, failed_costs_measured = (
+                        self._failed_leg_terminal_result(
+                            leg, leg_tx_results, total_gas_used, total_gas_cost_wei, error_summary
+                        )
                     )
                     if failed_execution_result is not None:
                         leg_tx_results.extend(failed_tx_results)
@@ -11412,6 +11556,7 @@ class StrategyRunner:
                 total_gas_used,
                 total_gas_cost_wei,
                 error_summary,
+                costs_measured=failed_costs_measured,
             )
             return IterationResult(
                 status=IterationStatus.EXECUTION_FAILED,
@@ -12862,13 +13007,10 @@ class StrategyRunner:
         total_gas_used = sum(int(getattr(tr, "gas_used", 0) or 0) for tr in state.leg_tx_results)
         total_gas_cost_wei = sum(int(getattr(tr, "gas_cost_wei", 0) or 0) for tr in state.leg_tx_results)
         failed_execution_result = None
+        failed_costs_measured = True
         if state.failed_result is not None:
-            failed_execution_result, _failed_tx_results = self._failed_leg_execution_result(
-                state.failed_result,
-                state.leg_tx_results,
-                total_gas_used,
-                total_gas_cost_wei,
-                iteration_error,
+            failed_execution_result, _, iteration_error, failed_costs_measured = self._failed_leg_terminal_result(
+                state.failed_result, state.leg_tx_results, total_gas_used, total_gas_cost_wei, iteration_error
             )
         failed_execution_result = self._failed_iteration_execution_result(
             failed_execution_result,
@@ -12876,6 +13018,7 @@ class StrategyRunner:
             total_gas_used,
             total_gas_cost_wei,
             iteration_error,
+            costs_measured=failed_costs_measured,
         )
 
         # Issue #1780: the bridge-wait failed result is the terminal
@@ -13133,7 +13276,7 @@ class StrategyRunner:
         )
 
     async def _reconcile_post_execution_balances(
-        self, strategy, intent, execution_result, pre_snapshot=None, *, balance_provider=None
+        self, strategy, intent, execution_result, pre_snapshot=None, *, balance_provider=None, prior_attempt_receipts=()
     ):
         from .runner_state import reconcile_post_execution_balances
 
@@ -13144,6 +13287,7 @@ class StrategyRunner:
             execution_result,
             pre_snapshot=pre_snapshot,
             balance_provider=balance_provider,
+            prior_attempt_receipts=prior_attempt_receipts,
         )
 
     @staticmethod

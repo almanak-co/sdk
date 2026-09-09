@@ -313,7 +313,7 @@ def test_nonce_capture_fails_closed_when_rpc_response_is_incomplete():
 
 @pytest.mark.parametrize(
     ("demo", "profile"),
-    [("benqi_lending_lifecycle", "lending_lifecycle"), ("accounting_looping", "looping")],
+    [("benqi_lending_lifecycle", "lending_lifecycle"), ("accounting_looping", "looping"), ("v4_roundtrip", "spot")],
 )
 def test_accountant_profile_is_explicit_and_demo_specific(demo, profile):
     module = _load()
@@ -503,3 +503,64 @@ def test_publication_reuses_identical_receipts_and_refuses_different_ones(tmp_pa
     assert (receipt_dir / "receipt-0xbb.json").read_text() == "SENTINEL\n"
     with pytest.raises(module.EvidenceError, match="refusing to overwrite receipt reconciliation"):
         module.publish_receipt_reconciliation(_reconciliation_result(), tmp_path / "first.json", receipt_dir)
+
+
+@pytest.mark.parametrize("include_l1_in_ledger", [True, False])
+def test_observed_base_l1_fee_is_required_in_ledger_reconciliation(include_l1_in_ledger):
+    module = _load()
+    observed = json.loads((SCRIPT.parent.parent / "tests/fixtures/execution/base_additive_l1_fee.json").read_text())
+    receipts = {raw["transactionHash"]: raw for raw in observed["raw_receipts"]}
+    parts = [int(raw["gasUsed"], 16) for raw in receipts.values()]
+    row = _row(sum(parts), parts, row_id="base-observed", price="2498.5")
+    sub = [
+        {"tx_hash": tx_hash, "gas_used": int(raw["gasUsed"], 16), "role": "ACTION"} for tx_hash, raw in receipts.items()
+    ]
+    row.update(chain="base", tx_hash=sub[-1]["tx_hash"], extracted_data_json=json.dumps({"sub_transactions": sub}))
+    cost = Decimal(observed["expected_cost_wei"] if include_l1_in_ledger else observed["expected_execution_cost_wei"])
+    row["gas_usd"] = str(cost / Decimal(10**18) * Decimal("2498.5"))
+    if not include_l1_in_ledger:
+        with pytest.raises(module.EvidenceError, match="does not reconcile"):
+            module.reconcile_receipts([row], receipt_lookup=receipts.get)
+        return
+    result = module.reconcile_receipts([row], receipt_lookup=receipts.get)
+    assert result["native_unit_reconciliation"]["aggregate_gas_cost_wei"] == 2927288871908
+    assert result["usd_price_basis_reconciliation"]["status"] == "PASS"
+    assert sum(tx["l1_fee_wei"] for tx in result["intents"][0]["transactions"]) == 22745682539
+
+
+def test_malformed_l1_receipt_fee_fails_closed_in_evidence():
+    module = _load()
+    row = _row(21000, [21000])
+    receipts = _receipts([row])
+    next(iter(receipts.values()))["l1Fee"] = "invalid"
+    with pytest.raises(module.EvidenceError, match="invalid additive receipt fee"):
+        module.reconcile_receipts([row], receipt_lookup=receipts.get)
+
+
+@pytest.mark.parametrize("chain", ["base", "optimism"])
+@pytest.mark.parametrize("missing", [True, False])
+def test_op_receipt_without_measured_l1_fee_cannot_pass_reconciliation(chain, missing):
+    module = _load()
+    row = _row(21000, [21000])
+    row["chain"] = chain
+    receipts = _receipts([row])
+    receipt = next(iter(receipts.values()))
+    if not missing:
+        receipt["l1Fee"] = None
+    with pytest.raises(module.EvidenceError, match="L1 receipt fee is unmeasured"):
+        module.reconcile_receipts([row], receipt_lookup=receipts.get)
+    receipt["l1Fee"] = "0x0"
+    result = module.reconcile_receipts([row], receipt_lookup=receipts.get)
+    assert result["usd_price_basis_reconciliation"]["status"] == "PASS"
+
+
+@pytest.mark.parametrize("chain", ["ethereum", "arbitrum"])
+def test_nonadditive_chain_cost_does_not_require_op_fee(chain):
+    module = _load()
+    row = _row(21000, [21000])
+    row["chain"] = chain
+    receipts = _receipts([row])
+    if chain == "arbitrum":
+        next(iter(receipts.values()))["gasUsedForL1"] = "0x42"
+    result = module.reconcile_receipts([row], receipt_lookup=receipts.get)
+    assert result["native_unit_reconciliation"]["aggregate_gas_cost_wei"] == 21000 * 10**9

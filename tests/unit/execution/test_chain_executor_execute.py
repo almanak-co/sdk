@@ -432,7 +432,7 @@ def _wire_receipt(executor: ChainExecutor, response) -> MagicMock:
 
 class TestWaitForReceipt:
     def test_success_maps_receipt_fields(self, executor):
-        web3 = _wire_receipt(executor, _raw_receipt())
+        web3 = _wire_receipt(executor, _raw_receipt(l1Fee="0x64"))
 
         receipt = asyncio.run(executor.wait_for_receipt(_TX_HASH))
 
@@ -441,6 +441,8 @@ class TestWaitForReceipt:
         assert receipt.block_hash == HexBytes("0x" + "cd" * 32).hex()
         assert receipt.gas_used == 21000
         assert receipt.effective_gas_price == 55
+        assert receipt.l1_fee_wei == 100
+        assert receipt.gas_cost_wei == 21000 * 55 + 100
         assert receipt.status == 1
         assert receipt.logs == [{"address": "0x" + "ee" * 20, "data": "0x"}]
         assert receipt.contract_address is None

@@ -274,6 +274,7 @@ def _prepare_runtime_bootstrap(
     gateway_client: Any,
     gateway_network: str,
     fresh: bool,
+    simulation_override: bool | None = None,
 ) -> RuntimeBootstrap:
     """Resolve runtime config and stable identity for `run()`.
 
@@ -303,6 +304,8 @@ def _prepare_runtime_bootstrap(
         gateway_client=gateway_client,
         strategy_config=strategy_bootstrap.strategy_config,
     )
+    if simulation_override is not None:
+        runtime_config.simulation_enabled = simulation_override
     identity_info = _resolve_identity(
         strategy_config=strategy_bootstrap.strategy_config,
         fresh=fresh,

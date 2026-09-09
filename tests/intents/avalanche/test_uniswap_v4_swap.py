@@ -9,23 +9,10 @@ Tests the full Intent -> Compile -> Execute -> Parse -> Verify flow:
 
 NO MOCKING. All tests execute real on-chain swaps and verify state changes.
 
-Pool verification (probed against avalanche mainnet 2026-05-14):
-- NATIVE/USDC fee=3000 ts=60 sqrtPriceX96=2.477e23 tick=-253527
-  liquidity=1.47e13 (sufficient for 100 USDC / 1 WAVAX swaps).
-- NATIVE/USDC fee=500  ts=10 liquidity=2.86e13 also initialized.
-- V4 Quoter `quoteExactInputSingle` returns 9.74 USDC for 1 WAVAX and
-  10.18 WAVAX for 100 USDC against the fee=3000 NATIVE/USDC pool.
-
-This file uses **WAVAX/USDC** rather than WETH/USDC because WAVAX is the
-wrapped native on Avalanche. ``UniswapV4SDK._is_wrapped_native(WAVAX)``
-returns True, so the SDK substitutes the NATIVE_CURRENCY sentinel
-(address(0)) for the pool key — the same code path that works on
-Base/Optimism/Arbitrum where the WETH/USDC test routes through the
-NATIVE/USDC pool. VIB-4413 documents that the ERC20<>ERC20 V4 swap path
-reverts via UniversalRouter (it succeeds on chains where WETH is the
-wrapped native because the SDK rewrites the pool key to NATIVE). Picking
-the wrapped-native side here avoids that bug entirely and exercises the
-known-good native-key path.
+These tests pin the hookless WAVAX/USDC PoolKey with fee 500 and tick spacing
+10. WAVAX remains an ERC-20 currency in that key; native AVAX is a distinct
+currency represented by address(0). Compilation metadata, PoolManager receipts,
+and exact token balance deltas must agree on the selected pool and swap amounts.
 
 To run:
     uv run pytest tests/intents/avalanche/test_uniswap_v4_swap.py -v -s
@@ -36,6 +23,7 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
+from almanak.connectors.uniswap_v4.pool_key import PoolKey
 from almanak.connectors.uniswap_v4.receipt_parser import UniswapV4ReceiptParser
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import SwapIntent
@@ -54,6 +42,13 @@ from tests.intents.conftest import (
 # =============================================================================
 
 CHAIN_NAME = "avalanche"
+EXPECTED_POOL_KEY = PoolKey(
+    currency0=CHAIN_CONFIGS[CHAIN_NAME]["tokens"]["WAVAX"],
+    currency1=CHAIN_CONFIGS[CHAIN_NAME]["tokens"]["USDC"],
+    fee=500,
+    tick_spacing=10,
+    hooks="0x" + "0" * 40,
+)
 USDC_TO_WAVAX_MAX_SLIPPAGE = Decimal("0.25")
 
 
@@ -74,10 +69,8 @@ class TestUniswapV4SwapIntent:
     - UniswapV4ReceiptParser correctly interprets PoolManager Swap events
     - Balance changes match expected amounts
 
-    Pair choice: WAVAX/USDC routes through the NATIVE/USDC V4 pool (WAVAX
-    is the wrapped native on Avalanche, so the SDK substitutes address(0)
-    for the pool key). This avoids the VIB-4413 ERC20<>ERC20 UR-mediated
-    bug that affects pairs where neither side is the wrapped native.
+    WAVAX and USDC are the two ERC-20 currencies of the explicitly pinned pool.
+    Native AVAX pays transaction gas and is not a swap currency in these cases.
     """
 
     @pytest.mark.intent(IntentType.SWAP)
@@ -137,6 +130,7 @@ class TestUniswapV4SwapIntent:
             # CoinGecko-priced native-output direction.
             max_slippage=USDC_TO_WAVAX_MAX_SLIPPAGE,
             protocol="uniswap_v4",
+            swap_params={"fee_tier": 500, "tick_spacing": 10},
             chain=CHAIN_NAME,
         )
 
@@ -152,6 +146,8 @@ class TestUniswapV4SwapIntent:
             f"Compilation failed: {compilation_result.error}"
         )
         assert compilation_result.action_bundle is not None, "ActionBundle must be created"
+        assert compilation_result.action_bundle.metadata["pool_key"] == EXPECTED_POOL_KEY.to_wire()
+        assert compilation_result.action_bundle.metadata["pool_id"] == EXPECTED_POOL_KEY.pool_id
 
         print(f"ActionBundle created with {len(compilation_result.action_bundle.transactions)} transactions")
 
@@ -163,7 +159,7 @@ class TestUniswapV4SwapIntent:
 
         # Layer 3: Receipt Parsing
         parser = UniswapV4ReceiptParser(chain=CHAIN_NAME)
-        parsed_swap = False
+        parsed_swaps = []
 
         for i, tx_result in enumerate(execution_result.transaction_results):
             print(f"\nTransaction {i + 1}:")
@@ -171,10 +167,16 @@ class TestUniswapV4SwapIntent:
             print(f"  Gas used: {tx_result.gas_used}")
 
             if tx_result.receipt:
-                parse_result = parser.parse_receipt(tx_result.receipt.to_dict())
+                parse_result = parser.parse_receipt(
+                    tx_result.receipt.to_dict(),
+                    swap_pool_key=EXPECTED_POOL_KEY.to_wire(),
+                    swap_token_meta=compilation_result.action_bundle.metadata["swap_token_meta"],
+                )
 
                 if parse_result.swap_result:
-                    parsed_swap = True
+                    assert len(parse_result.swap_events) == 1
+                    assert parse_result.swap_events[0].pool_id.lower() == EXPECTED_POOL_KEY.pool_id
+                    parsed_swaps.append(parse_result.swap_result)
                     assert parse_result.swap_result.amount_in_decimal > 0, "Parsed amount_in must be > 0"
                     assert parse_result.swap_result.amount_out_decimal > 0, "Parsed amount_out must be > 0"
                     assert parse_result.swap_result.effective_price > 0, "Parsed effective_price must be > 0"
@@ -182,7 +184,10 @@ class TestUniswapV4SwapIntent:
                     print(f"  Amount out: {parse_result.swap_result.amount_out_decimal}")
                     print(f"  Price:      {parse_result.swap_result.effective_price}")
 
-        assert parsed_swap, "Must find at least one Swap event in transaction receipts"
+        assert len(parsed_swaps) == 1, "Exactly one swap must execute across the complete bundle"
+        parsed_swap = parsed_swaps[0]
+        assert parsed_swap.token_in == token_in.lower()
+        assert parsed_swap.token_out == token_out.lower()
 
         # Layer 4: Balance Deltas
         usdc_after = get_token_balance(web3, token_in, funded_wallet)
@@ -190,6 +195,8 @@ class TestUniswapV4SwapIntent:
 
         usdc_spent = usdc_before - usdc_after
         wavax_received = wavax_after - wavax_before
+        assert usdc_spent == parsed_swap.amount_in
+        assert wavax_received == parsed_swap.amount_out
 
         print("\n--- Balance Deltas ---")
         print(f"USDC spent:     {format_token_amount(usdc_spent, in_decimals)}")
@@ -251,6 +258,7 @@ class TestUniswapV4SwapIntent:
             amount=swap_amount,
             max_slippage=SWAP_MAX_SLIPPAGE,
             protocol="uniswap_v4",
+            swap_params={"fee_tier": 500, "tick_spacing": 10},
             chain=CHAIN_NAME,
         )
 
@@ -264,6 +272,8 @@ class TestUniswapV4SwapIntent:
             f"Compilation failed: {compilation_result.error}"
         )
         assert compilation_result.action_bundle is not None
+        assert compilation_result.action_bundle.metadata["pool_key"] == EXPECTED_POOL_KEY.to_wire()
+        assert compilation_result.action_bundle.metadata["pool_id"] == EXPECTED_POOL_KEY.pool_id
 
         print(f"Compiled: {len(compilation_result.action_bundle.transactions)} transactions")
 
@@ -274,13 +284,19 @@ class TestUniswapV4SwapIntent:
 
         # Layer 3: Receipt Parsing
         parser = UniswapV4ReceiptParser(chain=CHAIN_NAME)
-        parsed_swap = False
+        parsed_swaps = []
 
         for tx_result in execution_result.transaction_results:
             if tx_result.receipt:
-                parse_result = parser.parse_receipt(tx_result.receipt.to_dict())
+                parse_result = parser.parse_receipt(
+                    tx_result.receipt.to_dict(),
+                    swap_pool_key=EXPECTED_POOL_KEY.to_wire(),
+                    swap_token_meta=compilation_result.action_bundle.metadata["swap_token_meta"],
+                )
                 if parse_result.swap_result:
-                    parsed_swap = True
+                    assert len(parse_result.swap_events) == 1
+                    assert parse_result.swap_events[0].pool_id.lower() == EXPECTED_POOL_KEY.pool_id
+                    parsed_swaps.append(parse_result.swap_result)
                     assert parse_result.swap_result.amount_in_decimal > 0, "Parsed amount_in must be > 0"
                     assert parse_result.swap_result.amount_out_decimal > 0, "Parsed amount_out must be > 0"
                     assert parse_result.swap_result.effective_price > 0, "Parsed effective_price must be > 0"
@@ -289,7 +305,10 @@ class TestUniswapV4SwapIntent:
                         f"out={parse_result.swap_result.amount_out_decimal}"
                     )
 
-        assert parsed_swap, "Must find at least one Swap event in transaction receipts"
+        assert len(parsed_swaps) == 1, "Exactly one swap must execute across the complete bundle"
+        parsed_swap = parsed_swaps[0]
+        assert parsed_swap.token_in == token_in.lower()
+        assert parsed_swap.token_out == token_out.lower()
 
         # Layer 4: Balance Deltas
         wavax_after = get_token_balance(web3, token_in, funded_wallet)
@@ -297,6 +316,8 @@ class TestUniswapV4SwapIntent:
 
         wavax_spent = wavax_before - wavax_after
         usdc_received = usdc_after - usdc_before
+        assert wavax_spent == parsed_swap.amount_in
+        assert usdc_received == parsed_swap.amount_out
 
         assert wavax_spent == expected_wavax_spent, (
             f"WAVAX spent mismatch. Expected: {expected_wavax_spent}, Got: {wavax_spent}"
@@ -350,6 +371,7 @@ class TestUniswapV4SwapIntent:
             amount=excessive_amount,
             max_slippage=SWAP_MAX_SLIPPAGE,
             protocol="uniswap_v4",
+            swap_params={"fee_tier": 500, "tick_spacing": 10},
             chain=CHAIN_NAME,
         )
 
@@ -363,6 +385,8 @@ class TestUniswapV4SwapIntent:
         compilation_result = compiler.compile(intent)
         assert compilation_result.status.value == "SUCCESS"
         assert compilation_result.action_bundle is not None
+        assert compilation_result.action_bundle.metadata["pool_key"] == EXPECTED_POOL_KEY.to_wire()
+        assert compilation_result.action_bundle.metadata["pool_id"] == EXPECTED_POOL_KEY.pool_id
 
         # Layer 2: Execution (should fail)
         execution_result = await orchestrator.execute(compilation_result.action_bundle)

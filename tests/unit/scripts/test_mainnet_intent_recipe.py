@@ -798,3 +798,63 @@ def test_chain_approval_census_excludes_erc721_approvals(monkeypatch) -> None:
     pairs = runner._chain_approval_pairs(web3, wallet=wallet, from_block=1)
 
     assert pairs == [("0x" + "aa" * 20, "0x" + "bb" * 20)]
+
+
+@pytest.mark.parametrize("rpc_url", ["https://rpc.invalid", "http://127.0.0.1:8545"])
+def test_mainnet_runner_builds_capable_simulator_even_when_env_disables_it(monkeypatch, rpc_url):
+    from almanak.framework.execution.simulator import LocalSimulator, SimulationConfig
+
+    runner = _runner_module()
+    config = SimulationConfig(enabled=False)
+    monkeypatch.setattr(runner.SimulationConfig, "from_env", lambda: config)
+    orchestrator = runner._orchestrator(private_key="0x" + "11" * 32, rpc_url=rpc_url, chain="arbitrum")
+    assert isinstance(orchestrator.simulator, LocalSimulator)
+    assert orchestrator.simulator._rpc_url == rpc_url
+    assert config.enabled is True
+
+
+@pytest.mark.asyncio
+async def test_mainnet_runner_simulation_revert_stops_before_signing(monkeypatch):
+    from unittest.mock import AsyncMock, Mock
+
+    from almanak.framework.execution.interfaces import UnsignedTransaction
+    from almanak.framework.execution.orchestrator import ExecutionPhase, ExecutionResult
+    from almanak.framework.execution.simulator import SimulationConfig
+    from almanak.framework.models.reproduction_bundle import ActionBundle
+
+    runner = _runner_module()
+    monkeypatch.setattr(runner.SimulationConfig, "from_env", lambda: SimulationConfig(enabled=False))
+    orchestrator = runner._orchestrator(private_key="0x" + "11" * 32, rpc_url="https://rpc.invalid", chain="arbitrum")
+    simulator = orchestrator.simulator
+    monkeypatch.setattr(simulator, "_get_web3", AsyncMock(return_value=Mock()))
+    estimate = AsyncMock(return_value=(0, "execution reverted: minimum not met"))
+    monkeypatch.setattr(simulator, "_estimate_gas", estimate)
+    sign = AsyncMock(side_effect=AssertionError("Must refuse before signing"))
+    submit = AsyncMock(side_effect=AssertionError("Must refuse before submission"))
+    monkeypatch.setattr(orchestrator.signer, "sign", sign)
+    monkeypatch.setattr(orchestrator.submitter, "submit", submit)
+    tx = UnsignedTransaction(
+        to="0x" + "22" * 20,
+        value=0,
+        data="0x12345678",
+        chain_id=42161,
+        gas_limit=100000,
+        max_fee_per_gas=2,
+        max_priority_fee_per_gas=1,
+        from_address=orchestrator.signer.address,
+    )
+    state = SimpleNamespace(
+        context=runner.ExecutionContext(deployment_id="test", chain="arbitrum", simulation_enabled=True),
+        result=ExecutionResult(success=False, phase=ExecutionPhase.VALIDATION),
+        session=None,
+        unsigned_txs=[tx],
+        action_bundle=ActionBundle(intent_type="SWAP", transactions=[], metadata={}),
+    )
+    refusal = await orchestrator._phase_simulate(state)
+    assert refusal is state.result
+    assert refusal.error_phase is ExecutionPhase.SIMULATION
+    assert "minimum not met" in refusal.error
+    assert refusal.simulation_result.simulated is True
+    estimate.assert_awaited_once_with(tx)
+    sign.assert_not_called()
+    submit.assert_not_called()

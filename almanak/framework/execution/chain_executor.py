@@ -65,6 +65,7 @@ from almanak.framework.execution.interfaces import (
     UnsignedTransaction,
 )
 from almanak.framework.execution.nonce_recovery import build_complete_evm_receipt, try_recover_nonce_too_low
+from almanak.framework.execution.receipt_costs import receipt_l1_fee_wei
 
 if TYPE_CHECKING:
     from almanak.framework.execution.signer.safe import SafeSigner
@@ -908,6 +909,7 @@ class ChainExecutor:
                 block_hash=receipt["blockHash"].hex(),
                 gas_used=receipt["gasUsed"],
                 effective_gas_price=receipt.get("effectiveGasPrice", 0),
+                l1_fee_wei=receipt_l1_fee_wei(receipt),
                 status=status,
                 logs=[dict(log) for log in receipt.get("logs", [])],
                 contract_address=receipt.get("contractAddress"),

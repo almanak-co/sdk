@@ -1594,10 +1594,11 @@ class IntentCompiler:
         params = intent.swap_params
         if not params:
             return None
-        present = [key for key in ("fee_tier", "pool") if key in params]
+        from almanak.connectors._strategy_base.protocol_aliases import SWAP_PIN_KEY_SUPPORT
+
+        present = [key for key in SWAP_PIN_KEY_SUPPORT if key in params]
         if not present:
             return None
-        from almanak.connectors._strategy_base.protocol_aliases import SWAP_PIN_KEY_SUPPORT
 
         protocol = self._resolve_swap_pin_protocol(intent)
         unsupported = [key for key in present if protocol not in SWAP_PIN_KEY_SUPPORT[key]]

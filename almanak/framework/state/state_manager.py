@@ -3301,6 +3301,23 @@ class StateManager:
     # Transaction Ledger (VIB-2402)
     # =========================================================================
 
+    async def get_ledger_entry_by_id(self, ledger_entry_id: str, *, strict: bool = False) -> dict | None:
+        """Read durable ledger identity without confusing unavailable storage with absence."""
+        if not self._initialized:
+            await self.initialize()
+        reader = getattr(self._warm, "get_ledger_entry_by_id", None)
+        if reader is None:
+            if strict:
+                raise RuntimeError("Warm state store does not support ledger identity lookup")
+            return None
+        try:
+            return await reader(ledger_entry_id, strict=strict)
+        except Exception:
+            if strict:
+                raise
+            logger.warning("Ledger identity lookup failed for %s", ledger_entry_id, exc_info=True)
+            return None
+
     async def save_ledger_entry(self, entry: "LedgerEntry") -> None:
         """Save a transaction ledger entry to the WARM backend.
 

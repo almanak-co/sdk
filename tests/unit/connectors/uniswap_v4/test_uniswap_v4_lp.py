@@ -11,17 +11,21 @@ from unittest.mock import MagicMock
 import pytest
 
 from almanak.connectors.uniswap_v4.hooks import HookFlags
+from almanak.connectors.uniswap_v4.receipt_parser import (
+    EVENT_TOPICS,
+    UniswapV4ReceiptParser,
+)
 from almanak.connectors.uniswap_v4.sdk import (
     ACTION_CLEAR_OR_TAKE,
     ACTION_CLOSE_CURRENCY,
     ACTION_SETTLE,
     ACTION_SETTLE_ALL,
     ACTION_SETTLE_PAIR,
-    ACTION_SWEEP,
     ACTION_SWAP_EXACT_IN,
     ACTION_SWAP_EXACT_IN_SINGLE,
     ACTION_SWAP_EXACT_OUT,
     ACTION_SWAP_EXACT_OUT_SINGLE,
+    ACTION_SWEEP,
     ACTION_TAKE,
     ACTION_TAKE_ALL,
     ACTION_TAKE_PAIR,
@@ -53,11 +57,6 @@ from almanak.connectors.uniswap_v4.sdk import (
     UniswapV4SDK,
     _tick_to_sqrt_ratio_x96,
     sqrt_ratio_x96_to_tick,
-)
-from almanak.connectors.uniswap_v4.receipt_parser import (
-    EVENT_TOPICS,
-    ModifyLiquidityEventData,
-    UniswapV4ReceiptParser,
 )
 
 
@@ -241,6 +240,7 @@ class TestSqrtRatioToTick:
 class TestLPConstants:
     def test_position_manager_addresses_exist(self):
         from almanak.connectors.uniswap_v4.addresses import UNISWAP_V4
+
         for chain, addr in POSITION_MANAGER_ADDRESSES.items():
             expected = UNISWAP_V4[chain]["position_manager"].lower()
             assert addr.lower() == expected, f"PositionManager on {chain} mismatch"
@@ -296,12 +296,20 @@ class TestLPConstants:
 
         A gap would indicate a missing constant from Actions.sol.
         """
-        settlement_bytes = sorted([
-            ACTION_SETTLE, ACTION_SETTLE_ALL, ACTION_SETTLE_PAIR,
-            ACTION_TAKE, ACTION_TAKE_ALL, ACTION_TAKE_PORTION,
-            ACTION_TAKE_PAIR, ACTION_CLOSE_CURRENCY,
-            ACTION_CLEAR_OR_TAKE, ACTION_SWEEP,
-        ])
+        settlement_bytes = sorted(
+            [
+                ACTION_SETTLE,
+                ACTION_SETTLE_ALL,
+                ACTION_SETTLE_PAIR,
+                ACTION_TAKE,
+                ACTION_TAKE_ALL,
+                ACTION_TAKE_PORTION,
+                ACTION_TAKE_PAIR,
+                ACTION_CLOSE_CURRENCY,
+                ACTION_CLEAR_OR_TAKE,
+                ACTION_SWEEP,
+            ]
+        )
         assert settlement_bytes == list(range(0x0B, 0x15))
 
     def test_modify_liquidities_selector(self):
@@ -331,9 +339,7 @@ class TestSDKLPMethods:
         amount0 = 1_000_000_000_000_000_000  # 1e18
         amount1 = 1_000_000_000_000_000_000  # 1e18
 
-        liquidity = sdk.compute_liquidity_from_amounts(
-            sqrt_price, tick_lower, tick_upper, amount0, amount1
-        )
+        liquidity = sdk.compute_liquidity_from_amounts(sqrt_price, tick_lower, tick_upper, amount0, amount1)
         assert liquidity > 0
 
     def test_compute_liquidity_from_amounts_below_range(self, sdk):
@@ -344,9 +350,7 @@ class TestSDKLPMethods:
         amount0 = 1_000_000_000_000_000_000
         amount1 = 0
 
-        liquidity = sdk.compute_liquidity_from_amounts(
-            sqrt_price, tick_lower, tick_upper, amount0, amount1
-        )
+        liquidity = sdk.compute_liquidity_from_amounts(sqrt_price, tick_lower, tick_upper, amount0, amount1)
         assert liquidity > 0
 
     def test_compute_liquidity_from_amounts_above_range(self, sdk):
@@ -357,16 +361,12 @@ class TestSDKLPMethods:
         amount0 = 0
         amount1 = 1_000_000_000_000_000_000
 
-        liquidity = sdk.compute_liquidity_from_amounts(
-            sqrt_price, tick_lower, tick_upper, amount0, amount1
-        )
+        liquidity = sdk.compute_liquidity_from_amounts(sqrt_price, tick_lower, tick_upper, amount0, amount1)
         assert liquidity > 0
 
     def test_compute_liquidity_zero_amounts(self, sdk):
         sqrt_price = _tick_to_sqrt_ratio_x96(0)
-        liquidity = sdk.compute_liquidity_from_amounts(
-            sqrt_price, -1000, 1000, 0, 0
-        )
+        liquidity = sdk.compute_liquidity_from_amounts(sqrt_price, -1000, 1000, 0, 0)
         assert liquidity == 0
 
     def test_estimate_sqrt_price_x96(self, sdk):
@@ -460,8 +460,7 @@ class TestSDKLPMethods:
         tx = sdk.build_mint_position_tx(params)
         actions = _extract_actions_from_modify_liquidities(tx.data)
         assert actions == bytes([PM_MINT_POSITION, PM_SETTLE_PAIR, PM_SWEEP]), (
-            f"Native mint actions must be [0x02, 0x0D, 0x14] (SWEEP refunds unspent "
-            f"msg.value) but got: {actions.hex()}"
+            f"Native mint actions must be [0x02, 0x0D, 0x14] (SWEEP refunds unspent msg.value) but got: {actions.hex()}"
         )
         # The full native budget is pre-sent; SWEEP returns whatever the mint
         # didn't settle.
@@ -480,9 +479,7 @@ class TestSDKLPMethods:
         assert swept_currency.lower() == pool_key.currency0.lower(), (
             f"SWEEP must target the native currency {pool_key.currency0}, got {swept_currency}"
         )
-        assert swept_to.lower() == params.owner.lower(), (
-            f"SWEEP must refund the owner {params.owner}, got {swept_to}"
-        )
+        assert swept_to.lower() == params.owner.lower(), f"SWEEP must refund the owner {params.owner}, got {swept_to}"
 
     def test_native_pool_zero_native_leg_appends_no_sweep(self, sdk):
         """VIB-5145: a native pool whose native leg is 0 must NOT append SWEEP.
@@ -547,9 +544,7 @@ class TestSDKLPMethods:
         assert actions == bytes([PM_DECREASE_LIQUIDITY, PM_TAKE_PAIR]), (
             f"Decrease (no burn) actions must be exactly [0x01, 0x11] but got: {actions.hex()}"
         )
-        assert PM_BURN_POSITION not in actions, (
-            "PM_BURN_POSITION must not appear when burn=False"
-        )
+        assert PM_BURN_POSITION not in actions, "PM_BURN_POSITION must not appear when burn=False"
 
     def test_build_decrease_liquidity_tx_no_burn(self, sdk):
         params = LPDecreaseParams(token_id=42, liquidity=500_000)
@@ -747,7 +742,7 @@ class TestAdapterLPCompilation:
             },
         )
         price_oracle = {"WETH": Decimal("2000"), "USDC": Decimal("1")}
-        with pytest.raises(UniswapV4UnsupportedPoolError, match="VIB-4485"):
+        with pytest.raises(UniswapV4UnsupportedPoolError, match="hook"):
             adapter.compile_lp_open_intent(intent, price_oracle)
 
     def test_compile_lp_close_intent(self, adapter):
@@ -756,6 +751,7 @@ class TestAdapterLPCompilation:
         intent = LPCloseIntent(
             position_id="42",
             protocol="uniswap_v4",
+            protocol_params={"amount0_min": 1, "amount1_min": 1},
         )
 
         bundle = adapter.compile_lp_close_intent(
@@ -802,7 +798,6 @@ class TestAdapterLPCompilation:
     def test_parse_pool_invalid(self, adapter):
         with pytest.raises(ValueError, match="Invalid pool format"):
             adapter._parse_pool("WETH-USDC")
-
 
     def test_compile_lp_open_estimated_price_uses_estimated_floor(self, adapter):
         """When on-chain sqrtPrice is unavailable, an estimated-price LP open with
@@ -982,7 +977,6 @@ class TestReceiptParserLP:
         ``amount0_collected`` / ``amount1_collected`` by ``currency0`` /
         ``currency1`` order (not by sorting observed Transfer addresses).
         """
-        from almanak.connectors.uniswap_v4.sdk import PoolKey
 
         token_a = "0x000000000000000000000000000000000000000a"  # sorted first
         token_b = "0x000000000000000000000000000000000000000b"
@@ -1002,10 +996,15 @@ class TestReceiptParserLP:
                 # Decrease liquidity event (negative delta)
                 self._modify_liquidity_log(liquidity_delta=-500_000),
                 # Token transfers out from pool manager
-                self._erc20_transfer_log(token_a, self.POOL_MANAGER, "0x1234567890abcdef1234567890abcdef12345678", 1000),
-                self._erc20_transfer_log(token_b, self.POOL_MANAGER, "0x1234567890abcdef1234567890abcdef12345678", 2000),
+                self._erc20_transfer_log(
+                    token_a, self.POOL_MANAGER, "0x1234567890abcdef1234567890abcdef12345678", 1000
+                ),
+                self._erc20_transfer_log(
+                    token_b, self.POOL_MANAGER, "0x1234567890abcdef1234567890abcdef12345678", 2000
+                ),
             ],
         }
+        receipt["logs"][0]["topics"][2] = "0x" + self.POSITION_MANAGER[2:].lower().zfill(64)
         lp_close_data = parser.extract_lp_close_data(receipt)
         assert lp_close_data is not None
         assert lp_close_data.liquidity_removed == 500_000
@@ -1084,6 +1083,7 @@ class TestCompilerV4LPRouting:
         intent = LPCloseIntent(
             position_id="42",
             protocol="uniswap_v4",
+            protocol_params={"amount0_min": 1, "amount1_min": 1},
         )
 
         compiler = IntentCompiler(

@@ -214,7 +214,7 @@ def test_manifests_declare_only_the_reviewed_exact_venue_protocols() -> None:
         for declaration in connector.venue_verifiers
     }
 
-    assert set(declared) == {"aerodrome_slipstream", "curve", "pancakeswap_v3", "uniswap_v3"}
+    assert set(declared) == {"aerodrome_slipstream", "curve", "pancakeswap_v3", "uniswap_v3", "uniswap_v4"}
     assert declared["uniswap_v3"].chains == (
         "arbitrum",
         "avalanche",
@@ -240,8 +240,5 @@ def test_manifests_declare_only_the_reviewed_exact_venue_protocols() -> None:
     assert declared["aerodrome_slipstream"].chains == ("base",)
     assert declared["aerodrome_slipstream"].primitives == (Primitive.LP,)
     assert declared["aerodrome_slipstream"].component_names == ("tick_spacing",)
-    assert all(
-        declared[protocol].component_names == ("fee",)
-        for protocol in ("pancakeswap_v3", "uniswap_v3")
-    )
+    assert all(declared[protocol].component_names == ("fee",) for protocol in ("pancakeswap_v3", "uniswap_v3"))
     assert AddressRegistry.resolve_contract_address("uniswap_v3", "arbitrum", "factory")

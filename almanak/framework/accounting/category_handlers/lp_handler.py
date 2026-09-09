@@ -2009,21 +2009,13 @@ def handle_lp(
     else:
         position_id_v = _resolve_lp_close_discriminator(ledger_row)
 
-    # VIB-4473 / VIB-4636 — V4 lot-matching anchor read from
-    # ``extracted["lp_open_data"]`` on LP_OPEN. V3 parsers leave the field
-    # ``None`` and it forwards as-is so the payload key shape is stable
-    # across protocols. LP_CLOSE / LP_COLLECT_FEES leave it ``None``: the
-    # close leg matches against the prior OPEN payload by ``position_key``,
-    # not by re-reading the hash off the burn receipt.
     position_hash_v: str | None = None
-    if intent_type_str == "LP_OPEN":
-        lp_open_extracted = extracted.get("lp_open_data") if isinstance(extracted, dict) else None
-        if isinstance(lp_open_extracted, dict):
-            # dict fallback from deserialize_extracted_data — getattr would
-            # silently lose the anchor, so read the key directly.
-            position_hash_v = lp_open_extracted.get("position_hash")
-        elif lp_open_extracted is not None:
-            position_hash_v = getattr(lp_open_extracted, "position_hash", None)
+    lp_identity_key = "lp_open_data" if intent_type_str == "LP_OPEN" else "lp_close_data"
+    lp_identity = extracted.get(lp_identity_key) if isinstance(extracted, dict) else None
+    if isinstance(lp_identity, dict):
+        position_hash_v = lp_identity.get("position_hash")
+    elif lp_identity is not None:
+        position_hash_v = getattr(lp_identity, "position_hash", None)
 
     realized_pnl_usd, fees_total_usd = _compute_lp_realized_pnl_and_fees(
         intent_type_str=intent_type_str,

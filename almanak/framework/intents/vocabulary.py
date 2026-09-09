@@ -272,7 +272,11 @@ class SwapIntent(BaseIntent):
         if self.is_cross_chain and self.protocol and self.protocol.lower() not in ("enso", "lifi"):
             raise ValueError("Cross-chain swaps require protocol='enso' or protocol='lifi'")
         # Aggregator-routed cross-chain swaps would silently ignore a pool pin.
-        if self.is_cross_chain and self.swap_params and ({"fee_tier", "pool"} & self.swap_params.keys()):
+        if (
+            self.is_cross_chain
+            and self.swap_params
+            and ({"fee_tier", "pool", "pool_id", "pool_key", "hooks", "hook_data"} & self.swap_params.keys())
+        ):
             raise ValueError("swap_params fee_tier/pool pinning is not supported for cross-chain swaps")
         self._validate_swap_params()
         return self
@@ -298,8 +302,12 @@ class SwapIntent(BaseIntent):
             if key in self.swap_params:
                 val = self.swap_params[key]
                 # bool is an int subclass but never a valid routing parameter.
-                if isinstance(val, bool) or not isinstance(val, int) or val <= 0:
-                    raise ValueError(f"swap_params.{key} must be a positive integer, got {val!r}")
+                from almanak.connectors._strategy_base.protocol_aliases import swap_pin_integer_minimum
+
+                minimum = swap_pin_integer_minimum(self.protocol, key)
+                if isinstance(val, bool) or not isinstance(val, int) or val < minimum:
+                    description = "a nonnegative integer" if minimum == 0 else "a positive integer"
+                    raise ValueError(f"swap_params.{key} must be {description}, got {val!r}")
         for key in self._SWAP_PARAMS_ADDRESS_KEYS:
             if key in self.swap_params:
                 val = self.swap_params[key]

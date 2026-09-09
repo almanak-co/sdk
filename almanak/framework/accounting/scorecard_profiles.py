@@ -57,6 +57,7 @@ class ScorecardCtx:
     acct_payloads: dict[Any, dict[str, Any]]
     payload_errors: dict[Any, str]
     position_state_rows: list[dict[str, Any]]
+    ledger: list[dict[str, Any]] | None = None
 
 
 @dataclass(frozen=True)

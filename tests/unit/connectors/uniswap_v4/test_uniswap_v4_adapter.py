@@ -69,7 +69,7 @@ class TestConfigPositionalAbi:
         """The consequence the rebinding caused, asserted end-to-end."""
         client = MagicMock()
         config = UniswapV4Config("arbitrum", _TEST_WALLET, None, 3000, 50, client)
-        adapter = UniswapV4Adapter(config=config, token_resolver=_make_resolver())
+        adapter = _adapter(config)
 
         assert adapter._gateway_client is client
         assert adapter.managed_fork is None
@@ -128,6 +128,26 @@ class TestAdapterInit:
 _TEST_WALLET = "0x1234567890123456789012345678901234567890"
 
 
+def _adapter(config):
+    from eth_abi import encode
+    from eth_utils import keccak
+
+    from almanak.connectors.uniswap_v4.addresses import UNISWAP_V4
+    from tests.unit.connectors.uniswap_v4.test_operation_contract import Gateway
+
+    class ChainGateway(Gateway):
+        def read(self, *, payload, **kwargs):
+            if payload == keccak(text="poolManager()")[:4]:
+                return encode(["address"], [UNISWAP_V4[config.chain]["pool_manager"]])
+            return super().read(payload=payload, **kwargs)
+
+    return UniswapV4Adapter(
+        config=config,
+        token_resolver=_make_resolver(),
+        venue_verification_gateway_factory=(lambda: ChainGateway()) if config.rpc_url else None,
+    )
+
+
 class TestSwapExactInput:
     # USDC (6 dec) → WETH (18 dec) — VIB-3875 requires price_ratio for cross-decimal quotes.
     # 1 USDC ≈ 0.0003 ETH, so price_ratio (token_out per token_in) is Decimal("0.0003").
@@ -137,13 +157,14 @@ class TestSwapExactInput:
 
     def test_basic_swap(self):
         config = UniswapV4Config(chain="arbitrum", wallet_address=_TEST_WALLET)
-        adapter = UniswapV4Adapter(config=config, token_resolver=_make_resolver())
+        adapter = _adapter(config)
         result = adapter.swap_exact_input(
             token_in=self._USDC_ADDR,
             token_out=self._WETH_ADDR,
             amount_in=Decimal("1000"),
             slippage_bps=50,
             price_ratio=self._USDC_TO_WETH_PRICE_RATIO,
+            offline_mode=True,
         )
         assert result.success is True
         assert len(result.transactions) == 3  # approve Permit2 + Permit2 approve router + swap
@@ -163,13 +184,14 @@ class TestSwapExactInput:
 
     def test_native_eth_no_approve(self):
         config = UniswapV4Config(chain="arbitrum", wallet_address=_TEST_WALLET)
-        adapter = UniswapV4Adapter(config=config, token_resolver=_make_resolver())
+        adapter = _adapter(config)
         result = adapter.swap_exact_input(
             token_in="0x0000000000000000000000000000000000000000",
             token_out=self._USDC_ADDR,
             amount_in=Decimal("1"),
             # ETH (18 dec) → USDC (6 dec): price_ratio = USDC per ETH ≈ 3000.
             price_ratio=Decimal("3000"),
+            offline_mode=True,
         )
         assert result.success is True
         # No approve needed for native ETH - just swap
@@ -177,13 +199,14 @@ class TestSwapExactInput:
 
     def test_slippage_applied(self):
         config = UniswapV4Config(chain="arbitrum", wallet_address=_TEST_WALLET)
-        adapter = UniswapV4Adapter(config=config, token_resolver=_make_resolver())
+        adapter = _adapter(config)
         result = adapter.swap_exact_input(
             token_in=self._USDC_ADDR,
             token_out=self._WETH_ADDR,
             amount_in=Decimal("1000"),
             slippage_bps=100,  # 1%
             price_ratio=self._USDC_TO_WETH_PRICE_RATIO,
+            offline_mode=True,
         )
         assert result.success is True
         # amount_out_minimum should be ~99% of quote output
@@ -212,7 +235,7 @@ class TestSwapExactInput:
             wallet_address=_TEST_WALLET,
             rpc_url="https://arb.example.invalid",
         )
-        adapter = UniswapV4Adapter(config=config, token_resolver=_make_resolver())
+        adapter = _adapter(config)
         adapter._sdk.get_quote = MagicMock(side_effect=ValueError("quoter unavailable"))
         adapter._sdk.get_quote_local = MagicMock(return_value=self._make_local_quote())
 
@@ -242,7 +265,7 @@ class TestSwapExactInput:
             wallet_address=_TEST_WALLET,
             rpc_url="https://arb.example.invalid",
         )
-        adapter = UniswapV4Adapter(config=config, token_resolver=_make_resolver())
+        adapter = _adapter(config)
         local_quote = self._make_local_quote()
         adapter._sdk.get_quote = MagicMock(side_effect=ValueError("quoter unavailable"))
         adapter._sdk.get_quote_local = MagicMock(return_value=local_quote)
@@ -271,7 +294,7 @@ class TestSwapExactInput:
             wallet_address=_TEST_WALLET,
             rpc_url="https://arb.example.invalid",
         )
-        adapter = UniswapV4Adapter(config=config, token_resolver=_make_resolver())
+        adapter = _adapter(config)
         onchain_quote = self._make_local_quote(amount_out=299_000_000_000_000_000)
         adapter._sdk.get_quote = MagicMock(return_value=onchain_quote)
         adapter._sdk.get_quote_local = MagicMock(side_effect=AssertionError("must not be called"))
@@ -294,7 +317,7 @@ class TestSwapExactInput:
         path (the executable quoter is physically unreachable). Provenance reflects it.
         """
         config = UniswapV4Config(chain="arbitrum", wallet_address=_TEST_WALLET)
-        adapter = UniswapV4Adapter(config=config, token_resolver=_make_resolver())
+        adapter = _adapter(config)
         adapter._sdk.get_quote = MagicMock(side_effect=AssertionError("must not be called"))
 
         result = adapter.swap_exact_input(
@@ -303,6 +326,7 @@ class TestSwapExactInput:
             amount_in=Decimal("1000"),
             slippage_bps=50,
             price_ratio=self._USDC_TO_WETH_PRICE_RATIO,
+            offline_mode=True,
         )
 
         assert result.success is True
@@ -319,7 +343,7 @@ class TestSwapExactInput:
             wallet_address=_TEST_WALLET,
             rpc_url="https://arb.example.invalid",
         )
-        adapter = UniswapV4Adapter(config=config, token_resolver=_make_resolver())
+        adapter = _adapter(config)
         # Oracle implies ~0.3 WETH out for 1000 USDC; quoter returns ~0.15 WETH → 50%
         # impact, well over the default 5% ceiling.
         thin_quote = self._make_local_quote(amount_out=150_000_000_000_000_000)
@@ -344,7 +368,7 @@ class TestSwapExactInput:
             wallet_address=_TEST_WALLET,
             rpc_url="https://arb.example.invalid",
         )
-        adapter = UniswapV4Adapter(config=config, token_resolver=_make_resolver())
+        adapter = _adapter(config)
         # 1000 USDC * 0.0003 = 0.3 WETH oracle; quoter 0.297 WETH → 1% impact < 5%.
         healthy_quote = self._make_local_quote(amount_out=297_000_000_000_000_000)
         adapter._sdk.get_quote = MagicMock(return_value=healthy_quote)
@@ -371,7 +395,7 @@ class TestSwapExactInput:
             wallet_address=_TEST_WALLET,
             rpc_url="https://arb.example.invalid",
         )
-        adapter = UniswapV4Adapter(config=config, token_resolver=_make_resolver())
+        adapter = _adapter(config)
         zero_quote = self._make_local_quote(amount_out=0)
         adapter._sdk.get_quote = MagicMock(return_value=zero_quote)
 
@@ -399,7 +423,7 @@ class TestSwapExactInput:
             wallet_address=_TEST_WALLET,
             rpc_url="https://arb.example.invalid",
         )
-        adapter = UniswapV4Adapter(config=config, token_resolver=_make_resolver())
+        adapter = _adapter(config)
         onchain_quote = self._make_local_quote(amount_out=296_000_000_000_000_000)
         adapter._sdk.get_quote = MagicMock(return_value=onchain_quote)
         adapter._sdk.get_quote_local = MagicMock(side_effect=AssertionError("must not be called"))
@@ -423,7 +447,7 @@ class TestSwapExactInput:
             rpc_url=rpc_url,
             managed_fork=managed_fork,
         )
-        adapter = UniswapV4Adapter(config=config, token_resolver=_make_resolver())
+        adapter = _adapter(config)
         thin_quote = self._make_local_quote(amount_out=150_000_000_000_000_000)
         adapter._sdk.get_quote = MagicMock(return_value=thin_quote)
 
@@ -630,7 +654,8 @@ class TestCompileSwapIntent:
         intent.max_slippage = Decimal("0.005")
         intent.intent_id = "test-intent-1"
 
-        bundle = adapter.compile_swap_intent(intent, self._PRICE_ORACLE)
+        intent.swap_params = None
+        bundle = adapter.compile_swap_intent(intent, self._PRICE_ORACLE, permission_discovery=True)
         assert bundle.intent_type == "SWAP"
         assert len(bundle.transactions) > 0
         assert bundle.metadata["protocol_version"] == "v4"
@@ -663,7 +688,8 @@ class TestCompileSwapIntent:
         intent.max_slippage = Decimal("0.005")
         intent.intent_id = "test-intent-2"
 
-        bundle = adapter.compile_swap_intent(intent, self._PRICE_ORACLE)
+        intent.swap_params = None
+        bundle = adapter.compile_swap_intent(intent, self._PRICE_ORACLE, permission_discovery=True)
         assert bundle.intent_type == "SWAP"
         assert len(bundle.transactions) > 0
 
@@ -702,12 +728,13 @@ class TestIntentCompilerV4Routing:
     def test_compiler_v4_routes_to_adapter(self):
         """Verify V4 compilation routes through UniswapV4Adapter and succeeds."""
         from almanak.framework.intents import SwapIntent
-        from almanak.framework.intents.compiler import IntentCompiler
+        from almanak.framework.intents.compiler import IntentCompiler, IntentCompilerConfig
 
         compiler = IntentCompiler(
             chain="arbitrum",
             wallet_address=_TEST_WALLET,
             price_oracle={"USDC": Decimal("1.0"), "WETH": Decimal("2500.0")},
+            config=IntentCompilerConfig(permission_discovery=True),
         )
         intent = SwapIntent(
             from_token="USDC",
@@ -718,8 +745,11 @@ class TestIntentCompilerV4Routing:
             chain="arbitrum",
         )
 
-        result = compiler.compile(intent)
-        assert result.status.value == "SUCCESS"
+        from unittest.mock import patch
+
+        with patch("almanak.connectors.uniswap_v4.sdk.UniswapV4SDK.get_quote", side_effect=ValueError("offline")):
+            result = compiler.compile(intent)
+        assert result.status.value == "SUCCESS", result.error
         assert result.action_bundle is not None
         assert result.action_bundle.metadata["protocol"] == "uniswap_v4"
         from almanak.connectors.uniswap_v4.addresses import UNISWAP_V4

@@ -695,7 +695,15 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
         if signer is None:
             signer = self._create_signer(wallet_address)
         submitter = PublicMempoolSubmitter(rpc_url=rpc_url)
-        simulator = create_simulator(rpc_url=rpc_url)
+        from almanak.framework.execution.simulator.config import SimulationConfig
+
+        simulation_config = SimulationConfig.from_env()
+        # Requests carry the resolved preference; the cached backend must remain capable.
+        simulation_config.enabled = True
+        simulator = create_simulator(config=simulation_config, rpc_url=rpc_url)
+
+        from almanak.core.rpc_network import Network
+        from almanak.gateway.services.venue_verification_gateway import GatewayRpcVenueVerificationGateway
 
         orchestrator = ExecutionOrchestrator(
             signer=signer,
@@ -707,6 +715,10 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
             # A mainnet gateway declares False, so Enso's 5% slippage widening
             # can no longer be granted by an RPC URL that merely looks local.
             managed_fork=is_managed_fork_network(network),
+            operation_observer_factory=lambda: GatewayRpcVenueVerificationGateway(
+                chain=chain,
+                network=Network.parse(network),
+            ),
         )
 
         self._orchestrator_cache[cache_key] = orchestrator
@@ -1011,6 +1023,8 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
             compiler.update_prices(prices)
             if batch.peg_tokens:
                 compiler._seed_peg_fallbacks(batch.peg_tokens)
+        elif discovered:
+            compiler.update_prices(dict(compiler.price_oracle or {}))
         for token in discovered:
             found = lookup_price(compiler.price_oracle, token=token.token_ref, infer_symbol_from_address=False)
             if found is None or not found.price.is_finite() or found.price <= 0:

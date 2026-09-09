@@ -155,7 +155,7 @@ def compute_expected_swap_deltas(
 
     - from_token: delta is negative. We expect ``-amount_in``; allow a
       slippage-sized band in either direction. If gas is paid in the
-      from-token (native wallet), the lower bound is stretched by
+      from-token (native wallet), both bounds are shifted down by
       ``gas_cost_native``.
     - to_token: delta is positive. Lower bound is ``amount_out * (1 -
       max_slippage)``; upper bound is ``amount_out * (1 + max_slippage)``
@@ -186,10 +186,11 @@ def compute_expected_swap_deltas(
         extra_gas_out = gas_cost_native
 
     from_min = -(amount_in + slack_in + extra_gas_out)
-    from_max = -(amount_in - slack_in)
+    from_max = -(amount_in - slack_in) - extra_gas_out
 
-    to_min = amount_out - slack_out
-    to_max = amount_out + slack_out
+    gas_on_output = gas_cost_native if gas_token == intent.to_token and gas_cost_native is not None else Decimal("0")
+    to_min = amount_out - slack_out - gas_on_output
+    to_max = amount_out + slack_out - gas_on_output
 
     return {
         intent.from_token: ExpectedRange(intent.from_token, from_min, from_max),

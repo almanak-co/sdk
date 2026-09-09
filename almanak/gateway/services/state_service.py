@@ -1592,8 +1592,32 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
 
             extracted_data_for_pg: str | None = extracted_json or None
 
+            from almanak.framework.state.failed_attempt_ledger import (
+                validate_failed_attempt_row,
+                verify_failed_attempt_replay,
+            )
+
+            incoming = {
+                "id": entry_id,
+                "deployment_id": deployment_id,
+                "chain": request.chain,
+                "protocol": request.protocol,
+                "intent_type": request.intent_type,
+                "success": ledger_success,
+                "tx_hash": request.tx_hash,
+                "gas_used": request.gas_used,
+                "extracted_data_json": ledger_extracted_json
+                if ledger_extracted_json is not None
+                else extracted_data_for_pg,
+            }
             try:
-                await self._snapshot_execute(
+                validate_failed_attempt_row(incoming)
+            except ValueError as exc:
+                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                context.set_details(str(exc))
+                return gateway_pb2.SaveLedgerEntryResponse(success=False, error=str(exc))
+            try:
+                command = await self._snapshot_execute(
                     """
                     INSERT INTO transaction_ledger (
                         id, cycle_id, deployment_id, execution_mode,
@@ -1630,6 +1654,12 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                         price_inputs_json = EXCLUDED.price_inputs_json,
                         pre_state_json = EXCLUDED.pre_state_json,
                         post_state_json = EXCLUDED.post_state_json
+                    WHERE NOT (
+                        COALESCE(jsonb_typeof(transaction_ledger.extracted_data_json) = 'object'
+                                 AND transaction_ledger.extracted_data_json ? 'failed_attempt', FALSE)
+                        OR COALESCE(jsonb_typeof(EXCLUDED.extracted_data_json) = 'object'
+                                 AND EXCLUDED.extracted_data_json ? 'failed_attempt', FALSE)
+                    )
                     """,
                     entry_id,
                     request.cycle_id,
@@ -1655,6 +1685,15 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                     pre_state_json,
                     post_state_json,
                 )
+                if command == "INSERT 0 0":
+                    existing = await self._snapshot_fetchrow("SELECT * FROM transaction_ledger WHERE id = $1", entry_id)
+                    try:
+                        if existing is None or not verify_failed_attempt_replay(dict(existing), incoming):
+                            raise ValueError("Failed-attempt conflict did not retain matching durable evidence")
+                    except ValueError as exc:
+                        context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+                        context.set_details(str(exc))
+                        return gateway_pb2.SaveLedgerEntryResponse(success=False, error=str(exc))
                 return gateway_pb2.SaveLedgerEntryResponse(success=True)
             except Exception as e:
                 logger.error("SaveLedgerEntry failed for %s (id=%s): %s", deployment_id, request.id, e)
@@ -3106,8 +3145,8 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         assert self._state_manager is not None
         warm = self._state_manager.warm_backend
         if warm is None or not hasattr(warm, "get_ledger_entry_by_id"):
-            return gateway_pb2.GetLedgerEntryResponse(found=False)
-        row = await warm.get_ledger_entry_by_id(ledger_entry_id)
+            raise RuntimeError("Ledger lookup backend is unavailable")
+        row = await warm.get_ledger_entry_by_id(ledger_entry_id, strict=True)
         if row is None:
             return gateway_pb2.GetLedgerEntryResponse(found=False)
         return gateway_pb2.GetLedgerEntryResponse(found=True, entry=_sqlite_ledger_entry_row_to_proto(row))

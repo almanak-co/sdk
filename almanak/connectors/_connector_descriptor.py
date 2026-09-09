@@ -1467,6 +1467,9 @@ class Connector:
     venue_verifiers: tuple[VenueVerifierDecl, ...] = field(default_factory=tuple)
     exact_venue_data_providers: tuple[ExactVenueDataProviderDecl, ...] = field(default_factory=tuple)
     compiler: ImportRef | None = None
+    execution_validator: ImportRef | None = None
+    # Compiler artifacts retained for audit; copying does not attest validation.
+    execution_evidence_keys: tuple[str, ...] = field(default_factory=tuple)
     compiler_protocols: tuple[str, ...] | None = None
     compiler_default_keys: tuple[str, ...] = field(default_factory=tuple)
     flash_loan_provider_name: str | None = None
@@ -1480,6 +1483,8 @@ class Connector:
 
     def __post_init__(self) -> None:
         """Validate connector-owned manifest metadata."""
+        if self.execution_validator is not None and type(self.execution_validator) is not ImportRef:
+            raise TypeError("Connector.execution_validator must be an ImportRef")
         if not isinstance(self.name, str) or not self.name.strip():
             raise ValueError(f"Connector.name must be a non-empty string, got {self.name!r}")
         if self.name != self.name.lower() or "-" in self.name:
@@ -1531,6 +1536,8 @@ class Connector:
         self._validate_metadata_amount_encoding()
         self._validate_fungible_lp()
         self._validate_receipt_parser_kwargs()
+        if self.execution_evidence_keys != ():
+            self._validate_non_empty_string_tuple("execution_evidence_keys", self.execution_evidence_keys)
         self._validate_prediction_read()
         self._validate_prediction_execute()
         self._validate_gateway_stub()

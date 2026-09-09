@@ -34,12 +34,47 @@ def _as_decimal(value: Decimal | float | int | str) -> Decimal:
     return value if isinstance(value, Decimal) else Decimal(str(value))
 
 
+# Uniswap v4-core/src/libraries/TickMath.sol (SPDX-License-Identifier: MIT).
+# https://github.com/Uniswap/v4-core/blob/main/src/libraries/TickMath.sol
+# Q128.128 reciprocal square-root multipliers; truncation order is contractual.
+_TICK_SQRT_MULTIPLIERS = (
+    0xFFFCB933BD6FAD37AA2D162D1A594001,
+    0xFFF97272373D413259A46990580E213A,
+    0xFFF2E50F5F656932EF12357CF3C7FDCC,
+    0xFFE5CACA7E10E4E61C3624EAA0941CD0,
+    0xFFCB9843D60F6159C9DB58835C926644,
+    0xFF973B41FA98C081472E6896DFB254C0,
+    0xFF2EA16466C96A3843EC78B326B52861,
+    0xFE5DEE046A99A2A811C461F1969C3053,
+    0xFCBE86C7900A88AEDCFFC83B479AA3A4,
+    0xF987A7253AC413176F2B074CF7815E54,
+    0xF3392B0822B70005940C7A398E4B70F3,
+    0xE7159475A2C29B7443B29C7FA6E889D9,
+    0xD097F3BDFD2022B8845AD8F792AA5825,
+    0xA9F746462D870FDF8A65DC1F90E061E5,
+    0x70D869A156D2A1B890BB3DF62BAF32F7,
+    0x31BE135F97D08FD981231505542FCFA6,
+    0x9AA508B5B7A84E1C677DE54F3E99BC9,
+    0x5D6AF8DEDB81196699C329225EE604,
+    0x2216E584F5FA1EA926041BEDFE98,
+    0x48A170391F7DC42444E8FA2,
+)
+
+
 def tick_to_sqrt_price_x96(tick: int) -> int:
-    """Convert a CL tick to a Q64.96 sqrt price."""
+    """Return the exact Solidity TickMath Q64.96 price, rounded upward."""
+    if type(tick) is not int:
+        raise ValueError("tick must be an integer")
     if tick < MIN_TICK or tick > MAX_TICK:
         raise ValueError(f"tick must be between {MIN_TICK} and {MAX_TICK}, got {tick}")
-    sqrt_ratio = math.pow(1.0001, tick / 2)
-    return int(sqrt_ratio * Q96)
+    absolute_tick = abs(tick)
+    ratio = Q128
+    for bit, multiplier in enumerate(_TICK_SQRT_MULTIPLIERS):
+        if absolute_tick & (1 << bit):
+            ratio = (ratio * multiplier) >> 128
+    if tick > 0:
+        ratio = MAX_UINT256 // ratio
+    return (ratio + (1 << 32) - 1) >> 32
 
 
 def sqrt_price_x96_to_tick(sqrt_price_x96: int) -> int:
@@ -50,11 +85,10 @@ def sqrt_price_x96_to_tick(sqrt_price_x96: int) -> int:
     ``TickMath.getTickAtSqrtRatio`` semantics — pinned to this module's own
     forward so the round-trip is exact.
 
-    The bare ``floor(log(...))`` estimate double-floors against the floored
-    forward (``int(...)``) and lands one tick low for negative ticks (e.g.
-    tick ``-1`` round-tripped to ``-2``); a bounded correction step pins it
-    back to the invariant. The correction walks at most ~1 tick since the
-    log estimate is already within one of the answer.
+    A logarithmic estimate is corrected against the exact integer forward
+    conversion, so floating-point rounding cannot select an adjacent tick.
+    Positive prices outside the supported interval retain the shared helper's
+    boundary-clamping contract.
     """
     if sqrt_price_x96 <= 0:
         raise ValueError("sqrt_price_x96 must be positive")

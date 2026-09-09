@@ -211,12 +211,16 @@ class AnvilEthCallAdapter:
         *,
         block: int | None = None,
         raise_on_error: bool = False,
+        from_address: str | None = None,
+        value: int = 0,
     ) -> str | None:
         del chain, raise_on_error
         result = self.web3.eth.call(
             {
                 "to": Web3.to_checksum_address(to),
                 "data": data,
+                **({"from": Web3.to_checksum_address(from_address)} if from_address else {}),
+                **({"value": value} if value else {}),
             },
             block_identifier="latest" if block is None else block,
         )
@@ -460,6 +464,22 @@ class AnvilEthCallAdapter:
 @pytest.fixture
 def anvil_eth_call_adapter(web3: Web3) -> AnvilEthCallAdapter:
     return AnvilEthCallAdapter(web3)
+
+
+def capture_v4_position_hash(gateway: AnvilEthCallAdapter, *, chain: str, token_id: int, wallet: str) -> str:
+    """Measure the open NFT anchor before a later fee-collection receipt."""
+    from almanak.connectors.uniswap_v4.addresses import UNISWAP_V4
+    from almanak.connectors.uniswap_v4.hooks import compute_position_hash
+    from almanak.connectors.uniswap_v4.position import observe_position
+
+    position = observe_position(gateway, chain=chain, token_id=token_id, wallet=wallet)
+    assert position.liquidity > 0
+    return compute_position_hash(
+        owner=UNISWAP_V4[chain]["position_manager"],
+        tick_lower=position.tick_lower,
+        tick_upper=position.tick_upper,
+        salt=token_id.to_bytes(32, "big"),
+    )
 
 
 def _reset_sqlite_file(db_path: Path) -> None:
@@ -3335,6 +3355,30 @@ def _declare_managed_fork(monkeypatch: pytest.MonkeyPatch) -> None:
             config.managed_fork = True
 
     monkeypatch.setattr(IntentCompiler, "__init__", _init_declaring_fork)
+
+
+@pytest.fixture(autouse=True)
+def _wire_v4_verified_gateway(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Compile V4 intent proofs against the same fork observed during execution."""
+    if "uniswap_v4" not in request.path.stem:
+        return
+
+    from almanak.framework.intents.compiler import IntentCompiler
+
+    gateway = request.getfixturevalue("anvil_eth_call_adapter")
+    original_init = IntentCompiler.__init__
+
+    def _init_with_verified_gateway(self, *args: Any, **kwargs: Any) -> None:
+        original_init(self, *args, **kwargs)
+        if self._config.permission_discovery:
+            # Synthetic pools and NFT IDs are selector probes, not owned live positions.
+            return
+        if self._gateway_client is None:
+            self._gateway_client = gateway
+        if self._venue_verification_gateway_factory is None:
+            self._venue_verification_gateway_factory = lambda: gateway
+
+    monkeypatch.setattr(IntentCompiler, "__init__", _init_with_verified_gateway)
 
 
 @pytest.fixture

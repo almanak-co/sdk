@@ -129,18 +129,10 @@ def _assert_no_lot_id(row: dict, payload: dict) -> None:
     assert "lot_id" not in payload
 
 
-def _assert_v4_close_position_hash(payload: dict) -> None:
-    """V4 LP_CLOSE / LP_COLLECT_FEES leave ``position_hash`` ``None``.
-
-    The close leg matches against the prior OPEN payload by ``position_key``
-    (not by re-reading the hash off the burn receipt), so the handler
-    forwards ``position_hash=None`` for the close-like events even on V4.
-    See ``lp_accounting.py`` VIB-4473 comment.
-    """
-    assert payload["position_hash"] is None, (
-        "V4 LP_CLOSE/LP_COLLECT_FEES match by position_key; position_hash "
-        "must stay None (not re-read off the burn receipt)"
-    )
+def _assert_v4_close_position_hash(payload: dict, open_payload: dict) -> None:
+    """The closing receipt must bind to the measured opening position."""
+    assert open_payload["position_hash"]
+    assert payload["position_hash"] == open_payload["position_hash"]
 
 
 def _assert_v4_open_position_hash(payload: dict) -> None:
@@ -500,9 +492,7 @@ class TestUniswapV4LPCloseIntent:
         # #4 linkage: LP_CLOSE.position_key == LP_OPEN.position_key + basis from prior OPEN.
         assert close_payload["position_key"] == open_payload["position_key"]
         _assert_no_lot_id(close_accounting_row, close_payload)
-        # #2 directional null-contract: V4 close matches by position_key, so
-        # position_hash stays None on LP_CLOSE (the anchor lives on LP_OPEN).
-        _assert_v4_close_position_hash(close_payload)
+        _assert_v4_close_position_hash(close_payload, open_payload)
         assert close_payload["realized_pnl_usd"] is not None, (
             "open-then-close must compute realized PnL"
         )

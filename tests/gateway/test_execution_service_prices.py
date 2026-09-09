@@ -853,3 +853,49 @@ class TestExtractTokenSymbolsFromIntent:
         tokens = ExecutionServiceServicer._extract_token_symbols_from_intent(intent)
         assert tokens == ["WETH"]
         assert "USD" not in tokens
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("compile_success", [False, True])
+async def test_discovered_price_alias_does_not_mutate_cached_oracle_or_suppress_refresh(compile_success):
+    from contextlib import nullcontext
+
+    from almanak.framework.data.tokens import ResolvedToken
+    from almanak.gateway.services.execution_service import _FetchedPriceBatch
+
+    service = ExecutionServiceServicer(GatewaySettings(network="anvil"))
+    service._ensure_initialized = AsyncMock()
+    token = ResolvedToken(symbol="CUSTOM", address="0x" + "ab" * 20, decimals=18, chain="arbitrum", chain_id=42161)
+    compiler = IntentCompiler(chain="arbitrum", price_oracle={token.address: Decimal("2")})
+    original_oracle = compiler.price_oracle
+    original_placeholders = compiler._using_placeholders
+    scoped_key = f"arbitrum:{token.address}"
+    seen_prices = []
+
+    def compile_intent(*, intent):
+        seen_prices.append(dict(compiler.price_oracle))
+        return _make_compilation_result(success=compile_success)
+
+    compiler.compile = compile_intent
+    service._get_compiler = MagicMock(return_value=compiler)
+    service._create_intent = MagicMock(return_value=MagicMock())
+    service._prepare_swap_metadata = AsyncMock(side_effect=lambda *_: (nullcontext(), (token,)))
+    service._fetch_prices_for_tokens = AsyncMock(
+        return_value=_FetchedPriceBatch(prices={scoped_key: Decimal("3")}, sources={}, peg_tokens=frozenset())
+    )
+
+    first = await service.CompileIntent(_make_compile_request(), MagicMock())
+    assert first.success is compile_success
+    assert seen_prices[0][scoped_key] == Decimal("2")
+    service._fetch_prices_for_tokens.assert_not_awaited()
+    assert original_oracle == {token.address: Decimal("2")}
+    assert compiler.price_oracle == original_oracle
+    assert compiler._using_placeholders is original_placeholders
+
+    # Expiring the underlying price must make the next request fetch again.
+    del compiler.price_oracle[token.address]
+    second = await service.CompileIntent(_make_compile_request(), MagicMock())
+    assert second.success is compile_success
+    service._fetch_prices_for_tokens.assert_awaited_once_with([token.address], "arbitrum")
+    assert seen_prices[1][scoped_key] == Decimal("3")
+    assert compiler.price_oracle == {}

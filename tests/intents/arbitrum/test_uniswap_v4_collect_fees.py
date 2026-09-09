@@ -21,6 +21,7 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
+from almanak.connectors.uniswap_v4.pool_key import PoolKey
 from almanak.connectors.uniswap_v4.receipt_parser import UniswapV4ReceiptParser
 from almanak.framework.execution.orchestrator import (
     ExecutionContext,
@@ -30,11 +31,12 @@ from almanak.framework.execution.orchestrator import (
 )
 from almanak.framework.execution.result_enricher import enrich_result
 from almanak.framework.intents.compiler import IntentCompiler
-from almanak.framework.intents.vocabulary import CollectFeesIntent, IntentType, LPOpenIntent
+from almanak.framework.intents.vocabulary import CollectFeesIntent, IntentType, LPOpenIntent, SwapIntent
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
     assert_accounting_persisted,
     assert_no_accounting_on_failure,
+    capture_v4_position_hash,
     format_token_amount,
     get_token_balance,
     get_token_decimals,
@@ -107,18 +109,9 @@ def _assert_no_lot_id(row: dict, payload: dict) -> None:
     assert "lot_id" not in payload
 
 
-def _assert_v4_close_position_hash(payload: dict) -> None:
-    """V4 LP_CLOSE / LP_COLLECT_FEES leave ``position_hash`` ``None``.
-
-    The close leg matches against the prior OPEN payload by ``position_key``
-    (not by re-reading the hash off the burn receipt), so the handler
-    forwards ``position_hash=None`` for the close-like events even on V4.
-    See ``lp_accounting.py`` VIB-4473 comment.
-    """
-    assert payload["position_hash"] is None, (
-        "V4 LP_CLOSE/LP_COLLECT_FEES match by position_key; position_hash "
-        "must stay None (not re-read off the burn receipt)"
-    )
+def _assert_v4_close_position_hash(payload: dict, opening_hash: str) -> None:
+    """Fee collection must retain the independently measured opening anchor."""
+    assert payload["position_hash"] == opening_hash
 
 
 def _payload_fee(raw) -> Decimal | None:
@@ -246,7 +239,7 @@ class TestUniswapV4CollectFeesIntent:
     - Balance deltas are non-negative (fees collected >= 0)
     """
 
-    @pytest.mark.intent(IntentType.LP_OPEN, IntentType.LP_COLLECT_FEES)
+    @pytest.mark.intent(IntentType.LP_OPEN, IntentType.SWAP, IntentType.LP_COLLECT_FEES)
     @pytest.mark.asyncio
     async def test_collect_fees_weth_usdc(
         self,
@@ -263,11 +256,9 @@ class TestUniswapV4CollectFeesIntent:
         1. Compilation: IntentCompiler -> SUCCESS with ActionBundle
         2. Execution: ExecutionOrchestrator -> success
         3. Receipt Parsing: Transaction confirmed with expected events
-        4. Balance Deltas: Balances non-negative (fees >= 0, no tokens lost)
+        4. Balance Deltas: Positive USDC fees exactly match parsed receipt transfers
 
-        Note: On a freshly opened position, accrued fees will be 0.
-        The test verifies the collection flow works without errors,
-        not that fees > 0 (which requires trading activity in the pool).
+        A swap through the position's full PoolKey generates measurable USDC fees.
         """
         tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
         weth_addr = tokens["WETH"]
@@ -285,8 +276,31 @@ class TestUniswapV4CollectFeesIntent:
         position_id, currency0, currency1 = await _open_v4_position(
             web3, funded_wallet, orchestrator, price_oracle,
         )
+        opening_hash = capture_v4_position_hash(
+            anvil_eth_call_adapter, chain=CHAIN_NAME, token_id=position_id, wallet=funded_wallet
+        )
         print(f"Opened position: id={position_id}")
         print(f"Currencies: {currency0[:10]}.../{currency1[:10]}...")
+
+        pool_key = PoolKey(currency0, currency1, 3000, 60)
+        counter_compiler = IntentCompiler(
+            chain=CHAIN_NAME, wallet_address=funded_wallet, price_oracle=price_oracle
+        )
+        counter_intent = SwapIntent(
+            from_token=usdc_addr,
+            to_token=weth_addr,
+            amount=Decimal("100"),
+            max_slippage=Decimal("0.01"),
+            protocol="uniswap_v4",
+            chain=CHAIN_NAME,
+            swap_params={"pool_key": pool_key.to_wire()},
+        )
+        counter = counter_compiler.compile(counter_intent)
+        assert counter.status.value == "SUCCESS", counter.error
+        assert counter.action_bundle is not None
+        assert counter.action_bundle.metadata["pool_id"] == pool_key.pool_id
+        counter_result = await orchestrator.execute(counter.action_bundle)
+        assert counter_result.success, counter_result.error
 
         # Record balances before fee collection
         weth_before = get_token_balance(web3, weth_addr, funded_wallet)
@@ -342,6 +356,8 @@ class TestUniswapV4CollectFeesIntent:
         # Layer 3: Receipt Parsing
         parser = UniswapV4ReceiptParser(chain=CHAIN_NAME)
         lp_close_data = None
+        collection_events = []
+        transfer_amounts = {weth_addr.lower(): 0, usdc_addr.lower(): 0}
 
         for i, tx_result in enumerate(execution_result.transaction_results):
             print(f"\nTransaction {i+1}:")
@@ -352,15 +368,27 @@ class TestUniswapV4CollectFeesIntent:
                 receipt_dict = tx_result.receipt.to_dict()
                 parsed = parser.parse_receipt(receipt_dict)
 
-                # Log Transfer events (fee collection)
+                collection_events.extend(parsed.modify_liquidity_events)
                 for transfer in parsed.transfer_events:
-                    print(f"  Transfer: from={transfer.from_address[:10]}... to={transfer.to_address[:10]}... amount={transfer.amount}")
-                for ml in parsed.modify_liquidity_events:
-                    print(f"  ModifyLiquidity: delta={ml.liquidity_delta}")
+                    if (
+                        transfer.from_address.lower() == parser.pool_manager
+                        and transfer.to_address.lower() == funded_wallet.lower()
+                        and transfer.token.lower() in transfer_amounts
+                    ):
+                        transfer_amounts[transfer.token.lower()] += transfer.amount
 
                 close_data = parser.extract_lp_close_data(receipt_dict)
                 if close_data is not None:
                     lp_close_data = close_data
+
+        assert len(collection_events) == 1
+        collect_event = collection_events[0]
+        assert collect_event.liquidity_delta == 0
+        assert collect_event.pool_id.lower() == pool_key.pool_id
+        assert int(collect_event.salt, 16) == position_id
+        assert transfer_amounts[usdc_addr.lower()] > 0
+        assert lp_close_data is not None
+        assert lp_close_data.position_hash == opening_hash
 
         # Layer 4: Balance Deltas
         weth_after = get_token_balance(web3, weth_addr, funded_wallet)
@@ -368,6 +396,8 @@ class TestUniswapV4CollectFeesIntent:
 
         weth_delta = weth_after - weth_before
         usdc_delta = usdc_after - usdc_before
+        assert weth_delta == transfer_amounts[weth_addr.lower()]
+        assert usdc_delta == transfer_amounts[usdc_addr.lower()]
 
         print("\n--- Balance Deltas ---")
         print(f"WETH delta: {format_token_amount(weth_delta, weth_decimals)}")
@@ -402,9 +432,7 @@ class TestUniswapV4CollectFeesIntent:
         collect_payload = _payload(collect_accounting_row)
         assert collect_payload["position_key"] == collect_accounting_row["position_key"]
         _assert_no_lot_id(collect_accounting_row, collect_payload)
-        # #2 directional null-contract: LP_COLLECT_FEES matches by
-        # position_key, so position_hash stays None (anchor lives on OPEN).
-        _assert_v4_close_position_hash(collect_payload)
+        _assert_v4_close_position_hash(collect_payload, opening_hash)
         # #3 parser ↔ event exact equality, honoring Empty≠Zero≠None.
         if lp_close_data is not None:
             dec0 = get_token_decimals(web3, tokens[collect_payload["token0"]])

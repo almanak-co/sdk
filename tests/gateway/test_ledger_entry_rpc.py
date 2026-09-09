@@ -413,3 +413,51 @@ class TestSaveLedgerEntryPostgresJsonbColumns:
         mock_context.set_code.assert_called_with(grpc.StatusCode.INVALID_ARGUMENT)
         # Validation runs before the INSERT -- no PG round trip on bad input.
         pg_service._snapshot_execute.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure,expected_code,expected_details",
+    [
+        ("malformed", grpc.StatusCode.INVALID_ARGUMENT, "Invalid failed-attempt ledger marker"),
+        ("conflict", grpc.StatusCode.FAILED_PRECONDITION, "Conflicting immutable failed-attempt ledger evidence"),
+        ("database", grpc.StatusCode.INTERNAL, "internal server error"),
+    ],
+)
+async def test_failed_attempt_status_is_preserved_across_public_grpc_transport(
+    failure, expected_code, expected_details
+):
+    from almanak.gateway.proto import gateway_pb2_grpc
+    from tests.unit.state.test_failed_attempt_ledger_immutability import make_entry, mutation, request
+
+    service = StateServiceServicer.__new__(StateServiceServicer)
+    service._snapshot_pool = object()
+    service._ensure_snapshot_pool = AsyncMock()
+    service._snapshot_execute = AsyncMock(return_value="INSERT 0 1")
+    entry = make_entry()
+    service._snapshot_fetchrow = AsyncMock(return_value=entry.to_dict())
+    server = grpc.aio.server()
+    gateway_pb2_grpc.add_StateServiceServicer_to_server(service, server)
+    port = server.add_insecure_port("127.0.0.1:0")
+    assert port > 0
+    await server.start()
+    try:
+        async with grpc.aio.insecure_channel(f"127.0.0.1:{port}") as channel:
+            stub = gateway_pb2_grpc.StateServiceStub(channel)
+            saved = await stub.SaveLedgerEntry(request(entry), timeout=5)
+            assert saved.success and saved.error == ""
+            if failure == "malformed":
+                incoming = mutation(entry, "null")
+            elif failure == "conflict":
+                incoming = mutation(entry, "compiler")
+                service._snapshot_execute.return_value = "INSERT 0 0"
+            else:
+                incoming = entry
+                service._snapshot_execute.side_effect = RuntimeError("private database connection details")
+            with pytest.raises(grpc.aio.AioRpcError) as exc:
+                await stub.SaveLedgerEntry(request(incoming), timeout=5)
+            assert exc.value.code() is expected_code
+            assert exc.value.details() == expected_details
+            assert "private database" not in exc.value.details()
+    finally:
+        await server.stop(0)

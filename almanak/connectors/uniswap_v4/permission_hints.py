@@ -171,6 +171,8 @@ def build_discovery_vectors(
                     "currency1": wrapped_native,
                     "fee": _SYNTHETIC_FEE_TIER,
                     "tick_spacing": _SYNTHETIC_TICK_SPACING,
+                    "amount0_min": 0,
+                    "amount1_min": 0,
                 },
             )
         ]

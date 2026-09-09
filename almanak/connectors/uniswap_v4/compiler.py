@@ -279,6 +279,13 @@ class UniswapV4Compiler(BaseProtocolCompiler[SwapCompilerContext]):
             adapter = self._adapter(ctx)
             protocol_params = getattr(intent, "protocol_params", None) or {}
             position_id = protocol_params.get("position_id") or getattr(intent, "position_id", None)
+            intent_position_id = getattr(intent, "position_id", None)
+            if (
+                intent_position_id is not None
+                and position_id is not None
+                and int(intent_position_id) != int(position_id)
+            ):
+                raise ValueError("V4 collection position_id pins conflict")
             if not position_id:
                 return CompilationResult(
                     status=CompilationStatus.FAILED,
@@ -291,6 +298,18 @@ class UniswapV4Compiler(BaseProtocolCompiler[SwapCompilerContext]):
             if (not currency0 or not currency1) and intent.pool:
                 currency0, currency1 = self._resolve_pool_currencies(adapter, intent.pool, currency0, currency1)
 
+            if (not currency0 or not currency1) and "pool_key" in protocol_params:
+                from .pool_key import PoolKey
+
+                key = PoolKey.from_wire(protocol_params["pool_key"])
+                currency0, currency1 = currency0 or key.currency0, currency1 or key.currency1
+            if not currency0 or not currency1:
+                try:
+                    owned0, owned1 = adapter.get_position_currencies(int(position_id), rpc_url=ctx.rpc_url)
+                    currency0, currency1 = currency0 or owned0, currency1 or owned1
+                except Exception as exc:
+                    logger.warning("V4 collection could not resolve owned NFT currencies: %s", exc)
+
             if not currency0 or not currency1:
                 return CompilationResult(
                     status=CompilationStatus.FAILED,
@@ -302,16 +321,20 @@ class UniswapV4Compiler(BaseProtocolCompiler[SwapCompilerContext]):
                 )
 
             currency0, currency1 = self._canonical_currency_order(currency0, currency1)
-            hook_data = b""
-            hook_data_hex = protocol_params.get("hook_data", "")
-            if hook_data_hex:
-                hook_data = bytes.fromhex(hook_data_hex.replace("0x", ""))
+            hook_data = None
+            if "hook_data" in protocol_params:
+                hook_data_hex = protocol_params["hook_data"]
+                if not isinstance(hook_data_hex, str) or not hook_data_hex.startswith("0x"):
+                    raise ValueError("V4 collection hook_data must be 0x-prefixed hex bytes")
+                hook_data = bytes.fromhex(hook_data_hex[2:])
 
             bundle = adapter.compile_collect_fees_intent(
                 position_id=int(position_id),
                 currency0=currency0,
                 currency1=currency1,
                 hook_data=hook_data,
+                pool=intent.pool,
+                protocol_params=protocol_params,
             )
 
             if not bundle.transactions:
@@ -356,7 +379,12 @@ class UniswapV4Compiler(BaseProtocolCompiler[SwapCompilerContext]):
         if default_slippage_bps is not None:
             kwargs["default_slippage_bps"] = default_slippage_bps
         config = UniswapV4Config(**kwargs)
-        return UniswapV4Adapter(config=config, token_resolver=ctx.token_resolver, gateway_client=ctx.gateway_client)
+        return UniswapV4Adapter(
+            config=config,
+            token_resolver=ctx.token_resolver,
+            gateway_client=ctx.gateway_client,
+            venue_verification_gateway_factory=ctx.venue_verification_gateway_factory,
+        )
 
     @staticmethod
     def _transaction_from_dict(tx: dict[str, Any], *, tx_type: str) -> TransactionData:

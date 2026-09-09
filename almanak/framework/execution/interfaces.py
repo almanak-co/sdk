@@ -45,6 +45,8 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Any
 
+from almanak.framework.execution.receipt_costs import measured_gas_cost_wei, receipt_l1_fee_wei
+
 # =============================================================================
 # Enums
 # =============================================================================
@@ -702,6 +704,7 @@ class TransactionReceipt:
         contract_address: Address of created contract (if deployment)
         from_address: Sender address
         to_address: Recipient address
+        l1_fee_wei: Explicit additive L1 fee; None means unmeasured/not supplied
     """
 
     tx_hash: str
@@ -714,6 +717,7 @@ class TransactionReceipt:
     contract_address: str | None = None
     from_address: str | None = None
     to_address: str | None = None
+    l1_fee_wei: int | None = None
 
     @property
     def success(self) -> bool:
@@ -722,8 +726,8 @@ class TransactionReceipt:
 
     @property
     def gas_cost_wei(self) -> int:
-        """Calculate total gas cost in wei."""
-        return self.gas_used * self.effective_gas_price
+        """Measured execution cost plus any measured additive L1 charge."""
+        return measured_gas_cost_wei(self.gas_used, self.effective_gas_price, self.l1_fee_wei)
 
     @property
     def gas_cost_eth(self) -> Decimal:
@@ -743,6 +747,7 @@ class TransactionReceipt:
             "contract_address": self.contract_address,
             "from_address": self.from_address,
             "to_address": self.to_address,
+            "l1_fee_wei": str(self.l1_fee_wei) if self.l1_fee_wei is not None else None,
         }
 
     @classmethod
@@ -759,6 +764,7 @@ class TransactionReceipt:
             contract_address=data.get("contract_address"),
             from_address=data.get("from_address"),
             to_address=data.get("to_address"),
+            l1_fee_wei=receipt_l1_fee_wei(data),
         )
 
 

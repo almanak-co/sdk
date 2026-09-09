@@ -18,6 +18,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
+from uuid import uuid4
 
 import aiohttp
 import grpc
@@ -648,11 +649,14 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
         """
         session = await self._get_session()
 
+        # Protobuf defaults an omitted ID to ""; some RPC providers reject it.
+        # The HTTP correlation ID is stable across retries, while gRPC responses
+        # retain the caller's original ID (including an omitted one).
         payload = {
             "jsonrpc": "2.0",
             "method": method,
             "params": params,
-            "id": request_id,
+            "id": request_id or uuid4().hex,
         }
 
         # Non-idempotent tx-submission methods get a single attempt.

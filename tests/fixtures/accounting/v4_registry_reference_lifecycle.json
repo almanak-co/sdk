@@ -1,0 +1,58 @@
+{
+  "events": [
+    {
+      "id": "e51a1d66-d351-5758-a9ac-758a821c96c3",
+      "deployment_id": "deployment:a7e7ebacafd4",
+      "cycle_id": "20075147-fa1f-43e7-9664-18e3662d743f",
+      "execution_mode": "live",
+      "timestamp": "2026-09-08T18:56:54+00:00",
+      "chain": "base",
+      "protocol": "uniswap_v4",
+      "wallet_address": "0xEc97A6a32676c4638827e2C45b3e47d18f2c4292",
+      "event_type": "LP_OPEN",
+      "position_key": "lp:uniswap_v4:base:0xec97a6a32676c4638827e2c45b3e47d18f2c4292:0x90333bb05c258fe0dddb2840ef66f1a05165aa7dac6815d24e807cc6ebd943a0",
+      "ledger_entry_id": "26fb1bbc-65a1-46be-85a3-6fecafe47b58",
+      "tx_hash": "0x2f396babc529e5122dd6b18b37236ecb56cfce46115fc4e011e3124eef268113",
+      "confidence": "HIGH",
+      "payload_json": "{\"amount0\": \"0.00053958582663351\", \"amount1\": \"1.47619\", \"coin_addresses\": null, \"coin_symbols\": null, \"confidence\": \"HIGH\", \"cost_basis_usd\": \"2.81654836528111062366307\", \"current_tick\": -198151, \"event_type\": \"LP_OPEN\", \"fees0_collected\": null, \"fees1_collected\": null, \"fees_total_usd\": null, \"formula_version\": 1, \"hodl_value_usd\": null, \"il_usd\": null, \"in_range\": true, \"liquidity\": 579433292263, \"lp_token_amount\": null, \"matching_policy_version\": 2, \"pool_address\": \"0x90333bb05c258fe0dddb2840ef66f1a05165aa7dac6815d24e807cc6ebd943a0\", \"position_hash\": \"0xdb73ed7e733b314cd039979663dae42fc5715597726de4d14eaa9e2826730a3c\", \"position_id\": \"3026951\", \"position_key\": \"lp:uniswap_v4:base:0xec97a6a32676c4638827e2c45b3e47d18f2c4292:0x90333bb05c258fe0dddb2840ef66f1a05165aa7dac6815d24e807cc6ebd943a0\", \"position_reference\": {\"accounting_category\": \"lp\", \"grouping_policy_version\": null, \"matching_policy_version\": null, \"physical_identity_hash\": null, \"primitive\": \"lp\", \"registry_handle\": null, \"semantic_grouping_key\": null, \"source\": \"legacy\"}, \"primitive_version\": 1, \"protocol\": \"uniswap_v4\", \"realized_pnl_usd\": null, \"schema_version\": 1, \"tick_lower\": -199200, \"tick_upper\": -197200, \"token0\": \"WETH\", \"token1\": \"USDC\", \"unavailable_reason\": null}",
+      "schema_version": 1,
+      "position_reference": "{\"accounting_category\": \"lp\", \"grouping_policy_version\": null, \"matching_policy_version\": null, \"physical_identity_hash\": null, \"primitive\": \"lp\", \"registry_handle\": null, \"semantic_grouping_key\": null, \"source\": \"legacy\"}"
+    },
+    {
+      "id": "3bc7f68c-aac1-5724-94da-135eb2677a91",
+      "deployment_id": "deployment:a7e7ebacafd4",
+      "cycle_id": "11afa7c9-f75b-45e6-9c2b-abdadc6d94d2",
+      "execution_mode": "live",
+      "timestamp": "2026-09-08T18:58:44+00:00",
+      "chain": "base",
+      "protocol": "uniswap_v4",
+      "wallet_address": "0xEc97A6a32676c4638827e2C45b3e47d18f2c4292",
+      "event_type": "LP_CLOSE",
+      "position_key": "lp:uniswap_v4:base:0xec97a6a32676c4638827e2c45b3e47d18f2c4292:0x90333bb05c258fe0dddb2840ef66f1a05165aa7dac6815d24e807cc6ebd943a0",
+      "ledger_entry_id": "8d47241b-2ee0-49da-a907-c3e653c79390",
+      "tx_hash": "0x82d9504e333a790fdaf766e17603ea97eda7d8c035848ae2c10abee12bbf576c",
+      "confidence": "HIGH",
+      "payload_json": "{\"amount0\": \"0.000539585826633509\", \"amount1\": \"1.476189\", \"coin_addresses\": null, \"coin_symbols\": null, \"confidence\": \"HIGH\", \"cost_basis_usd\": \"2.816412468824449762362713\", \"current_tick\": null, \"event_type\": \"LP_CLOSE\", \"fees0_collected\": \"0\", \"fees1_collected\": \"0\", \"fees_total_usd\": \"0.000000\", \"formula_version\": 1, \"hodl_value_usd\": \"2.81641346882445224616307\", \"il_usd\": \"-0.000001000000002483800357\", \"in_range\": null, \"liquidity\": 579433292263, \"lp_token_amount\": null, \"matching_policy_version\": 2, \"pool_address\": \"0x90333bb05c258fe0dddb2840ef66f1a05165aa7dac6815d24e807cc6ebd943a0\", \"position_hash\": \"0xdb73ed7e733b314cd039979663dae42fc5715597726de4d14eaa9e2826730a3c\", \"position_id\": \"3026951\", \"position_key\": \"lp:uniswap_v4:base:0xec97a6a32676c4638827e2c45b3e47d18f2c4292:0x90333bb05c258fe0dddb2840ef66f1a05165aa7dac6815d24e807cc6ebd943a0\", \"position_reference\": {\"accounting_category\": \"lp\", \"grouping_policy_version\": null, \"matching_policy_version\": null, \"physical_identity_hash\": null, \"primitive\": \"lp\", \"registry_handle\": null, \"semantic_grouping_key\": null, \"source\": \"legacy\"}, \"primitive_version\": 1, \"protocol\": \"uniswap_v4\", \"realized_pnl_usd\": \"-0.000135896456660861300357\", \"schema_version\": 1, \"tick_lower\": -199200, \"tick_upper\": -197200, \"token0\": \"WETH\", \"token1\": \"USDC\", \"unavailable_reason\": null}",
+      "schema_version": 1,
+      "position_reference": "{\"accounting_category\": \"lp\", \"grouping_policy_version\": null, \"matching_policy_version\": null, \"physical_identity_hash\": null, \"primitive\": \"lp\", \"registry_handle\": null, \"semantic_grouping_key\": null, \"source\": \"legacy\"}"
+    }
+  ],
+  "registry": {
+    "deployment_id": "deployment:a7e7ebacafd4",
+    "chain": "base",
+    "primitive": "lp_v4",
+    "accounting_category": "lp",
+    "physical_identity_hash": "0xa5030410cfc71b53a06393d0c993e3d683ed1e530cec951e13e429f55f1b8a3a",
+    "semantic_grouping_key": "base:0x90333bb05c258fe0dddb2840ef66f1a05165aa7dac6815d24e807cc6ebd943a0",
+    "grouping_policy_version": "univ4_lp@v1",
+    "handle": null,
+    "status": "closed",
+    "payload": "{\"amount0_close\": \"539585826633509\", \"amount0_open\": \"539585826633510\", \"amount1_close\": \"1476189\", \"amount1_open\": \"1476190\", \"currency0\": \"0x4200000000000000000000000000000000000006\", \"currency1\": \"0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\", \"fee_owed_0\": null, \"fee_owed_1\": null, \"liquidity\": \"579433292263\", \"pool_id\": \"0x90333bb05c258fe0dddb2840ef66f1a05165aa7dac6815d24e807cc6ebd943a0\", \"position_manager\": \"0x7c5f5a4bbd8fd63184577525326123b519429bdc\", \"tick_lower\": -199200, \"tick_upper\": -197200, \"token_id\": \"3026951\"}",
+    "opened_at_block": null,
+    "opened_tx": "0x2f396babc529e5122dd6b18b37236ecb56cfce46115fc4e011e3124eef268113",
+    "closed_at_block": null,
+    "closed_tx": "0x82d9504e333a790fdaf766e17603ea97eda7d8c035848ae2c10abee12bbf576c",
+    "last_reconciled_at_block": null,
+    "matching_policy_version": 2
+  }
+}

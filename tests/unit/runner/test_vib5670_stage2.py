@@ -423,11 +423,16 @@ class TestSameChainLegsFailStop:
             error=gateway_result.error,
         )
         orchestrator = _wire_happy_path(runner, [failed_leg])
+        del runner._adapt_leg_to_execution_result
         runner._save_execution_progress = AsyncMock()  # type: ignore[method-assign]
 
         first = await _run_lane(runner, orchestrator, intents)
 
         assert first.status == IterationStatus.EXECUTION_FAILED
+        assert first.execution_result is None
+        assert "gas cost is unmeasured" in first.error
+        callback = runner._notify_intent_executed.call_args.args
+        assert callback[2] is False and callback[3] is None
         assert "BROADCAST_RECONCILIATION_REQUIRED" in (first.error or "")
         progress = runner._save_execution_progress.await_args.args[1]
         assert progress.reconciliation_required_step_index == 0

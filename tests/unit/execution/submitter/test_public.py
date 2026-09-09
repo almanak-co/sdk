@@ -705,6 +705,7 @@ class TestReceiptPolling:
             "blockHash": bytes.fromhex("1234567890abcdef" * 4),
             "gasUsed": 21000,
             "effectiveGasPrice": 30_000_000_000,
+            "l1Fee": "0x64",
             "status": 1,
             "logs": [{"address": "0xtoken", "data": "0x01"}],
             "contractAddress": None,
@@ -715,20 +716,27 @@ class TestReceiptPolling:
         mock_web3 = MagicMock()
         mock_web3.eth = AsyncMock()
         mock_web3.eth.wait_for_transaction_receipt = AsyncMock(return_value=mock_receipt)
+        mock_web3.eth.get_transaction_receipt = AsyncMock(return_value=mock_receipt)
+        mock_web3.eth.get_block = AsyncMock(
+            return_value={
+                "hash": mock_receipt["blockHash"],
+                "transactions": [mock_receipt["transactionHash"]],
+            }
+        )
         mock_web3_class.return_value = mock_web3
 
         submitter = PublicMempoolSubmitter(rpc_url="https://example.com")
         submitter._web3 = mock_web3
 
-        receipt = run_async(
-            submitter.get_receipt("0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab")
-        )
+        receipt = run_async(submitter.get_receipt("0x" + "abcdef1234567890" * 4))
 
         assert isinstance(receipt, TransactionReceipt)
         assert receipt.block_number == 12345
         assert receipt.gas_used == 21000
         assert receipt.status == 1
         assert receipt.success is True
+        assert receipt.l1_fee_wei == 100
+        assert receipt.gas_cost_wei == 21000 * 30_000_000_000 + 100
 
     @patch("almanak.framework.execution.submitter.public.AsyncWeb3")
     def test_get_receipt_reverted_raises(self, mock_web3_class: MagicMock) -> None:
@@ -750,6 +758,13 @@ class TestReceiptPolling:
         mock_web3 = MagicMock()
         mock_web3.eth = AsyncMock()
         mock_web3.eth.wait_for_transaction_receipt = AsyncMock(return_value=mock_receipt)
+        mock_web3.eth.get_transaction_receipt = AsyncMock(return_value=mock_receipt)
+        mock_web3.eth.get_block = AsyncMock(
+            return_value={
+                "hash": mock_receipt["blockHash"],
+                "transactions": [mock_receipt["transactionHash"]],
+            }
+        )
         mock_web3.eth.get_transaction = AsyncMock(return_value=None)
         mock_web3_class.return_value = mock_web3
 
@@ -796,8 +811,8 @@ class TestReceiptPolling:
             call_count[0] += 1
             await asyncio.sleep(0.01)  # Small delay
             return {
-                "transactionHash": bytes.fromhex("abcdef1234567890" * 4),
-                "blockNumber": 12345 + call_count[0],
+                "transactionHash": args[0],
+                "blockNumber": 12345,
                 "blockHash": bytes.fromhex("1234567890abcdef" * 4),
                 "gasUsed": 21000,
                 "effectiveGasPrice": 30_000_000_000,
@@ -808,6 +823,13 @@ class TestReceiptPolling:
         mock_web3 = MagicMock()
         mock_web3.eth = AsyncMock()
         mock_web3.eth.wait_for_transaction_receipt = mock_wait
+        mock_web3.eth.get_transaction_receipt = mock_wait
+        mock_web3.eth.get_block = AsyncMock(
+            return_value={
+                "hash": bytes.fromhex("1234567890abcdef" * 4),
+                "transactions": [bytes.fromhex("ab" * 31 + f"{i:02x}") for i in range(3)],
+            }
+        )
         mock_web3_class.return_value = mock_web3
 
         submitter = PublicMempoolSubmitter(rpc_url="https://example.com")

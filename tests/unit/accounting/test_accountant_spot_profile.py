@@ -67,6 +67,8 @@ def _rows() -> tuple[list[dict], dict[str, dict], list[dict]]:
             ),
         }
     ]
+    for row in events + snapshots:
+        row["chain"] = "base"
     return events, payloads, snapshots
 
 
@@ -127,3 +129,147 @@ def test_s4_rejects_inventory_basis_that_disagrees_with_acquisition_replay() -> 
     positions["metadata"]["swap_inventory"]["tokens"]["weth"]["cost_usd"] = "3.50"
     snapshots[0]["positions_json"] = json.dumps(positions)
     assert _by_id(events, payloads, snapshots)["S4"].status == "FAIL"
+
+
+def _prefunded_wallet(snapshots):
+    wallet = json.loads(snapshots[0]["wallet_balances_json"])
+    wallet[0].update(balance="100.002", value_usd="200004.00")
+    snapshots[0]["wallet_balances_json"] = json.dumps(wallet)
+
+
+def test_s3_preexisting_wallet_inventory_does_not_become_acquired_inventory():
+    events, payloads, snapshots = _rows()
+    _prefunded_wallet(snapshots)
+    assert _by_id(events, payloads, snapshots)["S3"].status == "PASS"
+
+
+def test_s3_wrong_quantity_below_wallet_coverage_still_fails_fifo_replay():
+    events, payloads, snapshots = _rows()
+    _prefunded_wallet(snapshots)
+    positions = json.loads(snapshots[0]["positions_json"])
+    positions["metadata"]["swap_inventory"]["tokens"]["weth"].update(quantity="0.001", value_usd="2.00")
+    snapshots[0]["positions_json"] = json.dumps(positions)
+    cell = _by_id(events, payloads, snapshots)["S3"]
+    assert cell.status == "FAIL"
+    assert "independent FIFO replay" in cell.diagnostic
+
+
+def test_s3_correct_fifo_quantity_without_wallet_coverage_fails():
+    events, payloads, snapshots = _rows()
+    wallet = json.loads(snapshots[0]["wallet_balances_json"])
+    wallet[0].update(balance="0.001", value_usd="2.00")
+    snapshots[0]["wallet_balances_json"] = json.dumps(wallet)
+    assert _by_id(events, payloads, snapshots)["S3"].status == "FAIL"
+
+
+def test_s3_prefix_orders_parsed_instants_not_lexical_offsets_or_input_order():
+    events, payloads, snapshots = _rows()
+    events[0]["timestamp"] = "2026-08-10T20:01:00-04:00"
+    events[1]["timestamp"] = "2026-08-10T20:03:00-04:00"
+    assert _by_id(list(reversed(events)), payloads, snapshots)["S3"].status == "PASS"
+
+
+def test_s3_ambiguous_same_second_snapshot_cannot_prove_event_inclusion():
+    events, payloads, snapshots = _rows()
+    snapshots[0]["timestamp"] = events[0]["timestamp"]
+    assert _by_id(events, payloads, snapshots)["S3"].status == "FAIL"
+
+
+def test_s3_non_swap_inventory_movements_need_independent_replay_provenance():
+    events, payloads, snapshots = _rows()
+    events.append(
+        {"id": "transfer", "event_type": "TRANSFER", "chain": "base", "timestamp": "2026-08-11T00:01:30+00:00"}
+    )
+    cell = _by_id(events, payloads, snapshots)["S3"]
+    assert cell.status == "FAIL"
+    assert "non-SWAP" in cell.diagnostic
+
+
+def test_native_anvil_prefunded_snapshot_replay_preserves_measured_acquisition():
+    from pathlib import Path
+
+    fixture = Path(__file__).parents[2] / "fixtures/accounting/spot_native_prefunded_snapshot.json"
+    data = json.loads(fixture.read_text())
+    cells = _by_id(data["events"], data["payloads"], data["snapshots"])
+    assert {key: cell.status for key, cell in cells.items()} == {"S1": "PASS", "S2": "PASS", "S3": "PASS", "S4": "PASS"}
+
+
+def test_s3_same_symbol_and_prefunded_wallet_cannot_mix_chains():
+    events, payloads, snapshots = _rows()
+    _prefunded_wallet(snapshots)
+    for row in events:
+        row["chain"] = "arbitrum"
+    cell = _by_id(events, payloads, snapshots)["S3"]
+    assert cell.status == "FAIL"
+    assert "chain scope" in cell.diagnostic
+
+
+def test_s3_missing_chain_evidence_cannot_establish_inventory_ownership():
+    events, payloads, snapshots = _rows()
+    events[0].pop("chain")
+    assert _by_id(events, payloads, snapshots)["S3"].status == "FAIL"
+
+
+def test_s3_canonical_chain_alias_preserves_same_scope():
+    events, payloads, snapshots = _rows()
+    events[0]["chain"] = "BASE"
+    assert _by_id(events, payloads, snapshots)["S3"].status == "PASS"
+
+
+def _same_second_native_rows():
+    from pathlib import Path
+
+    fixture = Path(__file__).parents[2] / "fixtures/accounting/spot_native_same_second_snapshot.json"
+    return json.loads(fixture.read_text())
+
+
+def _same_second_s3(data):
+    return next(
+        cell
+        for cell in _cells_spot(data["events"], data["snapshots"], data["payloads"], {}, data["ledger"])
+        if cell.cell_id == "S3"
+    )
+
+
+def test_real_native_same_second_post_iteration_snapshot_uses_ledger_cycle_binding():
+    data = _same_second_native_rows()
+    assert data["events"][0]["timestamp"] == data["snapshots"][1]["timestamp"]
+    assert _same_second_s3(data).status == "PASS"
+
+
+def test_same_second_snapshot_without_ledger_evidence_remains_ambiguous():
+    data = _same_second_native_rows()
+    data["ledger"] = []
+    assert _same_second_s3(data).status == "FAIL"
+
+
+def test_same_second_teardown_pre_snapshot_cannot_use_shared_cycle_as_order():
+    data = _same_second_native_rows()
+    for row in (data["events"][0], data["snapshots"][1], data["ledger"][0]):
+        row["cycle_id"] = "teardown-td_example"
+    assert _same_second_s3(data).status == "FAIL"
+
+
+def test_same_second_ledger_binding_rejects_wrong_identity_and_multiple_members():
+    import copy
+
+    original = _same_second_native_rows()
+    for field in ("deployment_id", "cycle_id", "chain", "id", "tx_hash", "intent_type", "timestamp"):
+        data = copy.deepcopy(original)
+        data["ledger"][0][field] = "unrelated"
+        assert _same_second_s3(data).status == "FAIL", field
+    data = copy.deepcopy(original)
+    data["ledger"][0]["success"] = False
+    assert _same_second_s3(data).status == "FAIL"
+    data = copy.deepcopy(original)
+    data["ledger"].append(copy.deepcopy(data["ledger"][0]))
+    assert _same_second_s3(data).status == "FAIL"
+
+
+def test_same_second_cycle_binding_does_not_bypass_wrong_inventory_quantity():
+    data = _same_second_native_rows()
+    snapshot = data["snapshots"][1]
+    positions = json.loads(snapshot["positions_json"])
+    positions["metadata"]["swap_inventory"]["tokens"]["eth"]["quantity"] = "0.001"
+    snapshot["positions_json"] = json.dumps(positions)
+    assert _same_second_s3(data).status == "FAIL"

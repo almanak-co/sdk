@@ -362,12 +362,20 @@ class TestUniswapV4SwapPriceImpactWiring:
             token_out=weth,
         )
 
+        from almanak.connectors.uniswap_v4.adapter import UniswapV4Config
+        from tests.unit.connectors.uniswap_v4.test_uniswap_v4_adapter import _adapter
+
+        observed = _adapter(
+            UniswapV4Config(chain="arbitrum", wallet_address=TEST_WALLET, rpc_url="http://unused.invalid")
+        )
+
         # Real prices (not placeholders) so the guard runs: 100 USDC ≈ 0.0556 WETH.
         compiler = IntentCompiler(
             chain="arbitrum",
             wallet_address=TEST_WALLET,
             price_oracle={"USDC": Decimal("1.0"), "WETH": Decimal("1800.0"), "ETH": Decimal("1800.0")},
             gateway_client=self._connected_gateway(),
+            venue_verification_gateway_factory=observed._venue_verification_gateway_factory,
         )
         intent = SwapIntent(
             from_token="USDC",

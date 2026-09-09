@@ -1146,6 +1146,7 @@ class ExecutionOrchestrator:
         tx_risk_config: TransactionRiskConfig | None = None,
         registry_preflight: "RegistryPreflightCheck | None" = None,
         managed_fork: bool | None = None,
+        operation_observer_factory: Any = None,
     ) -> None:
         """Initialize the orchestrator.
 
@@ -1180,6 +1181,7 @@ class ExecutionOrchestrator:
                 to 5% against a production RPC proxy.
         """
         self.registry_preflight = registry_preflight
+        self.operation_observer_factory = operation_observer_factory
         self.managed_fork = managed_fork
         self.signer = signer
         self.submitter = submitter
@@ -1706,6 +1708,10 @@ class ExecutionOrchestrator:
         session = state.session
         assert state.unsigned_txs is not None
 
+        refusal = await self._validate_connector_operation(state)
+        if refusal is not None:
+            return refusal
+
         self._emit_event(
             ExecutionEventType.VALIDATING,
             context,
@@ -1736,6 +1742,30 @@ class ExecutionOrchestrator:
             )
             return result
 
+        return None
+
+    async def _validate_connector_operation(self, state: ExecutionPipelineState) -> ExecutionResult | None:
+        from .connector_validation import validate_connector_execution
+
+        try:
+            await asyncio.to_thread(
+                validate_connector_execution,
+                state.action_bundle,
+                chain=self.chain,
+                wallet=state.context.wallet_address,
+                is_safe=isinstance(self.signer, SafeSigner),
+                observer_factory=self.operation_observer_factory,
+            )
+        except (ValueError, TypeError, KeyError) as exc:
+            state.result.error = f"Connector operation refused: {exc}"
+            state.result.error_phase = ExecutionPhase.VALIDATION
+            self._complete_session(state.session, success=False, error=state.result.error)
+            self._emit_event(
+                ExecutionEventType.RISK_BLOCKED,
+                state.context,
+                {"violations": [state.result.error]},
+            )
+            return state.result
         return None
 
     async def _phase_simulate(self, state: ExecutionPipelineState) -> ExecutionResult | None:
@@ -1777,6 +1807,27 @@ class ExecutionOrchestrator:
             state.unsigned_txs, context.chain, state_overrides=state_overrides
         )
         result.simulation_result = simulation_result
+        from .submission import execution_plan_hash
+
+        logger.info(
+            "execution_simulation_result chain=%s deployment_id=%s intent_id=%s "
+            "simulated=%s success=%s simulator=%s tx_count=%s plan_hash=%s",
+            context.chain,
+            context.deployment_id,
+            context.intent_id,
+            simulation_result.simulated,
+            simulation_result.success,
+            simulation_result.simulator_name or self.simulator.name,
+            len(state.unsigned_txs),
+            execution_plan_hash(state.action_bundle),
+        )
+
+        if not simulation_result.simulated:
+            result.error = "Simulation was requested but the configured backend did not simulate the operation"
+            result.error_phase = ExecutionPhase.SIMULATION
+            self._complete_session(session, success=False, error=result.error)
+            self._emit_event(ExecutionEventType.SIMULATION_FAILED, context, {"revert_reason": result.error})
+            return result
 
         if not simulation_result.success:
             result.error = f"Simulation failed: {simulation_result.revert_reason or 'Unknown reason'}"
@@ -2013,6 +2064,9 @@ class ExecutionOrchestrator:
 
     async def _phase_submit_and_confirm(self, state: ExecutionPipelineState) -> ExecutionResult | None:
         """Step 7 and 8: submit (sequential or parallel), gather receipts, emit TX_SENT."""
+        refusal = await self._validate_connector_operation(state)
+        if refusal is not None:
+            return refusal
         context = state.context
         result = state.result
         session = state.session

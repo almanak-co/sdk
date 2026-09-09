@@ -64,7 +64,11 @@ class TestNoRuntimeDetectionSurvives:
         from almanak.framework import execution
 
         assert not hasattr(execution, "probe_managed_fork")
-        assert set(fork_signal.__all__) == {"is_managed_fork_network", "resolve_managed_fork"}
+        assert set(fork_signal.__all__) == {
+            "is_managed_fork_network",
+            "resolve_managed_fork",
+            "gateway_confirms_managed_fork",
+        }
 
     def test_module_imports_no_transport(self):
         """No egress library is importable from this module, at any depth.

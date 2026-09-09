@@ -30,9 +30,9 @@ from almanak.framework.observability.metrics import (
 )
 
 from .addresses import UNISWAP_V4
+from .pool_key import PoolKey
 
 if TYPE_CHECKING:
-    from almanak.connectors.uniswap_v4.sdk import PoolKey
     from almanak.framework.execution.extracted_data import LPCloseData, LPOpenData, SwapAmounts
 
 # Synchronous injection keeps network I/O outside the parser while resolving a
@@ -208,6 +208,7 @@ class UniswapV4ReceiptParser:
         quoted_amount_out: int | None = None,
         *,
         swap_token_meta: dict[str, dict[str, Any]] | None = None,
+        swap_pool_key: dict[str, Any] | None = None,
     ) -> ParseResult:
         """Decode supported events and build a swap summary when present.
 
@@ -224,11 +225,15 @@ class UniswapV4ReceiptParser:
             topic0 = topics[0].lower() if isinstance(topics[0], str) else hex(topics[0])
 
             if topic0 == SWAP_EVENT_TOPIC.lower():
+                if swap_pool_key is not None and str(log.get("address", "")).lower() != self.pool_manager:
+                    continue
                 swap_event = self._decode_swap_event(log)
                 if swap_event:
                     result.swap_events.append(swap_event)
 
             elif topic0 == MODIFY_LIQUIDITY_TOPIC.lower():
+                if str(log.get("address", "")).lower() != self.pool_manager:
+                    continue
                 ml_event = self._decode_modify_liquidity_event(log)
                 if ml_event:
                     result.modify_liquidity_events.append(ml_event)
@@ -244,6 +249,7 @@ class UniswapV4ReceiptParser:
                 result.transfer_events,
                 quoted_amount_out,
                 swap_token_meta=swap_token_meta,
+                swap_pool_key=swap_pool_key,
             )
 
         return result
@@ -254,6 +260,7 @@ class UniswapV4ReceiptParser:
         *,
         expected_out: Decimal | None = None,
         swap_token_meta: dict[str, dict[str, Any]] | None = None,
+        swap_pool_key: dict[str, Any] | None = None,
     ) -> SwapAmounts | None:
         """Extract swap amounts for ResultEnricher integration.
 
@@ -263,7 +270,7 @@ class UniswapV4ReceiptParser:
         """
         from almanak.framework.execution.extracted_data import SwapAmounts
 
-        parsed = self.parse_receipt(receipt, swap_token_meta=swap_token_meta)
+        parsed = self.parse_receipt(receipt, swap_token_meta=swap_token_meta, swap_pool_key=swap_pool_key)
         if not parsed.swap_result:
             return None
 
@@ -283,8 +290,8 @@ class UniswapV4ReceiptParser:
             slippage_bps=slippage_bps,
             expected_out_decimal=expected_out,
             # Ledger and FIFO identity use canonical symbols, not addresses.
-            token_in=resolve_swap_token_symbol(sr.token_in, self.chain),
-            token_out=resolve_swap_token_symbol(sr.token_out, self.chain),
+            token_in=self._swap_token_symbol(sr.token_in),
+            token_out=self._swap_token_symbol(sr.token_out),
             amount_in_decimal_resolved=sr.amount_in_decimal_resolved,
             amount_out_decimal_resolved=sr.amount_out_decimal_resolved,
         )
@@ -297,7 +304,7 @@ class UniswapV4ReceiptParser:
         fallback; unknown or multiple fallback emitters fail closed.
         """
         logs = receipt.get("logs", [])
-        tx_hash = receipt.get("transactionHash", "unknown")
+        tx_hash = receipt.get("transactionHash") or receipt.get("tx_hash") or "unknown"
 
         known_pm_addresses = {
             addrs["position_manager"].lower() for addrs in UNISWAP_V4.values() if addrs.get("position_manager")
@@ -414,7 +421,7 @@ class UniswapV4ReceiptParser:
         from almanak.framework.execution.extracted_data import LPOpenData
 
         parsed = self.parse_receipt(receipt)
-        tx_hash = receipt.get("transactionHash", "unknown")
+        tx_hash = receipt.get("transactionHash") or receipt.get("tx_hash") or "unknown"
 
         mint_event: ModifyLiquidityEventData | None = None
         for event in parsed.modify_liquidity_events:
@@ -661,7 +668,7 @@ class UniswapV4ReceiptParser:
     def extract_lp_close_data(self, receipt: dict[str, Any]) -> LPCloseData | None:
         """Extract LP close data from a V4 burn receipt.
 
-        The first negative ModifyLiquidity supplies the pool ID and removed
+        A unique negative ModifyLiquidity supplies the pool ID and removed
         liquidity. Raw base-unit withdrawals are summed only from Transfers
         leaving PoolManager and assigned by the looked-up PoolKey, never by log
         order. Lookup failure or any observed token outside the key fails
@@ -677,17 +684,20 @@ class UniswapV4ReceiptParser:
         from almanak.framework.execution.extracted_data import LPCloseData
 
         parsed = self.parse_receipt(receipt)
-        tx_hash = receipt.get("transactionHash", "unknown")
+        tx_hash = receipt.get("transactionHash") or receipt.get("tx_hash") or "unknown"
 
-        burn_event: ModifyLiquidityEventData | None = None
-        for event in parsed.modify_liquidity_events:
-            if event.liquidity_delta < 0:
-                burn_event = event
-                break
+        burns = [event for event in parsed.modify_liquidity_events if event.liquidity_delta < 0]
+        if len(burns) > 1:
+            return None
+        burn_event = burns[0] if burns else None
         if burn_event is None:
             # Fee collection emits zero-delta ModifyLiquidity plus TAKE_PAIR;
             # its indexed pool ID is sufficient without a PoolKey lookup.
             return self._extract_fees_only_collect_data(parsed)
+
+        if burn_event.sender.lower() != self.position_manager:
+            return None
+        from almanak.connectors.uniswap_v4.hooks import compute_position_hash
 
         liquidity_removed = abs(burn_event.liquidity_delta)
         pool_id_hex = burn_event.pool_id.lower()
@@ -763,6 +773,13 @@ class UniswapV4ReceiptParser:
             liquidity_removed=liquidity_removed,
             pool_address=pool_id_hex,
             source="modify_liquidity",
+            position_id=str(int(burn_event.salt, 16)),
+            position_hash=compute_position_hash(
+                owner=burn_event.sender,
+                tick_lower=burn_event.tick_lower,
+                tick_upper=burn_event.tick_upper,
+                salt=burn_event.salt,
+            ),
             currency0=currency0,
             currency1=currency1,
         )
@@ -778,13 +795,13 @@ class UniswapV4ReceiptParser:
         """
         from almanak.framework.execution.extracted_data import LPCloseData
 
-        collect_event: ModifyLiquidityEventData | None = None
-        for event in parsed.modify_liquidity_events:
-            if event.liquidity_delta == 0:
-                collect_event = event
-                break
-        if collect_event is None:
+        collects = [event for event in parsed.modify_liquidity_events if event.liquidity_delta == 0]
+        if len(collects) != 1:
             return None
+        collect_event = collects[0]
+        if collect_event.sender.lower() != self.position_manager or len(collect_event.salt) != 66:
+            return None
+        from .hooks import compute_position_hash
 
         return LPCloseData(
             amount0_collected=0,
@@ -794,6 +811,13 @@ class UniswapV4ReceiptParser:
             liquidity_removed=0,
             pool_address=collect_event.pool_id.lower(),
             source="modify_liquidity",
+            position_id=str(int(collect_event.salt, 16)),
+            position_hash=compute_position_hash(
+                owner=collect_event.sender,
+                tick_lower=collect_event.tick_lower,
+                tick_upper=collect_event.tick_upper,
+                salt=collect_event.salt,
+            ),
             currency0=None,
             currency1=None,
         )
@@ -839,6 +863,27 @@ class UniswapV4ReceiptParser:
             payload["fee_tier"] = int(fee_tier)
         return payload
 
+    def registry_close_identity_matches(self, receipt: dict[str, Any], open_payload: dict[str, Any] | None) -> bool:
+        """Bind the burn to its canonical manager, pool and NFT salt before merging OPEN state."""
+        if not open_payload:
+            return False
+        token_id = self._open_payload_token_id_int(open_payload)
+        burns = [event for event in self.parse_receipt(receipt).modify_liquidity_events if event.liquidity_delta < 0]
+        if len(burns) != 1 or token_id is None:
+            return False
+        burn = burns[0]
+        if (
+            burn.sender.lower() != self.position_manager
+            or str(open_payload.get("position_manager") or "").lower() != self.position_manager
+            or burn.pool_id.lower() != str(open_payload.get("pool_id") or "").lower()
+            or int(burn.salt, 16) != token_id
+        ):
+            return False
+        return all(
+            open_payload.get(name) is None or int(open_payload[name]) == getattr(burn, name)
+            for name in ("tick_lower", "tick_upper")
+        )
+
     def extract_registry_payload_close(
         self,
         receipt: dict[str, Any],
@@ -848,10 +893,11 @@ class UniswapV4ReceiptParser:
     ) -> dict[str, Any] | None:
         """Build an LP_CLOSE registry payload using its matched OPEN identity.
 
-        Close receipts do not re-emit the NFT tokenId, so it must come from the
-        OPEN payload. Missing tokenId fails closed, and a supplied OPEN pool ID
-        must match the close receipt before identity fields are merged.
+        The matched OPEN tokenId must equal the canonical burn salt. Manager,
+        pool and ticks must also agree before OPEN identity fields are merged.
         """
+        if not self.registry_close_identity_matches(receipt, open_payload):
+            return None
         lp_close = self.extract_lp_close_data(receipt)
         if lp_close is None:
             return None
@@ -1251,7 +1297,21 @@ class UniswapV4ReceiptParser:
         bundle_metadata: dict[str, Any],
     ) -> dict[str, Any]:
         """Return canonical typed swap metadata for receipt extraction."""
-        return build_swap_token_meta_extract_kwargs(field=field, bundle_metadata=bundle_metadata, chain=self.chain)
+        kwargs = build_swap_token_meta_extract_kwargs(field=field, bundle_metadata=bundle_metadata, chain=self.chain)
+        if field == "swap_amounts" and "pool_key" in bundle_metadata:
+            key = PoolKey.from_wire(bundle_metadata["pool_key"])
+            if key.pool_id != bundle_metadata.get("pool_id"):
+                raise ValueError("V4 receipt metadata pool ID does not match its full key")
+            kwargs["swap_pool_key"] = key.to_wire()
+        return kwargs
+
+    def _swap_token_symbol(self, address: str | None) -> str | None:
+        from almanak.connectors._strategy_base.v4_pool_abi import V4_ZERO_ADDRESS
+        from almanak.framework.data.tokens.defaults import NATIVE_SENTINEL
+
+        if address == V4_ZERO_ADDRESS:
+            address = NATIVE_SENTINEL
+        return resolve_swap_token_symbol(address, self.chain)
 
     @staticmethod
     def _build_hint_map(
@@ -1292,6 +1352,11 @@ class UniswapV4ReceiptParser:
         hint_by_addr: dict[str, tuple[str, int]],
     ) -> tuple[int | None, int | None]:
         """Resolve decimals per side, with matching compiler hints authoritative."""
+        from almanak.connectors._strategy_base.v4_pool_abi import V4_ZERO_ADDRESS
+        from almanak.framework.data.tokens.defaults import NATIVE_SENTINEL
+
+        token_in_addr = NATIVE_SENTINEL if token_in_addr == V4_ZERO_ADDRESS else token_in_addr
+        token_out_addr = NATIVE_SENTINEL if token_out_addr == V4_ZERO_ADDRESS else token_out_addr
         token_in_decimals: int | None = None
         token_out_decimals: int | None = None
         if token_in_addr:
@@ -1328,6 +1393,7 @@ class UniswapV4ReceiptParser:
         transfer_events: list[TransferEventData],
         quoted_amount_out: int | None,
         swap_token_meta: dict[str, dict[str, Any]] | None = None,
+        swap_pool_key: dict[str, Any] | None = None,
     ) -> ParsedSwapResult:
         """Build a high-level swap result from decoded events.
 
@@ -1337,9 +1403,22 @@ class UniswapV4ReceiptParser:
         records the distinction in ``*_decimal_resolved``.
         """
         swap = swap_events[0]
+        token_in_addr: str | None
+        token_out_addr: str | None
         amount_in, amount_out = self._compute_swap_amounts(swap)
         slippage_bps = self._calculate_slippage_bps(amount_out, quoted_amount_out)
-        token_in_addr, token_out_addr = self._identify_swap_tokens(transfer_events, amount_in, amount_out)
+        if swap_pool_key is not None:
+            key = PoolKey.from_wire(swap_pool_key)
+            if len(swap_events) != 1 or swap.pool_id.lower() != key.pool_id:
+                raise ValueError("V4 receipt swaps do not match the selected single-pool operation")
+            if swap.amount0 < 0 < swap.amount1:
+                token_in_addr, token_out_addr = key.currency0, key.currency1
+            elif swap.amount1 < 0 < swap.amount0:
+                token_in_addr, token_out_addr = key.currency1, key.currency0
+            else:
+                raise ValueError("V4 receipt has no positive bilateral swap for the selected pool")
+        else:
+            token_in_addr, token_out_addr = self._identify_swap_tokens(transfer_events, amount_in, amount_out)
         token_in_addr, token_out_addr = self._apply_token_meta_addresses(
             token_in_addr, token_out_addr, swap_token_meta, single_swap=len(swap_events) == 1
         )

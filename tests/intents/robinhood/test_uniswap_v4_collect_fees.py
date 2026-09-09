@@ -35,12 +35,12 @@ from tests.intents.conftest import (
     CHAIN_CONFIGS,
     assert_accounting_persisted,
     assert_no_accounting_on_failure,
+    capture_v4_position_hash,
     format_token_amount,
     get_token_balance,
     get_token_decimals,
 )
 from tests.intents.pool_helpers import fail_if_v4_pool_missing
-
 
 CHAIN_NAME = "robinhood"
 
@@ -105,18 +105,9 @@ def _assert_no_lot_id(row: dict, payload: dict) -> None:
     assert "lot_id" not in payload
 
 
-def _assert_v4_close_position_hash(payload: dict) -> None:
-    """V4 LP_CLOSE / LP_COLLECT_FEES leave ``position_hash`` ``None``.
-
-    The close leg matches against the prior OPEN payload by ``position_key``
-    (not by re-reading the hash off the burn receipt), so the handler
-    forwards ``position_hash=None`` for the close-like events even on V4.
-    See ``lp_accounting.py`` VIB-4473 comment.
-    """
-    assert payload["position_hash"] is None, (
-        "V4 LP_CLOSE/LP_COLLECT_FEES match by position_key; position_hash "
-        "must stay None (not re-read off the burn receipt)"
-    )
+def _assert_v4_close_position_hash(payload: dict, opening_hash: str) -> None:
+    """Fee collection must retain the independently measured opening anchor."""
+    assert payload["position_hash"] == opening_hash
 
 
 def _payload_fee(raw) -> Decimal | None:
@@ -275,6 +266,9 @@ class TestUniswapV4CollectFeesIntent:
             orchestrator,
             price_oracle,
         )
+        opening_hash = capture_v4_position_hash(
+            anvil_eth_call_adapter, chain=CHAIN_NAME, token_id=position_id, wallet=funded_wallet
+        )
         print(f"Opened position: id={position_id}")
         print(f"Currencies: {currency0[:10]}.../{currency1[:10]}...")
 
@@ -385,9 +379,7 @@ class TestUniswapV4CollectFeesIntent:
         collect_payload = _payload(collect_accounting_row)
         assert collect_payload["position_key"] == collect_accounting_row["position_key"]
         _assert_no_lot_id(collect_accounting_row, collect_payload)
-        # #2 directional null-contract: LP_COLLECT_FEES matches by
-        # position_key, so position_hash stays None (anchor lives on OPEN).
-        _assert_v4_close_position_hash(collect_payload)
+        _assert_v4_close_position_hash(collect_payload, opening_hash)
         # #3 parser ↔ event exact equality, honoring Empty≠Zero≠None.
         if lp_close_data is not None:
             dec0 = get_token_decimals(web3, tokens[collect_payload["token0"]])

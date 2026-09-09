@@ -2799,6 +2799,134 @@ def _cell_g9_confidence(snapshots: list[dict[str, Any]], acct_events: list[dict[
     )
 
 
+def _g10_evm_hash(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.lower().removeprefix("0x")
+    if len(normalized) != 64 or any(character not in "0123456789abcdef" for character in normalized):
+        return None
+    return normalized
+
+
+def _g10_attempt_hashes(row: dict[str, Any]) -> tuple[str, ...]:
+    transactions = _json(row.get("extracted_data_json")).get("sub_transactions")
+    if not isinstance(transactions, list) or not transactions:
+        return ()
+    hashes = []
+    for transaction in transactions:
+        value = transaction.get("tx_hash") if isinstance(transaction, dict) else None
+        canonical = _g10_evm_hash(value)
+        if canonical is None:
+            return ()
+        hashes.append(canonical)
+    parent = _g10_evm_hash(row.get("tx_hash"))
+    if parent not in hashes or len(set(hashes)) != len(hashes):
+        return ()
+    return tuple(hashes)
+
+
+def _g10_revert_receipts(row: dict[str, Any], hashes: tuple[str, ...]) -> bool:
+    from almanak.framework.execution.failed_attempt import confirmed_failed_attempt_id
+    from almanak.framework.execution.reconciliation import complete_receipt_set_error
+
+    payload = _json(row.get("extracted_data_json"))
+    attempt = payload.get("failed_attempt")
+    if not isinstance(attempt, dict) or attempt.get("schema_version") != 1:
+        return False
+    receipts = attempt.get("receipts")
+    if not isinstance(receipts, list) or any(not isinstance(receipt, dict) for receipt in receipts):
+        return False
+    canonical_receipts = [
+        {
+            **receipt,
+            "tx_hash": _g10_evm_hash(receipt.get("tx_hash", receipt.get("transactionHash"))),
+        }
+        for receipt in receipts
+    ]
+    if not hashes or complete_receipt_set_error(hashes, canonical_receipts) is not None:
+        return False
+    deployment, chain = row.get("deployment_id"), row.get("chain")
+    if not deployment or not chain:
+        return False
+    expected_id = confirmed_failed_attempt_id(
+        {"success": False, "tx_hashes": hashes, "receipts": canonical_receipts}, deployment_id=deployment, chain=chain
+    )
+    if not expected_id or row.get("id") != expected_id or attempt.get("ledger_entry_id") != expected_id:
+        return False
+    gas = 0
+    for transaction, receipt in zip(payload["sub_transactions"], receipts, strict=True):
+        measured = receipt.get("gasUsed", receipt.get("gas_used"))
+        if not isinstance(measured, int) or isinstance(measured, bool) or measured < 0:
+            return False
+        if receipt.get("status") != 0 or isinstance(receipt.get("status"), bool) or receipt.get("logs") != []:
+            return False
+        evidence = transaction.get("receipt_evidence")
+        if not isinstance(evidence, dict) or transaction.get("status") != "failure":
+            return False
+        block_hash = receipt.get("blockHash", receipt.get("block_hash"))
+        block_number = receipt.get("blockNumber", receipt.get("block_number"))
+        if _g10_evm_hash(block_hash) is None:
+            return False
+        if not isinstance(block_number, int) or isinstance(block_number, bool) or block_number <= 0:
+            return False
+        if (
+            evidence.get("status") != 0
+            or _g10_evm_hash(evidence.get("block_hash")) != _g10_evm_hash(block_hash)
+            or evidence.get("block_number") != block_number
+            or transaction.get("gas_used") != measured
+            or evidence.get("gas_used") != str(measured)
+        ):
+            return False
+        gas += measured
+    return row.get("gas_used") == gas and attempt.get("total_gas_used") == gas
+
+
+def _g10_independent_reverted_retry(
+    row: dict[str, Any], peers: list[dict[str, Any]], events: list[dict[str, Any]]
+) -> bool:
+    hashes = _g10_attempt_hashes(row)
+    if not _g10_revert_receipts(row, hashes):
+        return False
+    timestamp = _parse_ts(row.get("timestamp"))
+    intent_id = _json(row.get("extracted_data_json")).get("execution_intent_id")
+    if timestamp is None or not isinstance(intent_id, str) or not intent_id.strip():
+        return False
+    scope = ("deployment_id", "chain", "protocol", "intent_type")
+    saw_retry = False
+    population: set[str] = set()
+    for peer in peers:
+        peer_hashes = _g10_attempt_hashes(peer)
+        if not peer_hashes or population.intersection(peer_hashes):
+            return False
+        population.update(peer_hashes)
+        if _row_landed(peer):
+            transactions = _json(peer.get("extracted_data_json"))["sub_transactions"]
+            if any(
+                transaction.get("status") != "success"
+                or not isinstance(transaction.get("receipt_evidence"), dict)
+                or transaction["receipt_evidence"].get("status") != 1
+                for transaction in transactions
+            ):
+                return False
+        later = _parse_ts(peer.get("timestamp"))
+        if (
+            _row_landed(peer)
+            and all(peer.get(key) == row.get(key) for key in scope)
+            and _json(peer.get("extracted_data_json")).get("execution_intent_id") == intent_id
+            and later is not None
+            and later > timestamp
+        ):
+            saw_retry = True
+    for event in events:
+        payload = _json(event.get("payload_json"))
+        if event.get("ledger_entry_id") == row.get("id") or payload.get("ledger_entry_id") == row.get("id"):
+            return False
+        event_hash = event.get("tx_hash") or payload.get("tx_hash")
+        if _g10_evm_hash(event_hash) in hashes:
+            return False
+    return saw_retry
+
+
 def _cell_g10_multi_tx_atomicity(
     ledger: list[dict[str, Any]],
     pos_events: list[dict[str, Any]],
@@ -2817,8 +2945,10 @@ def _cell_g10_multi_tx_atomicity(
        would be a tautology because every row has a unique PK.
 
     2. **Cycle-level atomicity**: rows that share a ``cycle_id`` must agree
-       on outcome — every dispatched intent within the cycle either
-       succeeded or every dispatched intent reverted. A cycle that had
+       on outcome, except a separately submitted, fully reverted attempt
+       followed by a successful retry of the same scoped intent. This exception
+       requires complete disjoint receipt evidence and no failed-attempt economic
+       event; a marker alone proves nothing. A cycle that had
        APPROVE succeed and SUPPLY revert is the failure mode this cell
        must catch. Pre-VIB-3868 G10 grouped only by intent identity, so
        mixed-status cycles silently passed — exactly the false positive
@@ -2861,9 +2991,11 @@ def _cell_g10_multi_tx_atomicity(
         if len(rs) < 2:
             continue
         successes = sum(1 for r in rs if _row_landed(r))
-        fails = len(rs) - successes
-        if successes > 0 and fails > 0:
-            mixed.append((cyc, successes, fails))
+        failures = [r for r in rs if not _row_landed(r)]
+        if successes > 0 and any(
+            not _g10_independent_reverted_retry(r, rs, [*pos_events, *acct_events]) for r in failures
+        ):
+            mixed.append((cyc, successes, len(failures)))
     if mixed:
         sample = mixed[:3]
         return CellResult(
@@ -2879,7 +3011,8 @@ def _cell_g10_multi_tx_atomicity(
         "Multi-tx atomicity",
         "PASS",
         f"{len(ledger)} ledger rows; no duplicates; "
-        f"{multi_row_cycles}/{len(cycles)} cycles span multiple intents and all are uniform-status",
+        f"{multi_row_cycles}/{len(cycles)} cycles span multiple rows; outcomes are uniform "
+        "or include receipt-proven fully reverted attempts before successful retries",
     )
 
 
@@ -4985,14 +5118,104 @@ def _spot_snapshot_inventory(snapshot: dict[str, Any]) -> dict[str, dict[str, An
     return tokens if isinstance(tokens, dict) else {}
 
 
-def _spot_mark_cell(snapshots: list[dict[str, Any]]) -> CellResult:
+def _spot_iteration_snapshot_follows_swap(
+    row: dict[str, Any], snapshot: dict[str, Any], ledger: list[dict[str, Any]]
+) -> bool:
+    from uuid import UUID
+
+    # Regular iteration snapshots follow the accounting commit/drain. Teardown
+    # brackets share a cycle across pre/post snapshots, so cannot use this rule.
+    cycle = snapshot.get("cycle_id")
+    try:
+        if str(UUID(cycle)) != cycle:
+            return False
+    except (ValueError, TypeError, AttributeError):
+        return False
+    deployment = snapshot.get("deployment_id")
+    if not deployment or row.get("deployment_id") != deployment or row.get("cycle_id") != cycle:
+        return False
+    members = [entry for entry in ledger if entry.get("cycle_id") == cycle]
+    if len(members) != 1:
+        return False
+    entry = members[0]
+    return bool(
+        row.get("ledger_entry_id")
+        and entry.get("id") == row["ledger_entry_id"]
+        and entry.get("deployment_id") == deployment
+        and entry.get("chain") == row.get("chain") == snapshot.get("chain")
+        and entry.get("intent_type") == "SWAP"
+        and entry.get("success") in (True, 1)
+        and row.get("tx_hash")
+        and entry.get("tx_hash") == row["tx_hash"]
+        and _parse_ts(entry.get("timestamp")) == _parse_ts(row.get("timestamp"))
+    )
+
+
+def _spot_snapshot_lots(
+    swaps: list[tuple[dict[str, Any], dict[str, Any]]],
+    snapshot: dict[str, Any],
+    ledger: list[dict[str, Any]] | None = None,
+) -> tuple[dict[str, list[list[Decimal]]], list[str]]:
+    from almanak.core.chains import ChainRegistry
+
+    scope = ChainRegistry.try_resolve(str(snapshot.get("chain") or ""))
+    event_scopes = [ChainRegistry.try_resolve(str(row.get("chain") or "")) for row, _ in swaps]
+    if scope is None or any(event_scope is None or event_scope.name != scope.name for event_scope in event_scopes):
+        return {}, ["snapshot/SWAP chain scope is missing or mixed; symbol-only cross-chain replay is forbidden"]
+    snapshot_ts = _parse_ts(snapshot.get("timestamp"))
+    timed = [(_parse_ts(row.get("timestamp")), row, payload) for row, payload in swaps]
+    if snapshot_ts is None or any(ts is None for ts, _, _ in timed):
+        return {}, ["snapshot/SWAP timestamp is unmeasured"]
+    prefix = [(ts, row, payload) for ts, row, payload in timed if ts is not None and ts <= snapshot_ts]
+    timestamps = [ts for ts, _, _ in prefix]
+    if len(set(timestamps)) != len(timestamps) or any(
+        ts == snapshot_ts and not _spot_iteration_snapshot_follows_swap(row, snapshot, ledger or [])
+        for ts, row, _ in prefix
+    ):
+        return {}, ["same-timestamp SWAP ordering cannot be independently established"]
+    lots, errors = _spot_replay_lots([(row, payload) for _, row, payload in sorted(prefix, key=lambda item: item[0])])
+    return lots, [error for error in errors if "no SWAP disposal matched" not in error]
+
+
+def _spot_mark_errors(mark: dict[str, Any], wallet_row: dict[str, Any], replay_quantity: Decimal) -> list[str]:
+    quantity = _dec(mark.get("quantity"))
+    balance = _dec(wallet_row.get("balance"))
+    price = _dec(wallet_row.get("price_usd"))
+    value = _dec(mark.get("value_usd"))
+    wallet_value = _dec(wallet_row.get("value_usd"))
+    if quantity is None or balance is None or price is None or value is None or wallet_value is None:
+        return ["quantity or valuation evidence is unmeasured/non-finite"]
+    if any(not v.is_finite() for v in (quantity, balance, price, value, wallet_value)):
+        return ["quantity or valuation evidence is unmeasured/non-finite"]
+    errors: list[str] = []
+    if quantity != replay_quantity:
+        errors.append(f"quantity={quantity} != independent FIFO replay {replay_quantity}")
+    if quantity <= 0 or balance < quantity or price <= 0:
+        errors.append("open quantity is not positive, wallet-covered, and positively priced")
+    if value != quantity * price:
+        errors.append("inventory mark != FIFO quantity × snapshot price")
+    if wallet_value != balance * price:
+        errors.append("wallet mark != balance × price")
+    return errors
+
+
+def _spot_mark_cell(
+    swaps: list[tuple[dict[str, Any], dict[str, Any]]],
+    snapshots: list[dict[str, Any]],
+    acct_events: list[dict[str, Any]],
+    ledger: list[dict[str, Any]] | None = None,
+) -> CellResult:
     marked_snapshots = 0
     errors: list[str] = []
+    if any(row.get("event_type") != "SWAP" for row in acct_events):
+        errors.append("non-SWAP accounting movements lack an independent inventory replay in the spot profile")
     for snapshot in snapshots:
         inventory = _spot_snapshot_inventory(snapshot)
         if not inventory:
             continue
         marked_snapshots += 1
+        lots, replay_errors = _spot_snapshot_lots(swaps, snapshot, ledger)
+        errors.extend(f"snapshot {snapshot.get('id')}: {error}" for error in replay_errors)
         wallet_rows = _json_list(snapshot.get("wallet_balances_json"))
         wallet = {str(row.get("symbol") or "").lower(): row for row in wallet_rows}
         for token, mark in inventory.items():
@@ -5000,22 +5223,18 @@ def _spot_mark_cell(snapshots: list[dict[str, Any]]) -> CellResult:
             if wallet_row is None:
                 errors.append(f"snapshot {snapshot.get('id')}: {token} absent from wallet balances")
                 continue
-            if _dec(mark.get("quantity")) != _dec(wallet_row.get("balance")):
-                errors.append(f"snapshot {snapshot.get('id')}: {token} quantity != wallet balance")
-            if _dec(mark.get("value_usd")) != _dec(wallet_row.get("value_usd")):
-                errors.append(f"snapshot {snapshot.get('id')}: {token} inventory mark != wallet mark")
-            balance = _dec(wallet_row.get("balance"))
-            price = _dec(wallet_row.get("price_usd"))
-            wallet_value = _dec(wallet_row.get("value_usd"))
-            if balance is None or price is None or wallet_value is None or balance * price != wallet_value:
-                errors.append(f"snapshot {snapshot.get('id')}: {token} wallet mark != balance × price")
+            replay_quantity = sum((lot[0] for lot in lots.get(str(token).upper(), [])), Decimal("0"))
+            errors.extend(
+                f"snapshot {snapshot.get('id')}: {token} {error}"
+                for error in _spot_mark_errors(mark, wallet_row, replay_quantity)
+            )
     if marked_snapshots == 0:
         errors.append("no snapshot published an open swap_inventory mark")
     return CellResult(
         "S3",
-        "Open-inventory mark equals wallet balance × price",
+        "Open FIFO inventory is wallet-covered and marked at snapshot price",
         "PASS" if not errors else "FAIL",
-        f"{marked_snapshots} open-inventory snapshots match wallet quantity and USD mark"
+        f"{marked_snapshots} open-inventory snapshots match independent FIFO quantity and measured price"
         if not errors
         else "; ".join(errors),
     )
@@ -5056,6 +5275,7 @@ def _cells_spot(
     snapshots: list[dict[str, Any]],
     acct_payloads: dict[Any, dict[str, Any]],
     payload_errors: dict[Any, str],
+    ledger: list[dict[str, Any]] | None = None,
 ) -> list[CellResult]:
     """S1–S4: persisted BUY→SELL SWAP round-trip contract (VIB-4203)."""
     swaps = _spot_swap_payloads(acct_events, acct_payloads)
@@ -5068,7 +5288,7 @@ def _cells_spot(
                 (
                     "BUY-leg cost basis recorded",
                     "SELL-leg realized PnL reconciles to FIFO replay",
-                    "Open-inventory mark equals wallet balance × price",
+                    "Open FIFO inventory is wallet-covered and marked at snapshot price",
                     "Acquired basis equals persisted open-lot basis",
                 ),
                 start=1,
@@ -5110,7 +5330,7 @@ def _cells_spot(
         "independent FIFO replay matches persisted matched PnL" if not replay_errors else "; ".join(replay_errors),
     )
 
-    return [s1, s2, _spot_mark_cell(snapshots), _spot_basis_cell(swaps, snapshots)]
+    return [s1, s2, _spot_mark_cell(swaps, snapshots, acct_events, ledger), _spot_basis_cell(swaps, snapshots)]
 
 
 # Profiles centralize lifecycle, tolerance, and cell dispatch. They live here
@@ -5129,6 +5349,7 @@ SCORECARD_PROFILES: dict[str, ScorecardProfile] = {
             ctx.snapshots,
             ctx.acct_payloads,
             ctx.payload_errors,
+            ctx.ledger,
         ),
     ),
     "lp": ScorecardProfile(
@@ -5352,6 +5573,7 @@ def evaluate_cells(
                     acct_payloads=acct_payloads,
                     payload_errors=payload_errors,
                     position_state_rows=position_state_rows,
+                    ledger=ledger,
                 )
             )
         )

@@ -521,7 +521,7 @@ class TestBuildSwapTx:
 
 
 class TestWethRouting:
-    """Test WETH -> native ETH routing in build_swap_tx."""
+    """WETH retains its ERC20 identity through the router."""
 
     WETH_ETHEREUM = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
     USDC = "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
@@ -544,8 +544,8 @@ class TestWethRouting:
         cmd_hex = raw[cmd_start + 64 : cmd_start + 64 + cmd_len * 2]
         return [int(cmd_hex[i : i + 2], 16) for i in range(0, len(cmd_hex), 2)]
 
-    def test_weth_in_produces_permit2_transfer_and_unwrap(self):
-        """WETH -> ERC20: commands = [PERMIT2_TRANSFER_FROM, UNWRAP_WETH, V4_SWAP]."""
+    def test_weth_in_preserves_erc20_currency(self):
+        """WETH -> ERC20: commands = [V4_SWAP]."""
         sdk = UniswapV4SDK(chain="ethereum")
         quote = SwapQuote(
             amount_in=5 * 10**16,
@@ -557,12 +557,10 @@ class TestWethRouting:
         tx = sdk.build_swap_tx(quote, recipient=self.RECIPIENT)
         assert tx.value == 0, "WETH-in should not send native ETH"
         cmds = self._extract_commands(tx.data)
-        assert cmds == [0x02, 0x0C, 0x10], (
-            f"Expected [PERMIT2_TRANSFER_FROM, UNWRAP_WETH, V4_SWAP], got {[hex(c) for c in cmds]}"
-        )
+        assert cmds == [0x10], f"Expected [V4_SWAP], got {[hex(c) for c in cmds]}"
 
-    def test_weth_out_produces_wrap_eth(self):
-        """ERC20 -> WETH: commands = [V4_SWAP, WRAP_ETH]."""
+    def test_weth_out_preserves_erc20_currency(self):
+        """ERC20 -> WETH: commands = [V4_SWAP]."""
         sdk = UniswapV4SDK(chain="ethereum")
         quote = SwapQuote(
             amount_in=100 * 10**6,
@@ -574,7 +572,7 @@ class TestWethRouting:
         tx = sdk.build_swap_tx(quote, recipient=self.RECIPIENT)
         assert tx.value == 0, "ERC20-in should not send native ETH"
         cmds = self._extract_commands(tx.data)
-        assert cmds == [0x10, 0x0B], f"Expected [V4_SWAP, WRAP_ETH], got {[hex(c) for c in cmds]}"
+        assert cmds == [0x10], f"Expected [V4_SWAP], got {[hex(c) for c in cmds]}"
 
     def test_weth_to_weth_raises(self):
         """WETH -> WETH: should raise ValueError."""
@@ -586,7 +584,7 @@ class TestWethRouting:
             token_in=self.WETH_ETHEREUM,
             token_out=self.WETH_ETHEREUM,
         )
-        with pytest.raises(ValueError, match="Cannot swap wrapped native token to itself"):
+        with pytest.raises(ValueError, match="distinct"):
             sdk.build_swap_tx(quote, recipient=self.RECIPIENT)
 
     def test_native_eth_passthrough_unchanged(self):
@@ -602,7 +600,7 @@ class TestWethRouting:
         tx = sdk.build_swap_tx(quote, recipient=self.RECIPIENT)
         assert tx.value == 10**18, "Native ETH-in should set msg.value"
         cmds = self._extract_commands(tx.data)
-        assert cmds == [0x10], f"Native ETH should be single V4_SWAP, got {[hex(c) for c in cmds]}"
+        assert cmds == [0x10, 0x04], f"Native ETH needs a remainder refund sweep, got {[hex(c) for c in cmds]}"
 
     def test_native_eth_out_has_sweep(self):
         """ERC20 -> native ETH: commands = [V4_SWAP, SWEEP]."""

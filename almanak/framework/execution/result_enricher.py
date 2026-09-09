@@ -578,7 +578,10 @@ class ResultEnricher:
         """
 
         if not result.success:
-            logger.debug("Enrichment skipped: execution failed")
+            protocol = self._get_protocol(intent) or getattr(context, "protocol", None)
+            protocol = self._canonicalise_protocol(protocol, context)
+            self._retain_compiler_evidence(result, protocol, bundle_metadata)
+            logger.debug("Fill enrichment skipped: execution failed")
             return result
 
         intent_type = self._get_intent_type(intent)
@@ -618,6 +621,7 @@ class ResultEnricher:
         # base fields so extraction order remains stable.
 
         protocol = self._canonicalise_protocol(protocol, context)
+        self._retain_compiler_evidence(result, protocol, bundle_metadata)
 
         spec = self._merge_spec_with_overlay(intent_type, protocol)
 
@@ -720,6 +724,19 @@ class ResultEnricher:
 
         self._fill_v4_lp_open_current_tick_from_metadata(result, bundle_metadata)
 
+        self._log_enrichment_summary(result, spec, intent_type, protocol, context, parser)
+
+        return result
+
+    def _log_enrichment_summary(
+        self,
+        result: ExecutionResult,
+        spec: list[str],
+        intent_type: str,
+        protocol: str | None,
+        context: ExecutionContext,
+        parser: Any,
+    ) -> None:
         extracted_parts = []
         missing_fields = []
         for f in spec:
@@ -739,8 +756,6 @@ class ResultEnricher:
                 f"Enrichment: fields not extracted for {intent_type}: {', '.join(missing_fields)} "
                 f"(protocol={protocol}, parser={parser_label})"
             )
-
-        return result
 
     def _extract_offchain_prediction_fields(
         self,
@@ -2104,6 +2119,35 @@ class ResultEnricher:
         current = getattr(parser, "parse_receipt", None)
         if current is not None and getattr(current, "_is_cached_wrapper", False):
             parser.parse_receipt = current._original
+
+    @staticmethod
+    def _retain_compiler_evidence(result: Any, protocol: str | None, bundle_metadata: dict[str, Any] | None) -> None:
+        """Retain declared compiler artifacts without claiming execution validation.
+
+        Auditors must independently bind these inputs to broadcast transactions
+        and canonical receipts. A deep copy isolates the persisted artifact from
+        subsequent mutation of the compilation bundle.
+        """
+        from copy import deepcopy
+
+        from almanak.connectors._connector import CONNECTOR_REGISTRY
+
+        if not protocol or not bundle_metadata:
+            return
+        connector = CONNECTOR_REGISTRY.get(protocol)
+        if connector is None:
+            return
+        evidence = {
+            key: deepcopy(bundle_metadata[key]) for key in connector.execution_evidence_keys if key in bundle_metadata
+        }
+        if not evidence:
+            return
+        existing = result.extracted_data.get("compiler_evidence", {})
+        if not isinstance(existing, dict):
+            raise ValueError("Existing compiler evidence is not a mapping")
+        if any(key in existing and existing[key] != value for key, value in evidence.items()):
+            raise ValueError("Compiler evidence changed across enrichment of the same execution result")
+        result.extracted_data["compiler_evidence"] = {**existing, **evidence}
 
     def _build_parser_kwargs(self, protocol: str, chain: str) -> dict[str, Any]:
         """Build kwargs for ReceiptParserRegistry.get(protocol, **kwargs).

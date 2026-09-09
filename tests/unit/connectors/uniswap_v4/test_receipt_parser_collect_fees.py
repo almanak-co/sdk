@@ -238,3 +238,37 @@ def test_no_modify_liquidity_returns_none():
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+@pytest.mark.parametrize("token_id", [1, 1234567])
+def test_collect_retains_exact_nft_and_position_hash(token_id):
+    from eth_abi.packed import encode_packed
+    from web3 import Web3
+
+    receipt = _collect_fees_receipt()
+    receipt["logs"][0]["data"] = receipt["logs"][0]["data"][:-64] + _pad_uint(token_id)
+    data = _parser_without_lookup().extract_lp_close_data(receipt)
+    assert data is not None and data.position_id == str(token_id)
+    expected_hash = (
+        "0x"
+        + Web3.keccak(
+            encode_packed(
+                ["address", "int24", "int24", "bytes32"],
+                [POSITION_MANAGER, -60000, 60000, token_id.to_bytes(32, "big")],
+            )
+        ).hex()
+    )
+    assert data.position_hash == expected_hash
+    assert data.to_dict()["position_hash"] == expected_hash
+
+
+@pytest.mark.parametrize("fault", ["foreign_sender", "ambiguous_collect", "missing_salt"])
+def test_collect_rejects_unbound_nft_identity(fault):
+    receipt = _collect_fees_receipt()
+    if fault == "foreign_sender":
+        receipt["logs"][0]["topics"][2] = "0x" + "00" * 12 + WALLET[2:]
+    elif fault == "ambiguous_collect":
+        receipt["logs"].append(_modify_liquidity_log(liquidity_delta=0, tick_lower=-50000))
+    else:
+        receipt["logs"][0]["data"] = receipt["logs"][0]["data"][:-64]
+    assert _parser_without_lookup().extract_lp_close_data(receipt) is None

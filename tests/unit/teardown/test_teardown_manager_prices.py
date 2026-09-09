@@ -37,6 +37,7 @@ def _make_strategy(intents=None):
 
     positions = MagicMock(spec=TeardownPositionSummary)
     positions.positions = []
+    positions.positions = []
     positions.total_value_usd = Decimal("10000")
     positions.has_liquidation_risk = False
     positions.chains_involved = {"arbitrum"}
@@ -332,6 +333,7 @@ async def test_execute_intents_swap_price_hardstop_is_non_retryable():
     strategy = _make_strategy()
 
     positions = MagicMock(spec=TeardownPositionSummary)
+    positions.positions = []
     positions.total_value_usd = Decimal("10000")
 
     state = TeardownState(
@@ -432,6 +434,7 @@ async def test_execute_intents_known_broadcast_hash_never_retries_teardown(
     """A receipt-set failure after broadcast is terminal on teardown too."""
     strategy = _make_strategy()
     positions = MagicMock(spec=TeardownPositionSummary)
+    positions.positions = []
     positions.total_value_usd = Decimal("10000")
     state = TeardownState(
         teardown_id="td_receipt_reconciliation",
@@ -503,6 +506,7 @@ async def test_execute_intents_swap_hardstops_when_gate_attr_missing():
     strategy = _make_strategy()
 
     positions = MagicMock(spec=TeardownPositionSummary)
+    positions.positions = []
     positions.total_value_usd = Decimal("10000")
 
     state = TeardownState(

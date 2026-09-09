@@ -30,12 +30,17 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from almanak.connectors._strategy_base.slippage import (
     SlippagePrecisionError,
     compute_min_amount_out_from_bps,
     slippage_to_bps,
+)
+from almanak.connectors._strategy_base.v4_pool_abi import (
+    V4PoolKeyError,
+    resolve_v4_tick_spacing,
+    validate_v4_fee_field,
 )
 from almanak.connectors.uniswap_v4.hooks import HookFlags, compute_pool_id
 from almanak.connectors.uniswap_v4.sdk import (
@@ -105,7 +110,7 @@ class UniswapV4EstimatedPriceWithoutOptInError(UniswapV4FailLoudError):
     """
 
 
-# On-chain sqrtPrice is accurate; a 5% floor covers normal price movement.
+# The sizing reserve reduces minted liquidity; requested token amounts remain hard caps.
 ON_CHAIN_MIN_SLIPPAGE = Decimal("0.05")
 # Estimated sqrtPrice can diverge from pool state, so a wider buffer avoids
 # PoolManager MaximumAmountExceeded reverts; tight-slippage users opt in explicitly.
@@ -203,6 +208,7 @@ class UniswapV4Adapter:
         config: UniswapV4Config | None = None,
         token_resolver: TokenResolver | None = None,
         gateway_client: GatewayClient | None = None,
+        venue_verification_gateway_factory: Any = None,
     ) -> None:
         if config is not None:
             self.chain = config.chain.lower()
@@ -231,6 +237,7 @@ class UniswapV4Adapter:
         self.addresses = UNISWAP_V4[self.chain]
         self._sdk = UniswapV4SDK(chain=self.chain, rpc_url=self.rpc_url, gateway_client=self._gateway_client)
         self._token_resolver = token_resolver
+        self._venue_verification_gateway_factory = venue_verification_gateway_factory
 
     def get_position_liquidity(self, token_id: int, rpc_url: str | None = None) -> int:
         """Query on-chain liquidity for a V4 LP position.
@@ -278,6 +285,7 @@ class UniswapV4Adapter:
         config_max_price_impact: Decimal | None = None,
         offline_mode: bool = False,
         using_placeholders: bool = False,
+        swap_params: dict[str, Any] | None = None,
     ) -> SwapResult:
         """Build swap transactions for exact input amount.
 
@@ -315,10 +323,37 @@ class UniswapV4Adapter:
                 ``success=False`` returns above are the *retryable* failures.
         """
         slippage_bps = self.default_slippage_bps if slippage_bps is None else slippage_bps
-        fee_tier = fee_tier or self.default_fee_tier
+        fee_tier = self.default_fee_tier if fee_tier is None else fee_tier
 
-        token_in_addr, token_in_dec = self._resolve_token(token_in)
-        token_out_addr, token_out_dec = self._resolve_token(token_out)
+        token_in_addr, token_in_dec = self._resolve_token(token_in, for_v4_pool=True)
+        token_out_addr, token_out_dec = self._resolve_token(token_out, for_v4_pool=True)
+        if not self.wallet_address:
+            raise ValueError("wallet_address must be set before building swap transactions")
+        from .routing import resolve_swap_selection
+
+        lookup = None
+        if self._gateway_client is not None:
+            from .gateway_pool_key_client import make_sync_pool_key_lookup
+
+            gateway_lookup = make_sync_pool_key_lookup(self._gateway_client)
+
+            def lookup(pool_id: str) -> PoolKey | None:
+                return gateway_lookup(pool_id, self.chain)
+
+        selection = resolve_swap_selection(
+            swap_params,
+            token_in=token_in_addr,
+            token_out=token_out_addr,
+            default_fee=fee_tier,
+            lookup=lookup,
+        )
+        fee_tier = selection.key.fee
+        verified = None
+        hook_evidence = None
+        if not offline_mode:
+            verified, hook_evidence = self._verify_swap_selection(selection)
+        elif selection.key.hooks != NATIVE_CURRENCY:
+            raise ValueError("Hooked swap permission discovery requires verified operation-specific evidence")
 
         # Human-readable amount to smallest units.
         amount_in_raw = int(amount_in * Decimal(10**token_in_dec))
@@ -334,6 +369,9 @@ class UniswapV4Adapter:
             token_out_dec=token_out_dec,
             price_ratio=price_ratio,
             offline_mode=offline_mode,
+            pool_key=selection.key,
+            hook_data=selection.hook_data or b"",
+            block_number=verified.evidence.block_number if verified is not None else None,
         )
         if quote is None:
             return SwapResult(
@@ -420,7 +458,63 @@ class UniswapV4Adapter:
             amount_out_quoted=quote.amount_out,
             gas_estimate=sum(tx.gas_estimate for tx in transactions),
             quote_source=quote_source,
+            pool_key=selection.key,
+            verified_venue=verified,
+            hook_evidence=hook_evidence,
+            token_in=token_in_addr,
+            token_out=token_out_addr,
+            hook_data=selection.hook_data or b"",
         )
+
+    def _observation_gateway(self) -> Any:
+        from almanak.framework.venues import GatewayClientVenueVerificationGateway
+
+        factory = self._venue_verification_gateway_factory
+        if callable(factory):
+            return factory()
+        if self._gateway_client is None:
+            raise ValueError("V4 observation requires gateway transport")
+        return GatewayClientVenueVerificationGateway(self._gateway_client)
+
+    def _can_observe(self) -> bool:
+        return callable(self._venue_verification_gateway_factory) or self._gateway_client is not None
+
+    def _verify_swap_selection(
+        self, selection: Any, operation: str = "swap_exact_in", *, block_number: int | None = None
+    ) -> tuple[Any, Any]:
+        from almanak.connectors._strategy_base.venue_verifier_registry import VenueVerifierRegistry
+        from almanak.framework.primitives.types import Primitive
+        from almanak.framework.venues import VenueBindingFailure
+
+        from .behavior import admit_hook
+        from .venue_verifier import verification_request
+
+        gateway = self._observation_gateway()
+        request = verification_request(
+            self.chain,
+            selection.key,
+            Primitive.SWAP if operation == "swap_exact_in" else Primitive.LP,
+        )
+        registry = VenueVerifierRegistry()
+        verifier = registry.load_class("uniswap_v4")()
+        verification = (
+            verifier.verify_venue(request, gateway)
+            if block_number is None
+            else verifier.verify_venue(request, gateway, block_number=block_number)
+        )
+        verified = registry.validate_result(request, verification)
+        if isinstance(verified, VenueBindingFailure):
+            raise ValueError(f"V4 venue verification refused: {verified.reason_code}: {verified.detail}")
+        evidence = admit_hook(
+            chain=self.chain,
+            key=selection.key,
+            operation=operation,
+            route="universal_router_eoa" if operation == "swap_exact_in" else "position_manager_eoa",
+            hook_data=selection.hook_data,
+            gateway=gateway,
+            block_number=verified.evidence.block_number,
+        )
+        return verified, evidence
 
     def _quote_for_swap(
         self,
@@ -433,6 +527,9 @@ class UniswapV4Adapter:
         token_out_dec: int,
         price_ratio: Decimal | None,
         offline_mode: bool,
+        pool_key: PoolKey | None = None,
+        hook_data: bytes = b"",
+        block_number: int | None = None,
     ) -> tuple[SwapQuote | None, str]:
         """Select the quote backing ``amount_out_minimum`` (VIB-2058 C1/C3).
 
@@ -458,8 +555,13 @@ class UniswapV4Adapter:
         }
 
         if not connected:
-            # Offline with no gateway/RPC: the oracle-derived local estimate is the fallback.
-            return self._sdk.get_quote_local(**local_kwargs), "local_estimate"
+            if not offline_mode:
+                return None, "unavailable"
+            from dataclasses import replace
+
+            return replace(
+                self._sdk.get_quote_local(**local_kwargs), pool_key=pool_key, hook_data=hook_data
+            ), "local_estimate"
 
         try:
             quote = self._sdk.get_quote(
@@ -469,6 +571,15 @@ class UniswapV4Adapter:
                 fee_tier=fee_tier,
                 token_in_decimals=token_in_dec,
                 token_out_decimals=token_out_dec,
+                pool_key=pool_key,
+                hook_data=hook_data,
+                block_number=block_number,
+                from_address=self.wallet_address or None,
+                quote_gateway=(
+                    self._venue_verification_gateway_factory()
+                    if callable(self._venue_verification_gateway_factory)
+                    else None
+                ),
             )
             return quote, "onchain_quoter"
         except Exception as exc:
@@ -478,7 +589,11 @@ class UniswapV4Adapter:
                     "V4 executable quote failed in offline-mode compile; using local estimate: %s",
                     exc,
                 )
-                return self._sdk.get_quote_local(**local_kwargs), "local_estimate"
+                from dataclasses import replace
+
+                return replace(
+                    self._sdk.get_quote_local(**local_kwargs), pool_key=pool_key, hook_data=hook_data
+                ), "local_estimate"
             # Connected quote failure fails closed; never substitute a theoretical estimate.
             logger.warning(
                 "V4 executable quote failed (gateway/RPC connected, online compile); failing closed: %s",
@@ -631,6 +746,7 @@ class UniswapV4Adapter:
             config_max_price_impact=config_max_price_impact,
             offline_mode=permission_discovery or using_placeholders,
             using_placeholders=using_placeholders,
+            swap_params=intent.swap_params,
         )
 
         if not result.success:
@@ -643,36 +759,34 @@ class UniswapV4Adapter:
                 },
             )
 
-        from_addr, from_dec = self._resolve_token(intent.from_token)
-        to_addr, to_dec = self._resolve_token(intent.to_token)
-
-        def _check_native(symbol: str) -> bool:
-            """Check if token is native using token resolver.
-
-            Uses resolve_for_swap() to match _resolve_token() behavior — ensures
-            native tokens like ETH are wrapped (ETH->WETH) so is_native=False,
-            preventing the orchestrator from incorrectly skipping balance checks.
-            """
-            if self._token_resolver:
-                try:
-                    resolved = self._token_resolver.resolve_for_swap(symbol, self.chain)
-                    return resolved.is_native
-                except Exception as e:
-                    logger.debug("Could not resolve is_native for %s: %s", symbol, e)
-            return False
+        from_addr, from_dec = self._resolve_token(intent.from_token, for_v4_pool=True)
+        to_addr, to_dec = self._resolve_token(intent.to_token, for_v4_pool=True)
 
         from_token_dict = {
             "symbol": intent.from_token,
             "address": from_addr,
             "decimals": from_dec,
-            "is_native": _check_native(intent.from_token),
+            "is_native": from_addr.lower() == NATIVE_CURRENCY,
         }
         to_token_dict = {
             "symbol": intent.to_token,
             "address": to_addr,
             "decimals": to_dec,
-            "is_native": _check_native(intent.to_token),
+            "is_native": to_addr.lower() == NATIVE_CURRENCY,
         }
+        swap_token_meta = build_swap_token_meta(from_token_dict, to_token_dict, chain=self.chain)
+        # Native V4 settlement has no ERC-20 Transfer event to recover identity from.
+        native_tokens: tuple[tuple[Literal["token_in", "token_out"], dict[str, Any]], ...] = (
+            ("token_in", from_token_dict),
+            ("token_out", to_token_dict),
+        )
+        for slot, token in native_tokens:
+            if token["is_native"]:
+                swap_token_meta[slot] = {
+                    "address": token["address"],
+                    "symbol": token["symbol"],
+                    "decimals": token["decimals"],
+                }
 
         # Pre-slippage human-readable quote for realized-slippage computation.
         expected_output_human: str | None = None
@@ -683,7 +797,7 @@ class UniswapV4Adapter:
             "intent_id": intent.intent_id,
             "from_token": from_token_dict,
             "to_token": to_token_dict,
-            "swap_token_meta": build_swap_token_meta(from_token_dict, to_token_dict, chain=self.chain),
+            "swap_token_meta": swap_token_meta,
             "amount_in": str(result.amount_in),
             "amount_out_minimum": str(result.amount_out_minimum),
             "slippage_bps": slippage_bps,
@@ -695,6 +809,21 @@ class UniswapV4Adapter:
             # Whether minOut came from an executable quote or an offline estimate.
             "quote_source": result.quote_source,
         }
+        if result.pool_key is not None:
+            metadata["pool_key"] = result.pool_key.to_wire()
+            metadata["pool_id"] = result.pool_key.pool_id
+        if result.verified_venue is not None:
+            metadata["venue_binding_hash"] = result.verified_venue.binding.binding_hash
+            metadata["venue_binding"] = result.verified_venue.binding.to_preimage_wire()
+            metadata["venue_verification_block"] = result.verified_venue.evidence.block_number
+            from .operation import bind_swap_operation
+
+            metadata["v4_operation"] = bind_swap_operation(
+                result=result,
+                chain=self.chain,
+                wallet=self.wallet_address,
+                slippage_bps=slippage_bps,
+            )
         if expected_output_human is not None:
             metadata["expected_output_human"] = expected_output_human
 
@@ -704,9 +833,28 @@ class UniswapV4Adapter:
             metadata=metadata,
         )
 
+    def _select_lp_key_and_tokens(
+        self, intent: LPOpenIntent, params: dict[str, Any]
+    ) -> tuple[PoolKey | None, str, str, int]:
+        selected = PoolKey.from_wire(params["pool_key"]) if "pool_key" in params else None
+        if "/" in intent.pool:
+            token0_symbol, token1_symbol, fee = self._parse_pool(intent.pool)
+        else:
+            if selected is None:
+                if self._gateway_client is None:
+                    raise ValueError("LP pool ID resolution requires a gateway or full pool_key")
+                from .gateway_pool_key_client import make_sync_pool_key_lookup
+
+                selected = make_sync_pool_key_lookup(self._gateway_client)(intent.pool, self.chain)
+            if selected is None or selected.pool_id != intent.pool.lower():
+                raise ValueError("LP PoolKey does not match the requested pool ID")
+            token0_symbol, token1_symbol, fee = selected.currency0, selected.currency1, selected.fee
+        return selected, token0_symbol, token1_symbol, fee
+
     def _prepare_lp_open_pool(self, intent: LPOpenIntent) -> _LPOpenPool:
         """Resolve and normalize the intent into the canonical V4 pool order."""
-        token0_symbol, token1_symbol, fee = self._parse_pool(intent.pool)
+        params = intent.protocol_params or {}
+        selected, token0_symbol, token1_symbol, fee = self._select_lp_key_and_tokens(intent, params)
         token0_addr, token0_dec = self._resolve_token(token0_symbol, for_v4_pool=True)
         token1_addr, token1_dec = self._resolve_token(token1_symbol, for_v4_pool=True)
 
@@ -730,23 +878,27 @@ class UniswapV4Adapter:
         tick_lower = self._sdk.price_to_tick(range_lower, token0_dec, token1_dec)
         tick_upper = self._sdk.price_to_tick(range_upper, token0_dec, token1_dec)
 
-        tick_spacing = intent.protocol_params.get("tick_spacing") if intent.protocol_params else None
-        if tick_spacing is None:
-            from almanak.connectors.uniswap_v4.sdk import TICK_SPACING
-
-            tick_spacing = TICK_SPACING.get(fee, 60)
+        tick_spacing = params.get("tick_spacing", selected.tick_spacing if selected is not None else None)
+        try:
+            validate_v4_fee_field(fee)
+            tick_spacing = resolve_v4_tick_spacing(fee, tick_spacing)
+        except V4PoolKeyError as exc:
+            # A "T0/T1/FEE" pool string cannot express tickSpacing, so a fee with
+            # no canonical pairing is an under-specified pool, not a defaulted one.
+            raise UniswapV4UnsupportedPoolError(str(exc)) from exc
         tick_lower = (tick_lower // tick_spacing) * tick_spacing
         tick_upper = (tick_upper // tick_spacing) * tick_spacing
         if tick_lower == tick_upper:
             tick_upper += tick_spacing
 
-        hooks = NATIVE_CURRENCY
+        hooks = selected.hooks if selected is not None else NATIVE_CURRENCY
         hook_data = b""
         if intent.protocol_params:
-            hooks = intent.protocol_params.get("hooks", NATIVE_CURRENCY)
-            hook_data_hex = intent.protocol_params.get("hook_data", "")
-            if hook_data_hex:
-                hook_data = bytes.fromhex(hook_data_hex.replace("0x", ""))
+            hooks = intent.protocol_params.get("hooks", hooks)
+            hook_data_hex = intent.protocol_params.get("hook_data", "0x")
+            if not isinstance(hook_data_hex, str) or not hook_data_hex.startswith("0x"):
+                raise ValueError("LP hook_data must be 0x-prefixed hex bytes")
+            hook_data = bytes.fromhex(hook_data_hex[2:])
 
         warnings: list[str] = []
         if hooks != NATIVE_CURRENCY:
@@ -758,7 +910,19 @@ class UniswapV4Adapter:
                     "This may cause the transaction to revert if the hook requires data."
                 )
 
-        pool_key = self._sdk.compute_pool_key(token0_addr, token1_addr, fee, tick_spacing, hooks)
+        try:
+            pool_key = self._sdk.compute_pool_key(token0_addr, token1_addr, fee, tick_spacing, hooks)
+        except ValueError as exc:
+            raise UniswapV4UnsupportedPoolError(str(exc)) from exc
+        if selected is not None and pool_key != selected:
+            raise ValueError("LP pool shorthand conflicts with the explicit PoolKey")
+        self._validate_lp_pool_pins(pool_key, params)
+        if hooks != NATIVE_CURRENCY and "hook_data" not in params:
+            raise UniswapV4UnsupportedPoolError(
+                "LP hook_data is absent; explicit empty data requires profile admission"
+            )
+        if hooks != NATIVE_CURRENCY and not self._can_observe():
+            raise UniswapV4UnsupportedPoolError("Hooked LP entry requires gateway-verified operation evidence")
         self._reject_unsupported_v0_pool(pool_key)
         return _LPOpenPool(
             token0_symbol=token0_symbol,
@@ -781,6 +945,30 @@ class UniswapV4Adapter:
             warnings=warnings,
         )
 
+    @staticmethod
+    def _validate_lp_pool_pins(key: PoolKey, params: dict[str, Any]) -> None:
+        if "pool_key" in params and PoolKey.from_wire(params["pool_key"]) != key:
+            raise ValueError("LP pool_key conflicts with the resolved PoolKey")
+        for name, expected in (("pool_id", key.pool_id), ("hooks", key.hooks)):
+            if name in params and (not isinstance(params[name], str) or params[name].lower() != expected):
+                raise ValueError(f"LP {name} conflicts with the resolved PoolKey")
+        for name, expected_number in (("fee_tier", key.fee), ("tick_spacing", key.tick_spacing)):
+            if name in params and (type(params[name]) is not int or params[name] != expected_number):
+                raise ValueError(f"LP {name} conflicts with the resolved PoolKey")
+
+    def _validate_lp_pool_hint(self, key: PoolKey, pool: str | None) -> None:
+        if not pool:
+            return
+        if "/" not in pool:
+            if pool.lower() != key.pool_id:
+                raise ValueError("LP pool does not match the owned V4 NFT")
+            return
+        symbol0, symbol1, fee = self._parse_pool(pool)
+        token0, _ = self._resolve_token(symbol0, for_v4_pool=True)
+        token1, _ = self._resolve_token(symbol1, for_v4_pool=True)
+        if sorted((token0.lower(), token1.lower())) != [key.currency0, key.currency1] or fee != key.fee:
+            raise ValueError("LP pool shorthand does not match the owned V4 NFT")
+
     def _resolve_lp_open_price(
         self,
         intent: LPOpenIntent,
@@ -792,7 +980,7 @@ class UniswapV4Adapter:
         used_onchain_price = False
         price_source = "on_chain"
 
-        if self.rpc_url:
+        if self.rpc_url or self._gateway_client is not None:
             sqrt_price_x96 = self._sdk.get_pool_sqrt_price(pool.pool_key, rpc_url=self.rpc_url)
             if sqrt_price_x96:
                 used_onchain_price = True
@@ -843,7 +1031,7 @@ class UniswapV4Adapter:
         pool: _LPOpenPool,
         price: _LPOpenPrice,
     ) -> _LPOpenLiquidity:
-        """Apply the slippage policy while keeping requested amounts as hard caps."""
+        """Reserve token budget for price movement while preserving requested spend caps."""
         user_slippage = getattr(intent, "max_slippage", None)
         if user_slippage is None:
             user_slippage = Decimal("0.005")
@@ -864,8 +1052,9 @@ class UniswapV4Adapter:
             effective_slippage = max(user_slippage, ESTIMATED_PRICE_MIN_SLIPPAGE)
 
         if effective_slippage > user_slippage:
-            logger.warning(
-                "V4 LP_OPEN: widening user slippage %s%% to %s%% (price_source=%s)",
+            logger.info(
+                "V4 LP_OPEN: requested tolerance=%s%%, liquidity sizing reserve=%s%% "
+                "(price_source=%s); requested token amounts remain hard spend caps",
                 user_slippage * 100,
                 effective_slippage * 100,
                 price.source,
@@ -965,6 +1154,7 @@ class UniswapV4Adapter:
             "compile_time_current_tick": compile_time_current_tick,
             "compile_time_current_tick_source": "onchain" if price.used_onchain_price else "estimated",
             "pool_id": pool.pool_id,
+            "pool_key": pool.pool_key.to_wire(),
             "protocol": (getattr(intent, "protocol", None) or "uniswap_v4"),
             "registry_handle": getattr(intent, "registry_handle", None),
         }
@@ -1010,7 +1200,32 @@ class UniswapV4Adapter:
 
         try:
             pool = self._prepare_lp_open_pool(intent)
-            price = self._resolve_lp_open_price(intent, pool, price_oracle)
+            verified = None
+            hook_evidence = None
+            exit_hook_evidence = None
+            if self._can_observe():
+                from .routing import SwapSelection
+
+                verified, hook_evidence = self._verify_swap_selection(
+                    SwapSelection(pool.pool_key, pool.hook_data), "lp_open"
+                )
+                from .behavior import admit_hook
+
+                exit_hook_evidence = admit_hook(
+                    chain=self.chain,
+                    key=pool.pool_key,
+                    operation="lp_close",
+                    route="position_manager_eoa",
+                    hook_data=pool.hook_data,
+                    gateway=self._observation_gateway(),
+                    block_number=verified.evidence.block_number,
+                )
+                measured = next(
+                    fact.value for fact in verified.evidence.observed_facts if fact.name == "sqrt_price_x96"
+                )
+                price = _LPOpenPrice(int(measured), True, "on_chain")
+            else:
+                price = self._resolve_lp_open_price(intent, pool, price_oracle)
             liquidity = self._compute_lp_open_liquidity(intent, pool, price)
             if liquidity.liquidity <= 0:
                 return ActionBundle(
@@ -1019,7 +1234,21 @@ class UniswapV4Adapter:
                     metadata={"error": "Computed liquidity is zero — check amounts and price range"},
                 )
             transactions = self._build_lp_open_transactions(pool, liquidity)
-            return self._build_lp_open_bundle(intent, pool, price, liquidity, transactions)
+            bundle = self._build_lp_open_bundle(intent, pool, price, liquidity, transactions)
+            if verified is not None:
+                from .operation import bind_lp_operation
+
+                bind_lp_operation(
+                    bundle,
+                    key=pool.pool_key,
+                    verified=verified,
+                    hook_evidence=hook_evidence,
+                    operation="lp_open",
+                    wallet=self.wallet_address,
+                    hook_data=pool.hook_data,
+                    exit_hook_evidence=exit_hook_evidence,
+                )
+            return bundle
 
         except SlippagePrecisionError:
             raise
@@ -1077,16 +1306,50 @@ class UniswapV4Adapter:
                 metadata={"error": f"Invalid position ID: {intent.position_id}"},
             )
 
-        hook_data = b""
-        amount0_min = 0
-        amount1_min = 0
         protocol_params = getattr(intent, "protocol_params", None) or {}
-        if protocol_params:
-            hook_data_hex = protocol_params.get("hook_data", "")
-            if hook_data_hex:
-                hook_data = bytes.fromhex(hook_data_hex.replace("0x", ""))
-            amount0_min = int(protocol_params.get("amount0_min", 0))
-            amount1_min = int(protocol_params.get("amount1_min", 0))
+        raw_data = protocol_params.get("hook_data", "0x")
+        if not isinstance(raw_data, str) or not raw_data.startswith("0x"):
+            raise ValueError("V4 withdrawal hook_data must be 0x-prefixed hex bytes")
+        hook_data = bytes.fromhex(raw_data[2:])
+        position = None
+        verified = None
+        hook_evidence = None
+        if self._can_observe():
+            from .position import observe_position, withdrawal_minima
+            from .routing import SwapSelection
+
+            position = observe_position(
+                self._observation_gateway(), chain=self.chain, token_id=token_id, wallet=self.wallet_address
+            )
+            self._validate_lp_pool_pins(position.key, protocol_params)
+            self._validate_lp_pool_hint(position.key, intent.pool)
+            if (currency0.lower(), currency1.lower()) != (position.key.currency0, position.key.currency1):
+                raise ValueError("Supplied withdrawal currencies do not match the owned V4 NFT")
+            if not 0 < liquidity <= position.liquidity:
+                raise ValueError("Withdrawal liquidity is not bounded by the owned V4 NFT")
+            if position.key.hooks != NATIVE_CURRENCY and "hook_data" not in protocol_params:
+                raise ValueError("Withdrawal hook_data is absent")
+            verified, hook_evidence = self._verify_swap_selection(
+                SwapSelection(position.key, hook_data), "lp_close", block_number=position.block_number
+            )
+            if verified.evidence.block_hash != position.block_hash:
+                raise ValueError("V4 withdrawal position observation was reorganized during venue verification")
+        supplied_minima = "amount0_min" in protocol_params or "amount1_min" in protocol_params
+        if supplied_minima:
+            if not {"amount0_min", "amount1_min"}.issubset(protocol_params):
+                raise ValueError("Both withdrawal minima must be explicit; an omitted leg is not measured zero")
+            amount0_min, amount1_min = int(protocol_params["amount0_min"]), int(protocol_params["amount1_min"])
+        elif position is not None:
+            tolerance = getattr(intent, "max_slippage", None)
+            amount0_min, amount1_min = withdrawal_minima(
+                position,
+                liquidity,
+                9900 if tolerance is None else slippage_to_bps(tolerance),
+            )
+        else:
+            raise ValueError("V4 withdrawal needs measured position state or explicit minima for offline compilation")
+        if any(value < 0 or value >= 1 << 128 for value in (amount0_min, amount1_min)):
+            raise ValueError("V4 withdrawal minima must fit uint128")
 
         decrease_params = LPDecreaseParams(
             token_id=token_id,
@@ -1109,13 +1372,17 @@ class UniswapV4Adapter:
 
         position_manager = self.addresses["position_manager"]
 
-        return ActionBundle(
+        bundle = ActionBundle(
             intent_type=IntentType.LP_CLOSE.value,
             transactions=[tx_to_dict(close_tx)],
             metadata={
                 "intent_id": intent.intent_id,
                 "position_id": str(token_id),
                 "liquidity_removed": str(liquidity),
+                "close_all": int(protocol_params.get("liquidity", 0)) == 0,
+                "amount0_min": str(amount0_min),
+                "amount1_min": str(amount1_min),
+                "withdrawal_bounds_source": "explicit" if supplied_minima else "measured_principal",
                 "chain": self.chain,
                 "position_manager": position_manager,
                 "pool_manager": self.addresses["pool_manager"],
@@ -1132,12 +1399,30 @@ class UniswapV4Adapter:
             },
         )
 
+        if verified is not None:
+            from .operation import bind_lp_operation
+
+            assert position is not None
+            bind_lp_operation(
+                bundle,
+                key=position.key,
+                verified=verified,
+                hook_evidence=hook_evidence,
+                operation="lp_close",
+                wallet=self.wallet_address,
+                hook_data=hook_data,
+            )
+        return bundle
+
     def compile_collect_fees_intent(
         self,
         position_id: int,
         currency0: str,
         currency1: str,
-        hook_data: bytes = b"",
+        hook_data: bytes | None = None,
+        *,
+        pool: str | None = None,
+        protocol_params: dict[str, Any] | None = None,
     ) -> ActionBundle:
         """Compile a collect-fees operation for a V4 LP position.
 
@@ -1156,6 +1441,30 @@ class UniswapV4Adapter:
         if not self.wallet_address:
             raise ValueError("wallet_address must be set before building collect fees transactions.")
 
+        verified = None
+        hook_evidence = None
+        position = None
+        if self._can_observe():
+            from .position import observe_position
+            from .routing import SwapSelection
+
+            position = observe_position(
+                self._observation_gateway(), chain=self.chain, token_id=position_id, wallet=self.wallet_address
+            )
+            self._validate_lp_pool_pins(position.key, protocol_params or {})
+            self._validate_lp_pool_hint(position.key, pool)
+            if (currency0.lower(), currency1.lower()) != (position.key.currency0, position.key.currency1):
+                raise ValueError("Collection currencies do not match the owned V4 NFT")
+            if position.key.hooks != NATIVE_CURRENCY and hook_data is None:
+                raise ValueError("Collection hook_data is absent")
+            hook_data = b"" if hook_data is None else hook_data
+            verified, hook_evidence = self._verify_swap_selection(
+                SwapSelection(position.key, hook_data), "lp_collect_fees", block_number=position.block_number
+            )
+            if verified.evidence.block_hash != position.block_hash:
+                raise ValueError("V4 collection position observation was reorganized during venue verification")
+
+        hook_data = b"" if hook_data is None else hook_data
         collect_tx = self._sdk.build_collect_fees_tx(
             token_id=position_id,
             currency0=currency0,
@@ -1165,7 +1474,7 @@ class UniswapV4Adapter:
             deadline=deadline_from_now(self.default_deadline_seconds),
         )
 
-        return ActionBundle(
+        bundle = ActionBundle(
             intent_type=IntentType.LP_COLLECT_FEES.value,
             transactions=[tx_to_dict(collect_tx)],
             metadata={
@@ -1177,32 +1486,29 @@ class UniswapV4Adapter:
             },
         )
 
+        if verified is not None:
+            from .operation import bind_lp_operation
+
+            assert position is not None
+            bind_lp_operation(
+                bundle,
+                key=position.key,
+                verified=verified,
+                hook_evidence=hook_evidence,
+                operation="lp_collect_fees",
+                wallet=self.wallet_address,
+                hook_data=hook_data,
+            )
+        return bundle
+
     @staticmethod
     def _reject_unsupported_v0_pool(pool_key: Any) -> None:
-        """Fail-loud guard for unsupported V4 pool shapes.
-
-        Rejects:
-        - hooks != 0x0000…0000 — VIB-4485 (P-V1-D) will lift this.
-
-        Native-ETH currency0 (currency0 == 0x0000…0000) is NO LONGER rejected:
-        VIB-4483 (P-V1-B) lifted that guard. Native-ETH V4 pools are supported —
-        the SDK threads the native leg as ``msg.value`` and the runner stamps the
-        post-mint native deposit amount onto ``LPOpenData`` via the gateway
-        ``QueryV4PositionState`` read.
-
-        Does NOT validate salt: per VIB-4426 §Q7, salt = bytes32(tokenId) is the
-        canonical PositionManager._mint path and is always non-zero for a minted
-        position. Rejecting non-zero salt would break every real LP open.
-        """
-        hooks_norm = pool_key.hooks.lower() if isinstance(pool_key.hooks, str) else pool_key.hooks
-        if hooks_norm != NATIVE_CURRENCY:
+        """Reject LP callbacks until an operation profile covers their behavior."""
+        if int(pool_key.hooks, 16) & 0x0C02:
             raise UniswapV4UnsupportedPoolError(
-                f"Uniswap V4 pool has hooks={pool_key.hooks} but hook support is not in V0 scope. "
-                "V0 (VIB-4426) supports only hookless ERC20-ERC20 pools. "
-                "Hook support is tracked by VIB-4485 (P-V1-D)."
+                f"Uniswap V4 pool has hooks={pool_key.hooks} with LP entry callbacks; "
+                "no reviewed LP operation profile admits these callbacks."
             )
-        # Native currency0 is supported; the native leg travels as msg.value and
-        # is measured post-mint, not from the receipt.
 
     @staticmethod
     def _parse_pool(pool: str) -> tuple[str, str, int]:
@@ -1228,7 +1534,7 @@ class UniswapV4Adapter:
             Tuple of (address, decimals).
         """
         # V4 uses address(0) for the native currency; the symbol set is per-chain.
-        if for_v4_pool and token.upper() in native_symbols_for(self.chain):
+        if for_v4_pool and (token.upper() in native_symbols_for(self.chain) or token.lower() == NATIVE_CURRENCY):
             return NATIVE_CURRENCY, ChainRegistry.resolve(self.chain).native.decimals
 
         # Never assume 18 decimals for address-form tokens.
@@ -1267,6 +1573,12 @@ class SwapResult:
     error: str | None = None
     # Whether minOut came from an executable quoter, an offline estimate, or is unstamped.
     quote_source: str = ""
+    pool_key: PoolKey | None = None
+    verified_venue: Any = None
+    hook_evidence: Any = None
+    token_in: str = ""
+    token_out: str = ""
+    hook_data: bytes = b""
 
 
 def tx_to_dict(tx: SwapTransaction) -> dict[str, Any]:

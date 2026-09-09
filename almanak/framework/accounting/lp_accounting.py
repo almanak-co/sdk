@@ -561,7 +561,7 @@ def _extract_lp_amounts(
 
 
 def _lp_position_hash(intent_type_str: str, lp_data: Any) -> str | None:
-    if intent_type_str != "LP_OPEN" or lp_data is None:
+    if intent_type_str not in {"LP_OPEN", "LP_CLOSE"} or lp_data is None:
         return None
     return getattr(lp_data, "position_hash", None)
 

@@ -345,6 +345,7 @@ def test_build_multi_chain_providers_uses_fallback_for_missing_wallet_key(
     runtime_config = SimpleNamespace(
         execution_address="fallback-wallet",
         max_gas_price_gwei=50,
+        simulation_enabled=False,
         rpc_urls={"arbitrum": "rpc"},
     )
 
@@ -362,6 +363,7 @@ def test_build_multi_chain_providers_uses_fallback_for_missing_wallet_key(
     assert built.ohlcv_provider == "ohlcv"
     assert factories.balance_provider.call_args.kwargs["wallet_address"] == "fallback-wallet"
     assert factories.multi_chain_orchestrator.from_gateway.call_args.kwargs["wallet_address"] == "fallback-wallet"
+    assert factories.multi_chain_orchestrator.from_gateway.call_args.kwargs["simulation_enabled"] is False
     assert multi_balance_factory.call_args.kwargs["wallet_address"] == "fallback-wallet"
     assert not hasattr(strategy, "set_multi_chain_providers")
 

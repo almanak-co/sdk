@@ -40,10 +40,13 @@ from dataclasses import dataclass
 from web3 import Web3
 
 from almanak.connectors._strategy_base.base import HexDecoder
-from almanak.connectors._strategy_base.v4_pool_abi import compute_v4_pool_id, encode_get_slot0
+from almanak.connectors._strategy_base.v4_pool_abi import (
+    compute_v4_pool_id,
+    encode_get_slot0,
+    resolve_v4_tick_spacing,
+)
 from almanak.connectors.uniswap_v4.sdk import (
     NATIVE_CURRENCY,
-    TICK_SPACING,
     PoolKey,
 )
 
@@ -590,8 +593,7 @@ def discover_pool(
     Returns:
         PoolDiscoveryResult with pool key, ID, and hook capabilities.
     """
-    if tick_spacing is None:
-        tick_spacing = TICK_SPACING.get(fee, 60)
+    tick_spacing = resolve_v4_tick_spacing(fee, tick_spacing)
 
     pool_key = PoolKey(
         currency0=token0,

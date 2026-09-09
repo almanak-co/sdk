@@ -1,0 +1,279 @@
+{
+  "compiler": "0.8.26",
+  "optimizer": {
+    "enabled": true,
+    "runs": 200
+  },
+  "evmVersion": "cancun",
+  "source_sha256": "31d6f6b43b7043274598cc46f2e4d312ce7e8fb62759fe316c5cf18025a9d25c",
+  "abi": [
+    {
+      "inputs": [
+        {
+          "internalType": "address",
+          "name": "manager",
+          "type": "address"
+        },
+        {
+          "internalType": "address",
+          "name": "authorizedOwner",
+          "type": "address"
+        },
+        {
+          "internalType": "bool",
+          "name": "overrideMode",
+          "type": "bool"
+        }
+      ],
+      "stateMutability": "nonpayable",
+      "type": "constructor"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "address",
+          "name": "",
+          "type": "address"
+        },
+        {
+          "components": [
+            {
+              "internalType": "address",
+              "name": "currency0",
+              "type": "address"
+            },
+            {
+              "internalType": "address",
+              "name": "currency1",
+              "type": "address"
+            },
+            {
+              "internalType": "uint24",
+              "name": "fee",
+              "type": "uint24"
+            },
+            {
+              "internalType": "int24",
+              "name": "tickSpacing",
+              "type": "int24"
+            },
+            {
+              "internalType": "address",
+              "name": "hooks",
+              "type": "address"
+            }
+          ],
+          "internalType": "struct PoolKey",
+          "name": "key",
+          "type": "tuple"
+        },
+        {
+          "internalType": "uint160",
+          "name": "",
+          "type": "uint160"
+        },
+        {
+          "internalType": "int24",
+          "name": "",
+          "type": "int24"
+        }
+      ],
+      "name": "afterInitialize",
+      "outputs": [
+        {
+          "internalType": "bytes4",
+          "name": "",
+          "type": "bytes4"
+        }
+      ],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "address",
+          "name": "",
+          "type": "address"
+        },
+        {
+          "components": [
+            {
+              "internalType": "address",
+              "name": "currency0",
+              "type": "address"
+            },
+            {
+              "internalType": "address",
+              "name": "currency1",
+              "type": "address"
+            },
+            {
+              "internalType": "uint24",
+              "name": "fee",
+              "type": "uint24"
+            },
+            {
+              "internalType": "int24",
+              "name": "tickSpacing",
+              "type": "int24"
+            },
+            {
+              "internalType": "address",
+              "name": "hooks",
+              "type": "address"
+            }
+          ],
+          "internalType": "struct PoolKey",
+          "name": "",
+          "type": "tuple"
+        },
+        {
+          "components": [
+            {
+              "internalType": "bool",
+              "name": "zeroForOne",
+              "type": "bool"
+            },
+            {
+              "internalType": "int256",
+              "name": "amountSpecified",
+              "type": "int256"
+            },
+            {
+              "internalType": "uint160",
+              "name": "sqrtPriceLimitX96",
+              "type": "uint160"
+            }
+          ],
+          "internalType": "struct SwapParams",
+          "name": "",
+          "type": "tuple"
+        },
+        {
+          "internalType": "bytes",
+          "name": "hookData",
+          "type": "bytes"
+        }
+      ],
+      "name": "beforeSwap",
+      "outputs": [
+        {
+          "internalType": "bytes4",
+          "name": "",
+          "type": "bytes4"
+        },
+        {
+          "internalType": "int256",
+          "name": "",
+          "type": "int256"
+        },
+        {
+          "internalType": "uint24",
+          "name": "",
+          "type": "uint24"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [],
+      "name": "currentFee",
+      "outputs": [
+        {
+          "internalType": "uint24",
+          "name": "",
+          "type": "uint24"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [],
+      "name": "owner",
+      "outputs": [
+        {
+          "internalType": "address",
+          "name": "",
+          "type": "address"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [],
+      "name": "poolManager",
+      "outputs": [
+        {
+          "internalType": "address",
+          "name": "",
+          "type": "address"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "components": [
+            {
+              "internalType": "address",
+              "name": "currency0",
+              "type": "address"
+            },
+            {
+              "internalType": "address",
+              "name": "currency1",
+              "type": "address"
+            },
+            {
+              "internalType": "uint24",
+              "name": "fee",
+              "type": "uint24"
+            },
+            {
+              "internalType": "int24",
+              "name": "tickSpacing",
+              "type": "int24"
+            },
+            {
+              "internalType": "address",
+              "name": "hooks",
+              "type": "address"
+            }
+          ],
+          "internalType": "struct PoolKey",
+          "name": "key",
+          "type": "tuple"
+        },
+        {
+          "internalType": "uint24",
+          "name": "nextFee",
+          "type": "uint24"
+        }
+      ],
+      "name": "setFee",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [],
+      "name": "useOverride",
+      "outputs": [
+        {
+          "internalType": "bool",
+          "name": "",
+          "type": "bool"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    }
+  ],
+  "bytecode": "0x60e06040525f805462ffffff19166103e817905534801561001e575f80fd5b506040516107c43803806107c483398101604081905261003d91610075565b6001600160a01b03928316608052911660a052151560c0526100bd565b80516001600160a01b0381168114610070575f80fd5b919050565b5f805f60608486031215610087575f80fd5b6100908461005a565b925061009e6020850161005a565b9150604084015180151581146100b2575f80fd5b809150509250925092565b60805160a05160c0516106ad6101175f395f8181610131015281816101f901526103ac01525f818160f2015261035b01525f818161019f015281816101cf01528181610293015281816102d501526103e601526106ad5ff3fe608060405234801561000f575f80fd5b506004361061007a575f3560e01c8063a901efd611610058578063a901efd61461012c578063da3c300d14610163578063db0f5b1114610185578063dc4c90d31461019a575f80fd5b8063575e24b41461007e5780636fe7e6eb146100c15780638da5cb5b146100ed575b5f80fd5b61009161008c36600461047c565b6101c1565b604080516001600160e01b03199094168452602084019290925262ffffff16908201526060015b60405180910390f35b6100d46100cf36600461053e565b610287565b6040516001600160e01b031990911681526020016100b8565b6101147f000000000000000000000000000000000000000000000000000000000000000081565b6040516001600160a01b0390911681526020016100b8565b6101537f000000000000000000000000000000000000000000000000000000000000000081565b60405190151581526020016100b8565b5f546101719062ffffff1681565b60405162ffffff90911681526020016100b8565b6101986101933660046105a7565b610350565b005b6101147f000000000000000000000000000000000000000000000000000000000000000081565b5f8080336001600160a01b037f00000000000000000000000000000000000000000000000000000000000000001614801561021957507f00000000000000000000000000000000000000000000000000000000000000005b610221575f80fd5b7f56570de287d73cd1cb6092bb8fdee6173974955fdef345ae579ee9f475ea743285856040516102529291906105d9565b604051809103902014610263575f80fd5b50505f80546315d7892d60e21b9891975062ffffff16624000001795509350505050565b5f336001600160a01b037f000000000000000000000000000000000000000000000000000000000000000016146102bc575f80fd5b5f54604051635275965160e01b81526001600160a01b037f0000000000000000000000000000000000000000000000000000000000000000169163527596519161031291889162ffffff909116906004016105e8565b5f604051808303815f87803b158015610329575f80fd5b505af115801561033b573d5f803e3d5ffd5b50636fe7e6eb60e01b98975050505050505050565b336001600160a01b037f0000000000000000000000000000000000000000000000000000000000000000161480156103905750620f42408162ffffff1611155b610398575f80fd5b5f805462ffffff191662ffffff83161790557f000000000000000000000000000000000000000000000000000000000000000061044b57604051635275965160e01b81526001600160a01b037f0000000000000000000000000000000000000000000000000000000000000000169063527596519061041d90859085906004016105e8565b5f604051808303815f87803b158015610434575f80fd5b505af1158015610446573d5f803e3d5ffd5b505050505b5050565b6001600160a01b0381168114610463575f80fd5b50565b5f60a08284031215610476575f80fd5b50919050565b5f805f805f858703610140811215610492575f80fd5b863561049d8161044f565b95506104ac8860208901610466565b9450606060bf19820112156104bf575f80fd5b5060c08601925061012086013567ffffffffffffffff8111156104e0575f80fd5b8601601f810188136104f0575f80fd5b803567ffffffffffffffff811115610506575f80fd5b886020828401011115610517575f80fd5b959894975092955050506020019190565b8035600281900b8114610539575f80fd5b919050565b5f805f806101008587031215610552575f80fd5b843561055d8161044f565b935061056c8660208701610466565b925060c085013561057c8161044f565b915061058a60e08601610528565b905092959194509250565b803562ffffff81168114610539575f80fd5b5f8060c083850312156105b8575f80fd5b6105c28484610466565b91506105d060a08401610595565b90509250929050565b818382375f9101908152919050565b60c0810183356105f78161044f565b6001600160a01b0316825260208401356106108161044f565b6001600160a01b0316602083015262ffffff61062e60408601610595565b16604083015261064060608501610528565b60020b606083015260808401356106568161044f565b6001600160a01b0316608083015262ffffff9290921660a09091015291905056fea26469706673582212201d2d03a64b279bd406ef81f7dea6721066a3ceae36e5b3967e137601af1400dc64736f6c634300081a0033"
+}

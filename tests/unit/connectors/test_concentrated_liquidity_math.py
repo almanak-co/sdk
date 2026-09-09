@@ -92,3 +92,56 @@ def test_tick_bounds_are_aligned_to_spacing():
 def test_get_nearest_tick_snaps_to_fee_spacing():
     assert get_nearest_tick(62, 3000) == 60
     assert get_nearest_tick(91, 3000) == 120
+
+
+@pytest.mark.parametrize(
+    ("tick", "expected"),
+    [
+        (-887272, 4295128739),
+        (-1, 79224201403219477170569942574),
+        (0, 79228162514264337593543950336),
+        (1, 79232123823359799118286999568),
+        (-199160, 3753110522050231601651967),
+        (-197150, 4149882182339026829982898),
+        (887272, 1461446703485210103287273052203988822378723970342),
+    ],
+)
+def test_tick_sqrt_matches_solidity_integer_vectors(tick, expected):
+    assert tick_to_sqrt_price_x96(tick) == expected
+    assert sqrt_price_x96_to_tick(expected) == tick
+    if tick > MIN_TICK:
+        assert sqrt_price_x96_to_tick(expected - 1) == tick - 1
+
+
+@pytest.mark.parametrize("tick", [True, False, 1.0, Decimal("1"), "1", None])
+def test_tick_sqrt_rejects_non_integer_ticks(tick):
+    with pytest.raises(ValueError, match="integer"):
+        tick_to_sqrt_price_x96(tick)
+
+
+def test_real_v4_liquidity_withdrawal_floor_uses_solidity_tick_rounding():
+    from almanak.connectors.uniswap_v4.pool_key import PoolKey
+    from almanak.connectors.uniswap_v4.position import PositionObservation, withdrawal_minima
+
+    # Integer price interval implied by measured fee-free mainnet NFT3026126
+    # withdrawal. Both interval endpoints must retain the exact principal floor.
+    for price in (3957736959911551546431072, 3957736959911551892333945):
+        position = PositionObservation(
+            PoolKey(
+                "0x4200000000000000000000000000000000000006",
+                "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                500,
+                10,
+                "0x0000000000000000000000000000000000000000",
+            ),
+            3026126,
+            "0xec97a6a32676c4638827e2c45b3e47d18f2c4292",
+            571557724624,
+            -199160,
+            -197150,
+            price,
+            51049213,
+            "0x" + "01" * 32,
+        )
+        assert withdrawal_minima(position, position.liquidity, 0) == (529769045987132, 1476189)
+        assert withdrawal_minima(position, position.liquidity, 50) == (527120200757196, 1468808)

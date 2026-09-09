@@ -482,3 +482,58 @@ class TestRpcServiceIndexerLagRetry:
     )
     def test_is_indexer_lag_error_classifier(self, message, expected):
         assert RpcServiceServicer._is_indexer_lag_error(message) is expected
+
+
+class TestRpcTransportIds:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("batch", [False, True])
+    async def test_strict_provider_accepts_omitted_ids_and_grpc_ids_are_preserved(self, batch):
+        from almanak.gateway.proto import gateway_pb2
+
+        svc = _make_service()
+        svc.settings.chains = ["base"]
+        session = MagicMock()
+        seen = []
+
+        def post(url, *, json, headers):
+            seen.append(json["id"])
+            if not json["id"]:
+                return _FakeResponse(400, text_body="invalid JSON-RPC id")
+            return _FakeResponse(json_body={"jsonrpc": "2.0", "id": json["id"], "result": "0x123"})
+
+        session.post.side_effect = post
+        requests = [
+            gateway_pb2.RpcRequest(chain="base", method="eth_blockNumber", params="[]", id=value)
+            for value in ["", "", "caller-id"]
+        ]
+        with (
+            patch.object(svc, "_get_session", AsyncMock(return_value=session)),
+            patch.object(svc, "_get_rpc_url", return_value="https://rpc.example.invalid"),
+        ):
+            if batch:
+                response = await svc.BatchCall(
+                    gateway_pb2.RpcBatchRequest(chain="base", requests=requests), MagicMock()
+                )
+                results = response.responses
+            else:
+                results = [await svc.Call(request, MagicMock()) for request in requests]
+        assert len(results) == 3
+        assert all(result.success for result in results)
+        assert [result.id for result in results] == ["", "", "caller-id"]
+        assert all(isinstance(value, str) and value for value in seen)
+        assert seen[0] != seen[1]
+        assert seen[2] == "caller-id"
+
+    @pytest.mark.asyncio
+    async def test_generated_transport_id_is_stable_across_read_retry(self):
+        svc = _make_service()
+        session = MagicMock()
+        session.post.side_effect = [_FakeResponse(503), _FakeResponse(json_body={"result": "0x123"})]
+        with (
+            patch.object(svc, "_get_session", AsyncMock(return_value=session)),
+            patch.object(svc, "_retry_sleep", AsyncMock()),
+        ):
+            result, error = await svc._make_rpc_call("https://rpc.example.invalid", "eth_blockNumber", [], "")
+        assert result == "0x123" and error is None
+        ids = [call.kwargs["json"]["id"] for call in session.post.call_args_list]
+        assert ids[0] and ids[0] == ids[1]

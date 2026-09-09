@@ -343,6 +343,7 @@ class TeardownRunnerHelpers:
     get_token_universe: GetTokenUniverse | None = None
     get_accounting_events: GetAccountingEvents | None = None
     get_tracked_swap_inventory: GetTrackedSwapInventory | None = None
+    get_native_closure_inventory: Callable[..., dict | None] | None = None
     discover_lp_positions: DiscoverLpPositions | None = None
     get_deployment_lp_ownership: GetDeploymentLpOwnership | None = None
     get_lp_outstanding: GetLpOutstanding | None = None
@@ -789,6 +790,11 @@ def build_runner_helpers(runner: Any) -> TeardownRunnerHelpers:
             logger.debug("accounting-event read for consolidation failed (non-fatal)", exc_info=True)
             return []
 
+    def _get_native_closure_inventory(strategy: Any, chain: str, wallet: str) -> dict | None:
+        from .native_inventory_closure import read_native_inventory
+
+        return read_native_inventory(getattr(runner, "state_manager", None), strategy.deployment_id, chain, wallet)
+
     def _get_tracked_swap_inventory(strategy: Any) -> dict[str, Any] | None:
         # ALM-2766 — deployment-scoped tracked wallet inventory for the
         # teardown swap-back clamp. Reads the runner's accounting StateManager
@@ -870,6 +876,7 @@ def build_runner_helpers(runner: Any) -> TeardownRunnerHelpers:
         get_lp_outstanding=partial(lp_outstanding, runner),
         get_accounting_events=_get_accounting_events,
         get_tracked_swap_inventory=_get_tracked_swap_inventory,
+        get_native_closure_inventory=_get_native_closure_inventory,
         prepare_intent_settlement=partial(_prepare_teardown_intent_settlement, runner),
         await_intent_settlement=partial(_await_teardown_intent_settlement, runner),
         reconcile_intent_settlement=partial(_reconcile_terminal_perp_settlement, runner),

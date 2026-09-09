@@ -35,6 +35,12 @@ evidence must come from the chain, through the gateway.
 
 Closure rule
 ------------
+Native sentinel, zero-address and chain-native aliases use the gateway native
+balance read. A positive native wallet balance can include gas principal and is
+therefore unmeasured position attribution; the manager's transaction-bound native
+inventory authority supplies closure only with independent receipt/balance proof.
+The ERC-20 whole-account rule below is unchanged.
+
 A TOKEN position is a plain ERC-20 balance in the wallet, so a clean close leaves
 **exactly 0**. Closure requires ``balanceOf(wallet) <= _TOKEN_DUST_WEI`` — a wei
 floor kept only as insurance against rounding residue. It is denominated in the
@@ -76,6 +82,9 @@ from typing import Any
 
 from almanak.connectors._strategy_base.teardown_post_condition import ClosureCheckResult
 from almanak.connectors._strategy_base.vault_post_condition import _is_evm_address, _read_with_retry
+from almanak.core.chains import ChainRegistry
+from almanak.core.enums import ChainFamily
+from almanak.framework.data.tokens import NATIVE_SENTINEL
 
 logger = logging.getLogger(__name__)
 
@@ -265,16 +274,36 @@ def token_balance_teardown_post_condition(
             ),
         )
 
-    balance = _read_with_retry(
-        lambda: gateway_client.query_erc20_balance(
-            chain=chain,
-            token_address=token_address,
-            wallet_address=wallet,
-            block=block,
+    descriptor = ChainRegistry.try_resolve(chain)
+    native_addresses = {NATIVE_SENTINEL.lower(), "0x" + "0" * 40}
+    if descriptor is not None:
+        native_addresses.update(address.lower() for address in descriptor.native.address_aliases)
+    is_native = token_address.lower() in native_addresses
+    if is_native and (descriptor is None or descriptor.family is not ChainFamily.EVM):
+        return ClosureCheckResult(
+            closed=False,
+            unmeasured=True,
+            protocol=protocol,
+            position_id=position_id,
+            error="Native TOKEN balance requires a registered EVM chain; closure is unmeasured",
         )
-    )
+    if is_native:
+        balance = _read_with_retry(
+            lambda: gateway_client.query_native_balance(chain=chain, wallet_address=wallet, block=block)
+        )
+    else:
+        balance = _read_with_retry(
+            lambda: gateway_client.query_erc20_balance(
+                chain=chain,
+                token_address=token_address,
+                wallet_address=wallet,
+                block=block,
+            )
+        )
     try:
-        balance = int(balance) if balance is not None else None
+        balance = int(balance) if isinstance(balance, int | str) and not isinstance(balance, bool) else None
+        if balance is not None and balance < 0:
+            balance = None
     except (TypeError, ValueError):
         balance = None
     if balance is None:
@@ -293,13 +322,25 @@ def token_balance_teardown_post_condition(
             protocol=protocol,
             position_id=position_id,
             error=(
-                f"TOKEN balanceOf({token_address}) read returned None/non-numeric after retry "
+                f"TOKEN {'native balance' if is_native else 'balanceOf'}({token_address}) read returned None/non-numeric after retry "
                 "(gateway/RPC fault); cannot confirm closure — unmeasured"
             ),
         )
 
     if balance <= _TOKEN_DUST_WEI:
         return ClosureCheckResult(closed=True, protocol=protocol, position_id=position_id)
+
+    if is_native:
+        return ClosureCheckResult(
+            closed=False,
+            unmeasured=True,
+            protocol=protocol,
+            position_id=position_id,
+            error=(
+                f"Measured native wallet balance {balance} wei includes possible gas or unrelated inventory; "
+                "position-attributed closure requires transaction-bound inventory and gas evidence"
+            ),
+        )
 
     logger.warning(
         "TOKEN post-condition MEASURED residual balance: protocol=%s token=%s wallet=%s "

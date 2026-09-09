@@ -906,6 +906,7 @@ async def reconcile_known_positions_against_chain(
     wallet_address: str = "",
     wallet_for_chain: Callable[[str], str | None] | None = None,
     phase: ReconciliationPhase = "pre",
+    token_closure_authority: Callable[[Any, str, Any], Any] | None = None,
 ) -> ReconciliationReport:
     """Plan-A reconciliation CHECK: confirm each KNOWN position's live chain state.
 
@@ -992,13 +993,22 @@ async def reconcile_known_positions_against_chain(
             else:
                 if resolved_wallet:
                     position_wallet = str(resolved_wallet)
-        verdict, detail = await _reconcile_one(
-            position=position,
-            gateway_client=gateway_client,
-            market=market,
-            network=network,
-            wallet_address=position_wallet,
-        )
+        authority_check = None
+        if is_post and token_closure_authority is not None:
+            try:
+                authority_check = token_closure_authority(position, position_wallet, gateway_client)
+            except Exception:  # noqa: BLE001 — a faulted proof is unmeasured, never closure
+                logger.warning("Native transaction-bound closure authority unavailable", exc_info=True)
+        if authority_check is not None and authority_check.closed and not authority_check.unmeasured:
+            verdict, detail = ReconciliationVerdict.DIVERGED_CLOSED, "Transaction-bound native inventory closure proved"
+        else:
+            verdict, detail = await _reconcile_one(
+                position=position,
+                gateway_client=gateway_client,
+                market=market,
+                network=network,
+                wallet_address=position_wallet,
+            )
         entry = PositionReconciliation(
             position_type=str(position.position_type),
             position_id=str(position.position_id),

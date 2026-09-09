@@ -183,17 +183,14 @@ def test_zero_slot0_response_is_uninitialized_pool(
     _assert_fallback(fallback_recorder, OnchainReadFallbackReason.POOL_UNINITIALIZED)
 
 
-def test_pool_key_encoding_error_still_raises(
+def test_pool_key_rejects_invalid_fee_before_rpc(
     monkeypatch: pytest.MonkeyPatch,
     fallback_recorder: MagicMock,
 ) -> None:
-    sdk = UniswapV4SDK(chain=CHAIN, rpc_url="http://anvil.local")
     rpc_call = MagicMock()
     monkeypatch.setattr("almanak.connectors.uniswap_v4.sdk.eth_call_hex", rpc_call)
-    invalid_pool_key = PoolKey(LOW_CURRENCY, HIGH_CURRENCY, fee=1 << 24, tick_spacing=60)
-
-    with pytest.raises(ValueError, match="uint24 out of range"):
-        sdk.get_pool_sqrt_price(invalid_pool_key)
+    with pytest.raises(ValueError, match="fee"):
+        PoolKey(LOW_CURRENCY, HIGH_CURRENCY, fee=1 << 24, tick_spacing=60)
 
     rpc_call.assert_not_called()
     fallback_recorder.assert_not_called()

@@ -689,6 +689,15 @@ async def commit_teardown_intent(
             if ledger_entry_id:
                 try:
                     await runner._write_outbox_and_fire_processor(strategy, intent, ledger_entry_id)
+                    # Closure reads run before the final snapshot's barrier and
+                    # must observe the disposal event, not only its durable outbox.
+                    from ._run_loop_helpers import await_drain_barrier
+
+                    drained = await await_drain_barrier(
+                        runner, getattr(runner, "_drain_batch", []), propagate_accounting_failure=True
+                    )
+                    if not drained:
+                        raise RuntimeError("Teardown accounting drain incomplete before closure verification")
                 except Exception as exc:  # noqa: BLE001 — never propagate
                     logger.error(
                         "commit_teardown_intent: outbox+fire failed for %s ledger=%s: %s",

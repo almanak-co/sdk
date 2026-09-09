@@ -98,32 +98,11 @@ class TestComputePoolIdAllFeeTiers:
 
 
 class TestComputePoolIdInt24SignExtension:
-    """Int24 sign-extension regression: tick_spacing is signed (V4 allows
-    negative values in principle); _pad_int24 must produce two's-complement
-    when fed a negative spacing.
-    """
-
-    def test_negative_tick_spacing(self) -> None:
-        pool_key = PoolKey(
-            currency0=USDC,
-            currency1=WETH,
-            fee=500,
-            tick_spacing=-10,
-        )
-        pool_id = compute_pool_id(pool_key)
-        assert pool_id == _expected_pool_id(pool_key)
-        # Sanity: the padded tick_spacing has the high bytes set (two's complement)
-        padded = _pad_int24(-10)
-        assert padded.startswith("ffff"), padded
-
-    def test_min_negative_tick_spacing(self) -> None:
-        pool_key = PoolKey(
-            currency0=USDC,
-            currency1=WETH,
-            fee=500,
-            tick_spacing=-(1 << 23),  # int24 min
-        )
-        assert compute_pool_id(pool_key) == _expected_pool_id(pool_key)
+    @pytest.mark.parametrize("spacing", [-10, -(1 << 23)])
+    def test_negative_spacing_is_rejected_before_hashing(self, spacing):
+        with pytest.raises(ValueError, match="tickSpacing"):
+            PoolKey(USDC, WETH, 500, spacing)
+        assert _pad_int24(spacing).startswith("ffff")
 
 
 class TestComputePoolIdDeterminism:

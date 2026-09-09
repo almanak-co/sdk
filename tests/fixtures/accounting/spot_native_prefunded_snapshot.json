@@ -1,0 +1,114 @@
+{
+  "source": "20260908-v4-anvil-runtime-native/db.sqlite; read-only selected accounting rows",
+  "events": [
+    {
+      "id": "3a1f1ccf-2dd5-585f-8bd6-85a1abcbaf48",
+      "timestamp": "2026-09-08T16:42:52+00:00",
+      "event_type": "SWAP",
+      "chain": "base"
+    },
+    {
+      "id": "093244c8-6c54-57d3-8b74-35e25e6a1b6b",
+      "timestamp": "2026-09-08T16:46:18+00:00",
+      "event_type": "SWAP",
+      "chain": "base"
+    }
+  ],
+  "payloads": {
+    "3a1f1ccf-2dd5-585f-8bd6-85a1abcbaf48": {
+      "amount_in": "3.1",
+      "amount_in_usd": "3.1",
+      "amount_out": "0.001240726504188265",
+      "amount_out_usd": "3.10326791048056277005",
+      "confidence": "ESTIMATED",
+      "cost_basis_recorded": true,
+      "effective_price": "0.0004002343561897629032258064516",
+      "event_type": "SWAP",
+      "formula_version": 1,
+      "gas_usd": "0.56119751758",
+      "matching_policy_version": 4,
+      "price_observed_at": "2026-09-08T16:42:20+00:00",
+      "price_out_observed_at": "2026-09-08T16:42:20+00:00",
+      "price_out_source": "aggregated",
+      "price_source": "stablecoin_peg",
+      "primitive_version": 7,
+      "protocol": "uniswap_v4",
+      "realized_pnl_usd": null,
+      "realized_pnl_usd_matched": null,
+      "schema_version": 1,
+      "slippage_bps": 0,
+      "swap_position_key": "swap:base:0xec97a6a32676c4638827e2c45b3e47d18f2c4292",
+      "token_in": "USDC",
+      "token_out": "ETH",
+      "unavailable_reason": "price provenance degraded: USDC=ESTIMATED, ETH=ESTIMATED",
+      "unmatched_amount_in": "3.1",
+      "unmatched_proceeds_usd": "3.1"
+    },
+    "093244c8-6c54-57d3-8b74-35e25e6a1b6b": {
+      "amount_in": "0.001240726504188265",
+      "amount_in_usd": "3.09705187069457956240",
+      "amount_out": "3.092607",
+      "amount_out_usd": "3.092607",
+      "confidence": "ESTIMATED",
+      "cost_basis_recorded": true,
+      "effective_price": "2492.577525796720541488392681",
+      "event_type": "SWAP",
+      "formula_version": 1,
+      "gas_usd": "0.28950713296",
+      "matching_policy_version": 4,
+      "price_observed_at": "2026-09-08T16:45:59+00:00",
+      "price_out_observed_at": "2026-09-08T16:45:59+00:00",
+      "price_out_source": "stablecoin_peg",
+      "price_source": "aggregated",
+      "primitive_version": 7,
+      "protocol": "uniswap_v4",
+      "realized_pnl_usd": "-0.00621603978598320765",
+      "realized_pnl_usd_matched": "-0.00621603978598320765",
+      "schema_version": 1,
+      "slippage_bps": 0,
+      "swap_position_key": "swap:base:0xec97a6a32676c4638827e2c45b3e47d18f2c4292",
+      "token_in": "ETH",
+      "token_out": "USDC",
+      "unavailable_reason": "price provenance degraded: ETH=ESTIMATED, USDC=ESTIMATED",
+      "unmatched_amount_in": "0E-18",
+      "unmatched_proceeds_usd": "0E-20"
+    }
+  },
+  "snapshots": [
+    {
+      "id": 1,
+      "timestamp": "2026-09-08T16:38:11+00:00",
+      "positions_json": "{\"schema_version\": 1, \"positions\": [], \"metadata\": {\"capital_flows\": {\"cursors\": {}, \"deposits_usd\": \"0\", \"era_start\": {}, \"pending_unclassified\": [], \"schema_version\": 1, \"status\": \"pending\", \"unclassified_in_usd\": \"0\", \"unclassified_out_usd\": \"0\", \"unmeasured_reason\": null, \"withdrawals_usd\": \"0\"}, \"external_cache_hit\": false, \"external_positions_count\": 0, \"external_provider\": \"zerion\", \"external_timestamp\": \"2026-09-08T16:38:14+00:00\", \"external_total_value_usd\": \"0\", \"framework_total_value_usd\": \"249485.98248300\", \"gas_aggregator_status\": \"ok\", \"gas_native_status\": \"already_tracked\", \"reconciliation_status\": \"external_non_positive\", \"valuation_source\": \"framework\"}, \"reconciliation\": {}}",
+      "wallet_balances_json": "[{\"symbol\": \"USDC\", \"balance\": \"3.2\", \"value_usd\": \"3.2\", \"address\": \"\", \"price_usd\": \"1\"}, {\"symbol\": \"ETH\", \"balance\": \"100\", \"value_usd\": \"249482.78248300\", \"address\": \"\", \"price_usd\": \"2494.82782483\"}]",
+      "chain": "base"
+    },
+    {
+      "id": 2,
+      "timestamp": "2026-09-08T16:42:53+00:00",
+      "positions_json": "{\"schema_version\": 1, \"positions\": [{\"position_type\": \"TOKEN\", \"protocol\": \"uniswap_v4\", \"chain\": \"base\", \"value_usd\": \"3.10108423183319142365\", \"label\": \"uniswap_v4 TOKEN\", \"tokens\": [], \"details\": {\"balance\": \"0.001240726504188265\", \"fill_measured\": true, \"swap_params\": {\"hook_data\": \"0x\", \"pool_id\": \"0x35be06dd865586884e107d15821d591644335ea775de2f1d444e2b9eb39aa514\", \"pool_key\": {\"currency0\": \"0x0000000000000000000000000000000000000000\", \"currency1\": \"0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\", \"fee\": 1000, \"hooks\": \"0x0000000000000000000000000000000000000000\", \"tick_spacing\": 20}}, \"token\": \"ETH\"}}, {\"position_type\": \"TOKEN\", \"protocol\": \"wallet\", \"chain\": \"base\", \"value_usd\": \"3.10108423183319142365\", \"label\": \"swap inventory ETH\", \"tokens\": [\"ETH\"], \"details\": {\"asset\": \"ETH\", \"capped\": false, \"classification\": \"deployed_inventory\", \"lot_remaining\": \"0.001240726504188265\", \"quantity\": \"0.001240726504188265\", \"source\": \"swap_inventory_lots\"}, \"cost_basis_usd\": \"3.10326791048056277005\", \"unrealized_pnl_usd\": \"-0.00218367864737134640\"}], \"metadata\": {\"capital_flows\": {\"cursors\": {\"base\": 51048071}, \"deposits_usd\": \"0\", \"era_start\": {\"base\": 51048071}, \"pending_unclassified\": [], \"schema_version\": 1, \"status\": \"measured\", \"unclassified_in_usd\": \"0\", \"unclassified_out_usd\": \"0\", \"unmeasured_reason\": null, \"withdrawals_usd\": \"0\"}, \"external_cache_hit\": true, \"external_positions_count\": 0, \"external_provider\": \"zerion\", \"external_timestamp\": \"2026-09-08T16:38:14+00:00\", \"external_total_value_usd\": \"0\", \"framework_total_value_usd\": \"249946.74136584432638284730\", \"gas_aggregator_status\": \"ok\", \"gas_native_status\": \"already_tracked\", \"nav_basis_coverage\": {\"legs_in_nav\": 2, \"legs_missing_basis\": 1, \"missing_basis_usd\": \"3.10108423183319142365\"}, \"reconciliation_status\": \"external_non_positive\", \"swap_inventory\": {\"cost_usd\": \"3.10326791048056277005\", \"status\": \"applied\", \"tokens\": {\"eth\": {\"capped\": false, \"cost_usd\": \"3.10326791048056277005\", \"quantity\": \"0.001240726504188265\", \"value_usd\": \"3.10108423183319142365\"}}, \"value_usd\": \"3.10108423183319142365\"}, \"valuation_source\": \"framework\"}, \"reconciliation\": {}}",
+      "wallet_balances_json": "[{\"symbol\": \"USDC\", \"balance\": \"0.1\", \"value_usd\": \"0.1\", \"address\": \"\", \"price_usd\": \"1\"}, {\"symbol\": \"ETH\", \"balance\": \"100.001016352504188265\", \"value_usd\": \"249943.54028161249319142365\", \"address\": \"\", \"price_usd\": \"2499.41\"}]",
+      "chain": "base"
+    },
+    {
+      "id": 3,
+      "timestamp": "2026-09-08T16:45:59+00:00",
+      "positions_json": "{\"schema_version\": 1, \"positions\": [{\"position_type\": \"TOKEN\", \"protocol\": \"uniswap_v4\", \"chain\": \"base\", \"value_usd\": \"3.09705187069457956240\", \"label\": \"uniswap_v4 TOKEN\", \"tokens\": [], \"details\": {\"balance\": \"0.001240726504188265\", \"fill_measured\": true, \"swap_params\": {\"hook_data\": \"0x\", \"pool_id\": \"0x35be06dd865586884e107d15821d591644335ea775de2f1d444e2b9eb39aa514\", \"pool_key\": {\"currency0\": \"0x0000000000000000000000000000000000000000\", \"currency1\": \"0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\", \"fee\": 1000, \"hooks\": \"0x0000000000000000000000000000000000000000\", \"tick_spacing\": 20}}, \"token\": \"ETH\"}}, {\"position_type\": \"TOKEN\", \"protocol\": \"wallet\", \"chain\": \"base\", \"value_usd\": \"3.09705187069457956240\", \"label\": \"swap inventory ETH\", \"tokens\": [\"ETH\"], \"details\": {\"asset\": \"ETH\", \"capped\": false, \"classification\": \"deployed_inventory\", \"lot_remaining\": \"0.001240726504188265\", \"quantity\": \"0.001240726504188265\", \"source\": \"swap_inventory_lots\"}, \"cost_basis_usd\": \"3.10326791048056277005\", \"unrealized_pnl_usd\": \"-0.00621603978598320765\"}], \"metadata\": {\"capital_flows\": {\"cursors\": {\"base\": 51048071}, \"deposits_usd\": \"0\", \"era_start\": {\"base\": 51048071}, \"pending_unclassified\": [], \"schema_version\": 1, \"status\": \"measured\", \"unclassified_in_usd\": \"0\", \"unclassified_out_usd\": \"0\", \"unmeasured_reason\": null, \"withdrawals_usd\": \"0\"}, \"external_cache_hit\": false, \"external_positions_count\": 0, \"external_provider\": \"zerion\", \"external_timestamp\": \"2026-09-08T16:46:01+00:00\", \"external_total_value_usd\": \"0\", \"framework_total_value_usd\": \"249621.73403033754915912480\", \"gas_aggregator_status\": \"ok\", \"gas_native_status\": \"already_tracked\", \"nav_basis_coverage\": {\"legs_in_nav\": 2, \"legs_missing_basis\": 1, \"missing_basis_usd\": \"3.09705187069457956240\"}, \"reconciliation_status\": \"external_non_positive\", \"swap_inventory\": {\"cost_usd\": \"3.10326791048056277005\", \"status\": \"applied\", \"tokens\": {\"eth\": {\"capped\": false, \"cost_usd\": \"3.10326791048056277005\", \"quantity\": \"0.001240726504188265\", \"value_usd\": \"3.09705187069457956240\"}}, \"value_usd\": \"3.09705187069457956240\"}, \"valuation_source\": \"framework\"}, \"reconciliation\": {}}",
+      "wallet_balances_json": "[{\"symbol\": \"USDC\", \"balance\": \"0.1\", \"value_usd\": \"0.1\", \"address\": \"\", \"price_usd\": \"1\"}, {\"symbol\": \"ETH\", \"balance\": \"100.001016352504188265\", \"value_usd\": \"249618.53697846685457956240\", \"address\": \"\", \"price_usd\": \"2496.16\"}]",
+      "chain": "base"
+    },
+    {
+      "id": 4,
+      "timestamp": "2026-09-08T16:46:19+00:00",
+      "positions_json": "{\"schema_version\": 1, \"positions\": [], \"metadata\": {\"capital_flows\": {\"cursors\": {\"base\": 51048072}, \"deposits_usd\": \"0\", \"era_start\": {\"base\": 51048071}, \"pending_unclassified\": [], \"schema_version\": 1, \"status\": \"measured\", \"unclassified_in_usd\": \"0\", \"unclassified_out_usd\": \"0\", \"unmeasured_reason\": null, \"withdrawals_usd\": \"0\"}, \"external_cache_hit\": true, \"external_positions_count\": 0, \"external_provider\": \"zerion\", \"external_timestamp\": \"2026-09-08T16:46:01+00:00\", \"external_total_value_usd\": \"0\", \"framework_total_value_usd\": \"249493.34345190695\", \"gas_aggregator_status\": \"ok\", \"gas_native_status\": \"already_tracked\", \"reconciliation_status\": \"external_non_positive\", \"swap_inventory\": {\"skipped\": {\"usdc\": \"numeraire_cash\"}, \"status\": \"applied\"}, \"valuation_source\": \"framework\"}, \"reconciliation\": {}}",
+      "wallet_balances_json": "[{\"symbol\": \"USDC\", \"balance\": \"3.192607\", \"value_usd\": \"3.192607\", \"address\": \"\", \"price_usd\": \"1\"}, {\"symbol\": \"ETH\", \"balance\": \"99.999659645\", \"value_usd\": \"249490.15084490695\", \"address\": \"\", \"price_usd\": \"2494.91\"}]",
+      "chain": "base"
+    },
+    {
+      "id": 6,
+      "timestamp": "2026-09-08T16:51:19+00:00",
+      "positions_json": "{\"schema_version\": 1, \"positions\": [], \"metadata\": {\"capital_flows\": {\"cursors\": {\"base\": 51048072}, \"deposits_usd\": \"0\", \"era_start\": {\"base\": 51048071}, \"pending_unclassified\": [], \"schema_version\": 1, \"status\": \"measured\", \"unclassified_in_usd\": \"0\", \"unclassified_out_usd\": \"0\", \"unmeasured_reason\": null, \"withdrawals_usd\": \"0\"}, \"external_cache_hit\": false, \"external_positions_count\": 0, \"external_provider\": \"zerion\", \"external_timestamp\": \"2026-09-08T16:51:22+00:00\", \"external_total_value_usd\": \"0\", \"framework_total_value_usd\": \"249779.34247849165\", \"gas_aggregator_status\": \"ok\", \"gas_native_status\": \"already_tracked\", \"reconciliation_status\": \"external_non_positive\", \"swap_inventory\": {\"skipped\": {\"usdc\": \"numeraire_cash\"}, \"status\": \"applied\"}, \"valuation_source\": \"framework\"}, \"reconciliation\": {}}",
+      "wallet_balances_json": "[{\"symbol\": \"USDC\", \"balance\": \"3.192607\", \"value_usd\": \"3.192607\", \"address\": \"\", \"price_usd\": \"1\"}, {\"symbol\": \"ETH\", \"balance\": \"99.999659645\", \"value_usd\": \"249776.14987149165\", \"address\": \"\", \"price_usd\": \"2497.77\"}]",
+      "chain": "base"
+    }
+  ]
+}

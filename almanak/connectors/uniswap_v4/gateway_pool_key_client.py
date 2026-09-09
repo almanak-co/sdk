@@ -75,6 +75,7 @@ async def lookup_v4_pool_key(
         V4PoolKeyNotFound: Gateway returned NOT_FOUND.
         grpc.RpcError: Transport / gateway error other than NOT_FOUND.
     """
+    chain = chain.strip().lower()
     pid_bytes = _coerce_pool_id_bytes(pool_id)
     request = gateway_pb2.LookupV4PoolKeyRequest(pool_id=pid_bytes, chain=chain)
 
@@ -100,13 +101,18 @@ async def lookup_v4_pool_key(
             f"gateway returned unsorted PoolKey for pool_id=0x{pid_bytes.hex()}: {pk.currency0} >= {pk.currency1}"
         )
 
-    return PoolKey(
+    key = PoolKey(
         currency0=pk.currency0,
         currency1=pk.currency1,
         fee=int(pk.fee),
         tick_spacing=int(pk.tick_spacing),
         hooks=pk.hooks,
     )
+    if key.pool_id != "0x" + pid_bytes.hex():
+        raise ValueError("Gateway PoolKey does not hash to the requested pool ID")
+    if response.chain and response.chain.strip().lower() != chain:
+        raise ValueError("Gateway PoolKey response belongs to a different chain")
+    return key
 
 
 def _run_coro_blocking(coro_factory: Callable[[], Any], *, timeout: float) -> Any:

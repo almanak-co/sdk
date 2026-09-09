@@ -35,13 +35,19 @@ from typing import TYPE_CHECKING
 from almanak.connectors._strategy_base import concentrated_liquidity_math as cl_math
 from almanak.connectors._strategy_base.rpc import eth_call, eth_call_hex
 from almanak.connectors._strategy_base.slippage import compute_min_amount_out_from_bps
-from almanak.connectors._strategy_base.v4_pool_abi import V4_DEFAULT_TICK_SPACING
+from almanak.connectors._strategy_base.v4_pool_abi import (
+    V4_DEFAULT_TICK_SPACING,
+    resolve_v4_tick_spacing,
+    validate_v4_static_fee,
+)
 from almanak.framework.intents._compiler_helpers import deadline_from_now
 
 from .addresses import UNISWAP_V4
+from .pool_key import PoolKey
 
 if TYPE_CHECKING:
     from almanak.framework.gateway_client import GatewayClient
+    from almanak.framework.venues import VenueVerificationGateway
 
 logger = logging.getLogger(__name__)
 
@@ -173,29 +179,7 @@ POSITION_MANAGER_ADDRESS_SET: frozenset[str] = frozenset(addr.lower() for addr i
 from almanak.framework.data.tokens.defaults import WRAPPED_NATIVE as WRAPPED_NATIVE_ADDRESSES
 
 
-@dataclass
-class PoolKey:
-    """Uniswap V4 pool key — uniquely identifies a pool.
-
-    In V4, pools are identified by (currency0, currency1, fee, tickSpacing, hooks).
-    currency0 must be numerically less than currency1 (sorted order).
-    """
-
-    currency0: str
-    currency1: str
-    fee: int
-    tick_spacing: int
-    hooks: str = NATIVE_CURRENCY
-
-    def __post_init__(self) -> None:
-        self.currency0 = self.currency0.lower()
-        self.currency1 = self.currency1.lower()
-        self.hooks = self.hooks.lower()
-        if int(self.currency0, 16) > int(self.currency1, 16):
-            self.currency0, self.currency1 = self.currency1, self.currency0
-
-
-@dataclass
+@dataclass(frozen=True)
 class SwapQuote:
     """Quote data for a V4 swap."""
 
@@ -208,6 +192,8 @@ class SwapQuote:
     effective_price: Decimal | None = None
     # None means unmeasured (offline estimate); an int is the Quoter pool-swap gasEstimate.
     gas_estimate: int | None = None
+    pool_key: PoolKey | None = None
+    hook_data: bytes = b""
 
 
 @dataclass
@@ -561,8 +547,7 @@ class UniswapV4SDK:
         Returns:
             PoolKey with sorted currency addresses.
         """
-        if tick_spacing is None:
-            tick_spacing = TICK_SPACING.get(fee, 60)
+        tick_spacing = resolve_v4_tick_spacing(fee, tick_spacing)
 
         return PoolKey(
             currency0=token0,
@@ -581,6 +566,12 @@ class UniswapV4SDK:
         token_in_decimals: int = 18,
         token_out_decimals: int = 18,
         rpc_url: str | None = None,
+        *,
+        pool_key: PoolKey | None = None,
+        hook_data: bytes = b"",
+        block_number: int | None = None,
+        from_address: str | None = None,
+        quote_gateway: "VenueVerificationGateway | None" = None,
     ) -> SwapQuote:
         """Get an executable exact-input quote from the V4 Quoter contract.
 
@@ -596,8 +587,6 @@ class UniswapV4SDK:
         Returns:
             SwapQuote with V4 Quoter amount_out.
         """
-        if fee_tier not in FEE_TIERS:
-            raise ValueError(f"Invalid V4 fee tier {fee_tier}; supported tiers: {FEE_TIERS}")
         if amount_in <= 0:
             raise ValueError(f"amount_in must be positive, got {amount_in}")
         if amount_in > (1 << 128) - 1:
@@ -606,13 +595,10 @@ class UniswapV4SDK:
         from eth_abi import decode as abi_decode
         from eth_abi import encode as abi_encode
 
-        pool_token_in = NATIVE_CURRENCY if self._is_wrapped_native(token_in) else token_in
-        pool_token_out = NATIVE_CURRENCY if self._is_wrapped_native(token_out) else token_out
-        if pool_token_in.lower() == pool_token_out.lower():
-            raise ValueError("Cannot quote a V4 swap from a token to itself")
-
-        pool_key = self.compute_pool_key(pool_token_in, pool_token_out, fee_tier)
-        zero_for_one = pool_token_in.lower() == pool_key.currency0
+        pool_key = pool_key or self.compute_pool_key(token_in, token_out, fee_tier)
+        zero_for_one = pool_key.direction(token_in, token_out)
+        if type(hook_data) is not bytes:
+            raise ValueError("hook_data must be bytes")
         params = (
             (
                 pool_key.currency0,
@@ -623,7 +609,7 @@ class UniswapV4SDK:
             ),
             zero_for_one,
             amount_in,
-            b"",
+            hook_data,
         )
         calldata = (
             "0x"
@@ -634,14 +620,40 @@ class UniswapV4SDK:
             ).hex()
         )
         try:
-            raw_result = eth_call(
-                chain=self.chain,
-                to=self.quoter,
-                data=calldata,
-                rpc_url=rpc_url or self.rpc_url,
-                gateway_client=self._gateway_client,
-                timeout=V4_QUOTER_DIRECT_RPC_TIMEOUT_SECONDS,
-            )
+            if block_number is not None:
+                if self._gateway_client is None and quote_gateway is None:
+                    raise ValueError("Block-anchored V4 quotes require gateway transport")
+                if self._gateway_client is not None:
+                    response = self._gateway_client.eth_call(
+                        chain=self.chain,
+                        to=self.quoter,
+                        data=calldata,
+                        block=block_number,
+                        from_address=from_address,
+                        raise_on_error=True,
+                    )
+                    raw_result = bytes.fromhex(response[2:]) if response else None
+                else:
+                    from almanak.framework.venues import VenueReferenceNamespace, VenueTargetRef, VenueTargetRole
+
+                    assert quote_gateway is not None
+                    raw_result = quote_gateway.read(
+                        chain=self.chain,
+                        target=VenueTargetRef(
+                            VenueTargetRole.PERMISSION_TARGET, VenueReferenceNamespace.EVM_ADDRESS, self.quoter.lower()
+                        ),
+                        payload=bytes.fromhex(calldata[2:]),
+                        block_number=block_number,
+                    )
+            else:
+                raw_result = eth_call(
+                    chain=self.chain,
+                    to=self.quoter,
+                    data=calldata,
+                    rpc_url=rpc_url or self.rpc_url,
+                    gateway_client=self._gateway_client,
+                    timeout=V4_QUOTER_DIRECT_RPC_TIMEOUT_SECONDS,
+                )
         except Exception as exc:
             raise ValueError(f"V4 Quoter quoteExactInputSingle failed: {exc}") from exc
         if raw_result is None:
@@ -661,11 +673,13 @@ class UniswapV4SDK:
         return SwapQuote(
             amount_in=amount_in,
             amount_out=int(amount_out),
-            fee_tier=fee_tier,
+            fee_tier=pool_key.fee,
             token_in=token_in,
             token_out=token_out,
             effective_price=effective_price,
             gas_estimate=int(gas_estimate),
+            pool_key=pool_key,
+            hook_data=hook_data,
         )
 
     def get_quote_local(
@@ -695,6 +709,9 @@ class UniswapV4SDK:
         Returns:
             SwapQuote with estimated output.
         """
+        # A sentinel or out-of-range fee read as a rate produces a negative
+        # amount_out, which downstream becomes a negative minOut.
+        validate_v4_static_fee(fee_tier)
         fee_fraction = Decimal(fee_tier) / Decimal(1_000_000)
 
         if price_ratio is not None:
@@ -817,9 +834,9 @@ class UniswapV4SDK:
           Inner: v4_input = abi.encode(bytes actions, bytes[] params)
                  actions = [SWAP_EXACT_IN_SINGLE, SETTLE, TAKE]
 
-        WETH routing: V4 pools primarily use native ETH (address(0)), not WETH.
-        When token_in or token_out is WETH, the swap routes through the native ETH
-        pool and adds UNWRAP_WETH or WRAP_ETH commands at the UniversalRouter level.
+        WETH retains its ERC-20 currency identity; the PoolKey binds both assets.
+        Only a native address(0) leg adds SWEEP to forward native output or refund
+        unspent native input.
 
         Args:
             quote: Swap quote with amounts.
@@ -832,34 +849,17 @@ class UniswapV4SDK:
         """
         amount_out_minimum = compute_min_amount_out_from_bps(quote.amount_out, slippage_bps)
 
-        weth_in = self._is_wrapped_native(quote.token_in)
-        weth_out = self._is_wrapped_native(quote.token_out)
-        if weth_in and weth_out:
-            raise ValueError("Cannot swap wrapped native token to itself")
-        pool_token_in = NATIVE_CURRENCY if weth_in else quote.token_in
-        pool_token_out = NATIVE_CURRENCY if weth_out else quote.token_out
-
+        pool_key = quote.pool_key or self.compute_pool_key(quote.token_in, quote.token_out, quote.fee_tier)
+        pool_key.direction(quote.token_in, quote.token_out)
+        pool_token_in, pool_token_out = quote.token_in, quote.token_out
         is_native_in = pool_token_in.lower() == NATIVE_CURRENCY
         is_native_out = pool_token_out.lower() == NATIVE_CURRENCY
-
         if deadline == 0:
             deadline = deadline_from_now(300)
+        swap_params = self._encode_exact_input_single_params(quote=quote, amount_out_minimum=amount_out_minimum)
 
-        pool_quote = SwapQuote(
-            token_in=pool_token_in,
-            token_out=pool_token_out,
-            amount_in=quote.amount_in,
-            amount_out=quote.amount_out,
-            fee_tier=quote.fee_tier,
-        )
-
-        swap_params = self._encode_exact_input_single_params(
-            quote=pool_quote,
-            amount_out_minimum=amount_out_minimum,
-        )
-
-        # SETTLE params: (Currency currency, uint256 maxAmount, bool payerIsUser); maxAmount=0 settles entire debt.
-        settle_params = _pad_address(pool_token_in) + _pad_uint(0) + _pad_bool(True)
+        # SETTLE_ALL rejects debt above the bound even when hooks alter settlement.
+        settle_params = _pad_address(pool_token_in) + _pad_uint(quote.amount_in)
 
         # TAKE params: (Currency currency, address recipient, uint256 amount); amount=0 takes all.
         # Native-ETH output uses address(2) with outer SWEEP/WRAP_ETH forwarding.
@@ -867,41 +867,23 @@ class UniswapV4SDK:
         take_params = _pad_address(pool_token_out) + _pad_address(take_recipient) + _pad_uint(0)
 
         # V4_SWAP input: abi.encode(bytes actions, bytes[] params).
-        inner_actions = bytes([ACTION_SWAP_EXACT_IN_SINGLE, ACTION_SETTLE, ACTION_TAKE])
+        inner_actions = bytes([ACTION_SWAP_EXACT_IN_SINGLE, ACTION_SETTLE_ALL, ACTION_TAKE])
         v4_swap_input = _encode_v4_actions(inner_actions, [swap_params, settle_params, take_params])
 
         ur_commands_list: list[int] = []
         ur_inputs_list: list[str] = []
 
-        if weth_in:
-            # WETH input moves via Permit2 transfer then UNWRAP_WETH; SETTLE uses the router ETH balance.
-            transfer_params = (
-                _pad_address(quote.token_in)
-                + _pad_address(ADDRESS_THIS)
-                + _pad_uint(min(quote.amount_in, (1 << 160) - 1))
-            )
-            ur_commands_list.append(PERMIT2_TRANSFER_FROM)
-            ur_inputs_list.append(transfer_params)
-
-            unwrap_params = (
-                _pad_address(ADDRESS_THIS)  # recipient = ADDRESS_THIS
-                + _pad_uint(quote.amount_in)
-            )
-            ur_commands_list.append(_UR_UNWRAP_WETH)
-            ur_inputs_list.append(unwrap_params)
-
         ur_commands_list.append(V4_SWAP)
         ur_inputs_list.append(v4_swap_input)
-
-        if is_native_out and weth_out:
-            # WRAP_ETH params: (address recipient, uint256 amountMin).
-            wrap_params = _pad_address(recipient) + _pad_uint(amount_out_minimum)
-            ur_commands_list.append(_UR_WRAP_ETH)
-            ur_inputs_list.append(wrap_params)
-        elif is_native_out and not weth_out:
+        if is_native_out:
             sweep_params = _pad_address(NATIVE_CURRENCY) + _pad_address(recipient) + _pad_uint(amount_out_minimum)
             ur_commands_list.append(_UR_SWEEP)
             ur_inputs_list.append(sweep_params)
+
+        if is_native_in:
+            # A price-limit partial fill may consume less than msg.value.
+            ur_commands_list.append(_UR_SWEEP)
+            ur_inputs_list.append(_pad_address(NATIVE_CURRENCY) + _pad_address(recipient) + _pad_uint(0))
 
         ur_commands = bytes(ur_commands_list)
         ur_inputs = ur_inputs_list
@@ -913,7 +895,7 @@ class UniswapV4SDK:
         )
 
         # msg.value only for native-ETH input; WETH input uses Permit2 transfer instead.
-        native_value = quote.amount_in if (is_native_in and not weth_in) else 0
+        native_value = quote.amount_in if is_native_in else 0
 
         return SwapTransaction(
             to=self.router,
@@ -1002,31 +984,19 @@ class UniswapV4SDK:
         Returns:
             Hex string (no 0x prefix) of ABI-encoded params.
         """
-        pool_key = self.compute_pool_key(quote.token_in, quote.token_out, quote.fee_tier)
-        zero_for_one = quote.token_in.lower() == pool_key.currency0
+        from eth_abi import encode
 
-        # Clamp amounts to uint128 (V4 uses uint128 not uint256)
+        pool_key = quote.pool_key or self.compute_pool_key(quote.token_in, quote.token_out, quote.fee_tier)
+        zero_for_one = pool_key.direction(quote.token_in, quote.token_out)
         uint128_max = (1 << 128) - 1
-        amount_in = min(quote.amount_in, uint128_max)
-        amount_out_min = min(amount_out_minimum, uint128_max)
-
-        # Inner struct head: 8 static fields + 1 hookData offset = 9 words (offset 0x120 from struct start).
-        head = (
-            _pad_address(pool_key.currency0)
-            + _pad_address(pool_key.currency1)
-            + _pad_uint24(pool_key.fee)
-            + _pad_int24(pool_key.tick_spacing)
-            + _pad_address(pool_key.hooks)
-            + _pad_bool(zero_for_one)
-            + _pad_uint(amount_in)
-            + _pad_uint(amount_out_min)
-            + _pad_uint(0x120)  # offset (within the struct) to hookData
-        )
-
-        tail = _pad_uint(0)
-
-        # ExactInputSingleParams is a dynamic tuple, so the action param leads with a 0x20 struct offset.
-        return _pad_uint(0x20) + head + tail
+        if type(quote.amount_in) is not int or not 0 < quote.amount_in <= uint128_max:
+            raise ValueError("V4 amount_in must be a positive uint128")
+        if type(amount_out_minimum) is not int or not 0 <= amount_out_minimum <= uint128_max:
+            raise ValueError("V4 amount_out_minimum must fit uint128")
+        return encode(
+            ["((address,address,uint24,int24,address),bool,uint128,uint128,bytes)"],
+            [(tuple(pool_key.to_wire().values()), zero_for_one, quote.amount_in, amount_out_minimum, quote.hook_data)],
+        ).hex()
 
     def build_mint_position_tx(
         self,

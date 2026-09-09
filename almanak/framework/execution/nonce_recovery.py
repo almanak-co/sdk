@@ -37,6 +37,7 @@ from almanak.framework.execution.interfaces import (
     TransactionReceipt,
     TransactionRevertedError,
 )
+from almanak.framework.execution.receipt_costs import receipt_l1_fee_wei
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +147,7 @@ def build_complete_evm_receipt(receipt: Any, *, expected_tx_hash: str) -> Transa
             contract_address=receipt.contract_address,
             from_address=receipt.from_address,
             to_address=receipt.to_address,
+            l1_fee_wei=receipt.l1_fee_wei,
         )
 
     tx_hash = _hex_string(_extract_receipt_field(receipt, "transactionHash", "transaction_hash", "tx_hash"))
@@ -169,6 +171,12 @@ def build_complete_evm_receipt(receipt: Any, *, expected_tx_hash: str) -> Transa
     tx_hash, block_number, block_hash, gas_used, effective_gas_price, status = complete_fields
     try:
         normalized_logs = [dict(log) for log in logs]
+        l1_fee_wei = receipt_l1_fee_wei(
+            {
+                "l1_fee_wei": _extract_receipt_field(receipt, "l1_fee_wei"),
+                "l1Fee": _extract_receipt_field(receipt, "l1Fee"),
+            }
+        )
     except (TypeError, ValueError):
         return None
     return TransactionReceipt(
@@ -182,6 +190,7 @@ def build_complete_evm_receipt(receipt: Any, *, expected_tx_hash: str) -> Transa
         contract_address=_extract_receipt_field(receipt, "contractAddress", "contract_address"),
         from_address=_extract_receipt_field(receipt, "from", "from_address"),
         to_address=_extract_receipt_field(receipt, "to", "to_address"),
+        l1_fee_wei=l1_fee_wei,
     )
 
 

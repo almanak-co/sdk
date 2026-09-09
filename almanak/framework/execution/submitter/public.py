@@ -59,7 +59,8 @@ from almanak.framework.execution.interfaces import (
     TransactionReceipt,
     TransactionRevertedError,
 )
-from almanak.framework.execution.nonce_recovery import build_complete_evm_receipt, try_recover_nonce_too_low
+from almanak.framework.execution.nonce_recovery import try_recover_nonce_too_low
+from almanak.framework.execution.submitter.canonical_receipt import wait_for_canonical_receipt
 
 logger = logging.getLogger(__name__)
 
@@ -1188,54 +1189,19 @@ class PublicMempoolSubmitter(Submitter):
         logger.info(f"Waiting for receipt: tx_hash={tx_hash}, timeout={timeout_to_use}s")
 
         try:
-            # Use Web3's built-in wait_for_transaction_receipt
-            # Convert tx_hash to HexBytes for proper typing
-            tx_hash_bytes = HexBytes(tx_hash)
-            receipt = await web3.eth.wait_for_transaction_receipt(
-                tx_hash_bytes,
-                timeout=timeout_to_use,
-            )
-
-            # Defensive check - receipt should never be None but handle gracefully
-            if receipt is None:
-                logger.error(f"Got None receipt for tx_hash={tx_hash}")
-                raise SubmissionError(
-                    reason=f"Received null receipt for transaction {tx_hash}",
+            tx_receipt = await wait_for_canonical_receipt(web3, tx_hash, timeout_to_use)
+            if tx_receipt.status == 0:
+                revert_reason = await self._extract_revert_reason(
                     tx_hash=tx_hash,
-                    recoverable=True,
+                    block_number=tx_receipt.block_number,
                 )
-
-            status = receipt["status"]
-            if status == 0:
-                tx_receipt = build_complete_evm_receipt(receipt, expected_tx_hash=tx_hash)
-                revert_reason = None
-                if tx_receipt is not None:
-                    revert_reason = await self._extract_revert_reason(
-                        tx_hash=tx_hash,
-                        block_number=tx_receipt.block_number,
-                    )
-                logger.warning(f"Transaction reverted: tx_hash={tx_hash}, reason={revert_reason or 'Unknown'}")
                 raise TransactionRevertedError(
                     tx_hash=tx_hash,
                     revert_reason=revert_reason,
-                    gas_used=tx_receipt.gas_used if tx_receipt is not None else receipt.get("gasUsed"),
-                    block_number=tx_receipt.block_number if tx_receipt is not None else receipt.get("blockNumber"),
+                    gas_used=tx_receipt.gas_used,
+                    block_number=tx_receipt.block_number,
                     receipt=tx_receipt,
                 )
-
-            # Convert to our TransactionReceipt dataclass
-            tx_receipt = TransactionReceipt(
-                tx_hash=receipt["transactionHash"].hex(),
-                block_number=receipt["blockNumber"],
-                block_hash=receipt["blockHash"].hex(),
-                gas_used=receipt["gasUsed"],
-                effective_gas_price=receipt.get("effectiveGasPrice", 0),
-                status=status,
-                logs=[dict(log) for log in receipt.get("logs", [])],
-                contract_address=receipt.get("contractAddress"),
-                from_address=receipt.get("from"),
-                to_address=receipt.get("to"),
-            )
 
             logger.info(
                 f"Transaction confirmed: tx_hash={tx_hash}, "
