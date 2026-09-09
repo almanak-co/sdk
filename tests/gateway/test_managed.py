@@ -149,11 +149,11 @@ class TestManagedGateway:
         finally:
             gw.stop()
 
-    def test_context_manager(self):
+    def test_context_manager(self, unused_tcp_port):
         """ManagedGateway works as a context manager."""
-        with ManagedGateway(self._make_settings(50062)) as gw:
+        with ManagedGateway(self._make_settings(unused_tcp_port)) as gw:
             assert gw._thread.is_alive()
-            channel = grpc.insecure_channel("127.0.0.1:50062")
+            channel = grpc.insecure_channel(f"127.0.0.1:{unused_tcp_port}")
             stub = health_pb2_grpc.HealthStub(channel)
             response = stub.Check(health_pb2.HealthCheckRequest(service=""))
             assert response.status == health_pb2.HealthCheckResponse.SERVING

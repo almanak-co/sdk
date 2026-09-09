@@ -169,6 +169,30 @@ message ReferencePriceRequest {
   string instrument = 1;  // e.g. XAU
   string quote = 2;       // USD only in the initial contract
   string chain = 3;       // chain hosting the verified feed
+  string token_address = 4;
+}
+
+enum ReferencePriceBasis {
+  REFERENCE_PRICE_BASIS_UNSPECIFIED = 0;
+  REFERENCE_PRICE_BASIS_UNDERLYING_SHARE = 1;
+  REFERENCE_PRICE_BASIS_RAW_TOKEN = 2;
+}
+
+message ReferencePriceComposition {
+  string underlying_instrument = 1;
+  string underlying_price = 2;
+  string underlying_source = 3;
+  int64 underlying_observed_at = 4;
+  string multiplier = 5;
+  uint64 multiplier_block_number = 6;
+  string multiplier_block_hash = 7;
+  int64 multiplier_block_timestamp = 8;
+  int64 multiplier_read_at = 9;
+  string scheduled_multiplier = 10;
+  int64 multiplier_effective_at = 11;
+  string beacon_address = 12;
+  string implementation_address = 13;
+  int64 composed_at = 14;
 }
 
 message ReferencePriceResponse {
@@ -185,6 +209,9 @@ message ReferencePriceResponse {
   int64 market_status_as_of = 11;
   string market_status_source = 12;
   string reason = 13;
+  ReferencePriceBasis basis = 14;
+  string token_address = 15;
+  ReferencePriceComposition composition = 16;
 }
 
 // VIB-5309 — Pendle PT/YT USD price contract (epic VIB-5299, M1).

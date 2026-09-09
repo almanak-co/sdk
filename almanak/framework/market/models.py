@@ -248,6 +248,30 @@ class ReferenceMarketStatus(StrEnum):
     UNKNOWN = "unknown"
 
 
+class ReferencePriceBasis(StrEnum):
+    UNSPECIFIED = "unspecified"
+    UNDERLYING_SHARE = "underlying_share"
+    RAW_TOKEN = "raw_token"
+
+
+@dataclass(frozen=True)
+class ReferencePriceCompositionData:
+    underlying_instrument: str
+    underlying_price: Decimal
+    underlying_source: str
+    underlying_observed_at: datetime
+    multiplier: Decimal
+    multiplier_block_number: int
+    multiplier_block_hash: str
+    multiplier_block_timestamp: datetime
+    multiplier_read_at: datetime
+    scheduled_multiplier: Decimal | None
+    multiplier_effective_at: datetime | None
+    beacon_address: str
+    implementation_address: str
+    composed_at: datetime
+
+
 @dataclass(frozen=True)
 class ReferencePriceData:
     """Exact-provider reference price with freshness and session provenance."""
@@ -264,6 +288,9 @@ class ReferencePriceData:
     market_status_as_of: datetime | None
     market_status_source: str
     reason: str = ""
+    basis: ReferencePriceBasis = ReferencePriceBasis.UNSPECIFIED
+    token_address: str | None = None
+    composition: ReferencePriceCompositionData | None = None
 
     def trade_block_reason(
         self,
@@ -279,6 +306,8 @@ class ReferencePriceData:
             raise ValueError("min_confidence must be between 0 and 1")
         if self.price is None or not self.price.is_finite() or self.price <= 0:
             return self.reason or "reference_price_unavailable"
+        if reason := self._composition_block_reason(now):
+            return reason
         if self.market_status is not ReferenceMarketStatus.OPEN:
             return f"reference_market_{self.market_status.value}"
         if self.stale:
@@ -298,6 +327,28 @@ class ReferencePriceData:
             return "reference_price_too_old"
         if self.confidence is None or self.confidence < min_confidence:
             return "reference_price_confidence_too_low"
+        return None
+
+    def _composition_block_reason(self, now: datetime | None) -> str | None:
+        from almanak.integrations.bstocks.catalog import MAX_CLOCK_SKEW_SECONDS, MAX_CONTRACT_AGE_SECONDS
+
+        if self.basis is not ReferencePriceBasis.RAW_TOKEN:
+            return None
+        if self.composition is None or not self.token_address:
+            return "reference_composition_missing"
+        current_time = now or datetime.now(UTC)
+        if current_time.tzinfo is None:
+            current_time = current_time.replace(tzinfo=UTC)
+        for stamp in (self.composition.multiplier_read_at, self.composition.multiplier_block_timestamp):
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=UTC)
+            age = (current_time.astimezone(UTC) - stamp).total_seconds()
+            if age < -MAX_CLOCK_SKEW_SECONDS:
+                return "multiplier_timestamp_invalid"
+            if age > MAX_CONTRACT_AGE_SECONDS:
+                return "multiplier_observation_stale"
+        if self.composition.scheduled_multiplier is not None:
+            return "multiplier_adjustment_pending"
         return None
 
     def is_tradeable(

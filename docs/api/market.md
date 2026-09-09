@@ -148,3 +148,31 @@ def decide(self, market: MarketSnapshot) -> Intent:
 ## Provider Protocols (sync adapters)
 
 ::: almanak.framework.market.services
+
+### Token-adjusted equity references
+
+For a curated token identity, use the existing reference API with an optional
+explicit token address:
+
+```python
+reference = market.reference_price(
+    "GOOGLB", chain="bsc", quote="USD",
+    token_address="0x3f53de71c126bdabae20f9cd64848d317f6c3238",
+)
+if reason := reference.trade_block_reason(max_age_seconds=120):
+    return Intent.hold(reason=reason)
+```
+
+The exact registered `GOOGLB` symbol also resolves to that address when
+`token_address` is omitted. `reference_price("GOOGL", chain="bsc")` remains an
+underlying share quote. A token reference has `basis=RAW_TOKEN`, a bound
+`token_address`, and `composition` containing the underlying quote, active
+multiplier, contract block and implementation provenance. Compare this raw-token
+reference with a raw-token pool quote; do not multiply it again by the multiplier.
+It does not change `market.price()` or wallet transfer units.
+
+Missing or incompatible gateway fields, changed implementation, expired contract
+observations and unaligned adjustments fail closed. The equity source timestamp
+is never replaced by composition time. Catalog availability alone does not prove
+that a provider meets a 120-second requirement, and fork/injected tests do not
+qualify hosted data access or asset eligibility.

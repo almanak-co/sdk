@@ -57,6 +57,23 @@ REFERENCE_MARKET_STATUS_CLOSED: ReferenceMarketStatus.ValueType  # 2
 REFERENCE_MARKET_STATUS_UNKNOWN: ReferenceMarketStatus.ValueType  # 3
 Global___ReferenceMarketStatus: _TypeAlias = ReferenceMarketStatus  # noqa: Y015
 
+class _ReferencePriceBasis:
+    ValueType = _typing.NewType("ValueType", _builtins.int)
+    V: _TypeAlias = ValueType  # noqa: Y015
+
+class _ReferencePriceBasisEnumTypeWrapper(_enum_type_wrapper._EnumTypeWrapper[_ReferencePriceBasis.ValueType], _builtins.type):
+    DESCRIPTOR: _descriptor.EnumDescriptor
+    REFERENCE_PRICE_BASIS_UNSPECIFIED: _ReferencePriceBasis.ValueType  # 0
+    REFERENCE_PRICE_BASIS_UNDERLYING_SHARE: _ReferencePriceBasis.ValueType  # 1
+    REFERENCE_PRICE_BASIS_RAW_TOKEN: _ReferencePriceBasis.ValueType  # 2
+
+class ReferencePriceBasis(_ReferencePriceBasis, metaclass=_ReferencePriceBasisEnumTypeWrapper): ...
+
+REFERENCE_PRICE_BASIS_UNSPECIFIED: ReferencePriceBasis.ValueType  # 0
+REFERENCE_PRICE_BASIS_UNDERLYING_SHARE: ReferencePriceBasis.ValueType  # 1
+REFERENCE_PRICE_BASIS_RAW_TOKEN: ReferencePriceBasis.ValueType  # 2
+Global___ReferencePriceBasis: _TypeAlias = ReferencePriceBasis  # noqa: Y015
+
 class _PtPriceAvailability:
     ValueType = _typing.NewType("ValueType", _builtins.int)
     V: _TypeAlias = ValueType  # noqa: Y015
@@ -774,23 +791,81 @@ class ReferencePriceRequest(_message.Message):
     INSTRUMENT_FIELD_NUMBER: _builtins.int
     QUOTE_FIELD_NUMBER: _builtins.int
     CHAIN_FIELD_NUMBER: _builtins.int
+    TOKEN_ADDRESS_FIELD_NUMBER: _builtins.int
     instrument: _builtins.str
     """e.g. XAU"""
     quote: _builtins.str
     """USD only in the initial contract"""
     chain: _builtins.str
     """chain hosting the verified feed"""
+    token_address: _builtins.str
     def __init__(
         self,
         *,
         instrument: _builtins.str = ...,
         quote: _builtins.str = ...,
         chain: _builtins.str = ...,
+        token_address: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "instrument", b"instrument", "quote", b"quote"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "instrument", b"instrument", "quote", b"quote", "token_address", b"token_address"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___ReferencePriceRequest: _TypeAlias = ReferencePriceRequest  # noqa: Y015
+
+@_typing.final
+class ReferencePriceComposition(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    UNDERLYING_INSTRUMENT_FIELD_NUMBER: _builtins.int
+    UNDERLYING_PRICE_FIELD_NUMBER: _builtins.int
+    UNDERLYING_SOURCE_FIELD_NUMBER: _builtins.int
+    UNDERLYING_OBSERVED_AT_FIELD_NUMBER: _builtins.int
+    MULTIPLIER_FIELD_NUMBER: _builtins.int
+    MULTIPLIER_BLOCK_NUMBER_FIELD_NUMBER: _builtins.int
+    MULTIPLIER_BLOCK_HASH_FIELD_NUMBER: _builtins.int
+    MULTIPLIER_BLOCK_TIMESTAMP_FIELD_NUMBER: _builtins.int
+    MULTIPLIER_READ_AT_FIELD_NUMBER: _builtins.int
+    SCHEDULED_MULTIPLIER_FIELD_NUMBER: _builtins.int
+    MULTIPLIER_EFFECTIVE_AT_FIELD_NUMBER: _builtins.int
+    BEACON_ADDRESS_FIELD_NUMBER: _builtins.int
+    IMPLEMENTATION_ADDRESS_FIELD_NUMBER: _builtins.int
+    COMPOSED_AT_FIELD_NUMBER: _builtins.int
+    underlying_instrument: _builtins.str
+    underlying_price: _builtins.str
+    underlying_source: _builtins.str
+    underlying_observed_at: _builtins.int
+    multiplier: _builtins.str
+    multiplier_block_number: _builtins.int
+    multiplier_block_hash: _builtins.str
+    multiplier_block_timestamp: _builtins.int
+    multiplier_read_at: _builtins.int
+    scheduled_multiplier: _builtins.str
+    multiplier_effective_at: _builtins.int
+    beacon_address: _builtins.str
+    implementation_address: _builtins.str
+    composed_at: _builtins.int
+    def __init__(
+        self,
+        *,
+        underlying_instrument: _builtins.str = ...,
+        underlying_price: _builtins.str = ...,
+        underlying_source: _builtins.str = ...,
+        underlying_observed_at: _builtins.int = ...,
+        multiplier: _builtins.str = ...,
+        multiplier_block_number: _builtins.int = ...,
+        multiplier_block_hash: _builtins.str = ...,
+        multiplier_block_timestamp: _builtins.int = ...,
+        multiplier_read_at: _builtins.int = ...,
+        scheduled_multiplier: _builtins.str = ...,
+        multiplier_effective_at: _builtins.int = ...,
+        beacon_address: _builtins.str = ...,
+        implementation_address: _builtins.str = ...,
+        composed_at: _builtins.int = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["beacon_address", b"beacon_address", "composed_at", b"composed_at", "implementation_address", b"implementation_address", "multiplier", b"multiplier", "multiplier_block_hash", b"multiplier_block_hash", "multiplier_block_number", b"multiplier_block_number", "multiplier_block_timestamp", b"multiplier_block_timestamp", "multiplier_effective_at", b"multiplier_effective_at", "multiplier_read_at", b"multiplier_read_at", "scheduled_multiplier", b"scheduled_multiplier", "underlying_instrument", b"underlying_instrument", "underlying_observed_at", b"underlying_observed_at", "underlying_price", b"underlying_price", "underlying_source", b"underlying_source"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___ReferencePriceComposition: _TypeAlias = ReferencePriceComposition  # noqa: Y015
 
 @_typing.final
 class ReferencePriceResponse(_message.Message):
@@ -809,6 +884,9 @@ class ReferencePriceResponse(_message.Message):
     MARKET_STATUS_AS_OF_FIELD_NUMBER: _builtins.int
     MARKET_STATUS_SOURCE_FIELD_NUMBER: _builtins.int
     REASON_FIELD_NUMBER: _builtins.int
+    BASIS_FIELD_NUMBER: _builtins.int
+    TOKEN_ADDRESS_FIELD_NUMBER: _builtins.int
+    COMPOSITION_FIELD_NUMBER: _builtins.int
     instrument: _builtins.str
     quote: _builtins.str
     chain: _builtins.str
@@ -826,6 +904,10 @@ class ReferencePriceResponse(_message.Message):
     market_status_as_of: _builtins.int
     market_status_source: _builtins.str
     reason: _builtins.str
+    basis: Global___ReferencePriceBasis.ValueType
+    token_address: _builtins.str
+    @_builtins.property
+    def composition(self) -> Global___ReferencePriceComposition: ...
     def __init__(
         self,
         *,
@@ -842,8 +924,13 @@ class ReferencePriceResponse(_message.Message):
         market_status_as_of: _builtins.int = ...,
         market_status_source: _builtins.str = ...,
         reason: _builtins.str = ...,
+        basis: Global___ReferencePriceBasis.ValueType = ...,
+        token_address: _builtins.str = ...,
+        composition: Global___ReferencePriceComposition | None = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["availability", b"availability", "chain", b"chain", "confidence", b"confidence", "instrument", b"instrument", "market_status", b"market_status", "market_status_as_of", b"market_status_as_of", "market_status_source", b"market_status_source", "observed_at", b"observed_at", "price", b"price", "quote", b"quote", "reason", b"reason", "source", b"source", "stale", b"stale"]  # noqa: Y015
+    _HasFieldArgType: _TypeAlias = _typing.Literal["composition", b"composition"]  # noqa: Y015
+    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["availability", b"availability", "basis", b"basis", "chain", b"chain", "composition", b"composition", "confidence", b"confidence", "instrument", b"instrument", "market_status", b"market_status", "market_status_as_of", b"market_status_as_of", "market_status_source", b"market_status_source", "observed_at", b"observed_at", "price", b"price", "quote", b"quote", "reason", b"reason", "source", b"source", "stale", b"stale", "token_address", b"token_address"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___ReferencePriceResponse: _TypeAlias = ReferencePriceResponse  # noqa: Y015

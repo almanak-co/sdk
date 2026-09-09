@@ -1090,11 +1090,14 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         """
         from almanak.gateway.services.onchain_lookup import OnChainLookup
         from almanak.gateway.utils import get_rpc_url
+        from almanak.gateway.utils.rpc_provider import inject_poa_middleware
 
         async with self._onchain_lookups_lock:
             if chain not in self._onchain_lookups:
                 rpc_url = get_rpc_url(chain, network=self.settings.network)
-                self._onchain_lookups[chain] = OnChainLookup(rpc_url=rpc_url)
+                lookup = OnChainLookup(rpc_url=rpc_url)
+                inject_poa_middleware(lookup._w3, chain)
+                self._onchain_lookups[chain] = lookup
             return self._onchain_lookups[chain]
 
     def _resolve_pricing_chain(self, token: str, requested_chain: str, *, is_evm_address: bool) -> str | None:
@@ -1956,6 +1959,24 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
                 reason="chain_not_configured",
             )
 
+        from almanak.integrations.bstocks.catalog import reference_profile
+
+        try:
+            profile = reference_profile(chain, instrument, request.token_address)
+            if profile is not None and not request.token_address:
+                raise ValueError("reference_token_address_required")
+        except ValueError as exc:
+            return gateway_pb2.ReferencePriceResponse(
+                instrument=instrument,
+                quote=quote,
+                chain=chain,
+                availability=gateway_pb2.REFERENCE_PRICE_AVAILABILITY_UNMEASURED,
+                market_status=gateway_pb2.REFERENCE_MARKET_STATUS_UNKNOWN,
+                reason=str(exc),
+            )
+        if profile is not None:
+            return await self._get_token_reference(profile, quote, context)
+
         if chain not in self._price_aggregators:
             await self.reinitialize(chain)
         aggregator = self._price_aggregators.get(chain)
@@ -2010,6 +2031,7 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             instrument=instrument,
             quote=quote,
             chain=chain,
+            basis=gateway_pb2.REFERENCE_PRICE_BASIS_UNDERLYING_SHARE,
             price=str(result.price),
             availability=gateway_pb2.REFERENCE_PRICE_AVAILABILITY_AVAILABLE,
             confidence=result.confidence,
@@ -2020,6 +2042,47 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             market_status_as_of=int(status.as_of.timestamp()),
             market_status_source=status.source,
         )
+
+    async def _read_reference_multiplier(self, profile: Any) -> Any:
+        from almanak.gateway.data.price.scaled_token_reference import read_multiplier
+
+        lookup = await self._get_onchain_lookup(profile.chain)
+        return await read_multiplier(lookup._w3, profile)
+
+    async def _get_token_reference(self, profile: Any, quote: str, context: Any) -> gateway_pb2.ReferencePriceResponse:
+        from almanak.gateway.data.price.scaled_token_reference import AdjustmentCoherence, compose_reference
+
+        underlying = await self.GetReferencePrice(
+            gateway_pb2.ReferencePriceRequest(instrument=profile.underlying, chain=profile.chain, quote=quote),
+            context,
+        )
+        if underlying.availability != gateway_pb2.REFERENCE_PRICE_AVAILABILITY_AVAILABLE:
+            underlying.instrument = profile.symbol
+            underlying.token_address = profile.address
+            underlying.basis = gateway_pb2.REFERENCE_PRICE_BASIS_RAW_TOKEN
+            return underlying
+        try:
+            state = await self._read_reference_multiplier(profile)
+            if not hasattr(self, "_reference_adjustment_coherence"):
+                self._reference_adjustment_coherence = AdjustmentCoherence()
+            return compose_reference(underlying, profile, state, self._reference_adjustment_coherence)
+        except Exception as exc:  # noqa: BLE001 - provider failures remain typed and never expose RPC credentials
+            logger.warning("Token reference contract observation failed (%s)", type(exc).__name__)
+            reason = (
+                str(exc)
+                if isinstance(exc, ValueError) and str(exc).startswith("multiplier_")
+                else "multiplier_read_failed"
+            )
+            underlying.instrument = profile.symbol
+            underlying.token_address = profile.address
+            underlying.basis = gateway_pb2.REFERENCE_PRICE_BASIS_RAW_TOKEN
+            underlying.price = ""
+            underlying.availability = gateway_pb2.REFERENCE_PRICE_AVAILABILITY_ERRORED
+            underlying.reason = reason
+            underlying.source = ""
+            underlying.observed_at = 0
+            underlying.stale = True
+            return underlying
 
     async def GetBalance(
         self,

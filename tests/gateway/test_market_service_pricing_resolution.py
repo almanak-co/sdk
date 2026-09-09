@@ -177,7 +177,8 @@ async def test_static_symbol_ambiguity_remains_a_best_effort_miss(caplog: pytest
         resolved = await servicer._resolve_token_for_pricing("DUP", "base")
 
     assert resolved is None
-    assert caplog.messages == [f"Static token price identity resolution failed for DUP on base: {error}"]
+    messages = [record.getMessage() for record in caplog.records if record.name == market_service_module.__name__]
+    assert messages == [f"Static token price identity resolution failed for DUP on base: {error}"]
 
 
 @pytest.mark.asyncio

@@ -1104,6 +1104,7 @@ class MarketSnapshot:
         chain: str | None = None,
         *,
         quote: str = "USD",
+        token_address: str | None = None,
     ) -> ReferencePriceData:
         """Read one gateway-verified non-crypto reference price.
 
@@ -1171,10 +1172,22 @@ class MarketSnapshot:
             self._record_critical_data_failure("reference_price", f"{instrument}@{requested_chain}", reason)
             return _unavailable(reason)
 
+        from almanak.integrations.bstocks.catalog import reference_profile
+
+        from .reference import decode_reference_composition
+
+        try:
+            profile = reference_profile(requested_chain, instrument, token_address or "")
+        except ValueError as exc:
+            self._record_critical_data_failure("reference_price", f"{instrument}@{requested_chain}", str(exc))
+            return _unavailable(str(exc))
+        resolved_address = profile.address if profile else ""
+
         request = gateway_pb2.ReferencePriceRequest(
             instrument=instrument,
             quote=quote,
             chain=requested_chain,
+            token_address=resolved_address,
         )
         config_timeout = getattr(getattr(client, "config", None), "timeout", None)
         rpc_timeout = config_timeout if isinstance(config_timeout, int | float) else _GATEWAY_RPC_TIMEOUT_SECONDS
@@ -1204,6 +1217,18 @@ class MarketSnapshot:
             )
             return _unavailable("non_positive_or_non_finite_reference_price", response=response)
 
+        try:
+            basis, composition = decode_reference_composition(
+                response,
+                profile,
+                instrument=instrument.strip().upper(),
+                chain=requested_chain,
+                quote=quote.strip().upper(),
+            )
+        except (ValueError, OverflowError, OSError) as exc:
+            self._record_critical_data_failure("reference_price", f"{instrument}@{requested_chain}", str(exc))
+            return _unavailable(str(exc), response=response)
+
         market_status = {
             gateway_pb2.REFERENCE_MARKET_STATUS_OPEN: ReferenceMarketStatus.OPEN,
             gateway_pb2.REFERENCE_MARKET_STATUS_CLOSED: ReferenceMarketStatus.CLOSED,
@@ -1223,6 +1248,9 @@ class MarketSnapshot:
             market_status_as_of=_timestamp(response.market_status_as_of),
             market_status_source=response.market_status_source,
             reason=response.reason,
+            basis=basis,
+            token_address=resolved_address or None,
+            composition=composition,
         )
 
     def pt_price(
