@@ -139,6 +139,9 @@ _REFERENCE_ADDRESSES: dict[str, dict[str, str]] = {
         # https://data.chain.link/feeds/bsc/mainnet/xau-usd
         # This is the proxy (consumer) address, not the underlying aggregator.
         "XAU/USD": "0x86896fEB19D8A607c3b11f2aF50A0f239Bd71CD0",
+        # Consumer proxies for equity reference feeds, never wrapper-token prices.
+        "GOOGL/USD": "0xeDA73F8acb669274B15A977Cb0cdA57a84F18c2a",
+        "TSLA/USD": "0xEEA2ae9c074E87596A85ABE698B2Afebc9B57893",
     }
 }
 
@@ -205,9 +208,13 @@ _HEARTBEATS = {
     "USDT/USD": 86400,
     "DAI/USD": 3600,
     "XAU/USD": 600,
+    "GOOGL/USD": 86400,
+    "TSLA/USD": 86400,
     "RETH/ETH": 86400,
 }
 _DEVIATIONS = {
+    "GOOGL/USD": Decimal("0.5"),
+    "TSLA/USD": Decimal("0.5"),
     "ETH/USD": Decimal("0.5"),
     "BTC/USD": Decimal("0.5"),
     "LINK/USD": Decimal("1.0"),

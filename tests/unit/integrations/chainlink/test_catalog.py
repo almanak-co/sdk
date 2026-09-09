@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+import pytest
+
 from almanak.integrations.chainlink.catalog import ChainlinkCatalog
 from almanak.integrations.chainlink.models import FeedKind
 
@@ -74,3 +76,24 @@ def test_chain_aliases_resolve_to_the_canonical_feed_catalogue() -> None:
     assert catalog.feeds("bnb") == catalog.feeds("bsc")
     assert catalog.feed_for_token("bnb", "WBNB") == catalog.feed("bsc", "BNB/USD")
     assert catalog.supports_chain("bnb")
+
+
+@pytest.mark.parametrize(
+    ("instrument", "proxy"),
+    [
+        ("GOOGL", "0xeDA73F8acb669274B15A977Cb0cdA57a84F18c2a"),
+        ("TSLA", "0xEEA2ae9c074E87596A85ABE698B2Afebc9B57893"),
+    ],
+)
+def test_bsc_equity_reference_identity_and_cadence(instrument, proxy):
+    catalog = ChainlinkCatalog()
+    spec = catalog.feed("bsc", f"{instrument}/USD")
+    assert spec is not None
+    assert (spec.address, spec.chain_id, spec.decimals) == (proxy, 56, 8)
+    assert spec.kind is FeedKind.REFERENCE
+    assert spec.heartbeat_seconds == 86400
+    assert spec.deviation_threshold_pct == Decimal("0.5")
+    assert f"{instrument}/USD" not in catalog.feeds("bsc", kind=FeedKind.USD)
+    assert catalog.feed_for_token("bsc", instrument) is None
+    assert catalog.feed("ethereum", f"{instrument}/USD") is None
+    assert catalog.feed("bsc", f"{instrument}B/USD") is None

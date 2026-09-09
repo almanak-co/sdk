@@ -30,7 +30,8 @@ class MarketHoursObservation:
 
 # Chainlink classifies XAU/USD as Precious_Metals. CME Globex Gold provides the
 # conservative regular/holiday/early-close calendar for that reference market.
-_CALENDAR_BY_PAIR = {"XAU/USD": "CMEGlobex_Gold"}
+# Equity calendars follow the provider directory's regular-session convention.
+_CALENDAR_BY_PAIR = {"XAU/USD": "CMEGlobex_Gold", "GOOGL/USD": "NYSE", "TSLA/USD": "NYSE"}
 
 
 def reference_market_status(pair: str, *, as_of: datetime | None = None) -> MarketHoursObservation:

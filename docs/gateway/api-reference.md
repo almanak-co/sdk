@@ -115,7 +115,12 @@ Get a named non-crypto reference price from one gateway-verified feed. Unlike
 `GetPrice`, this RPC never aggregates same-symbol crypto assets. The gateway
 owns the exact feed selection, provider timestamp and heartbeat evaluation, and
 reference-market session status. Unsupported pairs and unavailable, malformed,
-stale, or errored observations fail closed without a numeric price.
+or errored observations have no numeric price. Stale observations retain the price
+and `stale=true`; consumers must enforce freshness and session gates.
+
+BSC supports canonical `XAU`, `GOOGL`, and `TSLA` reference instruments. Wrapper
+symbols and token addresses are not aliases. See the [reference-price contract](../api/market.md#non-crypto-reference-prices)
+for provider cadence, session conventions, and strict strategy-age checks.
 
 ```protobuf
 rpc GetReferencePrice(ReferencePriceRequest) returns (ReferencePriceResponse)
