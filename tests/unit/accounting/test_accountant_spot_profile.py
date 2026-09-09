@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from almanak.framework.accounting.accountant_test import SCORECARD_PROFILES, _cells_spot
 from almanak.framework.primitives.types import Primitive
 
@@ -13,6 +15,8 @@ def _rows() -> tuple[list[dict], dict[str, dict], list[dict]]:
         {"id": "buy", "event_type": "SWAP", "timestamp": "2026-08-11T00:01:00+00:00"},
         {"id": "sell", "event_type": "SWAP", "timestamp": "2026-08-11T00:03:00+00:00"},
     ]
+    for event in events:
+        event.update(deployment_id="deployment:test", chain="base", position_key="swap:base:0x1234")
     payloads = {
         "buy": {
             "event_type": "SWAP",
@@ -60,6 +64,8 @@ def _rows() -> tuple[list[dict], dict[str, dict], list[dict]]:
     snapshots = [
         {
             "id": 1,
+            "deployment_id": "deployment:test",
+            "chain": "base",
             "timestamp": "2026-08-11T00:02:00+00:00",
             "positions_json": json.dumps(positions),
             "wallet_balances_json": json.dumps(
@@ -67,8 +73,6 @@ def _rows() -> tuple[list[dict], dict[str, dict], list[dict]]:
             ),
         }
     ]
-    for row in events + snapshots:
-        row["chain"] = "base"
     return events, payloads, snapshots
 
 
@@ -129,6 +133,305 @@ def test_s4_rejects_inventory_basis_that_disagrees_with_acquisition_replay() -> 
     positions["metadata"]["swap_inventory"]["tokens"]["weth"]["cost_usd"] = "3.50"
     snapshots[0]["positions_json"] = json.dumps(positions)
     assert _by_id(events, payloads, snapshots)["S4"].status == "FAIL"
+
+
+def _append_consolidation(events, payloads):
+    events.append({**events[-1], "id": "consolidate", "timestamp": "2026-08-11T00:04:00+00:00"})
+    payloads["consolidate"] = {
+        **payloads["sell"],
+        "token_in": "USDC",
+        "token_out": "DAI",
+        "amount_in": "4.01",
+        "amount_out": "4",
+        "amount_in_usd": "4.01",
+        "amount_out_usd": "4",
+        "realized_pnl_usd": "0",
+        "realized_pnl_usd_matched": "0",
+    }
+
+
+def test_s1_closed_lot_survives_terminal_consolidation():
+    events, payloads, snapshots = _rows()
+    _append_consolidation(events, payloads)
+    cells = _by_id(events, payloads, snapshots)
+    assert all(cell.status == "PASS" for cell in cells.values())
+    assert "buy -> sell" in cells["S1"].diagnostic
+    assert "buy -> consolidate" not in cells["S1"].diagnostic
+
+
+def test_s1_requires_the_actual_close_even_with_consolidation():
+    events, payloads, snapshots = _rows()
+    _append_consolidation(events, payloads)
+    events.pop(1)
+    assert _by_id(events, payloads, snapshots)["S1"].status == "FAIL"
+
+
+def test_s1_accumulates_partial_disposals_until_the_lot_is_closed():
+    events, payloads, snapshots = _rows()
+    payloads["sell"].update(
+        amount_in="0.001",
+        amount_out="2.005",
+        amount_in_usd="2.01",
+        amount_out_usd="2.005",
+        realized_pnl_usd="0.015",
+        realized_pnl_usd_matched="0.015",
+    )
+    assert _by_id(events, payloads, snapshots)["S1"].status == "FAIL"
+    events.append({**events[-1], "id": "sell-rest", "timestamp": "2026-08-11T00:04:00+00:00"})
+    payloads["sell-rest"] = dict(payloads["sell"])
+    cells = _by_id(events, payloads, snapshots)
+    assert cells["S1"].status == "PASS"
+    assert cells["S2"].status == "PASS"
+    assert "buy -> sell,sell-rest" in cells["S1"].diagnostic
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("cost_basis_recorded", False),
+        ("amount_out_usd", None),
+        ("amount_out_usd", ""),
+        ("amount_out_usd", "0"),
+        ("amount_out_usd", "NaN"),
+        ("amount_out_usd", "Infinity"),
+        ("amount_in", "0"),
+        ("amount_out", "-1"),
+    ],
+)
+def test_s1_later_good_pair_cannot_hide_bad_acquisition_basis(field, value):
+    events, payloads, snapshots = _rows()
+    payloads["buy"][field] = value
+    more, other, _ = _rows()
+    for event in more:
+        old_id = event["id"]
+        event["id"] = "later-" + old_id
+        event["position_key"] = "swap:base:0x5678"
+        events.append(event)
+        payloads[event["id"]] = other[old_id]
+    assert _by_id(events, payloads, snapshots)["S1"].status == "FAIL"
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("deployment_id", "deployment:other"),
+        ("chain", "ethereum"),
+        ("position_key", "swap:base:0x5678"),
+        ("position_key", ""),
+        ("chain", ""),
+        ("deployment_id", ""),
+    ],
+)
+def test_s1_never_matches_a_different_or_unmeasured_accounting_scope(field, value):
+    events, payloads, snapshots = _rows()
+    events[1][field] = value
+    assert _by_id(events, payloads, snapshots)["S1"].status == "FAIL"
+
+
+def test_s1_uses_payload_swap_key_when_row_position_key_is_empty():
+    events, payloads, snapshots = _rows()
+    for event in events:
+        payloads[event["id"]]["swap_position_key"] = event.pop("position_key")
+    assert _by_id(events, payloads, snapshots)["S1"].status == "PASS"
+    payloads["sell"]["swap_position_key"] = "swap:base:0x5678"
+    assert _by_id(events, payloads, snapshots)["S1"].status == "FAIL"
+
+
+@pytest.mark.parametrize("unmatched", [None, "", "0.001", "NaN"])
+def test_s1_requires_measured_fully_matched_disposal(unmatched):
+    events, payloads, snapshots = _rows()
+    payloads["sell"]["unmatched_amount_in"] = unmatched
+    assert _by_id(events, payloads, snapshots)["S1"].status == "FAIL"
+
+
+def test_s1_rejects_persisted_zero_when_disposal_exceeds_acquired_quantity():
+    events, payloads, snapshots = _rows()
+    payloads["sell"]["amount_in"] = "0.003"
+    cells = _by_id(events, payloads, snapshots)
+    assert cells["S1"].status == "FAIL"
+    assert cells["S2"].status == "FAIL"
+    assert "FIFO replay" in cells["S2"].diagnostic
+
+
+def test_s1_does_not_match_a_sell_before_its_acquisition():
+    events, payloads, snapshots = _rows()
+    events.reverse()
+    assert _by_id(events, payloads, snapshots)["S1"].status == "FAIL"
+
+
+def test_s1_respects_fifo_provenance_instead_of_reversed_symbol_presence():
+    events, payloads, snapshots = _rows()
+    older = {**events[0], "id": "older", "timestamp": "2026-08-11T00:00:00+00:00"}
+    events.insert(0, older)
+    payloads["older"] = {**payloads["buy"], "token_in": "DAI"}
+    # The only sale consumes the older DAI-funded lot, not the USDC-funded one.
+    assert _by_id(events, payloads, snapshots)["S1"].status == "FAIL"
+
+
+def test_s1_explicit_different_token_addresses_do_not_match():
+    events, payloads, snapshots = _rows()
+    payloads["buy"]["token_out"] = "0x" + "1" * 40
+    payloads["sell"]["token_in"] = "0x" + "2" * 40
+    assert _by_id(events, payloads, snapshots)["S1"].status == "FAIL"
+
+
+def test_s1_preserves_a_closed_lot_with_interleaved_other_wallet_activity():
+    events, payloads, snapshots = _rows()
+    events.insert(1, {**events[0], "id": "other-wallet", "position_key": "swap:base:0x5678"})
+    payloads["other-wallet"] = dict(payloads["buy"])
+    cells = _by_id(events, payloads, snapshots)
+    assert cells["S1"].status == "PASS"
+    assert cells["S2"].status == "PASS"
+
+
+def test_s1_measured_zero_realized_pnl_still_closes_the_lot():
+    events, payloads, snapshots = _rows()
+    payloads["sell"].update(amount_in_usd="3.99", realized_pnl_usd="0", realized_pnl_usd_matched="0")
+    cells = _by_id(events, payloads, snapshots)
+    assert cells["S1"].status == "PASS"
+    assert cells["S2"].status == "PASS"
+
+
+def test_s1_solana_mint_case_is_identity_not_a_symbol_alias():
+    events, payloads, snapshots = _rows()
+    for event in events:
+        event.update(chain="solana", position_key="swap:solana:WalletIdentity")
+    mint = "A" * 32
+    payloads["buy"]["token_out"] = mint
+    payloads["sell"]["token_in"] = mint.lower()
+    assert _by_id(events, payloads, snapshots)["S1"].status == "FAIL"
+    payloads["sell"]["token_in"] = mint
+    assert _by_id(events, payloads, snapshots)["S1"].status == "PASS"
+
+
+def test_explicit_conflicting_row_and_payload_wallet_keys_fail_closed():
+    events, payloads, snapshots = _rows()
+    payloads["buy"]["swap_position_key"] = "swap:base:0x5678"
+    cells = _by_id(events, payloads, snapshots)
+    assert cells["S1"].status == "FAIL"
+    assert cells["S2"].status == "FAIL"
+    assert cells["S4"].status == "FAIL"
+
+
+def test_matching_explicit_keys_preserve_evm_wallet_case_normalization():
+    events, payloads, snapshots = _rows()
+    for row in events:
+        row["position_key"] = "swap:base:0xabCd"
+        payloads[row["id"]]["swap_position_key"] = "swap:base:0xABcD"
+    assert _by_id(events, payloads, snapshots)["S1"].status == "PASS"
+
+
+@pytest.mark.parametrize("different_scope", ["chain", "deployment"])
+def test_s4_snapshot_excludes_lots_from_another_proven_scope(different_scope):
+    events, payloads, snapshots = _rows()
+    other = {**events[0], "id": "other-scope"}
+    if different_scope == "chain":
+        other.update(chain="ethereum", position_key="swap:ethereum:0x1234")
+    else:
+        other["deployment_id"] = "deployment:other"
+    events.insert(1, other)
+    payloads["other-scope"] = dict(payloads["buy"])
+    assert _by_id(events, payloads, snapshots)["S4"].status == "PASS"
+    positions = json.loads(snapshots[0]["positions_json"])
+    positions["metadata"]["swap_inventory"]["tokens"]["weth"]["cost_usd"] = "7.98"
+    snapshots[0]["positions_json"] = json.dumps(positions)
+    assert _by_id(events, payloads, snapshots)["S4"].status == "FAIL"
+
+
+def test_s4_same_deployment_chain_with_two_wallets_is_ambiguous():
+    events, payloads, snapshots = _rows()
+    events.insert(1, {**events[0], "id": "other-wallet", "position_key": "swap:base:0x5678"})
+    payloads["other-wallet"] = dict(payloads["buy"])
+    positions = json.loads(snapshots[0]["positions_json"])
+    positions["metadata"]["swap_inventory"]["tokens"]["weth"]["cost_usd"] = "7.98"
+    snapshots[0]["positions_json"] = json.dumps(positions)
+    cell = _by_id(events, payloads, snapshots)["S4"]
+    assert cell.status == "FAIL"
+    assert "ambiguous" in cell.diagnostic
+
+
+@pytest.mark.parametrize("field", ["deployment_id", "chain"])
+def test_s4_does_not_infer_missing_snapshot_scope(field):
+    events, payloads, snapshots = _rows()
+    snapshots[0].pop(field)
+    assert _by_id(events, payloads, snapshots)["S4"].status == "FAIL"
+
+
+def test_s1_closure_evidence_remains_independent_of_s2_pnl_mismatch():
+    events, payloads, snapshots = _rows()
+    payloads["sell"]["realized_pnl_usd_matched"] = "999"
+    cells = _by_id(events, payloads, snapshots)
+    assert cells["S1"].status == "PASS"
+    assert cells["S2"].status == "FAIL"
+    assert "realized_pnl_usd_matched" in cells["S2"].diagnostic
+
+
+def _thirds_rows():
+    events, payloads, snapshots = _rows()
+    payloads["buy"].update(
+        amount_in="2",
+        amount_out="3",
+        amount_in_usd="2",
+        amount_out_usd="2",
+        unmatched_amount_in="2",
+        unmatched_proceeds_usd="2",
+    )
+    payloads["sell"].update(
+        amount_in="1",
+        amount_out="1",
+        amount_in_usd="1",
+        amount_out_usd="1",
+        realized_pnl_usd="0.3333333333333333333333333334",
+        realized_pnl_usd_matched="0.3333333333333333333333333334",
+    )
+    for index in (2, 3):
+        row_id = f"sell-{index}"
+        events.append({**events[1], "id": row_id, "timestamp": f"2026-08-11T00:0{index + 2}:00+00:00"})
+        payloads[row_id] = dict(payloads["sell"])
+    # The held one-third basis is independently fixed at the 28-digit Decimal oracle.
+    positions = json.loads(snapshots[0]["positions_json"])
+    positions["metadata"]["swap_inventory"]["tokens"]["weth"].update(
+        quantity="1", cost_usd="0.6666666666666666666666666666", value_usd="1"
+    )
+    snapshots[0].update(
+        timestamp="2026-08-11T00:04:30+00:00",
+        positions_json=json.dumps(positions),
+        wallet_balances_json=json.dumps([{"symbol": "WETH", "balance": "1", "value_usd": "1", "price_usd": "1"}]),
+    )
+    return events, payloads, snapshots
+
+
+def test_sequential_thirds_preserve_original_acquisition_basis():
+    cells = _by_id(*_thirds_rows())
+    assert {key: cell.status for key, cell in cells.items()} == {"S1": "PASS", "S2": "PASS", "S3": "PASS", "S4": "PASS"}
+
+
+def test_partial_thirds_do_not_claim_full_lot_closure():
+    events, payloads, snapshots = _thirds_rows()
+    cells = _by_id(events[:-1], payloads, snapshots)
+    assert cells["S1"].status == "FAIL"
+    assert cells["S2"].status == "PASS"
+    assert cells["S4"].status == "PASS"
+
+
+def test_thirds_replay_still_rejects_small_pnl_discrepancy():
+    events, payloads, snapshots = _thirds_rows()
+    payloads["sell-2"]["realized_pnl_usd_matched"] = "0.3333333333333333333333333335"
+    cells = _by_id(events, payloads, snapshots)
+    assert cells["S1"].status == "PASS"
+    assert cells["S2"].status == "FAIL"
+    assert "realized_pnl_usd_matched" in cells["S2"].diagnostic
+
+
+def test_thirds_replay_still_rejects_small_open_basis_discrepancy():
+    events, payloads, snapshots = _thirds_rows()
+    positions = json.loads(snapshots[0]["positions_json"])
+    positions["metadata"]["swap_inventory"]["tokens"]["weth"]["cost_usd"] = "0.6666666666666666666666666665"
+    snapshots[0]["positions_json"] = json.dumps(positions)
+    cells = _by_id(events, payloads, snapshots)
+    assert cells["S2"].status == "PASS"
+    assert cells["S4"].status == "FAIL"
+    assert "cost_usd" in cells["S4"].diagnostic
 
 
 def _prefunded_wallet(snapshots):

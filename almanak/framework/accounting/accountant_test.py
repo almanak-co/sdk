@@ -32,6 +32,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Literal
 
+from almanak.core.chains._helpers import is_solana_chain
 from almanak.framework.accounting.gas_pricing import native_token_for_chain
 from almanak.framework.accounting.inventory_revaluation import (
     compute_inventory_revaluation,
@@ -5041,71 +5042,148 @@ def _spot_swap_payloads(
     return [(row, acct_payloads.get(row.get("id"), {})) for row in acct_events if row.get("event_type") == "SWAP"]
 
 
+@dataclass
+class _SpotLot:
+    acquisition_id: str
+    entry_token: str
+    amount: Decimal
+    remaining: Decimal
+    original_cost: Decimal
+    returned: Decimal = Decimal("0")
+    disposal_ids: list[str] = field(default_factory=list)
+
+
+def _spot_position_key(value: Any, chain: str) -> str | None:
+    parts = str(value or "").strip().split(":", 2)
+    if len(parts) != 3 or parts[:2] != ["swap", chain] or not parts[2]:
+        return None
+    wallet = parts[2].lower() if parts[2].startswith("0x") else parts[2]
+    return f"swap:{chain}:{wallet}"
+
+
+def _spot_scope(row: dict[str, Any], payload: dict[str, Any]) -> tuple[str, str, str] | None:
+    deployment = str(row.get("deployment_id") or "").strip()
+    chain = str(row.get("chain") or "").strip().lower()
+    raw_keys = [value for value in (payload.get("swap_position_key"), row.get("position_key")) if value]
+    keys = {_spot_position_key(value, chain) for value in raw_keys}
+    if not deployment or not chain or len(keys) != 1 or None in keys:
+        return None
+    position = next(iter(keys))
+    assert position is not None
+    return deployment, chain, position
+
+
+def _spot_token(token: Any, chain: str) -> str:
+    value = str(token or "").strip()
+    # Mint addresses are case-sensitive; persisted display symbols are not.
+    if is_solana_chain(chain) and 32 <= len(value) <= 44:
+        return value
+    return value.upper()
+
+
+def _spot_measured_acquisition(payload: dict[str, Any]) -> bool:
+    values = [_dec(payload.get(key)) for key in ("amount_in", "amount_out", "amount_in_usd", "amount_out_usd")]
+    return payload.get("cost_basis_recorded") is True and all(
+        value is not None and value.is_finite() and value > 0 for value in values
+    )
+
+
+def _spot_consume_lots(
+    lots: list[_SpotLot], amount: Decimal
+) -> tuple[Decimal, Decimal, list[tuple[_SpotLot, Decimal]]]:
+    remaining = amount
+    basis_consumed = Decimal("0")
+    consumed_lots: list[tuple[_SpotLot, Decimal]] = []
+    for lot in lots:
+        if remaining <= 0:
+            break
+        if lot.remaining <= 0:
+            continue
+        consumed = min(remaining, lot.remaining)
+        consumed_cost = lot.original_cost * (consumed / lot.amount)
+        lot.remaining -= consumed
+        remaining -= consumed
+        basis_consumed += consumed_cost
+        consumed_lots.append((lot, consumed))
+    return remaining, basis_consumed, consumed_lots
+
+
 def _spot_replay_lots(
     swaps: list[tuple[dict[str, Any], dict[str, Any]]],
-) -> tuple[dict[str, list[list[Decimal]]], list[str]]:
+) -> tuple[dict[tuple[str, str, str, str], list[_SpotLot]], list[str], list[str]]:
     """Replay the persisted SWAP payloads through a minimal FIFO ledger.
 
     The replay is deliberately independent of the production ``FIFOBasisStore``:
     S2 is meant to catch a defect in that implementation, so importing it here
     would make the Accountant repeat the same bug rather than audit it.
     """
-    lots: dict[str, list[list[Decimal]]] = {}
+    lots: dict[tuple[str, str, str, str], list[_SpotLot]] = {}
     errors: list[str] = []
+    pnl_errors: list[str] = []
     matched_disposals = 0
     for row, payload in swaps:
         row_id = str(row.get("id") or "?")
-        token_in = str(payload.get("token_in") or "").upper()
-        token_out = str(payload.get("token_out") or "").upper()
+        scope = _spot_scope(row, payload)
+        if scope is None:
+            errors.append(f"row {row_id}: swap accounting identity is unmeasured or inconsistent")
+            continue
+        token_in = _spot_token(payload.get("token_in"), scope[1])
+        token_out = _spot_token(payload.get("token_out"), scope[1])
         amount_in = _dec(payload.get("amount_in"))
         amount_out = _dec(payload.get("amount_out"))
         amount_in_usd = _dec(payload.get("amount_in_usd"))
         amount_out_usd = _dec(payload.get("amount_out_usd"))
-        if not token_in or not token_out or amount_in is None or amount_out is None:
-            errors.append(f"row {row_id}: token/amount evidence is unmeasured")
+        if (
+            not token_in
+            or not token_out
+            or token_in == token_out
+            or amount_in is None
+            or amount_out is None
+            or not amount_in.is_finite()
+            or not amount_out.is_finite()
+            or amount_in <= 0
+            or amount_out <= 0
+        ):
+            errors.append(f"row {row_id}: token/amount evidence is unmeasured or invalid")
             continue
 
-        remaining = amount_in
-        basis_consumed = Decimal("0")
-        for lot in lots.get(token_in, []):
-            if remaining <= 0:
-                break
-            lot_amount, lot_cost = lot
-            if lot_amount <= 0:
-                continue
-            consumed = min(remaining, lot_amount)
-            consumed_cost = lot_cost * (consumed / lot_amount)
-            lot[0] -= consumed
-            lot[1] -= consumed_cost
-            remaining -= consumed
-            basis_consumed += consumed_cost
+        remaining, basis_consumed, consumed_lots = _spot_consume_lots(lots.get((*scope, token_in), []), amount_in)
 
         persisted_unmatched = _dec(payload.get("unmatched_amount_in"))
         if persisted_unmatched is None or persisted_unmatched != remaining:
             errors.append(
                 f"row {row_id}: unmatched_amount_in={persisted_unmatched} does not equal FIFO replay {remaining}"
             )
+        if remaining == 0 and persisted_unmatched == 0 and _spot_measured_acquisition(payload):
+            for lot, consumed in consumed_lots:
+                if lot.entry_token == token_out:
+                    lot.returned += consumed
+                    lot.disposal_ids.append(row_id)
         matched = amount_in - remaining
         if matched > 0:
             matched_disposals += 1
-            if amount_in_usd is None:
-                errors.append(f"row {row_id}: matched disposal has no amount_in_usd")
+            if amount_in_usd is None or not amount_in_usd.is_finite():
+                errors.append(f"row {row_id}: matched disposal has no finite amount_in_usd")
             else:
                 matched_proceeds = amount_in_usd * (matched / amount_in)
                 expected_pnl = matched_proceeds - basis_consumed
                 actual_pnl = _dec(payload.get("realized_pnl_usd_matched"))
                 if actual_pnl is None or actual_pnl != expected_pnl:
-                    errors.append(f"row {row_id}: realized_pnl_usd_matched={actual_pnl} != FIFO replay {expected_pnl}")
+                    pnl_errors.append(
+                        f"row {row_id}: realized_pnl_usd_matched={actual_pnl} != FIFO replay {expected_pnl}"
+                    )
 
         if amount_out > 0:
-            if amount_out_usd is None:
+            if amount_out_usd is None or not amount_out_usd.is_finite():
                 errors.append(f"row {row_id}: acquired {token_out} without measured USD basis")
             else:
-                lots.setdefault(token_out, []).append([amount_out, amount_out_usd])
+                lots.setdefault((*scope, token_out), []).append(
+                    _SpotLot(row_id, token_in, amount_out, amount_out, amount_out_usd)
+                )
 
     if matched_disposals == 0:
         errors.append("no SWAP disposal matched a previously acquired FIFO lot")
-    return lots, errors
+    return lots, errors, pnl_errors
 
 
 def _spot_snapshot_inventory(snapshot: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -5155,7 +5233,7 @@ def _spot_snapshot_lots(
     swaps: list[tuple[dict[str, Any], dict[str, Any]]],
     snapshot: dict[str, Any],
     ledger: list[dict[str, Any]] | None = None,
-) -> tuple[dict[str, list[list[Decimal]]], list[str]]:
+) -> tuple[dict[tuple[str, str, str, str], list[_SpotLot]], list[str]]:
     from almanak.core.chains import ChainRegistry
 
     scope = ChainRegistry.try_resolve(str(snapshot.get("chain") or ""))
@@ -5173,8 +5251,13 @@ def _spot_snapshot_lots(
         for ts, row, _ in prefix
     ):
         return {}, ["same-timestamp SWAP ordering cannot be independently established"]
-    lots, errors = _spot_replay_lots([(row, payload) for _, row, payload in sorted(prefix, key=lambda item: item[0])])
-    return lots, [error for error in errors if "no SWAP disposal matched" not in error]
+    ordered = [(row, payload) for _, row, payload in sorted(prefix, key=lambda item: item[0])]
+    wallet_scope = _spot_snapshot_scope(snapshot, ordered)
+    if wallet_scope is None:
+        return {}, ["snapshot wallet/chain scope is unmeasured or ambiguous"]
+    scoped = [(row, payload) for row, payload in ordered if _spot_scope(row, payload) == wallet_scope]
+    lots, errors, pnl_errors = _spot_replay_lots(scoped)
+    return lots, [error for error in errors + pnl_errors if "no SWAP disposal matched" not in error]
 
 
 def _spot_mark_errors(mark: dict[str, Any], wallet_row: dict[str, Any], replay_quantity: Decimal) -> list[str]:
@@ -5223,7 +5306,15 @@ def _spot_mark_cell(
             if wallet_row is None:
                 errors.append(f"snapshot {snapshot.get('id')}: {token} absent from wallet balances")
                 continue
-            replay_quantity = sum((lot[0] for lot in lots.get(str(token).upper(), [])), Decimal("0"))
+            replay_quantity = sum(
+                (
+                    lot.remaining
+                    for key, token_lots in lots.items()
+                    if key[-1] == _spot_token(token, key[1])
+                    for lot in token_lots
+                ),
+                Decimal("0"),
+            )
             errors.extend(
                 f"snapshot {snapshot.get('id')}: {token} {error}"
                 for error in _spot_mark_errors(mark, wallet_row, replay_quantity)
@@ -5240,6 +5331,22 @@ def _spot_mark_cell(
     )
 
 
+def _spot_snapshot_scope(
+    snapshot: dict[str, Any], swaps: list[tuple[dict[str, Any], dict[str, Any]]]
+) -> tuple[str, str, str] | None:
+    deployment = str(snapshot.get("deployment_id") or "").strip()
+    chain = str(snapshot.get("chain") or "").strip().lower()
+    if not deployment or not chain:
+        return None
+    scopes = {_spot_scope(row, payload) for row, payload in swaps}
+    if None in scopes:
+        return None
+    candidates = {scope for scope in scopes if scope is not None and scope[:2] == (deployment, chain)}
+    if len(candidates) != 1:
+        return None
+    return next(iter(candidates))
+
+
 def _spot_basis_cell(swaps: list[tuple[dict[str, Any], dict[str, Any]]], snapshots: list[dict[str, Any]]) -> CellResult:
     errors: list[str] = []
     checked_basis = 0
@@ -5249,11 +5356,25 @@ def _spot_basis_cell(swaps: list[tuple[dict[str, Any], dict[str, Any]]], snapsho
             continue
         snapshot_ts = str(snapshot.get("timestamp") or "")
         prefix = [(row, payload) for row, payload in swaps if str(row.get("timestamp") or "") <= snapshot_ts]
-        lots, replay_errors = _spot_replay_lots(prefix)
-        errors.extend(error for error in replay_errors if "no SWAP disposal matched" not in error)
+        scope = _spot_snapshot_scope(snapshot, prefix)
+        if scope is None:
+            errors.append(f"snapshot {snapshot.get('id')}: wallet/chain scope is unmeasured or ambiguous")
+            continue
+        scoped_prefix = [(row, payload) for row, payload in prefix if _spot_scope(row, payload) == scope]
+        lots, replay_errors, pnl_errors = _spot_replay_lots(scoped_prefix)
+        errors.extend(error for error in replay_errors + pnl_errors if "no SWAP disposal matched" not in error)
         for token, mark in inventory.items():
             checked_basis += 1
-            replay_basis = sum((lot[1] for lot in lots.get(str(token).upper(), []) if lot[0] > 0), Decimal("0"))
+            replay_basis = sum(
+                (
+                    lot.original_cost * (lot.remaining / lot.amount)
+                    for key, token_lots in lots.items()
+                    if key[:3] == scope and key[-1] == _spot_token(token, scope[1])
+                    for lot in token_lots
+                    if lot.remaining > 0
+                ),
+                Decimal("0"),
+            )
             if _dec(mark.get("cost_usd")) != replay_basis:
                 errors.append(
                     f"snapshot {snapshot.get('id')}: {token} cost_usd={mark.get('cost_usd')} != replay {replay_basis}"
@@ -5295,39 +5416,34 @@ def _cells_spot(
             )
         ]
 
-    # S1 — a closed pair with a measured acquisition lot.
-    round_trip = False
-    if len(swaps) >= 2:
-        first = swaps[0][1]
-        last = swaps[-1][1]
-        round_trip = (
-            str(first.get("token_in") or "").upper() == str(last.get("token_out") or "").upper()
-            and str(first.get("token_out") or "").upper() == str(last.get("token_in") or "").upper()
-            and first.get("cost_basis_recorded") is True
-            and all(
-                first.get(key) not in (None, "")
-                for key in ("amount_in", "amount_out", "amount_in_usd", "amount_out_usd")
-            )
-            and all(
-                (_dec(first.get(key)) or Decimal("0")) > 0
-                for key in ("amount_in", "amount_out", "amount_in_usd", "amount_out_usd")
-            )
-        )
+    lots, replay_errors, pnl_errors = _spot_replay_lots(swaps)
+    invalid_basis = [str(row.get("id")) for row, payload in swaps if not _spot_measured_acquisition(payload)]
+    witnesses = [
+        f"{lot.acquisition_id} -> {','.join(lot.disposal_ids)} ({key[0]}, {key[2]})"
+        for key, token_lots in lots.items()
+        for lot in token_lots
+        if lot.remaining == 0 and lot.returned == lot.amount
+    ]
+    round_trip = bool(witnesses) and not invalid_basis and not replay_errors
     s1 = CellResult(
         "S1",
         "BUY-leg cost basis recorded",
         "PASS" if round_trip else "FAIL",
-        "opening SWAP recorded measured basis and terminal SWAP closes the token pair"
+        "measured acquisition lot fully returned to its entry token: " + "; ".join(witnesses)
         if round_trip
-        else "need a measured SWAP→SWAP-back pair whose BUY records acquisition basis",
+        else "; ".join([f"unmeasured acquisition basis in rows {invalid_basis}"] if invalid_basis else [])
+        or "; ".join(replay_errors)
+        or "no fully closed, scope-matched SWAP acquisition lot",
     )
 
-    _, replay_errors = _spot_replay_lots(swaps)
+    all_replay_errors = replay_errors + pnl_errors
     s2 = CellResult(
         "S2",
         "SELL-leg realized PnL reconciles to FIFO replay",
-        "PASS" if not replay_errors else "FAIL",
-        "independent FIFO replay matches persisted matched PnL" if not replay_errors else "; ".join(replay_errors),
+        "PASS" if not all_replay_errors else "FAIL",
+        "independent FIFO replay matches persisted matched PnL"
+        if not all_replay_errors
+        else "; ".join(all_replay_errors),
     )
 
     return [s1, s2, _spot_mark_cell(swaps, snapshots, acct_events, ledger), _spot_basis_cell(swaps, snapshots)]
