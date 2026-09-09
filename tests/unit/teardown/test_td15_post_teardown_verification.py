@@ -629,3 +629,46 @@ async def test_pre_teardown_reconciliation_fault_returns_none(monkeypatch):
     monkeypatch.setattr(tm, "reconcile_known_positions_against_chain", _boom)
     out = await _mgr()._pre_teardown_reconciliation(_Strategy(), _summary(_lp_position()), market=None)
     assert out is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["closed", "open", "reconciliation_error", "already_failed"])
+async def test_incomplete_enumeration_never_certifies_known_subset(monkeypatch, outcome):
+    from dataclasses import replace
+
+    from almanak.framework.cli._run_modes import _chain_certified_closure
+    from almanak.framework.runner._teardown_helpers import closure_chain_evidence
+    from almanak.framework.teardown import teardown_manager as tm
+
+    async def chain_read(**_kwargs):
+        return outcome == "open"
+
+    async def broken_reconciliation(**_kwargs):
+        raise RuntimeError("gateway unavailable")
+
+    monkeypatch.setattr(live_position_reads, "chain_verify_lp_open", chain_read)
+    if outcome == "reconciliation_error":
+        monkeypatch.setattr(tm, "reconcile_known_positions_against_chain", broken_reconciliation)
+    summary = _summary(_lp_position())
+    summary.strategy_enumeration_complete = False
+    incoming = _verified()
+    if outcome == "already_failed":
+        incoming = replace(incoming, all_closed=False, verification_status=VerificationStatus.FAILED, positions_closed=0)
+    manager = _mgr()
+    for _attempt in range(2):
+        out = await manager.verify_closure_against_chain(
+            _Strategy(), verification=incoming, pre_execution_positions=summary, market=None
+        )
+        assert out.verification_status is not VerificationStatus.CHAIN_VERIFIED
+        assert out.has_position_breakdown is False
+        assert _chain_certified_closure({"teardown_closure": closure_chain_evidence(out)}) is False
+        if outcome in {"open", "already_failed"}:
+            assert out.all_closed is False
+            assert out.verification_status is VerificationStatus.FAILED
+            assert out.positions_closed == 0
+        else:
+            assert out.all_closed is True
+            assert out.has_position_breakdown is False
+            assert out.positions_total == out.positions_closed == 1
+            assert out.verification_status is VerificationStatus.UNVERIFIED
+        incoming = out

@@ -329,6 +329,7 @@ def test_prediction_and_cex_are_not_enforced():
     report = check_intent_coverage(_summary([pred, cex]), [])
     assert report.complete
     assert report.total_enforceable == 0
+    assert report.total_positions == 2
 
 
 def test_chain_mismatch_is_not_coverage():

@@ -1410,6 +1410,8 @@ def _emit_unstarted_strategy_test_result(
     skipped = skip_reason is not None
     summary: dict[str, object] = {
         "all_passed": None if skipped else False,
+        "deployment_ready": False,
+        "test_action_expectations": None,
         "skipped": skipped,
         "skip_reason": skip_reason,
         "steps_run": 0,

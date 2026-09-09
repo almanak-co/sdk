@@ -132,8 +132,8 @@ def _orchestrator_executed_result(*, tx_hash: str) -> IterationResult:
     )
 
 
-def test_teardown_only_succeeds(capsys, monkeypatch):
-    """`almanak strat test --teardown` (no actions) must return 0 when teardown completes."""
+def test_unmeasured_teardown_only_fails(capsys, monkeypatch):
+    """Completion without measured unwind evidence cannot certify teardown."""
     # No-op teardown state manager; the lifecycle creates a teardown request and
     # the runner's iteration returns a TEARDOWN status.
     monkeypatch.setattr(
@@ -152,10 +152,10 @@ def test_teardown_only_succeeds(capsys, monkeypatch):
     )
     captured = capsys.readouterr()
     payload = _parse_last_json_object(captured.out)
-    assert exit_code == 0
-    assert payload["summary"]["all_passed"] is True
+    assert exit_code == 1
+    assert payload["summary"]["all_passed"] is False
     assert payload["summary"]["actions_passed"] is True  # all([]) == True
-    assert payload["summary"]["teardown_passed"] is True
+    assert payload["summary"]["teardown_passed"] is False
     assert len(payload["steps"]) == 1
     assert payload["steps"][0]["action"] == "teardown"
 
@@ -214,7 +214,7 @@ def test_empty_transaction_hash_does_not_prove_action_coverage(capsys):
     )
     payload = _parse_last_json_object(capsys.readouterr().out)
 
-    assert exit_code == 0
+    assert exit_code == 1
     assert payload["summary"]["coverage"] == {
         "requested_paths_exercised": False,
         "actions": [{"action": "open", "outcome": "unmeasured"}],
@@ -237,7 +237,7 @@ def test_real_orchestrator_result_requires_usable_transaction_hash(capsys):
     )
     payload = _parse_last_json_object(capsys.readouterr().out)
 
-    assert exit_code == 0
+    assert exit_code == 1
     assert payload["summary"]["coverage"]["actions"] == [{"action": "open", "outcome": "unmeasured"}]
     assert payload["summary"]["coverage"]["requested_paths_exercised"] is False
 
@@ -281,7 +281,7 @@ def test_invalid_clob_order_id_does_not_prove_action_coverage(capsys, order_id):
     )
     payload = _parse_last_json_object(capsys.readouterr().out)
 
-    assert exit_code == 0
+    assert exit_code == 1
     assert payload["summary"]["coverage"]["actions"] == [{"action": "buy", "outcome": "unmeasured"}]
     assert payload["summary"]["coverage"]["requested_paths_exercised"] is False
 
@@ -326,8 +326,8 @@ def test_inject_sentinel_keeps_natural_decide_human_verdict(capsys):
     assert "Test lifecycle passed." in capsys.readouterr().out
 
 
-def test_action_hold_counts_as_pass(capsys, monkeypatch):
-    """A HOLD status for an action should NOT trigger fail-fast or attach logs."""
+def test_action_hold_does_not_certify_requested_paths(capsys, monkeypatch):
+    """Safe holds continue the sequence but cannot prove requested execution."""
     monkeypatch.setattr(
         "almanak.framework.teardown.get_teardown_state_manager",
         lambda *a, **k: MagicMock(create_request=MagicMock()),
@@ -348,11 +348,13 @@ def test_action_hold_counts_as_pass(capsys, monkeypatch):
     )
     captured = capsys.readouterr()
     payload = _parse_last_json_object(captured.out)
-    assert exit_code == 0
-    assert payload["summary"]["all_passed"] is True
+    assert exit_code == 1
+    assert payload["summary"]["all_passed"] is False
     assert len(payload["steps"]) == 3  # 2 actions + 1 teardown, no fail-fast
-    assert "failure_logs" not in payload["steps"][0]
-    assert "failure_logs" not in payload["steps"][1]
+    assert "failure_logs" in payload["steps"][0]
+    assert "failure_logs" in payload["steps"][1]
+    assert "observed held" in payload["steps"][0]["assertion_error"]
+    assert "observed unmeasured" in payload["steps"][1]["assertion_error"]
     assert payload["summary"]["coverage"] == {
         "requested_paths_exercised": False,
         "actions": [
@@ -372,7 +374,9 @@ def test_trustworthy_zero_position_breakdown_reports_nothing_to_unwind(capsys, m
     )
     runner = _make_runner(_result(IterationStatus.TEARDOWN))
     runner._teardown_closure_verification = {
+        "all_closed": True,
         "positions_total": 0,
+        "closure_unknown": False,
         "positions_closed": 0,
         "has_position_breakdown": True,
     }
@@ -389,6 +393,8 @@ def test_trustworthy_zero_position_breakdown_reports_nothing_to_unwind(capsys, m
     payload = _parse_last_json_object(capsys.readouterr().out)
 
     assert exit_code == 0
+    assert payload["summary"]["all_passed"] is True
+    assert payload["summary"]["deployment_ready"] is False
     assert payload["summary"]["coverage"]["teardown"] == "nothing_to_unwind"
     assert payload["summary"]["coverage"]["requested_paths_exercised"] is False
 
@@ -429,6 +435,7 @@ def test_positive_execution_and_chain_closure_prove_requested_paths(capsys, monk
     }
     assert payload["steps"][0]["coverage"] == "executed"
     assert payload["steps"][1]["coverage"] == "proved"
+    assert payload["summary"]["deployment_ready"] is True
 
 
 def test_action_requires_terminal_settlement_but_teardown_uses_recovery_lane(capsys, monkeypatch):
@@ -459,8 +466,8 @@ def test_action_requires_terminal_settlement_but_teardown_uses_recovery_lane(cap
     )
     payload = _parse_last_json_object(capsys.readouterr().out)
 
-    assert exit_code == 0
-    assert payload["summary"]["all_passed"] is True
+    assert exit_code == 1
+    assert payload["summary"]["all_passed"] is False
     assert requirements_seen == [True, False]
     assert runner._require_terminal_async_settlement is False
 
@@ -488,7 +495,7 @@ def test_teardown_failure_marks_all_passed_false(capsys, monkeypatch):
     payload = _parse_last_json_object(captured.out)
     assert exit_code == 1
     assert payload["summary"]["all_passed"] is False
-    assert payload["summary"]["actions_passed"] is True
+    assert payload["summary"]["actions_passed"] is False
     assert payload["summary"]["teardown_passed"] is False
 
 
@@ -520,7 +527,7 @@ def test_action_failure_still_runs_teardown(capsys, monkeypatch):
     # Steps must be: failed `open` (fail-fast skipped `close`), then teardown.
     assert [s["action"] for s in payload["steps"]] == ["open", "teardown"]
     assert payload["summary"]["actions_passed"] is False
-    assert payload["summary"]["teardown_passed"] is True
+    assert payload["summary"]["teardown_passed"] is False
     assert payload["summary"]["all_passed"] is False
 
 
@@ -570,7 +577,7 @@ def test_action_raise_does_not_skip_teardown(capsys, monkeypatch):
     assert actions_seen == ["open", "close", "teardown"]
     assert payload["steps"][1]["status"] == "STRATEGY_ERROR"
     assert "transient connector blowup" in payload["steps"][1]["error"]
-    assert payload["summary"]["teardown_passed"] is True
+    assert payload["summary"]["teardown_passed"] is False
     assert payload["summary"]["actions_passed"] is False
     assert payload["summary"]["all_passed"] is False
     assert exit_code == 1
@@ -643,3 +650,303 @@ def test_lifecycle_exception_emits_json_error(capsys, monkeypatch):
     assert exit_code == 1
     assert payload["summary"]["all_passed"] is False
     assert "gateway boot failed" in payload["summary"]["error"]
+
+
+@pytest.mark.parametrize("expected_hold", [False, True])
+def test_all_held_lifecycle_requires_explicit_opt_in(capsys, monkeypatch, expected_hold):
+    monkeypatch.setattr(
+        "almanak.framework.teardown.get_teardown_state_manager",
+        lambda *a, **k: MagicMock(create_request=MagicMock()),
+    )
+    runner = _make_runner(*[_result(IterationStatus.HOLD) for _ in range(3)], _result(IterationStatus.TEARDOWN))
+    runner._teardown_closure_verification = {
+        "all_closed": True,
+        "positions_total": 0,
+        "closure_unknown": False,
+        "positions_closed": 0,
+        "has_position_breakdown": True,
+    }
+    cleanup = _noop_cleanup()
+    strategy = _make_strategy()
+    strategy.test_action_expectations = {
+        action: {"expected_to_hold": expected_hold, "reason": "Exercise guard behavior."}
+        for action in ["open", "close"]
+    }
+    exit_code = _run_test_lifecycle(
+        runner=runner,
+        strategy_instance=strategy,
+        state_manager=MagicMock(),
+        cleanup_fn=cleanup,
+        actions=["open", "close", "open"],
+        teardown=True,
+        json_output=True,
+    )
+    summary = _parse_last_json_object(capsys.readouterr().out)["summary"]
+    assert exit_code == (0 if expected_hold else 1)
+    assert summary["all_passed"] is expected_hold
+    assert summary["actions_passed"] is expected_hold
+    assert summary["teardown_passed"] is True
+    assert summary["test_action_expectations"] == strategy.test_action_expectations
+    assert summary["deployment_ready"] is False
+    assert summary["coverage"]["requested_paths_exercised"] is False
+    assert runner.run_iteration.await_count == 4
+    cleanup.assert_awaited_once()
+
+
+@pytest.mark.parametrize("status", [IterationStatus.SUCCESS, IterationStatus.EXECUTION_FAILED])
+def test_expected_hold_never_accepts_failed_or_unmeasured_execution(capsys, status):
+    strategy = _make_strategy()
+    strategy.test_action_expectations = {"open": {"expected_to_hold": True, "reason": "Guard must hold."}}
+    exit_code = _run_test_lifecycle(
+        runner=_make_runner(_result(status)),
+        strategy_instance=strategy,
+        state_manager=MagicMock(),
+        cleanup_fn=_noop_cleanup(),
+        actions=["open"],
+        teardown=False,
+        json_output=True,
+    )
+    assert exit_code == 1
+    assert _parse_last_json_object(capsys.readouterr().out)["summary"]["actions_passed"] is False
+
+
+@pytest.mark.parametrize("residual", [False, True])
+def test_expected_hold_cannot_bypass_unmeasured_or_residual_teardown(capsys, monkeypatch, residual):
+    from almanak.framework.cli import _run_modes
+
+    monkeypatch.setattr(
+        "almanak.framework.teardown.get_teardown_state_manager",
+        lambda *a, **k: MagicMock(create_request=MagicMock()),
+    )
+    monkeypatch.setattr(
+        _run_modes,
+        "_measure_open_positions_after_teardown",
+        lambda _: ([{"position_id": "open"}], None) if residual else ([], "unavailable"),
+    )
+    exit_code = _run_test_lifecycle(
+        runner=_make_runner(_result(IterationStatus.TEARDOWN)),
+        strategy_instance=_make_strategy(),
+        state_manager=MagicMock(),
+        cleanup_fn=_noop_cleanup(),
+        actions=[],
+        teardown=True,
+        json_output=True,
+    )
+    assert exit_code == 1
+    assert _parse_last_json_object(capsys.readouterr().out)["summary"]["teardown_passed"] is False
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"positions_total": None},
+        {"positions_total": -1},
+        {"positions_total": 0.5},
+        {"positions_total": False},
+        {"positions_total": "0"},
+        {"positions_closed": None},
+        {"positions_closed": 1},
+        {"positions_closed": False},
+        {"closure_unknown": True},
+        {"closure_unknown": None},
+        {"all_closed": False},
+        {"all_closed": None},
+        {"all_closed": 1},
+    ],
+)
+def test_expected_hold_rejects_malformed_empty_teardown_evidence(capsys, monkeypatch, override):
+    monkeypatch.setattr(
+        "almanak.framework.teardown.get_teardown_state_manager",
+        lambda *a, **k: MagicMock(create_request=MagicMock()),
+    )
+    runner = _make_runner(_result(IterationStatus.TEARDOWN))
+    runner._teardown_closure_verification = {
+        "all_closed": True,
+        "positions_total": 0,
+        "positions_closed": 0,
+        "closure_unknown": False,
+        "has_position_breakdown": True,
+        **override,
+    }
+    exit_code = _run_test_lifecycle(
+        runner=runner,
+        strategy_instance=_make_strategy(),
+        state_manager=MagicMock(),
+        cleanup_fn=_noop_cleanup(),
+        actions=[],
+        teardown=True,
+        json_output=True,
+    )
+    summary = _parse_last_json_object(capsys.readouterr().out)["summary"]
+    assert exit_code == 1
+    assert summary["teardown_passed"] is False
+    assert summary["coverage"]["teardown"] == "unmeasured"
+
+
+@pytest.mark.parametrize(
+    "declared",
+    [
+        None,
+        [],
+        {"": {}},
+        {"teardown": {}},
+        {"open": {}},
+        {"open": {"expected_to_hold": "true", "reason": "guard"}},
+        {"open": {"expected_to_hold": 1, "reason": "guard"}},
+        {"open": {"expected_to_hold": True, "reason": "  "}},
+        {"open": {"expected_to_hold": False, "reason": None}},
+        {"open": {"expected_to_hold": True, "reason": "guard", "typo": True}},
+    ],
+)
+def test_invalid_expectations_fail_before_setup_and_still_cleanup(capsys, declared):
+    runner = _make_runner(_executed_result())
+    strategy = _make_strategy()
+    strategy.test_action_expectations = declared
+    cleanup = _noop_cleanup()
+    code = _run_test_lifecycle(
+        runner=runner,
+        strategy_instance=strategy,
+        state_manager=MagicMock(),
+        cleanup_fn=cleanup,
+        actions=["open"],
+        teardown=False,
+        json_output=True,
+    )
+    summary = _parse_last_json_object(capsys.readouterr().out)["summary"]
+    assert code == 1
+    assert summary["all_passed"] is False
+    assert summary["deployment_ready"] is False
+    assert "test_action_expectations" in summary["error"]
+    assert summary["test_action_expectations"] is None
+    runner.setup_gateway_integration.assert_not_called()
+    runner.run_iteration.assert_not_awaited()
+    strategy.load_state_async.assert_not_awaited()
+    cleanup.assert_awaited_once()
+
+
+@pytest.mark.parametrize("initial_hold", [False, True])
+def test_expectations_cannot_change_after_observing_results(capsys, initial_hold):
+    strategy = _make_strategy()
+    strategy.test_action_expectations = {"open": {"expected_to_hold": initial_hold, "reason": "Before run."}}
+    runner = _make_runner()
+
+    async def mutate_and_hold(_):
+        strategy.test_action_expectations["open"]["expected_to_hold"] = not initial_hold
+        strategy.test_action_expectations["open"]["reason"] = "After result."
+        return _result(IterationStatus.HOLD)
+
+    runner.run_iteration.side_effect = mutate_and_hold
+    code = _run_test_lifecycle(
+        runner=runner,
+        strategy_instance=strategy,
+        state_manager=MagicMock(),
+        cleanup_fn=_noop_cleanup(),
+        actions=["open"],
+        teardown=False,
+        json_output=True,
+    )
+    payload = _parse_last_json_object(capsys.readouterr().out)
+    assert code == (0 if initial_hold else 1)
+    assert payload["summary"]["test_action_expectations"]["open"] == {
+        "expected_to_hold": initial_hold,
+        "reason": "Before run.",
+    }
+    assert payload["steps"][0]["expectation"] == payload["summary"]["test_action_expectations"]["open"]
+    assert payload["summary"]["deployment_ready"] is False
+
+
+def test_hold_assertion_fails_on_unexpected_execution(capsys):
+    strategy = _make_strategy()
+    strategy.test_action_expectations = {"open": {"expected_to_hold": True, "reason": "Guard must hold."}}
+    code = _run_test_lifecycle(
+        runner=_make_runner(_executed_result()),
+        strategy_instance=strategy,
+        state_manager=MagicMock(),
+        cleanup_fn=_noop_cleanup(),
+        actions=["open"],
+        teardown=False,
+        json_output=True,
+    )
+    summary = _parse_last_json_object(capsys.readouterr().out)["summary"]
+    assert code == 1
+    assert summary["all_passed"] is False
+    assert summary["coverage"]["requested_paths_exercised"] is True
+    assert summary["deployment_ready"] is False
+
+
+def test_one_hold_declaration_does_not_excuse_other_action(capsys):
+    strategy = _make_strategy()
+    strategy.test_action_expectations = {"open": {"expected_to_hold": True, "reason": "Entry guard."}}
+    runner = _make_runner(_result(IterationStatus.HOLD), _result(IterationStatus.HOLD))
+    code = _run_test_lifecycle(
+        runner=runner,
+        strategy_instance=strategy,
+        state_manager=MagicMock(),
+        cleanup_fn=_noop_cleanup(),
+        actions=["open", "close"],
+        teardown=False,
+        json_output=True,
+    )
+    summary = _parse_last_json_object(capsys.readouterr().out)["summary"]
+    assert code == 1
+    assert summary["test_action_expectations"]["close"]["expected_to_hold"] is False
+    assert runner.run_iteration.await_count == 2
+
+
+def test_hold_declaration_cannot_excuse_error_payload(capsys):
+    strategy = _make_strategy()
+    strategy.test_action_expectations = {"open": {"expected_to_hold": True, "reason": "Entry guard."}}
+    code = _run_test_lifecycle(
+        runner=_make_runner(_result(IterationStatus.HOLD, error="data unavailable")),
+        strategy_instance=strategy,
+        state_manager=MagicMock(),
+        cleanup_fn=_noop_cleanup(),
+        actions=["open"],
+        teardown=False,
+        json_output=True,
+    )
+    assert code == 1
+    assert _parse_last_json_object(capsys.readouterr().out)["summary"]["all_passed"] is False
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+def test_assertion_mismatch_reports_expected_and_actual_without_stopping_recovery(capsys, json_output):
+    runner = _make_runner(_result(IterationStatus.HOLD), _result(IterationStatus.HOLD))
+    exit_code = _run_test_lifecycle(
+        runner=runner,
+        strategy_instance=_make_strategy(),
+        state_manager=MagicMock(),
+        cleanup_fn=_noop_cleanup(),
+        actions=["open", "close"],
+        teardown=False,
+        json_output=json_output,
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert runner.run_iteration.await_count == 2
+    if json_output:
+        steps = _parse_last_json_object(captured.out)["steps"]
+        assert all("failure_logs" in step for step in steps)
+        assert "Expected executed action 'open', observed held" in steps[0]["assertion_error"]
+    else:
+        assert "assertion failed: Expected executed action 'open', observed held" in captured.err
+        assert "assertion failed: Expected executed action 'close', observed held" in captured.err
+
+
+def test_valid_empty_expectations_are_captured_as_mapping(capsys):
+    runner = _make_runner(_executed_result())
+    strategy = _make_strategy()
+    strategy.test_action_expectations = {}
+    code = _run_test_lifecycle(
+        runner=runner,
+        strategy_instance=strategy,
+        state_manager=MagicMock(),
+        cleanup_fn=_noop_cleanup(),
+        actions=[""],
+        teardown=False,
+        json_output=True,
+    )
+    summary = _parse_last_json_object(capsys.readouterr().out)["summary"]
+    assert code == 0
+    assert summary["test_action_expectations"] == {}
+    runner.setup_gateway_integration.assert_called_once()

@@ -288,10 +288,13 @@ class CompletenessReport:
         total_enforceable: How many positions were eligible for the check
             (enforceable types). Informational — distinguishes "nothing to
             enforce" from "all covered".
+        total_positions: Full enumerated set, including types outside enforcement.
+            None means this count was not supplied, never a measured empty set.
     """
 
     uncovered: tuple[PositionInfo, ...] = ()
     total_enforceable: int = 0
+    total_positions: int | None = None
 
     @property
     def complete(self) -> bool:
@@ -1306,7 +1309,11 @@ def check_intent_coverage(
             ", ".join(f"{p.position_type.value}:{p.position_id}" for p in uncovered),
         )
 
-    return CompletenessReport(uncovered=tuple(uncovered), total_enforceable=len(enforceable))
+    return CompletenessReport(
+        uncovered=tuple(uncovered),
+        total_enforceable=len(enforceable),
+        total_positions=len(pos_list) if getattr(positions, "strategy_enumeration_complete", True) else None,
+    )
 
 
 __all__ = ["CompletenessReport", "check_intent_coverage", "resolve_consolidation_noop_target"]

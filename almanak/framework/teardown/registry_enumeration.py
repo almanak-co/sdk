@@ -1297,6 +1297,7 @@ def reconcile_lp_with_registry(
         deployment_id=strategy_summary.deployment_id,
         timestamp=strategy_summary.timestamp,
         positions=enriched_positions + net_new,
+        strategy_enumeration_complete=strategy_summary.strategy_enumeration_complete,
         # Preserve the strategy's explicit totals: the model recomputes
         # ``total_value_usd`` / ``has_liquidation_risk`` from positions when
         # omitted (== 0 / == False), which would silently clobber a strategy
@@ -1442,6 +1443,7 @@ def _union_residuals(
         deployment_id=getattr(summary, "deployment_id", None) or "unknown",
         timestamp=getattr(summary, "timestamp", None) or datetime.now(UTC),
         positions=existing_positions + net_new,
+        strategy_enumeration_complete=getattr(summary, "strategy_enumeration_complete", True),
         total_value_usd=orig_total if isinstance(orig_total, Decimal) else Decimal("0"),
         has_liquidation_risk=bool(orig_risk),
     )
@@ -1475,6 +1477,7 @@ async def resolve_open_positions_with_registry(strategy: Any) -> TeardownPositio
         # the deployment id for downstream tracking instead of falling back to
         # the bare "unknown" sentinel inside ``reconcile_lp_with_registry``.
         summary = TeardownPositionSummary.empty(deployment_id or "unknown")
+        summary.strategy_enumeration_complete = False
     state_manager = getattr(strategy, "_state_manager", None)
     read = await read_open_lp_positions_detailed(
         state_manager=state_manager,

@@ -6,6 +6,8 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 from almanak.framework.cli.run_helpers import _run_test_lifecycle
 from almanak.framework.runner.runner_gateway import lifecycle_handle_stop
 from almanak.framework.runner.runner_models import IterationResult, IterationStatus
@@ -104,9 +106,10 @@ def _patch_state_manager(monkeypatch) -> MagicMock:
     return manager
 
 
-def _run(strategy, monkeypatch, asset_policy: str | None = None) -> tuple[int, MagicMock]:
+def _run(strategy, monkeypatch, asset_policy: str | None = None, closure=None) -> tuple[int, MagicMock]:
     manager = _patch_state_manager(monkeypatch)
     runner = _make_runner(_teardown_result())
+    runner._teardown_closure_verification = closure
     exit_code = _run_test_lifecycle(
         runner=runner,
         strategy_instance=strategy,
@@ -139,12 +142,12 @@ def test_residual_open_position_fails_teardown(capsys, monkeypatch):
     assert payload["summary"]["coverage"]["teardown"] == "residual"
 
 
-def test_clean_teardown_passes(capsys, monkeypatch):
+def test_empty_residuals_without_closure_evidence_do_not_pass(capsys, monkeypatch):
     strategy = _make_strategy(open_positions=[])
     exit_code, _ = _run(strategy, monkeypatch)
     payload = _parse_last_json_object(capsys.readouterr().out)
-    assert exit_code == 0
-    assert payload["summary"]["teardown_passed"] is True
+    assert exit_code == 1
+    assert payload["summary"]["teardown_passed"] is False
     assert "open_positions_after_teardown" not in payload["steps"][0]
     assert payload["summary"]["coverage"] == {
         "requested_paths_exercised": False,
@@ -153,12 +156,23 @@ def test_clean_teardown_passes(capsys, monkeypatch):
     }
 
 
-def test_dust_residual_is_ignored(capsys, monkeypatch):
+@pytest.mark.parametrize("measured_empty", [False, True])
+def test_dust_residual_is_ignored(capsys, monkeypatch, measured_empty):
+    from almanak.framework.runner._teardown_helpers import closure_chain_evidence
+    from almanak.framework.teardown.models import ClosureVerification
+
     strategy = _make_strategy(open_positions=[_supply_position(value_usd="0.005")])
-    exit_code, _ = _run(strategy, monkeypatch)
+    evidence = closure_chain_evidence(ClosureVerification(all_closed=True, has_position_breakdown=True))
+    exit_code, _ = _run(strategy, monkeypatch, closure=evidence if measured_empty else None)
     payload = _parse_last_json_object(capsys.readouterr().out)
-    assert exit_code == 0
-    assert payload["summary"]["teardown_passed"] is True
+    assert exit_code == (0 if measured_empty else 1)
+    assert payload["summary"]["teardown_passed"] is measured_empty
+    assert payload["summary"]["deployment_ready"] is False
+    assert "open_positions_after_teardown" not in payload["steps"][0]
+    assert payload["summary"]["coverage"]["teardown"] == ("nothing_to_unwind" if measured_empty else "unmeasured")
+    if not measured_empty:
+        assert "Teardown closure was not measured" in payload["steps"][0]["assertion_error"]
+        assert "failure_logs" in payload["steps"][0]
 
 
 def test_unvalued_residual_still_fails_teardown(capsys, monkeypatch):

@@ -2182,17 +2182,18 @@ class TestReconciliationSignalReset:
         assert runner._teardown_reconciliation is None
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("enumeration_failed", [False, True])
     @patch("almanak.framework.teardown.get_teardown_state_manager_for_runtime")
-    async def test_stale_closure_verdict_cannot_leak_into_a_later_teardown(self, mock_get_manager):
-        """ALM-3109: the composed closure verdict gets the same reset discipline.
+    async def test_stale_closure_verdict_cannot_leak_into_a_later_teardown(
+        self, mock_get_manager, enumeration_failed, monkeypatch
+    ):
+        """A reused runner replaces prior closure proof with this teardown's evidence.
 
-        It is the ONLY signal that can turn a `strat test` teardown FAIL into a
-        PASS (it lets a measured chain closure override a contradicting strategy
-        cache), so a value surviving from a PRIOR teardown on a reused runner
-        would certify a teardown it never examined — a false success, the severe
-        direction. Only the verify lane writes it; every early-exit lane must
-        leave it None.
+        A measured empty set is a no-op, never an exercised unwind. A failed
+        enumeration exits before publishing new evidence and must still clear
+        the prior chain-certified result.
         """
+        from almanak.framework.cli._run_modes import _chain_certified_closure, _teardown_step_coverage
         from almanak.framework.runner.runner_teardown import execute_teardown
 
         manager = MagicMock()
@@ -2214,11 +2215,35 @@ class TestReconciliationSignalReset:
             "protocols_to_prove": ["gmx_v2"],
         }
 
-        # No positions to close → early exit BEFORE the verify lane runs; only the
-        # top-of-function reset can clear the stale verdict.
+        assert _chain_certified_closure({"teardown_closure": runner._teardown_closure_verification})
         strategy = _make_strategy(deployment_id="reuse_strat", teardown_intents=[])
+        if enumeration_failed:
+            monkeypatch.setattr(
+                "almanak.framework.runner.runner_teardown._check_no_intent_completeness",
+                AsyncMock(return_value=None),
+            )
 
         result = await execute_teardown(runner, strategy, TeardownMode.SOFT, datetime.now(UTC))
 
-        assert result.status == IterationStatus.TEARDOWN
-        assert runner._teardown_closure_verification is None
+        evidence = runner._teardown_closure_verification
+        if enumeration_failed:
+            assert result.status == IterationStatus.STRATEGY_ERROR
+            assert evidence is None
+        else:
+            assert result.status == IterationStatus.TEARDOWN
+            assert evidence == {
+                "positions_total": 0,
+                "positions_closed": 0,
+                "has_position_breakdown": True,
+                "all_closed": True,
+                "closure_unknown": False,
+                "verification_status": "not_run",
+                "protocols_to_prove": [],
+                "measured_closed_protocols": [],
+                "unproven_protocols": [],
+            }
+        step = {"status": result.status.value, "teardown_closure": evidence}
+        assert not _chain_certified_closure(step)
+        assert _teardown_step_coverage(step, requested=True) == (
+            "failed" if enumeration_failed else "nothing_to_unwind"
+        )

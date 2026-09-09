@@ -2287,3 +2287,35 @@ def test_vib6752_alias_slug_resolves_to_the_canonical_connector_manager() -> Non
         assert registry_enumeration_module._derived_lp_manager(proto, chain) == "", (
             f"{proto}/{chain} must still REFUSE — normalisation must not defeat the multi-generation guard"
         )
+
+
+@pytest.mark.asyncio
+async def test_unavailable_strategy_enumeration_keeps_registry_unwind_without_full_coverage():
+    from almanak.framework.teardown.completeness import check_intent_coverage
+    from almanak.framework.teardown.full_close import full_close_intents
+    from almanak.framework.teardown.registry_enumeration import _union_residuals
+
+    strategy = _FakeStrategy(summary=_empty_summary(), state_manager=_FakeRegistrySM({"lp": [_v3_row("22")]}))
+    strategy._summary = None
+    summary = await resolve_open_positions_with_registry(strategy)
+    assert [p.position_id for p in summary.positions] == ["22"]
+    assert summary.strategy_enumeration_complete is False
+    intents = full_close_intents(summary)
+    assert len(intents) == 1
+    report = check_intent_coverage(summary, intents)
+    assert report.complete is True
+    assert report.total_positions is None
+    assert check_intent_coverage(summary, []).complete is False
+    merged = _union_residuals(summary, [_lp("33")])
+    assert {p.position_id for p in merged.positions} == {"22", "33"}
+    assert merged.strategy_enumeration_complete is False
+    assert check_intent_coverage(merged, full_close_intents(merged)).total_positions is None
+
+
+@pytest.mark.asyncio
+async def test_typed_empty_strategy_enumeration_is_measured():
+    from almanak.framework.teardown.completeness import check_intent_coverage
+
+    summary = await resolve_open_positions_with_registry(_FakeStrategy(summary=_empty_summary(), state_manager=None))
+    assert summary.strategy_enumeration_complete is True
+    assert check_intent_coverage(summary, []).total_positions == 0

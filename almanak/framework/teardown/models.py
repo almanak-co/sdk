@@ -288,6 +288,8 @@ class TeardownPositionSummary:
     # Computed fields (can be set explicitly or calculated)
     total_value_usd: Decimal = Decimal("0")
     has_liquidation_risk: bool = False
+    # Known registry positions can be unwound even when strategy enumeration is unavailable.
+    strategy_enumeration_complete: bool = True
 
     def __post_init__(self) -> None:
         """Calculate derived fields if not set."""

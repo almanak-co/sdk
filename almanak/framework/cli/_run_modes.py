@@ -10,7 +10,7 @@ import json
 import logging
 import sys
 import time
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Mapping
 from typing import TYPE_CHECKING, Any, NoReturn
 
 import click
@@ -900,12 +900,17 @@ def _teardown_step_coverage(step: dict | None, *, requested: bool) -> str:
 
     evidence = step.get("teardown_closure")
     if isinstance(evidence, dict):
-        try:
-            if int(evidence.get("positions_total", 0)) > 0:
-                return "unmeasured"
-        except (TypeError, ValueError):
-            return "unmeasured"
-        if evidence.get("has_position_breakdown") is True:
+        total = evidence.get("positions_total")
+        closed = evidence.get("positions_closed")
+        if (
+            type(total) is int
+            and total == 0
+            and type(closed) is int
+            and closed == 0
+            and evidence.get("all_closed") is True
+            and evidence.get("closure_unknown") is False
+            and evidence.get("has_position_breakdown") is True
+        ):
             return "nothing_to_unwind"
     return "unmeasured"
 
@@ -993,6 +998,62 @@ def _teardown_step_ok(step: dict) -> bool:
     )
 
 
+def _snapshot_action_expectations(strategy: Any, actions: list[str]) -> dict[str, dict[str, Any]]:
+    """Validate and detach the strategy's assertions before any lifecycle work."""
+    declared = getattr(strategy, "test_action_expectations", {})
+    if not isinstance(declared, Mapping):
+        raise ValueError("test_action_expectations must be a mapping")
+    snapshot = {}
+    for action, expectation in declared.items():
+        if not isinstance(action, str) or not action.strip() or action == "teardown":
+            raise ValueError("test_action_expectations keys must be nonempty action names, excluding teardown")
+        if not isinstance(expectation, Mapping) or set(expectation) != {"expected_to_hold", "reason"}:
+            raise ValueError(f"test_action_expectations[{action!r}] requires expected_to_hold and reason")
+        expected = expectation["expected_to_hold"]
+        reason = expectation["reason"]
+        if type(expected) is not bool or not isinstance(reason, str) or not reason.strip():
+            raise ValueError(f"test_action_expectations[{action!r}] requires a boolean and a nonempty reason")
+        snapshot[action] = {"expected_to_hold": expected, "reason": reason}
+    for action in actions:
+        if action:
+            snapshot.setdefault(action, {"expected_to_hold": False, "reason": "Execution required by default."})
+    return snapshot
+
+
+def _lifecycle_step_verdicts(
+    action_results: list[dict],
+    teardown_result: dict | None,
+    *,
+    coverage: dict[str, Any],
+    requested_actions: list[str],
+    teardown_requested: bool,
+    expectations: dict[str, dict[str, Any]],
+) -> tuple[bool, bool | None]:
+    """Compare measured outcomes with assertions captured before execution."""
+    from ..runner import IterationStatus
+
+    actions_ok = len(action_results) == len(requested_actions) and all(
+        not result.get("error")
+        and result.get("status") in (IterationStatus.SUCCESS.value, IterationStatus.HOLD.value)
+        and (
+            _action_step_coverage(result)
+            == ("held" if expectations.get(action, {}).get("expected_to_hold") else "executed")
+            if action
+            else True
+        )
+        for action, result in zip(requested_actions, action_results, strict=False)
+    )
+    if not teardown_requested:
+        return actions_ok, None
+    teardown_ok = (
+        teardown_result is not None
+        and not teardown_result.get("error")
+        and _teardown_step_ok(teardown_result)
+        and coverage["teardown"] in {"proved", "nothing_to_unwind"}
+    )
+    return actions_ok, teardown_ok
+
+
 def _run_test_lifecycle(  # noqa: C901
     *,
     runner: Any,
@@ -1069,13 +1130,15 @@ def _run_test_lifecycle(  # noqa: C901
     # whatever steps completed before run_iteration() raised.
     action_results: list[dict] = []
     teardown_result_dict: dict | None = None
+    action_expectations: dict[str, dict[str, Any]] | None = None
 
     async def run_lifecycle_with_cleanup() -> tuple[list[dict], dict | None]:  # noqa: C901
-        nonlocal action_results, teardown_result_dict
+        nonlocal action_results, teardown_result_dict, action_expectations
         gateway_integration_ready = False
         previous_settlement_requirement = getattr(runner, "_require_terminal_async_settlement", False)
         runner._require_terminal_async_settlement = True
         try:
+            action_expectations = _snapshot_action_expectations(strategy_instance, actions)
             runner.setup_gateway_integration(strategy_instance)
             gateway_integration_ready = True
 
@@ -1141,14 +1204,13 @@ def _run_test_lifecycle(  # noqa: C901
             # path. See `_run_once` above for the full rationale.
             await hydrate_recent_open_events_cache(runner, strategy_instance)
 
-            # Single predicate: an action passes iff status is SUCCESS or HOLD.
-            # Used identically by per-step failure_logs, fail-fast, and the final
-            # summary so the three never disagree.
+            # A safe HOLD must not prevent later recovery actions or teardown.
+            # Execution coverage is enforced separately in the final verdict.
             deployment_id = _require_strategy_deployment_id(
                 strategy_instance,
                 operation="strat_test_lifecycle",
             )
-            action_pass_statuses = (IterationStatus.SUCCESS.value, IterationStatus.HOLD.value)
+            action_completion_statuses = (IterationStatus.SUCCESS.value, IterationStatus.HOLD.value)
             for action in actions:
                 strategy_instance.force_action = action
                 if not json_output:
@@ -1200,11 +1262,22 @@ def _run_test_lifecycle(  # noqa: C901
                     break
                 entry = {"action": action, **result.to_dict()}
                 entry["coverage"] = _action_step_coverage(entry)
-                action_passed = result.status.value in action_pass_statuses
-                if not action_passed:
+                if action:
+                    entry["expectation"] = dict(action_expectations[action])
+                action_completed = result.status.value in action_completion_statuses and not entry.get("error")
+                if action and action_completed:
+                    expected_coverage = "held" if action_expectations[action]["expected_to_hold"] else "executed"
+                    if entry["coverage"] != expected_coverage:
+                        entry["assertion_error"] = (
+                            f"Expected {expected_coverage} action {action!r}, observed {entry['coverage']}. "
+                            f"{action_expectations[action]['reason']}"
+                        )
+                if not action_completed or entry.get("assertion_error"):
                     entry["failure_logs"] = log_buffer.slice_since(logs_before)
+                    if not json_output and entry.get("assertion_error"):
+                        click.echo(f"  assertion failed: {entry['assertion_error']}", err=True)
                 action_results.append(entry)
-                if not action_passed:
+                if not action_completed:
                     if not json_output:
                         click.echo(f"  failed: {result.error or result.status.value}", err=True)
                     break  # fail-fast
@@ -1349,13 +1422,24 @@ def _run_test_lifecycle(  # noqa: C901
                                 "did NOT fail this teardown. The cache is stale — fix the strategy's position "
                                 "tracking (ALM-3109)."
                             )
-                    teardown_passed = _teardown_step_ok(teardown_result_dict)
                     teardown_result_dict["coverage"] = _teardown_step_coverage(
                         teardown_result_dict,
                         requested=True,
                     )
+                    teardown_passed = (
+                        not teardown_result_dict.get("error")
+                        and _teardown_step_ok(teardown_result_dict)
+                        and teardown_result_dict["coverage"] in {"proved", "nothing_to_unwind"}
+                    )
+                    if teardown_result_dict["coverage"] == "unmeasured":
+                        teardown_result_dict["assertion_error"] = (
+                            "Teardown closure was not measured. Completed execution does not prove an unwind; "
+                            "this does not assert that positions remain open."
+                        )
                     if not teardown_passed:
                         teardown_result_dict["failure_logs"] = log_buffer.slice_since(logs_before)
+                        if not json_output and teardown_result_dict.get("assertion_error"):
+                            click.echo(f"  assertion failed: {teardown_result_dict['assertion_error']}", err=True)
                         if not json_output:
                             # Surface both signals: the iteration failure (when the
                             # status itself is bad) AND any residual positions.
@@ -1432,34 +1516,30 @@ def _run_test_lifecycle(  # noqa: C901
             partial_steps: list[dict] = list(action_results)
             if teardown_result_dict is not None:
                 partial_steps.append(teardown_result_dict)
-            # Reflect the real per-step pass state so summary doesn't contradict steps —
-            # the exception itself (e.g. flush_pending_saves / cleanup) may have fired
-            # AFTER all action and teardown iterations already passed.
-            partial_actions_ok = all(
-                step["status"] in (IterationStatus.SUCCESS.value, IterationStatus.HOLD.value) for step in action_results
+            partial_coverage = _lifecycle_coverage(
+                action_results, teardown_result_dict, requested_actions=actions, teardown_requested=teardown
             )
-            if not teardown:
-                partial_teardown_ok: bool | None = None
-            elif teardown_result_dict is None:
-                partial_teardown_ok = False
-            else:
-                partial_teardown_ok = _teardown_step_ok(teardown_result_dict)
+            partial_actions_ok, partial_teardown_ok = _lifecycle_step_verdicts(
+                action_results,
+                teardown_result_dict,
+                coverage=partial_coverage,
+                requested_actions=actions,
+                teardown_requested=teardown,
+                expectations=action_expectations or {},
+            )
             click.echo(
                 json.dumps(
                     {
                         "summary": {
                             "all_passed": False,  # exception always means run failed overall
+                            "deployment_ready": False,
                             "skipped": False,
                             "skip_reason": None,
                             "steps_run": len(partial_steps),
                             "actions_passed": partial_actions_ok,
                             "teardown_passed": partial_teardown_ok,
-                            "coverage": _lifecycle_coverage(
-                                action_results,
-                                teardown_result_dict,
-                                requested_actions=actions,
-                                teardown_requested=teardown,
-                            ),
+                            "coverage": partial_coverage,
+                            "test_action_expectations": action_expectations,
                             "error": str(e),
                         },
                         "steps": partial_steps,
@@ -1473,27 +1553,21 @@ def _run_test_lifecycle(  # noqa: C901
     finally:
         _logging.getLogger().removeHandler(log_buffer)
 
-    # teardown_passed is None ("not applicable") when --teardown wasn't requested,
-    # True when the teardown step passed (see _teardown_step_ok), False otherwise.
-    # Same convention as the exception path, so JSON consumers see one shape.
-    teardown_ok: bool | None
-    if not teardown:
-        teardown_ok = None
-    elif teardown_result_dict is None:
-        teardown_ok = False  # asked for but never executed (logic error)
-    else:
-        teardown_ok = _teardown_step_ok(teardown_result_dict)
-    # all([]) is True — teardown-only runs (no actions) correctly identity to True here
-    # and rely on teardown_ok for the final verdict.
-    actions_ok = all(r["status"] in (IterationStatus.SUCCESS.value, IterationStatus.HOLD.value) for r in action_results)
-    # Treat teardown_ok=None (not applicable) as a non-blocker for all_passed.
-    all_passed = actions_ok and (teardown_ok is None or teardown_ok)
     coverage = _lifecycle_coverage(
         action_results,
         teardown_result_dict,
         requested_actions=actions,
         teardown_requested=teardown,
     )
+    actions_ok, teardown_ok = _lifecycle_step_verdicts(
+        action_results,
+        teardown_result_dict,
+        coverage=coverage,
+        requested_actions=actions,
+        teardown_requested=teardown,
+        expectations=action_expectations or {},
+    )
+    all_passed = actions_ok and (teardown_ok is None or teardown_ok)
 
     if json_output:
         steps: list[dict] = list(action_results)
@@ -1506,10 +1580,17 @@ def _run_test_lifecycle(  # noqa: C901
             ),
             "summary": {
                 "all_passed": all_passed,
+                "deployment_ready": (
+                    all_passed
+                    and bool(coverage["actions"])
+                    and coverage["requested_paths_exercised"] is True
+                    and coverage["teardown"] == "proved"
+                ),
                 "steps_run": len(steps),
                 "actions_passed": actions_ok,
                 "teardown_passed": teardown_ok,
                 "coverage": coverage,
+                "test_action_expectations": action_expectations,
             },
             "steps": steps,
         }
@@ -1524,7 +1605,7 @@ def _run_test_lifecycle(  # noqa: C901
             else:
                 click.echo("Test lifecycle completed safely, but requested path coverage is incomplete.")
         else:
-            click.echo("Test lifecycle failed.")
+            click.echo("Test lifecycle failed: a step failed or requested path coverage is incomplete.")
 
     return 0 if all_passed else 1
 

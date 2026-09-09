@@ -580,3 +580,86 @@ async def test_multichain_failure_preserves_annotation_and_shutdown(
         manager.mark_failed.assert_not_called()
     else:
         manager.mark_failed.assert_called_once_with("deployment:test", error=expected)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("position_kind", [None, "prediction", "cex", "token"])
+async def test_no_intent_completion_requires_full_empty_enumeration(monkeypatch, position_kind):
+    from decimal import Decimal
+
+    from almanak.framework.cli._run_modes import (
+        _chain_certified_closure,
+        _lifecycle_coverage,
+        _lifecycle_step_verdicts,
+    )
+    from almanak.framework.teardown.models import PositionInfo, PositionType
+
+    positions = (
+        []
+        if position_kind is None
+        else [
+            PositionInfo(
+                position_type=PositionType[position_kind.upper()],
+                position_id="retained-position",
+                chain="polygon",
+                protocol="polymarket" if position_kind == "prediction" else "kraken",
+                value_usd=Decimal("10"),
+                details={"asset": "USDC"},
+            )
+        ]
+    )
+    monkeypatch.setattr(
+        "almanak.framework.teardown.registry_enumeration.resolve_open_positions_with_registry",
+        AsyncMock(return_value=positions),
+    )
+    runner = _runner()
+    runner._teardown_closure_verification = None
+    request = SimpleNamespace(asset_policy="target_token", target_token="USDC") if position_kind == "token" else None
+    result = await rt._complete_teardown_without_intents(
+        runner, _strategy(), MagicMock(), request, "deployment:test", datetime.now(UTC), False, None, None
+    )
+    step = {"status": result.status.value, "teardown_closure": runner._teardown_closure_verification}
+    coverage = _lifecycle_coverage([], step, requested_actions=[], teardown_requested=True)
+    assert coverage["teardown"] == ("nothing_to_unwind" if position_kind is None else "unmeasured")
+    assert _lifecycle_step_verdicts(
+        [], step, coverage=coverage, requested_actions=[], teardown_requested=True, expectations={}
+    ) == (True, position_kind is None)
+    assert _chain_certified_closure(step) is False
+    assert coverage["requested_paths_exercised"] is False
+    if position_kind is None:
+        assert step["teardown_closure"]["all_closed"] is True
+        assert step["teardown_closure"]["verification_status"] == "not_run"
+        assert step["teardown_closure"]["protocols_to_prove"] == []
+    else:
+        assert step["teardown_closure"] is None
+    runner.request_shutdown.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_legacy_fallback_completion_is_not_measured_closure():
+    from almanak.framework.cli._run_modes import _lifecycle_coverage, _lifecycle_step_verdicts
+    from almanak.framework.runner._teardown_helpers import closure_chain_evidence
+    from almanak.framework.teardown.teardown_manager import TeardownManager
+
+    strategy = SimpleNamespace(get_open_positions=lambda: SimpleNamespace(positions=[]))
+    verification = await TeardownManager()._verify_closure_detailed(strategy)
+    assert verification.all_closed is True
+    assert verification.has_position_breakdown is False
+    step = {"status": "TEARDOWN", "teardown_closure": closure_chain_evidence(verification)}
+    coverage = _lifecycle_coverage([], step, requested_actions=[], teardown_requested=True)
+    assert coverage["teardown"] == "unmeasured"
+    assert coverage["requested_paths_exercised"] is False
+    assert _lifecycle_step_verdicts(
+        [], step, coverage=coverage, requested_actions=[], teardown_requested=True, expectations={}
+    ) == (True, False)
+
+
+@pytest.mark.asyncio
+async def test_none_strategy_enumeration_cannot_certify_empty_teardown():
+    strategy = SimpleNamespace(deployment_id="deployment:test", chain="polygon", get_open_positions=lambda: None)
+    runner = _runner()
+    runner._teardown_closure_verification = None
+    await rt._complete_teardown_without_intents(
+        runner, strategy, MagicMock(), None, "deployment:test", datetime.now(UTC), False, None, None
+    )
+    assert runner._teardown_closure_verification is None

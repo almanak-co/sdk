@@ -1150,6 +1150,15 @@ async def _complete_teardown_without_intents(
         error = recovery_warning or "On-chain LP discovery incomplete; manual check required."
         return _fail_teardown_before_execution(runner, manager, request, deployment_id, start_time, error)
 
+    if completeness.total_positions == 0:
+        from ..teardown.models import ClosureVerification
+        from ._teardown_helpers import closure_chain_evidence
+
+        # The full known set is empty; no position unwind was measured.
+        runner._teardown_closure_verification = closure_chain_evidence(
+            ClosureVerification(all_closed=True, has_position_breakdown=True)
+        )
+
     logger.info(f"🛑 {deployment_id} teardown complete (no positions to close)")
     if request:
         completion_result: dict[str, Any] = {"reason": "no_positions"}

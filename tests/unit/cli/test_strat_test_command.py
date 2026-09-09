@@ -181,6 +181,8 @@ def test_setup_failure_emits_documented_json_result(monkeypatch, tmp_path):
     assert json.loads(result.output) == {
         "summary": {
             "all_passed": False,
+            "deployment_ready": False,
+            "test_action_expectations": None,
             "skipped": False,
             "skip_reason": None,
             "steps_run": 0,

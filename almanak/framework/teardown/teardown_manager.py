@@ -546,6 +546,23 @@ class AtomicBundle:
     multisend_data: bytes | None = None
 
 
+def _limit_closure_to_known_positions(
+    verification: ClosureVerification, pre_execution_positions: Any
+) -> ClosureVerification:
+    # Closing the known subset cannot prove a complete unwind after unavailable enumeration.
+    if getattr(pre_execution_positions, "strategy_enumeration_complete", True) is False:
+        verification = replace(
+            verification,
+            has_position_breakdown=False,
+            verification_status=(
+                VerificationStatus.UNVERIFIED
+                if verification.verification_status in (VerificationStatus.CHAIN_VERIFIED, VerificationStatus.NOT_RUN)
+                else verification.verification_status
+            ),
+        )
+    return verification
+
+
 @dataclass(frozen=True)
 class _ExecutePlan:
     positions: TeardownPositionSummary
@@ -3775,6 +3792,8 @@ class TeardownManager:
         Never raises — a reconciliation fault degrades to the incoming
         ``verification`` (the CHECK must never fault the teardown lane).
         """
+        verification = _limit_closure_to_known_positions(verification, pre_execution_positions)
+
         # Preserve the first actionable residual verdict.
         if not verification.all_closed:
             return verification
@@ -3894,7 +3913,8 @@ class TeardownManager:
                 all_closed=False,
                 positions_total=positions_total,
                 positions_closed=max(positions_total - len(residual), 0),
-                has_position_breakdown=True,
+                has_position_breakdown=getattr(pre_execution_positions, "strategy_enumeration_complete", True)
+                is not False,
                 verification_status=VerificationStatus.FAILED,  # == status (post report failed)
             )
 

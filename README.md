@@ -273,6 +273,38 @@ uv run almanak strat backtest pnl -s demo_uniswap_rsi --start 2024-01-01 --end 2
 > `Tutorials/` folder (VIB-5332). For complete documentation, see
 > [`almanak/framework/backtesting/README.md`](almanak/framework/backtesting/README.md).
 
+### Lifecycle test verdicts
+
+`uv run almanak strat test --actions open,close,open --teardown` requires successful
+execution evidence for every requested action by default. Strategies testing a
+specific guard can run `uv run almanak strat test --actions open` with this
+declaration captured before execution:
+
+```python
+test_action_expectations = {
+    "open": {"expected_to_hold": True, "reason": "The stale reference guard must reject entry."},
+}
+```
+
+The mapping is validated and copied before the run. Repeated action names share
+one expectation; the mapping cannot express different outcomes for successive
+`open` steps. Missing entries require execution;
+a declared HOLD fails if the action executes. Declarations never excuse runtime/data
+errors or failed, residual, missing, or unmeasured teardown. A measured empty teardown
+passes cleanup assertions but provides no unwind coverage. Cleanup and risk-reducing
+teardown still run after an action failure.
+
+JSON `summary.test_action_expectations` echoes the snapshot (including default
+expectations), and each requested action step includes its `expectation` and actual
+`coverage`. `all_passed` and the exit code report assertion success.
+`coverage.requested_paths_exercised` reports actual requested execution coverage.
+`deployment_ready` requires successful assertions, at least one requested action,
+all requested actions executed, and a requested, measured position unwind. It covers
+only this local lifecycle test, not production/provider/accounting qualification.
+Natural `--inject` decisions without forced actions may safely hold but cannot by
+themselves establish deployment readiness. Deployment consumers must gate on
+`deployment_ready`, while guard-test consumers may use `all_passed`.
+
 ## Supported Networks
 
 19 chains have first-class `ChainDescriptor` configs. Chains marked with `*` have one or more registered protocol connectors today; the others have chain configs in place but no protocol coverage yet.
