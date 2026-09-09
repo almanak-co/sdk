@@ -277,8 +277,10 @@ def identify_erc4626_vault(
             "Morpho generation: Morpho Vault V2 (adapter-based) — supported by the morpho_vault connector "
             "(deposit + redeem; redeem-all sizes from balanceOf and is simulated before send). Exit liquidity "
             "on V2 comes from idle assets plus one liquidity adapter and is NOT guaranteed: a redeem that "
-            "cannot be covered fails closed at compile time (VaultIlliquidError) rather than reverting on-chain; "
-            "the penalised forceDeallocate escape hatch is not automated. Size positions with that in mind."
+            "cannot be covered fails closed at compile time (VaultIlliquidError) rather than reverting on-chain. "
+            "A penalised forced exit (the vault's forceDeallocate) is available ONLY as an opt-in on the redeem "
+            "intent — allow_force_deallocate=True, capped by max_force_deallocate_penalty_bps — which the user "
+            "must accept explicitly. Size positions with that in mind."
         )
     else:
         notes.append(

@@ -1708,7 +1708,7 @@ class ExecutionOrchestrator:
         session = state.session
         assert state.unsigned_txs is not None
 
-        refusal = await self._validate_connector_operation(state)
+        refusal = await self._validate_connector_operation(state) or self._refuse_non_atomic_bundle(state)
         if refusal is not None:
             return refusal
 
@@ -1917,6 +1917,9 @@ class ExecutionOrchestrator:
         # Opted-in dry runs validate the same signed liability as live execution.
         funding_config = (state.action_bundle.metadata or {}).get(_NATIVE_FUNDING_PREFLIGHT_KEY)
         if context.dry_run and not isinstance(funding_config, dict):
+            refusal = self._refuse_non_atomic_bundle(state)
+            if refusal is not None:
+                return refusal
             result.success = True
             result.phase = ExecutionPhase.COMPLETE
             result.completed_at = datetime.now(UTC)
@@ -2062,9 +2065,37 @@ class ExecutionOrchestrator:
 
         return requirements
 
+    def _refuse_non_atomic_bundle(self, state: ExecutionPipelineState) -> ExecutionResult | None:
+        """Refuse EOA sequential confirm for bundles that must land atomically.
+
+        Penalty burns before a trailing redeem cannot be reversed if the redeem
+        fails. Safe MultiSend is the atomic path; there is no EOA helper.
+        """
+        metadata = state.action_bundle.metadata or {}
+        if not metadata.get("requires_atomic") or isinstance(self.signer, SafeSigner):
+            return None
+        error_msg = (
+            "Penalised forced exit requires atomic execution (Safe/MultiSend). "
+            "An EOA sequential confirm can burn penalty shares then fail the "
+            "trailing redeem. There is no EOA atomic helper for this bundle."
+        )
+        result = state.result
+        result.success = False
+        result.error = error_msg
+        result.error_phase = ExecutionPhase.SUBMISSION
+        result.phase = ExecutionPhase.SUBMISSION
+        result.completed_at = datetime.now(UTC)
+        self._complete_session(state.session, success=False, error=error_msg)
+        self._emit_event(
+            ExecutionEventType.EXECUTION_FAILED,
+            state.context,
+            {"error": error_msg, "error_phase": ExecutionPhase.SUBMISSION.value},
+        )
+        return result
+
     async def _phase_submit_and_confirm(self, state: ExecutionPipelineState) -> ExecutionResult | None:
         """Step 7 and 8: submit (sequential or parallel), gather receipts, emit TX_SENT."""
-        refusal = await self._validate_connector_operation(state)
+        refusal = await self._validate_connector_operation(state) or self._refuse_non_atomic_bundle(state)
         if refusal is not None:
             return refusal
         context = state.context
@@ -2073,11 +2104,6 @@ class ExecutionOrchestrator:
         assert state.signed_txs is not None
         signed_txs = state.signed_txs
 
-        # Use sequential submit-and-confirm for multi-TX bundles with EOA
-        # signers to avoid hitting RPC in-flight TX limits (e.g. Alchemy's
-        # 2-TX limit for delegated accounts on Base).  Safe signers bundle
-        # atomically via MultiSend into a single on-chain TX, so they are
-        # exempt and use the faster parallel path.
         self._emit_event(
             ExecutionEventType.SUBMITTING,
             context,

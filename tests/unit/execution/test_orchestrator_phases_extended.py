@@ -1599,3 +1599,62 @@ class TestPipelineStateInvariants:
         assert state.signed_txs is not None
         assert state.receipts is None
         assert state.submission_results is None
+
+
+@pytest.mark.asyncio
+async def test_eoa_refuses_requires_atomic_forced_exit(orchestrator):
+    """Penalty burns must not land without the trailing redeem — EOA sequential is refused."""
+    state = _make_state(
+        orchestrator,
+        intent_type="VAULT_REDEEM",
+        transactions=[{"to": "0x1", "data": "0x", "value": 0}, {"to": "0x1", "data": "0x", "value": 0}],
+        metadata={"requires_atomic": True, "force_deallocate": {"legs": [{}]}},
+    )
+    state.signed_txs = [MagicMock(), MagicMock()]
+    callback = MagicMock()
+    orchestrator.set_event_callback(callback)
+    returned = await orchestrator._phase_submit_and_confirm(state)
+    assert returned is state.result
+    assert returned.success is False
+    assert "atomic" in (returned.error or "").lower()
+    assert returned.error_phase == ExecutionPhase.SUBMISSION
+    assert returned.to_dict()["error_phase"] == "SUBMISSION"
+    orchestrator.submitter.submit.assert_not_called()
+    callback.assert_called()
+    event_type, details = callback.call_args.args
+    assert event_type == ExecutionEventType.EXECUTION_FAILED
+    assert "atomic" in details["error"].lower()
+
+
+@pytest.mark.asyncio
+async def test_dry_run_eoa_refuses_requires_atomic_forced_exit(orchestrator):
+    """Dry-run must not report success for an EOA bundle that live execution would refuse."""
+    state = _make_state(
+        orchestrator,
+        intent_type="VAULT_REDEEM",
+        transactions=[{"to": "0x1", "data": "0x", "value": 0}, {"to": "0x1", "data": "0x", "value": 0}],
+        metadata={"requires_atomic": True, "force_deallocate": {"legs": [{}]}},
+    )
+    state.context.dry_run = True
+    state.unsigned_txs = [MagicMock(nonce=1), MagicMock(nonce=2)]
+    orchestrator._validate_connector_operation = AsyncMock(return_value=None)
+    orchestrator._assign_nonces = AsyncMock(return_value=state.unsigned_txs)
+    orchestrator.signer.sign_batch = AsyncMock(return_value=[MagicMock(), MagicMock()])
+    callback = MagicMock()
+    orchestrator.set_event_callback(callback)
+
+    validated = await orchestrator._phase_validate(state)
+    assert validated is state.result
+    assert validated.success is False
+    assert "atomic" in (validated.error or "").lower()
+    assert validated.error_phase == ExecutionPhase.SUBMISSION
+    assert validated.to_dict()["error_phase"] == "SUBMISSION"
+    orchestrator.submitter.submit.assert_not_called()
+
+    signed = await orchestrator._phase_sign(state)
+    assert signed is state.result
+    assert signed.success is False
+    orchestrator.submitter.submit.assert_not_called()
+    event_type, details = callback.call_args.args
+    assert event_type == ExecutionEventType.EXECUTION_FAILED
+    assert "atomic" in details["error"].lower()

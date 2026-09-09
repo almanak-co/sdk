@@ -407,3 +407,29 @@ class TestVaultV2:
         assert not result.success
         assert "exceeds redeemable" in result.error
         mock_sdk.get_max_redeem.assert_not_called()
+
+    def test_forced_redeem_orders_deallocate_before_redeem_and_stamps_atomic(self):
+        adapter, mock_sdk = self._v2_adapter()
+        mock_sdk.simulate_redeem.side_effect = VaultIlliquidError("liquidity adapter short")
+        force_tx = {"to": VAULT_ADDR, "data": "0xforce", "value": "0", "gas_estimate": 100000}
+        mock_sdk.build_force_deallocate_tx.return_value = force_tx
+        leg = MagicMock()
+        leg.adapter = "0x" + "ad" * 20
+        leg.market_params_data = "0x00"
+        leg.assets = 1
+        plan = MagicMock()
+        plan.legs = [leg]
+        plan.redeem_shares = 6 * 10**18
+        mock_sdk.plan_force_deallocate.return_value = plan
+
+        result = adapter.redeem(VAULT_ADDR, "all", allow_force_deallocate=True)
+        assert result.success, result.error
+        assert list(result.tx_data) == ["force_deallocate", "redeem"]
+        assert result.tx_data["force_deallocate"] == [force_tx]
+        assert result.requires_atomic is True
+        assert "requires_atomic" not in result.tx_data
+        payload = result.to_dict()
+        assert payload["requires_atomic"] is True
+        assert "requires_atomic" not in payload["tx_data"]
+        mock_sdk.build_redeem_tx.assert_called_once()
+        assert mock_sdk.build_redeem_tx.call_args.kwargs["shares"] == 6 * 10**18

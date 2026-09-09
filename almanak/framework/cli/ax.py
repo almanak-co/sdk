@@ -3499,8 +3499,9 @@ def vault(ctx, address):
         deployable_note = (
             "Morpho Vault V2: supported by the morpho_vault connector (vault_deposit / vault_redeem; redeem-all "
             "sizes from balanceOf and is simulated before send). Exit liquidity comes from idle assets plus one "
-            "liquidity adapter and is not guaranteed — an uncoverable redeem fails closed at compile time; "
-            "forceDeallocate is not automated."
+            "liquidity adapter and is not guaranteed — an uncoverable redeem fails closed at compile time unless "
+            "the redeem intent opts in to a penalised forced exit (allow_force_deallocate=True, capped by "
+            "max_force_deallocate_penalty_bps)."
         )
     elif version == "v1":
         deployable_note = "MetaMorpho v1: supported by the morpho_vault connector (vault_deposit / vault_redeem)."

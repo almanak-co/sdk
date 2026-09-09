@@ -7,6 +7,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Opt-in forced exit for Morpho Vault V2 (`allow_force_deallocate`).** A V2
+  redeem that the vault's idle assets + liquidity market cannot cover fails
+  closed by default. `Intent.vault_redeem(..., allow_force_deallocate=True,
+  max_force_deallocate_penalty_bps=N)` lets the connector first call the
+  vault's `forceDeallocate` on its other markets (sized from
+  `adapter.marketIds` / Morpho Blue `market` + `position` reads — no API) to
+  pull the shortfall into idle assets, then redeem, as one bundle. The
+  curator-set penalty is burned from the redeemer's shares; a plan above the
+  cap, or that cannot cover the shortfall, is refused whole. Teardown reads the
+  same consent from the strategy config's `vault_exit` block
+  (`{"allow_force_deallocate": bool, "max_penalty_bps": int}`), off by default.
+  The `forceDeallocate` selector is added to the vault permission hints so the
+  opt-in is executable from a Safe.
 - **Morpho Vault V2 support in `morpho_vault`.** The connector now detects the
   vault generation on-chain (`detect_vault_version`: `withdrawQueueLength()`
   answers only on MetaMorpho v1, `adaptersLength()` only on Vault V2) and
@@ -18,7 +31,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   V2 receive-shares gate instead of `maxDeposit`, and `get_vault_info` reads
   V2 performance/management fees, adapters and the liquidity adapter instead of
   the v1 `fee()`/`timelock()`/queue selectors that revert on V2. The penalised
-  `forceDeallocate` escape hatch is not issued by the connector (follow-up).
+  `forceDeallocate` exit is opt-in only (see the entry above).
 
 ## [2.28.0] - 2026-09-08
 

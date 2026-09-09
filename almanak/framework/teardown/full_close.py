@@ -47,6 +47,7 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import Iterable
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
@@ -63,6 +64,54 @@ logger = logging.getLogger("almanak.framework.teardown.full_close")
 # teardown manager's manual initial slippage; the escalation ladder loosens it
 # under operator approval, so this is only the starting tolerance.
 _DEFAULT_SWAP_SLIPPAGE = Decimal("0.02")
+
+
+@dataclass(frozen=True)
+class VaultExitPolicy:
+    """Strategy-level consent for a PAID forced exit from a Morpho Vault V2.
+
+    Read from the strategy config's ``vault_exit`` block::
+
+        "vault_exit": {"allow_force_deallocate": true, "max_penalty_bps": 5}
+
+    Default: forced exits are OFF — an uncoverable V2 redeem fails closed at
+    compile time and the position stays in the vault until liquidity returns
+    or the user changes the policy. The knobs map 1:1 onto the
+    ``VaultRedeemIntent`` fields the teardown redeem carries.
+    """
+
+    allow_force_deallocate: bool = False
+    max_penalty_bps: int = 10
+
+    @classmethod
+    def from_config(cls, raw: object) -> VaultExitPolicy:
+        """Parse the ``vault_exit`` block; anything not an explicit opt-in is OFF.
+
+        ``allow_force_deallocate`` is read strictly: the JSON boolean ``true``
+        or the strings ``"true"`` / ``"yes"`` / ``"1"`` (case-insensitive) opt
+        in; everything else — including the string ``"false"``, which
+        ``bool()`` would have read as truthy — leaves the paid exit disabled.
+        """
+        if not isinstance(raw, dict):
+            return cls()
+        allow = _strict_opt_in(raw.get("allow_force_deallocate"))
+        bps_raw = raw.get("max_penalty_bps", raw.get("max_force_deallocate_penalty_bps"))
+        bps = 10
+        if bps_raw is not None and not isinstance(bps_raw, bool):
+            try:
+                bps = int(bps_raw)
+            except (TypeError, ValueError):
+                bps = 10
+        return cls(allow_force_deallocate=allow, max_penalty_bps=max(0, min(bps, 10_000)))
+
+
+def _strict_opt_in(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "yes", "1")
+    return False
+
 
 # A well-formed bytes32 order key: ``0x`` + exactly 64 hex chars (no underscores).
 # Mirrors ``PerpCancelIntent``'s validator so the two fail-closed gates never drift.
@@ -157,6 +206,7 @@ def _close_intent_for_position(
     *,
     target_token: str,
     max_slippage: Decimal,
+    vault_exit: VaultExitPolicy | None = None,
 ) -> AnyIntent | None:
     """Map ONE known position to its live-resolving full-close intent.
 
@@ -201,13 +251,18 @@ def _close_intent_for_position(
         vault = _first(details, "vault_address", "address", "vault") or position.position_id
         if not vault:
             return None
-        # shares="all" -> live share->asset conversion at execution.
+        # shares="all" -> live share->asset conversion at execution. The
+        # forced-exit consent rides on the intent (OFF unless the strategy
+        # config's ``vault_exit`` block enables it) — see VaultExitPolicy.
+        policy = vault_exit or VaultExitPolicy()
         return Intent.vault_redeem(
             protocol=protocol,
             vault_address=str(vault),
             shares="all",
             deposit_token=_first(details, "asset", "deposit_token", "underlying"),
             chain=chain,
+            allow_force_deallocate=policy.allow_force_deallocate,
+            max_force_deallocate_penalty_bps=policy.max_penalty_bps,
         )
 
     if ptype == PositionType.LP:
@@ -298,6 +353,7 @@ def full_close_intents(
     *,
     target_token: str = "USDC",
     max_slippage: Decimal = _DEFAULT_SWAP_SLIPPAGE,
+    vault_exit: VaultExitPolicy | None = None,
 ) -> list[AnyIntent]:
     """Build live-resolving "close fully" intents for a set of KNOWN positions.
 
@@ -306,6 +362,8 @@ def full_close_intents(
             ``PositionInfo`` (e.g. ``get_open_positions().positions``).
         target_token: Token to swap residual held / staked tokens into.
         max_slippage: Starting slippage for the SWAP-shaped close.
+        vault_exit: Consent for a penalised forced exit from a Morpho Vault V2
+            (default: off — see :class:`VaultExitPolicy`).
 
     Returns:
         Close intents ordered by ``PositionType.priority`` (PERP first, TOKEN
@@ -329,6 +387,7 @@ def full_close_intents(
                 position,
                 target_token=target_token,
                 max_slippage=max_slippage,
+                vault_exit=vault_exit,
             )
         except Exception:  # noqa: BLE001 - one bad position must not abort the unwind
             logger.warning(

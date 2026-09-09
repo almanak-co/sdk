@@ -103,6 +103,51 @@ class TestMorphoVaultConnectorNameAliasBase:
 # =============================================================================
 
 
+def _receipt_dict(execution_result, vault_address: str, topic: str) -> dict:
+    """The executed tx that emitted ``topic`` from the vault, as the receipt dict the protocol parser reads."""
+
+    def _hex(value) -> str:
+        if isinstance(value, bytes | bytearray):
+            return "0x" + bytes(value).hex()
+        text = str(value)
+        return text if text.startswith("0x") else "0x" + text
+
+    for tx_result in execution_result.transaction_results:
+        receipt_logs = getattr(tx_result.receipt, "logs", None) if tx_result.receipt is not None else None
+        logs = list(tx_result.logs or receipt_logs or [])
+        for log in logs:
+            log_addr = log.get("address", "") if isinstance(log, dict) else getattr(log, "address", "")
+            topics = (log.get("topics", []) if isinstance(log, dict) else getattr(log, "topics", [])) or []
+            if (
+                topics
+                and str(log_addr).lower() == vault_address.lower()
+                and topic.removeprefix("0x") in _hex(topics[0])
+            ):
+                return {
+                    "transactionHash": tx_result.tx_hash,
+                    "status": 1,
+                    "logs": [
+                        {
+                            "address": entry.get("address")
+                            if isinstance(entry, dict)
+                            else getattr(entry, "address", ""),
+                            "topics": [
+                                _hex(t)
+                                for t in (
+                                    (entry.get("topics") if isinstance(entry, dict) else getattr(entry, "topics", None))
+                                    or []
+                                )
+                            ],
+                            "data": _hex(
+                                entry.get("data", "0x") if isinstance(entry, dict) else getattr(entry, "data", "0x")
+                            ),
+                        }
+                        for entry in logs
+                    ],
+                }
+    return {"logs": []}
+
+
 @pytest.mark.base
 class TestMetamorphoVaultDepositOnChainBase:
     """Layers 2–4 for VAULT_DEPOSIT into the Moonwell USDC vault on Base."""
@@ -134,16 +179,10 @@ class TestMetamorphoVaultDepositOnChainBase:
         )
         result = compiler.compile(intent)
         if result.status.value != "SUCCESS":
-            assert (
-                "GatewayClient" in (result.error or "")
-                or "gateway" in (result.error or "").lower()
-            ), (
+            assert "GatewayClient" in (result.error or "") or "gateway" in (result.error or "").lower(), (
                 f"Unexpected compiler error: {result.error}"
             )
-            pytest.skip(
-                "VIB-4307: VAULT_DEPOSIT compilation requires a "
-                "connected GatewayClient. as of 2026-05-12."
-            )
+            pytest.skip("VIB-4307: VAULT_DEPOSIT compilation requires a connected GatewayClient. as of 2026-05-12.")
         assert result.action_bundle is not None
         assert len(result.transactions) == 2
 
@@ -164,8 +203,7 @@ class TestMetamorphoVaultDepositOnChainBase:
         usdc_before = get_token_balance(web3, UNDERLYING_ADDRESS, funded_wallet)
         shares_before = get_token_balance(web3, VAULT_ADDRESS, funded_wallet)
         assert usdc_before >= deposit_amount_wei, (
-            f"USDC funding insufficient: have {usdc_before}, "
-            f"need {deposit_amount_wei}"
+            f"USDC funding insufficient: have {usdc_before}, need {deposit_amount_wei}"
         )
 
         intent = VaultDepositIntent(
@@ -188,17 +226,11 @@ class TestMetamorphoVaultDepositOnChainBase:
                 f"GatewayClient. Error: {compilation_result.error}"
             )
 
-        execution_result = await orchestrator.execute(
-            compilation_result.action_bundle
-        )
-        assert execution_result.success, (
-            f"Execution failed: {execution_result.error}"
-        )
+        execution_result = await orchestrator.execute(compilation_result.action_bundle)
+        assert execution_result.success, f"Execution failed: {execution_result.error}"
 
         # Layer 3: Receipt — Deposit event from vault.
-        deposit_topic = (
-            "0xdcbc1c05240f31ff3ad067ef1ee35ce4997762752e3a095284754544f4c709d7"
-        )
+        deposit_topic = "0xdcbc1c05240f31ff3ad067ef1ee35ce4997762752e3a095284754544f4c709d7"
         deposit_log_found = False
         for tx_result in execution_result.transaction_results:
             if tx_result.receipt is None:
@@ -214,8 +246,7 @@ class TestMetamorphoVaultDepositOnChainBase:
                     topics = getattr(log, "topics", []) or []
                 first_topic = topics[0] if topics else None
                 first_topic_hex = (
-                    first_topic.hex() if hasattr(first_topic, "hex")
-                    else str(first_topic) if first_topic else None
+                    first_topic.hex() if hasattr(first_topic, "hex") else str(first_topic) if first_topic else None
                 )
                 if (
                     log_addr.lower() == VAULT_ADDRESS.lower()
@@ -224,9 +255,18 @@ class TestMetamorphoVaultDepositOnChainBase:
                 ):
                     deposit_log_found = True
                     break
-        assert deposit_log_found, (
-            "Expected ERC-4626 Deposit event from MetaMorpho vault"
+        assert deposit_log_found, "Expected ERC-4626 Deposit event from MetaMorpho vault"
+        assert compilation_result.action_bundle is not None
+        # Layer 3 through the protocol parser (not just the topic): the
+        # enricher's deposit extraction must decode this vault's Deposit event.
+        from almanak.connectors.morpho_vault import MetaMorphoReceiptParser
+
+        deposit_data = MetaMorphoReceiptParser().extract_deposit_data(
+            _receipt_dict(execution_result, VAULT_ADDRESS, deposit_topic)
         )
+        assert deposit_data is not None, "receipt parser did not extract the Deposit event"
+        assert deposit_data["assets"] == deposit_amount_wei
+        assert deposit_data["shares"] > 0
 
         usdc_after = get_token_balance(web3, UNDERLYING_ADDRESS, funded_wallet)
         shares_after = get_token_balance(web3, VAULT_ADDRESS, funded_wallet)
@@ -273,10 +313,7 @@ class TestMetamorphoVaultRedeemOnChainBase:
         )
         deposit_result = compiler.compile(deposit_intent)
         if deposit_result.status.value != "SUCCESS":
-            pytest.skip(
-                f"VIB-4307: VAULT_DEPOSIT compilation needs a gateway "
-                f"client. Error: {deposit_result.error}"
-            )
+            pytest.skip(f"VIB-4307: VAULT_DEPOSIT compilation needs a gateway client. Error: {deposit_result.error}")
         deposit_exec = await orchestrator.execute(deposit_result.action_bundle)
         assert deposit_exec.success
 
@@ -295,21 +332,14 @@ class TestMetamorphoVaultRedeemOnChainBase:
         )
         redeem_result = compiler.compile(redeem_intent)
         if redeem_result.status.value != "SUCCESS":
-            pytest.skip(
-                f"VIB-4307: VAULT_REDEEM needs a gateway client. "
-                f"Error: {redeem_result.error}"
-            )
+            pytest.skip(f"VIB-4307: VAULT_REDEEM needs a gateway client. Error: {redeem_result.error}")
         assert len(redeem_result.transactions) == 1
 
         execution_result = await orchestrator.execute(redeem_result.action_bundle)
-        assert execution_result.success, (
-            f"Redeem failed: {execution_result.error}"
-        )
+        assert execution_result.success, f"Redeem failed: {execution_result.error}"
 
         # Layer 3: Withdraw event
-        withdraw_topic = (
-            "0xfbde797d201c681b91056529119e0b02407c7bb96a4a2c75c01fc9667232c8db"
-        )
+        withdraw_topic = "0xfbde797d201c681b91056529119e0b02407c7bb96a4a2c75c01fc9667232c8db"
         withdraw_log_found = False
         for tx_result in execution_result.transaction_results:
             if tx_result.receipt is None:
@@ -325,8 +355,7 @@ class TestMetamorphoVaultRedeemOnChainBase:
                     topics = getattr(log, "topics", []) or []
                 first_topic = topics[0] if topics else None
                 first_topic_hex = (
-                    first_topic.hex() if hasattr(first_topic, "hex")
-                    else str(first_topic) if first_topic else None
+                    first_topic.hex() if hasattr(first_topic, "hex") else str(first_topic) if first_topic else None
                 )
                 if (
                     log_addr.lower() == VAULT_ADDRESS.lower()
@@ -335,9 +364,16 @@ class TestMetamorphoVaultRedeemOnChainBase:
                 ):
                     withdraw_log_found = True
                     break
-        assert withdraw_log_found, (
-            "Expected ERC-4626 Withdraw event from MetaMorpho vault"
+        assert withdraw_log_found, "Expected ERC-4626 Withdraw event from MetaMorpho vault"
+        assert redeem_result.action_bundle is not None
+        from almanak.connectors.morpho_vault import MetaMorphoReceiptParser
+
+        redeem_data = MetaMorphoReceiptParser().extract_redeem_data(
+            _receipt_dict(execution_result, VAULT_ADDRESS, withdraw_topic)
         )
+        assert redeem_data is not None, "receipt parser did not extract the Withdraw event"
+        assert redeem_data["shares_burned"] == shares_before
+        assert redeem_data["assets_received"] > 0
 
         usdc_after = get_token_balance(web3, UNDERLYING_ADDRESS, funded_wallet)
         shares_after = get_token_balance(web3, VAULT_ADDRESS, funded_wallet)

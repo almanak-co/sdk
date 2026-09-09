@@ -726,9 +726,13 @@ class TestPermissionHints:
         vault_entry = next(p for p in eth_perms if "Vault" in p.label)
         assert "0x6e553f65" in vault_entry.selectors  # deposit
         assert "0xba087652" in vault_entry.selectors  # redeem
-        base_vaults = {p.target.lower() for p in hints.static_permissions["base"] if "Vault" in p.label}
+        assert "0xe4d38cd8" in vault_entry.selectors  # forceDeallocate (V2 opt-in forced exit)
+        base_vaults = {p.target.lower(): p for p in hints.static_permissions["base"] if "Vault" in p.label}
         assert "0xc1256ae5ff1cf2719d4937adb3bbccab2e00a2ca" in base_vaults  # v1 representative
-        assert "0xbeef0e0834849acc03f0089f01f4f1eeb06873c9" in base_vaults  # V2 Steakhouse Prime USDC
+        v2 = base_vaults["0xbeef0e0834849acc03f0089f01f4f1eeb06873c9"]  # V2 Steakhouse Prime USDC
+        assert "0x6e553f65" in v2.selectors
+        assert "0xba087652" in v2.selectors
+        assert "0xe4d38cd8" in v2.selectors
 
     def test_hints_are_frozen(self):
         """PermissionHints should be immutable (frozen dataclass)."""

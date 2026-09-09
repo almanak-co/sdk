@@ -38,6 +38,7 @@ from .sdk import (
     InsufficientSharesError,
     MetaMorphoSDK,
     MetaMorphoSDKError,
+    VaultIlliquidError,
     VaultInfo,
     VaultPosition,
 )
@@ -79,10 +80,14 @@ class TransactionResult:
 
     Attributes:
         success: Whether operation succeeded
-        tx_data: Transaction data (to, value, data)
+        tx_data: Transaction payloads only (to/value/data). Execution order
+            is insertion order; force-deallocate legs come before redeem.
         gas_estimate: Estimated gas
         description: Human-readable description
         error: Error message if failed
+        requires_atomic: When True, the caller must put this on
+            ``ActionBundle.metadata['requires_atomic']`` so the orchestrator
+            can refuse EOA sequential confirm. Not a transaction payload.
     """
 
     success: bool
@@ -90,6 +95,7 @@ class TransactionResult:
     gas_estimate: int = 0
     description: str = ""
     error: str | None = None
+    requires_atomic: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
@@ -99,6 +105,7 @@ class TransactionResult:
             "gas_estimate": self.gas_estimate,
             "description": self.description,
             "error": self.error,
+            "requires_atomic": self.requires_atomic,
         }
 
 
@@ -281,12 +288,20 @@ class MetaMorphoAdapter:
         self,
         vault_address: str,
         shares: Decimal | str,
+        *,
+        allow_force_deallocate: bool = False,
+        max_force_deallocate_penalty_bps: int = 10,
     ) -> TransactionResult:
-        """Build a redeem transaction for a MetaMorpho vault.
+        """Build a redeem transaction for a Morpho vault (v1 or V2).
 
         Args:
-            vault_address: MetaMorpho vault address
+            vault_address: Morpho vault address
             shares: Number of shares to redeem, or "all" to redeem all
+            allow_force_deallocate: V2 only — permit a penalised forced exit
+                (``forceDeallocate`` legs before the redeem) when the vault's
+                liquidity market cannot cover it. Default False: fail closed.
+            max_force_deallocate_penalty_bps: V2 only — refuse a forced exit whose
+                penalty exceeds this share of the redeemed assets.
 
         Returns:
             TransactionResult with transaction data
@@ -319,11 +334,29 @@ class MetaMorphoAdapter:
                         f"for vault {vault_address} on {self.chain}"
                     )
 
+            force_txs: list[dict[str, Any]] = []
             if is_v2:
                 # V2 reverts when idle + liquidity adapter cannot cover the
                 # withdrawal; prove it before building the tx.
                 self.sdk.check_redeem_gates(vault_address, self.wallet_address, self.wallet_address)
-                self.sdk.simulate_redeem(vault_address, shares_wei, self.wallet_address, self.wallet_address)
+                try:
+                    self.sdk.simulate_redeem(vault_address, shares_wei, self.wallet_address, self.wallet_address)
+                except VaultIlliquidError:
+                    if not allow_force_deallocate:
+                        raise
+                    plan = self.sdk.plan_force_deallocate(
+                        vault_address, shares_wei, self.wallet_address, max_force_deallocate_penalty_bps
+                    )
+                    for leg in plan.legs:
+                        self.sdk.simulate_force_deallocate(
+                            vault_address, leg.adapter, leg.market_params_data, leg.assets, self.wallet_address
+                        )
+                        force_txs.append(
+                            self.sdk.build_force_deallocate_tx(
+                                vault_address, leg.adapter, leg.market_params_data, leg.assets, self.wallet_address
+                            )
+                        )
+                    shares_wei = plan.redeem_shares
 
             # Build redeem TX (no approve needed - redeeming own shares)
             redeem_tx = self.sdk.build_redeem_tx(
@@ -332,12 +365,18 @@ class MetaMorphoAdapter:
                 receiver=self.wallet_address,
                 owner=self.wallet_address,
             )
-
+            # Insertion order is execution order: force legs must land before redeem.
+            tx_data: dict[str, Any] = {}
+            if force_txs:
+                tx_data["force_deallocate"] = force_txs
+            tx_data["redeem"] = redeem_tx
             return TransactionResult(
                 success=True,
-                tx_data={"redeem": redeem_tx},
-                gas_estimate=redeem_tx["gas_estimate"],
-                description=f"Redeem {'all' if shares == 'all' else shares} shares from MetaMorpho vault {vault_address[:10]}...",
+                tx_data=tx_data,
+                gas_estimate=redeem_tx["gas_estimate"] + sum(tx["gas_estimate"] for tx in force_txs),
+                description=f"Redeem {'all' if shares == 'all' else shares} shares from MetaMorpho vault {vault_address[:10]}..."
+                + (f" after {len(force_txs)} forced deallocation(s)" if force_txs else ""),
+                requires_atomic=bool(force_txs),
             )
 
         except MetaMorphoSDKError as e:

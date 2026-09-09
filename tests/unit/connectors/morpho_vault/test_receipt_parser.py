@@ -2,8 +2,6 @@
 
 from decimal import Decimal
 
-import pytest
-
 from almanak.connectors.morpho_vault.receipt_parser import (
     EVENT_NAME_TO_TYPE,
     EVENT_TOPICS,
@@ -16,7 +14,6 @@ from almanak.connectors.morpho_vault.receipt_parser import (
     VaultDepositEventData,
     VaultWithdrawEventData,
 )
-
 
 # =============================================================================
 # Helpers
@@ -209,11 +206,13 @@ class TestParseTransfer:
 class TestMultipleEvents:
     def test_parse_deposit_with_transfers(self):
         parser = MetaMorphoReceiptParser()
-        receipt = _make_receipt([
-            _make_transfer_log(),  # ERC20 transfer
-            _make_deposit_log(),  # Vault deposit
-            _make_transfer_log(),  # Share mint
-        ])
+        receipt = _make_receipt(
+            [
+                _make_transfer_log(),  # ERC20 transfer
+                _make_deposit_log(),  # Vault deposit
+                _make_transfer_log(),  # Share mint
+            ]
+        )
         result = parser.parse_receipt(receipt)
 
         assert result.success is True
@@ -244,22 +243,30 @@ class TestEdgeCases:
 
     def test_unknown_topic_skipped(self):
         parser = MetaMorphoReceiptParser()
-        receipt = _make_receipt([{
-            "address": "0x" + "00" * 20,
-            "topics": ["0x" + "ff" * 32],
-            "data": "0x",
-        }])
+        receipt = _make_receipt(
+            [
+                {
+                    "address": "0x" + "00" * 20,
+                    "topics": ["0x" + "ff" * 32],
+                    "data": "0x",
+                }
+            ]
+        )
         result = parser.parse_receipt(receipt)
         assert result.success is True
         assert len(result.events) == 0
 
     def test_log_with_no_topics_skipped(self):
         parser = MetaMorphoReceiptParser()
-        receipt = _make_receipt([{
-            "address": "0x" + "00" * 20,
-            "topics": [],
-            "data": "0x",
-        }])
+        receipt = _make_receipt(
+            [
+                {
+                    "address": "0x" + "00" * 20,
+                    "topics": [],
+                    "data": "0x",
+                }
+            ]
+        )
         result = parser.parse_receipt(receipt)
         assert result.success is True
         assert len(result.events) == 0
@@ -288,15 +295,19 @@ class TestEdgeCases:
     def test_bytes_topic(self):
         parser = MetaMorphoReceiptParser()
         topic_bytes = bytes.fromhex(EVENT_TOPICS["Transfer"][2:])
-        receipt = _make_receipt([{
-            "address": "0x" + "00" * 20,
-            "topics": [
-                topic_bytes,
-                "0x" + "0" * 24 + "11" * 20,
-                "0x" + "0" * 24 + "22" * 20,
-            ],
-            "data": "0x" + hex(1000)[2:].zfill(64),
-        }])
+        receipt = _make_receipt(
+            [
+                {
+                    "address": "0x" + "00" * 20,
+                    "topics": [
+                        topic_bytes,
+                        "0x" + "0" * 24 + "11" * 20,
+                        "0x" + "0" * 24 + "22" * 20,
+                    ],
+                    "data": "0x" + hex(1000)[2:].zfill(64),
+                }
+            ]
+        )
         result = parser.parse_receipt(receipt)
         assert result.success is True
         assert len(result.events) == 1
@@ -377,3 +388,64 @@ class TestMetaMorphoEvent:
         d = event.to_dict()
         assert d["event_type"] == "DEPOSIT"
         assert d["log_index"] == 0
+
+
+# Forced exit on Morpho Vault V2: the forceDeallocate penalty must never be read as the payout.
+
+_VAULT = "0xBEEF01735c132Ada46AA9aA4c54623cAA92A64CB"
+_OWNER = "0x" + "33" * 20
+_PAYOUT_ASSETS = 99_990_000  # 99.99 USDC to the owner
+_PENALTY_ASSETS = 10_000  # 0.01 USDC paid back to the vault
+
+
+def _penalty_log():
+    # The vault charges the penalty by withdrawing to ITSELF on behalf of the redeemer.
+    return _make_withdraw_log(
+        receiver=_VAULT, owner=_OWNER, assets=_PENALTY_ASSETS, shares=10**13, contract_address=_VAULT
+    )
+
+
+def _payout_log():
+    return _make_withdraw_log(
+        receiver=_OWNER, owner=_OWNER, assets=_PAYOUT_ASSETS, shares=96 * 10**18, contract_address=_VAULT
+    )
+
+
+class TestForcedExitReceipts:
+    def test_penalty_only_receipt_is_not_a_redemption(self):
+        """The forceDeallocate tx (EOA route) must yield no redeem data — the enricher moves on."""
+        parser = MetaMorphoReceiptParser()
+        receipt = _make_receipt([_penalty_log()], tx_hash="0x" + "f0" * 32)
+        assert parser.extract_redeem_data(receipt) is None
+        assert parser.extract_force_deallocate_penalty(receipt) == {
+            "penalty_shares": 10**13,
+            "penalty_assets": _PENALTY_ASSETS,
+        }
+
+    def test_combined_receipt_reports_the_payout_not_the_penalty(self):
+        """Safe route: penalty and payout Withdraws land in ONE receipt; the payout is the redemption."""
+        parser = MetaMorphoReceiptParser()
+        data = parser.extract_redeem_data(_make_receipt([_penalty_log(), _payout_log()]))
+        assert data == {
+            "shares_burned": 96 * 10**18,
+            "assets_received": _PAYOUT_ASSETS,
+            "penalty_shares": 10**13,
+            "penalty_assets": _PENALTY_ASSETS,
+        }
+
+    def test_ordinary_redeem_carries_zero_penalty(self):
+        parser = MetaMorphoReceiptParser()
+        data = parser.extract_redeem_data(_make_receipt([_payout_log()]))
+        assert data["assets_received"] == _PAYOUT_ASSETS and data["penalty_assets"] == 0 and data["penalty_shares"] == 0
+        assert parser.extract_force_deallocate_penalty(_make_receipt([_payout_log()])) is None
+
+    def test_penalty_classification_is_by_receiver_equals_emitting_vault(self):
+        """A Withdraw paid to some OTHER contract is a payout, not a penalty."""
+        parser = MetaMorphoReceiptParser()
+        other = "0x" + "44" * 20
+        data = parser.extract_redeem_data(
+            _make_receipt(
+                [_make_withdraw_log(receiver=other, owner=_OWNER, assets=5, shares=7, contract_address=_VAULT)]
+            )
+        )
+        assert data["assets_received"] == 5 and data["penalty_assets"] == 0

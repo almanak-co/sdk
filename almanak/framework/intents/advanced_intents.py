@@ -465,6 +465,17 @@ class VaultRedeemIntent(BaseIntent):
         vault_address: ERC-4626 vault contract address
         shares: Number of vault shares to redeem, or "all" to redeem all
         chain: Optional target chain for execution (defaults to strategy's primary chain)
+        allow_force_deallocate: Morpho Vault V2 only. V2 serves withdrawals from
+            idle assets plus ONE curator-designated liquidity market and reverts
+            when those cannot cover the redeem. When True, the connector may
+            first call the vault's ``forceDeallocate`` on its other markets to
+            pull the shortfall into idle assets — a PAID exit: the vault burns a
+            curator-set penalty (``forceDeallocatePenalty``) from the redeemer's
+            shares. Default False: an uncoverable redeem fails closed at compile
+            time and nothing is sent. Ignored on MetaMorpho v1.
+        max_force_deallocate_penalty_bps: Ceiling on the penalty the strategy
+            accepts, in basis points of the assets being redeemed (default 10 =
+            0.10%). A plan whose penalty exceeds it is refused, never trimmed.
         intent_id: Unique identifier for this intent
         created_at: Timestamp when the intent was created
 
@@ -484,6 +495,17 @@ class VaultRedeemIntent(BaseIntent):
             shares="all",
             chain="ethereum",
         )
+
+        # Morpho Vault V2: accept a paid forced exit of at most 0.05% if the
+        # vault's liquidity market cannot cover the redeem
+        intent = Intent.vault_redeem(
+            protocol="metamorpho",
+            vault_address="0xbeef0e0834849aCC03f0089F01f4F1Eeb06873C9",
+            shares="all",
+            chain="base",
+            allow_force_deallocate=True,
+            max_force_deallocate_penalty_bps=5,
+        )
     """
 
     protocol: str
@@ -491,6 +513,8 @@ class VaultRedeemIntent(BaseIntent):
     shares: PydanticChainedAmount
     deposit_token: str | None = None
     chain: str | None = None
+    allow_force_deallocate: bool = False
+    max_force_deallocate_penalty_bps: int = 10
     intent_id: str = Field(default_factory=default_intent_id)
     created_at: datetime = Field(default_factory=default_timestamp)
 
@@ -503,6 +527,10 @@ class VaultRedeemIntent(BaseIntent):
             raise ValueError("shares must be a positive Decimal or 'all'")
         if not self.vault_address.startswith("0x") or len(self.vault_address) != 42:
             raise ValueError(f"Invalid vault_address: {self.vault_address}. Must be 0x-prefixed 40 hex chars.")
+        if not 0 <= self.max_force_deallocate_penalty_bps <= 10_000:
+            raise ValueError(
+                f"max_force_deallocate_penalty_bps must be within 0..10000, got {self.max_force_deallocate_penalty_bps}"
+            )
         _validate_vault_protocol(self.protocol)
         return self
 

@@ -18,7 +18,8 @@ PROTOCOL_CAPABILITIES: dict[str, dict[str, Any]] = {
         # Generations the connector round-trips (deposit AND redeem/teardown),
         # detected on-chain per vault address — see ``sdk.detect_vault_version``.
         # V2 redeem is liquidity-simulated before send; the penalised
-        # ``forceDeallocate`` escape hatch is not issued by the connector.
+        # ``forceDeallocate`` exit is issued only when the redeem intent opts in
+        # (``allow_force_deallocate``, capped by ``max_force_deallocate_penalty_bps``).
         "vault_versions": ["v1", "v2"],
     },
 }

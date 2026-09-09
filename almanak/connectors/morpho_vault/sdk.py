@@ -91,6 +91,31 @@ GATE_CAN_SEND_SHARES_SELECTOR = "0x8e511e4d"  # selector of the canSendShares(ad
 GATE_CAN_RECEIVE_ASSETS_SELECTOR = "0x0d326b18"  # selector of the canReceiveAssets(address) read
 GATE_CAN_SEND_ASSETS_SELECTOR = "0x20fe8d58"  # selector of canSendAssets(address)
 
+# Morpho Vault V2 force-deallocate surface — the depositor's PENALISED
+# liquidity valve. ``forceDeallocate(adapter, data, assets, onBehalf)`` pulls
+# ``assets`` from one market of one adapter back into the vault's idle balance
+# and burns ``forceDeallocatePenalty(adapter)`` (WAD) of ``assets`` in shares
+# from ``onBehalf``. Only issued when a redeem intent opts in.
+V2_FORCE_DEALLOCATE_SELECTOR = "0xe4d38cd8"  # selector of forceDeallocate(address,bytes,uint256,address)
+V2_LIQUIDITY_DATA_SELECTOR = "0x2e029228"  # selector of the liquidityData read (abi-encoded MarketParams)
+V2_ADAPTER_MARKET_IDS_SELECTOR = "0x779a9683"  # selector of MorphoMarketV1Adapter.marketIds(uint256)
+V2_ADAPTER_MORPHO_SELECTOR = "0xd8fbc833"  # selector of MorphoMarketV1Adapter.morpho()
+PREVIEW_WITHDRAW_SELECTOR = "0x0a28a477"  # selector of previewWithdraw(uint256)
+# Morpho Blue reads used to size a forced exit (called on the Morpho Blue singleton).
+MORPHO_BLUE_ID_TO_MARKET_PARAMS_SELECTOR = "0x2c3c9157"  # selector of idToMarketParams(bytes32)
+MORPHO_BLUE_MARKET_SELECTOR = "0x5c60e39a"  # selector of market(bytes32)
+MORPHO_BLUE_POSITION_SELECTOR = "0x93c52062"  # selector of position(bytes32,address)
+WAD = 10**18
+MAX_ADAPTER_MARKETS = 64  # Safety bound for adapter market enumeration
+# Extra assets pulled on top of the measured shortfall so interest accrued between
+# plan-build and execution cannot leave the redeem a few wei short (0.1%).
+FORCE_DEALLOCATE_SHORTFALL_BUFFER_BPS = 10
+# Shares held back from a redeem-all after a forced exit: the penalty burn is
+# rounded up on-chain against a share price that may tick between plan-build
+# and execution, so a cushion of 0.1% of the estimated penalty shares (at least
+# one wei of share) keeps ``redeem`` from asking for more than the wallet holds.
+FORCE_DEALLOCATE_SHARE_CUSHION_BPS = 10
+
 VAULT_VERSION_V1 = "v1"  # MetaMorpho (queue-based)
 VAULT_VERSION_V2 = "v2"  # Morpho Vault V2 (adapter-based)
 ZERO_ADDRESS = "0x" + "00" * 20
@@ -162,7 +187,17 @@ class VaultIlliquidError(MetaMorphoSDKError):
 
     V2 serves withdrawals from idle assets plus one liquidity adapter and
     reverts when those cannot cover the request; the depositor's escape hatch
-    is ``forceDeallocate`` (penalised), which this connector does not issue.
+    is ``forceDeallocate`` (penalised), which the connector issues only when
+    the redeem intent opts in (``allow_force_deallocate=True``).
+    """
+
+
+class ForceDeallocateRefusedError(MetaMorphoSDKError):
+    """Raised when a forced exit cannot be planned within the caller's limits.
+
+    Either the vault's other markets cannot cover the shortfall, or the penalty
+    the plan would pay exceeds ``max_penalty_bps``. The plan is refused whole,
+    never trimmed to fit.
     """
 
 
@@ -189,6 +224,42 @@ class VaultInfo:
     liquidity_adapter: str | None = None  # V2 only: adapter that serves withdrawals
     adapters: list[str] = field(default_factory=list)  # V2 only
     force_deallocate_penalty: int | None = None  # WAD; V2 only, read on the liquidity adapter
+
+
+@dataclass
+class ForceDeallocateLeg:
+    """One ``forceDeallocate`` call in a planned forced exit."""
+
+    adapter: str
+    market_id: str
+    market_params_data: str  # abi.encode(MarketParams) as 0x hex — the adapter's ``data`` argument
+    assets: int  # underlying wei pulled back into idle
+    withdrawable: int  # what that market could have served (adapter position ∧ market liquidity)
+    penalty_wad: int  # forceDeallocatePenalty(adapter), WAD
+    penalty_assets: int  # ceil(assets * penalty_wad / WAD)
+    penalty_shares: int  # previewWithdraw(penalty_assets) — burned from the redeemer
+
+
+@dataclass
+class ForceDeallocatePlan:
+    """A forced exit sized against live vault + Morpho Blue state."""
+
+    vault_address: str
+    owner: str
+    requested_shares: int
+    needed_assets: int  # previewRedeem(requested_shares)
+    idle_assets: int
+    liquidity_market_capacity: int  # what the vault's own liquidity market can serve right now
+    shortfall_assets: int  # needed - idle - liquidity capacity (+ buffer)
+    legs: list[ForceDeallocateLeg] = field(default_factory=list)
+    total_penalty_assets: int = 0
+    total_penalty_shares: int = 0
+    penalty_bps: int = 0  # ceil(total_penalty_assets * 10_000 / needed_assets)
+    redeem_shares: int = 0  # shares to redeem AFTER the penalty burn (cushioned)
+
+    @property
+    def needed(self) -> bool:
+        return self.shortfall_assets > 0
 
 
 @dataclass
@@ -250,6 +321,40 @@ def _is_contract_revert(message: str) -> bool:
     """True when an eth_call error text describes the EVM rejecting the call (not the transport failing)."""
     lowered = message.lower()
     return any(marker in lowered for marker in _REVERT_MARKERS)
+
+
+def _decode_words(hex_str: str) -> list[int]:
+    """Split an ABI return payload into 32-byte words (as ints)."""
+    clean = hex_str.removeprefix("0x")
+    return [int(clean[i : i + 64], 16) for i in range(0, len(clean) - len(clean) % 64, 64)]
+
+
+def _decode_dynamic_bytes(hex_str: str) -> str:
+    """Decode a single ``bytes`` return value to 0x hex."""
+    clean = hex_str.removeprefix("0x")
+    offset = int(clean[:64], 16) * 2
+    length = int(clean[offset : offset + 64], 16) * 2
+    return "0x" + clean[offset + 64 : offset + 64 + length]
+
+
+def _mul_div_up(value: int, numerator: int, denominator: int) -> int:
+    return (value * numerator + denominator - 1) // denominator if value else 0
+
+
+def encode_force_deallocate_calldata(adapter: str, data_hex: str, assets: int, on_behalf: str) -> str:
+    """ABI-encode ``forceDeallocate(address,bytes,uint256,address)``.
+
+    ``data`` is the adapter's opaque market selector — for ``MorphoMarketV1Adapter``
+    that is ``abi.encode(MarketParams)`` (five words), exactly what
+    ``idToMarketParams`` returns and what the vault's own ``liquidityData()`` holds.
+    """
+    body = data_hex.removeprefix("0x")
+    if len(body) % 2:
+        raise ValueError("market data must be whole bytes")
+    padded = body + "0" * ((64 - len(body) % 64) % 64)
+    head = _encode_address(adapter) + _encode_uint256(4 * 32) + _encode_uint256(assets) + _encode_address(on_behalf)
+    tail = _encode_uint256(len(body) // 2) + padded
+    return V2_FORCE_DEALLOCATE_SELECTOR + head + tail
 
 
 # =============================================================================
@@ -549,6 +654,261 @@ class MetaMorphoSDK:
             raise VaultGatedError(
                 f"Vault {vault_address} on {self._chain} has a receive-assets gate ({receive_gate}) that refuses {receiver}."
             )
+
+    # Morpho Vault V2 - forced exit (opt-in, penalised)
+
+    def get_v2_liquidity_data(self, vault_address: str) -> str | None:
+        """The vault's ``liquidityData()`` — ``abi.encode(MarketParams)`` of the liquidity market."""
+        raw = self._try_eth_call(vault_address, V2_LIQUIDITY_DATA_SELECTOR, "metamorpho_v2_liquidity_data")
+        if raw is None:
+            return None
+        data = _decode_dynamic_bytes(raw)
+        return data if len(data) > 2 else None
+
+    def get_v2_adapter_market_ids(self, adapter: str) -> list[str]:
+        """Enumerate ``marketIds(i)`` on a MorphoMarketV1Adapter until it reverts."""
+        ids: list[str] = []
+        for i in range(MAX_ADAPTER_MARKETS):
+            raw = self._try_eth_call(
+                adapter, V2_ADAPTER_MARKET_IDS_SELECTOR + _encode_uint256(i), f"metamorpho_v2_market_id_{i}"
+            )
+            if raw is None:
+                break
+            ids.append("0x" + raw.removeprefix("0x")[:64])
+        return ids
+
+    def get_v2_adapter_morpho(self, adapter: str) -> str:
+        """The Morpho Blue singleton the adapter allocates to."""
+        return _decode_address(
+            self._eth_call(to=adapter, data=V2_ADAPTER_MORPHO_SELECTOR, request_id="metamorpho_v2_adapter_morpho")
+        )
+
+    def get_morpho_blue_market_params_data(self, morpho: str, market_id: str) -> str:
+        """``idToMarketParams(id)`` as raw 160-byte hex — the adapter's ``data`` for that market."""
+        raw = self._eth_call(
+            to=morpho,
+            data=MORPHO_BLUE_ID_TO_MARKET_PARAMS_SELECTOR + market_id.removeprefix("0x").zfill(64),
+            request_id="metamorpho_v2_market_params",
+        )
+        return "0x" + raw.removeprefix("0x")[: 5 * 64]
+
+    def get_morpho_blue_market_liquidity(self, morpho: str, market_id: str) -> tuple[int, int, int]:
+        """``market(id)`` → (totalSupplyAssets, totalSupplyShares, available liquidity)."""
+        words = _decode_words(
+            self._eth_call(
+                to=morpho,
+                data=MORPHO_BLUE_MARKET_SELECTOR + market_id.removeprefix("0x").zfill(64),
+                request_id="metamorpho_v2_market_state",
+            )
+        )
+        total_supply_assets, total_supply_shares, total_borrow_assets = words[0], words[1], words[2]
+        return total_supply_assets, total_supply_shares, max(total_supply_assets - total_borrow_assets, 0)
+
+    def get_morpho_blue_supply_shares(self, morpho: str, market_id: str, account: str) -> int:
+        """``position(id, account).supplyShares``."""
+        words = _decode_words(
+            self._eth_call(
+                to=morpho,
+                data=MORPHO_BLUE_POSITION_SELECTOR + market_id.removeprefix("0x").zfill(64) + _encode_address(account),
+                request_id="metamorpho_v2_adapter_position",
+            )
+        )
+        return words[0]
+
+    def get_asset_balance_of(self, token: str, account: str) -> int:
+        """ERC-20 ``balanceOf`` of ``account`` on ``token`` (the vault's idle assets when account is the vault)."""
+        return _decode_uint256(
+            self._eth_call(
+                to=token, data=BALANCE_OF_SELECTOR + _encode_address(account), request_id="metamorpho_asset_balance"
+            )
+        )
+
+    def preview_withdraw(self, vault_address: str, assets: int) -> int:
+        """``previewWithdraw(assets)`` — shares burned to withdraw ``assets`` (rounds up)."""
+        return _decode_uint256(
+            self._eth_call(
+                to=vault_address,
+                data=PREVIEW_WITHDRAW_SELECTOR + _encode_uint256(assets),
+                request_id="metamorpho_preview_withdraw",
+            )
+        )
+
+    def _enumerate_v2_withdrawable_markets(self, vault_address: str) -> tuple[list[tuple[str, str, str, int]], int]:
+        """Every market of every adapter with what it could serve right now.
+
+        Returns ``(candidates, liquidity_capacity)``: ``candidates`` are
+        ``(adapter, market_id, params_data, withdrawable)`` for the markets a
+        forced exit may draw on, and ``liquidity_capacity`` is what the vault's
+        own liquidity market (``liquidityData()``) can serve — the normal redeem
+        path already drains that one, so it is never a forced-exit candidate.
+        ``withdrawable`` is min(adapter's supplied assets there, the market's free liquidity).
+        """
+        liquidity_data = (self.get_v2_liquidity_data(vault_address) or "").lower()
+        candidates: list[tuple[str, str, str, int]] = []
+        liquidity_capacity = 0
+        for adapter in self.get_v2_adapters(vault_address):
+            morpho_raw = self._try_eth_call(adapter, V2_ADAPTER_MORPHO_SELECTOR, "metamorpho_v2_adapter_morpho")
+            if morpho_raw is None:
+                # Not a Morpho-market adapter (V2 vaults may also allocate to other
+                # protocols); it holds nothing a forceDeallocate on Morpho Blue can free.
+                logger.info(
+                    "Vault %s adapter %s does not expose morpho(); skipping it for the forced exit",
+                    vault_address,
+                    adapter,
+                )
+                continue
+            morpho = _decode_address(morpho_raw)
+            for market_id in self.get_v2_adapter_market_ids(adapter):
+                params_data = self.get_morpho_blue_market_params_data(morpho, market_id)
+                total_supply_assets, total_supply_shares, available = self.get_morpho_blue_market_liquidity(
+                    morpho, market_id
+                )
+                supply_shares = self.get_morpho_blue_supply_shares(morpho, market_id, adapter)
+                adapter_assets = (
+                    (supply_shares * total_supply_assets) // total_supply_shares if total_supply_shares else 0
+                )
+                withdrawable = min(adapter_assets, available)
+                if params_data.lower() == liquidity_data:
+                    liquidity_capacity += withdrawable
+                else:
+                    candidates.append((adapter, market_id, params_data, withdrawable))
+        return candidates, liquidity_capacity
+
+    def plan_force_deallocate(
+        self, vault_address: str, shares: int, owner: str, max_penalty_bps: int
+    ) -> ForceDeallocatePlan:
+        """Size a forced exit for redeeming ``shares`` against live state.
+
+        Shortfall = assets the redeem needs − vault idle assets − what the
+        vault's own liquidity market can serve (the normal path already drains
+        that one). The shortfall (+ a 0.1% accrual buffer) is covered from the
+        adapters' OTHER markets, largest withdrawable first, where withdrawable
+        is min(adapter's supplied assets there, that market's free liquidity).
+        Refused whole when the markets cannot cover it or the total penalty
+        exceeds ``max_penalty_bps`` of the redeemed assets.
+        """
+        if not self.is_vault_v2(vault_address):
+            raise ForceDeallocateRefusedError(
+                f"Vault {vault_address} is not a Morpho Vault V2; forceDeallocate does not exist on v1"
+            )
+        if shares <= 0:
+            raise ForceDeallocateRefusedError("shares must be positive")
+        if not 0 <= max_penalty_bps <= 10_000:
+            raise ForceDeallocateRefusedError(f"max_penalty_bps must be within 0..10000, got {max_penalty_bps}")
+
+        needed_assets = self.preview_redeem(vault_address, shares)
+        asset = self.get_vault_asset(vault_address)
+        idle_assets = self.get_asset_balance_of(asset, vault_address)
+        owner_balance = self.get_balance_of(vault_address, owner)
+
+        candidates, liquidity_capacity = self._enumerate_v2_withdrawable_markets(vault_address)
+
+        shortfall = needed_assets - idle_assets - liquidity_capacity
+        plan = ForceDeallocatePlan(
+            vault_address=vault_address,
+            owner=owner,
+            requested_shares=shares,
+            needed_assets=needed_assets,
+            idle_assets=idle_assets,
+            liquidity_market_capacity=liquidity_capacity,
+            shortfall_assets=max(shortfall, 0),
+            redeem_shares=shares,
+        )
+        if shortfall <= 0:
+            return plan  # nothing to force; the plain redeem should cover it
+
+        remaining = shortfall + _mul_div_up(shortfall, FORCE_DEALLOCATE_SHORTFALL_BUFFER_BPS, 10_000)
+        penalty_cache: dict[str, int] = {}
+        for adapter, market_id, params_data, withdrawable in sorted(candidates, key=lambda c: c[3], reverse=True):
+            if remaining <= 0:
+                break
+            if withdrawable <= 0:
+                continue
+            take = min(withdrawable, remaining)
+            if adapter not in penalty_cache:
+                penalty = self.get_v2_force_deallocate_penalty(vault_address, adapter)
+                if penalty is None:
+                    # An unreadable penalty is NOT a free exit: refusing is the only
+                    # answer that cannot understate the cost the user consented to.
+                    raise ForceDeallocateRefusedError(
+                        f"forceDeallocatePenalty({adapter}) could not be read on vault {vault_address}; "
+                        "refusing to plan a forced exit whose cost is unknown."
+                    )
+                penalty_cache[adapter] = penalty
+            penalty_wad = penalty_cache[adapter]
+            penalty_assets = _mul_div_up(take, penalty_wad, WAD)
+            penalty_shares = self.preview_withdraw(vault_address, penalty_assets) if penalty_assets else 0
+            plan.legs.append(
+                ForceDeallocateLeg(
+                    adapter=adapter,
+                    market_id=market_id,
+                    market_params_data=params_data,
+                    assets=take,
+                    withdrawable=withdrawable,
+                    penalty_wad=penalty_wad,
+                    penalty_assets=penalty_assets,
+                    penalty_shares=penalty_shares,
+                )
+            )
+            remaining -= take
+        if remaining > 0:
+            coverable = sum(c[3] for c in candidates)
+            raise ForceDeallocateRefusedError(
+                f"Forced exit cannot cover the shortfall: need {shortfall} more underlying wei than idle "
+                f"({idle_assets}) + liquidity market ({liquidity_capacity}) can serve, but the vault's other "
+                f"markets can release only {coverable}. Wait for liquidity or exit partially."
+            )
+
+        plan.total_penalty_assets = sum(leg.penalty_assets for leg in plan.legs)
+        plan.total_penalty_shares = sum(leg.penalty_shares for leg in plan.legs)
+        plan.penalty_bps = _mul_div_up(plan.total_penalty_assets, 10_000, needed_assets) if needed_assets else 0
+        if plan.penalty_bps > max_penalty_bps:
+            raise ForceDeallocateRefusedError(
+                f"Forced exit penalty {plan.total_penalty_assets} underlying wei ({plan.penalty_bps} bps of the "
+                f"{needed_assets} redeemed) exceeds the accepted cap of {max_penalty_bps} bps; refusing."
+            )
+        # The penalty is burned from the redeemer BEFORE the redeem lands, so a
+        # redeem-all must ask for what will be left, with a small share cushion.
+        cushion = max(1, _mul_div_up(plan.total_penalty_shares, FORCE_DEALLOCATE_SHARE_CUSHION_BPS, 10_000))
+        after_burn = owner_balance - plan.total_penalty_shares - cushion
+        plan.redeem_shares = min(shares, after_burn)
+        if plan.redeem_shares <= 0:
+            raise ForceDeallocateRefusedError("Forced exit would burn the entire share balance as penalty; refusing.")
+        return plan
+
+    def build_force_deallocate_tx(
+        self, vault_address: str, adapter: str, market_params_data: str, assets: int, on_behalf: str
+    ) -> dict:
+        """Unsigned ``forceDeallocate`` call (sent by ``on_behalf``, who pays the penalty)."""
+        if assets <= 0:
+            raise ValueError("forceDeallocate assets must be positive")
+        return {
+            "to": vault_address,
+            "from": on_behalf,
+            "data": encode_force_deallocate_calldata(adapter, market_params_data, assets, on_behalf),
+            "value": "0",
+            "gas_estimate": DEFAULT_GAS_ESTIMATES["redeem"],
+        }
+
+    def simulate_force_deallocate(
+        self, vault_address: str, adapter: str, market_params_data: str, assets: int, on_behalf: str
+    ) -> None:
+        """Dry-run one ``forceDeallocate`` leg from ``on_behalf``; raises ``VaultIlliquidError`` on revert."""
+        calldata = encode_force_deallocate_calldata(adapter, market_params_data, assets, on_behalf)
+        try:
+            self._eth_call(
+                to=vault_address,
+                data=calldata,
+                request_id="metamorpho_simulate_force_deallocate",
+                from_address=on_behalf,
+            )
+        except (RPCError, VaultNotFoundError) as exc:
+            if isinstance(exc, RPCError) and not _is_contract_revert(str(exc)):
+                raise  # transport failure: not a verdict about the vault, must not read as "illiquid"
+            raise VaultIlliquidError(
+                f"forceDeallocate({assets} wei from adapter {adapter}) simulation reverted for vault {vault_address}: {exc}; "
+                "the forced exit was NOT sent."
+            ) from exc
 
     # Read Methods - Morpho Vault V2-specific
 

@@ -133,7 +133,13 @@ _AGGREGATE_FIELDS: dict[str, str] = {
 # remain inert for unrelated events.
 
 
-_MERGED_RECEIPT_FIELDS: frozenset[str] = frozenset({"primitive_money_legs"})
+# ``redeem_data`` joins the set because a Morpho Vault V2 forced exit is a
+# multi-tx bundle: the ``forceDeallocate`` leg(s) emit a penalty Withdraw
+# (receiver == vault) BEFORE the redeem tx emits the payout Withdraw. Parsed
+# per receipt, the first successful extraction would be the penalty; parsed
+# from the union, the parser sees both and reports the payout as the
+# redemption with the penalty alongside it.
+_MERGED_RECEIPT_FIELDS: frozenset[str] = frozenset({"primitive_money_legs", "redeem_data"})
 
 
 def _legacy_warn(parser: Any, field: str) -> None:

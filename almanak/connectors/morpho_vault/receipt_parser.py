@@ -413,26 +413,84 @@ class MetaMorphoReceiptParser:
             logger.warning(f"Failed to extract deposit data: {e}")
             return None
 
+    @staticmethod
+    def _is_penalty_withdraw(event: MetaMorphoEvent) -> bool:
+        """A Withdraw whose receiver is the vault itself is a ``forceDeallocate`` penalty, not a payout.
+
+        Morpho Vault V2 charges the penalty as ``withdraw(penaltyAssets, address(this),
+        onBehalf)``, so its Withdraw event names the emitting vault as receiver
+        while the shares burn from the redeemer. Only the leg that pays an
+        external receiver is the redemption.
+        """
+        receiver = str(event.data.get("receiver") or "").lower()
+        return bool(receiver) and receiver == str(event.contract_address or "").lower()
+
     def extract_redeem_data(self, receipt: dict[str, Any]) -> dict | None:
         """Extract redeem data from transaction receipt.
 
-        Called by ResultEnricher for VAULT_REDEEM intents.
+        Called by ResultEnricher for VAULT_REDEEM intents. The redemption is the
+        Withdraw that pays an external receiver; penalty Withdraws (receiver ==
+        vault, emitted by ``forceDeallocate``) are reported separately as
+        ``penalty_shares`` / ``penalty_assets`` and NEVER as the payout. A
+        receipt holding only penalty legs yields ``None`` so the enricher moves
+        on to the receipt that carries the redemption.
 
         Returns:
-            Dict with {shares_burned, assets_received} if found, None otherwise
+            Dict with {shares_burned, assets_received, penalty_shares, penalty_assets}
+            if a payout Withdraw is found, None otherwise.
         """
         try:
             result = self.parse_receipt(receipt)
+            payout: tuple[int, int] | None = None
+            penalty_shares = 0
+            penalty_assets = 0
             for event in result.events:
-                if event.event_type == MetaMorphoEventType.WITHDRAW:
-                    assets = event.data.get("assets")
-                    shares = event.data.get("shares")
-                    if assets is not None and shares is not None:
-                        return {
-                            "shares_burned": int(Decimal(shares)),
-                            "assets_received": int(Decimal(assets)),
-                        }
-            return None
+                if event.event_type != MetaMorphoEventType.WITHDRAW:
+                    continue
+                assets = event.data.get("assets")
+                shares = event.data.get("shares")
+                if assets is None or shares is None:
+                    continue
+                if self._is_penalty_withdraw(event):
+                    penalty_shares += int(Decimal(shares))
+                    penalty_assets += int(Decimal(assets))
+                elif payout is None:
+                    payout = (int(Decimal(shares)), int(Decimal(assets)))
+            if payout is None:
+                return None
+            return {
+                "shares_burned": payout[0],
+                "assets_received": payout[1],
+                "penalty_shares": penalty_shares,
+                "penalty_assets": penalty_assets,
+            }
         except Exception as e:
             logger.warning(f"Failed to extract redeem data: {e}")
+            return None
+
+    def extract_force_deallocate_penalty(self, receipt: dict[str, Any]) -> dict | None:
+        """Sum the ``forceDeallocate`` penalty legs (Withdraws paid to the vault itself) in a receipt.
+
+        Returns:
+            Dict with {penalty_shares, penalty_assets} when at least one penalty
+            leg is present, None otherwise.
+        """
+        try:
+            result = self.parse_receipt(receipt)
+            penalty_shares = 0
+            penalty_assets = 0
+            found = False
+            for event in result.events:
+                if event.event_type != MetaMorphoEventType.WITHDRAW or not self._is_penalty_withdraw(event):
+                    continue
+                assets = event.data.get("assets")
+                shares = event.data.get("shares")
+                if assets is None or shares is None:
+                    continue
+                found = True
+                penalty_shares += int(Decimal(shares))
+                penalty_assets += int(Decimal(assets))
+            return {"penalty_shares": penalty_shares, "penalty_assets": penalty_assets} if found else None
+        except Exception as e:
+            logger.warning(f"Failed to extract force-deallocate penalty: {e}")
             return None

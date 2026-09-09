@@ -764,3 +764,238 @@ class TestVaultInfoV2:
         assert info.adapters == [adapter_addr]
         assert info.force_deallocate_penalty == 10**13
         assert info.share_price == 1_039_759
+
+
+# Morpho Vault V2 forced exit (opt-in): planning against scripted vault + Morpho Blue state.
+
+from almanak.connectors.morpho_vault.sdk import (  # noqa: E402
+    ASSET_SELECTOR as _ASSET_SEL,
+)
+from almanak.connectors.morpho_vault.sdk import (
+    BALANCE_OF_SELECTOR as _BAL_SEL,
+)
+from almanak.connectors.morpho_vault.sdk import (
+    MORPHO_BLUE_ID_TO_MARKET_PARAMS_SELECTOR,
+    MORPHO_BLUE_MARKET_SELECTOR,
+    MORPHO_BLUE_POSITION_SELECTOR,
+    PREVIEW_REDEEM_SELECTOR,
+    PREVIEW_WITHDRAW_SELECTOR,
+    V2_ADAPTER_MARKET_IDS_SELECTOR,
+    V2_ADAPTER_MORPHO_SELECTOR,
+    V2_ADAPTERS_SELECTOR,
+    V2_FORCE_DEALLOCATE_PENALTY_SELECTOR,
+    V2_FORCE_DEALLOCATE_SELECTOR,
+    V2_LIQUIDITY_DATA_SELECTOR,
+    WAD,
+    ForceDeallocateRefusedError,
+    encode_force_deallocate_calldata,
+)
+
+_ADAPTER = "0x" + "ad" * 20
+_MORPHO = "0x" + "bb" * 20
+_MID_LIQ = "0x" + "11" * 32  # the vault's designated liquidity market
+_MID_BIG = "0x" + "22" * 32  # a large other market
+_MID_SMALL = "0x" + "33" * 32  # a small other market
+
+
+def _params(tag: int) -> str:
+    """Distinct 160-byte MarketParams payload per market."""
+    return "0x" + (_encode_address("0x" + f"{tag:02x}" * 20) * 4) + _encode_uint256(860_000_000_000_000_000)
+
+
+def _dyn_bytes(hex_payload: str) -> str:
+    body = hex_payload.removeprefix("0x")
+    return "0x" + _encode_uint256(32) + _encode_uint256(len(body) // 2) + body
+
+
+def _market_words(total_supply_assets: int, total_supply_shares: int, total_borrow_assets: int) -> str:
+    return "0x" + "".join(
+        _encode_uint256(v) for v in (total_supply_assets, total_supply_shares, total_borrow_assets, 0, 0, 0)
+    )
+
+
+def _forced_exit_script(*, idle: int, liq_available: int, big_available: int, small_available: int, penalty_wad: int):
+    """A V2 vault whose liquidity market can serve ``liq_available`` and two other markets.
+
+    Share price is 1:1 (previewRedeem(x)=x, previewWithdraw(x)=x) so numbers read directly.
+    """
+    v = VAULT_ADDR.lower()
+    script = _v2_script()
+    script.update(
+        {
+            (v, _ASSET_SEL): "0x" + "0" * 24 + ASSET_ADDR[2:].lower(),
+            (ASSET_ADDR.lower(), _BAL_SEL + _encode_address(VAULT_ADDR)): "0x" + _encode_uint256(idle),
+            (v, V2_LIQUIDITY_DATA_SELECTOR): _dyn_bytes(_params(0x11)),
+            (v, V2_ADAPTERS_SELECTOR + _encode_uint256(0)): "0x" + "0" * 24 + _ADAPTER[2:],
+            (_ADAPTER.lower(), V2_ADAPTER_MORPHO_SELECTOR): "0x" + "0" * 24 + _MORPHO[2:],
+            (_ADAPTER.lower(), V2_ADAPTER_MARKET_IDS_SELECTOR + _encode_uint256(0)): _MID_LIQ,
+            (_ADAPTER.lower(), V2_ADAPTER_MARKET_IDS_SELECTOR + _encode_uint256(1)): _MID_BIG,
+            (_ADAPTER.lower(), V2_ADAPTER_MARKET_IDS_SELECTOR + _encode_uint256(2)): _MID_SMALL,
+            (v, V2_FORCE_DEALLOCATE_PENALTY_SELECTOR + _encode_address(_ADAPTER)): "0x" + _encode_uint256(penalty_wad),
+            (v, PREVIEW_REDEEM_SELECTOR): None,  # filled per test via prefix match below
+        }
+    )
+    del script[(v, PREVIEW_REDEEM_SELECTOR)]
+    for mid, tag, available in (
+        (_MID_LIQ, 0x11, liq_available),
+        (_MID_BIG, 0x22, big_available),
+        (_MID_SMALL, 0x33, small_available),
+    ):
+        key = mid.removeprefix("0x")
+        script[(_MORPHO.lower(), MORPHO_BLUE_ID_TO_MARKET_PARAMS_SELECTOR + key)] = _params(tag)
+        # adapter holds 10x the available liquidity everywhere, so "withdrawable" is bounded by market liquidity
+        script[(_MORPHO.lower(), MORPHO_BLUE_MARKET_SELECTOR + key)] = _market_words(
+            total_supply_assets=available * 20, total_supply_shares=available * 20, total_borrow_assets=available * 19
+        )
+        script[(_MORPHO.lower(), MORPHO_BLUE_POSITION_SELECTOR + key + _encode_address(_ADAPTER))] = (
+            "0x" + _encode_uint256(available * 10) + _encode_uint256(0) + _encode_uint256(0)
+        )
+    return script
+
+
+class _IdentityPreview:
+    """Answers previewRedeem/previewWithdraw/balanceOf(owner) with 1:1 share price."""
+
+    def __init__(self, script, owner_balance):
+        self.script = script
+        self.owner_balance = owner_balance
+
+    def gateway(self):
+        base = _scripted_gateway(self.script)
+        inner = base.rpc.Call.side_effect
+
+        def call(request, timeout=None):
+            params = json.loads(request.params)[0]
+            data = params["data"]
+            if params["to"].lower() == VAULT_ADDR.lower():
+                if data.startswith(PREVIEW_REDEEM_SELECTOR) or data.startswith(PREVIEW_WITHDRAW_SELECTOR):
+                    resp = MagicMock()
+                    resp.success = True
+                    resp.error = ""
+                    resp.result = json.dumps("0x" + data[10:])
+                    return resp
+                if data.startswith(_BAL_SEL):
+                    resp = MagicMock()
+                    resp.success = True
+                    resp.error = ""
+                    resp.result = json.dumps("0x" + _encode_uint256(self.owner_balance))
+                    return resp
+            return inner(request, timeout)
+
+        base.rpc.Call.side_effect = call
+        return base
+
+
+class TestForceDeallocatePlanning:
+    def test_no_shortfall_returns_empty_plan(self):
+        script = _forced_exit_script(
+            idle=0, liq_available=1_000, big_available=5_000, small_available=100, penalty_wad=WAD // 100_000
+        )
+        sdk = MetaMorphoSDK(_IdentityPreview(script, owner_balance=500).gateway(), "base")
+        plan = sdk.plan_force_deallocate(VAULT_ADDR, 500, USER_ADDR, max_penalty_bps=10)
+        assert plan.needed is False and plan.legs == [] and plan.redeem_shares == 500
+
+    def test_shortfall_is_covered_largest_market_first_with_buffer(self):
+        # need 1_000, idle 0, liquidity market serves 100 -> shortfall 900 (+0.1% buffer = 901)
+        script = _forced_exit_script(
+            idle=0, liq_available=100, big_available=5_000, small_available=50, penalty_wad=WAD // 100_000
+        )
+        sdk = MetaMorphoSDK(_IdentityPreview(script, owner_balance=1_000).gateway(), "base")
+        plan = sdk.plan_force_deallocate(VAULT_ADDR, 1_000, USER_ADDR, max_penalty_bps=10)
+        assert plan.shortfall_assets == 900
+        assert [leg.market_id for leg in plan.legs] == [_MID_BIG]
+        assert plan.legs[0].assets == 901  # shortfall + ceil(0.1%)
+        assert plan.legs[0].market_params_data.lower() == _params(0x22).lower()
+        assert plan.total_penalty_assets == 1  # ceil(901 * 1e-5)
+        assert plan.penalty_bps == 10  # ceil(1 * 10_000 / 1_000) — exactly at the 10 bps cap, so allowed
+        # penalty (1 share at 1:1) is burned first; cushion = max(1, 0.1% of it) = 1
+        assert plan.redeem_shares == 1_000 - plan.total_penalty_shares - 1
+
+    def test_spills_over_to_the_next_market_when_the_largest_is_short(self):
+        script = _forced_exit_script(idle=0, liq_available=0, big_available=600, small_available=600, penalty_wad=0)
+        sdk = MetaMorphoSDK(_IdentityPreview(script, owner_balance=2_000).gateway(), "base")
+        plan = sdk.plan_force_deallocate(VAULT_ADDR, 1_000, USER_ADDR, max_penalty_bps=10)
+        assert [leg.assets for leg in plan.legs] == [600, 401]
+        assert plan.total_penalty_assets == 0
+
+    def test_refuses_when_other_markets_cannot_cover(self):
+        script = _forced_exit_script(idle=0, liq_available=0, big_available=300, small_available=200, penalty_wad=0)
+        sdk = MetaMorphoSDK(_IdentityPreview(script, owner_balance=2_000).gateway(), "base")
+        with pytest.raises(ForceDeallocateRefusedError, match="cannot cover"):
+            sdk.plan_force_deallocate(VAULT_ADDR, 1_000, USER_ADDR, max_penalty_bps=10)
+
+    def test_refuses_when_penalty_exceeds_cap_never_trims(self):
+        # 2% penalty on a 1_000 shortfall = 20 assets = 200 bps > cap 10 bps
+        script = _forced_exit_script(
+            idle=0, liq_available=0, big_available=5_000, small_available=0, penalty_wad=WAD * 2 // 100
+        )
+        sdk = MetaMorphoSDK(_IdentityPreview(script, owner_balance=2_000).gateway(), "base")
+        with pytest.raises(ForceDeallocateRefusedError, match="exceeds the accepted cap"):
+            sdk.plan_force_deallocate(VAULT_ADDR, 1_000, USER_ADDR, max_penalty_bps=10)
+
+    def test_refuses_when_the_penalty_cannot_be_read(self):
+        script = _forced_exit_script(idle=0, liq_available=0, big_available=5_000, small_available=0, penalty_wad=0)
+        del script[(VAULT_ADDR.lower(), V2_FORCE_DEALLOCATE_PENALTY_SELECTOR + _encode_address(_ADAPTER))]
+        sdk = MetaMorphoSDK(_IdentityPreview(script, owner_balance=2_000).gateway(), "base")
+        with pytest.raises(ForceDeallocateRefusedError, match="could not be read"):
+            sdk.plan_force_deallocate(VAULT_ADDR, 1_000, USER_ADDR, max_penalty_bps=0)
+
+    def test_adapter_without_morpho_selector_is_skipped_and_a_valid_adapter_still_covers(self):
+        """V2 vaults may allocate to non-Morpho adapters; those cannot answer morpho() and must be skipped, not fatal."""
+        script = _forced_exit_script(idle=0, liq_available=0, big_available=5_000, small_available=0, penalty_wad=0)
+        foreign = "0x" + "fe" * 20
+        v = VAULT_ADDR.lower()
+        script[(v, V2_ADAPTERS_LENGTH_SELECTOR)] = "0x" + _encode_uint256(2)
+        script[(v, V2_ADAPTERS_SELECTOR + _encode_uint256(1))] = "0x" + "0" * 24 + foreign[2:]
+        # ``foreign`` answers nothing: its morpho() and marketIds() revert.
+        sdk = MetaMorphoSDK(_IdentityPreview(script, owner_balance=2_000).gateway(), "base")
+        plan = sdk.plan_force_deallocate(VAULT_ADDR, 1_000, USER_ADDR, max_penalty_bps=10)
+        assert [leg.adapter for leg in plan.legs] == [_ADAPTER]
+
+    def test_refuses_on_v1(self):
+        sdk = MetaMorphoSDK(_scripted_gateway(_v1_script()), "base")
+        with pytest.raises(ForceDeallocateRefusedError, match="not a Morpho Vault V2"):
+            sdk.plan_force_deallocate(VAULT_ADDR, 10, USER_ADDR, max_penalty_bps=10)
+
+
+class TestForceDeallocateEncoding:
+    def test_calldata_layout(self):
+        data = _params(0x22)
+        calldata = encode_force_deallocate_calldata(_ADAPTER, data, 901, USER_ADDR)
+        body = calldata.removeprefix(V2_FORCE_DEALLOCATE_SELECTOR)
+        words = [body[i : i + 64] for i in range(0, len(body), 64)]
+        assert words[0] == _encode_address(_ADAPTER)
+        assert int(words[1], 16) == 128  # offset of the bytes argument
+        assert int(words[2], 16) == 901
+        assert words[3] == _encode_address(USER_ADDR)
+        assert int(words[4], 16) == 160  # bytes length: five MarketParams words
+        assert "".join(words[5:10]).lower() == data.removeprefix("0x").lower()
+
+    def test_build_tx_is_sent_by_the_redeemer(self):
+        sdk = MetaMorphoSDK(_scripted_gateway(_v2_script()), "base")
+        tx = sdk.build_force_deallocate_tx(VAULT_ADDR, _ADAPTER, _params(0x22), 5, USER_ADDR)
+        assert tx["to"] == VAULT_ADDR and tx["from"] == USER_ADDR
+        assert tx["data"].startswith(V2_FORCE_DEALLOCATE_SELECTOR)
+
+    def test_simulation_transport_failure_is_reraised_not_illiquid(self):
+        gw = _scripted_gateway(_v2_script())
+        inner = gw.rpc.Call.side_effect
+
+        def call(request, timeout=None):
+            if json.loads(request.params)[0]["data"].startswith(V2_FORCE_DEALLOCATE_SELECTOR):
+                resp = MagicMock()
+                resp.success = False
+                resp.error = "DEADLINE_EXCEEDED: gateway timeout"
+                resp.result = ""
+                return resp
+            return inner(request, timeout)
+
+        gw.rpc.Call.side_effect = call
+        sdk = MetaMorphoSDK(gw, "base")
+        with pytest.raises(RPCError):
+            sdk.simulate_force_deallocate(VAULT_ADDR, _ADAPTER, _params(0x22), 5, USER_ADDR)
+
+    def test_simulation_revert_surfaces_as_illiquid(self):
+        sdk = MetaMorphoSDK(_scripted_gateway(_v2_script()), "base")  # forceDeallocate unscripted -> revert
+        with pytest.raises(VaultIlliquidError, match="NOT sent"):
+            sdk.simulate_force_deallocate(VAULT_ADDR, _ADAPTER, _params(0x22), 5, USER_ADDR)

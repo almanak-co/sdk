@@ -9,6 +9,12 @@ ERC-4626 function selectors:
 - deposit(uint256,address)           = 0x6e553f65
 - redeem(uint256,address,address)    = 0xba087652
 - approve(address,uint256)           = 0x095ea7b3
+
+Morpho Vault V2 selector (no-op on v1, which lacks the function):
+- forceDeallocate(address,bytes,uint256,address) = 0xe4d38cd8 — the
+  depositor's penalised liquidity valve. The connector only issues it when a
+  redeem intent carries ``allow_force_deallocate=True`` (opt-in), but the role
+  must permit it for that opt-in to be executable from a Safe.
 """
 
 from almanak.connectors._base.erc20_abi import ERC20_APPROVE_SELECTOR
@@ -25,6 +31,11 @@ def _permission_vault_rows() -> list[tuple[str, dict[str, str]]]:
 def _build_static_permissions() -> dict[str, list[StaticPermissionEntry]]:
     result: dict[str, list[StaticPermissionEntry]] = {}
     seen_targets: dict[str, set[str]] = {}
+    vault_selectors = {
+        "0x6e553f65": "deposit(uint256,address)",
+        "0xba087652": "redeem(uint256,address,address)",
+        "0xe4d38cd8": "forceDeallocate(address,bytes,uint256,address)",
+    }
     for chain, addrs in _permission_vault_rows():
         chain_entries = result.setdefault(chain, [])
         chain_seen = seen_targets.setdefault(chain, set())
@@ -45,10 +56,7 @@ def _build_static_permissions() -> dict[str, list[StaticPermissionEntry]]:
                 StaticPermissionEntry(
                     target=vault,
                     label="MetaMorpho Vault",
-                    selectors={
-                        "0x6e553f65": "deposit(uint256,address)",
-                        "0xba087652": "redeem(uint256,address,address)",
-                    },
+                    selectors=dict(vault_selectors),
                 )
             )
     return result

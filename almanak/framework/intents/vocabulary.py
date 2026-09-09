@@ -2964,18 +2964,35 @@ class Intent:
         deposit_token: str | None = None,
         chain: str | None = None,
         registry_handle: str | None = None,
+        allow_force_deallocate: bool = False,
+        max_force_deallocate_penalty_bps: int = 10,
     ) -> VaultRedeemIntent:
-        """Create a vault redeem intent for MetaMorpho ERC-4626 vaults.
+        """Create a vault redeem intent for Morpho ERC-4626 vaults (MetaMorpho v1 and Vault V2).
 
         Redeems vault shares to receive underlying assets. No approval needed
         since the user is redeeming their own shares.
 
+        Morpho Vault V2 serves withdrawals from idle assets plus one
+        curator-designated liquidity market and reverts when those cannot
+        cover the redeem; the connector simulates the redeem before sending
+        and fails closed in that case. ``allow_force_deallocate=True`` is the
+        opt-in for a PAID exit: the connector first calls the vault's
+        ``forceDeallocate`` on its other markets to pull the shortfall into
+        idle assets, and the vault burns a curator-set penalty from the
+        redeemer's shares. Only enable it when the user has accepted that
+        cost; ``max_force_deallocate_penalty_bps`` caps it.
+
         Args:
             protocol: Vault protocol (must be "metamorpho")
-            vault_address: MetaMorpho vault contract address
+            vault_address: Morpho vault contract address (v1 or V2)
             shares: Number of shares to redeem, or "all" to redeem all
             deposit_token: Underlying token symbol (e.g. "USDC") for backtesting
             chain: Target chain (defaults to strategy's primary chain)
+            allow_force_deallocate: V2 only — permit a penalised forced exit when
+                the liquidity market cannot cover the redeem (default False)
+            max_force_deallocate_penalty_bps: V2 only — refuse a forced exit whose
+                penalty exceeds this many basis points of the redeemed assets
+                (default 10)
 
         Returns:
             VaultRedeemIntent: The created vault redeem intent
@@ -2997,6 +3014,8 @@ class Intent:
             deposit_token=deposit_token,
             chain=chain,
             registry_handle=registry_handle,
+            allow_force_deallocate=allow_force_deallocate,
+            max_force_deallocate_penalty_bps=max_force_deallocate_penalty_bps,
         )
 
     @staticmethod

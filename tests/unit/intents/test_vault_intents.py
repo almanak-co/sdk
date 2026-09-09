@@ -355,3 +355,38 @@ class TestIntentType:
 
     def test_vault_manage_exists(self):
         assert IntentType.VAULT_MANAGE.value == "VAULT_MANAGE"
+
+
+class TestVaultRedeemForcedExitFields:
+    """Opt-in forced exit: off by default, capped, serialised, and threaded by the factory."""
+
+    def test_defaults_are_off(self):
+        intent = VaultRedeemIntent(protocol="metamorpho", vault_address="0x" + "be" * 20, shares="all")
+        assert intent.allow_force_deallocate is False
+        assert intent.max_force_deallocate_penalty_bps == 10
+
+    def test_factory_threads_the_fields_and_serialises_them(self):
+        from almanak.framework.intents import Intent
+
+        intent = Intent.vault_redeem(
+            protocol="metamorpho",
+            vault_address="0x" + "be" * 20,
+            shares="all",
+            chain="base",
+            allow_force_deallocate=True,
+            max_force_deallocate_penalty_bps=5,
+        )
+        assert intent.allow_force_deallocate is True
+        data = intent.serialize()
+        assert data["allow_force_deallocate"] is True and data["max_force_deallocate_penalty_bps"] == 5
+        restored = VaultRedeemIntent.deserialize(data)
+        assert restored.allow_force_deallocate is True and restored.max_force_deallocate_penalty_bps == 5
+
+    def test_penalty_cap_is_bounded(self):
+        with pytest.raises(ValueError, match="max_force_deallocate_penalty_bps"):
+            VaultRedeemIntent(
+                protocol="metamorpho",
+                vault_address="0x" + "be" * 20,
+                shares="all",
+                max_force_deallocate_penalty_bps=10_001,
+            )

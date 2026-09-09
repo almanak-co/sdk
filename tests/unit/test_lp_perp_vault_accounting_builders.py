@@ -617,6 +617,28 @@ class TestVaultAccountingBuilder:
         assert payload["event_type"] == "VAULT_DEPOSIT"
         assert payload["assets_amount"] == "250"
 
+    def test_forced_exit_penalty_is_recorded_on_the_redeem_event(self) -> None:
+        from almanak.framework.accounting.vault_accounting import build_vault_accounting_event
+
+        intent = _make_intent("VAULT_REDEEM", protocol="metamorpho")
+        result = _make_result()
+        result.extracted_data = {
+            "redeem_data": {
+                "shares_burned": 96 * 10**18,
+                "assets_received": 99_990_000,
+                "penalty_shares": 10**13,
+                "penalty_assets": 10_000,
+            }
+        }
+        event = build_vault_accounting_event(intent=intent, result=result, **_COMMON_KWARGS)
+        assert event is not None
+        assert event.penalty_shares == Decimal(10**13)
+        assert event.penalty_assets == Decimal(10_000)
+        assert event.shares_amount == Decimal(96 * 10**18) + Decimal(10**13)
+        payload = json.loads(event.to_payload_json())
+        assert payload["penalty_shares"] == str(10**13)
+        assert payload["penalty_assets"] == "10000"
+
 
 # ---------------------------------------------------------------------------
 # Aerodrome stable pool state persistence

@@ -18,6 +18,7 @@ from almanak.framework.accounting.ids import make_accounting_event_id
 from almanak.framework.accounting.models import AccountingConfidence, AccountingIdentity, VaultEventType
 from almanak.framework.accounting.vault_accounting import VaultAccountingEvent
 from almanak.framework.models.run_mode import RunMode
+from almanak.framework.observability.ledger import deserialize_extracted_data
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,28 @@ def _vault_address_from_position_key(position_key: str) -> str:
     if not position_key:
         return ""
     return position_key.rsplit(":", 1)[-1]
+
+
+def _share_amounts_from_ledger(
+    ledger_row: dict[str, Any],
+) -> tuple[Decimal | None, Decimal | None, Decimal | None]:
+    """Return (shares_amount, penalty_shares, penalty_assets).
+
+    Empty ≠ Zero: a missing redeem_data key stays None (unmeasured); Decimal("0")
+    is only used when the key is present and parses as zero. When both
+    shares_burned and penalty_shares are measured, shares_amount includes the
+    penalty burn so cost basis can reconcile to the post-exit share balance.
+    """
+    extracted = deserialize_extracted_data(ledger_row.get("extracted_data_json") or "")
+    redeem_data = extracted.get("redeem_data") if isinstance(extracted, dict) else None
+    if not isinstance(redeem_data, dict):
+        redeem_data = {}
+    penalty_shares = _safe_decimal(redeem_data.get("penalty_shares")) if "penalty_shares" in redeem_data else None
+    penalty_assets = _safe_decimal(redeem_data.get("penalty_assets")) if "penalty_assets" in redeem_data else None
+    shares_amount = _safe_decimal(redeem_data.get("shares_burned"))
+    if shares_amount is not None and penalty_shares is not None:
+        shares_amount = shares_amount + penalty_shares
+    return shares_amount, penalty_shares, penalty_assets
 
 
 def handle_vault(
@@ -109,6 +132,8 @@ def handle_vault(
     if amount_in_raw and str(amount_in_raw).lower() not in ("all", ""):
         assets_amount = _safe_decimal(amount_in_raw)
 
+    shares_amount, penalty_shares, penalty_assets = _share_amounts_from_ledger(ledger_row)
+
     # ── Identity / ID ────────────────────────────────────────────────────────
     _id_seed = tx_hash or ledger_entry_id or position_key
     identity = AccountingIdentity(
@@ -131,10 +156,12 @@ def handle_vault(
         vault_address=vault_address,
         asset_token=asset_token,
         assets_amount=assets_amount,
-        shares_amount=None,
+        shares_amount=shares_amount,
         share_price=None,
         cost_basis_usd=None,
         yield_usd=None,
+        penalty_shares=penalty_shares,
+        penalty_assets=penalty_assets,
         confidence=AccountingConfidence.ESTIMATED,
         unavailable_reason="shares, share_price, and yield require vault receipt parser (pending)",
     )

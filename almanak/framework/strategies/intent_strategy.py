@@ -36,6 +36,8 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Optional, final
 
 if TYPE_CHECKING:
+    from almanak.framework.teardown.full_close import VaultExitPolicy
+
     from ..data.wallet_activity import WalletActivityProvider
     from ..portfolio.models import PortfolioSnapshot
     from ..teardown.models import (
@@ -2244,6 +2246,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
         *,
         target_token: str = "USDC",
         max_slippage: "Decimal | None" = None,
+        vault_exit: "VaultExitPolicy | None" = None,
     ) -> "list[AnyIntent]":
         """Build live-resolving "close fully" intents for KNOWN positions (VIB-5465).
 
@@ -2274,18 +2277,35 @@ class IntentStrategy(StrategyBase[ConfigT]):
             target_token: Token to swap residual held / staked tokens into.
             max_slippage: Starting slippage for the SWAP-shaped close (defaults
                 to the helper's 2% manual-initial tolerance).
+            vault_exit: Consent for a penalised forced exit from a Morpho Vault
+                V2. Defaults to the strategy config's ``vault_exit`` block
+                (``{"allow_force_deallocate": bool, "max_penalty_bps": int}``),
+                and to OFF when that block is absent.
 
         Returns:
             Close intents ordered by ``PositionType.priority``.
         """
-        from almanak.framework.teardown.full_close import _DEFAULT_SWAP_SLIPPAGE, full_close_intents
+        from almanak.framework.teardown.full_close import (
+            _DEFAULT_SWAP_SLIPPAGE,
+            VaultExitPolicy,
+            full_close_intents,
+        )
 
         if positions is None:
             positions = self.get_open_positions()
+        if vault_exit is None:
+            # Strategy doubles built without a config (``__new__`` in tests) have
+            # no ``config`` attribute; treat that as "no vault_exit block" (OFF).
+            try:
+                raw_policy = self.get_config("vault_exit", None)
+            except AttributeError:
+                raw_policy = None
+            vault_exit = VaultExitPolicy.from_config(raw_policy)
         return full_close_intents(
             positions,
             target_token=target_token,
             max_slippage=_DEFAULT_SWAP_SLIPPAGE if max_slippage is None else max_slippage,
+            vault_exit=vault_exit,
         )
 
     async def resolve_open_positions(self) -> "TeardownPositionSummary":

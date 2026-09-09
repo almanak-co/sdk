@@ -21,7 +21,10 @@ import pytest
 from almanak.framework.accounting.basis import FIFOBasisStore
 from almanak.framework.accounting.category_handlers.lp_handler import handle_lp
 from almanak.framework.accounting.category_handlers.perp_handler import handle_perp
-from almanak.framework.accounting.category_handlers.vault_handler import handle_vault
+from almanak.framework.accounting.category_handlers.vault_handler import (
+    _share_amounts_from_ledger,
+    handle_vault,
+)
 from almanak.framework.accounting.lp_accounting import LPAccountingEvent
 from almanak.framework.accounting.models import LPEventType, PerpEventType, VaultEventType
 from almanak.framework.accounting.perp_accounting import PerpAccountingEvent
@@ -1924,6 +1927,40 @@ class TestHandleVault:
 
         assert result is not None
         assert result.event_type == VaultEventType.VAULT_WITHDRAW.value
+        assert result.penalty_shares is None
+        assert result.penalty_assets is None
+
+    def test_vault_redeem_records_force_deallocate_penalty(self) -> None:
+        led_id = str(uuid.uuid4())
+        outbox_row = _make_outbox_row(
+            led_id,
+            intent_type="VAULT_REDEEM",
+            position_key="vault:metamorpho:base:0xwallet:0xvault",
+            market_id="0xvault",
+        )
+        ledger_row = _make_ledger_row(
+            led_id,
+            intent_type="VAULT_REDEEM",
+            protocol="metamorpho",
+            chain="base",
+            token_in="USDC",
+            amount_in="99.99",
+            extracted_data_json=json.dumps(
+                {
+                    "redeem_data": {
+                        "shares_burned": 96 * 10**18,
+                        "assets_received": 99_990_000,
+                        "penalty_shares": 10**13,
+                        "penalty_assets": 10_000,
+                    }
+                }
+            ),
+        )
+        result = handle_vault(outbox_row, ledger_row)
+        assert result is not None
+        assert result.penalty_shares == Decimal(10**13)
+        assert result.penalty_assets == Decimal(10_000)
+        assert result.shares_amount == Decimal(96 * 10**18) + Decimal(10**13)
 
     def test_vault_redeem_all_string_returns_none_amount(self) -> None:
         """Amount 'all' (close entire position) should leave assets_amount as None."""
@@ -2026,6 +2063,75 @@ class TestHandleVault:
         assert result.shares_amount is None
         assert result.share_price is None
         assert result.yield_usd is None
+
+
+class TestShareAmountsFromLedger:
+    def test_missing_keys_stay_none(self) -> None:
+        shares, penalty_shares, penalty_assets = _share_amounts_from_ledger({})
+        assert shares is None
+        assert penalty_shares is None
+        assert penalty_assets is None
+
+        shares, penalty_shares, penalty_assets = _share_amounts_from_ledger(
+            {"extracted_data_json": json.dumps({"redeem_data": {"shares_burned": "10"}})}
+        )
+        assert shares == Decimal("10")
+        assert penalty_shares is None
+        assert penalty_assets is None
+
+    def test_explicit_zero_is_measured_zero(self) -> None:
+        shares, penalty_shares, penalty_assets = _share_amounts_from_ledger(
+            {
+                "extracted_data_json": json.dumps(
+                    {
+                        "redeem_data": {
+                            "shares_burned": "0",
+                            "penalty_shares": 0,
+                            "penalty_assets": "0",
+                        }
+                    }
+                )
+            }
+        )
+        assert shares == Decimal("0")
+        assert penalty_shares == Decimal("0")
+        assert penalty_assets == Decimal("0")
+
+    def test_malformed_values_are_unmeasured(self) -> None:
+        shares, penalty_shares, penalty_assets = _share_amounts_from_ledger(
+            {
+                "extracted_data_json": json.dumps(
+                    {
+                        "redeem_data": {
+                            "shares_burned": "not-a-number",
+                            "penalty_shares": "NaN",
+                            "penalty_assets": object.__name__,
+                        }
+                    }
+                )
+            }
+        )
+        assert shares is None
+        assert penalty_shares is None
+        assert penalty_assets is None
+
+    def test_measured_penalty_is_added_into_shares_amount(self) -> None:
+        shares, penalty_shares, penalty_assets = _share_amounts_from_ledger(
+            {
+                "extracted_data_json": json.dumps(
+                    {
+                        "redeem_data": {
+                            "shares_burned": 96 * 10**18,
+                            "penalty_shares": 10**13,
+                            "penalty_assets": 10_000,
+                        }
+                    }
+                )
+            }
+        )
+        assert penalty_shares == Decimal(10**13)
+        assert penalty_assets == Decimal(10_000)
+        assert shares == Decimal(96 * 10**18) + Decimal(10**13)
 
 
 class TestHandleLpWalletBasisHooks:

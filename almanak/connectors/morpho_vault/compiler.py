@@ -11,6 +11,7 @@ from almanak.connectors.morpho_vault.sdk import SUPPORTED_CHAINS as _METAMORPHO_
 from almanak.connectors.morpho_vault.sdk import (
     VAULT_VERSION_V1,
     VAULT_VERSION_V2,
+    ForceDeallocateRefusedError,
     VaultGatedError,
     VaultIlliquidError,
 )
@@ -172,14 +173,29 @@ class MorphoVaultCompiler(BaseProtocolCompiler[BaseCompilerContext]):
             if shares_wei <= 0:
                 return _failed(intent.intent_id, "Redeem shares must be positive")
 
+            force_txs: list[TransactionData] = []
+            force_meta: dict[str, Any] | None = None
             if vault_version == VAULT_VERSION_V2:
                 try:
                     adapter.sdk.check_redeem_gates(intent.vault_address, ctx.wallet_address, ctx.wallet_address)
+                except VaultGatedError as exc:
+                    return _failed(intent.intent_id, str(exc))
+                try:
                     adapter.sdk.simulate_redeem(
                         intent.vault_address, shares_wei, receiver=ctx.wallet_address, owner=ctx.wallet_address
                     )
-                except (VaultGatedError, VaultIlliquidError) as exc:
-                    return _failed(intent.intent_id, str(exc))
+                except VaultIlliquidError as illiquid:
+                    if not getattr(intent, "allow_force_deallocate", False):
+                        return _failed(
+                            intent.intent_id,
+                            f"{illiquid} A penalised forced exit is possible but not enabled: set "
+                            "allow_force_deallocate=True on the vault_redeem intent (cap the cost with "
+                            "max_force_deallocate_penalty_bps) once the user has accepted the penalty.",
+                        )
+                    forced = _plan_forced_exit(adapter, intent, ctx, shares_wei)
+                    if isinstance(forced, CompilationResult):
+                        return forced
+                    force_txs, force_meta, shares_wei = forced
 
             redeem_tx_data = adapter.sdk.build_redeem_tx(
                 vault_address=intent.vault_address,
@@ -196,19 +212,27 @@ class MorphoVaultCompiler(BaseProtocolCompiler[BaseCompilerContext]):
                 tx_type="vault_redeem",
             )
 
-            result.transactions = [redeem_tx]
-            result.total_gas_estimate = redeem_tx.gas_estimate
+            transactions = [*force_txs, redeem_tx]
+            result.transactions = transactions
+            result.total_gas_estimate = sum(tx.gas_estimate for tx in transactions)
+            metadata: dict[str, Any] = {
+                "protocol": intent.protocol,
+                "vault_address": intent.vault_address,
+                "vault_version": vault_version,
+                "shares_wei": str(shares_wei),
+                "redeem_all": intent.shares == "all",
+                "chain": ctx.chain,
+            }
+            if force_meta is not None:
+                metadata["force_deallocate"] = force_meta
+                # Penalty burns happen before the redeem. Sequential EOA confirm
+                # can land the burn and then fail the redeem; Safe MultiSend is
+                # the existing atomic path. The orchestrator refuses EOA.
+                metadata["requires_atomic"] = True
             result.action_bundle = ActionBundle(
                 intent_type=IntentType.VAULT_REDEEM.value,
-                transactions=[redeem_tx.to_dict()],
-                metadata={
-                    "protocol": intent.protocol,
-                    "vault_address": intent.vault_address,
-                    "vault_version": vault_version,
-                    "shares_wei": str(shares_wei),
-                    "redeem_all": intent.shares == "all",
-                    "chain": ctx.chain,
-                },
+                transactions=[tx.to_dict() for tx in transactions],
+                metadata=metadata,
             )
             logger.info(
                 "Compiled VAULT_REDEEM: %s shares from vault %s...",
@@ -221,6 +245,85 @@ class MorphoVaultCompiler(BaseProtocolCompiler[BaseCompilerContext]):
             result.status = CompilationStatus.FAILED
             result.error = str(exc)
             return result
+
+
+def _plan_forced_exit(
+    adapter: Any, intent: VaultRedeemIntent, ctx: BaseCompilerContext, shares_wei: int
+) -> CompilationResult | tuple[list[TransactionData], dict[str, Any], int]:
+    """Build the opt-in ``forceDeallocate`` legs that make a V2 redeem coverable.
+
+    Returns the leg transactions, the metadata block, and the (possibly reduced)
+    share count the trailing ``redeem`` must request — the penalty is burned
+    from the redeemer before the redeem lands. Returns a FAILED
+    ``CompilationResult`` when the SDK refuses the plan (cannot cover, penalty
+    above the intent's cap) or a leg does not simulate.
+    """
+    max_bps = int(getattr(intent, "max_force_deallocate_penalty_bps", 10))
+    try:
+        plan = adapter.sdk.plan_force_deallocate(intent.vault_address, shares_wei, ctx.wallet_address, max_bps)
+    except ForceDeallocateRefusedError as exc:
+        return _failed(intent.intent_id, str(exc))
+    if not plan.needed or not plan.legs:
+        # The simulation said illiquid but the live math finds no shortfall:
+        # state moved under us. Refuse rather than send a redeem we could not prove.
+        return _failed(
+            intent.intent_id,
+            "Redeem simulation reverted but no liquidity shortfall is measurable; retry rather than force an exit.",
+        )
+    txs: list[TransactionData] = []
+    for leg in plan.legs:
+        try:
+            adapter.sdk.simulate_force_deallocate(
+                intent.vault_address, leg.adapter, leg.market_params_data, leg.assets, ctx.wallet_address
+            )
+        except VaultIlliquidError as exc:
+            return _failed(intent.intent_id, str(exc))
+        tx = adapter.sdk.build_force_deallocate_tx(
+            intent.vault_address, leg.adapter, leg.market_params_data, leg.assets, ctx.wallet_address
+        )
+        txs.append(
+            TransactionData(
+                to=tx["to"],
+                value=tx["value"],
+                data=tx["data"],
+                gas_estimate=tx["gas_estimate"],
+                description=(
+                    f"Force-deallocate {leg.assets} wei from market {leg.market_id[:10]}... "
+                    f"(penalty {leg.penalty_assets} wei) to cover the redeem"
+                ),
+                tx_type="vault_force_deallocate",
+            )
+        )
+    logger.warning(
+        "VAULT_REDEEM on %s: forcing exit of %d wei across %d market(s) at %d bps penalty (cap %d bps)",
+        intent.vault_address[:10],
+        plan.shortfall_assets,
+        len(plan.legs),
+        plan.penalty_bps,
+        max_bps,
+    )
+    meta = {
+        "needed_assets": str(plan.needed_assets),
+        "idle_assets": str(plan.idle_assets),
+        "liquidity_market_capacity": str(plan.liquidity_market_capacity),
+        "shortfall_assets": str(plan.shortfall_assets),
+        "legs": [
+            {
+                "adapter": leg.adapter,
+                "market_id": leg.market_id,
+                "assets": str(leg.assets),
+                "penalty_assets": str(leg.penalty_assets),
+                "penalty_shares": str(leg.penalty_shares),
+            }
+            for leg in plan.legs
+        ],
+        "total_penalty_assets": str(plan.total_penalty_assets),
+        "total_penalty_shares": str(plan.total_penalty_shares),
+        "penalty_bps": plan.penalty_bps,
+        "max_penalty_bps": max_bps,
+        "redeem_shares_after_penalty": str(plan.redeem_shares),
+    }
+    return txs, meta, plan.redeem_shares
 
 
 def _vault_version(adapter: Any, vault_address: str) -> str:

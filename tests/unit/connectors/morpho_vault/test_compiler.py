@@ -274,3 +274,127 @@ def test_compile_deposit_on_v2_fails_closed_when_gated() -> None:
     assert result.status == CompilationStatus.FAILED
     assert "receive-shares gate" in (result.error or "")
     adapter.sdk.build_deposit_tx.assert_not_called()
+
+
+# Opt-in forced exit on V2: only with allow_force_deallocate=True, always as one bundle.
+
+from almanak.connectors.morpho_vault.sdk import (  # noqa: E402
+    ForceDeallocateLeg,
+    ForceDeallocatePlan,
+    ForceDeallocateRefusedError,
+)
+
+
+def _illiquid_v2_adapter(*, balance: int = 1_000) -> MagicMock:
+    adapter = _v2_adapter(balance=balance)
+    adapter.sdk.simulate_redeem.side_effect = VaultIlliquidError("redeem simulation reverted: liquidity adapter short")
+    adapter.sdk.build_force_deallocate_tx.return_value = {
+        "to": VAULT_ADDRESS,
+        "value": "0",
+        "data": "0xforce",
+        "gas_estimate": 450_000,
+    }
+    adapter.sdk.simulate_force_deallocate.return_value = None
+    return adapter
+
+
+def _plan(*, legs: int = 1, redeem_shares: int = 990, penalty_bps: int = 1) -> ForceDeallocatePlan:
+    plan = ForceDeallocatePlan(
+        vault_address=VAULT_ADDRESS,
+        owner=WALLET_ADDRESS,
+        requested_shares=1_000,
+        needed_assets=1_000,
+        idle_assets=0,
+        liquidity_market_capacity=100,
+        shortfall_assets=900,
+        redeem_shares=redeem_shares,
+        total_penalty_assets=1,
+        total_penalty_shares=1,
+        penalty_bps=penalty_bps,
+    )
+    for i in range(legs):
+        plan.legs.append(
+            ForceDeallocateLeg(
+                adapter="0x" + "ad" * 20,
+                market_id="0x" + f"{i + 1:02x}" * 32,
+                market_params_data="0x" + "00" * 160,
+                assets=901,
+                withdrawable=5_000,
+                penalty_wad=10**13,
+                penalty_assets=1,
+                penalty_shares=1,
+            )
+        )
+    return plan
+
+
+def _redeem_intent_forced(**kw) -> VaultRedeemIntent:
+    return VaultRedeemIntent(protocol="metamorpho", vault_address=VAULT_ADDRESS, shares="all", chain="ethereum", **kw)
+
+
+def test_illiquid_v2_without_opt_in_fails_closed_and_names_the_flag() -> None:
+    adapter = _illiquid_v2_adapter()
+    with patch("almanak.connectors.morpho_vault.compiler._build_adapter", return_value=adapter):
+        result = MorphoVaultCompiler().compile_redeem(_ctx(), _redeem_intent_forced())
+    assert result.status == CompilationStatus.FAILED
+    assert "allow_force_deallocate=True" in (result.error or "")
+    adapter.sdk.plan_force_deallocate.assert_not_called()
+    adapter.sdk.build_redeem_tx.assert_not_called()
+
+
+def test_opt_in_builds_force_legs_then_redeem_with_post_penalty_shares() -> None:
+    adapter = _illiquid_v2_adapter()
+    adapter.sdk.plan_force_deallocate.return_value = _plan(legs=2, redeem_shares=990)
+    with patch("almanak.connectors.morpho_vault.compiler._build_adapter", return_value=adapter):
+        result = MorphoVaultCompiler().compile_redeem(
+            _ctx(), _redeem_intent_forced(allow_force_deallocate=True, max_force_deallocate_penalty_bps=5)
+        )
+    assert result.status == CompilationStatus.SUCCESS, result.error
+    adapter.sdk.plan_force_deallocate.assert_called_once_with(VAULT_ADDRESS, 1_000, WALLET_ADDRESS, 5)
+    assert [tx.tx_type for tx in result.transactions] == [
+        "vault_force_deallocate",
+        "vault_force_deallocate",
+        "vault_redeem",
+    ]
+    assert adapter.sdk.simulate_force_deallocate.call_count == 2
+    adapter.sdk.build_redeem_tx.assert_called_once_with(
+        vault_address=VAULT_ADDRESS, shares=990, receiver=WALLET_ADDRESS, owner=WALLET_ADDRESS
+    )
+    meta = result.action_bundle.metadata
+    assert meta["shares_wei"] == "990"
+    assert meta["requires_atomic"] is True
+    assert meta["force_deallocate"]["penalty_bps"] == 1 and meta["force_deallocate"]["max_penalty_bps"] == 5
+    assert len(meta["force_deallocate"]["legs"]) == 2
+    assert result.total_gas_estimate == 2 * 450_000 + 180_000
+
+
+def test_opt_in_refused_plan_fails_the_compilation() -> None:
+    adapter = _illiquid_v2_adapter()
+    adapter.sdk.plan_force_deallocate.side_effect = ForceDeallocateRefusedError(
+        "penalty 200 bps exceeds the accepted cap of 10 bps"
+    )
+    with patch("almanak.connectors.morpho_vault.compiler._build_adapter", return_value=adapter):
+        result = MorphoVaultCompiler().compile_redeem(_ctx(), _redeem_intent_forced(allow_force_deallocate=True))
+    assert result.status == CompilationStatus.FAILED
+    assert "exceeds the accepted cap" in (result.error or "")
+    adapter.sdk.build_redeem_tx.assert_not_called()
+
+
+def test_opt_in_leg_simulation_revert_fails_closed() -> None:
+    adapter = _illiquid_v2_adapter()
+    adapter.sdk.plan_force_deallocate.return_value = _plan()
+    adapter.sdk.simulate_force_deallocate.side_effect = VaultIlliquidError("forceDeallocate simulation reverted")
+    with patch("almanak.connectors.morpho_vault.compiler._build_adapter", return_value=adapter):
+        result = MorphoVaultCompiler().compile_redeem(_ctx(), _redeem_intent_forced(allow_force_deallocate=True))
+    assert result.status == CompilationStatus.FAILED
+    adapter.sdk.build_redeem_tx.assert_not_called()
+
+
+def test_opt_in_is_ignored_when_the_plain_redeem_simulates_fine() -> None:
+    adapter = _v2_adapter(balance=1_000)
+    with patch("almanak.connectors.morpho_vault.compiler._build_adapter", return_value=adapter):
+        result = MorphoVaultCompiler().compile_redeem(_ctx(), _redeem_intent_forced(allow_force_deallocate=True))
+    assert result.status == CompilationStatus.SUCCESS
+    adapter.sdk.plan_force_deallocate.assert_not_called()
+    assert [tx.tx_type for tx in result.transactions] == ["vault_redeem"]
+    assert "force_deallocate" not in result.action_bundle.metadata

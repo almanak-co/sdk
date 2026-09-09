@@ -49,6 +49,8 @@ class VaultAccountingEvent:
         yield_usd: Decimal | None,
         confidence: AccountingConfidence,
         unavailable_reason: str = "",
+        penalty_shares: Decimal | None = None,
+        penalty_assets: Decimal | None = None,
     ) -> None:
         self.identity = identity
         self.event_type = event_type.value
@@ -62,6 +64,11 @@ class VaultAccountingEvent:
         self.yield_usd = yield_usd
         self.confidence = confidence
         self.unavailable_reason = unavailable_reason
+        # Morpho Vault V2 forceDeallocate: shares/assets burned as the
+        # penalty (receiver == vault). None = unmeasured; Decimal("0") =
+        # measured zero. Must not be omitted from cost-basis reconciliation.
+        self.penalty_shares = penalty_shares
+        self.penalty_assets = penalty_assets
 
     def to_payload_json(self) -> str:
         def _enc(v: Any) -> Any:
@@ -82,6 +89,8 @@ class VaultAccountingEvent:
                 "share_price": _enc(self.share_price),
                 "cost_basis_usd": _enc(self.cost_basis_usd),
                 "yield_usd": _enc(self.yield_usd),
+                "penalty_shares": _enc(self.penalty_shares),
+                "penalty_assets": _enc(self.penalty_assets),
                 "confidence": str(self.confidence),
                 "unavailable_reason": self.unavailable_reason,
                 "schema_version": self.schema_version,
@@ -155,6 +164,14 @@ def build_vault_accounting_event(
 
     position_key = f"vault:{protocol}:{chain.lower()}:{wallet_address.lower()}:{vault_address}"
 
+    redeem_data = (getattr(result, "extracted_data", None) or {}).get("redeem_data") or {}
+    penalty_shares = _safe_decimal(redeem_data.get("penalty_shares")) if "penalty_shares" in redeem_data else None
+    penalty_assets = _safe_decimal(redeem_data.get("penalty_assets")) if "penalty_assets" in redeem_data else None
+    shares_amount = _safe_decimal(redeem_data.get("shares_burned"))
+    if shares_amount is not None and penalty_shares is not None:
+        # Total shares leaving the wallet = payout burn + penalty burn.
+        shares_amount = shares_amount + penalty_shares
+
     _id_seed = tx_hash or ledger_entry_id or str(uuid4())
     identity = AccountingIdentity(
         id=make_accounting_event_id(deployment_id, cycle_id, event_type.value, _id_seed, position_key),
@@ -176,10 +193,12 @@ def build_vault_accounting_event(
         vault_address=vault_address,
         asset_token=asset_token,
         assets_amount=assets_amount,
-        shares_amount=None,
+        shares_amount=shares_amount,
         share_price=None,
         cost_basis_usd=None,
         yield_usd=None,
+        penalty_shares=penalty_shares,
+        penalty_assets=penalty_assets,
         confidence=AccountingConfidence.ESTIMATED,
         unavailable_reason="shares, share_price, and yield require vault receipt parser (pending)",
     )
