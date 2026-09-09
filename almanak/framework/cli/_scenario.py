@@ -9,8 +9,9 @@ never exercised by a force-action test.
 
 This module is the missing seam: it parses a small, typed override document
 (``--inject``) and applies it to the ``MarketSnapshot`` the runner feeds into
-``decide()`` — using only the **already-public** ``MarketSnapshot`` setters
-(``set_price`` / ``set_balance`` / ``set_rsi`` …). Nothing here changes the
+``decide()``. Numeric condition overrides use the public ``MarketSnapshot`` setters
+(``set_price`` / ``set_balance`` / ``set_rsi`` …). Reference events use a guarded
+GetReferencePrice client decorator and an explicit snapshot scenario clock. Nothing changes the
 ``MarketSnapshot`` or ``decide()`` production contract; it is a thin,
 additive, test-only applier that runs after the runner builds the snapshot.
 
@@ -31,6 +32,42 @@ Schema (inline JSON or a path to a ``.json`` file)::
       "balances": {"USDC": "10000", "WETH": "5"},
       "indicators": {"rsi": {"WETH": 25}}
     }
+
+Reference scenario schema (also accepted by managed continuous ``strat run
+--reference-scenario scenario.json``)::
+
+    {"reference_events": [
+      {"scenario_at": "2026-09-08T15:00:00+00:00", "references": [
+        {"instrument": "GOOGL", "quote": "USD", "chain": "bsc",
+         "price": "337.12", "confidence": 0.95, "source": "fixture:GOOGL/USD",
+         "observed_at": 1788879600, "stale": false,
+         "availability": "REFERENCE_PRICE_AVAILABILITY_AVAILABLE",
+         "market_status": "REFERENCE_MARKET_STATUS_OPEN",
+         "market_status_as_of": 1788879600, "market_status_source": "fixture:regular_session",
+         "reason": "", "basis": "REFERENCE_PRICE_BASIS_UNDERLYING_SHARE", "token_address": ""}
+      ]}
+    ]}
+
+Every response field except ``composition`` must be present, including explicit
+empty optional values. RAW_TOKEN responses require the full composition message:
+underlying instrument/price/source/observed_at, multiplier, multiplier block
+number/hash/timestamp/read_at, scheduled multiplier/effective_at, beacon and
+implementation addresses, and composed_at. Names match ReferencePriceResponse
+and ReferencePriceComposition in gateway.proto. Epochs are integer seconds;
+prices and multipliers are decimal strings. Missing fields never inherit defaults.
+
+Reference events cannot mix with prices, balances or indicators. One explicit
+frame is consumed per runner-built snapshot, with strictly increasing timezone-
+aware scenario_at values. Exhaustion fails the iteration; frames never repeat or
+refresh source timestamps. An empty references list delegates all requests to
+the real gateway for that frame. Unlisted identities always retain normal reads.
+Declared observations in the active frame must all be requested before advancing
+or completing the run. Final validation happens after risk reduction and resource
+cleanup, before the mode reports success. Unused future frames do not fail a run.
+An unconsumed-observation error identifies the missing reads.
+The harness tags source provenance and log controls SYNTHETIC. Strategies must
+pass now=market.timestamp to use the declared test clock; default wall time in
+reference guards remains unchanged. Hosted/mainnet/external gateways are rejected.
 
 Condition mapping (no synthetic snapshot methods are invented — depeg and
 drawdown are *derived* conditions strategies compute from these primitives):
@@ -59,6 +96,8 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
+from ._reference_scenario import ReferenceScenarioEvent, parse_reference_events
+
 logger = logging.getLogger(__name__)
 
 
@@ -81,9 +120,10 @@ class ScenarioOverrides:
     prices: dict[str, Decimal] = field(default_factory=dict)
     balances: dict[str, Decimal] = field(default_factory=dict)
     rsi: dict[str, Decimal] = field(default_factory=dict)
+    reference_events: tuple[ReferenceScenarioEvent, ...] = ()
 
     def is_empty(self) -> bool:
-        return not (self.prices or self.balances or self.rsi)
+        return not (self.prices or self.balances or self.rsi or self.reference_events)
 
 
 def _to_decimal(label: str, raw: Any) -> Decimal:
@@ -109,6 +149,16 @@ def _parse_token_map(label: str, raw: Any) -> dict[str, Decimal]:
             raise ScenarioParseError(f"{label}: token keys must be non-empty strings, got {token!r}")
         out[token.strip()] = _to_decimal(f"{label}.{token}", amount)
     return out
+
+
+def _reference_events(doc: dict, *, prices: dict, balances: dict, rsi: dict) -> tuple[ReferenceScenarioEvent, ...]:
+    try:
+        events = parse_reference_events(doc["reference_events"]) if "reference_events" in doc else ()
+    except (ValueError, TypeError, InvalidOperation) as exc:
+        raise ScenarioParseError(f"reference_events: {exc}") from exc
+    if events and (prices or balances or rsi):
+        raise ScenarioParseError("reference events cannot override token prices, balances or indicators")
+    return events
 
 
 def parse_scenario(raw: str) -> ScenarioOverrides:
@@ -147,7 +197,7 @@ def parse_scenario(raw: str) -> ScenarioOverrides:
     if not isinstance(doc, dict):
         raise ScenarioParseError(f"--inject: top-level value must be a JSON object, got {type(doc).__name__}")
 
-    allowed = {"prices", "balances", "indicators"}
+    allowed = {"prices", "balances", "indicators", "reference_events"}
     unknown = set(doc) - allowed
     if unknown:
         raise ScenarioParseError(f"--inject: unknown key(s) {sorted(unknown)}; supported keys are {sorted(allowed)}")
@@ -169,7 +219,8 @@ def parse_scenario(raw: str) -> ScenarioOverrides:
                 if not (Decimal("0") <= value <= Decimal("100")):
                     raise ScenarioParseError(f"indicators.rsi.{token}: RSI must be within 0..100, got {value}")
 
-    overrides = ScenarioOverrides(prices=prices, balances=balances, rsi=rsi)
+    reference_events = _reference_events(doc, prices=prices, balances=balances, rsi=rsi)
+    overrides = ScenarioOverrides(prices=prices, balances=balances, rsi=rsi, reference_events=reference_events)
     if overrides.is_empty():
         raise ScenarioParseError("--inject: document contained no overrides (prices/balances/indicators all empty)")
     return overrides
@@ -183,6 +234,9 @@ def apply_scenario(market: Any, overrides: ScenarioOverrides) -> list[str]:
     Returns a list of human-readable descriptions of what was applied (for the
     harness log), never raises for a recoverable per-token issue.
     """
+    if overrides.reference_events:
+        raise ScenarioParseError("reference events require the guarded managed-Anvil runner hook")
+
     from almanak.framework.market.models import RSIData, TokenBalance
 
     applied: list[str] = []

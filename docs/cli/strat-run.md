@@ -231,6 +231,13 @@ Usage: almanak strat run [OPTIONS]
     Run single iteration then exit.
 
 
+* `reference_scenario`:
+    * Type: `Path`
+    * Default: `None`
+    * Usage: `--reference-scenario`
+    Synthetic reference event JSON for local managed-Anvil tests only.
+
+
 * `config_file`:
     * Type: `Path`
     * Default: `None`
@@ -371,6 +378,8 @@ Options:
   -i, --interval INTEGER          Loop interval in seconds. Defaults to
                                   [tool.almanak.run].interval or 60.
   --once                          Run single iteration then exit.
+  --reference-scenario FILE       Synthetic reference event JSON for local
+                                  managed-Anvil tests only.
   -c, --config PATH               Path to strategy config JSON file.
   -d, --working-dir PATH          Working directory containing the strategy
                                   files. Defaults to the current directory.

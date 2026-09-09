@@ -1147,7 +1147,12 @@ def _run_test_lifecycle(  # noqa: C901
             # after gateway integration so the snapshot the runner builds carries
             # live providers; the injected overrides win because the snapshot's
             # read caches are consulted before any provider call.
-            if inject is not None:
+            if getattr(inject, "reference_events", ()):
+                from ._reference_scenario import ReferenceScenarioHook
+
+                if not isinstance(runner._snapshot_override_hook, ReferenceScenarioHook):
+                    raise ValueError("reference events require the guarded managed-Anvil runner hook")
+            elif inject is not None:
                 from ._scenario import apply_scenario
 
                 def _override_hook(market: Any) -> None:

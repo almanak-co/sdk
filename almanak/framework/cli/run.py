@@ -1250,6 +1250,7 @@ def run(
     reset_fork: bool = False,
     max_iterations: int | None = None,
     teardown_after: bool = False,
+    reference_scenario: str | None = None,
     # Internal-only (not exposed as click flags). Used by `almanak strat test`
     # to drive a force-action lifecycle through this command's setup pipeline
     # without duplicating it. Do not set from the CLI.
@@ -1316,6 +1317,23 @@ def run(
         _stop_dashboard,
         _wire_token_resolver,
     )
+
+    reference_overrides = test_inject if getattr(test_inject, "reference_events", ()) else None
+    if reference_scenario:
+        from ._scenario import parse_scenario
+
+        if test_inject is not None:
+            raise click.ClickException("--reference-scenario cannot be combined with --inject")
+        reference_overrides = parse_scenario(reference_scenario)
+        if not reference_overrides.reference_events:
+            raise click.ClickException("--reference-scenario requires reference_events")
+    if reference_overrides is not None:
+        from ._reference_scenario import require_reference_test_runtime
+
+        try:
+            require_reference_test_runtime(network=network, managed=not no_gateway and not anvil_ports)
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
 
     _configure_logging_and_validate(
         verbose=verbose,
@@ -1484,6 +1502,24 @@ def run(
         keep_anvil=keep_anvil,
         components=components,
     )
+
+    if reference_overrides is not None:
+        from ._reference_scenario import ReferenceScenarioHook
+
+        try:
+            runner._snapshot_override_hook = ReferenceScenarioHook(
+                reference_overrides.reference_events,
+                network=runtime_bootstrap.resolved_network,
+                managed=managed_gateway is not None and not no_gateway and not anvil_ports,
+                client=gateway_client,
+            )
+            cleanup_resources = runner._snapshot_override_hook.wrap_cleanup(cleanup_resources)
+            click.echo(f"SYNTHETIC reference scenario: {runner._snapshot_override_hook.digest}")
+        except Exception:
+            import asyncio
+
+            asyncio.run(cleanup_resources())
+            raise
 
     exit_code = _execute_run_mode(
         test_actions=test_actions,

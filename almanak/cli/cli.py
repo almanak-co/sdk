@@ -1758,6 +1758,7 @@ def strategy_run(
     teardown_after,
     anvil_ports,
     keep_anvil,
+    reference_scenario=None,
 ):
     """Run a strategy from its working directory.
 
@@ -1862,6 +1863,7 @@ def strategy_run(
             working_dir=working_dir,
             anvil_ports=anvil_ports,
             keep_anvil=keep_anvil,
+            reference_scenario=reference_scenario,
         )
     except click.Abort:
         sys.exit(1)

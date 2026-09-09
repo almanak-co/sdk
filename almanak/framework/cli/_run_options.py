@@ -63,6 +63,12 @@ def strategy_run_options(func: Callable[..., Any]) -> Callable[..., Any]:
         help="Path to strategy config JSON file.",
     )(func)
     func = click.option(
+        "--reference-scenario",
+        type=click.Path(exists=True, dir_okay=False),
+        default=None,
+        help="Synthetic reference event JSON for local managed-Anvil tests only.",
+    )(func)
+    func = click.option(
         "--once",
         is_flag=True,
         default=False,

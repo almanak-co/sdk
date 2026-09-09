@@ -103,6 +103,7 @@ def test_strategy_run_forwards_exact_defaults(tmp_path: Path, strategy_run_harne
         "working_dir": str(tmp_path),
         "anvil_ports": (),
         "keep_anvil": False,
+        "reference_scenario": None,
     }
 
 
@@ -113,6 +114,8 @@ def test_strategy_run_forwards_every_explicit_option(
     config_file = tmp_path / "custom.json"
     config_file.write_text("{}")
     replay_file = tmp_path / "replay.jsonl"
+    reference_file = tmp_path / "reference-scenario.json"
+    reference_file.write_text("{}")
     log_file = tmp_path / "run.jsonl"
 
     result = _invoke_strategy_run(
@@ -157,6 +160,8 @@ def test_strategy_run_forwards_every_explicit_option(
         "--anvil-port",
         "arbitrum=8545",
         "--keep-anvil",
+        "--reference-scenario",
+        str(reference_file),
     )
 
     assert result.exit_code == 0
@@ -190,6 +195,7 @@ def test_strategy_run_forwards_every_explicit_option(
         "working_dir": str(tmp_path),
         "anvil_ports": ("arbitrum=8545",),
         "keep_anvil": True,
+        "reference_scenario": str(reference_file),
     }
 
 
