@@ -2585,6 +2585,7 @@ class MarketSnapshot:
             "no chainlink feed",
             "not found",
             "unsupported",
+            "reference_instrument_not_supported",
             "invalid",
             "no pairs found",
             "symbol",

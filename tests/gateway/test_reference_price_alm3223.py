@@ -10,7 +10,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from almanak.framework.data.interfaces import DataSourceUnavailable, PriceResult
+from almanak.framework.data.interfaces import DataSourceUnavailable, PriceResult, ReferenceInstrumentNotSupported
+from almanak.framework.market import MarketSnapshotBuilder
 from almanak.gateway.proto import gateway_pb2
 from almanak.gateway.services.market_service import MarketServiceServicer
 from almanak.integrations.chainlink.catalog import CATALOG
@@ -197,4 +198,88 @@ async def test_gateway_reference_price_does_not_expose_provider_exception_text(c
 
     assert response.availability == gateway_pb2.REFERENCE_PRICE_AVAILABILITY_ERRORED
     assert response.reason == "reference_price_unavailable"
+    assert "secret-provider-detail" not in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("instrument", ["NVDAB", "NOK", "SKHYB", "GOOG", "ETH"])
+async def test_unsupported_reference_is_diagnosable_through_provider_gateway_and_snapshot(instrument):
+    source = ChainlinkPriceSource(chain="bsc")
+    service = MarketServiceServicer.__new__(MarketServiceServicer)
+    service.settings = SimpleNamespace(chains=["bsc"])
+    service._ensure_initialized = AsyncMock()
+    service._price_aggregators = {"bsc": SimpleNamespace(sources=[source])}
+
+    try:
+        with patch.object(source, "_eth_call", new_callable=AsyncMock) as eth_call:
+            response = await service.GetReferencePrice(
+                gateway_pb2.ReferencePriceRequest(instrument=instrument, quote="USD", chain="bsc"),
+                MagicMock(),
+            )
+        eth_call.assert_not_awaited()
+    finally:
+        await source.close()
+
+    assert response.reason == "reference_instrument_not_supported"
+    assert response.availability == gateway_pb2.REFERENCE_PRICE_AVAILABILITY_UNMEASURED
+    assert response.price == ""
+    assert response.observed_at == 0
+    client = MagicMock()
+    client.is_connected = True
+    client.market.GetReferencePrice.return_value = response
+    snapshot = MarketSnapshotBuilder.for_strategy_runner(
+        strategy=SimpleNamespace(chain="bsc", wallet_address="0x1"),
+        gateway_client=client,
+        runtime_surface="unit_test",
+    )
+
+    result = snapshot.reference_price(instrument, chain="bsc")
+
+    assert result.price is None
+    assert result.observed_at is None
+    assert result.trade_block_reason(max_age_seconds=120) == "reference_instrument_not_supported"
+    assert snapshot.has_critical_data_failures()
+    assert snapshot.classify_critical_data_failures() == "permanent"
+    assert "reference_instrument_not_supported" in snapshot.summarize_critical_data_failures()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "reason", "availability"),
+    [
+        (
+            ReferenceInstrumentNotSupported("provider", "secret-provider-detail"),
+            "reference_instrument_not_supported",
+            gateway_pb2.REFERENCE_PRICE_AVAILABILITY_UNMEASURED,
+        ),
+        (
+            DataSourceUnavailable("provider", "secret-provider-detail", transport=True),
+            "reference_price_unavailable",
+            gateway_pb2.REFERENCE_PRICE_AVAILABILITY_ERRORED,
+        ),
+        (
+            DataSourceUnavailable("provider", "No catalogued reference feed; secret-provider-detail"),
+            "reference_price_unavailable",
+            gateway_pb2.REFERENCE_PRICE_AVAILABILITY_ERRORED,
+        ),
+    ],
+)
+async def test_reference_capability_diagnosis_uses_type_without_exposing_exception_text(
+    error, reason, availability, caplog
+):
+    source = SimpleNamespace(get_reference_price=AsyncMock(side_effect=error))
+    service = MarketServiceServicer.__new__(MarketServiceServicer)
+    service.settings = SimpleNamespace(chains=["bsc"])
+    service._ensure_initialized = AsyncMock()
+    service._price_aggregators = {"bsc": SimpleNamespace(sources=[source])}
+
+    response = await service.GetReferencePrice(
+        gateway_pb2.ReferencePriceRequest(instrument="GOOGL", quote="USD", chain="bsc"),
+        MagicMock(),
+    )
+
+    assert response.reason == reason
+    assert response.availability == availability
+    assert response.price == ""
+    assert "secret-provider-detail" not in str(response)
     assert "secret-provider-detail" not in caplog.text

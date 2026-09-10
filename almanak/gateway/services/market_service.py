@@ -38,6 +38,7 @@ from almanak.connectors._base.gateway_capabilities import (
 from almanak.connectors._gateway_registry import GATEWAY_REGISTRY
 from almanak.core.chains import ChainRegistry
 from almanak.core.chains._helpers import native_price_alias_map, native_symbols_for
+from almanak.framework.data.interfaces import ReferenceInstrumentNotSupported
 from almanak.framework.data.timeframes import (
     COINGECKO_OHLCV_TIMEFRAMES,
     OHLCVTimeframe,
@@ -2040,15 +2041,20 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
                 raise ValueError(f"non-positive/non-finite reference price: {result.price}")
         except Exception as exc:  # noqa: BLE001 - typed errored response is the wire contract
             logger.warning("GetReferencePrice failed for %s on %s: %s", pair, chain, type(exc).__name__)
+            unsupported = isinstance(exc, ReferenceInstrumentNotSupported)
             return gateway_pb2.ReferencePriceResponse(
                 instrument=instrument,
                 quote=quote,
                 chain=chain,
-                availability=gateway_pb2.REFERENCE_PRICE_AVAILABILITY_ERRORED,
+                availability=(
+                    gateway_pb2.REFERENCE_PRICE_AVAILABILITY_UNMEASURED
+                    if unsupported
+                    else gateway_pb2.REFERENCE_PRICE_AVAILABILITY_ERRORED
+                ),
                 market_status=status_value,
                 market_status_as_of=int(status.as_of.timestamp()),
                 market_status_source=status.source,
-                reason="reference_price_unavailable",
+                reason="reference_instrument_not_supported" if unsupported else "reference_price_unavailable",
             )
 
         return gateway_pb2.ReferencePriceResponse(

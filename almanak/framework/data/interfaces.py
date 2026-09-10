@@ -92,6 +92,14 @@ class DataSourceUnavailable(DataSourceError):
         super().__init__(f"Data source '{source}' unavailable: {reason}")
 
 
+class ReferenceInstrumentNotSupported(DataSourceUnavailable):
+    """The selected provider has no reference feed for the requested instrument.
+
+    This is a capability refusal, not evidence of a transport outage. Retrying
+    the same provider configuration cannot add the missing instrument.
+    """
+
+
 class DataSourceTimeout(DataSourceError):
     """Raised when a data source request times out.
 
@@ -1129,6 +1137,7 @@ __all__ = [
     # Exceptions
     "DataSourceError",
     "DataSourceUnavailable",
+    "ReferenceInstrumentNotSupported",
     "DataSourceTimeout",
     "DataSourceRateLimited",
     "AllDataSourcesFailed",

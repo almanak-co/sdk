@@ -37,6 +37,7 @@ from almanak.framework.data.interfaces import (
     BasePriceSource,
     DataSourceUnavailable,
     PriceResult,
+    ReferenceInstrumentNotSupported,
 )
 from almanak.framework.data.tokens import TokenResolutionError, get_token_resolver
 from almanak.framework.data.tokens.address_resolution import looks_like_evm_address
@@ -607,7 +608,7 @@ class ChainlinkPriceSource(BasePriceSource):
         pair = f"{instrument.strip().upper()}/{quote.strip().upper()}"
         spec = CATALOG.feed(self._chain, pair)
         if spec is None or spec.kind is not FeedKind.REFERENCE:
-            raise DataSourceUnavailable(
+            raise ReferenceInstrumentNotSupported(
                 source=self.source_name,
                 reason=f"No catalogued Chainlink reference feed for {pair} on {self._chain}",
             )
